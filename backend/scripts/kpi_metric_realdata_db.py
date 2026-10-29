@@ -99,6 +99,21 @@ async def fetchKpis(session: AsyncSession) -> list[KpiCatalog]:
     return list(result.scalars().all())
 
 
+async def fetchLinkedMetricNames(session: AsyncSession) -> dict[str, str]:
+    """``kpi_code → 挂靠的 ontology_metric.metric_name``（仅已挂靠的 KPI）。
+
+    用于 S2.2 的**归属**判定：``metric_id`` 非空只说明「挂上了」，不说明
+    「挂对了」。``metric_name`` 是回填的归属键（PLAN 的 ``metricName``，库内
+    UNIQUE），拿它反查才能抓出「全量挂靠但挂错对象」。
+    """
+    result = await session.execute(
+        select(KpiCatalog.kpi_code, OntologyMetric.metric_name).join(
+            OntologyMetric, OntologyMetric.id == KpiCatalog.metric_id
+        )
+    )
+    return {str(code): str(name) for code, name in result.all()}
+
+
 async def countMetrics(session: AsyncSession) -> int:
     """``ontology_metric`` 的行数。"""
     result = await session.execute(select(func.count()).select_from(OntologyMetric))
@@ -165,6 +180,7 @@ __all__ = [
     "currentDatabaseName",
     "deleteSwitchValue",
     "fetchKpis",
+    "fetchLinkedMetricNames",
     "hasIndexOn",
     "readAlembicVersion",
     "readSwitchValue",

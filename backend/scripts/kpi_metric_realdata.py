@@ -9,6 +9,9 @@
 --------------------------------------
 - ``kpi_metric_realdata_lib``：常量、DSN 解析、PASS/FAIL/SKIP 输出；
 - ``kpi_metric_realdata_db``：只读 DB helper + 开关行的读写与还原；
+- ``kpi_metric_realdata_s3``：S3 的判定 oracle（列差异 / 分母判定 / formula 覆盖）；
+- ``kpi_metric_realdata_s4``：S4 发布闸门（开关 ON/OFF 的可还原写）；
+- ``kpi_metric_realdata_inject``：S5 契约注入端到端（含审核模拟）；
 - 本文件（入口）：S1–S9 各步骤与主流程。
 
 覆盖的步骤
@@ -73,7 +76,6 @@ import logging
 import os
 import sys
 from collections import Counter
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 # 允许从 scripts/ 直接运行：把 backend/ 放进 sys.path
@@ -129,22 +131,14 @@ os.environ.setdefault("LOG_LEVEL", "WARNING")
 from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
-from app.domain.enums import MetricType  # noqa: E402
-from app.domain.exceptions import ConflictError  # noqa: E402
-from app.domain.models import KpiCatalog, OntologyMetric, SchemaCache  # noqa: E402
+from app.domain.models import OntologyMetric, SchemaCache  # noqa: E402
 from app.infrastructure.database import getEngine, getSessionFactory  # noqa: E402
 from app.services.kpi_datasource_suggestion_service import (  # noqa: E402
     buildTableIndex,
     splitLegacyTableNames,
 )
 from app.services.kpi_match_cache import get_kpi_match_cache  # noqa: E402
-from app.services.kpi_metric_publish_gate import (  # noqa: E402
-    checkKpiPublishGate,
-    enforceKpiPublishGate,
-)
 from app.services.kpi_metric_reconcile import (  # noqa: E402
-    REASON_GOVERNANCE_COLUMN_NOT_IN_TECHNICAL,
-    REASON_TECHNICAL_COLUMN_NOT_IN_GOVERNANCE,
     VERDICT_MISMATCH,
     reconcileMetric,
 )
@@ -157,7 +151,6 @@ from app.services.kpi_metric_switches import (  # noqa: E402
 from app.services.kpi_semantic_match_service import (  # noqa: E402
     getKpiSemanticMatchService,
 )
-from app.services.nl2sql_semantic_guard import extractSqlIdentifiers  # noqa: E402
 from scripts.kpi_metric_backfill import (  # noqa: E402
     applyPlans,
     buildPlans,
@@ -170,13 +163,12 @@ from scripts.kpi_metric_realdata_db import (  # noqa: E402
     countMetrics,
     currentDatabaseName,
     fetchKpis,
+    fetchLinkedMetricNames,
     hasIndexOn,
     readAlembicVersion,
     readSwitchValue,
-    restoreSwitchValue,
     tableColumns,
     uniqueConstraintColumnSets,
-    writeSwitchValue,
 )
 
 # ⚠️ 必须在 ``os.environ["DATABASE_URL"]`` 设置**之后**导入：本模块连带导入
@@ -185,6 +177,14 @@ from scripts.kpi_metric_realdata_db import (  # noqa: E402
 from scripts.kpi_metric_realdata_inject import (  # noqa: E402
     step5_contractInjection,
 )
+from scripts.kpi_metric_realdata_s3 import (  # noqa: E402
+    ReconcileOutcome,
+    actualColumnCodes,
+    anyColumnDiffers,
+    expectedColumnCodes,
+    formulaCoverage,
+)
+from scripts.kpi_metric_realdata_s4 import step4_publishGate  # noqa: E402
 
 # PLAN 的构造保证（不是库内实测值；库内实测值另行打印）
 EXPECTED_TIER_COUNTS = {"A": 4, "B": 5, "C": 3}
@@ -334,19 +334,28 @@ async def step2_backfillPreview(session: AsyncSession) -> None:
         f"缺 {sorted(planCodes - dbCodes)}；多 {sorted(dbCodes - planCodes)}",
     )
 
-    # T16-11 的 S2.2′：库内挂靠状态必须与 PLAN 的归属**一致**。严格集合相等
+    # T16-11 的 S2.2′：库内挂靠必须与 PLAN 的**归属**一致。严格集合相等
     # 在「回填前」不成立（S2 在 S9 之前跑，此时 linked = 0），因此改用可判定的
-    # 不变量：**要么 0 条（未回填），要么全量挂靠**——不允许「部分挂靠」这种
-    # 半成品状态；且挂靠的 code 不得越出 PLAN。
-    linkedCodes = {kpi.kpi_code for kpi in kpis if kpi.metric_id is not None}
-    isConsistent = linkedCodes <= planCodes and len(linkedCodes) in (0, len(planCodes))
-    check(
-        "S2.2 库内挂靠与 PLAN 归属一致（0 条=未回填；或全量挂靠，不允许部分）",
-        isConsistent,
-        f"已挂靠 {len(linkedCodes)} 条 / PLAN {len(planCodes)} 条；"
-        f"越界 {sorted(linkedCodes - planCodes)}",
+    # 不变量：**要么 0 条（未回填），要么全量挂靠且 metric_name 与 PLAN 一致**
+    # ——不允许「部分挂靠」或「挂错对象」；且挂靠的 code 不得越出 PLAN。
+    # 检查名说的是「归属」⇒ 必须真的比对归属键（metric_name），不能只数条数。
+    linkedNames = await fetchLinkedMetricNames(session)
+    expectedNames = {plan.kpiCode: plan.metricName for plan in plans}
+    wrongTargets = sorted(
+        code for code, name in linkedNames.items() if expectedNames.get(code) != name
     )
-    if not linkedCodes:
+    isConsistent = (
+        set(linkedNames) <= planCodes
+        and len(linkedNames) in (0, len(planCodes))
+        and not wrongTargets
+    )
+    check(
+        "S2.2 库内挂靠与 PLAN 归属一致（0 条=未回填；或全量挂靠且 metric_name 匹配）",
+        isConsistent,
+        f"已挂靠 {len(linkedNames)} 条 / PLAN {len(planCodes)} 条；"
+        f"越界 {sorted(set(linkedNames) - planCodes)}；挂错 {wrongTargets}",
+    )
+    if not linkedNames:
         info("S2.2 备注：0 条 KPI 已挂靠 ontology_metric（尚未回填）")
 
     columnIndex = await classColumnIndex(session)
@@ -375,75 +384,24 @@ async def step2_backfillPreview(session: AsyncSession) -> None:
 # ── S3 三层对账逐档 ───────────────────────────────────────────────────
 
 
-def _normTokens(values: object) -> set[str]:
-    """把列/粒度数组归一化成小写集合（与对账引擎的 ``_tokens`` 同语义）。"""
-    if not isinstance(values, (list, tuple)):
-        return set()
-    return {v.strip().lower() for v in values if isinstance(v, str) and v.strip()}
-
-
-def _roleColumnDiffers(declared: object, measure: object) -> bool:
-    """治理声明的列与技术度量列**都非空且不相等** ⇒ 对账必须出列级 finding。
-
-    ``measure`` 是 ``MeasureSpec | None``：``None`` 时引擎给的是
-    ``governance_measure_absent``（不是列级 code）⇒ 这里返回 ``False``。
-    """
-    declaredSet = _normTokens(declared)
-    technical = measure.columns() if measure is not None else set()
-    return bool(declaredSet) and bool(technical) and declaredSet != technical
-
-
-def _needsDenominatorCheck(governance: object, technique: object) -> bool:
-    """复刻层 2 的分母判定：比率/差值型，或治理侧显式声明了分母列。"""
-    metricType = getattr(technique, "metric_type", None)
-    if metricType in (MetricType.RATIO.value, MetricType.DIFFERENCE.value):
-        return True
-    return bool(_normTokens(getattr(governance, "denominator_columns", ())))
-
-
-def _formulaCoverage(
-    declared: set[str], formula: str | None
-) -> tuple[bool, list[str]]:
-    """tier A 的 formula 是否覆盖全部结构化列（T16-17）。"""
-    if not declared:
-        return False, ["结构化度量为空（可能已降级）"]
-    missing = sorted(declared - extractSqlIdentifiers(formula))
-    return not missing, missing
-
-
-async def step3_reconcile(session: AsyncSession) -> None:
-    plans: dict[str, KpiBackfillPlan] = {
-        plan.kpiCode: plan for plan in buildPlans()
-    }
-    kpis = await fetchKpis(session)
-    linked = [kpi for kpi in kpis if kpi.metric_id is not None]
-    if not linked:
-        skipStep(
-            "S3 三层对账逐档",
-            "库内 12 条 KPI 均未挂靠 ontology_metric —— 请先执行 "
-            "scripts/kpi_metric_backfill.py（并经业务方审核）",
-        )
-        return
-
-    verdicts: dict[str, str] = {}
-    reasonsByCode: dict[str, set[str]] = {}
-    columnDiffers: dict[str, bool] = {}
-    for kpi in linked:
+async def _collectReconcile(
+    session: AsyncSession, plans: dict[str, KpiBackfillPlan]
+) -> list[ReconcileOutcome]:
+    """逐条对账并当场判定 S3.1 / S3.2；返回跨条目判定所需的快照。"""
+    outcomes: list[ReconcileOutcome] = []
+    for kpi in await fetchKpis(session):
+        if kpi.metric_id is None:
+            continue
         metric = await session.get(OntologyMetric, kpi.metric_id)
         technique = techniqueOf(metric)
         governance = governanceSpecOf(kpi)
         result = reconcileMetric(governance, technique)
-        verdicts[kpi.kpi_code] = result.verdict
-        reasonsByCode[kpi.kpi_code] = set(result.reasons())
-        # S3.4 的期望值：治理列与技术列**都非空且不相等**时，对账必须给出
-        # 列级 finding。用它反查「_checkRole 的列比对被删掉」这类退化。
-        denominatorNeeded = _needsDenominatorCheck(governance, technique)
-        columnDiffers[kpi.kpi_code] = _roleColumnDiffers(
-            governance.numerator_columns, technique.numerator
-        ) or (
-            denominatorNeeded
-            and _roleColumnDiffers(
-                governance.denominator_columns, technique.denominator
+        outcomes.append(
+            ReconcileOutcome(
+                code=kpi.kpi_code,
+                verdict=result.verdict,
+                reasons=tuple(result.reasons()),
+                columnDiffers=anyColumnDiffers(governance, technique),
             )
         )
         plan = plans.get(kpi.kpi_code)
@@ -463,7 +421,7 @@ async def step3_reconcile(session: AsyncSession) -> None:
             f"实际 {result.verdict}；findings={result.reasons()}",
         )
         if tier == "A":
-            ok, missing = _formulaCoverage(
+            ok, missing = formulaCoverage(
                 technique.structuredColumns(), technique.formula
             )
             check(
@@ -471,7 +429,14 @@ async def step3_reconcile(session: AsyncSession) -> None:
                 ok,
                 f"缺失 {missing}" if missing else "",
             )
+    return outcomes
 
+
+def _judgeReconcile(
+    plans: dict[str, KpiBackfillPlan], outcomes: list[ReconcileOutcome]
+) -> None:
+    """跨条目判定：mismatch 集合（S3.3）与列级 finding 集合（S3.4）。"""
+    verdicts = {outcome.code: outcome.verdict for outcome in outcomes}
     mismatches = {
         code for code, verdict in verdicts.items() if verdict == VERDICT_MISMATCH
     }
@@ -484,25 +449,16 @@ async def step3_reconcile(session: AsyncSession) -> None:
         f"多判 {sorted(mismatches - deviationCodes)}；漏判 "
         f"{sorted(deviationCodes - mismatches)}",
     )
-
     # ⚠️ S3.3 单独不够：12 条 PLAN 的治理粒度（中文业务词）与技术粒度（列名）
     # **永远**不等 ⇒ 每条 findings 都含 ``grain_mismatch`` ⇒ 即便把
-    # ``_checkRole`` 的列比对整体删掉，S3.3 依旧全绿。这里按 **finding code**
+    # ``_checkRole`` 的列比对整体删掉，S3.3 依旧全绿。S3.4 按 **finding code**
     # 独立断言：列级 finding 的有无必须与「治理列 vs 技术列」的实际差异一致。
-    columnCodes = {
-        REASON_GOVERNANCE_COLUMN_NOT_IN_TECHNICAL,
-        REASON_TECHNICAL_COLUMN_NOT_IN_GOVERNANCE,
-    }
-    expectedColumnCodes = {
-        code for code, differs in columnDiffers.items() if differs
-    }
-    actualColumnCodes = {
-        code for code, reasons in reasonsByCode.items() if columnCodes & reasons
-    }
+    expected = expectedColumnCodes(outcomes)
+    actual = actualColumnCodes(outcomes)
     check(
         "S3.4 列级 finding 集合 = 治理/技术列差异集合（防 _checkRole 列比对被删）",
-        expectedColumnCodes == actualColumnCodes,
-        f"期望 {sorted(expectedColumnCodes)}；实际 {sorted(actualColumnCodes)}",
+        expected == actual,
+        f"期望 {sorted(expected)}；实际 {sorted(actual)}",
     )
     info(f"实测 verdict 分布：{dict(Counter(verdicts.values()))}")
     if len(mismatches) == len(verdicts):
@@ -513,111 +469,22 @@ async def step3_reconcile(session: AsyncSession) -> None:
         )
 
 
-# ── S4 发布闸门 ───────────────────────────────────────────────────────
-
-
-async def _runWithSwitch(
-    session: AsyncSession,
-    key: str,
-    value: str,
-    action: Callable[[], Awaitable[None]],
-    label: str,
-) -> None:
-    """临时写开关 → 执行 action → **无条件还原**并核对前后值。"""
-    original = await readSwitchValue(session, key)
-    await writeSwitchValue(session, key, value)
-    try:
-        await action()
-    finally:
-        await restoreSwitchValue(session, key, original)
-        after = await readSwitchValue(session, key)
-        check(
-            f"{label} 开关已还原",
-            after == original,
-            f"原值 {original!r} → 还原后 {after!r}",
-        )
-        info(f"开关对照 {key}：运行前={original!r} 临时={value!r} 还原后={after!r}")
-
-
-async def _gateOn(session: AsyncSession, target: KpiCatalog) -> None:
-    checkResult = await checkKpiPublishGate(
-        session,
-        target,
-        metricId=target.metric_id,
-        datasourceId=target.datasource_id,
-    )
-    failedMessages = [item.message for item in checkResult.failedItems]
-    info(f"S4 闸门未通过项（{target.kpi_code}）：{[i.code for i in checkResult.failedItems]}")
-    if not failedMessages:
+async def step3_reconcile(session: AsyncSession) -> None:
+    plans = {plan.kpiCode: plan for plan in buildPlans()}
+    outcomes = await _collectReconcile(session, plans)
+    if not outcomes:
         skipStep(
-            "S4 发布闸门（拦截路径）",
-            f"{target.kpi_code} 已满足全部闸门条件 —— 没有可拦截的样本",
+            "S3 三层对账逐档",
+            "库内 12 条 KPI 均未挂靠 ontology_metric —— 请先执行 "
+            "scripts/kpi_metric_backfill.py（并经业务方审核）",
         )
         return
-
-    blocked = False
-    message = ""
-    try:
-        await enforceKpiPublishGate(
-            session,
-            target,
-            metricId=target.metric_id,  # type: ignore[attr-defined]
-            datasourceId=target.datasource_id,  # type: ignore[attr-defined]
-        )
-    except ConflictError as exc:
-        blocked = True
-        message = str(exc)
-    check(
-        "S4.1 开关 ON ⇒ 服务层抛 ConflictError（被拦下）",
-        blocked,
-        "enforceKpiPublishGate 未抛异常" if not blocked else "",
-    )
-    check(
-        "S4.2 错误信息带出缺项明细",
-        blocked and all(item in message for item in failedMessages),
-        f"failedItems={[i.code for i in checkResult.failedItems]}",
-    )
+    _judgeReconcile(plans, outcomes)
 
 
-async def _gateOff(session: AsyncSession, target: KpiCatalog) -> None:
-    blocked = False
-    try:
-        await enforceKpiPublishGate(
-            session,
-            target,
-            metricId=target.metric_id,
-            datasourceId=target.datasource_id,
-        )
-    except ConflictError:
-        blocked = True
-    check(
-        "S4.3 开关 OFF ⇒ 只观察不拦截",
-        not blocked,
-        "开关关闭时抛了 ConflictError（观察模式不应阻断）" if blocked else "",
-    )
-
-
-async def step4_publishGate(session: AsyncSession) -> None:
-    kpis = await fetchKpis(session)
-    if not kpis:
-        skipStep("S4 发布闸门", "库里没有 kpi_catalog 行")
-        return
-    target = kpis[0]
-    await _runWithSwitch(
-        session,
-        SWITCH_GATE,
-        "true",
-        lambda: _gateOn(session, target),
-        "S4.4",
-    )
-    await _runWithSwitch(
-        session,
-        SWITCH_GATE,
-        "false",
-        lambda: _gateOff(session, target),
-        "S4.5",
-    )
-
+# ── S4 发布闸门（实现见 kpi_metric_realdata_s4） ──────────────────────
+# 单列模块的原因：S4 是唯一会临时改灰度开关的步骤（运行前后必须一致），
+# 与只读步骤分开便于审阅；同时避免入口文件越过 800 行。
 
 # ── S5 契约块注入端到端（实现见 kpi_metric_realdata_inject） ─────────────
 # 单列模块的原因：S5 的判据依赖「治理列是否已审核对齐」，并含**写测试库**的

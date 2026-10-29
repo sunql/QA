@@ -124,6 +124,50 @@ async def _writeGovernance(
     await session.refresh(kpi)
 
 
+async def _simulateAlignedReview(
+    session: AsyncSession, target: KpiCatalog
+) -> None:
+    """治理列对齐物理列后：verdict 必须 pass，块必须非空且含硬断言。"""
+    await _writeGovernance(session, target, ALIGNED_GOVERNANCE)
+    metric = await session.get(OntologyMetric, target.metric_id)
+    after = reconcileMetric(governanceSpecOf(target), techniqueOf(metric))
+    check(
+        f"S5.9 审核模拟：{TARGET_KPI} 治理列对齐后 verdict = pass",
+        after.verdict == VERDICT_PASS,
+        f"实际 {after.verdict}；findings={after.reasons()}",
+    )
+    block = await buildKpiContractBlock(session, CONTRACT_QUESTION)
+    check(
+        "S5.10 审核模拟：对齐后契约块非空",
+        bool(block.strip()),
+        f"{len(block)} 字符",
+    )
+    _checkBlockText(block)
+    _checkPrompt(block)
+
+
+async def _restoreGovernance(
+    session: AsyncSession, target: KpiCatalog, original: dict[str, object]
+) -> None:
+    """还原治理列；还原/回滚失败**必须**暴露（测试库可能残留脏状态）。"""
+    try:
+        await _writeGovernance(session, target, original)
+    except Exception as error:  # noqa: BLE001 — 任何还原失败都必须暴露
+        failStep("S5.11 审核模拟的治理列已还原", f"还原失败：{error!r}")
+        try:
+            await session.rollback()
+        except Exception as rollbackError:  # noqa: BLE001
+            failStep(
+                "S5.11 审核模拟的治理列已还原",
+                f"回滚也失败：{rollbackError!r}（测试库可能仍是脏状态）",
+            )
+        return
+    unchanged = all(
+        getattr(target, field) == original[field] for field in _GOVERNANCE_FIELDS
+    )
+    check("S5.11 审核模拟的治理列已还原", unchanged, "")
+
+
 async def _reviewSimulation(session: AsyncSession) -> None:
     """模拟业务方审核完成（治理列对齐物理列）⇒ 契约块必须出现。
 
@@ -149,42 +193,11 @@ async def _reviewSimulation(session: AsyncSession) -> None:
     # 先把原值**拷贝**成普通值（还原时不依赖 ORM 状态）
     original = {field: getattr(target, field) for field in _GOVERNANCE_FIELDS}
     try:
-        await _writeGovernance(session, target, ALIGNED_GOVERNANCE)
-        metric = await session.get(OntologyMetric, target.metric_id)
-        after = reconcileMetric(governanceSpecOf(target), techniqueOf(metric))
-        check(
-            f"S5.9 审核模拟：{TARGET_KPI} 治理列对齐后 verdict = pass",
-            after.verdict == VERDICT_PASS,
-            f"实际 {after.verdict}；findings={after.reasons()}",
-        )
-        block = await buildKpiContractBlock(session, CONTRACT_QUESTION)
-        check(
-            "S5.10 审核模拟：对齐后契约块非空",
-            bool(block.strip()),
-            f"{len(block)} 字符",
-        )
-        _checkBlockText(block)
-        _checkPrompt(block)
+        await _simulateAlignedReview(session, target)
     finally:
         # 还原失败**绝不能静默**：测试库会被留在「治理列已对齐」的脏状态，
-        # 后续跑 S3/S5 的人会把模拟结果当真。显式 failStep + 回滚。
-        try:
-            await _writeGovernance(session, target, original)
-        except Exception as error:  # noqa: BLE001 — 任何还原失败都必须暴露
-            failStep("S5.11 审核模拟的治理列已还原", f"还原失败：{error!r}")
-            try:
-                await session.rollback()
-            except Exception as rollbackError:  # noqa: BLE001
-                failStep(
-                    "S5.11 审核模拟的治理列已还原",
-                    f"回滚也失败：{rollbackError!r}（测试库可能仍是脏状态）",
-                )
-        else:
-            unchanged = all(
-                getattr(target, field) == original[field]
-                for field in _GOVERNANCE_FIELDS
-            )
-            check("S5.11 审核模拟的治理列已还原", unchanged, "")
+        # 后续跑 S3/S5 的人会把模拟结果当真。
+        await _restoreGovernance(session, target, original)
 
 
 async def step5_contractInjection(session: AsyncSession) -> None:

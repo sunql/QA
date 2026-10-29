@@ -4,11 +4,12 @@
 脚本：backend/scripts/kpi_metric_realdata.py（S1–S9，三态退出码 0/1/2）
 DSN 只来自 --database-url 或 KPI_METRIC_REALDATA_DATABASE_URL（不读 TEST_DATABASE_URL / DATABASE_URL / PG*）。
 判定语义：PASS=断言成立；FAIL=断言不成立；SKIP=前置条件不满足（既非通过也非失败，影响退出码）。
-以下两段是**完整 stdout**（含结尾 RESULT 行）；缺 RESULT 行即视为被截断。
+以下三段是**完整 stdout**（含结尾 RESULT 行）；缺 RESULT 行即视为被截断。
+退出码：全 PASS⇒0；有 FAIL⇒1（优先于 SKIP）；无 FAIL 但有 SKIP⇒2。
 
 ────────────────────────────────────────────────────────────────────────
 A. 正式库（prod 同源）只读实跑 —— 允许的只读验证
-   命令：./.venv/bin/python -m scripts.kpi_metric_realdata \
+   命令：cd backend && ./.venv/bin/python -m scripts.kpi_metric_realdata \
            --database-url postgresql+asyncpg://qa_user:***@localhost:5433/qa_metadata \
            --allow-prod-write
    （--allow-prod-write 是「目标库是 qa_metadata」的显式 opt-in，按**库名**判定，
@@ -68,13 +69,14 @@ INFO  跳过步骤数 = 8；例如：迁移未应用到 0137（新列/新表缺�
 ────────────────────────────────────────────────────────────────────────
 B. 隔离测试库回填落库 + 幂等（S9 语义证明）—— 不在正式库执行
    测试库：localhost:5434 / qa_metadata_test_t16（alembic upgrade head ⇒ 0137）
-   命令：./.venv/bin/python -m scripts.kpi_metric_realdata \
+   命令：cd backend && ./.venv/bin/python -m scripts.kpi_metric_realdata \
            --database-url postgresql+asyncpg://qa_user:***@localhost:5434/qa_metadata_test_t16 \
            --apply-backfill
    退出码：0
    结论：9/9 PASS。S9.1 第 2 次回填 created=0 updated=12（幂等）；
          S9.2 ontology_metric 行数 0 → 12 → 12（二次回填不新增）；
          S9.3 12/12 KPI 已挂靠；S3.4 列级 finding 集合 = 治理/技术列差异集合。
+   回填前 S2.2：已挂靠 0 条 / PLAN 12 条；越界 []；挂错 []（0 条 = 未回填，合法）。
    ⚠️ 正式库的 --apply-backfill 仍**未执行**：须业务方审核回填清单后由人显式发起。
 ────────────────────────────────────────────────────────────────────────
 
@@ -102,7 +104,7 @@ INFO  STEP S1 end
 INFO  STEP S2 begin
 INFO  PLAN：12 条，tier 分布 {'A': 4, 'B': 5, 'C': 3}（构造期望 {'A': 4, 'B': 5, 'C': 3}）
 PASS  S2.1 库内 kpi_catalog 与 PLAN 的 KPI 集合一致 — 库内 12 条 / PLAN 12 条；缺 []；多 []
-PASS  S2.2 库内挂靠与 PLAN 归属一致（0 条=未回填；或全量挂靠，不允许部分） — 已挂靠 0 条 / PLAN 12 条；越界 []
+PASS  S2.2 库内挂靠与 PLAN 归属一致（0 条=未回填；或全量挂靠且 metric_name 匹配） — 已挂靠 0 条 / PLAN 12 条；越界 []；挂错 []
 INFO  S2.2 备注：0 条 KPI 已挂靠 ontology_metric（尚未回填）
 INFO  schema_cache 覆盖的本体类/表键：3614 个
 PASS  S2.3 tier A 物理列齐备 KPI_SUPPLIER_OTD
@@ -186,3 +188,118 @@ INFO  STEP S8 end
 ------------------------------------------------------------------------
 RESULT: PASS steps=9 passed=9 failed=0 skipped=0
 OK  all steps passed
+
+────────────────────────────────────────────────────────────────────────
+C. 回填后的隔离测试库只读复跑（证明落库结果可被后续只读运行看见）
+   命令：cd backend && ./.venv/bin/python -m scripts.kpi_metric_realdata \
+           --database-url postgresql+asyncpg://qa_user:***@localhost:5434/qa_metadata_test_t16
+   退出码：2
+   结论：0 FAIL、8 PASS、1 SKIP（S9 在只读模式恒 SKIP）⇒ **exit 2**。
+         注意：**测试库只读 ≠ exit 0**；exit 0 只出现在「测试库 + --apply-backfill」。
+         S2.2 已挂靠 12 条 / PLAN 12 条；越界 []；挂错 []（metric_name 归属校验通过）；
+         S3.4 期望=实际 = 4 条列级 finding KPI。
+────────────────────────────────────────────────────────────────────────
+
+KPI 发布闸门未通过（开关关闭，仅观察）id=9 code=KPI_COST_SAVING items=['metric_published', 'reconcile', 'datasource'] reasons=['governance_measure_absent', 'grain_mismatch']
+KPI 口径对账 mismatch，拒绝注入 code=KPI_SUPPLIER_OTD reasons=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
+TARGET  postgresql+asyncpg://qa_user:***@localhost:5434/qa_metadata_test_t16  (from --database-url)
+DATABASE  qa_metadata_test_t16
+MODE  read-only
+PLAN STEPS = 9
+------------------------------------------------------------------------
+SKIP  S9 回填落库 + 幂等 — 只读模式未加 --apply-backfill（落库需业务方审核后显式发起）
+PASS  PREFLIGHT current_database() = 守卫认定库名 — qa_metadata_test_t16
+INFO  计数：kpi_catalog=12 条（metric_id 非空 12 条）；ontology_metric=12 条
+INFO  alembic_version 实测 = '0137'
+INFO  system_config[KPI_CONTRACT_INJECTION_ENABLED] 缺失（走代码默认值）
+INFO  system_config[KPI_METRIC_GATE_ENABLED] 缺失（走代码默认值）
+INFO  system_config[KPI_METRIC_TIER_A_ENABLED] 缺失（走代码默认值）
+INFO  STEP S1 begin
+PASS  S1.1 迁移版本 = 0137 — 实际 '0137'
+PASS  S1.2 ontology_metric 新增 9 列 — 实到 9 列
+PASS  S1.3 kpi_catalog 新增 3 列 — grain_keys/numerator_columns/denominator_columns
+PASS  S1.4 ontology_metric_source 表存在 — 列数 4
+PASS  S1.5 UNIQUE(metric_id, class_id, role) — 实际约束列组合 [['class_id', 'metric_id', 'role']]
+PASS  S1.6 ontology_metric_source.class_id 索引
+INFO  STEP S1 end
+INFO  STEP S2 begin
+INFO  PLAN：12 条，tier 分布 {'A': 4, 'B': 5, 'C': 3}（构造期望 {'A': 4, 'B': 5, 'C': 3}）
+PASS  S2.1 库内 kpi_catalog 与 PLAN 的 KPI 集合一致 — 库内 12 条 / PLAN 12 条；缺 []；多 []
+PASS  S2.2 库内挂靠与 PLAN 归属一致（0 条=未回填；或全量挂靠且 metric_name 匹配） — 已挂靠 12 条 / PLAN 12 条；越界 []；挂错 []
+INFO  schema_cache 覆盖的本体类/表键：3614 个
+PASS  S2.3 tier A 物理列齐备 KPI_SUPPLIER_OTD
+PASS  S2.3 tier A 物理列齐备 KPI_SUPPLIER_OVERDUE_RATIO
+PASS  S2.3 tier A 物理列齐备 KPI_PAYMENT_ON_TIME
+PASS  S2.3 tier A 物理列齐备 KPI_INVOICE_MATCH_RATE
+INFO  实测物理列缺失条目：无
+INFO  tier C 观测：execution_source=['NONE']，结构化度量条数=0
+INFO  STEP S2 end
+INFO  STEP S3 begin
+PASS  S3.1 KPI_COST_SAVING 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'grain_mismatch')
+PASS  S3.1 KPI_INVOICE_MATCH_RATE 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.2 KPI_INVOICE_MATCH_RATE tier A formula 覆盖全部结构化列
+PASS  S3.1 KPI_PAYMENT_ON_TIME 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
+PASS  S3.2 KPI_PAYMENT_ON_TIME tier A formula 覆盖全部结构化列
+PASS  S3.1 KPI_PURCHASE_CYCLE_TIME 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'grain_mismatch')
+PASS  S3.1 KPI_PURCHASE_PRICE_VARIANCE 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'governance_measure_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_DEFECT_RATE 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_DELAY_DAYS 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_FPY 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_MAINTENANCE_RATIO 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_columns_absent', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_NCR_RATE 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_columns_absent', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_OTD 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
+PASS  S3.2 KPI_SUPPLIER_OTD tier A formula 覆盖全部结构化列
+PASS  S3.1 KPI_SUPPLIER_OVERDUE_RATIO 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
+PASS  S3.2 KPI_SUPPLIER_OVERDUE_RATIO tier A formula 覆盖全部结构化列
+PASS  S3.3 mismatch 集合 = PLAN 已登记偏差集合（不多不少） — 多判 []；漏判 []
+PASS  S3.4 列级 finding 集合 = 治理/技术列差异集合（防 _checkRole 列比对被删） — 期望 ['KPI_INVOICE_MATCH_RATE', 'KPI_PAYMENT_ON_TIME', 'KPI_SUPPLIER_OTD', 'KPI_SUPPLIER_OVERDUE_RATIO']；实际 ['KPI_INVOICE_MATCH_RATE', 'KPI_PAYMENT_ON_TIME', 'KPI_SUPPLIER_OTD', 'KPI_SUPPLIER_OVERDUE_RATIO']
+INFO  实测 verdict 分布：{'mismatch': 12}
+INFO  ⚠️ 12/12 条全部 mismatch ⇒ 契约注入与发布闸门均被对账拦截，直到业务方审核并对齐治理列（这是设计上的多签互锁，不是脚本缺陷）
+INFO  STEP S3 end
+INFO  STEP S4 begin
+INFO  S4 闸门未通过项（KPI_COST_SAVING）：['metric_published', 'reconcile', 'datasource']
+PASS  S4.1 开关 ON ⇒ 服务层抛 ConflictError（被拦下）
+PASS  S4.2 错误信息带出缺项明细 — failedItems=['metric_published', 'reconcile', 'datasource']
+PASS  S4.4 开关已还原 — 原值 None → 还原后 None
+INFO  开关对照 KPI_METRIC_GATE_ENABLED：运行前=None 临时='true' 还原后=None
+PASS  S4.3 开关 OFF ⇒ 只观察不拦截
+PASS  S4.5 开关已还原 — 原值 None → 还原后 None
+INFO  开关对照 KPI_METRIC_GATE_ENABLED：运行前=None 临时='false' 还原后=None
+INFO  STEP S4 end
+INFO  STEP S5 begin
+PASS  S5.1 12 条全部 mismatch ⇒ 契约块必须为空（对账拦截生效） — 0 字符
+INFO  全部 mismatch 的来源 = PLAN 的**刻意**治理↔物理偏差（T15-L）；业务方审核并对齐治理列之前，本特性只观察、不注入
+PASS  S5.9 审核模拟：KPI_SUPPLIER_OTD 治理列对齐后 verdict = pass — 实际 pass；findings=()
+PASS  S5.10 审核模拟：对齐后契约块非空 — 575 字符
+PASS  S5.2 契约块含 KPI code
+PASS  S5.3 契约块含标题
+PASS  S5.4 允许形态 SUM(分子)/SUM(分母)
+PASS  S5.5 禁止形态 AVG(分子/分母)
+PASS  S5.6 prompt 里真的含契约标题 — prompt 4361 字符
+PASS  S5.7 prompt 里真的含比率形态指引
+PASS  S5.8 prompt 里真的含 KPI code
+PASS  S5.11 审核模拟的治理列已还原
+INFO  STEP S5 end
+INFO  STEP S6 begin
+PASS  S6.1 缓存已 warmUp
+PASS  S6.2 缓存含 KPI_SUPPLIER_OTD
+PASS  S6.3 精确 alias 命中且 confidence = 1.0 — 结果 [('KPI_SUPPLIER_OTD', 1.0)]
+INFO  L1 遗留项实测：自然语言问句 '供应商准时交付率是多少' 最高分 0.0 （目录关键词 5–6 词 vs 阈值 0.75 ⇒ Jaccard 路径不可达）
+INFO  STEP S6 end
+INFO  STEP S7 begin
+PASS  S7.1 缓存条目数 = PUBLISHED KPI 条数 — 缓存 12 vs PUBLISHED 12（全量 12）
+PASS  S7.2 findByAnyKeyword 命中候选 — 关键词 '成本节约' 命中 1 条
+INFO  STEP S7 end
+INFO  STEP S8 begin
+PASS  S8.1 拆分纯函数：多表 + 去重 + 大写 + 保序
+PASS  S8.2 拆分纯函数：空值
+PASS  S8.3 表索引纯函数：空输入
+INFO  实测：22 个裸表名引用，命中 13 个（59.1%）；未命中 9 个
+INFO  未命中清单：KPI_COST_SAVING:DWD_PURCHASE_CONTRACT、KPI_PAYMENT_ON_TIME:DWD_PAYMENT、KPI_PURCHASE_CYCLE_TIME:DWD_PURCHASE_REQUISITION、KPI_PURCHASE_PRICE_VARIANCE:DWD_PURCHASE_CONTRACT、KPI_SUPPLIER_DEFECT_RATE:DWD_INCOMING_INSPECTION、KPI_SUPPLIER_FPY:DWD_INCOMING_INSPECTION、KPI_SUPPLIER_MAINTENANCE_RATIO:DWD_SUPPLIER_CERTIFICATION、KPI_SUPPLIER_NCR_RATE:DWD_INCOMING_INSPECTION、KPI_SUPPLIER_NCR_RATE:DWD_NCR
+PASS  S8.4 裸表名 join 有命中（否则信号完全失效） — 命中 13 / 22
+INFO  STEP S8 end
+------------------------------------------------------------------------
+NOTE  1 step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失败）
+  - S9 回填落库 + 幂等: 只读模式未加 --apply-backfill（落库需业务方审核后显式发起）
+RESULT: SKIP steps=9 passed=8 failed=0 skipped=1
+INFO  跳过步骤数 = 1；例如：None

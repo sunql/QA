@@ -373,7 +373,7 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 | 4 | Tier A 灰度（**默认关**） | `KPI_METRIC_TIER_A_ENABLED=true` ⇒ L1 命中走 0 LLM 直通 |
 | 5 | 发布闸门（**默认关**） | `KPI_METRIC_GATE_ENABLED=true` ⇒ DRAFT→PUBLISHED 缺项返回 409 + 缺项清单 |
 | 6 | 前端发布 | 指标管理页 / KPI 页两处字段可见可编辑 |
-| 7 | 真实数据验证 | `backend/scripts/kpi_metric_realdata.py --database-url <DSN>` 跑通。按库区分：**测试库只读 ⇒ 全 PASS / exit 0**；**prod 只读 ⇒ S1 FAIL（迁移未应用）/ exit 1**；无 FAIL 但有 SKIP（如只读模式的 S9）⇒ **exit 2** |
+| 7 | 真实数据验证 | `backend/scripts/kpi_metric_realdata.py --database-url <DSN>` 跑通。按库/模式区分（**三态退出码**）：**测试库 + `--apply-backfill` ⇒ 全 PASS / exit 0**；**测试库只读 ⇒ 无 FAIL 但有 SKIP（S9 恒 SKIP）⇒ exit 2**；**prod 只读 ⇒ S1 FAIL（迁移未应用）/ exit 1**（FAIL 优先于 SKIP）；「全跳过」也落 `2`，不会被读成通过 |
 
 > ⚠️ 步骤 1 前须处理 **alembic 版本漂移**：alembic 读 `DATABASE_URL`，pytest 读 `TEST_DATABASE_URL`；换分支后 `alembic_version` 残留要 `UPDATE`。
 > ⚠️ 迁移/测试**不得触碰生产 Milvus / Neo4j**。
@@ -408,7 +408,7 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 
 - **Spec**：[`docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md`](../../docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md)
 - **Wiki**：[`Harness/wiki/kpi-metric-technical-form.md`](../../wiki/kpi-metric-technical-form.md)（架构参考 + §14 实施结果）
-- **实跑证据**：[`realdata-run.txt`](realdata-run.txt)（prod 只读 S1 FAIL 为预期 + 隔离测试库 S9 幂等 9/9 PASS）
+- **实跑证据**：[`realdata-run.txt`](realdata-run.txt)（A：prod 只读 S1 FAIL 为预期 / exit 1；B：隔离测试库回填 S9 幂等 9/9 PASS / exit 0；C：回填后只读复跑 0 FAIL 但有 SKIP / **exit 2**）
 - **回填审核清单**：[`docs/kpi-metric-backfill-review.md`](../../../docs/kpi-metric-backfill-review.md)（2026-10-29 从 prod 只读生成，12 新建 / 0 匹配）
 - **Rules**：[`Harness/rules/开发流程规范.md`](../../rules/开发流程规范.md)（10 阶段工作流）、[`Harness/rules/变更记录强制规范.md`](../../rules/变更记录强制规范.md)
 - **Memory**：[`qa-system-kpi-metric-technical-form-design.md`](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-kpi-metric-technical-form-design.md)
@@ -448,22 +448,35 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 | exact-alias | `KPI_SUPPLIER_OTD` 命中，`confidence = 1.0` |
 | Jaccard 自然语言路径 | 「供应商准时交付率是多少」最高分 **0.0** ⇒ 不可达（遗留项 L1） |
 | 裸表名 join | 22 个表引用 / 命中 13（59.1%） |
+| 回填后只读复跑（隔离测试库） | `RESULT: SKIP`（8 PASS / 1 SKIP：S9 只读恒 SKIP）⇒ **exit 2**；S2.2 12/12 挂靠；S3.4 期望=实际 |
 | prod 迁移状态 | `alembic_version = '0135'` ⇒ S1 FAIL（**预期**），S2–S9 SKIP |
 | prod `system_config` | 28 行，KPI 开关 0 行（只读跑前/跑后一致） |
 
-> **S2.2′ 的口径（T16-11）**：严格集合相等（`linked == plan`）在**回填前不成立** —— S2 在 S9 之前跑，未回填时 `linked = 0`，而脚本必须在回填前后都能跑。因此采用可判定的不变量：**要么 0 条（未回填），要么全量挂靠（不允许部分挂靠）**，且挂靠 code 不得越出 PLAN。这比子集断言强，又不依赖执行顺序。
+> **S2.2′ 的口径（T16-11，复审后升级为真归属校验）**：严格集合相等（`linked == plan`）在**回填前不成立** —— S2 在 S9 之前跑，未回填时 `linked = 0`，而脚本必须在回填前后都能跑。因此采用可判定的不变量：**要么 0 条（未回填），要么全量挂靠（不允许部分挂靠）**，挂靠 code 不得越出 PLAN，且**每条挂靠的 `ontology_metric.metric_name` 必须等于 PLAN 的 `metricName`**（`fetchLinkedMetricNames` 连接 `kpi_catalog.metric_id → ontology_metric`）。只数非空 `metric_id` 会放过「挂到了别的指标」；负向对照实测：把 `KPI_SUPPLIER_OTD` 改成指向另一条 metric ⇒ `FAIL S2.2 … 挂错 ['KPI_SUPPLIER_OTD']`，还原后 12/12 PASS。
 
 ### 10.3 测试与静态检查
 
 | 项 | 结果 |
 |---|---|
-| 单测（本任务三文件：realdata_lib / spec / reconcile） | 74 passed；新模块覆盖率 `kpi_metric_spec.py` **100%**、`kpi_metric_realdata_lib.py` **96%**（合并 96.77%） |
-| KPI 单测扫面 | 356 passed |
+| 单测（本任务四文件：realdata_lib / s3 / spec / reconcile） | 89 passed；新模块覆盖率 `kpi_metric_spec.py` **100%**、`kpi_metric_realdata_lib.py` **96%**、`kpi_metric_realdata_s3.py` **100%**（合并 98%，134 语句 / 3 未覆盖） |
+| KPI 单测扫面 | 371 passed |
 | 集成（6 文件：backfill_apply / contract_injection / publish_gate_api / persistence / schema / publish_gate_http） | 71 passed（unit 与 integration **分两个 session**） |
 | ruff | 新增文件 0 告警；改动文件无新增告警（`All checks passed!`） |
 | 数据库 | 真实 PostgreSQL（5434 `qa_metadata_test_t16`，`alembic upgrade head` 到 0137）；无 sqlite |
 
-`kpi_metric_realdata.py` / `_db.py` / `_inject.py` 是**真库入口脚本**，由 S1–S9 实跑覆盖（不适用 pytest 覆盖率口径）；纯函数层（`_lib` / `_spec`）已按上表覆盖。
+`kpi_metric_realdata.py` / `_db.py` / `_s3.py` / `_s4.py` / `_inject.py` 是**真库入口脚本**，由 S1–S9 实跑覆盖（不适用 pytest 覆盖率口径）；纯函数层（`_lib` / `_s3` / `_spec`）已按上表覆盖。
+
+### 10.4 三层防线的判别力边界（复审实测，务必如实理解）
+
+| 退化 | 谁抓到 |
+|---|---|
+| `_checkRole` 的列比对被整体删掉 / 只删一个方向 | **单测**（整体置空 ⇒ `test_kpi_metric_reconcile.py` 8 failed）；S3.4 只抓「两个方向都丢」 |
+| `MeasureSpec.columns()` 退化（技术列抽取崩） | **只有单测**（置空 ⇒ 14 failed）；S3.1 / S3.3 / S3.4 **全绿**（被 `grain_mismatch` 兜住） |
+| 治理列与物理列错配 / 偏差登记手误 | S3.1 / S3.3（verdict 与偏差集合对不上） |
+
+> **结论**：S3.4 是**端到端兜底**，不是唯一防线；真正的判别力在**单测层**。
+> S3.4 自身的已知局限（刻意不修，靠单测兜）：① 只丢一个方向的列级 code 时无判别力；
+> ② 技术列抽取与引擎**同源**（都用 `MeasureSpec.columns()`），该输入退化时 S3.4 会跟着绿。
 
 ---
 

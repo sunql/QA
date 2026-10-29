@@ -39,7 +39,7 @@ from app.domain.models import (
     OntologyMetric,
     OntologyMetricSource,
 )
-from app.services.kpi_match_cache import kpi_match_cache
+from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_audit import recordReconcileResult
 from app.services.kpi_metric_reconcile import (
     VERDICT_MISMATCH,
@@ -273,7 +273,7 @@ async def _matchKpiCodes(
     if not question or not question.strip():
         return []
     try:
-        await kpi_match_cache.ensureFresh(session)
+        await get_kpi_match_cache().ensureFresh(session)
         results = await getKpiSemanticMatchService().matchAll(question, limit=limit)
     except Exception:
         logger.warning("KPI 语义匹配失败，跳过契约注入", exc_info=True)

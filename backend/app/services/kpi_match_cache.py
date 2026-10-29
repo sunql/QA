@@ -31,6 +31,26 @@ logger = logging.getLogger(__name__)
 _CACHE_MAX_AGE_SECONDS = 60
 
 
+def _hasPendingKpiChanges(session: AsyncSession) -> bool:
+    """session 里是否有**待落库**的 KpiCatalog 改动。
+
+    `populate_existing=True` 会用查询结果**覆盖** identity map 中同 id 实例的
+    属性 ⇒ 若调用方改了 KpiCatalog 却还没 flush，这次 SELECT 会把改动抹掉
+    （生产 session `autoflush=False` + `expire_on_commit=False`
+    ⇒ 后续 flush 会把**旧值**写回 DB = 静默数据丢失）。
+
+    ⇒ 有待落库改动时退回普通 SELECT：可能读到略旧的值（缓存是加速器，
+    TTL 到期后自愈），但绝不毁数据。
+
+    注：`session.new` / `session.dirty` / `session.deleted` 的读取**不触发
+    autoflush**（它们只扫 identity map 与属性历史），因此这里做检测是安全的。
+    """
+    from app.domain.models import KpiCatalog
+
+    pending = (*session.new, *session.dirty, *session.deleted)
+    return any(isinstance(obj, KpiCatalog) for obj in pending)
+
+
 class KpiMatchCache:
     """L1 语义匹配缓存。
 
@@ -127,14 +147,18 @@ class KpiMatchCache:
         同 id 行。默认行为下 SELECT 会直接返回 identity map 里的旧实例（属性不
         刷新）⇒ 绕过 ORM 的写入（Core UPDATE / 裸 SQL）即使重建了索引，读到的
         仍是旧口径。缓存必须反映 DB 现状，故显式声明刷新语义。
+
+        ⚠️ **契约**：该刷新语义会**覆盖调用方 session 里同 id 行的内存属性**。
+        若调用方 session 中存在**待落库**的 KpiCatalog 改动（改了但没 flush），
+        这次刷新会把改动静默抹掉（生产 session `autoflush=False` ⇒ 随后 flush
+        把旧值写回 DB = 数据丢失）。因此这里**条件化**：检测到待落库改动时退回
+        普通 SELECT（读到略旧的值，但绝不毁数据；缓存是加速器，TTL 到期自愈）。
         """
         from app.domain.models import KpiCatalog
 
-        stmt = (
-            select(KpiCatalog)
-            .where(KpiCatalog.status == KpiStatus.PUBLISHED.value)
-            .execution_options(populate_existing=True)
-        )
+        stmt = select(KpiCatalog).where(KpiCatalog.status == KpiStatus.PUBLISHED.value)
+        if not _hasPendingKpiChanges(session):
+            stmt = stmt.execution_options(populate_existing=True)
         rows = await session.execute(stmt)
         kpis = list(rows.scalars().all())
 

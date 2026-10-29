@@ -95,6 +95,23 @@ def test_kpi_gate_execution_source_empty_blocked() -> None:
     assert "execution_source" in _failed(items)
 
 
+def test_kpi_gate_reconcile_pass_message_is_not_unknown() -> None:
+    """Q7：通过项的文案不得写成「口径对账未完成（unknown）」。"""
+    items = buildKpiGateItems(
+        metricId=1,
+        metricStatus="PUBLISHED",
+        executionSource="COMPILED",
+        datasourceId=7,
+        reconcileVerdict="pass",
+        reconcileDetail="",
+    )
+    reconcile = next(i for i in items if i.code == "reconcile")
+
+    assert reconcile.ok is True
+    assert "unknown" not in reconcile.message
+    assert "未完成" not in reconcile.message
+
+
 def test_kpi_gate_reconcile_unknown_blocked() -> None:
     """unknown 不允许发布（spec §7.5 ④）。"""
     items = buildKpiGateItems(

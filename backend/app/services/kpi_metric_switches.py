@@ -29,10 +29,12 @@ async def readKpiMetricSwitch(
 ) -> bool:
     """读 system_config 布尔开关；缺席/非法/异常返 default。"""
     try:
-        row = await session.execute(
-            select(SystemConfig).where(SystemConfig.key == key)
-        )
-        cfg = row.scalar_one_or_none()
+        # savepoint：开关读取失败不得把调用方事务打成 failed 态（chat 主流程仍在用同一 session）。
+        async with session.begin_nested():
+            row = await session.execute(
+                select(SystemConfig).where(SystemConfig.key == key)
+            )
+            cfg = row.scalar_one_or_none()
     except Exception:
         logger.warning("读取开关 %s 失败，返默认值 %s", key, default, exc_info=True)
         return default

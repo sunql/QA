@@ -16,6 +16,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import (
@@ -441,3 +442,64 @@ async def test_build_contract_block_omits_ratio_guidance_for_measure_type(
     assert "AVG(分子/分母)" not in block
     # 残留值本身仍如实呈现（不隐藏事实，只是不据此发指引）
     assert "聚合阶：WEIGHTED_RATIO" in block
+
+
+# ── F1：DB 级失败必须被 savepoint 隔离（不得把 chat session 打成 failed 态） ──
+
+
+async def test_build_contract_block_db_failure_keeps_session_usable(
+    dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_loadMetric` 触发真实 DB 错误 ⇒ 只丢该 KPI + 同一 session 仍可继续查询。
+
+    若缺少 per-code savepoint，SQLAlchemy 会把事务标记为 failed：后续兄弟 KPI
+    查询抛 ``PendingRollbackError``，最终整个 chat 请求失败（可选功能打挂主流程）。
+    """
+    goodMetric = await _seedRatioMetric(dbSession, name="可用指标")
+    await _seedKpi(
+        dbSession, code="KPI_OK_AFTER_DB_FAIL", name="可用指标", metricId=goodMetric.id
+    )
+    boomMetric = await _seedRatioMetric(dbSession, name="炸库指标")
+    await _seedKpi(
+        dbSession, code="KPI_DB_BOOM", name="炸库指标", metricId=boomMetric.id
+    )
+    _matchOnly(monkeypatch, ["KPI_DB_BOOM", "KPI_OK_AFTER_DB_FAIL"])
+
+    originalLoadMetric = builder_module._loadMetric
+
+    async def _fakeLoadMetric(session, metricId):  # type: ignore[no-untyped-def]
+        if metricId == boomMetric.id:
+            # 真实 DB 级失败（PostgreSQL 除以零，sqlstate 22012）
+            await session.execute(text("SELECT 1/0"))
+        return await originalLoadMetric(session, metricId)
+
+    monkeypatch.setattr(builder_module, "_loadMetric", _fakeLoadMetric)
+
+    block = await buildKpiContractBlock(dbSession, "问题")
+
+    assert "KPI_OK_AFTER_DB_FAIL" in block
+    assert "KPI_DB_BOOM" not in block
+    # 关键：事务没被打死 —— 同一 session 上紧接着的查询必须成功
+    assert (await dbSession.execute(text("SELECT 1"))).scalar_one() == 1
+
+
+async def test_build_contract_block_audit_db_failure_keeps_session_usable(
+    dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`recordReconcileResult` 触发 DB 错误 ⇒ 审计丢失但契约照常构建、session 仍可用。"""
+    metric = await _seedRatioMetric(dbSession, name="审计炸库指标")
+    await _seedKpi(
+        dbSession, code="KPI_AUDIT_BOOM", name="审计炸库指标", metricId=metric.id
+    )
+    _matchOnly(monkeypatch, ["KPI_AUDIT_BOOM"])
+
+    async def _boomAudit(session, **_kwargs):  # type: ignore[no-untyped-def]
+        await session.execute(text("SELECT 1/0"))
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(builder_module, "recordReconcileResult", _boomAudit)
+
+    block = await buildKpiContractBlock(dbSession, "问题")
+
+    assert "KPI_AUDIT_BOOM" in block
+    assert (await dbSession.execute(text("SELECT 1"))).scalar_one() == 1

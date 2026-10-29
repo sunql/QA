@@ -58,6 +58,7 @@ from app.services.messages_zh import (
     MSG_KPI_GATE_NO_DATASOURCE,
     MSG_KPI_GATE_NO_EXECUTION_SOURCE,
     MSG_KPI_GATE_RECONCILE_MISMATCH,
+    MSG_KPI_GATE_RECONCILE_PASS,
     MSG_KPI_GATE_RECONCILE_UNKNOWN,
     MSG_KPI_RECONCILE_FINDING,
     MSG_KPI_RECONCILE_FINDING_NO_DETAIL,
@@ -159,7 +160,11 @@ def buildKpiGateItems(
         executionSource != MetricExecutionSource.NONE.value
     )
     detail = reconcileDetail or MSG_KPI_RECONCILE_FINDING_NO_DETAIL
-    if reconcileVerdict == VERDICT_MISMATCH:
+    if reconcileVerdict == VERDICT_PASS:
+        # Q7：pass 时不得复用「未完成（unknown）」文案——闸门通过项写着
+        # 「口径对账未完成」会让运维误判为仍有缺口。
+        reconcileMessage = MSG_KPI_GATE_RECONCILE_PASS
+    elif reconcileVerdict == VERDICT_MISMATCH:
         reconcileMessage = MSG_KPI_GATE_RECONCILE_MISMATCH.format(detail=detail)
     else:
         reconcileMessage = MSG_KPI_GATE_RECONCILE_UNKNOWN.format(detail=detail)

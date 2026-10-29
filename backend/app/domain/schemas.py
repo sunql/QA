@@ -636,7 +636,8 @@ class MeasureSpecSchema(CamelModel):
     agg：聚合函数（SUM / COUNT / AVG / COUNT_DISTINCT）。
     expr：表达式文本（列名或列名算术式），如 "ACTUAL_RECEIPT_DATE - PROMISED_DATE"。
     filter：过滤谓词（如 "IQCRESULT = 'FAIL'"），可为 None。
-    class_id：源类 ID（应用层校验存在性，DB 无法对 JSON 内嵌引用加 FK）。
+    class_id：源类 ID（JSON 内嵌引用，DB 无法加 FK；本 DTO **不做**存在性校验，
+    悬空 id 由契约渲染降级为 class#{id}，回填脚本写库前才检查 role/class 归属）。
     class_alias：源类别名（人读，冗余存储便于 prompt 渲染）。
     """
 

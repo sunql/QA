@@ -6,7 +6,9 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from app.services import kpi_contract_builder as builderModule
 from app.services.kpi_contract_builder import (
+    KPI_CONTRACT_MAX_FIELD_CHARS,
     ContractEntry,
     SourceClassRef,
     ratioSqlGuidance,
@@ -141,3 +143,61 @@ def test_contract_entry_is_immutable() -> None:
     entry = ContractEntry(kpi_code="KPI_A", kpi_name="指标A", verdict="pass")
     with pytest.raises(FrozenInstanceError):
         entry.verdict = "mismatch"  # type: ignore[misc]
+
+
+# ── F11：字段 / 整块长度上限（绝不静默截断） ─────────────────────────
+
+
+def test_render_entry_truncates_long_field_with_explicit_marker() -> None:
+    """超长治理文本必须**原位**截断并写明截掉多少字（静默截断会让模型误读口径）。"""
+    longText = "甲" * (KPI_CONTRACT_MAX_FIELD_CHARS + 10)
+    entry = ContractEntry(
+        kpi_code="KPI_LONG",
+        kpi_name="长字段指标",
+        verdict="pass",
+        business_definition=longText,
+    )
+
+    text = renderContractEntry(entry)
+
+    assert longText not in text
+    assert "…[已截断 10 字]" in text
+    assert "甲" * KPI_CONTRACT_MAX_FIELD_CHARS in text
+
+
+def test_render_entry_short_values_are_unchanged() -> None:
+    """正常长度**逐字相等**（截断逻辑不得改写正常文本）。"""
+    entry = ContractEntry(
+        kpi_code="KPI_SHORT",
+        kpi_name="短名",
+        verdict="pass",
+        business_definition="定义",
+    )
+
+    assert renderContractEntry(entry) == (
+        "- KPI_SHORT（短名）\n  - 业务定义：定义\n  - 对账状态：pass"
+    )
+
+
+def test_render_block_drops_entries_over_limit_and_notes_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """整块超限：丢**整条**后续 entry（不从 markup 中间切），并加尾注写明条数。"""
+    entries = tuple(
+        ContractEntry(
+            kpi_code=f"KPI_{index}",
+            kpi_name="长条目",
+            verdict="pass",
+            business_definition="乙" * 200,
+        )
+        for index in range(3)
+    )
+    monkeypatch.setattr(builderModule, "KPI_CONTRACT_MAX_BLOCK_CHARS", 500)
+
+    block = renderContractBlock(entries)
+
+    assert block.count("- KPI_") == 1
+    assert "KPI_0" in block
+    assert "KPI_1" not in block
+    assert "KPI_2" not in block
+    assert "[…更多 KPI 契约因长度上限未注入，共 2 条]" in block

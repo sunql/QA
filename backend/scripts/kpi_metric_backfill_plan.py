@@ -286,6 +286,10 @@ _PLAN_LIST: tuple[KpiBackfillPlan, ...] = (
         classRefs=(
             ("DWD_PURCHASE_INVOICE_LINE", MetricSourceRole.NUMERATOR.value),
             ("DWD_PURCHASE_INVOICE", MetricSourceRole.DENOMINATOR.value),
+            # M-6：分子 filter 引用 O.PO_NO / O.PO_LINE_NO / O.ORDER_QTY /
+            # O.UNIT_PRICE，O 是订单行表 ⇒ 必须有对应的来源类，否则 filter
+            # 引用的列在下游没有类来源，无法编译。
+            ("DWD_PURCHASE_ORDER_LINE", MetricSourceRole.FILTER.value),
         ),
         governanceNumerator=("PO", "QTY", "PRICE"),
         governanceDenominator=(),

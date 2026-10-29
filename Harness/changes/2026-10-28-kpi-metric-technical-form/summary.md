@@ -3,7 +3,7 @@
 - **日期**：2026-10-28（设计）/ 2026-10-29（实施完成）
 - **作者**：Claude（与用户逐节确认）
 - **Phase**：Phase 6.7 指标技术形态治理
-- **状态**：**已实施；prod 已迁移（0137），回填/关键词待业务审核后执行**（P1 + P1-数据工具链已落地；tier 分布 **A4 / B5 / C3**；见 §11）
+- **状态**：**已实施；prod 已迁移（0137）+ 已回填（12 指标挂靠）**；待办=关键词/数据源绑定 + 开关策略 + 治理列对齐（见 §11）
 - **分支**：`feat/kpi-metric-technical-form`
 - **Spec 路径**：[`docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md`](../../docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md)（608 行）
 - **Spec commit**：`4a4f736f`（分支 `docs/kpi-metric-technical-form-spec`，base `main` @ `3ecd780c`）
@@ -548,8 +548,12 @@ prod `system_config` **没有任何 KPI 开关行** ⇒ 走代码默认：
 - [x] **迁移后在真实 prod 复验 F8**（复审遗留）：2026-10-30 prod 只读 realdata，S4 显示
   「目标库是正式库：…prod 一律不写」SKIP（非「迁移未应用」FAIL），failed=0 / passed=4 / skipped=5
   （S3/S5/S7.2/S9 因回填未落库 SKIP，符合预期）⇒ F8 具备真实 prod 证据
-- [ ] 业务方审核 [`docs/kpi-metric-backfill-review.md`](../../../docs/kpi-metric-backfill-review.md)（12 新建 / 0 匹配）
-- [ ] **人工**发起 `kpi_metric_backfill.py --database-url <prod DSN> --apply --allow-prod-write`（S9 语义已在隔离测试库证明幂等；prod 未跑）
+- [x] 业务方审核 [`docs/kpi-metric-backfill-review.md`](../../../docs/kpi-metric-backfill-review.md)（12 新建 / 0 匹配）
+- [x] **人工**发起 `kpi_metric_backfill.py --database-url <prod DSN> --apply --allow-prod-write`
+  （**2026-10-30 完成**：created=12 updated=0 degraded=0 skipped=0；脚本自动备份 + 手工备份双保险；
+  库内复核 metric=12 / source=18 / 挂靠 12/12；复跑 realdata failed=0，S3 确认 12/12 mismatch
+  与 PLAN 登记偏差一致、S5.1 契约块 0 字符=对账拦截生效；脚本提示 **12 条 KPI 未绑数据源，
+  发布闸门会拦**——对应下一条 datasource_id 项）
 - [ ] 补齐 `semantic_keywords` / `datasource_id`（12/12 仍为 NULL）
 - [ ] 决定 §11.2 的开关策略（先关后开 / 接受默认）
 - [ ] 治理列对齐后重跑 `kpi_metric_realdata.py`，确认 verdict 从 `mismatch` 转 `pass` 且契约块非空

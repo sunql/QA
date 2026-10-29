@@ -388,3 +388,18 @@ INFO  跳过步骤数 = 8；例如：迁移未应用到 0137（新列/新表缺�
 - S3/S5/S7.2/S9 SKIP：回填未落库 + 无 semantic_keywords，符合预期（≠ 通过）
 - 对比 D 段（0135 时期）：S1 由 FAIL 转 PASS，S4 SKIP 文案由「迁移未应用」转为「正式库不写开关」，
   其余 SKIP 语义一致 —— 修复未引入回归的结论在 0137 上继续成立。
+
+========================================================================
+## F. 2026-10-30 prod 回填落库 + 回填后复跑
+
+- 命令：`kpi_metric_backfill.py --database-url <prod DSN> --apply --allow-prod-write`
+- 结果：`created=12 updated=0 degraded=0 skipped=0`；脚本提示 12 条 KPI 未绑数据源（发布闸门会拦）
+- 库内复核：ontology_metric=12 / ontology_metric_source=18 / kpi_catalog 挂靠 12/12；
+  execution_source 分布 = ESCAPE_HATCH + NONE（A/B 档带公式，C 档无类映射）
+- 回填后只读 realdata：RESULT failed=0 / passed=5 / skipped=4
+  - S3.1 ×12：verdict 全部 = mismatch，findings 与 PLAN 登记偏差「不多不少」（S3.3/S3.4 PASS）
+  - S5.1：12 条全 mismatch ⇒ 契约块 0 字符（对账拦截生效，prod 当前输出为零符合设计预期）
+  - S5.9 SKIP：治理列对齐审核模拟只在隔离测试库做（prod 不写治理列）
+  - S4/S9/S7.2 SKIP 语义同 E 段
+- 证据文件（会话外不留档）：预览 /tmp/kpi_backfill_preview_20261030.txt、
+  apply /tmp/kpi_backfill_apply_20261030.txt、复跑 /tmp/kpi_realdata_post_backfill_20261030.txt

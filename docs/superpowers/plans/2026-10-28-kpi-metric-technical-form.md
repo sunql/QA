@@ -2339,10 +2339,13 @@ git commit -m "feat: KPI 指标技术形态三层对账引擎（纯函数，层 
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.system_config import SystemConfig
 from app.services.kpi_metric_audit import (
     RECONCILE_ENTITY_TYPE,
     recordReconcileResult,
@@ -2354,6 +2357,12 @@ from app.services.kpi_metric_reconcile import (
     ReconcileFinding,
     ReconcileResult,
 )
+from app.services.kpi_metric_switches import readKpiMetricSwitch
+
+
+@pytest.fixture
+def session(dbSession: AsyncSession) -> AsyncSession:
+    return dbSession
 
 
 def _finding(reason: str, verdict: str) -> ReconcileFinding:
@@ -2432,12 +2441,33 @@ async def test_audit_row_shape(session: AsyncSession) -> None:
     assert rec["action"] == "CREATE"
     after = rec["after_json"]
     if isinstance(after, str):
-        import json
-
         after = json.loads(after)
     assert after["verdict"] == "mismatch"
     assert after["kpi_code"] == "KPI_SHAPE"
     assert after["findings"][0]["reason"] == "grain_mismatch"
+
+
+async def test_switch_recognizes_falsy_value(session: AsyncSession) -> None:
+    session.add(SystemConfig(key="KPI_TEST_FALSY", value=" Off "))
+    await session.commit()
+    assert await readKpiMetricSwitch(session, "KPI_TEST_FALSY", True) is False
+
+
+async def test_switch_recognizes_truthy_value(session: AsyncSession) -> None:
+    session.add(SystemConfig(key="KPI_TEST_TRUTHY", value="YES"))
+    await session.commit()
+    assert await readKpiMetricSwitch(session, "KPI_TEST_TRUTHY", False) is True
+
+
+async def test_switch_missing_uses_default(session: AsyncSession) -> None:
+    assert await readKpiMetricSwitch(session, "KPI_TEST_MISSING", True) is True
+    assert await readKpiMetricSwitch(session, "KPI_TEST_MISSING", False) is False
+
+
+async def test_switch_invalid_uses_default(session: AsyncSession) -> None:
+    session.add(SystemConfig(key="KPI_TEST_INVALID", value="not-a-number"))
+    await session.commit()
+    assert await readKpiMetricSwitch(session, "KPI_TEST_INVALID", True) is True
 
 
 async def _auditCount(session: AsyncSession) -> int:
@@ -2643,7 +2673,7 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@loca
   uv run pytest app/tests/unit/test_kpi_metric_audit.py -q
 ```
 
-Expected: PASS（5 passed）
+Expected: PASS（8 passed：4 个审计用例 + 4 个开关用例）
 
 - [ ] **Step 7: 提交**
 

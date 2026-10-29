@@ -48,7 +48,7 @@ from app.tests._pg_support import resolveTestDatabaseUrl
 from scripts.kpi_metric_backfill import PLAN, applyPlans, classColumnIndex, verifyPlan
 from scripts.kpi_metric_backfill_apply import _graphSyncSuppressed
 from scripts.kpi_metric_backfill_plan import BACKFILL_ACTOR_ID
-from scripts.seed_kpi_semantic_index import seedKpiSemanticIndex
+from scripts.seed_kpi_semantic_index import _runSeed, seedKpiSemanticIndex
 
 _CLASS_TABLES = (
     "DIM_SUPPLIER",
@@ -284,7 +284,8 @@ async def test_apply_creates_metric_and_links_kpi(
     assert summary.created == ("KPI_SUPPLIER_OTD",)
     assert summary.updated == ()
     assert summary.degraded == ()
-    assert summary.unboundDataSource == ()
+    assert summary.unbound_data_source == ()
+    assert summary.reverted_to_draft == ()
 
     await dbSession.refresh(kpi)
     assert kpi.metric_id is not None
@@ -462,7 +463,7 @@ async def test_apply_skips_when_class_table_unresolved(dbSession: AsyncSession) 
     summary = await applyPlans(dbSession, [_plan("KPI_SUPPLIER_OTD")])
 
     assert summary.skipped == ("KPI_SUPPLIER_OTD",)
-    assert any("DWD_GOODS_RECEIPT_LINE" in item for item in summary.unresolvedClasses)
+    assert any("DWD_GOODS_RECEIPT_LINE" in item for item in summary.unresolved_classes)
 
 
 async def test_apply_does_not_change_kpi_status(dbSession: AsyncSession) -> None:
@@ -526,6 +527,7 @@ async def test_cli_preview_reads_target_and_writes_nothing(
     args = argparse.Namespace(
         apply=False,
         allow_prod_write=False,
+        overwrite=False,
         embed=False,
         out=str(out),
         only="KPI_SUPPLIER_OTD",
@@ -536,11 +538,122 @@ async def test_cli_preview_reads_target_and_writes_nothing(
 
     printed = capsys.readouterr().out
     assert "新建本体指标：1 条" in printed
-    assert "匹配到已有指标（只补结构化字段）：0 条" in printed
+    assert "匹配到已有指标（默认只填空值；`--overwrite` 才覆盖）：0 条" in printed
     assert "预览模式：未写库" in printed
     assert out.exists()
     metrics = (await dbSession.execute(select(OntologyMetric))).scalars().all()
     assert metrics == []
+
+
+async def test_default_apply_preserves_manual_edits(dbSession: AsyncSession) -> None:
+    """FIX-I1：不带 --overwrite 的二次 apply **不得**回退人工修订。
+
+    场景即评审给的那条：业务方核对 → 手工改公式 / owner / 治理列并发布 →
+    之后为别的 KPI 重跑全量 `--apply` ⇒ 人工值必须仍在、created=0、
+    plan 之外的 source 行必须仍在。
+    """
+    kpi, classIds, _ = await _seedOtd(dbSession)
+    plan = _plan("KPI_SUPPLIER_OTD")
+    await applyPlans(dbSession, [plan])
+    await dbSession.refresh(kpi)
+    metric = await dbSession.get(OntologyMetric, kpi.metric_id)
+    await dbSession.refresh(metric)
+
+    metric.status = "PUBLISHED"
+    metric.formula = "SELECT 1 -- manual edit"
+    metric.owner = "human-owner"
+    kpi.numerator_columns = ["MANUAL_NUM"]
+    kpi.grain_keys = ["人工粒度"]
+    dbSession.add(
+        OntologyMetricSource(
+            metric_id=metric.id, class_id=classIds["DIM_SUPPLIER"], role="FILTER"
+        )
+    )
+    await dbSession.commit()
+
+    summary = await applyPlans(dbSession, [plan])
+
+    assert summary.created == ()
+    assert summary.updated == ("KPI_SUPPLIER_OTD",)
+    assert summary.reverted_to_draft == ()
+    await dbSession.refresh(metric)
+    await dbSession.refresh(kpi)
+    assert metric.status == "PUBLISHED"
+    assert metric.formula == "SELECT 1 -- manual edit"
+    assert metric.owner == "human-owner"
+    assert kpi.numerator_columns == ["MANUAL_NUM"]
+    assert kpi.grain_keys == ["人工粒度"]
+    sources = (
+        await dbSession.execute(
+            select(OntologyMetricSource).where(
+                OntologyMetricSource.metric_id == metric.id
+            )
+        )
+    ).scalars().all()
+    assert (classIds["DIM_SUPPLIER"], "FILTER") in {
+        (row.class_id, row.role) for row in sources
+    }
+
+
+async def test_overwrite_reverts_published_metric_to_draft(
+    dbSession: AsyncSession,
+) -> None:
+    """FIX-I1：--overwrite 写 PUBLISHED 指标 ⇒ 全量重写 + 回退 DRAFT + 删额外 source。"""
+    kpi, classIds, _ = await _seedOtd(dbSession)
+    plan = _plan("KPI_SUPPLIER_OTD")
+    await applyPlans(dbSession, [plan])
+    await dbSession.refresh(kpi)
+    metric = await dbSession.get(OntologyMetric, kpi.metric_id)
+    await dbSession.refresh(metric)
+    metric.status = "PUBLISHED"
+    metric.formula = "SELECT 2 -- manual edit"
+    dbSession.add(
+        OntologyMetricSource(
+            metric_id=metric.id, class_id=classIds["DIM_SUPPLIER"], role="FILTER"
+        )
+    )
+    await dbSession.commit()
+
+    summary = await applyPlans(dbSession, [plan], overwrite=True)
+
+    assert summary.reverted_to_draft == ("KPI_SUPPLIER_OTD",)
+    await dbSession.refresh(metric)
+    assert metric.status == "DRAFT"
+    assert metric.formula == plan.formula
+    assert metric.owner == BACKFILL_ACTOR_ID
+    sources = (
+        await dbSession.execute(
+            select(OntologyMetricSource).where(
+                OntologyMetricSource.metric_id == metric.id
+            )
+        )
+    ).scalars().all()
+    assert {(row.class_id, row.role) for row in sources} == {
+        (classIds["DWD_GOODS_RECEIPT_LINE"], "NUMERATOR"),
+        (classIds["DWD_PURCHASE_ORDER_LINE"], "DENOMINATOR"),
+    }
+
+
+async def test_seed_cli_dry_run_prints_and_writes_nothing(
+    dbSession: AsyncSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """FIX-I3：seed 的 --dry-run 只打印，不写库。"""
+    dsId = await _seedDatasource(dbSession)
+    published = await _seedKpi(dbSession, "KPI_SUPPLIER_OTD", dsId, status="PUBLISHED")
+    args = argparse.Namespace(
+        database_url=resolveTestDatabaseUrl(),
+        allow_prod_write=False,
+        dry_run=True,
+    )
+
+    assert await _runSeed(args) == 0
+
+    printed = capsys.readouterr().out
+    assert "预览模式：未写库" in printed
+    assert "KPI_SUPPLIER_OTD" in printed
+    assert "准时交付" in printed
+    await dbSession.refresh(published)
+    assert published.semantic_keywords is None
 
 
 async def test_seed_semantic_index_writes_through_service(dbSession: AsyncSession) -> None:

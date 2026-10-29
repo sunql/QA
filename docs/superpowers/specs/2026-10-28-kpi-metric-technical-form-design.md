@@ -62,7 +62,7 @@
 | 窗口/刷新 | ❌ | ✅ | ❌ |
 | 预计算值 | ❌ | ✅ `feature_value`（1/6 有值，且 stale @2026-09-19） | ❌ |
 | 语义关键词 | `semantic_keywords`（dev **12/12 全空**）+ `match_threshold` | ❌ | ❌ |
-| 与本体挂钩 | `data_source` 血缘字符串（22 表引用 / 14 命中 = 64%） | SQL 内表名（3/9 命中） | FK（0 行） |
+| 与本体挂钩 | `data_source` 血缘字符串（22 表引用 / 13 命中 = 59%） | SQL 内表名（3/9 命中） | FK（0 行） |
 | **进 NL2SQL** | ❌ | ❌（只有散文描述经 `<feature_catalog>` 进 prompt） | ❌（**代码层零消费者**） |
 
 > 结论：三者各有对方没有的东西，**没有一个是完整的**。`kpi_catalog` 有治理语义缺技术形态；`feature_definition` 有技术形态缺治理语义与本体挂钩；`ontology_metric` 是 4 字段空壳。
@@ -142,7 +142,7 @@ chat_service.py:435      preamble = await self._runL1AndL4Preamble(dto, session,
 | E 比率型（差值比） | `KPI_PURCHASE_PRICE_VARIANCE` | `(实际-标准) / 标准` |
 
 ⇒ 分子/分母的值**不是"列名"**，而是「(聚合函数, 表达式, 过滤谓词)」三元组 ⇒ 必须**两层模型**（measure 层 / metric 层）。
-⇒ 且 **12 条 KPI 全部跨 2–3 张表** ⇒ `ontology_metric.target_class_id` 的**单值 FK 表达不了任何一条真实口径** ⇒ 必须 M:N。
+⇒ 且 **9/12 条 KPI 跨 2–3 张表**（3 条单表：`KPI_PAYMENT_ON_TIME` / `KPI_SUPPLIER_DEFECT_RATE` / `KPI_SUPPLIER_FPY`）⇒ `ontology_metric.target_class_id` 的**单值 FK 表达不了其中 9 条真实口径** ⇒ 必须 M:N。
 
 ### 3.6 准确性的两个正交维度
 
@@ -547,7 +547,7 @@ TDD RED → GREEN → IMPROVE，覆盖率 ≥ 80%，真实 PostgreSQL 集成测�
 |---|---|---|---|
 | 1 | **B2 挂在无调用方的 `compileObject` 上** ⇒ 对账永不触发 | `knowledge_compiler_service.py` `_compileSqlMetadata` | 改为注入时 + 发布时实时对账（§6.4） |
 | 2 | **B3 比率型文案写反** | 分支 `nl2sql_prompts.py:311`：「禁止先聚合后相除以外的写法」字面 = **强制先聚合后相除** = 辛普森悖论错误写法 | 按 §7.3 重写；提案原文 `Harness/changes/2026-10-27-...proposal.md:156` 同一处也错，一并修 |
-| 3 | **`kpi_catalog.data_source` 是表血缘但被当"数据源"用** | `kpi_datasource_suggestion_service.py:98-105` 只做名字模糊匹配 | `source_table` 是**裸表名**（实测 `DWD_SUPPLIER_PRICE_LIST_HEADER`）⇒ 按 `+` 分割即可**精确 join** `ontology_class.source_table`（22 引用 / 14 命中 = 64%） |
+| 3 | **`kpi_catalog.data_source` 是表血缘但被当"数据源"用** | `kpi_datasource_suggestion_service.py:98-105` 只做名字模糊匹配 | `source_table` 是**裸表名**（实测 `DWD_SUPPLIER_PRICE_LIST_HEADER`）⇒ 按 `+` 分割即可**精确 join** `ontology_class.source_table`（22 引用 / 13 命中 = 59%） |
 | 4 | **C1/C2/C3 缓存三洞** | `kpi_match_cache.py` | §8 |
 
 ---
@@ -599,9 +599,9 @@ TDD RED → GREEN → IMPROVE，覆盖率 ≥ 80%，真实 PostgreSQL 集成测�
 | L1 直通存在但失效 | `chat_stream_output.py:207/222` → `chat_service.py:1456/1499/1520`；dev 库 formula↔feature_definition 等值命中 0 |
 | 语义关键词全空 | dev 库 `SELECT semantic_keywords FROM kpi_catalog` 12/12 NULL |
 | C3 raw SQL 绕过 | `backend/scripts/seed_kpi_semantic_index.py` 裸 SQL UPDATE；`kpi_match_cache.py:201-212` listener 只 log |
-| 12 条 KPI 跨 2–3 表 | dev 库 `kpi_catalog.data_source` 展开 22 表引用 / 14 命中 `ontology_class.source_table` |
+| 9/12 条 KPI 跨 2–3 表 | dev 库 `kpi_catalog.data_source` 展开 22 表引用 / 13 命中 `ontology_class.source_table` |
 | 本体 DWS/ADS = 0 | dev 库 `ontology_class` 分层统计：ODS 21 + DWD 30 + 空 3 |
-| `target_class_id` 单值不够 | 12/12 KPI `data_source` 含 `+`（多表） |
+| `target_class_id` 单值不够 | 9/12 KPI `data_source` 含 `+`（多表；3 条单表：PAYMENT_ON_TIME / DEFECT_RATE / FPY） |
 | B2 挂死路径 | `knowledge_compiler_service.py` `compileObject` 零生产调用方；唯一实例 `knowledge_reconcile_worker.py:60` 只调 `reconcile()` |
 | B3 文案倒置 | 分支 `nl2sql_prompts.py:311` |
 | 提案同处亦错 | `Harness/changes/2026-10-27-kpi-governance-into-nl2sql-proposal.md:156` |

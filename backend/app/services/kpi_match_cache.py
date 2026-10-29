@@ -13,6 +13,7 @@ onKpiChanged() 失效。
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select, event
@@ -26,6 +27,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 缓存 TTL（秒）：超过则读路径重建，兜住绕过 ORM listener 的写入
+_CACHE_MAX_AGE_SECONDS = 60
+
 
 class KpiMatchCache:
     """L1 语义匹配缓存。
@@ -34,7 +38,14 @@ class KpiMatchCache:
     - _by_code：kpi_code → KpiCatalog
     - _by_keyword：keyword 子串 → list[KpiCatalog]
 
-    写入时 onKpiChanged(kpi_code) 失效对应条目，下次查询时触发 lazy rebuild。
+    写入时 onKpiChanged(kpi_code, kpiId=…) 失效对应条目，下次查询时触发 lazy rebuild。
+
+    ⚠️ **失效按 id 定位**（id 跨改名稳定）：只按 code 失效会漏掉改名后的旧 code
+    残留（C1）——命中了但口径是旧的。
+    ⚠️ **冷缓存不 no-op**：冷态下 `refreshOne` 改为全量重建（C2）——否则缓存
+    永久停在冷态，`findByAnyKeyword` 恒空 ⇒ 语义匹配静默失效。
+    ⚠️ **TTL 兜底**：读路径 `ensureFresh` 按 TTL 重建，兜住绕过 ORM listener 的
+    写入（Core UPDATE / 裸 SQL）（C3）。
 
     ⚠️ **未来扩展示例**（`chat-service-assessment.md` §15 末尾第 1 项登记，
     当前未启用）：如果目录规模真的上来（千级 KPI / 万级关键词），正确结构是
@@ -51,6 +62,10 @@ class KpiMatchCache:
         self._by_code: dict[str, "KpiCatalog"] = {}
         self._by_keyword: dict[str, list["KpiCatalog"]] = {}
         self._loaded: bool = False
+        # 脏标记：任何失效后置 True，读路径 ensureFresh 见到就重建。
+        self._dirty: bool = False
+        # 上次全量加载时刻（time.monotonic 基准），TTL 兜底 raw SQL 绕过。
+        self._loadedAt: float = 0.0
 
     # -------------------------------------------------------------------------
     # Public interface
@@ -106,10 +121,20 @@ class KpiMatchCache:
         return result
 
     async def warmUp(self, session: AsyncSession) -> None:
-        """全量加载 status=PUBLISHED 的 KPI，重建两个索引。"""
+        """全量加载 status=PUBLISHED 的 KPI，重建两个索引。
+
+        `populate_existing=True`：**强制用 DB 当前值刷新**已在 identity map 里的
+        同 id 行。默认行为下 SELECT 会直接返回 identity map 里的旧实例（属性不
+        刷新）⇒ 绕过 ORM 的写入（Core UPDATE / 裸 SQL）即使重建了索引，读到的
+        仍是旧口径。缓存必须反映 DB 现状，故显式声明刷新语义。
+        """
         from app.domain.models import KpiCatalog
 
-        stmt = select(KpiCatalog).where(KpiCatalog.status == KpiStatus.PUBLISHED.value)
+        stmt = (
+            select(KpiCatalog)
+            .where(KpiCatalog.status == KpiStatus.PUBLISHED.value)
+            .execution_options(populate_existing=True)
+        )
         rows = await session.execute(stmt)
         kpis = list(rows.scalars().all())
 
@@ -130,45 +155,76 @@ class KpiMatchCache:
         self._by_code = by_code
         self._by_keyword = by_keyword
         self._loaded = True
+        self._dirty = False
+        self._loadedAt = time.monotonic()
         logger.info("KpiMatchCache warmed up: %d active KPIs, %d keywords", len(by_code), len(by_keyword))
 
-    def onKpiChanged(self, kpi_code: str | None = None) -> None:
+    def onKpiChanged(self, kpi_code: str | None = None, *, kpiId: int | None = None) -> None:
         """写时失效：清空指定条目或全量。
 
-        写入路径（KpiCatalogService.create/update/delete）在事务提交后调用此方法，
-        标记缓存条目失效。下次查询时若发现条目缺失，触发 lazy rebuild。
-        """
-        if kpi_code is None:
-            # 全量清空
-            self._by_code.clear()
-            self._by_keyword.clear()
-            self._loaded = False
-            logger.debug("KpiMatchCache 全量失效")
-        else:
-            # 单条失效：同时清 _by_code 和 _by_keyword 中该 KPI 的所有引用
-            old = self._by_code.pop(kpi_code, None)
-            if old:
-                for kw in (old.semantic_keywords or []):
-                    lst = self._by_keyword.get(kw)
-                    if lst:
-                        self._by_keyword[kw] = [k for k in lst if k.kpi_code != kpi_code]
-                        if not self._by_keyword[kw]:
-                            del self._by_keyword[kw]
-            logger.debug("KpiMatchCache 失效: %s", kpi_code)
+        失效**按 id 定位**（id 跨改名稳定）：改名场景下按 code 失效会漏掉旧 code
+        的残留条目（C1）。传 kpiId 时按 id 从两个索引中移除该 KPI 的**所有**引用。
 
-    async def refreshOne(self, session: AsyncSession, kpi_code: str) -> None:
+        写入路径（KpiCatalogService.create/update/delete）在事务提交后调用此方法。
+        """
+        if kpi_code is None and kpiId is None:
+            # 全量清空（新建容器替换，不原地 clear —— 保持不可变语义）
+            self._by_code = {}
+            self._by_keyword = {}
+            self._loaded = False
+            self._dirty = True
+            logger.debug("KpiMatchCache 全量失效")
+            return
+        self._removeEntries(kpi_code=kpi_code, kpiId=kpiId)
+        self._dirty = True
+        logger.debug("KpiMatchCache 失效: code=%s id=%s", kpi_code, kpiId)
+
+    def _removeEntries(self, *, kpi_code: str | None, kpiId: int | None) -> None:
+        """从两个索引中移除匹配条目（copy-on-write：新建容器后整体替换）。
+
+        匹配条件（任一命中即移除）：`_by_code` 的 key 等于 kpi_code，或条目 id
+        等于 kpiId。关键词索引按**条目的 id** 与 kpi_code 一并摘除 —— 改名场景下
+        缓存里的旧条目 key 是旧 code，但行 id 不变 ⇒ 按 id 摘才摘得掉（C1）。
+        空关键词桶整体丢弃（不留空 list）。
+        """
+        byCode: dict[str, KpiCatalog] = {}
+        for code, kpi in self._by_code.items():
+            if code == kpi_code or (kpiId is not None and kpi.id == kpiId):
+                continue
+            byCode[code] = kpi
+        byKeyword: dict[str, list[KpiCatalog]] = {}
+        for kw, kpis in self._by_keyword.items():
+            kept = [
+                kpi
+                for kpi in kpis
+                if kpi.kpi_code != kpi_code
+                and not (kpiId is not None and kpi.id == kpiId)
+            ]
+            if kept:
+                byKeyword[kw] = kept
+        self._by_code = byCode
+        self._by_keyword = byKeyword
+
+    async def refreshOne(
+        self, session: AsyncSession, kpi_code: str, *, kpiId: int | None = None
+    ) -> None:
         """写时刷新单条（update 路径）：重新查询该 KPI 并更新索引。
 
-        仅当缓存已 warmUp 时调用；若未 warmUp 则跳过（lifespan 会兜底）。
+        **冷缓存不再 no-op**（C2）：缓存停在冷态时 `findByAnyKeyword` 恒返回空
+        ⇒ 语义匹配静默失效 ⇒ Tier B 契约永远注不进去。此时改为全量重建。
 
-        先清理该 KPI 在两个索引中的旧条目，再插入新数据。
+        kpiId：用于按 id 失效（改名场景，见 onKpiChanged）。
         """
         if not self._loaded:
+            logger.info(
+                "KpiMatchCache 冷缓存，refreshOne 改为全量重建 code=%s", kpi_code
+            )
+            await self.warmUp(session)
             return
         from app.domain.models import KpiCatalog
 
-        # 先清理该 KPI 在两个索引中的旧条目
-        self.onKpiChanged(kpi_code)
+        # 先清理该 KPI 在两个索引中的旧条目（按 id + 按 code 双保险）
+        self.onKpiChanged(kpi_code, kpiId=kpiId)
 
         row = await session.execute(
             select(KpiCatalog).where(KpiCatalog.kpi_code == kpi_code)
@@ -182,9 +238,36 @@ class KpiMatchCache:
         # 与 warmUp 同口径：仅 status=PUBLISHED 入索引。曾误引 kpi.is_enabled
         # （85907cb）——kpi_catalog 无此列，读即 AttributeError。
         if kpi.status == KpiStatus.PUBLISHED.value:
-            self._by_code[kpi_code] = kpi
+            byCode = {**self._by_code, kpi_code: kpi}
+            byKeyword: dict[str, list[KpiCatalog]] = {
+                kw: list(kpis) for kw, kpis in self._by_keyword.items()
+            }
             for kw in (kpi.semantic_keywords or []):
-                self._by_keyword.setdefault(kw, []).append(kpi)
+                byKeyword[kw] = [*byKeyword.get(kw, []), kpi]
+            self._by_code = byCode
+            self._by_keyword = byKeyword
+        self._dirty = False
+
+    async def ensureFresh(
+        self, session: AsyncSession, *, maxAgeSeconds: int = _CACHE_MAX_AGE_SECONDS
+    ) -> None:
+        """确保缓存处于可用且不过期的状态（**读路径**调用）。
+
+        触发全量重建的三种情况：
+
+        1. 冷缓存（从未 warmUp）—— 否则 `getAll()` 抛 RuntimeError、
+           `findByAnyKeyword` 恒空 ⇒ 语义匹配静默失效
+        2. 脏标记（写路径失效过，尚未定向刷新）
+        3. 超过 maxAgeSeconds —— **兜住绕过 ORM listener 的写入**
+           （Core UPDATE / 裸 SQL / 手工改库），C3 的最后一道防线
+
+        缓存新鲜时**不查库**（no-op）。
+        """
+        if not self._loaded or self._dirty:
+            await self.warmUp(session)
+            return
+        if (time.monotonic() - self._loadedAt) > maxAgeSeconds:
+            await self.warmUp(session)
 
 
 # ---------------------------------------------------------------------------
@@ -195,22 +278,39 @@ def _setup_kpi_catalog_listeners() -> None:
     """在 Mapper 级别注册 insert/update/delete 监听，触发缓存失效。
 
     注册一次（module load 时）；写入路径通过 KpiCatalogService 调用
-    onKpiChanged(kpi_code) 主动失效。
+    onKpiChanged(kpi_code, kpiId=…) 主动失效。
     """
+
+    def _invalidate(target: KpiCatalog) -> None:
+        """ORM 写入后失效缓存条目。
+
+        listener 是**同步**回调（跑在事件循环线程的 greenlet 里），只做 dict 变更
+        （无 await）⇒ 无跨线程风险。失效发生在**提交前**，方向保守：宁可缓存偏冷，
+        不可缓存偏陈旧；提交后由 KpiCatalogService.refreshOne 重新写入。
+
+        ⚠️ Core UPDATE（`sqlalchemy.update`）**不触发** mapper 事件 ⇒ 绕过本
+        listener。这类写入由读路径 ensureFresh 的 TTL 兜底（见 ensureFresh）。
+        """
+        try:
+            get_kpi_match_cache().onKpiChanged(
+                target.kpi_code, kpiId=target.id
+            )
+        except Exception:
+            logger.warning(
+                "KPI 缓存失效失败 code=%s", target.kpi_code, exc_info=True
+            )
 
     @event.listens_for(KpiCatalog, "after_insert")
     def _after_insert(mapper: Mapper, connection: Any, target: "KpiCatalog") -> None:
-        # 异步上下文：直接写缓存不安全（不在事件循环），改为标记需要 refresh
-        # 实际失效由 KpiCatalogService 在事务提交后主动调用 onKpiChanged
-        logger.debug("kpi_catalog after_insert: %s", target.kpi_code)
+        _invalidate(target)
 
     @event.listens_for(KpiCatalog, "after_update")
     def _after_update(mapper: Mapper, connection: Any, target: "KpiCatalog") -> None:
-        logger.debug("kpi_catalog after_update: %s", target.kpi_code)
+        _invalidate(target)
 
     @event.listens_for(KpiCatalog, "after_delete")
     def _after_delete(mapper: Mapper, connection: Any, target: "KpiCatalog") -> None:
-        logger.debug("kpi_catalog after_delete: %s", target.kpi_code)
+        _invalidate(target)
 
 
 # 模块加载时注册监听（一次性）

@@ -124,7 +124,9 @@ class KpiCatalogService:
         )
         await session.commit()
         await session.refresh(entity)
-        await get_kpi_match_cache().refreshOne(session, entity.kpi_code)
+        await get_kpi_match_cache().refreshOne(
+            session, entity.kpi_code, kpiId=entity.id
+        )
         logger.info("创建 KPI Catalog id=%d code=%s", entity.id, entity.kpi_code)
         return entity
 
@@ -178,7 +180,9 @@ class KpiCatalogService:
         )
         await session.commit()
         await session.refresh(entity)
-        await get_kpi_match_cache().refreshOne(session, entity.kpi_code)
+        await get_kpi_match_cache().refreshOne(
+            session, entity.kpi_code, kpiId=entity.id
+        )
         logger.info(
             "更新 KPI Catalog id=%d revision=%d by %s",
             id,
@@ -214,7 +218,7 @@ class KpiCatalogService:
         )
         await session.delete(entity)
         await session.commit()
-        get_kpi_match_cache().onKpiChanged(entity.kpi_code)
+        get_kpi_match_cache().onKpiChanged(entity.kpi_code, kpiId=entity.id)
         logger.info("删除 KPI Catalog id=%d by %s", id, actor.userId)
 
 

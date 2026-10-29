@@ -77,7 +77,7 @@ def _matchOnly(monkeypatch: pytest.MonkeyPatch, codes: list[str]) -> None:
     实测：Jaccard 关键词路径的最好得分 ≈ 0.09，达不到默认阈值 0.75 ⇒ 唯一可靠
     命中路径是精确 alias（见 Task 14 实证脚本）。编排测试不该依赖分数语义。
     """
-    async def _fakeMatch(question: str, limit: int) -> list[str]:
+    async def _fakeMatch(*_args: object, **_kwargs: object) -> list[str]:
         return list(codes)
 
     monkeypatch.setattr(builder_module, "_matchKpiCodes", _fakeMatch)

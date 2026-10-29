@@ -39,6 +39,7 @@ from app.domain.models import (
     OntologyMetric,
     OntologyMetricSource,
 )
+from app.services.kpi_match_cache import kpi_match_cache
 from app.services.kpi_metric_audit import recordReconcileResult
 from app.services.kpi_metric_reconcile import (
     VERDICT_MISMATCH,
@@ -261,11 +262,18 @@ async def _loadSourceClasses(
     )
 
 
-async def _matchKpiCodes(question: str, limit: int) -> list[str]:
-    """动态匹配 KPI（读配置里的 semantic_keywords，不是硬编码清单）。"""
+async def _matchKpiCodes(
+    session: AsyncSession, question: str, limit: int
+) -> list[str]:
+    """动态匹配 KPI（读配置里的 semantic_keywords，不是硬编码清单）。
+
+    先 ensureFresh：缓存冷/脏/过期时重建（否则语义匹配静默失效 ⇒ 契约永远注不进）。
+    兜底失败**降级而非抛**：缓存是加速器，不是正确性依赖。
+    """
     if not question or not question.strip():
         return []
     try:
+        await kpi_match_cache.ensureFresh(session)
         results = await getKpiSemanticMatchService().matchAll(question, limit=limit)
     except Exception:
         logger.warning("KPI 语义匹配失败，跳过契约注入", exc_info=True)
@@ -285,7 +293,7 @@ async def buildKpiContractBlock(
     if not enabled:
         logger.info("KPI 契约注入开关关闭，跳过")
         return ""
-    codes = await _matchKpiCodes(question, limit)
+    codes = await _matchKpiCodes(session, question, limit)
     if not codes:
         return ""
     entries: list[ContractEntry] = []

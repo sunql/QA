@@ -7,8 +7,9 @@
 价格类（2）：Price Variance / Cost Saving
 财务/合规（3）：Invoice Match / Payment On-Time / Maintenance Ratio
 
-幂等：UPDATE 限定 status=PUBLISHED，重复运行覆盖旧值。
-DRAFT/DEPRECATED 不被触碰。
+幂等：只更新 status=PUBLISHED 的 KPI，重复运行覆盖旧值。
+DRAFT/DEPRECATED 不被触碰。写入走 `KpiCatalogService.updateKpi`
+（产出 audit_log / history / outbox + `refreshOne`），不用裸 Core UPDATE。
 
 语义关键词设计原则：
 - 中文 2-4 字 ngram + 英文短语
@@ -30,10 +31,15 @@ from typing import Any
 # 允许从 scripts/ 直接运行
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sqlalchemy import update  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 
+from app.dependencies import CurrentUser  # noqa: E402
+from app.domain.enums import KpiStatus  # noqa: E402
 from app.domain.models import KpiCatalog  # noqa: E402
+from app.domain.schemas import KpiCatalogUpdate  # noqa: E402
 from app.infrastructure.database import getSessionFactory  # noqa: E402
+from app.services.acl_service import ADMIN_ROLE  # noqa: E402
+from app.services.kpi_catalog_service import KpiCatalogService  # noqa: E402
 
 # 12 个 KPI 的语义关键词（字段与 KpiCatalog ORM 列对齐）
 # 仅更新 status=PUBLISHED 的 KPI；DRAFT/DEPRECATED 不在范围内
@@ -190,25 +196,39 @@ KPI_SEMANTIC_INDEX: list[dict[str, Any]] = [
 async def seedKpiSemanticIndex(session: Any) -> int:
     """幂等写入 12 条 KPI 的 semantic_keywords；返回 affected 行数。
 
-    使用 UPDATE 限定 status=PUBLISHED：
-    - 仅更新已发布的 KPI（DRAFT 不被触碰）
-    - 重复运行覆盖旧值（幂等）
-    - 不依赖 INSERT 故无需处理 NOT NULL 列问题
+    **改走 `KpiCatalogService.updateKpi`**（修 C3）。原来的
+    `sqlalchemy.update(...)` 是 Core UPDATE，绕过 service 链路 ⇒ 少了：
+    - 审计与追踪：audit_log / kpi_catalog_history / outbox 事件；
+    - 写后刷新：`updateKpi` 内部的 `refreshOne` 把该 KPI 重新写进匹配索引；
+    - 统一校验：关键词与阈值归一（`match_threshold` 在本层转 `Decimal`）。
+
+    仍只更新 status=PUBLISHED 的 KPI（DRAFT/DEPRECATED 不碰）。重复运行覆盖旧值。
+
+    闸门说明（T15-K）：`updateKpi` 只在本次更新带 `status=PUBLISHED` 时才走
+    发布闸门；本脚本只改关键词/阈值 ⇒ 不会触发 409，因此**不需要**捕获
+    `ConflictError`（该分支永远不可能执行，已删除）。
     """
+    service = KpiCatalogService()
+    actor = CurrentUser(userId="system-seed", roles=(ADMIN_ROLE,), departments=())
     affected = 0
     for spec in KPI_SEMANTIC_INDEX:
-        stmt = (
-            update(KpiCatalog)
-            .where(KpiCatalog.kpi_code == spec["kpi_code"])
-            .where(KpiCatalog.status == "PUBLISHED")
-            .values(
-                semantic_keywords=spec["semantic_keywords"],
-                match_threshold=spec["match_threshold"],
+        row = (
+            await session.execute(
+                select(KpiCatalog).where(KpiCatalog.kpi_code == spec["kpi_code"])
             )
+        ).scalar_one_or_none()
+        if row is None or row.status != KpiStatus.PUBLISHED.value:
+            continue
+        await service.updateKpi(
+            session,
+            row.id,
+            KpiCatalogUpdate(
+                semantic_keywords=list(spec["semantic_keywords"]),
+                match_threshold=float(spec["match_threshold"]),
+            ),
+            actor,
         )
-        result = await session.execute(stmt)
-        affected += result.rowcount or 0
-    await session.commit()
+        affected += 1
     return affected
 
 

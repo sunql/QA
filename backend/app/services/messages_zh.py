@@ -690,3 +690,25 @@ MSG_CHAT_STEP_EXEC_FAILED_PREFIX = "该步骤执行失败："
 MSG_CHAT_STEP_UNANSWERABLE = "无法回答（LLM 判定无有效查询计划）"
 # 汇总步骤被跳过（前置数据步骤全失败）：非失败、非成功，如实说「未执行」
 MSG_CHAT_STEP_AGGREGATION_SKIPPED = "未执行（前置数据步骤全部失败）"
+
+
+# ── KPI 指标技术形态对账（P1）────────────────────────────────────────
+# 对账 entity_type：与 kpi_metric_audit.RECONCILE_ENTITY_TYPE 一致。
+MSG_KPI_RECONCILE_ENTITY_TYPE = "kpi_metric_reconcile"
+# 对账结果一行摘要（前端「技术形态挂靠」列显示）
+MSG_KPI_RECONCILE_VERDICT = "对账结果：{verdict}"
+# 单条 finding 的可读文本
+MSG_KPI_RECONCILE_FINDING = "[{layer}] {detail}"
+
+# ── KPI 发布闸门（P1）────────────────────────────────────────────────
+MSG_KPI_GATE_MISSING_METRIC = "未挂靠本体指标（metric_id 为空）"
+MSG_KPI_GATE_METRIC_NOT_FOUND = "挂靠的本体指标不存在（metric_id 悬空）"
+MSG_KPI_GATE_METRIC_NOT_PUBLISHED = "本体指标未发布（status != PUBLISHED）"
+MSG_KPI_GATE_NO_EXECUTION_SOURCE = "本体指标无可执行口径（execution_source 为空或 NONE）"
+MSG_KPI_GATE_RECONCILE_MISMATCH = "口径对账不通过（mismatch）：{detail}"
+MSG_KPI_GATE_RECONCILE_UNKNOWN = "口径对账未完成（unknown）：治理侧未填结构化列"
+MSG_KPI_GATE_NO_DATASOURCE = "未绑定业务数据源（datasource_id 为空）"
+MSG_KPI_GATE_METRIC_NO_NUMERATOR = "未配置分子度量（numerator_measure 为空）"
+MSG_KPI_GATE_METRIC_NO_DENOMINATOR = "比率型指标未配置分母度量（denominator_measure 为空）"
+MSG_KPI_GATE_METRIC_NO_AGGREGATION_ORDER = "比率型指标未配置聚合阶（aggregation_order 为空）"
+MSG_KPI_GATE_BLOCKED = "发布闸门未通过：{items}"

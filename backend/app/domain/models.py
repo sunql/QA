@@ -51,6 +51,11 @@ from app.domain.enums import (
     KpiStatus,
     LineageLayer,
     MatchRule,
+    MetricAggregationOrder,
+    MetricExecutionSource,
+    MetricSourceRole,
+    MetricStatus,
+    MetricType,
     RefreshFrequency,
     ReportTimeWindowType,
     RuleOperator,
@@ -350,6 +355,35 @@ class OntologyMetric(Base, TimestampMixin):
     dimension_defaults: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
+    # ── P1 指标技术形态（结构化轨道 = 真相）────────────────────────────
+    metric_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=MetricType.MEASURE.value,
+        server_default=MetricType.MEASURE.value,
+    )
+    numerator_measure: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
+    denominator_measure: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
+    aggregation_order: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    grain_keys: Mapped[list[str] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
+    filter_expression: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ── P1 管理性（发布闸门落点）──────────────────────────────────────
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=MetricStatus.DRAFT.value,
+        server_default=MetricStatus.DRAFT.value,
+    )
+    owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    execution_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
     # Relationships
     target_class: Mapped[OntologyClass | None] = relationship(
         back_populates="metrics", lazy="selectin"
@@ -357,6 +391,33 @@ class OntologyMetric(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<OntologyMetric id={self.id} name={self.metric_name}>"
+
+
+class OntologyMetricSource(Base):
+    """本体指标的多源类映射（M:N）。
+
+    `ontology_metric.target_class_id`（单值 FK）保留不动 —— 语义 = role=BASE
+    的那个类；但 9/12 条真实 KPI 跨 2–3 张表，单值 FK 表达不了 ⇒ 新表为权威。
+    role 必填：「这个类在口径里扮演什么角色」正是当前完全缺失的信息。
+    """
+
+    __tablename__ = "ontology_metric_source"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    metric_id: Mapped[int] = mapped_column(
+        BigIntFk,
+        ForeignKey("ontology_metric.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    class_id: Mapped[int] = mapped_column(
+        BigIntFk,
+        ForeignKey("ontology_class.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<OntologyMetricSource metric_id={self.metric_id} class_id={self.class_id} role={self.role}>"
 
 
 class KpiCatalog(Base, TimestampMixin):
@@ -412,6 +473,17 @@ class KpiCatalog(Base, TimestampMixin):
     )
     match_threshold: Mapped[Decimal] = mapped_column(
         Numeric(3, 2), nullable=False, default=Decimal("0.75")
+    )
+
+    # ── P1 治理侧结构化字段（让对账从「中文 vs 结构」降级为「列集合比对」）──
+    grain_keys: Mapped[list[str] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
+    numerator_columns: Mapped[list[str] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
+    denominator_columns: Mapped[list[str] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
     )
 
     # Relationships

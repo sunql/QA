@@ -1653,6 +1653,9 @@ export const zhCN = {
         targetClassId: "目标类",
         dimensionDefaults: "默认维度",
         actions: "操作",
+        metricTypeColumn: "指标类型",
+        aggregationOrderColumn: "聚合阶",
+        executionSourceColumn: "执行来源",
       },
 
       joinColumns: {
@@ -1831,6 +1834,19 @@ export const zhCN = {
         targetClassId: "目标类",
         formula: "公式",
         dimensionDefaults: "默认维度（可选）",
+        metricType: "指标类型",
+        aggregationOrder: "聚合阶",
+        executionSource: "执行来源",
+        numeratorAgg: "分子聚合",
+        numeratorExpr: "分子表达式",
+        numeratorFilter: "分子过滤",
+        denominatorAgg: "分母聚合",
+        denominatorExpr: "分母表达式",
+        denominatorFilter: "分母过滤",
+        grainKeys: "粒度键",
+        filterExpression: "全局过滤",
+        owner: "技术口径负责人",
+        status: "指标状态",
       },
       metricPlaceholders: {
         targetClassId: "可选",
@@ -1838,6 +1854,13 @@ export const zhCN = {
         metricAlias: "如 销售额 / 订单量",
         formula: "如 SUM(order_amount) / COUNT(DISTINCT customer_id)",
         dimensionDefaults: "格式: region:华东,product:手机",
+        numeratorExpr: "如：QTY",
+        numeratorFilter: "如：STATUS = 'OK'",
+        denominatorExpr: "如：AMOUNT",
+        denominatorFilter: "如：STATUS = 'OK'",
+        grainKeys: "回车新增，如：plant_code",
+        filterExpression: "全局过滤谓词",
+        owner: "技术口径负责人",
       },
 
       classOptionLabel: "{name}（{alias}）",
@@ -2162,6 +2185,26 @@ export const zhCN = {
   },
 
   enums: {
+    metricType: {
+      MEASURE: "度量",
+      RATIO: "比率",
+      DIFFERENCE: "差值",
+      DERIVED: "派生",
+    },
+    metricAggregationOrder: {
+      WEIGHTED_RATIO: "加权比率（SUM(分子)/SUM(分母)）",
+      AVG_OF_RATIOS: "比率均值（AVG(分子/分母)）",
+      NONE: "无",
+    },
+    metricExecutionSource: {
+      COMPILED: "结构化编译",
+      ESCAPE_HATCH: "手写公式",
+      NONE: "无可执行口径",
+    },
+    metricStatus: {
+      DRAFT: "草稿",
+      PUBLISHED: "已发布",
+    },
     kpiStatus: {
       DRAFT: "草稿",
       PUBLISHED: "已发布",

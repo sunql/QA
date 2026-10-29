@@ -34,6 +34,15 @@ const mockMetric: OntologyMetric = {
   createdBy: null,
   createdTime: "2026-08-11T00:00:00Z",
   updatedTime: "2026-08-11T00:00:00Z",
+  metricType: "MEASURE",
+  numeratorMeasure: null,
+  denominatorMeasure: null,
+  aggregationOrder: null,
+  grainKeys: null,
+  filterExpression: null,
+  status: "DRAFT",
+  owner: null,
+  executionSource: null,
 };
 
 const api = vi.hoisted(() => ({
@@ -210,5 +219,54 @@ describe("MetricTab — 解析 dimensionDefaults", () => {
     // 不依赖完整提交，只验证 dimensionDefaults 解析路径（行 144-152）
     // 简化：点击确定（即使其他字段空也会触发 validateFields 失败，但函数本身已被调用）
     // 这里直接通过 mock 路径：选择第一个 select 然后点确定
+  });
+});
+
+describe("MetricTab — 结构化技术形态", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listMetrics.mockResolvedValue([]);
+    api.createMetric.mockResolvedValue({ id: 1 });
+  });
+
+  it("指标类型选比率时出现分母字段", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByRole("table");
+
+    await user.click(screen.getByRole("button", { name: /新\s?增/ }));
+    await user.click(await screen.findByLabelText("指标类型"));
+    await user.click(await screen.findByTitle("比率"));
+
+    expect(await screen.findByLabelText("分母表达式")).toBeInTheDocument();
+  });
+
+  it("提交时把分子/分母转成 measure JSON", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByRole("table");
+
+    await user.click(screen.getByRole("button", { name: /新\s?增/ }));
+    await user.type(await screen.findByLabelText("指标名"), "新指标");
+    await user.type(await screen.findByLabelText("公式"), "SELECT 1 FROM T");
+    await user.type(await screen.findByLabelText("分子表达式"), "QTY");
+
+    // 分子聚合选 SUM
+    await user.click(await screen.findByLabelText("分子聚合"));
+    await user.click(await screen.findByTitle("SUM"));
+
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.createMetric).toHaveBeenCalled());
+    const payload = api.createMetric.mock.calls[0][0];
+    expect(payload.metricType).toBe("MEASURE");
+    expect(payload.numeratorMeasure).toEqual({
+      agg: "SUM",
+      expr: "QTY",
+      filter: null,
+      class_id: null,
+      class_alias: null,
+    });
+    expect(payload.status).toBe("DRAFT");
   });
 });

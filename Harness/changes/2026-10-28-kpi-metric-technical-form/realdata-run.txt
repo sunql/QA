@@ -74,7 +74,7 @@ B. 隔离测试库回填落库 + 幂等（S9 语义证明）—— 不在正式�
    退出码：0
    结论：9/9 PASS。S9.1 第 2 次回填 created=0 updated=12（幂等）；
          S9.2 ontology_metric 行数 0 → 12 → 12（二次回填不新增）；
-         S9.3 12/12 KPI 已挂靠。
+         S9.3 12/12 KPI 已挂靠；S3.4 列级 finding 集合 = 治理/技术列差异集合。
    ⚠️ 正式库的 --apply-backfill 仍**未执行**：须业务方审核回填清单后由人显式发起。
 ────────────────────────────────────────────────────────────────────────
 
@@ -102,7 +102,7 @@ INFO  STEP S1 end
 INFO  STEP S2 begin
 INFO  PLAN：12 条，tier 分布 {'A': 4, 'B': 5, 'C': 3}（构造期望 {'A': 4, 'B': 5, 'C': 3}）
 PASS  S2.1 库内 kpi_catalog 与 PLAN 的 KPI 集合一致 — 库内 12 条 / PLAN 12 条；缺 []；多 []
-PASS  S2.2 已挂靠的 KPI 全部在 PLAN 内（无越界挂靠） — 已挂靠 0 条；越界 []
+PASS  S2.2 库内挂靠与 PLAN 归属一致（0 条=未回填；或全量挂靠，不允许部分） — 已挂靠 0 条 / PLAN 12 条；越界 []
 INFO  S2.2 备注：0 条 KPI 已挂靠 ontology_metric（尚未回填）
 INFO  schema_cache 覆盖的本体类/表键：3614 个
 PASS  S2.3 tier A 物理列齐备 KPI_SUPPLIER_OTD
@@ -137,6 +137,7 @@ PASS  S3.2 KPI_SUPPLIER_OTD tier A formula 覆盖全部结构化列
 PASS  S3.1 KPI_SUPPLIER_OVERDUE_RATIO 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
 PASS  S3.2 KPI_SUPPLIER_OVERDUE_RATIO tier A formula 覆盖全部结构化列
 PASS  S3.3 mismatch 集合 = PLAN 已登记偏差集合（不多不少） — 多判 []；漏判 []
+PASS  S3.4 列级 finding 集合 = 治理/技术列差异集合（防 _checkRole 列比对被删） — 期望 ['KPI_INVOICE_MATCH_RATE', 'KPI_PAYMENT_ON_TIME', 'KPI_SUPPLIER_OTD', 'KPI_SUPPLIER_OVERDUE_RATIO']；实际 ['KPI_INVOICE_MATCH_RATE', 'KPI_PAYMENT_ON_TIME', 'KPI_SUPPLIER_OTD', 'KPI_SUPPLIER_OVERDUE_RATIO']
 INFO  实测 verdict 分布：{'mismatch': 12}
 INFO  ⚠️ 12/12 条全部 mismatch ⇒ 契约注入与发布闸门均被对账拦截，直到业务方审核并对齐治理列（这是设计上的多签互锁，不是脚本缺陷）
 INFO  STEP S3 end

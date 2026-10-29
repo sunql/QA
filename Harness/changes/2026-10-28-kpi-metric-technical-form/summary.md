@@ -3,7 +3,7 @@
 - **日期**：2026-10-28（设计）/ 2026-10-29（实施完成）
 - **作者**：Claude（与用户逐节确认）
 - **Phase**：Phase 6.7 指标技术形态治理
-- **状态**：**implemented（P1 + P1-数据工具链已落地；prod 迁移/回填未执行，见 §11）**
+- **状态**：**已实施，待部署验证**（P1 + P1-数据工具链已落地；tier 分布 **A4 / B5 / C3**；prod 迁移/回填未执行，见 §11）
 - **分支**：`feat/kpi-metric-technical-form`
 - **Spec 路径**：[`docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md`](../../docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md)（608 行）
 - **Spec commit**：`4a4f736f`（分支 `docs/kpi-metric-technical-form-spec`，base `main` @ `3ecd780c`）
@@ -373,7 +373,7 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 | 4 | Tier A 灰度（**默认关**） | `KPI_METRIC_TIER_A_ENABLED=true` ⇒ L1 命中走 0 LLM 直通 |
 | 5 | 发布闸门（**默认关**） | `KPI_METRIC_GATE_ENABLED=true` ⇒ DRAFT→PUBLISHED 缺项返回 409 + 缺项清单 |
 | 6 | 前端发布 | 指标管理页 / KPI 页两处字段可见可编辑 |
-| 7 | 真实数据验证 | `backend/scripts/kpi_metric_realdata.py --database-url <DSN>` 跑通；只读模式下 S1 必须 PASS、S2–S8 全 PASS、S9 SKIP；退出码 `2` |
+| 7 | 真实数据验证 | `backend/scripts/kpi_metric_realdata.py --database-url <DSN>` 跑通。按库区分：**测试库只读 ⇒ 全 PASS / exit 0**；**prod 只读 ⇒ S1 FAIL（迁移未应用）/ exit 1**；无 FAIL 但有 SKIP（如只读模式的 S9）⇒ **exit 2** |
 
 > ⚠️ 步骤 1 前须处理 **alembic 版本漂移**：alembic 读 `DATABASE_URL`，pytest 读 `TEST_DATABASE_URL`；换分支后 `alembic_version` 残留要 `UPDATE`。
 > ⚠️ 迁移/测试**不得触碰生产 Milvus / Neo4j**。
@@ -451,12 +451,14 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 | prod 迁移状态 | `alembic_version = '0135'` ⇒ S1 FAIL（**预期**），S2–S9 SKIP |
 | prod `system_config` | 28 行，KPI 开关 0 行（只读跑前/跑后一致） |
 
+> **S2.2′ 的口径（T16-11）**：严格集合相等（`linked == plan`）在**回填前不成立** —— S2 在 S9 之前跑，未回填时 `linked = 0`，而脚本必须在回填前后都能跑。因此采用可判定的不变量：**要么 0 条（未回填），要么全量挂靠（不允许部分挂靠）**，且挂靠 code 不得越出 PLAN。这比子集断言强，又不依赖执行顺序。
+
 ### 10.3 测试与静态检查
 
 | 项 | 结果 |
 |---|---|
-| 单测（本任务两文件） | 30 passed；新模块覆盖率 `kpi_metric_spec.py` **100%**、`kpi_metric_realdata_lib.py` **96%** |
-| KPI 单测扫面 | 349 passed |
+| 单测（本任务三文件：realdata_lib / spec / reconcile） | 74 passed；新模块覆盖率 `kpi_metric_spec.py` **100%**、`kpi_metric_realdata_lib.py` **96%**（合并 96.77%） |
+| KPI 单测扫面 | 356 passed |
 | 集成（6 文件：backfill_apply / contract_injection / publish_gate_api / persistence / schema / publish_gate_http） | 71 passed（unit 与 integration **分两个 session**） |
 | ruff | 新增文件 0 告警；改动文件无新增告警（`All checks passed!`） |
 | 数据库 | 真实 PostgreSQL（5434 `qa_metadata_test_t16`，`alembic upgrade head` 到 0137）；无 sqlite |
@@ -486,7 +488,11 @@ prod `system_config` **没有任何 KPI 开关行** ⇒ 走代码默认：
 | `KPI_METRIC_GATE_ENABLED` | **False** | 发布闸门只观察、不阻断 |
 | `KPI_METRIC_TIER_A_ENABLED` | **False** | Tier A 未接线，保持关 |
 
-**实测修正（重要）**：回填后 **12/12 全部 `mismatch`**（PLAN 刻意保留「治理列 = 业务口径、技术列 = 物理列」的偏差，见 T15-L）⇒ **今天即使落库，契约块仍为空、注入实际不生效**。风险窗口在**业务方审核并对齐治理列之后**才打开 —— 那一刻起注入自动开始，**不需要任何人翻开关**。
+**实测修正（重要）**：回填后 **12/12 全部 `mismatch`**（PLAN 刻意保留「治理列 = 业务口径、技术列 = 物理列」的偏差，见 T15-L）⇒ **今天即使落库，契约块仍为空、注入实际不生效**（`kpi_contract_builder.py` 对 `mismatch` 直接 `return None`）。风险窗口在**业务方审核并对齐治理列之后**才打开 —— 那一刻起注入自动开始，**不需要任何人翻开关**。
+
+⚠️ **这个风险是「延后 + 静默」的**：它不会在回填当天暴露，而是会在**某天某人把治理列改对的时候**自动打开 —— **不需要翻任何开关、不需要重启、不需要发版**，那一刻**没有任何部署信号**会提示「注入刚刚生效了」。危险不在回填当天，而在**某次看似无害的治理数据修正**。
+
+⇒ 因此上线前的二选一（下条）**不能因为「今天块是空的」而推迟**：正因为它是静默的，才必须在回填/迁移之前就把开关策略定下来。
 
 **上线前二选一**（须由人决定并执行）：
 
@@ -520,7 +526,7 @@ prod `system_config` **没有任何 KPI 开关行** ⇒ 走代码默认：
 ## SSOT 校验清单（实施合并前必查）
 
 - [x] frontmatter 元数据齐全（日期 / 作者 / Phase / 状态 / 关联变更 / 迁移版本 / MEMORY）
-- [x] 9 段都非空，无 TBD/TODO/待补 占位（§6/§7/§8 为 draft 期的**计划**内容，非结果）
+- [x] 9 段都非空，无 TBD/TODO/待补 占位
 - [x] 第 2 段 ≥ 2 个候选方案对比（三层选型各 ≥ 2）
 - [x] 第 3 段迁移文件名 ≤ 32 字符（`0136_metric_structured` 19 / `0137_metric_source_unique` 27）
 - [ ] 第 7 段触发 `security-reviewer` 并填结论（**未做 —— 不在 Task 16 范围**）
@@ -530,7 +536,14 @@ prod `system_config` **没有任何 KPI 开关行** ⇒ 走代码默认：
 - [x] 至少 1 条 MEMORY 索引已在 MEMORY.md 添加
 - [x] `backend/scripts/kpi_metric_realdata.py` 已跑通（prod 只读 + 隔离测试库，见 [`realdata-run.txt`](realdata-run.txt)）
 
-> **合并门禁现状**：剩余 2 项（`security-reviewer` 结论 / compose 冒烟）**未完成**，不在 Task 16 范围 ⇒ **合并前仍须补齐**；在此之前本变更可视为「代码已实现」，但**不满足合并条件**。
+> **控制器裁定**：**可合并到主干，但不得据此判定生产就绪。**
+>
+> 未完成的闸门逐条列出（不含糊）：
+> ① `security-reviewer` 结论**未出**；
+> ② compose 冒烟**未做**；
+> ③ prod 仍在 alembic **`0135`**，**未迁移**（`0136`/`0137` 未应用）；
+> ④ prod **未回填**（须业务方审核 `docs/kpi-metric-backfill-review.md` 后人工发起）；
+> ⑤ 治理列**未对齐** ⇒ 契约块为空（12/12 `mismatch`，见 §11.2）。
 
 ---
 

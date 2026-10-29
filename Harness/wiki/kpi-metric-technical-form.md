@@ -1,6 +1,6 @@
 # KPI 指标技术形态治理
 
-> **状态**：**P1 + P1-数据工具链已实施（2026-10-29，分支 `feat/kpi-metric-technical-form`）**；prod 迁移/回填未执行；Tier A（P2）与结构化→SQL 编译器（P3）未实现。
+> **状态**：**已实施，待部署验证**（2026-10-29，分支 `feat/kpi-metric-technical-form`）；prod 迁移/回填未执行；Tier A（P2）与结构化→SQL 编译器（P3）未实现。
 > **灰度默认**：`KPI_CONTRACT_INJECTION_ENABLED` = true（代码默认）、`KPI_METRIC_GATE_ENABLED` = false、`KPI_METRIC_TIER_A_ENABLED` = false。
 > **Spec**：[`docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md`](../../docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md)（608 行）
 > **变更 SSOT**：[`Harness/changes/2026-10-28-kpi-metric-technical-form/summary.md`](../changes/2026-10-28-kpi-metric-technical-form/summary.md)

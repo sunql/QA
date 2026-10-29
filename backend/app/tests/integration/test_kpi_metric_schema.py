@@ -103,3 +103,82 @@ async def test_new_columns_are_nullable_and_writable(
         text("DELETE FROM ontology_metric WHERE metric_name = '__schema_probe__'")
     )
     await session.commit()
+
+
+async def test_metric_source_unique_blocks_duplicate_triple(
+    session: AsyncSession,
+) -> None:
+    """同一 (metric_id, class_id, role) 不得重复。"""
+    from sqlalchemy.exc import IntegrityError
+
+    metric_id = await _seedProbeMetric(session)
+    class_id = await _seedProbeClass(session)
+    await session.execute(
+        text(
+            "INSERT INTO ontology_metric_source (metric_id, class_id, role) "
+            "VALUES (:m, :c, 'BASE')"
+        ),
+        {"m": metric_id, "c": class_id},
+    )
+    await session.commit()
+    with pytest.raises(IntegrityError):
+        await session.execute(
+            text(
+                "INSERT INTO ontology_metric_source (metric_id, class_id, role) "
+                "VALUES (:m, :c, 'BASE')"
+            ),
+            {"m": metric_id, "c": class_id},
+        )
+    await session.rollback()
+
+
+async def test_metric_source_allows_same_class_different_role(
+    session: AsyncSession,
+) -> None:
+    """同一 (metric_id, class_id) 不同 role 必须允许（UNIQUE 是三元组）。"""
+    metric_id = await _seedProbeMetric(session)
+    class_id = await _seedProbeClass(session)
+    await session.execute(
+        text(
+            "INSERT INTO ontology_metric_source (metric_id, class_id, role) "
+            "VALUES (:m, :c, 'NUMERATOR')"
+        ),
+        {"m": metric_id, "c": class_id},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO ontology_metric_source (metric_id, class_id, role) "
+            "VALUES (:m, :c, 'DENOMINATOR')"
+        ),
+        {"m": metric_id, "c": class_id},
+    )
+    await session.commit()
+    rows = await session.execute(
+        text(
+            "SELECT role FROM ontology_metric_source WHERE metric_id = :m AND class_id = :c"
+        ),
+        {"m": metric_id, "c": class_id},
+    )
+    assert {r[0] for r in rows.all()} == {"NUMERATOR", "DENOMINATOR"}
+
+
+async def _seedProbeMetric(session: AsyncSession) -> int:
+    row = await session.execute(
+        text(
+            "INSERT INTO ontology_metric "
+            "(metric_name, formula, created_time, updated_time) "
+            "VALUES ('__probe_metric__', 'x', NOW(), NOW()) RETURNING id"
+        )
+    )
+    return int(row.scalar_one())
+
+
+async def _seedProbeClass(session: AsyncSession) -> int:
+    row = await session.execute(
+        text(
+            "INSERT INTO ontology_class "
+            "(class_name, version, valid_from, created_time, updated_time) "
+            "VALUES ('__probe_class__', 1, NOW(), NOW(), NOW()) RETURNING id"
+        )
+    )
+    return int(row.scalar_one())

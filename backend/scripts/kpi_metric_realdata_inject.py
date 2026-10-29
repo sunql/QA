@@ -36,6 +36,7 @@ from scripts.kpi_metric_realdata_db import (
 from scripts.kpi_metric_realdata_lib import (
     CONTRACT_QUESTION,
     check,
+    failStep,
     info,
     skipStep,
 )
@@ -165,11 +166,25 @@ async def _reviewSimulation(session: AsyncSession) -> None:
         _checkBlockText(block)
         _checkPrompt(block)
     finally:
-        await _writeGovernance(session, target, original)
-        unchanged = all(
-            getattr(target, field) == original[field] for field in _GOVERNANCE_FIELDS
-        )
-        check("S5.11 审核模拟的治理列已还原", unchanged, "")
+        # 还原失败**绝不能静默**：测试库会被留在「治理列已对齐」的脏状态，
+        # 后续跑 S3/S5 的人会把模拟结果当真。显式 failStep + 回滚。
+        try:
+            await _writeGovernance(session, target, original)
+        except Exception as error:  # noqa: BLE001 — 任何还原失败都必须暴露
+            failStep("S5.11 审核模拟的治理列已还原", f"还原失败：{error!r}")
+            try:
+                await session.rollback()
+            except Exception as rollbackError:  # noqa: BLE001
+                failStep(
+                    "S5.11 审核模拟的治理列已还原",
+                    f"回滚也失败：{rollbackError!r}（测试库可能仍是脏状态）",
+                )
+        else:
+            unchanged = all(
+                getattr(target, field) == original[field]
+                for field in _GOVERNANCE_FIELDS
+            )
+            check("S5.11 审核模拟的治理列已还原", unchanged, "")
 
 
 async def step5_contractInjection(session: AsyncSession) -> None:

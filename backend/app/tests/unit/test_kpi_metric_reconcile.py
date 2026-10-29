@@ -206,6 +206,28 @@ def test_layer2_grain_mismatch_is_mismatch() -> None:
     assert REASON_GRAIN_MISMATCH in r.reasons()
 
 
+def test_layer2_grain_aligned_columns_differ_is_mismatch_without_grain_code() -> None:
+    """FIX-1 反向用例：粒度已对齐、列不一致 ⇒ 仍 mismatch，且**不含** grain code。
+
+    真实数据里 12/12 的 findings 都带 ``grain_mismatch``（治理粒度是中文业务词、
+    技术粒度是列名）⇒ 它会**掩盖**列比对的失效。本用例把 grain 对齐，单独钉住
+    ``_checkRole`` 的列比对：把该比对删掉时，本用例必须变红。
+    """
+    g = GovernanceSpec(
+        numerator_columns=("RECEIPT_DATE",),
+        grain_keys=("supplier_code", "facility_code"),
+    )
+    t = MetricTechnique(
+        numerator=_measure("PROMISED_RECEIPT_DATE"),
+        grain_keys=("SUPPLIER_CODE", "FACILITY_CODE"),
+    )
+    r = reconcileGovernanceVsTechnique(g, t)
+    assert r.verdict == VERDICT_MISMATCH
+    assert REASON_GRAIN_MISMATCH not in r.reasons()
+    assert REASON_GOVERNANCE_COLUMN_NOT_IN_TECHNICAL in r.reasons()
+    assert REASON_TECHNICAL_COLUMN_NOT_IN_GOVERNANCE in r.reasons()
+
+
 def test_layer2_ratio_without_aggregation_order_is_mismatch() -> None:
     g = GovernanceSpec(numerator_columns=("QTY",), denominator_columns=("AMOUNT",))
     t = MetricTechnique(

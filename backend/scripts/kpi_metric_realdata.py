@@ -85,6 +85,7 @@ from scripts.kpi_metric_realdata_lib import (  # noqa: E402
     MAX_STEPS,
     SKIPS,
     check,
+    expectedVerdictFor,
     failStep,
     guardTarget,
     info,
@@ -128,6 +129,7 @@ os.environ.setdefault("LOG_LEVEL", "WARNING")
 from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
+from app.domain.enums import MetricType  # noqa: E402
 from app.domain.exceptions import ConflictError  # noqa: E402
 from app.domain.models import KpiCatalog, OntologyMetric, SchemaCache  # noqa: E402
 from app.infrastructure.database import getEngine, getSessionFactory  # noqa: E402
@@ -141,9 +143,9 @@ from app.services.kpi_metric_publish_gate import (  # noqa: E402
     enforceKpiPublishGate,
 )
 from app.services.kpi_metric_reconcile import (  # noqa: E402
+    REASON_GOVERNANCE_COLUMN_NOT_IN_TECHNICAL,
+    REASON_TECHNICAL_COLUMN_NOT_IN_GOVERNANCE,
     VERDICT_MISMATCH,
-    VERDICT_PASS,
-    VERDICT_UNKNOWN,
     reconcileMetric,
 )
 from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf  # noqa: E402
@@ -332,11 +334,17 @@ async def step2_backfillPreview(session: AsyncSession) -> None:
         f"缺 {sorted(planCodes - dbCodes)}；多 {sorted(dbCodes - planCodes)}",
     )
 
+    # T16-11 的 S2.2′：库内挂靠状态必须与 PLAN 的归属**一致**。严格集合相等
+    # 在「回填前」不成立（S2 在 S9 之前跑，此时 linked = 0），因此改用可判定的
+    # 不变量：**要么 0 条（未回填），要么全量挂靠**——不允许「部分挂靠」这种
+    # 半成品状态；且挂靠的 code 不得越出 PLAN。
     linkedCodes = {kpi.kpi_code for kpi in kpis if kpi.metric_id is not None}
+    isConsistent = linkedCodes <= planCodes and len(linkedCodes) in (0, len(planCodes))
     check(
-        "S2.2 已挂靠的 KPI 全部在 PLAN 内（无越界挂靠）",
-        linkedCodes <= planCodes,
-        f"已挂靠 {len(linkedCodes)} 条；越界 {sorted(linkedCodes - planCodes)}",
+        "S2.2 库内挂靠与 PLAN 归属一致（0 条=未回填；或全量挂靠，不允许部分）",
+        isConsistent,
+        f"已挂靠 {len(linkedCodes)} 条 / PLAN {len(planCodes)} 条；"
+        f"越界 {sorted(linkedCodes - planCodes)}",
     )
     if not linkedCodes:
         info("S2.2 备注：0 条 KPI 已挂靠 ontology_metric（尚未回填）")
@@ -367,6 +375,32 @@ async def step2_backfillPreview(session: AsyncSession) -> None:
 # ── S3 三层对账逐档 ───────────────────────────────────────────────────
 
 
+def _normTokens(values: object) -> set[str]:
+    """把列/粒度数组归一化成小写集合（与对账引擎的 ``_tokens`` 同语义）。"""
+    if not isinstance(values, (list, tuple)):
+        return set()
+    return {v.strip().lower() for v in values if isinstance(v, str) and v.strip()}
+
+
+def _roleColumnDiffers(declared: object, measure: object) -> bool:
+    """治理声明的列与技术度量列**都非空且不相等** ⇒ 对账必须出列级 finding。
+
+    ``measure`` 是 ``MeasureSpec | None``：``None`` 时引擎给的是
+    ``governance_measure_absent``（不是列级 code）⇒ 这里返回 ``False``。
+    """
+    declaredSet = _normTokens(declared)
+    technical = measure.columns() if measure is not None else set()
+    return bool(declaredSet) and bool(technical) and declaredSet != technical
+
+
+def _needsDenominatorCheck(governance: object, technique: object) -> bool:
+    """复刻层 2 的分母判定：比率/差值型，或治理侧显式声明了分母列。"""
+    metricType = getattr(technique, "metric_type", None)
+    if metricType in (MetricType.RATIO.value, MetricType.DIFFERENCE.value):
+        return True
+    return bool(_normTokens(getattr(governance, "denominator_columns", ())))
+
+
 def _formulaCoverage(
     declared: set[str], formula: str | None
 ) -> tuple[bool, list[str]]:
@@ -392,23 +426,36 @@ async def step3_reconcile(session: AsyncSession) -> None:
         return
 
     verdicts: dict[str, str] = {}
+    reasonsByCode: dict[str, set[str]] = {}
+    columnDiffers: dict[str, bool] = {}
     for kpi in linked:
         metric = await session.get(OntologyMetric, kpi.metric_id)
         technique = techniqueOf(metric)
-        result = reconcileMetric(governanceSpecOf(kpi), technique)
+        governance = governanceSpecOf(kpi)
+        result = reconcileMetric(governance, technique)
         verdicts[kpi.kpi_code] = result.verdict
+        reasonsByCode[kpi.kpi_code] = set(result.reasons())
+        # S3.4 的期望值：治理列与技术列**都非空且不相等**时，对账必须给出
+        # 列级 finding。用它反查「_checkRole 的列比对被删掉」这类退化。
+        denominatorNeeded = _needsDenominatorCheck(governance, technique)
+        columnDiffers[kpi.kpi_code] = _roleColumnDiffers(
+            governance.numerator_columns, technique.numerator
+        ) or (
+            denominatorNeeded
+            and _roleColumnDiffers(
+                governance.denominator_columns, technique.denominator
+            )
+        )
         plan = plans.get(kpi.kpi_code)
         tier = _tierOfCode(plans, kpi.kpi_code)
         # ⚠️ PLAN **刻意**保留业务治理列（``governance*``）与技术物理列不同
         # （T15-L）：有已登记偏差 ⇒ 对账**必须**判 mismatch，否则等于「脚本自己
-        # 给自己签字」。没有偏差时才按档位判 pass / unknown。
+        # 给自己签字」。没有偏差时才按档位判 pass / unknown（这两条分支由
+        # ``expectedVerdictFor`` 的单测覆盖 —— 真实 12 条全部有偏差）。
+        expected = expectedVerdictFor(
+            tier, plan.deviations if plan is not None else ()
+        )
         hasDeviation = bool(plan is not None and plan.deviations)
-        if hasDeviation:
-            expected = VERDICT_MISMATCH
-        elif tier == "A":
-            expected = VERDICT_PASS
-        else:
-            expected = VERDICT_UNKNOWN
         basis = "PLAN 已登记治理↔物理偏差" if hasDeviation else f"tier {tier} 无已登记偏差"
         check(
             f"S3.1 {kpi.kpi_code} 对账 verdict = {expected}（{basis}）",
@@ -436,6 +483,26 @@ async def step3_reconcile(session: AsyncSession) -> None:
         mismatches == deviationCodes,
         f"多判 {sorted(mismatches - deviationCodes)}；漏判 "
         f"{sorted(deviationCodes - mismatches)}",
+    )
+
+    # ⚠️ S3.3 单独不够：12 条 PLAN 的治理粒度（中文业务词）与技术粒度（列名）
+    # **永远**不等 ⇒ 每条 findings 都含 ``grain_mismatch`` ⇒ 即便把
+    # ``_checkRole`` 的列比对整体删掉，S3.3 依旧全绿。这里按 **finding code**
+    # 独立断言：列级 finding 的有无必须与「治理列 vs 技术列」的实际差异一致。
+    columnCodes = {
+        REASON_GOVERNANCE_COLUMN_NOT_IN_TECHNICAL,
+        REASON_TECHNICAL_COLUMN_NOT_IN_GOVERNANCE,
+    }
+    expectedColumnCodes = {
+        code for code, differs in columnDiffers.items() if differs
+    }
+    actualColumnCodes = {
+        code for code, reasons in reasonsByCode.items() if columnCodes & reasons
+    }
+    check(
+        "S3.4 列级 finding 集合 = 治理/技术列差异集合（防 _checkRole 列比对被删）",
+        expectedColumnCodes == actualColumnCodes,
+        f"期望 {sorted(expectedColumnCodes)}；实际 {sorted(actualColumnCodes)}",
     )
     info(f"实测 verdict 分布：{dict(Counter(verdicts.values()))}")
     if len(mismatches) == len(verdicts):

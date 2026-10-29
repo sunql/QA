@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from scripts.kpi_metric_db_guard import (
@@ -20,7 +22,11 @@ from scripts.kpi_metric_db_guard import (
 from scripts.kpi_metric_realdata_lib import (
     FAILURES,
     SKIPS,
+    VERDICT_MISMATCH,
+    VERDICT_PASS,
+    VERDICT_UNKNOWN,
     check,
+    expectedVerdictFor,
     guardTarget,
     lastSkipReason,
     printSummary,
@@ -277,3 +283,52 @@ def test_last_skip_reason_returns_most_recent_prefix_match() -> None:
     assert lastSkipReason("S3") == "原因 A"
     assert lastSkipReason("S7") == "原因 B"
     assert lastSkipReason("S9") is None
+
+
+# ── S3 期望 verdict（FIX-2：无偏差分支必须被真实执行过） ──────────────
+#
+# 真实 12 条 PLAN **全部**有 deviations ⇒ S3 里「无偏差」的两条分支实跑
+# 永不执行。这里构造 ``deviations=()`` 的 plan 输入直接跑这两条路径。
+
+
+def test_expected_verdict_without_deviation_tier_a_is_pass() -> None:
+    plan = SimpleNamespace(tier="A", deviations=())
+    assert expectedVerdictFor(plan.tier, plan.deviations) == VERDICT_PASS
+
+
+def test_expected_verdict_without_deviation_tier_b_is_unknown() -> None:
+    plan = SimpleNamespace(tier="B", deviations=())
+    assert expectedVerdictFor(plan.tier, plan.deviations) == VERDICT_UNKNOWN
+
+
+def test_expected_verdict_without_deviation_tier_c_is_unknown() -> None:
+    plan = SimpleNamespace(tier="C", deviations=())
+    assert expectedVerdictFor(plan.tier, plan.deviations) == VERDICT_UNKNOWN
+
+
+def test_expected_verdict_with_deviation_is_mismatch_even_tier_a() -> None:
+    plan = SimpleNamespace(tier="A", deviations=("governance↔物理列偏差",))
+    assert expectedVerdictFor(plan.tier, plan.deviations) == VERDICT_MISMATCH
+
+
+def test_expected_verdict_unknown_tier_without_deviation_is_unknown() -> None:
+    """PLAN 里查不到该 code（tier=None）⇒ 不得当成 pass。"""
+    assert expectedVerdictFor(None, ()) == VERDICT_UNKNOWN
+
+
+def test_verdict_literals_match_reconcile_module() -> None:
+    """lib 保持零 app 依赖（入口 import 早于 DATABASE_URL 设置）⇒ 字面量
+    必须由测试钉住，防止两处漂移。"""
+    from app.services.kpi_metric_reconcile import (
+        VERDICT_MISMATCH as RECONCILE_MISMATCH,
+    )
+    from app.services.kpi_metric_reconcile import (
+        VERDICT_PASS as RECONCILE_PASS,
+    )
+    from app.services.kpi_metric_reconcile import (
+        VERDICT_UNKNOWN as RECONCILE_UNKNOWN,
+    )
+
+    assert VERDICT_PASS == RECONCILE_PASS
+    assert VERDICT_MISMATCH == RECONCILE_MISMATCH
+    assert VERDICT_UNKNOWN == RECONCILE_UNKNOWN

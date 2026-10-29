@@ -73,6 +73,28 @@ FAILURES: list[str] = []
 # 收集被跳过的步骤（``(步骤, 原因)``）；汇总必须如实列出。
 SKIPS: list[tuple[str, str]] = []
 
+# 层 2 的三档 verdict 字面量（与 ``app.services.kpi_metric_reconcile`` 一致）。
+# ⚠️ 本模块必须**零 app 依赖**：入口在设置 ``DATABASE_URL`` 之前就 import 它
+# （否则 ``app.config`` 会读到 5432 的默认 DSN）。字面量一致性由单测钉住。
+VERDICT_PASS = "pass"
+VERDICT_MISMATCH = "mismatch"
+VERDICT_UNKNOWN = "unknown"
+
+
+def expectedVerdictFor(tier: str | None, deviations: object) -> str:
+    """PLAN 档位 + 已登记偏差 ⇒ 期望的层 2 verdict。
+
+    ``deviations`` 传 PLAN 的 ``deviations``（空序列 / ``None`` = 无偏差）。
+
+    为什么抽成纯函数：真实 12 条 PLAN **全部**有 deviations ⇒ 「无偏差」的
+    两条分支（tier A ⇒ pass / tier B/C ⇒ unknown）在实跑里**永不执行**。
+    留作未测代码，等哪天 PLAN 清空 deviations 时会静默生效 —— 由单测直接
+    覆盖这两条路径（FIX-2）。
+    """
+    if deviations:
+        return VERDICT_MISMATCH
+    return VERDICT_PASS if tier == "A" else VERDICT_UNKNOWN
+
 
 def resolveDatabaseUrl(explicit: str | None = None) -> tuple[str, str]:
     """解析目标 DSN，返回 ``(dsn, 来源说明)``。
@@ -216,8 +238,12 @@ __all__ = [
     "MAX_STEPS",
     "SKIPS",
     "SCRIPT_ACTOR",
+    "VERDICT_MISMATCH",
+    "VERDICT_PASS",
+    "VERDICT_UNKNOWN",
     "assertSafeTarget",
     "check",
+    "expectedVerdictFor",
     "failStep",
     "guardTarget",
     "info",

@@ -1,11 +1,11 @@
 """`data_source` 裸表名 → 数据源的精确 join（真实 PG + 完整 API 链路）。
 
 覆盖：
-- 单表 / 多表（'+' 与空格两种分隔）都能定位到数据源
+- 单表 / 多表（'+' 与空格两种分隔，含**无空格**的 ``A+B``）都能定位到数据源
 - 表名大小写不敏感
 - 停用数据源被排除（正向对照）
 - 未命中表名 ⇒ 无该信号（正向对照）
-- 与 legacy 名称信号并存时两条 reasons 合并
+- 与 legacy 名称信号并存时两条 reasons 合并，且 reasons 按**分值降序**排列
 """
 
 from __future__ import annotations
@@ -167,6 +167,51 @@ async def test_unknown_table_name_yields_no_table_signal(
     assert missRows == []
     assert [r["datasourceId"] for r in hitRows] == [ds.id]
     assert "legacy_table_exact" in hitRows[0]["reasons"]
+
+
+@pytest.mark.asyncio
+async def test_plus_without_spaces_suggests_all_tables(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """存量真实形态可能是 ``"A+B"``（**无空格**）⇒ 两个表名都必须被拆开并识别。
+
+    对照：若分隔符正则漏掉 '+'，整串会变成单个 token ⇒ 一条建议都拿不到。
+    """
+    first = await _addSource(dbSession, "TABLE_JOIN_NOSP_A")
+    await _addSchema(dbSession, first.id, ["DWD_PURCHASE_ORDER"])
+    second = await _addSource(dbSession, "TABLE_JOIN_NOSP_B")
+    await _addSchema(dbSession, second.id, ["DWD_GOODS_RECEIPT"])
+    kpi = await _addKpi(
+        dbSession, "TJ_KPI_NOSPACE_PLUS", "DWD_PURCHASE_ORDER+DWD_GOODS_RECEIPT"
+    )
+
+    rows = await _suggestions(client, kpi.id)
+
+    assert rows, "无空格 '+' 分隔的裸表名应能建议出数据源"
+    assert "legacy_table_exact" in rows[0]["reasons"]
+    assert {r["datasourceId"] for r in rows} == {first.id, second.id}
+    assert all("legacy_table_exact" in r["reasons"] for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_reasons_are_sorted_by_score_descending(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """同一数据源同时被 fuzzy(0.55) 与裸表名精确(0.85) 命中 ⇒ reasons 按分值降序。
+
+    前端只渲染 ``reasons[0]`` ⇒ 若 reasons 是命中顺序，用户会看到「部分匹配」
+    文案，而实际最强信号是**表名精确命中**（标签与置信度自相矛盾）。
+    """
+    ds = await _addSource(dbSession, "THBI Oracle")
+    await _addSchema(dbSession, ds.id, ["ORDERS"])
+    kpi = await _addKpi(dbSession, "TJ_KPI_REASON_ORDER", "THBI Oracle ORDERS")
+
+    rows = await _suggestions(client, kpi.id)
+
+    assert len(rows) == 1
+    assert rows[0]["datasourceId"] == ds.id
+    assert rows[0]["score"] == pytest.approx(0.85)
+    assert rows[0]["reasons"] == ["legacy_table_exact", "legacy_name_fuzzy"]
 
 
 @pytest.mark.asyncio

@@ -15,8 +15,8 @@
 只考虑 ``data_source.is_active=True`` 的源；同一数据源多个信号命中时合并
 reasons 并取最高分；最多返回 5 条。
 
-注意：``score`` 取**最高**信号分值；``reasons`` 是**命中顺序**而非分值序
-（前端只展示 ``reasons[0]``）。
+注意：``score`` 取**最高**信号分值；``reasons`` 在**出口按分值降序**排列
+（同分保持命中顺序），前端只展示 ``reasons[0]`` ⇒ 即分值最高那条信号。
 
 数据源数量很小，全部载入后在内存里匹配，避免 ILIKE 通配符转义与多次往返。
 """
@@ -39,6 +39,14 @@ _SCORE_TABLE_EXACT = 0.85
 _SCORE_ONTOLOGY = 0.80
 _SCORE_FUZZY = 0.55
 _MAX_SUGGESTIONS = 5
+
+# reason → 分值（出口排序用）。未知 reason 兜底 0.0，不让它把排序打乱。
+_REASON_SCORES: Mapping[str, float] = {
+    "legacy_name_exact": _SCORE_EXACT,
+    "legacy_table_exact": _SCORE_TABLE_EXACT,
+    "ontology_table": _SCORE_ONTOLOGY,
+    "legacy_name_fuzzy": _SCORE_FUZZY,
+}
 
 # `data_source` 历史值是裸表名，多个表用空格 / '+' / ',' / '、' 分隔
 _TABLE_SEPARATORS = re.compile(r"[\s+,、]+")
@@ -82,6 +90,14 @@ def buildTableIndex(schemaRows: tuple[SchemaCache, ...]) -> dict[str, tuple[int,
     """表名（大写）→ 持有该表的数据源 id 列表。
 
     ``schema_data`` 是无类型 JSONB，历史行里可能有非 dict 条目 —— 跳过。
+
+    表名同时兼容 ``table_name`` 与 ``tableName`` 两种键（与
+    ``api/v1/datasource.py`` 的分层统计口径保持一致，否则同一份 schema
+    在一处数得到、在这里却看不见）。
+
+    ⚠️ 与 ``datasource.py`` 有一处**刻意差异**：那里用 ``str(name).upper()``
+    把数字/布尔表名转成字符串，这里直接**跳过**脏值 —— ``None`` 若被
+    ``str()`` 转成 ``"NONE"``，就会凭空多出一个可被冒名命中的表名。
     """
     index: dict[str, set[int]] = {}
     for row in schemaRows:
@@ -90,7 +106,10 @@ def buildTableIndex(schemaRows: tuple[SchemaCache, ...]) -> dict[str, tuple[int,
         for table in row.schema_data or []:
             if not isinstance(table, dict):
                 continue
-            name = str(table.get("table_name", "")).strip().upper()
+            raw = table.get("table_name") or table.get("tableName")
+            if not isinstance(raw, str):
+                continue
+            name = raw.strip().upper()
             if not name:
                 continue
             index.setdefault(name, set()).add(row.datasource_id)
@@ -175,7 +194,12 @@ class KpiDatasourceSuggestionService:
 
         ordered = sorted(hits.values(), key=lambda h: (-h.score, h.name))
         return [
-            DatasourceSuggestion(h.datasourceId, h.name, h.score, tuple(h.reasons))
+            DatasourceSuggestion(
+                h.datasourceId,
+                h.name,
+                h.score,
+                tuple(sorted(h.reasons, key=lambda r: -_REASON_SCORES.get(r, 0.0))),
+            )
             for h in ordered[:_MAX_SUGGESTIONS]
         ]
 

@@ -48,6 +48,14 @@ class TestSplitLegacyTableNames:
     def test_splits_on_comma_and_ideographic_comma(self) -> None:
         assert splitLegacyTableNames("T_A, T_B、T_C") == ("T_A", "T_B", "T_C")
 
+    def test_splits_on_plus_without_spaces(self) -> None:
+        """存量真实形态可能是 ``"A+B"``（无空格）⇒ '+' 必须独立成分隔符。
+
+        之前所有用例都写成 ``"A + B"``（带空格），空格就能拆开 ⇒ '+'
+        被「空格」掩盖，从没被真正测到。
+        """
+        assert splitLegacyTableNames("T_A+T_B") == ("T_A", "T_B")
+
     def test_deduplicates_while_preserving_order(self) -> None:
         assert splitLegacyTableNames("T_B T_A T_B") == ("T_B", "T_A")
 
@@ -73,6 +81,30 @@ class TestBuildTableIndex:
         rows = (_schemaRow(1, [{}, {"table_name": "  "}, {"table_name": "T_A"}]),)
 
         assert buildTableIndex(rows) == {"T_A": (1,)}
+
+    def test_skips_null_table_name_instead_of_indexing_none(self) -> None:
+        """``table_name: null`` 不能被 ``str(None)`` 转成 ``"NONE"`` 进索引。
+
+        否则 KPI 的 ``data_source`` 恰好是 ``"none"`` 时会冒出一条 0.85 的假建议。
+        """
+        rows = (_schemaRow(1, [{"table_name": None, "columns": []}]),)
+
+        index = buildTableIndex(rows)
+
+        assert "NONE" not in index
+        assert index == {}
+
+    def test_accepts_camel_case_table_name_key(self) -> None:
+        """历史行用驼峰 ``tableName`` 时也必须能建索引（与 datasource.py 口径一致）。"""
+        rows = (_schemaRow(1, [{"tableName": "T_A", "columns": []}]),)
+
+        assert buildTableIndex(rows) == {"T_A": (1,)}
+
+    def test_skips_non_string_table_name(self) -> None:
+        """数字/布尔等脏值直接跳过（不被 ``str()`` 转成表名）。"""
+        rows = (_schemaRow(1, [{"table_name": 123}, {"table_name": True}]),)
+
+        assert buildTableIndex(rows) == {}
 
     def test_same_table_in_multiple_sources_yields_sorted_ids(self) -> None:
         rows = (_schemaRow(2, [{"table_name": "T_A"}]), _schemaRow(1, [{"table_name": "t_a"}]))

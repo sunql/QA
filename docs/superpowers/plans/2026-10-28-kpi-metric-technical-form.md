@@ -3894,9 +3894,11 @@ git commit -m "feat: KPI 契约块注入 Tier B 链路（第 12 个 untrusted la
 
 **Files:**
 - Modify: `backend/app/services/kpi_match_cache.py`（`__init__` / `warmUp` / `onKpiChanged` / `refreshOne` / `_setup_kpi_catalog_listeners`）
-- Modify: `backend/app/services/kpi_catalog_service.py:181`（`updateKpi` 传 `kpiId`）、`:217`（`deleteKpi` 传 `kpiId`）
+- Modify: `backend/app/services/kpi_catalog_service.py:127`（`createKpi` 传 `kpiId`）、`:181`（`updateKpi` 传 `kpiId`）、`:217`（`deleteKpi` 传 `kpiId`）
 - Modify: `backend/app/services/kpi_contract_builder.py`（读路径调用 `ensureFresh`）
 - Test: `backend/app/tests/unit/test_kpi_match_cache_dynamic.py`（新建）
+- Modify: `backend/app/tests/unit/test_kpi_match_cache.py:360`（**改写** `test_refreshOne_is_noop_before_warm_up` —— 它钉死的是 C2 缺陷本身，见下方「预检修正 2」）
+- Modify: `backend/app/tests/integration/test_kpi_contract_injection.py:80`（`_matchOnly` 的 fake 签名跟随 `_matchKpiCodes` 变更，见下方「预检修正 3」）
 
 **Interfaces:**
 - Consumes: Task 8 的 `kpi_contract_builder`（读路径入口）
@@ -3913,6 +3915,17 @@ git commit -m "feat: KPI 契约块注入 Tier B 链路（第 12 个 untrusted la
 | **C1** 改名残留 | `onKpiChanged(code)` 按 code 失效；改 code 后旧 code 条目永远留在缓存里（陈旧命中） | 失效**按 id**（id 跨改名稳定）：`onKpiChanged(code, kpiId=…)` 同时按 id 扫两个索引 |
 | **C2** 冷缓存 no-op | `refreshOne` 在 `not self._loaded` 时直接 return ⇒ 缓存永久停在冷态，`findByAnyKeyword` 恒返回 `[]` ⇒ **语义匹配静默失效** | 冷缓存时**全量重建**（`warmUp`），不再 no-op；并置 `_dirty` 脏标记 |
 | **C3** raw SQL 绕过 | ORM listener 只 `logger.debug`；Core UPDATE（seed 脚本）根本不触发 mapper 事件 | listener **真失效** + 读路径 `ensureFresh` 带 TTL 兜底（覆盖绕过 ORM 的写入） |
+
+**预检修正（2026-10-29，控制器实码核对后写回）**
+
+1. **写路径漏了 `createKpi`** —— 计划只列了 `updateKpi`(:181) / `deleteKpi`(:217)，
+   但 `createKpi` 在 `:127` 也调 `refreshOne(session, entity.kpi_code)`。三处都要传 `kpiId`。
+2. **既有用例钉死了 C2 缺陷** —— `test_kpi_match_cache.py:360`
+   `test_refreshOne_is_noop_before_warm_up` 断言「冷缓存 `refreshOne` 必须 no-op」。
+   修 C2 必然让它红 ⇒ 它是缺陷的规格化，不是回归。Step 5.5 改写为钉死新语义。
+3. **Task 9 集成测试的 fake 签名会随本 Task 变更失效** ——
+   `test_kpi_contract_injection.py:80` 的 `_fakeMatch(question, limit)`
+   在 `_matchKpiCodes(session, question, limit)` 下会 TypeError。Step 5.6 改为一律 `*_args`。
 
 ---
 
@@ -4299,7 +4312,21 @@ _CACHE_MAX_AGE_SECONDS = 60
 
 - [ ] **Step 4: 写路径传 kpiId**
 
-修改 `backend/app/services/kpi_catalog_service.py`：
+修改 `backend/app/services/kpi_catalog_service.py`（**三处**写路径都要传 `kpiId`）：
+
+⓪ `createKpi` 里（`:127`，计划原稿漏了 —— 预检修正 1）：
+
+```python
+        await get_kpi_match_cache().refreshOne(session, entity.kpi_code)
+```
+
+改为：
+
+```python
+        await get_kpi_match_cache().refreshOne(
+            session, entity.kpi_code, kpiId=entity.id
+        )
+```
 
 ① `updateKpi` 里：
 
@@ -4377,6 +4404,44 @@ from app.services.kpi_match_cache import kpi_match_cache
     codes = await _matchKpiCodes(session, question, limit)
 ```
 
+- [ ] **Step 5.5: 改写钉死 C2 缺陷的既有测试（预检修正 2）**
+
+`backend/app/tests/unit/test_kpi_match_cache.py:360` 的 `test_refreshOne_is_noop_before_warm_up`
+**钉死的正是 C2 这个缺陷本身**（冷缓存 `refreshOne` 必须是 no-op）。Task 10 修掉 C2 之后，
+该用例必然失败 —— 它不是「回归」，它是**缺陷的规格化**。
+
+把该用例**改写**为钉死新语义（冷缓存 `refreshOne` 触发全量重建）：
+
+```python
+    async def test_refreshOne_on_cold_cache_rebuilds(self, dbSession: AsyncSession) -> None:
+        """未 warmUp 时 `refreshOne` **不再 no-op** —— 改为全量重建。
+
+        C2 修复：旧语义（冷缓存直接 return）让缓存永久停在冷态，
+        `findByAnyKeyword` 恒返回 `[]` ⇒ 语义匹配静默失效 ⇒ Tier B 契约永远注不进去。
+        """
+        await _insertKpis(dbSession, _OVERLAP)
+        cache = KpiMatchCache()
+        await cache.refreshOne(dbSession, "KPI_SALES")
+        assert cache.is_warmUp() is True
+        assert cache.hasCode("KPI_SALES") is True
+        assert _codes(cache.findByAnyKeyword(["销售额"])) != []
+```
+
+- [ ] **Step 5.6: 跟随 `_matchKpiCodes` 签名变更（预检修正 3）**
+
+Step 5 把 `_matchKpiCodes(question, limit)` 改成 `_matchKpiCodes(session, question, limit)`。
+Task 9 的集成测试 `backend/app/tests/integration/test_kpi_contract_injection.py` 里
+`_matchOnly()` 的 fake 签名是 `(question, limit)` ⇒ 调用点变成 3 个位置参数后会 TypeError。
+
+把 `test_kpi_contract_injection.py` 的 fake 改为：
+
+```python
+    async def _fakeMatch(*_args: object, **_kwargs: object) -> list[str]:
+        return list(codes)
+```
+
+（编排测试不该钉死内部签名；签名本身由 Task 10 的实现保证。）
+
 - [ ] **Step 6: 运行测试确认通过**
 
 ```bash
@@ -4386,14 +4451,21 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@loca
   app/tests/unit/test_kpi_semantic_match_service.py -q
 ```
 
-Expected: PASS（新增 7 条 + 既有缓存/匹配测试全绿，不回归）
+Expected: PASS（新增 7 条 + 改写 1 条 + 既有缓存/匹配测试全绿）
+
+⚠️ 注意：既有 `test_kpi_match_cache.py` 的 `test_refreshOne_is_noop_before_warm_up`
+已按 Step 5.5 改写为 `test_refreshOne_on_cold_cache_rebuilds` —— 它钉死的是 C2 缺陷本身，
+不改就会红。这是**规格变更**，不是回归。
+
 
 - [ ] **Step 7: 提交**
 
 ```bash
 git add backend/app/services/kpi_match_cache.py backend/app/services/kpi_catalog_service.py \
   backend/app/services/kpi_contract_builder.py \
-  backend/app/tests/unit/test_kpi_match_cache_dynamic.py
+  backend/app/tests/unit/test_kpi_match_cache_dynamic.py \
+  backend/app/tests/unit/test_kpi_match_cache.py \
+  backend/app/tests/integration/test_kpi_contract_injection.py
 git commit -m "fix: KPI 语义匹配缓存三洞——按 id 失效（改名残留）/ 冷缓存重建 / TTL 兜底绕过 ORM 的写入"
 ```
 

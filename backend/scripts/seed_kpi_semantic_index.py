@@ -11,6 +11,12 @@
 DRAFT/DEPRECATED 不被触碰。写入走 `KpiCatalogService.updateKpi`
 （产出 audit_log / history / outbox + `refreshOne`），不用裸 Core UPDATE。
 
+⚠️ **调用契约变更（FIX-I3）**：本脚本现在带目标库守卫 ——
+- 目标库必须显式传 `--database-url`（`DATABASE_URL` 环境变量只作兜底）；
+- 目标库是 `qa_metadata`（prod 同源）⇒ 必须显式 `--allow-prod-write`，
+  且写库前自动完成当日 `pg_dump` 备份（复用回填脚本的 `_ensureProdBackup`）；
+- `--dry-run` 只打印将更新的 KPI / 字段，不写库。
+
 语义关键词设计原则：
 - 中文 2-4 字 ngram + 英文短语
 - 不填停用词
@@ -22,8 +28,11 @@ DRAFT/DEPRECATED 不被触碰。写入走 `KpiCatalogService.updateKpi`
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import os
 import sys
+from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -31,15 +40,29 @@ from typing import Any
 # 允许从 scripts/ 直接运行
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import asyncpg  # noqa: E402
 from sqlalchemy import select  # noqa: E402
+from sqlalchemy.exc import DBAPIError, OperationalError  # noqa: E402
 
 from app.dependencies import CurrentUser  # noqa: E402
 from app.domain.enums import KpiStatus  # noqa: E402
 from app.domain.models import KpiCatalog  # noqa: E402
 from app.domain.schemas import KpiCatalogUpdate  # noqa: E402
-from app.infrastructure.database import getSessionFactory  # noqa: E402
 from app.services.acl_service import ADMIN_ROLE  # noqa: E402
 from app.services.kpi_catalog_service import KpiCatalogService  # noqa: E402
+from scripts.kpi_metric_backfill import (  # noqa: E402
+    _alembicRevision,
+    _assertSameDatabase,
+    _ensureProdBackup,
+    _printBanner,
+    buildSessionFactory,
+    connectionErrorExit,
+    maskDsn,
+)
+from scripts.kpi_metric_db_guard import (  # noqa: E402
+    PROD_DB_NAME,
+    assertSafeTarget,
+)
 
 # 12 个 KPI 的语义关键词（字段与 KpiCatalog ORM 列对齐）
 # 仅更新 status=PUBLISHED 的 KPI；DRAFT/DEPRECATED 不在范围内
@@ -193,6 +216,33 @@ KPI_SEMANTIC_INDEX: list[dict[str, Any]] = [
 ]
 
 
+async def _publishedSpecs(session: Any) -> list[tuple[KpiCatalog, dict[str, Any]]]:
+    """取「存在且 PUBLISHED」的 KPI 及其关键词规格（DRAFT/DEPRECATED 不碰）。"""
+    pairs: list[tuple[KpiCatalog, dict[str, Any]]] = []
+    for spec in KPI_SEMANTIC_INDEX:
+        row = (
+            await session.execute(
+                select(KpiCatalog).where(KpiCatalog.kpi_code == spec["kpi_code"])
+            )
+        ).scalar_one_or_none()
+        if row is None or row.status != KpiStatus.PUBLISHED.value:
+            continue
+        pairs.append((row, spec))
+    return pairs
+
+
+async def previewKpiSemanticIndex(session: Any) -> tuple[str, ...]:
+    """``--dry-run``：列出将更新的 KPI 与字段（不写库）。"""
+    lines: list[str] = []
+    for row, spec in await _publishedSpecs(session):
+        keywords = "、".join(spec["semantic_keywords"])
+        lines.append(
+            f"- {row.kpi_code}：semantic_keywords=[{keywords}] "
+            f"match_threshold={spec['match_threshold']}"
+        )
+    return tuple(lines)
+
+
 async def seedKpiSemanticIndex(session: Any) -> int:
     """幂等写入 12 条 KPI 的 semantic_keywords；返回 affected 行数。
 
@@ -211,14 +261,7 @@ async def seedKpiSemanticIndex(session: Any) -> int:
     service = KpiCatalogService()
     actor = CurrentUser(userId="system-seed", roles=(ADMIN_ROLE,), departments=())
     affected = 0
-    for spec in KPI_SEMANTIC_INDEX:
-        row = (
-            await session.execute(
-                select(KpiCatalog).where(KpiCatalog.kpi_code == spec["kpi_code"])
-            )
-        ).scalar_one_or_none()
-        if row is None or row.status != KpiStatus.PUBLISHED.value:
-            continue
+    for row, spec in await _publishedSpecs(session):
         await service.updateKpi(
             session,
             row.id,
@@ -232,16 +275,67 @@ async def seedKpiSemanticIndex(session: Any) -> int:
     return affected
 
 
-async def main() -> None:
-    factory = getSessionFactory()
-    async with factory() as session:
-        affected = await seedKpiSemanticIndex(session)
+def _parseArgs(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="KPI 语义关键词种子（默认写库；--dry-run 只预览）"
+    )
+    parser.add_argument(
+        "--database-url",
+        default=None,
+        help="目标库 DSN（必选；env DATABASE_URL 仅作兜底）",
+    )
+    parser.add_argument(
+        "--allow-prod-write",
+        action="store_true",
+        help="允许目标是正式库 qa_metadata（写前自动备份）",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="只打印将更新的 KPI，不写库")
+    return parser.parse_args(list(argv) if argv is not None else None)
+
+
+def _requireDatabaseUrl(explicit: str | None) -> str:
+    databaseUrl = explicit or os.environ.get("DATABASE_URL")
+    if not databaseUrl:
+        raise SystemExit(
+            "缺少目标库：必须传 --database-url（env DATABASE_URL 仅作兜底，"
+            "本机默认配置指向 5432 的 OpenMetadata PG，不可信）。"
+        )
+    return databaseUrl
+
+
+async def _runSeed(args: argparse.Namespace) -> int:
+    databaseUrl = _requireDatabaseUrl(args.database_url)
+    targetDb = assertSafeTarget(databaseUrl, allowProdWrite=args.allow_prod_write)
+    if not args.dry_run and targetDb == PROD_DB_NAME:
+        revision = await _alembicRevision(databaseUrl)
+        _printBanner(targetDb, _ensureProdBackup(databaseUrl, revision))
+
+    print(f"目标库：{targetDb}（{maskDsn(databaseUrl)}）")
+    factory = buildSessionFactory(databaseUrl)
+    try:
+        async with factory() as session:
+            await _assertSameDatabase(session, targetDb)
+            if args.dry_run:
+                pending = await previewKpiSemanticIndex(session)
+                print("预览模式：未写库。将更新以下 KPI：")
+                print("\n".join(pending) if pending else "（无可更新项）")
+                return 0
+            affected = await seedKpiSemanticIndex(session)
+    except (OperationalError, OSError, DBAPIError, asyncpg.PostgresError) as exc:
+        raise connectionErrorExit(exc, databaseUrl) from exc
+    finally:
+        await factory.kw["bind"].dispose()
     print(
         f"[seed_kpi_semantic_index] affected={affected} 条 "
         f"（12 KPI semantic index，Task 1.5 验收）"
     )
     print("✅ KPI semantic index 种子完成（12 条：4 交付 + 3 质量 + 2 价格 + 3 财务/合规）")
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    return asyncio.run(_runSeed(_parseArgs(argv)))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(main())

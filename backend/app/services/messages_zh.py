@@ -18,8 +18,16 @@ user-facing 中文字面量集中。本模块**仅含字面量**，不引入 i18
 - LLM prompt 模板（属于模型指令，归模块常量如 ``_CLARIFY_SYSTEM_PROMPT``）
 - ``logger.*`` 中的运维文案（面向运维排障）
 - docstring 中的中文（文档）
+
+导入：
+- ``from types import MappingProxyType`` —— 只读映射常量的唯一来源
+- ``from typing import Mapping`` —— 常量的类型标注
+
 - 正则表达式 pattern 内的字符（逻辑而非文案）
 """
+
+from collections.abc import Mapping
+from types import MappingProxyType
 
 # =============================================================================
 # 通用
@@ -703,11 +711,15 @@ MSG_KPI_RECONCILE_FINDING = "[{layer}] {detail}"
 MSG_KPI_RECONCILE_FINDING_NO_DETAIL = "未记录具体对账明细"
 # 对账层英文常量 → 中文层名（英文常量同时用于审计落库，此处只做展示映射；
 # 未收录的层值原样展示，不静默丢层次信息）
-MSG_KPI_RECONCILE_LAYER_NAMES = {
-    "technique_internal": "技术层",
-    "governance": "治理层",
-    "executable": "可执行层",
-}
+# 用 MappingProxyType 封成只读映射：这是模块级共享常量，可变 dict 会被外部就地改写
+# （违反「不可变数据」约束），且改写后 409 正文会静默变成错层名。
+MSG_KPI_RECONCILE_LAYER_NAMES: Mapping[str, str] = MappingProxyType(
+    {
+        "technique_internal": "技术层",
+        "governance": "治理层",
+        "executable": "可执行层",
+    }
+)
 
 # ── KPI 发布闸门（P1）────────────────────────────────────────────────
 MSG_KPI_GATE_MISSING_METRIC = "未挂靠本体指标（metric_id 为空）"

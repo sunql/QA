@@ -4569,10 +4569,11 @@ git commit -m "fix: KPI 语义匹配缓存三洞——按 id 失效（改名残�
   - `kpi_metric_publish_gate.GateResult(entityType, entityId, items)` + `.passed` + `.failedItems` + `.message()`
   - `kpi_metric_publish_gate.buildKpiGateItems(...) -> tuple[GateItem, ...]`
   - `kpi_metric_publish_gate.buildMetricGateItems(...) -> tuple[GateItem, ...]`
-  - `kpi_metric_publish_gate.checkKpiPublishGate(session, kpi, *, metricId=None, datasourceId=None) -> GateResult`
+  - `kpi_metric_publish_gate.checkKpiPublishGate(session, kpi, *, metricId=UNSET, datasourceId=UNSET, governance=None) -> GateResult`
   - `kpi_metric_publish_gate.checkMetricPublishGate(session, metric, *, technique=None) -> GateResult`
-  - `kpi_metric_publish_gate.enforceKpiPublishGate(session, kpi, *, metricId=None, datasourceId=None) -> GateResult`（不通过抛 `ConflictError` ⇒ 409）
+  - `kpi_metric_publish_gate.enforceKpiPublishGate(session, kpi, *, metricId=UNSET, datasourceId=UNSET, governance=None) -> GateResult`（不通过抛 `ConflictError` ⇒ 409）
   - `kpi_metric_publish_gate.enforceMetricPublishGate(session, metric, *, technique=None) -> GateResult`
+  - `kpi_metric_publish_gate.UNSET` 哨兵：覆盖参数三态（未覆盖=沿用实体现值 / 显式 `None`=清空挂靠 / 传值=设置）
 
 **闸门条件（spec §7.5）**：
 
@@ -4602,6 +4603,14 @@ KPI: DRAFT → PUBLISHED ⟸
 >    中文 `ReconcileFinding.detail` 被丢弃、`MSG_KPI_RECONCILE_FINDING` 成死代码。
 >    已改为 `renderReconcileFindings`（中文层名 + 中文 detail）渲染正文，
 >    reason 码只进 `enforce*` 的 warn 日志。
+> 3. **覆盖参数是三态，不是两态**（2026-10-29 第二次同步补齐）：
+>    原样例 `metricId: int | None = None`（`None` = 沿用实体现值）会让
+>    「解绑挂靠 + 同时发布」被误判成「仍挂着指标」⇒ 闸门漏放行。
+>    实码已改用 `UNSET` 哨兵（未覆盖 = 沿用 / 显式 `None` = 清空 / 传值 = 设置），
+>    并新增 `governance` 覆盖参数（同一请求里既改治理列又发布时按**新值**对账）。
+>    本样例已同步为 `UNSET` 语义。
+> 4. 指标方向的关联 KPI 对账已抽成 `_linkedMismatchOf`（返回 `_LinkedMismatch(message, reasonCodes)`），
+>    便于「中文 message 进正文 / 英文 reason 码进日志」分流；本样例已同步。
 
 ---
 
@@ -5094,6 +5103,53 @@ async def _loadLinkedKpis(
     return list(result.scalars().all())
 
 
+class _Unset:
+    """哨兵：区分「未覆盖（沿用实体现值）」与「显式 None（清空挂靠）」。
+
+    KPI 的 ``metric_id`` / ``datasource_id`` 都可被显式置空（解绑）。
+    若把「None」一律当成「未覆盖」，则「解绑 + 发布」同一次请求会被判成
+    「仍挂着指标」⇒ 闸门漏放行。故覆盖参数用哨兵表达「未覆盖」。
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - 仅调试用
+        return "<UNSET>"
+
+
+UNSET = _Unset()
+
+
+@dataclass(frozen=True)
+class _LinkedMismatch:
+    """关联 KPI 的层 2 不一致（只记 mismatch；unknown 放行）。"""
+
+    message: str
+    reasonCodes: tuple[str, ...]
+
+
+def _linkedMismatchOf(
+    linked: tuple[KpiCatalog, ...], technique: MetricTechnique
+) -> tuple[_LinkedMismatch, ...]:
+    """关联 KPI 的层 2 对账：**只拦 mismatch**（unknown 放行，打破互锁）。"""
+    mismatches: list[_LinkedMismatch] = []
+    for kpi in linked:
+        layer2 = reconcileGovernanceVsTechnique(_governanceOf(kpi), technique)
+        # 只有 mismatch 计入（unknown 放行；反向实验把它改成 != VERDICT_PASS 时
+        # ⇒ 用例 test_metric_publish_allowed_when_linked_kpi_governance_unknown 必须变红）
+        if layer2.verdict == VERDICT_MISMATCH:
+            mismatches.append(
+                _LinkedMismatch(
+                    message=(
+                        f"{kpi.kpi_code}: "
+                        f"{renderReconcileFindings(layer2.findings)}"
+                    ),
+                    reasonCodes=layer2.reasons(),
+                )
+            )
+    return tuple(mismatches)
+
+
 async def checkMetricPublishGate(
     session: AsyncSession,
     metric: OntologyMetric,
@@ -5107,18 +5163,7 @@ async def checkMetricPublishGate(
     degraded = (
         layer1.verdict == VERDICT_MISMATCH or layer3.verdict == VERDICT_MISMATCH
     )
-    linked = await _loadLinkedKpis(session, metric.id)
-    linkedMismatch: list[str] = []
-    reasonCodes: list[str] = list(layer1.reasons() + layer3.reasons())
-    for kpi in linked:
-        governance = _governanceOf(kpi)
-        layer2 = reconcileGovernanceVsTechnique(governance, tech)
-        # 只拦 mismatch；unknown 放行（打破 KPI / 指标互锁）
-        if layer2.verdict == VERDICT_MISMATCH:
-            linkedMismatch.append(
-                f"{kpi.kpi_code}: {renderReconcileFindings(layer2.findings)}"
-            )
-            reasonCodes.extend(layer2.reasons())
+    linkedFindings = _linkedMismatchOf(await _loadLinkedKpis(session, metric.id), tech)
     items = buildMetricGateItems(
         metricType=tech.metric_type,
         numeratorMeasure=tech.numerator,
@@ -5127,13 +5172,18 @@ async def checkMetricPublishGate(
         grainKeys=tech.grain_keys,
         executionSource=tech.execution_source,
         degraded=degraded,
-        linkedMismatch=tuple(linkedMismatch),
+        linkedMismatch=tuple(f.message for f in linkedFindings),
+    )
+    reasonCodes = (
+        layer1.reasons()
+        + layer3.reasons()
+        + tuple(code for f in linkedFindings for code in f.reasonCodes)
     )
     return GateResult(
-        entityType="ontology_metric",
+        entityType=ENTITY_TYPE_METRIC,
         entityId=metric.id,
         items=items,
-        reasonCodes=tuple(reasonCodes),
+        reasonCodes=reasonCodes,
     )
 
 
@@ -5141,24 +5191,30 @@ async def checkKpiPublishGate(
     session: AsyncSession,
     kpi: KpiCatalog,
     *,
-    metricId: int | None = None,
-    datasourceId: int | None = None,
+    metricId: int | None | _Unset = UNSET,
+    datasourceId: int | None | _Unset = UNSET,
+    governance: GovernanceSpec | None = None,
 ) -> GateResult:
     """KPI 发布闸门（只读检查）。
 
-    metricId / datasourceId 允许覆盖（同一请求里既改挂靠又发布时，
-    要按**新值**判定，而不是旧值）。
+    metricId / datasourceId / governance 允许覆盖（同一请求里既改挂靠又发布时，
+    要按**新值**判定，而不是旧值）。未覆盖（默认 ``UNSET``）时沿用实体现值；
+    显式传 ``None`` 表示「本次要把该挂靠清空」⇒ 按「无挂靠」判定。
     """
-    effectiveMetricId = metricId if metricId is not None else kpi.metric_id
+    effectiveMetricId = (
+        kpi.metric_id if isinstance(metricId, _Unset) else metricId
+    )
     effectiveDatasourceId = (
-        datasourceId if datasourceId is not None else kpi.datasource_id
+        kpi.datasource_id if isinstance(datasourceId, _Unset) else datasourceId
     )
     metric: OntologyMetric | None = None
     if effectiveMetricId is not None:
         metric = await session.get(OntologyMetric, effectiveMetricId)
     technique = _techniqueOf(metric) if metric is not None else MetricTechnique()
-    governance = _governanceOf(kpi)
-    layer2 = reconcileGovernanceVsTechnique(governance, technique)
+    effectiveGovernance = (
+        governance if governance is not None else _governanceOf(kpi)
+    )
+    layer2 = reconcileGovernanceVsTechnique(effectiveGovernance, technique)
     items = buildKpiGateItems(
         metricId=effectiveMetricId,
         metricStatus=metric.status if metric is not None else None,
@@ -5191,21 +5247,27 @@ async def enforceKpiPublishGate(
     session: AsyncSession,
     kpi: KpiCatalog,
     *,
-    metricId: int | None = None,
-    datasourceId: int | None = None,
+    metricId: int | None | _Unset = UNSET,
+    datasourceId: int | None | _Unset = UNSET,
+    governance: GovernanceSpec | None = None,
 ) -> GateResult:
     """KPI 发布闸门强制执行。开关关闭 ⇒ 只 warning 放行；开启且不通过 ⇒ 409。"""
     result = await checkKpiPublishGate(
-        session, kpi, metricId=metricId, datasourceId=datasourceId
+        session,
+        kpi,
+        metricId=metricId,
+        datasourceId=datasourceId,
+        governance=governance,
     )
     if result.passed:
         return result
     if not await _gateEnabled(session):
         logger.warning(
-            "KPI 发布闸门未通过（开关关闭，仅观察）id=%s code=%s items=%s",
+            "KPI 发布闸门未通过（开关关闭，仅观察）id=%s code=%s items=%s reasons=%s",
             kpi.id,
             kpi.kpi_code,
             [item.code for item in result.failedItems],
+            list(result.reasonCodes),
         )
         return result
     raise ConflictError(result.message())

@@ -3896,8 +3896,10 @@ git commit -m "feat: KPI 契约块注入 Tier B 链路（第 12 个 untrusted la
 - Modify: `backend/app/services/kpi_match_cache.py`（`__init__` / `warmUp` / `onKpiChanged` / `refreshOne` / `_setup_kpi_catalog_listeners`）
 - Modify: `backend/app/services/kpi_catalog_service.py:127`（`createKpi` 传 `kpiId`）、`:181`（`updateKpi` 传 `kpiId`）、`:217`（`deleteKpi` 传 `kpiId`）
 - Modify: `backend/app/services/kpi_contract_builder.py`（读路径调用 `ensureFresh`）
+- Modify: `backend/app/services/knowledge_compiler_service.py:505`（**计划原稿漏列的第 4 个写路径调用方** —— 该处 `refreshOne(session, code)` 未传 `kpiId` ⇒ 该路径上 C1 原样未闭合；见下方「预检修正 4」）
 - Test: `backend/app/tests/unit/test_kpi_match_cache_dynamic.py`（新建）
 - Modify: `backend/app/tests/unit/test_kpi_match_cache.py:360`（**改写** `test_refreshOne_is_noop_before_warm_up` —— 它钉死的是 C2 缺陷本身，见下方「预检修正 2」）
+- Modify: `backend/app/tests/unit/test_knowledge_compiler_service.py`（`fakeRefreshOne` 的 monkeypatch 签名跟随 `kpiId` 关键字参数）
 - Modify: `backend/app/tests/integration/test_kpi_contract_injection.py:80`（`_matchOnly` 的 fake 签名跟随 `_matchKpiCodes` 变更，见下方「预检修正 3」）
 
 **Interfaces:**
@@ -3926,6 +3928,19 @@ git commit -m "feat: KPI 契约块注入 Tier B 链路（第 12 个 untrusted la
 3. **Task 9 集成测试的 fake 签名会随本 Task 变更失效** ——
    `test_kpi_contract_injection.py:80` 的 `_fakeMatch(question, limit)`
    在 `_matchKpiCodes(session, question, limit)` 下会 TypeError。Step 5.6 改为一律 `*_args`。
+4. **计划漏列的第 4 个写路径调用方** —— `knowledge_compiler_service.py:505`
+   `await cache.refreshOne(session, code)`（按 `metric_id` 反查 KPI 后逐个刷新）。
+   新签名 `refreshOne(session, kpi_code, *, kpiId=None)` 的 `kpiId` 是**可选** ⇒ **不会崩**；
+   但该处拿得到 `row.id` 却没传 ⇒ 严格说 C1 的按 id 失效在这条路径上没生效（code 不变时按 code 也够用）。
+   **落地时补传 `kpiId=row.id`**，并同步 `test_knowledge_compiler_service.py` 里
+   `fakeRefreshOne` 的 monkeypatch 签名。
+5. **【实现回写 2026-10-29】读路径一律用 `get_kpi_match_cache()` 访问器** ——
+   计划原稿的 builder 直接 `from app.services.kpi_match_cache import kpi_match_cache`
+   导入单例对象；写路径用的全是访问器。两者当前是同一对象（无「写路径失效 A 缓存、
+   读路径刷新 B 缓存」的分叉），但风格不一致且单例将来被替换时读路径会握着旧对象
+   ⇒ **统一改用 `get_kpi_match_cache()`**。
+6. **【实现回写 2026-10-29】copy-on-write 取代原地修改** —— 见 Step 3 ④/⑤ 的回写说明
+   （全局约束 #1：不可变）。
 
 ---
 
@@ -4151,7 +4166,62 @@ import time
         self._loadedAt = time.monotonic()
 ```
 
+> ⚠️ **【实现回写 2026-10-29】`warmUp` 的 SELECT 还要加 `populate_existing=True`，
+> 且必须条件化。** 计划原稿的 `warmUp` 只在末尾补两个字段，漏了查询语义 ——
+> 实测生产 session `expire_on_commit=False`（`app/infrastructure/database.py:71`）
+> ⇒ SELECT 会直接返回 identity map 里的**旧实例**（属性不刷新）⇒ 绕过 ORM 的写入
+> （Core UPDATE / 裸 SQL）即使重建了索引，读到的仍是**旧口径** ⇒ C3 的 TTL 用例会**假绿**。
+>
+> 但 `populate_existing=True` 会**覆盖调用方 session 里同 id 行的内存属性**，
+> 而生产 `autoflush=False`（`:72`）⇒ 同 session 里「改了但没 flush」的 KpiCatalog
+> 会被静默改回去 ⇒ **静默数据丢失**。
+>
+> **落地形态（已实现）**：只在 session **无待落库 KpiCatalog 改动**时才开
+> `populate_existing`；有则退回普通 SELECT（读到略旧的值，但绝不毁数据 ——
+> 缓存是加速器，TTL 到期自愈）。判定只看 KpiCatalog，别的实体有 pending 不退让。
+
+模块级新增辅助函数（放在 `class KpiMatchCache` 之前）：
+
+```python
+def _hasPendingKpiChanges(session: AsyncSession) -> bool:
+    """session 里是否有**待落库**的 KpiCatalog 改动。
+
+    `populate_existing=True` 会用查询结果**覆盖** identity map 中同 id 实例的
+    属性 ⇒ 若调用方改了 KpiCatalog 却还没 flush，这次 SELECT 会把改动抹掉
+    （生产 session `autoflush=False` + `expire_on_commit=False`
+    ⇒ 后续 flush 会把**旧值**写回 DB = 静默数据丢失）。
+
+    ⇒ 有待落库改动时退回普通 SELECT：可能读到略旧的值（缓存是加速器，
+    TTL 到期后自愈），但绝不毁数据。
+
+    注：`session.new` / `session.dirty` / `session.deleted` 的读取**不触发
+    autoflush**（它们只扫 identity map 与属性历史），因此这里做检测是安全的。
+    """
+    from app.domain.models import KpiCatalog
+
+    pending = (*session.new, *session.dirty, *session.deleted)
+    return any(isinstance(obj, KpiCatalog) for obj in pending)
+```
+
+`warmUp` 的查询部分改为：
+
+```python
+        stmt = select(KpiCatalog).where(KpiCatalog.status == KpiStatus.PUBLISHED.value)
+        if not _hasPendingKpiChanges(session):
+            stmt = stmt.execution_options(populate_existing=True)
+        rows = await session.execute(stmt)
+```
+
 ④ `onKpiChanged` 整体替换为：
+
+> ⚠️ **【实现回写 2026-10-29】本计划原稿的 ④/⑤ 用的是**原地修改**
+> （`self._by_code.clear()` / `del self._by_code[code]` /
+> `self._by_keyword[kw] = kept` / `self._by_code[kpi_code] = kpi` /
+> `self._by_keyword.setdefault(kw, []).append(kpi)`）—— **违反全局约束 #1
+> （不可变：永远新建对象，禁止原地修改）**。落地时全部改成 **copy-on-write**
+> （新建容器后整体替换），并把 `removeById` + `removeFromKeywordIndex` 两个
+> 语义重叠的方法合并为一个 `_removeEntries`（双条件过滤，比原稿更严：
+> 不会漏摘也不会误摘）。**以本节为准。**
 
 ```python
     def onKpiChanged(self, kpi_code: str | None = None, *, kpiId: int | None = None) -> None:
@@ -4163,41 +4233,42 @@ import time
         写入路径（KpiCatalogService.create/update/delete）在事务提交后调用此方法。
         """
         if kpi_code is None and kpiId is None:
-            self._by_code.clear()
-            self._by_keyword.clear()
+            # 全量清空（新建容器替换，不原地 clear —— 保持不可变语义）
+            self._by_code = {}
+            self._by_keyword = {}
             self._loaded = False
             self._dirty = True
             logger.debug("KpiMatchCache 全量失效")
             return
-        if kpiId is not None:
-            self._removeById(kpiId)
-        if kpi_code is not None:
-            old = self._by_code.pop(kpi_code, None)
-            if old is not None:
-                self._removeFromKeywordIndex(old)
+        self._removeEntries(kpi_code=kpi_code, kpiId=kpiId)
         self._dirty = True
         logger.debug("KpiMatchCache 失效: code=%s id=%s", kpi_code, kpiId)
 
-    def _removeById(self, kpiId: int) -> None:
-        """按 id 从两个索引中移除该 KPI 的全部引用（改名场景的关键）。"""
-        for code, kpi in list(self._by_code.items()):
-            if kpi.id == kpiId:
-                del self._by_code[code]
-        for kw, kpis in list(self._by_keyword.items()):
-            kept = [k for k in kpis if k.id != kpiId]
-            if kept:
-                self._by_keyword[kw] = kept
-            else:
-                del self._by_keyword[kw]
+    def _removeEntries(self, *, kpi_code: str | None, kpiId: int | None) -> None:
+        """从两个索引中移除匹配条目（copy-on-write：新建容器后整体替换）。
 
-    def _removeFromKeywordIndex(self, kpi: "KpiCatalog") -> None:
-        """把一个 KPI 从关键词索引里摘掉（按 code 匹配，兼容无 id 的老对象）。"""
-        for kw, kpis in list(self._by_keyword.items()):
-            kept = [k for k in kpis if k.kpi_code != kpi.kpi_code]
+        匹配条件（任一命中即移除）：`_by_code` 的 key 等于 kpi_code，或条目 id
+        等于 kpiId。关键词索引按**条目的 id** 与 kpi_code 一并摘除 —— 改名场景下
+        缓存里的旧条目 key 是旧 code，但行 id 不变 ⇒ 按 id 摘才摘得掉（C1）。
+        空关键词桶整体丢弃（不留空 list）。
+        """
+        byCode: dict[str, KpiCatalog] = {}
+        for code, kpi in self._by_code.items():
+            if code == kpi_code or (kpiId is not None and kpi.id == kpiId):
+                continue
+            byCode[code] = kpi
+        byKeyword: dict[str, list[KpiCatalog]] = {}
+        for kw, kpis in self._by_keyword.items():
+            kept = [
+                kpi
+                for kpi in kpis
+                if kpi.kpi_code != kpi_code
+                and not (kpiId is not None and kpi.id == kpiId)
+            ]
             if kept:
-                self._by_keyword[kw] = kept
-            else:
-                del self._by_keyword[kw]
+                byKeyword[kw] = kept
+        self._by_code = byCode
+        self._by_keyword = byKeyword
 ```
 
 ⑤ `refreshOne` 整体替换为：
@@ -4234,9 +4305,14 @@ import time
         # 与 warmUp 同口径：仅 status=PUBLISHED 入索引。曾误引 kpi.is_enabled
         # （85907cb）——kpi_catalog 无此列，读即 AttributeError。
         if kpi.status == KpiStatus.PUBLISHED.value:
-            self._by_code[kpi_code] = kpi
+            byCode = {**self._by_code, kpi_code: kpi}
+            byKeyword: dict[str, list[KpiCatalog]] = {
+                kw: list(kpis) for kw, kpis in self._by_keyword.items()
+            }
             for kw in (kpi.semantic_keywords or []):
-                self._by_keyword.setdefault(kw, []).append(kpi)
+                byKeyword[kw] = [*byKeyword.get(kw, []), kpi]
+            self._by_code = byCode
+            self._by_keyword = byKeyword
         self._dirty = False
 ```
 
@@ -4384,7 +4460,7 @@ async def _matchKpiCodes(
     if not question or not question.strip():
         return []
     try:
-        await kpi_match_cache.ensureFresh(session)
+        await get_kpi_match_cache().ensureFresh(session)
         results = await getKpiSemanticMatchService().matchAll(question, limit=limit)
     except Exception:
         logger.warning("KPI 语义匹配失败，跳过契约注入", exc_info=True)
@@ -4395,8 +4471,11 @@ async def _matchKpiCodes(
 并在 import 区加：
 
 ```python
-from app.services.kpi_match_cache import kpi_match_cache
+from app.services.kpi_match_cache import get_kpi_match_cache
 ```
+
+> ⚠️ **【实现回写 2026-10-29】用 `get_kpi_match_cache()` 访问器，不要直接 import 单例对象**
+> —— 见上方「预检修正 5」。
 
 并把 `buildKpiContractBlock` 里的调用改为：
 

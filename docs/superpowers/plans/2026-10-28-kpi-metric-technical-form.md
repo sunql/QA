@@ -745,7 +745,7 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@loca
   -k "not unique_constraint and not index_on_class_id"
 ```
 
-Expected: PASS（15 passed, 2 deselected）
+Expected: PASS（14 passed, 2 deselected —— 12 个 parametrize + `table_exists` + `nullable_and_writable`；`unique_constraint` / `index_on_class_id` 两条留给 Task 3）
 
 - [ ] **Step 6: 提交**
 

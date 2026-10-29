@@ -215,6 +215,35 @@ async def test_reasons_are_sorted_by_score_descending(
 
 
 @pytest.mark.asyncio
+async def test_datasource_name_fragment_does_not_leak_into_other_datasource(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """B-3：含空白数据源名被切碎后，碎片不能冒充别的数据源的表名。
+
+    正确源 ``THBI Oracle`` 持有表 ``ORDERS``；错误源 ``WRONG_DS`` 恰好持有表
+    ``THBI``（片段碰名）。``data_source = "THBI Oracle ORDERS"`` 未修复时会被
+    切成 ``THBI/ORACLE/ORDERS`` ⇒ ``THBI`` 给 ``WRONG_DS`` 产出 0.85 的
+    ``legacy_table_exact``。
+
+    必须**双向**断言：只断言正确源存在会假绿（错源仍可能并列出现）。
+    """
+    correct = await _addSource(dbSession, "THBI Oracle")
+    await _addSchema(dbSession, correct.id, ["ORDERS"])
+    wrong = await _addSource(dbSession, "WRONG_DS")
+    await _addSchema(dbSession, wrong.id, ["THBI"])
+    kpi = await _addKpi(dbSession, "TJ_KPI_DS_FRAGMENT", "THBI Oracle ORDERS")
+
+    rows = await _suggestions(client, kpi.id)
+
+    # 正向：正确源仍在 TOP，且表名信号没被整体摘没
+    assert rows[0]["datasourceId"] == correct.id
+    assert rows[0]["score"] == pytest.approx(0.85)
+    assert "legacy_table_exact" in rows[0]["reasons"]
+    # 反向：碎片碰撞的错源不得出现在建议里
+    assert all(r["datasourceId"] != wrong.id for r in rows)
+
+
+@pytest.mark.asyncio
 async def test_legacy_name_and_table_signals_merge(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:

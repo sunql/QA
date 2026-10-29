@@ -24,7 +24,7 @@ reasons 并取最高分；最多返回 5 条。
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
@@ -51,6 +51,56 @@ _REASON_SCORES: Mapping[str, float] = {
 # `data_source` 历史值是裸表名，多个表用空格 / '+' / ',' / '、' 分隔
 _TABLE_SEPARATORS = re.compile(r"[\s+,、]+")
 
+# 数据源名里可能含空白（dev 上就有 "THBI Oracle"）。legacy data_source 若照抄
+# 数据源名，切分会把它拆成碎片，碎片再冒充别的数据源的表名 ⇒ 0.85 的
+# legacy_table_exact 会压过 0.80 的 ontology_table，把错的数据源顶到第一名。
+# 修法：拆表名**之前**先把「含空白的启用数据源名」跨度从文本里摘掉。
+#
+# 只对**含空白**的名字建模式：单字数据源名（"DWD_PAYMENT"）在存量语义里
+# 同时是合法裸表名，摘掉会丢掉 legacy_table_exact（既有集成测试依赖）。
+_DS_NAME_BOUNDARY_LEFT = r"(?<![A-Z0-9_])"
+_DS_NAME_BOUNDARY_RIGHT = r"(?![A-Z0-9_])"
+
+
+def buildDatasourceNamePattern(names: Iterable[str]) -> re.Pattern[str] | None:
+    """把**含空白**的数据源名编译成边界安全的联合正则。
+
+    名字内部的空白用 ``\\s+`` 容忍多空格（"THBI  Oracle" 也算命中）；
+    前后加 ``(?<![A-Z0-9_])`` / ``(?![A-Z0-9_])`` 边界，
+    避免 "THBI_ORDERS" 之类含下划线的标识被误当成独立词命中。
+
+    单字名字一律不建模式（见模块注释与既有测试约束）。
+
+    名字先转大写，匹配时用 ``re.IGNORECASE``：legacy 文本大小写混用
+    （``"THBI Oracle ORDERS"``）也必须能命中；边界断言在 IGNORECASE 下
+    同样拒绝小写字母（``[A-Z]`` 会匹配 ``[a-z]``）。
+    """
+    alternatives: list[str] = []
+    for name in names:
+        cleaned = (name or "").strip().upper()
+        if not cleaned or not any(ch.isspace() for ch in cleaned):
+            continue
+        alternatives.append(r"\s+".join(re.escape(w) for w in cleaned.split()))
+    if not alternatives:
+        return None
+    # 长名优先，避免短名先吃掉长名的前缀
+    alternatives.sort(key=len, reverse=True)
+    body = "|".join(alternatives)
+    return re.compile(
+        rf"{_DS_NAME_BOUNDARY_LEFT}(?:{body}){_DS_NAME_BOUNDARY_RIGHT}",
+        re.IGNORECASE,
+    )
+
+
+def stripDatasourceNames(text: str | None, pattern: re.Pattern[str] | None) -> str:
+    """把文本里「含空白的启用数据源名」跨度替换成空格（其余原样保留）。
+
+    替换成空格而不是空串 ⇒ 保留分隔语义，后续切分不会把两侧粘成一个 token。
+    """
+    if not text or pattern is None:
+        return text or ""
+    return pattern.sub(" ", text)
+
 
 @dataclass
 class _Hit:
@@ -70,16 +120,23 @@ class DatasourceSuggestion:
     reasons: tuple[str, ...]
 
 
-def splitLegacyTableNames(text: str | None) -> tuple[str, ...]:
+def splitLegacyTableNames(
+    text: str | None,
+    datasourceNamePattern: re.Pattern[str] | None = None,
+) -> tuple[str, ...]:
     """把 ``kpi_catalog.data_source`` 拆成候选表名（大写、去空项、去重、保序）。
 
     历史数据里 ``data_source`` 存的是**裸表名**而不是数据源名，多个表用
     空格或 ``+`` 分隔，例如 ``"DWD_PURCHASE_ORDER + DWD_GOODS_RECEIPT"``。
+
+    ``datasourceNamePattern`` 非空时，先把「含空白的启用数据源名」跨度摘掉，
+    避免数据源名被切成碎片后冒充别的数据源的表名（B-3）。
     """
     if not text:
         return ()
+    prepared = stripDatasourceNames(text, datasourceNamePattern)
     ordered: dict[str, None] = {}
-    for part in _TABLE_SEPARATORS.split(text):
+    for part in _TABLE_SEPARATORS.split(prepared):
         name = part.strip().upper()
         if name:
             ordered.setdefault(name, None)
@@ -125,11 +182,15 @@ class SuggestionContext:
 
     ``tableDatasourceIds`` 是「表名 → 数据源 id」索引，由 ``schemaRows``
     一次构建；两条表级信号（legacy 裸表名 / ontology class 主表）共用它。
+
+    ``datasourceNamePattern`` 是含空白启用数据源名的边界安全模式，拆 legacy
+    裸表名前先摘掉这些跨度（见 ``buildDatasourceNamePattern``）。
     """
 
     sources: tuple[DataSource, ...]
     schemaRows: tuple[SchemaCache, ...]
     tableDatasourceIds: Mapping[str, tuple[int, ...]] = field(default_factory=dict)
+    datasourceNamePattern: re.Pattern[str] | None = None
 
 
 def _addHit(
@@ -153,6 +214,7 @@ class KpiDatasourceSuggestionService:
             sources=tuple(sources),
             schemaRows=schemaRows,
             tableDatasourceIds=buildTableIndex(schemaRows),
+            datasourceNamePattern=buildDatasourceNamePattern(ds.name for ds in sources),
         )
 
     async def suggest(
@@ -181,7 +243,11 @@ class KpiDatasourceSuggestionService:
                     _addHit(hits, ds, _SCORE_FUZZY, "legacy_name_fuzzy")
 
         # 裸表名 → 数据源（存量 data_source 就是裸表名，这是存量数据唯一可用的信号）
-        for table in splitLegacyTableNames(kpi.data_source):
+        # 先摘掉「含空白的启用数据源名」跨度（B-3）：否则 "THBI Oracle ORDERS"
+        # 会被切成 THBI/ORACLE/ORDERS，碎片 THBI/ORACLE 可能撞上别的数据源的表名，
+        # 产出 0.85 的 legacy_table_exact 压过 0.80 的 ontology_table。
+        # 注意：名称类信号（legacy_name_exact / legacy_name_fuzzy）仍用原始文本。
+        for table in splitLegacyTableNames(kpi.data_source, ctx.datasourceNamePattern):
             for dsId in ctx.tableDatasourceIds.get(table, ()):
                 ds = sourcesById.get(dsId)
                 if ds is not None:

@@ -14,8 +14,10 @@ from app.domain.models import SchemaCache
 from app.services.kpi_datasource_suggestion_service import (
     KpiDatasourceSuggestionService,
     SuggestionContext,
+    buildDatasourceNamePattern,
     buildTableIndex,
     splitLegacyTableNames,
+    stripDatasourceNames,
 )
 
 
@@ -61,6 +63,73 @@ class TestSplitLegacyTableNames:
 
     def test_strips_surrounding_whitespace(self) -> None:
         assert splitLegacyTableNames("  T_A  ") == ("T_A",)
+
+
+class TestBuildDatasourceNamePattern:
+    """只对**含空白**的数据源名建模式（B-3 的核心约束）。"""
+
+    def test_pattern_is_none_when_no_spaced_name(self) -> None:
+        assert buildDatasourceNamePattern(["DWD_PAYMENT", "TABLE_JOIN_DS"]) is None
+
+    def test_pattern_skips_single_word_names(self) -> None:
+        # 单字名同时是合法裸表名 ⇒ 摘掉会丢 legacy_table_exact（既有测试依赖）
+        assert buildDatasourceNamePattern(["DWD_PAYMENT"]) is None
+
+    def test_pattern_matches_spaced_name_with_any_inner_whitespace(self) -> None:
+        pattern = buildDatasourceNamePattern(["THBI Oracle"])
+
+        assert pattern is not None
+        assert splitLegacyTableNames("THBI  Oracle ORDERS", pattern) == ("ORDERS",)
+
+    def test_pattern_respects_word_boundaries(self) -> None:
+        pattern = buildDatasourceNamePattern(["THBI Oracle"])
+
+        assert pattern is not None
+        # 含下划线的标识不能被当成独立词命中
+        assert stripDatasourceNames("THBI_ORDERS", pattern) == "THBI_ORDERS"
+        assert stripDatasourceNames("XTHBI ORACLE", pattern) == "XTHBI ORACLE"
+        assert stripDatasourceNames("THBI ORACLEX", pattern) == "THBI ORACLEX"
+
+    def test_pattern_prefers_longer_name_first(self) -> None:
+        pattern = buildDatasourceNamePattern(["A B", "A B C"])
+
+        assert pattern is not None
+        # 长名整体摘掉，而不是被短名先吃掉前缀留下 " C"
+        assert stripDatasourceNames("A B C", pattern).strip() == ""
+
+
+class TestStripDatasourceNames:
+    """拆表名前先摘掉含空白的数据源名跨度（B-3）。"""
+
+    def test_split_removes_spaced_datasource_name_span(self) -> None:
+        pattern = buildDatasourceNamePattern(["THBI Oracle"])
+
+        assert splitLegacyTableNames("THBI Oracle ORDERS", pattern) == ("ORDERS",)
+
+    def test_split_keeps_tokens_when_pattern_is_none(self) -> None:
+        # 不传 pattern ⇒ 旧行为逐位不变（回归护栏）
+        assert splitLegacyTableNames("THBI Oracle ORDERS") == (
+            "THBI",
+            "ORACLE",
+            "ORDERS",
+        )
+
+    def test_split_keeps_single_word_datasource_name_as_table(self) -> None:
+        pattern = buildDatasourceNamePattern(["DWD_PAYMENT"])
+
+        assert pattern is None
+        assert splitLegacyTableNames("DWD_PAYMENT", pattern) == ("DWD_PAYMENT",)
+
+    def test_split_preserves_space_separated_tables(self) -> None:
+        pattern = buildDatasourceNamePattern(["THBI Oracle"])
+
+        assert splitLegacyTableNames("T_A T_B", pattern) == ("T_A", "T_B")
+
+    def test_strip_replaces_with_space_not_empty(self) -> None:
+        pattern = buildDatasourceNamePattern(["THBI Oracle"])
+
+        # 替换成空串会把两侧粘成 "AB"；替换成空格才能保持分隔
+        assert splitLegacyTableNames("A THBI Oracle B", pattern) == ("A", "B")
 
 
 class TestBuildTableIndex:

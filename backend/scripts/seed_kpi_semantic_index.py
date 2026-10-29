@@ -12,7 +12,7 @@ DRAFT/DEPRECATED 不被触碰。写入走 `KpiCatalogService.updateKpi`
 （产出 audit_log / history / outbox + `refreshOne`），不用裸 Core UPDATE。
 
 ⚠️ **调用契约变更（FIX-I3）**：本脚本现在带目标库守卫 ——
-- 目标库必须显式传 `--database-url`（`DATABASE_URL` 环境变量只作兜底）；
+- 目标库必须显式传 `--database-url`（**不读** `DATABASE_URL` / `TEST_DATABASE_URL`）；
 - 目标库是 `qa_metadata`（prod 同源）⇒ 必须显式 `--allow-prod-write`，
   且写库前自动完成当日 `pg_dump` 备份（复用回填脚本的 `_ensureProdBackup`）；
 - `--dry-run` 只打印将更新的 KPI / 字段，不写库。

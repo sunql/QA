@@ -3,8 +3,15 @@
 - **日期**：2026-10-30
 - **背景**：第四轮 CI（run 41058271071）首次完整跑通 integration 全量（297 文件 / 4 分片），
   暴露 **85 条失败（shard1 26F+4E / shard2 33F / shard3 22F）+ shard0 待统计**。
-  三角定位：**全部失败在 main @ `1b9f4f71` 本地逐一复现（shard1/2/3 已验证，净新增 = 0）**——
-  这是「无 CI + 从未整体跑过全量」积累的基线债，不是本批引入。
+  第五轮（run 41063713547）补齐：**shard0 = 36F+2E（78 文件，47m29s——最重分片）**，
+  backend-unit = **16 条**（原 14 + 下表 A 层新增 2 条 env 敏感）。
+  **三角定位最终结论：integration 123 条 + unit 16 条 = 139 条基线红，全部在 main @ `1b9f4f71`
+  逐一复现（4 分片 + unit 全部验证，净新增 = 0）**——这是「无 CI + 从未整体跑过全量」积累的
+  基线债，不是本批引入。
+- **CI 时长注**：同样 14 个失败文件本地 100 秒 vs CI shard0 47 分钟——慢在全新库逐测试重建
+  schema fixture，不是测试本身重；修复批次若顺带优化可另立话题。
+- **重要口径修正**：unit 预期「恰好 14 条」是 macOS 上形成的——Linux runner 上基线即 16 条
+  （tmp_path 在 `/tmp` 下 + DSN 密码不是本地 dev 密码），见 A 层新条目。
 - **根因分类方法**：每个文件提取首个 `E` 行报错 + 本地/CI 双环境对照。
 - **处置分层**：
   - **A 层 = 脚手架/环境问题**：测试保留，修环境装配或 fixture，不改断言语义；
@@ -25,6 +32,22 @@
 | test_stream_meta_single_frame | 2E | 同上 | 同上 | 同上 |
 | test_evidence_sql_hook | 1 | 同上（非 setup） | 同上 | 同上 |
 | test_wiki_relation_api | 2 | `UniqueViolation uq_ontology_class_name_version` | schema 加了类名+版本唯一约束，fixture 重复插类名未适配 | fixture 改用不重名/复用已有类 |
+
+### A 层补遗二：shard 0（第五轮，main 基线 36F 逐一复现）
+
+| 文件 | 条数 | 首个报错 | 根因 | 修法 |
+|---|---|---|---|---|
+| test_supplier_itemmaster_purchaseorder_receipt_class | 2E | `Connect call failed 5433` | **5433 硬编码第 3 处** | 改读 TEST_DATABASE_URL |
+| test_business_object_entity_type_fk | 1 | 同上 | **5433 硬编码第 4 处** | 同上 |
+| test_chat_l1_routing | 3 | `NotNullViolation: header_class_id` | fixture 未对齐 NOT NULL 约束（同 chat_stream 家族） | fixture 补字段 |
+| test_evidence_metric_result | 3 | 同上 | 同上 | 同上 |
+
+### A 层补遗：unit 侧 env 敏感 2 条（第五轮 CI 首次暴露，main 原样存在、本批 diff 未触碰）
+
+| 文件 | 条数 | 首个报错 | 根因 | 修法 |
+|---|---|---|---|---|
+| test_kpi_metric_backfill_plan::test_print_banner_and_summary | 1 | `assert '备份：/tmp' not in out` | **macOS/Linux 差异**：断言「备份路径不含 /tmp」，mac 的 pytest tmp_path 在 `/private/var/folders/` 永不触发；GitHub runner 的 tmp_path 恰在 `/tmp/pytest-of-runner/` 下 | 断言改为「不含 `str(tmp_path 以外的固定 /tmp 路径)`」或对 tmp_path 参数化判断 |
+| test_kpi_metric_backfill_plan::test_run_reports_bad_password_without_leaking_it | 1 | `assert 'qa_pg_dev_2026' in dsn` | **硬编码本地 dev 密码当前置断言**（同 5433 家族 env 契约违规）；CI 的 TEST_DATABASE_URL 密码是 `ci-postgres-only` | 前置断言改为「DSN 含密码段」的结构性检查（如 `':' in dsn.split('@')[0]`），不绑定具体密码 |
 
 ## B 层：断言改自足式（34 条）
 
@@ -76,9 +99,23 @@
 | test_data_quality_api | 2 | 日志里报错块未提取到（NL2SQL PLAN_EMPTY 降级噪声），修复批次本地复跑取证据 |
 | test_ontology_class_versioning | 1 | 疑似与 wiki_relation 同族（唯一约束 fixture 适配） |
 
+### C 层补遗：shard 0（main 基线逐一复现）
+
+| 文件 | 条数 | 首个报错 | 验尸问题 |
+|---|---|---|---|
+| test_mcp_auth | 5 | `期望 403，实得 307`（重定向） | **与 test_app_wiring 矛盾**：一个说 MCP catch-all Mount 不存在、一个说 MCP 路由在 307 重定向——两测试必有一个描述过时；顺带查匿名可达性 |
+| test_document_catalog_api | 2 | `assert 403 == 200`（带鉴权请求被拒） | 鉴权集群反向形态：是 ACL 角色种子缺失还是守卫过严？安全相关 |
+| test_chat_follow_up_cascade | 8 | `assert 'query' == 'multi_step'` | 追问路由漂移，与 classify_and_recall / chat_hypothesis 同族 |
+| test_chat_service_state | 1 | `ORDER BY QTY ASC` vs `NULLS LAST` | ASC/DESC 关键词漂移家族（[[qa-system-asc-desc-keyword-drift]]） |
+| test_ontology_unified_id | 1 | `assert 422 == 201` | 建类被 422 拒：校验规则收紧 or 测试数据过时 |
+| test_ontology_api | 4 | `assert [{...}] == []`（期望空列表） | 疑 B：conftest/seed 填了数据而测试假设空库；验尸后可降为 B |
+| test_ontology_drift_api | 2 | `assert 7 == 3` | 计数依赖库状态，疑 B |
+| test_seed_menu_config | 4 | `assert 55 == 53` | 菜单 seed 计数（[[qa-system-menu-config-seed]] quirks 家族），疑 B |
+| test_check_schema_drift | 1 | 待逐条 | schema drift 守卫，验尸 |
+| test_apply_isolated_join_edges | 1 | `assert 0 == 6` | 疑 B：源数据空 |
+
 ## 与本批 PR 的关系
 
-- 本表 **不阻塞 PR #73 合并**：净新增失败 = 0（shard1/2/3 已逐一在 main 复现验证）；
-- CI 将如实带红运行（unit 14 条 + integration ~85+ 条），每次红都是待修清单的提醒；
-- 修复批次顺序建议：**A 层（一次性 Milvus 建库 + env 契约）→ C-1 鉴权集群（安全优先）→ B 层 → C-2/C-3**。
-- shard0 失败清单出来后补进本表。
+- 本表 **不阻塞 PR #73 合并**：净新增失败 = 0（**4 分片 123 条 + unit 16 条 = 139 条全部在 main 复现**）；
+- CI 将如实带红运行（每次红都是待修清单的提醒），直到修复批次完成；
+- 修复批次顺序建议：**A 层（一次性 Milvus 建库 + env 契约 4 处 5433 + fixture 对齐）→ C-1 鉴权集群（安全优先，含 mcp_auth/document_catalog）→ B 层 → C-2/C-3**。

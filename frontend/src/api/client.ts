@@ -41,14 +41,19 @@ export function normalizeError(err: AxiosError<ApiResponse<unknown>>): AppError 
   // 后端 ErrorResponse(CamelModel) 的业务文案放在响应体顶层 `error`（字符串），
   // `detail` 恒为 null —— 只读 detail 会把「工具不存在：X」这类诊断丢掉，
   // 页面只能拿到 axios 的 "Request failed with status code 422"。
-  // 取值优先级：detail 对象里的 message → 响应体顶层 error → axios 兜底文案。
+  // 取值优先级：detail 对象里的 message → 响应体顶层 error → 网络异常兜底 → axios 兜底文案。
+  // 网络异常（status=0，即没有拿到任何 HTTP 响应）必须落到「网络异常，请稍后重试」：
+  // toast 已经是这个文案，若 reject 的 Error 里换成 axios 兜底/Unknown error，
+  // 页面 catch 后展示的文案就与 toast 不一致（2026-10-30 修复）。
   const bodyError = (err.response?.data as { error?: unknown } | undefined)?.error;
   const message =
     typeof rawDetail === "object" && rawDetail !== null && "message" in rawDetail
       ? String((rawDetail as { message: unknown }).message)
       : typeof bodyError === "string" && bodyError
         ? bodyError
-        : err.message ?? "Unknown error";
+        : status === 0
+          ? i18n.t("errors.networkError")
+          : err.message ?? "Unknown error";
 
   // Object.assign to a fresh Error — same pattern as brief GREEN
   const appErr: AppError = Object.assign(new Error(message), { code, status, detail });

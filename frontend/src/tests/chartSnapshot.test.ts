@@ -56,6 +56,21 @@ describe("renderChartPng", () => {
     expect(option.textStyle.color).toBe(LIGHT_TOKEN.colorText);
   });
 
+  it("截图与在线同口径：数值轴 formatter + tooltip valueFormatter 一并注入", async () => {
+    await renderChartPng({
+      yAxis: { type: "value" },
+      tooltip: { trigger: "axis" },
+      series: [],
+    });
+
+    const option = chartStub.setOption.mock.calls[0][0];
+    // 数字 formatter 是前端 JS 函数：PNG 与用户看到的图必须走同一套口径
+    const formatter = (option.yAxis.axisLabel as Record<string, unknown>).formatter as (v: unknown) => string;
+    expect(formatter(15000)).toBe("1.5万");
+    const valueFormatter = (option.tooltip as Record<string, unknown>).valueFormatter as (v: unknown) => string;
+    expect(valueFormatter(9812)).toBe("9,812");
+  });
+
   it("不原地改动调用方手里的 option（不可变）", async () => {
     const option = { series: [], animation: true };
 

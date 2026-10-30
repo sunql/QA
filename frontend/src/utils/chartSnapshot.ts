@@ -16,6 +16,7 @@
  */
 import * as echarts from "echarts";
 import { applyChartTheme } from "../theme/chartTheme";
+import { applyChartNumberFormat } from "../theme/chartFormat";
 import { LIGHT_TOKEN } from "../theme/tokens";
 
 /** 截图画布尺寸（2 倍像素密度由 getDataURL 的 pixelRatio 负责，这里给 CSS 尺寸）。 */
@@ -64,8 +65,13 @@ export async function renderChartPng(
       height: SNAPSHOT_HEIGHT,
       renderer: "canvas",
     });
-    // 关掉动画：PDF 是静态图，等动画收敛既慢又可能截到中间帧
-    chart.setOption({ ...applyChartTheme(chartOption, LIGHT_TOKEN), animation: false }, true);
+    // 关掉动画：PDF 是静态图，等动画收敛既慢又可能截到中间帧。
+    // 数字口径先于主题（formatter 是函数，主题层只补颜色、不碰 formatter），
+    // 与在线渲染 `applyChartTheme(applyChartNumberFormat(raw), token)` 同序。
+    chart.setOption(
+      { ...applyChartTheme(applyChartNumberFormat(chartOption, "zh-CN"), LIGHT_TOKEN), animation: false },
+      true
+    );
     await nextFrame();
     const dataUrl = chart.getDataURL({
       type: "png",

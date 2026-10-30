@@ -215,8 +215,8 @@ e2e 已按本决定断言多步 `charts.length === 0`（**与决定一致，不�
 | `frontend/src/theme/chartTheme.ts` | `applyChartTheme(option, token)` —— 不可变注入调色板/轴色/文字色/tooltip 底色；调用方显式写的 `itemStyle.color`（语义色）优先不被覆盖 |
 | `frontend/src/theme/chartFormat.ts` | **数字格式化层（2026-10-30，表现归前端）**：formatter 是 JS 函数，JSON 下不来 —— `formatAxisValue`（zh：≥1e8→亿、≥1e4→万，其余千分位；非有限数→空串）、`formatTooltipValue`（千分位 + ≤2 位小数，数组递归）、`applyChartNumberFormat(option, locale)`（只给 value/log 轴与 tooltip.valueFormatter 补缺省；**已有 formatter（函数/字符串）一律不覆盖**；双轴数组全覆盖；**绝不遍历 series** —— 饼图 `{b}: {d}%`、瀑布 `{c}` 结构模板逐字保留；不可变；非对象原样返回）。其它 locale 不发明 K/M，只走千分位 |
 | `frontend/src/theme/tokens.ts` | `chartPalette`（两套主题各一套分类系列色）；`colorChatAssistantBg`/`colorChatUserBg`（2026-10-30，亮色保留原硬编码值 `#fafafa`/`#e6f4ff`，暗色 `#152838`/`#1c3b56`） |
-| `frontend/src/utils/chartSnapshot.ts` | `renderChartPng(option)` → `data:image/png;base64,...`。离屏容器**显式 800×420**（零尺寸容器里 ECharts 拿到 0×0 画布）、**固定亮色 token + 白底**（PDF 页面是白的）、关动画、`finally` 里 dispose + 移除容器、**任何异常返回 `null`**。`needsSnapshot(kind)` 对 `table`/`kpi` 返回 false。**2026-10-30 起先过 `applyChartNumberFormat(option, "zh-CN")` 再补亮色主题** —— 截图与在线渲染同数字口径 |
-| `frontend/src/utils/collectExportCharts.ts` | 导出前挑图：GET 服务端消息流（**`?tail=true` 取最新**，与导出的「最近 500 轮」窗口对齐）→ 按 `SessionMessage` 主键挑需要截图的轮次 → 离屏渲成 PNG。**以服务端消息流为准而非屏幕列表**（实时会话的前端消息没有 DB id；必须覆盖滚出屏幕的轮次；服务端 `chartOption` 才是落库那份）。截断到 180 张时**保最新**；渲染**块内并发 4、块间串行**（`renderChartPng` 在 `await` 前是同步的，`Promise.all` 会一次性建出全部离屏画布 ≈ 1 GB 后备存储） |
+| `frontend/src/utils/chartSnapshot.ts` | `renderChartPng(option)` → `data:image/png;base64,...`。离屏容器**宽度固定 800、CSS 高度由 `chartHeightOf(option)` 决定**（零尺寸容器里 ECharts 拿到 0×0 画布）、`pixelRatio: 2`、**固定亮色 token + 白底**（PDF 页面是白的）、关动画、`finally` 里 dispose + 移除容器、**任何异常返回 `null`**。`needsSnapshot(kind)` 对 `table`/`kpi` 返回 false。**2026-10-30 起先过 `applyChartNumberFormat(option, "zh-CN")` 再补亮色主题** —— 截图与在线渲染同数字口径 |
+| `frontend/src/utils/collectExportCharts.ts` | 导出前挑图：GET 服务端消息流（**`?tail=true` 取最新**，与导出的「最近 500 轮」窗口对齐）→ 按 `SessionMessage` 主键挑需要截图的轮次 → 离屏渲成 PNG。**以服务端消息流为准而非屏幕列表**（实时会话的前端消息没有 DB id；必须覆盖滚出屏幕的轮次；服务端 `chartOption` 才是落库那份）。按**像素预算**（累计 36M，每图 1600×2H）截断时**保最新**（条数另设 180 绝对上限）；渲染**块内并发 4、块间串行**（`renderChartPng` 在 `await` 前是同步的，`Promise.all` 会一次性建出全部动态高度离屏画布） |
 
 ## 导出报告里的图（0105）
 
@@ -270,6 +270,11 @@ reportlab 会在 `doc.build()` 里抛 `LayoutError` —— 那已经出了 `_cha
 图负载不重复下发，前端从 `message.steps[stepIndex]` 取。解析失败（模型没按格式）
 回退为「原文 + 文末图」，图绝不静默丢失。
 
+- **回放门是 `len(steps_snapshot) > 1`，不要删**：单步消息也会为计划卡持久化
+  1 元素快照；去掉这个门会让同一张图被画两次。
+- **部分回退**：成功但未被正文引用的可出图步骤补到 `### 关键图表`；空输入返回
+  `[]`（前端据此按旧渲染处理，不当作「有新分节」）。
+
 ## 图表高度与多类别可读性（2026-10-31）
 
 - 高度由 option 结构推断：横向条形 `clamp(320, 96 + 类别数×28 + 图例32, 960)`；
@@ -278,6 +283,9 @@ reportlab 会在 `doc.build()` 里抛 `LayoutError` —— 那已经出了 `_cha
 - 后端轴结构：hbar >12 类 `axisLabel {interval:0, overflow:"truncate", width:160}`；
   纵向 bar >12 类旋转 45°；类别 >40 加 `dataZoom`（inside + slider），
   `grid.bottom` +34，有图例时 `legend.bottom=24`。line 保持自动稀疏。
+  slider 恒为 `orient: "horizontal"` 的底部横条（绑 yAxis 时 ECharts 默认会转成竖向）。
+- **导出按像素预算**：每图 `1600 × 2H` 像素，累计上限 36M，超限优先丢弃最早的
+  消息（保留最新）；后端硬上限 40M 像素，超了整份导出 422。
 
 ## 已知边界（一期）
 

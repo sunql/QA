@@ -231,11 +231,22 @@ def _buildCategoryAxis(
 
 
 def _dataZoomOf(horizontal: bool) -> list[dict[str, Any]]:
-    """缩放滑块：inside 负责滚轮/拖拽，slider 负责可见的把手。"""
+    """缩放滑块：inside 负责滚轮/拖拽，slider 负责可见的把手。
+
+    slider 必须显式 `orient: "horizontal"`：绑到 yAxis 时 ECharts 默认把它转成
+    **竖向**，`height` 于是变成滑块长度，渲染成右下角一个小方块 —— 而 grid.bottom
+    与 legend.bottom 都是按整条底部横条预留的。两种朝向都留底部横条，故恒定横向。
+    """
     axisIndex = "yAxisIndex" if horizontal else "xAxisIndex"
     return [
         {"type": "inside", axisIndex: 0},
-        {"type": "slider", axisIndex: 0, "height": _DATAZOOM_SLIDER_HEIGHT, "bottom": 0},
+        {
+            "type": "slider",
+            axisIndex: 0,
+            "height": _DATAZOOM_SLIDER_HEIGHT,
+            "bottom": 0,
+            "orient": "horizontal",
+        },
     ]
 
 

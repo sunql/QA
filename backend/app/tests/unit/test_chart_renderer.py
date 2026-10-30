@@ -815,7 +815,7 @@ class TestCategoryReadability:
 
         assert option["dataZoom"] == [
             {"type": "inside", "yAxisIndex": 0},
-            {"type": "slider", "yAxisIndex": 0, "height": 20, "bottom": 0},
+            {"type": "slider", "yAxisIndex": 0, "height": 20, "bottom": 0, "orient": "horizontal"},
         ]
         assert option["grid"]["bottom"] == 66  # 32 + 34
         assert "legend" not in option
@@ -825,7 +825,7 @@ class TestCategoryReadability:
 
         assert option["dataZoom"] == [
             {"type": "inside", "xAxisIndex": 0},
-            {"type": "slider", "xAxisIndex": 0, "height": 20, "bottom": 0},
+            {"type": "slider", "xAxisIndex": 0, "height": 20, "bottom": 0, "orient": "horizontal"},
         ]
 
     def test_combo_over_threshold_zooms_x_axis(self) -> None:
@@ -834,7 +834,7 @@ class TestCategoryReadability:
 
         assert option["dataZoom"] == [
             {"type": "inside", "xAxisIndex": 0},
-            {"type": "slider", "xAxisIndex": 0, "height": 20, "bottom": 0},
+            {"type": "slider", "xAxisIndex": 0, "height": 20, "bottom": 0, "orient": "horizontal"},
         ]
         assert option["grid"]["bottom"] == 66  # 32 + 34
 

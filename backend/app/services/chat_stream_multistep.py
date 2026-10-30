@@ -46,6 +46,7 @@ from app.services.chat_stream_entry import _overviewStepPayload
 from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
 from app.services.multi_step_retry import ERROR_KIND_PERMANENT
 from app.services.nl2sql_service import _readFloatConfig
+from app.services.report_sections import buildReportSections
 from app.services.think_block import applyThinkPolicy
 from app.services.stream_events import (
     EVENT_DONE,
@@ -290,6 +291,7 @@ class StreamMultiStepMixin:
                     if affinity is not None
                     else None
                 )
+                stepReads = [_step_result_to_read(s) for s in completed]
                 yield StreamEvent(EVENT_TOKEN, {"content": agg_content})
                 # v3.1 B6（M7）：流式多步假设后处理——只落库，不进 SSE 帧
                 await self._maybeGenerateHypotheses(
@@ -303,7 +305,9 @@ class StreamMultiStepMixin:
                         "modelName": last_model_name,
                         "latency_ms": int((time.monotonic() - _ms_t0) * 1000),
                         "affinityStatus": affinity_payload,
-                        "steps": [_step_result_to_read(s).model_dump(by_alias=True) for s in completed],
+                        "steps": [s.model_dump(by_alias=True) for s in stepReads],
+                        # 2026-10-31：分节块与最终文本同源现算；图负载不重复下发。
+                        "reportSections": buildReportSections(agg_content, stepReads),
                         # 汇总步不发 step_result（纯文字），SUMMARY_TEXT_ONLY 只能经 done 帧抵达前端
                         "visualRationale": summaryTextOnlyRationale().to_dict(),
                         "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)

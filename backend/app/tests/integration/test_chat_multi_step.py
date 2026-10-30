@@ -721,6 +721,10 @@ class TestMultiStepChatStreamApi:
         # done 事件携带 steps 数组
         done = frames[-1][1]
         assert len(done["steps"]) == 2
+        # 2026-10-31（分节报告）：done 帧带分块，前端据此替换纯 markdown 渲染
+        sections = done["reportSections"]
+        assert [b["kind"] for b in sections] == ["text", "chart", "text", "chart", "text"]
+        assert [b["stepIndex"] for b in sections if b["kind"] == "chart"] == [0, 1]
 
     async def test_stream_multi_step_done_carries_suggested_agent(self, client, dbSession, monkeypatch) -> None:
         """G4 审查 MEDIUM 修复回归：多步路径 done 帧携带中置信建议卡片。

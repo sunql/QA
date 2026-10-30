@@ -1016,7 +1016,6 @@ class StreamMixin:
         # _hasDataStepResult / done 帧 steps 的入参）；这里一律用 int。
         completedCount = 0
         anyFailed = False
-        anySkipped = False
 
         # 循环前一次性下发完整计划概览，前端据此渲染各步骤的「待执行」状态。
         # **必须在下发之前**取得 run：顺序反了 run 还是 None，runId 永远发不出去。
@@ -1155,7 +1154,7 @@ class StreamMixin:
                 await self._closeRun(
                     session, run,
                     status=runStatusFor(
-                        completedCount, len(multiStepPlan.steps), anyFailed, anySkipped
+                        completedCount, len(multiStepPlan.steps), anyFailed
                     ),
                     completedSteps=completedCount,
                     currentStepIdx=len(multiStepPlan.steps),
@@ -1254,7 +1253,7 @@ class StreamMixin:
         await self._closeRun(
             session, run,
             status=runStatusFor(
-                completedCount, len(multiStepPlan.steps), anyFailed, anySkipped
+                completedCount, len(multiStepPlan.steps), anyFailed
             ),
             completedSteps=completedCount,
             currentStepIdx=len(multiStepPlan.steps),

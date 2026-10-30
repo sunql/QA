@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 # 结构可读性上界，不是可调策略（不治理）。
 _LABEL_MAX_POINTS = 12
 
+# grid 底部留白：无图例 32；有图例 56 —— 图例常驻底部单行（见 _scrollLegend），
+# 多留一截给刻度标签，避免图例与 x 轴刻度贴在一起。
+_GRID_BOTTOM_DEFAULT = 32
+_GRID_BOTTOM_WITH_LEGEND = 56
+
 # 饼图/环形图之外的 kind 不允许出现 `{d}` 模板变量。
 _PIE_LIKE = frozenset({ChartType.PIE, ChartType.DONUT})
 
@@ -145,10 +150,17 @@ def _title(spec: ChartSpec) -> dict[str, Any]:
     return {"title": {"text": spec.title}} if spec.title else {}
 
 
+def _scrollLegend(show: bool) -> dict[str, Any]:
+    """图例常驻**底部单行滚动**：默认顶部放置时，多系列会折成多行直接盖住标题
+    （线上实测：31 条系列把标题糊成一片）。`type: "scroll"` 让图例分页而不是折行，
+    永远只占一行。图例位置是结构（不是颜色），所以归服务端。"""
+    return {"show": show, "type": "scroll", "bottom": 0}
+
+
 def _legend(spec: ChartSpec, seriesCount: int) -> dict[str, Any]:
     if not spec.showLegend or seriesCount <= 1:
         return {}
-    return {"legend": {"show": True}}
+    return {"legend": _scrollLegend(True)}
 
 
 # ---------------------------------------------------------------------------
@@ -198,11 +210,19 @@ def _buildAxisOption(spec: ChartSpec, data: list[dict], kind: ChartType) -> dict
     categoryAxis = _namedAxis(categoryAxis, _axisNameOf(spec, catField))
     valueAxis: dict[str, Any] = {"type": "value"}
 
+    legend = _legend(spec, len(series))
     option: dict[str, Any] = {
         **_title(spec),
         "tooltip": {"trigger": "axis"},
-        **_legend(spec, len(series)),
-        "grid": {"left": 48, "right": 48, "bottom": 32, "top": 40, "containLabel": True},
+        **legend,
+        # 有图例时底部多留一截给滚动条 + 刻度标签（32/56 常数见模块头）。
+        "grid": {
+            "left": 48,
+            "right": 48,
+            "bottom": _GRID_BOTTOM_WITH_LEGEND if legend else _GRID_BOTTOM_DEFAULT,
+            "top": 40,
+            "containLabel": True,
+        },
         "series": series,
     }
     if horizontal:
@@ -304,7 +324,7 @@ def _buildPieLike(spec: ChartSpec, data: list[dict], kind: ChartType) -> dict[st
     return {
         **_title(spec),
         "tooltip": {"trigger": "item"},
-        "legend": {"show": spec.showLegend},
+        "legend": _scrollLegend(spec.showLegend),
         "series": [
             {
                 "type": "pie",
@@ -410,11 +430,17 @@ def _buildWaterfall(spec: ChartSpec, data: list[dict]) -> dict[str, Any]:
     measureField = _measureOf(spec, 0)
     values = [toNumber(row.get(measureField)) if measureField else None for row in data]
 
-    bases: list[float] = []
-    heights: list[float] = []
+    bases: list[float | None] = []
+    heights: list[float | None] = []
     cumulative = 0.0
     for value in values:
-        delta = float(value) if isinstance(value, (int, float)) else 0.0
+        if value is None:
+            # 缺失/非数值差值 = 断点：不伪造 0（0 是「变化量为零」的假事实），
+            # 该位不画，累计量不推进 —— 后续项从既有累计量继续。
+            bases.append(None)
+            heights.append(None)
+            continue
+        delta = float(value)
         base = cumulative if delta >= 0 else cumulative + delta
         bases.append(base)
         heights.append(abs(delta))

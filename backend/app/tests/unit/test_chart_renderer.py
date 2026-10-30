@@ -294,6 +294,76 @@ class TestCartesian:
         assert option["series"][0]["data"] == [12.5]
 
 
+class TestLegendPlacement:
+    """图例放底部 + 滚动（用户实测：多系列图例默认顶部折行，直接盖住标题）。"""
+
+    def test_multi_series_cartesian_legend_is_bottom_scroll_and_grid_leaves_room(self) -> None:
+        spec = _spec(
+            ChartType.BAR,
+            columns=("SUPPLIER_NAME", "RCV_QTY_PUU", "LINE_AMT"),
+            measures=(_measure("RCV_QTY_PUU"), _measure("LINE_AMT", "金额")),
+            series=(
+                SpecSeries(name="供货量", kind="bar", dimension="SUPPLIER_NAME", measure="RCV_QTY_PUU"),
+                SpecSeries(name="金额", kind="bar", dimension="SUPPLIER_NAME", measure="LINE_AMT"),
+            ),
+        )
+
+        option = renderChartOption(spec, _ROWS)
+
+        assert option["legend"] == {"show": True, "type": "scroll", "bottom": 0}
+        assert option["grid"]["bottom"] == 56
+
+    def test_single_series_has_no_legend_and_default_grid_bottom(self) -> None:
+        option = renderChartOption(_spec(ChartType.BAR), _ROWS)
+        assert "legend" not in option
+        assert option["grid"]["bottom"] == 32
+
+    def test_legend_disabled_keeps_default_grid_bottom(self) -> None:
+        spec = _spec(
+            ChartType.BAR,
+            showLegend=False,
+            columns=("SUPPLIER_NAME", "RCV_QTY_PUU", "LINE_AMT"),
+            measures=(_measure("RCV_QTY_PUU"), _measure("LINE_AMT", "金额")),
+            series=(
+                SpecSeries(name="供货量", kind="bar", dimension="SUPPLIER_NAME", measure="RCV_QTY_PUU"),
+                SpecSeries(name="金额", kind="bar", dimension="SUPPLIER_NAME", measure="LINE_AMT"),
+            ),
+        )
+
+        option = renderChartOption(spec, _ROWS)
+
+        assert "legend" not in option
+        assert option["grid"]["bottom"] == 32
+
+    def test_pie_and_donut_legend_is_bottom_scroll(self) -> None:
+        for kind in (ChartType.PIE, ChartType.DONUT):
+            option = renderChartOption(_spec(kind), _ROWS)
+            assert option["legend"] == {"show": True, "type": "scroll", "bottom": 0}
+
+        hidden = renderChartOption(_spec(ChartType.PIE, showLegend=False), _ROWS)
+        assert hidden["legend"]["show"] is False
+
+    def test_many_grouped_series_legend_stays_one_scrollable_row(self) -> None:
+        """31 系列回归：图例必须单行滚动（type=scroll），不能折行盖标题。"""
+        rows = [
+            {"SUPPLIER_NAME": f"S{i}", "MATERIAL_NAME": f"M{i}", "AMT": i}
+            for i in range(31)
+        ]
+        spec = _spec(
+            ChartType.BAR,
+            columns=("SUPPLIER_NAME", "MATERIAL_NAME", "AMT"),
+            dimensions=(_dim("SUPPLIER_NAME"), _dim("MATERIAL_NAME", "物料")),
+            measures=(_measure("AMT", "金额"),),
+            series=(SpecSeries(name="金额", kind="bar", dimension="SUPPLIER_NAME", measure="AMT"),),
+        )
+
+        option = renderChartOption(spec, rows)
+
+        assert option["legend"] == {"show": True, "type": "scroll", "bottom": 0}
+        assert len(option["series"]) == 31
+        assert option["grid"]["bottom"] == 56
+
+
 class TestPieLike:
     def test_pie_uses_named_data_points(self) -> None:
         option = renderChartOption(_spec(ChartType.PIE), _ROWS)
@@ -543,6 +613,32 @@ class TestWaterfall:
         rows = [{"ITEM": "A", "DELTA_AMT": 10}, {"ITEM": "B", "DELTA_AMT": -5}]
         option = renderChartOption(self._waterfallSpec(), rows)
         assert option["series"][0]["itemStyle"]["color"] == "transparent"
+
+    def test_invalid_deltas_are_gaps_not_zero(self) -> None:
+        """缺失/非数值差值 = 断点：该位 base/height 双 None，累计量不推进。
+
+        伪造成 0 会画出一格「变化量为零」的假事实；断点让缺口诚实可见，
+        后续项从既有累计量继续（不是从断点重算）。
+        """
+        rows = [
+            {"ITEM": "a", "DELTA_AMT": 100},
+            {"ITEM": "b", "DELTA_AMT": None},
+            {"ITEM": "c", "DELTA_AMT": -40},
+            {"ITEM": "d", "DELTA_AMT": "oops"},
+            {"ITEM": "e", "DELTA_AMT": 30},
+        ]
+
+        option = renderChartOption(self._waterfallSpec(), rows)
+
+        base, height = option["series"]
+        assert base["data"] == [0, None, 60, None, 60]
+        assert height["data"] == [100, None, 40, None, 30]
+
+    def test_all_invalid_deltas_do_not_raise(self) -> None:
+        rows = [{"ITEM": "a", "DELTA_AMT": None}, {"ITEM": "b", "DELTA_AMT": "x"}]
+        option = renderChartOption(self._waterfallSpec(), rows)
+        assert option["series"][0]["data"] == [None, None]
+        assert option["series"][1]["data"] == [None, None]
 
     def test_injected_axis_label_renders_dimension_name_and_never_raw_field(self) -> None:
         """注入后：瀑布类目轴名 = 维度显示名；原始列名不上轴。

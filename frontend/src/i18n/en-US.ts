@@ -971,6 +971,7 @@ export const enUS = {
     // {rows}/{kind} are i18next interpolation placeholders matching the backend params keys.
     visual: {
       dataTable: "Data Table",
+      chartLoading: "Rendering chart…",
       R00_EMPTY_TABLE: "No rows returned; no chart generated",
       R01_SINGLE_VALUE_KPI: "Single aggregate value shown as a KPI card",
       R01S_SINGLE_ROW_TABLE: "Single-row result shown as a table (one point is not a chart)",

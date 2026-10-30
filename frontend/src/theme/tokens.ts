@@ -33,6 +33,9 @@ export interface ThemeToken {
   // 背景层级
   colorBgBase: string;       // 页面底色
   colorBgContainer: string;  // 卡片/容器色
+  // 聊天消息卡背景（语义 token：暗色下 #fafafa 上白色轴文字不可读的修复点）
+  colorChatAssistantBg: string;
+  colorChatUserBg: string;
   // 边框
   colorBorder: string;
   // 语义色
@@ -58,6 +61,8 @@ export const DARK_TOKEN: ThemeToken = {
   colorPrimary: "#00D9C0",
   colorBgBase: "#0f1e2e",
   colorBgContainer: "#152838",
+  colorChatAssistantBg: "#152838",
+  colorChatUserBg: "#1c3b56",
   colorBorder: "#1f3a52",
   colorSuccess: "#00D9C0",
   colorWarning: "#FF8C42",
@@ -92,6 +97,8 @@ export const LIGHT_TOKEN: ThemeToken = {
   colorPrimary: "#00B8A9",  // teal 深一档，亮色背景上对比度更好
   colorBgBase: "#f5f7fa",
   colorBgContainer: "#ffffff",
+  colorChatAssistantBg: "#fafafa",   // 亮色保留原硬编码值（外观不回归）
+  colorChatUserBg: "#e6f4ff",
   colorBorder: "#e4e7ed",
   colorSuccess: "#00B8A9",
   colorWarning: "#FA8C16",

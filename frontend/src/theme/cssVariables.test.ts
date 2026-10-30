@@ -36,6 +36,8 @@ const TEST_TOKEN: ThemeToken = {
     layerAi: "#eb2f96",
   },
   chartPalette: ["#00D9C0", "#4C9AFF"],
+  colorChatAssistantBg: "#152838",
+  colorChatUserBg: "#1c3b56",
 };
 
 describe("tokensToCssVars", () => {

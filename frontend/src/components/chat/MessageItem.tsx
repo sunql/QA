@@ -7,6 +7,7 @@ import QueryPlanCard from "./QueryPlanCard";
 import MultiStepPlanCard from "./MultiStepPlanCard";
 import SqlPreview from "./SqlPreview";
 import ChartRenderer from "./ChartRenderer";
+import ChartSkeleton from "./ChartSkeleton";
 import TermDictionaryButton from "./TermDictionaryButton";
 import Supplier360Card from "./Supplier360Card";
 import SupplierRiskCard from "./SupplierRiskCard";
@@ -18,6 +19,8 @@ import type { ChatMessage } from "../../types/chat";
 import { useTranslation } from "../../i18n";
 import { visualRationaleText } from "../../utils/visualRationale";
 import { useChatStore } from "../../stores/chatStore";
+import { useThemeStore } from "../../stores/themeStore";
+import { DARK_TOKEN, LIGHT_TOKEN } from "../../theme/tokens";
 
 // F2：KPI 警告 code → i18n 键映射表（白名单制：只有表里有的 code 才渲染，
 // 未知 code 直接不渲染——否则 t() 会把裸 key 原样打到界面上，
@@ -73,16 +76,24 @@ function MessageItem({
   const loading = useChatStore((s) => s.loading);
   const selectedModelId = useChatStore((s) => s.selectedModelId);
   const isUser = message.role === "user";
+  const isDark = useThemeStore((state) => state.isDark);
+  const chatToken = isDark ? DARK_TOKEN : LIGHT_TOKEN;
 
   if (isUser) {
     return (
       <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-        <Card size="small" style={{ maxWidth: "95%", background: "#e6f4ff" }}>
+        <Card size="small" style={{ maxWidth: "95%", background: chatToken.colorChatUserBg }}>
           <Paragraph style={{ margin: 0, whiteSpace: "pre-wrap" }}>{message.content}</Paragraph>
         </Card>
       </div>
     );
   }
+
+  // 流式门控：chart SSE 事件先于答案 token 到达。流式中且正文尚无任何 token 时
+  // 不渲染图表（空气泡里先蹦出整张图），改出骨架；非流式（历史回放/降级形态）
+  // 直接渲染。中止/完成会把 isStreaming 置 false，骨架必收敛。
+  const chartReady =
+    Boolean(message.chartType) && (!message.isStreaming || message.content.trim().length > 0);
 
   // 消息级 rationale（Task 8）：多步汇总走这条（SUMMARY_TEXT_ONLY，无顶层图）。
   // 单步的 rationale 随 chartType 交给 ChartRenderer 渲染，这里跳过避免重复。
@@ -93,7 +104,7 @@ function MessageItem({
 
   return (
     <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 12 }}>
-      <Card size="small" style={{ maxWidth: "95%", background: "#fafafa" }}>
+      <Card size="small" style={{ maxWidth: "95%", background: chatToken.colorChatAssistantBg }}>
         {message.isError ? (
           <>
             <Alert type="error" showIcon message={message.content} />
@@ -211,16 +222,21 @@ function MessageItem({
             ) : null}
             {/* 渲染门只看 chartType：`kpi` 这类非 ECharts 类型（指标卡）没有 ECharts
                 option 语义，用 `chartOption` 兜门会把它们挡掉。有没有内容由
-                ChartRenderer 自己判（无负载/无 option 时它返回 null）。 */}
+                ChartRenderer 自己判（无负载/无 option 时它返回 null）。
+                流式中正文为空时先出骨架（chartReady 门控，见上方注释）。 */}
             {message.chartType ? (
               <div style={{ marginTop: 8 }}>
-                <ChartRenderer
-                  chartType={message.chartType}
-                  chartOption={message.chartOption}
-                  data={message.data}
-                  tableOption={message.tableOption}
-                  visualRationale={message.visualRationale}
-                />
+                {chartReady ? (
+                  <ChartRenderer
+                    chartType={message.chartType}
+                    chartOption={message.chartOption}
+                    data={message.data}
+                    tableOption={message.tableOption}
+                    visualRationale={message.visualRationale}
+                  />
+                ) : (
+                  <ChartSkeleton />
+                )}
               </div>
             ) : null}
             {/* Task 8：消息级 rationale（多步汇总 SUMMARY_TEXT_ONLY）。单步的 rationale

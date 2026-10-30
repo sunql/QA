@@ -120,8 +120,12 @@ docker exec -e PYTHONPATH=/app -w /app qa-backend sh -c \
   'python -m scripts.kpi_metric_backfill --database-url "$DATABASE_URL" --allow-prod-write --apply'
 
 # ② 语义关键词种子：先 --dry-run 预览，再正式（预期 affected=12）
+#    ⚠️ dry-run 也要带 --allow-prod-write：assertSafeTarget 对正式库一律要求该旗标
+#    （kpi_metric_db_guard.py，标志检查先于 dry-run 分支）；dry-run 不触发备份。
+#    正式跑触发的备份闸复用回填脚本的 _ensureProdBackup——回填时放入的 3 个
+#    备份文件直接复用，无需再装 pg_dump。
 docker exec -e PYTHONPATH=/app -w /app qa-backend sh -c \
-  'python -m scripts.seed_kpi_semantic_index --database-url "$DATABASE_URL" --dry-run'
+  'python -m scripts.seed_kpi_semantic_index --database-url "$DATABASE_URL" --allow-prod-write --dry-run'
 docker exec -e PYTHONPATH=/app -w /app qa-backend sh -c \
   'python -m scripts.seed_kpi_semantic_index --database-url "$DATABASE_URL" --allow-prod-write'
 

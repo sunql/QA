@@ -176,6 +176,21 @@ execute_sql 不要调超过 3 次 —— 先打磨 SQL 再重试。
 | SQL Guard 拒绝 | 跳过 `execute_sql` tool 结果，让 LLM 重新生成 |
 | Tool 在该数据源不可用 | 返空结果，LLM 继续 |
 
+## Token 构成探针（feat/l4-token-profiling，2026-10-31）
+
+纯观测，不改循环行为、不改台账。探针异常只留 `agent_loop.token_profile_failed` warning。
+
+| 日志 TAG | 时机 | 内容 |
+|---|---|---|
+| `L4_TOKEN_PROFILE`（event=iteration） | 每轮 `complete_with_tools` 之后、cost_cap 判定之前 | runId/sessionId/iteration/modelName、provider 实测 prompt/completion、cachedTokens（None=缺失，0=未命中）、组件 tiktoken 估值（system/toolSchemas/user/assistant/tool:\<name\>）、scale=P/Σest |
+| `L4_TOKEN_PROFILE`（event=loop_end） | run 结束返回前 | 累计 prompt/completion/cached、iterations、terminatedReason（丢轮时对照台账 `Σ逐轮==台账` 校验） |
+| `L4_TOOL_RESULT` | 每条工具结果 wrapUntrusted 之后 | rawChars/sentChars/escapeExpansion（转义放大）/rowCount（仅 execute_sql） |
+
+- 组件 token 是 **tiktoken（cl100k_base）估值**，每轮用 provider 真实 prompt_tokens 标定（`scale_i = P_i / Σest_i,c`）；报告分母永远以 provider 实测为准。
+- `LlmResponseWithTools.cachedTokens` 新字段（与 `LlmResponse.cachedTokens` 同口径）；usage dict **不加** cached_tokens 键（`agent_orchestration_cost.usageFromMapping` 会读它，加键会改变编排链路成本口径）。
+- run_agent_loop 新增可选 `sessionId` 参数（chat_l4 传 `dto.sessionId`）；runId=uuid4().hex[:12] 每次生成，串起逐轮/工具/汇总行。
+- 离线分析：`Harness/changes/2026-10-31-l4-token-cost-profiling/analyze_token_profile.py`（薄壳）→ `app/services/l4_token_profile_report.py`（解析/聚合/渲染）。
+
 ## 关联文件（实际路径）
 
 | 组件 | 实际路径 |

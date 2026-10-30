@@ -21,13 +21,13 @@ AgentRegistryService），便于单测替换为 fake。
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,21 +44,21 @@ from app.domain.models import AgentDefinition
 from app.domain.schemas import AgentRunRead, _normalizeDataLayer
 from app.infrastructure.business_db_pool import _assert_read_only
 from app.infrastructure.llm.base_client import BaseLlmClient
-from app.services.agent_registry_service import AgentRegistryService
-from app.services.agent_tools import (
-    AgentTool,
-    AgentToolContext,
-    AgentToolRegistry,
-)
-from app.services.agent_tool_config_registry import (
-    AgentToolConfigRegistry,
-    agent_tool_config_registry,
-)
-from app.services.agent_binding_cache import agent_binding_cache
 from app.security.prompt_sanitizer import (
     UntrustedLabel,
     renderSecurityPreamble,
     wrapUntrusted,
+)
+from app.services.agent_binding_cache import agent_binding_cache
+from app.services.agent_registry_service import AgentRegistryService
+from app.services.agent_tool_config_registry import (
+    AgentToolConfigRegistry,
+    agent_tool_config_registry,
+)
+from app.services.agent_tools import (
+    AgentTool,
+    AgentToolContext,
+    AgentToolRegistry,
 )
 from app.services.supplier_name_resolver import SupplierNameResolver
 
@@ -159,7 +159,7 @@ class AgentRuntimeService:
             completion_tokens=result.completion_tokens,
             cost=result.cost,
             llm_model_name=result.llm_model_name,
-            executed_at=datetime.now(timezone.utc),
+            executed_at=datetime.now(UTC),
         )
 
     async def _resolveTool(self, session: AsyncSession, name: str) -> AgentTool:
@@ -298,7 +298,7 @@ def _build_system_message(prompt: str):
         return {"role": "system", "content": prompt, "type": "system"}
 
 
-def _to_llm_message(msg) -> "LlmMessage":
+def _to_llm_message(msg) -> LlmMessage:
     """把 langchain BaseMessage 或 dev shim dict 转为项目的 LlmMessage。"""
     from app.infrastructure.llm.base_client import LlmMessage
 
@@ -441,6 +441,8 @@ class _AgentLoopStepResult:
     # 那一轮的钱已经花了，会计上不能因为「本轮没产出答案」就把它抹掉。
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # provider 报告的 prompt cache 命中 token；None = 字段缺失/不支持（≠ 0）
+    cached_tokens: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +461,9 @@ async def _runAgentLoopIteration(
     cumulative_cost: float,
     cost_per_1k_input: float,
     cost_per_1k_output: float,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    iteration: int = 0,
 ) -> _AgentLoopStepResult:
     """单次 LLM 决策迭代：调用 complete_with_tools，检查 cost cap。"""
     llm_messages = [_to_llm_message(m) for m in messages]
@@ -468,6 +473,15 @@ async def _runAgentLoopIteration(
         tool_choice="auto",
     )
     prompt_tokens, completion_tokens = _usage_tokens(response.usage)
+    cached_tokens = getattr(response, "cachedTokens", None)
+    _logIterationTokenProfile(
+        run_id=run_id,
+        session_id=session_id,
+        iteration=iteration,
+        response=response,
+        messages=llm_messages,
+        tool_schemas=tool_schemas,
+    )
     cost_incurred = float(
         _cost_for_usage(
             prompt_tokens,
@@ -489,6 +503,7 @@ async def _runAgentLoopIteration(
             stop_reason="cost_cap",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
         )
 
     ai_message = _buildAiMessage(response)
@@ -504,6 +519,7 @@ async def _runAgentLoopIteration(
             stop_reason="answered",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
         )
 
     return _AgentLoopStepResult(
@@ -516,7 +532,78 @@ async def _runAgentLoopIteration(
         stop_reason="continue",
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        cached_tokens=cached_tokens,
     )
+
+
+def _logToolResultProfile(
+    *,
+    run_id: str | None,
+    session_id: str | None,
+    iteration: int,
+    tool_call_id,
+    tool_name: str,
+    raw_content: str,
+    sent_content: str,
+    row_count: int | None,
+) -> None:
+    """工具结果 raw vs sent 探针（转义放大 + 行数）。同迭代探针：失败只留 warning。"""
+    from app.services import l4_token_profile
+
+    if not logger.isEnabledFor(logging.INFO):
+        return
+    try:
+        l4_token_profile.logToolResultProfile(
+            l4_token_profile.buildToolResultProfile(
+                runId=run_id,
+                sessionId=session_id,
+                iteration=iteration,
+                toolCallId=str(tool_call_id) if tool_call_id is not None else None,
+                toolName=tool_name,
+                rawContent=raw_content,
+                sentContent=sent_content,
+                rowCount=row_count,
+            )
+        )
+    except Exception:
+        logger.warning(
+            "agent_loop.token_profile_failed (tool_result tool=%s)", tool_name, exc_info=True
+        )
+
+
+def _logIterationTokenProfile(
+    *,
+    run_id: str | None,
+    session_id: str | None,
+    iteration: int,
+    response,
+    messages: list,
+    tool_schemas: list[dict],
+) -> None:
+    """逐轮 token 构成探针（纯观测）。度量绝不允许打断循环：任何异常只留 warning。"""
+    from app.services import l4_token_profile
+
+    if not logger.isEnabledFor(logging.INFO):
+        return
+    try:
+        profile = l4_token_profile.buildIterationProfile(
+            runId=run_id,
+            sessionId=session_id,
+            iteration=iteration,
+            modelName=getattr(response, "model", "") or "",
+            messages=messages,
+            toolSchemas=tool_schemas,
+            usage=response.usage,
+            cachedTokens=getattr(response, "cachedTokens", None),
+        )
+        l4_token_profile.logIterationProfile(profile)
+    except Exception:
+        logger.warning(
+            "agent_loop.token_profile_failed run_id=%s iteration=%d",
+            run_id,
+            iteration,
+            exc_info=True,
+        )
 
 
 def _buildAiMessage(response) -> Any:
@@ -562,20 +649,26 @@ async def _dispatchSingleTool(
     tc,
     session: AsyncSession,
     executor,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    iteration: int = 0,
 ) -> Any:  # ToolMessage
     """处理单个 tool_call → ToolMessage。"""
-    from app.infrastructure.llm.base_client import ToolCall as Tc
     import json
+
+    from app.infrastructure.llm.base_client import ToolCall as Tc
 
     tc_adapter = Tc(id=tc.id, name=tc.name, args=tc.args)
 
+    rowCount: int | None = None
     if tc.name == "execute_sql":
         try:
             sql = tc.args.get("sql", "")
             _assert_read_only(sql)
             rows = await executor.execute_read_only(sql)
+            rowCount = len(rows)
             content = json.dumps(
-                {"rows": rows, "row_count": len(rows)},
+                {"rows": rows, "row_count": rowCount},
                 ensure_ascii=False,
                 default=str,
             )
@@ -591,6 +684,16 @@ async def _dispatchSingleTool(
         content = result.content
 
     safeContent = wrapUntrusted(UntrustedLabel.AGENT_TOOL_RESULT, content)
+    _logToolResultProfile(
+        run_id=run_id,
+        session_id=session_id,
+        iteration=iteration,
+        tool_call_id=tc.id,
+        tool_name=tc.name,
+        raw_content=content,
+        sent_content=safeContent,
+        row_count=rowCount,
+    )
     try:
         from langchain_core.messages import ToolMessage
         return ToolMessage(content=safeContent, tool_call_id=tc.id, name=tc.name)
@@ -617,6 +720,7 @@ async def run_agent_loop(
     cost_budget_usd: float = 0.5,
     cost_per_1k_input: float = 0.0,
     cost_per_1k_output: float = 0.0,
+    sessionId: str | None = None,
 ) -> AgentLoopResult:
     """LLM 驱动的 agent loop（纯 Python async while 实现）。
 
@@ -636,6 +740,10 @@ async def run_agent_loop(
     _logLoopStart(user_id, question)
 
     state = _initLoopState(question)
+    # 探针归因字段：runId 串起逐轮 profile / 工具结果行 / loop_end 汇总
+    state["run_id"] = uuid.uuid4().hex[:12]
+    state["session_id"] = sessionId
+    state["cached_tokens"] = None
     messages = state["messages"]
 
     while state["iterations"] < max_iterations:
@@ -689,6 +797,25 @@ async def run_agent_loop(
         iterations=state["iterations"],
         total_cost=state["total_cost"],
     )
+
+    from app.services import l4_token_profile
+
+    if logger.isEnabledFor(logging.INFO):
+        try:
+            l4_token_profile.logLoopEndProfile(
+                l4_token_profile.buildLoopEndProfile(
+                    runId=state.get("run_id"),
+                    sessionId=state.get("session_id"),
+                    modelName=getattr(llm_client, "modelName", "") or "",
+                    iterations=state["iterations"],
+                    terminatedReason=state["terminated_reason"],
+                    promptTokens=state["prompt_tokens"],
+                    completionTokens=state["completion_tokens"],
+                    cachedTokens=state.get("cached_tokens"),
+                )
+            )
+        except Exception:
+            logger.warning("agent_loop.token_profile_failed (loop_end)", exc_info=True)
 
     return AgentLoopResult(
         final_sql=state["final_sql"],
@@ -769,11 +896,16 @@ async def _runOneStep(
         cumulative_cost=state["total_cost"],
         cost_per_1k_input=cost_per_1k_input,
         cost_per_1k_output=cost_per_1k_output,
+        run_id=state.get("run_id"),
+        session_id=state.get("session_id"),
+        iteration=state["iterations"] + 1,
     )
     state["iterations"] += 1
     state["total_cost"] += step.cost_incurred
     state["prompt_tokens"] += step.prompt_tokens
     state["completion_tokens"] += step.completion_tokens
+    if step.cached_tokens is not None:
+        state["cached_tokens"] = (state.get("cached_tokens") or 0) + step.cached_tokens
 
     if step.should_stop:
         state["terminated_reason"] = step.stop_reason
@@ -791,7 +923,14 @@ async def _executePendingToolCalls(*, state: dict, session, executor) -> None:
     """执行 pending tool_calls；in-place 更新 state.tool_calls_made / messages。"""
     for tc in state.pop("pending_tool_calls", []):
         state["tool_calls_made"].append(tc.name)
-        tm = await _dispatchSingleTool(tc=tc, session=session, executor=executor)
+        tm = await _dispatchSingleTool(
+            tc=tc,
+            session=session,
+            executor=executor,
+            run_id=state.get("run_id"),
+            session_id=state.get("session_id"),
+            iteration=state["iterations"],
+        )
         state["messages"].append(tm)
 
 

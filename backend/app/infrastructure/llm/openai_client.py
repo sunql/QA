@@ -385,6 +385,10 @@ class OpenAiClient(BaseLlmClient):
                 "total_tokens": prompt_tokens + completion_tokens,
             },
             model=getattr(response, "model", self._modelName) or self._modelName,
+            # usage dict 刻意不加 cached_tokens 键：agent_orchestration_cost.usageFromMapping
+            # 会读 usage.get("cached_tokens")，加键会改变编排链路成本口径。缓存命中
+            # 走独立字段，与 LlmResponse.cachedTokens 同口径。
+            cachedTokens=_readCachedTokens(response.usage),
         )
 
     async def close(self) -> None:

@@ -2203,6 +2203,12 @@ class ChatMessageRead(CamelModel):
         default=None,
         description="多步/单步消息的回放快照（历史回放用，形状对齐前端 MultiStepStep）",
     )
+    # 2026-10-31（分节报告）：回放时由 content + steps_snapshot 现算，不落库。
+    # 存量行、非多步行、无可图步骤 → None（前端走旧渲染）。
+    report_sections: list[dict] | None = Field(
+        default=None,
+        description="多步最终回答的分节块（历史回放现算）",
+    )
 
 
 class SessionMessagesResponse(CamelModel):

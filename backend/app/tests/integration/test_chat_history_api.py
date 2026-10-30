@@ -32,6 +32,7 @@ async def _seedMessage(
     chartOption: dict | None = None,
     tableOption: dict | None = None,
     visualRationale: dict | None = None,
+    stepsSnapshot: list[dict] | None = None,
     createdAt: datetime | None = None,
 ) -> SessionMessage:
     """插入一行会话消息（created_time 可指定，便于排序断言）。"""
@@ -44,6 +45,7 @@ async def _seedMessage(
         chart_option=chartOption,
         table_option=tableOption,
         visual_rationale=visualRationale,
+        steps_snapshot=stepsSnapshot,
         created_time=createdAt or datetime.now(UTC),
         updated_time=createdAt or datetime.now(UTC),
     )
@@ -397,6 +399,70 @@ class TestChatHistoryMessages:
         asst = resp.json()["messages"][1]
         assert asst["tableOption"] is None
         assert asst["visualRationale"] is None
+
+    async def test_messages_computes_report_sections_from_snapshot(
+        self, client, dbSession
+    ) -> None:
+        """回放不落 reportSections：由 content + steps_snapshot 现算（同一纯函数）。"""
+        content = (
+            "## 分析报告\n"
+            "### 步骤 1：2024 销售额\n"
+            "1000 万。\n"
+            "\n"
+            "### 步骤 2：2025 销售额\n"
+            "1200 万。\n"
+            "\n"
+            "### 结论\n"
+            "增长 20%。"
+        )
+        snapshot = [
+            {"stepIndex": 0, "description": "2024 销售额", "sql": "SELECT 1",
+             "chartType": "bar", "chartOption": {"series": []}},
+            {"stepIndex": 1, "description": "2025 销售额", "sql": "SELECT 2",
+             "chartType": "hbar", "chartOption": {"series": []}},
+        ]
+        await _seedMessage(
+            dbSession, sessionId="s1", role="assistant", content=content,
+            stepsSnapshot=snapshot,
+        )
+
+        resp = await client.get("/api/v1/sessions/s1/messages")
+        assert resp.status_code == 200, resp.text
+        sections = resp.json()["messages"][0]["reportSections"]
+
+        assert [b["kind"] for b in sections] == ["text", "chart", "text", "chart", "text"]
+        assert [b["stepIndex"] for b in sections if b["kind"] == "chart"] == [0, 1]
+
+    async def test_messages_without_snapshot_have_no_report_sections(
+        self, client, dbSession
+    ) -> None:
+        """存量行没有快照 → None，前端走旧渲染（零回归）。"""
+        await _seedMessage(
+            dbSession, sessionId="s1", role="assistant",
+            content="### 步骤 1：A\n纯文本老消息",
+        )
+
+        resp = await client.get("/api/v1/sessions/s1/messages")
+        assert resp.json()["messages"][0]["reportSections"] is None
+
+    async def test_single_step_snapshot_has_no_report_sections(
+        self, client, dbSession
+    ) -> None:
+        """单步消息也落 1 元素快照（回放计划卡用）—— 但单步不是「分节报告」。
+
+        不挡住会在回放里画出**两张**一模一样的图（顶层 chartType 一张 + 报告块一张）。
+        """
+        await _seedMessage(
+            dbSession, sessionId="s1", role="assistant",
+            content="各供应商的收货数量汇总：共 3 家。",
+            stepsSnapshot=[
+                {"stepIndex": 0, "description": "各供应商的收货数量", "sql": "SELECT 1",
+                 "chartType": "hbar", "chartOption": {"series": []}},
+            ],
+        )
+
+        resp = await client.get("/api/v1/sessions/s1/messages")
+        assert resp.json()["messages"][0]["reportSections"] is None
 
 
 # ============ DELETE /{sessionId} ============

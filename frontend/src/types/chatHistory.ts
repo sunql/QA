@@ -39,6 +39,8 @@ export interface ChatMessageRead {
   // stepsSnapshot 的 status 过白名单收窄成 MultiStepStep[]，结构不合法按「无卡」处理。
   queryPlan?: unknown;
   stepsSnapshot?: unknown;
+  // 2026-10-31：后端回放时现算的分节块；同是系统边界原始 JSON
+  reportSections?: unknown;
 }
 
 // 会话消息流响应（对齐后端 SessionMessagesResponse）

@@ -28,6 +28,7 @@ import type {
   StepStatus,
 } from "../types/chat";
 import { asChartOption, asTablePayload, asVisualRationale, normalizeChartType } from "../utils/chartContract";
+import { asReportSections } from "../utils/reportSections";
 import { i18n } from "../i18n";
 import {
   readHistoryPanelOpen,
@@ -214,6 +215,7 @@ function toChatMessage(read: ChatMessageRead): ChatMessage {
     // （MultiStepPlanCard）。同是系统边界原始 JSON，见 asReplaySteps 的收窄规则。
     queryPlan: (read.queryPlan ?? null) as ChatMessage["queryPlan"],
     steps: asReplaySteps(read.stepsSnapshot),
+    reportSections: asReportSections(read.reportSections) ?? undefined,
     // 回放出来的消息天然知道自己的落库主键，补上它「导出此条」按钮才会出现。
     // 此前不填：入口只在 dbMessageId 存在时才渲染，于是刷新恢复出来的会话
     // 整段没有单条导出（实时发送的消息仍然没有，见 ChatMessage.dbMessageId 注释）。
@@ -477,6 +479,7 @@ function streamHandlers(
       suggestedAgent,
       queryPlan,
       visualRationale,
+      reportSections,
     }) =>
       set((state) => ({
         messages: finalizeRunningSteps(
@@ -500,6 +503,8 @@ function streamHandlers(
             // 单步的 rationale 已由 chart 事件回填，这里只在非 null 时覆盖 ——
             // 否则会把 chart 事件写好的依据抹成 null（键必须整段缺省，不能 `?? undefined`）。
             ...(visualRationale ? { visualRationale } : {}),
+            // 2026-10-31：分节块同理整段缺省 —— 缺键/空/null 都走旧纯 Markdown 渲染。
+            ...(reportSections ? { reportSections } : {}),
           }),
           targetId
         ),
@@ -824,6 +829,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             suggestedAgent,
             queryPlan,
             visualRationale,
+            reportSections,
           }) => {
             if (!isCurrent()) return;
             set((state) => ({
@@ -844,6 +850,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   // 抹成 null，导致前端查询计划卡片不渲染（Phase E 红 #2）。
                   ...(queryPlan !== undefined ? { queryPlan } : {}),
                   ...(visualRationale ? { visualRationale } : {}),
+                  // 2026-10-31：分节块整段缺省 —— 缺键/空/null 都走旧纯 Markdown 渲染。
+                  ...(reportSections ? { reportSections } : {}),
                 })
               ),
               loading: false,
@@ -882,6 +890,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               visualRationale: response.visualRationale ?? null,
               data: response.data ?? null,
               queryPlan: response.queryPlan ?? null,
+              reportSections: asReportSections(response.reportSections) ?? undefined,
               intent: isIntent(response.intent) ? response.intent : undefined,
               extractedEntities: response.extractedEntities ?? null,
               tokensUsed: response.tokensUsed,

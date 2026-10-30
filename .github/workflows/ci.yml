@@ -132,6 +132,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Start isolated Milvus
+        # 覆盖 job 级 working-directory: backend —— compose 文件在仓库根 docker/ 下
+        working-directory: .
         run: docker compose -f docker/docker-compose.yml up -d --wait --wait-timeout 240 milvus-standalone
       - uses: astral-sh/setup-uv@v6
         with:

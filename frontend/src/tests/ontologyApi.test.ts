@@ -56,7 +56,9 @@ import {
   syncClassEmbedding,
   syncMissingEmbeddings,
   syncMissingGraph,
+  ONTOLOGY_BATCH_TIMEOUT_MS,
 } from "../api/ontology";
+import { LONG_RUNNING_TIMEOUT_MS } from "../config";
 
 // =============================================================================
 // Class
@@ -282,7 +284,11 @@ describe("api/ontology — Semantic Relation", () => {
     const data = { syncedJoins: 3, backfilledReferences: 2 };
     httpMock.post.mockResolvedValue({ data });
     const result = await backfillRelations();
-    expect(httpMock.post).toHaveBeenCalledWith("/ontology/relations/backfill");
+    expect(httpMock.post).toHaveBeenCalledWith(
+      "/ontology/relations/backfill",
+      undefined,
+      { timeout: LONG_RUNNING_TIMEOUT_MS },
+    );
     expect(result).toEqual(data);
   });
 });
@@ -305,7 +311,9 @@ describe("api/ontology — Batch Relation Engine", () => {
     const payload = { syncGraph: true, inferJoins: true, onConflict: "skip" as const };
     httpMock.post.mockResolvedValue({ data: emptyResult });
     const result = await runOntologyBatch(payload);
-    expect(httpMock.post).toHaveBeenCalledWith("/ontology/batch", payload);
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/batch", payload, {
+      timeout: ONTOLOGY_BATCH_TIMEOUT_MS,
+    });
     expect(result).toEqual(emptyResult);
   });
 
@@ -320,14 +328,18 @@ describe("api/ontology — Batch Relation Engine", () => {
     };
     httpMock.post.mockResolvedValue({ data: emptyResult });
     await runOntologyBatch(payload);
-    expect(httpMock.post).toHaveBeenCalledWith("/ontology/batch", payload);
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/batch", payload, {
+      timeout: ONTOLOGY_BATCH_TIMEOUT_MS,
+    });
   });
 
   it("previewOntologyBatch POST /ontology/batch/preview（只读预览）", async () => {
     const payload = { inferJoins: true, onConflict: "skip" as const };
     httpMock.post.mockResolvedValue({ data: emptyResult });
     const result = await previewOntologyBatch(payload);
-    expect(httpMock.post).toHaveBeenCalledWith("/ontology/batch/preview", payload);
+    expect(httpMock.post).toHaveBeenCalledWith("/ontology/batch/preview", payload, {
+      timeout: LONG_RUNNING_TIMEOUT_MS,
+    });
     expect(result).toEqual(emptyResult);
   });
 
@@ -431,7 +443,11 @@ describe("api/ontology — embedding 手动同步", () => {
     };
     httpMock.post.mockResolvedValue({ data });
     const result = await syncMissingGraph();
-    expect(httpMock.post).toHaveBeenCalledWith("/ontology/graph/sync-missing");
+    expect(httpMock.post).toHaveBeenCalledWith(
+      "/ontology/graph/sync-missing",
+      undefined,
+      { timeout: LONG_RUNNING_TIMEOUT_MS },
+    );
     expect(result).toEqual(data);
   });
 });

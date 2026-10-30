@@ -9,6 +9,14 @@ from starlette.routing import Mount
 from app.dependencies import getCurrentUser
 from app.main import app
 
+try:
+    # FastAPI >= 0.141：include_router() 的结果被包成 `_IncludedRouter` 包装层，
+    # app.routes 不再是 flat 的 APIRoute 列表 ⇒ 靠公开的 iter_route_contexts 展平。
+    # 0.136.x 没有该符号 ⇒ 走下面的 flat 分支（见 _enumerateRoutes）。
+    from fastapi.routing import iter_route_contexts
+except ImportError:  # pragma: no cover - FastAPI < 0.141
+    iter_route_contexts = None
+
 # 应公开的路由（键与 (method, APIRoute.path) 同形）
 PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/v1/health"),
@@ -31,32 +39,54 @@ MIN_ENUMERATED_ROUTES = 300
 _IGNORED_METHODS = frozenset({"HEAD", "OPTIONS"})
 
 
+def _hasCurrentUserInDependant(dependant) -> bool:
+    """依赖链（含 router 级 dependencies）是否含 getCurrentUser。"""
+    if dependant is None:
+        return False
+    seen: set[int] = set()
+    stack = [dependant]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if current.call is getCurrentUser:
+            return True
+        stack.extend(current.dependencies)
+    return False
+
+
 def _hasCurrentUser(route: APIRoute, extraDependencies: tuple = ()) -> bool:
     """路由依赖链（含 router 级 dependencies）是否含 getCurrentUser。"""
     for dependency in extraDependencies:
         if getattr(dependency, "dependency", None) is getCurrentUser:
             return True
-    seen: set[int] = set()
-    stack = [route.dependant]
-    while stack:
-        dependant = stack.pop()
-        if id(dependant) in seen:
-            continue
-        seen.add(id(dependant))
-        if dependant.call is getCurrentUser:
-            return True
-        stack.extend(dependant.dependencies)
-    return False
+    return _hasCurrentUserInDependant(route.dependant)
 
 
 def _enumerateRoutes() -> list[tuple[str, str, bool]]:
     """枚举 (method, path, hasAuth)。
 
-    FastAPI 0.136.1 的 app.routes 是 flat 列表——`include_router()` 已被自动
-    展平为独立 APIRoute 对象（0.141 才有 `_IncludedRouter` 包装层，0.136.1 没有）。
+    FastAPI 0.141+ 的 app.routes 里，include_router() 的结果是 `_IncludedRouter`
+    包装层（不是 APIRoute）⇒ 直接 isinstance 过滤只能枚举到 app 上直接声明的
+    少数路由 ⇒ 鉴权守卫会「空集通过」（展开失效守卫正是为此而设）。
+    公开 API `iter_route_contexts()` 给出展平后的 RouteContext：path 是拼好的
+    最终路径，dependant 已合并 router 级 dependencies。
+
+    FastAPI 0.136.x 没有该符号，app.routes 本身就是 flat 的 APIRoute 列表。
     Mount 路由（starlette Mount）走单独的 test_mountsAreProtectedByMiddleware。
     """
     found: list[tuple[str, str, bool]] = []
+    if iter_route_contexts is not None:
+        for context in iter_route_contexts(app.routes):
+            route = context.original_route
+            if not isinstance(route, APIRoute):
+                continue
+            dependant = getattr(context, "dependant", None) or route.dependant
+            methods = getattr(context, "methods", None) or route.methods
+            for method in methods - _IGNORED_METHODS:
+                found.append((method, context.path, _hasCurrentUserInDependant(dependant)))
+        return found
     for route in app.routes:
         if isinstance(route, APIRoute):
             for method in route.methods - _IGNORED_METHODS:
@@ -69,6 +99,8 @@ def _enumerateRoutes() -> list[tuple[str, str, bool]]:
 # ⇒ ImportError block 整个 integration suite collection（200+ tests）。
 # 修法见 fix/route-auth-guard-fastapi-compat（PR #20）；F1 follow-up
 # （fix/data-quality-share-auth-policy）也带上同一修法以便独立可测。
+# 2026-10-30：锁文件已升到 FastAPI 0.141.1（uv.lock），app.routes 恢复包装层形态，
+# 上面改用公开的 iter_route_contexts 展平——不再依赖私有符号，0.136/0.141 双兼容。
 
 
 def test_enumeratedRouteCountMeetsFloor() -> None:

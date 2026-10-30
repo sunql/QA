@@ -22,7 +22,16 @@ describe("api/kpiCatalog", () => {
   it("listKpis GET /kpi-catalog", async () => {
     httpMock.get.mockResolvedValue({ data: [] });
     await listKpis();
-    expect(httpMock.get).toHaveBeenCalledWith("/kpi-catalog");
+    // 2026-10-18 起 listKpis 支持 unbound 查询参数，普通调用第二个参数为 undefined
+    expect(httpMock.get).toHaveBeenCalledWith("/kpi-catalog", undefined);
+  });
+
+  it("listKpis(unbound=true) GET /kpi-catalog?unbound=true", async () => {
+    httpMock.get.mockResolvedValue({ data: [] });
+    await listKpis(true);
+    expect(httpMock.get).toHaveBeenCalledWith("/kpi-catalog", {
+      params: { unbound: true },
+    });
   });
 
   it("getKpi GET /kpi-catalog/:id", async () => {

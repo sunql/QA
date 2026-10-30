@@ -174,7 +174,9 @@ class StreamMultiStepMixin:
         # _hasDataStepResult / done 帧 steps 的入参）；这里一律用 int。
         completedCount = 0
         anyFailed = False
-        anySkipped = False
+        # 注：#59 删除步间依赖脚手架后，L1 线性计划没有「跳过步骤」语义，
+        # `runStatusFor` 收敛为 (completed, total, anyFailed) 三参
+        # （本文件此前仍传四参 ⇒ 运行期 TypeError，多步 chat 收尾直接 500）。
 
         # 循环前一次性下发完整计划概览，前端据此渲染各步骤的「待执行」状态。
         # **必须在下发之前**取得 run：顺序反了 run 还是 None，runId 永远发不出去。
@@ -313,7 +315,7 @@ class StreamMultiStepMixin:
                 await self._closeRun(
                     session, run,
                     status=runStatusFor(
-                        completedCount, len(multiStepPlan.steps), anyFailed, anySkipped
+                        completedCount, len(multiStepPlan.steps), anyFailed
                     ),
                     completedSteps=completedCount,
                     currentStepIdx=len(multiStepPlan.steps),
@@ -412,7 +414,7 @@ class StreamMultiStepMixin:
         await self._closeRun(
             session, run,
             status=runStatusFor(
-                completedCount, len(multiStepPlan.steps), anyFailed, anySkipped
+                completedCount, len(multiStepPlan.steps), anyFailed
             ),
             completedSteps=completedCount,
             currentStepIdx=len(multiStepPlan.steps),

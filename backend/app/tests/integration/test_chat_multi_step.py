@@ -76,7 +76,17 @@ class _MultiStepLlm:
         if "查询拆分器" in system:
             _Resp.content = _MULTI_STEP_PLAN_JSON
         elif "企业数据分析助手" in system:
-            _Resp.content = "2025 年销售额较 2024 年增长 25%。"
+            _Resp.content = (
+                "## 分析报告\n"
+                "### 步骤 1：2024 年销售额\n"
+                "2024 年销售额已执行。\n"
+                "\n"
+                "### 步骤 2：2025 年销售额\n"
+                "2025 年销售额已执行。\n"
+                "\n"
+                "### 结论\n"
+                "2025 年销售额较 2024 年增长 25%。"
+            )
         elif "解析为查询计划" in system:
             _Resp.content = '{"target":"销售额","selectedClasses":["PRECEIPT"],"selectedProperties":["NAME","QTY"]}'
         elif "生成 SQL 时必须" in system:
@@ -318,6 +328,10 @@ class TestMultiStepChatApi:
         assert body["steps"][0]["sql"] is not None
         assert body["steps"][1]["stepIndex"] == 1
         assert "增长" in body["answer"]
+        # 2026-10-31（分节报告）：报告按步骤分块，图块只带 stepIndex
+        sections = body["reportSections"]
+        assert [b["kind"] for b in sections] == ["text", "chart", "text", "chart", "text"]
+        assert [b["stepIndex"] for b in sections if b["kind"] == "chart"] == [0, 1]
         # 两个数据步骤各执行一次 SQL（另有 1 次值域采样，不计入）
         assert len(_data_queries(adapter)) == 2
         # 拆步 + 2×计划/SQL + 汇总 均已调用 LLM
@@ -1499,6 +1513,30 @@ class TestReplayPlanCardSnapshot:
         assert "data" not in snapshot[0]
         # 汇总消息本体仍是纯文字（无图）
         assert msgs[1].chart_type is None
+
+    async def test_non_stream_multistep_summary_persists_steps_snapshot(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        """非流式汇总落库与流式对齐：不落快照 ⇒ 回放的新报告缺图。"""
+        config, ds = await _seed(dbSession)
+        _install(monkeypatch, config, _MultiStepLlm(), _OkAdapter())
+
+        resp = await client.post(
+            "/api/v1/chat",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        msgs = list(
+            (await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id)))
+            .scalars()
+            .all()
+        )
+        snapshot = msgs[1].steps_snapshot
+        assert isinstance(snapshot, list)
+        assert [s["stepIndex"] for s in snapshot] == [0, 1, 2]
+        assert snapshot[0]["sql"] is not None
+        assert snapshot[2]["sql"] is None
 
     async def test_single_step_persists_query_plan_and_snapshot(
         self, client, dbSession, monkeypatch,

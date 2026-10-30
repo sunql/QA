@@ -1983,6 +1983,12 @@ class ChatResponse(CamelModel):
         default=None,
         description="多步查询各子步骤执行结果",
     )
+    # 2026-10-31（分节报告）：多步最终回答的结构化分块。chart 块只带 stepIndex，
+    # 图负载复用 steps[i]，不重复下发。仅多步聚合/降级收尾填充；其余意图为 None。
+    report_sections: list[dict] | None = Field(
+        default=None,
+        description="多步报告分块：{kind:'text',content} | {kind:'chart',stepIndex,title}",
+    )
     # Phase 1.4 数据可信度 badge：每张 selectedClass 对应一条；无 selectedClasses 或
     # DQ 服务降级时为 None；存在 selectedClasses 但部分表未评估时，相应 badge 的
     # evaluated=False、其余分数字段全 None。

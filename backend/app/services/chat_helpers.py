@@ -37,6 +37,7 @@ from app.services.messages_zh import (
     MSG_SPEAKER_ASSISTANT,
     MSG_SPEAKER_USER,
 )
+from app.services.report_sections import buildReportSections
 from app.utils.json_safe import jsonSafe
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,7 @@ def _multiStepResponse(
 
     queryPlan：最后一个成功数据步骤的 NL2SQL 查询计划（供前端「总查询计划」渲染）。
     """
+    stepReads = [_step_result_to_read(s, s.query_plan) for s in completed]
     return ChatResponse(
         answer=answer,
         intent="multi_step",
@@ -154,7 +156,9 @@ def _multiStepResponse(
         chartOption=None,
         visual_rationale=visualRationale,
         data=data,
-        steps=[_step_result_to_read(s, s.query_plan) for s in completed],
+        steps=stepReads,
+        # 2026-10-31：分节块由最终文本 + 每步结果现算，不落库。
+        report_sections=buildReportSections(answer, stepReads),
         tokensUsed=tokensUsed,
         cost=float(cost),
         latency_ms=int((time.monotonic() - t0) * 1000),

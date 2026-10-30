@@ -49,6 +49,7 @@ from app.services.chat_helpers import (
     _step_result_to_read,
     _stepFailedError,
     _StepRun,
+    buildStepsSnapshot,
 )
 from app.services.messages_zh import (
     MSG_MULTI_STEP_DEGRADE_FAILED,
@@ -718,6 +719,13 @@ class MultiStepMixin:
                     chart_option=None,
                     table_option=None,
                     visual_rationale=summaryTextOnlyRationale().to_dict(),
+                    # 2026-10-31：与流式对齐 —— 非流式多步也要能回放分节图。
+                    steps_snapshot=buildStepsSnapshot(
+                        plan=multiStepPlan,
+                        stepsByIdx=stepsByIdx,
+                        completed=completed,
+                        runId=str(run.id) if run is not None else None,
+                    ),
                 )
                 # B5 HIGH-1：计算 inheritance_snapshot（支持下一轮追问链路）。
                 # semanticState 可能为 None（如 B/C 路径直接进多步无 A7 输出），

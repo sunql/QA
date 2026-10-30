@@ -16,10 +16,16 @@ json），宁可留个可读痕迹也不静默丢值。
 **不可变**：容器只在确有子值发生变化时才重建；无变化时原样返回入参，保持对象
 同一性（调用方拿它发给前端的那份不受影响）。
 
-与 `app.services.chat_chart_persist._jsonSafe` 的关系：两者归一规则一致，那是
-图表负载（session_message 两列）的落库路径，属另一特性；本模块是多步落库路径的
-SSOT，供 `multi_step_persistence` 与 `multi_step_compressor` 复用，避免同一套
-Decimal/datetime 规则在多步链路里各写一份而漂移。
+**SSOT**：本模块是 JSONB 落库归一的唯一实现。多步落库（`multi_step_persistence`、
+`multi_step_compressor`）与图表负载落库（`chat_chart_persist` 的
+`boundedChartOption` / `boundedTableOption`，即 session_message 两列）都调用它 ——
+同一套 Decimal/datetime 规则不再各写一份而漂移。
+
+不归本模块管的两个同名归一（契约**刻意不同**，勿合并）：
+
+- `app.services.stream_events._jsonSafe`：SSE 出口，`Decimal→str`、非有限值走哨兵；
+- `app.services.research_session_service._coerceJsonSafe`：研究会话，bytes→utf8/hex、
+  set 展开、`json.dumps` 兜底。
 """
 from __future__ import annotations
 

@@ -30,8 +30,8 @@ qa_compose config --quiet && echo COMPOSE_OK
 
 | 文件 | 内容 | sha256 | 大小 |
 |---|---|---|---|
-| `/tmp/qa-backend-amd64-1030.tar.gz` | `qa-system-backend:amd64-1030`（linux/amd64） | 待回填 | 待回填 |
-| `/tmp/qa-frontend-amd64-1030.tar.gz` | `qa-system-frontend:amd64-1030`（linux/amd64，`VITE_API_BASE_URL=` 空同源相对路径） | 待回填 | 待回填 |
+| `/tmp/qa-backend-amd64-1030.tar.gz` | `qa-system-backend:amd64-1030`（linux/amd64，已核验：代码 sha `0ca4492f` ≡ git 树 `5f6bef24`） | `f86b13890b74ecb21d4e74bced4eda701c61966a0e4eb1e9e8098c4597128b71` | 218M |
+| `/tmp/qa-frontend-amd64-1030.tar.gz` | `qa-system-frontend:amd64-1030`（linux/amd64，`VITE_API_BASE_URL=` 空同源相对路径；bundle `index-XQsSE0o6.js` 与开发机同 hash，5 处 localhost 均为正则库+i18n 占位无害上下文） | `ebb8e18be335d7427b665790a30b3e2c7e06a0147b66c3c88b9c98ed668b5e3b` | 27M |
 
 > 两镜像均 `--platform linux/amd64` 构建（不指定平台 load 后 `exec format error`）。
 > 传输后先 `sha256sum` 比对再 load，防中途损坏。

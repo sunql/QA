@@ -559,7 +559,14 @@ prod `system_config` **没有任何 KPI 开关行** ⇒ 走代码默认：
   `datasource_id` 12/12 绑定 `data_source.id=1`「THBI Oracle」（UPDATE 前手工备份
   `/tmp/kpi_catalog_20261030_predatasource.sql`）；复跑 realdata S7.2 转 PASS，
   failed=0 / passed=6 / skipped=3）
-- [ ] 决定 §11.2 的开关策略（先关后开 / 接受默认）
+- [x] 决定 §11.2 的开关策略（**2026-10-30 定为「先关后开」**：`system_config` 已写入
+  `KPI_CONTRACT_INJECTION_ENABLED=false`（带决策说明，写前备份
+  `/tmp/system_config_20261030.sql`）；治理列对齐并在隔离测试库演练通过后人工改回 `true`）
+- [x] `security-reviewer` 结论（安全审计有条件通过，I1–I6 全修，见 §10）+ compose 冒烟
+  （**2026-10-30 部署完成**：main `1235537c` 经 /tmp 独立 worktree 构建
+  backend/frontend/worker 三镜像（frontend 空 `VITE_API_BASE_URL`，bundle 0 处 localhost，
+  hash `DnUmUNV1→XQsSE0o6`），`--no-deps` 重建三容器，health ok + alembic 0137 no-op +
+  worker 轮询正常）
 - [ ] 治理列对齐后重跑 `kpi_metric_realdata.py`，确认 verdict 从 `mismatch` 转 `pass` 且契约块非空
 - [ ] `security-reviewer` 结论 + compose 冒烟（SSOT 清单另两项，**不在 Task 16 范围**）
 - [ ] **单独立项（复审 Important #2，本波不修）**：`MetricTechniqueForm` 只对

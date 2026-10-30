@@ -149,6 +149,63 @@ export const AGG_FUNCTION_OPTIONS: { value: AggFunction; labelKey: AggFunction }
   { value: "MIN", labelKey: "MIN" },
 ];
 
+export type MetricType = "MEASURE" | "RATIO" | "DIFFERENCE" | "DERIVED";
+
+export const METRIC_TYPE_OPTIONS: { value: MetricType; labelKey: MetricType }[] = [
+  { value: "MEASURE", labelKey: "MEASURE" },
+  { value: "RATIO", labelKey: "RATIO" },
+  { value: "DIFFERENCE", labelKey: "DIFFERENCE" },
+  { value: "DERIVED", labelKey: "DERIVED" },
+];
+
+export type MetricAggregationOrder = "WEIGHTED_RATIO" | "AVG_OF_RATIOS" | "NONE";
+
+export const METRIC_AGGREGATION_ORDER_OPTIONS: {
+  value: MetricAggregationOrder;
+  labelKey: MetricAggregationOrder;
+}[] = [
+  { value: "WEIGHTED_RATIO", labelKey: "WEIGHTED_RATIO" },
+  { value: "AVG_OF_RATIOS", labelKey: "AVG_OF_RATIOS" },
+  { value: "NONE", labelKey: "NONE" },
+];
+
+export type MetricExecutionSource = "COMPILED" | "ESCAPE_HATCH" | "NONE";
+
+export const METRIC_EXECUTION_SOURCE_OPTIONS: {
+  value: MetricExecutionSource;
+  labelKey: MetricExecutionSource;
+}[] = [
+  { value: "COMPILED", labelKey: "COMPILED" },
+  { value: "ESCAPE_HATCH", labelKey: "ESCAPE_HATCH" },
+  { value: "NONE", labelKey: "NONE" },
+];
+
+export type MetricStatus = "DRAFT" | "PUBLISHED";
+
+export const METRIC_STATUS_OPTIONS: { value: MetricStatus; labelKey: MetricStatus }[] = [
+  { value: "DRAFT", labelKey: "DRAFT" },
+  { value: "PUBLISHED", labelKey: "PUBLISHED" },
+];
+
+/**
+ * 结构化度量（ontology_metric.numerator_measure / denominator_measure 的 JSONB）。
+ *
+ * 键名：读端是裸 dict、落库是 `model_dump()`（未带 by_alias）⇒ 恒为 snake_case；
+ * 写端 `MeasureSpecSchema`（CamelModel + `populate_by_name=True`）两种键都收。
+ * 故前端统一 snake_case。`class_id` / `class_alias` 由回填脚本按本体类推导，
+ * 表单不暴露（编辑时原样带回，见 `toMeasureSpec` 的 `existing`）。
+ *
+ * 后端上限（`schemas.py` `MeasureSpecSchema`）：expr / filter ≤ 1000，
+ * class_alias ≤ 100；`extra="forbid"` ⇒ 只能出现这 5 个键。
+ */
+export interface MeasureSpec {
+  agg: string;
+  expr: string | null;
+  filter: string | null;
+  class_id: number | null;
+  class_alias: string | null;
+}
+
 export interface OntologyMetric {
   id: number;
   metricName: string;
@@ -160,6 +217,16 @@ export interface OntologyMetric {
   createdBy: string | null;
   createdTime: string | null;
   updatedTime: string | null;
+  // ── P1 指标技术形态 ──
+  metricType: MetricType;
+  numeratorMeasure: MeasureSpec | null;
+  denominatorMeasure: MeasureSpec | null;
+  aggregationOrder: MetricAggregationOrder | null;
+  grainKeys: string[] | null;
+  filterExpression: string | null;
+  status: MetricStatus;
+  owner: string | null;
+  executionSource: MetricExecutionSource | null;
 }
 
 export interface OntologyMetricCreate {
@@ -170,15 +237,38 @@ export interface OntologyMetricCreate {
   targetClassId?: number;
   dimensionDefaults?: Record<string, string>;
   createdBy?: string;
+  // ── P1 指标技术形态 ──
+  metricType?: MetricType;
+  // 显式 null = 清空（undefined 会被 axios 丢弃 ⇒ 后端静默保留旧值）。
+  numeratorMeasure?: MeasureSpec | null;
+  denominatorMeasure?: MeasureSpec | null;
+  aggregationOrder?: MetricAggregationOrder | null;
+  grainKeys?: string[];
+  filterExpression?: string | null;
+  status?: MetricStatus;
+  // `owner` 是用户可编辑字段 ⇒ 清空即「取消负责人」，显式 null 正确。
+  // 与 measure 内的 `class_id` / `class_alias`（派生字段，必须保留）刻意不同。
+  owner?: string | null;
+  executionSource?: MetricExecutionSource | null;
 }
 
 export interface OntologyMetricUpdate {
   metricName?: string;
-  metricAlias?: string;
+  metricAlias?: string | null;
   formula?: string;
   aggFunction?: string;
-  targetClassId?: number;
-  dimensionDefaults?: Record<string, string>;
+  targetClassId?: number | null;
+  dimensionDefaults?: Record<string, string> | null;
+  // ── P1 指标技术形态 ──
+  metricType?: MetricType;
+  numeratorMeasure?: MeasureSpec | null;
+  denominatorMeasure?: MeasureSpec | null;
+  aggregationOrder?: MetricAggregationOrder | null;
+  grainKeys?: string[];
+  filterExpression?: string | null;
+  status?: MetricStatus;
+  owner?: string | null;
+  executionSource?: MetricExecutionSource | null;
 }
 
 // ===== Join（关联关系目录） =====

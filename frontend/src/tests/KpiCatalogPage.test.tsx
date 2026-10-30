@@ -6,6 +6,12 @@ import { ConfigProvider, message } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import KpiCatalogPage from "../pages/KpiCatalogPage";
 import type { KpiCatalog, KpiDatasourceSuggestion } from "../types/kpiCatalog";
+import type { OntologyMetric } from "../types/ontology";
+import {
+  buildKpiCreatePayload,
+  buildKpiUpdatePayload,
+  emptyKpiForm,
+} from "../utils/kpiCatalogPayload";
 
 const { mockKpi } = vi.hoisted(() => ({
   mockKpi: {
@@ -25,6 +31,12 @@ const { mockKpi } = vi.hoisted(() => ({
     revisionCount: 0,
     status: "PUBLISHED",
     metricId: null,
+    semanticKeywords: ["准时交付"],
+    // 刻意取**非默认值**：若 openEdit 漏回填 matchThreshold，表单会退回 0.75 ⇒ 断言才有判别力
+    matchThreshold: 0.6,
+    grainKeys: ["supplier_code"],
+    numeratorColumns: ["QTY"],
+    denominatorColumns: ["AMOUNT"],
     createdBy: null,
     createdTime: "2026-08-30T00:00:00Z",
     updatedTime: "2026-08-30T00:00:00Z",
@@ -47,6 +59,37 @@ const datasourceApi = vi.hoisted(() => ({
 
 vi.mock("../api/datasource", () => datasourceApi);
 
+const ontologyApi = vi.hoisted(() => ({
+  listMetrics: vi.fn(),
+}));
+
+vi.mock("../api/ontology", () => ontologyApi);
+
+/** 本体指标工厂：避免同一份 19 字段字面量在多处重复。 */
+const makeMetric = (over: Partial<OntologyMetric> = {}): OntologyMetric =>
+  ({
+    id: 42,
+    metricName: "供应商准时率",
+    metricAlias: "supplier_otd",
+    formula: "SELECT 1 FROM DUAL",
+    aggFunction: "SUM",
+    targetClassId: null,
+    dimensionDefaults: null,
+    createdBy: null,
+    createdTime: null,
+    updatedTime: null,
+    metricType: "RATIO",
+    numeratorMeasure: null,
+    denominatorMeasure: null,
+    aggregationOrder: "WEIGHTED_RATIO",
+    grainKeys: ["supplier_code"],
+    filterExpression: null,
+    status: "PUBLISHED",
+    owner: null,
+    executionSource: "COMPILED",
+    ...over,
+  }) as OntologyMetric;
+
 function renderPage() {
   return render(
     <ConfigProvider locale={zhCN}>
@@ -67,6 +110,8 @@ describe("KpiCatalogPage", () => {
       { id: 7, name: "DWS_TEST", isActive: true },
     ]);
     api.getDatasourceSuggestions.mockResolvedValue([]);
+    // 页面挂载即拉取本体指标列表；既有 18 条用例不关心指标内容
+    ontologyApi.listMetrics.mockResolvedValue([]);
   });
 
   it("渲染标题与表格，并加载 KPI 列表", async () => {
@@ -409,5 +454,167 @@ describe("KpiCatalogPage", () => {
     await waitFor(() => {
       expect(api.createKpi).toHaveBeenCalled();
     });
+  });
+});
+
+describe("KpiCatalogPage — 结构化口径与技术形态挂靠", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listKpis.mockResolvedValue([{ ...mockKpi, metricId: 42 }]);
+    datasourceApi.listDataSources.mockResolvedValue([
+      { id: 7, name: "DWS_TEST", isActive: true },
+    ]);
+    api.getDatasourceSuggestions.mockResolvedValue([]);
+    ontologyApi.listMetrics.mockResolvedValue([makeMetric()]);
+  });
+
+  it("列表显示挂靠的指标名与指标状态（定位法：行内找 Tag）", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("供应商准时率")).toBeInTheDocument();
+    });
+    // enums.metricStatus.PUBLISHED 与 enums.kpiStatus.PUBLISHED 中文都是「已发布」
+    // ⇒ 只能靠位置辨认：找到指标名所在单元格，在单元格内断言。
+    const cell = screen.getByText("供应商准时率").closest("td");
+    expect(cell).not.toBeNull();
+    expect(cell).toHaveTextContent("已发布");
+  });
+
+  it("未挂靠指标的 KPI 显示「未挂靠指标」标签", async () => {
+    api.listKpis.mockResolvedValue([{ ...mockKpi, metricId: null }]);
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("未挂靠指标")).toBeInTheDocument();
+    });
+  });
+
+  it("编辑回填并提交时带上 semanticKeywords / grainKeys / metricId / matchThreshold", async () => {
+    const user = userEvent.setup();
+    api.updateKpi.mockResolvedValue({ ...mockKpi });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    await user.click(await screen.findByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateKpi).toHaveBeenCalled());
+    const payload = api.updateKpi.mock.calls[0][1];
+    expect(payload.semanticKeywords).toEqual(["准时交付"]);
+    expect(payload.grainKeys).toEqual(["supplier_code"]);
+    expect(payload.numeratorColumns).toEqual(["QTY"]);
+    expect(payload.denominatorColumns).toEqual(["AMOUNT"]);
+    expect(payload.metricId).toBe(42);
+    // 0.6 ≠ DEFAULT_MATCH_THRESHOLD(0.75) ⇒ 证明回填路径真的生效，而非默认值兜底
+    expect(payload.matchThreshold).toBe(0.6);
+  });
+
+  it("语义关键词 tags Select 可输入新标签并进入 payload", async () => {
+    const user = userEvent.setup();
+    api.updateKpi.mockResolvedValue({ ...mockKpi });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    // antd Select 的 placeholder 渲染成 span（不是 input 的 placeholder 属性），
+    // 且已有值时不显示 ⇒ 按 Form.Item label 定位到内部的搜索输入框
+    const kwItem = (await screen.findByText("语义关键词")).closest(
+      ".ant-form-item",
+    );
+    expect(kwItem).not.toBeNull();
+    const kwInput = kwItem!.querySelector("input");
+    expect(kwInput).not.toBeNull();
+    await user.click(kwInput!);
+    await user.type(kwInput!, "准时率");
+    await user.keyboard("{Enter}");
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateKpi).toHaveBeenCalled());
+    const payload = api.updateKpi.mock.calls[0][1];
+    expect(payload.semanticKeywords).toContain("准时率");
+    expect(payload.semanticKeywords).toContain("准时交付");
+  });
+
+  it("清空「挂靠本体指标」后提交显式 null（解除挂靠）", async () => {
+    const user = userEvent.setup();
+    api.updateKpi.mockResolvedValue({ ...mockKpi });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    const metricItem = (await screen.findByText("挂靠本体指标")).closest(
+      ".ant-form-item",
+    );
+    expect(metricItem).not.toBeNull();
+    const clearIcon = metricItem!.querySelector(".ant-select-clear");
+    expect(clearIcon).not.toBeNull();
+    fireEvent.mouseDown(clearIcon!);
+
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateKpi).toHaveBeenCalled());
+    const payload = api.updateKpi.mock.calls[0][1];
+    expect(payload.metricId).toBeNull();
+  });
+
+  it("清空「匹配阈值」后提交复位为默认 0.75（不是 null / undefined）", async () => {
+    const user = userEvent.setup();
+    api.updateKpi.mockResolvedValue({ ...mockKpi });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    const thresholdItem = (await screen.findByText("匹配阈值")).closest(
+      ".ant-form-item",
+    );
+    expect(thresholdItem).not.toBeNull();
+    const thresholdInput = thresholdItem!.querySelector("input");
+    expect(thresholdInput).not.toBeNull();
+    // rc-input-number 清空 ⇒ onChange(null) ⇒ Form 值变 null（校验规则不拦空值）
+    await user.clear(thresholdInput!);
+
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateKpi).toHaveBeenCalled());
+    const payload = api.updateKpi.mock.calls[0][1];
+    // 后端 match_threshold 是 NOT NULL 列 ⇒ 前端必须发显式默认值，发 null 会 500
+    expect(payload.matchThreshold).toBe(0.75);
+  });
+
+});
+
+/**
+ * Q6：UI 层「payload 不与 record 别名共享」的断言**恒真**——rc-field-form 在
+ * 表单初值 / 挂载时就会重建数组，即便 buildKpi*Payload 去掉展开拷贝，表单值
+ * 也已不是 record 的实例 ⇒ UI 用例无法判别。
+ * 真正承重的是下面的工厂函数测试：直接对入参实例做身份断言。
+ */
+describe("kpiCatalogPayload — 数组字段不与入参共享实例", () => {
+  it("buildKpiUpdatePayload / buildKpiCreatePayload 各自拷贝四个数组", () => {
+    const values = {
+      ...emptyKpiForm(),
+      semanticKeywords: ["准时交付"],
+      grainKeys: ["supplier_code"],
+      numeratorColumns: ["QTY"],
+      denominatorColumns: ["AMOUNT"],
+    };
+    const payloads = [
+      buildKpiUpdatePayload(values),
+      buildKpiCreatePayload(values),
+    ];
+    for (const payload of payloads) {
+      expect(payload.semanticKeywords).toEqual(values.semanticKeywords);
+      expect(payload.semanticKeywords).not.toBe(values.semanticKeywords);
+      expect(payload.grainKeys).not.toBe(values.grainKeys);
+      expect(payload.numeratorColumns).not.toBe(values.numeratorColumns);
+      expect(payload.denominatorColumns).not.toBe(values.denominatorColumns);
+    }
   });
 });

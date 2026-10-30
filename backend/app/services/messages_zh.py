@@ -18,8 +18,16 @@ user-facing 中文字面量集中。本模块**仅含字面量**，不引入 i18
 - LLM prompt 模板（属于模型指令，归模块常量如 ``_CLARIFY_SYSTEM_PROMPT``）
 - ``logger.*`` 中的运维文案（面向运维排障）
 - docstring 中的中文（文档）
+
+导入：
+- ``from types import MappingProxyType`` —— 只读映射常量的唯一来源
+- ``from typing import Mapping`` —— 常量的类型标注
+
 - 正则表达式 pattern 内的字符（逻辑而非文案）
 """
+
+from collections.abc import Mapping
+from types import MappingProxyType
 
 # =============================================================================
 # 通用
@@ -599,6 +607,18 @@ MSG_BUSINESS_OBJECT_GRAPH_LABEL_MISMATCH = (
 MSG_BUSINESS_OBJECT_IN_USE = "业务对象「{code}」正被以下表引用，无法删除：{tables}"
 
 # =============================================================================
+# feat-data-domain-layer（方案 1）：数据域基础数据 + 业务对象域绑定
+# =============================================================================
+
+MSG_DATA_DOMAIN_NOT_FOUND = "数据域「{code}」不存在"
+MSG_DATA_DOMAIN_CODE_EXISTS = "数据域代码「{code}」已存在"
+MSG_DATA_DOMAIN_IN_USE = "数据域「{code}」正被以下位置引用，无法删除：{refs}"
+MSG_DATA_DOMAIN_ORG_NOT_FOUND = "管理组织 id={org_id} 不存在"
+MSG_BUSINESS_OBJECT_DOMAIN_CONFLICT = (
+    "业务对象「{code}」的附域「{domain}」与主域重复，附域不能等于主域"
+)
+
+# =============================================================================
 # 数据质量规则自动生成（dq-rule-auto-generation Task 4）
 # =============================================================================
 
@@ -678,3 +698,44 @@ MSG_CHAT_STEP_EXEC_FAILED_PREFIX = "该步骤执行失败："
 MSG_CHAT_STEP_UNANSWERABLE = "无法回答（LLM 判定无有效查询计划）"
 # 汇总步骤被跳过（前置数据步骤全失败）：非失败、非成功，如实说「未执行」
 MSG_CHAT_STEP_AGGREGATION_SKIPPED = "未执行（前置数据步骤全部失败）"
+
+
+# ── KPI 指标技术形态对账（P1）────────────────────────────────────────
+# 对账 entity_type：与 kpi_metric_audit.RECONCILE_ENTITY_TYPE 一致。
+MSG_KPI_RECONCILE_ENTITY_TYPE = "kpi_metric_reconcile"
+# 对账结果一行摘要（前端「技术形态挂靠」列显示）
+MSG_KPI_RECONCILE_VERDICT = "对账结果：{verdict}"
+# 单条 finding 的可读文本
+MSG_KPI_RECONCILE_FINDING = "[{layer}] {detail}"
+# finding 无 detail 时的兜底（不臆测成因）
+MSG_KPI_RECONCILE_FINDING_NO_DETAIL = "未记录具体对账明细"
+# 对账层英文常量 → 中文层名（英文常量同时用于审计落库，此处只做展示映射；
+# 未收录的层值原样展示，不静默丢层次信息）
+# 用 MappingProxyType 封成只读映射：这是模块级共享常量，可变 dict 会被外部就地改写
+# （违反「不可变数据」约束），且改写后 409 正文会静默变成错层名。
+MSG_KPI_RECONCILE_LAYER_NAMES: Mapping[str, str] = MappingProxyType(
+    {
+        "technique_internal": "技术层",
+        "governance": "治理层",
+        "executable": "可执行层",
+    }
+)
+
+# ── KPI 发布闸门（P1）────────────────────────────────────────────────
+MSG_KPI_GATE_MISSING_METRIC = "未挂靠本体指标（metric_id 为空）"
+MSG_KPI_GATE_METRIC_NOT_FOUND = "挂靠的本体指标不存在（metric_id 悬空）"
+MSG_KPI_GATE_METRIC_NOT_PUBLISHED = "本体指标未发布（status != PUBLISHED）"
+MSG_KPI_GATE_NO_EXECUTION_SOURCE = "本体指标无可执行口径（execution_source 为空或 NONE）"
+MSG_KPI_GATE_RECONCILE_PASS = "口径对账通过"
+MSG_KPI_GATE_RECONCILE_MISMATCH = "口径对账不通过（mismatch）：{detail}"
+MSG_KPI_GATE_RECONCILE_UNKNOWN = "口径对账未完成（unknown）：{detail}"
+MSG_KPI_GATE_NO_DATASOURCE = "未绑定业务数据源（datasource_id 为空）"
+MSG_KPI_GATE_METRIC_NO_NUMERATOR = "未配置分子度量（numerator_measure 为空）"
+MSG_KPI_GATE_METRIC_NO_DENOMINATOR = "指标未配置分母度量（denominator_measure 为空）"
+MSG_KPI_GATE_METRIC_NO_AGGREGATION_ORDER = "比率型指标未配置合法聚合阶（aggregation_order）"
+MSG_KPI_GATE_BLOCKED = "发布闸门未通过：{items}"
+# 本体指标方向（结构化齐全 / 技术形态未降级 / 关联 KPI 无 mismatch）
+MSG_KPI_GATE_METRIC_NO_TYPE = "本体指标未配置指标类型（metric_type 为空）"
+MSG_KPI_GATE_METRIC_NO_GRAIN = "本体指标未配置结构化粒度键（grain_keys 为空）"
+MSG_KPI_GATE_METRIC_DEGRADED = "本体指标技术形态降级（结构化口径与可执行 SQL 列引用不一致）"
+MSG_KPI_GATE_METRIC_LINKED_MISMATCH = "关联 KPI 口径对账不通过：{items}"

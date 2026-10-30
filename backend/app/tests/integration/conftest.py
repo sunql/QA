@@ -167,10 +167,20 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
 
     await seedAgentToolConfigs(dbSession)
     await dbSession.commit()
+    # feat-data-domain-layer：域/层规则 seed 先行（BO seed 的 primary_domain_id
+    # FK 依赖 PROCUREMENT 行；registry warmUp 供 DataDomainCodeType validator 用）
+    from scripts.seed_data_domain import seedDataDomains, seedLayerRules
+
+    await seedDataDomains(dbSession)
+    await seedLayerRules(dbSession)
     # Seed business_object rows so FK targets exist for entity_mapping /
     # feature_definition / document_entity_relation tests (Task 8 FK constraint).
+    # 0133 收紧 header NOT NULL：BO seed 需 ontology_class 解析 header，
+    # 测试库 truncate 后补种最小 header 类集合
+    from app.tests._pg_support import seedHeaderOntologyClasses
     from scripts.seed_business_objects import seedBusinessObjects
 
+    await seedHeaderOntologyClasses(dbSession)
     await seedBusinessObjects(dbSession)
 
     agent_binding_cache.invalidate()
@@ -193,6 +203,14 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
 
     businessObjectRegistry.invalidate()
     await businessObjectRegistry.warmUp(dbSession)
+    # feat-data-domain-layer：域/层规则 registry（validator 同步快路径依赖）
+    from app.services.data_domain_registry import dataDomainRegistry
+    from app.services.layer_rule_registry import layerRuleRegistry
+
+    dataDomainRegistry.invalidate()
+    await dataDomainRegistry.warmUp(dbSession)
+    layerRuleRegistry.invalidate()
+    await layerRuleRegistry.warmUp(dbSession)
     # Phase 1.4：warmUp kpi_match_cache（L1 匹配依赖）
     from app.services.kpi_match_cache import kpi_match_cache
     kpi_match_cache.onKpiChanged()
@@ -205,6 +223,11 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     agent_tool_config_registry.invalidate()
     feature_rule_registry.invalidate()
     businessObjectRegistry.invalidate()
+    from app.services.data_domain_registry import dataDomainRegistry
+    from app.services.layer_rule_registry import layerRuleRegistry
+
+    dataDomainRegistry.invalidate()
+    layerRuleRegistry.invalidate()
     from app.services.kpi_match_cache import kpi_match_cache
     kpi_match_cache.onKpiChanged()
 

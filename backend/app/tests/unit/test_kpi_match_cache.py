@@ -357,14 +357,18 @@ class TestWritePathInvalidation:
         assert cache.hasCode("KPI_OTD") is False
         assert _codes(cache.findByAnyKeyword(["供应商"])) == []
 
-    async def test_refreshOne_is_noop_before_warm_up(self, dbSession: AsyncSession) -> None:
-        """未 warmUp 时 `refreshOne` 直接返回（lifespan 会兜底全量），不写入半份索引。"""
+    async def test_refreshOne_on_cold_cache_rebuilds(self, dbSession: AsyncSession) -> None:
+        """未 warmUp 时 `refreshOne` **不再 no-op** —— 改为全量重建。
+
+        C2 修复：旧语义（冷缓存直接 return）让缓存永久停在冷态，
+        `findByAnyKeyword` 恒返回 `[]` ⇒ 语义匹配静默失效 ⇒ Tier B 契约永远注不进去。
+        """
         await _insertKpis(dbSession, _OVERLAP)
         cache = KpiMatchCache()
         await cache.refreshOne(dbSession, "KPI_SALES")
-        assert cache.is_warmUp() is False
-        assert cache.findByAnyKeyword(["销售额"]) == []
-        assert cache.hasCode("KPI_SALES") is False
+        assert cache.is_warmUp() is True
+        assert cache.hasCode("KPI_SALES") is True
+        assert _codes(cache.findByAnyKeyword(["销售额"])) != []
 
 
 class TestNotWarmedUp:

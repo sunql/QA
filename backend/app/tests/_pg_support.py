@@ -95,6 +95,48 @@ async def _truncateAll(engine: Any) -> None:
             )
 
 
+async def seedHeaderOntologyClasses(session: AsyncSession) -> int:
+    """补种 business_object header 所需的最小本体类集合（仅测试库）。
+
+    0133 收紧 business_object.header_class_id NOT NULL 后，seedBusinessObjects
+    需经 ontology_class 解析 header；测试库每测试 TRUNCATE 全表，ontology_class
+    为空会导致 seed 行全被过滤。生产由 seed_ontology 全量维护，不走本函数。
+
+    **必须带 seed_ontology.CLASSES 同款 source_table**：后续调 seed_ontology.seed()
+    的测试（seedEngine 路径）经 _seedClasses 按 source_table 查重复用，缺了会
+    撞 uq_ontology_class_name_version（class_name, version）唯一约束。
+    CLASSES 没有的类（IncomingInspection）source_table 置 None，无碰撞面。
+    """
+    import seed_ontology
+
+    from app.domain.models import OntologyClass
+    from scripts.seed_business_objects import HEADER_CLASS_NAMES
+
+    sourceTableByName = {
+        c["class_name"]: c["source_table"] for c in seed_ontology.CLASSES
+    }
+    inserted = 0
+    for name in HEADER_CLASS_NAMES:
+        exists = (
+            await session.execute(
+                text("SELECT 1 FROM ontology_class WHERE class_name = :name"),
+                {"name": name},
+            )
+        ).scalar_one_or_none()
+        if exists is not None:
+            continue
+        session.add(
+            OntologyClass(
+                class_name=name,
+                source_table=sourceTableByName.get(name),
+                created_by="seed-test-header",
+            )
+        )
+        inserted += 1
+    await session.commit()
+    return inserted
+
+
 async def pgApiClient() -> AsyncIterator[AsyncClient]:
     """完整 API 链路测试客户端：真实 PG + 每个测试清库。
 

@@ -5,6 +5,7 @@ import { useAuthStore } from "../stores/authStore";
 import type {
   DataSource,
   DataSourceCreate,
+  DataSourceLayersRead,
   DataSourceTestRequest,
   DataSourceTestResponse,
   DataSourceUpdate,
@@ -96,5 +97,17 @@ export async function testDataSource(
   payload: DataSourceTestRequest
 ): Promise<DataSourceTestResponse> {
   const res = await rawClient.post<DataSourceTestResponse>(`${BASE}/test`, payload);
+  return res.data;
+}
+
+// 数据层分布（feat-data-domain-layer 方案 2）：cache-only，未探测时 fromCache=false。
+export async function getDatasourceLayers(
+  id: number,
+  schema?: string | null,
+): Promise<DataSourceLayersRead> {
+  const res = await httpClient.get<DataSourceLayersRead>(
+    `${BASE}/${id}/layers`,
+    { params: schema ? { owner: schema } : undefined },
+  );
   return res.data;
 }

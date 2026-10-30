@@ -34,10 +34,15 @@ export interface TablePaginationState {
  * - 用户切换页/页大小后状态保留（弹窗关闭再开仍记得页大小）
  * - showTotal 用 i18n 文案
  */
-export function useTablePagination(): {
+export function useTablePagination(options?: {
+  /** 服务端分页模式：传入后端 total，antd 据此算页数（不传 = 客户端分页，行为不变）。 */
+  serverTotal?: number;
+}): {
   pagination: TablePaginationConfig;
   reset: () => void;
   setPage: (page: number) => void;
+  /** 当前分页状态：服务端模式下页面用它算 limit/offset 发请求。 */
+  state: TablePaginationState;
 } {
   const { t } = useTranslation();
   const [state, setState] = useState<TablePaginationState>({
@@ -52,6 +57,8 @@ export function useTablePagination(): {
     pageSizeOptions: TABLE_PAGE_SIZES.map(String),
     showQuickJumper: true,
     showTotal: (total: number) => t("common.totalItems", { total }),
+    // 服务端模式下 total 来自后端信封；客户端模式不传 → antd 用 dataSource 长度（原行为）
+    ...(options?.serverTotal !== undefined ? { total: options.serverTotal } : {}),
     onChange: (current, pageSize) => setState({ current, pageSize }),
   };
 
@@ -61,5 +68,6 @@ export function useTablePagination(): {
     // 切换过滤条件时回到第 1 页，但保留用户选的 pageSize。
     // 单独 reset() 会把 pageSize 也回到 20，影响用户已经调好的页大小。
     setPage: (page: number) => setState((s) => ({ ...s, current: page })),
+    state,
   };
 }

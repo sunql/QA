@@ -176,7 +176,12 @@ async def suggestKpiDatasource(
     _user: CurrentUser = Depends(getCurrentUser),
     db: AsyncSession = Depends(getDb),
 ) -> list[KpiDatasourceSuggestionRead]:
-    """基于 legacy 名称与 ontology 表反查给出绑定建议；不写库。"""
+    """给出绑定建议；不写库。
+
+    三类来源：legacy ``data_source`` 文本与数据源**名**的匹配（精确 / 模糊）、
+    legacy 文本中的**裸表名**与 ``schema_cache`` 的**表名精确 join**、
+    以及 ontology 类主表的反查。
+    """
     return [
         KpiDatasourceSuggestionRead.model_validate(s, from_attributes=True)
         for s in await _suggestion_service.suggest(db, id)

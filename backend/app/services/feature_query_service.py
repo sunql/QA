@@ -211,7 +211,9 @@ class FeatureQueryService:
         entries = "\n".join(self._catalogEntry(f) for f in eligible)
         return (
             "以下预计算特征可直接引用（无需实时聚合计算）。若问题语义与某特征匹配，"
-            "请在 conditions 中写明「使用特征 FEATURE_NAME」；否则按常规方式规划查询。\n"
+            "请在 conditions 中写明「使用特征 FEATURE_NAME」；否则按常规方式规划查询。"
+            "注意：FEATURE_NAME 不是本体属性，只允许写在 conditions 中；"
+            "写进 aggregations/selectedProperties/groupBy 会被计划校验拒绝。\n"
             f"{entries}"
         )
 

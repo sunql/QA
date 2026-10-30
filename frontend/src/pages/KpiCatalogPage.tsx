@@ -5,6 +5,7 @@ import {
   Modal,
   Form,
   Input,
+  InputNumber,
   Select,
   Space,
   Tag,
@@ -21,14 +22,21 @@ import {
   deleteKpi,
   getDatasourceSuggestions,
 } from "../api/kpiCatalog";
+import { listMetrics } from "../api/ontology";
+import type { MetricStatus, OntologyMetric } from "../types/ontology";
 import type {
   KpiCatalog,
-  KpiCatalogCreate,
-  KpiCatalogUpdate,
   KpiDatasourceSuggestion,
   KpiStatus,
 } from "../types/kpiCatalog";
 import { KPI_STATUS_OPTIONS } from "../types/kpiCatalog";
+import {
+  buildKpiCreatePayload,
+  buildKpiUpdatePayload,
+  emptyKpiForm,
+  DEFAULT_MATCH_THRESHOLD,
+} from "../utils/kpiCatalogPayload";
+import type { KpiFormValues } from "../utils/kpiCatalogPayload";
 import { useTranslation } from "../i18n";
 import { useDatasourceOptions, datasourceName } from "../hooks/useDatasourceOptions";
 import { useTablePagination } from "../utils/useTablePagination";
@@ -44,36 +52,10 @@ const KPI_STATUS_TAG_COLOR: Record<KpiStatus, string> = {
   DEPRECATED: "orange",
 };
 
-interface KpiFormValues {
-  kpiCode: string;
-  kpiName: string;
-  businessDefinition: string;
-  formula: string;
-  numerator: string;
-  denominator: string;
-  grain: string;
-  unit: string;
-  dataSource: string;
-  datasourceId?: number;
-  owner: string;
-  version: string;
-  status: KpiStatus;
-}
-
-const EMPTY_KPI_FORM: KpiFormValues = {
-  kpiCode: "",
-  kpiName: "",
-  businessDefinition: "",
-  formula: "",
-  numerator: "",
-  denominator: "",
-  grain: "",
-  unit: "",
-  dataSource: "",
-  datasourceId: undefined,
-  owner: "",
-  version: "v1.0",
-  status: "DRAFT",
+/** 本体指标状态 Tag 配色（位于「技术形态挂靠」列）。 */
+const METRIC_STATUS_TAG_COLOR: Record<MetricStatus, string> = {
+  DRAFT: "default",
+  PUBLISHED: "green",
 };
 
 export default function KpiCatalogPage() {
@@ -81,6 +63,7 @@ export default function KpiCatalogPage() {
   const { pagination } = useTablePagination();
   const sources = useDatasourceOptions();
   const [kpis, setKpis] = useState<KpiCatalog[]>([]);
+  const [metrics, setMetrics] = useState<OntologyMetric[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<KpiCatalog | null>(null);
@@ -125,11 +108,35 @@ export default function KpiCatalogPage() {
     void load();
   }, [load]);
 
+  // 指标列表与 KPI 列表互不依赖：一个失败不该影响另一个。
+  const loadMetrics = useCallback(async () => {
+    try {
+      setMetrics(await listMetrics());
+    } catch {
+      // 错误已由 axios 拦截器 toast；此处降级为空列表，
+      // 只影响「技术形态挂靠」列与「挂靠本体指标」下拉，不阻断页面其余部分。
+      setMetrics([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadMetrics();
+  }, [loadMetrics]);
+
+  // 避免每行都 find
+  const metricsById = useMemo(
+    () => new Map(metrics.map((m) => [m.id, m])),
+    [metrics],
+  );
+
+  // 表单初值必须是全新对象（tags 数组不得跨次打开共享实例）
+  const initialFormValues = useMemo(() => emptyKpiForm(), []);
+
   const openCreate = () => {
     suggestionSeq.current += 1;
     setEditing(null);
     setSuggestions([]);
-    void form.setFieldsValue(EMPTY_KPI_FORM);
+    void form.setFieldsValue(emptyKpiForm());
     setModalOpen(true);
   };
 
@@ -150,6 +157,14 @@ export default function KpiCatalogPage() {
       owner: record.owner ?? "",
       version: record.version,
       status: record.status,
+      // 四个数组一律展开拷贝：form store 不得持有 `kpis` state 里的同一实例
+      // （rc-field-form 的 set.js 在 setValue 时会递归 merge 并重建数组）
+      semanticKeywords: [...(record.semanticKeywords ?? [])],
+      matchThreshold: record.matchThreshold ?? DEFAULT_MATCH_THRESHOLD,
+      grainKeys: [...(record.grainKeys ?? [])],
+      numeratorColumns: [...(record.numeratorColumns ?? [])],
+      denominatorColumns: [...(record.denominatorColumns ?? [])],
+      metricId: record.metricId ?? undefined,
     });
     setModalOpen(true);
     // 建议是增强提示：失败不影响编辑流程，静默降级为空
@@ -178,40 +193,10 @@ export default function KpiCatalogPage() {
     try {
       const values = await form.validateFields();
       if (editing) {
-        const payload: KpiCatalogUpdate = {
-          kpiCode: values.kpiCode,
-          kpiName: values.kpiName,
-          businessDefinition: values.businessDefinition || null,
-          formula: values.formula || null,
-          numerator: values.numerator || null,
-          denominator: values.denominator || null,
-          grain: values.grain || null,
-          unit: values.unit || null,
-          dataSource: values.dataSource || null,
-          datasourceId: values.datasourceId ?? null,
-          owner: values.owner || null,
-          version: values.version || undefined,
-          status: values.status,
-        };
-        await updateKpi(editing.id, payload);
+        await updateKpi(editing.id, buildKpiUpdatePayload(values));
         void message.success(t("toast.updated"));
       } else {
-        const payload: KpiCatalogCreate = {
-          kpiCode: values.kpiCode,
-          kpiName: values.kpiName,
-          businessDefinition: values.businessDefinition || undefined,
-          formula: values.formula || undefined,
-          numerator: values.numerator || undefined,
-          denominator: values.denominator || undefined,
-          grain: values.grain || undefined,
-          unit: values.unit || undefined,
-          dataSource: values.dataSource || undefined,
-          datasourceId: values.datasourceId!,
-          owner: values.owner || undefined,
-          version: values.version || undefined,
-          status: values.status,
-        };
-        await createKpi(payload);
+        await createKpi(buildKpiCreatePayload(values));
         void message.success(t("toast.created"));
       }
       setModalOpen(false);
@@ -254,6 +239,28 @@ export default function KpiCatalogPage() {
         ),
     },
     { title: t("kpiCatalog.columns.owner"), dataIndex: "owner", width: 120 },
+    {
+      title: t("kpiCatalog.columns.metricId"),
+      dataIndex: "metricId",
+      width: 200,
+      render: (id: number | null) => {
+        if (!id) {
+          return <Tag color="orange">{t("kpiCatalog.technical.unlinked")}</Tag>;
+        }
+        const metric = metricsById.get(id);
+        if (!metric) {
+          return <Tag color="default">{`ID:${id}`}</Tag>;
+        }
+        return (
+          <Space size={4}>
+            <span>{metric.metricName}</span>
+            <Tag color={METRIC_STATUS_TAG_COLOR[metric.status]}>
+              {t(`enums.metricStatus.${metric.status}`)}
+            </Tag>
+          </Space>
+        );
+      },
+    },
     {
       title: t("kpiCatalog.columns.version"),
       dataIndex: "version",
@@ -328,7 +335,7 @@ export default function KpiCatalogPage() {
         width={640}
         destroyOnHidden
       >
-        <Form form={form} layout="vertical" initialValues={EMPTY_KPI_FORM}>
+        <Form form={form} layout="vertical" initialValues={initialFormValues}>
           <Form.Item
             name="kpiCode"
             label={t("kpiCatalog.labels.kpiCode")}
@@ -410,6 +417,72 @@ export default function KpiCatalogPage() {
               placeholder={t("kpiCatalog.placeholders.datasourceId")}
             />
           </Form.Item>
+          <Form.Item
+            name="metricId"
+            label={t("kpiCatalog.labels.metricId")}
+          >
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder={t("kpiCatalog.placeholders.metricId")}
+              options={metrics.map((m) => ({
+                value: m.id,
+                label: `${m.metricName}（${m.metricAlias ?? m.id}）`,
+              }))}
+            />
+          </Form.Item>
+          <Form.Item
+            name="semanticKeywords"
+            label={t("kpiCatalog.labels.semanticKeywords")}
+          >
+            <Select
+              mode="tags"
+              placeholder={t("kpiCatalog.placeholders.semanticKeywords")}
+            />
+          </Form.Item>
+          <Form.Item
+            name="matchThreshold"
+            label={t("kpiCatalog.labels.matchThreshold")}
+            rules={[
+              {
+                type: "number",
+                min: 0,
+                max: 1,
+                message: t("kpiCatalog.validation.matchThresholdRange"),
+              },
+            ]}
+          >
+            <InputNumber min={0} max={1} step={0.05} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item name="grainKeys" label={t("kpiCatalog.labels.grainKeys")}>
+            <Select
+              mode="tags"
+              placeholder={t("kpiCatalog.placeholders.grainKeys")}
+            />
+          </Form.Item>
+          <Space.Compact style={{ width: "100%" }}>
+            <Form.Item
+              name="numeratorColumns"
+              label={t("kpiCatalog.labels.numeratorColumns")}
+              style={{ width: "50%" }}
+            >
+              <Select
+                mode="tags"
+                placeholder={t("kpiCatalog.placeholders.numeratorColumns")}
+              />
+            </Form.Item>
+            <Form.Item
+              name="denominatorColumns"
+              label={t("kpiCatalog.labels.denominatorColumns")}
+              style={{ width: "50%" }}
+            >
+              <Select
+                mode="tags"
+                placeholder={t("kpiCatalog.placeholders.denominatorColumns")}
+              />
+            </Form.Item>
+          </Space.Compact>
           {topSuggestion && (
             <Alert
               type="info"

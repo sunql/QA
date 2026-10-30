@@ -3,7 +3,9 @@
 公共 API：
   - sanitizeForLlmPrompt(text): 5 字符 HTML entity 转义 + U+200B 打断 </x>
   - wrapUntrusted(label, text): 把 text 包成 <label>...</label>，label 走白名单
-  - UntrustedLabel: 11 个预定义 label（防 label 注入；含 3 个向后兼容旧标签）
+  - wrapSanitized(label, safeText): 包**已 sanitize** 文本（不二次转义），供
+    需要按渲染后长度裁剪的调用方使用
+  - UntrustedLabel: 12 个预定义 label（防 label 注入；含 3 个向后兼容旧标签）
   - SECURITY_PREAMBLE_EN / _ZH: system prompt guard 段
   - renderSecurityPreamble(): 拼接中英 guard
 """
@@ -26,7 +28,7 @@ _HTML5_ESCAPE: dict[str, str] = {
 # label 命名规则：小写字母开头 + 小写字母/数字/下划线
 _LABEL_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
-# 预定义 label 白名单（11 个 = 8 个新 + 3 个旧代码已有）
+# 预定义 label 白名单（12 个 = 9 个新 + 3 个旧代码已有）
 _ALLOWED_LABELS: frozenset[str] = frozenset(
     {
         # 8 个 L1 新增（spec 定义）
@@ -42,12 +44,14 @@ _ALLOWED_LABELS: frozenset[str] = frozenset(
         "feature_catalog",   # nl2sql_prompts.py 现有标签
         "term_dictionary",   # nl2sql_prompts.py 现有标签
         "user_content",      # hypothesis_service.py 现有标签
+        # 1 个 KPI 口径契约（feat-kpi-metric-technical-form Tier B 注入）
+        "kpi_contract",
     }
 )
 
 
 class UntrustedLabel:
-    """11 个预定义 label 常量 — 防 label 注入。"""
+    """12 个预定义 label 常量 — 防 label 注入。"""
 
     USER_QUESTION = "user_question"
     ONTOLOGY_RECALL = "ontology_recall"
@@ -61,10 +65,12 @@ class UntrustedLabel:
     FEATURE_CATALOG = "feature_catalog"
     TERM_DICTIONARY = "term_dictionary"
     USER_CONTENT = "user_content"
+    # KPI 口径契约（Tier B 注入；内容来自业务方填写的治理口径）
+    KPI_CONTRACT = "kpi_contract"
 
 
 # 在 _sanitizeContext 之后追加：U+200B 打断 *任意* 关闭标签 + 自闭标签
-# 注意：neutralizeFence 仍会处理 user_content 历史兼容，但 L1 防御需覆盖所有 8 个 label。
+# 注意：neutralizeFence 仍会处理 user_content 历史兼容，但 L1 防御需覆盖所有白名单 label。
 # 顺序：先 HTML escape，再 neutralizeFence（user_content 兼容），最后 break 任意 label 关闭/自闭。
 _CLOSING_TAG_PATTERN = re.compile(r"&lt;/([a-z][a-z0-9_]*)\b")
 _SELF_CLOSING_TAG_PATTERN = re.compile(r"&lt;([a-z][a-z0-9_]*)/&gt;")
@@ -73,10 +79,10 @@ _SELF_CLOSING_TAG_PATTERN = re.compile(r"&lt;([a-z][a-z0-9_]*)/&gt;")
 def _insertZeroWidthAfterEscapedOpen(text: str) -> str:
     """在 HTML 转义后的 `&lt;/x>` 和 `&lt;x/>` 模式中插入 U+200B。
 
-    防御面覆盖 8 个白名单 label + 旧 user_content fence，避免 close-tag/self-close
+    防御面覆盖全部白名单 label + 旧 user_content fence，避免 close-tag/self-close
     跨 LLM 工具还原后闭合外层包装。
     必须在 neutralizeFence 之后调用（neutralizeFence 处理 user_content；本函数补
-    其余 8 个 label 的关闭/自闭）。
+    其余白名单 label 的关闭/自闭）。
     """
     zws = "​"
     # 1. &lt;/x> → &lt;/x>
@@ -92,18 +98,15 @@ def sanitizeForLlmPrompt(text: str) -> str:
     1. HTML entity escape（& < > " '；比旧 _sanitizeContext 3 字符版多 " '）
     2. neutralizeFence（用户内容历史兼容）
     3. _insertZeroWidthAfterEscapedOpen：插入 U+200B 打断 *任意* label 的
-       关闭标签（&lt;/x>）和自闭标签（&lt;x/&gt;），覆盖 8 个白名单 label
+       关闭标签（&lt;/x>）和自闭标签（&lt;x/&gt;），覆盖全部白名单 label
     """
     escaped = "".join(_HTML5_ESCAPE.get(c, c) for c in text)
     after_fence = neutralizeFence(escaped)
     return _insertZeroWidthAfterEscapedOpen(after_fence)
 
 
-def wrapUntrusted(label: str, text: str) -> str:
-    """把 text 包成 <label>...</label>，label 内部用 sanitizeForLlmPrompt。
-
-    label 必须是预定义常量（白名单内），不接受运行时拼字符串。
-    """
+def _assertAllowedLabel(label: str) -> None:
+    """校验 label 命名与白名单，防止运行时拼接 label 注入。"""
     if not _LABEL_PATTERN.match(label):
         raise ValueError(
             f"invalid untrusted-wrap label: {label!r} "
@@ -114,8 +117,28 @@ def wrapUntrusted(label: str, text: str) -> str:
             f"untrusted-wrap label {label!r} not in whitelist; "
             f"use UntrustedLabel.<CONSTANT>"
         )
+
+
+def wrapUntrusted(label: str, text: str) -> str:
+    """把 text 包成 <label>...</label>，label 内部用 sanitizeForLlmPrompt。
+
+    label 必须是预定义常量（白名单内），不接受运行时拼字符串。
+    """
+    _assertAllowedLabel(label)
     safe = sanitizeForLlmPrompt(text)
     return f"<{label}>{safe}</{label}>"
+
+
+def wrapSanitized(label: str, safeText: str) -> str:
+    """把**已经 sanitize 过**的文本包成 <label>...</label>（不二次转义）。
+
+    给需要先按「渲染后长度」裁剪、再包裹的调用方用：先用
+    ``sanitizeForLlmPrompt`` + 长度裁剪得到 ``safeText``，再走本函数，
+    避免二次转义把长度放大 5~6 倍。label 白名单校验与 ``wrapUntrusted``
+    完全一致。
+    """
+    _assertAllowedLabel(label)
+    return f"<{label}>{safeText}</{label}>"
 
 
 # System prompt guard 段（中英双语）

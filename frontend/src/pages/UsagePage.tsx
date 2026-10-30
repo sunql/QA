@@ -34,6 +34,24 @@ import { useTranslation } from "../i18n";
 
 const { Text } = Typography;
 
+// 成本口径白名单（P1-2）。costSource 是 DB 原始字符串（系统边界）：只有已知值才
+// 映射到专属文案；未知值 / 历史 NULL 一律显示「未知」——绝不把原始值拼进 i18n key
+// （i18next 缺 key 会回落成 key 本身，等于把内部枚举暴露给用户）。
+const COST_SOURCE_LABELS: Record<string, { key: string; color: string }> = {
+  measured: { key: "forms.usage.costSource.measured", color: "green" },
+  estimated: { key: "forms.usage.costSource.estimated", color: "orange" },
+  unknown: { key: "forms.usage.costSource.unknown", color: "default" },
+};
+const COST_SOURCE_UNKNOWN_LABEL = "forms.usage.costSource.unknown";
+
+function costSourceLabel(value: string | null): { key: string; color: string } {
+  // hasOwnProperty：value 是 DB 原始字符串，"constructor" 等原型键不能被当成命中。
+  if (value && Object.prototype.hasOwnProperty.call(COST_SOURCE_LABELS, value)) {
+    return COST_SOURCE_LABELS[value];
+  }
+  return { key: COST_SOURCE_UNKNOWN_LABEL, color: "default" };
+}
+
 // 选中会话的明细：按模型聚合卡片 + 流水明细表
 interface SessionDetail {
   summary: TokenUsageSummary;
@@ -226,6 +244,15 @@ export default function UsagePage() {
       dataIndex: "completionTokens",
       width: 110,
       align: "right" as const,
+    },
+    {
+      title: t("forms.usage.columns.costSource"),
+      dataIndex: "costSource",
+      width: 100,
+      render: (v: string | null) => {
+        const label = costSourceLabel(v);
+        return <Tag color={label.color}>{t(label.key)}</Tag>;
+      },
     },
     {
       title: t("forms.usage.columns.actions"),

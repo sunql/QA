@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   Table,
   Button,
@@ -26,6 +26,11 @@ import type {
   OntologyMetricCreate,
   OntologyMetricUpdate,
   AggFunction,
+  MetricType,
+  MetricAggregationOrder,
+  MetricExecutionSource,
+  MetricStatus,
+  MeasureSpec,
 } from "../../types/ontology";
 import { AGG_FUNCTION_OPTIONS } from "../../types/ontology";
 import { useTranslation } from "../../i18n";
@@ -34,6 +39,8 @@ import type { FilterField } from "./FilterBar";
 import { filterMetrics } from "../../utils/ontologyFilter";
 import type { FilterValues } from "../../utils/ontologyFilter";
 import { classOptions } from "./classOptions";
+import MetricTechniqueForm from "./MetricTechniqueForm";
+import { fromMeasureSpec, toMeasureSpec } from "../../utils/metricTechnique";
 
 interface MetricFormValues {
   metricName: string;
@@ -42,6 +49,21 @@ interface MetricFormValues {
   aggFunction: AggFunction;
   targetClassId: number | undefined;
   dimensionDefaults: string;
+  // ── P1 指标技术形态（扁平形状，提交时转 measure JSON）──
+  metricType: MetricType;
+  aggregationOrder: MetricAggregationOrder | undefined;
+  executionSource: MetricExecutionSource | undefined;
+  numeratorAgg: string | undefined;
+  numeratorExpr: string;
+  numeratorFilter: string;
+  denominatorAgg: string | undefined;
+  // needsDenominator=false 时这两个字段未注册 ⇒ validateFields 不返回它们。
+  denominatorExpr: string | undefined;
+  denominatorFilter: string | undefined;
+  grainKeys: string[];
+  filterExpression: string;
+  owner: string;
+  status: MetricStatus;
 }
 
 const EMPTY_METRIC_FORM: MetricFormValues = {
@@ -51,7 +73,74 @@ const EMPTY_METRIC_FORM: MetricFormValues = {
   aggFunction: "SUM",
   targetClassId: undefined,
   dimensionDefaults: "",
+  metricType: "MEASURE",
+  aggregationOrder: undefined,
+  executionSource: undefined,
+  numeratorAgg: undefined,
+  numeratorExpr: "",
+  numeratorFilter: "",
+  denominatorAgg: undefined,
+  denominatorExpr: "",
+  denominatorFilter: "",
+  grainKeys: [],
+  filterExpression: "",
+  owner: "",
+  status: "DRAFT",
 };
+
+/** 编辑时库里的原 measure —— 用于把派生字段 `class_id` / `class_alias` 原样带回。 */
+interface ExistingMeasures {
+  numerator: MeasureSpec | null;
+  denominator: MeasureSpec | null;
+}
+
+function parseDimensionDefaults(raw: string): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  const result: Record<string, string> = {};
+  for (const pair of raw.split(",")) {
+    const [k, ...rest] = pair.trim().split(":");
+    if (k) {
+      result[k] = rest.join(":") || k;
+    }
+  }
+  return result;
+}
+
+function buildMetricPayload(
+  values: MetricFormValues,
+  existing: ExistingMeasures,
+): OntologyMetricCreate {
+  return {
+    metricName: values.metricName,
+    metricAlias: values.metricAlias || undefined,
+    formula: values.formula,
+    aggFunction: values.aggFunction,
+    targetClassId: values.targetClassId,
+    dimensionDefaults: parseDimensionDefaults(values.dimensionDefaults),
+    metricType: values.metricType,
+    numeratorMeasure: toMeasureSpec(
+      { agg: values.numeratorAgg, expr: values.numeratorExpr, filter: values.numeratorFilter },
+      existing.numerator,
+    ),
+    denominatorMeasure: toMeasureSpec(
+      {
+        agg: values.denominatorAgg,
+        expr: values.denominatorExpr,
+        filter: values.denominatorFilter,
+      },
+      existing.denominator,
+    ),
+    aggregationOrder: values.aggregationOrder ?? null,
+    grainKeys: values.grainKeys,
+    filterExpression: values.filterExpression || null,
+    // `status` 恒传：编辑已发布指标 = 一次重新发布（会重跑 Task 11 发布闸门）。
+    status: values.status,
+    // `owner` 是用户可编辑字段 ⇒ 清空即显式 null。与 measure 内的派生字段
+    // `class_id` / `class_alias`（必须保留）刻意不同。
+    owner: values.owner || null,
+    executionSource: values.executionSource ?? null,
+  };
+}
 
 export interface MetricTabProps {
   classes: OntologyClass[];
@@ -64,6 +153,9 @@ export default function MetricTab({ classes }: MetricTabProps) {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<OntologyMetric | null>(null);
   const [form] = Form.useForm<MetricFormValues>();
+  // 编辑时保留原 measure 的派生字段（class_id / class_alias）——
+  // 后端更新是整块替换 JSONB，不回传就会抹掉回填脚本写入的源类信息。
+  const existingMeasures = useRef<ExistingMeasures>({ numerator: null, denominator: null });
   const [filters, setFilters] = useState<FilterValues>({});
   const updateFilter = useCallback(
     (k: string, v: string) => setFilters((prev) => ({ ...prev, [k]: v })),
@@ -104,6 +196,7 @@ export default function MetricTab({ classes }: MetricTabProps) {
 
   const openCreate = () => {
     setEditing(null);
+    existingMeasures.current = { numerator: null, denominator: null };
     void form.setFieldsValue(EMPTY_METRIC_FORM);
     setModalOpen(true);
   };
@@ -115,6 +208,12 @@ export default function MetricTab({ classes }: MetricTabProps) {
             .map(([k, v]) => `${k}:${v}`)
             .join(",")
         : "";
+    const numerator = fromMeasureSpec(record.numeratorMeasure);
+    const denominator = fromMeasureSpec(record.denominatorMeasure);
+    existingMeasures.current = {
+      numerator: record.numeratorMeasure,
+      denominator: record.denominatorMeasure,
+    };
     setEditing(record);
     void form.setFieldsValue({
       metricName: record.metricName,
@@ -123,6 +222,19 @@ export default function MetricTab({ classes }: MetricTabProps) {
       aggFunction: record.aggFunction as AggFunction,
       targetClassId: record.targetClassId ?? undefined,
       dimensionDefaults: dimDefaults,
+      metricType: record.metricType,
+      aggregationOrder: record.aggregationOrder ?? undefined,
+      executionSource: record.executionSource ?? undefined,
+      numeratorAgg: numerator.agg,
+      numeratorExpr: numerator.expr,
+      numeratorFilter: numerator.filter,
+      denominatorAgg: denominator.agg,
+      denominatorExpr: denominator.expr,
+      denominatorFilter: denominator.filter,
+      grainKeys: record.grainKeys ?? [],
+      filterExpression: record.filterExpression ?? "",
+      owner: record.owner ?? "",
+      status: record.status,
     });
     setModalOpen(true);
   };
@@ -140,24 +252,7 @@ export default function MetricTab({ classes }: MetricTabProps) {
   const handleSubmit = async () => {
     try {
       const values = await form.validateFields();
-      let dimensionDefaults: Record<string, string> | undefined;
-      if (values.dimensionDefaults) {
-        dimensionDefaults = {};
-        for (const pair of values.dimensionDefaults.split(",")) {
-          const [k, ...rest] = pair.trim().split(":");
-          if (k) {
-            dimensionDefaults[k] = rest.join(":") || k;
-          }
-        }
-      }
-      const payload: OntologyMetricCreate = {
-        metricName: values.metricName,
-        metricAlias: values.metricAlias || undefined,
-        formula: values.formula,
-        aggFunction: values.aggFunction,
-        targetClassId: values.targetClassId,
-        dimensionDefaults,
-      };
+      const payload = buildMetricPayload(values, existingMeasures.current);
       if (editing) {
         const updatePayload: OntologyMetricUpdate = { ...payload };
         await updateMetric(editing.id, updatePayload);
@@ -168,8 +263,11 @@ export default function MetricTab({ classes }: MetricTabProps) {
       }
       setModalOpen(false);
       void load();
-    } catch (err) {
-      if (err instanceof Error && err.message.includes(t("forms.required"))) return;
+    } catch {
+      // 表单校验失败：antd 已在字段下就地列出原因（validateFields 的 reject 值
+      // 不是 Error，无从按 message 分流）；发布闸门 409 与其它错误的文案由
+      // axios 响应拦截器统一 toast。此处只需保证不关闭弹窗 ——
+      // `setModalOpen(false)` 在 await 之后，抛错时不会执行。
     }
   };
 
@@ -193,6 +291,26 @@ export default function MetricTab({ classes }: MetricTabProps) {
       dataIndex: "aggFunction",
       width: 100,
       render: (fn: AggFunction) => t(`enums.aggFunction.${fn}`),
+    },
+    {
+      title: t("forms.ontology.metricColumns.metricTypeColumn"),
+      dataIndex: "metricType",
+      width: 110,
+      render: (v: MetricType) => t(`enums.metricType.${v}`),
+    },
+    {
+      title: t("forms.ontology.metricColumns.aggregationOrderColumn"),
+      dataIndex: "aggregationOrder",
+      width: 140,
+      render: (v: MetricAggregationOrder | null) =>
+        v ? t(`enums.metricAggregationOrder.${v}`) : t("common.emDash"),
+    },
+    {
+      title: t("forms.ontology.metricColumns.executionSourceColumn"),
+      dataIndex: "executionSource",
+      width: 140,
+      render: (v: MetricExecutionSource | null) =>
+        v ? t(`enums.metricExecutionSource.${v}`) : t("common.emDash"),
     },
     {
       title: t("forms.ontology.metricColumns.targetClassId"),
@@ -329,6 +447,7 @@ export default function MetricTab({ classes }: MetricTabProps) {
           >
             <Input placeholder={t("forms.ontology.metricPlaceholders.dimensionDefaults")} />
           </Form.Item>
+          <MetricTechniqueForm form={form} />
         </Form>
       </Modal>
     </>

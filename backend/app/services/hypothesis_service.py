@@ -34,6 +34,7 @@ from app.security.prompt_sanitizer import (
     wrapUntrusted,
 )
 from app.services.llm_json_fence import stripJsonFence
+from app.services.token_usage_service import COST_SOURCE_ESTIMATED
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +342,8 @@ class HypothesisMixin:
                 await self._recordUsage(
                     session, sessionId, pc.selected,
                     promptTokens, completionTokens, purpose="hypothesis",
+                    # 异常里提取的 token ⇒ 估算口径（与 chat_usage retry-gen 同口径）。
+                    cost_source=COST_SOURCE_ESTIMATED,
                 )
         except Exception as accountExc:  # pragma: no cover - 防御分支
             logger.warning("假设失败路径用量补账失败: %s", accountExc)

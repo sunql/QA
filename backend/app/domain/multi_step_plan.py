@@ -98,27 +98,12 @@ class StepPlan:
         description: 自然语言描述，如"2024 年销售额"。
         sub_question: 喂给 NL2SQL 的子问题，可注入前序步骤结果后发给 LLM。
         aggregation_only: True 表示该步是汇总步骤（仅产生最终回答，不执行 SQL）。
-        depends_on: P1-4 显式依赖的前序步骤 index 元组。
-        input_refs: P1-4 输入引用的 result set 名（元组，L1 不真用，仅作 metadata）。
-        output_schema: P1-4 输出 schema 描述（dict，L1 不真用，仅作 metadata）。
-        execution_group: P1-4 执行组（同组可视为并行候选；L1 串行，保留字段为 L2 占位）。
-        on_failure: P1-4 失败策略。abort=立即终止；isolate=标 error 继续（既有默认行为）；skip=标 skipped。
     """
 
     index: int
     description: str
     sub_question: str
     aggregation_only: bool = False
-    # P1-4：显式依赖（前序步骤 index 列表）
-    depends_on: tuple[int, ...] = ()
-    # P1-4：输入引用（result set 名列表，语义层 metadata，L1 不真用）
-    input_refs: tuple[str, ...] = ()
-    # P1-4：输出 schema 描述（语义层 metadata）
-    output_schema: dict = field(default_factory=dict)
-    # P1-4：执行组（同 group 可视为并行候选；L1 串行，保留字段为 L2 占位）
-    execution_group: int = 0
-    # P1-4：失败策略
-    on_failure: Literal["skip", "abort", "isolate"] = "isolate"
 
 
 @dataclass(frozen=True)
@@ -158,10 +143,6 @@ class StepResult:
     table_option: dict | None = None
     visual_rationale: dict | None = None
     query_plan: "QueryPlan | None" = None
-    # P1-4：被 dep 失败标 skip（不是自己失败，而是因依赖失败被跳过）
-    skipped: bool = False
-    # P1-4：skip 原因描述
-    skip_reason: str | None = None
 
 
 @dataclass(frozen=True)

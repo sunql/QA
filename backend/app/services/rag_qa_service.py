@@ -42,7 +42,7 @@ from app.services.stream_events import (
     StreamEvent,
 )
 from app.services.think_block import ThinkStreamFilter, isThinkHideEnabled
-from app.services.token_usage_service import TokenUsageService
+from app.services.token_usage_service import COST_SOURCE_MEASURED, TokenUsageService
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +255,8 @@ class RagQaService:
                 completionTokens=total_ct,
                 cost=cost,
                 purpose=_PURPOSE_DOC_QA,
+                # 成本由已选配置单价 × 客户端上报的 token 算出 ⇒ 实测口径。
+                cost_source=COST_SOURCE_MEASURED,
             )
 
         # 11. 落库（user + assistant）

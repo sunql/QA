@@ -149,3 +149,16 @@ class TestCatalogValidation:
 
     def test_empty_catalog_renders_none(self) -> None:
         assert FeatureQueryService()._renderCatalogText([]) is None
+
+    def test_header_forbids_feature_name_outside_conditions(self) -> None:
+        """目录头必须显式禁止把 FEATURE_NAME 写进聚合/属性/分组字段。
+
+        2026-10-30 prod 回归：LLM 把 SUPPLIER_OTD_3M 写进 aggregations，
+        validatePlan 拒绝非本体属性 → 2 次重试全挂 → 硬失败。设计路径是
+        写进 conditions 由 _tryFeatureResponse 拦截，文案必须给出方向。
+        """
+        text = FeatureQueryService()._renderCatalogText([_feature()])
+        assert text is not None
+        assert "只允许写在 conditions 中" in text
+        assert "aggregations" in text
+        assert "会被计划校验拒绝" in text

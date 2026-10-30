@@ -41,6 +41,10 @@ from app.domain.enums import (
     KpiStatus,
     LineageLayer,
     MatchRule,
+    MetricAggregationOrder,
+    MetricExecutionSource,
+    MetricStatus,
+    MetricType,
     ObjectType,
     RefreshFrequency,
     ReportTimeWindowType,
@@ -56,6 +60,8 @@ from typing import Annotated, Any, Literal, Mapping
 from pydantic import BeforeValidator
 
 from app.services.business_object_registry import businessObjectRegistry
+from app.services.data_domain_registry import dataDomainRegistry
+from app.services.layer_rule_registry import layerRuleRegistry
 
 
 def _validateBusinessObjectCode(code: str) -> str:
@@ -89,6 +95,23 @@ BusinessObjectCodeNew = Annotated[str, BeforeValidator(_validateBusinessObjectCo
 Unlike BusinessObjectCodeType, this does NOT check the registry — a code being
 CREATED is by definition not yet in the registry. DB CHECK constraint (uppercase
 VARCHAR(20)) enforces the rest.
+"""
+
+
+def _validateDataDomainCode(code: str) -> str:
+    """Runtime validation against data_domain table via registry（仅 enabled 码）。"""
+    if not dataDomainRegistry.isValid(code):
+        raise ValueError(f"Invalid data domain code: {code!r}")
+    return code
+
+
+DataDomainCodeType = Annotated[str, BeforeValidator(_validateDataDomainCode)]
+"""已存在且启用的数据域 code（feat-data-domain-layer）。
+
+用于 BO 挂域、Agent dataDomains 等引用点；格式校验复用
+`_validateBusinessObjectCodeFormat`（大写+字母数字+下划线，≤20），存在性由
+dataDomainRegistry 保证。DataDomainCreate 自身的 code 用 format-only 版本
+（create payload paradox：新域尚不在 registry）。
 """
 
 from app.domain.error_messages import (
@@ -436,6 +459,8 @@ class SessionTokenUsageRead(CamelModel):
     cost: Decimal
     request_time: datetime
     purpose: str | None = None
+    # 成本口径（P1-2）：measured / estimated / unknown；NULL = 早期未标注行。
+    cost_source: str | None = None
 
 
 class ModelUsageStat(CamelModel):
@@ -602,6 +627,41 @@ class OntologyPropertyUpdate(CamelModel):
         return v
 
 
+_MEASURE_AGG_ALLOWED: frozenset[str] = frozenset(
+    {"SUM", "COUNT", "AVG", "COUNT_DISTINCT"}
+)
+
+
+class MeasureSpecSchema(CamelModel):
+    """结构化度量定义（numerator_measure / denominator_measure 共用形状）。
+
+    agg：聚合函数（SUM / COUNT / AVG / COUNT_DISTINCT）。
+    expr：表达式文本（列名或列名算术式），如 "ACTUAL_RECEIPT_DATE - PROMISED_DATE"。
+    filter：过滤谓词（如 "IQCRESULT = 'FAIL'"），可为 None。
+    class_id：源类 ID（JSON 内嵌引用，DB 无法加 FK；本 DTO **不做**存在性校验，
+    悬空 id 由契约渲染降级为 class#{id}，回填脚本写库前才检查 role/class 归属）。
+    class_alias：源类别名（人读，冗余存储便于 prompt 渲染）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    agg: str = Field(..., description="SUM|COUNT|AVG|COUNT_DISTINCT")
+    expr: str | None = Field(default=None, max_length=1000)
+    filter: str | None = Field(default=None, max_length=1000)
+    class_id: int | None = None
+    class_alias: str | None = Field(default=None, max_length=100)
+
+    @field_validator("agg")
+    @classmethod
+    def _validateAgg(cls, value: str) -> str:
+        token = value.strip().upper()
+        if token not in _MEASURE_AGG_ALLOWED:
+            raise ValueError(
+                f"measure agg 非法：{value!r}；应为 {sorted(_MEASURE_AGG_ALLOWED)}"
+            )
+        return token
+
+
 class OntologyMetricCreate(CamelModel):
     metric_name: str = Field(..., min_length=1, max_length=100)
     metric_alias: str | None = Field(default=None, max_length=100)
@@ -610,6 +670,16 @@ class OntologyMetricCreate(CamelModel):
     target_class_id: int | None = None
     dimension_defaults: dict | None = None
     created_by: str | None = None
+    # ── P1 指标技术形态 ────────────────────────────────────────────
+    metric_type: MetricType = MetricType.MEASURE
+    numerator_measure: MeasureSpecSchema | None = None
+    denominator_measure: MeasureSpecSchema | None = None
+    aggregation_order: MetricAggregationOrder | None = None
+    grain_keys: list[str] | None = None
+    filter_expression: str | None = Field(default=None, max_length=2000)
+    status: MetricStatus = MetricStatus.DRAFT
+    owner: str | None = Field(default=None, max_length=100)
+    execution_source: MetricExecutionSource | None = None
 
 
 class OntologyMetricUpdate(CamelModel):
@@ -619,6 +689,16 @@ class OntologyMetricUpdate(CamelModel):
     agg_function: str | None = None
     target_class_id: int | None = None
     dimension_defaults: dict | None = None
+    # ── P1 指标技术形态 ────────────────────────────────────────────
+    metric_type: MetricType | None = None
+    numerator_measure: MeasureSpecSchema | None = None
+    denominator_measure: MeasureSpecSchema | None = None
+    aggregation_order: MetricAggregationOrder | None = None
+    grain_keys: list[str] | None = None
+    filter_expression: str | None = Field(default=None, max_length=2000)
+    status: MetricStatus | None = None
+    owner: str | None = Field(default=None, max_length=100)
+    execution_source: MetricExecutionSource | None = None
 
 
 class OntologyClassRead(CamelModel):
@@ -675,6 +755,16 @@ class OntologyMetricRead(CamelModel):
     created_by: str | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
+    # ── P1 指标技术形态 ────────────────────────────────────────────
+    metric_type: MetricType = MetricType.MEASURE
+    numerator_measure: dict | None = None
+    denominator_measure: dict | None = None
+    aggregation_order: MetricAggregationOrder | None = None
+    grain_keys: list[str] | None = None
+    filter_expression: str | None = None
+    status: MetricStatus = MetricStatus.DRAFT
+    owner: str | None = None
+    execution_source: MetricExecutionSource | None = None
 
 
 class KpiCatalogCreate(CamelModel):
@@ -698,6 +788,15 @@ class KpiCatalogCreate(CamelModel):
     status: KpiStatus = KpiStatus.DRAFT
     datasource_id: int = Field(..., ge=1, description="绑定的业务数据源 ID（FK → data_source.id）")
     metric_id: int | None = None
+    grain_keys: list[str] | None = Field(
+        default=None, description="结构化粒度键（业务人员可填，词汇有限）"
+    )
+    numerator_columns: list[str] | None = Field(
+        default=None, description="分子列名数组（治理侧声明，对账用）"
+    )
+    denominator_columns: list[str] | None = Field(
+        default=None, description="分母列名数组（治理侧声明，对账用）"
+    )
     created_by: str | None = Field(default=None, max_length=50)
     semantic_keywords: list[str] | None = Field(
         default=None,
@@ -732,6 +831,15 @@ class KpiCatalogUpdate(CamelModel):
     status: KpiStatus | None = Field(default=None, description="KPI 状态；显式传 null 会被 422 拒绝（NOT NULL 约束）")
     datasource_id: int | None = Field(default=None, ge=1, description="重绑数据源；显式传 null 解绑")
     metric_id: int | None = None
+    semantic_keywords: list[str] | None = Field(
+        default=None, description="L1 语义匹配关键词"
+    )
+    match_threshold: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="匹配阈值，默认 0.75"
+    )
+    grain_keys: list[str] | None = None
+    numerator_columns: list[str] | None = None
+    denominator_columns: list[str] | None = None
 
 
 class KpiCatalogRead(CamelModel):
@@ -751,6 +859,11 @@ class KpiCatalogRead(CamelModel):
     revision_count: int
     status: KpiStatus
     metric_id: int | None = None
+    semantic_keywords: list[str] | None = None
+    match_threshold: float = 0.75
+    grain_keys: list[str] | None = None
+    numerator_columns: list[str] | None = None
+    denominator_columns: list[str] | None = None
     created_by: str | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
@@ -763,7 +876,12 @@ class KpiDatasourceSuggestionRead(CamelModel):
     name: str
     score: float
     reasons: list[
-        Literal["legacy_name_exact", "legacy_name_fuzzy", "ontology_table"]
+        Literal[
+            "legacy_name_exact",
+            "legacy_name_fuzzy",
+            "legacy_table_exact",
+            "ontology_table",
+        ]
     ]
 
 
@@ -2462,6 +2580,20 @@ class EntityMappingRead(CamelModel):
     )
 
 
+class EntityMappingPage(CamelModel):
+    """编码映射分页响应（fix-entity-mapping-page-pagination 2026-10-24）。
+
+    rows 为当前页 EntityMappingRead 列表，total 为满足过滤条件的总条数
+    （独立于 limit/offset，前端用于分页渲染）。
+
+    替代「裸 list[EntityMappingRead]」响应：生产 entity_mapping 已 35 万行
+    （THBI 同步），前端原页面无分页控件 + 后端默认 limit=200，永远只显示
+    前 200 行。范式与 AuditLogPage 一致（feat-audit-history-api Task 1）。
+    """
+    rows: list["EntityMappingRead"]
+    total: int
+
+
 class EntityMappingBulkImportItem(CamelModel):
     """批量导入单行请求 DTO（feat-entity-mapping-bulk-import 2026-09-16）。
 
@@ -2744,13 +2876,37 @@ class AgentAccessPolicyRead(CamelModel):
     created_time: datetime | None = None
 
 
+def _allowedAgentDomains() -> tuple[str, ...]:
+    """域词表当前合法值（feat-data-domain-layer：SSOT 已迁 DB）。
+
+    dataDomainRegistry 已 warmUp → DB enabled 集（管理端可动态加域）；
+    未 warmUp（单测/极早期启动）→ AGENT_DATA_DOMAINS 常量 fallback。
+    **授权词表语义不变**：两个来源都是闭合集合，绝不允许未加载即放行。
+    """
+    if dataDomainRegistry.isWarmedUp():
+        return tuple(sorted(dataDomainRegistry.getEnabled()))
+    return AGENT_DATA_DOMAINS
+
+
+def _allowedAgentLayers() -> tuple[str, ...]:
+    """层词表当前合法值（feat-data-domain-layer 方案 2：SSOT 已迁 DB）。
+
+    layerRuleRegistry 已 warmUp → data_layer_rule 全部 enabled 层（含 FEATURE
+    手工声明层）；未 warmUp → AGENT_DATA_LAYERS 常量 fallback。
+    """
+    if layerRuleRegistry.isWarmedUp():
+        return layerRuleRegistry.distinctLayers()
+    return AGENT_DATA_LAYERS
+
+
 def _vocabCheckDomains(values: list[str]) -> list[str]:
     """域归一化 + 词表校验 + 去重保序；非法值抛 ValueError（Pydantic 422）。"""
+    allowed = _allowedAgentDomains()
     normalized = [normalizeAgentDomain(x) for x in values]
-    rejected = [x for x in normalized if x not in AGENT_DATA_DOMAINS]
+    rejected = [x for x in normalized if x not in allowed]
     if rejected:
         raise ValueError(MSG_AGENT_DOMAIN_NOT_IN_VOCAB.format(
-            value=",".join(rejected), allowed=",".join(AGENT_DATA_DOMAINS)
+            value=",".join(rejected), allowed=",".join(allowed)
         ))
     seen: set[str] = set()
     deduped: list[str] = []
@@ -2762,11 +2918,12 @@ def _vocabCheckDomains(values: list[str]) -> list[str]:
 
 def _vocabCheckLayers(values: list[str]) -> list[str]:
     """层归一化 + 词表校验 + 去重保序；复用既有 `_normalizeDataLayer`（None → None 会被过滤）。"""
+    allowed = _allowedAgentLayers()
     normalized = [n for n in (_normalizeDataLayer(x) for x in values if x is not None) if n]
-    rejected = [x for x in normalized if x not in AGENT_DATA_LAYERS]
+    rejected = [x for x in normalized if x not in allowed]
     if rejected:
         raise ValueError(MSG_AGENT_LAYER_NOT_IN_VOCAB.format(
-            value=",".join(rejected), allowed=",".join(AGENT_DATA_LAYERS)
+            value=",".join(rejected), allowed=",".join(allowed)
         ))
     seen: set[str] = set()
     deduped: list[str] = []
@@ -3076,12 +3233,16 @@ class AgentToolConfigRead(AgentToolConfigBase):
 
 
 class BusinessObjectCreate(CamelModel):
-    """创建业务对象 (Phase 4.4)."""
+    """创建业务对象 (Phase 4.4；feat-data-domain-layer 收紧 header/主域必填)."""
 
     code: BusinessObjectCodeNew = Field(...)
     name: str = Field(..., min_length=1, max_length=100)
-    header_class_id: int | None = None
+    # 0133 起收紧为必填（规则①）：无本体类的 BO 无法参与图谱与问答
+    header_class_id: int = Field(...)
     graph_label: str | None = Field(default=None, max_length=100)
+    # 规则②：主域必填且唯一（附域经 attachedDomainIds）；必须为已启用的域
+    primary_domain_id: DataDomainCodeType = Field(...)
+    attached_domain_ids: list[DataDomainCodeType] = Field(default_factory=list)
     description: str | None = Field(default=None, max_length=4000)
 
 
@@ -3091,6 +3252,8 @@ class BusinessObjectUpdate(CamelModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     header_class_id: int | None = None
     graph_label: str | None = Field(default=None, max_length=100)
+    primary_domain_id: DataDomainCodeType | None = None
+    attached_domain_ids: list[DataDomainCodeType] | None = None
     description: str | None = Field(default=None, max_length=4000)
 
 
@@ -3103,11 +3266,64 @@ class BusinessObjectRead(CamelModel):
 
     code: BusinessObjectCodeType
     name: str
-    header_class_id: int | None = None
+    header_class_id: int
+    primary_domain_id: str
+    attached_domain_ids: list[str] = Field(default_factory=list)
     graph_label: str | None = None
     description: str | None = None
     created_time: datetime | None = None
     updated_time: datetime | None = None
+
+
+class DataDomainCreate(CamelModel):
+    """创建数据域（feat-data-domain-layer 方案 1）。"""
+
+    # create payload paradox 同 BO：format-only，存在性由 DB PK 约束兜底
+    code: BusinessObjectCodeNew = Field(...)
+    name: str = Field(..., min_length=1, max_length=100)
+    primary_org_id: int | None = None
+    description: str | None = Field(default=None, max_length=4000)
+    enabled: bool = True
+
+
+class DataDomainUpdate(CamelModel):
+    """更新数据域（code 不可改）。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    primary_org_id: int | None = None
+    description: str | None = Field(default=None, max_length=4000)
+    enabled: bool | None = None
+
+
+class DataDomainRead(CamelModel):
+    """数据域响应（含主管理组织名称，供管理页直显）。"""
+
+    code: str
+    name: str
+    primary_org_id: int | None = None
+    primary_org_name: str | None = None
+    description: str | None = None
+    enabled: bool = True
+    created_time: datetime | None = None
+    updated_time: datetime | None = None
+
+
+class DataLayerCountRead(CamelModel):
+    """单层数据表计数（feat-data-domain-layer 方案 2）。"""
+
+    layer: str
+    table_count: int
+
+
+class DataSourceLayersRead(CamelModel):
+    """按数据源探测的数据层分布（cache-only；miss 时 fromCache=false）。"""
+
+    datasource_id: int
+    schema_name: str
+    from_cache: bool
+    total_tables: int = 0
+    unknown_tables: int = 0
+    layers: list[DataLayerCountRead] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

@@ -1,3 +1,5 @@
+// 必须最先执行：HTTP 非安全上下文下补 crypto.randomUUID（wikiChatStore 模块加载期就会调用）。
+import "./polyfills/randomUUID";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";

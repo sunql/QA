@@ -39,20 +39,32 @@ describe("api/businessObject", () => {
     await createBusinessObject({
       code: "SUPPLIER",
       name: "供应商",
+      headerClassId: 1,
+      primaryDomainId: "PROCUREMENT",
+      attachedDomainIds: ["LOGISTICS"],
       graphLabel: "Supplier",
     });
     expect(httpMock.post).toHaveBeenCalledWith("/business-objects", {
       code: "SUPPLIER",
       name: "供应商",
+      headerClassId: 1,
+      primaryDomainId: "PROCUREMENT",
+      attachedDomainIds: ["LOGISTICS"],
       graphLabel: "Supplier",
     });
   });
 
   it("updateBusinessObject uses PUT with code", async () => {
     httpMock.put.mockResolvedValue({ data: {} });
-    await updateBusinessObject("SUPPLIER", { name: "新名字" });
+    await updateBusinessObject("SUPPLIER", {
+      name: "新名字",
+      primaryDomainId: "PROCUREMENT",
+      attachedDomainIds: [],
+    });
     expect(httpMock.put).toHaveBeenCalledWith("/business-objects/SUPPLIER", {
       name: "新名字",
+      primaryDomainId: "PROCUREMENT",
+      attachedDomainIds: [],
     });
   });
 

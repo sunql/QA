@@ -71,10 +71,17 @@ function matchRuleColor(rule: MatchRule): string {
 
 export default function EntityMappingPage() {
   const { t } = useTranslation();
-  const { pagination } = useTablePagination();
   const [mappings, setMappings] = useState<EntityMappingRead[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [filterType, setFilterType] = useState<EntityType | undefined>();
+  // 服务端分页（fix-entity-mapping-page-pagination 2026-10-24）：生产
+  // entity_mapping 35 万行，必须按后端 total 渲染页数，前端只拉当前页。
+  const {
+    pagination,
+    setPage,
+    state: { current: currentPage, pageSize },
+  } = useTablePagination({ serverTotal: total });
   const [editing, setEditing] = useState<EntityMappingRead | null>(null);
   const [creating, setCreating] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -83,17 +90,24 @@ export default function EntityMappingPage() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await listMappings(
-        filterType ? { entityType: filterType } : undefined,
-      );
-      setMappings(data);
+      const data = await listMappings({
+        ...(filterType ? { entityType: filterType } : {}),
+        limit: pageSize,
+        offset: (currentPage - 1) * pageSize,
+      });
+      setMappings(data.rows);
+      setTotal(data.total);
+      // 删掉当前页最后一行等场景：落在超出 total 的空页 → 弹回第 1 页重拉
+      if (data.rows.length === 0 && data.total > 0 && currentPage > 1) {
+        setPage(1);
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       message.error(msg);
     } finally {
       setLoading(false);
     }
-  }, [filterType]);
+  }, [filterType, currentPage, pageSize]);
 
   useEffect(() => {
     void refresh();
@@ -268,7 +282,11 @@ export default function EntityMappingPage() {
           placeholder={t("entityMapping.filterType")}
           style={{ width: 200 }}
           value={filterType}
-          onChange={(v) => setFilterType(v as EntityType | undefined)}
+          onChange={(v) => {
+            // 切筛选回第 1 页（保留用户 pageSize），effect 会带新参数重拉
+            setPage(1);
+            setFilterType(v as EntityType | undefined);
+          }}
           options={ENTITY_TYPES.map((et) => ({ label: et, value: et }))}
         />
         <Button type="primary" onClick={() => setCreating(true)}>

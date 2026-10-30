@@ -74,14 +74,31 @@ async def warmBusinessObjectRegistry(dbSession: AsyncSession) -> AsyncIterator[N
     并发测试的 TRUNCATE（d01a4e1 教训）。
     """
     from app.services.business_object_registry import businessObjectRegistry
+    from app.services.data_domain_registry import dataDomainRegistry
+    from app.services.layer_rule_registry import layerRuleRegistry
     from scripts.seed_business_objects import seedBusinessObjects
 
+    # feat-data-domain-layer：域/层规则 seed 先行（BO seed 的 primary_domain_id
+    # FK 依赖 PROCUREMENT 行；registry warmUp 供 DataDomainCodeType validator 用）
+    from scripts.seed_data_domain import seedDataDomains, seedLayerRules
+
+    await seedDataDomains(dbSession)
+    await seedLayerRules(dbSession)
+    # 0133 收紧 header NOT NULL：BO seed 需 ontology_class 解析 header，
+    # 测试库 truncate 后补种最小 header 类集合
+    from app.tests._pg_support import seedHeaderOntologyClasses
+
+    await seedHeaderOntologyClasses(dbSession)
     await seedBusinessObjects(dbSession)
     businessObjectRegistry.invalidate()
     await businessObjectRegistry.warmUp(dbSession)
+    await dataDomainRegistry.warmUp(dbSession)
+    await layerRuleRegistry.warmUp(dbSession)
     await dbSession.commit()
     yield
     businessObjectRegistry.invalidate()
+    dataDomainRegistry.invalidate()
+    layerRuleRegistry.invalidate()
 
 
 @pytest_asyncio.fixture(autouse=True)

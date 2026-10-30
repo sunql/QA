@@ -7,6 +7,7 @@ _applyRefineDirect 在 REFINE 意图下优先改写上一轮 SQL（行数/排序
 
 from __future__ import annotations
 
+from app.domain.enums import DataSourceType
 from app.domain.query_plan import QueryPlan
 from app.services.nl2sql_service import Nl2SqlService, _REFINE_MAX_LIMIT_DEFAULT, _normalizeDate
 
@@ -15,8 +16,15 @@ def _plan(*props: str) -> QueryPlan:
     return QueryPlan(target="t", selectedProperties=tuple(props))
 
 
-def _direct(sql: str, plan: QueryPlan | None, question: str) -> str | None:
-    return Nl2SqlService().applyRefineDirect(sql, plan, question)
+def _direct(
+    sql: str,
+    plan: QueryPlan | None,
+    question: str,
+    datasourceType: DataSourceType | str | None = None,
+) -> str | None:
+    return Nl2SqlService().applyRefineDirect(
+        sql, plan, question, datasourceType=datasourceType
+    )
 
 
 class TestRefineDirect:
@@ -24,7 +32,7 @@ class TestRefineDirect:
 
     def test_modifies_fetch_first(self) -> None:
         sql = "SELECT NAME FROM ZJTH.T ORDER BY NAME ASC FETCH FIRST 10 ROWS ONLY"
-        out = _direct(sql, _plan("NAME"), "只要前 3 条")
+        out = _direct(sql, _plan("NAME"), "只要前 3 条", DataSourceType.ORACLE)
         assert out is not None
         assert "FETCH FIRST 3 ROWS ONLY" in out
 
@@ -42,7 +50,7 @@ class TestRefineDirect:
 
     def test_appends_order_by_before_fetch_first(self) -> None:
         sql = "SELECT NAME, SUM(QTY) AS TOTAL_QTY FROM ZJTH.PRECEIPT GROUP BY NAME FETCH FIRST 10 ROWS ONLY"
-        out = _direct(sql, _plan("NAME", "QTY"), "按 QTY 升序排列")
+        out = _direct(sql, _plan("NAME", "QTY"), "按 QTY 升序排列", DataSourceType.ORACLE)
         assert out is not None
         assert "GROUP BY NAME ORDER BY QTY ASC FETCH FIRST 10 ROWS ONLY" in out
 
@@ -354,7 +362,8 @@ class TestRefineExtension35:
 
     def test_scalar_subquery_alias_captured(self) -> None:
         # 标量子查询的 AS 别名在顶层（括号外），应可排序
-        sql = "SELECT (SELECT MAX(x) FROM inner) AS 内部, 名称 FROM outer"
+        # （表名不可用 inner/outer：它们是 sqlglot 关键字，无法解析）
+        sql = "SELECT (SELECT MAX(x) FROM inner_t) AS 内部, 名称 FROM outer_t"
         out = _direct(sql, _plan("名称"), "按 内部 降序")
         assert out is not None
         assert out.endswith("ORDER BY 内部 DESC")

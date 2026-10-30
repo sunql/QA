@@ -6,12 +6,21 @@
 模型配置：`model_name`(唯一)、`provider`、`api_endpoint`、`api_key_encrypted`(Fernet 加密)、`cost_per_1k_input/output`、`max_input_tokens`、`weight`(0-100)、`cost_threshold`、`is_active`、时间戳。
 
 ### session_token_usage
-会话 Token 流水：`session_id`、`model_config_id`(FK)、`model_name`、`prompt_tokens`、`completion_tokens`、`total_tokens`、`cost`、`request_time`、`purpose`。索引 `(session_id, request_time)` 与 `(model_config_id, request_time)`。
+会话 Token 流水：`session_id`、`model_config_id`(FK)、`model_name`、`prompt_tokens`、`completion_tokens`、`total_tokens`、`cost`、`request_time`、`purpose`、`cost_source`。索引 `(session_id, request_time)` 与 `(model_config_id, request_time)`。
+
+**`cost_source`（P1-2，migration 0126，2026-10-18 收尾）**：成本口径，取值为白名单 `measured`（token 由 provider 上报、单价来自 `llm_config`）、`estimated`（只有部分用量，如异常里提取的 token）、`unknown`（无法定价，如研究链路按名称查不到配置 ⇒ 成本是占位 0）。常量 SSOT 在 `app/services/token_usage_service.py`（`COST_SOURCE_*` / `COST_SOURCES`）。写入方：chat 主链路（默认 `measured`，retry-gen 为 `estimated`）、doc-QA、报告总结、研究 `LlmUsageRecorder`（无配置时 `unknown`）。**NULL = 0126 之前的早期行**，与 `unknown` 语义不同（后者是「当时确实无法定价」）。读侧 `GET /api/v1/sessions/{id}/usage/list` 以 `costSource` 暴露；前端 `UsagePage` 按白名单映射文案，未知值一律显示「未知」，**绝不把原始枚举拼进 i18n key**（缺 key 会回显 key 本身）。
 
 ### 后续表（Phase 2-3）
 - `ontology_class`：本体类，`source_table` 映射物理表，支持 `parent_class_id` 继承，`version` + `valid_from/to` 版本。
 - `ontology_property`：属性，`data_type`、`is_primary_key`、`is_foreign_key`、`ref_class_id`、`source_column`。
-- `ontology_metric`：指标，`formula`、`agg_function`、`target_class_id`、`dimension_defaults`(JSON)。
+- `ontology_metric`：指标，**技术形态 SSOT**。现有列：`formula`(Text NN，逃生舱)、`agg_function`(varchar20 default 'SUM')、`target_class_id`(FK→ontology_class，单值，语义=role=BASE)、`dimension_defaults`(JSON，**零消费者**)。
+  🔴 **该表在 NL2SQL 链路零消费者**（`nl2sql_service.py:34-35` 不 import、`nl2sql_prompts.py` 0 个 "etric"、`buildSchemaText` 只渲染类、`chat_recall` 用 `typeFilter="class"`）⇒ **补数据不改变任何一条 SQL**。
+  扩展设计（`metric_type` / `numerator_measure` / `denominator_measure` / `aggregation_order` / `grain_keys` / `filter_expression` / `status` / `owner` / `execution_source`）见 [kpi-metric-technical-form](kpi-metric-technical-form.md)。
+- `kpi_catalog`：KPI 业务目录，**治理 SSOT**。列：`kpi_code`(unique)、`kpi_name`、`business_definition`、`formula`、`numerator`、`denominator`、`grain`、`unit`、`data_source`(血缘文本)、`datasource_id`(FK→data_source，**RESTRICT**)、`owner`、`version`(default 'v1.0')、`revision_count`、`status`(`KpiStatus`: DRAFT/PUBLISHED/DEPRECATED)、`metric_id`(FK→ontology_metric，nullable)、`created_by`、`semantic_keywords`(`ARRAY(String(64))`)、`match_threshold`(`Numeric(3,2)` default 0.75)。
+  通过 `metric_id` 弱关联 `ontology_metric`（KPI 可先于 metric 存在：业务定义先行、技术实现后置）。不进 Neo4j / Milvus（治理层不入向量检索）。
+  ⚠️ dev 库现状：`semantic_keywords` **12/12 全空**、`datasource_id` **12/12 全 NULL**、挂靠 `metric_id` **0 条**。
+- `ontology_metric_source`：**规划中**（未实施）。`ontology_metric` 的多源类 M:N 表 —— `metric_id`(FK→ontology_metric, CASCADE)、`class_id`(FK→ontology_class, RESTRICT)、`role`(NUMERATOR/DENOMINATOR/FILTER/BASE)、`UNIQUE(metric_id, class_id, role)`。
+  必要性：9/12 KPI 的 `data_source` 含 `+`（多表；3 条单表：`KPI_PAYMENT_ON_TIME` / `KPI_SUPPLIER_DEFECT_RATE` / `KPI_SUPPLIER_FPY`）⇒ `target_class_id` 单值 FK 表达不了其中 9 条真实口径。
 - `data_source`：数据源，`type`、`connection_url`、`encrypted_password`、`is_read_only`、`is_default`。
 - `session_message`（Phase 5）：会话消息持久化，`session_id`、`role`(user/assistant)、`content`、`question`(assistant 回填)、`sql_generated`(assistant 回填)、时间戳。索引 `(session_id, created_time)`。用于 NL2SQL 前注入最近 5 轮上下文；服务端无记录时回退到客户端 `history` 字段。注入前按预算收口（H3，2026-09-26）：单条正文/历史 SQL 各限 500 字符，拼接后总预算 4000 字符，超预算丢最旧整块并记 `历史上下文按预算裁剪` —— 上下文会被注入 plan/SQL/answer 各阶段，不限长则长轮次下每轮 prompt 成本线性膨胀。**Migration 0051** 新增字段：`routing_layer`（VARCHAR(10)，L1/L2/L3/L4）、`latency_ms`（INTEGER，毫秒）、`token_cost_usd`（FLOAT，美元）。**Migration 0105** 新增字段：`chart_type`（VARCHAR(20)，NULL）、`chart_option`（JSONB，NULL）—— 让图表进最终报告（聊天回答 + 导出 PDF）并让**历史回放也能看到图**。两条必须在**唯一落库点**（`chat_context._storeSessionMessages`，归一函数在 `chat_chart_persist.py`）做的归一：`chart_type` 归一为裸字符串（`ChatResponse.chartType` 是 `ChartType | None`，pydantic 保留**枚举成员**，直接落 VARCHAR 会存成 `ChartType.BAR` 这种脏值）；`chart_option` 的 TABLE 负载 `rows` 截到 200 行并记 `truncated: true`（`QUERY_ROW_LIMIT` 默认 0 = 不限行，而表格 builder 返回**全量** data，不截则有把十万行塞进一行的风险）。**只截落库份**，实时响应仍发全量；`truncated` 必须在**读侧两侧**都披露（PDF 与前端回放）。
 
@@ -299,3 +308,145 @@ created_at / updated_at TIMESTAMPTZ
 
 迁移链：`0117 → b1ea6cb32588_run_state → 0118 → 0119 → 0120 → 0121`（**非**线性 0117→0118；
 `0118` 的 `down_revision` 是 hash 命名的 `b1ea6cb32588`）。生产库 head：`0121`（2026-10-13 部署冒烟实测）。
+
+## Phase 6.6 增量：通用多工具 Agent 编排
+
+**日期**：2026-10-28 · **变更**：[feat-agent-orchestration](../changes/feat-agent-orchestration/summary.md)
+· **Wiki**：[[agent-runtime]]
+
+**只新增，不改既有表**（设计稿 §2.2 的非回归底线）。既有 6 张 Agent 相关表
+（`agent_definition` / `agent_access_policy` / `agent_tool_config` / `agent_schedule` /
+`agent_run_log` / `session_token_usage`）**零改动**——编排配置与运行记录全部落在
+下面 5 张新表里。
+
+### agent_orchestration_profile（一个 Agent 一份编排配置）
+
+```
+id                     BIGINT PK
+agent_id               BIGINT FK → agent_definition.id (ON DELETE CASCADE)  -- UNIQUE
+instructions           TEXT NOT NULL         -- 编排指令（进 LLM 前过 prompt sanitizer）
+enabled                BOOLEAN NOT NULL DEFAULT false    -- 新建一律停用，需显式 toggle
+default_max_iterations INTEGER NOT NULL DEFAULT 20
+default_max_tool_calls INTEGER NOT NULL DEFAULT 30
+default_max_cost_usd   NUMERIC(16,8) NOT NULL DEFAULT 5
+default_timeout_seconds INTEGER NOT NULL DEFAULT 900
+max_observation_chars  INTEGER NOT NULL DEFAULT 50000
+revision               INTEGER NOT NULL DEFAULT 1        -- 乐观锁
+created_time / updated_time TIMESTAMPTZ
+```
+
+约束：`uq_agent_orchestration_profile_agent`（一个 Agent 只一份）、
+`ck_agent_orchestration_profile_limits`（各项上限 > 0 / 成本 ≥ 0）、
+`ck_agent_orchestration_profile_revision`（`revision >= 1`）。
+
+### agent_orchestration_binding（profile ↔ 工具绑定）
+
+```
+id            BIGINT PK
+profile_id    BIGINT FK → agent_orchestration_profile.id (ON DELETE CASCADE)
+tool_name     VARCHAR(64) NOT NULL       -- 指向 agent_tool_config.name
+enabled       BOOLEAN NOT NULL DEFAULT true
+sort_order    INTEGER NOT NULL DEFAULT 0
+```
+
+约束：`uq_agent_orchestration_binding_tool`（`profile_id` + `tool_name` 唯一）、
+`ck_agent_orchestration_binding_sort_order`（`sort_order >= 0`）。
+**表里不存 handler_ref** —— handler 一律从 `agent_tool_config` 现读，杜绝动态 handler 注入。
+
+### agent_orchestration_run（一次编排运行）
+
+```
+run_id                  VARCHAR(36) NOT NULL   -- UNIQUE，外部标识
+agent_id / agent_code   BIGINT / VARCHAR(64)   -- agent_id 可空（Agent 被删后历史仍在）
+profile_revision        INTEGER NOT NULL       -- 快照用的 profile 版本
+instructions_snapshot   TEXT NOT NULL          -- 指令快照
+tool_bindings_snapshot  JSONB NOT NULL         -- 工具绑定快照（执行时按它约束）
+max_observation_chars   INTEGER NOT NULL
+question                TEXT NOT NULL
+created_by              VARCHAR(64) NOT NULL
+model_config_id         BIGINT NOT NULL
+status                  VARCHAR(32) NOT NULL DEFAULT 'QUEUED'
+max_iterations / max_tool_calls INTEGER NOT NULL
+max_cost_usd            NUMERIC(16,8) NOT NULL
+timeout_seconds         INTEGER NOT NULL
+iteration_count / tool_call_count / prompt_tokens / completion_tokens / total_tokens INTEGER NOT NULL DEFAULT 0
+cost                    NUMERIC(20,8) NOT NULL DEFAULT 0
+cost_source             VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'   -- MEASURED/ESTIMATED/UNKNOWN/MIXED
+cost_complete           BOOLEAN NOT NULL DEFAULT false
+final_answer            TEXT                   -- 可空
+pause_code              VARCHAR(64)            -- 可空：暂停原因
+pause_detail            JSONB                  -- 可空
+error_code / error_message                       -- 可空
+cancel_requested        BOOLEAN NOT NULL DEFAULT false
+lease_owner / lease_until                        -- Worker 租约（可空）
+revision                INTEGER NOT NULL DEFAULT 1
+queued_at / started_at / finished_at TIMESTAMPTZ
+created_time / updated_time TIMESTAMPTZ
+```
+
+索引：`uq_agent_orchestration_run_run_id`（`run_id` 唯一）、
+`ix_agent_orchestration_run_status_id`（`status`,`id`——Worker 扫描队列用）、
+`ix_agent_orchestration_run_creator_time`（`created_by`,`created_time`——「我的运行」列表）、
+`ix_agent_orchestration_run_agent_time`（`agent_id`,`created_time`）。
+
+### agent_orchestration_step（运行的轨迹）
+
+```
+id            BIGINT PK
+run_id        BIGINT FK → agent_orchestration_run.id (ON DELETE CASCADE)
+step_no       INTEGER NOT NULL        -- 全局递增序号
+iteration_no  INTEGER NOT NULL        -- 第几轮
+kind          VARCHAR(32) NOT NULL    -- PLAN / TOOL
+status        VARCHAR(32) NOT NULL DEFAULT 'RUNNING'   -- RUNNING/SUCCEEDED/FAILED/SKIPPED
+action        VARCHAR(32)             -- 可空：CALL_TOOL / FINISH / ASK_USER
+plan_summary / answer TEXT            -- 可空
+tool_name     VARCHAR(64)             -- 可空
+input_json / output_json JSONB        -- 可空
+error_code / error_message            -- 可空
+prompt_tokens / completion_tokens INTEGER NOT NULL DEFAULT 0
+cost          NUMERIC(20,8) NOT NULL DEFAULT 0
+started_at    TIMESTAMPTZ NOT NULL
+finished_at   TIMESTAMPTZ             -- 可空
+```
+
+索引：`ix_agent_orchestration_step_run_step`（`run_id`,`step_no`）——**非唯一**索引。
+
+约束：`uq_agent_orchestration_step_run_step`（`run_id` + `step_no` **唯一**——同一 run 内
+step 序号不重复）、`ck_agent_orchestration_step_kind`（`kind IN ('PLAN','TOOL')`）、
+`ck_agent_orchestration_step_status`（`status IN ('RUNNING','SUCCEEDED','FAILED','SKIPPED')`）、
+`ck_agent_orchestration_step_action`（`action IN ('CALL_TOOL','FINISH','ASK_USER')`）、
+`ck_agent_orchestration_step_counters`（`step_no >= 0` 且 `iteration_no >= 0` 且
+`prompt_tokens >= 0` 且 `completion_tokens >= 0` 且 `cost >= 0`）。
+外键只有一条：`run_id → agent_orchestration_run.id`（`ON DELETE CASCADE`，已在上方字段表列出）。
+完整清单见 `backend/alembic/versions/0135_agent_orchestration.py:162-177`。
+
+### agent_orchestration_usage（计量台账）
+
+```
+id              BIGINT PK
+run_id          BIGINT FK → agent_orchestration_run.id (ON DELETE CASCADE)
+step_id         BIGINT FK → agent_orchestration_step.id (ON DELETE SET NULL)  -- 可空
+caller_type     VARCHAR(32) NOT NULL    -- PLANNER / TOOL
+model_config_id BIGINT NOT NULL
+model_name      VARCHAR(50) NOT NULL
+prompt_tokens / completion_tokens INTEGER NOT NULL DEFAULT 0
+cached_tokens   INTEGER                 -- 可空
+cost            NUMERIC(20,8) NOT NULL DEFAULT 0
+cost_source     VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'
+call_status     VARCHAR(32) NOT NULL    -- SUCCEEDED / OUTPUT_INVALID / FAILED
+request_time    TIMESTAMPTZ NOT NULL
+```
+
+### 迁移文件
+
+- `alembic/versions/0135_agent_orchestration.py` — 建 5 张表 + 5 个索引
+  - **文件主干（stem）** = `0135_agent_orchestration`（**24 字符**）；文件名含 `.py` = **27 字符**
+  - **revision id** = `0135`（**4 字符**），`down_revision = "0134"`
+    （线性接在 `0134_data_layer_rule` 之后）
+  - `alembic_version.version_num` 是 `varchar(32)` ⇒ **三个值（4 / 24 / 27 字符）都在约束内**
+  - **downgrade 会 DROP 这 5 张表** ⇒ 回滚口径是「停 Worker + 关 flag」，**不做 downgrade**（见灰度手册 §5）
+
+**已知缺口（不阻塞上线，但要记账）**：
+
+- `(run_id, iteration_no, kind)` **没有** DB 级唯一索引（靠应用层保证幂等）；
+- `agent_orchestration_usage` **没有** `run_id` 索引（用量台账按 run 聚合时会全表扫）。

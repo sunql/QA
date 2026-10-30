@@ -34,6 +34,34 @@ const mockMetric: OntologyMetric = {
   createdBy: null,
   createdTime: "2026-08-11T00:00:00Z",
   updatedTime: "2026-08-11T00:00:00Z",
+  metricType: "MEASURE",
+  numeratorMeasure: null,
+  denominatorMeasure: null,
+  aggregationOrder: null,
+  grainKeys: null,
+  filterExpression: null,
+  status: "DRAFT",
+  owner: null,
+  executionSource: null,
+};
+
+/** 带非空 measure 的指标：用于守住「编辑回显 class_id / class_alias」的接线。
+ *
+ * ⚠️ `metricType` 必须是 `RATIO`：`MetricTechniqueForm` 只对 RATIO/DIFFERENCE
+ * 渲染分母行，MEASURE 下分母字段不在表单里注册 ⇒ antd 不返回它们 ⇒
+ * `toMeasureSpec` 按设计返回 null（分母被清空），分母断言会恒失败。
+ */
+const mockMetricWithMeasure: OntologyMetric = {
+  ...mockMetric,
+  metricType: "RATIO",
+  numeratorMeasure: { agg: "SUM", expr: "QTY", filter: null, class_id: 7, class_alias: "Order" },
+  denominatorMeasure: {
+    agg: "COUNT",
+    expr: "ORDER_ID",
+    filter: null,
+    class_id: 8,
+    class_alias: "OrderItem",
+  },
 };
 
 const api = vi.hoisted(() => ({
@@ -71,6 +99,15 @@ describe("MetricTab — 渲染 + 加载", () => {
     await waitFor(() => expect(api.listMetrics).toHaveBeenCalled());
     // 组件不崩（Table 仍渲染，只是无数据）
     expect(screen.getByRole("table")).toBeInTheDocument();
+  });
+
+  it("列表展示指标类型 / 聚合阶 / 执行来源三列", async () => {
+    renderTab();
+    await screen.findByText("订单金额");
+    // 三列表头渲染的是词典译文；key 拼错会显示裸 key 而不会红。
+    expect(screen.getByText("指标类型")).toBeInTheDocument();
+    expect(screen.getByText("聚合阶")).toBeInTheDocument();
+    expect(screen.getByText("执行来源")).toBeInTheDocument();
   });
 });
 
@@ -173,6 +210,39 @@ describe("MetricTab — 编辑流", () => {
       expect(api.updateMetric).toHaveBeenCalledWith(10, expect.objectContaining({ metricName: "改后" })),
     );
   });
+
+  it("只改指标名时把原 measure 的 class_id / class_alias 原样回传（不抹掉回填信息）", async () => {
+    api.listMetrics.mockResolvedValue([mockMetricWithMeasure]);
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByText("订单金额");
+
+    const editBtn = screen.getAllByRole("button").find((b) =>
+      (b.textContent || "").replace(/\s+/g, "").includes("编辑"),
+    );
+    expect(editBtn).toBeDefined();
+    await user.click(editBtn!);
+
+    // 只改指标名；分子/分母字段保持原样（改了会走「measure 清空」的另一条分支）。
+    const nameInput = await screen.findByLabelText("指标名");
+    await user.clear(nameInput);
+    await user.type(nameInput, "订单金额改");
+
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateMetric).toHaveBeenCalled());
+    const payload = api.updateMetric.mock.calls[0][1];
+    expect(payload.numeratorMeasure?.class_id).toBe(7);
+    expect(payload.numeratorMeasure?.class_alias).toBe("Order");
+    expect(payload.numeratorMeasure?.agg).toBe("SUM");
+    expect(payload.numeratorMeasure?.expr).toBe("QTY");
+    // Q4：分母侧必须与分子侧对称回传 class_id / class_alias；
+    // 只锁分子侧时，分母的绑定信息被清空也照样绿。
+    expect(payload.denominatorMeasure?.class_id).toBe(8);
+    expect(payload.denominatorMeasure?.class_alias).toBe("OrderItem");
+    expect(payload.denominatorMeasure?.agg).toBe("COUNT");
+    expect(payload.denominatorMeasure?.expr).toBe("ORDER_ID");
+  });
 });
 
 describe("MetricTab — 解析 dimensionDefaults", () => {
@@ -210,5 +280,54 @@ describe("MetricTab — 解析 dimensionDefaults", () => {
     // 不依赖完整提交，只验证 dimensionDefaults 解析路径（行 144-152）
     // 简化：点击确定（即使其他字段空也会触发 validateFields 失败，但函数本身已被调用）
     // 这里直接通过 mock 路径：选择第一个 select 然后点确定
+  });
+});
+
+describe("MetricTab — 结构化技术形态", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listMetrics.mockResolvedValue([]);
+    api.createMetric.mockResolvedValue({ id: 1 });
+  });
+
+  it("指标类型选比率时出现分母字段", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByRole("table");
+
+    await user.click(screen.getByRole("button", { name: /新\s?增/ }));
+    await user.click(await screen.findByLabelText("指标类型"));
+    await user.click(await screen.findByTitle("比率"));
+
+    expect(await screen.findByLabelText("分母表达式")).toBeInTheDocument();
+  });
+
+  it("提交时把分子/分母转成 measure JSON", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByRole("table");
+
+    await user.click(screen.getByRole("button", { name: /新\s?增/ }));
+    await user.type(await screen.findByLabelText("指标名"), "新指标");
+    await user.type(await screen.findByLabelText("公式"), "SELECT 1 FROM T");
+    await user.type(await screen.findByLabelText("分子表达式"), "QTY");
+
+    // 分子聚合选 SUM
+    await user.click(await screen.findByLabelText("分子聚合"));
+    await user.click(await screen.findByTitle("SUM"));
+
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.createMetric).toHaveBeenCalled());
+    const payload = api.createMetric.mock.calls[0][0];
+    expect(payload.metricType).toBe("MEASURE");
+    expect(payload.numeratorMeasure).toEqual({
+      agg: "SUM",
+      expr: "QTY",
+      filter: null,
+      class_id: null,
+      class_alias: null,
+    });
+    expect(payload.status).toBe("DRAFT");
   });
 });

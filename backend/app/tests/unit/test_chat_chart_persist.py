@@ -224,7 +224,7 @@ class TestBoundedTableOption:
         """`float(Decimal("NaN"))` 也产出 nan —— 与 Task 10 的 Decimal 崩溃同源。
 
         NUMERIC 列里出现 NaN/Infinity 时（触发条件比 Decimal 更窄），两条路径
-        （boundedChartOption / boundedTableOption）都经 `_jsonSafe` 的
+        （boundedChartOption / boundedTableOption）都经 `jsonSafe` 的
         `Decimal→float` 中招，必须归一成可序列化形态。
         """
         import json

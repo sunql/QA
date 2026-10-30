@@ -179,6 +179,10 @@ class AgentRuntimeService:
             )
         return tool
 
+    def enforcePolicies(self, entity: AgentDefinition, tool: AgentTool) -> None:
+        """Public delegate for separate runtimes; policy semantics remain here."""
+        self._enforcePolicies(entity, tool)
+
     def _enforcePolicies(self, entity: AgentDefinition, tool: AgentTool) -> None:
         """deny-by-default：工具读取的每个数据层都需被授权。
 

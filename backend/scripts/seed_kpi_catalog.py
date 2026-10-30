@@ -269,6 +269,10 @@ async def seedKpiCatalog(session: Any) -> int:
     `uq_kpi_catalog_code` 冲突的行由 DB 直接跳过，并发运行安全，无需预查重（无 TOCTOU race）。
 
     F2 §5.4：每个 KPI 绑定 _getOrCreateSeedDataSource() 返回的 DataSource。
+
+    Q8：seed 直接写入 ``status=PUBLISHED`` 是**引导数据**（早于 metric 挂靠存在，
+    此时 ``metric_id`` 仍为 None）；发布闸门只约束 ``DRAFT → PUBLISHED`` 的状态
+    流转，不回溯校验引导数据，故这里绕过闸门是预期行为。
     """
     ds_id = await _getOrCreateSeedDataSource(session)
     inserted = 0

@@ -25,6 +25,8 @@ import {
   listBusinessObjects,
   updateBusinessObject,
 } from "../api/businessObject";
+import { listDataDomains } from "../api/dataDomain";
+import type { DataDomain } from "../types/dataDomain";
 import { listClasses } from "../api/ontology";
 import type { OntologyClass } from "../types/ontology";
 
@@ -36,7 +38,14 @@ export default function BusinessObjectPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<BusinessObject | null>(null);
   const [classes, setClasses] = useState<OntologyClass[]>([]);
+  const [domains, setDomains] = useState<DataDomain[]>([]);
   const [form] = Form.useForm();
+
+  // 数据域下拉（仅 enabled；Agent 授权域同源）
+  const domainOptions = useMemo(
+    () => domains.map((d) => ({ value: d.code, label: `${d.name}（${d.code}）` })),
+    [domains],
+  );
 
   // 本体类选项（label 含别名，方便模糊匹配时一眼看出）
   const classOptions = useMemo(
@@ -82,6 +91,9 @@ export default function BusinessObjectPage() {
   useEffect(() => {
     void load();
     void loadClasses();
+    void listDataDomains(true)
+      .then(setDomains)
+      .catch(() => setDomains([]));
   }, []);
 
   const onCreate = () => {
@@ -102,6 +114,8 @@ export default function BusinessObjectPage() {
       code: row.code,
       name: row.name,
       headerClassId: row.headerClassId ?? undefined,
+      primaryDomainId: row.primaryDomainId,
+      attachedDomainIds: row.attachedDomainIds ?? [],
       graphLabel: derivedGraphLabel,
       description: row.description ?? undefined,
     });
@@ -120,7 +134,9 @@ export default function BusinessObjectPage() {
       if (editing) {
         const payload: BusinessObjectUpdate = {
           name: values.name,
-          headerClassId: values.headerClassId ?? null,
+          headerClassId: values.headerClassId,
+          primaryDomainId: values.primaryDomainId,
+          attachedDomainIds: values.attachedDomainIds ?? [],
           graphLabel: values.graphLabel ?? null,
           description: values.description ?? null,
         };
@@ -129,7 +145,9 @@ export default function BusinessObjectPage() {
         const payload: BusinessObjectCreate = {
           code: values.code,
           name: values.name,
-          headerClassId: values.headerClassId ?? null,
+          headerClassId: values.headerClassId,
+          primaryDomainId: values.primaryDomainId,
+          attachedDomainIds: values.attachedDomainIds ?? [],
           graphLabel: values.graphLabel ?? null,
           description: values.description ?? null,
         };
@@ -165,6 +183,25 @@ export default function BusinessObjectPage() {
         columns={[
           { title: t("businessObject.columns.code"), dataIndex: "code" },
           { title: t("businessObject.columns.name"), dataIndex: "name" },
+          {
+            title: t("businessObject.columns.primaryDomain"),
+            dataIndex: "primaryDomainId",
+            render: (v: string) => (v ? <Tag color="blue">{v}</Tag> : "—"),
+          },
+          {
+            title: t("businessObject.columns.attachedDomains"),
+            dataIndex: "attachedDomainIds",
+            render: (v: string[]) =>
+              v?.length ? (
+                <span>
+                  {v.map((d) => (
+                    <Tag key={d}>{d}</Tag>
+                  ))}
+                </span>
+              ) : (
+                "—"
+              ),
+          },
           {
             title: t("businessObject.columns.graphLabel"),
             dataIndex: "graphLabel",
@@ -228,6 +265,8 @@ export default function BusinessObjectPage() {
             name="headerClassId"
             label={t("businessObject.columns.headerClassId")}
             tooltip={t("businessObject.tooltips.headerClassId")}
+            // 0133 收紧 NOT NULL：无本体类的 BO 不落库
+            rules={[{ required: true }]}
           >
             <Select
               allowClear
@@ -244,6 +283,59 @@ export default function BusinessObjectPage() {
                   graphLabel: cls?.className ?? undefined,
                 });
               }}
+            />
+          </Form.Item>
+          <Form.Item
+            name="primaryDomainId"
+            label={t("businessObject.columns.primaryDomain")}
+            tooltip={t("businessObject.tooltips.primaryDomain")}
+            rules={[{ required: true }]}
+          >
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder={t("businessObject.placeholders.selectPrimaryDomain")}
+              options={domainOptions}
+              notFoundContent={t("businessObject.placeholders.noDomain")}
+              onChange={() => {
+                // 主域变更后，附域里等于新主域的项立即失效
+                const primary = form.getFieldValue("primaryDomainId");
+                const attached: string[] =
+                  form.getFieldValue("attachedDomainIds") ?? [];
+                if (primary && attached.includes(primary)) {
+                  form.setFieldsValue({
+                    attachedDomainIds: attached.filter((d) => d !== primary),
+                  });
+                }
+              }}
+            />
+          </Form.Item>
+          <Form.Item
+            name="attachedDomainIds"
+            label={t("businessObject.columns.attachedDomains")}
+            tooltip={t("businessObject.tooltips.attachedDomains")}
+            rules={[
+              {
+                // 与后端 _assertAttachedNotPrimary 同规则的前端镜像（提前拦截，免等 409）
+                validator: async (_rule, value: string[] | undefined) => {
+                  const primary = form.getFieldValue("primaryDomainId");
+                  if (primary && value?.includes(primary)) {
+                    throw new Error(
+                      t("businessObject.validation.attachedEqualsPrimary"),
+                    );
+                  }
+                },
+              },
+            ]}
+          >
+            <Select
+              mode="multiple"
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder={t("businessObject.placeholders.selectAttachedDomains")}
+              options={domainOptions}
+              notFoundContent={t("businessObject.placeholders.noDomain")}
             />
           </Form.Item>
           <Form.Item

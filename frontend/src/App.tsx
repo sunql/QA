@@ -33,6 +33,8 @@ import SupplierRiskPage from "./pages/SupplierRiskPage";
 import ReportsPage from "./pages/ReportsPage";
 import AgentRegistryPage from "./pages/AgentRegistryPage";
 import AgentRuntimePage from "./pages/AgentRuntimePage";
+import AgentOrchestrationPage from "./pages/AgentOrchestrationPage";
+import AgentTaskPage from "./pages/AgentTaskPage";
 import AdminAuditPage from "./pages/AdminAuditPage";
 import AdminToolsPage from "./pages/AdminToolsPage";
 import AdminFeatureRulesPage from "./pages/AdminFeatureRulesPage";
@@ -57,6 +59,7 @@ import ResearchSessionPage from "./pages/research/ResearchSessionPage";
 import ResearchReportPage from "./pages/research/ResearchReportPage";
 import ResearchComparePage from "./pages/research/ResearchComparePage";
 import BusinessObjectPage from "./pages/BusinessObjectPage";
+import DataDomainPage from "./pages/DataDomainPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
 import { setMessageApi } from "./api/client";
@@ -109,6 +112,8 @@ export default function App() {
         <Route path="reports" element={<ReportsPage />} />
         <Route path="agents/run" element={<AgentRuntimePage />} />
         <Route path="agents" element={<AgentRegistryPage />} />
+        <Route path="agent-orchestrations" element={<AgentOrchestrationPage />} />
+        <Route path="agent-tasks" element={<AgentTaskPage />} />
         <Route path="admin/audit" element={<AdminAuditPage />} />
         <Route path="admin/tools" element={<AdminToolsPage />} />
         <Route path="admin/feature-rules" element={<AdminFeatureRulesPage />} />
@@ -127,6 +132,7 @@ export default function App() {
         <Route path="admin/wiki-links" element={<WikiLinksPage />} />
         <Route path="admin/wiki-categories" element={<AdminWikiCategoriesPage />} />
         <Route path="business-objects" element={<BusinessObjectPage />} />
+        <Route path="data-domains" element={<DataDomainPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />
         <Route path="profile" element={<ProfilePage />} />
@@ -138,6 +144,11 @@ export default function App() {
         <Route path="research/:id/report" element={<ResearchReportPage />} />
         </Route>
       </Route>
+
+      {/* 兜底：未知路径重定向到 /（登录态决定去向——未登录经 RequireAuth 落 /login）。
+          fix/login-401-white-screen：没有兜底路由时未知路径（如旧的 /auth/login）
+          一律白屏无提示。 */}
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }

@@ -65,6 +65,15 @@ function metric(over: Partial<OntologyMetric>): OntologyMetric {
     createdBy: null,
     createdTime: null,
     updatedTime: null,
+    metricType: "MEASURE",
+    numeratorMeasure: null,
+    denominatorMeasure: null,
+    aggregationOrder: null,
+    grainKeys: null,
+    filterExpression: null,
+    status: "DRAFT",
+    owner: null,
+    executionSource: null,
     ...over,
   };
 }

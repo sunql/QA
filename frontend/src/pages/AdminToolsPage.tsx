@@ -34,6 +34,7 @@ import {
     deleteAgentTool,
     toggleAgentTool,
 } from "../api/agentTools";
+import { getAgentOptions } from "../api/agentOptions";
 import type {
     AgentToolConfig,
     AgentToolConfigCreate,
@@ -42,7 +43,6 @@ import type {
 
 const { TextArea } = Input;
 
-const DATA_LAYER_OPTIONS = ["DIM", "DWD", "FEATURE"].map((v) => ({ value: v }));
 const HANDLER_KIND_OPTIONS = ["BUILTIN", "NL2SQL"].map((v) => ({ value: v }));
 
 export default function AdminToolsPage(): JSX.Element {
@@ -51,6 +51,10 @@ export default function AdminToolsPage(): JSX.Element {
     const [loading, setLoading] = useState(false);
     const [modalOpen, setModalOpen] = useState(false);
     const [editing, setEditing] = useState<AgentToolConfig | null>(null);
+    // 数据层词表与 Agent Registry 同源（feat-data-domain-layer 方案 2 后 DB SSOT，
+    // 经 /agents/options 下发；不再前端硬编码子集）。加载失败置空——页面级数据
+    // 拉取失败时 fetchList 已有 message.error 兜底，这里不重复弹。
+    const [layerOptions, setLayerOptions] = useState<{ value: string }[]>([]);
     const [form] = Form.useForm();
 
     const fetchList = useCallback(async () => {
@@ -69,6 +73,11 @@ export default function AdminToolsPage(): JSX.Element {
 
     useEffect(() => {
         void fetchList();
+        void getAgentOptions()
+            .then((opts) =>
+                setLayerOptions(opts.layers.map((v) => ({ value: v }))),
+            )
+            .catch(() => setLayerOptions([]));
     }, [fetchList]);
 
     const onCreate = () => {
@@ -288,7 +297,7 @@ export default function AdminToolsPage(): JSX.Element {
                     >
                         <Select
                             mode="multiple"
-                            options={DATA_LAYER_OPTIONS}
+                            options={layerOptions}
                         />
                     </Form.Item>
                     <Form.Item

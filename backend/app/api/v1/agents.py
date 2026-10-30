@@ -33,6 +33,29 @@ from app.domain.schemas import (
     AgentToolOption,
 )
 from app.domain.agent_vocabulary import AGENT_DATA_DOMAINS, AGENT_DATA_LAYERS
+from app.services.data_domain_registry import dataDomainRegistry
+
+
+def _optionsDomains() -> list[str]:
+    """域下拉：registry enabled 集（warmUp 失败/未 warm → 常量 fallback）。"""
+    try:
+        if dataDomainRegistry.isWarmedUp():
+            return sorted(dataDomainRegistry.getEnabled())
+    except Exception:  # pragma: no cover - 防御：词表读取失败不阻断 options
+        pass
+    return list(AGENT_DATA_DOMAINS)
+
+
+def _optionsLayers() -> list[str]:
+    """层下拉：data_layer_rule 全部 enabled 层（含 FEATURE 手工层）。"""
+    from app.services.layer_rule_registry import layerRuleRegistry
+
+    try:
+        if layerRuleRegistry.isWarmedUp():
+            return list(layerRuleRegistry.distinctLayers())
+    except Exception:  # pragma: no cover
+        pass
+    return list(AGENT_DATA_LAYERS)
 from app.services.agent_registry_service import (
     AgentRegistryService,
     _policyToRead,
@@ -90,12 +113,13 @@ async def getAgentOptions(
     必须在 GET /{agent_code} 之前注册——否则 "options" 会被路径参数吞成
     agent_code='options'，触发 getAgent → 404。测试 test_agent_options_api.py 守护。
 
-    tools 来自 ``agent_tool_registry.all()``（按 name 排序）；前端 Agent 表单的
-    tool 下拉数据源，避免额外请求。
+    feat-data-domain-layer：域/层词表 SSOT 已迁 DB（data_domain.enabled /
+    data_layer_rule），经 registry 同步快路径取值，未 warmUp fallback 常量。
+    tools 来自 ``agent_tool_config_registry.all()``（按 name 排序）。
     """
     return AgentOptionsRead(
-        domains=list(AGENT_DATA_DOMAINS),
-        layers=list(AGENT_DATA_LAYERS),
+        domains=_optionsDomains(),
+        layers=_optionsLayers(),
         tools=[
             AgentToolOption(
                 name=t.name,

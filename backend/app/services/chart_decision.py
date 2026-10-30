@@ -201,6 +201,56 @@ def _heatmapCoverage(
     return len(data) / (cardFirst * cardSecond)
 
 
+def _isBijectivePair(first: str, second: str, data: list[dict]) -> bool:
+    """两列是否构成**严格双射**：行数 = 双侧基数，且双向都是单值映射。
+
+    聚合结果里 GROUP BY code, name 且 code↔name 一一对应时（典型：编码列 +
+    名称列），第二维不携带任何交叉信息 —— 摊成分组系列只会得到「每条系列一个
+    非空点」的图例噪声。任何一侧出现 None、或行数对不上基数（重复行）都不算。
+    """
+    if not data:
+        return False
+    forward: dict[object, object] = {}
+    backward: dict[object, object] = {}
+    for row in data:
+        left, right = row.get(first), row.get(second)
+        if left is None or right is None:
+            return False
+        if forward.setdefault(left, right) != right:
+            return False
+        if backward.setdefault(right, left) != left:
+            return False
+    return len(forward) == len(data) and len(backward) == len(data)
+
+
+def _avgLabelLength(field: str, data: list[dict]) -> float:
+    values = [row.get(field) for row in data if row.get(field) is not None]
+    if not values:
+        return 0.0
+    return sum(len(str(v)) for v in values) / len(values)
+
+
+def _collapseBijectiveDimensions(
+    dimensions: tuple[str, ...], data: list[dict]
+) -> tuple[str, ...]:
+    """把「严格双射的两维」折叠成单维，保留平均标签更长（更可读）的一维。
+
+    折叠只针对**聚合结果**的冗余维度对；原始明细（无聚合无分组）哪怕列间唯一
+    也不折叠 —— 明细的每一列都是原文，不是分组键，折叠会把采购单清单变成柱状图。
+    """
+    if len(dimensions) != 2 or len(data) < 2:
+        return dimensions
+    first, second = dimensions
+    if not _isBijectivePair(first, second, data):
+        return dimensions
+    keep = (
+        second
+        if _avgLabelLength(second, data) > _avgLabelLength(first, data)
+        else first
+    )
+    return (keep,)
+
+
 def buildChartSignals(
     plan: QueryPlan | None,
     columns: list[str],
@@ -236,6 +286,10 @@ def buildChartSignals(
     )
 
     aggregations = plan.aggregations if plan is not None else ()
+    isRawDetail = not aggregations and not (plan.groupBy if plan is not None else ())
+    # 双射冗余维折叠（编码↔名称一类的 1:1 对）：只折叠聚合结果，原始明细绝不折叠。
+    if not isRawDetail:
+        dimensions = _collapseBijectiveDimensions(dimensions, data)
     signedMeasure = any(
         _isNumber(row.get(m)) and row.get(m) < 0 for row in data for m in measures
     )
@@ -248,7 +302,7 @@ def buildChartSignals(
         etlColumns=etlColumns,
         heatmapCoverage=_heatmapCoverage(dimensions, data),
         hasShareFormula=any(a.formula for a in aggregations),
-        isRawDetail=not aggregations and not (plan.groupBy if plan is not None else ()),
+        isRawDetail=isRawDetail,
         isTopN=bool(
             plan is not None
             and (

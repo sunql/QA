@@ -167,6 +167,27 @@ class TestSeriesShape:
         assert len(spec.series) == len(spec.measures) >= 1
         assert spec.series[0].kind in {"bar", "line"}
 
+    def test_bijective_pair_builds_single_dimension_spec(self) -> None:
+        """编码↔名称双射：spec 只保留名称维（折叠在信号层完成，构建层继承）。"""
+        rows = [
+            {
+                "SUPPLIER_CODE": f"B{i:03d}",
+                "SUPPLIER_NAME": f"供应商{i:03d}某某五金有限公司",
+                "RCV_QTY_PUU": i,
+            }
+            for i in range(31)
+        ]
+        plan = _plan(
+            groupBy=("SUPPLIER_CODE", "SUPPLIER_NAME"),
+            aggregations=(Aggregation(function="SUM", property="RCV_QTY_PUU"),),
+        )
+
+        spec, signals = _build(["SUPPLIER_CODE", "SUPPLIER_NAME", "RCV_QTY_PUU"], rows, plan=plan)
+
+        assert signals.dimensions == ("SUPPLIER_NAME",)
+        assert len(spec.dimensions) == 1
+        assert spec.dimensions[0].field == "SUPPLIER_NAME"
+
     def test_share_kind_is_pie_like_and_has_one_series(self) -> None:
         plan = _plan(
             aggregations=(

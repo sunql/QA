@@ -54,18 +54,26 @@
 - iter2/3 断裂推测：iter1 产出的 assistant 消息（tool_calls 序列化形态）与重发时**不是逐字节前缀一致**（`_to_llm_message` dict shim 形态），prefix match 在 ~1K tokens 处断掉；iter4 起反而能对齐 iter3 的 prompt（新增内容少、且上一轮 prompt 原样保留）。**此异常是 ④ 的直接靶点**：若修复对齐，命中有望从 71% → 95%+，有效计费从 54,488 → ~25,000 tokens。
 - 成本口径：台账 $0.1663 是**上界**（未透传 cachedTokens）；按 0.25 折扣实付估算 **$0.0792**。
 
+> **更正（2026-10-31，详见 `2026-10-31-l4-system-role/summary.md` §1）**
+>
+> 上面「iter2 9.0% / iter3 33.5%」用的是 `cached ÷ 本轮 prompt`，**分母含本轮新增内容**，所以被稀释——不是缓存断裂。
+> 正确口径是 `cached ÷ 上轮 prompt`（唯一能命中的前缀）：基线 iter2 = 1,024 ÷ 1,060 = **96.6%**、iter3 = 11,520 ÷ 11,442 = **100.7%**，iter4/5 同上。
+> 佐证：有效计费输入 54,488 **低于**「每次重发全额命中缓存」的理论下限 55,436（`ΣP_i − 0.75·ΣP_{<n}`）——缓存已在下限。
+>
+> 因此 §6 表里 ④ 的「命中 71%→95%、计费 −50%」**不成立**，④ 已降级为 system 角色正确性修复（3 行），实测零成本收益、但首次让 L4 收敛到 `answered`。
+
 ## 6. 对 ②③④ 的量化结论（供决策，不在本批实施）
 
 | 选项 | 证据 | 预期收益（本样本反事实手算） |
 |---|---|---|
 | **② 工具结果瘦身/增量注入** | describe_table 单次 52,919 chars（全列 schema）；list_joins 27,753 chars（全量 FK 图）；两者占 prompt 92% | 二者裁到 ~2K+1K tokens ⇒ 单轮 prompt 35K→~8K，Σ输入 116,696→~30K（**-75%**）；叠加免转义再 -25%。**最大杠杆，优先做** |
 | **③ 模型分层** | 每轮 completion 仅 42~411 tokens；成本几乎全在输入侧 | 分层只对「输入单价」有效（换更便宜模型跑元数据阶段）；DeepSeek 已是低价档，**②落地前收益有限，后置** |
-| **④ prompt cache** | 实测 71.1% 命中但 iter2/3 断裂；resend tax 70% | 修复 assistant/tool 消息重发的前缀一致性 ⇒ 命中→95%+，实付估算再 -50%；与 ② 叠加最优（重发内容越小、前缀越稳） |
+| **④ prompt cache** | ~~实测 71.1% 命中但 iter2/3 断裂~~ **（已更正：按上轮 prompt 作分母，逐轮命中 96.6%~102.5%，无断裂）**；resend tax 70% | ~~命中→95%+、实付再 -50%~~ **不成立**。实际落地为 system 角色修复（3 行），见 `2026-10-31-l4-system-role/` |
 
 ## 7. 取证途中发现（均未修，本批只记录）
 
 1. **L4 冷启动崩溃（main 既有 bug，P1）**：`chat_l4.py:105` 传 `executor=self._adapterProvider(dto.datasourceId, None)`，`get_adapter`（`business_db_pool.py:708`）缓存未命中时解引用 `None.password_encrypted` ⇒ AttributeError → 回退 L2/L3。历史 L4 之所以能用，是同进程内其它路径先焐热了 adapter 池；容器重启后第一次 L4 **必失败**。修复方向：chat_l4 先查 ds 再传（或 get_adapter 内部懒查）。本次取证即先跑了一次 L2 回退（`l4-token-profile-20261031-1`）焐热后才成功。
-2. **system prompt 以 user 角色 + dict-repr 形态发送（已知未修）**：iter1 组件里没有 `system` 桶，`user`=1,463 chars ≈ `_L4_SYSTEM_PROMPT`（1,338）+ 问题；即 system 内容被 `_to_llm_message` 折进 user 消息（str(dict)）。**这也是 ④ 前缀断裂的帮凶**（静态前缀不是规范的 system 开头）。
+2. **system prompt 以 user 角色 + dict-repr 形态发送（已知未修）**：iter1 组件里没有 `system` 桶，`user`=1,463 chars ≈ `_L4_SYSTEM_PROMPT`（1,338）+ 问题；即 system 内容被 `_to_llm_message` 折进 user 消息（str(dict)）。~~这也是 ④ 前缀断裂的帮凶（静态前缀不是规范的 system 开头）。~~ **后半句已更正：不存在前缀断裂（见 §5 更正注记），但它确实是真实的指令层级错误 + 计费噪声。已在 `feat/l4-prefix-alignment`（PR #83 / 提交 `3953e085`）修复。**
 3. **模型名口径不一致**：探针逐轮 `modelName="deepseek-flash"`（llm_config）vs 台账 `model_name="deepseek-chat"`。不影响 token 数，计费单价口径待核对。
 4. iter5 execute_sql 返回 286 行 / 120,550 chars —— 幸好循环即止没再发送；若 LLM 再走一轮，单轮 prompt 会飙到 ~55K tokens。**QUERY_ROW_LIMIT=0 的风险被直接拍到**。
 

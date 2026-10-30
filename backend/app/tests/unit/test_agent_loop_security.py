@@ -6,6 +6,7 @@
   ③ _dispatchSingleTool 的 content 用 <agent_tool_result> 包裹（langchain + dict shim 两条路径）
   ④ 内含 </user_question> 提前闭合被 U+200B 打断
   ⑤ tool_call_id 和 name 字段保留（OpenAI/Anthropic tool API 强约束）
+  ⑥ system 消息经 _to_llm_message 转换后仍是 role="system"（不被折叠进 user）
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from app.services.agent_runtime_service import (
     _L4_SYSTEM_PROMPT,
     _dispatchSingleTool,
     _initLoopState,
+    _to_llm_message,
 )
 
 
@@ -175,3 +177,59 @@ def test_dispatch_single_tool_preserves_tool_call_id_and_name() -> None:
     else:
         assert result.tool_call_id == "call_xyz_42"
         assert result.name == "execute_sql"
+
+
+# ---------------------------------------------------------------------------
+# 4. _to_llm_message — system 角色保真（配 ④ 修复）
+# ---------------------------------------------------------------------------
+
+
+def test_to_llm_message_preserves_system_role_dict_shim() -> None:
+    """dict shim 的 system 消息必须转成 role="system"，不能被 str(dict) 折进 user。"""
+    msg = {"role": "system", "content": "SYSTEM-X", "type": "system"}
+    out = _to_llm_message(msg)
+    assert out.role == "system"
+    assert out.content == "SYSTEM-X"
+
+
+def test_to_llm_message_preserves_system_role_langchain() -> None:
+    """langchain SystemMessage（生产路径）同样保持 role="system" 且内容不被 repr 化。"""
+    import pytest
+
+    langchain_messages = pytest.importorskip("langchain_core.messages")
+    out = _to_llm_message(langchain_messages.SystemMessage(content="SYSTEM-X"))
+    assert out.role == "system"
+    assert out.content == "SYSTEM-X"
+
+
+def test_to_llm_message_preserves_system_role_object_without_langchain() -> None:
+    """生产走 langchain 对象路径；本地无 langchain 时用同构对象钉死 getattr 分支。"""
+    from types import SimpleNamespace
+
+    out = _to_llm_message(SimpleNamespace(type="system", content="SYSTEM-X"))
+    assert out.role == "system"
+    assert out.content == "SYSTEM-X"
+
+
+def test_to_llm_message_fallback_still_stringifies_unknown_type() -> None:
+    """反向守卫：未知 type 仍走 fallback 的 str() 折叠（不因新增 system 分支而透传）。"""
+    out = _to_llm_message({"type": "weird", "content": "x"})
+    assert out.role == "user"
+    assert "x" in out.content
+
+
+def test_init_loop_state_system_role_survives_conversion() -> None:
+    """端到端：_initLoopState 的 messages 转成 LlmMessage 后，消息 0 仍是 system。"""
+    state = _initLoopState("查询供应商")
+    llm_messages = [_to_llm_message(m) for m in state["messages"]]
+
+    assert llm_messages[0].role == "system"
+    assert llm_messages[0].content == _L4_SYSTEM_PROMPT
+    assert llm_messages[1].role == "user"
+    assert "<user_question>" in llm_messages[1].content
+
+    # 任何一条都不允许残留 dict-repr / langchain repr 痕迹
+    for m in llm_messages:
+        assert "{'role'" not in m.content
+        assert "SystemMessage(" not in m.content
+        assert "additional_kwargs=" not in m.content

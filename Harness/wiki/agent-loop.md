@@ -88,6 +88,20 @@ class AgentLoopResult:
 describe_table 68,334 → 18,176 tokens，list_joins 38,931 → 2,046 tokens，
 转义净增 116,120 → 156 字符。详见 `Harness/changes/2026-10-31-l4-tool-slimming/summary.md`。
 
+### 消息角色契约（④ system 角色修复，2026-10-31）
+
+`_to_llm_message` 必须把 `type == "system"` 的消息转成 `LlmMessage(role="system", ...)`。
+`_initLoopState` 的消息 0 是 `_L4_SYSTEM_PROMPT`（安全前言 + 行为规则），**绝不能掉进 fallback**：
+`role: str` 原样透传给 provider，一旦折成 `role="user"` + `str(msg)`，安全前言就降级为用户输入
+（还外带 ~77 字符 repr 噪声）。`l4_token_profile` 已把 `system` 当独立桶，修复后逐轮组件应为
+`system ~844 / user ~35` 而不是 `user ~913`。修复后同题复跑首次以 `answered` 结束
+（前两次都是 `max_iterations`）——系统级指令让模型遵守了迭代预算。
+详见 `Harness/changes/2026-10-31-l4-system-role/summary.md`。
+
+**缓存口径**：`cachedTokens ÷ 本轮 prompt` 会低估命中率（分母含本轮新增）。唯一可命中的前缀是
+**上一轮 prompt**，所以正确口径是 `cachedTokens ÷ P_{i-1}`；按下限 `ΣP_i − 0.75·ΣP_{<n}` 可快速判断
+「缓存是否已到顶」——实测多次运行均低于下限，说明前缀本就对齐，无需再优化。
+
 ## BaseLlmClient.complete_with_tools
 
 抽象方法在 `app/infrastructure/llm/base.py`，所有 LLM 客户端必须实现以支持 tool calling。

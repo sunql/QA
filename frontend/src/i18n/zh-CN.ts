@@ -1887,7 +1887,13 @@ export const zhCN = {
         modelName: "模型",
         promptTokens: "Prompt",
         completionTokens: "Completion",
+        costSource: "成本口径",
         actions: "合计",
+      },
+      costSource: {
+        measured: "实测",
+        estimated: "估算",
+        unknown: "未知",
       },
       globalCards: {
         sessions: "会话数",

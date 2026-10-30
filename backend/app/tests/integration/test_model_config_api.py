@@ -278,6 +278,7 @@ class TestSessionUsageApi:
                 completionTokens=5,
                 cost=Decimal("0"),
                 purpose="chat",
+                cost_source="measured",
             )
         resp = await client.get("/api/v1/sessions/sess_2/usage/list")
         assert resp.status_code == 200
@@ -285,3 +286,5 @@ class TestSessionUsageApi:
         assert len(items) == 1
         assert items[0]["modelName"] == "llama3.1"
         assert items[0]["totalTokens"] == 15
+        # P1-2 读契约：成本口径必须以 camelCase 暴露（此前只写不读）
+        assert items[0]["costSource"] == "measured"

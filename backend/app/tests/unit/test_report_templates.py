@@ -40,7 +40,11 @@ from app.services.report_template_service import (
     validateTemplateStructure,
 )
 from app.services.report_templates import REPORT_TEMPLATES
-from app.services.token_usage_service import TokenUsageService
+from app.services.token_usage_service import (
+    COST_SOURCE_ESTIMATED,
+    COST_SOURCE_MEASURED,
+    TokenUsageService,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +355,7 @@ class TestGenerateSummary:
         assert summary == "[事实] A"
         assert len(usage.recorded) == 1
         assert usage.recorded[0]["purpose"] == PURPOSE_REPORT_SUMMARY
+        assert usage.recorded[0]["cost_source"] == COST_SOURCE_MEASURED
 
     async def test_no_configs_skips_llm(self) -> None:
         llm = _FakeLlm()
@@ -371,6 +376,18 @@ class TestGenerateSummary:
         summary = await service._generateSummary(AsyncMock(), [], configs=[_llmConfig()])
         assert llm.calls == 1
         assert summary is None, "LLM 失败 → None（调用方落「（总结生成失败）」）"
+
+    async def test_failure_path_usage_labeled_estimated(self) -> None:
+        """异常里提取的 token 是部分用量，口径必须是 estimated 而不是 measured。"""
+        from app.domain.exceptions import LlmClientError
+
+        llm = _FakeLlm(raiseExc=LlmClientError("boom", tokens=(10, 5)))
+        usage = _SpyTokenUsage()
+        service = self._service(llm, usage)
+        summary = await service._generateSummary(AsyncMock(), [], configs=[_llmConfig()])
+        assert summary is None
+        assert len(usage.recorded) == 1, "失败路径也要补账（M4 口径）"
+        assert usage.recorded[0]["cost_source"] == COST_SOURCE_ESTIMATED
 
     async def test_routing_and_usage_share_one_session_id(self, monkeypatch) -> None:
         """L1：RoutingContext 与 token_usage 台账共用同一合成 reportSessionId。"""

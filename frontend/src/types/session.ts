@@ -9,6 +9,8 @@ export interface SessionTokenUsage {
   cost: number;
   requestTime: string;
   purpose: string | null;
+  // 成本口径（系统边界原始字符串）：measured / estimated / unknown；NULL = 早期未标注行
+  costSource: string | null;
 }
 
 // 单模型统计（对齐后端 ModelUsageStat）

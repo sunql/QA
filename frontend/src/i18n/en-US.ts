@@ -1864,7 +1864,13 @@ export const enUS = {
         modelName: "Model",
         promptTokens: "Prompt",
         completionTokens: "Completion",
+        costSource: "Cost source",
         actions: "Total",
+      },
+      costSource: {
+        measured: "Measured",
+        estimated: "Estimated",
+        unknown: "Unknown",
       },
       globalCards: {
         sessions: "Sessions",

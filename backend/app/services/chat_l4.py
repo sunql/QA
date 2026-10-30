@@ -21,6 +21,7 @@ from app.domain.exceptions import ConfigError
 from app.domain.schemas import ChatRequest, ChatResponse
 from app.infrastructure.llm.base_client import BaseLlmClient
 from app.services.agent_runtime_service import AgentLoopResult
+from app.services.step_query_planner import StepQueryPlanner
 from app.services.chat_constants import (
     ROUTING_LAYER_L4,
     USAGE_PURPOSE_L4_AGENT_LOOP,
@@ -49,11 +50,23 @@ class L4Mixin:
         1. ENABLE_L4_AGENT_LOOP='true'（system_config 表）
         2. 问题含探索性关键词（为什么/怎么算/拆解/解释/如何...）
 
+        例外（显式分步让路，2026-10-31 生产缺陷）：问题命中
+        ``StepQueryPlanner.is_explicit_multi_step``（「第X步」标号 / 「分步分析」/
+        「先…然后…」）时**不进 L4**——这类问题的正主是 L2 管线的拆步（多步计划卡
+        + 分步 SQL 前端可见）。探索性关键词（"分别是什么"/"为什么下降"）在分步
+        问题里极常见，朴素子串会把整题截走：直接产出无计划、无 SQL 的大段文本，
+        且单次 12~18 万 token（2026-10-30 15:45-15:49 生产日志实锤）。
+
         返回 ChatResponse = 命中 L4（LLM 已跑完）；返回 None = 降级到 L2/L3。
 
         L4 失败时同样返回 None，确保不阻断主链路（与 L1 KPI 同模式）。
         """
         if not await self._isL4AgentLoopEnabled(session):
+            return None
+
+        # 显式分步问题让路：零 LLM 成本的规则判定（与 L2 拆步入口同一把尺子）
+        if StepQueryPlanner.is_explicit_multi_step(dto.question):
+            logger.info("显式分步问题让路 L4 Agent Loop，降级 L2 拆步: %s", dto.question)
             return None
 
         # 探索性关键词检测（简单 substring，不过度设计；详见 _L4_EXPLORATORY_KEYWORDS 定义处）

@@ -51,3 +51,23 @@ export function downloadBlob(blob: Blob, filename: string): void {
 export function downloadCsv(rows: Record<string, unknown>[], filename: string): void {
   downloadBlob(new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8" }), filename);
 }
+
+const PNG_DATA_URL_PREFIX = "data:image/png;base64,";
+
+/** PNG data URL → 真正的二进制 image/png Blob。
+ *
+ * base64 必须先解码再进 Blob：直接 `new Blob([dataUrl])` 会把 base64 **字符串**
+ * 原样写进 .png，文件打不开（既有 bug 的修复点）。非 PNG 前缀抛错 —— 调用方
+ * （ChartRenderer）把它并入统一的导出失败提示。
+ */
+export function dataUrlToBlob(dataUrl: string): Blob {
+  if (!dataUrl.startsWith(PNG_DATA_URL_PREFIX)) {
+    throw new Error("不是 PNG data URL，拒绝写入 .png");
+  }
+  const binary = atob(dataUrl.slice(PNG_DATA_URL_PREFIX.length));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type: "image/png" });
+}

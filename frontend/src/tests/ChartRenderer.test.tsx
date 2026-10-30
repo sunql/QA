@@ -1,12 +1,39 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { message } from "antd";
 import React from "react";
 
-// 全局共享的 echarts 实例 mock：暴露 getDataURL，便于断言图表导出路径。
+// 全局共享的 echarts 实例 mock：暴露 getDataURL / resize，便于断言导出与 resize 路径。
 const echartsInstance = vi.hoisted(() => ({
   getDataURL: vi.fn(() => "data:image/png;base64,x"),
+  resize: vi.fn(),
 }));
+
+// 离屏渲染替身：导出改走 renderChartPng（亮色口径在内部完成），不再摸在线实例。
+const renderChartPngMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../utils/chartSnapshot", () => ({
+  __esModule: true,
+  renderChartPng: renderChartPngMock,
+  needsSnapshot: (chartType: string) => chartType !== "table" && chartType !== "kpi",
+}));
+
+// ResizeObserver 替身：jsdom 未实现；捕获回调以便手动触发「容器尺寸变化」。
+class ResizeObserverMock {
+  static instances: ResizeObserverMock[] = [];
+  callback: ResizeObserverCallback;
+  observe = vi.fn();
+  disconnect = vi.fn();
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+    ResizeObserverMock.instances.push(this);
+  }
+}
+
+function installResizeObserver(): void {
+  ResizeObserverMock.instances = [];
+  vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+}
 
 // mock echarts-for-react：转发 ref 暴露 getEchartsInstance，避免在 jsdom 中实例化 ECharts 画布。
 // 图表导出依赖 ref.current.getEchartsInstance()，普通函数 mock 无法承载。
@@ -24,6 +51,7 @@ vi.mock("echarts-for-react", () => ({
 }));
 
 import ChartRenderer from "../components/chat/ChartRenderer";
+import { useThemeStore } from "../stores/themeStore";
 
 const createObjectUrl = vi.fn();
 const revokeObjectUrl = vi.fn();
@@ -56,13 +84,28 @@ function readBlobText(blob: Blob): Promise<string> {
   });
 }
 
+function readBlobBytes(blob: Blob): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(blob);
+  });
+}
+
 describe("ChartRenderer", () => {
   beforeEach(() => {
     createObjectUrl.mockReset().mockReturnValue("blob:mock");
     revokeObjectUrl.mockReset();
     anchorClick.mockReset();
     echartsInstance.getDataURL.mockReset().mockReturnValue("data:image/png;base64,x");
+    echartsInstance.resize.mockReset();
+    renderChartPngMock.mockReset().mockResolvedValue("data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==");
     mockBlobDownload();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("TABLE 类型渲染 antd 表格", () => {
@@ -175,24 +218,97 @@ describe("ChartRenderer", () => {
     expect(anchorClick).toHaveBeenCalled();
   });
 
-  it("图表渲染「导出 PNG」按钮，点击调用 getDataURL 并下载", async () => {
+  it("导出 PNG 走离屏渲染：以原始 chartOption 调用，下载解码后的 PNG 字节", async () => {
+    const chartOption = { series: [{ type: "bar", data: [1] }] };
+    render(<ChartRenderer chartType="bar" chartOption={chartOption} />);
+    fireEvent.click(screen.getByRole("button", { name: /导出 PNG/ }));
+
+    await waitFor(() => expect(createObjectUrl).toHaveBeenCalledTimes(1));
+
+    // 传的是**原始结构**（服务端 JSON），不带任何主题注入 —— 亮色口径在离屏渲染内部完成
+    expect(renderChartPngMock).toHaveBeenCalledWith(chartOption);
+    // 不再从在线实例取图：暗色在线实例直接 getDataURL 会得到白底白字
+    expect(echartsInstance.getDataURL).not.toHaveBeenCalled();
+
+    const blob = createObjectUrl.mock.calls[0][0] as Blob;
+    expect(blob.type).toBe("image/png");
+    // 回归钉：base64 字符串曾原样写进 .png（打不开）；现在必须是解码后的 PNG 魔数
+    const bytes = await readBlobBytes(blob);
+    expect(Array.from(bytes.slice(0, 4))).toEqual([0x89, 0x50, 0x4e, 0x47]);
+
+    const anchor = anchorClick.mock.instances[0] as HTMLAnchorElement | undefined;
+    expect(anchor?.getAttribute("download")).toBe("chart.png");
+    expect(anchorClick).toHaveBeenCalled();
+  });
+
+  it("暗色模式下导出仍传原始结构（不把暗色注入烤进 PNG）", async () => {
+    const chartOption = { series: [{ type: "bar" }] };
+    useThemeStore.setState({ isDark: true });
+
+    render(<ChartRenderer chartType="bar" chartOption={chartOption} />);
+    fireEvent.click(screen.getByRole("button", { name: /导出 PNG/ }));
+    await waitFor(() => expect(createObjectUrl).toHaveBeenCalledTimes(1));
+
+    expect(renderChartPngMock).toHaveBeenCalledWith(chartOption);
+    expect(renderChartPngMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("离屏渲染返回 null（渲染失败）时 message.error 提示", async () => {
+    const errorSpy = vi.spyOn(message, "error").mockReturnValue(1 as unknown as ReturnType<typeof message.error>);
+    renderChartPngMock.mockResolvedValue(null);
+
     render(<ChartRenderer chartType="bar" chartOption={{ series: [{ type: "bar" }] }} />);
     fireEvent.click(screen.getByRole("button", { name: /导出 PNG/ }));
 
-    expect(echartsInstance.getDataURL).toHaveBeenCalledWith({
-      type: "png",
-      pixelRatio: 2,
-      backgroundColor: "#fff",
-    });
-    expect(createObjectUrl).toHaveBeenCalledTimes(1);
-    const blob = createObjectUrl.mock.calls[0][0] as Blob;
-    expect(blob.type).toBe("image/png");
-    expect(await readBlobText(blob)).toBe("data:image/png;base64,x");
+    await waitFor(() => expect(errorSpy).toHaveBeenCalled());
+    expect(createObjectUrl).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
 
-    const anchor = anchorClick.mock.instances[0] as HTMLAnchorElement | undefined;
-    expect(anchor).toBeDefined();
-    expect(anchor?.getAttribute("download")).toBe("chart.png");
-    expect(anchorClick).toHaveBeenCalled();
+  // ===== ResizeObserver（侧栏开合只改 flex 宽度，不触发 window resize）=====
+
+  it("容器尺寸变化时调用实例 resize 重绘", () => {
+    installResizeObserver();
+    render(<ChartRenderer chartType="bar" chartOption={{ series: [{ type: "bar" }] }} />);
+
+    const container = screen.getByTestId("chart-container");
+    Object.defineProperty(container, "clientWidth", { configurable: true, value: 400 });
+    const observer = ResizeObserverMock.instances[0];
+    expect(observer.observe).toHaveBeenCalledWith(container);
+
+    observer.callback([], observer as unknown as ResizeObserver);
+    expect(echartsInstance.resize).toHaveBeenCalledTimes(1);
+  });
+
+  it("宽度为 0 的回调被忽略（侧栏收起瞬间的过渡尺寸不重绘）", () => {
+    installResizeObserver();
+    render(<ChartRenderer chartType="bar" chartOption={{ series: [{ type: "bar" }] }} />);
+
+    const container = screen.getByTestId("chart-container");
+    Object.defineProperty(container, "clientWidth", { configurable: true, value: 0 });
+    const observer = ResizeObserverMock.instances[0];
+
+    observer.callback([], observer as unknown as ResizeObserver);
+    expect(echartsInstance.resize).not.toHaveBeenCalled();
+  });
+
+  it("卸载时 disconnect，不留观察器", () => {
+    installResizeObserver();
+    const { unmount } = render(
+      <ChartRenderer chartType="bar" chartOption={{ series: [{ type: "bar" }] }} />
+    );
+
+    const observer = ResizeObserverMock.instances[0];
+    unmount();
+    expect(observer.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("环境无 ResizeObserver API 时不抛错", () => {
+    // 不 stub —— jsdom 默认没有 ResizeObserver
+    expect(() =>
+      render(<ChartRenderer chartType="bar" chartOption={{ series: [{ type: "bar" }] }} />)
+    ).not.toThrow();
+    expect(screen.getByTestId("echarts-mock")).toBeInTheDocument();
   });
 
   it("无内容（无 chartType / data 为空）时不渲染导出按钮", () => {
@@ -220,15 +336,16 @@ describe("ChartRenderer", () => {
     errorSpy.mockRestore();
   });
 
-  it("导出 PNG 失败时 message.error 提示", () => {
+  it("导出 PNG 失败时 message.error 提示（离屏渲染抛错）", async () => {
     const errorSpy = vi.spyOn(message, "error").mockReturnValue(1 as unknown as ReturnType<typeof message.error>);
-    // getDataURL 抛错
-    echartsInstance.getDataURL.mockImplementation(() => {
-      throw new Error("getDataURL failed");
-    });
+    renderChartPngMock.mockRejectedValue(new Error("offscreen render failed"));
+
     render(<ChartRenderer chartType="bar" chartOption={{ series: [{ type: "bar" }] }} />);
     fireEvent.click(screen.getByRole("button", { name: /导出 PNG/ }));
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("getDataURL failed"));
+
+    await waitFor(() =>
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("offscreen render failed"))
+    );
     errorSpy.mockRestore();
   });
 

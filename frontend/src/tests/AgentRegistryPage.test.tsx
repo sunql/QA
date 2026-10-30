@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { ConfigProvider } from "antd";
@@ -102,6 +102,35 @@ describe("AgentRegistryPage - toolName binding", () => {
       tools: mockTools,
     });
     api.listAgents.mockReset().mockResolvedValue([]);
+  });
+
+  // unhandledRejection 守卫：本组用例都走「点击提交 / 联动校验」路径，而 antd 的
+  // `validateFields()` 在校验失败时 **reject**、调用点（onOk / onChange）丢弃返回值
+  // ⇒ rejection 无人接管。vitest 默认把它计入套件错误（exit=1），但那只是末尾一行
+  // 摘要、不指向具体用例；这里显式断言，让失败落在**用例**上。
+  // 监听只在本 describe 内装/卸：装了就得由我断言，免得顺带屏蔽 vitest 对本文件
+  // 其余用例的全局统计。
+  const unhandledRejections: unknown[] = [];
+  const collectUnhandled = (reason: unknown) => {
+    unhandledRejections.push(reason);
+  };
+
+  beforeAll(() => {
+    process.on("unhandledRejection", collectUnhandled);
+  });
+  afterAll(() => {
+    process.off("unhandledRejection", collectUnhandled);
+  });
+  beforeEach(() => {
+    unhandledRejections.length = 0;
+  });
+  afterEach(async () => {
+    // node 在微任务队列清空后才派发 unhandledRejection —— 让出一轮事件循环再断言
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      unhandledRejections,
+      "本组用例不得泄漏 unhandled rejection（antd validateFields 校验失败会 reject）",
+    ).toHaveLength(0);
   });
 
   it("displays toolName in detail drawer when present", async () => {

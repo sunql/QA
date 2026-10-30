@@ -1,13 +1,15 @@
 import ReactECharts from "echarts-for-react";
 import { Button, Collapse, Space, Table, Typography, message } from "antd";
 import { DownloadOutlined } from "@ant-design/icons";
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "../../i18n";
 import { useThemeStore } from "../../stores/themeStore";
 import { applyChartTheme } from "../../theme/chartTheme";
+import { applyChartNumberFormat } from "../../theme/chartFormat";
 import { DARK_TOKEN, LIGHT_TOKEN } from "../../theme/tokens";
 import type { ChartType, TablePayload, VisualRationale } from "../../types/chat";
-import { downloadBlob, downloadCsv } from "../../utils/download";
+import { dataUrlToBlob, downloadBlob, downloadCsv } from "../../utils/download";
+import { renderChartPng } from "../../utils/chartSnapshot";
 import { visualRationaleText } from "../../utils/visualRationale";
 import KpiCard, { parseKpiPayload } from "./KpiCard";
 
@@ -80,9 +82,10 @@ export default function ChartRenderer({
   tableOption,
   visualRationale,
 }: ChartRendererProps) {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const isDark = useThemeStore((state) => state.isDark);
   const chartRef = useRef<InstanceType<typeof ReactECharts>>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   // TABLE 的 chartOption 本身就是 `{columns, rows}`，所以表格并不依赖调用方传 data：
   // 多步每一步不铺全量 data（见 MultiStepPlanCard），表格要从自己的负载里自取自足。
@@ -97,15 +100,39 @@ export default function ChartRenderer({
   // 不会误报；历史回放读到 `truncated: true` 时才提示，与后端 PDF 口径一致。
   const isTruncatedTable = chartOption?.truncated === true;
   // 决策 6：服务端只发结构，颜色在这一层补（只补色、不改结构；option 来自 store，
-  // 必须走不可变路径，否则同一份消息的其它引用会串台）
+  // 必须走不可变路径，否则同一份消息的其它引用会串台）。
+  // 数字口径先于主题：formatter 是 JS 函数（JSON 下不来），主题层只补色不碰它。
   const themedOption = useMemo(
-    () => (chartOption ? applyChartTheme(chartOption, isDark ? DARK_TOKEN : LIGHT_TOKEN) : null),
-    [chartOption, isDark]
+    () =>
+      chartOption
+        ? applyChartTheme(
+            applyChartNumberFormat(chartOption, locale),
+            isDark ? DARK_TOKEN : LIGHT_TOKEN
+          )
+        : null,
+    [chartOption, isDark, locale]
   );
   const kpiPayload = useMemo(
     () => (isKpi ? parseKpiPayload(chartOption) : null),
     [isKpi, chartOption]
   );
+  // 侧栏开合只改 flex 宽度，不触发 window resize —— ECharts 不会自己知道要重绘，
+  // 需要观察容器尺寸。宽度 <= 0 是收起过程的过渡态，重绘只会拿到空画布，忽略。
+  // （hooks 必须在早退之前：组件会随消息流重挂，早退后挂 hook 直接炸。）
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (container.clientWidth <= 0) {
+        return;
+      }
+      chartRef.current?.getEchartsInstance()?.resize();
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
   // 无 kpi 负载（后端降级为不发卡）时不渲染空壳卡
   if (isKpi && !kpiPayload) {
     return null;
@@ -125,14 +152,16 @@ export default function ChartRenderer({
     }
   };
 
-  const handleExportPng = () => {
+  // PNG 导出走离屏渲染（chartSnapshot）：恒亮色 + 白底 + 与在线同一套数字口径。
+  // 在线实例在暗色下 getDataURL 会得到白底白字，不能再用；dataUrl 必须先解码
+  // （dataUrlToBlob）再进 Blob，base64 字符串直接写入会产出打不开的文件。
+  const handleExportPng = async () => {
     try {
-      const instance = chartRef.current?.getEchartsInstance();
-      if (!instance) {
+      const dataUrl = await renderChartPng(chartOption ?? {});
+      if (!dataUrl) {
         throw new Error(t("errors.unknownError"));
       }
-      const dataUrl = instance.getDataURL({ type: "png", pixelRatio: 2, backgroundColor: "#fff" });
-      downloadBlob(new Blob([dataUrl], { type: "image/png" }), PNG_FILENAME);
+      downloadBlob(dataUrlToBlob(dataUrl), PNG_FILENAME);
       void message.success(t("chartExport.success"));
     } catch (error) {
       const messageText = errorMessageOf(error) || t("errors.unknownError");
@@ -159,7 +188,7 @@ export default function ChartRenderer({
                 {t("chartExport.csv")}
               </Button>
             ) : (
-              <Button size="small" icon={<DownloadOutlined />} onClick={handleExportPng}>
+              <Button size="small" icon={<DownloadOutlined />} onClick={() => void handleExportPng()}>
                 {t("chartExport.png")}
               </Button>
             )}
@@ -172,7 +201,9 @@ export default function ChartRenderer({
         <KpiCard kpi={kpiPayload} />
       ) : (
         <>
-          <ReactECharts ref={chartRef} option={themedOption} style={{ height: 320 }} notMerge />
+          <div ref={containerRef} data-testid="chart-container">
+            <ReactECharts ref={chartRef} option={themedOption} style={{ height: 320 }} notMerge />
+          </div>
           {/* 图下方的折叠明细表（Task 8，决策 2）：默认折叠，展开看原始数字。
               表负载来自 tableOption（后端只在图型附带；TABLE 的表已在 chartOption、
               KPI 不附表，故此处 tableOption 为 null 时整个面板不渲染）。 */}

@@ -216,6 +216,37 @@ class TestDeterministicShapesSkipTheLlm:
         assert client.calls == 0
 
 
+class TestBijectivePairEndToEnd:
+    """31 供应商线上实例的端到端回归：编码↔名称双射折叠成单维横柱。
+
+    用户看到的是「31 条系列、每条一个非空点、图例盖住标题」；折叠后
+    单系列 HBAR，无图例，类目取名称列。
+    """
+
+    _COLUMNS = ["SUPPLIER_CODE", "SUPPLIER_NAME", "RCV_QTY_PUU"]
+    _PLAN = _plan(
+        groupBy=("SUPPLIER_CODE", "SUPPLIER_NAME"),
+        aggregations=(Aggregation(function="SUM", property="RCV_QTY_PUU"),),
+    )
+
+    async def test_bijective_code_name_pair_yields_one_series_without_legend(self) -> None:
+        data = [
+            {
+                "SUPPLIER_CODE": f"B{i:03d}",
+                "SUPPLIER_NAME": f"供应商{i:03d}某某五金有限公司",
+                "RCV_QTY_PUU": i,
+            }
+            for i in range(31)
+        ]
+
+        build = await _build(columns=self._COLUMNS, data=data, plan=self._PLAN)
+
+        assert build.chartType is ChartType.HBAR
+        assert len(build.option["series"]) == 1
+        assert "legend" not in build.option
+        assert build.option["yAxis"]["data"][0] == "供应商000某某五金有限公司"
+
+
 class TestAmbiguousShapeAsksOnce:
     def _ambiguous(self) -> dict:
         return {"columns": ["SUPPLIER_NAME", "RCV_QTY_PUU"], "data": _ROWS}

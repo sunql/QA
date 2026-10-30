@@ -401,12 +401,14 @@ class TestMultiDimension:
     def test_sparse_two_dimensions_falls_back_to_bar(self) -> None:
         """稀疏交叉表画成热力图是大片空白 —— 退普通柱状。
 
-        对角稀疏：20 行 / (20×20) = 0.05，远低于 0.6 门槛。
+        对角稀疏 + 一行破坏双射（S0 同时挂 M0/M1）：21 行 / (20×20) = 0.0525，
+        远低于 0.6 门槛；非双射保证不会被 1:1 折叠收走一维。
         """
         sparse = [
             {"SUPPLIER_NAME": f"S{s}", "MATERIAL_NAME": f"M{s}", "AMT": 1}
             for s in range(20)
         ]
+        sparse.append({"SUPPLIER_NAME": "S0", "MATERIAL_NAME": "M1", "AMT": 1})
         decision = decideChartKind(
             _signals(self._CROSS_TAB_COLUMNS, sparse, plan=self._CROSS_TAB_PLAN),
             _THRESHOLDS,
@@ -432,6 +434,102 @@ class TestMultiDimension:
         )
         assert decision.kind is ChartType.TABLE
         assert decision.ruleId == "R13_RAW_DETAIL_TABLE"
+
+
+class TestBijectiveDimensionCollapse:
+    """双维 1:1 冗余折叠 —— 线上实例：GROUP BY 供应商编码, 供应商名称 得到 31 行，
+    分组柱状摊出 31 条系列（每条只有一个非空点），图例糊成一片。
+
+    编码↔名称是严格双射时不携带交叉信息：折叠成单维，保留**平均标签更长**的
+    （更可读的）一维。守卫：原始明细（R13）绝不折叠，重复行 / None / 单行不折叠。
+    """
+
+    _COLUMNS = ["SUPPLIER_CODE", "SUPPLIER_NAME", "RCV_QTY_PUU"]
+    _PLAN = _plan(
+        groupBy=("SUPPLIER_CODE", "SUPPLIER_NAME"),
+        aggregations=(Aggregation(function="SUM", property="RCV_QTY_PUU"),),
+    )
+
+    def _bijectiveRows(self, count: int = 31) -> list[dict]:
+        return [
+            {
+                "SUPPLIER_CODE": f"B{i:03d}",
+                "SUPPLIER_NAME": f"供应商{i:03d}某某五金有限公司",
+                "RCV_QTY_PUU": i,
+            }
+            for i in range(count)
+        ]
+
+    def test_bijective_pair_collapses_to_the_more_readable_dimension(self) -> None:
+        signals = _signals(self._COLUMNS, self._bijectiveRows(), plan=self._PLAN)
+
+        assert signals.dimensions == ("SUPPLIER_NAME",)
+
+        decision = decideChartKind(signals, _THRESHOLDS)
+        assert decision.kind is ChartType.HBAR  # 31 行单维 → R11，不是 R10 分组柱状
+        assert decision.ruleId == "R11_HBAR_MANY_ROWS"
+
+    def test_label_length_tie_keeps_the_first_dimension(self) -> None:
+        rows = [
+            {"CODE_A": f"A{i}", "CODE_B": f"B{i}", "AMT": i} for i in range(5)
+        ]
+        signals = _signals(
+            ["CODE_A", "CODE_B", "AMT"],
+            rows,
+            plan=_plan(
+                groupBy=("CODE_A", "CODE_B"),
+                aggregations=(Aggregation(function="SUM", property="AMT"),),
+            ),
+        )
+        assert signals.dimensions == ("CODE_A",)
+
+    def test_non_bijective_pair_is_kept(self) -> None:
+        rows = [
+            {"SUPPLIER_NAME": f"S{s}", "MATERIAL_NAME": f"M{m}", "AMT": 1}
+            for s in range(2)
+            for m in range(2)
+        ]
+        signals = _signals(
+            ["SUPPLIER_NAME", "MATERIAL_NAME", "AMT"], rows, plan=self._CROSS_PLAN()
+        )
+        assert signals.dimensions == ("SUPPLIER_NAME", "MATERIAL_NAME")
+
+    def test_duplicate_pairs_are_not_collapsed(self) -> None:
+        """同一 (编码, 名称) 出现两次 ⇒ 行数 ≠ 基数，不是聚合后的干净双射。"""
+        rows = self._bijectiveRows(3) * 2
+        signals = _signals(self._COLUMNS, rows, plan=self._PLAN)
+        assert signals.dimensions == ("SUPPLIER_CODE", "SUPPLIER_NAME")
+
+    def test_none_dimension_value_prevents_collapse(self) -> None:
+        rows = self._bijectiveRows(3)
+        rows.append({"SUPPLIER_CODE": "B999", "SUPPLIER_NAME": None, "RCV_QTY_PUU": 1})
+        signals = _signals(self._COLUMNS, rows, plan=self._PLAN)
+        assert signals.dimensions == ("SUPPLIER_CODE", "SUPPLIER_NAME")
+
+    def test_single_row_is_not_collapsed(self) -> None:
+        signals = _signals(self._COLUMNS, self._bijectiveRows(1), plan=self._PLAN)
+        assert signals.dimensions == ("SUPPLIER_CODE", "SUPPLIER_NAME")
+
+    def test_raw_detail_bijective_columns_are_not_collapsed(self) -> None:
+        """R13 明细表守卫：无聚合无分组时，编码↔名称唯一也必须保持两维。
+
+        不守卫的话，采购单明细（PO_NO 唯一 ↔ 供应商唯一）会被折叠成柱状图。
+        """
+        rows = [
+            {"PO_NO": f"P{i:03d}", "SUPPLIER_NAME": f"供应商{i:03d}", "LINE_AMT": i}
+            for i in range(5)
+        ]
+        signals = _signals(["PO_NO", "SUPPLIER_NAME", "LINE_AMT"], rows, plan=_plan())
+
+        assert signals.dimensions == ("PO_NO", "SUPPLIER_NAME")
+        decision = decideChartKind(signals, _THRESHOLDS)
+        assert decision.ruleId == "R13_RAW_DETAIL_TABLE"
+
+    def _CROSS_PLAN(self) -> QueryPlan:
+        return _plan(
+            groupBy=("SUPPLIER_NAME", "MATERIAL_NAME"),
+            aggregations=(Aggregation(function="SUM", property="AMT"),),
+        )
 
 
 class TestCategoryBarAndHbar:

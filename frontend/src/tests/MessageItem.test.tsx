@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
+import { readFileSync } from "node:fs";
 
 // ResumeRunButton 渲染即调 useLlmModels（本文件里任何带 steps 的消息都会走到）。
 // 默认值必须在**模块级**给全：只在本文件末尾那个 describe 的 beforeEach 里设的话，
@@ -22,7 +23,17 @@ vi.mock("../hooks/useLlmModels", () => ({
 
 import MessageItem from "../components/chat/MessageItem";
 import { useChatStore } from "../stores/chatStore";
+import { useThemeStore } from "../stores/themeStore";
+import { DARK_TOKEN, LIGHT_TOKEN } from "../theme/tokens";
 import type { ChatMessage } from "../types/chat";
+
+// ChartRenderer 用替身：本文件测的是「何时渲染图表/骨架」的门控与时序，
+// 不是 ChartRenderer 内部（那在 ChartRenderer.test.tsx）。替身让骨架与图表
+// 的出现与否可以断言 testid，而不必在 jsdom 里实例化 ECharts。
+vi.mock("../components/chat/ChartRenderer", () => ({
+  __esModule: true,
+  default: () => <div data-testid="chart-renderer" />,
+}));
 
 function renderItem(overrides: Partial<ChatMessage> = {}) {
   const message: ChatMessage = {
@@ -582,5 +593,143 @@ describe("MessageItem 换模型续跑（N4 接缝）", () => {
     fireEvent.click(screen.getByTestId("resume-with-selected"));
 
     expect(resumeRun).toHaveBeenCalledWith("r-1", 2, "m-1", 1);
+  });
+});
+
+describe("MessageItem 图表门控与卡片主题化", () => {
+  afterEach(() => {
+    useThemeStore.setState({ isDark: false });
+  });
+
+  /** ChartRenderer 替身渲染它时必然可见；「无图表」= 替身未挂载。 */
+  const CHART_FIELDS = { chartType: "bar", chartOption: { series: [{ type: "bar" }] } } as const;
+
+  /** 独立渲染助手消息（可 rerender，用于流式时序断言）。 */
+  function renderMessage(props: Partial<ChatMessage>) {
+    const message: ChatMessage = {
+      id: "m-1",
+      role: "assistant",
+      content: "回答",
+      timestamp: 1,
+      ...props,
+    };
+    return render(
+      <ConfigProvider locale={zhCN}>
+        <MessageItem message={message} />
+      </ConfigProvider>
+    );
+  }
+
+  function rerenderMessage(
+    rerender: (ui: React.ReactElement) => void,
+    props: Partial<ChatMessage>
+  ): void {
+    const message: ChatMessage = {
+      id: "m-1",
+      role: "assistant",
+      content: "回答",
+      timestamp: 1,
+      ...props,
+    };
+    rerender(
+      <ConfigProvider locale={zhCN}>
+        <MessageItem message={message} />
+      </ConfigProvider>
+    );
+  }
+
+  function cardBackground(): string | undefined {
+    return document.querySelector<HTMLElement>(".ant-card")?.style.background;
+  }
+
+  /** jsdom 把十六进制颜色规范化为 rgb()，比较前对齐口径。 */
+  function hexToRgb(hex: string): string {
+    const value = hex.replace("#", "");
+    const channels = [0, 2, 4].map((offset) => parseInt(value.slice(offset, offset + 2), 16));
+    return `rgb(${channels.join(", ")})`;
+  }
+
+  // ===== 卡片背景语义 token 化（暗色下 #fafafa 上白色轴文字不可读的修复点）=====
+
+  it("亮色：助手卡片背景 == LIGHT_TOKEN.colorChatAssistantBg", () => {
+    renderMessage({ ...CHART_FIELDS });
+    expect(cardBackground()).toBe(hexToRgb(LIGHT_TOKEN.colorChatAssistantBg));
+  });
+
+  it("亮色：用户卡片背景 == LIGHT_TOKEN.colorChatUserBg", () => {
+    renderMessage({ role: "user", content: "问" });
+    expect(cardBackground()).toBe(hexToRgb(LIGHT_TOKEN.colorChatUserBg));
+  });
+
+  it("暗色：助手/用户卡片分别切换为 DARK_TOKEN 的语义色", () => {
+    useThemeStore.setState({ isDark: true });
+    const { unmount } = renderMessage({ ...CHART_FIELDS });
+    expect(cardBackground()).toBe(hexToRgb(DARK_TOKEN.colorChatAssistantBg));
+    // querySelector 取的是文档里第一张卡：先卸载助手卡，再验用户卡
+    unmount();
+
+    renderMessage({ role: "user", content: "问" });
+    expect(cardBackground()).toBe(hexToRgb(DARK_TOKEN.colorChatUserBg));
+  });
+
+  it("组件源码不再硬编码卡片背景字面量（防回归钉）", () => {
+    // vitest 的 cwd 即 frontend/，相对路径最稳（import.meta.url 在转换后非 file scheme）
+    const source = readFileSync("src/components/chat/MessageItem.tsx", "utf8");
+    expect(source).not.toContain("#fafafa");
+    expect(source).not.toContain("#e6f4ff");
+  });
+
+  // ===== 流式门控：chart 事件先于答案 token 到达，空气泡里不能先蹦出整张图 =====
+
+  it("流式中且正文为空：图表槽显示骨架，不渲染图表", () => {
+    renderMessage({ ...CHART_FIELDS, content: "", isStreaming: true });
+
+    expect(screen.getByTestId("chart-skeleton")).toBeInTheDocument();
+    expect(screen.queryByTestId("chart-renderer")).toBeNull();
+  });
+
+  it("正文只有空白字符：仍视为未开始，显示骨架（只 trim 判据）", () => {
+    renderMessage({ ...CHART_FIELDS, content: "  \n ", isStreaming: true });
+
+    expect(screen.getByTestId("chart-skeleton")).toBeInTheDocument();
+    expect(screen.queryByTestId("chart-renderer")).toBeNull();
+  });
+
+  it("首个 token 到达：骨架让位于图表", () => {
+    const { rerender } = renderMessage({ ...CHART_FIELDS, content: "", isStreaming: true });
+    expect(screen.queryByTestId("chart-renderer")).toBeNull();
+
+    rerenderMessage(rerender, { ...CHART_FIELDS, content: "2026-01 起", isStreaming: true });
+
+    expect(screen.getByTestId("chart-renderer")).toBeInTheDocument();
+    expect(screen.queryByTestId("chart-skeleton")).toBeNull();
+  });
+
+  it("isStreaming=false 且正文为空：图表立即出现（非流式历史/降级形态）", () => {
+    renderMessage({ ...CHART_FIELDS, content: "", isStreaming: false });
+
+    expect(screen.getByTestId("chart-renderer")).toBeInTheDocument();
+    expect(screen.queryByTestId("chart-skeleton")).toBeNull();
+  });
+
+  it("isStreaming 未定义（持久化历史消息）：图表立即出现", () => {
+    renderMessage({ ...CHART_FIELDS, content: "历史回答" });
+
+    expect(screen.getByTestId("chart-renderer")).toBeInTheDocument();
+    expect(screen.queryByTestId("chart-skeleton")).toBeNull();
+  });
+
+  it("无 chartType 时骨架与图表都不渲染", () => {
+    renderMessage({ content: "", isStreaming: true });
+
+    expect(screen.queryByTestId("chart-skeleton")).toBeNull();
+    expect(screen.queryByTestId("chart-renderer")).toBeNull();
+  });
+
+  it("骨架带 role=status 与加载文案（可访问性）", () => {
+    renderMessage({ ...CHART_FIELDS, content: "", isStreaming: true });
+
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(screen.getByText("图表生成中…")).toBeInTheDocument();
   });
 });

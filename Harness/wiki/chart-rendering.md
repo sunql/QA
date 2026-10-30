@@ -5,6 +5,9 @@
 > 2026-10-01 补充「可视化输出策略」（图/表/图+表 + 判断依据）：契约新增 `tableOption` /
 > `visualRationale`，多步顶层继承图**反转**为无图；变更记录见
 > `Harness/changes/2026-10-01-visual-output-strategy/`。
+> 2026-10-30 补「图表输出可读性」批（feat/chat-chart-rendering）：图例底部滚动、
+> 双维 1:1 双射折叠、瀑布断点、前端数字格式化层、PNG 离屏导出修正、ResizeObserver、
+> 流式门控 + 骨架；变更记录见 `Harness/changes/2026-10-30-chat-chart-rendering/`。
 
 ## 原则
 
@@ -40,6 +43,14 @@
 列类型、维度/指标/时间列、`hasFormula`（`plan.aggregations[].formula` 非空 = 占比，
 由 `validatePlan` 强制）、`isTopN`、`wantCombo`（同比/环比）、`wantWaterfall`、
 `questionTrend` / `questionShare` 问句线索。
+
+**双维 1:1 冗余折叠（2026-10-30）**：GROUP BY `code,name` 且两列严格双射（行数=双侧
+基数、双向单值映射、无 None、行数>1）的聚合结果不携带交叉信息 —— 直接当两维会画出
+「31 条系列、每条一个非空点、图例盖住标题」的假分组柱状图。`buildChartSignals` 在
+进入规则表前把这种对折叠成单维，**保留平均标签更长者**（供应商场景即名称列；等长留
+首维）。守卫：**R13 原始明细绝不折叠**（无聚合无 groupBy 时跳过）、重复行 / 含 None /
+单行不折叠。折叠后 ruleId 由 R10 变 R11/R12 属预期语义变化。`heatmapCoverage` 在折叠
+**之后**计算。
 
 **ETL 列黑名单**：`ETL_LOAD_TS` / `UPDATE_DATE` / `CREATE_TIME` 等不进时间维，
 否则会出现「按 ETL 加载时间画折线」。
@@ -131,6 +142,17 @@ ETL 黑名单与关键词集合**不治理** —— 它们属解析语法/契约
 option，但渲染器自己产出的 formatter 仍要正确）。`toNumber(value)` 是公开的取值助手
 （KPI 路径也用它），排除 bool、保留 None。
 
+**图例恒底部单行滚动（2026-10-30）**：`_legend` 曾只发 `{"show": true}` —— ECharts
+默认顶部放置，31 条系列折成多行直接盖住标题（线上实锤）。现统一
+`{"show", "type": "scroll", "bottom": 0}`（轴图 `_buildAxisOption` 与饼类
+`_buildPieLike` 共用 `_scrollLegend`），`grid.bottom` 按有无图例在
+`_GRID_BOTTOM_DEFAULT = 32` / `_GRID_BOTTOM_WITH_LEGEND = 56` 间联动；单系列 /
+`showLegend=False` 不发 legend（保持 32，旧形态逐字不变）。
+
+**瀑布图断点（2026-10-30）**：缺失/非数值差值输出双 None（`base=None`、`height=None`），
+**累计量不推进** —— 不伪造「变化量为零」的假事实；ECharts 对 null 段自然画成断点。
+全无效行不抛错。
+
 ## 线上契约
 
 `chartType` + `chartOption` + `data` 三个字段名与语义**保持不变**，前端保持透传；
@@ -186,13 +208,14 @@ e2e 已按本决定断言多步 `charts.length === 0`（**与决定一致，不�
 | `frontend/src/types/chat.ts` | `ChartType` 联合类型（11 类 + table）+ `TablePayload` / `VisualRationale` 两接口（0107） |
 | `frontend/src/utils/chartContract.ts` | **图表字段的唯一收窄口径**（0105 抽出）。`VALID_CHART_TYPES` **必须与后端同步** —— 漏同步的表现是「图不见了但没有任何报错」（未知类型被静默置 null）。**为什么单独一个模块**：收窄规则描述的是**线上契约**不是 HTTP 传输，三个消费者分属三层（SSE/HTTP 响应、历史回放、导出挑图）；留在 `api/chat.ts` 会让 `stores/chatStore` 为一个谓词反向依赖 HTTP 客户端。0107 新增 `asTablePayload` / `asVisualRationale`（**不内置 code 白名单** —— rationale 漏一个 code 只是说明行退化成英文码，代价不对称） |
 | `frontend/src/api/chat.ts` | 消费上面的收窄，**流式与非流式同一道**（`normalizeChatResponse` / `normalizeStepResult` / `chart` 事件 / `done` 事件的 `visualRationale`） |
-| `frontend/src/components/chat/MessageItem.tsx` | 渲染门为 `Boolean(chartType)`（不是 `chartType && chartOption`：KPI 卡没有 ECharts option 语义）。**消息级 `visualRationale`**（多步汇总 SUMMARY_TEXT_ONLY）渲染为答案下方次要色一行，**只在无顶层图时兜底**，避免与 ChartRenderer 的依据画两行 |
-| `frontend/src/components/chat/ChartRenderer.tsx` | `table` → antd Table；`kpi` → `KpiCard` + CSV 导出；其余 → `ReactECharts` + PNG 导出。**表格自取自足**：`data` 缺省时用 `chartOption.rows/columns` 渲染（多步每步不铺全量 data）。**表格带 `truncated: true` 时在下方补一行次要色说明**（落库截行）。0107：图形类在图下方加 antd `Collapse`「数据表」（`defaultActiveKey=[]` **默认折叠**，`tableOption` 为 null 不渲染）+ rationale 次要色一行（**所有形态都渲染**，含「为什么不生成图表」）；TABLE/KPI 不重复出表 |
+| `frontend/src/components/chat/MessageItem.tsx` | 渲染门为 `Boolean(chartType)`（不是 `chartType && chartOption`：KPI 卡没有 ECharts option 语义）。**消息级 `visualRationale`**（多步汇总 SUMMARY_TEXT_ONLY）渲染为答案下方次要色一行，**只在无顶层图时兜底**，避免与 ChartRenderer 的依据画两行。**流式门控（2026-10-30）**：`chartReady = Boolean(chartType) && (!isStreaming \|\| content.trim().length > 0)` —— `chart` SSE 事件先于答案 token 到达，流式中正文为空时渲染 `ChartSkeleton`（`role="status"`，`chat.visual.chartLoading`），首个 token 到达后让位；`isStreaming=false`/undefined（历史回放）直接渲染。**卡片背景走语义 token** `colorChatAssistantBg`/`colorChatUserBg`（组件内禁止 `#fafafa`/`#e6f4ff` 字面量，测试有防回归钉） |
+| `frontend/src/components/chat/ChartRenderer.tsx` | `table` → antd Table；`kpi` → `KpiCard` + CSV 导出；其余 → `ReactECharts` + PNG 导出。**表格自取自足**：`data` 缺省时用 `chartOption.rows/columns` 渲染（多步每步不铺全量 data）。**表格带 `truncated: true` 时在下方补一行次要色说明**（落库截行）。0107：图形类在图下方加 antd `Collapse`「数据表」（`defaultActiveKey=[]` **默认折叠**，`tableOption` 为 null 不渲染）+ rationale 次要色一行（**所有形态都渲染**，含「为什么不生成图表」）；TABLE/KPI 不重复出表。**2026-10-30**：option 组合顺序为 `applyChartTheme(applyChartNumberFormat(raw, locale), token)`；**PNG 导出改走 `renderChartPng` 离屏渲染**（不再从在线实例 getDataURL —— 暗色在线实例会烤出白底白字，且 base64 曾未解码直接写 `.png` 导致文件打不开，`dataUrlToBlob` 修复）；容器挂 `ResizeObserver`（侧栏开合只改 flex 宽度不触发 window resize；`clientWidth <= 0` 的过渡态忽略；卸载 `disconnect`；无 API 环境静默跳过；**hooks 必须在早退之前**） |
 | `frontend/src/components/chat/MultiStepPlanCard.tsx` | 每个 step 挂同一个 `ChartRenderer`（图跟着步骤走，不错位），并透传该步的 `tableOption` / `visualRationale` |
 | `frontend/src/utils/visualRationale.ts` + `i18n/zh-CN.ts`/`en-US.ts` | `visualRationaleText(rationale, t)` 把结构化依据转成文案；`params.kind` 先经 `chatPanel.chartTypes.<kind>` 本地化图型名再插值；缺 key 回退显示 code 原文。i18n 各一套 `chat.visual.<code>`（**21 个 code**），插值用**单花括号** `{rows}`/`{kind}`（本仓 i18next 被覆写为 `{`/`}`，双花括号不插值） |
 | `frontend/src/theme/chartTheme.ts` | `applyChartTheme(option, token)` —— 不可变注入调色板/轴色/文字色/tooltip 底色；调用方显式写的 `itemStyle.color`（语义色）优先不被覆盖 |
-| `frontend/src/theme/tokens.ts` | `chartPalette`（两套主题各一套分类系列色） |
-| `frontend/src/utils/chartSnapshot.ts` | `renderChartPng(option)` → `data:image/png;base64,...`。离屏容器**显式 800×420**（零尺寸容器里 ECharts 拿到 0×0 画布）、**固定亮色 token + 白底**（PDF 页面是白的）、关动画、`finally` 里 dispose + 移除容器、**任何异常返回 `null`**。`needsSnapshot(kind)` 对 `table`/`kpi` 返回 false |
+| `frontend/src/theme/chartFormat.ts` | **数字格式化层（2026-10-30，表现归前端）**：formatter 是 JS 函数，JSON 下不来 —— `formatAxisValue`（zh：≥1e8→亿、≥1e4→万，其余千分位；非有限数→空串）、`formatTooltipValue`（千分位 + ≤2 位小数，数组递归）、`applyChartNumberFormat(option, locale)`（只给 value/log 轴与 tooltip.valueFormatter 补缺省；**已有 formatter（函数/字符串）一律不覆盖**；双轴数组全覆盖；**绝不遍历 series** —— 饼图 `{b}: {d}%`、瀑布 `{c}` 结构模板逐字保留；不可变；非对象原样返回）。其它 locale 不发明 K/M，只走千分位 |
+| `frontend/src/theme/tokens.ts` | `chartPalette`（两套主题各一套分类系列色）；`colorChatAssistantBg`/`colorChatUserBg`（2026-10-30，亮色保留原硬编码值 `#fafafa`/`#e6f4ff`，暗色 `#152838`/`#1c3b56`） |
+| `frontend/src/utils/chartSnapshot.ts` | `renderChartPng(option)` → `data:image/png;base64,...`。离屏容器**显式 800×420**（零尺寸容器里 ECharts 拿到 0×0 画布）、**固定亮色 token + 白底**（PDF 页面是白的）、关动画、`finally` 里 dispose + 移除容器、**任何异常返回 `null`**。`needsSnapshot(kind)` 对 `table`/`kpi` 返回 false。**2026-10-30 起先过 `applyChartNumberFormat(option, "zh-CN")` 再补亮色主题** —— 截图与在线渲染同数字口径 |
 | `frontend/src/utils/collectExportCharts.ts` | 导出前挑图：GET 服务端消息流（**`?tail=true` 取最新**，与导出的「最近 500 轮」窗口对齐）→ 按 `SessionMessage` 主键挑需要截图的轮次 → 离屏渲成 PNG。**以服务端消息流为准而非屏幕列表**（实时会话的前端消息没有 DB id；必须覆盖滚出屏幕的轮次；服务端 `chartOption` 才是落库那份）。截断到 180 张时**保最新**；渲染**块内并发 4、块间串行**（`renderChartPng` 在 `await` 前是同步的，`Promise.all` 会一次性建出全部离屏画布 ≈ 1 GB 后备存储） |
 
 ## 导出报告里的图（0105）

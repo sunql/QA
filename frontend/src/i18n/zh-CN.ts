@@ -977,6 +977,7 @@ export const zhCN = {
     // {rows}/{kind} 为 i18next 单花括号插值占位符，与后端 params 的 key 逐字对齐。
     visual: {
       dataTable: "数据表",
+      chartLoading: "图表生成中…",
       R00_EMPTY_TABLE: "查询无结果，不生成图表",
       R01_SINGLE_VALUE_KPI: "单一聚合值，以指标卡呈现",
       R01S_SINGLE_ROW_TABLE: "仅单行结果，以表格呈现（单点数据不构成图形）",

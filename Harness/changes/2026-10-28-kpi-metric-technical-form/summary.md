@@ -367,7 +367,7 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 |---|---|---|
 | 1 | 跑 migration `0136` / `0137` | `alembic current` == `0137`；`SELECT version_num FROM alembic_version` 一致 |
 | 2 | 后端起服 | `curl /openapi.json \| jq '.paths \| keys'` 出现 `ontology/metrics`、`kpi-catalog` |
-| 3 | 契约注入灰度 | `KPI_CONTRACT_INJECTION_ENABLED=true` ⇒ plan prompt 出现契约块 |
+| 3 | 契约注入灰度 | `system_config` 写 `KPI_CONTRACT_INJECTION_ENABLED=true` ⇒ plan prompt 出现契约块（默认关，fail-closed） |
 | 4 | Tier A 灰度（**默认关**） | `KPI_METRIC_TIER_A_ENABLED=true` ⇒ L1 命中走 0 LLM 直通 |
 | 5 | 发布闸门（**默认关**） | `KPI_METRIC_GATE_ENABLED=true` ⇒ DRAFT→PUBLISHED 缺项返回 409 + 缺项清单 |
 | 6 | 前端发布 | 指标管理页 / KPI 页两处字段可见可编辑 |
@@ -380,7 +380,7 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 
 | 开关 | 默认 | 作用 |
 |---|---|---|
-| `KPI_CONTRACT_INJECTION_ENABLED` | true | Tier B 契约注入 |
+| `KPI_CONTRACT_INJECTION_ENABLED` | **false（fail-closed，2026-10-30 改）** | 契约注入总闸（**两条面共用**：nl2sql 侧 B3 治理契约面 + chat 侧 Tier B 签字口径面）。读 `system_config` 行；行缺失 / 非法 / 读取异常 ⇒ 关。env 同名变量是**紧急杀闸**（默认 true = 不干预），置 true 不会打开灰度开关 |
 | `KPI_METRIC_TIER_A_ENABLED` | **false** | Tier A 直通（先只读对比两路答案一致性） |
 | `KPI_METRIC_GATE_ENABLED` | **false** | 发布闸门（先观察再阻断） |
 
@@ -517,24 +517,29 @@ unit + integration 覆盖率均需 ≥ 80%（项目规则）。unit 与 integrat
 
 ### 11.2 硬结论 ②：灰度开关默认值与真实风险窗口
 
-prod `system_config` **没有任何 KPI 开关行** ⇒ 走代码默认：
+prod `system_config` 的 KPI 开关行状态（2026-10-30 实测）：`KPI_CONTRACT_INJECTION_ENABLED`
+**已写入 `false`**（先关后开决策，见 §11.3 清单）。
 
-| 开关 | 代码默认 | 现状含义 |
+| 开关 | 代码默认（行缺失时） | 现状含义 |
 |---|---|---|
-| `KPI_CONTRACT_INJECTION_ENABLED` | **True** | 满足匹配 + 对账条件即注入（无需翻开关） |
+| `KPI_CONTRACT_INJECTION_ENABLED` | **False（fail-closed，2026-10-30 改）** | 行缺失 / 非法 / 读取异常 ⇒ 关。**注入必须显式写 `value='true'` 才会开** |
 | `KPI_METRIC_GATE_ENABLED` | **False** | 发布闸门只观察、不阻断 |
 | `KPI_METRIC_TIER_A_ENABLED` | **False** | Tier A 未接线，保持关 |
 
-**实测修正（重要）**：回填后 **12/12 全部 `mismatch`**（PLAN 刻意保留「治理列 = 业务口径、技术列 = 物理列」的偏差，见 T15-L）⇒ **今天即使落库，契约块仍为空、注入实际不生效**（`kpi_contract_builder.py` 对 `mismatch` 直接 `return None`）。风险窗口在**业务方审核并对齐治理列之后**才打开 —— 那一刻起注入自动开始，**不需要任何人翻开关**。
+⚠️ **本条是 2026-10-30 的口径修正**：此前本文件记录的是「代码默认 True ⇒ 满足匹配 +
+对账条件即注入，无需翻开关」。该口径已被废止，原因是它带来一个「延后 + 静默」的风险窗口：
 
-⚠️ **这个风险是「延后 + 静默」的**：它不会在回填当天暴露，而是会在**某天某人把治理列改对的时候**自动打开 —— **不需要翻任何开关、不需要重启、不需要发版**，那一刻**没有任何部署信号**会提示「注入刚刚生效了」。危险不在回填当天，而在**某次看似无害的治理数据修正**。
+- 旧口径下，回填后 **12/12 全部 `mismatch`**（PLAN 刻意保留「治理列 = 业务口径、
+  技术列 = 物理列」的偏差，见 T15-L）⇒ 回填当天契约块为空、注入实际不生效；
+- 风险窗口在**业务方审核并对齐治理列之后**才打开 —— 那一刻起注入自动开始，
+  **不需要翻任何开关、不需要重启、不需要发版**，没有任何部署信号提示「注入刚刚生效了」；
+- 现在 fail-closed ⇒ **治理列对齐不再自动打开注入**，必须有人显式写开关行（一次可审计的
+  `system_config` 写入）才会生效 ⇒ 该风险窗口**已关闭**。
 
-⇒ 因此上线前的二选一（下条）**不能因为「今天块是空的」而推迟**：正因为它是静默的，才必须在回填/迁移之前就把开关策略定下来。
+⇒ 因此上线前的决策从「二选一」收敛为「**何时显式写 `true`**」：
 
-**上线前二选一**（须由人决定并执行）：
-
-1. **先写 `KPI_CONTRACT_INJECTION_ENABLED=false`**，业务方审核对齐后再开启；或
-2. **接受默认（True）**，并接受「治理列对齐即注入」的隐式生效。
+1. **保持 `false`（推荐）**：治理列对齐 + 隔离测试库演练通过后，再显式写 `true`；
+2. **演练通过即写 `true`**：由人（不由脚本）执行这次写入。
 
 ⚠️ 本任务**只记录清单与风险，未改 prod 任何开关**（只读跑前/跑后 `system_config` 均为 28 行、KPI 开关 0 行）。
 

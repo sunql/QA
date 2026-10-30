@@ -26,6 +26,7 @@ from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import AuditLog
+from app.services.actor_departments import DepartmentsInput, departmentsToString
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ class AuditService:
         entity_id: int,
         action: str,
         actor: str,
-        actor_departments: tuple[str, ...] | None = None,
+        actor_departments: DepartmentsInput = None,
         before: dict[str, Any] | None = None,
         after: dict[str, Any] | None = None,
         outbox_id: int | None = None,
@@ -74,7 +75,10 @@ class AuditService:
             entity_id：实体 PK
             action：CREATE / UPDATE / DELETE（其他值被 DB CHECK 约束拒绝）
             actor：用户标识（X-User-Id）
-            actor_departments：用户所属部门（tuple of str），逗号拼接存储
+            actor_departments：用户所属部门。接受 tuple/list（历史调用方）或
+                逗号分隔字符串（本体侧契约）——统一归一后逗号拼接存储
+                （2026-10-30：此前直接 ``",".join(str)`` ⇒ "采购部" 落库成
+                "采,购,部"）
             before：变更前快照（CREATE 为 None，UPDATE 必有，DELETE 必有）
             after：变更后快照（CREATE 必有，UPDATE 必有，DELETE 为 None）
             outbox_id：outbox 幂等键（feat-audit-outbox，仅 worker 消费路径填写；
@@ -94,7 +98,7 @@ class AuditService:
         if action == "UPDATE" and (before is None or after is None):
             raise ValueError("audit UPDATE 必须提供 before 与 after")
 
-        depts_str = ",".join(actor_departments) if actor_departments else None
+        depts_str = departmentsToString(actor_departments)
         row = AuditLog(
             entity_type=entity_type,
             entity_id=entity_id,

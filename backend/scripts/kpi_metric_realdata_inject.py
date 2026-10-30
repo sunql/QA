@@ -7,6 +7,14 @@
 - 全部 ``mismatch`` ⇒ 契约块**必须为空**（对账拦截生效）；
 - 只要有一条非 ``mismatch`` ⇒ 契约块**必须非空**（否则注入链路坏了）。
 
+⚠️ **「块为空」有两种原因，必须先判总闸**（2026-10-30 起总闸 fail-closed，
+默认关）：「总闸关闭」与「对账 mismatch 拦截」。不先判闸门 ⇒ 上面两条断言
+一条恒真（假绿）、一条恒假（假红）。故本模块入口先读总闸：
+
+- 正式库：总闸关 ⇒ ``SKIP``（不写开关、不做审核模拟）；
+- 隔离测试库：总闸关 ⇒ **临时**把开关写成 true 再验，退出时原样还原
+  （与 S4 同一套 ``runWithSwitch`` 安全边界）。
+
 「块非空」这一条只能在**模拟业务方审核完成**后验证：把目标 KPI 的治理列
 临时对齐到物理列（仅隔离测试库），重跑一遍，退出前**原样还原**。
 正式库上这一项 ``SKIP`` —— 审查模拟要写库，不在正式库做。
@@ -26,12 +34,17 @@ from app.services.kpi_metric_reconcile import (
     reconcileMetric,
 )
 from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
+from app.services.kpi_metric_switches import (
+    SWITCH_CONTRACT_INJECTION,
+    isKpiContractInjectionEnabled,
+)
 from app.services.nl2sql_dialects import resolveDialect
 from app.services.nl2sql_prompts import _buildPlanSystemPrompt
 from scripts.kpi_metric_realdata_db import (
     countLinkedKpis,
     currentDatabaseName,
     fetchKpis,
+    runWithSwitch,
 )
 from scripts.kpi_metric_realdata_lib import (
     CONTRACT_QUESTION,
@@ -200,8 +213,20 @@ async def _reviewSimulation(session: AsyncSession) -> None:
         await _restoreGovernance(session, target, original)
 
 
-async def step5_contractInjection(session: AsyncSession) -> None:
-    """S5 主步骤：先判拦截语义，再做审核模拟。"""
+async def step5_contractInjection(
+    session: AsyncSession, *, isProd: bool = False
+) -> None:
+    """S5 主步骤：先判闸门与前置条件，再判拦截语义，最后做审核模拟。
+
+    总闸口径（2026-10-30 起 fail-closed，默认关）：**空块有两种完全不同的原因**
+    ——「总闸关闭」与「对账 mismatch 拦截」。不先判闸门，两者在断言里不可区分：
+    闸门关时块必然空 ⇒ 「全部 mismatch ⇒ 块为空」这条会**恒真**（假绿），
+    而「存在非 mismatch ⇒ 块非空」这条会**恒假**（假红）。
+
+    - 正式库：总闸关 ⇒ SKIP（不写开关、不做审核模拟）。
+    - 隔离测试库：总闸关 ⇒ **临时**把开关写成 true 再验，退出时原样还原
+      （复用 S4 的 ``runWithSwitch``，与 S4 同一条安全边界：正式库不做）。
+    """
     cache = get_kpi_match_cache()
     await cache.ensureFresh(session)
 
@@ -214,6 +239,36 @@ async def step5_contractInjection(session: AsyncSession) -> None:
         )
         return
 
+    if await isKpiContractInjectionEnabled(session):
+        await _verifyInjection(session)
+        await _reviewSimulation(session)
+        return
+
+    if isProd:
+        skipStep(
+            "S5 契约块注入端到端",
+            "KPI 契约注入总闸关闭（system_config 行缺失/值为 false——"
+            "fail-closed 默认关）⇒ 本步不验证注入。**空块的原因是闸门，不是对账拦截**",
+        )
+        return
+
+    # 隔离测试库：临时开闸 → 验证（含审核模拟，模拟也必须在闸门开着时跑，
+    # 否则「对齐后契约块非空」这条必然假红）→ 退出时原样还原。
+    async def _run() -> None:
+        await _verifyInjection(session)
+        await _reviewSimulation(session)
+
+    await runWithSwitch(
+        session,
+        SWITCH_CONTRACT_INJECTION,
+        "true",
+        _run,
+        "S5.0",
+    )
+
+
+async def _verifyInjection(session: AsyncSession) -> None:
+    """总闸为开时的注入验证（拦截语义 + 块文本 + prompt 透传）。"""
     verdicts = await _linkedVerdicts(session)
     allMismatch = bool(verdicts) and all(
         verdict == VERDICT_MISMATCH for verdict in verdicts.values()
@@ -240,8 +295,6 @@ async def step5_contractInjection(session: AsyncSession) -> None:
     if block.strip():
         _checkBlockText(block)
         _checkPrompt(block)
-
-    await _reviewSimulation(session)
 
 
 __all__ = ["ALIGNED_GOVERNANCE", "TARGET_KPI", "step5_contractInjection"]

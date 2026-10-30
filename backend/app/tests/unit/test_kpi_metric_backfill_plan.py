@@ -462,11 +462,18 @@ def test_checklist_documents_overwrite_revert_semantics() -> None:
 
 
 def test_checklist_states_tier_b_injection_default_on_decision() -> None:
-    """审核清单必须写出「Tier B 契约注入默认开」的灰度决策（grep 得到）。"""
+    """审核清单必须写出契约注入总闸的灰度决策（grep 得到）。
+
+    2026-10-30 起总闸 **fail-closed（默认关）**：注入必须显式写
+    ``system_config`` 为 true 才会开；旧口径「默认 true（治理列对齐后自动
+    注入）」已废止 —— 那会带来「对齐即静默生效」的风险窗口。
+    """
     checklist = renderReviewChecklist(PLAN)
     assert "Tier B" in checklist
     assert "KPI_CONTRACT_INJECTION_ENABLED" in checklist
-    assert "默认 true" in checklist
+    assert "默认关（fail-closed" in checklist
+    # 反向：不得再出现已废止的「默认 true」旧口径
+    assert "默认 true" not in checklist
     assert "先关后开" in checklist
     assert "KPI_METRIC_GATE_ENABLED" in checklist
 

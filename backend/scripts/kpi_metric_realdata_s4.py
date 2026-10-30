@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ConflictError
@@ -19,34 +17,9 @@ from app.services.kpi_metric_publish_gate import (
 from app.services.kpi_metric_switches import SWITCH_GATE
 from scripts.kpi_metric_realdata_db import (
     fetchKpis,
-    readSwitchValue,
-    restoreSwitchValue,
-    writeSwitchValue,
+    runWithSwitch as _runWithSwitch,
 )
 from scripts.kpi_metric_realdata_lib import check, info, skipStep
-
-
-async def _runWithSwitch(
-    session: AsyncSession,
-    key: str,
-    value: str,
-    action: Callable[[], Awaitable[None]],
-    label: str,
-) -> None:
-    """临时写开关 → 执行 action → **无条件还原**并核对前后值。"""
-    original = await readSwitchValue(session, key)
-    await writeSwitchValue(session, key, value)
-    try:
-        await action()
-    finally:
-        await restoreSwitchValue(session, key, original)
-        after = await readSwitchValue(session, key)
-        check(
-            f"{label} 开关已还原",
-            after == original,
-            f"原值 {original!r} → 还原后 {after!r}",
-        )
-        info(f"开关对照 {key}：运行前={original!r} 临时={value!r} 还原后={after!r}")
 
 
 async def _gateOn(session: AsyncSession, target: KpiCatalog) -> None:

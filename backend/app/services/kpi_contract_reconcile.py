@@ -24,9 +24,9 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import getSettings
 from app.domain.models import KpiCatalog, OntologyMetric
 from app.services.audit_service import AuditService
+from app.services.kpi_metric_switches import isKpiContractInjectionEnabled
 from app.services.nl2sql_semantic_guard import (
     denominatorContractWarning,
     extractSqlIdentifiers,
@@ -187,16 +187,22 @@ async def buildKpiContractBlock(
     链路：KpiSemanticMatchService.matchAll（KpiMatchCache，只索引 PUBLISHED，
     冷缓存安全降级空列表）→ confidence 降序 Top-3 → 逐个过 B2 门禁 → 渲染条目。
 
-    门禁口径：任何 verdict=mismatch 的检查 → 该 KPI 不注入（宁可少注入不注入
-    错的）；unknown 允许注入（治理声明无法被技术公式反驳，恰是治理文本唯一
-    可用的场景——诚实口径，不把 unknown 当「不通过」）。
+    门禁口径：
+    - **未挂靠可用 metric ⇒ Tier C ⇒ 不注入**（2026-10-30 补齐；此前本面把
+      「无 metric 的 KPI」也注入，与 spec §7 和 chat 侧 Tier B 面都不一致；
+      治理列可由任意登录用户创建，未挂 metric 的口径文本不该进他人 prompt）；
+    - 任何 verdict=mismatch 的检查 → 该 KPI 不注入（宁可少注入不注入错的）；
+    - unknown 允许注入（治理声明无法被技术公式反驳，恰是治理文本唯一可用的
+      场景——诚实口径，不把 unknown 当「不通过」）。
 
     零回归契约：无匹配 / 空问句 / 开关关闭 → None（调用方 prompt 侧零改动）；
     装配器内部异常由调用方（nl2sql_service）兜底降级，不阻断 plan。
     """
     if not question or not question.strip():
         return None
-    if not getSettings().kpiContractInjectionEnabled:
+    # 注入总闸（2026-10-30 口径统一）：本面与 chat 侧 Tier B 面共用同一个
+    # system_config 灰度开关 + env 紧急杀闸，fail-closed（行缺失 ⇒ 不注入）。
+    if not await isKpiContractInjectionEnabled(session):
         return None
 
     from app.services.kpi_match_cache import get_kpi_match_cache
@@ -221,25 +227,37 @@ async def buildKpiContractBlock(
         kpi = byCode.get(match.code)
         if kpi is None:
             continue
-        # B2 门禁：mismatch → 不注入
+        # 挂靠门禁（2026-10-30 补齐，spec §7 Tier B/C 分界）：
+        # metric 缺失（kpi.metric_id 为空或指向已删行）⇒ **Tier C ⇒ 不注入**。
+        # 之前本面把「无 metric 的 KPI」也照样注入治理文本——与 spec（§7
+        # 「metric 缺失 / 对账 mismatch ⇒ Tier C」）和 chat 侧 Tier B 面
+        # （kpi_contract_builder：metric 缺失即降级 Tier C）都不一致。
+        # 治理列可由任意登录用户创建（kpi_catalog 建档不做 ACL），未挂靠
+        # metric 的 KPI 等于「未经技术侧确认的口径文本」⇒ 不该进他人 prompt。
         metric: OntologyMetric | None = None
         if kpi.metric_id is not None:
             metric = await session.get(OntologyMetric, kpi.metric_id)
-        if metric is not None:
-            verdicts = [
-                finding["verdict"]
-                for finding in (
-                    _checkFormulaSemantics(kpi, metric),
-                    _checkGrainCoverage(kpi, metric),
-                    _checkFormulaMixing(kpi, metric),
-                )
-                if finding is not None
-            ]
-            if _RECON_VERDICT_MISMATCH in verdicts:
-                logger.warning(
-                    "KPI %s 对账 mismatch，B3 不注入其治理契约", kpi.kpi_code
-                )
-                continue
+        if metric is None:
+            logger.warning(
+                "KPI %s 未挂靠可用本体指标（Tier C），B3 不注入其治理契约",
+                kpi.kpi_code,
+            )
+            continue
+        # B2 门禁：mismatch → 不注入
+        verdicts = [
+            finding["verdict"]
+            for finding in (
+                _checkFormulaSemantics(kpi, metric),
+                _checkGrainCoverage(kpi, metric),
+                _checkFormulaMixing(kpi, metric),
+            )
+            if finding is not None
+        ]
+        if _RECON_VERDICT_MISMATCH in verdicts:
+            logger.warning(
+                "KPI %s 对账 mismatch，B3 不注入其治理契约", kpi.kpi_code
+            )
+            continue
         entry = f"- {_truncField(kpi.kpi_name) or kpi.kpi_code} ({kpi.kpi_code}"
         if getattr(kpi, "version", None):
             entry += f", {kpi.version}"

@@ -113,6 +113,19 @@ describe("client.ts response interceptor 401 vs 403（真链路）", () => {
     });
   });
 
+  // 反向守卫自检：location stub 的 setter / getter 自身也必须被真正执行过一次。
+  // 否则上面几条「没有发生跳转」的断言可能是恒真 —— stub 根本没装上，
+  // 任何 href 赋值都不会被记录，断言照样绿。
+  describe("location stub 自检（反向守卫）", () => {
+    it("set href 会记录赋值、get href 返回桩值（证明『未跳转』断言非恒真）", () => {
+      // getter：读一次，触发 stub 的 get href
+      expect(window.location.href).toBe("");
+      // setter：赋一次，触发 stub 的 set href —— 赋值被记录进 assignedHrefs
+      window.location.href = "/auth/login";
+      expect(assignedHrefs).toEqual(["/auth/login"]);
+    });
+  });
+
   describe("403 PermissionDenied", () => {
     it("does NOT remove token from localStorage", async () => {
       client.defaults.adapter = makeRejectingAdapter(403, { detail: { code: "FORBIDDEN" } });

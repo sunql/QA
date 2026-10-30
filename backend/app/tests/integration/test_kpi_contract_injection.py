@@ -12,6 +12,7 @@ mismatch 兄弟 KPI 隔离 / metric 缺失降级 Tier C / 单 KPI 失败不拖�
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -26,12 +27,14 @@ from app.domain.enums import (
     MetricType,
 )
 from app.domain.models import KpiCatalog, OntologyMetric
+from app.models.system_config import SystemConfig
 from app.security.prompt_sanitizer import UntrustedLabel
 from app.services import chat_service as chat_service_module
 from app.services import kpi_contract_builder as builder_module
 from app.services.chat_service import ChatService
 from app.services.kpi_contract_builder import buildKpiContractBlock
 from app.services.kpi_match_cache import kpi_match_cache
+from app.services.kpi_metric_switches import SWITCH_CONTRACT_INJECTION
 from app.services.nl2sql_dialects import resolveDialect
 from app.services.nl2sql_prompts import _buildPlanSystemPrompt
 from app.services.nl2sql_service import Nl2SqlService
@@ -82,6 +85,19 @@ def _matchOnly(monkeypatch: pytest.MonkeyPatch, codes: list[str]) -> None:
         return list(codes)
 
     monkeypatch.setattr(builder_module, "_matchKpiCodes", _fakeMatch)
+
+
+@pytest.fixture(autouse=True)
+async def _enableInjectionSwitch(dbSession: AsyncSession) -> AsyncIterator[None]:
+    """默认打开 KPI 注入总闸。
+
+    注入总闸自 2026-10-30 起 fail-closed（system_config 行缺失 ⇒ 不注入），
+    本文件的用例测的是「内容/编排」，不是「开关」⇒ 统一在这里播种开关行。
+    开关自身的语义在 ``test_kpi_switch_unification.py`` 里单独覆盖。
+    """
+    dbSession.add(SystemConfig(key=SWITCH_CONTRACT_INJECTION, value="true"))
+    await dbSession.commit()
+    yield
 
 
 async def _seedRatioMetric(
@@ -390,10 +406,10 @@ async def test_build_contract_block_returns_empty_when_switch_off(
     dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """灰度开关关闭 ⇒ 直接返回空串（不查库、不匹配）。"""
-    async def _fakeSwitch(session, key, default):
+    async def _fakeSwitch(session, *args, **kwargs):
         return False
 
-    monkeypatch.setattr(builder_module, "readKpiMetricSwitch", _fakeSwitch)
+    monkeypatch.setattr(builder_module, "isKpiContractInjectionEnabled", _fakeSwitch)
 
     assert await buildKpiContractBlock(dbSession, "问题") == ""
 

@@ -20,7 +20,7 @@ export default defineConfig({
     exclude: ["e2e/**", "node_modules/**", "dist/**", ".worktrees/**"],
     coverage: {
       provider: "v8",
-      reporter: ["text", "html"],
+      reporter: ["text", "html", "json-summary"],
       thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },
       // 排除入口文件与 Playwright E2E 支撑代码（不可在 jsdom 单测中真实执行）
       exclude: [
@@ -33,6 +33,18 @@ export default defineConfig({
         "src/i18n/types.ts",
         // src/types/** 是纯类型/枚举常量模块，无运行时代码
         "src/types/**",
+        // 测试文件自身不进覆盖率分母：它们的函数覆盖率天然偏高
+        // （2026-10-30 实测 321/381 = 84.25%，而产品代码 src/** 只有 1419/2015 =
+        // 70.42%）⇒ 计入分母会把全局数字抬高 2 个点，属于自欺。
+        // 口径变更后基线：产品代码 functions 70.42%（达标 80% 需覆盖 1612 个）。
+        "src/tests/**",
+        "**/__tests__/**",
+        // 根级构建/校验支撑文件，不是产品代码（vite/vitest/playwright 配置 +
+        // verify_*.mjs 人工校验脚本）
+        "*.config.ts",
+        "*.config.js",
+        "*.config.d.ts",
+        "verify_*.mjs",
       ],
     },
   },

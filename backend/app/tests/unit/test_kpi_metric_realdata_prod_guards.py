@@ -33,24 +33,25 @@ def _loadRealdataModule(monkeypatch: pytest.MonkeyPatch):
 async def test_step4_prod_skips_without_any_switch_read_or_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """prod 的 S4 必须**不碰任何开关**（读也不碰）。
+
+    判据落在 ``_runWithSwitch`` 上：它是 S4 唯一接触开关的入口
+    （2026-10-30 起开关读写收敛到 ``kpi_metric_realdata_db.runWithSwitch``
+    共享实现）。prod 路径必须在调它之前就 SKIP ⇒ 一次都不该被调到。
+    """
     from scripts import kpi_metric_realdata_s4 as s4Module
     from scripts.kpi_metric_realdata_lib import SKIPS
 
     calls: list[str] = []
 
-    async def _write(*_args: object, **_kwargs: object) -> None:
-        calls.append("write")
-
-    async def _read(*_args: object, **_kwargs: object) -> str | None:
-        calls.append("read")
-        return None
+    async def _runWithSwitch(*_args: object, **_kwargs: object) -> None:
+        calls.append("switch")
 
     async def _fetch(*_args: object, **_kwargs: object) -> list[object]:
         calls.append("fetch")
         return []
 
-    monkeypatch.setattr(s4Module, "writeSwitchValue", _write)
-    monkeypatch.setattr(s4Module, "readSwitchValue", _read)
+    monkeypatch.setattr(s4Module, "_runWithSwitch", _runWithSwitch)
     monkeypatch.setattr(s4Module, "fetchKpis", _fetch)
     SKIPS.clear()
     try:
@@ -61,7 +62,121 @@ async def test_step4_prod_skips_without_any_switch_read_or_write(
         SKIPS.clear()
 
 
+async def test_step5_prod_skips_without_touching_the_injection_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """prod 的 S5 同样不碰开关（总闸 fail-closed ⇒ 总闸关时只能 SKIP）。
+
+    与 S4 同一条安全边界：临时改写 ``system_config`` 的写法在正式库一律不用
+    （进程被 SIGKILL 时 ``finally`` 不执行 ⇒ 残留 ``...=true``）。
+    """
+    from scripts import kpi_metric_realdata_inject as s5Module
+    from scripts.kpi_metric_realdata_lib import SKIPS
+
+    calls: list[str] = []
+
+    async def _runWithSwitch(*_args: object, **_kwargs: object) -> None:
+        calls.append("switch")
+
+    async def _countLinked(*_args: object, **_kwargs: object) -> int:
+        return 1
+
+    async def _switchOff(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def _cacheFresh(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(s5Module, "runWithSwitch", _runWithSwitch)
+    monkeypatch.setattr(s5Module, "countLinkedKpis", _countLinked)
+    monkeypatch.setattr(s5Module, "isKpiContractInjectionEnabled", _switchOff)
+    monkeypatch.setattr(
+        s5Module.get_kpi_match_cache(),
+        "ensureFresh",
+        _cacheFresh,
+    )
+    SKIPS.clear()
+    try:
+        await s5Module.step5_contractInjection(object(), isProd=True)  # type: ignore[arg-type]
+        assert calls == []
+        assert any("S5" in name for name, _reason in SKIPS)
+    finally:
+        SKIPS.clear()
+
+
 # ── F7：prod 的 S9 先备份再写，备份失败即停 ──────────────────────────
+
+
+async def test_run_with_switch_refuses_prod_database_regardless_of_isProd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``runWithSwitch`` 内置 prod 断言（defense-in-depth，2026-10-30 安全审查 LOW-3）。
+
+    入口侧的 ``isProd`` 判断靠调用方自觉；万一未来某个调用点在判 prod 之前
+    就进了 ``runWithSwitch``，函数本体必须自己拒绝——落库实测库名是
+    ``qa_metadata`` 即 SystemExit，且**一次开关读写都不能发生**。
+    """
+    from scripts import kpi_metric_realdata_db as dbModule
+
+    calls: list[str] = []
+
+    async def _currentDb(_session: object) -> str:
+        calls.append("currentDatabaseName")
+        return "qa_metadata"
+
+    async def _read(_session: object, _key: str) -> str | None:
+        calls.append("read")
+        return None
+
+    async def _write(_session: object, _key: str, _value: str) -> None:
+        calls.append("write")
+
+    monkeypatch.setattr(dbModule, "currentDatabaseName", _currentDb)
+    monkeypatch.setattr(dbModule, "readSwitchValue", _read)
+    monkeypatch.setattr(dbModule, "writeSwitchValue", _write)
+
+    async def _action() -> None:
+        calls.append("action")
+
+    with pytest.raises(SystemExit, match="qa_metadata"):
+        await dbModule.runWithSwitch(object(), "some_switch", "true", _action, "T")
+
+    assert calls == ["currentDatabaseName"]
+
+
+async def test_run_with_switch_allows_test_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """反向：隔离测试库（``qa_metadata_test*``）必须照常可用。"""
+    from scripts import kpi_metric_realdata_db as dbModule
+
+    calls: list[str] = []
+
+    async def _currentDb(_session: object) -> str:
+        return "qa_metadata_test_solo"
+
+    async def _read(_session: object, _key: str) -> str | None:
+        calls.append("read")
+        return None
+
+    async def _write(_session: object, _key: str, _value: str) -> None:
+        calls.append("write")
+
+    async def _delete(_session: object, _key: str) -> None:
+        calls.append("delete")
+
+    monkeypatch.setattr(dbModule, "currentDatabaseName", _currentDb)
+    monkeypatch.setattr(dbModule, "readSwitchValue", _read)
+    monkeypatch.setattr(dbModule, "writeSwitchValue", _write)
+    monkeypatch.setattr(dbModule, "deleteSwitchValue", _delete)
+
+    async def _action() -> None:
+        calls.append("action")
+
+    await dbModule.runWithSwitch(object(), "some_switch", "true", _action, "T")
+
+    # read → write(临时) → action → restore(原值 None ⇒ delete) → 复核 read
+    assert calls == ["read", "write", "action", "delete", "read"]
 
 
 class _FakeApplySummary:

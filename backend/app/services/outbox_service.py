@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import AuditOutbox
+from app.services.actor_departments import DepartmentsInput, departmentsToList
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ class OutboxService:
         entity_id: int | None,
         actor: str,
         payload: dict[str, Any],
-        actor_departments: tuple[str, ...] | None = None,
+        actor_departments: DepartmentsInput = None,
     ) -> AuditOutbox:
         """入队一条审计事件（与业务同事务，不 commit）。
 
@@ -53,7 +54,8 @@ class OutboxService:
             entity_id：实体 PK；DELETE 事件业务行已删仍传 id（可为 None 兜底）
             actor：用户标识（CurrentUser.userId）
             payload：{"before": ..., "after": ...}，与 AuditService.record 同构
-            actor_departments：用户部门 tuple（JSONB 存 list）
+            actor_departments：用户部门。接受 tuple/list 或逗号分隔字符串
+                （本体侧契约）——统一归一为 list 后存 JSONB
 
         校验失败抛 ValueError（fail fast，业务事务整体回滚 -- 这是调用方
         的程序错误，不是审计写入故障）。
@@ -81,7 +83,7 @@ class OutboxService:
             entity_id=entity_id,
             actor=actor,
             # tuple 不能 JSON 序列化，统一转 list；JSONB 侧读回即 list
-            actor_departments=list(actor_departments) if actor_departments else None,
+            actor_departments=departmentsToList(actor_departments),
             payload=payload,
         )
         session.add(row)

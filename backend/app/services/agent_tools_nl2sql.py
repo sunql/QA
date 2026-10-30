@@ -1,14 +1,17 @@
 """NL2SQL 工具 handler（供给 L4 Agent Loop 调用）。
 
 5 个工具：
-- list_tables       → 返回 ontology_class 表名列表（schema.table 格式）
-- describe_table    → 返回指定表的列定义（property 行）
+- list_tables       → 返回 ontology_class 表名列表（schema.table 格式，去重）
+- describe_table    → 返回指定表的列定义（列式紧凑编码 + 自描述表头）
 - sample_rows       → 返回表前 N 行
-- execute_sql       → 执行只读 SELECT（SQL Guard 必走）
-- list_joins        → 返回 join 关系列表
+- execute_sql       → 执行只读 SELECT（SQL Guard 必走；LLM 可见行数截到 100）
+- list_joins        → 返回 TABLE.COL -> TABLE.COL 文本边（去重、可按表过滤）
 
 所有 handler 返回 frozen ToolResult，content 为 JSON 字符串。
 异常路径返回 ToolResult(is_error=True)。
+
+工具结果是 L4 prompt 的最大头（2026-10-31 取证：占 prompt 92%），因此输出格式
+按「列式 + 表名化 + 行数上限」紧凑编码；row_count 等语义字段仍报真实值。
 """
 
 from __future__ import annotations
@@ -26,6 +29,51 @@ from app.infrastructure.business_db_pool import _assert_read_only
 from app.infrastructure.llm.base_client import ToolCall
 
 log = logging.getLogger(__name__)
+
+# LLM 可见的 execute_sql 行数上限。执行器仍取全量（row_count 报真实总数），
+# 只截「喂给 LLM 的序列化」——一次 286 行的明细曾产生 12 万字符工具结果。
+L4_TOOL_ROW_CAP = 100
+
+# describe_table 列式输出的自描述表头（LLM 靠它把数组位映射回字段）。
+DESCRIBE_TABLE_COLUMN_FORMAT = (
+    "[name,alias,data_type,source_column,flags,ref]; "
+    "alias='' means same as name/source_column; "
+    "flags='PK'|'FK'|'PK,FK'|''; ref=referenced table ('' if none)"
+)
+
+
+# =============================================================================
+# 输出编码器
+# =============================================================================
+
+
+def encodeExecuteSqlResult(rows: list[dict]) -> dict:
+    """把 execute_sql 的行字典列表编码成「列名一次 + 值数组」的紧凑结构。
+
+    - 列取所有行键的并集（按首次出现顺序），不规则行缺失值补 None；
+    - 最多输出 ``L4_TOOL_ROW_CAP`` 行；``row_count`` 永远报真实总行数；
+    - 截断时追加 ``truncated`` + ``note``（提示聚合应在 SQL 内完成）。
+    """
+    columns: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row:
+            if key not in seen:
+                seen.add(key)
+                columns.append(key)
+    encodedRows = [[row.get(c) for c in columns] for row in rows[:L4_TOOL_ROW_CAP]]
+    payload: dict[str, object] = {
+        "columns": columns,
+        "rows": encodedRows,
+        "row_count": len(rows),
+    }
+    if len(rows) > L4_TOOL_ROW_CAP:
+        payload["truncated"] = True
+        payload["note"] = (
+            f"showing first {L4_TOOL_ROW_CAP} of {len(rows)} rows; "
+            "aggregate in SQL if the full set matters"
+        )
+    return payload
 
 
 # =============================================================================
@@ -58,7 +106,8 @@ async def handle_list_tables(*, session: AsyncSession) -> ToolResult:
             .order_by(OntologyClass.source_table)
         )
         result = await session.execute(stmt)
-        tables = [row[0] for row in result.fetchall()]
+        # 同一 source_table 可能对应多个 ontology_class：去重保序
+        tables = list(dict.fromkeys(row[0] for row in result.fetchall()))
         return ToolResult(
             tool_call_id="",
             name="list_tables",
@@ -96,25 +145,48 @@ async def handle_describe_table(*, session: AsyncSession, table_name: str) -> To
             .order_by(OntologyProperty.property_name)
         )
         propResult = await session.execute(propStmt)
-        columns = []
-        for prop in propResult.scalars().all():
-            col: dict[str, object] = {
-                "name": prop.property_name,
-                "alias": prop.property_alias,
-                "data_type": prop.data_type,
-                "source_column": prop.source_column,
-                "is_primary_key": prop.is_primary_key,
-                "is_foreign_key": prop.is_foreign_key,
-            }
-            if prop.ref_class_id:
-                col["ref_class_id"] = prop.ref_class_id
-            columns.append(col)
+        props = list(propResult.scalars().all())
+
+        # 3. 外键目标 class_id → 表名（class_id 对 LLM 不可用：没有工具能映射）
+        refIds = sorted({p.ref_class_id for p in props if p.ref_class_id})
+        refTableById = await _loadClassTables(session, refIds)
+
+        columns: list[list[str]] = []
+        for prop in props:
+            alias = prop.property_alias or ""
+            if alias in (prop.property_name, prop.source_column):
+                alias = ""
+            flags = ",".join(
+                flag
+                for flag, enabled in (
+                    ("PK", prop.is_primary_key),
+                    ("FK", prop.is_foreign_key),
+                )
+                if enabled
+            )
+            ref = refTableById.get(prop.ref_class_id, "") if prop.ref_class_id else ""
+            columns.append(
+                [
+                    prop.property_name,
+                    alias,
+                    prop.data_type,
+                    prop.source_column,
+                    flags,
+                    ref,
+                ]
+            )
 
         return ToolResult(
             tool_call_id="",
             name="describe_table",
             content=json.dumps(
-                {"table_name": table_name, "columns": columns}, ensure_ascii=False, default=str
+                {
+                    "table": table_name,
+                    "column_format": DESCRIBE_TABLE_COLUMN_FORMAT,
+                    "columns": columns,
+                },
+                ensure_ascii=False,
+                default=str,
             ),
         )
     except Exception as exc:
@@ -179,7 +251,7 @@ async def handle_execute_sql(
             tool_call_id="",
             name="execute_sql",
             content=json.dumps(
-                {"rows": rows, "row_count": len(rows)}, ensure_ascii=False, default=str
+                encodeExecuteSqlResult(rows), ensure_ascii=False, default=str
             ),
         )
     except SqlSafetyError as exc:
@@ -193,30 +265,116 @@ async def handle_execute_sql(
         return _errorResult("", "execute_sql", exc)
 
 
-async def handle_list_joins(*, session: AsyncSession) -> ToolResult:
-    """列出 ontology 全部 join 关系。"""
+async def handle_list_joins(
+    *, session: AsyncSession, tables: list[str] | str | None = None
+) -> ToolResult:
+    """列出 join 关系，渲染成 ``TABLE.COL -> TABLE.COL`` 文本边。
+
+    - class_id 批量解析成表名；端点不可解析（软删类等）的边跳过；
+    - 反向重复边（A→B 与 B→A 同列）去重，同表对不同列的多条边保留；
+    - ``tables`` 非空时只保留任一端命中的边（大小写不敏感，支持裸表名）。
+    """
     try:
         stmt = select(OntologyJoin).order_by(OntologyJoin.id)
         result = await session.execute(stmt)
-        joins = []
-        for join in result.scalars().all():
-            joins.append({
-                "id": join.id,
-                "source_class_id": join.source_class_id,
-                "source_columns": join.source_columns,
-                "target_class_id": join.target_class_id,
-                "target_columns": join.target_columns,
-                "join_type": join.join_type,
-                "relation_type": join.relation_type,
-                "description": join.description,
-            })
+        joins = list(result.scalars().all())
+
+        classIds = sorted(
+            {j.source_class_id for j in joins} | {j.target_class_id for j in joins}
+        )
+        tableById = await _loadClassTables(session, classIds)
+
+        # LLM 可能把数组传成单个字符串：统一成列表再过滤（否则会逐字符迭代）
+        if isinstance(tables, str):
+            tables = [tables]
+        wanted = {t.strip().upper() for t in (tables or []) if t.strip()}
+        seen: set[tuple] = set()
+        edges: list[str] = []
+        skipped = 0
+        for join in joins:
+            sourceTable = tableById.get(join.source_class_id)
+            targetTable = tableById.get(join.target_class_id)
+            if not sourceTable or not targetTable:
+                skipped += 1
+                continue
+            sourceCols = _joinColumns(join.source_columns)
+            targetCols = _joinColumns(join.target_columns)
+            key = tuple(sorted([
+                (sourceTable.upper(), sourceCols),
+                (targetTable.upper(), targetCols),
+            ]))
+            if key in seen:
+                continue
+            seen.add(key)
+            if wanted and not (
+                _matchesTable(sourceTable, wanted) or _matchesTable(targetTable, wanted)
+            ):
+                continue
+            edges.append(
+                _renderEdge(join, sourceTable, sourceCols, targetTable, targetCols)
+            )
+
+        if skipped:
+            log.info("list_joins: 跳过 %d 条端点不可解析的边", skipped)
         return ToolResult(
             tool_call_id="",
             name="list_joins",
-            content=json.dumps({"joins": joins}, ensure_ascii=False, default=str),
+            content=json.dumps(
+                {"count": len(edges), "edges": edges}, ensure_ascii=False
+            ),
         )
     except Exception as exc:
         return _errorResult("", "list_joins", exc)
+
+
+def _joinColumns(value: object) -> tuple[str, ...]:
+    """join 列字段（JSONB list）转成稳定 tuple。"""
+    if isinstance(value, (list, tuple)):
+        return tuple(str(v) for v in value)
+    return (str(value),) if value else ()
+
+
+def _matchesTable(tableName: str, wanted: set[str]) -> bool:
+    """表名匹配：全名或裸表名（最后一个 . 之后）命中即可。"""
+    upper = tableName.upper()
+    return upper in wanted or upper.rsplit(".", 1)[-1] in wanted
+
+
+def _renderEdge(
+    join: OntologyJoin,
+    sourceTable: str,
+    sourceCols: tuple[str, ...],
+    targetTable: str,
+    targetCols: tuple[str, ...],
+) -> str:
+    """单条边渲染：``TABLE.COL -> TABLE.COL (LEFT) # 描述``。"""
+    left = f"{sourceTable}.{','.join(sourceCols) or '*'}"
+    right = f"{targetTable}.{','.join(targetCols) or '*'}"
+    edge = f"{left} -> {right}"
+    if (join.join_type or "INNER").upper() != "INNER":
+        edge += f" ({join.join_type})"
+    if join.description:
+        edge += f" # {join.description}"
+    return edge
+
+
+async def _loadClassTables(
+    session: AsyncSession, classIds: list[int]
+) -> dict[int, str]:
+    """class_id → source_table 批量解析（只取未软删、有表名的类）。"""
+    if not classIds:
+        return {}
+    stmt = select(OntologyClass.id, OntologyClass.source_table).where(
+        OntologyClass.id.in_(classIds),
+        OntologyClass.valid_to.is_(None),
+    )
+    result = await session.execute(stmt)
+    tableById: dict[int, str] = {}
+    for row in result.fetchall():
+        mapping = row._mapping
+        if mapping.get("source_table"):
+            tableById[mapping["id"]] = mapping["source_table"]
+    return tableById
 
 
 # =============================================================================
@@ -270,7 +428,9 @@ async def dispatch_tool_call(
         elif name == "execute_sql":
             content_obj = await handle_execute_sql(session=session, sql=args["sql"])
         elif name == "list_joins":
-            content_obj = await handle_list_joins(session=session)
+            content_obj = await handle_list_joins(
+                session=session, tables=args.get("tables")
+            )
         else:
             return ToolResult(
                 tool_call_id=tool_call.id,
@@ -340,7 +500,10 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "execute_sql",
-            "description": "执行只读 SELECT 查询（禁止 DML/DDL）",
+            "description": (
+                "执行只读 SELECT 查询（禁止 DML/DDL）；最多返回 100 行，"
+                "聚合/计数请直接在 SQL 内完成"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"sql": {"type": "string"}},
@@ -352,8 +515,20 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "list_joins",
-            "description": "列出已建模的 join 关系",
-            "parameters": {"type": "object", "properties": {}},
+            "description": "列出已建模的 join 关系（TABLE.COL -> TABLE.COL 形式）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tables": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "只返回涉及这些表的边（可传裸表名或 schema.table）；"
+                            "不传返回全部"
+                        ),
+                    }
+                },
+            },
         },
     },
 ]

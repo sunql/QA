@@ -17,6 +17,7 @@ import pytest
 from app.infrastructure.llm.base_client import LlmMessage, LlmResponseWithTools, ToolCall
 from app.security.prompt_sanitizer import UntrustedLabel, wrapUntrusted
 from app.services import l4_token_profile as prof
+from app.services.agent_tools_nl2sql import encodeExecuteSqlResult
 
 TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "execute_sql", "parameters": {"sql": "string"}}},
@@ -413,7 +414,9 @@ class TestLoopWiring:
         assert len(parsed) == 2
         byIteration = {p["iteration"]: p for p in parsed}
         first = byIteration[1]
-        expectedRaw = json.dumps({"rows": [{"x": 1}], "row_count": 1}, ensure_ascii=False, default=str)
+        expectedRaw = json.dumps(
+            encodeExecuteSqlResult([{"x": 1}]), ensure_ascii=False, default=str
+        )
         assert first["rawChars"] == len(expectedRaw)
         assert first["sentChars"] > first["rawChars"]
         assert first["escapeExpansion"] > 1

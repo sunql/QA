@@ -48,6 +48,7 @@ from app.security.prompt_sanitizer import (
     UntrustedLabel,
     renderSecurityPreamble,
     wrapUntrusted,
+    wrapUntrustedStructured,
 )
 from app.services.agent_binding_cache import agent_binding_cache
 from app.services.agent_registry_service import AgentRegistryService
@@ -280,9 +281,12 @@ _L4_SYSTEM_PROMPT = (
    - 探索阶段（list_tables / list_joins / describe_table / sample_rows）**最多 1 轮**且并发执行；同轮内可同时发出多个工具调用
    - 拿到 schema 立即写 execute_sql，**不要反复 describe 同一表**
    - 多步骤问题（topN + 子分析 + 聚合）**必须用一次 execute_sql + CTE/子查询合并**，不要拆成多次单 SQL 依次查询
-3. **回答语言**：与用户问题一致（默认中文）
-4. **结束**：拿到足够信息后必须直接文字总结（**不要再发任何 tool_call**），纯文本响应即终止
-5. **放弃条件**：若 1 轮探索 + 1 次 execute_sql 仍未拿到数据，请基于已有信息给出推断 + 明确说明数据缺口，**立即文字总结**，不要再调工具
+3. **工具结果阅读**：
+   - describe_table 的 columns 是数组行，字段顺序见返回的 column_format；list_joins 只给涉及的表（tables 参数过滤）
+   - execute_sql 的 rows 与 columns 按位置对应；若带 truncated=true，仅前 100 行可见——**不要用部分行推总数**，需要的聚合/计数请写进 SQL
+4. **回答语言**：与用户问题一致（默认中文）
+5. **结束**：拿到足够信息后必须直接文字总结（**不要再发任何 tool_call**），纯文本响应即终止
+6. **放弃条件**：若 1 轮探索 + 1 次 execute_sql 仍未拿到数据，请基于已有信息给出推断 + 明确说明数据缺口，**立即文字总结**，不要再调工具
 
 历史反例：曾因 LLM 反复 describe_table 而耗尽 max_iterations，请严守上述预算。"""
 )
@@ -667,8 +671,11 @@ async def _dispatchSingleTool(
             _assert_read_only(sql)
             rows = await executor.execute_read_only(sql)
             rowCount = len(rows)
+            # 列式 + 行数上限：执行器取全量，只截喂给 LLM 的序列化（rowCount 仍真值）
+            from app.services.agent_tools_nl2sql import encodeExecuteSqlResult
+
             content = json.dumps(
-                {"rows": rows, "row_count": rowCount},
+                encodeExecuteSqlResult(rows),
                 ensure_ascii=False,
                 default=str,
             )
@@ -683,7 +690,8 @@ async def _dispatchSingleTool(
         result = await dispatch_tool_call(tc_adapter, session=session)
         content = result.content
 
-    safeContent = wrapUntrusted(UntrustedLabel.AGENT_TOOL_RESULT, content)
+    # 工具结果是 JSON 数据：只转 & < >（引号保留），避免 &quot; 放大 + 保持可读
+    safeContent = wrapUntrustedStructured(UntrustedLabel.AGENT_TOOL_RESULT, content)
     _logToolResultProfile(
         run_id=run_id,
         session_id=session_id,

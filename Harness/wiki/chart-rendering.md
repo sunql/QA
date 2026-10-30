@@ -257,6 +257,28 @@ reportlab 会在 `doc.build()` 里抛 `LayoutError` —— 那已经出了 `_cha
 且 `builder.build(payload)` 是**同步调用跑在 async handler 里**，服务端光栅化会阻塞事件循环。
 项目对同类问题的既有判断同向（见 `evaluation_report_export_service.py`）。
 
+## 多步报告分节（2026-10-31）
+
+多步最终回答由 `StepAggregator` 按固定结构产出：`## 分析报告` → 每步
+`### 步骤 N：<描述>` + 正文 → `### 结论`。后端 `buildReportSections`
+（`services/report_sections.py`）把文本解析成 `text` / `chart(stepIndex)` 块：
+
+- 非流式：`ChatResponse.reportSections`；
+- 流式：`done` 帧 `reportSections`；
+- 历史回放：`ChatMessageRead.reportSections`（由 `content + steps_snapshot` 现算）。
+
+图负载不重复下发，前端从 `message.steps[stepIndex]` 取。解析失败（模型没按格式）
+回退为「原文 + 文末图」，图绝不静默丢失。
+
+## 图表高度与多类别可读性（2026-10-31）
+
+- 高度由 option 结构推断：横向条形 `clamp(320, 96 + 类别数×28 + 图例32, 960)`；
+  热力图 `clamp(320, 120 + 行数×26, 960)`；其余 320。在线渲染与 PNG 导出共用
+  `utils/chartLayout.ts::chartHeightOf`。
+- 后端轴结构：hbar >12 类 `axisLabel {interval:0, overflow:"truncate", width:160}`；
+  纵向 bar >12 类旋转 45°；类别 >40 加 `dataZoom`（inside + slider），
+  `grid.bottom` +34，有图例时 `legend.bottom=24`。line 保持自动稀疏。
+
 ## 已知边界（一期）
 
 - **地图二期**：需要 GeoJSON + `registerMap` + 地域名映射。当前本体**没有地域属性**

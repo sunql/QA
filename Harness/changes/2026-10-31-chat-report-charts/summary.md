@@ -2,7 +2,7 @@
 
 - **日期**：2026-10-31
 - **分支**：`feat/chat-report-charts`（base `559971f6`）
-- **状态**：**设计已批准，待实施**
+- **状态**：**已实施**
 - **关联**：[2026-09-30-chart-in-final-report](../2026-09-30-chart-in-final-report/summary.md)（0105：顶层图 = 最后一步）、[2026-10-01-visual-output-strategy](../2026-10-01-visual-output-strategy/summary.md)（0107 反转：汇总纯文字）、[2026-10-31-replay-plan-cards](../2026-10-31-replay-plan-cards/summary.md)（0138：`steps_snapshot`）、[2026-10-30-chat-chart-rendering](../2026-10-30-chat-chart-rendering/summary.md)（图例/数字格式/PNG）
 
 ---
@@ -126,7 +126,7 @@ ReportBlock = {"kind": "text", "content": str}
 **前端 `frontend/src/utils/chartLayout.ts`（新增，纯函数）**
 
 ```
-chartHeightOf(chartType, option) -> number
+chartHeightOf(option) -> number
 ```
 
 | 形态 | 高度 |
@@ -222,3 +222,64 @@ chartHeightOf(chartType, option) -> number
 | `frontend/src/stores/chatStore.ts` / `types/chat.ts` | 契约字段 |
 | `Harness/wiki/chart-rendering.md` | 契约与尺寸规则更新 |
 | 测试 | 见 §7 |
+
+## 10. 测试证据（2026-10-31 实施后实测）
+
+### 后端（5 个文件，真实 PostgreSQL 5434 + Neo4j 7688）
+
+```
+TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@127.0.0.1:5434/qa_metadata_test
+TEST_NEO4J_URI=bolt://127.0.0.1:7688
+TEST_NEO4J_PASSWORD=qa_neo4j_dev_2026
+pytest app/tests/unit/test_report_sections.py app/tests/unit/test_step_aggregator.py \
+       app/tests/unit/test_chart_renderer.py app/tests/integration/test_chat_multi_step.py \
+       app/tests/integration/test_chat_history_api.py -q
+```
+
+| 套件 | passed | failed |
+|---|---|---|
+| `unit/test_report_sections.py` | 9 | 0 |
+| `unit/test_step_aggregator.py` | 11 | 0 |
+| `unit/test_chart_renderer.py` | 60 | 0 |
+| `integration/test_chat_multi_step.py` | 41 | 0 |
+| `integration/test_chat_history_api.py` | 25 | 0 |
+| **合计** | **146** | **0** |
+
+pytest 自报 `146 passed, 21 warnings in 85.00s`（wall `real 87.74s`；21 条均为
+`slowapi` 的 `asyncio.iscoroutinefunction` DeprecationWarning）。
+
+**基线对照**：Task 0 基线为 step_aggregator / chart_renderer / chat_multi_step /
+chat_history_api 四文件共 **123 passed**；本次四文件 137 passed（新增用例随本批加入）
++ 新文件 report_sections 9 passed = 146 passed、**0 failed ⇒ 净新增失败 0**。
+
+**reportSections 负载**：集成测试断言非流式与流式 `done` 两处均为 5 个块
+（`text, chart, text, chart, text`），图块只带 `stepIndex` + `title`，**不重复下发
+`chartOption`**（前端从 `message.steps[stepIndex]` 取）。
+
+### 前端（6 个文件）
+
+```
+npx vitest run src/tests/chartLayout.test.ts src/tests/chartSnapshot.test.ts \
+  src/tests/ChartRenderer.test.tsx src/tests/MessageItem.test.tsx \
+  src/tests/chatStore.test.ts src/tests/reportSections.test.ts
+```
+
+| 套件 | tests passed |
+|---|---|
+| `chartLayout.test.ts` | 7 |
+| `chartSnapshot.test.ts` | 14 |
+| `ChartRenderer.test.tsx` | 34 |
+| `MessageItem.test.tsx` | 53 |
+| `chatStore.test.ts` | 52 |
+| `reportSections.test.ts` | 3 |
+| **合计** | **163 passed / 0 failed（6/6 files）** |
+
+vitest 自报 `Test Files 6 passed (6) / Tests 163 passed (163)`，Duration 3.15s
+（wall `real 3.46s`）。**基线对照**：Task 0 基线 4 文件 145 passed；本次新增
+`chartLayout` 7 + `reportSections` 3 及既有文件新增用例，合计 163 passed，
+**0 failed ⇒ 净新增失败 0**。仅有既存的 antd/jsdom `getComputedStyle` stderr 噪音，
+未触碰的套件同样复现。
+
+### 类型检查
+
+`npx tsc --noEmit`：**0 错误**（wall `real 4.52s`）。

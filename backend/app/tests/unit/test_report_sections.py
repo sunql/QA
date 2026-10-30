@@ -46,7 +46,7 @@ def test_splits_sections_and_places_chart_after_each_section() -> None:
 def test_accepts_step_keyword_fullwidth_colon_and_heading_levels() -> None:
     answer = "## 分析报告\n#### Step 2：2025 销售额\n增长 20%。"
 
-    blocks = buildReportSections(answer, [_step(0), _step(1)])
+    blocks = buildReportSections(answer, [_step(1)])
 
     assert [b["kind"] for b in blocks] == ["text", "chart"]
     assert blocks[1]["stepIndex"] == 1
@@ -72,6 +72,17 @@ def test_duplicate_reference_inserts_chart_once() -> None:
 
     assert [b["kind"] for b in blocks] == ["text", "chart", "text"]
     assert len([b for b in blocks if b["kind"] == "chart"]) == 1
+
+
+def test_unreferenced_earlier_step_is_still_appended() -> None:
+    """规则 4：只写 Step 2 时，Step 1 的图不能静默丢失（关键图表补齐）。"""
+    answer = "### 步骤 2：B\n只有第二步。"
+    blocks = buildReportSections(answer, [_step(0), _step(1)])
+
+    assert [b["kind"] for b in blocks] == ["text", "chart", "text", "chart"]
+    assert blocks[1] == {"kind": "chart", "stepIndex": 1, "title": "步骤2描述"}
+    assert blocks[2] == {"kind": "text", "content": "### 关键图表"}
+    assert blocks[3] == {"kind": "chart", "stepIndex": 0, "title": "步骤1描述"}
 
 
 def test_unreferenced_chart_steps_are_appended_under_key_charts() -> None:

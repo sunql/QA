@@ -114,14 +114,8 @@ def buildReportSections(
             _chartBlock(step) for _, step in sorted(byIndex.items())
         ]
 
-    # 只补齐「最后引用步骤之后」的未引用图：模型提前收尾时尾部图不能丢；更早的
-    # 跳节（例如只写 Step 2）按模型主动省略处理，不再补图。
-    lastReferenced = max(referenced)
-    missing = [
-        (index, step)
-        for index, step in sorted(byIndex.items())
-        if index not in referenced and index > lastReferenced
-    ]
+    # 任何有图但未被引用的成功步骤都补齐，按 step_index 升序 —— 图绝不静默丢失。
+    missing = [(index, step) for index, step in sorted(byIndex.items()) if index not in referenced]
     if missing:
         blocks.append({"kind": "text", "content": f"### {_ORPHAN_TITLE}"})
         blocks.extend(_chartBlock(step) for _, step in missing)

@@ -197,11 +197,8 @@ function MessageItem({
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
               </div>
             )}
-            {message.queryPlan && !message.isStreaming ? (
-              <div style={{ marginTop: 8 }}>
-                <QueryPlanCard plan={message.queryPlan} dataQuality={message.dataQuality ?? null} />
-              </div>
-            ) : null}
+            {/* 卡片固定阅读顺序（2026-10-31 用户反馈）：分析计划 → 查询计划 → SQL。
+                单步问题三张卡同时出现，顺序必须与流式事件到达顺序解耦。 */}
             {message.steps && message.steps.length ? (
               <div style={{ marginTop: 8 }}>
                 <MultiStepPlanCard
@@ -213,6 +210,11 @@ function MessageItem({
                   }
                   disabled={loading}
                 />
+              </div>
+            ) : null}
+            {message.queryPlan && !message.isStreaming ? (
+              <div style={{ marginTop: 8 }}>
+                <QueryPlanCard plan={message.queryPlan} dataQuality={message.dataQuality ?? null} />
               </div>
             ) : null}
             {message.sql ? (

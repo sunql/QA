@@ -133,15 +133,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Start isolated Milvus
         # 覆盖 job 级 working-directory: backend —— compose 文件在仓库根 docker/ 下。
-        # GitHub runner 的 Docker Hub 匿名拉取会限流（报 pull access denied /
-        # manifest unknown，4 分片同时拉更易触发）——先显式预拉三镜像 + 退避重试，
-        # compose 只负责启动。若重试全败（如镜像 tag 被上游清理），完整报错会
-        # 在这里暴露，再决定是否换 tag/registry，不做任何掩盖。
+        # minio/minio 的 Docker Hub 官方镜像已下架（MinIO 2025 年中迁出，dockerproxy
+        # 等镜像代理也无此 tag 缓存）——CI 改从 ghcr.io/sunql/qa-ci-minio（本仓库
+        # 自托管、public，digest=sha256:b36662dc5313，与原 Docker Hub amd64 镜像
+        # 逐字节同源）预拉，再 retag 成 compose 期望的 minio/minio 名字；prod compose
+        # 文件因此零改动。其余两镜像按 tag 直接预拉；任何一步失败完整暴露报错，
+        # 不做掩盖。
         working-directory: .
         run: |
+          docker pull ghcr.io/sunql/qa-ci-minio:RELEASE.2023-03-20T20-16-18Z
+          docker tag ghcr.io/sunql/qa-ci-minio:RELEASE.2023-03-20T20-16-18Z \
+            minio/minio:RELEASE.2023-03-20T20-16-18Z
           for img in \
             quay.io/coreos/etcd:v3.5.5 \
-            minio/minio:RELEASE.2023-03-20T20-16-18Z \
             milvusdb/milvus:v2.4.6; do
             ok=""
             for i in 1 2 3 4; do

@@ -205,6 +205,12 @@ class _FakeOntologyService:
         self.createdMetrics: list[OntologyMetricCreate] = []
         self.createdClasses: list = []
         self.updatedProperties: list[tuple[int, OntologyPropertyUpdate]] = []
+        # actor 审计归属记录（2026-10-30）：真实 OntologyService 的 actor 是必填
+        # keyword-only，替身必须同样必填（否则替身比真实更宽松 → 漏传 actor 时
+        # 单测全绿而生产 TypeError）。这里额外记录调用参数供行为断言。
+        self.createdMetricActors: list[str] = []
+        self.createdClassActors: list[str] = []
+        self.updatedPropertyActors: list[str] = []
 
     async def listClasses(self, session) -> list[OntologyClass]:
         return self._classes
@@ -221,15 +227,30 @@ class _FakeOntologyService:
         return self.joins
 
     async def createMetric(
-        self, session, dto: OntologyMetricCreate, *, actor: str = "chat"
+        self,
+        session,
+        dto: OntologyMetricCreate,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
     ) -> OntologyMetric:
         self.createdMetrics.append(dto)
+        self.createdMetricActors.append(actor)
         return OntologyMetric(
             id=99, metric_name=dto.metric_name, formula=dto.formula, agg_function=dto.agg_function
         )
 
-    async def createClass(self, session, dto) -> OntologyClass:
+    async def createClass(
+        self,
+        session,
+        dto,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+        sync_embedding: bool = True,
+    ) -> OntologyClass:
         self.createdClasses.append(dto)
+        self.createdClassActors.append(actor)
         return OntologyClass(
             id=98,
             class_name=dto.class_name,
@@ -237,8 +258,17 @@ class _FakeOntologyService:
             description=dto.description,
         )
 
-    async def updateProperty(self, session, id: int, dto: OntologyPropertyUpdate) -> OntologyProperty:
+    async def updateProperty(
+        self,
+        session,
+        id: int,
+        dto: OntologyPropertyUpdate,
+        *,
+        actor: str,
+        actor_departments: str | None = None,
+    ) -> OntologyProperty:
         self.updatedProperties.append((id, dto))
+        self.updatedPropertyActors.append(actor)
         return OntologyProperty(id=id, class_id=1, property_name="x", data_type="STRING")
 
 

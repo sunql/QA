@@ -82,6 +82,9 @@ logger = logging.getLogger(__name__)
 
 from app.services.prompts_zh import PROMPT_CLARIFY_SYSTEM as _CLARIFY_SYSTEM_PROMPT
 
+# 匿名链路（无 CurrentUser）写本体时的 actor 归属：与 /metric 路径同口径。
+_ANONYMOUS_ACTOR = "chat"
+
 
 class DomainCommandMixin:
     """领域命令 / Agent / 供应商 / 图推理（由 ChatService 组合）。"""
@@ -149,10 +152,10 @@ class DomainCommandMixin:
         """
         if result.intent == IntentType.DEFINE:
             if result.target and not result.metric:
-                return await self._handleDefineClass(session, dto, result)
+                return await self._handleDefineClass(session, dto, result, user=user)
             return await self._handleDefineMetric(session, dto, result, user=user)
         if result.intent == IntentType.MAP:
-            return await self._handleMapProperty(session, dto, result)
+            return await self._handleMapProperty(session, dto, result, user=user)
         if result.intent == IntentType.METRIC:
             if result.metric and result.formula:
                 return await self._handleDefineMetric(
@@ -571,15 +574,26 @@ class DomainCommandMixin:
             OntologyMetricCreate(metric_name=result.metric, formula=result.formula),
             # actor 审计归属（此前漏传 → createMetric TypeError，/metric 事实上
             # 全灭——2026-10-28 实测 dev ontology_metric 为 0 的根因）
-            actor=user.userId if user is not None else "chat",
+            actor=user.userId if user is not None else _ANONYMOUS_ACTOR,
+            # actor_departments 契约是逗号分隔字符串（ontology_service / KPI 服务
+            # 统一口径：内部按逗号拆首个部门作 derivedOwner）——不是 tuple
+            actor_departments=(
+                ",".join(user.departments)
+                if user is not None and user.departments
+                else None
+            ),
         )
         draftCode: str | None = None
         try:
             draft = await KpiCatalogService().ensureDraftForMetric(
                 session,
                 metric,
-                actor=user.userId if user is not None else "chat",
-                actor_departments=user.departments if user is not None else None,
+                actor=user.userId if user is not None else _ANONYMOUS_ACTOR,
+                actor_departments=(
+                    ",".join(user.departments)
+                    if user is not None and user.departments
+                    else None
+                ),
             )
             draftCode = draft.kpi_code
         except Exception:
@@ -594,7 +608,12 @@ class DomainCommandMixin:
         return ChatResponse(answer=answer, intent=intentLabel.value)
 
     async def _handleDefineClass(
-        self, session: AsyncSession, dto: ChatRequest, result: IntentResult
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        result: IntentResult,
+        *,
+        user: CurrentUser | None = None,
     ) -> ChatResponse:
         """DEFINE（斜杠 /define）：创建本体类（设计01 语义）。
 
@@ -611,6 +630,17 @@ class DomainCommandMixin:
                 class_name=result.target,
                 class_alias=result.source,
                 description=result.formula,
+            ),
+            # actor 审计归属（此前漏传 → createClass TypeError，/define 建类事实上
+            # 全灭——真实实现里 actor 是必填 keyword-only；单测替身当时也没 actor
+            # ⇒ 替身比真实更宽松，单测全绿而生产全灭，2026-10-30 修复）
+            actor=user.userId if user is not None else _ANONYMOUS_ACTOR,
+            # ontology_service 的 actor_departments 契约是**逗号分隔字符串**
+            #（内部 .split(",")[0] 取首个部门作 derivedOwner）——不是 tuple
+            actor_departments=(
+                ",".join(user.departments)
+                if user is not None and user.departments
+                else None
             ),
         )
         answer = MSG_CLASS_CREATED.format(name=entity.class_name) + (
@@ -633,7 +663,12 @@ class DomainCommandMixin:
         return ChatResponse(answer=answer, intent=IntentType.METRIC.value)
 
     async def _handleMapProperty(
-        self, session: AsyncSession, dto: ChatRequest, result: IntentResult
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        result: IntentResult,
+        *,
+        user: CurrentUser | None = None,
     ) -> ChatResponse:
         """MAP：把源属性映射到目标类（设置属性外键 ref_class_id）。"""
         if not result.source or not result.target:
@@ -670,6 +705,17 @@ class DomainCommandMixin:
             session,
             sourceProp.id,
             OntologyPropertyUpdate(is_foreign_key=True, ref_class_id=targetClass.id),
+            # actor 审计归属（此前漏传 → updateProperty TypeError，/map 映射事实上
+            # 全灭——真实实现里 actor 是必填 keyword-only；单测替身当时也没 actor
+            # ⇒ 替身比真实更宽松，单测全绿而生产全灭，2026-10-30 修复）
+            actor=user.userId if user is not None else _ANONYMOUS_ACTOR,
+            # actor_departments 契约是逗号分隔字符串（ontology_service 内部
+            # .split(",")[0] 取首个部门作 derivedOwner）——不是 tuple
+            actor_departments=(
+                ",".join(user.departments)
+                if user is not None and user.departments
+                else None
+            ),
         )
         answer = MSG_MAP_PROPERTY_OK.format(
             property=sourceProp.property_name, className=targetClass.class_name

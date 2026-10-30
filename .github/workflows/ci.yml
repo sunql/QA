@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend / typecheck + coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm exec -- tsc -b
+      - name: Test with 80% coverage gates
+        run: npm run test:coverage
+
+  backend-unit:
+    name: Backend / unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: qa_metadata_test
+          POSTGRES_USER: qa_user
+          POSTGRES_PASSWORD: ci-postgres-only
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U qa_user -d qa_metadata_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://qa_user:ci-postgres-only@127.0.0.1:5434/qa_metadata_test
+      TEST_DATABASE_URL: postgresql+asyncpg://qa_user:ci-postgres-only@127.0.0.1:5434/qa_metadata_test
+      PYTHONDONTWRITEBYTECODE: "1"
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+      - name: Migrate test database
+        run: uv run alembic upgrade head
+      - name: Run unit suite
+        # 不做任何 deselect：本地实测（2026-10-30）main @ 1b9f4f71 上
+        # test_refine_shortcuts 已 59/59 全绿（旧「28 红基线」已过时，不得据此豁免）；
+        # 另有 14 条在 main 上即红的既有失败（test_chat_service 4 / stream 2 /
+        # datasource_pool 2 / dependencies 1 / intent_classify_order 1 /
+        # no_sqlite_fallback 1 / rate_limit 3）—— CI 首跑会如实暴露，
+        # 修复属独立批次，不用 deselect 掩盖（防假绿）。
+        run: uv run pytest app/tests/unit -q -p no:randomly
+
+  backend-integration:
+    name: Backend / integration shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: qa_metadata_test
+          POSTGRES_USER: qa_user
+          POSTGRES_PASSWORD: ci-postgres-only
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U qa_user -d qa_metadata_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      neo4j:
+        image: neo4j:5.23-community
+        env:
+          NEO4J_AUTH: neo4j/ci-neo4j-only
+          NEO4J_PLUGINS: '["apoc"]'
+        ports:
+          - 7688:7687
+        options: >-
+          --health-cmd "wget -O /dev/null -q http://localhost:7474 || exit 1"
+          --health-interval 15s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+asyncpg://qa_user:ci-postgres-only@127.0.0.1:5434/qa_metadata_test
+      TEST_DATABASE_URL: postgresql+asyncpg://qa_user:ci-postgres-only@127.0.0.1:5434/qa_metadata_test
+      TEST_NEO4J_URI: bolt://127.0.0.1:7688
+      NEO4J_PASSWORD: ci-neo4j-only
+      MILVUS_URI: http://127.0.0.1:19530
+      MILVUS_TEST_DB_NAME: qa_ci
+      MINIO_ROOT_USER: ci-minio-only
+      MINIO_ROOT_PASSWORD: ci-minio-password-only
+      PYTHONDONTWRITEBYTECODE: "1"
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start isolated Milvus
+        run: docker compose -f docker/docker-compose.yml up -d --wait --wait-timeout 240 milvus-standalone
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+      - name: Migrate test database
+        run: uv run alembic upgrade head
+      - name: Run integration shard
+        shell: bash
+        run: |
+          mapfile -t all_tests < <(find app/tests/integration -name 'test_*.py' -print | sort)
+          shard_tests=()
+          for ((i=${{ matrix.shard }}; i<${#all_tests[@]}; i+=4)); do
+            shard_tests+=("${all_tests[$i]}")
+          done
+          printf 'Shard ${{ matrix.shard }}: %d test files\n' "${#shard_tests[@]}"
+          uv run pytest "${shard_tests[@]}" -q -p no:randomly

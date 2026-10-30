@@ -204,3 +204,16 @@ class TestStepAggregatorPrompt:
 
 
 from decimal import Decimal
+
+
+def test_system_prompt_requires_sectioned_report() -> None:
+    from app.services.step_aggregator import _STEP_AGGREGATOR_SYSTEM_PROMPT
+
+    prompt = _STEP_AGGREGATOR_SYSTEM_PROMPT
+    assert "## 分析报告" in prompt
+    assert "### 步骤 N：<该步骤的描述>" in prompt
+    assert "### 结论" in prompt
+    # 失败步骤不成节 —— 否则解析器会给失败步找不到图，生成空节
+    assert "不要单独成节" in prompt
+    # 既有安全/诚实约束不能丢（本次只改结构，不改行为底线）
+    assert "不得编造" in prompt

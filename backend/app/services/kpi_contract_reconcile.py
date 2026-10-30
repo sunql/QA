@@ -24,9 +24,9 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import getSettings
 from app.domain.models import KpiCatalog, OntologyMetric
 from app.services.audit_service import AuditService
+from app.services.kpi_metric_switches import isKpiContractInjectionEnabled
 from app.services.nl2sql_semantic_guard import (
     denominatorContractWarning,
     extractSqlIdentifiers,
@@ -196,7 +196,9 @@ async def buildKpiContractBlock(
     """
     if not question or not question.strip():
         return None
-    if not getSettings().kpiContractInjectionEnabled:
+    # 注入总闸（2026-10-30 口径统一）：本面与 chat 侧 Tier B 面共用同一个
+    # system_config 灰度开关 + env 紧急杀闸，fail-closed（行缺失 ⇒ 不注入）。
+    if not await isKpiContractInjectionEnabled(session):
         return None
 
     from app.services.kpi_match_cache import get_kpi_match_cache

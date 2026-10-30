@@ -17,15 +17,32 @@ cap 用例走 Jaccard 路径（keywords 短词 + match_threshold 调低）。
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import app.services.kpi_contract_reconcile as kcr_module
 from app.domain.models import KpiCatalog, OntologyMetric
+from app.models.system_config import SystemConfig
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_contract_reconcile import buildKpiContractBlock
+from app.services.kpi_metric_switches import SWITCH_CONTRACT_INJECTION
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+async def _enableInjectionSwitch(dbSession: AsyncSession) -> AsyncIterator[None]:
+    """默认打开 KPI 注入总闸。
+
+    注入总闸自 2026-10-30 起 fail-closed（system_config 行缺失 ⇒ 不注入），
+    本文件的用例测的是「装配/门禁」，不是「开关」⇒ 统一在这里播种开关行。
+    开关自身的语义在 ``test_kpi_switch_unification.py`` 里单独覆盖。
+    """
+    dbSession.add(SystemConfig(key=SWITCH_CONTRACT_INJECTION, value="true"))
+    await dbSession.commit()
+    yield
 
 
 async def _seedMetric(
@@ -229,15 +246,18 @@ async def test_draft_kpi_not_injected(dbSession: AsyncSession) -> None:
     assert await buildKpiContractBlock(dbSession, "KPI_B3_06 是多少") is None
 
 
-async def test_flag_disabled_returns_none(
-    dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch
+async def test_switch_row_missing_returns_none(
+    dbSession: AsyncSession,
 ) -> None:
-    """灰度开关关闭 → None（装配器不工作，prompt 侧零改动）。"""
+    """注入总闸行缺失 → None（fail-closed：装配器不工作，prompt 侧零改动）。
 
-    class _FakeSettings:
-        kpiContractInjectionEnabled = False
-
-    monkeypatch.setattr(kcr_module, "getSettings", lambda: _FakeSettings())
+    2026-10-30 口径统一前，这里读的是 env ``KPI_CONTRACT_INJECTION_ENABLED``
+    （默认 true ⇒ 恒开）；现在改读 system_config 行，缺席即关。
+    """
+    await dbSession.execute(
+        delete(SystemConfig).where(SystemConfig.key == SWITCH_CONTRACT_INJECTION)
+    )
+    await dbSession.commit()
     await _seedKpi(
         dbSession, "KPI_B3_07", name="开关指标", keywords=["开关"]
     )

@@ -286,6 +286,9 @@ export interface ChatMessage {
   // N4 qwen 续跑：该消息首发时使用的 modelId（sendMessage 时从 dto.modelId 拷）
   originalModelId?: number;
   isError?: boolean;
+  // 错误细分类型（P2-1 error 事件回填；系统边界原始字符串）。渲染前一律过
+  // MessageItem 的白名单，未知值只显示通用错误，不透传原文。
+  errorType?: string | null;
   // 意图（meta 事件回填）
   intent?: IntentType;
   // 从问题中抽取的查询实体（仅查询意图回填）

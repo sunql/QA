@@ -236,7 +236,7 @@ New columns on `session_message`:
 
 ## 派生指标 formula 必填硬约束（占比/比率/百分比）
 
-`validatePlan`（`app/services/nl2sql_service.py:1387-1478`）在 aggregation 循环里加一条规则：**alias 命中派生指标关键词 → `formula` 必填**，否则 SQL 不会算百分比，占比沦为列别名，重试耗尽后整步被标"无法回答"被静默收纳（2026-08-17 真实回归：用户问"top10 物料的占比"时 LLM 倾向 `alias="占比"` 但无 formula → Step 失败，Step 3 因依赖被卡）。
+`validatePlan`（`app/services/nl2sql_service.py:1387-1478`）在 aggregation 循环里加一条规则：**alias 命中派生指标关键词 → `formula` 必填**，否则 SQL 不会算百分比，占比沦为列别名，重试耗尽后整步被标"无法回答"被静默收纳（2026-08-17 真实回归：用户问"top10 物料的占比"时 LLM 倾向 `alias="占比"` 但无 formula → 数据步失败 → 汇总步骤因 `_hasDataStepResult(completed)` 为假而不执行，整轮落到降级收尾）。
 
 关键词集合（中英文，大小写不敏感）：
 

@@ -59,10 +59,10 @@ ALL_LABELS = [
     UntrustedLabel.SQL_RESULT,
     UntrustedLabel.STEP_RESULT,
     UntrustedLabel.AGENT_TOOL_RESULT,
+    UntrustedLabel.KPI_CONTRACT,
     UntrustedLabel.FEATURE_CATALOG,
     UntrustedLabel.TERM_DICTIONARY,
     UntrustedLabel.USER_CONTENT,
-    UntrustedLabel.KPI_CONTRACT,
 ]
 
 

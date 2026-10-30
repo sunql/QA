@@ -40,6 +40,7 @@ from app.services.chat_helpers import (
     _summarizeExecutionError,
 )
 from app.services.chat_stream_output import _ANSWER_SYSTEM_PROMPT
+from app.services.token_usage_service import COST_SOURCE_ESTIMATED, COST_SOURCE_MEASURED
 from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.llm_retry_policy import (
     attachRetryGenTokens as _attachRetryGenTokens,
@@ -201,7 +202,7 @@ class UsageMixin:
             session, "LLM_CACHE_HIT_MULTIPLIER", 0.0,
         )
         cost = self._costFor(cfg, pt, ct, cacheHitMultiplier=cacheHitMultiplier)
-        await self._recordUsage(session, dto.sessionId, cfg, pt, ct, purpose="nl2sql", cost_source="estimated")
+        await self._recordUsage(session, dto.sessionId, cfg, pt, ct, purpose="nl2sql", cost_source=COST_SOURCE_ESTIMATED)
         return _RetryGenUsage(tokens=pt + ct, cost=cost, modelName=cfg.model_name)
 
     @staticmethod
@@ -395,7 +396,7 @@ class UsageMixin:
         *,
         purpose: str,
         cachedTokens: int | None = None,
-        cost_source: str = "measured",  # P1-2
+        cost_source: str = COST_SOURCE_MEASURED,  # P1-2
     ) -> None:
         # 4-1（feat-token-cache，2026-09-28 续）：system_config.LLM_CACHE_HIT_MULTIPLIER
         # 控制 cache 命中部分的实付比例（默认 0 = 命中免费，回滚口径；上线后
@@ -432,7 +433,7 @@ class UsageMixin:
         cost: float,
         model_name: str | None,
         purpose: str,
-        cost_source: str = "measured",  # P1-2
+        cost_source: str = COST_SOURCE_MEASURED,  # P1-2
     ) -> None:
         """按已知计量写 token_usage（供 Agent/Tool 路径：模型配置未透传）。
 

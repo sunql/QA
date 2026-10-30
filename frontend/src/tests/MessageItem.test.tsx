@@ -155,6 +155,41 @@ describe("MessageItem 消息渲染", () => {
     expect(screen.queryByText("校验失败详情")).toBeNull();
   });
 
+  it("已知 errorType 渲染可操作的差异化提示（真实文案，无裸 key）", () => {
+    renderItem({
+      content: "查询超时",
+      isError: true,
+      errorType: "query_timeout",
+    });
+    expect(
+      screen.getByText("查询超时，可缩小时间范围或减少维度后重试。")
+    ).toBeInTheDocument();
+    // i18n 缺 key 时会回落成 key 本身 ⇒ 必须反向断言不出现裸 key
+    expect(screen.queryByText(/messageItem\.errorHints\./)).toBeNull();
+    expect(screen.queryByText(/query_timeout/)).toBeNull();
+  });
+
+  it("未知 errorType 不渲染提示、不透传原始枚举", () => {
+    renderItem({
+      content: "服务不可用",
+      isError: true,
+      errorType: "some_future_type",
+    });
+    expect(screen.getByText("服务不可用")).toBeInTheDocument();
+    expect(screen.queryByText(/some_future_type/)).toBeNull();
+    expect(screen.queryByText(/messageItem\.errorHints\./)).toBeNull();
+  });
+
+  it("原型链键名（constructor）不命中白名单、不崩溃", () => {
+    renderItem({
+      content: "服务不可用",
+      isError: true,
+      errorType: "constructor",
+    });
+    expect(screen.getByText("服务不可用")).toBeInTheDocument();
+    expect(screen.queryByText(/messageItem\.errorHints\./)).toBeNull();
+  });
+
   it("错误消息展示「添加到术语词典」入口", () => {
     renderItem({ content: "无法生成查询计划", isError: true });
     expect(screen.getByRole("button", { name: "添加到术语词典" })).toBeInTheDocument();

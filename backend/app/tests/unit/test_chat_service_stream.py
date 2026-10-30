@@ -63,6 +63,18 @@ def _isolate_value_sample_cache():
     clearValueSampleCache()
 
 
+@pytest.fixture(autouse=True)
+def _stub_ensure_draft_kpi(monkeypatch):
+    """B5：同 test_chat_service 的 stub（本文件复用其 _FakeOntologyService，
+    domain 命令用例同样不该触发真实建户头查询）。"""
+    from app.services.kpi_catalog_service import KpiCatalogService
+
+    async def _raise(self, session, metric, **kwargs):
+        raise RuntimeError("unit: draft KPI creation stubbed off")
+
+    monkeypatch.setattr(KpiCatalogService, "ensureDraftForMetric", _raise)
+
+
 class _StreamPipelineLlm:
     """complete() 供 nl2sql/chart；completeStream() 供回答（可配置失败）。"""
 
@@ -208,7 +220,9 @@ class TestTryFeatureResponseArg:
 
         # backend/app/tests/unit/ → parents[3] = backend/
         repoRoot = Path(__file__).resolve().parents[3]
-        chatStreamPath = repoRoot / "app" / "services" / "chat_stream.py"
+        # Phase 1.2 split (PR #54 follow-up): _streamQuery moved to chat_stream_query.py.
+        # The `_tryFeatureResponse(..., user=user)` contract lives in that file now.
+        chatStreamPath = repoRoot / "app" / "services" / "chat_stream_query.py"
         source = chatStreamPath.read_text(encoding="utf-8")
         # _streamQuery 内必须有一行 self._tryFeatureResponse(... user=user)
         # 防御性扫描：出现 self._tryFeatureResponse( 后必须能在 2 行内看到 user=user

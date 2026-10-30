@@ -459,6 +459,8 @@ class SessionTokenUsageRead(CamelModel):
     cost: Decimal
     request_time: datetime
     purpose: str | None = None
+    # 成本口径（P1-2）：measured / estimated / unknown；NULL = 早期未标注行。
+    cost_source: str | None = None
 
 
 class ModelUsageStat(CamelModel):

@@ -403,6 +403,15 @@ export const enUS = {
     classRecallTruncated: "This query hit the recall window limit ({total} tables); some related tables may be excluded. Try a more specific question or ask an admin to adjust the recall window.",
     classRecallFallback: "Table recall is temporarily unavailable; tables were picked by warehouse layer order (bounded by the recall window limit), which may affect answer accuracy.",
     interrupted: "This answer was interrupted: the content generated before the connection dropped is incomplete. Please ask again for a complete answer.",
+    errorHints: {
+      permission: "Your account is not allowed to perform this action. Ask an administrator for access and retry.",
+      providerTransient: "The model service is temporarily unavailable. Please retry later.",
+      providerProtocol: "The model returned an unparseable result. Try rephrasing your question.",
+      queryTimeout: "The query timed out. Narrow the time range or reduce dimensions and retry.",
+      dbConnectivity: "The data source is unreachable. Verify the database is available and retry.",
+      sqlSyntax: "The generated SQL failed the safety check. Rephrase your question and retry.",
+      schemaReference: "A referenced table or column was not recognized. Check the terms or add the business object and retry.",
+    },
   },
 
   suggestedAgent: {
@@ -950,6 +959,13 @@ export const enUS = {
       driverTooltip: "Field from the data model",
       sqlDetail: "View verification SQL",
       disclaimer: "These are possible explanations based on current data and the data model (not causal conclusions). Send the verification SQL to investigate further.",
+      status: {
+        pending: "Pending",
+        supported: "Supported",
+        contradicted: "Contradicted",
+        inconclusive: "Inconclusive",
+        execution_failed: "Execution failed",
+      },
     },
     // Visual output strategy (Task 8): rationale copy keyed by backend ruleId.
     // {rows}/{kind} are i18next interpolation placeholders matching the backend params keys.
@@ -1864,7 +1880,13 @@ export const enUS = {
         modelName: "Model",
         promptTokens: "Prompt",
         completionTokens: "Completion",
+        costSource: "Cost source",
         actions: "Total",
+      },
+      costSource: {
+        measured: "Measured",
+        estimated: "Estimated",
+        unknown: "Unknown",
       },
       globalCards: {
         sessions: "Sessions",

@@ -408,6 +408,17 @@ export const zhCN = {
     classRecallTruncated: "本次命中的数据表已达上限（{total} 张），部分相关表可能未被纳入查询，可尝试更具体的表述或联系管理员调整召回窗口。",
     classRecallFallback: "数据表智能召回暂不可用，本次已按数仓分层顺序选取数据表（张数受召回窗口上限约束），回答准确性可能受影响。",
     interrupted: "本次回答已中断：连接断开前生成的内容不完整，请重新提问以获取完整回答。",
+    // 错误细分类型的差异化提示（P2-1 errorType）。只有白名单内的类型才渲染；
+    // domain / llm / internal 的正文本身已面向用户，不再追加提示。
+    errorHints: {
+      permission: "当前账号没有执行该操作的权限，请联系管理员开通后重试。",
+      providerTransient: "模型服务暂时不可用，稍后重试通常可恢复。",
+      providerProtocol: "模型返回了无法解析的结果，可尝试换一种问法。",
+      queryTimeout: "查询超时，可缩小时间范围或减少维度后重试。",
+      dbConnectivity: "数据源连接失败，请确认数据库可用后重试。",
+      sqlSyntax: "生成的 SQL 未通过安全校验，请调整问题描述后重试。",
+      schemaReference: "问题涉及的表或字段无法识别，请检查术语或补充业务对象后重试。",
+    },
   },
 
   suggestedAgent: {
@@ -953,6 +964,13 @@ export const zhCN = {
       driverTooltip: "来自数据模型的关联字段",
       sqlDetail: "查看验证 SQL",
       disclaimer: "以上为基于当前数据与数据模型的可能解释（非因果结论），可发送验证 SQL 进一步核实。",
+      status: {
+        pending: "待验证",
+        supported: "支持",
+        contradicted: "相反",
+        inconclusive: "无法判定",
+        execution_failed: "执行失败",
+      },
     },
     // 可视化输出策略（Task 8）：「为什么这么画」的判断依据文案。code 即后端 ruleId，
     // 前端不内置白名单（后端可先发新 code，缺 key 时回退显示 code 原文）。
@@ -1887,7 +1905,13 @@ export const zhCN = {
         modelName: "模型",
         promptTokens: "Prompt",
         completionTokens: "Completion",
+        costSource: "成本口径",
         actions: "合计",
+      },
+      costSource: {
+        measured: "实测",
+        estimated: "估算",
+        unknown: "未知",
       },
       globalCards: {
         sessions: "会话数",

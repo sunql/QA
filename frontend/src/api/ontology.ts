@@ -190,6 +190,9 @@ export async function backfillRelations(): Promise<RelationBackfillResult> {
 
 // ===== Batch Relation Engine（通用批量关系引擎） =====
 
+/** POST /ontology/batch 的临时等待预算（见 runOntologyBatch 注释）。 */
+export const ONTOLOGY_BATCH_TIMEOUT_MS = 300_000;
+
 /** POST /ontology/batch — 执行：syncGraph / inferJoins / applyManifest（任选其一或多个）。
  *
  * 超时 300s 是批量接口的**临时等待预算**（生产实测可贴近 nginx 300s 硬上限），
@@ -198,7 +201,7 @@ export async function backfillRelations(): Promise<RelationBackfillResult> {
  */
 export async function runOntologyBatch(payload: BatchRelationRequest): Promise<BatchRelationResult> {
   const res = await httpClient.post<BatchRelationResult>(`${BASE}/batch`, payload, {
-    timeout: 300_000,
+    timeout: ONTOLOGY_BATCH_TIMEOUT_MS,
   });
   return res.data;
 }

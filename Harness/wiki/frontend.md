@@ -1,6 +1,6 @@
 ---
 created: 2026-09-01
-updated: 2026-09-01
+updated: 2026-10-18
 ---
 
 # Frontend
@@ -97,6 +97,33 @@ useEffect(() => {
 - **必须有用例断言请求头**（`expect(init.headers).toMatchObject({ Authorization: ..., "X-Tenant-Id": ... })`）：`wikiChat` 当初正是因为没有任何头断言，才把「完全没注入」的 403 带到线上。
 
 **遗留**：`api/chatHistory.ts` 仍发死值 `X-User-Id`；`datasource` / `localImport` 有重复拦截器；`RoutingMetricsPage` 不发鉴权头。
+
+## 假设验证状态标签（chore-p2-residual-cleanup）
+
+**SSOT**：`src/components/chat/HypothesisPanel.tsx` —— `verificationStatus` 是数据库字符串（系统边界），渲染前先经 `KNOWN_VERIFICATION_STATUSES` 白名单收窄，未知值回落 `pending`（「待验证」），**绝不把未知枚举拼进 i18n key**（缺 key 时 i18next 回落成 key 本身）。
+
+- 文案 key：`chat.hypothesis.status.{pending,supported,contradicted,inconclusive,execution_failed}`，`zh-CN` / `en-US` 两套齐备。
+- **测试必须断言真实文案**：旧用例用 `/pending/i` 匹配，恰好命中回落 key `chat.hypothesis.status.pending`，缺失 i18n 时照样绿；现在每条用例额外断言 `queryByText(/chat\.hypothesis\.status\./)` 为空。
+- **后端验证判定链路未接线**：`Hypothesis.verify()` / `VerificationResult` / `_recordVerification` 已作为死代码删除（无生产调用方）；前端「验证」按钮仍把 `verificationSql` 当普通问题走既有 QUERY 链路，因此 `verification_status` 恒为 null ⇒ 标签恒为「待验证」。要真正流转需新 API + 前端改调用。
+
+## 错误细分类型（errorType）端到端（chore-p2-errortype）
+
+后端 `error` SSE 帧携带 `errorType`（`app/services/stream_events.ErrorType`：`domain` / `llm` / `internal` / `provider_transient` / `provider_protocol` / `schema_reference` / `sql_syntax` / `db_connectivity` / `permission` / `query_timeout`）。前端链路：
+
+```
+SSE frame ── api/chat.ts parseEvent ── onError(message, detail?, errorType?)
+          ── chatStore（首发/续跑两处）写 ChatMessage.errorType
+          ── MessageItem：ERROR_TYPE_HINT_KEYS 白名单 → 错误气泡下方提示
+```
+
+**关键约定**：
+
+- `errorType` 是**系统边界原始字符串**，只用于查表。`MessageItem` 的 `ERROR_TYPE_HINT_KEYS` 只列用户可以采取动作的 7 类；`domain` / `llm` / `internal` 不追加提示（正文已面向用户），未知类型静默不渲染。
+- **绝不**把 `errorType` 拼进 i18n key：i18next `returnNull: false`，缺 key 会原样回显 key（与 hypothesis 状态标签同一个坑）。
+- doc-QA / Wiki 客户端用 `{...obj, kind}` 展开，`errorType` 运行时已透传；是否有消费端取决于页面，聊天是本次接线的目标。
+- 网络层兜底（`catch`）没有 `errorType`，不要伪造一个。
+
+**测试锚点**：`chatApi.test.ts`（三参透传）、`chatStore.test.ts`（回填消息字段）、`MessageItem.test.tsx`（真实文案 + 反向断言无裸 key / 未知枚举不泄露）。
 
 ## 研究型 Agent 入口（research）（feat-research-entry-ux-fixes）
 

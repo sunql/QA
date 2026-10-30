@@ -67,11 +67,13 @@ from app.services.messages_zh import (
     MSG_MAP_PROPERTY_OK,
     MSG_MAP_PROPERTY_RETRY_HINT,
     MSG_METRIC_DEFINED,
+    MSG_METRIC_DRAFT_KPI_SUFFIX,
     MSG_METRIC_LIST_HEADER,
     MSG_NO_METRICS_DEFINED,
     MSG_SUPPLIER_360_NOT_FOUND,
     MSG_SUPPLIER_RISK_NOT_FOUND,
 )
+from app.services.kpi_catalog_service import KpiCatalogService
 from app.services.stream_events import EVENT_DONE, EVENT_TOKEN, StreamEvent
 from app.services.supplier_360_service import Supplier360Service
 from app.services.supplier_risk_service import SupplierRiskService, buildRiskAnswer
@@ -130,7 +132,8 @@ class DomainCommandMixin:
     # =========================================================================
 
     async def _handleDomainCommand(
-        self, session: AsyncSession, dto: ChatRequest, result: IntentResult
+        self, session: AsyncSession, dto: ChatRequest, result: IntentResult,
+        user: CurrentUser | None = None,
     ) -> ChatResponse:
         """DEFINE / MAP / METRIC：调用本体 CRUD，不进入 NL2SQL 流水线、不消耗 Token。
 
@@ -140,17 +143,20 @@ class DomainCommandMixin:
         - METRIC：携带 metric+formula（斜杠 /metric）→ 创建指标 _handleDefineMetric；
                   否则（自然语言"有哪些指标"）→ _handleShowMetric 列举。
         - MAP：直接派发。
+
+        user：B5 起透传调用方（/metric 自动建 DRAFT KPI 户头的 created_by / 审计
+        actor 归属），与 _handleAgentRun 的 actor 透传同约定；匿名链路传 None。
         """
         if result.intent == IntentType.DEFINE:
             if result.target and not result.metric:
                 return await self._handleDefineClass(session, dto, result)
-            return await self._handleDefineMetric(session, dto, result)
+            return await self._handleDefineMetric(session, dto, result, user=user)
         if result.intent == IntentType.MAP:
             return await self._handleMapProperty(session, dto, result)
         if result.intent == IntentType.METRIC:
             if result.metric and result.formula:
                 return await self._handleDefineMetric(
-                    session, dto, result, intentLabel=IntentType.METRIC
+                    session, dto, result, intentLabel=IntentType.METRIC, user=user
                 )
             return await self._handleShowMetric(session, dto, result)
         raise AssertionError(f"非领域命令意图: {result.intent}")
@@ -546,18 +552,44 @@ class DomainCommandMixin:
         result: IntentResult,
         *,
         intentLabel: IntentType = IntentType.DEFINE,
+        user: CurrentUser | None = None,
     ) -> ChatResponse:
         """创建本体指标；公式缺失时返回格式引导。
 
         intentLabel：自然语言"定义指标"→ DEFINE；斜杠 /metric → METRIC。
+
+        B5：创建成功后幂等补一条 DRAFT KPI 治理户头（metric_id 挂靠），消灭
+        「只有技术形态没有户头」的孤儿指标——人工补全治理字段并发布后，
+        该指标才进入 L1 匹配与报告链路。户头创建失败不回滚指标本体
+        （best-effort：只降级答案文案的尾注）。
         """
         if not result.metric or not result.formula:
             answer = MSG_DEFINE_METRIC_GUIDE_PREFIX + MSG_DEFINE_METRIC_GUIDE_EXAMPLE
             return ChatResponse(answer=answer, intent=intentLabel.value)
         metric = await self._ontology.createMetric(
-            session, OntologyMetricCreate(metric_name=result.metric, formula=result.formula)
+            session,
+            OntologyMetricCreate(metric_name=result.metric, formula=result.formula),
+            # actor 审计归属（此前漏传 → createMetric TypeError，/metric 事实上
+            # 全灭——2026-10-28 实测 dev ontology_metric 为 0 的根因）
+            actor=user.userId if user is not None else "chat",
         )
-        answer = MSG_METRIC_DEFINED.format(name=metric.metric_name, formula=metric.formula)
+        draftCode: str | None = None
+        try:
+            draft = await KpiCatalogService().ensureDraftForMetric(
+                session,
+                metric,
+                actor=user.userId if user is not None else "chat",
+                actor_departments=user.departments if user is not None else None,
+            )
+            draftCode = draft.kpi_code
+        except Exception:
+            logger.warning(
+                "metric_id=%s 自动建 DRAFT KPI 户头失败（指标本体不受影响）",
+                metric.id, exc_info=True,
+            )
+        answer = MSG_METRIC_DEFINED.format(name=metric.metric_name, formula=metric.formula) + (
+            MSG_METRIC_DRAFT_KPI_SUFFIX.format(code=draftCode) if draftCode else ""
+        )
         await self._storeSessionMessages(session, dto.sessionId, dto.question, answer, None)
         return ChatResponse(answer=answer, intent=intentLabel.value)
 
@@ -646,10 +678,11 @@ class DomainCommandMixin:
         return ChatResponse(answer=answer, intent=IntentType.MAP.value)
 
     async def _streamDomainCommand(
-        self, dto: ChatRequest, session: AsyncSession, result: IntentResult
+        self, dto: ChatRequest, session: AsyncSession, result: IntentResult,
+        user: CurrentUser | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """领域命令的 SSE 形式：token(结果) + done（零 LLM 消耗，与闲聊同构）。"""
-        resp = await self._handleDomainCommand(session, dto, result)
+        resp = await self._handleDomainCommand(session, dto, result, user=user)
         yield StreamEvent(EVENT_TOKEN, {"content": resp.answer})
         yield StreamEvent(EVENT_DONE, {"tokensUsed": 0, "cost": 0.0, "modelName": None})
 

@@ -37,6 +37,7 @@ from app.domain.schemas import (
     OntologyMetricCreate,
     OntologyPropertyUpdate,
 )
+from app.services.kpi_catalog_service import KpiCatalogService
 from app.services.chat_service import (
     ChatService,
     _statePlan,
@@ -58,6 +59,18 @@ def _isolate_value_sample_cache():
     clearValueSampleCache()
     yield
     clearValueSampleCache()
+
+
+@pytest.fixture(autouse=True)
+def _stub_ensure_draft_kpi(monkeypatch):
+    """B5：_FakeSession 撑不起 ensureDraftForMetric 的真实查询（MagicMock 恒真值
+    会把 mock 垃圾塞进答案尾注）。单测里把它 stub 成抛错 → 走 best-effort
+    降级路径（无尾注，确定性）；真实建户头行为由
+    integration/test_chat_metric_draft_kpi.py 全链路覆盖。"""
+    async def _raise(self, session, metric, **kwargs):
+        raise RuntimeError("unit: draft KPI creation stubbed off")
+
+    monkeypatch.setattr(KpiCatalogService, "ensureDraftForMetric", _raise)
 
 
 # 测试用查询结果（与 test_chat_service_stream.py 同构，供本文件的 affinity 测试使用）
@@ -207,7 +220,9 @@ class _FakeOntologyService:
         # join 目录（运行时 JOIN 唯一真源）；单测默认无 join 边
         return self.joins
 
-    async def createMetric(self, session, dto: OntologyMetricCreate) -> OntologyMetric:
+    async def createMetric(
+        self, session, dto: OntologyMetricCreate, *, actor: str = "chat"
+    ) -> OntologyMetric:
         self.createdMetrics.append(dto)
         return OntologyMetric(
             id=99, metric_name=dto.metric_name, formula=dto.formula, agg_function=dto.agg_function

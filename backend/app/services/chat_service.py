@@ -40,7 +40,7 @@ from app.services.chat_constants import (
     USAGE_PURPOSE_NL2SQL,
 )
 from app.domain.chart_spec import ChartSpec, SpecKpi
-from app.domain.enums import ChartType, IntentType
+from app.domain.enums import ChartType, DataSourceType, IntentType
 from app.domain.exceptions import (
     ConfigError,
     ConflictError,
@@ -130,6 +130,7 @@ from app.security.prompt_sanitizer import (
     wrapUntrusted,
 )
 from app.services.nl2sql_semantic_guard import shareAmbiguityWarning
+from app.services.kpi_contract_reconcile import buildKpiDenominatorWarning
 from app.services.nl2sql_dialects import coerceDatasourceType
 from app.services.think_block import applyThinkPolicy
 from app.services.ontology_service import OntologyService
@@ -137,6 +138,7 @@ from app.services.step_aggregator import StepAggregator
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.supplier_360_service import Supplier360Service
 from app.services.step_subquestion_rewriter import StepSubquestionRewriter
+from app.services.token_usage_service import COST_SOURCE_ESTIMATED
 from app.services.supplier_name_resolver import SupplierNameResolver
 from app.services.supplier_risk_service import SupplierRiskService, buildRiskAnswer
 from app.services.schema_introspection_service import (
@@ -266,6 +268,11 @@ from app.services.chat_context import (
 )
 from app.services.chat_usage import UsageMixin
 from app.services.chat_stream import StreamMixin
+from app.services.chat_stream_entry import StreamEntryMixin
+from app.services.chat_stream_multistep import StreamMultiStepMixin
+from app.services.chat_stream_persist import StreamPersistMixin
+from app.services.chat_stream_query import StreamQueryMixin
+from app.services.chat_stream_shortcuts import StreamShortcutMixin
 from app.services.evidence_record_service import (
     resetChatSessionId,
     resetChatUserId,
@@ -318,7 +325,12 @@ def _wrapMultistepInputs(
     return safe_sub, safe_inj, safe_st
 
 
-class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin, L1L4PreambleMixin):
+class ChatService(
+    RecallMixin, MultiStepMixin, MultiStepPersistMixin,
+    StreamEntryMixin, StreamShortcutMixin, StreamQueryMixin, StreamMultiStepMixin, StreamPersistMixin,
+    ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin,
+    ChatStreamOutputMixin, L1L4PreambleMixin,
+):
     """自然语言问答编排服务。
 
     组合 ChatStreamOutputMixin 提供流式回答输出的超时保护与降级能力。
@@ -467,7 +479,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             await self._storeSessionMessages(session, dto.sessionId, dto.question, response.answer, None)
             return response
         if result.intent in (IntentType.DEFINE, IntentType.MAP, IntentType.METRIC):
-            return await self._handleDomainCommand(session, dto, result)
+            return await self._handleDomainCommand(session, dto, result, user=user)
         # Phase 5.3：供应商 360° 视图（chat 拦截，跳过 NL2SQL）
         if result.intent == IntentType.SUPPLIER_360:
             return await self._handleSupplier360(session, dto, result)
@@ -678,10 +690,18 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
         # 数学判错（也可能是组内明细 ≤ N），在答案前追加核对提示——violations 已在
         # _runQueryWithRetry 出口抛错，到这里只剩 warning 场景。
         shareWarning = shareAmbiguityWarning(outcome.plan, data)
+        # B4 分母契约弱校验（kpi-governance B4）：问句命中 KPI 且治理声明分母列
+        # 未出现在生成 SQL 的分母表达式中 → 示警前置（L2 出口，不硬拒——治理
+        # 声明可能有历史误差，先积累数据）。装配失败/判不了 → None 零影响。
+        denominatorWarning = await buildKpiDenominatorWarning(
+            session, dto.question, finalSql
+        )
         # Think_Hide（feat-think-hide）：推理模型的 <think> 思维链按系统参数剥离
         answerText = await applyThinkPolicy(session, answerResp.content)
         if shareWarning:
             answerText = f"{shareWarning}\n\n{answerText}"
+        if denominatorWarning:
+            answerText = f"{denominatorWarning}\n\n{answerText}"
         # 4-1（feat-token-cache）：一次性读 cache hit multiplier，避免 chart/answer
         # 路径上每次 _recordUsage 都查一次。chat_service 入口处读取一次足够。
         cacheHitMultiplier = await _readFloatConfig(
@@ -1028,7 +1048,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
         question = sub_question if sub_question is not None else dto.question
 
         if intent == IntentType.REFINE and state is not None and state.last_sql:
-            rewritten = self._tryRefineDirect(state, question)
+            rewritten = self._tryRefineDirect(state, question, pc.ds.type)
             if rewritten is not None:
                 return _SqlOutcome(plan=_statePlan(state), sql=rewritten, sqlConfig=None)
 
@@ -1153,13 +1173,20 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             cachedTokens=mergedCachedTokens,
         )
 
-    def _tryRefineDirect(self, state: SessionQueryState, question: str) -> str | None:
+    def _tryRefineDirect(
+        self,
+        state: SessionQueryState,
+        question: str,
+        datasourceType: DataSourceType | str | None = None,
+    ) -> str | None:
         """尝试纯代码改写上一轮 SQL（排序/行数/简单筛选）；无法改写返回 None。"""
         sql = state.last_sql
         if not sql:
             return None
         try:
-            return self._nl2sql.applyRefineDirect(sql, _statePlan(state), question)
+            return self._nl2sql.applyRefineDirect(
+                sql, _statePlan(state), question, datasourceType=datasourceType
+            )
         except Exception:
             # 捷径属最佳努力：任何意外失败都退回 LLM 两阶段，不阻断流水线
             logger.warning("REFINE 捷径改写失败，退回 LLM: %s", question, exc_info=True)
@@ -1535,17 +1562,70 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
         kpi: KpiCatalog,
         session: AsyncSession,
     ) -> Any | None:
-        """按 kpi.formula 解析关联的 FeatureDefinition（无 formula / 找不到 → None）。"""
+        """解析 KPI 关联的 FeatureDefinition（B1 契约：外键链路优先，等值回退）。
+
+        B1（2026-10-27 提案 Phase 1）前的实现只有 ``kpi.formula == FD.feature_definition``
+        字符串等值一条路：锚点脆弱（改一个空格即静默失效）且失败无痕（2026-10-27 探针：
+        dev 12 条存量 KPI 的 formula 无一条命中 FD，全部静默降级）。现按两级解析：
+
+        1. ``metric_id`` 非空 → 走 ``metric.formula`` 等值锚定（挂靠关系由外键保证，
+           漂移面从 KPI+FD 两份自由文本缩到 metric+FD 一份）；
+        2. 回退 ``kpi.formula`` 等值（存量兼容）——**每次进入回退路径都 warning**，
+           让「还在依赖脆弱等值匹配」的 KPI 从日志可见（metric 链路未命中时同样降级
+           到回退，尽量保持命中率）。
+        """
+        metricFormula: str | None = None
+        if kpi.metric_id is not None:
+            from app.domain.models import OntologyMetric
+
+            metric = await session.get(OntologyMetric, kpi.metric_id)
+            if metric is not None and metric.formula and metric.formula.strip():
+                metricFormula = metric.formula
+                feat = await self._findEnabledFeature(session, metricFormula)
+                if feat is not None:
+                    return feat
+                logger.warning(
+                    "L1 metric 链路未命中 FeatureDefinition kpi=%s metric_id=%s，"
+                    "回退 formula 等值",
+                    kpi.kpi_code, kpi.metric_id,
+                )
+            else:
+                logger.warning(
+                    "L1 kpi=%s 挂靠的 metric_id=%s 不存在或 formula 为空，"
+                    "回退 formula 等值",
+                    kpi.kpi_code, kpi.metric_id,
+                )
+
+        # 回退路径：kpi.formula 等值（存量兼容；概念混用面由 B2 对账收敛）
         if not kpi.formula or not kpi.formula.strip():
             return None
+        feat = await self._findEnabledFeature(session, kpi.formula)
+        if feat is None:
+            logger.warning(
+                "L1 回退路径未命中 FeatureDefinition kpi=%s formula=%r"
+                "（metric_id=%s）——执行降级为无数据回答",
+                kpi.kpi_code, kpi.formula, kpi.metric_id,
+            )
+        else:
+            logger.warning(
+                "L1 kpi=%s 命中于回退路径（formula 等值，metric_id=%s）——"
+                "建议补挂 metric 外键以脱离字符串等值锚点",
+                kpi.kpi_code, kpi.metric_id,
+            )
+        return feat
 
+    @staticmethod
+    async def _findEnabledFeature(
+        session: AsyncSession, anchor: str
+    ) -> Any | None:
+        """按锚文本等值查找启用的 FeatureDefinition（FD.feature_definition 列）。"""
         from sqlalchemy import select
 
         from app.domain.models import FeatureDefinition
 
         feat_row = await session.execute(
             select(FeatureDefinition).where(
-                FeatureDefinition.feature_definition == kpi.formula,
+                FeatureDefinition.feature_definition == anchor,
                 FeatureDefinition.is_enabled.is_(True),
             )
         )
@@ -1989,6 +2069,8 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             await self._recordUsage(
                 session, sessionId, primary, promptTokens, completionTokens,
                 purpose=f"fallback_{purpose}",
+                # 异常里提取的 token ⇒ 估算口径（与 retry-gen 同口径）。
+                cost_source=COST_SOURCE_ESTIMATED,
             )
             try:
                 result = await _callWithRetryBackoff(caller, fallback)

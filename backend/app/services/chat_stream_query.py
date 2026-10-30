@@ -30,6 +30,7 @@ from app.services.chat_helpers import (
     _looks_like_compound_question,
     _PipelineContext,
     _clipText,
+    buildSingleStepSnapshot,
     streamPersistStateOf,
 )
 from app.services.kpi_contract_reconcile import buildKpiDenominatorWarning
@@ -212,6 +213,13 @@ class StreamQueryMixin:
                 routing_layer=ROUTING_LAYER_L2,
                 latency_ms=int((time.monotonic() - _stream_t0) * 1000),
                 token_cost_usd=float(self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)),
+                # 历史回放计划卡：无法回答也下发过计划卡（overview + plan 事件），
+                # 回放保持同一形态（sql=None、status=done）
+                query_plan=outcome.plan.to_dict() if outcome.plan else None,
+                steps_snapshot=buildSingleStepSnapshot(
+                    description="无法回答", subQuestion=dto.question, sql=None,
+                    summary="该问题当前数据条件下无法回答",
+                ),
             )
             await self._saveQueryState(
                 session, dto.sessionId,
@@ -466,6 +474,13 @@ class StreamQueryMixin:
             # 0107：图之外的明细表 + 判断依据同轮落库（与流式下发那份同一份）。
             table_option=tableOption,
             visual_rationale=rationale,
+            # 历史回放计划卡（2026-10-31）：顶层查询计划（消息级 QueryPlanCard）
+            # + 单步回放快照（分析计划卡）。per-step queryPlan 有意不带 ——
+            # 与线上单步不渲染步内计划卡一致（计划在顶层卡里）。
+            query_plan=outcome.plan.to_dict() if outcome.plan else None,
+            steps_snapshot=buildSingleStepSnapshot(
+                description=stepDesc, subQuestion=dto.question, sql=finalSql,
+            ),
         )
         await self._saveQueryState(
             session, dto.sessionId,

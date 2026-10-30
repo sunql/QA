@@ -210,6 +210,10 @@ function toChatMessage(read: ChatMessageRead): ChatMessage {
     // 同一道收窄（older 后端可能发来未知形状，收窄成 null 等于「这轮没有」）。
     tableOption: asTablePayload(read.tableOption),
     visualRationale: asVisualRationale(read.visualRationale),
+    // 历史回放计划卡（2026-10-31）：顶层查询计划（QueryPlanCard）+ 回放快照
+    // （MultiStepPlanCard）。同是系统边界原始 JSON，见 asReplaySteps 的收窄规则。
+    queryPlan: (read.queryPlan ?? null) as ChatMessage["queryPlan"],
+    steps: asReplaySteps(read.stepsSnapshot),
     // 回放出来的消息天然知道自己的落库主键，补上它「导出此条」按钮才会出现。
     // 此前不填：入口只在 dbMessageId 存在时才渲染，于是刷新恢复出来的会话
     // 整段没有单条导出（实时发送的消息仍然没有，见 ChatMessage.dbMessageId 注释）。
@@ -217,6 +221,46 @@ function toChatMessage(read: ChatMessageRead): ChatMessage {
     // F2：kpiDatasourceCode 不在后端 DTO 里，会话恢复时显式清零（不靠「新对象恰好没这个字段」的隐性保证）
     kpiDatasourceCode: null,
   };
+}
+
+// 回放快照里允许出现的 StepStatus 终态。白名单外的值（旧后端/脏数据）收窄为
+// "done"——快照只存终态（succeeded/failed/compressed 已由后端映射好），落到
+// 白名单外只能说明形状异常，渲染成终态比渲染成「执行中」诚实。
+const REPLAY_STEP_STATUSES: ReadonlySet<string> = new Set([
+  "pending", "running", "done", "error", "compressed",
+]);
+
+// stepsSnapshot（unknown）→ MultiStepStep[]：逐项校验关键字段，不合法的项丢弃。
+// 整体不是数组、或没有任何合法项时返回 undefined（= 「这轮没有分析计划卡」），
+// 与 normalizeChartType 的「收窄成 null」同一哲学。
+function asReplaySteps(snapshot: unknown): MultiStepStep[] | undefined {
+  if (!Array.isArray(snapshot)) return undefined;
+  const steps: MultiStepStep[] = [];
+  for (const raw of snapshot) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const s = raw as Record<string, unknown>;
+    if (typeof s.stepIndex !== "number") continue;
+    const status = typeof s.status === "string" && REPLAY_STEP_STATUSES.has(s.status)
+      ? (s.status as StepStatus)
+      : "done";
+    steps.push({
+      stepIndex: s.stepIndex,
+      description: typeof s.description === "string" ? s.description : "",
+      subQuestion: typeof s.subQuestion === "string" ? s.subQuestion : "",
+      aggregationOnly: s.aggregationOnly === true,
+      status,
+      sql: typeof s.sql === "string" ? s.sql : null,
+      summary: typeof s.summary === "string" ? s.summary : null,
+      error: typeof s.error === "string" ? s.error : null,
+      chartType: normalizeChartType(s.chartType),
+      chartOption: asChartOption(s.chartOption),
+      tableOption: asTablePayload(s.tableOption),
+      visualRationale: asVisualRationale(s.visualRationale),
+      queryPlan: (s.queryPlan ?? null) as MultiStepStep["queryPlan"],
+      runId: typeof s.runId === "string" ? s.runId : undefined,
+    });
+  }
+  return steps.length ? steps : undefined;
 }
 
 /** 回放结果：成功落地 / 载不动 / 被更新的动作作废（见 `sessionLoadSeq`）。 */

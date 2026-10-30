@@ -225,6 +225,10 @@ class SessionHistoryService:
                 # 0107（可视化输出策略）：图之外的明细表 + 判断依据随行带出。
                 SessionMessage.table_option,
                 SessionMessage.visual_rationale,
+                # 2026-10-31（历史回放计划卡）：查询计划 + 回放快照随行带出，
+                # 前端据此还原 查询计划卡 与 分析计划卡（刷新/重开会话不再丢）。
+                SessionMessage.query_plan,
+                SessionMessage.steps_snapshot,
             )
             .where(SessionMessage.session_id == sessionId)
             .limit(limit)
@@ -259,6 +263,9 @@ class SessionHistoryService:
                 # 0107：无表/无依据的行（user 行 / 改动前的存量行）两列均为 NULL → None
                 table_option=r.table_option,
                 visual_rationale=r.visual_rationale,
+                # 2026-10-31：无计划的行（user 行 / 改动前的存量行）两列均为 NULL → None
+                query_plan=r.query_plan,
+                steps_snapshot=r.steps_snapshot,
             )
             for r in rows
         ]

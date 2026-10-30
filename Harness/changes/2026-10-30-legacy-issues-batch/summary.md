@@ -84,10 +84,16 @@
 
 ## 7. 安全审查
 
+security-reviewer（haiku，2026-10-30）对 `1b9f4f71..HEAD` 全量后端 diff + ci.yml 的审查结论：**无 CRITICAL / 无 HIGH / 无阻断项**。四个重点：① prod 库写入守卫链完整未被削弱（S5 临时开关 prod 不可达 + 反向单测守卫）；② fail-closed 门禁不可绕过（两扇面共用同一决策，全仓 grep 无第二处直读 `SWITCH_CONTRACT_INJECTION`；Tier C 门禁修掉了原「无 metric 的 KPI 直接进注入集」的真实越权注入面）；③ ci.yml 干净（最小权限、无 secrets、无 `pull_request_target`、CI 假值仅存在于 runner 本机 ephemeral 容器）；④ chat actor 修复未引入注入/越权（departments 来自服务端而非客户端自由文本）。
+
+**MEDIUM ×2（既有问题，非本批引入 → 登记为后续批次，本批不仓促改）**：
+1. `chat_domain.py` 4 处 actor 用 `user.userId` 而非 `dbUserId`（stub AUTH_MODE 下 departments 可经 `X-User-Id` 伪造；本批让 /define /map 首次落库、扩大了可写面）——改身份格式波及 audit_log 全链路，需独立小设计。
+2. B3 注入的治理文本（numerator/denominator/grain/unit 各 120 字符）只截断无反注入消毒（fence neutralize / 结构剥离）——Tier C 门禁已消掉最大一块，残余面待独立批次。
+
+**LOW ×3**：③ `runWithSwitch` 无内置 prod 断言 → **本批已修**（TDD：落库实测库名 == `qa_metadata` 即 SystemExit 且零开关读写，`test_run_with_switch_refuses_prod_database_regardless_of_isProd` RED→GREEN）；④ `actor_departments` 对契约外类型（set）降级为脏串 + 部门名含逗号往返有损 → 随 MEDIUM-1 批次处理；⑤ S5 总闸开时 prod 会跑 `cache.ensureFresh`（既有行为，`--allow-prod-write` 已前置闸住，备忘）。
+
 - B3 门禁针对的正是安全评审 M-3（治理列任意登录用户可建 ⇒ 未对账文本不得进他人 prompt）——本批是其落地。
-- realdata `runWithSwitch`：`finally` 还原 + 还原后复读校验；prod 路径（`isProd` / 库名 `qa_metadata`）一律不触碰开关行。
-- security-reviewer 对 `1b9f4f71..HEAD` 全量 diff 的审查结论：见 §9 记录（agent 结果回填；若 agent 不可用则如实标注未执行，不假称已审查）。
-- CI 密钥全部使用 CI 作用域假值（`ci-postgres-only` 等），无仓库 secret 依赖；Milvus 仅在 integration job 内起**隔离容器**（`MILVUS_TEST_DB_NAME=qa_ci`），不触本机 19530 生产实例。
+- CI 密钥全部使用 CI 作用域假值（`ci-postgres-only` 等），无仓库 secret 依赖；Milvus 仅在 integration job 内起**隔离容器**（`MILVUS_TEST_DB_NAME=qa_ci`），不触本机 19530 生产实例。密钥扫描：全量 diff 无硬编码密钥。
 
 ## 8. 部署验证
 
@@ -123,7 +129,7 @@ dev `qa_metadata`（与 prod 同名，走 prod 路径）实测：kpi=12 / metric
 - [x] 9 段非空，无占位
 - [x] 第 2 段 ≥ 2 个候选方案对比
 - [x] 第 3 段无迁移（无需文件名校验）
-- [x] 第 7 段 security-reviewer 结论回填（agent 结果见提交后补充；未跑成则如实标注）
+- [x] 第 7 段 security-reviewer 结论已回填（无 CRITICAL/HIGH；2 MEDIUM 登记为后续批次；LOW-3 已修）
 - [x] 第 8 段真库只读演练输出贴出（本批无运行时部署）
 - [x] 第 9 段 ≥ 3 个跨文件链接
 - [x] wiki 已更新（kpi-metric-technical-form.md 开关表）

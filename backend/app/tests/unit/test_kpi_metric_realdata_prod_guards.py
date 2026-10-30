@@ -107,6 +107,78 @@ async def test_step5_prod_skips_without_touching_the_injection_switch(
 # ── F7：prod 的 S9 先备份再写，备份失败即停 ──────────────────────────
 
 
+async def test_run_with_switch_refuses_prod_database_regardless_of_isProd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``runWithSwitch`` 内置 prod 断言（defense-in-depth，2026-10-30 安全审查 LOW-3）。
+
+    入口侧的 ``isProd`` 判断靠调用方自觉；万一未来某个调用点在判 prod 之前
+    就进了 ``runWithSwitch``，函数本体必须自己拒绝——落库实测库名是
+    ``qa_metadata`` 即 SystemExit，且**一次开关读写都不能发生**。
+    """
+    from scripts import kpi_metric_realdata_db as dbModule
+
+    calls: list[str] = []
+
+    async def _currentDb(_session: object) -> str:
+        calls.append("currentDatabaseName")
+        return "qa_metadata"
+
+    async def _read(_session: object, _key: str) -> str | None:
+        calls.append("read")
+        return None
+
+    async def _write(_session: object, _key: str, _value: str) -> None:
+        calls.append("write")
+
+    monkeypatch.setattr(dbModule, "currentDatabaseName", _currentDb)
+    monkeypatch.setattr(dbModule, "readSwitchValue", _read)
+    monkeypatch.setattr(dbModule, "writeSwitchValue", _write)
+
+    async def _action() -> None:
+        calls.append("action")
+
+    with pytest.raises(SystemExit, match="qa_metadata"):
+        await dbModule.runWithSwitch(object(), "some_switch", "true", _action, "T")
+
+    assert calls == ["currentDatabaseName"]
+
+
+async def test_run_with_switch_allows_test_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """反向：隔离测试库（``qa_metadata_test*``）必须照常可用。"""
+    from scripts import kpi_metric_realdata_db as dbModule
+
+    calls: list[str] = []
+
+    async def _currentDb(_session: object) -> str:
+        return "qa_metadata_test_solo"
+
+    async def _read(_session: object, _key: str) -> str | None:
+        calls.append("read")
+        return None
+
+    async def _write(_session: object, _key: str, _value: str) -> None:
+        calls.append("write")
+
+    async def _delete(_session: object, _key: str) -> None:
+        calls.append("delete")
+
+    monkeypatch.setattr(dbModule, "currentDatabaseName", _currentDb)
+    monkeypatch.setattr(dbModule, "readSwitchValue", _read)
+    monkeypatch.setattr(dbModule, "writeSwitchValue", _write)
+    monkeypatch.setattr(dbModule, "deleteSwitchValue", _delete)
+
+    async def _action() -> None:
+        calls.append("action")
+
+    await dbModule.runWithSwitch(object(), "some_switch", "true", _action, "T")
+
+    # read → write(临时) → action → restore(原值 None ⇒ delete) → 复核 read
+    assert calls == ["read", "write", "action", "delete", "read"]
+
+
 class _FakeApplySummary:
     def __init__(self) -> None:
         self.created: tuple[str, ...] = ()

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import KpiCatalog, OntologyMetric
 from app.models.system_config import SystemConfig
+from scripts.kpi_metric_db_guard import PROD_DB_NAME
 from scripts.kpi_metric_realdata_lib import check, info
 
 
@@ -190,7 +191,18 @@ async def runWithSwitch(
     验证一条链路，而开关的**真实**取值由人决定（fail-closed 默认关）。
     还原是 ``finally`` 里的硬动作——进程被 SIGKILL 时 ``finally`` 不会执行，
     所以该写法**只允许在隔离测试库使用**（正式库一律 SKIP，见 S4/S5 入口）。
+
+    Defense-in-depth（2026-10-30 安全审查 LOW-3）：入口侧的 ``isProd`` 判断
+    靠调用方自觉——这里落库实测库名，是 ``qa_metadata``（prod 同名库）直接
+    SystemExit，**一次开关读写都不发生**。不信任调用方先判。
     """
+    dbName = await currentDatabaseName(session)
+    if dbName == PROD_DB_NAME:
+        raise SystemExit(
+            f"runWithSwitch 拒绝执行：落库实测 {dbName!r} 是正式库名 "
+            f"（SIGKILL 残留开关值的风险不可带入）——临时开关写法只允许在 "
+            f"qa_metadata_test* 隔离库使用"
+        )
     original = await readSwitchValue(session, key)
     await writeSwitchValue(session, key, value)
     try:

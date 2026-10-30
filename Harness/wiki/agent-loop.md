@@ -68,6 +68,26 @@ class AgentLoopResult:
 每个 tool 都有 `cost_usd` 字段（按调用的 LLM 估计成本或固定常数），累加到 `cost_so_far_usd`。
 `execute_sql` 调 SQL Guard 失败不抛异常，转写 `{"error": "...", "cost_usd": 0.0}` 让 LLM 自我修复。
 
+### 工具结果契约（② 工具结果瘦身，2026-10-31）
+
+工具结果占 L4 prompt 的 90%+（① 取证：92%，其中 describe_table 58.6% / list_joins 33.4%），
+因此**创建期**（不是历史重写——改写旧消息会打断 prompt cache 前缀）按下列形态编码：
+
+| Tool | 返回形态 | 关键点 |
+|---|---|---|
+| `list_tables` | `{"tables": [...]}` | 按 `source_table` 去重保序（同一物理表可对应多个 ontology_class） |
+| `describe_table` | `{"table", "column_format", "columns": [[name, alias, data_type, source_column, flags, ref]]}` | 列式；`alias` 等于 name/source_column 时置 `""`；`flags` 取 `PK`/`FK`/`PK,FK`/`""`；`ref` 把 `ref_class_id` 解析成**目标表名**（class_id 对 LLM 无用） |
+| `execute_sql` | `{"columns", "rows": [[...]], "row_count", ["truncated", "note"]}` | 行数上限 `L4_TOOL_ROW_CAP=100`；`row_count` 恒为**真实总数**；截断时带 `truncated`+`note`（提示在 SQL 内聚合）。执行器仍取全量 |
+| `list_joins` | `{"count", "edges": ["TABLE.COL -> TABLE.COL (LEFT) # desc"]}` | 端点 class_id 解析成表名、不可解析的边跳过；反向重复边去重（列集合参与键，保留同表对不同列）；可选 `tables` 过滤（裸表名或 schema.table，大小写不敏感） |
+
+**转义通道**：工具结果用 `wrapUntrustedStructured`（`prompt_sanitizer.py`）——只转 `& < >`，
+保留引号（免 `&quot;` 放大）；`&` 先转义保证数据里的 `&lt;/x&gt;` 无法一次解码还原，
+`<`→`&lt;` + U+200B 打断关闭标签的防御不变。其余 label 仍用 5 字符版 `wrapUntrusted`。
+
+实测（同题复跑 `l4-tool-slim-20261031-1`）：Σprompt 116,696 → 29,525（−74.7%），
+describe_table 68,334 → 18,176 tokens，list_joins 38,931 → 2,046 tokens，
+转义净增 116,120 → 156 字符。详见 `Harness/changes/2026-10-31-l4-tool-slimming/summary.md`。
+
 ## BaseLlmClient.complete_with_tools
 
 抽象方法在 `app/infrastructure/llm/base.py`，所有 LLM 客户端必须实现以支持 tool calling。

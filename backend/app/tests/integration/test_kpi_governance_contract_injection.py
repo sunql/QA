@@ -6,7 +6,9 @@
 2. 每个候选过 B2 对账门禁：任何 verdict=mismatch 的检查 → 该 KPI 不注入
    （宁可少注入不注入错的）；unknown 允许注入（声明无法被技术公式反驳，
    恰是治理文本唯一可用的场景）；
-3. 有挂靠 metric 且门禁通过 → 渲染技术公式行；无 metric → 仅治理字段。
+3. 挂靠门禁（2026-10-30 补齐）：**无挂靠 metric ⇒ Tier C ⇒ 不注入**（B2 对账
+   需要一个可对账的本体指标，无 metric 即「未经对账的治理声明」）；
+4. 门禁通过 → 渲染治理字段 + 技术公式行。
 
 零回归契约：无匹配 / 冷缓存 / 开关关闭 / 空问句 → None。
 
@@ -175,9 +177,27 @@ async def test_unknown_verdict_still_injected(dbSession: AsyncSession) -> None:
     assert "SUM(received_qty)/SUM(order_qty)" in block  # 技术公式照注
 
 
-async def test_no_metric_governance_only(dbSession: AsyncSession) -> None:
-    """无挂靠 metric（无 B2 门禁对象）→ 仅治理字段，无技术公式行。"""
-    await _seedKpi(
+async def test_no_metric_not_injected(dbSession: AsyncSession) -> None:
+    """无挂靠 metric ⇒ Tier C ⇒ 不注入（2026-10-30 口径统一 + 安全评审 M-3）。
+
+    为什么这条改口径（三条独立依据）：
+    - 2026-10-27 提案的验收口径是「问句命中 PUBLISHED KPI → 含契约段；
+      **未命中/无挂靠 → 不含**」；
+    - 同一提案把 B2 对账定为 B3 的**硬依赖**（「注入未经对账的治理声明等于把
+      漂移喂给 LLM」）。B2 需要一个可对账的本体指标 ⇒ 无 metric 的 KPI 没有
+      B2 门禁对象，注入它 = 注入未经对账的治理文本；
+    - 2026-10-28 设计 §7.1 的路由写明「metric 缺失 / 对账 mismatch ⇒
+      Tier C：NL2SQL 无契约」；
+    - 安全评审 M-3：治理列可由任意登录用户建档（kpi_catalog 建档不做 ACL），
+      未挂 metric 的口径文本不该进他人 prompt。
+
+    chat 侧 Tier B 面（kpi_contract_builder._buildEntry）本来就是这个口径
+    （metric 缺失 ⇒ 降 Tier C 不注入），本条让 nl2sql 侧 B3 面与之对齐。
+
+    反向守卫（同一用例内）：给同一 KPI 挂上 metric ⇒ 真的注入。否则本条可能
+    因「永远不注入」而假绿。
+    """
+    kpi = await _seedKpi(
         dbSession,
         "KPI_B3_04",
         name="库存周转率",
@@ -188,11 +208,20 @@ async def test_no_metric_governance_only(dbSession: AsyncSession) -> None:
     )
     await _warmCache(dbSession)
 
+    assert await buildKpiContractBlock(dbSession, "KPI_B3_04 怎么样") is None
+
+    # 反向守卫：挂上 metric ⇒ 真的注入（中文分子分母 ⇒ unknown 口径 ⇒ 允许注入）
+    metric = await _seedMetric(
+        dbSession, name="库存周转率-指标", formula="SUM(out_qty)/AVG(inv_qty)"
+    )
+    kpi.metric_id = metric.id
+    await dbSession.commit()
+    await _warmCache(dbSession)
+
     block = await buildKpiContractBlock(dbSession, "KPI_B3_04 怎么样")
 
     assert block is not None
     assert "库存周转率" in block
-    assert "技术公式" not in block
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +230,12 @@ async def test_no_metric_governance_only(dbSession: AsyncSession) -> None:
 
 
 async def test_cap_three_kpis(dbSession: AsyncSession) -> None:
-    """4 个同义命中 KPI → 只注入 confidence Top-3。"""
+    """4 个同义命中 KPI → 只注入 confidence Top-3。
+
+    4 个 KPI 都挂同一个 metric：**挂靠是 2026-10-30 起的注入前置条件**，
+    否则它们会先被 Tier C 门禁拦掉，本用例就测不到 Top-3 截断（假绿）。
+    """
+    metric = await _seedMetric(dbSession, name="采购额-指标", formula="SUM(qty)")
     for i in range(4):
         await _seedKpi(
             dbSession,
@@ -209,6 +243,7 @@ async def test_cap_three_kpis(dbSession: AsyncSession) -> None:
             name=f"采购额指标{i}",
             keywords=["采购", "额度"],
             numerator="qty",
+            metricId=metric.id,
             matchThreshold="0.05",
         )
     await _warmCache(dbSession)

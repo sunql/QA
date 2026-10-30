@@ -79,6 +79,22 @@ def _envKillOff(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(switches_module, "getSettings", lambda: _FakeSettings())
 
 
+@pytest.fixture(autouse=True)
+def _pinEnvKillSwitchOn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """钉住 env 杀闸的「不杀闸」前提（本文件所有用例的默认前提）。
+
+    为什么必须钉：``getSettings()`` 读进程环境 / ``backend/.env``。若运行者
+    本地或 CI 导出 ``KPI_CONTRACT_INJECTION_ENABLED=false``（这正是本特性的
+    用途），本文件「开」侧的 6 条用例会莫名失败，而报错完全不指向真实原因。
+    杀闸用例（``_envKillOff``）各自 override 为 False。
+    """
+
+    class _FakeSettings:
+        kpiContractInjectionEnabled = True
+
+    monkeypatch.setattr(switches_module, "getSettings", lambda: _FakeSettings())
+
+
 async def _seedMetric(
     session: AsyncSession, *, name: str, formula: str
 ) -> OntologyMetric:
@@ -179,14 +195,13 @@ async def test_env_kill_switch_overrides_row_true(
 
 
 async def test_env_true_does_not_open_missing_row(dbSession: AsyncSession) -> None:
-    """反向守卫：env 默认 true **不会**打开灰度开关。
+    """反向守卫：env 为 true（不杀闸，见 ``_pinEnvKillSwitchOn``）**不会**打开
+    灰度开关。
 
     没有这条，一个把 env 当作唯一判据的实现（= 修复前的 B3 面语义）会在
     「行缺失 ⇒ 关」这条断言上假绿。
     """
     await _setSwitch(dbSession, None)
-    # 不打补丁 ⇒ 走真实 getSettings()（默认 kpiContractInjectionEnabled=true）
-    assert switches_module.getSettings().kpiContractInjectionEnabled is True
     assert await isKpiContractInjectionEnabled(dbSession) is False
 
 
@@ -214,6 +229,35 @@ async def test_reconcile_block_none_when_row_missing(dbSession: AsyncSession) ->
     await _setSwitch(dbSession, None)
 
     assert await buildReconcileBlock(dbSession, "KPI_SWITCH_B3_OFF 是多少") is None
+
+
+async def test_reconcile_block_none_when_kpi_has_no_metric(
+    dbSession: AsyncSession,
+) -> None:
+    """B3 面：KPI **未挂靠**可用 metric ⇒ Tier C ⇒ 不注入（2026-10-30 补齐）。
+
+    背景：治理列（numerator/denominator/business_definition）可由任意登录用户
+    建档（kpi_catalog 建档不做 ACL），未挂 metric 的 KPI 等于「未经技术侧确认的
+    口径文本」⇒ 不该进他人 prompt。此前本面照样注入，与 spec §7
+    「metric 缺失 ⇒ Tier C」及 chat 侧 Tier B 面都不一致。
+
+    反向守卫见下一条（挂靠 metric ⇒ 真的注入）——否则本条可能因"永远不注入"
+    而假绿。
+    """
+    await _seedKpi(
+        dbSession,
+        "KPI_SWITCH_B3_NO_METRIC",
+        name="无挂靠供货率",
+        keywords=["供货"],
+        numerator="received_qty",
+        denominator="order_qty",
+        grain="按月+供应商",
+        metricId=None,
+    )
+    await _warmCache(dbSession)
+    await _setSwitch(dbSession, "true")
+
+    assert await buildReconcileBlock(dbSession, "KPI_SWITCH_B3_NO_METRIC 是多少") is None
 
 
 async def test_reconcile_block_injected_when_row_true(

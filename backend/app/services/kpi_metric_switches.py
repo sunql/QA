@@ -55,9 +55,7 @@ async def readKpiMetricSwitch(
         return default
 
 
-async def isKpiContractInjectionEnabled(
-    session: AsyncSession, key: str = SWITCH_CONTRACT_INJECTION
-) -> bool:
+async def isKpiContractInjectionEnabled(session: AsyncSession) -> bool:
     """KPI 契约注入总闸：**两条注入面共用一个决策**（fail-closed）。
 
     2026-10-30 修复的历史缺陷：同一个字符串 ``KPI_CONTRACT_INJECTION_ENABLED``
@@ -80,8 +78,12 @@ async def isKpiContractInjectionEnabled(
 
     注意 env 与 system_config **同名但不同源**：env 只作杀闸，置 true 不会打开
     灰度开关；system_config 才是灰度旋钮。
+
+    开关**恒定读同一个 key**（``SWITCH_CONTRACT_INJECTION``）——不开放换 key
+    的参数，否则「两条面共用一个决策」的不变量可被调用方悄悄打破。
     """
     if not getSettings().kpiContractInjectionEnabled:
-        logger.info("KPI 契约注入 env 紧急杀闸关闭：两条注入面一律不注入")
+        # DEBUG 而非 INFO：这是每请求都会走到的路径，INFO 会刷屏
+        logger.debug("KPI 契约注入 env 紧急杀闸关闭：两条注入面一律不注入")
         return False
-    return await readKpiMetricSwitch(session, key, False)
+    return await readKpiMetricSwitch(session, SWITCH_CONTRACT_INJECTION, False)

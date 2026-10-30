@@ -296,12 +296,14 @@ async def buildKpiContractBlock(
 
     注入总闸（2026-10-30 口径统一）：本面与 nl2sql 侧 B3 治理契约面共用同一个
     system_config 灰度开关 ``KPI_CONTRACT_INJECTION_ENABLED`` + env 紧急杀闸，
-    fail-closed（行缺失 ⇒ 不注入）。关闭时直接返回空串（不查库、不匹配）。
+    fail-closed（行缺失 ⇒ 不注入）。env 杀闸关闭 ⇒ 完全不查库；system_config 行
+    关闭 ⇒ 只多读一次开关行即返回空串（不发起语义匹配）。
     单个 KPI 构建失败只丢该条，不影响其余 KPI（spec §7.4 永不静默：写 warning）。
     """
     enabled = await isKpiContractInjectionEnabled(session)
     if not enabled:
-        logger.info("KPI 契约注入开关关闭，跳过")
+        # DEBUG 而非 INFO：每请求都会走到，INFO 会刷屏
+        logger.debug("KPI 契约注入开关关闭，跳过")
         return ""
     codes = await _matchKpiCodes(session, question, limit)
     if not codes:

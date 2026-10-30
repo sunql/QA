@@ -403,6 +403,51 @@ describe("MessageItem 消息渲染", () => {
   });
 });
 
+// 卡片顺序（2026-10-31 用户反馈）：单步问题同时有 分析计划（MultiStepPlanCard）、
+// 查询计划（QueryPlanCard）、SQL（SqlPreview）三张卡，用户要求固定为
+// 分析计划 → 查询计划 → SQL 的阅读顺序。用 DOM 先后序断言（compareDocumentPosition），
+// 不依赖组件内部实现 —— 面板标题文案是三张卡各自的稳定锚点。
+describe("MessageItem 卡片顺序", () => {
+  const PLAN_STEPS = [
+    {
+      stepIndex: 0,
+      description: "供应商数量",
+      subQuestion: "B019 供应商有多少个",
+      aggregationOnly: false,
+      status: "done" as const,
+      sql: "SELECT count(*) FROM dim_supplier",
+    },
+  ];
+
+  function assertBefore(earlier: Element, later: Element) {
+    // Node.DOCUMENT_POSITION_FOLLOWING = 4：earlier 在 later 之前
+    expect(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  }
+
+  it("渲染顺序为 分析计划 → 查询计划 → SQL", () => {
+    renderItem({
+      content: "查询完成。",
+      steps: PLAN_STEPS,
+      queryPlan: {
+        target: "供应商",
+        selectedClasses: ["DIM_SUPPLIER"],
+        selectedProperties: ["NAME"],
+        aggregations: [],
+        groupBy: [],
+        conditions: [],
+        joins: [],
+        sortBy: [],
+      } as never,
+      sql: "SELECT count(*) FROM dim_supplier",
+    });
+    const planCard = screen.getByText("查看分析计划");
+    const queryPlanCard = screen.getByText("查看查询计划");
+    const sqlCard = screen.getByText("查看 SQL");
+    assertBefore(planCard, queryPlanCard);
+    assertBefore(queryPlanCard, sqlCard);
+  });
+});
+
 describe("MessageItem 类召回诊断提示", () => {
   it("classRecall.truncated=true 渲染截断提示", () => {
     renderItem({

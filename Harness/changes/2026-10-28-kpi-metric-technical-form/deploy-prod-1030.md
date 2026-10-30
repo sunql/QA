@@ -107,6 +107,10 @@ docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
 
 ## Phase 5 KPI 治理数据五连（容器内执行；脚本读容器 env 的 DATABASE_URL）
 
+> ⚠️ **本段全部用 `docker exec`，要求 `qa-backend` 容器在跑**。Phase 4 结束时 backend
+> 处于 stop 状态（`run --rm` 的一次性迁移容器跑完即删）⇒ 先 `qa_compose up -d backend`
+> 并确认 `Application startup complete`，再执行本段。
+
 ```bash
 # ① 回填：先预览再 apply（预期 created=12 updated=0 degraded=0 skipped=0；
 #    脚本自带当日备份逻辑，并会提示 12 条未绑数据源——下一步解决）

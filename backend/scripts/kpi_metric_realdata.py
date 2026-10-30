@@ -690,7 +690,8 @@ def _buildSteps(applyBackfill: bool) -> list[tuple[str, object]]:
         ("S3", step3_reconcile),
         # F8：prod 一律不写 system_config ⇒ 入口判定后传入，步骤内直接 SKIP
         ("S4", partial(step4_publishGate, isProd=_IS_PROD)),
-        ("S5", step5_contractInjection),
+        # S5：总闸 fail-closed ⇒ 正式库总闸关时只能 SKIP（不写开关）
+        ("S5", partial(step5_contractInjection, isProd=_IS_PROD)),
         ("S6", step6_exactAlias),
         ("S7", step7_cacheDynamic),
         ("S8", step8_legacyTableJoin),

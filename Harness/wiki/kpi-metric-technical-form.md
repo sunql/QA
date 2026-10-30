@@ -1,7 +1,7 @@
 # KPI 指标技术形态治理
 
 > **状态**：**已实施，待部署验证**（2026-10-29，分支 `feat/kpi-metric-technical-form`）；prod 迁移/回填未执行；Tier A（P2）与结构化→SQL 编译器（P3）未实现。
-> **灰度默认**：`KPI_CONTRACT_INJECTION_ENABLED` = true（代码默认）、`KPI_METRIC_GATE_ENABLED` = false、`KPI_METRIC_TIER_A_ENABLED` = false。
+> **灰度默认**：`KPI_CONTRACT_INJECTION_ENABLED` = **false（fail-closed，2026-10-30 起）** —— `system_config` 无该行 / 值非法 / 读取异常 ⇒ 一律不注入；显式写 `key='KPI_CONTRACT_INJECTION_ENABLED', value='true'` 才开。env 侧的同名变量是**紧急杀闸**（默认 true = 不干预），不是开启旋钮。两条注入面（nl2sql 侧 B3 治理契约面、chat 侧 Tier B 签字口径面）**共用这一个决策**。`KPI_METRIC_GATE_ENABLED` = false、`KPI_METRIC_TIER_A_ENABLED` = false。
 > **Spec**：[`docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md`](../../docs/superpowers/specs/2026-10-28-kpi-metric-technical-form-design.md)（608 行）
 > **变更 SSOT**：[`Harness/changes/2026-10-28-kpi-metric-technical-form/summary.md`](../changes/2026-10-28-kpi-metric-technical-form/summary.md)
 
@@ -229,9 +229,13 @@ KPI: DRAFT → PUBLISHED  ⟸ 必须同时满足：
 
 | 开关 | 默认 | 作用 |
 |---|---|---|
-| `KPI_CONTRACT_INJECTION_ENABLED` | true | Tier B 契约注入 |
+| `KPI_CONTRACT_INJECTION_ENABLED` | **false（fail-closed）** | KPI 契约注入总闸（**两条面共用**：nl2sql 侧 B3 治理契约面 + chat 侧 Tier B 签字口径面）。读 `system_config` 行；行缺失 / 非法 / 读取异常 ⇒ 关 |
 | `KPI_METRIC_TIER_A_ENABLED` | **false** | Tier A 直通（先只读对比两路答案一致性） |
 | `KPI_METRIC_GATE_ENABLED` | **false** | 发布闸门（先观察再阻断） |
+
+> 开关的 env 侧同名变量 `KPI_CONTRACT_INJECTION_ENABLED`（`Settings.kpiContractInjectionEnabled`，
+> 默认 true）是**紧急杀闸**：置 false ⇒ 一律不注入（进程级，需重启）；置 true **不会**打开灰度开关。
+> 灰度旋钮只有 `system_config` 行一个（2026-10-30 起两条注入面共用同一个决策）。
 
 ---
 

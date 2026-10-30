@@ -81,7 +81,9 @@ L1 KPI 直连的 FeatureDefinition 解析只有 `kpi.formula == FD.feature_defin
   `formula_mixing`。无 findings 不落条目（验收口径：一致 fixture 零条目）。
 - B3（无 API 变更，行为变更）：NL2SQL plan system prompt 在词典块之后新增
   `<kpi_contract>` 包裹块（仅当问句命中 PUBLISHED KPI 且灰度开关开）；
-  开关 `KPI_CONTRACT_INJECTION_ENABLED`（默认 true）。wrapped 内容是数据不是指令
+  开关 `KPI_CONTRACT_INJECTION_ENABLED`（**2026-10-30 口径已改：fail-closed，默认关**
+  —— `system_config` 行缺失/非法/读异常 ⇒ 不注入；本分支记录的「默认 true」是当时实现，
+  已被 `feat/遗留问题处理` 的总闸统一废止）。wrapped 内容是数据不是指令
   （preamble 已声明），但块前仍附中文用途说明。不命中时 prompt 与现状零差异。
 - B4（无 API 变更，行为变更）：chat 单步与 SSE 流式答案可能前置
   `⚠️ KPI 口径提示：治理契约声明的分母列 X 未全部出现在生成 SQL 的分母表达式中…`

@@ -9,11 +9,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import KpiCatalog, OntologyMetric
 from app.models.system_config import SystemConfig
+from scripts.kpi_metric_realdata_lib import check, info
 
 
 async def currentDatabaseName(session: AsyncSession) -> str:
@@ -174,6 +177,35 @@ async def restoreSwitchValue(
         await writeSwitchValue(session, key, original)
 
 
+async def runWithSwitch(
+    session: AsyncSession,
+    key: str,
+    value: str,
+    action: Callable[[], Awaitable[None]],
+    label: str,
+) -> None:
+    """临时写开关 → 执行 action → **无条件还原**并核对前后值。
+
+    S4（发布闸门）与 S5（契约注入）共用：两者都需要在「开关开」的状态下
+    验证一条链路，而开关的**真实**取值由人决定（fail-closed 默认关）。
+    还原是 ``finally`` 里的硬动作——进程被 SIGKILL 时 ``finally`` 不会执行，
+    所以该写法**只允许在隔离测试库使用**（正式库一律 SKIP，见 S4/S5 入口）。
+    """
+    original = await readSwitchValue(session, key)
+    await writeSwitchValue(session, key, value)
+    try:
+        await action()
+    finally:
+        await restoreSwitchValue(session, key, original)
+        after = await readSwitchValue(session, key)
+        check(
+            f"{label} 开关已还原",
+            after == original,
+            f"原值 {original!r} → 还原后 {after!r}",
+        )
+        info(f"开关对照 {key}：运行前={original!r} 临时={value!r} 还原后={after!r}")
+
+
 __all__ = [
     "countLinkedKpis",
     "countMetrics",
@@ -185,6 +217,7 @@ __all__ = [
     "readAlembicVersion",
     "readSwitchValue",
     "restoreSwitchValue",
+    "runWithSwitch",
     "tableColumns",
     "uniqueConstraintColumnSets",
     "writeSwitchValue",

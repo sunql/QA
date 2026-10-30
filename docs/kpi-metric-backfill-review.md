@@ -17,25 +17,29 @@
 回填不只是写数据，它会**改变 NL2SQL 的运行时行为**：
 
 - 脚本会把 `kpi_catalog.metric_id` 挂到本体指标上。
-- Tier B 契约注入（`backend/app/services/kpi_contract_builder.py`）要求 KPI
-  挂到本体指标才会注入契约块 ⇒ **`metric_id` 一落库，契约注入就有了注入对象**。
-- 而 `KPI_CONTRACT_INJECTION_ENABLED` 开关在本分支**默认 true**
-  （`backend/app/services/kpi_metric_switches.py`；`system_config` 无该行时
-  `readKpiMetricSwitch(session, SWITCH_CONTRACT_INJECTION, True)` 返回 `True`）
-  ⇒ **回填落库后，契约注入默认生效，不需要额外翻开关**。
-- 对比：`KPI_METRIC_GATE_ENABLED`（发布闸门）默认 **false** ⇒ 闸门「先观察再阻断」；
-  注入则是「默认开」。**两者灰度口径不一致，上线前要单独决策。**
+- 契约注入（chat 侧 Tier B 面 `backend/app/services/kpi_contract_builder.py`、
+  nl2sql 侧 B3 治理契约面 `backend/app/services/kpi_contract_reconcile.py`）
+  都要求 KPI 挂到本体指标才有注入对象 ⇒ **`metric_id` 一落库，注入就有了对象**。
+- 而 `KPI_CONTRACT_INJECTION_ENABLED` 开关**默认关（fail-closed，2026-10-30 起）**：
+  读 `system_config` 行，行缺失 / 值非法 / 读取异常 ⇒ 一律不注入
+  （`backend/app/services/kpi_metric_switches.py` 的
+  `isKpiContractInjectionEnabled` ⇒ `readKpiMetricSwitch(session, SWITCH_CONTRACT_INJECTION, False)`）
+  ⇒ **回填落库后注入仍不生效，必须显式把该行写成 `true` 才会开**。
+- 对比：`KPI_METRIC_GATE_ENABLED`（发布闸门）同样默认 **false** ⇒ 两者灰度口径一致，
+  都是「先观察再阻断」。
 
-**因此业务方/运维在 `--apply` 之前必须二选一（写进清单，不要口头传）：**
+**因此业务方/运维在 `--apply` 之前要做一次明确决策（写进清单，不要口头传）：**
 
-1. **先关后开**：先把 `KPI_CONTRACT_INJECTION_ENABLED` 显式置为 `false`，
-   回填落库后观察一轮，再按需置 `true`；
-2. **接受默认生效**：直接回填，契约注入随之启用（NL2SQL plan prompt 会多出
-   「【KPI 口径契约】」块）。
+1. **先关后开（推荐）**：回填落库（注入保持默认关）→ 业务方审核对齐治理列 →
+   观察一轮 → 再把 `KPI_CONTRACT_INJECTION_ENABLED` 显式置为 `true`；
+2. **回填即开**：在 `--apply` 的同时把该行写成 `true` ⇒ 契约注入随之启用
+   （NL2SQL plan prompt 会多出「【KPI 口径契约】」块）。
 
-> 把注入显式置 false 的写法（**控制器上线决策，不由脚本默认执行**）：
-> 在 `system_config` 写 `config_key='KPI_CONTRACT_INJECTION_ENABLED'`、
-> `config_value='false'`（按 `seed_system_config.py` 的 upsert 口径）。
+> 把注入置 true / false 的写法（**控制器上线决策，不由脚本默认执行**）：
+> 在 `system_config` 写 `key='KPI_CONTRACT_INJECTION_ENABLED'`、
+> `value='true'`（或 `'false'`）——列名是 `key` / `value`（不是 `config_key` /
+> `config_value`；见 `backend/app/models/system_config.py`），写法按
+> `seed_system_config.py` 的 upsert 口径。
 
 ## `--overwrite` 的破坏性语义（默认关闭，FIX-I1）
 

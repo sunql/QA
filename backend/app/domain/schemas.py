@@ -2185,6 +2185,18 @@ class ChatMessageRead(CamelModel):
     visual_rationale: dict | None = Field(
         default=None, description=MSG_SCHEMA_CHAT_HISTORY_MESSAGE_VISUAL_RATIONALE
     )
+    # 历史回放计划卡（2026-10-31）：单步顶层 NL2SQL 计划 + 多步/单步回放快照。
+    # 前端 `chatStore.toChatMessage` 映射为 message.queryPlan / message.steps
+    # （status 过白名单收窄），据此还原 查询计划卡 与 分析计划卡。
+    # 存量行与不带计划的路径两列为 NULL → 前端照「无卡」渲染。
+    query_plan: dict | None = Field(
+        default=None,
+        description="单步消息的顶层 NL2SQL 查询计划（历史回放用）",
+    )
+    steps_snapshot: list[dict] | None = Field(
+        default=None,
+        description="多步/单步消息的回放快照（历史回放用，形状对齐前端 MultiStepStep）",
+    )
 
 
 class SessionMessagesResponse(CamelModel):

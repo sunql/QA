@@ -1455,3 +1455,91 @@ class TestSingleStepRetryMetering:
         # 2 行 = 单步首次生成 + 单步回灌重试生成（均已在各自调用后提交）
         assert len(rows) == 2, f"nl2sql 台账行数不符：{[(r.prompt_tokens, r.completion_tokens) for r in rows]}"
         assert all(r.prompt_tokens > 0 for r in rows)
+
+
+class TestReplayPlanCardSnapshot:
+    """历史回放计划卡快照（feat/history-replay-plan-cards）。
+
+    多步/单步消息落库必须带 ``steps_snapshot``（回放分析计划卡）；
+    单步消息另落顶层 ``query_plan``（回放查询计划卡）。历史回放缺口：
+    此前多步消息落库只有汇总文本，刷新后分析计划/查询计划/分步 SQL 全丢。
+    """
+
+    async def test_multistep_summary_persists_steps_snapshot(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        llm = _MultiStepLlm()
+        _install(monkeypatch, config, llm, _OkAdapter())
+
+        resp = await client.post(
+            "/api/v1/chat/stream",
+            json=_payload("请分步查询 2024 和 2025 年的销售额并对比", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+        frames = _parseFrames(resp)
+        runId = frames[2][1].get("runId")
+
+        msgs = list(
+            (await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id)))
+            .scalars()
+            .all()
+        )
+        snapshot = msgs[1].steps_snapshot
+        assert isinstance(snapshot, list) and len(snapshot) == 3
+        assert [s["stepIndex"] for s in snapshot] == [0, 1, 2]
+        assert [s["aggregationOnly"] for s in snapshot] == [False, False, True]
+        # runId 盖章：前端失败步的续跑按钮靠它
+        assert all(s["runId"] == runId for s in snapshot)
+        # 数据步带 SQL；汇总步无 SQL 但状态终态
+        assert snapshot[0]["sql"] is not None
+        assert snapshot[2]["sql"] is None
+        assert snapshot[2]["status"] == "done"
+        # data 行不进快照（与顶层 chart 落库口径一致）
+        assert "data" not in snapshot[0]
+        # 汇总消息本体仍是纯文字（无图）
+        assert msgs[1].chart_type is None
+
+    async def test_single_step_persists_query_plan_and_snapshot(
+        self, client, dbSession, monkeypatch,
+    ) -> None:
+        config, ds = await _seed(dbSession)
+
+        class _StreamCapableNoDecomposeLlm(_NoDecomposeLlm):
+            """补 completeStream：单步回答走流式（_NoDecomposeLlm 只有 complete）。"""
+
+            async def completeStream(self, messages: list, **kwargs):
+                from app.infrastructure.llm.base_client import StreamChunk
+                yield StreamChunk(
+                    content="查询完成。", isDone=False, promptTokens=0,
+                    completionTokens=0, modelName="test-model",
+                )
+                yield StreamChunk(
+                    content="", isDone=True, promptTokens=10,
+                    completionTokens=5, modelName="test-model",
+                )
+
+        llm = _StreamCapableNoDecomposeLlm()
+        _install(monkeypatch, config, llm, _OkAdapter())
+
+        resp = await client.post(
+            "/api/v1/chat/stream",
+            json=_payload("各供应商的收货数量汇总", ds.id),
+        )
+        assert resp.status_code == 200, resp.text
+
+        msgs = list(
+            (await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id)))
+            .scalars()
+            .all()
+        )
+        # 顶层查询计划（消息级 QueryPlanCard 回放）
+        assert isinstance(msgs[1].query_plan, dict)
+        assert msgs[1].query_plan.get("target")
+        # 单步快照：1 步、非汇总、带 SQL、runId 为 None（单步不落 run）
+        snapshot = msgs[1].steps_snapshot
+        assert isinstance(snapshot, list) and len(snapshot) == 1
+        assert snapshot[0]["stepIndex"] == 0
+        assert snapshot[0]["aggregationOnly"] is False
+        assert snapshot[0]["sql"] is not None
+        assert snapshot[0]["runId"] is None

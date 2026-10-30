@@ -971,6 +971,21 @@ class SessionMessage(Base, TimestampMixin):
         JSON().with_variant(postgresql.JSONB(), "postgresql"),
         nullable=True,
     )
+    # query_plan / steps_snapshot（2026-10-31，历史回放计划卡）：回放时还原
+    # 查询计划卡（QueryPlanCard）与分析计划卡（MultiStepPlanCard）。
+    # query_plan：单步消息顶层 NL2SQL 计划（plan.to_dict()，与 `plan` SSE 事件同一份）；
+    # 多步消息恒 NULL（多步的计划卡在 steps_snapshot 里逐步承载）。
+    # steps_snapshot：回放快照（buildStepsSnapshot / buildSingleStepSnapshot 构造，
+    # 形状对齐前端 MultiStepStep，camelCase）—— 计划步序 + DB 终态 + 执行产物定格，
+    # 与 multi_step_run/step 表（续跑 SSOT）解耦；`data` 有意不进快照。
+    query_plan: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
+    )
+    steps_snapshot: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
+    )
 
     __table_args__ = (
         Index("idx_session_msg_time", "session_id", "created_time"),

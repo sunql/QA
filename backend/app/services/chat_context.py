@@ -501,6 +501,8 @@ class ContextMixin:
         chart_option: dict | None = None,
         table_option: dict | None = None,
         visual_rationale: dict | None = None,
+        query_plan: dict | None = None,
+        steps_snapshot: list[dict] | None = None,
     ) -> None:
         """持久化一轮对话：user + assistant 双写（仅创建新记录，不可变）。
 
@@ -522,6 +524,12 @@ class ContextMixin:
         已按 FULL_DATA_THRESHOLD 截过一轮）；visual_rationale 由调用方经
         `VisualRationale.to_dict()` 归一成 ``{"code", "params"}``，这里原样落库。
         默认 None ⇒ 无图/无依据的调用点语义不变。
+
+        query_plan / steps_snapshot（2026-10-31，历史回放计划卡）：单步消息的
+        顶层 NL2SQL 计划 + 回放快照（buildStepsSnapshot / buildSingleStepSnapshot
+        构造）。历史回放（刷新/重开会话）据此还原 查询计划卡 与 分析计划卡 ——
+        图不能只活在实时响应里，计划卡同理。默认 None ⇒ 不带计划的调用点
+        （闲聊/域命令/错误兜底等）语义不变。
 
         设计说明：Token 计量在每次 LLM 调用后立即提交（见 _recordUsage），故此处也在独立事务提交。
         属"最终一致"设计——即使后续环节失败，已消耗的 Token 与成本仍会被记录，不随本轮回滚。
@@ -555,6 +563,8 @@ class ContextMixin:
             chart_option=boundedChartOption(chart_option),
             table_option=boundedTableOption(table_option),
             visual_rationale=visual_rationale,
+            query_plan=query_plan,
+            steps_snapshot=steps_snapshot,
             user_id=chatUserId,
         )
         session.add_all([userMsg, assistantMsg])

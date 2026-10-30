@@ -37,6 +37,7 @@ from app.services.messages_zh import (
     MSG_SPEAKER_ASSISTANT,
     MSG_SPEAKER_USER,
 )
+from app.utils.json_safe import jsonSafe
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,115 @@ def _step_result_to_read(
         visual_rationale=result.visual_rationale,
         query_plan=plan.to_dict() if plan else None,
     )
+
+
+# ---- 历史回放计划卡快照（feat/history-replay-plan-cards）---------------------
+# 多步/单步消息落库原本只有汇总文本（多步）或 sql/chart（单步），历史回放时
+# 分析计划（MultiStepPlanCard）与查询计划（QueryPlanCard）全部丢失。方案：落库时
+# 顺手存一份**回放快照**（session_message.steps_snapshot JSONB），形状对齐前端
+# MultiStepStep（camelCase）。快照是「那一轮用户看到了什么」的定格，与
+# multi_step_run/step 表（续跑的 SSOT）解耦 —— 后者缺 description/aggregation_only/
+# 每步 query_plan，汇总步更是根本不落行，撑不起回放形状。
+
+# multi_step_step.status → 前端 StepStatus 的终态映射（快照只存终态，
+# pending/running 是流式过程的瞬态，回放里不应出现）。
+_REPLAY_STATUS_BY_DB = {
+    "succeeded": "done",
+    "failed": "error",
+    "compressed": "compressed",
+}
+
+# 快照里每个步的固定键序（漏键 = 前端拿 undefined 渲染崩溃，故测试逐键断言）。
+_REPLAY_STEP_KEYS = (
+    "stepIndex", "description", "subQuestion", "aggregationOnly", "status",
+    "sql", "summary", "error", "chartType", "chartOption", "tableOption",
+    "visualRationale", "queryPlan", "runId",
+)
+
+
+def _replayStepBase(step: StepPlan, runId: str | None) -> dict:
+    return {
+        "stepIndex": step.index,
+        "description": step.description,
+        "subQuestion": step.sub_question,
+        "aggregationOnly": bool(step.aggregation_only),
+        "status": "done",
+        "sql": None,
+        "summary": "",
+        "error": None,
+        "chartType": None,
+        "chartOption": None,
+        "tableOption": None,
+        "visualRationale": None,
+        "queryPlan": None,
+        "runId": runId,
+    }
+
+
+def buildStepsSnapshot(
+    *,
+    plan,
+    stepsByIdx: dict[int, Any],
+    completed: list[StepResult],
+    runId: str | None,
+) -> list[dict]:
+    """多步消息的回放快照：计划步序 + DB 终态 + 执行产物三源合流。
+
+    - 步的**身份**（stepIndex/description/subQuestion/aggregationOnly）来自计划
+      （汇总步只在这里有，它从不进 completed）；
+    - **终态**以 DB 行为准（compressed 只有 DB 知道），无 DB 行（kill switch
+      关掉落库）时按执行结果推断：有 error 即 error，否则 done；
+    - **产物**（sql/summary/chart/queryPlan）来自 StepResult；
+    - `data` 有意排除：TOP-N 全量行由 chartOption（TABLE rows）承载，与顶层
+      chart_type/chart_option 落库口径一致（0105 起 data 不落库）。
+
+    整份快照出口过 `jsonSafe`：SQL 结果行里的 Decimal 不归一会在编译期抛
+    StatementError（与 multi_step_persistence.finishStep 同一道闸）。
+    """
+    resultsByIdx = {r.step_index: r for r in completed}
+    snapshot: list[dict] = []
+    for step in plan.steps:
+        entry = _replayStepBase(step, runId)
+        dbRow = stepsByIdx.get(step.index)
+        result = resultsByIdx.get(step.index)
+        dbStatus = getattr(dbRow, "status", None)
+        if dbStatus in _REPLAY_STATUS_BY_DB:
+            entry["status"] = _REPLAY_STATUS_BY_DB[dbStatus]
+        elif result is not None and result.error:
+            entry["status"] = "error"
+        if result is not None:
+            entry["sql"] = result.sql
+            entry["summary"] = result.summary
+            entry["error"] = result.error
+            entry["chartType"] = result.chart_type
+            entry["chartOption"] = result.chart_option
+            entry["tableOption"] = result.table_option
+            entry["visualRationale"] = result.visual_rationale
+            entry["queryPlan"] = result.query_plan.to_dict() if result.query_plan else None
+        elif getattr(dbRow, "sql", None):
+            # 无 StepResult（如断连兜底后仅 DB 有值）：至少保住 SQL
+            entry["sql"] = dbRow.sql
+        snapshot.append(jsonSafe({k: entry[k] for k in _REPLAY_STEP_KEYS}))
+    return snapshot
+
+
+def buildSingleStepSnapshot(
+    *,
+    description: str,
+    subQuestion: str,
+    sql: str | None,
+    summary: str = "",
+) -> list[dict]:
+    """单步消息的回放快照（单元素列表）。
+
+    单步的查询计划随顶层 `query_plan` 列落库（对应消息级 QueryPlanCard），
+    快照里**不带** per-step queryPlan —— 与线上单步不渲染步内计划卡一致。
+    """
+    step = StepPlan(index=0, description=description, sub_question=subQuestion)
+    entry = _replayStepBase(step, None)
+    entry["sql"] = sql
+    entry["summary"] = summary
+    return [jsonSafe({k: entry[k] for k in _REPLAY_STEP_KEYS})]
 
 
 def _logEmbeddingTaskFailure(task: asyncio.Task[Any]) -> None:

@@ -537,6 +537,64 @@ describe("chatStore", () => {
     expect(state.error).toBeNull();
   });
 
+  // 历史回放计划卡（feat/history-replay-plan-cards）：stepsSnapshot / queryPlan
+  // 是系统边界原始 JSON，toChatMessage 必须收窄 —— status 过白名单、steps 结构
+  // 不合法时按「无卡」处理，不把未知形状放进渲染层。
+  it("loadSessionMessages 还原 stepsSnapshot 为 steps（状态过白名单）", async () => {
+    const historyMessages: ChatMessageRead[] = [
+      { id: 1, role: "user", content: "分步问题", question: "分步问题", sql: null, createdTime: "2026-01-01T00:00:00Z", interrupted: false },
+      {
+        id: 2, role: "assistant", content: "汇总回答", question: null, sql: null,
+        createdTime: "2026-01-01T00:01:00Z", interrupted: false,
+        stepsSnapshot: [
+          {
+            stepIndex: 0, description: "A 年销量", subQuestion: "A 年销量是多少",
+            aggregationOnly: false, status: "done", sql: "SELECT 1", summary: "A=1",
+            error: null, runId: "run-1",
+          },
+          {
+            stepIndex: 1, description: "汇总对比", subQuestion: "请对比", aggregationOnly: true,
+            status: "succeeded", sql: null, summary: "", error: null, runId: "run-1",
+          },
+          {
+            stepIndex: 2, description: "坏数据", subQuestion: "坏", aggregationOnly: false,
+            status: "未知状态", sql: null, summary: "", error: null, runId: "run-1",
+          },
+        ],
+      },
+    ];
+    historyApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-history", messages: historyMessages });
+
+    await useChatStore.getState().loadSessionMessages("s-history");
+
+    const steps = useChatStore.getState().messages[1].steps;
+    expect(steps).toHaveLength(3);
+    expect(steps?.[0]).toMatchObject({ stepIndex: 0, description: "A 年销量", status: "done", sql: "SELECT 1", runId: "run-1" });
+    expect(steps?.[1]?.aggregationOnly).toBe(true);
+    // 白名单外的 status 收窄为 done（回放步都是终态，不冒未知值进渲染层）
+    expect(steps?.[2]?.status).toBe("done");
+  });
+
+  it("loadSessionMessages 还原顶层 queryPlan；stepsSnapshot 缺失时无 steps", async () => {
+    const historyMessages: ChatMessageRead[] = [
+      { id: 1, role: "user", content: "单步问题", question: "单步问题", sql: null, createdTime: "2026-01-01T00:00:00Z", interrupted: false },
+      {
+        id: 2, role: "assistant", content: "回答", question: null, sql: "SELECT 1",
+        createdTime: "2026-01-01T00:01:00Z", interrupted: false,
+        queryPlan: { target: "各供应商的收货数量汇总", selectedClasses: ["PRECEIPT"], selectedProperties: ["NAME"], aggregations: [], groupBy: [], conditions: [], joins: [], sortBy: [] },
+      },
+      { id: 3, role: "assistant", content: "闲聊", question: null, sql: null, createdTime: "2026-01-01T00:02:00Z", interrupted: false },
+    ];
+    historyApi.loadSessionMessages.mockResolvedValue({ sessionId: "s-history", messages: historyMessages });
+
+    await useChatStore.getState().loadSessionMessages("s-history");
+
+    const messages = useChatStore.getState().messages;
+    expect(messages[1].queryPlan?.target).toBe("各供应商的收货数量汇总");
+    expect(messages[1].steps).toBeUndefined();
+    expect(messages[2].queryPlan).toBeNull();
+  });
+
   it("loadSessionMessages 透传 interrupted（H4 断连兜底写入的半截回答）", async () => {
     const historyMessages: ChatMessageRead[] = [
       { id: 1, role: "user", content: "历史 Q1", question: "历史 Q1", sql: null, createdTime: "2026-01-01T00:00:00Z", interrupted: false },

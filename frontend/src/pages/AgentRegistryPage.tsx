@@ -12,6 +12,7 @@ import {
   Tag,
   message,
 } from "antd";
+import type { FormInstance } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useTranslation } from "../i18n";
 import { useAgentOptions } from "../hooks/useAgentOptions";
@@ -77,6 +78,32 @@ function permissionColor(p: AgentPermission): string {
   }
 }
 
+/**
+ * 校验通过返回表单值；不通过返回 `null`。
+ *
+ * antd 的 `validateFields()` 在校验失败时 **reject**，而本页的校验都发生在
+ * `onOk` / `onChange` 这类**丢弃返回值**的调用点上 —— rejection 于是变成
+ * unhandled promise rejection（vitest 计入套件失败、exit=1；浏览器里是未捕获的
+ * 控制台错误）。字段级红字由 antd 内联展示，调用方只需静默中止，不必再弹提示。
+ */
+async function validateOrNull<T extends object>(
+  form: FormInstance<T>,
+): Promise<T | null> {
+  try {
+    return await form.validateFields();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 只用来触发**联动校验**（如 dataLayers 依赖 toolName）—— 结果由 antd 内联展示，
+ * 无需消费。同 `validateOrNull`：这里吞掉的是「校验不通过」，不是业务错误。
+ */
+function revalidate<T>(form: FormInstance<T>, fields?: string[]): void {
+  void form.validateFields(fields).catch(() => undefined);
+}
+
 export default function AgentRegistryPage() {
   const { t } = useTranslation();
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
@@ -138,7 +165,8 @@ export default function AgentRegistryPage() {
   );
 
   const submitCreate = useCallback(async () => {
-    const values = await createForm.validateFields();
+    const values = await validateOrNull(createForm);
+    if (!values) return;
     try {
       await createAgent({
         ...values,
@@ -161,7 +189,8 @@ export default function AgentRegistryPage() {
 
   const submitEdit = useCallback(async () => {
     if (!editing) return;
-    const values = await editForm.validateFields();
+    const values = await validateOrNull(editForm);
+    if (!values) return;
     try {
       await updateAgent(editing.agentCode, values);
       message.success(t("agentRegistry.messages.updated"));
@@ -191,7 +220,8 @@ export default function AgentRegistryPage() {
 
   const submitAddPolicy = useCallback(async () => {
     if (!detailAgent) return;
-    const values = await policyForm.validateFields();
+    const values = await validateOrNull(policyForm);
+    if (!values) return;
     try {
       await addAgentPolicy(detailAgent.agentCode, {
         ...values,
@@ -524,7 +554,7 @@ export default function AgentRegistryPage() {
               }))}
               showSearch
               optionFilterProp="label"
-              onChange={() => createForm.validateFields(["dataLayers"])}
+              onChange={() => revalidate(createForm, ["dataLayers"])}
             />
           </Form.Item>
         </Form>
@@ -599,7 +629,7 @@ export default function AgentRegistryPage() {
               }))}
               showSearch
               optionFilterProp="label"
-              onChange={() => editForm.validateFields(["dataLayers"])}
+              onChange={() => revalidate(editForm, ["dataLayers"])}
             />
           </Form.Item>
           <Form.Item name="status" label={t("agentRegistry.fields.status")}>
@@ -718,6 +748,7 @@ export default function AgentRegistryPage() {
                             .then((values) =>
                               void submitEditPolicy(values as AgentAccessPolicyUpdate),
                             )
+                            .catch(() => undefined)
                         }
                       >
                         {t("agentRegistry.policies.saveEdit")}

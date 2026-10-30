@@ -3,10 +3,12 @@
 - **日期**：2026-10-28
 - **作者**：Claude
 - **Phase**：Phase 1（B1+B5，提案 `../2026-10-27-kpi-governance-into-nl2sql-proposal.md`）+ B2 对账 + B3 注入 + B4 守卫（同日追加）
-- **状态**：draft（待部署验证后转 in-review）
-- **关联变更**：[KPI 治理注入提案](../2026-10-27-kpi-governance-into-nl2sql-proposal.md)
+- **状态**：**in-review** —— 已实现并合入 `main`（PR #70 → squash `607ad254`，2026-10-30）；
+  prod 已于 2026-10-30 部署，但注入开关 `KPI_CONTRACT_INJECTION_ENABLED=false`（先关后开）
+  ⇒ 线上走关闭态，**开关打开后的验收待补**（见 §8 第 8 段）。
+- **关联变更**：[KPI 治理注入提案](../2026-10-27-kpi-governance-into-nl2sql-proposal.md)（B1–B5 已全量实施）
 - **迁移版本**：无（B1/B2/B5 均不加列不迁移；后续如需 FeatureDefinition.metric_id 另起 0136+）
-- **分支**：`feat/kpi-l1-metric-id`
+- **分支**：`feat/kpi-l1-metric-id`（PR #70 合入 `main`）
 
 ---
 
@@ -221,7 +223,9 @@ nginx 剥 X-User-* 头 + prod AUTH_STUB_ENABLED=0），是「保护性断言从�
 
 ## 8. 部署验证
 
-未部署（draft）。部署时冒烟：
+**已部署（2026-10-30）**，但治理契约注入开关 `KPI_CONTRACT_INJECTION_ENABLED=false`（先关后开）
+⇒ 线上跑的是**关闭态**：B3 注入块 / B4 分母示警的行为面冒烟**必须等开关打开后**才能执行；
+下面 1/3/4 属与开关无关的存量面，可先行核对。部署后冒烟：
 1. `docker exec -it qa-backend python -c` 探活；
 2. chat 发 `/metric 测试指标 = SUM(x)/COUNT(*)` → 答案含户头尾注；
 3. dev 库验证 `SELECT * FROM kpi_catalog WHERE kpi_code LIKE 'KPI_AUTO_M%';`
@@ -244,7 +248,7 @@ nginx 剥 X-User-* 头 + prod AUTH_STUB_ENABLED=0），是「保护性断言从�
   `docs/kpi-governance-nl2sql-proposal`）
 - Wiki：`Harness/wiki/nl2sql-engine.md`（L1 段）、`Harness/wiki/数据模型.md`（两表双视角）
 - Rules：`Harness/rules/测试规范.md`（真实 PG 集成）
-- Memory：待合并后写 `qa-system-kpi-b1-b5-l1-metric-id`
+- Memory：已写 `qa-system-kpi-b1-b5-l1-metric-id`（+ `qa-system-kpi-metric-technical-form-design`）
 - 前置探针（2026-10-27 dev）：①metric_id 空但有 formula=12；②挂靠=0；③漂移=0（无样本）；
   ④formula 等值命中 FD=0
 
@@ -253,10 +257,10 @@ nginx 剥 X-User-* 头 + prod AUTH_STUB_ENABLED=0），是「保护性断言从�
 ## SSOT 校验清单（合并前必查）
 
 - [x] frontmatter 元数据齐全
-- [x] 9 段非空（第 8 段为 draft 待部署状态说明）
+- [x] 9 段非空（第 8 段已更新为「已部署 + 开关关闭态」说明）
 - [x] 第 2 段含候选/实证修正
 - [x] 无迁移
 - [x] 第 7 段安全结论（MEDIUM 一项）
-- [ ] 第 8 段部署冒烟输出（部署后补）
+- [ ] 第 8 段部署冒烟输出（开关打开后补）
 - [x] 第 9 段 ≥3 跨文件链接
 - [ ] MEMORY 索引（合并后添加）

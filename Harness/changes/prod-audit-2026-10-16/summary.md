@@ -22,6 +22,12 @@ scope: prod alembic vs origin/main
 
 ⇒ `alembic upgrade head` 在 prod 跑会是 no-op。
 
+> **后续状态（2026-10-30 补记）**：本文是 **2026-10-16 的快照**，结论只对当时的
+> `d5c8a429` 成立。此后 `main` 又合入 `0136_metric_structured` / `0137_metric_source_unique`
+> （KPI 指标技术形态治理），**prod 已随部署迁移到 `0137`**（`alembic_version = 0137`），
+> `main` 的 head 同样是 `0137` ⇒ 当前仍对齐，但**不要再用本文的 `0127` 判断今天的 prod 状态**。
+> 审计方法（静态 head + prod version + 关键表 + `alembic check`）依然有效，照跑即可。
+
 ## 验证方法
 
 1. 静态扫描 origin/main 所有迁移文件，提取 `(revision, down_revision)` 配对：

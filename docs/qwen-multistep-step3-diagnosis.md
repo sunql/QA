@@ -5,6 +5,17 @@
 - **原始问题**：「分步分析：B019 圣特公司近 12 个月供货量下降的原因。第一步统计各月供货量趋势，第二步按收货地点拆分各月供货量，第三步对照同地点其他供应商的供货量变化判断是公司因素还是行业因素，最后汇总」
 - **结论先行**：失败发生在**模型层**，不在应用层；deepseek-chat 与 Qwen3.8-27B-4bit 都**走到**了计划阶段，但 Qwen 的计划 JSON 把 `target` 字段填成了「无法回答」——这是模型主动放弃的语义，不是解析失败、不是校验失败。
 
+> **归档说明（2026-10-30）**
+>
+> - 本文档原落在**仓库根目录**，与 `CLAUDE.md` / `README.md` 并列，违反仓库文档归置约定 ⇒ 移入 `docs/`。
+> - **行号已漂移**（本文写作于 2026-10-04 当时的代码）：`chat_stream.py` 已于 PR #54 拆成 5 个 mixin，
+>   `chat_multistep.py` 的软失败分支现落在 `backend/app/services/chat_multistep.py:355-358`
+>   （原文写 316-321），文案常量已上移到
+>   `backend/app/services/messages_zh.py:706`（`MSG_CHAT_STEP_UNANSWERABLE`，
+>   经 `chat_helpers.py:36` 以 `_MSG_STEP_UNANSWERABLE` 别名导出；原文写 chat_helpers.py:244-245）。
+> - **结论与机制描述仍然成立**（`outcome.plan.isUnanswerable` → 步骤级软失败隔离），
+>   本文保留作为 Qwen 多步失败模式的原始现场记录。
+
 ---
 
 ## 1. 现象（用户口述）

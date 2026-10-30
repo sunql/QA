@@ -1,8 +1,15 @@
 # 提案：KPI 治理信息注入 NL2SQL 技术链路（业务面 → 本体指标技术面的对账与利用）
 
 - **日期**：2026-10-27
-- **状态**：proposal（未排期）
+- **状态**：**已实施（B1–B5 全量）** —— PR #70 已于 2026-10-30 squash 合入 `main`（`607ad254`）；
+  prod 已于 2026-10-30 部署，但治理契约注入开关 `KPI_CONTRACT_INJECTION_ENABLED=false`（先关后开），
+  ⇒ 线上当前走关闭态，开关打开后的验收待补。本文档**保留为决策与风险存档**（候选方案对比、
+  「B2 必须先于 B3」的硬依赖理由、「不做的风险」等分析未在实施记录中重复）。
 - **来源**：2026-10-27 会话——讨论 `ontology_metric` 与 `kpi_catalog` 关系时发现的「治理信息只展示、不生成」断层
+- **实施记录**：[`kpi-l1-metric-id/summary.md`](kpi-l1-metric-id/summary.md)（B1–B5 落地 SSOT；
+  本文件路径被该记录以 `../2026-10-27-kpi-governance-into-nl2sql-proposal.md` 反向引用，**路径勿改**）
+- **下游变更**：[`2026-10-28-kpi-metric-technical-form/summary.md`](2026-10-28-kpi-metric-technical-form/summary.md)
+  （指标技术形态治理，Phase 6.7）
 - **关联**：
   - `Harness/changes/2026-10-18-kpi-datasource-write-flow-spec/`（F2：KPI 数据源写入流，本提案在其下游）
   - `Harness/changes/2026-10-01-nl2sql-structural-formula-guard/`（占比守卫家族，建议④在其上扩展）

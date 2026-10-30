@@ -247,6 +247,25 @@ def test_redteam_l4_tool_result_quoted_closing_tag_stays_parseable() -> None:
     assert "&lt;​/agent_tool_result&gt;" in value
 
 
+def test_redteam_l4_system_prompt_survives_llm_conversion() -> None:
+    """L4 system prompt 经 _to_llm_message 转换后仍是 system 角色且 preamble 完整。
+
+    攻击面：system 被折叠成 user 时，安全前言与行为规则降级为用户输入，
+    模型可把其中的约束当成"用户建议"。修复后必须保持 role=system。
+    """
+    state = agent_svc._initLoopState("供应商列表")
+    llm_messages = [agent_svc._to_llm_message(m) for m in state["messages"]]
+
+    assert llm_messages[0].role == "system"
+    assert llm_messages[0].content.startswith(renderSecurityPreamble())
+    # 不允许 dict-repr / langchain repr 混进内容
+    assert "{'role'" not in llm_messages[0].content
+    assert "additional_kwargs=" not in llm_messages[0].content
+    # 用户问题仍是独立的 user 消息，且被 <user_question> 包裹
+    assert llm_messages[1].role == "user"
+    assert llm_messages[1].content.startswith("<user_question>")
+
+
 # ---------------------------------------------------------------------------
 # Test 5: Hypothesis — data_summary closing tag neutralized
 # ---------------------------------------------------------------------------

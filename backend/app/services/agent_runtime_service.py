@@ -313,6 +313,10 @@ def _to_llm_message(msg) -> LlmMessage:
         msg_type = msg.get("type")
         msg_content = msg.get("content")
 
+    if msg_type == "system":
+        # 缺此分支时 system 会掉进 fallback 的 str(msg)，以 user 角色 + repr 形态
+        # 发给 provider（指令层级错误 + 每轮多付一份 repr 噪声）
+        return LlmMessage(role="system", content=msg_content or "")
     if msg_type == "human":
         return LlmMessage(role="user", content=msg_content or "")
     if msg_type == "ai":

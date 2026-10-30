@@ -93,7 +93,22 @@ describe("renderChartPng", () => {
 
     const host = echartsMock.init.mock.calls[0][0] as unknown as HTMLElement;
     expect(host.style.width).toBe("800px");
-    expect(host.style.height).toBe("420px");
+    expect(host.style.height).toBe("320px");
+  });
+
+  it("离屏高度与在线一致：30 类横向条形图 936px", async () => {
+    await renderChartPng({
+      yAxis: {
+        type: "category",
+        data: Array.from({ length: 30 }, (_, i) => `S${i}`),
+      },
+      xAxis: { type: "value" },
+      series: [{ type: "bar" }],
+    });
+
+    const host = echartsMock.init.mock.calls[0][0] as unknown as HTMLElement;
+    expect(host.style.height).toBe("936px");
+    expect((echartsMock.init.mock.calls[0][2] as { height: number }).height).toBe(936);
   });
 
   it("getDataURL 抛错时返回 null 并仍然 dispose", async () => {

@@ -10,6 +10,7 @@ import { DARK_TOKEN, LIGHT_TOKEN } from "../../theme/tokens";
 import type { ChartType, TablePayload, VisualRationale } from "../../types/chat";
 import { dataUrlToBlob, downloadBlob, downloadCsv } from "../../utils/download";
 import { renderChartPng } from "../../utils/chartSnapshot";
+import { chartHeightOf } from "../../utils/chartLayout";
 import { visualRationaleText } from "../../utils/visualRationale";
 import KpiCard, { parseKpiPayload } from "./KpiCard";
 
@@ -116,6 +117,8 @@ export default function ChartRenderer({
     () => (isKpi ? parseKpiPayload(chartOption) : null),
     [isKpi, chartOption]
   );
+  // 高度随类别数增长：在线与 PNG 导出共用同一函数（见 utils/chartLayout.ts）。
+  const chartHeight = useMemo(() => chartHeightOf(chartOption), [chartOption]);
   // 侧栏开合只改 flex 宽度，不触发 window resize —— ECharts 不会自己知道要重绘，
   // 需要观察容器尺寸。宽度 <= 0 是收起过程的过渡态，重绘只会拿到空画布，忽略。
   // （hooks 必须在早退之前：组件会随消息流重挂，早退后挂 hook 直接炸。）
@@ -202,7 +205,12 @@ export default function ChartRenderer({
       ) : (
         <>
           <div ref={containerRef} data-testid="chart-container">
-            <ReactECharts ref={chartRef} option={themedOption} style={{ height: 320 }} notMerge />
+            <ReactECharts
+              ref={chartRef}
+              option={themedOption}
+              style={{ height: chartHeight }}
+              notMerge
+            />
           </div>
           {/* 图下方的折叠明细表（Task 8，决策 2）：默认折叠，展开看原始数字。
               表负载来自 tableOption（后端只在图型附带；TABLE 的表已在 chartOption、

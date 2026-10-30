@@ -759,3 +759,94 @@ class TestImmutability:
 
         assert rows == before
         assert spec.columns == ("SUPPLIER_NAME", "RCV_QTY_PUU")
+
+
+def _many_rows(count: int) -> list[dict]:
+    return [
+        {"SUPPLIER_NAME": f"S{i:02d}", "RCV_QTY_PUU": count - i}
+        for i in range(count)
+    ]
+
+
+class TestCategoryReadability:
+    """2026-10-31：类别一多，图和标签被等比压扁；用高度（前端）+ 轴配置（后端）解决。"""
+
+    def test_hbar_many_categories_shows_every_label_truncated(self) -> None:
+        option = renderChartOption(_spec(ChartType.HBAR), _many_rows(20))
+
+        assert option["yAxis"]["axisLabel"] == {
+            "interval": 0,
+            "overflow": "truncate",
+            "width": 160,
+        }
+
+    def test_hbar_few_categories_keep_bare_axis(self) -> None:
+        option = renderChartOption(_spec(ChartType.HBAR), _ROWS)
+
+        assert "axisLabel" not in option["yAxis"]
+
+    def test_vertical_bar_many_categories_rotates_labels(self) -> None:
+        option = renderChartOption(_spec(ChartType.BAR), _many_rows(20))
+
+        assert option["xAxis"]["axisLabel"] == {
+            "rotate": 45,
+            "interval": 0,
+            "hideOverlap": True,
+        }
+
+    def test_line_many_categories_keeps_auto_interval(self) -> None:
+        """折线不旋转：斜着的日期标签比稀疏标签更难读。"""
+        spec = _spec(
+            ChartType.LINE,
+            columns=("MONTH", "LINE_AMT"),
+            dimensions=(_dim("MONTH", "月份"),),
+            measures=(_measure("LINE_AMT", "金额"),),
+            series=(SpecSeries(name="金额", kind="line", dimension="MONTH", measure="LINE_AMT"),),
+        )
+        rows = [{"MONTH": f"M{i:02d}", "LINE_AMT": i} for i in range(50)]
+
+        option = renderChartOption(spec, rows)
+
+        assert "axisLabel" not in option["xAxis"]
+        assert "dataZoom" not in option
+
+    def test_hbar_over_threshold_adds_datazoom_and_grid_room(self) -> None:
+        option = renderChartOption(_spec(ChartType.HBAR), _many_rows(50))
+
+        assert option["dataZoom"] == [
+            {"type": "inside", "yAxisIndex": 0},
+            {"type": "slider", "yAxisIndex": 0, "height": 20, "bottom": 0},
+        ]
+        assert option["grid"]["bottom"] == 66  # 32 + 34
+        assert "legend" not in option
+
+    def test_vertical_bar_over_threshold_zooms_x_axis(self) -> None:
+        option = renderChartOption(_spec(ChartType.BAR), _many_rows(50))
+
+        assert option["dataZoom"] == [
+            {"type": "inside", "xAxisIndex": 0},
+            {"type": "slider", "xAxisIndex": 0, "height": 20, "bottom": 0},
+        ]
+
+    def test_datazoom_and_legend_share_the_bottom_band(self) -> None:
+        spec = _spec(
+            ChartType.BAR,
+            columns=("SUPPLIER_NAME", "RCV_QTY_PUU", "LINE_AMT"),
+            measures=(_measure("RCV_QTY_PUU"), _measure("LINE_AMT", "金额")),
+            series=(
+                SpecSeries(name="供货量", kind="bar", dimension="SUPPLIER_NAME", measure="RCV_QTY_PUU"),
+                SpecSeries(name="金额", kind="bar", dimension="SUPPLIER_NAME", measure="LINE_AMT"),
+            ),
+        )
+
+        option = renderChartOption(spec, _many_rows(50))
+
+        assert option["grid"]["bottom"] == 90  # 56 + 34
+        assert option["legend"]["bottom"] == 24  # 滑块 20 + 4
+        assert option["legend"]["type"] == "scroll"
+
+    def test_threshold_is_strictly_greater_than_40(self) -> None:
+        option = renderChartOption(_spec(ChartType.HBAR), _many_rows(40))
+
+        assert "dataZoom" not in option
+        assert option["grid"]["bottom"] == 32

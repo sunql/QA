@@ -37,6 +37,18 @@ _LABEL_MAX_POINTS = 12
 _GRID_BOTTOM_DEFAULT = 32
 _GRID_BOTTOM_WITH_LEGEND = 56
 
+# 2026-10-31：类目轴可读性（结构边界，不做数据治理）。
+# 标签 > 12 个时强制逐条显示：横条图截断超长名称，纵向柱状图旋转 45°。
+_CATEGORY_LABEL_DENSE_THRESHOLD = 12
+_AXIS_LABEL_MAX_WIDTH = 160
+# 类别 > 40 时绘图区已塞不下，打开缩放滑块（inside 滚轮 + slider 拖拽）。
+# 只给柱状图：折线靠标签稀疏就能读，不应被缩放框改变视野。
+_DATAZOOM_THRESHOLD = 40
+_DATAZOOM_SLIDER_HEIGHT = 20
+_DATAZOOM_BAND_HEIGHT = 34
+_DATAZOOM_LEGEND_BOTTOM = 24
+_DATAZOOM_KINDS = frozenset({ChartType.BAR, ChartType.HBAR})
+
 # 饼图/环形图之外的 kind 不允许出现 `{d}` 模板变量。
 _PIE_LIKE = frozenset({ChartType.PIE, ChartType.DONUT})
 
@@ -188,6 +200,44 @@ def _buildKpi(spec: ChartSpec, data: list[dict]) -> dict[str, Any]:
     }
 
 
+def _denseLabel(kind: ChartType, horizontal: bool) -> dict[str, Any] | None:
+    """类别多到必须逐条显示时，标签怎么摆；line/combo 保持 ECharts 自动稀疏。
+
+    斜着的日期标签比稀疏标签更难读，所以只有纵向柱状图旋转。
+    """
+    if horizontal:
+        return {"interval": 0, "overflow": "truncate", "width": _AXIS_LABEL_MAX_WIDTH}
+    if kind is ChartType.BAR:
+        return {"rotate": 45, "interval": 0, "hideOverlap": True}
+    return None
+
+
+def _buildCategoryAxis(
+    spec: ChartSpec, categories: list[str], catField: str | None, kind: ChartType
+) -> dict[str, Any]:
+    """类目轴：Top N 翻转 + 标签密度 + （可选的）轴名。两种朝向共用这一份。"""
+    horizontal = kind is ChartType.HBAR
+    axis: dict[str, Any] = {"type": "category", "data": categories}
+    if horizontal:
+        # Top N 的语义是「最大的在最上面」：类目轴默认自下而上，故翻转。
+        axis["inverse"] = True
+    if len(categories) > _CATEGORY_LABEL_DENSE_THRESHOLD:
+        label = _denseLabel(kind, horizontal)
+        if label is not None:
+            axis["axisLabel"] = label
+    # 轴名只此一处。无注入 ⇒ 原对象原样返回。
+    return _namedAxis(axis, _axisNameOf(spec, catField))
+
+
+def _dataZoomOf(horizontal: bool) -> list[dict[str, Any]]:
+    """缩放滑块：inside 负责滚轮/拖拽，slider 负责可见的把手。"""
+    axisIndex = "yAxisIndex" if horizontal else "xAxisIndex"
+    return [
+        {"type": "inside", axisIndex: 0},
+        {"type": "slider", axisIndex: 0, "height": _DATAZOOM_SLIDER_HEIGHT, "bottom": 0},
+    ]
+
+
 def _buildAxisOption(spec: ChartSpec, data: list[dict], kind: ChartType) -> dict[str, Any]:
     """折线/柱状/横柱/组合共用一套笛卡尔装配。
 
@@ -202,15 +252,17 @@ def _buildAxisOption(spec: ChartSpec, data: list[dict], kind: ChartType) -> dict
     )
 
     horizontal = kind is ChartType.HBAR
-    categoryAxis: dict[str, Any] = {"type": "category", "data": categories}
-    if horizontal:
-        # Top N 的语义是「最大的在最上面」：类目轴默认自下而上，故翻转。
-        categoryAxis["inverse"] = True
-    # 两种朝向共用同一个 categoryAxis 对象，故轴名只此一处。无注入 ⇒ 原对象原样返回。
-    categoryAxis = _namedAxis(categoryAxis, _axisNameOf(spec, catField))
+    categoryAxis = _buildCategoryAxis(spec, categories, catField, kind)
     valueAxis: dict[str, Any] = {"type": "value"}
-
     legend = _legend(spec, len(series))
+
+    zoomed = kind in _DATAZOOM_KINDS and len(categories) > _DATAZOOM_THRESHOLD
+    gridBottom = (_GRID_BOTTOM_WITH_LEGEND if legend else _GRID_BOTTOM_DEFAULT) + (
+        _DATAZOOM_BAND_HEIGHT if zoomed else 0
+    )
+    if zoomed and legend:
+        # 图例让位给滑块：滑块贴底 0，图例抬到它上面 4px。
+        legend = {"legend": {**legend["legend"], "bottom": _DATAZOOM_LEGEND_BOTTOM}}
     option: dict[str, Any] = {
         **_title(spec),
         "tooltip": {"trigger": "axis"},
@@ -219,12 +271,14 @@ def _buildAxisOption(spec: ChartSpec, data: list[dict], kind: ChartType) -> dict
         "grid": {
             "left": 48,
             "right": 48,
-            "bottom": _GRID_BOTTOM_WITH_LEGEND if legend else _GRID_BOTTOM_DEFAULT,
+            "bottom": gridBottom,
             "top": 40,
             "containLabel": True,
         },
         "series": series,
     }
+    if zoomed:
+        option["dataZoom"] = _dataZoomOf(horizontal)
     if horizontal:
         option["yAxis"] = categoryAxis
         option["xAxis"] = valueAxis

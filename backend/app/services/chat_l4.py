@@ -21,11 +21,11 @@ from app.domain.exceptions import ConfigError
 from app.domain.schemas import ChatRequest, ChatResponse
 from app.infrastructure.llm.base_client import BaseLlmClient
 from app.services.agent_runtime_service import AgentLoopResult
-from app.services.step_query_planner import StepQueryPlanner
 from app.services.chat_constants import (
     ROUTING_LAYER_L4,
     USAGE_PURPOSE_L4_AGENT_LOOP,
 )
+from app.services.step_query_planner import StepQueryPlanner
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,8 @@ class L4Mixin:
                 # config 单价脱钩，监控埋点上的 L4 成本随之失真）。
                 cost_per_1k_input=float(llm_config.cost_per_1k_input),
                 cost_per_1k_output=float(llm_config.cost_per_1k_output),
+                # 探针归因：逐轮 token profile 与台账行 / session_message 对齐
+                sessionId=dto.sessionId,
             )
         except Exception:
             # L4 异常不阻断：log warning + 降级 L2/L3（与 L1 同模式）

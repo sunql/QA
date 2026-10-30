@@ -9,7 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,10 @@ class LlmResponseWithTools:
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: dict | None = None
     model: str = ""
+    # DeepSeek prompt cache 命中 token（None = 字段缺失/不支持，0 = 未命中）。
+    # 与 LlmResponse.cachedTokens 同口径；usage dict 刻意不加 cached_tokens 键，
+    # 避免改变 agent_orchestration_cost.usageFromMapping 的成本口径。
+    cachedTokens: int | None = None
 
 
 @dataclass(frozen=True)

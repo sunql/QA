@@ -97,12 +97,17 @@ class L4Mixin:
             return None
         llm_client, llm_config = resolved
         try:
+            # 冷启动修复（2026-10-31 取证发现）：此前传 ds=None，进程内 adapter 池
+            # 冷缓存时 get_adapter 解引用 None.password_encrypted → AttributeError
+            # → 容器重启后第一次 L4 必失败回退 L2/L3（历史上全靠其它路径先焐热
+            # 池子掩盖）。与 _buildPipelineContext 同模式先取真实 ds 再传。
+            ds = await self._datasource.get(session, dto.datasourceId)
             result = await self._agentRuntime.run_agent_loop(
                 session=session,
                 user_id=user.userId if user else 0,
                 question=dto.question,
                 llm_client=llm_client,
-                executor=self._adapterProvider(dto.datasourceId, None),  # 懒加载 adapter
+                executor=self._adapterProvider(ds.id, ds),
                 ontology=self._ontology,
                 # 单价的唯一来源是本次实际使用的 model config：agent loop 内部
                 # 无从得知用了哪个模型（历史实现硬编码 gpt-4o-mini 参考价，与实际

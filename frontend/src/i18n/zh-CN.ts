@@ -964,6 +964,13 @@ export const zhCN = {
       driverTooltip: "来自数据模型的关联字段",
       sqlDetail: "查看验证 SQL",
       disclaimer: "以上为基于当前数据与数据模型的可能解释（非因果结论），可发送验证 SQL 进一步核实。",
+      status: {
+        pending: "待验证",
+        supported: "支持",
+        contradicted: "相反",
+        inconclusive: "无法判定",
+        execution_failed: "执行失败",
+      },
     },
     // 可视化输出策略（Task 8）：「为什么这么画」的判断依据文案。code 即后端 ruleId，
     // 前端不内置白名单（后端可先发新 code，缺 key 时回退显示 code 原文）。

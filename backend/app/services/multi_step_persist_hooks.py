@@ -18,7 +18,6 @@ from app.domain.exceptions import ValidationError
 # 与本仓 nl2sql_service.py 的既有形态一致，接受工具的规范形态。
 from app.domain.multi_step_models import (
     RUN_STATUS_FAILED,
-    RUN_STATUS_PARTIALLY_FAILED,
     RUN_STATUS_SUCCEEDED,
     MultiStepRun,
     MultiStepStep,
@@ -281,10 +280,8 @@ class MultiStepPersistMixin:
         # 落步的终态（spec §6.3 永久错误 → failed）。`_persistStepFailure` 只把步
         # 置为 running（per-attempt 语义），终态在此落一次。
         #
-        # 不走 spec §4.1 的 skipped 分支：它靠「压缩后仍 > 95% 预算」判定，而该阈值
-        # 与「压缩后重估」在本任务范围内都没有实现源（全仓无 0.95 常量、无重估钩子）。
-        # 凭空造一个阈值会引入未经治理的魔数，故一律按普通 failed 处理；
-        # skipped / partially_failed 留作遗留项。
+        # L1 线性计划没有「跳过步骤」语义（原来的 skipped 分支从未有过生产者），
+        # 一律按普通 failed 处理。
         await persistence.finishStep(session, step, status=_STEP_STATUS_FAILED)
 
     async def _recordSoftFailure(
@@ -378,12 +375,14 @@ class MultiStepPersistMixin:
         return compressedCount > 0
 
 
-def runStatusFor(completed: int, total: int, anyFailed: bool, anySkipped: bool) -> str:
-    """run 终态判定（spec §4.2）。"""
-    if anyFailed and not anySkipped:
+def runStatusFor(completed: int, total: int, anyFailed: bool) -> str:
+    """run 终态判定（spec §4.2）。
+
+    L1 线性计划没有「跳过步骤」语义：步骤要么执行并成功/失败，要么因前序失败
+    提前终止；提前终止时 `completed < total` 也归为 failed。
+    """
+    if anyFailed:
         return RUN_STATUS_FAILED
-    if anySkipped:
-        return RUN_STATUS_PARTIALLY_FAILED
     if completed >= total:
         return RUN_STATUS_SUCCEEDED
     return RUN_STATUS_FAILED

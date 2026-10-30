@@ -276,14 +276,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         seeded = await seed_agent_tool_bindings(session)
         if seeded:
             logger.info("agent_tool_binding seed: %d new rows", seeded)
-        from scripts.seed_agent_tool_configs import seedAgentToolConfigs
+        from scripts.seed_agent_tool_configs import TOOL_SEEDS, seedAgentToolConfigs
         from app.services.agent_tool_config_registry import (
             agent_tool_config_registry,
         )
 
         tool_changed = await seedAgentToolConfigs(session)
         if tool_changed:
-            logger.info("agent_tool_config seed: %d/%d updated", tool_changed, 3)
+            # 分母用 len(TOOL_SEEDS)：写死 3 会让人以为只有 3 个工具被 seed 管理，
+            # 而实际是 7 个 —— 这条日志是操作员发现 seed 重置 input_schema 的线索。
+            logger.info(
+                "agent_tool_config seed: %d/%d updated", tool_changed, len(TOOL_SEEDS)
+            )
         # Task 6：cache 预热必须在 seed 之后（seed 写入了 tool_name）；
         # 若 seed 失败（RuntimeError），不继续 warmUp（fail-fast）。
         await agent_binding_cache.warmUp(session)
@@ -299,6 +303,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.services.business_object_registry import businessObjectRegistry
 
         await businessObjectRegistry.warmUp(session)
+        # feat-data-domain-layer：数据域 + 数据层规则注册表（Agent 词表 DB SSOT；
+        # schema validator / chat_recall 经同步快路径消费，未 warmUp fallback 常量）。
+        # 幂等 seed 先行（迁移 0133/0134 已管 prod 首装，此处兜底防漂移）
+        from scripts.seed_data_domain import seedDataDomains, seedLayerRules
+
+        await seedDataDomains(session)
+        await seedLayerRules(session)
+        from app.services.data_domain_registry import dataDomainRegistry
+        from app.services.layer_rule_registry import layerRuleRegistry
+
+        await dataDomainRegistry.warmUp(session)
+        await layerRuleRegistry.warmUp(session)
         # Phase 1 Task 1.3：KpiMatchCache 启动预热，加载所有 PUBLISHED KPI
         from app.services.kpi_match_cache import kpi_match_cache
 
@@ -403,6 +419,7 @@ def createApp() -> FastAPI:
         auth,
         business_object,
         chat,
+        data_domains,
         data_lineage,
         data_quality,
         data_quality_generate,
@@ -510,6 +527,9 @@ def createApp() -> FastAPI:
     app.include_router(
         business_object.router, prefix="/api/v1", tags=["business-object"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
+    app.include_router(
+        data_domains.router, prefix="/api/v1/data-domains", tags=["data-domain"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
+    )
     app.include_router(features.router, prefix="/api/v1/features", tags=["features"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(
         supplier_360.router,
@@ -534,6 +554,26 @@ def createApp() -> FastAPI:
         agent_runtime.router, prefix="/api/v1/agents", tags=["agents"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )
     app.include_router(agent_tools.router, tags=["agent-tools"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    # 通用 Agent 编排（Task 3）：feature flag 关闭时整组路由不注册（404），
+    # 且模块级 import 也必须留在条件内，避免未启用的子系统被加载。
+    if settings.enableAgentOrchestration:
+        from app.api.v1 import agent_orchestrations
+
+        app.include_router(
+            agent_orchestrations.router,
+            prefix="/api/v1/agent-orchestrations",
+            tags=["agent-orchestrations"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
+        # Task 7：run 生命周期（create/list/get/steps/resume/cancel）
+        from app.api.v1 import agent_runs
+
+        app.include_router(
+            agent_runs.router,
+            prefix="/api/v1/agent-runs",
+            tags=["agent-runs"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
     app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     # auth.router 和 authRouter.router 不加 guard：白名单路径 /auth/me、/auth/change-password、/auth/logout 需无条件放行

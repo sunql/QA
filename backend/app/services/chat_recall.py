@@ -99,8 +99,10 @@ _LAYER_RANK = {
 
 
 def _getClassLayer(cls: Any) -> str:
-    """按 source_table 前缀识别层。
+    """按 source_table 前缀识别层（feat-data-domain-layer 起与 data_layer_rule 同源）。
 
+    规则 SSOT = data_layer_rule 表（layerRuleRegistry 同步快路径，未 warmUp
+    fallback DEFAULT_LAYER_RULES——seed 与默认常量逐字对齐，行为不变）。
     返回值（按优先级升序）：
     - ADS: 应用视图层
     - DWS: 数据汇总层
@@ -110,20 +112,16 @@ def _getClassLayer(cls: Any) -> str:
     - ODS_BUSINESS: ODS 业务原始表
     - UNKNOWN: 未识别
     """
+    from app.services.data_layer_defaults import DEFAULT_LAYER_RULES, matchTableNameLayer
+    from app.services.layer_rule_registry import layerRuleRegistry
+
     src = (getattr(cls, "source_table", "") or "").upper()
-    if src.startswith("ADS_"):
-        return "ADS"
-    if src.startswith("DWS_"):
-        return "DWS"
-    if src.startswith("DWD_"):
-        return "DWD"
-    if src.startswith("DIM_"):
-        return "DIM"
-    if src.startswith("ODS_DIM_"):
-        return "ODS_DICT"
-    if src.startswith("ODS_"):
-        return "ODS_BUSINESS"
-    return "UNKNOWN"
+    rules = (
+        layerRuleRegistry.rules()
+        if layerRuleRegistry.isWarmedUp()
+        else DEFAULT_LAYER_RULES
+    )
+    return matchTableNameLayer(src, rules) or "UNKNOWN"
 
 
 _ODS_TABLE_PATTERN = re.compile(r"\bODS_[A-Z][A-Z0-9_]*\b")

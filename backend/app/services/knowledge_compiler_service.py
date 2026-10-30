@@ -525,8 +525,9 @@ class KnowledgeCompilerService:
             )
         codes = [row.kpi_code for row in rows]
         cache = get_kpi_match_cache()
-        for code in codes:
-            await cache.refreshOne(session, code)
+        for row in rows:
+            # 同时传 kpiId：只按 code 失效摘不掉「改名后旧 code」的残留条目（C1）
+            await cache.refreshOne(session, row.kpi_code, kpiId=row.id)
         # B2：治理契约对账（只读附加工序）——失败不阻断编译（主产物是缓存刷新）
         try:
             await reconcileKpiContract(session, self._audit, entity, rows)

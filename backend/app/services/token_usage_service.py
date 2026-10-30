@@ -26,6 +26,14 @@ from app.domain.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# 成本口径 SSOT（P1-2）：写入方必须显式标注，读侧按白名单收窄。
+COST_SOURCE_MEASURED = "measured"    # token 由 provider 上报、单价来自 llm_config
+COST_SOURCE_ESTIMATED = "estimated"  # 只有部分用量（如异常里提取的 token），成本为估算
+COST_SOURCE_UNKNOWN = "unknown"      # 无法定价（如研究链路按名称查不到 llm_config）
+COST_SOURCES = frozenset(
+    {COST_SOURCE_MEASURED, COST_SOURCE_ESTIMATED, COST_SOURCE_UNKNOWN}
+)
+
 
 class TokenUsageService:
     """Token 消耗流水服务。"""
@@ -41,9 +49,15 @@ class TokenUsageService:
         completionTokens: int,
         cost: Decimal,
         purpose: str | None = None,
-        cost_source: str | None = None,  # P1-2
+        cost_source: str | None = COST_SOURCE_UNKNOWN,  # P1-2
     ) -> SessionTokenUsage:
-        """记录一次 LLM 调用的 Token 消耗并提交。"""
+        """记录一次 LLM 调用的 Token 消耗并提交。
+
+        `cost_source` 必须在 `COST_SOURCES` 词表内（`None` 仅保留给历史兼容，
+        新写入一律显式标注）；写错口径是静默的账单失真，故在写入边界 fail fast。
+        """
+        if cost_source is not None and cost_source not in COST_SOURCES:
+            raise ValueError(f"invalid cost_source: {cost_source!r}")
         totalTokens = promptTokens + completionTokens
         usage = SessionTokenUsage(
             session_id=sessionId,

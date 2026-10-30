@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from sqlalchemy import select, text
 
 from app.domain.enums import KpiStatus
@@ -198,6 +200,45 @@ class TestKpiCatalogApi:
         assert resp.status_code == 200
         assert resp.json()["owner"] is None
         assert resp.json()["unit"] is None
+
+    async def test_update_match_threshold_null_resets_to_default(
+        self, client, dbSession, seed_data_source
+    ) -> None:
+        """显式 match_threshold=null ⇒ 复位为默认 0.75（不是写穿 NOT NULL 约束 ⇒ 500）。
+
+        kpi_catalog.match_threshold 是 Numeric(3,2) NOT NULL（DB 默认 0.75）；
+        创建路径已把 None 归一为默认值，update 路径必须对称，否则 commit 抛
+        IntegrityError（main.py 无全局处理器）⇒ 用户只看到泛化 500。
+        """
+        created = await client.post(
+            "/api/v1/kpi-catalog",
+            json=_kpiPayload(
+                seed_data_source,
+                kpiCode="KPI_THR_NULL",
+                kpiName="阈值复位",
+                matchThreshold=0.6,
+            ),
+        )
+        assert created.status_code == 201
+        assert created.json()["matchThreshold"] == 0.6
+        cid = created.json()["id"]
+
+        resp = await client.put(
+            f"/api/v1/kpi-catalog/{cid}",
+            json={"matchThreshold": None},
+            headers=ADMIN_HEADERS,
+        )
+        # 关键断言：不是 500（NOT NULL 写穿会是 500）
+        assert resp.status_code == 200
+        assert resp.json()["matchThreshold"] == 0.75
+
+        # 再直接读 DB 行，确认落库值也是默认阈值（而非 API 层伪造）
+        row = (
+            await dbSession.execute(
+                select(KpiCatalog.match_threshold).where(KpiCatalog.id == cid)
+            )
+        ).scalar_one()
+        assert row == Decimal("0.75")
 
     async def test_deprecate_status(self, client, seed_data_source) -> None:
         created = await client.post(

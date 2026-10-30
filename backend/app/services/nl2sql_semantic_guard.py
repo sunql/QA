@@ -297,8 +297,14 @@ _DIVISION_STOP_RE = re.compile(
     re.IGNORECASE,
 )
 
-# B4 复用的 SQL 标识符词法（B2 对账同名逻辑上收至此处——semantic_guard 是
-# 低层纯函数模块，依赖方向 kpi_contract_reconcile → 本模块）
+# ─────────────────────────────────────────────────────────────────────
+# SQL 标识符词法（B4 提取；kpi_metric_reconcile 与分母守卫共用）
+#
+# 来源：分支 feat/kpi-l1-metric-id 的 B4 commit fd84d092（该分支不整体合并，
+# 只取纯函数）。放在 semantic_guard 是因为它是**低层无状态词法**，
+# 依赖方向永远是 上层 → 本模块。
+# ─────────────────────────────────────────────────────────────────────
+
 _SQL_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SQL_STOPWORDS = frozenset({
     "sum", "count", "avg", "max", "min", "case", "when", "then", "else", "end",
@@ -310,10 +316,24 @@ _SQL_STOPWORDS = frozenset({
 
 
 def extractSqlIdentifiers(text: str | None) -> set[str]:
-    """从公式/声明/表达式文本抽取列名候选集合（小写、剔 SQL 关键字与函数名）。"""
+    """从公式/声明/表达式文本抽取列名候选集合（小写、剔 SQL 关键字与函数名）。
+
+    刻意宽松：抽出的可能包含表名/别名。调用方负责"宁漏不误报"的取舍
+    （只判"声明 ⊆ 实际"方向，不判反向）。
+    """
     if not text:
         return set()
     return {t.lower() for t in _SQL_IDENTIFIER_RE.findall(text)} - _SQL_STOPWORDS
+
+
+def measureColumnIdentifiers(expr: str | None) -> set[str]:
+    """从结构化度量的 expr 抽取列集合。
+
+    **只取 expr，不取 filter** —— measure.filter 是过滤谓词，可能引用别的类的列
+    （例如 "IQCRESULT = 'FAIL'" 里的 IQCRESULT 属于源类）。把它算进列集合会让
+    「治理未声明该列」被误判成 mismatch（假阳性）。
+    """
+    return extractSqlIdentifiers(expr)
 
 
 def _divisionDenominatorTexts(text: str) -> Iterator[str]:

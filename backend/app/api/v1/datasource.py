@@ -9,6 +9,7 @@ POST   /api/v1/datasources/test            测试连接
 POST   /api/v1/datasources/{datasourceId}/introspect  触发 schema 发现并缓存
 GET    /api/v1/datasources/{datasourceId}/schema     读取 schema 缓存
 GET    /api/v1/datasources/{datasourceId}/schemas    列出可见 schema（Oracle owner）
+GET    /api/v1/datasources/{datasourceId}/layers     数据层分布（前缀规则 × schema 缓存）
 """
 
 from __future__ import annotations
@@ -23,7 +24,9 @@ from app.domain.error_messages import (
 )
 from app.domain.exceptions import NotFoundError
 from app.domain.schemas import (
+    DataLayerCountRead,
     DataSourceCreate,
+    DataSourceLayersRead,
     DataSourceRead,
     DataSourceTestRequest,
     DataSourceTestResponse,
@@ -143,6 +146,76 @@ async def listDatasourceSchemas(
     """
     ds = await _service.get(session, datasourceId)
     return await _schemaService.listSchemas(ds)
+
+
+@router.get("/{datasourceId}/layers", response_model=DataSourceLayersRead)
+async def getDatasourceLayers(
+    datasourceId: int,
+    session: AsyncSession = Depends(getDb),
+    owner: str | None = Query(default=None),
+) -> DataSourceLayersRead:
+    """数据层分布（feat-data-domain-layer 方案 2）。
+
+    **cache-only**：只读 schema 缓存，miss 不实时探库——Oracle 全量内省可能超
+    前端 30s 全局超时；fromCache=false 时前端提示先执行探测。表名按
+    data_layer_rule 前缀规则（priority 升序）归类；未命中前缀的表计入
+    unknownTables 显式透出（ERP 原生命名断层不吞）。
+    """
+    from sqlalchemy import select as sa_select
+
+    from app.domain.models import DataSource
+    from app.services.data_layer_defaults import DEFAULT_LAYER_RULES
+    from app.services.layer_rule_registry import layerRuleRegistry
+    from app.services.data_layer_defaults import matchTableNameLayer
+
+    ds = (
+        await session.execute(
+            sa_select(DataSource).where(DataSource.id == datasourceId)
+        )
+    ).scalars().first()
+    if ds is None:
+        raise NotFoundError(f"数据源 id={datasourceId} 不存在")
+
+    cache = await _schemaService.getCached(session, datasourceId, owner=owner, ds=ds)
+    if cache is None:
+        return DataSourceLayersRead(
+            datasourceId=datasourceId,
+            schemaName=owner or "",
+            fromCache=False,
+        )
+
+    rules = (
+        layerRuleRegistry.rules()
+        if layerRuleRegistry.isWarmedUp()
+        else DEFAULT_LAYER_RULES
+    )
+    layerCounts: dict[str, int] = {}
+    unknown = 0
+    total = 0
+    for table in cache.schema_data:
+        name = table.get("table_name") or table.get("tableName") or ""
+        if not name:
+            continue
+        total += 1
+        layer = matchTableNameLayer(str(name).upper(), rules)
+        if layer is None:
+            unknown += 1
+        else:
+            layerCounts[layer] = layerCounts.get(layer, 0) + 1
+    return DataSourceLayersRead(
+        datasourceId=datasourceId,
+        schemaName=cache.schema_name,
+        fromCache=True,
+        totalTables=total,
+        unknownTables=unknown,
+        layers=sorted(
+            (
+                DataLayerCountRead(layer=layer, tableCount=count)
+                for layer, count in layerCounts.items()
+            ),
+            key=lambda c: c.layer,
+        ),
+    )
 
 
 @router.get("/{datasourceId}/ontology-drift", response_model=OntologyDriftReport)

@@ -51,7 +51,11 @@ from app.services.model_router_service import ModelRouterService, RoutingContext
 from app.services.nl2sql_service import _readFloatConfig
 from app.services.report_templates import REPORT_TEMPLATES, listTemplateMetas
 from app.services.supplier_360_service import Supplier360Service
-from app.services.token_usage_service import TokenUsageService
+from app.services.token_usage_service import (
+    COST_SOURCE_ESTIMATED,
+    COST_SOURCE_MEASURED,
+    TokenUsageService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -518,6 +522,7 @@ class ReportTemplateService:
         completionTokens: int,
         *,
         cachedTokens: int | None = None,
+        costSource: str = COST_SOURCE_MEASURED,
     ) -> None:
         """计量必须落 token_usage（红线）；零用量不落行（rag_qa 同口径）。
 
@@ -544,6 +549,9 @@ class ReportTemplateService:
             completionTokens=completionTokens,
             cost=cost,
             purpose=PURPOSE_REPORT_SUMMARY,
+            # 正常路径：provider 上报 token + _costFor 现算 ⇒ measured；
+            # 失败补账路径（异常里提取的 token）由调用方传 estimated。
+            cost_source=costSource,
         )
 
     async def _accountFailure(
@@ -556,7 +564,12 @@ class ReportTemplateService:
             promptTokens, completionTokens = consumedTokens(exc)
             if promptTokens or completionTokens:
                 await self._recordSummaryUsage(
-                    session, reportSessionId, selected, promptTokens, completionTokens
+                    session,
+                    reportSessionId,
+                    selected,
+                    promptTokens,
+                    completionTokens,
+                    costSource=COST_SOURCE_ESTIMATED,
                 )
         except Exception as accountExc:  # pragma: no cover - 防御分支
             logger.warning("报告总结失败路径补账失败: %s", accountExc)

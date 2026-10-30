@@ -254,9 +254,9 @@ describe("chatStore", () => {
     expect(chatApi.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("sendMessage 流式 error 事件写入错误消息", async () => {
+  it("sendMessage 流式 error 事件写入错误消息与 errorType", async () => {
     chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
-      handlers.onError?.("数据源 99999 不存在");
+      handlers.onError?.("数据源 99999 不存在", undefined, "db_connectivity");
     });
     useChatStore.getState().setDatasourceId(1);
     await useChatStore.getState().sendMessage("查询", true);
@@ -264,6 +264,8 @@ describe("chatStore", () => {
     const state = useChatStore.getState();
     expect(state.messages[1].isError).toBe(true);
     expect(state.messages[1].content).toBe("数据源 99999 不存在");
+    // P2-1：细分类型必须落到消息上（此前解析层直接丢弃）
+    expect(state.messages[1].errorType).toBe("db_connectivity");
     expect(state.messages[1].isStreaming).toBe(false);
     expect(state.loading).toBe(false);
     expect(state.error).toBe("数据源 99999 不存在");

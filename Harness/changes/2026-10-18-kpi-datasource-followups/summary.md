@@ -44,9 +44,19 @@ recon 发现 #55 「只跑了 9 个新用例，整条存量链路没有回归」
 
 ### 2.4 P1a — 数据源建议（Task 4，`c698c8e4`）
 
-`KpiDatasourceSuggestionService`：legacy 名称精确 0.90 / ontology 表反查 0.80 / legacy 模糊 0.55；只取启用源、同源合并 reasons、最多 5 条。
+`KpiDatasourceSuggestionService`：legacy 名称精确 0.90 / **legacy 裸表名精确 0.85** / ontology 表反查 0.80 / legacy 模糊 0.55；只取启用源、同源合并 reasons、最多 5 条。
 `GET /api/v1/kpi-catalog/{id}/datasource-suggestions`。前端编辑表单展示 Alert（建议名 + 依据）+「采用」按钮——**绝不自动写入**；建议与当前绑定相同时不提示。
 测试：后端 7 例（三类信号 / 停用排除 / 空 / 404 / 上限），前端 2 例。
+
+> 📌 **2026-10-29 更新（分支 `feat/kpi-metric-technical-form`）**：
+> 上文的三类信号已扩为**四类**，新增 **`legacy_table_exact` = 0.85**
+> （`kpi_catalog.data_source` 里的**裸表名**与数据源 `schema_cache` 的表名**精确 join**，
+> 不依赖 `metric_id`）。同时两条行为变更：
+> ① `reasons` 出口**按分值降序**排列（同分保持命中顺序）⇒ 前端只渲染 `reasons[0]`，
+> 看到的就是**分值最高**那条信号；
+> ② 拆表名前会先**摘掉「含空白的启用数据源名」跨度**（如 `THBI Oracle`），
+> 避免数据源名碎片冒充别的数据源的表名 ⇒ 0.85 的错源建议压过 0.80 的正确源。
+> 详见 `Harness/changes/2026-10-28-kpi-metric-technical-form/summary.md`。
 
 ### 2.5 P0 — 回填工具（Task 5，`2d088f99` + `b810ef08`）
 

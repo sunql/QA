@@ -15,9 +15,11 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,24 +29,42 @@ from app.domain.enums import (
     AgentStatus,
     AgentTriggerType,
 )
-from app.domain.models import AgentRunLog, AgentSchedule
+from app.domain.models import AgentSchedule
 from app.domain.schemas import AgentDefinitionCreate, AgentScheduleCreate
 from app.services.agent_registry_service import AgentRegistryService
-from app.services.agent_tool_config_registry import agent_tool_config_registry
-from scripts.seed_agents import _AGENT_DEFAULT_BINDINGS as AGENT_DEFAULT_BINDINGS
 from app.services.agent_scheduler_service import AgentSchedulerService
+from app.services.agent_tool_config_registry import agent_tool_config_registry
+from app.tests._orchestration_support import (
+    createOrchestrationProfile,
+    createOrchestrationTool,
+    orchestrationClient,
+    orchestrationRunCount,
+    spyLegacyRuntime,
+    spyOrchestration,
+)
 from app.tests.integration.test_agent_runtime_api import (
     _defaultPolicies,
     _seedFeatureAndValue,
     _seedFeatureDatasource,
     _seedSupplier,
 )
+from scripts.seed_agents import _AGENT_DEFAULT_BINDINGS as AGENT_DEFAULT_BINDINGS
 
 AUTH_ADMIN = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
 AUTH_OWNER = {"X-User-Id": "bob", "X-User-Roles": "analyst", "X-User-Departments": "procurement"}
 AUTH_OTHER = {"X-User-Id": "alice", "X-User-Roles": "analyst", "X-User-Departments": "finance"}
 _ADMIN = CurrentUser(userId="test-admin", roles=("admin",))
 _OWNER = CurrentUser(userId="bob", roles=("analyst",), departments=("procurement",))
+
+
+@pytest.fixture
+async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
+    """本模块默认 client：编排开关版（隔离断言需要 profile 端点）。
+
+    实现复用 app.tests._orchestration_support 的 ``orchestrationClient``（唯一定义处）。
+    """
+    async for apiClient in orchestrationClient(monkeypatch):
+        yield apiClient
 
 
 @pytest.fixture(autouse=True)
@@ -386,3 +406,55 @@ class TestAgentScheduleDispatch:
         assert len(logs) == 1
         assert logs[0].status == "success"
         assert logs[0].actor == f"scheduler:{created.id}"
+
+
+class TestAgentScheduleOrchestrationIsolation:
+    """spec 10.3：旧 scheduler 只走单工具 runtime，绝不进入新编排 Worker。"""
+
+    async def test_due_schedule_calls_legacy_runtime_exactly_once(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """到期调度：旧 AgentRuntimeService.run 恰好一次，新编排 runner 零次。
+
+        被调度的 Agent 同时持有一个**有效的多工具编排 profile**（已启用）——
+        只有这样「没进新 Worker」才是有意义的隔离结论，而不是「本来就没配置」。
+        """
+        await _seedAgent(dbSession, "SUPPLIER_RISK_AGENT")
+        await _seedSupplier(dbSession, 100001, "SUP000001")
+        await _seedFeatureDatasource(dbSession)
+        await _seedFeatureAndValue(
+            dbSession, 5003, "late_payment_rate", "SUP000001", 0.35
+        )
+        await createOrchestrationTool(client, "sched_iso_tool_a", "wiki_search")
+        await createOrchestrationTool(client, "sched_iso_tool_b", "wiki_read")
+        await createOrchestrationProfile(
+            client, "SUPPLIER_RISK_AGENT", ["sched_iso_tool_a", "sched_iso_tool_b"]
+        )
+        legacyCalls = spyLegacyRuntime(monkeypatch)
+        runnerCalls, creationCalls = spyOrchestration(monkeypatch)
+
+        created = await client.post(
+            "/api/v1/agents/SUPPLIER_RISK_AGENT/schedules",
+            json=_schedulePayload(),
+            headers=AUTH_ADMIN,
+        )
+        assert created.status_code == 201, created.text
+        sid = created.json()["id"]
+        row = (
+            await dbSession.execute(select(AgentSchedule).where(AgentSchedule.id == sid))
+        ).scalar_one()
+        row.next_run_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        await dbSession.commit()
+
+        log = await AgentSchedulerService().runSchedule(
+            dbSession, row, datetime.now(timezone.utc)
+        )
+        assert log is not None
+        assert log.status == "success"
+        assert log.agent_code == "SUPPLIER_RISK_AGENT"
+        # 旧 runtime 恰好一次，新编排 runner 一次都没有
+        assert len(legacyCalls) == 1
+        assert legacyCalls[0][0] == "SUPPLIER_RISK_AGENT"
+        assert runnerCalls == []
+        assert creationCalls == []
+        assert await orchestrationRunCount(dbSession) == 0

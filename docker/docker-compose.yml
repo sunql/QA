@@ -177,6 +177,49 @@ services:
       milvus-standalone:
         condition: service_healthy
 
+  # ===== 通用 Agent 编排 Worker（opt-in，默认**不**启动）=====
+  # 灰度开关 = profiles：默认 `docker compose up -d` 完全看不到它，只有显式
+  #   docker compose --profile agent-orchestration up -d agent-orchestration-worker
+  # 才会拉起。CentOS 生产用同一份定义（overlay 合并继承），不需要改生产文件。
+  #
+  # 硬约束（勿改）：
+  #   - 不发布宿主端口：Worker 只出站访问 DB / LLM，不对外提供服务；
+  #   - 不得被 backend / frontend 通过 depends_on 拉起 —— API 侧永不自动起 Worker；
+  #   - ENABLE_AGENT_ORCHESTRATION=true 只写在这里（Worker 侧）；
+  #     backend 侧的 flag 仍由 docker/.env 控制 ⇒ 默认不暴露编排路由（默认下线）；
+  #   - 与 backend 同源构建（同一 Dockerfile + 同一 build context），**不写 image: 键**
+  #     —— 与 backend / frontend 同为「本地 build 的服务」，compose 里带 image: 的
+  #     一律是外部镜像（build_offline_images.py 的 IMAGES 清单按这个约定维护）。
+  #     镜像名由 compose 自动派生（qa-system-agent-orchestration-worker，
+  #     跨 compose 版本可能是下划线），离线部署时以目标机
+  #     `docker compose --profile agent-orchestration config --images` 的输出为准。
+  agent-orchestration-worker:
+    profiles:
+      - agent-orchestration
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: qa-agent-orchestration-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 覆盖 env_file 里的同名变量（compose 里 environment 优先于 env_file）。
+      # flag 关闭时 Worker 会直接返回不轮询 —— 所以这里必须显式打开。
+      ENABLE_AGENT_ORCHESTRATION: "true"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # 覆盖镜像默认 CMD（默认是 alembic upgrade head && uvicorn）：
+    # Worker 是纯轮询进程，不跑迁移（迁移由 backend 容器负责），也不监听端口。
+    command: ["python", "-m", "app.workers.agent_orchestration_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      milvus-standalone:
+        condition: service_healthy
+
   # ===== React 前端 =====
   frontend:
     build:

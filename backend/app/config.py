@@ -163,6 +163,18 @@ class Settings(BaseSettings):
     # ===== 多步持久化（Task 5）=====
     multiStepPersistEnabled: bool = Field(default=True, alias="MULTI_STEP_PERSIST_ENABLED")
 
+    # ===== 通用 Agent 编排 =====
+    enableAgentOrchestration: bool = Field(default=False, alias="ENABLE_AGENT_ORCHESTRATION")
+    agentOrchestrationPollSeconds: float = Field(default=2.0, alias="AGENT_ORCHESTRATION_POLL_SECONDS")
+    agentOrchestrationLeaseSeconds: int = Field(default=60, alias="AGENT_ORCHESTRATION_LEASE_SECONDS")
+    agentOrchestrationMaxIterations: int = Field(default=20, alias="AGENT_ORCHESTRATION_MAX_ITERATIONS")
+    agentOrchestrationMaxToolCalls: int = Field(default=30, alias="AGENT_ORCHESTRATION_MAX_TOOL_CALLS")
+    agentOrchestrationMaxCostUsd: float = Field(default=5.0, alias="AGENT_ORCHESTRATION_MAX_COST_USD")
+    agentOrchestrationMaxTimeoutSeconds: int = Field(default=900, alias="AGENT_ORCHESTRATION_MAX_TIMEOUT_SECONDS")
+    agentOrchestrationMaxObservationChars: int = Field(default=50000, alias="AGENT_ORCHESTRATION_MAX_OBSERVATION_CHARS")
+    agentOrchestrationMaxPlannerCorrections: int = Field(default=2, alias="AGENT_ORCHESTRATION_MAX_PLANNER_CORRECTIONS")
+    agentOrchestrationMaxToolFailures: int = Field(default=2, alias="AGENT_ORCHESTRATION_MAX_TOOL_FAILURES")
+
     # ===== ResearchCheckpoint TTL（B2）=====
     researchCheckpointTtlHours: int = Field(default=24, alias="RESEARCH_CHECKPOINT_TTL_HOURS")
 

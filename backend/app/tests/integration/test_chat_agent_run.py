@@ -15,6 +15,7 @@ agent_run 意图在 classifyResult 中最优先（显式指名胜过一切启发
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -45,6 +46,21 @@ from app.domain.models import (
 from app.domain.schemas import AgentAccessPolicyCreate, AgentDefinitionCreate
 from app.infrastructure.llm.base_client import StreamChunk
 from app.services.agent_registry_service import AgentRegistryService
+from app.tests._orchestration_support import (
+    createOrchestrationProfile,
+    createOrchestrationTool,
+    orchestrationClient,
+    orchestrationRunCount,
+    spyOrchestration,
+)
+
+
+@pytest.fixture
+async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
+    """本模块默认 client：编排开关版（隔离断言需要 profile 端点）。"""
+    async for apiClient in orchestrationClient(monkeypatch):
+        yield apiClient
+
 
 AUTH_HEADERS = {"X-User-Id": "tester", "X-User-Tenant": "default"}
 _ADMIN = CurrentUser(userId="test-admin", roles=("admin",))
@@ -706,3 +722,77 @@ async def test_chat_semantic_routing_stream_done_carries_card(
     assert suggestion is not None, f"done 帧缺 suggestedAgent: {doneFrames}"
     assert suggestion["recommendedAgentCode"] == "SUPPLIER_360_AGENT"
     assert 0.4 <= suggestion["confidence"] < 0.7
+
+
+async def _seedChatOrchestrationIsolation(client: AsyncClient, dbSession: AsyncSession) -> None:
+    """种下「旧链路可跑」的完整前置 + 一个**已启用的多工具编排 profile**。"""
+    await _seedDatasource(dbSession)
+    await _seedAgent(dbSession, "SUPPLIER_RISK_AGENT")
+    await _seedSupplier(dbSession, 100001, "SUP000001")
+    await _seedFeatureAndValue(
+        dbSession, 1, "SUPPLIER_RISK_SCORE", "SUP000001", 0.50, unit="score", window="12M",
+    )
+    await createOrchestrationTool(client, "chat_iso_tool_a", "wiki_search")
+    await createOrchestrationTool(client, "chat_iso_tool_b", "wiki_read")
+    await createOrchestrationProfile(
+        client, "SUPPLIER_RISK_AGENT", ["chat_iso_tool_a", "chat_iso_tool_b"]
+    )
+
+
+class TestChatOrchestrationIsolation:
+    """spec 10.3：Chat 显式 Agent / 语义路由都不进入新编排 Worker。
+
+    被断言的 Agent 同时持有**已启用的多工具编排 profile**（否则隔离结论空洞）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_chat_explicit_agent_does_not_enter_orchestration(
+        self, client: AsyncClient, dbSession: AsyncSession, monkeypatch
+    ) -> None:
+        """显式指名 Agent：仍走旧 runtime，编排 run 零行、新 runner 零调用。"""
+        await _seedChatOrchestrationIsolation(client, dbSession)
+        await _setupChatFakes(monkeypatch, dbSession)
+        runnerCalls, creationCalls = spyOrchestration(monkeypatch)
+
+        resp = await client.post(
+            "/api/v1/chat",
+            headers=AUTH_HEADERS,
+            json={
+                "sessionId": "test-agent-run-orch-1",
+                "question": "用 supplier_risk_agent 评估供应商 100001",
+                "datasourceId": _CHAT_DATASOURCE_ID,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["intent"] == "agent_run"
+        assert body["agentRun"]["tool"] == "supplier_risk"
+        assert runnerCalls == []
+        assert creationCalls == []
+        assert await orchestrationRunCount(dbSession) == 0
+
+    @pytest.mark.asyncio
+    async def test_chat_semantic_routing_does_not_enter_orchestration(
+        self, client: AsyncClient, dbSession: AsyncSession, monkeypatch
+    ) -> None:
+        """语义路由（无显式 Agent 指名）：同样不进新编排 Worker。"""
+        await _seedChatOrchestrationIsolation(client, dbSession)
+        await _setupChatFakes(monkeypatch, dbSession)
+        runnerCalls, creationCalls = spyOrchestration(monkeypatch)
+
+        resp = await client.post(
+            "/api/v1/chat",
+            headers=AUTH_HEADERS,
+            json={
+                "sessionId": "test-agent-run-orch-2",
+                "question": "供应商 100001 的风险",
+                "datasourceId": _CHAT_DATASOURCE_ID,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["intent"] == "supplier_risk"
+        assert body.get("agentRun") is None
+        assert runnerCalls == []
+        assert creationCalls == []
+        assert await orchestrationRunCount(dbSession) == 0

@@ -327,9 +327,13 @@ async def test_sql_metadata_role_refreshes_linked_kpis(
     await dbSession.commit()
 
     refreshed: list[str] = []
+    refreshedIds: list[int | None] = []
 
-    async def fakeRefreshOne(session: AsyncSession, kpi_code: str) -> None:
+    async def fakeRefreshOne(
+        session: AsyncSession, kpi_code: str, *, kpiId: int | None = None
+    ) -> None:
         refreshed.append(kpi_code)
+        refreshedIds.append(kpiId)
 
     monkeypatch.setattr(
         get_kpi_match_cache(), "refreshOne", fakeRefreshOne
@@ -340,6 +344,8 @@ async def test_sql_metadata_role_refreshes_linked_kpis(
 
     assert role.status == "success"
     assert refreshed == ["KPI_TEST_LINKED"]
+    # 必须带上 kpiId：只按 code 失效摘不掉改名残留（C1）
+    assert refreshedIds == [kpi.id]
     assert "KPI_TEST_LINKED" in (role.detail or "")
 
 

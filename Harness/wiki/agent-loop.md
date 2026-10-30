@@ -1,5 +1,8 @@
 # L4 Agent Loop（Phase 6.4，纯 Python async while loop）
 
+> 本文只覆盖 L4 循环本体；Agent 子系统全貌（数据模型 / 管理面 / 路径 A 单工具
+> 直跑 / chat 触发入口）见 [[agent-runtime]]。
+
 > ⚠️ **2026-09-27 重写**：本文档原基于 LangGraph StateGraph 实现假设撰写（路径、节点定义、Checkpointing、LangSmith tracing 等均为**虚构/设计文档遗留**），实际代码是**纯 Python async while loop**。
 >
 > **路径更正**：

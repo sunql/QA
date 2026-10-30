@@ -220,7 +220,9 @@ class TestTryFeatureResponseArg:
 
         # backend/app/tests/unit/ → parents[3] = backend/
         repoRoot = Path(__file__).resolve().parents[3]
-        chatStreamPath = repoRoot / "app" / "services" / "chat_stream.py"
+        # Phase 1.2 split (PR #54 follow-up): _streamQuery moved to chat_stream_query.py.
+        # The `_tryFeatureResponse(..., user=user)` contract lives in that file now.
+        chatStreamPath = repoRoot / "app" / "services" / "chat_stream_query.py"
         source = chatStreamPath.read_text(encoding="utf-8")
         # _streamQuery 内必须有一行 self._tryFeatureResponse(... user=user)
         # 防御性扫描：出现 self._tryFeatureResponse( 后必须能在 2 行内看到 user=user

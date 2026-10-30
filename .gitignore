@@ -67,5 +67,9 @@ backups/
 
 # E2E smoke 的 node_modules 是指向 frontend/node_modules 的符号链接（node_modules/ 模式不匹配链接）
 scripts/e2e_smoke/node_modules
+# git worktree 里的 frontend/node_modules 同样是符号链接（指向主仓那一份，避免重装依赖）。
+# 上面 `node_modules/` 带尾斜杠，只匹配**目录**，匹配不到符号链接 ⇒ worktree 的
+# `git status` 永远挂着一个未跟踪项，误 `git add -A` 就会把一条坏链接提交进去。
+frontend/node_modules
 # Playwright 根目录产物
 /test-results/

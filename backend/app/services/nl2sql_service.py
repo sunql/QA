@@ -402,7 +402,14 @@ class Nl2SqlService:
         dictionaryText: str | None = None,
         featureCatalogText: str | None = None,
     ) -> str:
-        """推理阶段 System Prompt：要求模型先输出结构化查询计划 JSON。"""
+        """推理阶段 System Prompt：要求模型先输出结构化查询计划 JSON。
+
+        ⚠️ **本门面仅供测试使用**（唯一调用方 `app/tests/unit/test_nl2sql_service.py`）。
+        它**不透传** `wikiRulesBlock` / `kpiContractBlock` —— 生产链路的
+        `Nl2SqlService.generateValidatedPlan` → `nl2sql_plan.generateQueryPlan`
+        → `nl2sql_prompts._buildPlanSystemPrompt` 才是权威路径。
+        若将来有生产代码改走本门面，会**静默丢掉**契约块与 wiki 规则块。
+        """
         return _buildPlanSystemPrompt(
             schemaText, dialect, schemaPrefix,
             context=context, priorState=priorState, fewShot=fewShot,
@@ -523,6 +530,7 @@ class Nl2SqlService:
         featureCatalogText: str | None = None,
         globalFiltersText: str | None = None,
         wikiRulesBlock: str | None = None,
+        kpiContractBlock: str | None = None,
         session: AsyncSession | None = None,
     ) -> Any:
         """生成并通过本体 schema 校验的查询计划（ReAct 两阶段流水线阶段一）。
@@ -552,6 +560,7 @@ class Nl2SqlService:
             globalFiltersText=globalFiltersText,
             wikiRulesBlock=wikiRulesBlock,
             kpiContractText=await _buildKpiContractOrNone(session, question),
+            kpiContractBlock=kpiContractBlock,
         )
         # 多步子问题常丢失主问题的时间范围（如主问「2025 年采购情况」，
         # 子问题只剩「查各供应商采购额」）→ 并集判定，宁可不限也不误限。
@@ -609,15 +618,29 @@ class Nl2SqlService:
 
     @staticmethod
     def applyRefineDirect(
-        sql: str, plan: QueryPlan | None, question: str, *, maxLimit: int = _REFINE_MAX_LIMIT_DEFAULT
+        sql: str,
+        plan: QueryPlan | None,
+        question: str,
+        *,
+        maxLimit: int = _REFINE_MAX_LIMIT_DEFAULT,
+        datasourceType: DataSourceType | str | None = None,
     ) -> str | None:
         """REFINE 捷径：纯代码改写上一轮 SQL（行数/排序/筛选），不调 LLM。
 
         maxLimit 为魔数治理 Phase 2 hard tier 注入参数：默认 _DEFAULT，
         编排层（generateSql）传 system_config 现读值；直接调本方法时
         缺省为默认值（既有调用零改动）。
+
+        datasourceType 传给 sqlglot 决定解析/输出方言（Oracle 的 FETCH FIRST
+        不得被改写为 LIMIT）。
         """
-        return applyRefineDirect(sql, plan, question, maxLimit=maxLimit)
+        return applyRefineDirect(
+            sql,
+            plan,
+            question,
+            maxLimit=maxLimit,
+            datasourceType=datasourceType,
+        )
 
     # ------------------------------------------------------------------
     # 编排入口（保留在门面）：流式 SQL 解析 + SQL 生成。

@@ -91,6 +91,42 @@ describe("normalizeError（真实现）", () => {
     });
   });
 
+  // 后端 ErrorResponse(CamelModel)：{ success, error: string, detail: string|None, details }
+  // DomainError 抛出的业务文案放在顶层 error，detail 恒为 null —— 不lift 顶层 error，
+  // 页面就只能拿到 axios 的 "Request failed with status code 422"。
+  describe("响应体顶层 error 的兜底提取", () => {
+    it("lifts the top-level body error when detail carries no message", () => {
+      const err = normalizeError(
+        makeAxiosError(
+          422,
+          { success: false, error: "工具不存在：X", detail: null },
+          "Request failed with status code 422",
+        ),
+      );
+      expect(err.message).toBe("工具不存在：X");
+      expect(err.code).toBe("UNKNOWN");
+      expect(err.status).toBe(422);
+    });
+
+    it("prefers detail.message over the top-level body error", () => {
+      const err = normalizeError(
+        makeAxiosError(400, {
+          error: "顶层文案",
+          detail: { code: "TEST_ERROR", message: "detail 文案" },
+        }),
+      );
+      expect(err.message).toBe("detail 文案");
+      expect(err.code).toBe("TEST_ERROR");
+    });
+
+    it("falls back to the axios message when the body error is empty", () => {
+      const err = normalizeError(
+        makeAxiosError(500, { success: false, error: "", detail: null }, "Server error"),
+      );
+      expect(err.message).toBe("Server error");
+    });
+  });
+
   describe("401 错误码提取", () => {
     it("extracts code AUTH_INVALID from detail", () => {
       const err = normalizeError(makeAxiosError(401, { detail: { code: "AUTH_INVALID" } }));

@@ -3,7 +3,7 @@
 每个测试直接调用 prompt builder 纯函数（无 async，无 mock LLM），
 断言 wrap 标签 + HTML 转义 + U+200B 打断在所有服务都生效。
 
-10 个顶层测试 = 19 个实际用例（test 10 参数化遍历 12 个 label）。
+10 个顶层测试 = 21 个实际用例（9 个单例 + test 10 参数化遍历 12 个 label）。
 
 Strategy:
   - Tests 1-7: 单服务特定注入面红队（调纯函数 prompt builder）
@@ -49,7 +49,7 @@ from app.services.learning.prompt_fence import neutralizeFence
 # Zero-width space character (U+200B)
 ZWS = "​"
 
-# 12 label constants from UntrustedLabel（B3 新增 KPI_CONTRACT）
+# 12 label constants from UntrustedLabel
 ALL_LABELS = [
     UntrustedLabel.USER_QUESTION,
     UntrustedLabel.ONTOLOGY_RECALL,

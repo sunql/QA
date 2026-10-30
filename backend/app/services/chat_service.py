@@ -40,7 +40,7 @@ from app.services.chat_constants import (
     USAGE_PURPOSE_NL2SQL,
 )
 from app.domain.chart_spec import ChartSpec, SpecKpi
-from app.domain.enums import ChartType, IntentType
+from app.domain.enums import ChartType, DataSourceType, IntentType
 from app.domain.exceptions import (
     ConfigError,
     ConflictError,
@@ -84,6 +84,7 @@ from app.services.chart_service import ChartService
 from app.services.chat_stream_output import _ANSWER_SYSTEM_PROMPT, ChatStreamOutputMixin
 from app.services.data_summary import summarize_data
 from app.services.datasource_service import DataSourceService
+from app.services.kpi_contract_builder import buildKpiContractBlock
 from app.services.kpi_semantic_match_service import KpiMatchResult, KpiSemanticMatchService
 from app.services.embedding_service import EmbeddingService
 from app.services.intent_service import IntentResult, IntentService
@@ -137,6 +138,7 @@ from app.services.step_aggregator import StepAggregator
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.supplier_360_service import Supplier360Service
 from app.services.step_subquestion_rewriter import StepSubquestionRewriter
+from app.services.token_usage_service import COST_SOURCE_ESTIMATED
 from app.services.supplier_name_resolver import SupplierNameResolver
 from app.services.supplier_risk_service import SupplierRiskService, buildRiskAnswer
 from app.services.schema_introspection_service import (
@@ -266,6 +268,11 @@ from app.services.chat_context import (
 )
 from app.services.chat_usage import UsageMixin
 from app.services.chat_stream import StreamMixin
+from app.services.chat_stream_entry import StreamEntryMixin
+from app.services.chat_stream_multistep import StreamMultiStepMixin
+from app.services.chat_stream_persist import StreamPersistMixin
+from app.services.chat_stream_query import StreamQueryMixin
+from app.services.chat_stream_shortcuts import StreamShortcutMixin
 from app.services.evidence_record_service import (
     resetChatSessionId,
     resetChatUserId,
@@ -318,7 +325,12 @@ def _wrapMultistepInputs(
     return safe_sub, safe_inj, safe_st
 
 
-class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixin, ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin, ChatStreamOutputMixin, L1L4PreambleMixin):
+class ChatService(
+    RecallMixin, MultiStepMixin, MultiStepPersistMixin,
+    StreamEntryMixin, StreamShortcutMixin, StreamQueryMixin, StreamMultiStepMixin, StreamPersistMixin,
+    ContextMixin, UsageMixin, DomainCommandMixin, L4Mixin, HypothesisMixin,
+    ChatStreamOutputMixin, L1L4PreambleMixin,
+):
     """自然语言问答编排服务。
 
     组合 ChatStreamOutputMixin 提供流式回答输出的超时保护与降级能力。
@@ -1036,7 +1048,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
         question = sub_question if sub_question is not None else dto.question
 
         if intent == IntentType.REFINE and state is not None and state.last_sql:
-            rewritten = self._tryRefineDirect(state, question)
+            rewritten = self._tryRefineDirect(state, question, pc.ds.type)
             if rewritten is not None:
                 return _SqlOutcome(plan=_statePlan(state), sql=rewritten, sqlConfig=None)
 
@@ -1079,6 +1091,13 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             wiki_block = ""
             wiki_chunks_for_trace = []
 
+        # ★ KPI 口径契约注入（Tier B）：按命中 KPI 动态构建（失败隔离）。
+        # 失败隔离的 try/except **刻意放在 `_collectKpiContractBlock` 内部**
+        # （与上面 wiki 块的「调用点 inline try/except」形状相反）：契约采集要连
+        # 开关读取、语义匹配、DB 拉取多步，任一步抛错都必须整体降级为空块。
+        # 别把这里的异常处理搬到调用点。
+        kpi_contract_block = await self._collectKpiContractBlock(session, question)
+
         (planResult, sqlResult), sqlConfig, (wastedPt, wastedCt) = await self._callWithFallback(
             session, dto.sessionId, pc.configs, pc.selected, "nl2sql",
             lambda cfg: self._twoStageGenerate(
@@ -1100,6 +1119,8 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                 globalFiltersText=global_filters.text if global_filters else None,
                 # ★ wiki-ontology-link Task 6：业务规则块注入计划 system prompt。
                 wikiRulesBlock=wiki_block,
+                # ★ KPI 口径契约（Tier B）：业务方签字的口径规范，注入计划 system prompt。
+                kpiContractBlock=kpi_contract_block,
                 # 魔数治理 Phase 2 hard tier：session 传入让 nl2sql 编排层现读阈值。
                 session=session,
             ),
@@ -1152,13 +1173,20 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             cachedTokens=mergedCachedTokens,
         )
 
-    def _tryRefineDirect(self, state: SessionQueryState, question: str) -> str | None:
+    def _tryRefineDirect(
+        self,
+        state: SessionQueryState,
+        question: str,
+        datasourceType: DataSourceType | str | None = None,
+    ) -> str | None:
         """尝试纯代码改写上一轮 SQL（排序/行数/简单筛选）；无法改写返回 None。"""
         sql = state.last_sql
         if not sql:
             return None
         try:
-            return self._nl2sql.applyRefineDirect(sql, _statePlan(state), question)
+            return self._nl2sql.applyRefineDirect(
+                sql, _statePlan(state), question, datasourceType=datasourceType
+            )
         except Exception:
             # 捷径属最佳努力：任何意外失败都退回 LLM 两阶段，不阻断流水线
             logger.warning("REFINE 捷径改写失败，退回 LLM: %s", question, exc_info=True)
@@ -1292,6 +1320,26 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
                 })
         return block, trace_data
 
+    async def _collectKpiContractBlock(
+        self, session: AsyncSession, question: str
+    ) -> str:
+        """构建 KPI 口径契约块（Tier B 注入，spec §7.3）。
+
+        失败隔离：任何异常 → log warning → 返回 "" → 不阻断 chat 流水线
+        （与 wiki 注入同一失败语义，见 _planAndGenerateSql）。
+
+        内容来源是**业务方填写的治理口径**（KPI 目录 + 本体指标技术形态），
+        属于不可信输入 —— 真正的包裹在 prompt 层（wrapUntrusted KPI_CONTRACT），
+        本方法只负责产出文本。
+        """
+        try:
+            return await buildKpiContractBlock(session, question)
+        except Exception:
+            logger.warning(
+                "KPI contract injection failed: %s", question, exc_info=True
+            )
+            return ""
+
     @staticmethod
     def _classRecallScores(classes: list[Any]) -> list[Any]:
         """把 _selectRelevantClasses 产出的 class 列表转成 ScoredOntology(type="class")。
@@ -1413,6 +1461,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
         featureCatalogText: str | None = None,
         globalFiltersText: str | None = None,
         wikiRulesBlock: str | None = None,
+        kpiContractBlock: str | None = None,
         session: Any = None,
     ) -> tuple[Any, Any]:
         """两阶段 LLM 调用：先生成并校验查询计划，再基于计划生成 SQL。
@@ -1431,6 +1480,8 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
         session：可选 DB 会话（魔数治理 Phase 2 hard tier），传入时
         generateValidatedPlan / generateSql 现读 system_config 阈值；
         缺席时落默认值（既有调用零改动）。
+        kpiContractBlock（feat-kpi-metric-technical-form Tier B）：KPI 口径契约块，
+        透传进计划阶段 system prompt；None = 不注入。
         """
         planResult = await self._nl2sql.generateValidatedPlan(
             question, classes, client, cfg,
@@ -1442,6 +1493,7 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             featureCatalogText=featureCatalogText,
             globalFiltersText=globalFiltersText,
             wikiRulesBlock=wikiRulesBlock,
+            kpiContractBlock=kpiContractBlock,
             session=session,
         )
         if planResult.plan.isUnanswerable:
@@ -2017,6 +2069,8 @@ class ChatService(RecallMixin, MultiStepMixin, MultiStepPersistMixin, StreamMixi
             await self._recordUsage(
                 session, sessionId, primary, promptTokens, completionTokens,
                 purpose=f"fallback_{purpose}",
+                # 异常里提取的 token ⇒ 估算口径（与 retry-gen 同口径）。
+                cost_source=COST_SOURCE_ESTIMATED,
             )
             try:
                 result = await _callWithRetryBackoff(caller, fallback)

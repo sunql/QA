@@ -58,6 +58,15 @@ const mockMetric: OntologyMetric = {
   createdBy: null,
   createdTime: "2026-08-11T00:00:00Z",
   updatedTime: "2026-08-11T00:00:00Z",
+  metricType: "MEASURE",
+  numeratorMeasure: null,
+  denominatorMeasure: null,
+  aggregationOrder: null,
+  grainKeys: null,
+  filterExpression: null,
+  status: "DRAFT",
+  owner: null,
+  executionSource: null,
 };
 
 const api = vi.hoisted(() => ({

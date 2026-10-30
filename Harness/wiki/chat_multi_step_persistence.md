@@ -1,6 +1,6 @@
 ---
 created: 2026-10-06
-updated: 2026-10-06
+updated: 2026-10-18
 sources:
   - docs/superpowers/specs/2026-10-05-multi-step-persist.md
   - docs/superpowers/plans/2026-10-05-multi-step-persist.md
@@ -68,9 +68,13 @@ tags:
 
 ```
 running ──▶ succeeded          全部步 succeeded
-        ├─▶ failed             某步 failed 且无 skipped 兜底
-        └─▶ partially_failed   存在 skipped 步，但后续步跑完
+        └─▶ failed             任一步 failed，或因前序失败提前终止（completed < total）
 ```
+
+> `partially_failed` 自 2026-10-18 起**只存在于历史行**：它唯一的来源是「跳过步骤」分支，
+> 而 `StepPlan.depends_on` 从未有生产者、skip 分支从未触发（见
+> [chore-remove-multistep-dep-scaffold](../../changes/chore-remove-multistep-dep-scaffold/summary.md)）。
+> 常量本身保留 —— `RESUMABLE_STATUSES` 与清理任务仍需识别历史行。
 
 **写侧不变量（IMP-1 方案 B）**：
 
@@ -91,9 +95,11 @@ pending ─▶ running ─ok─▶ succeeded
              │
              ├─err(transient)─重试─▶ running        # attempt_count++
              ├─ctx > 70% ─压缩─▶ compressed ─rerun─▶ running
-             ├─err(permanent)─▶ failed
-             └─压缩后仍 > 95% ─▶ skipped             # 后续不再补（spec 定义；触发点未实现）
+             └─err(permanent)─▶ failed
 ```
+
+> `skipped` 同样是历史行专用取值（旧 spec 的「压缩后仍 > 95%」分支从未实现，2026-10-18 已连同
+> `StepResult.skipped` 一并删除）。
 
 ## 3. 自动重试（`multi_step_retry.py`）
 
@@ -119,7 +125,7 @@ POST /api/v1/chat/multi-step/{runId}/resume
 ```
 
 - 校验（`multi_step_resume.prepareResume`）：run 必须存在（否则 404）、`status ∈ {failed, partially_failed}`（否则 409）、`from_step_index` 之前的所有步必须是 `succeeded` / `compressed`（否则 409）、`from_step_index` 必须落在 `0..len(steps)-1`（越界 409）。
-- 默认起点 = 首个 `failed` / `skipped` 步。
+- 默认起点 = 首个 `failed` 步（历史行可能是 `skipped`）。
 - 幂等：`Idempotency-Key` 记进 `multi_step_run.idempotency_keys`（JSONB），重复 key 直接 409；并发靠 `version++` 乐观锁（无 `SELECT … FOR UPDATE`，极端并发下仍可能双跑，见遗留项 12）。
 - 起始步的**唯一事实来源是 DB**（`run.current_step_idx`），不经 DTO 传递；执行侧 `adoptRunForResume` 从那里读，且**只在本次计划形状与原 run 逐字一致时**沿用，形状变了（换模型 / 重新规划出不同子问题）就归零整跑。
 - 越界指针（写侧 `_closeRun` 落的是 `len(plan.steps)` 这个越过末尾的哨兵）在读侧被钳制为「无可续跑进度」，否则续跑会整跑跳过还把它封成终态（见 [[qa-system-multistep-current-step-idx-sentinel]]）。
@@ -146,6 +152,19 @@ POST /api/v1/chat/multi-step/{runId}/resume
 - 续跑经 store 的 `resumeRun` 统一发起，与首发共用同一套 SSE handler；`Idempotency-Key` 由前端 `crypto.randomUUID()` 生成。
 - 续跑的写入**按目标消息定向**：只更新被续跑的那条 assistant 消息，不动最新那条（见变更记录 Task 9 的续跑定向写入修复）。
 - 非流式渲染下**没有**续跑入口与压缩徽章（`runId` / 「已压缩」只走 SSE 增量，非流式 `steps` 负载不带），见遗留项 8。
+
+## 9. JSONB 归一 SSOT（chore-p2-jsonsafe）
+
+三条链路的 JSONB 落库共用 `app/utils/json_safe.py:jsonSafe`（`Decimal→float`、
+`datetime/date→isoformat`、tuple→list、未知类型→`str`、不可变且无变化时保持对象同一性）：
+
+| 调用方 | 用途 |
+|---|---|
+| `multi_step_persistence` / `multi_step_compressor` | `data` / `data_compressed` / `chart_option` |
+| `chat_chart_persist.boundedChartOption / boundedTableOption` | `session_message` 的图表/表负载（2026-10-18 由本模块原样复制件 `_jsonSafe` 收敛而来） |
+
+**刻意不合并**的两个同名函数：`stream_events._jsonSafe`（SSE 出口契约：`Decimal→str`、非有限值哨兵）与
+`research_session_service._coerceJsonSafe`（bytes/set 展开 + `json.dumps` 兜底）—— 语义不同，合并会改线上契约。
 
 ## 相关条目
 

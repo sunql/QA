@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  Alert,
+  Empty,
+  Spin,
   Table,
   Button,
   Modal,
@@ -28,10 +31,12 @@ import {
   deleteDataSource,
   testDataSource,
   introspectDatasource,
+  getDatasourceLayers,
 } from "../api/datasource";
 import type {
   DataSource,
   DataSourceCreate,
+  DataSourceLayersRead,
   DataSourceTestRequest,
   DataSourceTestResponse,
   DataSourceType,
@@ -93,6 +98,10 @@ export default function DatasourcePage() {
   const [editing, setEditing] = useState<DataSource | null>(null);
   const [importingId, setImportingId] = useState<number | null>(null);
   const [introspectingId, setIntrospectingId] = useState<number | null>(null);
+  // 数据层分布弹窗（方案 2）：cache-only 只读，未缓存时展示引导提示
+  const [layersRecord, setLayersRecord] = useState<DataSource | null>(null);
+  const [layersData, setLayersData] = useState<DataSourceLayersRead | null>(null);
+  const [layersLoading, setLayersLoading] = useState(false);
   const [form] = Form.useForm<FormValues>();
   // 监听类型字段，用于条件展示 Oracle 版本下拉
   const currentType = Form.useWatch("type", form);
@@ -238,8 +247,27 @@ export default function DatasourcePage() {
     }
   };
 
-  // 「更多」下拉：编辑 / 删除。删除走 Modal.confirm 二次确认（原 Popconfirm 无法置于 Dropdown 菜单内）。
+  // 数据层分布（方案 2）：cache-only，只读 schema_cache；未探测时展示「先缓存 Schema」引导。
+  const handleShowLayers = async (record: DataSource) => {
+    setLayersRecord(record);
+    setLayersData(null);
+    setLayersLoading(true);
+    try {
+      setLayersData(await getDatasourceLayers(record.id));
+    } catch {
+      // 加载失败直接收起空弹窗，错误已由拦截器提示
+      setLayersRecord(null);
+    } finally {
+      setLayersLoading(false);
+    }
+  };
+
+  // 「更多」下拉：数据层分布 / 编辑 / 删除。删除走 Modal.confirm 二次确认（原 Popconfirm 无法置于 Dropdown 菜单内）。
   const handleRowMenu = (record: DataSource, key: string) => {
+    if (key === "layers") {
+      void handleShowLayers(record);
+      return;
+    }
     if (key === "edit") {
       openEdit(record);
       return;
@@ -313,6 +341,7 @@ export default function DatasourcePage() {
             trigger={["click"]}
             menu={{
               items: [
+                { key: "layers", label: t("datasource.layers.action") },
                 { key: "edit", label: t("common.edit") },
                 { key: "delete", label: t("common.delete"), danger: true },
               ],
@@ -483,6 +512,61 @@ export default function DatasourcePage() {
             </Form.Item>
           </Space>
         </Form>
+      </Modal>
+
+      <Modal
+        title={t("datasource.layers.title", { name: layersRecord?.name ?? "" })}
+        open={layersRecord !== null}
+        footer={null}
+        onCancel={() => setLayersRecord(null)}
+        width={520}
+      >
+        {layersLoading ? (
+          <div style={{ textAlign: "center", padding: 24 }}>
+            <Spin />
+          </div>
+        ) : layersData ? (
+          <>
+            {!layersData.fromCache && (
+              <Alert
+                type="warning"
+                showIcon
+                message={t("datasource.layers.notCached")}
+                style={{ marginBottom: 12 }}
+              />
+            )}
+            <div style={{ marginBottom: 8 }}>
+              {t("datasource.layers.totalTables", { count: layersData.totalTables })}
+            </div>
+            {layersData.layers.length === 0 ? (
+              <Empty description={t("datasource.layers.noLayerData")} />
+            ) : (
+              <Table
+                rowKey="layer"
+                size="small"
+                pagination={false}
+                dataSource={layersData.layers}
+                columns={[
+                  {
+                    title: t("datasource.layers.layer"),
+                    dataIndex: "layer",
+                    render: (v: string) => <Tag color="blue">{v}</Tag>,
+                  },
+                  {
+                    title: t("datasource.layers.tableCount"),
+                    dataIndex: "tableCount",
+                    width: 100,
+                  },
+                ]}
+              />
+            )}
+            {layersData.unknownTables > 0 && (
+              <div style={{ marginTop: 12 }}>
+                {t("datasource.layers.unknownTables", { count: layersData.unknownTables })}
+              </div>
+            )}
+          </>
+        ) : null}
       </Modal>
 
       <ImportWizard

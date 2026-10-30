@@ -1,6 +1,6 @@
 ---
 created: 2026-09-01
-updated: 2026-09-01
+updated: 2026-10-18
 ---
 
 # Frontend
@@ -98,6 +98,33 @@ useEffect(() => {
 
 **遗留**：`api/chatHistory.ts` 仍发死值 `X-User-Id`；`datasource` / `localImport` 有重复拦截器；`RoutingMetricsPage` 不发鉴权头。
 
+## 假设验证状态标签（chore-p2-residual-cleanup）
+
+**SSOT**：`src/components/chat/HypothesisPanel.tsx` —— `verificationStatus` 是数据库字符串（系统边界），渲染前先经 `KNOWN_VERIFICATION_STATUSES` 白名单收窄，未知值回落 `pending`（「待验证」），**绝不把未知枚举拼进 i18n key**（缺 key 时 i18next 回落成 key 本身）。
+
+- 文案 key：`chat.hypothesis.status.{pending,supported,contradicted,inconclusive,execution_failed}`，`zh-CN` / `en-US` 两套齐备。
+- **测试必须断言真实文案**：旧用例用 `/pending/i` 匹配，恰好命中回落 key `chat.hypothesis.status.pending`，缺失 i18n 时照样绿；现在每条用例额外断言 `queryByText(/chat\.hypothesis\.status\./)` 为空。
+- **后端验证判定链路未接线**：`Hypothesis.verify()` / `VerificationResult` / `_recordVerification` 已作为死代码删除（无生产调用方）；前端「验证」按钮仍把 `verificationSql` 当普通问题走既有 QUERY 链路，因此 `verification_status` 恒为 null ⇒ 标签恒为「待验证」。要真正流转需新 API + 前端改调用。
+
+## 错误细分类型（errorType）端到端（chore-p2-errortype）
+
+后端 `error` SSE 帧携带 `errorType`（`app/services/stream_events.ErrorType`：`domain` / `llm` / `internal` / `provider_transient` / `provider_protocol` / `schema_reference` / `sql_syntax` / `db_connectivity` / `permission` / `query_timeout`）。前端链路：
+
+```
+SSE frame ── api/chat.ts parseEvent ── onError(message, detail?, errorType?)
+          ── chatStore（首发/续跑两处）写 ChatMessage.errorType
+          ── MessageItem：ERROR_TYPE_HINT_KEYS 白名单 → 错误气泡下方提示
+```
+
+**关键约定**：
+
+- `errorType` 是**系统边界原始字符串**，只用于查表。`MessageItem` 的 `ERROR_TYPE_HINT_KEYS` 只列用户可以采取动作的 7 类；`domain` / `llm` / `internal` 不追加提示（正文已面向用户），未知类型静默不渲染。
+- **绝不**把 `errorType` 拼进 i18n key：i18next `returnNull: false`，缺 key 会原样回显 key（与 hypothesis 状态标签同一个坑）。
+- doc-QA / Wiki 客户端用 `{...obj, kind}` 展开，`errorType` 运行时已透传；是否有消费端取决于页面，聊天是本次接线的目标。
+- 网络层兜底（`catch`）没有 `errorType`，不要伪造一个。
+
+**测试锚点**：`chatApi.test.ts`（三参透传）、`chatStore.test.ts`（回填消息字段）、`MessageItem.test.tsx`（真实文案 + 反向断言无裸 key / 未知枚举不泄露）。
+
 ## 研究型 Agent 入口（research）（feat-research-entry-ux-fixes）
 
 - **页面**：`pages/research/ResearchListPage.tsx`（列表 + 新建）、`ResearchSessionPage.tsx`（会话 + 检查点）、`ResearchReportPage.tsx`（报告）。
@@ -122,3 +149,82 @@ axios 超时**两层**，别顺手调齐（2026-10-23 定，2026-10-24 加例外
 **硬约束**：nginx `proxy_read_timeout=300s` 是上限，280s 是留余量；守卫测试 `ontologyBatchApiTimeout.test.ts` 锁定各调用值，新增长操作调用必须加进去。
 
 **运维语义**：axios 超时 ≠ 后端停止——操作还在跑，超时后**别重试**，先刷新看结果；「网络异常，请稍后重试」文案 = status=0 专有（前端掐断），后端 4xx/5xx 不显示它。
+
+## 通用 Agent 编排 UI（feat-agent-orchestration）
+
+**日期**：2026-10-28 · **变更**：[feat-agent-orchestration](../changes/feat-agent-orchestration/summary.md)
+· **Wiki**：[[agent-runtime]]
+
+### 路由
+
+| 路径 | 组件 | 说明 |
+|------|------|------|
+| `/agent-orchestrations` | `pages/AgentOrchestrationPage.tsx` | 编排配置列表 + 新建/编辑弹窗 + 启停 |
+| `/agent-tasks` | `pages/AgentTaskPage.tsx` | 编排任务（run）列表 + 创建 run + 时间线 + 恢复/取消 |
+
+路由在 `src/App.tsx:115-116` **无条件注册**（见下方「已知限制」）。
+
+### 轮询模型（任务页）
+
+```typescript
+// src/components/agent/task/useAgentRunTracker.ts
+export const RUN_POLL_MS = 2000;              // 固定 2s 一跳
+
+const afterStepNo = lastStepNoRef.current + 1;  // 闭区间下界 ⇒ 只取增量
+const [read, incoming] = await Promise.all([
+  getAgentRun(runId),
+  getAgentRunSteps(runId, { afterStepNo }),
+]);
+```
+
+要点：
+
+- `afterStepNo` 是**闭区间下界**（后端返回 `step_no >= afterStepNo`）⇒ 每次传
+  `lastStepNo + 1`，**绝不重取最后一步**。
+- 只在 `QUEUED` / `RUNNING` 时轮询；进入终态或 `PAUSED` 停轮询（终态再补拉一次快照）。
+- 用 `setTimeout` 递归（不是 `setInterval`），避免慢请求叠请求。
+- **代次机制**：每次 effect 重启换一代次，旧定时器链即使晚一拍恢复也因代次不匹配
+  而不再续期 ⇒ 不会出现两条并行的轮询链。
+- **404 ⇒ 停止轮询，绝不伪造一个终态运行出来**（`onMissing` → `setPollStopped(true)`）。
+- 拉取用 `Promise.all` 并行取「run 快照 + 增量步骤」。
+
+### 错误文案分流
+
+`src/components/agent/task/errors.ts` 的 `describeError` **只按 HTTP status 分流**：
+
+| status | 文案键 |
+|---|---|
+| 404 | `agentTask.messages.runNotFound` |
+| 403 | `agentTask.messages.forbidden` |
+| 409 | `agentTask.messages.conflict` |
+| 422 | `agentTask.messages.validationFailed`（带 detail）/ `…Generic` |
+| `undefined` / `0` | `agentTask.messages.networkError`（= 前端掐断） |
+
+> **不要用 `AppError.code` 判别**：后端对所有 DomainError 都返回 `code = "UNKNOWN"`。
+> `AppError.message` 的取值优先级 = 响应 `detail` 对象里的 `message` → 响应体**顶层
+> `error`** → axios 兜底文案（`src/api/client.ts` 的 `normalizeError`）。
+> ⚠️ `normalizeError` 这条「抬升顶层 `error`」是本特性**对共享模块的改动**，
+> 超出设计稿 §9.3 允许的前端范围 —— 已记在变更 SSOT §4。
+
+### 特性关闭时的降级
+
+后端 `ENABLE_AGENT_ORCHESTRATION=false` ⇒ 编排路由**不注册** ⇒ API 返回 **404**：
+
+- 任务页：404 ⇒ 停止轮询，提示「运行不存在」（**不会**伪装成已结束）；
+- 配置页：列表加载 404 ⇒ 显示「编排配置列表加载失败」。
+
+### 已知限制（前端）
+
+- **两条路由无条件注册**（不进 feature flag）⇒ 特性关闭时页面仍可打开，只是数据接口 404。
+  没有专门的「特性未启用」页面态。
+- **系统上限硬编码在前端**（20 / 30 / 5 USD / 900 / 1000-50000），而
+  `backend/app/config.py` 允许用环境变量覆盖 ⇒ 覆盖过的部署会出现 UI 边界漂移
+  （服务端仍按 `assertWithinSystemCeilings` 兜底）。
+- **两套并行的 status 分流 + 两份 i18n 键族**：`describeFailure`
+  （`components/agent/useOrchestrationProfiles.ts:62-78`，用 `agentOrchestration.*` 键）与
+  `describeError`（`components/agent/task/errors.ts:30-45`，用 `agentTask.*` 键）是两套
+  独立实现，同一种 status 在两处各自映射到各自的语言包键。
+  （`errorStatus` / `errorDetailText` **不是**重复定义——它们只在 `errors.ts` 定义一次。）
+- `useAgentRunTracker.ts:224-226` 的 `useCallAction` catch 把 `resumeRun` 的异常转成
+  `setActionError`（`resumeRun` 因此**正常 resolve**）⇒ 恢复被拒（409/422）时
+  `useResumeActions.ts:46-51` 的 `reset()` 仍会执行，用户填的内容丢失。

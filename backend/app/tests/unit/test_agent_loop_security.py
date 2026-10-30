@@ -106,7 +106,7 @@ def test_init_loop_state_double_quote_escaped() -> None:
 
 
 def test_dispatch_single_tool_wraps_content_with_agent_tool_result_label() -> None:
-    """ToolMessage content 用 <agent_tool_result> 包裹（langchain + dict shim 两条路径）。"""
+    """ToolMessage content 用 <agent_tool_result> 包裹；注入 payload 被中和。"""
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
@@ -131,14 +131,20 @@ def test_dispatch_single_tool_wraps_content_with_agent_tool_result_label() -> No
     result = asyncio.run(_check())
     # result 是 ToolMessage（langchain）或 dict shim
     content = result.get("content") if isinstance(result, dict) else result.content
-    expected = wrapUntrusted(
-        UntrustedLabel.AGENT_TOOL_RESULT, str(poisoned_rows).replace("'", '"')
-    )
-    # 简化断言：只确认 <agent_tool_result> 标签和转义后的注入 payload
-    assert "<agent_tool_result>" in content
-    assert "</agent_tool_result>" in content
-    # 注入 payload 的 </agent_tool_result> 被 U+200B 打断 -> 字面仍出现
-    assert "</agent_tool_result>" in content
+    assert content.startswith("<agent_tool_result>")
+    assert content.endswith("</agent_tool_result>")
+    # 注入 payload 的 < 被转义 + U+200B 打断：内层闭合标签不可能提前闭合包装
+    assert "&lt;​/agent_tool_result&gt;" in content
+    # 唯一可被解析成关闭标签的只有包装自身
+    assert content.count("</agent_tool_result>") == 1
+    # 结构化转义保留引号（&quot; 放大消失），内层 JSON 仍可解析
+    assert "&quot;" not in content
+    inner = content[len("<agent_tool_result>"): -len("</agent_tool_result>")]
+    import json
+
+    parsed = json.loads(inner)
+    assert parsed["columns"] == ["comment"]
+    assert "&lt;​/agent_tool_result&gt;" in parsed["rows"][0][0]
 
 
 def test_dispatch_single_tool_preserves_tool_call_id_and_name() -> None:

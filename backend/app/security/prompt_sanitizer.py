@@ -2,7 +2,9 @@
 
 公共 API：
   - sanitizeForLlmPrompt(text): 5 字符 HTML entity 转义 + U+200B 打断 </x>
+  - sanitizeStructured(text): 3 字符转义（& < >，保留引号）+ U+200B 打断 </x>
   - wrapUntrusted(label, text): 把 text 包成 <label>...</label>，label 走白名单
+  - wrapUntrustedStructured(label, text): 同上但用 sanitizeStructured（JSON 数据专用）
   - wrapSanitized(label, safeText): 包**已 sanitize** 文本（不二次转义），供
     需要按渲染后长度裁剪的调用方使用
   - UntrustedLabel: 12 个预定义 label（防 label 注入；含 3 个向后兼容旧标签）
@@ -23,6 +25,16 @@ _HTML5_ESCAPE: dict[str, str] = {
     ">": "&gt;",
     '"': "&quot;",
     "'": "&#39;",
+}
+
+# 3 字符转义（& < >）——仅用于结构化 JSON 工具结果。
+# 引号是 JSON 语法的一部分：escape 后每个引号膨胀为 6 chars（&quot;），
+# 实测 L4 工具结果因此放大 1.55~2.16×；而引号无法闭合 <label> 包装
+# （需要尖括号），故引号保留、其余三字符与 5 字符版一致。
+_HTML3_ESCAPE: dict[str, str] = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
 }
 
 # label 命名规则：小写字母开头 + 小写字母/数字/下划线
@@ -104,6 +116,17 @@ def sanitizeForLlmPrompt(text: str) -> str:
     return _insertZeroWidthAfterEscapedOpen(after_fence)
 
 
+def sanitizeStructured(text: str) -> str:
+    """结构化数据专用：3 字符转义（& < >，保留引号）+ U+200B fence 中和。
+
+    ``&`` 必须先于其它字符转义：数据里已有的 ``&lt;/x&gt;`` 会变成
+    ``&amp;lt;/x&amp;gt;``，一次实体解码无法还原成可闭合的标签。
+    """
+    escaped = "".join(_HTML3_ESCAPE.get(c, c) for c in text)
+    after_fence = neutralizeFence(escaped)
+    return _insertZeroWidthAfterEscapedOpen(after_fence)
+
+
 def _assertAllowedLabel(label: str) -> None:
     """校验 label 命名与白名单，防止运行时拼接 label 注入。"""
     if not _LABEL_PATTERN.match(label):
@@ -125,6 +148,17 @@ def wrapUntrusted(label: str, text: str) -> str:
     """
     _assertAllowedLabel(label)
     safe = sanitizeForLlmPrompt(text)
+    return f"<{label}>{safe}</{label}>"
+
+
+def wrapUntrustedStructured(label: str, text: str) -> str:
+    """把 JSON 类工具结果包成 <label>...</label>，内部走 ``sanitizeStructured``。
+
+    仅用于 ``AGENT_TOOL_RESULT``（L4 工具返回值）等结构化数据：保留引号让
+    JSON 可读且不被无谓放大；``& < >`` 与 U+200B 打断防御不变。
+    """
+    _assertAllowedLabel(label)
+    safe = sanitizeStructured(text)
     return f"<{label}>{safe}</{label}>"
 
 

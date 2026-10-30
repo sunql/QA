@@ -12,8 +12,11 @@ import pytest_asyncio
 
 from app.infrastructure.llm.base_client import ToolCall
 from app.services.agent_tools_nl2sql import (
+    DESCRIBE_TABLE_COLUMN_FORMAT,
+    L4_TOOL_ROW_CAP,
     ToolResult,
     dispatch_tool_call,
+    encodeExecuteSqlResult,
     handle_describe_table,
     handle_execute_sql,
     handle_list_joins,
@@ -263,14 +266,28 @@ async def test_list_tables_empty():
     assert parsed["tables"] == []
 
 
+@pytest.mark.asyncio
+async def test_list_tables_dedupes_repeated_source_table():
+    """同一 source_table 对应多个 ontology_class 时只列一次（去重保序）。"""
+    session = _FakeAsyncSession({
+        "source_table": [
+            _FakeClassRow(id=1, source_table="THBI.PO_HEADER", selected_columns=["source_table"]),
+            _FakeClassRow(id=2, source_table="THBI.PO_HEADER", selected_columns=["source_table"]),
+            _FakeClassRow(id=3, source_table="THBI.PO_LINE", selected_columns=["source_table"]),
+        ],
+    })
+    result = await handle_list_tables(session=session)
+    assert json.loads(result.content)["tables"] == ["THBI.PO_HEADER", "THBI.PO_LINE"]
+
+
 # =============================================================================
-# Tests — describe_table
+# Tests — describe_table（列式紧凑编码）
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_describe_table_returns_columns():
-    """describe_table 返回列定义"""
+async def test_describe_table_returns_compact_columns():
+    """describe_table 列式返回：自描述 column_format + 每列一行数组。"""
     session = _FakeAsyncSession({
         "ontology_class": [
             _FakeClassRow(id=10, source_table="THBI.PO_HEADER"),
@@ -297,12 +314,95 @@ async def test_describe_table_returns_columns():
     })
     result = await handle_describe_table(session=session, table_name="THBI.PO_HEADER")
     parsed = json.loads(result.content)
-    assert "columns" in parsed
-    assert len(parsed["columns"]) == 2
-    col0 = parsed["columns"][0]
-    assert col0["name"] == "订单号"
-    assert col0["is_primary_key"] is True
-    assert col0["source_column"] == "PTHNUM_0"
+    assert parsed["table"] == "THBI.PO_HEADER"
+    assert parsed["column_format"] == DESCRIBE_TABLE_COLUMN_FORMAT
+    assert parsed["columns"] == [
+        ["订单号", "PO Number", "VARCHAR2", "PTHNUM_0", "PK", ""],
+        ["金额", "Amount", "NUMBER", "CPRPRI_0", "", ""],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_describe_table_omits_alias_equal_to_name_or_source_column():
+    """alias 与 name / source_column 相同时置空，避免重复 token。"""
+    session = _FakeAsyncSession({
+        "ontology_class": [_FakeClassRow(id=10, source_table="THBI.PO_HEADER")],
+        "ontology_property": [
+            _FakePropertyRow(
+                id=1, property_name="PTHNUM_0", property_alias="PTHNUM_0",
+                data_type="VARCHAR2", source_column="PTHNUM_0", class_id=10,
+            ),
+            _FakePropertyRow(
+                id=2, property_name="订单号", property_alias=None,
+                data_type="VARCHAR2", source_column="PTHNUM_0", class_id=10,
+            ),
+        ],
+    })
+    parsed = json.loads(
+        (await handle_describe_table(session=session, table_name="THBI.PO_HEADER")).content
+    )
+    assert [row[1] for row in parsed["columns"]] == ["", ""]
+
+
+@pytest.mark.asyncio
+async def test_describe_table_marks_pk_and_fk_flags():
+    """PK / FK 用固定序逗号拼接（PK,FK）。"""
+    session = _FakeAsyncSession({
+        "ontology_class": [_FakeClassRow(id=10, source_table="THBI.PO_LINE")],
+        "ontology_property": [
+            _FakePropertyRow(
+                id=1, property_name="行号", property_alias="Line",
+                data_type="NUMBER", source_column="PTHLIN_0",
+                is_primary_key=True, is_foreign_key=True, class_id=10,
+            ),
+        ],
+    })
+    parsed = json.loads(
+        (await handle_describe_table(session=session, table_name="THBI.PO_LINE")).content
+    )
+    assert parsed["columns"][0][4] == "PK,FK"
+
+
+@pytest.mark.asyncio
+async def test_describe_table_resolves_ref_class_to_table_name():
+    """ref_class_id 解析成被引用表名（class_id 无法被任何其它工具消费）。"""
+    session = _FakeAsyncSession({
+        "ontology_class": [
+            _FakeClassRow(id=10, source_table="THBI.PO_LINE"),
+            _FakeClassRow(id=20, source_table="THBI.PO_HEADER"),
+        ],
+        "ontology_property": [
+            _FakePropertyRow(
+                id=1, property_name="订单号", property_alias="PO No",
+                data_type="VARCHAR2", source_column="PTHNUM_0",
+                is_foreign_key=True, ref_class_id=20, class_id=10,
+            ),
+        ],
+    })
+    parsed = json.loads(
+        (await handle_describe_table(session=session, table_name="THBI.PO_LINE")).content
+    )
+    assert parsed["columns"][0][5] == "THBI.PO_HEADER"
+
+
+@pytest.mark.asyncio
+async def test_describe_table_unresolvable_ref_keeps_empty_ref():
+    """ref_class_id 查不到表名（软删类等）→ ref 留空，FK 标记仍保留。"""
+    session = _FakeAsyncSession({
+        "ontology_class": [_FakeClassRow(id=10, source_table="THBI.PO_LINE")],
+        "ontology_property": [
+            _FakePropertyRow(
+                id=1, property_name="订单号", property_alias="PO No",
+                data_type="VARCHAR2", source_column="PTHNUM_0",
+                is_foreign_key=True, ref_class_id=999, class_id=10,
+            ),
+        ],
+    })
+    parsed = json.loads(
+        (await handle_describe_table(session=session, table_name="THBI.PO_LINE")).content
+    )
+    assert parsed["columns"][0][4] == "FK"
+    assert parsed["columns"][0][5] == ""
 
 
 @pytest.mark.asyncio
@@ -381,8 +481,8 @@ async def test_sample_rows_table_not_found():
 
 
 @pytest.mark.asyncio
-async def test_execute_sql_returns_query_result():
-    """execute_sql 跑 SELECT 并返回行"""
+async def test_execute_sql_returns_columnar_result():
+    """execute_sql 列式返回：columns 一次 + 值数组。"""
     session = _FakeAsyncSession({})
 
     class _FakeExecResult:
@@ -397,8 +497,74 @@ async def test_execute_sql_returns_query_result():
     result = await handle_execute_sql(session=session, sql="SELECT 1 AS x")
     assert not result.is_error
     parsed = json.loads(result.content)
+    assert parsed["columns"] == ["x"]
+    assert parsed["rows"] == [[1], [2]]
     assert parsed["row_count"] == 2
-    assert parsed["rows"][0]["x"] == 1
+    assert "truncated" not in parsed
+
+
+def _rows(n: int) -> list[_FakeRow]:
+    return [_FakeRow({"x": i}) for i in range(n)]
+
+
+@pytest.mark.asyncio
+async def test_execute_sql_caps_rows_and_reports_true_count():
+    """超过 L4_TOOL_ROW_CAP 行时只发前 100 行，row_count 仍报真实总数。"""
+    session = _FakeAsyncSession({})
+    rows = _rows(286)
+
+    class _FakeExecResult:
+        def fetchall(self):
+            return rows
+
+    async def fake_execute(stmt):
+        return _FakeExecResult()
+
+    session.execute = fake_execute  # type: ignore
+
+    parsed = json.loads(
+        (await handle_execute_sql(session=session, sql="SELECT x FROM T")).content
+    )
+    assert len(parsed["rows"]) == L4_TOOL_ROW_CAP == 100
+    assert parsed["row_count"] == 286
+    assert parsed["truncated"] is True
+    assert "100" in parsed["note"] and "286" in parsed["note"]
+
+
+@pytest.mark.asyncio
+async def test_execute_sql_full_result_has_no_truncation_markers():
+    """未超限时不带 truncated/note，避免 LLM 误判数据不完整。"""
+    session = _FakeAsyncSession({})
+
+    class _FakeExecResult:
+        def fetchall(self):
+            return _rows(3)
+
+    async def fake_execute(stmt):
+        return _FakeExecResult()
+
+    session.execute = fake_execute  # type: ignore
+
+    parsed = json.loads(
+        (await handle_execute_sql(session=session, sql="SELECT x FROM T")).content
+    )
+    assert "truncated" not in parsed
+    assert "note" not in parsed
+
+
+def test_encode_execute_sql_result_unions_ragged_row_keys():
+    """不规则行（部分 dict 缺键）→ 列取并集，缺失值补 None。"""
+    parsed = encodeExecuteSqlResult([{"a": 1}, {"b": 2}, {"a": 3, "c": 4}])
+    assert parsed["columns"] == ["a", "b", "c"]
+    assert parsed["rows"] == [[1, None, None], [None, 2, None], [3, None, 4]]
+
+
+def test_encode_execute_sql_result_does_not_mutate_input():
+    """编码器必须返回新对象，不修改调用方的行字典/列表。"""
+    rows = [{"a": 1}]
+    parsed = encodeExecuteSqlResult(rows)
+    parsed["rows"].append([9])
+    assert rows == [{"a": 1}]
 
 
 @pytest.mark.asyncio
@@ -432,9 +598,17 @@ async def test_execute_sql_rejects_delete():
 # =============================================================================
 
 
+def _joinClasses() -> list:
+    """list_joins 测试共用的 class_id → source_table 映射。"""
+    return [
+        _FakeClassRow(id=10, source_table="THBI.PO_HEADER"),
+        _FakeClassRow(id=20, source_table="THBI.PO_LINE"),
+    ]
+
+
 @pytest.mark.asyncio
-async def test_list_joins_returns_relationships():
-    """list_joins 返回 join 关系"""
+async def test_list_joins_renders_table_column_edges():
+    """list_joins 输出 TABLE.COL -> TABLE.COL 文本边（class_id 对 LLM 无意义）。"""
     session = _FakeAsyncSession({
         "ontology_join": [
             _FakeJoinRow(
@@ -448,13 +622,124 @@ async def test_list_joins_returns_relationships():
                 description="采购订单头行关系",
             ),
         ],
+        "ontology_class": _joinClasses(),
     })
     result = await handle_list_joins(session=session)
     parsed = json.loads(result.content)
-    assert "joins" in parsed
-    assert len(parsed["joins"]) == 1
-    assert parsed["joins"][0]["source_class_id"] == 10
-    assert parsed["joins"][0]["target_class_id"] == 20
+    assert parsed["count"] == 1
+    assert parsed["edges"] == [
+        "THBI.PO_HEADER.PTHNUM_0 -> THBI.PO_LINE.PTHNUM_0 # 采购订单头行关系"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_joins_marks_non_inner_join_type():
+    """非 INNER 连接追加 (LEFT) 等标记，否则 JOIN 语义丢失。"""
+    session = _FakeAsyncSession({
+        "ontology_join": [
+            _FakeJoinRow(
+                id=1, source_class_id=10, source_columns=["A"],
+                target_class_id=20, target_columns=["A"], join_type="LEFT",
+            ),
+        ],
+        "ontology_class": _joinClasses(),
+    })
+    parsed = json.loads((await handle_list_joins(session=session)).content)
+    assert parsed["edges"] == ["THBI.PO_HEADER.A -> THBI.PO_LINE.A (LEFT)"]
+
+
+@pytest.mark.asyncio
+async def test_list_joins_dedupes_reverse_duplicate_edges():
+    """同一对表的反向重复边（A→B 与 B→A 同列）只保留一条。"""
+    session = _FakeAsyncSession({
+        "ontology_join": [
+            _FakeJoinRow(id=1, source_class_id=10, source_columns=["PTHNUM_0"],
+                         target_class_id=20, target_columns=["PTHNUM_0"]),
+            _FakeJoinRow(id=2, source_class_id=20, source_columns=["PTHNUM_0"],
+                         target_class_id=10, target_columns=["PTHNUM_0"]),
+        ],
+        "ontology_class": _joinClasses(),
+    })
+    parsed = json.loads((await handle_list_joins(session=session)).content)
+    assert parsed["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_list_joins_keeps_parallel_edges_with_different_columns():
+    """同表对不同列的多条边是真实语义（JOIN 边扇出），不能按表对去重。"""
+    session = _FakeAsyncSession({
+        "ontology_join": [
+            _FakeJoinRow(id=1, source_class_id=10, source_columns=["PTHNUM_0"],
+                         target_class_id=20, target_columns=["PTHNUM_0"]),
+            _FakeJoinRow(id=2, source_class_id=10, source_columns=["PTHLIN_0"],
+                         target_class_id=20, target_columns=["PTHLIN_0"]),
+        ],
+        "ontology_class": _joinClasses(),
+    })
+    parsed = json.loads((await handle_list_joins(session=session)).content)
+    assert parsed["count"] == 2
+    assert "THBI.PO_HEADER.PTHLIN_0 -> THBI.PO_LINE.PTHLIN_0" in parsed["edges"]
+
+
+@pytest.mark.asyncio
+async def test_list_joins_filters_by_tables_param():
+    """tables 过滤：只保留任一端命中的边；大小写不敏感、支持裸表名。"""
+    session = _FakeAsyncSession({
+        "ontology_join": [
+            _FakeJoinRow(id=1, source_class_id=10, source_columns=["A"],
+                         target_class_id=20, target_columns=["A"]),
+            _FakeJoinRow(id=2, source_class_id=20, source_columns=["B"],
+                         target_class_id=30, target_columns=["B"]),
+        ],
+        "ontology_class": _joinClasses() + [
+            _FakeClassRow(id=30, source_table="THBI.DIM_SUPPLIER"),
+        ],
+    })
+    parsed = json.loads(
+        (await handle_list_joins(session=session, tables=["po_line"])).content
+    )
+    assert parsed["count"] == 2  # 两条边都涉及 PO_LINE
+    parsed2 = json.loads(
+        (await handle_list_joins(session=session, tables=["THBI.DIM_SUPPLIER"])).content
+    )
+    assert parsed2["count"] == 1
+    assert "DIM_SUPPLIER" in parsed2["edges"][0]
+
+
+@pytest.mark.asyncio
+async def test_list_joins_accepts_tables_as_plain_string():
+    """LLM 误把数组传成字符串时，按单个表名过滤而不是逐字符迭代。"""
+    session = _FakeAsyncSession({
+        "ontology_join": [
+            _FakeJoinRow(id=1, source_class_id=10, source_columns=["A"],
+                         target_class_id=20, target_columns=["A"]),
+            _FakeJoinRow(id=2, source_class_id=20, source_columns=["B"],
+                         target_class_id=30, target_columns=["B"]),
+        ],
+        "ontology_class": _joinClasses() + [
+            _FakeClassRow(id=30, source_table="THBI.DIM_SUPPLIER"),
+        ],
+    })
+    parsed = json.loads(
+        (await handle_list_joins(session=session, tables="THBI.DIM_SUPPLIER")).content
+    )
+    assert parsed["count"] == 1
+    assert "DIM_SUPPLIER" in parsed["edges"][0]
+
+
+@pytest.mark.asyncio
+async def test_list_joins_skips_edges_with_unresolvable_endpoint():
+    """端点类查不到表名（软删 / 越权）→ 跳过该边，不输出无法使用的 class_id。"""
+    session = _FakeAsyncSession({
+        "ontology_join": [
+            _FakeJoinRow(id=1, source_class_id=10, source_columns=["A"],
+                         target_class_id=999, target_columns=["A"]),
+        ],
+        "ontology_class": _joinClasses(),
+    })
+    parsed = json.loads((await handle_list_joins(session=session)).content)
+    assert parsed["count"] == 0
+    assert parsed["edges"] == []
 
 
 @pytest.mark.asyncio
@@ -463,7 +748,8 @@ async def test_list_joins_empty():
     session = _FakeAsyncSession({})
     result = await handle_list_joins(session=session)
     parsed = json.loads(result.content)
-    assert parsed["joins"] == []
+    assert parsed["edges"] == []
+    assert parsed["count"] == 0
 
 
 # =============================================================================
@@ -600,6 +886,23 @@ def test_tool_schemas_sample_rows_has_default_limit():
     schema = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "sample_rows")
     props = schema["function"]["parameters"]["properties"]
     assert props["limit"]["default"] == 5
+
+
+def test_tool_schemas_list_joins_has_optional_tables():
+    """list_joins 增加可选 tables 过滤参数（不传返回全部）。"""
+    schema = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "list_joins")
+    props = schema["function"]["parameters"]["properties"]
+    assert props["tables"]["type"] == "array"
+    assert props["tables"]["items"]["type"] == "string"
+    assert "required" not in schema["function"]["parameters"]
+
+
+def test_tool_schemas_execute_sql_mentions_row_cap():
+    """execute_sql 描述必须告知 100 行上限 + 聚合下推。"""
+    schema = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "execute_sql")
+    desc = schema["function"]["description"]
+    assert "100" in desc
+    assert "聚合" in desc
 
 
 # =============================================================================

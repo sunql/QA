@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.security.prompt_sanitizer import (
     UntrustedLabel,
     sanitizeForLlmPrompt,
+    sanitizeStructured,
     wrapUntrusted,
+    wrapUntrustedStructured,
 )
 
 
@@ -113,6 +117,55 @@ def test_wrap_untrusted_only_accepts_predefined_labels() -> None:
     """白名单外的 label 即使格式合法也拒绝。"""
     with pytest.raises(ValueError, match="not in whitelist"):
         wrapUntrusted("custom_label", "x")
+
+# ---------------------------------------------------------------------------
+# sanitizeStructured / wrapUntrustedStructured — 3 字符转义（& < >），引号保留
+# 用途：L4 agent_tool_result 的 JSON 数据（引号转义会膨胀 1.5~2.2 倍）
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_structured_keeps_quotes() -> None:
+    """引号是 JSON 语法的一部分，保留原样。"""
+    text = '{"name": "it\'s", "n": 1}'
+    assert sanitizeStructured(text) == text
+
+
+def test_sanitize_structured_escapes_amp_lt_gt() -> None:
+    assert sanitizeStructured("a & b <c> d") == "a &amp; b &lt;c&gt; d"
+
+
+def test_sanitize_structured_neutralizes_closing_tag() -> None:
+    """关闭标签仍被 U+200B 打断（与 5 字符版同一防御）。"""
+    out = sanitizeStructured("</agent_tool_result>")
+    assert "​" in out
+    assert "</agent_tool_result>" not in out
+    assert out == "&lt;​/agent_tool_result&gt;"
+
+
+def test_sanitize_structured_double_escapes_pre_escaped_entities() -> None:
+    """数据里已有的 &lt;/x&gt; 必须先转 & ⇒ 变成 &amp;lt;，无法一次解码还原成标签。"""
+    out = sanitizeStructured("&lt;/x&gt;")
+    assert out == "&amp;lt;/x&amp;gt;"
+    assert "​" not in out
+
+
+def test_wrap_untrusted_structured_keeps_inner_json_parseable() -> None:
+    """包装内部（去掉外层标签）应仍是合法 JSON——这是 L4 工具结果的核心契约。"""
+    payload = json.dumps({"table": "T", "cols": [["A", 'say "hi"', "</agent_tool_result>"]]})
+    out = wrapUntrustedStructured(UntrustedLabel.AGENT_TOOL_RESULT, payload)
+    assert out.startswith("<agent_tool_result>")
+    assert out.endswith("</agent_tool_result>")
+    inner = out[len("<agent_tool_result>"): -len("</agent_tool_result>")]
+    # 内层关闭标签打断后 JSON 仍可解析（ZWS 是字符串内普通字符）
+    assert json.loads(inner)["table"] == "T"
+    # 引号未被转义
+    assert "&quot;" not in out
+
+
+def test_wrap_untrusted_structured_rejects_unknown_label() -> None:
+    with pytest.raises(ValueError, match="not in whitelist"):
+        wrapUntrustedStructured("custom_label", "x")
+
 
 def test_render_security_preamble_bilingual() -> None:
     """中英 guard 段都应被拼接。"""

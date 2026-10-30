@@ -3,8 +3,8 @@
 - **日期**：2026-10-30
 - **作者**：Claude（与用户确认四项工作范围）
 - **Phase**：Phase 6.7 KPI 收尾 + 工程基建（CI / 覆盖率）
-- **状态**：done（本地全绿；**未 push / 未建 PR / 未改 prod 任何开关**）
-- **分支**：`feat/遗留问题处理`（worktree `feat-kpi-metric-technical-form`，base main @ `1b9f4f71`）
+- **状态**：done + 已合并 + 已部署 + 灰度开关已开（2026-10-30：PR #73 squash 合并 `44cca97b`；backend 镜像重建部署（B3 门禁生效）；`KPI_CONTRACT_INJECTION_ENABLED` 翻 true；S5.1 实测「对账拦截生效、契约块 0 字符」——详见 §8 收口补记）
+- **分支**：`feat/遗留问题处理`（worktree `feat-kpi-metric-technical-form`，base main @ `1b9f4f71`，**已合并删净**）
 - **迁移版本**：无新迁移（alembic head 仍为 `0137`）
 - **关联变更**：
   - predecessor：[2026-10-28-kpi-metric-technical-form](../2026-10-28-kpi-metric-technical-form/summary.md)（本批 = 其 §11 遗留项的工程化收尾）
@@ -110,10 +110,18 @@ dev `qa_metadata`（与 prod 同名，走 prod 路径）实测：kpi=12 / metric
 
 **下次部署步骤**（后端镜像重建后生效）：`docker compose build --no-cache backend && up -d backend`；冒烟 `curl /openapi.json | jq '.paths | keys'`。前端无运行时改动，无需重建。**CI 首跑**在 push 后由 GitHub Actions 执行，预期暴露 §6 的 14 条既有红（修复为独立批次）。
 
+**§8 收口补记（2026-10-30 晚，部署与灰度实况）**：
+- PR #73 squash 合并 ⇒ main = `44cca97b`；远端分支已删。
+- CI 五轮收口：环境装配问题清零（job working-directory 坑、Docker Hub `minio/minio` **官方镜像已下架** ⇒ ghcr.io/sunql/qa-ci-minio 自托管预拉+retag）；**基线红总账 139 条（unit 16 + integration 123），四分片 + unit 全部在 main @ `1b9f4f71` 逐一复现，净新增 = 0**。逐文件三层处置表见 [integration-baseline-triage.md](./integration-baseline-triage.md)（A 脚手架 / B 自足式 / C 验尸；鉴权集群安全优先）。
+- 部署：fresh worktree `/tmp/qa-main-deploy-1030` @ `44cca97b`；compose 在 `docker/` 子目录（`-f docker/docker-compose.yml`，项目名 `-p qa-system` 原地重建，无网络漂移）；`.env` 借旧部署源复用（SECRET_KEY 按规不重生）；冒烟通过 + 容器内确认 B3 门禁与 LOW-3 断言代码在位。
+- **灰度开关已开（用户批准）**：`UPDATE system_config SET value='true' WHERE key='KPI_CONTRACT_INJECTION_ENABLED'`（UPDATE 1，回读 true）。
+- **S5 验证信号命中预期**：翻转前 S5.1 SKIP（理由=总闸关闭）⇒ 翻转后 `PASS S5.1 12 条全部 mismatch ⇒ 契约块必须为空（对账拦截生效） — 0 字符`；日志首行即 B3 门禁逐 KPI 拒绝注入实录。**当前态：管道通、水不放**——治理列对齐（12/12 mismatch）前不会有治理文本进 prompt，多签互锁按设计生效。
+
 **R2 真正打开灰度的前置**（全部满足后由**人工**写 `system_config` value=true，不由脚本）：
 1. 业务方完成治理列对齐（A 档 4 条先行，12/12 mismatch 现状见 predecessor §10.2）；
 2. 隔离测试库演练通过（S5 审核模拟路径）；
 3. 部署含 B3 门禁的新后端镜像。
+—— 其中 2、3 已于 2026-10-30 完成（开关经用户批准后开启）；**1 仍未完成 ⇒ 对账拦截持续生效，治理文本不会进入 prompt**，直到业务方对齐。
 
 ## 9. 关联
 

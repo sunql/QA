@@ -40,7 +40,7 @@ from app.services.chat_helpers import (
     _failedStepResult,
     _hasDataStepResult,
     _step_result_to_read,
-    buildStepsSnapshot,
+    multiStepSummaryPersistFields,
 )
 from app.services.chat_stream_entry import _overviewStepPayload
 from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
@@ -262,17 +262,13 @@ class StreamMultiStepMixin:
                     token_cost_usd=float(total_cost),
                     # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
                     # （0107 补 rationale：顶层不附图，SUMMARY_TEXT_ONLY 解释为什么）。
-                    chart_type=None,
-                    chart_option=None,
-                    table_option=None,
-                    visual_rationale=summaryTextOnlyRationale().to_dict(),
                     # 历史回放计划卡（2026-10-31）：落一份回放快照，刷新/重开
                     # 会话后仍能还原 分析计划 → 分步 SQL → 每步查询计划。
-                    steps_snapshot=buildStepsSnapshot(
+                    **multiStepSummaryPersistFields(
                         plan=multiStepPlan,
                         stepsByIdx=stepsByIdx,
                         completed=completed,
-                        runId=str(run.id) if run is not None else None,
+                        run=run,
                     ),
                 )
                 await self._saveQueryState(

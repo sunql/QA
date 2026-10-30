@@ -49,7 +49,7 @@ from app.services.chat_helpers import (
     _step_result_to_read,
     _stepFailedError,
     _StepRun,
-    buildStepsSnapshot,
+    multiStepSummaryPersistFields,
 )
 from app.services.messages_zh import (
     MSG_MULTI_STEP_DEGRADE_FAILED,
@@ -715,16 +715,12 @@ class MultiStepMixin:
                     token_cost_usd=float(total_cost),
                     # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
                     # （0107 补 rationale：顶层不附图，SUMMARY_TEXT_ONLY 解释为什么）。
-                    chart_type=None,
-                    chart_option=None,
-                    table_option=None,
-                    visual_rationale=summaryTextOnlyRationale().to_dict(),
-                    # 2026-10-31：与流式对齐 —— 非流式多步也要能回放分节图。
-                    steps_snapshot=buildStepsSnapshot(
+                    # 2026-10-31：快照与非流式/流式共用同一构造，防两路漂移。
+                    **multiStepSummaryPersistFields(
                         plan=multiStepPlan,
                         stepsByIdx=stepsByIdx,
                         completed=completed,
-                        runId=str(run.id) if run is not None else None,
+                        run=run,
                     ),
                 )
                 # B5 HIGH-1：计算 inheritance_snapshot（支持下一轮追问链路）。

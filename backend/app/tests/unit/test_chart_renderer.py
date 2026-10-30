@@ -828,6 +828,16 @@ class TestCategoryReadability:
             {"type": "slider", "xAxisIndex": 0, "height": 20, "bottom": 0},
         ]
 
+    def test_combo_over_threshold_zooms_x_axis(self) -> None:
+        """组合图也走笛卡尔装配：类别 > 40 时同样要给类目轴缩放。"""
+        option = renderChartOption(_spec(ChartType.COMBO), _many_rows(50))
+
+        assert option["dataZoom"] == [
+            {"type": "inside", "xAxisIndex": 0},
+            {"type": "slider", "xAxisIndex": 0, "height": 20, "bottom": 0},
+        ]
+        assert option["grid"]["bottom"] == 66  # 32 + 34
+
     def test_datazoom_and_legend_share_the_bottom_band(self) -> None:
         spec = _spec(
             ChartType.BAR,

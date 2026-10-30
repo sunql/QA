@@ -42,12 +42,13 @@ _GRID_BOTTOM_WITH_LEGEND = 56
 _CATEGORY_LABEL_DENSE_THRESHOLD = 12
 _AXIS_LABEL_MAX_WIDTH = 160
 # 类别 > 40 时绘图区已塞不下，打开缩放滑块（inside 滚轮 + slider 拖拽）。
-# 只给柱状图：折线靠标签稀疏就能读，不应被缩放框改变视野。
+# 折线是唯一例外：标签稀疏就能读，不应被缩放框改变视野；组合图与柱状图同为
+# 笛卡尔装配，同样收不下密集类目，故一并启用。
 _DATAZOOM_THRESHOLD = 40
 _DATAZOOM_SLIDER_HEIGHT = 20
 _DATAZOOM_BAND_HEIGHT = 34
 _DATAZOOM_LEGEND_BOTTOM = 24
-_DATAZOOM_KINDS = frozenset({ChartType.BAR, ChartType.HBAR})
+_DATAZOOM_KINDS = frozenset({ChartType.BAR, ChartType.HBAR, ChartType.COMBO})
 
 # 饼图/环形图之外的 kind 不允许出现 `{d}` 模板变量。
 _PIE_LIKE = frozenset({ChartType.PIE, ChartType.DONUT})

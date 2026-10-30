@@ -47,6 +47,7 @@ from app.infrastructure.milvus_client import (
 from app.services.audit_service import AuditService
 from app.services.embedding_service import EmbeddingService
 from app.services.id_mapping_service import IdMappingService
+from app.services.kpi_contract_reconcile import reconcileKpiContract
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.messages_zh import (
     MSG_ONTOLOGY_CLASS_NOT_FOUND,
@@ -115,6 +116,29 @@ _MSG_TOMBSTONE_NOT_FOUND = (
 _MSG_RECONCILE_STORE_UNAVAILABLE = "对账：{store} 不可达，本轮跳过其比对：{error}"
 _MSG_RECONCILE_MISMATCH = "对账不一致 {object_type}: {counts}"
 _MSG_RECONCILE_MISSING_COLLECTION = "Milvus 集合缺失: {collection}"
+
+# B2：KPI 治理契约 ↔ 本体指标技术公式 对账（编译期，只读，不阻断编译）
+_RECON_KPI_ENTITY_TYPE = "kpi_metric_reconcile"
+_RECON_CHECK_FORMULA = "formula_semantics"
+_RECON_CHECK_GRAIN = "grain"
+_RECON_CHECK_MIXING = "formula_mixing"
+_RECON_VERDICT_MISMATCH = "mismatch"
+_RECON_VERDICT_UNKNOWN = "unknown"
+_MSG_RECON_FORMULA_MISMATCH = (
+    "numerator/denominator 中的列 {extras} 不在 metric.formula 列集合 {cols} 内"
+)
+_MSG_RECON_FORMULA_UNKNOWN = (
+    "numerator/denominator（{kpi_side!r}）与 metric.formula（{metric_side!r}）"
+    "结构解析不可判定（无列名可抽取）——未判等，标注 unknown"
+)
+_MSG_RECON_GRAIN = (
+    "grain={grain!r} 未覆盖 metric.dimension_defaults 的键 {missing}"
+    "（复用 B5 中文别名表判定）"
+)
+_MSG_RECON_MIXING = (
+    "kpi.formula 与 metric.formula 文本相同——概念混用嫌疑"
+    "（kpi.formula 的契约语义是 FeatureDefinition 锚文本，不应存 SQL 公式）"
+)
 
 # 运行日志错误信息截断长度（与 agent_scheduler 同口径，避免堆栈细节外泄）
 _MAX_ERROR_LEN = 500
@@ -504,6 +528,13 @@ class KnowledgeCompilerService:
         for row in rows:
             # 同时传 kpiId：只按 code 失效摘不掉「改名后旧 code」的残留条目（C1）
             await cache.refreshOne(session, row.kpi_code, kpiId=row.id)
+        # B2：治理契约对账（只读附加工序）——失败不阻断编译（主产物是缓存刷新）
+        try:
+            await reconcileKpiContract(session, self._audit, entity, rows)
+        except Exception as exc:  # noqa: BLE001 - 对账失败不影响编译角色成败
+            logger.warning(
+                "KPI 契约对账失败（不阻断编译）metric_id=%d: %s", entity.id, exc
+            )
         return CompileRoleResult(
             role=_ROLE_SQL_METADATA,
             status=_STATUS_SUCCESS,

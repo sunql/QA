@@ -238,7 +238,7 @@ class StreamEntryMixin:
                         yield event
                     return
             if result.intent in (IntentType.DEFINE, IntentType.MAP, IntentType.METRIC):
-                async for event in self._streamDomainCommand(dto, session, result):
+                async for event in self._streamDomainCommand(dto, session, result, user=user):
                     yield event
                 return
             if result.intent == IntentType.CLARIFY:

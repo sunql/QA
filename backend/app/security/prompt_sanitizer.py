@@ -40,12 +40,12 @@ _ALLOWED_LABELS: frozenset[str] = frozenset(
         "sql_result",
         "step_result",
         "agent_tool_result",
+        # B3：KPI 治理契约（plan system prompt）
+        "kpi_contract",
         # 3 个向后兼容（旧代码已用，避免一次性重命名多处）
         "feature_catalog",   # nl2sql_prompts.py 现有标签
         "term_dictionary",   # nl2sql_prompts.py 现有标签
         "user_content",      # hypothesis_service.py 现有标签
-        # 1 个 KPI 口径契约（feat-kpi-metric-technical-form Tier B 注入）
-        "kpi_contract",
     }
 )
 
@@ -61,12 +61,11 @@ class UntrustedLabel:
     SQL_RESULT = "sql_result"
     STEP_RESULT = "step_result"
     AGENT_TOOL_RESULT = "agent_tool_result"
+    KPI_CONTRACT = "kpi_contract"  # B3：KPI 治理契约（plan prompt 专用）
     # 向后兼容旧代码（feature_catalog / term_dictionary / user_content）
     FEATURE_CATALOG = "feature_catalog"
     TERM_DICTIONARY = "term_dictionary"
     USER_CONTENT = "user_content"
-    # KPI 口径契约（Tier B 注入；内容来自业务方填写的治理口径）
-    KPI_CONTRACT = "kpi_contract"
 
 
 # 在 _sanitizeContext 之后追加：U+200B 打断 *任意* 关闭标签 + 自闭标签

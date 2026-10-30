@@ -26,6 +26,7 @@ from typing import Any, Iterator
 
 from app.domain.query_plan import QueryPlan
 from app.services.messages_zh import (
+    MSG_NL2SQL_DENOMINATOR_CONTRACT_WARNING,
     MSG_NL2SQL_SHARE_AMBIGUOUS_WARNING,
     MSG_NL2SQL_SHARE_DENOMINATOR_FEEDBACK,
 )
@@ -286,11 +287,21 @@ def shareAmbiguityWarning(plan: QueryPlan | None, data: list[dict] | None) -> st
     return checkShareInvariants(plan, data).warning
 
 
+# ---------------------------------------------------------------------------
+# B4：分母契约弱校验（KPI 治理 denominator 声明 vs 生成 SQL 分母表达式）
+# ---------------------------------------------------------------------------
+
+# 除法表达式右操作数终止关键字（相对深度 0 处——表达式结束、不是分母的一部分）
+_DIVISION_STOP_RE = re.compile(
+    r"\b(?:FROM|WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|FETCH|WINDOW|UNION)\b",
+    re.IGNORECASE,
+)
+
 # ─────────────────────────────────────────────────────────────────────
 # SQL 标识符词法（B4 提取；kpi_metric_reconcile 与分母守卫共用）
 #
 # 来源：分支 feat/kpi-l1-metric-id 的 B4 commit fd84d092（该分支不整体合并，
-# 只取这两块纯函数）。放在 semantic_guard 是因为它是**低层无状态词法**，
+# 只取纯函数）。放在 semantic_guard 是因为它是**低层无状态词法**，
 # 依赖方向永远是 上层 → 本模块。
 # ─────────────────────────────────────────────────────────────────────
 
@@ -323,3 +334,64 @@ def measureColumnIdentifiers(expr: str | None) -> set[str]:
     「治理未声明该列」被误判成 mismatch（假阳性）。
     """
     return extractSqlIdentifiers(expr)
+
+
+def _divisionDenominatorTexts(text: str) -> Iterator[str]:
+    """产出语句中每个除法表达式 `/` 右操作数的文本（深度感知扫描）。
+
+    从 `/` 起括号配对扫描，深度 0 遇 `,`/`;`/子句关键字即止。刻意宽松：
+    WHERE 里的除法、窗口定义列也会进集合——集合只会偏大（宁漏不误报）。
+    """
+    for match in re.finditer(r"/", text):
+        i = match.end()
+        n = len(text)
+        depth = 0
+        start = i
+        while i < n:
+            ch = text[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif depth == 0 and (ch in ",;" or _DIVISION_STOP_RE.match(text, i)):
+                break
+            i += 1
+        yield text[start:i]
+
+
+def denominatorContractWarning(
+    sql: str | None, denominatorDeclared: str | None
+) -> str | None:
+    """B4：KPI 治理分母声明 vs 生成 SQL 分母表达式的弱校验（示警不硬拒）。
+
+    兼容口径：声明列集合 ⊆ SQL 全部除法表达式右操作数列集合（允许 NULLIF
+    包裹、多列等更复杂形态，不做等价证明）。不符 → 示警文本（L2 出口，
+    由答案渲染层前置）；判不了 → None（诚实跳过，不谎报任一方向）：
+
+    - 声明为中文业务文本（抽不出列名）→ None；
+    - SQL 无除法表达式 → None（本守卫只管「生成了比率但分母错列」，
+      不管「漏生成比率」——那是 plan 校验的职责）。
+    """
+    if not sql or not denominatorDeclared or not denominatorDeclared.strip():
+        return None
+    declared = extractSqlIdentifiers(denominatorDeclared)
+    if not declared:
+        return None
+    stripped = _stripLiteralsAndComments(sql)
+    denominatorTokens: set[str] = set()
+    for rhs in _divisionDenominatorTexts(stripped):
+        denominatorTokens |= extractSqlIdentifiers(rhs)
+    if not denominatorTokens:
+        return None
+    missing = sorted(declared - denominatorTokens)
+    if not missing:
+        return None
+    logger.warning(
+        "KPI 分母契约弱校验示警 declared=%s missing=%s",
+        sorted(declared), missing,
+    )
+    return MSG_NL2SQL_DENOMINATOR_CONTRACT_WARNING.format(
+        declared=", ".join(sorted(declared)), missing=", ".join(missing),
+    )

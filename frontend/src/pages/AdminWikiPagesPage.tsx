@@ -236,14 +236,22 @@ export default function AdminWikiPagesPage() {
     );
 
     const handleCreate = useCallback(async () => {
-        const values = await createForm.validateFields();
+        let values;
+        try {
+            values = await createForm.validateFields();
+        } catch {
+            // 校验失败：字段级红字已由 antd 内联渲染，早退即可。
+            // 不能让 rejection 从这里漏出去 —— onOk 是 `void handleCreate()`，
+            // 漏出去就是 unhandled rejection（同 AgentRegistryPage 的教训）。
+            return;
+        }
         try {
             await createWikiPage(values);
             setCreateOpen(false);
             createForm.resetFields();
             void fetchList();
         } catch {
-            // 校验失败（表单）或接口失败（拦截器已提示）都不关弹窗：
+            // 接口失败（拦截器已提示）不关弹窗：
             // 关掉会让用户丢掉刚敲的正文。
         }
     }, [createForm, fetchList]);

@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from types import SimpleNamespace
 
@@ -418,7 +419,13 @@ class OntologyBatchService:
             and classUids.get(str(p.class_id)) is not None
         ]
         try:
-            counts = neo4j.syncOntologyNodes(classRows, propRows)
+            # 同步入图是阻塞 I/O（neo4j driver），丢进线程池避免卡死事件循环——
+            # 否则批量入图期间整个 worker 无法响应其他请求（曾连带 unread-count 502）。
+            counts = await asyncio.to_thread(
+                neo4j.syncOntologyNodes,
+                classRows,
+                propRows,
+            )
             return GraphSyncResult(
                 classes=counts["classes"],
                 properties=counts["properties"],

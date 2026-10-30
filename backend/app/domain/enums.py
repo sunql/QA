@@ -527,3 +527,63 @@ class ExportFormat(str, Enum):
 
     PDF = "pdf"
     EXCEL = "excel"
+
+
+class MetricType(str, Enum):
+    """本体指标类型（P1 指标技术形态治理）。
+
+    MEASURE：单一度量（加总/平均/计数），无分母。
+    RATIO：比率型，必须配 denominator_measure + aggregation_order（辛普森开关）。
+    DIFFERENCE：差值型（分子 - 分母），分母语义是减数。
+    DERIVED：派生型（由其他指标再加工），P1 只登记，不参与编译。
+    """
+
+    MEASURE = "MEASURE"
+    RATIO = "RATIO"
+    DIFFERENCE = "DIFFERENCE"
+    DERIVED = "DERIVED"
+
+
+class MetricAggregationOrder(str, Enum):
+    """比率型指标的聚合阶 —— 辛普森悖论开关，两者绝不可混用。
+
+    WEIGHTED_RATIO：SUM(分子)/SUM(分母)（先聚合后相除，加权口径）。
+    AVG_OF_RATIOS：AVG(分子/分母)（先相除后平均，简单平均口径）。
+    NONE：非比率型指标。
+    """
+
+    WEIGHTED_RATIO = "WEIGHTED_RATIO"
+    AVG_OF_RATIOS = "AVG_OF_RATIOS"
+    NONE = "NONE"
+
+
+class MetricExecutionSource(str, Enum):
+    """指标可执行口径的来源 —— 显式枚举，禁止自动嗅探 formula 是不是 SQL。
+
+    COMPILED：由结构化列编译出可执行 SQL（P3 编译器落地后才可用）。
+    ESCAPE_HATCH：ontology_metric.formula 原文就是可执行 SQL（P1/P2 使用）。
+    NONE：无任何可执行路径 ⇒ 不允许 Tier A 直通（可发布，只能走 Tier B）。
+    """
+
+    COMPILED = "COMPILED"
+    ESCAPE_HATCH = "ESCAPE_HATCH"
+    NONE = "NONE"
+
+
+class MetricStatus(str, Enum):
+    """本体指标（技术形态）自身的成熟度。与 KpiStatus（治理状态）不同级。"""
+
+    DRAFT = "DRAFT"
+    PUBLISHED = "PUBLISHED"
+
+
+class MetricSourceRole(str, Enum):
+    """本体指标源类在本口径中扮演的角色。
+
+    「这个类在口径里扮演什么角色」正是当前完全缺失的信息。
+    """
+
+    NUMERATOR = "NUMERATOR"
+    DENOMINATOR = "DENOMINATOR"
+    FILTER = "FILTER"
+    BASE = "BASE"

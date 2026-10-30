@@ -10,14 +10,17 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient
 from neo4j import Driver, GraphDatabase
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
+from app.domain.models import DataSource, KpiCatalog
 from app.infrastructure import database as dbModule
 from app.infrastructure.llm.embedding_provider_factory import resetEmbeddingClientCache
 from app.infrastructure.security import crypto
@@ -164,10 +167,20 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
 
     await seedAgentToolConfigs(dbSession)
     await dbSession.commit()
+    # feat-data-domain-layer：域/层规则 seed 先行（BO seed 的 primary_domain_id
+    # FK 依赖 PROCUREMENT 行；registry warmUp 供 DataDomainCodeType validator 用）
+    from scripts.seed_data_domain import seedDataDomains, seedLayerRules
+
+    await seedDataDomains(dbSession)
+    await seedLayerRules(dbSession)
     # Seed business_object rows so FK targets exist for entity_mapping /
     # feature_definition / document_entity_relation tests (Task 8 FK constraint).
+    # 0133 收紧 header NOT NULL：BO seed 需 ontology_class 解析 header，
+    # 测试库 truncate 后补种最小 header 类集合
+    from app.tests._pg_support import seedHeaderOntologyClasses
     from scripts.seed_business_objects import seedBusinessObjects
 
+    await seedHeaderOntologyClasses(dbSession)
     await seedBusinessObjects(dbSession)
 
     agent_binding_cache.invalidate()
@@ -190,6 +203,14 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
 
     businessObjectRegistry.invalidate()
     await businessObjectRegistry.warmUp(dbSession)
+    # feat-data-domain-layer：域/层规则 registry（validator 同步快路径依赖）
+    from app.services.data_domain_registry import dataDomainRegistry
+    from app.services.layer_rule_registry import layerRuleRegistry
+
+    dataDomainRegistry.invalidate()
+    await dataDomainRegistry.warmUp(dbSession)
+    layerRuleRegistry.invalidate()
+    await layerRuleRegistry.warmUp(dbSession)
     # Phase 1.4：warmUp kpi_match_cache（L1 匹配依赖）
     from app.services.kpi_match_cache import kpi_match_cache
     kpi_match_cache.onKpiChanged()
@@ -202,6 +223,11 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     agent_tool_config_registry.invalidate()
     feature_rule_registry.invalidate()
     businessObjectRegistry.invalidate()
+    from app.services.data_domain_registry import dataDomainRegistry
+    from app.services.layer_rule_registry import layerRuleRegistry
+
+    dataDomainRegistry.invalidate()
+    layerRuleRegistry.invalidate()
     from app.services.kpi_match_cache import kpi_match_cache
     kpi_match_cache.onKpiChanged()
 
@@ -290,3 +316,69 @@ def milvusSeedExternalId(milvusCleanClient):
          "external_id": "obj:metric:5003"},
     ])
     return {"seeded": 3, "external_ids": ["obj:class:5001", "obj:property:5002", "obj:metric:5003"]}
+
+
+# ---------------------------------------------------------------------------
+# KPI Catalog + DataSource fixtures (F2 §5.4)
+# ---------------------------------------------------------------------------
+
+@pytest_asyncio.fixture
+async def seed_data_source(dbSession: AsyncSession) -> DataSource:
+    """F2 §5.4: 默认 is_active=true 的 DataSource fixture。"""
+    ds = DataSource(
+        name="TEST_DS_DEFAULT",
+        type="mysql",
+        host="x", port=3306,
+        database_name="x", username="x",
+        password_encrypted="x",
+        is_active=True,
+    )
+    dbSession.add(ds)
+    await dbSession.commit()
+    await dbSession.refresh(ds)
+    return ds
+
+
+@pytest_asyncio.fixture
+async def seed_inactive_data_source(dbSession: AsyncSession) -> DataSource:
+    """F2 I2: is_active=false 的 DataSource fixture。"""
+    ds = DataSource(
+        name="INACTIVE_TEST_DS",
+        type="mysql",
+        host="x", port=3306,
+        database_name="x", username="x",
+        password_encrypted="x",
+        is_active=False,
+    )
+    dbSession.add(ds)
+    await dbSession.commit()
+    await dbSession.refresh(ds)
+    return ds
+
+
+@pytest_asyncio.fixture
+async def sample_kpi(dbSession: AsyncSession, seed_data_source: DataSource) -> KpiCatalog:
+    """F2 I3: 绑定了 seed_data_source 的 KpiCatalog。"""
+    kpi = KpiCatalog(
+        kpi_code="SAMPLE_KPI_FIXTURE",
+        kpi_name="sample",
+        business_definition="d",
+        formula="SUM(x)",
+        numerator="x",
+        denominator=None,
+        grain="g",
+        unit="u",
+        data_source="legacy_text",
+        owner="o",
+        version="1",  # model: Mapped[str]，不是 int
+        # status 默认 KpiStatus.DRAFT（server_default 也是 DRAFT.value），不传
+        metric_id=None,
+        created_by="u",
+        semantic_keywords=[],
+        match_threshold=Decimal("0.5"),  # Numeric(3,2) → 必须 Decimal
+        datasource_id=seed_data_source.id,
+    )
+    dbSession.add(kpi)
+    await dbSession.commit()
+    await dbSession.refresh(kpi)
+    return kpi

@@ -9,10 +9,15 @@ import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import getSettings
 from app.dependencies import CurrentUser
+from app.domain.agent_orchestration_models import (
+    AgentOrchestrationBinding,
+    AgentOrchestrationProfile,
+)
 from app.domain.enums import AgentToolHandlerKind
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import AgentDefinition, AgentToolConfig
@@ -26,6 +31,8 @@ from app.services.agent_tools import _VALID_HANDLER_REFS
 from app.services.outbox_service import OutboxService
 
 logger = logging.getLogger(__name__)
+
+_ORCHESTRATION_IN_USE_CODE = "agent_tool_in_use_orchestration"
 
 
 def _configRowToDict(row: AgentToolConfig) -> dict:
@@ -52,9 +59,18 @@ class AgentToolConfigService:
         self,
         acl=None,
         outbox: OutboxService | None = None,
+        settings=None,
     ) -> None:
         self._acl = acl
         self._outbox = outbox or OutboxService()
+        # settings 缺省时**在调用点**读 getSettings()（lru_cache）——
+        # 构造期不固化开关值；测试改环境变量后须调用 getSettings.cache_clear()。
+        self._settings = settings
+
+    def _orchestrationEnabled(self) -> bool:
+        """编排特性是否启用（真的读 settings，不硬编码）。"""
+        settings = self._settings if self._settings is not None else getSettings()
+        return bool(settings.enableAgentOrchestration)
 
     # ---- read ----
 
@@ -192,7 +208,7 @@ class AgentToolConfigService:
     ) -> None:
         row = await self.getTool(session, name)
 
-        # 检查 AgentDefinition.tool_name 是否引用此工具
+        # 检查 AgentDefinition.tool_name（历史）与编排 profile 绑定（新）是否引用此工具
         referencing = (
             await session.execute(
                 select(AgentDefinition.agent_code).where(
@@ -200,6 +216,18 @@ class AgentToolConfigService:
                 )
             )
         ).scalars().all()
+        # 编排引用检查：**flag 关闭时完全不查**。编排特性整体停用 ⇒ 这几张表在
+        # 未迁移到 0135 的库上可能根本不存在，查了就是 500（而不是原来的 409/204）。
+        # flag 打开时仍然查，并对「库还没迁移」做 fail-soft（见 _orchestrationReferencing）。
+        orchestrationReferencing: list[str] = []
+        if self._orchestrationEnabled():
+            orchestrationReferencing = await self._orchestrationReferencing(session, name)
+        if orchestrationReferencing:
+            raise _OrchestrationToolInUseConflict(
+                name,
+                sorted(orchestrationReferencing),
+                sorted(referencing),
+            )
         if referencing:
             raise _ToolInUseConflict(name, list(referencing))
 
@@ -217,6 +245,47 @@ class AgentToolConfigService:
             actor_departments=tuple(actor.departments or []),
             payload={"before": before, "after": None},
         )
+
+    async def _orchestrationReferencing(
+        self,
+        session: AsyncSession,
+        name: str,
+    ) -> list[str]:
+        """返回编排 profile 绑定该工具的 Agent codes（任何 enabled 状态都算引用）。
+
+        **fail-soft**：目标库还没升到 0135 时，编排表不存在 ⇒ 查询抛
+        ``ProgrammingError``（relation does not exist）。这时降级为「没有编排
+        引用」，而不是让整个删除请求变成 500。
+
+        **降级不得污染 session**：SQLAlchemy 的 ``ProgrammingError`` 之后当前
+        事务已处于「已中止」状态，不回滚的话后续语句全部失败 ⇒ 整个请求 500。
+        这里用 SAVEPOINT（``session.begin_nested()``）把失败的那条语句圈起来，
+        回滚到 SAVEPOINT 后外层事务仍然可用（见集成测试的同 session 复用断言）。
+        """
+        stmt = (
+            select(AgentDefinition.agent_code)
+            .join(
+                AgentOrchestrationProfile,
+                AgentOrchestrationProfile.agent_id == AgentDefinition.id,
+            )
+            .join(
+                AgentOrchestrationBinding,
+                AgentOrchestrationBinding.profile_id
+                == AgentOrchestrationProfile.id,
+            )
+            .where(AgentOrchestrationBinding.tool_name == name)
+        )
+        try:
+            async with session.begin_nested():
+                rows = (await session.execute(stmt)).scalars().all()
+        except ProgrammingError as error:
+            logger.warning(
+                "编排引用检查失败（编排表可能尚未迁移，视为无引用）: %s",
+                error,
+                exc_info=True,
+            )
+            return []
+        return list(rows)
 
     async def toggleEnabled(
         self,
@@ -297,4 +366,32 @@ class _ToolInUseConflict(ConflictError):
             detail=f"referencingAgents={referencing}",
         )
         self.referencing_agents = referencing
+        self.tool_name = name
+
+
+class _OrchestrationToolInUseConflict(ConflictError):
+    """编排 profile 绑定该工具时抛出（稳定 code + 排序后的 Agent codes）。
+
+    detail 只含 Agent codes 与稳定 code，不含工具配置载荷；历史
+    ``referencingAgents`` 与编排列表可能同时出现。
+    """
+
+    def __init__(
+        self,
+        name: str,
+        orchestrationAgents: list[str],
+        legacyAgents: list[str],
+    ) -> None:
+        sortedOrchestration = sorted(orchestrationAgents)
+        sortedLegacy = sorted(legacyAgents)
+        parts = [_ORCHESTRATION_IN_USE_CODE]
+        if sortedLegacy:
+            parts.append(f"referencingAgents={sortedLegacy}")
+        parts.append(f"orchestrationAgents={sortedOrchestration}")
+        super().__init__(
+            f"agent_tool_config 被 Agent 引用，无法删除: {name}",
+            detail="; ".join(parts),
+        )
+        self.orchestration_agents = sortedOrchestration
+        self.referencing_agents = sortedLegacy
         self.tool_name = name

@@ -54,7 +54,10 @@ async def test_create_object_duplicate_code_raises_conflict(
     with pytest.raises(ConflictError):
         await svc.createObject(
             session,
-            BusinessObjectCreate(code="SUPPLIER", name="供应商"),
+            BusinessObjectCreate(
+                code="SUPPLIER", name="供应商",
+                header_class_id=1, primary_domain_id="PROCUREMENT",
+            ),
             actor="alice",
         )
 
@@ -74,7 +77,8 @@ async def test_create_object_graph_label_mismatch_raises(
             session,
             BusinessObjectCreate(
                 code="SUPPLIER", name="供应商",
-                header_class_id=1, graph_label="Material",  # 不一致
+                header_class_id=1, primary_domain_id="PROCUREMENT",
+                graph_label="Material",  # 不一致
             ),
             actor="alice",
         )

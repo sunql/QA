@@ -14,12 +14,18 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_get_options_returns_vocabulary(client) -> None:
-    """GET /agents/options 返回词表常量；不被 /{agent_code} 路径吞掉。"""
+    """GET /agents/options 返回词表；不被 /{agent_code} 路径吞掉。
+
+    feat-data-domain-layer：registry warmUp 后 layers 来自 data_layer_rule
+    （priority 升序去重，含 FEATURE 手工层），不再只是 3 个常量。
+    """
     res = await client.get("/api/v1/agents/options")
     assert res.status_code == 200
     body = res.json()
-    assert body["domains"] == ["PROCUREMENT", "QUALITY", "LOGISTICS"]
-    assert body["layers"] == ["DIM", "DWD", "FEATURE"]
+    assert body["domains"] == ["LOGISTICS", "PROCUREMENT", "QUALITY"]  # sorted
+    assert body["layers"] == [
+        "ODS_DICT", "ADS", "DWS", "DWD", "DIM", "ODS_BUSINESS", "FEATURE",
+    ]
 
 
 @pytest.mark.asyncio

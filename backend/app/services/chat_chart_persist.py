@@ -11,10 +11,9 @@
 
 from __future__ import annotations
 
-import math
-from datetime import date, datetime
-from decimal import Decimal
 from typing import Any
+
+from app.utils.json_safe import jsonSafe
 
 # TABLE 负载落库时的行数上界。**防御性兜底，不是可调策略**，故按《魔数治理》
 # 「判别不清」档留在源码里（不迁 system_config）：它不是运营想调的边界，是
@@ -48,14 +47,14 @@ def boundedChartOption(chartOption: dict | None) -> dict | None:
 
     TABLE 类负载存的是原始行（`chart_renderer._buildTable` 返回全量 data），
     NUMERIC 列在 SQLAlchemy 手里是 `Decimal`，裸 ``json.dumps`` 会抛
-    ``TypeError`` —— 与 `boundedTableOption` 同走 `_jsonSafe` 归一
+    ``TypeError`` —— 与 `boundedTableOption` 同走 `utils.json_safe.jsonSafe` 归一
     （`Decimal→float`、`datetime/date→isoformat`、dict/list 递归）。ECharts 类
-    （bar/line/pie）渲染器已归一成 float，`_jsonSafe` 原样透传。
+    （bar/line/pie）渲染器已归一成 float，`jsonSafe` 原样透传。
 
     不可变：有归一/截断时才返回新 dict；无变化时原样返回入参（调用方手里那份
     还要发给前端，不能被就地改）。
     """
-    return _jsonSafe(_boundedRows(chartOption))
+    return jsonSafe(_boundedRows(chartOption))
 
 
 def boundedTableOption(tableOption: dict | None) -> dict | None:
@@ -80,7 +79,7 @@ def boundedTableOption(tableOption: dict | None) -> dict | None:
     if not isinstance(tableOption, dict):
         return tableOption
     # 先截后归一：只对保留的那 200 行做 Decimal→float，避免超限时先归一全量再丢弃。
-    return _jsonSafe(_boundedRows(tableOption))
+    return jsonSafe(_boundedRows(tableOption))
 
 
 def _boundedRows(payload: dict | None) -> dict | None:
@@ -101,45 +100,3 @@ def _boundedRows(payload: dict | None) -> dict | None:
         "truncated": True,
     }
 
-
-def _jsonSafe(value: Any) -> Any:
-    """把 SQL 原始值递归归一为 JSON 可序列化值（供 JSONB 落库）。
-
-    不可变：容器只在确有子值发生变化时才重建（无变化时原样返回入参，保持对象
-    同一性，让调用方能把「无归一」与「是同一份对象」划等号）；绝不原地改。标量
-    （str/int/bool/None）原样返回；有限 float 原样返回、非有限 float（NaN/±Infinity）
-    落 `str(value)`（PG jsonb 拒绝裸 NaN/Infinity）；`Decimal→float`（非有限同样落
-    `str`）、`datetime/date→isoformat`；tuple 恒产出 list（类型本身就是变化）；
-    未知类型落 `str(value)`（宁可留个可读痕迹，也不静默丢值）。
-    """
-    if value is None or isinstance(value, (bool, int, str)):
-        return value
-    if isinstance(value, float):
-        # 非有限浮点（NaN/±Infinity）：裸 json.dumps 会输出 NaN/Infinity，而
-        # PostgreSQL 的 jsonb 拒绝（`select '{"v": NaN}'::jsonb` → invalid input
-        # syntax for type json）。与 Task 10 的 Decimal 崩溃同源、触发更窄（NUMERIC
-        # 列里出现 NaN/Infinity）。按本模块「未知类型落 str(value)」的 doctrine 落
-        # 字符串（"nan"/"inf"/"-inf" 一定可序列化）而非 None —— 落 None 会静默丢值，
-        # 违背「宁可留个可读痕迹，也不静默丢值」的既有原则。
-        return value if math.isfinite(value) else str(value)
-    if isinstance(value, Decimal):
-        f = float(value)
-        return f if math.isfinite(f) else str(f)
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    if isinstance(value, dict):
-        changed = False
-        result: dict = {}
-        for key, item in value.items():
-            normalized = _jsonSafe(item)
-            result[key] = normalized
-            if normalized is not item:
-                changed = True
-        return result if changed else value
-    if isinstance(value, (list, tuple)):
-        normalized = [_jsonSafe(item) for item in value]
-        changed = isinstance(value, tuple) or any(
-            newItem is not oldItem for newItem, oldItem in zip(normalized, value)
-        )
-        return normalized if changed else value
-    return str(value)

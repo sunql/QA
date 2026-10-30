@@ -1,110 +1,130 @@
 /**
- * client.ts response interceptor 401 vs 403 split test (audit-fx-2.1 Finding 4).
+ * client.ts response interceptor 401 vs 403 split test (audit-fx-2.1 Finding 4;
+ * 2026-10-25 fix/login-401-white-screen 重写为测真实 createHttpClient 链路).
+ *
+ * 旧版本在测试文件里复刻了一份拦截器逻辑（假绿：真实现坏了照样绿），
+ * 现在通过 axios adapter 桩把 401/403 响应喂给真实拦截器。
  *
  * Covers:
- * - 401 -> localStorage.removeItem("token") + window.location.href = "/auth/login"
- * - 403 -> localStorage and window.location unchanged
- * - 200 / other 4xx -> no side effects
+ * - 401 -> 清 token（localStorage + authStore）+ 拒绝携带 AppError，
+ *   但 **不做 window.location.href 硬跳转**（掉线重定向由 RequireAuth 软跳转负责；
+ *   登录失败由 LoginPage 自己 toast——旧行为硬跳 /auth/login 白屏已删）
+ * - 403 -> localStorage / store / location 均不动
  */
 
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { AxiosError } from "axios";
+import type { InternalAxiosRequestConfig } from "axios";
+import { createHttpClient } from "../client";
+import { useAuthStore } from "../../stores/authStore";
 
-// ---------------------------------------------------------------------------
-// Pure function mirroring the actual interceptor logic from client.ts
-// ---------------------------------------------------------------------------
-
-/** Mirrors the error-handling branch of client.ts response interceptor. */
-function handleResponseError(error: { response?: { status?: number } }): Promise<never> {
-  const status = error.response?.status;
-
-  // 401: token expired -> clear store and redirect to /login
-  if (status === 401) {
-    localStorage.removeItem("token");
-    window.location.href = "/auth/login";
-  }
-
-  // Attach HTTP status for business-level routing (e.g. 403 -> permission modal)
-  const err = new Error("request failed") as Error & { status?: number };
-  if (typeof status === "number") {
-    err.status = status;
-  }
-  return Promise.reject(err);
+/** 造一个拒绝式 adapter：模拟后端返回给定 status + data（config.url 由 axios 填充）。 */
+function makeRejectingAdapter(status: number, data: unknown) {
+  return (config: InternalAxiosRequestConfig) => {
+    const response = {
+      data,
+      status,
+      statusText: String(status),
+      headers: {},
+      config,
+    };
+    return Promise.reject(
+      new AxiosError("Request failed", AxiosError.ERR_BAD_RESPONSE, config, undefined, response)
+    );
+  };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+describe("client.ts response interceptor 401 vs 403（真链路）", () => {
+  // location stub：记录 href 赋值，断言「没有发生硬跳转」；afterEach 恢复原描述符。
+  let assignedHrefs: string[];
+  let locationDescriptor: PropertyDescriptor | undefined;
+  let client: ReturnType<typeof createHttpClient>;
 
-describe("client.ts response interceptor 401 vs 403", () => {
   beforeEach(() => {
     localStorage.setItem("token", "fake-token-12345");
-    // Stub window.location.href to avoid jsdom navigation side effects
-    let href = "";
+    useAuthStore.setState({
+      token: "fake-token-12345",
+      user: null,
+      mustChangePassword: false,
+    });
+    assignedHrefs = [];
+    locationDescriptor = Object.getOwnPropertyDescriptor(window, "location");
     Object.defineProperty(window, "location", {
       value: {
-        href,
-        set href(val: string) { href = val; },
-        get href() { return href; },
+        set href(val: string) {
+          assignedHrefs.push(val);
+        },
+        get href() {
+          return "";
+        },
       },
       writable: true,
       configurable: true,
     });
+    client = createHttpClient();
   });
 
   afterEach(() => {
+    if (locationDescriptor) {
+      Object.defineProperty(window, "location", locationDescriptor);
+    }
     localStorage.clear();
+    useAuthStore.setState({ token: null, user: null, mustChangePassword: false });
   });
 
   describe("401 AuthenticationFailed", () => {
     it("removes token from localStorage", async () => {
-      const error = { response: { status: 401 } as const };
-      await expect(handleResponseError(error)).rejects.toThrow();
+      client.defaults.adapter = makeRejectingAdapter(401, { detail: { code: "AUTH_INVALID" } });
+      await expect(client.get("/anything")).rejects.toMatchObject({ status: 401 });
       expect(localStorage.getItem("token")).toBeNull();
     });
 
-    it("sets window.location.href to /auth/login", async () => {
-      const error = { response: { status: 401 } as const };
-      await expect(handleResponseError(error)).rejects.toThrow();
-      expect(window.location.href).toBe("/auth/login");
+    it("clears authStore token (RequireAuth 由此感知并软跳转 /login)", async () => {
+      client.defaults.adapter = makeRejectingAdapter(401, { detail: { code: "AUTH_INVALID" } });
+      await expect(client.get("/anything")).rejects.toMatchObject({ status: 401 });
+      expect(useAuthStore.getState().token).toBeNull();
     });
 
-    it("rejects with error carrying status 401", async () => {
-      const error = { response: { status: 401 } as const };
-      await expect(handleResponseError(error)).rejects.toMatchObject({ status: 401 });
+    it("does NOT hard-navigate（旧实现跳 /auth/login 白屏，已删）", async () => {
+      client.defaults.adapter = makeRejectingAdapter(401, { detail: { code: "AUTH_INVALID" } });
+      await expect(client.get("/anything")).rejects.toMatchObject({ status: 401 });
+      expect(assignedHrefs).toEqual([]);
+    });
+
+    it("rejects with AppError carrying code + status", async () => {
+      client.defaults.adapter = makeRejectingAdapter(401, { detail: { code: "AUTH_INVALID" } });
+      await expect(client.get("/anything")).rejects.toMatchObject({
+        status: 401,
+        code: "AUTH_INVALID",
+      });
+    });
+  });
+
+  describe("401 on 改密接口（凭证校验失败，非会话过期）", () => {
+    it("does NOT clear token/store — 用户留在改密页自己提示", async () => {
+      client.defaults.adapter = makeRejectingAdapter(
+        401,
+        { success: false, error: "MSG_OLD_PASSWORD_INCORRECT", detail: null }
+      );
+      await expect(client.put("/auth/me/password", {})).rejects.toMatchObject({ status: 401 });
+      expect(localStorage.getItem("token")).toBe("fake-token-12345");
+      expect(useAuthStore.getState().token).toBe("fake-token-12345");
+      expect(assignedHrefs).toEqual([]);
     });
   });
 
   describe("403 PermissionDenied", () => {
     it("does NOT remove token from localStorage", async () => {
-      const error = { response: { status: 403 } as const };
-      await expect(handleResponseError(error)).rejects.toThrow();
+      client.defaults.adapter = makeRejectingAdapter(403, { detail: { code: "FORBIDDEN" } });
+      await expect(client.get("/anything")).rejects.toMatchObject({ status: 403 });
       expect(localStorage.getItem("token")).toBe("fake-token-12345");
+      expect(useAuthStore.getState().token).toBe("fake-token-12345");
     });
 
     it("does NOT change window.location.href", async () => {
-      const error = { response: { status: 403 } as const };
-      await expect(handleResponseError(error)).rejects.toThrow();
-      expect(window.location.href).toBe("");
-    });
-  });
-
-  describe("other status codes", () => {
-    it("200 does NOT remove token", async () => {
-      const error = { response: { status: 200 } as const };
-      await expect(handleResponseError(error)).rejects.toMatchObject({ status: 200 });
-      expect(localStorage.getItem("token")).toBe("fake-token-12345");
-    });
-
-    it("404 does NOT remove token", async () => {
-      const error = { response: { status: 404 } as const };
-      await expect(handleResponseError(error)).rejects.toMatchObject({ status: 404 });
-      expect(localStorage.getItem("token")).toBe("fake-token-12345");
-    });
-
-    it("500 does NOT remove token", async () => {
-      const error = { response: { status: 500 } as const };
-      await expect(handleResponseError(error)).rejects.toMatchObject({ status: 500 });
-      expect(localStorage.getItem("token")).toBe("fake-token-12345");
+      client.defaults.adapter = makeRejectingAdapter(403, { detail: { code: "FORBIDDEN" } });
+      await expect(client.get("/anything")).rejects.toMatchObject({ status: 403 });
+      expect(assignedHrefs).toEqual([]);
     });
   });
 });

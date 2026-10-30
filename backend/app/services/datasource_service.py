@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
 from app.dependencies import CurrentUser
-from app.domain.exceptions import NotFoundError, ValidationError
-from app.domain.models import DataSource
+from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
+from app.domain.models import DataSource, KpiCatalog
 from app.domain.schemas import (
     DataSourceCreate,
     DataSourceTestRequest,
@@ -29,6 +30,7 @@ from app.infrastructure.security.crypto import decryptApiKey, encryptApiKey
 from app.services.audit_service import AuditService
 from app.services.messages_zh import (
     MSG_DATASOURCE_CONNECT_FAILED,
+    MSG_DATASOURCE_HAS_KPI_BINDINGS,
     MSG_DATASOURCE_HOST_ALLOWLIST_DETAIL,
     MSG_DATASOURCE_HOST_NOT_ALLOWED,
     MSG_DATASOURCE_NAME_EXISTS,
@@ -189,6 +191,18 @@ class DataSourceService:
         actor: CurrentUser | None = None,
     ) -> None:
         """硬删除数据源并释放适配器；若删除的是默认源则提升首个启用源为默认。"""
+        # F2 §4.3: 删前查 KPI 引用计数，>0 抛 409
+        ref_count_result = await session.execute(
+            select(func.count()).select_from(KpiCatalog).where(
+                KpiCatalog.datasource_id == datasourceId
+            )
+        )
+        ref_count = ref_count_result.scalar_one()
+        if ref_count > 0:
+            raise ConflictError(
+                MSG_DATASOURCE_HAS_KPI_BINDINGS.format(id=datasourceId, count=ref_count)
+            )
+
         ds = await self.get(session, datasourceId)
         wasDefault = ds.is_default
         before_state = _datasourceToDict(ds)
@@ -203,7 +217,18 @@ class DataSourceService:
             before=before_state,
         )
         await session.delete(ds)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            # 计数查询与删除之间的并发竞态：KPI 在窗口期内绑定了该源，
+            # FK RESTRICT 在 commit 时兜底。映射为 409 而不是 500（计数可能过期，
+            # 至少 1 个引用是确定的）。
+            await session.rollback()
+            raise ConflictError(
+                MSG_DATASOURCE_HAS_KPI_BINDINGS.format(
+                    id=datasourceId, count=max(ref_count, 1)
+                )
+            ) from exc
         await dispose_adapter(datasourceId)
         logger.info("删除数据源 id=%s", datasourceId)
 

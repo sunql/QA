@@ -1,6 +1,6 @@
 import { httpClient } from "./client";
 import { API_BASE_URL } from "../config";
-import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery, StepPlanOverviewItem, StepPlanView, StepResultView, StreamChartData, StreamDataQualityPayload, StreamSummary, TablePayload, VisualRationale } from "../types/chat";
+import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallInfo, DataQualityBadge, HypothesisView, QueryPlan, SimilarQuery, TablePayload, VisualRationale } from "../types/chat";
 import { i18n } from "../i18n";
 import { authHeaders } from "./authHeaders";
 import { asChartOption, asTablePayload, asVisualRationale, normalizeChartType } from "../utils/chartContract";
@@ -253,7 +253,9 @@ export interface StreamEventHandlers {
   onChart?: (chart: StreamChartData) => void;
   onToken?: (content: string) => void;
   onDone?: (summary: StreamSummary) => void;
-  onError?: (message: string, detail?: string) => void;
+  // errorType（P2-1）：后端细分错误类型（permission / provider_transient / ...），
+  // 供 UI 差异化降级；系统边界原始字符串，渲染前必须过白名单。
+  onError?: (message: string, detail?: string, errorType?: string) => void;
   // 多步：完整计划概览 / 单个子步骤计划（进入执行）/ 单个子步骤结果
   // runId：Task 6 起 multi_step_plan 事件携带；单步路径不发 ⇒ undefined
   onStepPlanOverview?: (steps: StepPlanOverviewItem[], runId?: string) => void;
@@ -384,7 +386,8 @@ function dispatchFrame(frame: { event: string; data: string }, handlers: StreamE
     case "error":
       handlers.onError?.(
         typeof d.error === "string" ? d.error : i18n.t("errors.unknownError"),
-        typeof d.detail === "string" ? d.detail : undefined
+        typeof d.detail === "string" ? d.detail : undefined,
+        typeof d.errorType === "string" ? d.errorType : undefined
       );
       break;
     case "multi_step_plan":

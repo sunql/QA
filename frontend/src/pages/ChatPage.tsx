@@ -101,8 +101,8 @@ export default function ChatPage() {
   // 故首次自动加载只就地改 datasourceId；后续用户主动改 datasource（必然 datasourceId 已
   // 非 null 且新 id 不同）才走 chatStore 的「全新会话」语义。
   const handlePanelDatasourceChange = useCallback(
-    (id: number) => {
-      if (datasourceId === null) {
+    (id: number | null) => {
+      if (id !== null && datasourceId === null) {
         useChatStore.setState({ datasourceId: id });
         return;
       }

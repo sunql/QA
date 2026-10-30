@@ -271,7 +271,8 @@ async def main() -> None:
         ).scalar() or 0
     adapter = get_adapter(ds.id, ds)
     try:
-        ok, msg = await adapter.test()
+        # test() 自版本探测起返回 3 元组 (ok, msg, server_version)，第三项此脚本不消费
+        ok, msg, _server_version = await adapter.test()
         if not ok:
             raise RuntimeError(f"THBI 联通失败: {msg}")
         async with factory() as session:

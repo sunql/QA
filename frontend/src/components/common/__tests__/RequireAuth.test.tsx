@@ -1,9 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { MemoryRouter, useLocation, Outlet, Route, Routes } from "react-router-dom";
+import { MemoryRouter, useLocation, Route, Routes } from "react-router-dom";
 import RequireAuth from "../RequireAuth";
 import { useAuthStore } from "../../../stores/authStore";
 import type { AuthMeRead } from "../../../types/auth";
+
+// fix/login-401-white-screen（2026-10-25）：mustChangePassword 重定向目标与
+// 白名单统一改为 App.tsx 真实路由 /change-password（旧 /auth/change-password
+// 是不存在的路径 → 白屏）。
 
 const mockUser: AuthMeRead = {
   id: 1,
@@ -63,7 +67,7 @@ describe("RequireAuth", () => {
           <Route element={<RequireAuth />}>
             <Route path="/some-business-page" element={<TestOutlet />} />
           </Route>
-          <Route path="/auth/change-password" element={<div>change-password page</div>} />
+          <Route path="/change-password" element={<div>change-password page</div>} />
         </Routes>
         <LocationProbe />
       </MemoryRouter>
@@ -71,7 +75,7 @@ describe("RequireAuth", () => {
     expect(screen.getByTestId("probe-path").textContent).toBe("/some-business-page");
   });
 
-  it("redirects to /auth/change-password when mustChangePassword=true on a non-allowed path", () => {
+  it("redirects to /change-password when mustChangePassword=true on a non-allowed path", () => {
     useAuthStore.setState({ token: "valid-token", user: mockUserMustChange, mustChangePassword: true });
     render(
       <MemoryRouter initialEntries={["/some-business-page"]}>
@@ -79,37 +83,37 @@ describe("RequireAuth", () => {
           <Route element={<RequireAuth />}>
             <Route path="/some-business-page" element={<TestOutlet />} />
           </Route>
-          <Route path="/auth/change-password" element={<div>change-password page</div>} />
+          <Route path="/change-password" element={<div>change-password page</div>} />
         </Routes>
         <LocationProbe />
       </MemoryRouter>
     );
-    expect(screen.getByTestId("probe-path").textContent).toBe("/auth/change-password");
+    expect(screen.getByTestId("probe-path").textContent).toBe("/change-password");
   });
 
-  it("does NOT redirect when mustChangePassword=true but path is /auth/change-password", () => {
+  it("does NOT redirect when mustChangePassword=true but path is /change-password", () => {
     useAuthStore.setState({ token: "valid-token", user: mockUserMustChange, mustChangePassword: true });
     render(
-      <MemoryRouter initialEntries={["/auth/change-password"]}>
+      <MemoryRouter initialEntries={["/change-password"]}>
         <Routes>
           <Route element={<RequireAuth />}>
-            <Route path="/auth/change-password" element={<TestOutlet />} />
+            <Route path="/change-password" element={<TestOutlet />} />
           </Route>
           <Route path="/login" element={<div>login page</div>} />
         </Routes>
         <LocationProbe />
       </MemoryRouter>
     );
-    expect(screen.getByTestId("probe-path").textContent).toBe("/auth/change-password");
+    expect(screen.getByTestId("probe-path").textContent).toBe("/change-password");
   });
 
-  it("redirects to /login when token=null even on /auth/login (not /auth/change-password)", () => {
+  it("redirects to /login when token=null even on /change-password", () => {
     useAuthStore.setState({ token: null, user: null, mustChangePassword: false });
     render(
-      <MemoryRouter initialEntries={["/auth/login"]}>
+      <MemoryRouter initialEntries={["/change-password"]}>
         <Routes>
           <Route element={<RequireAuth />}>
-            <Route path="/auth/login" element={<TestOutlet />} />
+            <Route path="/change-password" element={<TestOutlet />} />
           </Route>
           <Route path="/login" element={<div>login page</div>} />
         </Routes>

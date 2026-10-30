@@ -162,7 +162,7 @@ async def test_l1_feature_calc_path_records_evidence(
             is_enabled=True,
         )
     )
-    dbSession.add(KpiCatalog(kpi_code="L1_HOOK", kpi_name="L1钩子指标", formula=sqlText))
+    dbSession.add(KpiCatalog(kpi_code="L1_HOOK", kpi_name="L1钩子指标", formula=sqlText, datasource_id=ds.id))
     await dbSession.commit()
 
     kpi = (

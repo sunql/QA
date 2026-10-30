@@ -3,18 +3,38 @@ import { CaretRightOutlined, CodeOutlined, QuestionCircleOutlined } from "@ant-d
 import type { HypothesisView } from "../../types/chat";
 import { useTranslation } from "../../i18n";
 
+// 验证状态是数据库字符串（系统边界）：白名单收窄后再拼 i18n key，
+// 未知值回落到「待验证」——绝不把原始 key / 未知枚举值渲染给用户。
+const KNOWN_VERIFICATION_STATUSES = new Set([
+  "pending",
+  "supported",
+  "contradicted",
+  "inconclusive",
+  "execution_failed",
+]);
+
+const VERIFICATION_STATUS_COLORS: Record<string, string> = {
+  pending: "default",
+  supported: "green",
+  contradicted: "red",
+  inconclusive: "orange",
+  execution_failed: "default",
+};
+
+function asVerificationStatus(status: string | null | undefined): string {
+  return status && KNOWN_VERIFICATION_STATUSES.has(status) ? status : "pending";
+}
+
 function renderVerificationStatus(
   status: string | null | undefined,
   t: (key: string) => string,
 ): JSX.Element {
-  const colorMap: Record<string, string> = {
-    supported: "green",
-    contradicted: "red",
-    inconclusive: "orange",
-    execution_failed: "default",
-  };
-  const i18nKey = status ? `chat.hypothesis.status.${status}` : "chat.hypothesis.status.pending";
-  return <Tag color={colorMap[status || ""] || "default"}>{t(i18nKey)}</Tag>;
+  const known = asVerificationStatus(status);
+  return (
+    <Tag color={VERIFICATION_STATUS_COLORS[known]}>
+      {t(`chat.hypothesis.status.${known}`)}
+    </Tag>
+  );
 }
 
 const { Paragraph, Text } = Typography;

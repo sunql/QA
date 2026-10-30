@@ -1,0 +1,813 @@
+# 变更：feat-agent-orchestration
+
+- **日期**：2026-10-28
+- **作者**：Claude
+- **Phase**：Phase 6.6 通用多工具 Agent 编排
+- **状态**：in-review
+- **关联变更**：无前序（本特性自成一条线；底座沿用 [[../../wiki/agent-runtime]] 记录的既有 Agent 运行时）
+- **迁移版本**：`0135_agent_orchestration`（revision `0135`，down_revision `0134`）
+- **MEMORY**：`qa-system-general-agent-orchestration.md`
+
+---
+
+## 1. 需求
+
+**背景**：平台上的 Agent 一直是「**一个 Agent 绑一个工具**」（`agent_definition.tool_name`
+FK-by-name）。一个 Agent 想先查 360° 视图、再做风险评估、再做图推理，只能拆成三个
+Agent 分别跑，或者塞进 chat 让 L4 自由发挥——后者不受预算/只读/ACL 的硬约束管，
+也无法回放轨迹。
+
+**目标**：让一个 Agent 能**按顺序调用多个只读工具**，并且每一步都留下可回放的
+轨迹、可核算的 token/成本、可审计的 ACL 判定。
+
+**做完是什么样（用户视角）**：
+
+1. 管理员在「编排配置」页给某个 Agent 写一段编排指令、勾几个**只读**工具、
+   设预算上限；保存后配置是**停用**的，显式点「启用」才生效。
+2. 业务用户在「编排任务」页发起一次任务，看到它从 `QUEUED` → `RUNNING` →
+   `SUCCEEDED`，右侧时间线逐步列出「规划了什么、调了哪个工具、观察到什么」。
+3. 工具调用受**只读白名单**（7 个 handler）+ **分层 ACL**（deny-by-default）约束；
+   越权不是报错，而是**暂停**并等管理员补授权。
+4. 预算（迭代数 / 工具调用数 / 成本 / 超时）任一触顶 ⇒ 暂停，可带增量预算恢复。
+
+**验收标准**：
+
+- 既有 Agent 的行为**零变化**（设计稿 §2 的非回归底线）；
+- 新能力**默认关闭**（`ENABLE_AGENT_ORCHESTRATION=false`），关闭时不注册路由、不起 Worker；
+- 只允许 7 个只读 handler；
+- 新代码覆盖率 ≥ 80%；
+- 真实 PostgreSQL 上跑通「建配置 → 建 run → 快照只含只读工具 → 清理」全链路。
+
+**非目标**（本特性明确不做）：不接 NL2SQL 写工具、不接外部 HTTP 工具、
+不做并行工具调用、不做多租户编排、不改 `agent_definition` 的既有字段。
+
+---
+
+## 2. 设计评审
+
+### 2.1 候选方案对比
+
+| 维度 | 方案 A：扩展 L4 Agent Loop | 方案 B：**独立第三条执行路径**（采纳） | 方案 C：配置驱动的 L4 变体 |
+|---|---|---|---|
+| 形态 | 在 `run_agent_loop` 里加「多工具」分支 | 新建 `agent_orchestration_runner` + **独立 Worker 进程** + 5 张新表 | 仍走 `run_agent_loop`，用 `profile` 表下发参数 |
+| 既有 L4 回归风险 | **高**——L4 是 chat 的降级路径，改它会牵动 chat / NL2SQL / 计量 | **零**——物理分流，L4 一行未改 | **高**——同 A，只是把参数外置 |
+| 状态/轨迹 | 复用 L4 的内存态，**无法回放**（L4 的 step 不落库） | 独立 `run` / `step` / `usage` 三张表，**可回放、可核算** | 仍不可回放 |
+| 执行进程 | 复用 API 进程（长任务占住请求/事件循环） | 独立 Worker（`profiles` 门控，不发布端口，不被 `depends_on` 拉起） | 复用 API 进程 |
+| 只读/预算/ACL 边界 | 与 NL2SQL 工具混在同一套判定里，难证明「只有 7 个 handler」 | **服务端唯一判定点** `assertOrchestrationToolValid`（enabled + BUILTIN + 白名单 + schema） | 与 A 同 |
+| 失败恢复 | L4 的「异常收敛为正常返回」语义会掩盖编排的暂停/恢复需求 | 独立状态机 `QUEUED/RUNNING/PAUSED/SUCCEEDED/FAILED/CANCELLED` + 租约 + `resume` | 无暂停概念 |
+| 交付成本 | 低 | **高**（5 张表 + Worker + 2 套前端 + 9 个端点） | 中 |
+| 结论 | ❌ 违反非回归底线 | ✅ **采纳** | ❌ 继承了 A 的全部缺点，又没拿到 B 的可回放性 |
+
+**最终决定**：**方案 B**。代价是交付量大，收益是「既有功能零行为变化」这条底线
+**在架构上就是成立的**（物理分流，不是靠约定维持）。落地时用三条机制把代价压下去：
+
+1. **默认关闭**（`ENABLE_AGENT_ORCHESTRATION=false`）：特性出厂即下线，
+   灰度由人按 [手册](deploy-gray-rollout.md) 手动开。
+2. **只读白名单硬编码**（`READ_ONLY_HANDLER_REFS`，7 项）＋ **schema-only 阶段 0**：
+   编排侧的第一波动作**只补 `input_schema`**，一个 `enabled` 都不翻 ⇒
+   既有 legacy Agent 行为零变化（见 §7 已知限制 12）。
+3. **复用既有只读 handler 与既有 ACL**：不新写工具实现，ACL 直接调
+   `AgentRuntimeService.enforcePolicies`。
+
+### 2.2 多视角意见
+
+| 视角 | 结论 | 落点 |
+|---|---|---|
+| `security-reviewer` | approved-with-deferred：0 CRITICAL / 0 HIGH / **3 MEDIUM** / 8 LOW | 3 个 MEDIUM 全部进灰度手册的 **PRE-ENABLE CHECKLIST**（现对应 P1–P3） |
+| `code-reviewer` | changes-requested：0 Critical / **2 Important** / 11 Minor | I1（灰度手册阶段 0 会改变既有 Agent 行为）→ **本变更已修**（手册 §2.5 + §9 坑 12）；I2（`_replayTool` 未捕获 `PlannerProtocolError`）→ 已在修复轮次修掉 |
+| 实现方 | 「多工具 + 可回放 + 预算」三件事必须成对出现，缺一就是半成品 | 采纳独立表 + 独立 Worker |
+
+> **编号说明（可追溯性用）**：表里的 `I1` / `I2` 是**开发期代码评审的发现编号**，
+> 只为可追溯性记录在这里；原始评审报告是开发期产物、不随仓库存档。
+> **每处都自带完整描述**（括号里就是描述）⇒ **不需要任何外部文档就能读懂**。
+> 本文件其它地方出现的 `M<n>`（安全 MEDIUM / 代码评审 Minor）与 `L<n>`（安全 LOW）
+> 同理，说明见本文件 §7 的「编号说明」。
+
+---
+
+## 3. 数据模型变更
+
+**只新增，不改既有表**（设计稿 §2.2）。既有 6 张 Agent 相关表
+（`agent_definition` / `agent_access_policy` / `agent_tool_config` / `agent_schedule` /
+`agent_run_log` / `session_token_usage`）的**字段、约束、语义全部不变**。
+
+新增 5 张表（ORM 见 `backend/app/domain/agent_orchestration_models.py`）：
+
+| 表 | 用途 | 关键约束 / 索引 |
+|---|---|---|
+| `agent_orchestration_profile` | 一个 Agent 一份编排配置（1:1） | `uq_agent_orchestration_profile_agent`；`ck_…_limits`、`ck_…_revision` |
+| `agent_orchestration_binding` | profile ↔ 工具绑定（1:N） | `uq_agent_orchestration_binding_tool`（`profile_id`+`tool_name`）；`ck_…_sort_order`。**不存 handler_ref** |
+| `agent_orchestration_run` | 一次编排运行 | `uq_agent_orchestration_run_run_id`；`ix_…_status_id`（Worker 扫队列）、`ix_…_creator_time`、`ix_…_agent_time` |
+| `agent_orchestration_step` | 运行的逐步轨迹（PLAN / TOOL） | `ix_agent_orchestration_step_run_step`（`run_id`,`step_no`） |
+| `agent_orchestration_usage` | 计量台账（run 级 + 每步） | 无索引（**已知缺口**，见 §7 限制 9） |
+
+**迁移文件**：`backend/alembic/versions/0135_agent_orchestration.py`
+
+- **文件主干（stem）** = `0135_agent_orchestration`（**24 字符**）；文件名含 `.py` 为 **27 字符**；
+- **revision id** = `0135`（**4 字符**），`down_revision` = `0134`
+  （线性接在 `0134_data_layer_rule` 之后）；
+- `alembic_version.version_num` 是 `varchar(32)` ⇒ **三个值（4 / 24 / 27 字符）都在约束内**。
+
+> **回滚口径**：`0135` 的 downgrade 会 **DROP 这 5 张表** ⇒ 回滚**不做 downgrade**，
+> 而是「停 Worker + 把 `ENABLE_AGENT_ORCHESTRATION` 改回 `false`」，表留着无害
+> （没有路由就没有写入）。
+
+**CheckConstraint 变化**：无（既有表的约束一个没动；新表自己的约束见上表）。
+
+**部分索引**：无。
+
+**既有表的数据改动**：**零**。唯一被写到的既有表是 `agent_tool_config`，
+且**只改 `input_schema`、不改 `enabled`**（阶段 0，见 §8 与灰度手册 §2.5）；
+`input_schema` 对 legacy 路径**无副作用**（`AgentToolAssembly.assemble` 只把它拷进
+描述符，legacy 入参来自 `arg_extractor`）。
+
+---
+
+## 4. 接口契约变更
+
+### 4.1 新增端点（flag 开启时共 9 条路径）
+
+配置面 `/api/v1/agent-orchestrations`：
+
+| Method | Path | 成功码 | 说明 |
+|---|---|---|---|
+| POST | `/api/v1/agent-orchestrations` | **201** | 建 profile；**创建后一律 `enabled=false`** |
+| GET | `/api/v1/agent-orchestrations` | 200 | 列当前用户可见的 profile |
+| GET | `/api/v1/agent-orchestrations/tool-options` | 200 | 列当前有效的可编排工具（**不含 `handlerRef`**） |
+| GET | `/api/v1/agent-orchestrations/{agentCode}` | 200 | 查单个 profile |
+| PUT | `/api/v1/agent-orchestrations/{agentCode}` | 200 | 全量更新（带 `revision` 乐观锁） |
+| POST | `/api/v1/agent-orchestrations/{agentCode}/toggle` | 200 | 显式启停 |
+
+运行面 `/api/v1/agent-runs`：
+
+| Method | Path | 成功码 | 说明 |
+|---|---|---|---|
+| POST | `/api/v1/agent-runs` | **202** | 建 run ⇒ `{ runId, status: "QUEUED" }` |
+| GET | `/api/v1/agent-runs` | 200 | 列当前用户自己的 run |
+| GET | `/api/v1/agent-runs/{runId}` | 200 | 查 run 详情 |
+| GET | `/api/v1/agent-runs/{runId}/steps` | 200 | 轨迹（`afterStepNo` 为**闭区间下界**） |
+| POST | `/api/v1/agent-runs/{runId}/resume` | **202** | 恢复 `PAUSED` 的 run |
+| POST | `/api/v1/agent-runs/{runId}/cancel` | 200 | 取消（`RUNNING` 只标记 `cancelRequested`） |
+
+DTO 契约见 `backend/app/domain/agent_orchestration_schemas.py`：
+请求模型一律 `extra="forbid"`（多带字段 ⇒ 422）；**系统上限不在 DTO 里重复**，
+由 service 层按 `Settings` 校验。
+
+### 4.2 状态机（新增，不影响既有状态机）
+
+| status | 含义 | 终态 |
+|---|---|---|
+| QUEUED | 排队等 Worker 领 | 否 |
+| RUNNING | Worker 持有租约执行中 | 否 |
+| PAUSED | 因 `pause_code` 暂停，可 `resume` | 否 |
+| SUCCEEDED | 正常完成 | 是 |
+| FAILED | 失败（`errorCode`/`errorMessage` 有原因） | 是 |
+| CANCELLED | 已取消 | 是 |
+
+`pause_code`：`NEEDS_INPUT` / `AMBIGUOUS` / `PERMISSION_DENIED` / `BUDGET_EXHAUSTED` /
+`TOOL_FAILED` / `PLANNER_OUTPUT_INVALID` / `AGENT_UNAVAILABLE` / `INFRASTRUCTURE_ERROR`。
+
+### 4.3 既有契约：**服务端不变；客户端渲染的失败文案有变（见 §4.4）**
+
+`AgentDefinitionCreate/Update/Read`、`AgentRunRequest/AgentRunRead`、
+`/agents/options`、既有 run API 的**服务端**状态码/错误码/错误消息——
+**一律不变**。
+既有 `POST /api/v1/agents/{code}/run` 仍只执行原 `tool_name`（原字段为空仍按旧规则 409）。
+
+⚠️ **前端渲染的失败文案不是「一律不变」**：既有页面（AgentRegistryPage /
+AgentRuntimePage / **ChatPage**）都走共享的 `frontend/src/api/client.ts`，而本分支
+改了它的 `normalizeError` ⇒ 这些页面在失败时**显示的文案**会变（响应体顶层
+`error` 优先于 axios 的「Request failed with status code NNN」）。**服务端契约没变，
+变的是客户端把同一个响应渲染成什么字**。这是**修 bug 而不是回归**：仓内
+`frontend/src/tests/client.test.ts` 本分支**未改**，它既有的两条用例
+（「HTTP 错误时优先使用响应体 error 消息」/「把 status 挂到 reject Error 上供业务页分流」）
+在分支基线上就是红的（base 9 红 → 分支 7 红）——基线的 `normalizeError` 没能满足
+仓里自己的测试。详见本文件 §4.4。
+
+### 4.4 ⚠️ 超出设计稿 §9.3 允许范围的改动（必须记账）
+
+**`frontend/src/api/client.ts` 的 `normalizeError` 改了**：现在会把**响应体顶层
+`error` 字段**抬升进 `AppError.message`。
+
+- **为什么必须改**：后端的 `ErrorResponse` 是 `{ success, error, detail }`，
+  `detail` 恒为 `null`、`AppError.code` 对所有 DomainError 恒为 `UNKNOWN`
+  ⇒ 前端拿不到任何可读的失败原因。抬升 `error` 是让编排页能显示后端真实报错
+  （如「工具已禁用：wiki_search」）的**最小改法**。
+- **影响面**：这是**共享模块**，全站所有走 `httpClient` 的请求都受影响。
+- **评审结论**：改动本身合理（顺带修掉 3 个既有前端红），但**必须显式记账**，
+  因为它超出了设计稿 §9.3 声明的「前端只新增、不改既有接线」的范围。
+- **记账位置**：本节 + [验证报告](../../../docs/superpowers/plans/2026-10-26-general-agent-orchestration-verification.md)。
+
+---
+
+## 5. 实现要点
+
+### 5.1 关键文件
+
+| 角色 | 路径 |
+|---|---|
+| 配置面 service | `backend/app/services/agent_orchestration_config_service.py` |
+| 运行面 service | `backend/app/services/agent_orchestration_run_service.py` |
+| 执行器（循环本体） | `backend/app/services/agent_orchestration_runner.py`（+ `…_runner_support.py` / `…_run_views.py`） |
+| Planner | `backend/app/services/agent_orchestration_planner.py` |
+| 工具准备与执行 | `backend/app/services/agent_orchestration_tool_executor.py` |
+| 校验（唯一判定点） | `backend/app/services/agent_orchestration_validation.py` |
+| 存储 / 租约 | `backend/app/services/agent_orchestration_store.py` |
+| 计量 | `backend/app/services/agent_orchestration_metering.py` / `…_cost.py` |
+| 类型与枚举 | `backend/app/services/agent_orchestration_types.py` / `backend/app/domain/agent_orchestration_schemas.py` |
+| ORM | `backend/app/domain/agent_orchestration_models.py` |
+| API | `backend/app/api/v1/agent_orchestrations.py` / `backend/app/api/v1/agent_runs.py` |
+| Worker | `backend/app/workers/agent_orchestration_worker.py` |
+| 开关 | `backend/app/config.py`（`ENABLE_AGENT_ORCHESTRATION`，默认 `false`） |
+| 路由注册 | `backend/app/main.py`（flag 关闭则**不 include_router**） |
+| 前端页面 | `frontend/src/pages/AgentOrchestrationPage.tsx` / `AgentTaskPage.tsx` |
+| 前端 API / 类型 | `frontend/src/api/agentOrchestrationApi.ts` / `frontend/src/types/agentOrchestration.ts` / `agentTask.ts` |
+| 轮询 hook | `frontend/src/components/agent/task/useAgentRunTracker.ts` |
+| compose 契约 | `docker/docker-compose.yml` 的 `agent-orchestration-worker`（`profiles: [agent-orchestration]`） |
+| 菜单脚本 | `backend/scripts/seed_agent_orchestration_menu.py` |
+| 真实数据脚本 | `backend/scripts/feat_agent_orchestration_realdata.py`（入口：S1–S10 与主流程）<br>`backend/scripts/feat_agent_orchestration_realdata_lib.py`（常量、DSN 解析、PASS/FAIL/SKIP 输出）<br>`backend/scripts/feat_agent_orchestration_realdata_db.py`（数据库访问 helper：工具行适配、快照/还原、前置条件自建行、清理） |
+
+### 5.2 关键算法
+
+**① 工具可用性判定（唯一判定点，两条路径共用，不得各自实现）**
+`assertOrchestrationToolValid(config, toolName)`
+（`agent_orchestration_validation.py:99-105`）：
+
+```
+enabled == true
+  AND handler_kind == BUILTIN
+  AND handler_ref ∈ READ_ONLY_HANDLER_REFS（7 项）
+  AND validateObjectSchema(input_schema) 通过
+```
+
+`validateObjectSchema` 要求：根 `type == "object"`、`properties` 是对象、
+`additionalProperties` 为 `false` 或缺省 ⇒ **`{}` 不合法**（这正是阶段 0 存在的理由）。
+
+**② 执行链路（服务端是所有权限与协议决策的最终边界）**
+
+```
+Planner 只提出下一步动作（CALL_TOOL / FINISH / ASK_USER），不直接执行工具
+  → 快照绑定校验 _assertSnapshotBinding
+  → 绑定存在且启用 _loadEnabledBinding
+  → 工具当前可用   _loadEnabledToolConfig + _assertReadOnlyBuiltin
+  → 入参 JSON Schema 校验 _validateArgs
+  → 解析工具       _resolveTool（registry.reload_one）
+  → 分层 ACL       _enforceAcl（复用 enforcePolicies，deny-by-default）
+  → 执行 handler（唯一调用点 PreparedTool.tool.handler）
+  → Observation + step + usage 落库
+```
+
+**③ 租约与恢复**
+Worker 领走 run 时写 `lease_owner` / `lease_until`（默认 60s）；
+`renewLease` 要求「owner + RUNNING + 租约仍有效」三条件；租约过期由
+`_recoverOneExpired` 回收重排队。所有写入都走 `_lockLeasedRun` ⇒ 陈旧租约无法提交。
+
+**④ 注入防御**
+run 的 `instructions` 与 Planner 输出都过 `prompt_sanitizer`
+（`wrapUntrusted` + security preamble，L1 注入防御）。
+
+**⑤ 计量**
+每次 LLM 调用（Planner / 工具内部）都落 `agent_orchestration_usage` 一行
+（`caller_type` 区分 PLANNER / TOOL）；run 级汇总带 `cost_source`
+（`MEASURED` / `ESTIMATED` / `UNKNOWN` / `MIXED`）与 `cost_complete`。
+
+**⑥ 依赖注入点**
+FastAPI `Depends(getCurrentUser)`（全部 9 条路由**强制鉴权**）、
+`Depends(getDb)`、`Depends(getAgentOrchestrationConfigService)` /
+`Depends(getAgentOrchestrationRunService)`；`POST /agent-runs`、`/resume`、`/cancel`
+另带 `@limiter.limit(rateLimitValue)`。
+
+---
+
+## 6. 测试
+
+### 6.1 新增测试
+
+| 层次 | 文件 |
+|---|---|
+| 单元 | `test_agent_orchestration_schemas.py`、`test_agent_orchestration_validation.py`、`test_agent_orchestration_tool_executor.py`、`test_agent_orchestration_planner.py`、`test_agent_orchestration_metering.py`、`test_agent_orchestration_worker.py`、`test_agent_orchestration_runner.py`、`test_agent_orchestration_runner_failures.py`、`test_agent_orchestration_runner_recovery.py`、`test_agent_orchestration_runner_recovery_pause.py` |
+| 集成（真实 PostgreSQL） | `test_agent_orchestration_config_api.py`、`test_agent_orchestration_config.py`、`test_agent_orchestration_acceptance.py`、`test_agent_orchestration_route_auth.py`、`test_agent_orchestration_tool_delete.py`、`test_agent_orchestration_worker_claim.py`、`test_agent_runs_api*.py`（create / list / read_acl / steps / resume / cancel / history_audit）、`test_agent_orchestration_menu_seed.py` |
+| 前端单测 | `src/tests/agentOrchestrationApi.test.ts`、`AgentOrchestrationPage.test.tsx`、`AgentTaskPage.test.tsx`、`AgentRunTimeline.test.tsx`、`App.test.tsx` |
+| 前端 E2E（**浏览器级 mock**） | `e2e/agent-orchestration.spec.ts`（4 条，**green**） |
+
+关键场景覆盖：只读白名单拒绝、schema 校验拒绝 `{}`、禁用工具拒绝（422
+「工具已禁用：wiki_search」）、ACL 拒绝转 `PERMISSION_DENIED` 暂停、预算触顶暂停与
+`resume`、租约过期回收、崩溃重放、重复工具调用幂等、他人 run 一律 404、注入防御、
+计量四类 `cost_source`、菜单播种幂等。
+
+### 6.2 质量门禁（实测输出见[验证报告](../../../docs/superpowers/plans/2026-10-26-general-agent-orchestration-verification.md)）
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| backend lint | `backend/.venv/bin/ruff check <14 个新文件>` | `All checks passed!`（exit 0） |
+| 前端类型 | `npx tsc -p tsconfig.json --noEmit` | exit 0 |
+| E2E 类型 | `npx tsc -p e2e/tsconfig.json --noEmit` | exit 0 |
+| 后端集成 session | 12 个编排定向测试文件（独立 session） | **84 passed** |
+| 后端单测 session | 12 个编排定向测试文件（独立 session） | **253 passed** |
+| 前端定向 vitest | 6 个 Task-16 测试文件 | `Test Files 6 passed (6)` / `Tests 78 passed (78)` |
+| **新代码覆盖率** | 18 个显式编排模块（integration + unit 两个 session，`--cov-append`，**命令见验证报告 §2.1**） | **2220 stmts / 172 miss / 92.25%**（门槛 ≥80%） |
+
+> **为什么必须分两个 pytest session**：集成与单测的 seed fixture 会对**同一个共享测试库**
+> 做 TRUNCATE/INSERT，混在一个 session 里会撞出 1 failed + 9 ERRORS（`UniqueViolationError`
+> on `uq_feature_rule_scope_code`、`ForeignKeyViolationError` on
+> `fk_business_object_primary_domain`）—— 那是**争用**，不是分支缺陷（两位评审独立复现、
+> 结论一致）。因此按隔离 session 分别跑再取并集，并在报告里写明原因。
+>
+> 当前 HEAD 独立复测（18 个显式模块）：`TOTAL 2220 stmts / 172 miss / 92%`，
+> `Required test coverage of 80.0% reached. Total coverage: 92.25%`。
+> **可复算的门禁口径以验证报告 §2.1 的显式模块命令为准**。旧的 15 模块
+> `94.44%` 清单未存档、不可复算；旧的 17 模块 `94.60%` 是最终修复前的历史测量。
+> 不能用带引号的 `--cov=..._*` 简写：coverage 会把 `*` 当字面模块名并漏测，
+> 因此当前命令逐一列出 18 个模块。
+
+**净新增失败 = 0**（与基线 `4d4114bb` 对比，同一套测试库，从不并发跑）：
+
+| 套件 | 分支 | 基线 | 结论 |
+|---|---|---|---|
+| 后端全树 `pytest app/tests` | 1 failed | 1 failed（同一个 `test_chat_service.py::TestChatService::test_class_filter_logs_successful_pruning`） | **净新增 0**（既有失败：`pytest_sessionstart` 先挂 2 个 root handler，导致 `seed_ontology.py:37` 的 `logging.basicConfig` 变成 no-op，root logger 停在 WARNING，测试断言的 INFO 记录从未发出） |
+| 前端 vitest 全量 | 195 文件 / 1851 测试，**7 failed** | 191 文件 / 1773 测试，**9 failed** | **净新增 0**（7 ⊂ 9；7 个是 `client.test.ts`(1) / `kpiCatalogApi.test.ts`(1) / `ontologyApi.test.ts`(5)） |
+| Playwright（mock） | **27 failed / 1 skipped / 5 passed**（33 测试，11 spec） | **27 failed / 1 skipped / 1 passed**（29 测试，10 spec） | **净新增 0**（失败用例名清单**完全一致**，27 = 27，空 diff；本分支新增的 4 条 `agent-orchestration.spec.ts` 全绿） |
+
+---
+
+## 7. 安全审查
+
+**已触发 `security-reviewer`**（触发条件：认证、用户输入、外部 API 调用、SQL/DB 写入）。
+评审对象：`git diff 4d4114bb...HEAD`。
+
+**结论：approved-with-deferred — 0 CRITICAL / 0 HIGH / 3 MEDIUM / 8 LOW**
+（LOW 8 条中**已归档到下方「已知限制」清单的是 7** 条；**L6 未归档**，原始安全评审报告
+为开发期产物、不随仓库存档）。
+10 条安全不变量全部 PASS，11 条对抗性检查全部 PASS（带 file:line 取证）。
+
+> **编号说明（可追溯性用）**：本节与 §7.1 里出现的 `M1`–`M3`（安全评审的 MEDIUM）、
+> `L1`–`L8`（安全评审的 LOW）以及「代码评审 `M4`–`M11`」是**开发期评审的发现编号**，
+> 只为让评审结论可追溯而记录在这里；它们的原始评审报告是开发期产物、不随仓库存档。
+> **每一行都自带完整描述**（事实 + 影响 + 处置）⇒ **不需要任何外部文档就能读懂**，
+> 编号本身不承载额外信息。
+
+| 严重度 | 编号 | 摘要 | 处置 |
+|---|---|---|---|
+| **MEDIUM** | M1（= 代码评审 M10） | **只读白名单的 TOCTOU**：白名单断言在 `prepare()` 读到的**第一份**行上（`agent_orchestration_tool_executor.py:90-91`），而真正执行的 handler 从**第二次**读取装配（`_resolveTool` → `registry.reload_one`，同文件 `:253`）。两次读之间管理员改 `handler_ref` 即绕过。**当前不可利用**（唯一非白名单 handler `nl2sql_default` 是惰性占位符），**一旦接上 NL2SQL 就变成可利用路径** | **已实证不可利用**（当前）+ **前提条件**：评审在真实 PG 上实测两个会话下 `expire_on_commit=False` 的 identity map 让第二次读拿到**同一行版本** ⇒ 断言过的行与执行的行在**同一 session 的 identity map 下**自洽。**前提条件**：两次读之间**没有别的会话**改这一行 `handler_ref` ⇒ **一旦接上 NL2SQL / 一旦允许跨会话并发改 `handler_ref`** 就变成可利用路径。⇒ 登记为灰度手册 **PRE-ENABLE CHECKLIST P1**，生产开 flag 前必须关闭 |
+| **MEDIUM** | M2（= 代码评审 M4） | **租约只在轮边界续**：`renewLease` 全仓库只被调用一次（`agent_orchestration_runner.py:156-168`，调用点 `:162`）；编排路径的 LLM 客户端**无显式 timeout**（沿用 OpenAI SDK 默认读超时 600s），租约默认 60s ⇒ 单轮慢于 60s 就丢租约 ⇒ 回收重排队 ⇒ 该轮重做（重复 LLM 花费；`getOrCreatePlanStep` 复用 RUNNING 的 PLAN 行且**不**累加 `iteration_count`，`max_iterations` 约束不到）。写入侧安全（都走 `_lockLeasedRun`） | **待修**（**不是已处置**）—— 尚未修复；已登记为灰度手册 PRE-ENABLE CHECKLIST 的 **P2**，**启用前必须关闭**；在此之前**保持 `ENABLE_AGENT_ORCHESTRATION=false`**（本特性出厂即关，业务不受影响）。**缓解窗口**：慢于租约（默认 `AGENT_ORCHESTRATION_LEASE_SECONDS=60`）的工具调用在多 Worker 部署下会被第二个 Worker 并发重放（重复执行 + 重复 LLM 花费）；灰度期间按**单 Worker + 只跑只读快工具**部署，并把租约调大到覆盖最长工具耗时 |
+| **MEDIUM** | M3（= 代码评审 M11） | **Planner 工具目录无长度/数量上界**：`agent_orchestration_planner.py:371-410`（`_buildMessages` / `_reduceToolCatalog`）把目录原样拼进 system prompt；`agent_tool_config.description` 是无界 `Text`，`tool_names` 无元素个数上限 | **待修**（**不是已处置**）—— 尚未修复；已登记为灰度手册 PRE-ENABLE CHECKLIST 的 **P3**，**启用前必须关闭**；在此之前**保持 `ENABLE_AGENT_ORCHESTRATION=false`**（本特性出厂即关，业务不受影响）。**缓解窗口**：灰度期间由管理员把工具目录控制在白名单规模（`READ_ONLY_HANDLER_REFS` 的 **7** 个）以内，避免 `description` / `inputSchema` 膨胀 |
+| LOW × 8 | L1–L8 | 见下方「已知限制」第 6 / 8 / 9 / 10 / 11 项（对应 L1 / L2 / L3 / L4 / L5 / L7 / L8 共 **7** 条；**L6 尚未归档到下方清单**，原始安全评审报告为开发期产物、不随仓库存档） | 记入下方清单 |
+
+**MEDIUM 的处置口径**：三项**都是「待修 + 已登记为启用前闸门」**——
+M1 为**已实证不可利用（当前）+ 前提条件**，M2 / M3 为**尚未修复**；
+**「登记进 PRE-ENABLE CHECKLIST」不等于「已处置」**。本特性**出厂即关闭**，
+生产开 flag 是人工操作 ⇒「待修」不等于「不可上线」；三项写进
+[灰度手册](deploy-gray-rollout.md)的 **PRE-ENABLE CHECKLIST（阶段 3.5）**
+（M1 ⇒ P1、M2 ⇒ P2、M3 ⇒ P3），作为**生产启用前必须逐项关闭的闸门**；
+若本轮灰度前关不掉 ⇒ **保持 `ENABLE_AGENT_ORCHESTRATION=false`**（业务不受影响），
+挂账走独立变更。
+
+### 7.1 已知限制清单（11 项 + 1 条部署纪律）
+
+| # | 限制 | 事实与影响 |
+|---|---|---|
+| 1 | **用户可见的暂停文案仍归咎于 Planner** | 崩溃重放路径复用既有 `PLANNER_OUTPUT_INVALID`（**故意不新增 `PauseCode` 成员**——那是 API 契约变更）。**服务端日志**明说「崩溃重放的工具参数不再合法（工具配置已变更，需重新规划）」，但**用户可见**文案仍点名 Planner。缓解：枚举 / i18n / API 契约零变更 |
+| 2 | **`timeout_seconds` 是「每次尝试」的窗口，不是「整条 run」的窗口** | `started_at` 在每次 claim 和每次 resume 时被重置。`max_iterations` / `max_tool_calls` 仍是**累计**的，所以 run 整体仍有界。（代码评审 M5） |
+| 3 | **前端硬编码了系统上限** | 前端写死 20 / 30 / 5 USD / 900 / 1000-50000，而 `backend/app/config.py` 允许用 `AGENT_ORCHESTRATION_MAX_*` 覆盖 ⇒ 覆盖过的部署出现 UI 边界漂移。服务层仍按 `assertWithinSystemCeilings` 兜底 ⇒ **只是 UI 边界漂移**。（代码评审 M6） |
+| 4 | **两套并行的 status 分流 + 两份 i18n 键族** | `describeFailure`（`frontend/src/components/agent/useOrchestrationProfiles.ts:62-78`，按 status 分流，用 `agentOrchestration.*` 键）与 `describeError`（`frontend/src/components/agent/task/errors.ts:30-45`，同样按 status 分流，用 `agentTask.*` 键）是**两套独立实现**：同一种 status 在两处各自映射到各自的语言包键。**不是** `errorStatus` / `errorDetailText` 的重复定义（那两个函数只在 `errors.ts` 定义一次，别处只是 import）。（代码评审 M7） |
+| 5 | **`resumeRun` 吞掉自身异常** | `frontend/src/components/agent/task/useAgentRunTracker.ts:224-226`（`useCallAction` 的 catch 把异常转成 `setActionError`，`resumeRun` 因此**正常 resolve**）⇒ 恢复被拒（409 / 422）时 `frontend/src/components/agent/task/useResumeActions.ts:46-51` 的 `reset()` 仍执行，用户填的输入丢失。（代码评审 M8） |
+| 6 | **`wiki_search` 的 embedding 花销落在 `wiki_token_usage`，不在 `agent_orchestration_usage`** | ⇒ 用了 `wiki_search` 的 run 是**双台账**，只看编排表**不足以**判定成本完整。（安全 L7） |
+| 7 | **被消费的 step 行不写 `finished_at`** | `_consumeSteps` 只把它标成 `SKIPPED`。这是**三条消费路径共有的既有行为**，不是本次新开的口子 |
+| 8 | **`cancelRun` 断言 owner 但不校验 `lease_until > now`**；`GET /{agentCode}` **没有 owner/admin 过滤**（列表端点有） | （安全 L1 / L4） |
+| 9 | **缺 DB 级唯一索引** | `(run_id, iteration_no, kind)` 没有唯一索引；`agent_orchestration_usage` 没有 `run_id` 索引（按 run 聚合会全表扫）。（安全 L2 / L3） |
+| 10 | **`tool_names` 无 `max_length`，`agent_tool_config.description` 是无界 `Text`** | （安全 L5 / M3；与 M3 同源） |
+| 11 | **两条前端路由无条件注册** | 不进 feature flag ⇒ 特性关闭时页面仍能打开（只是数据接口 404），没有专门的「特性未启用」页态。（安全 L8） |
+| 12（部署纪律） | **阶段 0 的 `enabled` 开关会改变既有 legacy Agent 的可运行性** | 4 个 wiki 工具绑在 4 个 `status=active` 的既有 Agent 上（`WIKI_SEARCH_AGENT` id 6 / `WIKI_READ_AGENT` id 7 / `WIKI_RULE_AGENT` id 8 / `WIKI_COVERAGE_AGENT` id 9）；legacy registry 只装载 `enabled=true` 的行（`agent_tool_config_registry.py:33,79`），否则 409（`agent_runtime_service.py:165-178`）。⚠️ **前提是分支式的**：「这 4 行 `enabled=false`」是**历史行状态**，**不是**本仓 seed 的产物（本仓 seed 会把全部 **7** 个工具写成 `enabled=true`）——**实测为 `false`** ⇒ 这 4 个 Agent 今天 409 不可运行，翻开关 = 4 个 Agent 从「409 不可运行」变「真的执行」；本波次（**只补 schema**）成立，翻开关推到**后续波次单独审批**。**实测为 `true`** ⇒ 这 4 个 legacy Agent **本来就在执行**，本波次**只需补 schema**，并把「它们本来就是启用的」写进灰度验收记录。**处置**：第一波**只补 schema**，翻开关推到**后续波次单独审批**（见[灰度手册 §2.5](deploy-gray-rollout.md)、§9 坑 12） |
+
+---
+
+## 8. 部署验证
+
+> **本特性未部署到生产。** 灰度是**人工执行的手册**
+> （[deploy-gray-rollout.md](deploy-gray-rollout.md)），由用户/运维在生产机上执行；
+> 本仓只交付「工件 + 手册」。下列冒烟**全部在本地隔离环境**完成。
+
+### 8.1 compose 冒烟（特性**关闭** ⇒ Worker **没起来**）
+
+命令（在含 `docker-compose.yml` + `docker-compose.centos.yml` 的目录下；
+`.env` 用**假的**合成文件，不碰真 `docker/.env`）：
+
+```bash
+# ① 默认部署：Worker 不在服务清单里
+docker compose -f docker-compose.yml -f docker-compose.centos.yml config --services
+
+# ② 显式开 profile：Worker 才出现
+docker compose -f docker-compose.yml -f docker-compose.centos.yml \
+  --profile agent-orchestration config --services
+
+# ③ 没有任何编排容器在跑
+docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep agent-orchestration
+
+# ④ 不带 profile 时，离线镜像清单里也没有 Worker 镜像
+docker compose -f docker-compose.yml -f docker-compose.centos.yml config --images
+```
+
+输出：
+
+```
+=== ① 默认 config --services ===
+neo4j
+ollama
+postgres
+qa-objects
+milvus-minio
+milvus-etcd
+milvus-standalone
+backend
+frontend
+mysql-demo
+--- worker 命中数 ---
+0
+
+=== ② --profile agent-orchestration config --services ===
+postgres
+milvus-etcd
+milvus-minio
+milvus-standalone
+neo4j
+backend
+frontend
+qa-objects
+agent-orchestration-worker
+mysql-demo
+ollama
+--- worker 命中数 ---
+1
+
+=== ③ docker ps agent-orchestration ===
+0
+(0 = 没有编排容器在跑)
+=== ④ config --images（不带 profile）===
+0
+```
+
+⇒ **默认 `up` 永不包含 Worker**；Worker 只在显式 `--profile agent-orchestration` 时存在。
+
+### 8.2 端点冒烟（`/openapi.json` + 真实 HTTP）
+
+**（a）进程内枚举**（`createApp().openapi()`）：
+
+```bash
+cd backend
+ENABLE_AGENT_ORCHESTRATION=false ./.venv/bin/python openapi_smoke.py false
+ENABLE_AGENT_ORCHESTRATION=true  ./.venv/bin/python openapi_smoke.py true
+```
+
+```
+=== feature-OFF ===
+flag = false
+total_paths = 252
+orchestration_paths = 0
+json_dump = []
+
+=== feature-ON ===
+flag = true
+total_paths = 261
+orchestration_paths = 9
+   /api/v1/agent-orchestrations ['get', 'post']
+   /api/v1/agent-orchestrations/tool-options ['get']
+   /api/v1/agent-orchestrations/{agentCode} ['get', 'put']
+   /api/v1/agent-orchestrations/{agentCode}/toggle ['post']
+   /api/v1/agent-runs ['get', 'post']
+   /api/v1/agent-runs/{runId} ['get']
+   /api/v1/agent-runs/{runId}/cancel ['post']
+   /api/v1/agent-runs/{runId}/resume ['post']
+   /api/v1/agent-runs/{runId}/steps ['get']
+```
+
+**（b）真实 HTTP 实例**（uvicorn 跑在 `127.0.0.1:8099`，连**隔离测试库**
+`localhost:5436/qa_metadata_test` 与 `bolt://localhost:7688`）：
+
+```bash
+curl -s http://127.0.0.1:8099/openapi.json \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); p=sorted(d['paths']); print('total_paths =',len(p)); print('orchestration_paths =',len([x for x in p if 'agent-orchestration' in x or 'agent-runs' in x]))"
+
+for p in /api/v1/agent-orchestrations /api/v1/agent-runs; do
+  printf '%s -> ' "$p"; curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:8099$p"
+done
+```
+
+```
+=== feature-OFF openapi ===
+total_paths = 252
+orchestration_paths = 0
+[]
+=== feature-OFF 端点冒烟（期望 404）===
+/api/v1/agent-orchestrations -> 404
+/api/v1/agent-runs -> 404
+
+=== feature-ON openapi ===
+total_paths = 261
+orchestration_paths = 9
+   /api/v1/agent-orchestrations
+   /api/v1/agent-orchestrations/tool-options
+   /api/v1/agent-orchestrations/{agentCode}
+   /api/v1/agent-orchestrations/{agentCode}/toggle
+   /api/v1/agent-runs
+   /api/v1/agent-runs/{runId}
+   /api/v1/agent-runs/{runId}/cancel
+   /api/v1/agent-runs/{runId}/resume
+   /api/v1/agent-runs/{runId}/steps
+=== feature-ON 端点冒烟（期望 200，stub auth）===
+/api/v1/agent-orchestrations -> 200
+/api/v1/agent-runs -> 200
+=== tool-options body ===
+[]
+```
+
+> `tool-options` 返回 `[]` 是**正确**的：隔离测试库里 7 个工具的 `input_schema` 全是 `{}`
+> （阶段 0 之前的状态），`validateObjectSchema` 判它们全部不可绑定。
+> 这正是「阶段 0 必须先做」的证据。
+>
+> **判据必须是 404 而不是 401**：flag 关闭时路由**没注册**，请求不会进入鉴权依赖；
+> 用「没带 token 所以 401」当证据是典型的假绿。
+
+### 8.3 真实数据验证脚本输出
+
+脚本：`backend/scripts/feat_agent_orchestration_realdata.py`（入口）
++ `feat_agent_orchestration_realdata_lib.py`（常量 / DSN 解析 / 判定输出）
++ `feat_agent_orchestration_realdata_db.py`（数据库访问 helper）。
+（**幂等**：自建行按 marker 删除后重建；**不翻任何 `enabled`**；既有 6 张表行数前后比对；
+阶段 0 改写的 3 行 `input_schema` **在退出前写回原值**）。
+
+#### 目标库与命令（**canonical**）
+
+**canonical 目标 = 隔离测试库 `localhost:5436/qa_metadata_test`**（**不是** dev 库
+`5433/qa_metadata`，**更不是**生产）。脚本的 DSN 解析顺序（先命中先用）：
+
+1. `AGENT_ORCHESTRATION_REALDATA_DATABASE_URL`
+2. `TEST_DATABASE_URL`（仓内标准测试变量；**本次用的就是它**）
+3. `DATABASE_URL`
+4. `PG*`（`PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE`），
+   **默认端口 5436 / 默认库 `qa_metadata_test`**
+
+⚠️ **裸跑默认落到隔离库只在「环境里没有 `DATABASE_URL`」时成立**：`DATABASE_URL`
+会按上面的顺序被命中，而开发者的 shell 里通常正导出着 dev 库的
+`DATABASE_URL=…@localhost:5433/qa_metadata` ⇒ 裸跑会指向 **dev 库**。
+因此脚本在**接触数据库之前**有硬守卫：目标库名**不以 `qa_metadata_test` 开头**
+⇒ **拒绝运行**（写 stderr、非零码退出、一个字节都不写）；只有用
+`AGENT_ORCHESTRATION_REALDATA_DATABASE_URL` 显式覆盖时才放行（那是操作者自己的选择）。
+
+⚠️ **因此开发者的 shell 里若导出了 dev 库的 `DATABASE_URL`，脚本会直接拒绝运行**
+（写 stderr + 非零码退出，**不连库、不写任何东西**）——这是**预期的保护**，不是脚本坏了。
+§8.3 的调用命令显式给了 `TEST_DATABASE_URL='…@localhost:5436/qa_metadata_test'`，
+而 `TEST_DATABASE_URL` 在解析顺序里**排在 `DATABASE_URL` 之前** ⇒ **按文档调用不会触发拒绝**。
+
+> ⚠️ 脚本**会写库**（并在退出前还原）⇒ **只允许指向隔离实例**。
+
+```bash
+cd backend
+TEST_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5436/qa_metadata_test' \
+  ./.venv/bin/python scripts/feat_agent_orchestration_realdata.py
+```
+
+> ⚠️ `<user>` / `<pwd>` 是**占位符**：把它换成隔离测试库的真实账号与口令。
+> 口令**不要**写进仓库、`.env` 或任何文档；本文档里出现的 `qa_user:***@…` 是**打码**形态
+> （脚本自己的 `TARGET` 输出也是这个形态），照抄 `***` 是**认证失败**的。
+
+#### 前置条件与 SKIP 语义
+
+脚本**只**断言与本特性自身相关的行为。目标库种子不满足前提时，该步骤输出
+`SKIP  <步骤> — <缺什么>` —— **不是** `FAIL`：
+
+- `SKIP` 表示「**本步骤在当前库上无法执行**」，它**既不等于通过、也不等于失败**；
+  库的种子状态不是脚本的缺陷。**退出码只由 `FAIL` 决定**，`SKIP` **不进**失败清单。
+- ⚠️ **有跳过步骤的运行不会说「all steps passed」**：结尾汇总会另外打印
+  `NOTE  M step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失败）` 并逐项列出
+  被跳过的步骤；**只有 0 失败且 0 跳过时**才会打印 `OK  all steps passed`。
+  退出码仍然只由 `FAIL` 决定（`SKIP` 不影响退出码）——「跳过不是通过」由**汇总文案**
+  表达，而不是靠改退出码。
+- `S7` 需要一个 `status='active'` 且尚无编排 profile 的 `agent_definition`：
+  库里没有 ⇒ 脚本**自建**一个（退出时删除）；自建失败 ⇒ 按异常类型判定
+  （前置条件形态 ⇒ `SKIP`；其它异常 ⇒ `FAIL`）。
+- `S8` 需要一个 `is_active` 的 `llm_config`：库里没有 ⇒ 脚本**自建**一个
+  （退出时删除）；自建失败 ⇒ 按异常类型判定（前置条件形态 ⇒ `SKIP`；
+  其它异常 ⇒ `FAIL`）。
+- `S4` 的「禁用工具被拒」分支：`assertOrchestrationToolValid` 是**纯函数**
+  （只读行的 5 个字段、不碰 DB），所以脚本拿**真实行的副本**置 `enabled=False`
+  来验证禁用分支，**不写库**；输出会明说这一点。
+- `S6` 断言的是「**脚本没有翻转任何 `enabled`**」——这个不变量在**任何**库上都成立；
+  判定文本会报出**观测到的运行前状态**（不同库种子不同，wiki 工具可能是
+  `enabled=true` 也可能是 `false`）。
+- `S5` 的「写入 N 行」按 UPDATE 的**实际命中行数**汇报：第一波只写 `enabled=true`
+  的行，某个工具被禁用 ⇒ 该行**没写成** ⇒ 按「未写入 + 原因」汇报
+  （`SKIP S5 schema-only 修复 — 实际写入 2 行，未写入 1 行：…`），
+  **绝不**声称写了没写的行。此时 `S6` 会因该工具不可编排而 `FAIL`（运行**不是**绿的）。
+- **SKIP 与 FAIL 的分类依据是异常的具体类型**：`NotFoundError` / `ConflictError` /
+  `ValidationError`（库种子不满足）⇒ `SKIP` 并写明缺什么；**其它**异常 ⇒ `FAIL`
+  （脚本或环境的缺陷，必须暴露）。
+  这条规则覆盖 **5 处分类点**，分两类：① **服务调用**（建 profile / toggle / 建 run）
+  ——`realdata.py` 的 3 处（`:476` / `:521` / `:574`）；② **准备前置条件**
+  （自建 ACTIVE Agent / 启用的模型配置）——`_db.py` 的 2 处（`:365` / `:394`）
+  ——`IntegrityError` / `OperationalError` 这类**真缺陷**在这里会记 `FAIL`
+  （退出码非零），**不会**被当成「库种子不满足」蒙混成 `SKIP`。
+  **其它步骤（S1/S2/S3/S4/S5/S6/S9/S10 与退出前的清理块）没有这一层分类**：那里冒出
+  未预期异常会**以未捕获的 traceback 直接冒出来**（`main()` 只有 `try/finally`、
+  没有 `except`）——这是**刻意的**：脚本不吞异常，缺陷必须显形。（`S3` / `S4` 只
+  捕获 `ValidationError` 当作**预期被拒的断言**，**不是** SKIP/FAIL 分类；那里冒出
+  **其它**异常，同样以未捕获的 traceback 冒出来。）
+
+#### 本次运行（两次连续运行，**完整 stdout，逐行未删改**）
+
+目标（脚本自己打印的第 1 行，口令已打码）：
+
+```
+TARGET  postgresql+asyncpg://qa_user:***@localhost:5436/qa_metadata_test  (from TEST_DATABASE_URL)
+MARKER = feat-agent-orchestration-realdata
+------------------------------------------------------------------------
+PASS  S1 迁移版本 — version_num=0135 (期望 0135)
+PASS  S1 五张新表 — 存在 5/5
+PASS  S2 既有表基线行数 — agent_definition=0, agent_access_policy=0, agent_tool_config=7, agent_schedule=0, agent_run_log=0, session_token_usage=0
+PASS  S3 空 schema 被拒 — ValidationError: tool input schema root type must be 'object'
+PASS  S3 合法 schema 通过 — supplier_360 的 §2.3 schema 被接受
+      wiki_search 真实行 enabled=True（脚本全程不写 enabled）
+PASS  S4 禁用工具被拒 — message=工具已禁用：wiki_search (期望 '工具已禁用：wiki_search')；针对真实行的副本置 enabled=False 验证禁用分支（未写库）
+      supplier_360: input_schema {} -> {"type": "object", "properties": {"key": {"type": "string"}}, "additionalProperties": false}（enabled 保持 True 未改）
+      supplier_risk: input_schema {} -> {"type": "object", "properties": {"key": {"type": "string"}}, "additionalProperties": false}（enabled 保持 True 未改）
+      graph_traverse: input_schema {} -> {"type": "object", "properties": {"key": {"type": "string"}}, "additionalProperties": false}（enabled 保持 True 未改）
+PASS  S5 schema-only 修复 — 实际写入 3 行（enabled 未翻转；退出前会还原）
+PASS  S6 三个已启用工具可编排 — supplier_360=True, supplier_risk=True, graph_traverse=True
+PASS  S6 脚本没有翻转任何 enabled — wiki_search: pre enabled=True → now enabled=True；wiki_read: pre enabled=True → now enabled=True；rule_evaluate: pre enabled=True → now enabled=True；coverage_status: pre enabled=True → now enabled=True（脚本全程不写 enabled；观测到的运行前状态如上，不同库种子不同——enabled=true 的库说明该库把 wiki 工具种成了启用态）
+PASS  S6 只读白名单仍是 7 项 — READ_ONLY_HANDLER_REFS=['coverage_status', 'graph_traverse', 'rule_evaluate', 'supplier_360', 'supplier_risk', 'wiki_read', 'wiki_search']
+      使用 Agent：REALDATA_ORCHESTRATION_AGENT（脚本自建（退出时删除））
+PASS  S7 profile 创建后为停用 — agent=REALDATA_ORCHESTRATION_AGENT enabled=False revision=1
+PASS  S7 绑定的是三个只读工具 — bindings=['graph_traverse', 'supplier_360', 'supplier_risk']
+PASS  S7 toggle 后启用且 revision=2 — enabled=True revision=2
+      使用模型配置：id=4（脚本自建（退出时删除））
+PASS  S8 run 创建为 QUEUED — run_id=343cab6b-0f61-4c41-8c70-d844070b7dfc status=QUEUED
+PASS  S8 run_id 非空 — run_id=343cab6b-0f61-4c41-8c70-d844070b7dfc
+PASS  S8 快照只含只读白名单工具 — snapshot_tools=['graph_traverse', 'supplier_360', 'supplier_risk']（无任何写工具）
+      run_id=343cab6b-0f61-4c41-8c70-d844070b7dfc（由本脚本创建；Worker 若在跑会接手该 run）
+PASS  S9 feature-off 时新路由缺席 — /openapi.json 中的编排路径 = []
+      删除自建 run: run_id=343cab6b-0f61-4c41-8c70-d844070b7dfc status=QUEUED
+      删除自建 profile: agent_id=4 enabled=True revision=2
+PASS  S10 自建行已清理 — 自建 run / profile / Agent / 模型配置均已删除
+PASS  S10 阶段 0 schema 已还原 — 3 行 input_schema 已写回运行前的原值
+PASS  S2 既有表行数前后一致 — 六张既有表行数无变化
+------------------------------------------------------------------------
+OK  all steps passed
+```
+
+**运行 2** —— 同一条命令紧接着再跑一次，**退出码 `0`**，stderr 为空，
+stdout 与运行 1 **逐行一致**，除了三个每次必然不同的自增/随机值：
+
+| 差异处 | 运行 1 | 运行 2 |
+|---|---|---|
+| S8 的模型配置 id | `id=4` | `id=5` |
+| S8 的 `run_id` | `343cab6b-0f61-4c41-8c70-d844070b7dfc` | `137c8f7f-b41b-45f2-83bf-244ff89f00ec` |
+| S10 打印的 `agent_id` | `agent_id=4` | `agent_id=5` |
+
+**幂等的口径**：**连续两次运行 ⇒ 退出码相同 + PASS/SKIP 集合相同**
+（`FAIL` 集合为空）。实测：
+
+| | 退出码 | PASS | FAIL | SKIP | PASS/SKIP 集合 |
+|---|---|---|---|---|---|
+| 运行 1 | `0` | 20 | 0 | 0 | 见上 |
+| 运行 2 | `0` | 20 | 0 | 0 | **与运行 1 完全一致**（`diff` 为空） |
+
+> **本次两次运行都没有出现 `SKIP` 行** —— 隔离库已种好 7 个内置工具、脚本又能自建
+> ACTIVE Agent 与启用的模型配置，所以 S4/S6/S7/S8 都**真正执行**了。
+> 若在别的库上跑而出现 `SKIP`，那一行会写明缺什么（见上方「SKIP 语义」）。
+
+> **非 canonical 观察（旧记录）**：本特性交付时曾在 **dev 库 `5433/qa_metadata`** 上
+> 跑过一次并得到全 PASS。该次运行**不是** canonical 证据——脚本自己的规矩是
+> 「绝不碰 dev 库」，而那次运行**永久改写了 3 行 `input_schema` 且没有还原**
+> （当前版本的脚本会在退出前把写过的 `input_schema` 写回原值，不再留残留）。
+> 该次记录**已被上面的隔离库证据取代**。
+>
+> ⚠️ **dev 库至今仍带着那次旧运行留下的残留**：那 3 行
+> （`supplier_360` / `supplier_risk` / `graph_traverse`）的 `input_schema` 仍是当时
+> 写入的值。**这是刻意不清理的**——本特性不碰 dev 库，清理动作超出本变更范围
+> （残留本身是良性的：schema-only 正是灰度手册阶段 0 规定的动作）。
+
+#### 这次运行证明了什么
+
+- **只读性质**：run 的工具快照只含 3 个只读工具，**没有任何写工具**；
+- **禁用路径**：针对**真实行的副本**置 `enabled=False` ⇒ 后端自己的 422
+  「工具已禁用：wiki_search」—— 走的是 `assertOrchestrationToolValid` 的 disabled
+  分支，**没有改动任何数据**（输出里明说了这一点）；
+- **既有功能零变化**：六张既有表的行数前后一致；7 个工具的 `enabled`
+  **全程未被翻转** ⇒ 既有 legacy Agent 的可运行性不变；
+- **库回到运行脚本前的状态**：自建的 run / profile / Agent / 模型配置 / 审计 outbox
+  行全部删除（实测残留计数全为 0），阶段 0 改写的 3 行 `input_schema`
+  **已写回运行前的原值**（实测运行后这 3 行仍是 `{}`）—— **零残留**；
+- **幂等**：见上表（两次运行退出码相同、PASS/SKIP 集合相同）。
+
+#### 前置条件不满足时的行为（**单独实测**，非 canonical 运行）
+
+为了验证「**准备前置条件**不满足 ⇒ `SKIP` 而不是 traceback」，在**同一个隔离测试库**上
+临时把第一波工具 `supplier_360` 置成 `enabled=false` 跑了一次，**跑完立刻改回
+`enabled=true`**（改前改后都核验过：7 个工具全部 `enabled=true`、
+`input_schema` 全部 `{}`、其余表零残留）。下面是这次运行的**关键输出摘录**
+（**不是完整 stdout**——完整 stdout 只在上面那次 canonical 运行里给）：
+
+```
+      supplier_360: 未写入（UPDATE 命中 0 行；该行 enabled=False）
+      supplier_risk: input_schema {} -> {"type": "object", "properties": {"key": {"type": "string"}}, "additionalProperties": false}（enabled 保持 True 未改）
+      graph_traverse: input_schema {} -> {"type": "object", "properties": {"key": {"type": "string"}}, "additionalProperties": false}（enabled 保持 True 未改）
+SKIP  S5 schema-only 修复 — 实际写入 2 行，未写入 1 行：supplier_360（该行 enabled=False；第一波只写 enabled=true 的行）（库种子前置条件未满足；本步骤在当前库上无法完整执行）
+FAIL  S6 三个已启用工具可编排 — supplier_360=False, supplier_risk=True, graph_traverse=True
+PASS  S6 脚本没有翻转任何 enabled — wiki_search: pre enabled=True → now enabled=True；wiki_read: pre enabled=True → now enabled=True；rule_evaluate: pre enabled=True → now enabled=True；coverage_status: pre enabled=True → now enabled=True（脚本全程不写 enabled；观测到的运行前状态如上，不同库种子不同——enabled=true 的库说明该库把 wiki 工具种成了启用态）
+PASS  S6 只读白名单仍是 7 项 — READ_ONLY_HANDLER_REFS=['coverage_status', 'graph_traverse', 'rule_evaluate', 'supplier_360', 'supplier_risk', 'wiki_read', 'wiki_search']
+      使用 Agent：REALDATA_ORCHESTRATION_AGENT（脚本自建（退出时删除））
+SKIP  S7 编排 profile — 建 profile 的前置条件未满足（ValidationError: 工具已禁用：supplier_360）；本步骤在当前库上无法执行
+SKIP  S8 创建 run — S7 已 SKIP（建 profile 的前置条件未满足（ValidationError: 工具已禁用：supplier_360）；本步骤在当前库上无法执行）
+PASS  S9 feature-off 时新路由缺席 — /openapi.json 中的编排路径 = []
+PASS  S10 自建行已清理 — 自建 run / profile / Agent / 模型配置均已删除
+PASS  S10 阶段 0 schema 已还原 — 3 行 input_schema 已写回运行前的原值
+PASS  S2 既有表行数前后一致 — 六张既有表行数无变化
+------------------------------------------------------------------------
+FAILED  1 step(s):
+  - S6 三个已启用工具可编排: supplier_360=False, supplier_risk=True, graph_traverse=True
+NOTE  3 step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失败）
+  - S5 schema-only 修复: 实际写入 2 行，未写入 1 行：supplier_360（该行 enabled=False；第一波只写 enabled=true 的行）（库种子前置条件未满足；本步骤在当前库上无法完整执行）
+  - S7 编排 profile: 建 profile 的前置条件未满足（ValidationError: 工具已禁用：supplier_360）；本步骤在当前库上无法执行
+  - S8 创建 run: S7 已 SKIP（建 profile 的前置条件未满足（ValidationError: 工具已禁用：supplier_360）；本步骤在当前库上无法执行）
+```
+
+⇒ **无 traceback、stderr 为空、退出码 1**；S5 如实汇报「写入 2 行、未写入 1 行」，
+S7 输出 `SKIP` 并**写明缺什么**（工具被禁用），
+S8 的 `SKIP` 原因**照抄 S7 的真实原因**（旧版本这里写的是「目标库没有可用的
+ACTIVE Agent」——**那句话是错的**：Agent 一直存在，失败的是建 profile），
+S6 因为该工具确实不可编排而 `FAIL` ⇒ **退出码 1，运行不是绿的**。
+
+⚠️ 结尾**没有** `OK  all steps passed`：有 1 个 `FAIL` + 3 个 `SKIP` ⇒ 汇总如实
+列出失败项**和**被跳过的步骤。退出码仍只由 `FAIL` 决定（这里是 1）。
+
+### 8.4 真实进程端到端补测
+
+最终修复后在产品代码 `9b051a10` 上启动真实 uvicorn、独立 Worker 和隔离 PostgreSQL
+`5436/qa_metadata_test`；仅外部 LLM 使用本地确定性 OpenAI-compatible planner。
+真实 run `4310b2c8-2af7-4f15-a7e4-e160414093a3` 最终 **SUCCEEDED**：
+3 轮规划、2 次真实工具调用（`wiki_search` / `coverage_status`）、54 tokens，
+最终答案及两个 TOOL `outputJson` 均可见。Worker 成功自预热并 claim run；
+真实 HTTP 轮询以闭区间游标取回 step 0/1/2/4 的同号 RUNNING→SUCCEEDED 更新，
+直接覆盖 C1/C2 原故障形态。详见[验证报告 §6.4](../../../docs/superpowers/plans/2026-10-26-general-agent-orchestration-verification.md)。
+这不是浏览器冒烟；真实浏览器项仍未执行。
+
+### 8.5 未执行项（明确记录，不得当成已完成）
+
+| 项 | 状态 | 原因 |
+|---|---|---|
+| **生产部署** | **未执行** | 生产操作全部由人手动执行（灰度手册）。本次交付的是工件 + 手册，**没有**碰生产机、**没有**改 `/opt/qa-system/docker/.env` |
+| **生产 `ENABLE_AGENT_ORCHESTRATION=true`** | **未执行** | 同上；且 PRE-ENABLE CHECKLIST 三项尚未关闭 |
+| **真实栈浏览器冒烟（Playwright 打真后端）** | **未执行** | 本仓 Playwright 是**浏览器级 mock**（`e2e/support/mockApi.ts` 拦截 `/api/v1/**`，`playwright.config.ts` 只起 Vite）⇒ 打不出真栈。**mock 套件本身是 27 红（分支前后都是）**，本特性新增的 4 条 `agent-orchestration.spec.ts` 全绿，但**不能说「E2E 通过」** |
+| **菜单播种在生产执行** | **未执行** | 人工操作（灰度手册阶段 6） |
+
+---
+
+## 9. 关联
+
+- **设计稿**：[2026-10-26-general-agent-orchestration-design.md](../../../docs/superpowers/specs/2026-10-26-general-agent-orchestration-design.md)
+- **灰度手册**：[deploy-gray-rollout.md](deploy-gray-rollout.md)（阶段 0–8、回滚、租约排空、
+  暂停码处置、已知坑 12 项、**PRE-ENABLE CHECKLIST**、上线检查清单）
+- **验证报告**：[2026-10-26-general-agent-orchestration-verification.md](../../../docs/superpowers/plans/2026-10-26-general-agent-orchestration-verification.md)
+- **真实数据脚本**：[feat_agent_orchestration_realdata.py](../../../backend/scripts/feat_agent_orchestration_realdata.py)
+- **Wiki**：
+  - [agent-runtime](../../wiki/agent-runtime.md)（**第三条**执行路径：路径 C）
+  - [data-model](../../wiki/data-model.md)（Phase 6.6 增量：5 张新表 + `0135`）
+  - [api-reference](../../wiki/api-reference.md)（9 条新路径 + 编排状态机 + 404/409/422 语义）
+  - [frontend](../../wiki/frontend.md)（两条路由 + 2s 轮询 + 降级）
+- **Rules**：
+  - [变更记录强制规范](../../rules/变更记录强制规范.md)（§一 的 5 条硬约束 —— 本变更的合并闸门）
+  - [开发流程规范](../../rules/开发流程规范.md)（真实数据验证门禁）
+- **Memory**：`qa-system-general-agent-orchestration.md`（本机 `~/.claude/projects/…/memory/`
+  下的记忆文件，**不随仓库存档**；索引行在同目录的 `MEMORY.md`）
+- **入口索引**：[Harness/agents/owner.md](../../agents/owner.md)
+
+---
+
+## SSOT 校验清单（合并前必查）
+
+- [x] frontmatter 元数据齐全（日期 / 作者 / Phase / 状态 / 关联变更 / 迁移版本 / MEMORY）
+- [x] 9 段都非空，无 TBD/TODO/待补 占位
+- [x] 第 2 段 ≥ 2 个候选方案对比（A / B / C 三案 + 取舍表 + 最终决定）
+- [x] 第 3 段迁移标识 ≤ 32 字符（**revision id** `0135` = 4；**文件主干（stem）**
+      `0135_agent_orchestration` = 24；文件名含 `.py` = 27 ⇒ 三个值都在
+      `alembic_version.version_num` 的 `varchar(32)` 约束内）
+- [x] 第 7 段触发了 security-reviewer 则必填 CRITICAL/HIGH/MEDIUM/LOW 至少 1 项
+      （0 CRITICAL / 0 HIGH / 3 MEDIUM / 8 LOW，另有代码评审 2 Important / 11 Minor）
+- [x] 第 8 段 docker compose 冒烟命令 + 输出贴出（§8.1）
+- [x] 第 8 段 `/openapi.json` 端点冒烟命令 + 输出贴出（§8.2，进程内 + 真实 HTTP 两轮）
+- [x] 第 8 段真实数据验证脚本输出贴出（§8.3）：命令
+      `TEST_DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5436/qa_metadata_test' ./.venv/bin/python scripts/feat_agent_orchestration_realdata.py`
+      （`<user>` / `<pwd>` 是占位符，真实口令不入文档；输出里一律打码成 `qa_user:***@…`）
+      在**隔离测试库** `5436/qa_metadata_test` 上连跑两次，**两次退出码都是 0**，
+      **两次的 PASS/SKIP 集合完全一致**（各 20 PASS / 0 FAIL / 0 SKIP），
+      完整 stdout（逐行未删改）贴在 §8.3；本次运行**没有产生任何 SKIP 行**
+      （若出现，§8.3 会逐条列出其原因）
+- [x] 第 9 段 ≥ 3 个跨文件链接：§9 共 **12 条**跨文件链接（设计稿 / 灰度手册 / 验证报告 /
+      真实数据脚本 / 4 个 Wiki / 2 条 Rules / Memory / owner.md），其中仓库内 **11 条**相对链接
+      全部解析成功（已逐条 `test -e` 验证）；Memory 条目在本机 `~/.claude/projects/...` 下，
+      **不随仓库存档**
+- [x] 相关 wiki 文档已更新（数据模型 / 接口 / 架构 / 前端 —— 4 处全改）
+- [x] 至少 1 条 MEMORY 索引已在 `~/.claude/projects/.../memory/MEMORY.md` 添加
+      （索引行 + 详情文件均已存在；由控制方写入）
+- [x] 涉及真实 SQL/DB 改动时 `scripts/<feature>_realdata.py` 已跑通
+      （`backend/scripts/feat_agent_orchestration_realdata.py` + `_lib.py` + `_db.py` 三个模块，
+      目标库 = 隔离测试库 `5436/qa_metadata_test`，退出码 0；详见 §8.3）

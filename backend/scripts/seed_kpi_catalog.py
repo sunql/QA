@@ -27,8 +27,39 @@ from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: E402
 
 from app.domain.enums import KpiStatus  # noqa: E402
-from app.domain.models import KpiCatalog  # noqa: E402
+from app.domain.models import DataSource, KpiCatalog  # noqa: E402
 from app.infrastructure.database import getSessionFactory  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# 默认种子数据源（F2 §5.4：每个 KPI 需绑定真实 DataSource）
+# ---------------------------------------------------------------------------
+_SEED_DS_NAME = "SEED_DS_KPI_CATALOG"
+
+
+async def _getOrCreateSeedDataSource(session: Any) -> int:
+    """返回种子脚本用的 DataSource id（幂等：已存在则复用）。"""
+    from sqlalchemy import select
+
+    result = await session.execute(
+        select(DataSource.id).where(DataSource.name == _SEED_DS_NAME)
+    )
+    row = result.scalar_one_or_none()
+    if row is not None:
+        return row
+
+    ds = DataSource(
+        name=_SEED_DS_NAME,
+        type="postgresql",
+        host="localhost",
+        port=5432,
+        database_name="seed",
+        username="seed",
+        password_encrypted="seed",
+        is_active=True,
+    )
+    session.add(ds)
+    await session.flush()
+    return ds.id
 
 # 12 个核心 KPI 定义（每个 dict 字段与 KpiCatalog ORM 列对齐）
 KPI_SEEDS: list[dict[str, Any]] = [
@@ -236,11 +267,19 @@ async def seedKpiCatalog(session: Any) -> int:
 
     用 PG `INSERT ... ON CONFLICT (kpi_code) DO NOTHING`：唯一约束
     `uq_kpi_catalog_code` 冲突的行由 DB 直接跳过，并发运行安全，无需预查重（无 TOCTOU race）。
+
+    F2 §5.4：每个 KPI 绑定 _getOrCreateSeedDataSource() 返回的 DataSource。
+
+    Q8：seed 直接写入 ``status=PUBLISHED`` 是**引导数据**（早于 metric 挂靠存在，
+    此时 ``metric_id`` 仍为 None）；发布闸门只约束 ``DRAFT → PUBLISHED`` 的状态
+    流转，不回溯校验引导数据，故这里绕过闸门是预期行为。
     """
+    ds_id = await _getOrCreateSeedDataSource(session)
     inserted = 0
     for kpi in KPI_SEEDS:
+        kpi_with_ds = {**kpi, "datasource_id": ds_id}
         result = await session.execute(
-            pg_insert(KpiCatalog).values(**kpi).on_conflict_do_nothing(
+            pg_insert(KpiCatalog).values(**kpi_with_ds).on_conflict_do_nothing(
                 index_elements=["kpi_code"]
             )
         )

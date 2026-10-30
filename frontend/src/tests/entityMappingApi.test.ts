@@ -41,22 +41,22 @@ describe("api/entityMapping", () => {
     vi.clearAllMocks();
   });
 
-  it("listMappings GET /entity-mappings 携带过滤参数", async () => {
-    httpMock.get.mockResolvedValue({ data: [mapping] });
-    const result = await listMappings({ entityType: "SUPPLIER" });
+  it("listMappings GET /entity-mappings 携带过滤参数（含分页）", async () => {
+    httpMock.get.mockResolvedValue({ data: { rows: [mapping], total: 1 } });
+    const result = await listMappings({ entityType: "SUPPLIER", limit: 20, offset: 0 });
     expect(httpMock.get).toHaveBeenCalledWith("/entity-mappings", {
-      params: { entityType: "SUPPLIER" },
+      params: { entityType: "SUPPLIER", limit: 20, offset: 0 },
     });
-    expect(result).toEqual([mapping]);
+    expect(result).toEqual({ rows: [mapping], total: 1 });
   });
 
   it("listMappings 无过滤时不传 params", async () => {
-    httpMock.get.mockResolvedValue({ data: [] });
+    httpMock.get.mockResolvedValue({ data: { rows: [], total: 0 } });
     const result = await listMappings();
     expect(httpMock.get).toHaveBeenCalledWith("/entity-mappings", {
       params: undefined,
     });
-    expect(result).toEqual([]);
+    expect(result).toEqual({ rows: [], total: 0 });
   });
 
   it("getMapping GET /entity-mappings/:id", async () => {

@@ -14,6 +14,8 @@ const ITEM_KEYS = [
   "models", "embeddings", "status", "adminAudit",
   // 企业 Wiki 的二级项 = 机制 1-6 各自的落地面板
   "wikiPages", "wikiImport", "wikiConflicts", "wikiSuggestions", "wikiCoverage",
+  // 通用 Agent 编排：编排配置页 + 任务页
+  "agentOrchestration", "agentTasks",
 ];
 
 describe("menu i18n keys", () => {

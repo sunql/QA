@@ -23,14 +23,14 @@ async def _clean(pg_session: AsyncSession) -> None:
     await pg_session.commit()
 
 
-async def test_seed_inserts_eight_sections_and_forty_three_items(
+async def test_seed_inserts_eight_sections_and_forty_five_items(
     dbSession: AsyncSession, client: object
 ) -> None:
     await _clean(dbSession)
 
     factory = dbModule.getSessionFactory()
     count = await seed_menu_config(factory)
-    # 8 sections + 43 items = 51 rows（feat-rbac-identity 追加 adminUsers/Roles/
+    # 8 sections + 45 items = 53 rows（feat-rbac-identity 追加 adminUsers/Roles/
     # Organizations/Menus + adminSystemConfig + bizConfig 追加 dataQualityGenerate/
     # ontologyProperties/businessObjects/adminFeatureRules + foundation 追加
     # localImport + feat-wiki-knowledge 追加一级类 enterpriseWiki 与其下 6 项
@@ -38,14 +38,18 @@ async def test_seed_inserts_eight_sections_and_forty_three_items(
     # + DQ 追加 dataQualityRuleParams/dataQualityReport + feat-wiki-chat 追加 wikiChat
     # + M4 追加 adminWikiLinks/adminWikiCategories + A8 追加 reports
     # + feat-research-entry 追加一级类 section.research + 2 叶子项
-    #   researchSession/researchCompare）
-    assert count == 51
+    #   researchSession/researchCompare
+    # + 2026-10-23 补 feat-user-onboarding 漏播的 item.profile/item.changePassword
+    #   —— 不补的话新装库 menu_config 无 item.profile，新建用户 500
+    #   （permission_grant FK fk_permission_grant_menu 违反））
+    assert count == 53
 
     svc = MenuConfigService(dbSession)
     result = await svc.list_sections()
     assert len(result.sections) == 8
     total_items = sum(len(s.children) for s in result.sections)
-    assert total_items == 43
+    # 45 项里 item.changePassword visible=false，list_sections 只列可见项 ⇒ 44
+    assert total_items == 44
 
 
 async def test_seed_is_idempotent(
@@ -58,8 +62,8 @@ async def test_seed_is_idempotent(
     await seed_menu_config(factory)
 
     rows = (await dbSession.execute(select(MenuConfig))).scalars().all()
-    assert len(rows) == 51
-    assert len({r.code for r in rows}) == 51
+    assert len(rows) == 53
+    assert len({r.code for r in rows}) == 53
 
 
 async def test_seed_does_not_overwrite_ui_edited_parent_id(
@@ -201,6 +205,10 @@ async def test_seed_paths_aligned_with_frontend_routes(
         "/admin/wiki-links", "/admin/wiki-categories",
         # A8（M4 Report 模板 MVP）：「我的报告」页，App.tsx:104 真实路由
         "/reports",
+        # feat-user-onboarding：个人信息页（App.tsx:132 真实路由；2026-10-23 补，
+        # 当年随 /change-password 一起漏——后者 seed 为 visible=false，
+        # list_sections 不列隐藏项，故只出现在 App.tsx 不出现在本清单）
+        "/profile",
         # feat-research-entry：研究会话 + 研究对比（App.tsx 真实路由）
         "/research", "/research/compare",
     }
@@ -263,5 +271,5 @@ async def test_main_runs_end_to_end_and_disposes_engine(
     await created_engines[0].dispose()
     # 验证种子落库（独立引擎与全局工厂指向同一 URL）
     rows = (await dbSession.execute(select(MenuConfig))).scalars().all()
-    assert len(rows) == 51
-    assert len({r.code for r in rows}) == 51
+    assert len(rows) == 53
+    assert len({r.code for r in rows}) == 53

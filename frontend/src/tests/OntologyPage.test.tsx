@@ -58,6 +58,15 @@ const mockMetric: OntologyMetric = {
   createdBy: null,
   createdTime: "2026-08-11T00:00:00Z",
   updatedTime: "2026-08-11T00:00:00Z",
+  metricType: "MEASURE",
+  numeratorMeasure: null,
+  denominatorMeasure: null,
+  aggregationOrder: null,
+  grainKeys: null,
+  filterExpression: null,
+  status: "DRAFT",
+  owner: null,
+  executionSource: null,
 };
 
 const api = vi.hoisted(() => ({
@@ -67,7 +76,7 @@ const api = vi.hoisted(() => ({
   updateClass: vi.fn(),
   deleteClass: vi.fn(),
   listClassVersions: vi.fn(),
-  listPropertiesByClass: vi.fn(),
+  listAllProperties: vi.fn(),
   createProperty: vi.fn(),
   updateProperty: vi.fn(),
   deleteProperty: vi.fn(),
@@ -113,7 +122,7 @@ describe("OntologyPage", () => {
     vi.clearAllMocks();
     api.listClasses.mockResolvedValue([mockClass]);
     api.listMetrics.mockResolvedValue([mockMetric]);
-    api.listPropertiesByClass.mockResolvedValue([mockProperty]);
+    api.listAllProperties.mockResolvedValue([mockProperty]);
   });
 
   // ---- Class Tab ----
@@ -606,7 +615,7 @@ describe("OntologyPage", () => {
   });
 
   it("属性列表加载失败时表格显示空", async () => {
-    api.listPropertiesByClass.mockRejectedValue(new Error("服务不可用"));
+    api.listAllProperties.mockRejectedValue(new Error("服务不可用"));
     renderPage();
     await waitFor(() => expect(screen.getByText("Customer")).toBeInTheDocument());
     await userEvent.click(screen.getByRole("tab", { name: /属性/ }));

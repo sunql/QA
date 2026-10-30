@@ -114,9 +114,11 @@ class GraphTraversalService:
             byType.setdefault(hop.to_type, []).append(hop)
 
         typeLabels = {
+            "ItemMaster": "物料",  # Phase 4.4 后的入图 label；Material 为旧数据兼容
             "Material": "物料",
             "PurchaseOrder": "采购订单",
             "GoodsReceipt": "收货单",
+            "Receipt": "收货单",
             "IncomingInspection": "来料检验",
             "NCR": "不合格处理",
             "Contract": "合同",

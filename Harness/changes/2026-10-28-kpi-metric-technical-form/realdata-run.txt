@@ -1,0 +1,418 @@
+真实库验证脚本实跑证据（Task 16，2026-10-29）
+================================================
+
+脚本：backend/scripts/kpi_metric_realdata.py（S1–S9，三态退出码 0/1/2）
+DSN 只来自 --database-url 或 KPI_METRIC_REALDATA_DATABASE_URL（不读 TEST_DATABASE_URL / DATABASE_URL / PG*）。
+判定语义：PASS=断言成立；FAIL=断言不成立；SKIP=前置条件不满足（既非通过也非失败，影响退出码）。
+以下三段是**完整 stdout**（含结尾 RESULT 行）；缺 RESULT 行即视为被截断。
+退出码：全 PASS⇒0；有 FAIL⇒1（优先于 SKIP）；无 FAIL 但有 SKIP⇒2。
+
+────────────────────────────────────────────────────────────────────────
+A. 正式库（prod 同源）只读实跑 —— 允许的只读验证
+   命令：cd backend && ./.venv/bin/python -m scripts.kpi_metric_realdata \
+           --database-url postgresql+asyncpg://qa_user:***@localhost:5433/qa_metadata \
+           --allow-prod-write
+   （--allow-prod-write 是「目标库是 qa_metadata」的显式 opt-in，按**库名**判定，
+     与本次是否真的写库无关；本次未加 --apply-backfill ⇒ 全流程只读）
+   退出码：1
+   结论：S1 FAIL（prod 仍在 0135，迁移未应用）—— **这是预期结论，不是脚本缺陷**；
+         其余 S2–S9 因迁移前置不满足/只读模式而 SKIP。prod 未被写入。
+────────────────────────────────────────────────────────────────────────
+
+TARGET  postgresql+asyncpg://qa_user:***@localhost:5433/qa_metadata  (from --database-url)
+DATABASE  qa_metadata
+MODE  read-only
+PLAN STEPS = 9
+------------------------------------------------------------------------
+SKIP  S9 回填落库 + 幂等 — 只读模式未加 --apply-backfill（落库需业务方审核后显式发起）
+PASS  PREFLIGHT current_database() = 守卫认定库名 — qa_metadata
+INFO  计数不可读（结构未迁移？）：ProgrammingError("(sqlalchemy.dialects.postgresql.asyncpg.ProgrammingError) <class 'asyncpg.exceptions.UndefinedColumnError'>: column kpi_catalog.grain_keys does not exist")
+INFO  alembic_version 实测 = '0135'
+INFO  system_config[KPI_CONTRACT_INJECTION_ENABLED] 缺失（走代码默认值）
+INFO  system_config[KPI_METRIC_GATE_ENABLED] 缺失（走代码默认值）
+INFO  system_config[KPI_METRIC_TIER_A_ENABLED] 缺失（走代码默认值）
+INFO  STEP S1 begin
+FAIL  S1.1 迁移版本 = 0137 — 实际 '0135'
+FAIL  S1.2 ontology_metric 新增 9 列 — 缺失 ['aggregation_order', 'denominator_measure', 'execution_source', 'filter_expression', 'grain_keys', 'metric_type', 'numerator_measure', 'owner', 'status']
+FAIL  S1.3 kpi_catalog 新增 3 列 — 缺失 ['denominator_columns', 'grain_keys', 'numerator_columns']
+FAIL  S1.4 ontology_metric_source 表存在 — 列数 0
+FAIL  S1.5 UNIQUE(metric_id, class_id, role) — 实际约束列组合 []
+FAIL  S1.6 ontology_metric_source.class_id 索引 — 断言不成立
+INFO  STEP S1 end
+SKIP  S2 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S3 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S4 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S5 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S6 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S7 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S8 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+------------------------------------------------------------------------
+FAILED  6 check(s) failed:
+  - S1.1 迁移版本 = 0137: 实际 '0135'
+  - S1.2 ontology_metric 新增 9 列: 缺失 ['aggregation_order', 'denominator_measure', 'execution_source', 'filter_expression', 'grain_keys', 'metric_type', 'numerator_measure', 'owner', 'status']
+  - S1.3 kpi_catalog 新增 3 列: 缺失 ['denominator_columns', 'grain_keys', 'numerator_columns']
+  - S1.4 ontology_metric_source 表存在: 列数 0
+  - S1.5 UNIQUE(metric_id, class_id, role): 实际约束列组合 []
+  - S1.6 ontology_metric_source.class_id 索引: 断言不成立
+NOTE  8 step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失败）
+  - S9 回填落库 + 幂等: 只读模式未加 --apply-backfill（落库需业务方审核后显式发起）
+  - S2 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S3 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S4 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S5 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S6 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S7 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S8 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+RESULT: FAIL steps=9 passed=0 failed=1 skipped=8
+INFO  跳过步骤数 = 8；例如：迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+
+────────────────────────────────────────────────────────────────────────
+B. 隔离测试库回填落库 + 幂等（S9 语义证明）—— 不在正式库执行
+   测试库：localhost:5434 / qa_metadata_test_t16（alembic upgrade head ⇒ 0137）
+   命令：cd backend && ./.venv/bin/python -m scripts.kpi_metric_realdata \
+           --database-url postgresql+asyncpg://qa_user:***@localhost:5434/qa_metadata_test_t16 \
+           --apply-backfill
+   退出码：0
+   结论：9/9 PASS。S9.1 第 2 次回填 created=0 updated=12（幂等）；
+         S9.2 ontology_metric 行数 0 → 12 → 12（二次回填不新增）；
+         S9.3 12/12 KPI 已挂靠；S3.4 列级 finding 集合 = 治理/技术列差异集合。
+   回填前 S2.2：已挂靠 0 条 / PLAN 12 条；越界 []；挂错 []（0 条 = 未回填，合法）。
+   ⚠️ 正式库的 --apply-backfill 仍**未执行**：须业务方审核回填清单后由人显式发起。
+────────────────────────────────────────────────────────────────────────
+
+KPI 发布闸门未通过（开关关闭，仅观察）id=9 code=KPI_COST_SAVING items=['metric_published', 'reconcile', 'datasource'] reasons=['governance_measure_absent', 'grain_mismatch']
+KPI 口径对账 mismatch，拒绝注入 code=KPI_SUPPLIER_OTD reasons=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
+TARGET  postgresql+asyncpg://qa_user:***@localhost:5434/qa_metadata_test_t16  (from --database-url)
+DATABASE  qa_metadata_test_t16
+MODE  apply-backfill
+PLAN STEPS = 9
+------------------------------------------------------------------------
+PASS  PREFLIGHT current_database() = 守卫认定库名 — qa_metadata_test_t16
+INFO  计数：kpi_catalog=12 条（metric_id 非空 0 条）；ontology_metric=0 条
+INFO  alembic_version 实测 = '0137'
+INFO  system_config[KPI_CONTRACT_INJECTION_ENABLED] 缺失（走代码默认值）
+INFO  system_config[KPI_METRIC_GATE_ENABLED] 缺失（走代码默认值）
+INFO  system_config[KPI_METRIC_TIER_A_ENABLED] 缺失（走代码默认值）
+INFO  STEP S1 begin
+PASS  S1.1 迁移版本 = 0137 — 实际 '0137'
+PASS  S1.2 ontology_metric 新增 9 列 — 实到 9 列
+PASS  S1.3 kpi_catalog 新增 3 列 — grain_keys/numerator_columns/denominator_columns
+PASS  S1.4 ontology_metric_source 表存在 — 列数 4
+PASS  S1.5 UNIQUE(metric_id, class_id, role) — 实际约束列组合 [['class_id', 'metric_id', 'role']]
+PASS  S1.6 ontology_metric_source.class_id 索引
+INFO  STEP S1 end
+INFO  STEP S2 begin
+INFO  PLAN：12 条，tier 分布 {'A': 4, 'B': 5, 'C': 3}（构造期望 {'A': 4, 'B': 5, 'C': 3}）
+PASS  S2.1 库内 kpi_catalog 与 PLAN 的 KPI 集合一致 — 库内 12 条 / PLAN 12 条；缺 []；多 []
+PASS  S2.2 库内挂靠与 PLAN 归属一致（0 条=未回填；或全量挂靠且 metric_name 匹配） — 已挂靠 0 条 / PLAN 12 条；越界 []；挂错 []
+INFO  S2.2 备注：0 条 KPI 已挂靠 ontology_metric（尚未回填）
+INFO  schema_cache 覆盖的本体类/表键：3614 个
+PASS  S2.3 tier A 物理列齐备 KPI_SUPPLIER_OTD
+PASS  S2.3 tier A 物理列齐备 KPI_SUPPLIER_OVERDUE_RATIO
+PASS  S2.3 tier A 物理列齐备 KPI_PAYMENT_ON_TIME
+PASS  S2.3 tier A 物理列齐备 KPI_INVOICE_MATCH_RATE
+INFO  实测物理列缺失条目：无
+INFO  tier C 观测：execution_source=['NONE']，结构化度量条数=0
+INFO  STEP S2 end
+INFO  STEP S9 begin
+INFO  第 1 次回填：created=12 updated=0 degraded=0 skipped=0 unbound=12 unresolved=0
+INFO  第 2 次回填：created=0 updated=12 degraded=0 skipped=0
+PASS  S9.1 第 2 次回填全部落为 updated（幂等） — created=0 updated=12 skipped=0 plans=12
+PASS  S9.2 二次回填不新增指标行 — 0 → 12 → 12
+PASS  S9.3 12 条 KPI 全部挂靠 ontology_metric — 12 条已挂靠
+INFO  STEP S9 end
+INFO  STEP S3 begin
+PASS  S3.1 KPI_COST_SAVING 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'grain_mismatch')
+PASS  S3.1 KPI_INVOICE_MATCH_RATE 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.2 KPI_INVOICE_MATCH_RATE tier A formula 覆盖全部结构化列
+PASS  S3.1 KPI_PAYMENT_ON_TIME 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
+PASS  S3.2 KPI_PAYMENT_ON_TIME tier A formula 覆盖全部结构化列
+PASS  S3.1 KPI_PURCHASE_CYCLE_TIME 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'grain_mismatch')
+PASS  S3.1 KPI_PURCHASE_PRICE_VARIANCE 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'governance_measure_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_DEFECT_RATE 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_DELAY_DAYS 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_FPY 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_MAINTENANCE_RATIO 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_columns_absent', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_NCR_RATE 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_columns_absent', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_OTD 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
+PASS  S3.2 KPI_SUPPLIER_OTD tier A formula 覆盖全部结构化列
+PASS  S3.1 KPI_SUPPLIER_OVERDUE_RATIO 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
+PASS  S3.2 KPI_SUPPLIER_OVERDUE_RATIO tier A formula 覆盖全部结构化列
+PASS  S3.3 mismatch 集合 = PLAN 已登记偏差集合（不多不少） — 多判 []；漏判 []
+PASS  S3.4 列级 finding 集合 = 治理/技术列差异集合（防 _checkRole 列比对被删） — 期望 ['KPI_INVOICE_MATCH_RATE', 'KPI_PAYMENT_ON_TIME', 'KPI_SUPPLIER_OTD', 'KPI_SUPPLIER_OVERDUE_RATIO']；实际 ['KPI_INVOICE_MATCH_RATE', 'KPI_PAYMENT_ON_TIME', 'KPI_SUPPLIER_OTD', 'KPI_SUPPLIER_OVERDUE_RATIO']
+INFO  实测 verdict 分布：{'mismatch': 12}
+INFO  ⚠️ 12/12 条全部 mismatch ⇒ 契约注入与发布闸门均被对账拦截，直到业务方审核并对齐治理列（这是设计上的多签互锁，不是脚本缺陷）
+INFO  STEP S3 end
+INFO  STEP S4 begin
+INFO  S4 闸门未通过项（KPI_COST_SAVING）：['metric_published', 'reconcile', 'datasource']
+PASS  S4.1 开关 ON ⇒ 服务层抛 ConflictError（被拦下）
+PASS  S4.2 错误信息带出缺项明细 — failedItems=['metric_published', 'reconcile', 'datasource']
+PASS  S4.4 开关已还原 — 原值 None → 还原后 None
+INFO  开关对照 KPI_METRIC_GATE_ENABLED：运行前=None 临时='true' 还原后=None
+PASS  S4.3 开关 OFF ⇒ 只观察不拦截
+PASS  S4.5 开关已还原 — 原值 None → 还原后 None
+INFO  开关对照 KPI_METRIC_GATE_ENABLED：运行前=None 临时='false' 还原后=None
+INFO  STEP S4 end
+INFO  STEP S5 begin
+PASS  S5.1 12 条全部 mismatch ⇒ 契约块必须为空（对账拦截生效） — 0 字符
+INFO  全部 mismatch 的来源 = PLAN 的**刻意**治理↔物理偏差（T15-L）；业务方审核并对齐治理列之前，本特性只观察、不注入
+PASS  S5.9 审核模拟：KPI_SUPPLIER_OTD 治理列对齐后 verdict = pass — 实际 pass；findings=()
+PASS  S5.10 审核模拟：对齐后契约块非空 — 575 字符
+PASS  S5.2 契约块含 KPI code
+PASS  S5.3 契约块含标题
+PASS  S5.4 允许形态 SUM(分子)/SUM(分母)
+PASS  S5.5 禁止形态 AVG(分子/分母)
+PASS  S5.6 prompt 里真的含契约标题 — prompt 4361 字符
+PASS  S5.7 prompt 里真的含比率形态指引
+PASS  S5.8 prompt 里真的含 KPI code
+PASS  S5.11 审核模拟的治理列已还原
+INFO  STEP S5 end
+INFO  STEP S6 begin
+PASS  S6.1 缓存已 warmUp
+PASS  S6.2 缓存含 KPI_SUPPLIER_OTD
+PASS  S6.3 精确 alias 命中且 confidence = 1.0 — 结果 [('KPI_SUPPLIER_OTD', 1.0)]
+INFO  L1 遗留项实测：自然语言问句 '供应商准时交付率是多少' 最高分 0.0 （目录关键词 5–6 词 vs 阈值 0.75 ⇒ Jaccard 路径不可达）
+INFO  STEP S6 end
+INFO  STEP S7 begin
+PASS  S7.1 缓存条目数 = PUBLISHED KPI 条数 — 缓存 12 vs PUBLISHED 12（全量 12）
+PASS  S7.2 findByAnyKeyword 命中候选 — 关键词 '成本节约' 命中 1 条
+INFO  STEP S7 end
+INFO  STEP S8 begin
+PASS  S8.1 拆分纯函数：多表 + 去重 + 大写 + 保序
+PASS  S8.2 拆分纯函数：空值
+PASS  S8.3 表索引纯函数：空输入
+INFO  实测：22 个裸表名引用，命中 13 个（59.1%）；未命中 9 个
+INFO  未命中清单：KPI_COST_SAVING:DWD_PURCHASE_CONTRACT、KPI_PAYMENT_ON_TIME:DWD_PAYMENT、KPI_PURCHASE_CYCLE_TIME:DWD_PURCHASE_REQUISITION、KPI_PURCHASE_PRICE_VARIANCE:DWD_PURCHASE_CONTRACT、KPI_SUPPLIER_DEFECT_RATE:DWD_INCOMING_INSPECTION、KPI_SUPPLIER_FPY:DWD_INCOMING_INSPECTION、KPI_SUPPLIER_MAINTENANCE_RATIO:DWD_SUPPLIER_CERTIFICATION、KPI_SUPPLIER_NCR_RATE:DWD_INCOMING_INSPECTION、KPI_SUPPLIER_NCR_RATE:DWD_NCR
+PASS  S8.4 裸表名 join 有命中（否则信号完全失效） — 命中 13 / 22
+INFO  STEP S8 end
+------------------------------------------------------------------------
+RESULT: PASS steps=9 passed=9 failed=0 skipped=0
+OK  all steps passed
+
+────────────────────────────────────────────────────────────────────────
+C. 回填后的隔离测试库只读复跑（证明落库结果可被后续只读运行看见）
+   命令：cd backend && ./.venv/bin/python -m scripts.kpi_metric_realdata \
+           --database-url postgresql+asyncpg://qa_user:***@localhost:5434/qa_metadata_test_t16
+   退出码：2
+   结论：0 FAIL、8 PASS、1 SKIP（S9 在只读模式恒 SKIP）⇒ **exit 2**。
+         注意：**测试库只读 ≠ exit 0**；exit 0 只出现在「测试库 + --apply-backfill」。
+         S2.2 已挂靠 12 条 / PLAN 12 条；越界 []；挂错 []（metric_name 归属校验通过）；
+         S3.4 期望=实际 = 4 条列级 finding KPI。
+────────────────────────────────────────────────────────────────────────
+
+KPI 发布闸门未通过（开关关闭，仅观察）id=9 code=KPI_COST_SAVING items=['metric_published', 'reconcile', 'datasource'] reasons=['governance_measure_absent', 'grain_mismatch']
+KPI 口径对账 mismatch，拒绝注入 code=KPI_SUPPLIER_OTD reasons=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
+TARGET  postgresql+asyncpg://qa_user:***@localhost:5434/qa_metadata_test_t16  (from --database-url)
+DATABASE  qa_metadata_test_t16
+MODE  read-only
+PLAN STEPS = 9
+------------------------------------------------------------------------
+SKIP  S9 回填落库 + 幂等 — 只读模式未加 --apply-backfill（落库需业务方审核后显式发起）
+PASS  PREFLIGHT current_database() = 守卫认定库名 — qa_metadata_test_t16
+INFO  计数：kpi_catalog=12 条（metric_id 非空 12 条）；ontology_metric=12 条
+INFO  alembic_version 实测 = '0137'
+INFO  system_config[KPI_CONTRACT_INJECTION_ENABLED] 缺失（走代码默认值）
+INFO  system_config[KPI_METRIC_GATE_ENABLED] 缺失（走代码默认值）
+INFO  system_config[KPI_METRIC_TIER_A_ENABLED] 缺失（走代码默认值）
+INFO  STEP S1 begin
+PASS  S1.1 迁移版本 = 0137 — 实际 '0137'
+PASS  S1.2 ontology_metric 新增 9 列 — 实到 9 列
+PASS  S1.3 kpi_catalog 新增 3 列 — grain_keys/numerator_columns/denominator_columns
+PASS  S1.4 ontology_metric_source 表存在 — 列数 4
+PASS  S1.5 UNIQUE(metric_id, class_id, role) — 实际约束列组合 [['class_id', 'metric_id', 'role']]
+PASS  S1.6 ontology_metric_source.class_id 索引
+INFO  STEP S1 end
+INFO  STEP S2 begin
+INFO  PLAN：12 条，tier 分布 {'A': 4, 'B': 5, 'C': 3}（构造期望 {'A': 4, 'B': 5, 'C': 3}）
+PASS  S2.1 库内 kpi_catalog 与 PLAN 的 KPI 集合一致 — 库内 12 条 / PLAN 12 条；缺 []；多 []
+PASS  S2.2 库内挂靠与 PLAN 归属一致（0 条=未回填；或全量挂靠且 metric_name 匹配） — 已挂靠 12 条 / PLAN 12 条；越界 []；挂错 []
+INFO  schema_cache 覆盖的本体类/表键：3614 个
+PASS  S2.3 tier A 物理列齐备 KPI_SUPPLIER_OTD
+PASS  S2.3 tier A 物理列齐备 KPI_SUPPLIER_OVERDUE_RATIO
+PASS  S2.3 tier A 物理列齐备 KPI_PAYMENT_ON_TIME
+PASS  S2.3 tier A 物理列齐备 KPI_INVOICE_MATCH_RATE
+INFO  实测物理列缺失条目：无
+INFO  tier C 观测：execution_source=['NONE']，结构化度量条数=0
+INFO  STEP S2 end
+INFO  STEP S3 begin
+PASS  S3.1 KPI_COST_SAVING 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'grain_mismatch')
+PASS  S3.1 KPI_INVOICE_MATCH_RATE 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.2 KPI_INVOICE_MATCH_RATE tier A formula 覆盖全部结构化列
+PASS  S3.1 KPI_PAYMENT_ON_TIME 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
+PASS  S3.2 KPI_PAYMENT_ON_TIME tier A formula 覆盖全部结构化列
+PASS  S3.1 KPI_PURCHASE_CYCLE_TIME 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'grain_mismatch')
+PASS  S3.1 KPI_PURCHASE_PRICE_VARIANCE 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'governance_measure_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_DEFECT_RATE 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_DELAY_DAYS 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_FPY 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_measure_absent', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_MAINTENANCE_RATIO 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_columns_absent', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_NCR_RATE 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_columns_absent', 'governance_columns_absent', 'grain_mismatch')
+PASS  S3.1 KPI_SUPPLIER_OTD 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
+PASS  S3.2 KPI_SUPPLIER_OTD tier A formula 覆盖全部结构化列
+PASS  S3.1 KPI_SUPPLIER_OVERDUE_RATIO 对账 verdict = mismatch（PLAN 已登记治理↔物理偏差） — 实际 mismatch；findings=('governance_column_not_in_technical', 'technical_column_not_in_governance', 'governance_column_not_in_technical', 'technical_column_not_in_governance', 'grain_mismatch')
+PASS  S3.2 KPI_SUPPLIER_OVERDUE_RATIO tier A formula 覆盖全部结构化列
+PASS  S3.3 mismatch 集合 = PLAN 已登记偏差集合（不多不少） — 多判 []；漏判 []
+PASS  S3.4 列级 finding 集合 = 治理/技术列差异集合（防 _checkRole 列比对被删） — 期望 ['KPI_INVOICE_MATCH_RATE', 'KPI_PAYMENT_ON_TIME', 'KPI_SUPPLIER_OTD', 'KPI_SUPPLIER_OVERDUE_RATIO']；实际 ['KPI_INVOICE_MATCH_RATE', 'KPI_PAYMENT_ON_TIME', 'KPI_SUPPLIER_OTD', 'KPI_SUPPLIER_OVERDUE_RATIO']
+INFO  实测 verdict 分布：{'mismatch': 12}
+INFO  ⚠️ 12/12 条全部 mismatch ⇒ 契约注入与发布闸门均被对账拦截，直到业务方审核并对齐治理列（这是设计上的多签互锁，不是脚本缺陷）
+INFO  STEP S3 end
+INFO  STEP S4 begin
+INFO  S4 闸门未通过项（KPI_COST_SAVING）：['metric_published', 'reconcile', 'datasource']
+PASS  S4.1 开关 ON ⇒ 服务层抛 ConflictError（被拦下）
+PASS  S4.2 错误信息带出缺项明细 — failedItems=['metric_published', 'reconcile', 'datasource']
+PASS  S4.4 开关已还原 — 原值 None → 还原后 None
+INFO  开关对照 KPI_METRIC_GATE_ENABLED：运行前=None 临时='true' 还原后=None
+PASS  S4.3 开关 OFF ⇒ 只观察不拦截
+PASS  S4.5 开关已还原 — 原值 None → 还原后 None
+INFO  开关对照 KPI_METRIC_GATE_ENABLED：运行前=None 临时='false' 还原后=None
+INFO  STEP S4 end
+INFO  STEP S5 begin
+PASS  S5.1 12 条全部 mismatch ⇒ 契约块必须为空（对账拦截生效） — 0 字符
+INFO  全部 mismatch 的来源 = PLAN 的**刻意**治理↔物理偏差（T15-L）；业务方审核并对齐治理列之前，本特性只观察、不注入
+PASS  S5.9 审核模拟：KPI_SUPPLIER_OTD 治理列对齐后 verdict = pass — 实际 pass；findings=()
+PASS  S5.10 审核模拟：对齐后契约块非空 — 575 字符
+PASS  S5.2 契约块含 KPI code
+PASS  S5.3 契约块含标题
+PASS  S5.4 允许形态 SUM(分子)/SUM(分母)
+PASS  S5.5 禁止形态 AVG(分子/分母)
+PASS  S5.6 prompt 里真的含契约标题 — prompt 4361 字符
+PASS  S5.7 prompt 里真的含比率形态指引
+PASS  S5.8 prompt 里真的含 KPI code
+PASS  S5.11 审核模拟的治理列已还原
+INFO  STEP S5 end
+INFO  STEP S6 begin
+PASS  S6.1 缓存已 warmUp
+PASS  S6.2 缓存含 KPI_SUPPLIER_OTD
+PASS  S6.3 精确 alias 命中且 confidence = 1.0 — 结果 [('KPI_SUPPLIER_OTD', 1.0)]
+INFO  L1 遗留项实测：自然语言问句 '供应商准时交付率是多少' 最高分 0.0 （目录关键词 5–6 词 vs 阈值 0.75 ⇒ Jaccard 路径不可达）
+INFO  STEP S6 end
+INFO  STEP S7 begin
+PASS  S7.1 缓存条目数 = PUBLISHED KPI 条数 — 缓存 12 vs PUBLISHED 12（全量 12）
+PASS  S7.2 findByAnyKeyword 命中候选 — 关键词 '成本节约' 命中 1 条
+INFO  STEP S7 end
+INFO  STEP S8 begin
+PASS  S8.1 拆分纯函数：多表 + 去重 + 大写 + 保序
+PASS  S8.2 拆分纯函数：空值
+PASS  S8.3 表索引纯函数：空输入
+INFO  实测：22 个裸表名引用，命中 13 个（59.1%）；未命中 9 个
+INFO  未命中清单：KPI_COST_SAVING:DWD_PURCHASE_CONTRACT、KPI_PAYMENT_ON_TIME:DWD_PAYMENT、KPI_PURCHASE_CYCLE_TIME:DWD_PURCHASE_REQUISITION、KPI_PURCHASE_PRICE_VARIANCE:DWD_PURCHASE_CONTRACT、KPI_SUPPLIER_DEFECT_RATE:DWD_INCOMING_INSPECTION、KPI_SUPPLIER_FPY:DWD_INCOMING_INSPECTION、KPI_SUPPLIER_MAINTENANCE_RATIO:DWD_SUPPLIER_CERTIFICATION、KPI_SUPPLIER_NCR_RATE:DWD_INCOMING_INSPECTION、KPI_SUPPLIER_NCR_RATE:DWD_NCR
+PASS  S8.4 裸表名 join 有命中（否则信号完全失效） — 命中 13 / 22
+INFO  STEP S8 end
+------------------------------------------------------------------------
+NOTE  1 step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失败）
+  - S9 回填落库 + 幂等: 只读模式未加 --apply-backfill（落库需业务方审核后显式发起）
+RESULT: SKIP steps=9 passed=8 failed=0 skipped=1
+INFO  跳过步骤数 = 1；例如：None
+
+────────────────────────────────────────────────────────────────────────
+D. 2026-10-29 最终修复波后 prod 只读**回归**重跑（F1–F11 落地后，HEAD 含 e0aa4a68）
+   命令：cd backend && ./.venv/bin/python -m scripts.kpi_metric_realdata \
+           --database-url postgresql+asyncpg://qa_user:***@localhost:5433/qa_metadata \
+           --allow-prod-write
+   退出码：1（与 A 段一致：S1 FAIL + 8 SKIP）
+
+   ⚠️ 本段的证明范围 = 「修复未引入 prod 回归」，**不是** F8 的功能验证。
+      F8（`step4_publishGate(isProd=True)` ⇒ 不碰任何开关直接 SKIP）针对的是
+      **已迁移**的 prod；而 prod 仍在 0135，S4 无论是否带 isProd 短路都会因
+      「迁移未应用」而 SKIP，两条路径输出完全相同 ⇒ 本段对 F8 无判别力。
+      F8 的功能验证由单测承担：
+      backend/app/tests/unit/test_kpi_metric_realdata_prod_guards.py
+      （isProd=True ⇒ writeSwitchValue 调用 0 次 + SKIPS 增加）。
+
+   跑前 / 跑后只读复核（psql，5433/qa_metadata）：
+     alembic_version      0135 → 0135
+     system_config KPI_*   0 行 → 0 行
+     ontology_metric       0 行 → 0 行
+     kpi_catalog          12 行 → 12 行
+   ⇒ prod 未被写入。
+────────────────────────────────────────────────────────────────────────
+
+TARGET  postgresql+asyncpg://qa_user:***@localhost:5433/qa_metadata  (from --database-url)
+DATABASE  qa_metadata
+MODE  read-only
+PLAN STEPS = 9
+------------------------------------------------------------------------
+SKIP  S9 回填落库 + 幂等 — 只读模式未加 --apply-backfill（落库需业务方审核后显式发起）
+PASS  PREFLIGHT current_database() = 守卫认定库名 — qa_metadata
+INFO  计数不可读（结构未迁移？）：ProgrammingError("(sqlalchemy.dialects.postgresql.asyncpg.ProgrammingError) <class 'asyncpg.exceptions.UndefinedColumnError'>: column kpi_catalog.grain_keys does not exist")
+INFO  alembic_version 实测 = '0135'
+INFO  system_config[KPI_CONTRACT_INJECTION_ENABLED] 缺失（走代码默认值）
+INFO  system_config[KPI_METRIC_GATE_ENABLED] 缺失（走代码默认值）
+INFO  system_config[KPI_METRIC_TIER_A_ENABLED] 缺失（走代码默认值）
+INFO  STEP S1 begin
+FAIL  S1.1 迁移版本 = 0137 — 实际 '0135'
+FAIL  S1.2 ontology_metric 新增 9 列 — 缺失 ['aggregation_order', 'denominator_measure', 'execution_source', 'filter_expression', 'grain_keys', 'metric_type', 'numerator_measure', 'owner', 'status']
+FAIL  S1.3 kpi_catalog 新增 3 列 — 缺失 ['denominator_columns', 'grain_keys', 'numerator_columns']
+FAIL  S1.4 ontology_metric_source 表存在 — 列数 0
+FAIL  S1.5 UNIQUE(metric_id, class_id, role) — 实际约束列组合 []
+FAIL  S1.6 ontology_metric_source.class_id 索引 — 断言不成立
+INFO  STEP S1 end
+SKIP  S2 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S3 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S4 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S5 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S6 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S7 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+SKIP  S8 步骤 — 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+------------------------------------------------------------------------
+FAILED  6 check(s) failed:
+  - S1.1 迁移版本 = 0137: 实际 '0135'
+  - S1.2 ontology_metric 新增 9 列: 缺失 ['aggregation_order', 'denominator_measure', 'execution_source', 'filter_expression', 'grain_keys', 'metric_type', 'numerator_measure', 'owner', 'status']
+  - S1.3 kpi_catalog 新增 3 列: 缺失 ['denominator_columns', 'grain_keys', 'numerator_columns']
+  - S1.4 ontology_metric_source 表存在: 列数 0
+  - S1.5 UNIQUE(metric_id, class_id, role): 实际约束列组合 []
+  - S1.6 ontology_metric_source.class_id 索引: 断言不成立
+NOTE  8 step(s) skipped — 见上方 SKIP 行（SKIP ≠ 通过，也不算失败）
+  - S9 回填落库 + 幂等: 只读模式未加 --apply-backfill（落库需业务方审核后显式发起）
+  - S2 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S3 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S4 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S5 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S6 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S7 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+  - S8 步骤: 迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+RESULT: FAIL steps=9 passed=0 failed=1 skipped=8
+INFO  跳过步骤数 = 8；例如：迁移未应用到 0137（新列/新表缺失）—— 该步骤在当前库上无法执行
+
+========================================================================
+## E. 2026-10-30 迁移后 prod 只读复跑（F8 真实 prod 证据）
+
+- 前置：备份 /tmp/ontology_metric_20261030.sql + /tmp/kpi_catalog_20261030.sql（均含
+  dump complete 标记；catalog 12 行 COPY 完整）后，alembic 0135 → 0137。
+- 命令：`kpi_metric_realdata.py --database-url <prod 5433 DSN> --allow-prod-write`（只读，未加 --apply-backfill）
+- RESULT: SKIP steps=9 passed=4 failed=0 skipped=5（退出码 2 = 无 FAIL 有 SKIP）
+- S1 全 PASS：0137 / ontology_metric 9 列 / kpi_catalog 3 列 / source 表 + UNIQUE + 索引
+- S2 PASS：12 KPI（tier A4/B5/C3）；tier A 物理列 4/4 齐备；已挂靠 0（未回填）
+- **S4 SKIP 文案 =「目标库是正式库：…prod 一律不写」⇒ F8（isProd 短路在真实 prod 生效），
+  此前只有单测证据（复审遗留项关闭）**
+- S3/S5/S7.2/S9 SKIP：回填未落库 + 无 semantic_keywords，符合预期（≠ 通过）
+- 对比 D 段（0135 时期）：S1 由 FAIL 转 PASS，S4 SKIP 文案由「迁移未应用」转为「正式库不写开关」，
+  其余 SKIP 语义一致 —— 修复未引入回归的结论在 0137 上继续成立。
+
+========================================================================
+## F. 2026-10-30 prod 回填落库 + 回填后复跑
+
+- 命令：`kpi_metric_backfill.py --database-url <prod DSN> --apply --allow-prod-write`
+- 结果：`created=12 updated=0 degraded=0 skipped=0`；脚本提示 12 条 KPI 未绑数据源（发布闸门会拦）
+- 库内复核：ontology_metric=12 / ontology_metric_source=18 / kpi_catalog 挂靠 12/12；
+  execution_source 分布 = ESCAPE_HATCH + NONE（A/B 档带公式，C 档无类映射）
+- 回填后只读 realdata：RESULT failed=0 / passed=5 / skipped=4
+  - S3.1 ×12：verdict 全部 = mismatch，findings 与 PLAN 登记偏差「不多不少」（S3.3/S3.4 PASS）
+  - S5.1：12 条全 mismatch ⇒ 契约块 0 字符（对账拦截生效，prod 当前输出为零符合设计预期）
+  - S5.9 SKIP：治理列对齐审核模拟只在隔离测试库做（prod 不写治理列）
+  - S4/S9/S7.2 SKIP 语义同 E 段
+- 证据文件（会话外不留档）：预览 /tmp/kpi_backfill_preview_20261030.txt、
+  apply /tmp/kpi_backfill_apply_20261030.txt、复跑 /tmp/kpi_realdata_post_backfill_20261030.txt
+
+========================================================================
+## G. 2026-10-30 语义关键词种子 + 数据源绑定 + 复跑
+
+- seed：`seed_kpi_semantic_index.py --dry-run` 预览后正式落库，`affected=12`
+  （4 交付 + 3 质量 + 2 价格 + 3 财务/合规；threshold 0.75；走 updateKpi 链路，
+  自动备份 ontology_metric / ontology_metric_source / kpi_catalog）
+- 数据源绑定：`UPDATE kpi_catalog SET datasource_id=1, updated_time=now() WHERE metric_id IS NOT NULL`
+  （=「THBI Oracle」data_source.id=1；UPDATE 12；备份 /tmp/kpi_catalog_20261030_predatasource.sql）
+- 复跑：RESULT failed=0 / passed=6 / skipped=3 —— **S7.2 由 SKIP 转 PASS**
+  （关键词「成本节约」命中 KPI_COST_SAVING，findByAnyKeyword 链路 prod 生效）；
+  S3 仍 12/12 mismatch（预期，待治理列对齐）；S4/S5.9/S9 SKIP 语义同前
+- 至此发布闸门条件⑤（datasource_id）满足；闸门剩余可拦因素 = 灰度开关（未配置）

@@ -284,3 +284,42 @@ def _resolveGroupKey(plan: QueryPlan, sampleRow: dict) -> str | None:
 def shareAmbiguityWarning(plan: QueryPlan | None, data: list[dict] | None) -> str | None:
     """L2 薄封装：只取歧义示警文本，供答案渲染层注入（violations 由执行层抛错处理）。"""
     return checkShareInvariants(plan, data).warning
+
+
+# ─────────────────────────────────────────────────────────────────────
+# SQL 标识符词法（B4 提取；kpi_metric_reconcile 与分母守卫共用）
+#
+# 来源：分支 feat/kpi-l1-metric-id 的 B4 commit fd84d092（该分支不整体合并，
+# 只取这两块纯函数）。放在 semantic_guard 是因为它是**低层无状态词法**，
+# 依赖方向永远是 上层 → 本模块。
+# ─────────────────────────────────────────────────────────────────────
+
+_SQL_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SQL_STOPWORDS = frozenset({
+    "sum", "count", "avg", "max", "min", "case", "when", "then", "else", "end",
+    "and", "or", "not", "null", "as", "on", "by", "distinct", "over", "partition",
+    "cast", "interval", "coalesce", "nullif", "round", "abs", "greatest", "least",
+    "select", "from", "where", "group", "order", "having", "join", "left", "right",
+    "inner", "outer", "desc", "asc", "limit",
+})
+
+
+def extractSqlIdentifiers(text: str | None) -> set[str]:
+    """从公式/声明/表达式文本抽取列名候选集合（小写、剔 SQL 关键字与函数名）。
+
+    刻意宽松：抽出的可能包含表名/别名。调用方负责"宁漏不误报"的取舍
+    （只判"声明 ⊆ 实际"方向，不判反向）。
+    """
+    if not text:
+        return set()
+    return {t.lower() for t in _SQL_IDENTIFIER_RE.findall(text)} - _SQL_STOPWORDS
+
+
+def measureColumnIdentifiers(expr: str | None) -> set[str]:
+    """从结构化度量的 expr 抽取列集合。
+
+    **只取 expr，不取 filter** —— measure.filter 是过滤谓词，可能引用别的类的列
+    （例如 "IQCRESULT = 'FAIL'" 里的 IQCRESULT 属于源类）。把它算进列集合会让
+    「治理未声明该列」被误判成 mismatch（假阳性）。
+    """
+    return extractSqlIdentifiers(expr)

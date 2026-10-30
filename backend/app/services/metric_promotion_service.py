@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import KpiCatalog, SessionMessage
-from app.domain.schemas import KpiCatalogCreate, KpiStatus
+from app.domain.schemas import KpiStatus
 from app.services.kpi_catalog_service import KpiCatalogService
 
 log = logging.getLogger(__name__)
@@ -165,22 +165,17 @@ class MetricPromotionService:
             log.info("kpi %s already exists (id=%d), skipping", code, existing.id)
             return existing.id
 
-        # 写入新 KpiCatalog（match_threshold 用 schema 默认）
-        dto = KpiCatalogCreate(
+        # 写入新 KpiCatalog（match_threshold 用列默认值）。
+        # 注意：这里刻意不走 KpiCatalogCreate —— 晋升候选来自 session_message，
+        # 没有数据源上下文，而该 DTO 自 F2 起 datasource_id 必填。系统晋升的
+        # DRAFT KPI 暂不绑定，由 backfill 工具（scripts/backfill_kpi_datasource.py）补绑。
+        entity = KpiCatalog(
             kpi_code=code,
             kpi_name=f"Auto: {candidate.sample_question[:80]}",
             formula=candidate.sample_sql or "",
-            status=KpiStatus.DRAFT,
+            status=KpiStatus.DRAFT.value,
             semantic_keywords=_extract_keywords(candidate.sample_question),
-        )
-
-        entity = KpiCatalog(
-            kpi_code=dto.kpi_code,
-            kpi_name=dto.kpi_name,
-            formula=dto.formula,
-            status=dto.status.value,
-            semantic_keywords=dto.semantic_keywords,
-            match_threshold=dto.match_threshold,
+            datasource_id=None,
         )
         self._session.add(entity)
         await self._session.flush()

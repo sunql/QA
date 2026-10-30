@@ -471,8 +471,14 @@ run(session, agent_code, params, *, actor)
 | `feature_definition`（PG） | seed + 后续 ONTOLOGY 派生 | `seed_features.py` | Supplier 360 / Supplier Risk |
 | `feature_value`（PG） | feature pipeline 计算 | `feature_pipeline/*` | Supplier 360 / Supplier Risk（按 enterprise_code VARCHAR JOIN） |
 | `agent` / `agent_access_policy`（PG） | 元数据 seed | `seed_agents.py` | Agent Runtime |
-| Neo4j（Supplier-PO-GR-IQC 业务图） | 实体映射关系同步 | `seed_graph_relations.py` | Agent Tool `graph_traverse`（不在 4 功能主链） |
-| THBI Oracle（192.168.205.70:1521/X3V71ORA） | 真实业务库 | — | 仅 `sync_entity_mapping_from_thbi.py` 直连（read-only） |
+| Neo4j（Supplier-PO-GR-IQC 业务图） | 实体映射 + THBI 采购订单事实 | `seed_graph_relations.py`（demo 键位）+ `sync_business_graph_from_thbi.py`（真实数据，PLACES/SUPPLIES/CONTAINS 三类边，`--since` 分年回填） | Agent Tool `graph_traverse`（不在 4 功能主链）+ 业务图 tab（`/graph/traverse`） |
+| THBI Oracle（192.168.205.70:1521/X3V71ORA） | 真实业务库 | — | `sync_entity_mapping_from_thbi.py` + `sync_business_graph_from_thbi.py` 直连（read-only） |
+
+**业务图数据语义**（feat-business-graph-backfill，2026-10-25）：BusinessEntity 节点
+key = `enterprise_code`（Supplier/ItemMaster）或 `po_no`（PurchaseOrder）；真实节点带
+`source: thbi_dwd`，demo 节点带 `source: sheet16_demo`。遍历（variable-length path，
+方向不限）受 `_MAX_TRAVERSAL_PATHS=1000` 行数封顶；跳数上限 5 不变。收货链路
+（GoodsReceipt）暂不入图。变更 SSOT：`Harness/changes/feat-business-graph-backfill/summary.md`。
 
 **重要语义**：`feature_value.entity_key` 存的是 `enterprise_code`（VARCHAR，如 `'10105'`），**不是** `enterprise_key`（BIGINT hash，如 3823452429）。Supplier360Service 内部同时持两者——profile 字段回填需要两个，feature_value JOIN 只能用 VARCHAR。这是 Phase 6.x 的双路解析（`str | int` 入参 + Pass-1 code / Pass-2 key 双查询）的根因。
 

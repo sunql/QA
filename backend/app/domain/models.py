@@ -51,6 +51,11 @@ from app.domain.enums import (
     KpiStatus,
     LineageLayer,
     MatchRule,
+    MetricAggregationOrder,
+    MetricExecutionSource,
+    MetricSourceRole,
+    MetricStatus,
+    MetricType,
     RefreshFrequency,
     ReportTimeWindowType,
     RuleOperator,
@@ -350,6 +355,35 @@ class OntologyMetric(Base, TimestampMixin):
     dimension_defaults: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
+    # ── P1 指标技术形态（结构化轨道 = 真相）────────────────────────────
+    metric_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=MetricType.MEASURE.value,
+        server_default=MetricType.MEASURE.value,
+    )
+    numerator_measure: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
+    denominator_measure: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
+    aggregation_order: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    grain_keys: Mapped[list[str] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
+    filter_expression: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ── P1 管理性（发布闸门落点）──────────────────────────────────────
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=MetricStatus.DRAFT.value,
+        server_default=MetricStatus.DRAFT.value,
+    )
+    owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    execution_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
     # Relationships
     target_class: Mapped[OntologyClass | None] = relationship(
         back_populates="metrics", lazy="selectin"
@@ -357,6 +391,33 @@ class OntologyMetric(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<OntologyMetric id={self.id} name={self.metric_name}>"
+
+
+class OntologyMetricSource(Base):
+    """本体指标的多源类映射（M:N）。
+
+    `ontology_metric.target_class_id`（单值 FK）保留不动 —— 语义 = role=BASE
+    的那个类；但 9/12 条真实 KPI 跨 2–3 张表，单值 FK 表达不了 ⇒ 新表为权威。
+    role 必填：「这个类在口径里扮演什么角色」正是当前完全缺失的信息。
+    """
+
+    __tablename__ = "ontology_metric_source"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    metric_id: Mapped[int] = mapped_column(
+        BigIntFk,
+        ForeignKey("ontology_metric.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    class_id: Mapped[int] = mapped_column(
+        BigIntFk,
+        ForeignKey("ontology_class.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<OntologyMetricSource metric_id={self.metric_id} class_id={self.class_id} role={self.role}>"
 
 
 class KpiCatalog(Base, TimestampMixin):
@@ -385,7 +446,11 @@ class KpiCatalog(Base, TimestampMixin):
     unit: Mapped[str | None] = mapped_column(String(50), nullable=True)
     data_source: Mapped[str | None] = mapped_column(Text, nullable=True)
     datasource_id: Mapped[int | None] = mapped_column(
-        BigIntFk, ForeignKey("data_source.id", ondelete="SET NULL"), nullable=True
+        # 0132（F2 §4.5）：SET NULL → RESTRICT，与 migration 保持一致。
+        # 删数据源前须先解绑 KPI（服务层 409 守卫 + DB 约束双保险）。
+        BigIntFk,
+        ForeignKey("data_source.id", ondelete="RESTRICT"),
+        nullable=True,
     )
     owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
     version: Mapped[str] = mapped_column(
@@ -410,6 +475,17 @@ class KpiCatalog(Base, TimestampMixin):
         Numeric(3, 2), nullable=False, default=Decimal("0.75")
     )
 
+    # ── P1 治理侧结构化字段（让对账从「中文 vs 结构」降级为「列集合比对」）──
+    grain_keys: Mapped[list[str] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
+    numerator_columns: Mapped[list[str] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
+    denominator_columns: Mapped[list[str] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
+
     # Relationships
     metric: Mapped[OntologyMetric | None] = relationship(
         "OntologyMetric", lazy="selectin"
@@ -419,17 +495,48 @@ class KpiCatalog(Base, TimestampMixin):
         return f"<KpiCatalog id={self.id} code={self.kpi_code} status={self.status}>"
 
 
+class DataLayerRule(Base, TimestampMixin):
+    """数据层规则（feat-data-domain-layer 方案 2）。
+
+    Agent 数据层词表 + 表名前缀识别的 DB SSOT。pattern 非空 = 前缀规则
+    （priority 小者先匹配，ODS_DIM_ 必须先于 ODS_）；pattern 为空 = 手工
+    声明层（如 FEATURE，不可由表名前缀探测）。datasource_type 预留按源类型
+    分默认规则，NULL = 全类型通用。
+    """
+
+    __tablename__ = "data_layer_rule"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    layer: Mapped[str] = mapped_column(String(20), nullable=False)
+    pattern: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    datasource_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    def __repr__(self) -> str:
+        return f"<DataLayerRule layer={self.layer} pattern={self.pattern}>"
+
+
 class BusinessObject(Base, TimestampMixin):
-    """业务对象注册表 SSOT（Phase 4）。"""
+    """业务对象注册表 SSOT（Phase 4）。
+
+    feat-data-domain-layer（0133）：header_class_id 收紧 NOT NULL + 唯一索引
+    （一个本体类只允许被一个 BO 作 header）；primary_domain_id 必填——
+    「有且只有一个主域」由 NOT NULL 列天然保证，附域走 BusinessObjectDomain。
+    """
 
     __tablename__ = "business_object"
 
     code: Mapped[str] = mapped_column(String(20), primary_key=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    header_class_id: Mapped[int | None] = mapped_column(
+    header_class_id: Mapped[int] = mapped_column(
         BigIntFk,
         ForeignKey("ontology_class.id", ondelete="RESTRICT"),
-        nullable=True,
+        nullable=False,
+    )
+    primary_domain_id: Mapped[str] = mapped_column(
+        ForeignKey("data_domain.code", ondelete="RESTRICT"),
+        nullable=False,
     )
     graph_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -437,6 +544,53 @@ class BusinessObject(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<BusinessObject code={self.code} name={self.name}>"
+
+
+class DataDomain(Base, TimestampMixin):
+    """企业数据域基础数据（feat-data-domain-layer 方案 1）。
+
+    Agent 授权域词表的 DB SSOT（迁移自 agent_vocabulary.AGENT_DATA_DOMAINS 常量，
+    常量降级为 registry 未 warmUp 时的 fallback）。主管理组织来自组织管理；
+    覆盖度域轴（class_domain_mapping）是独立分类轴，与本表无关。
+    """
+
+    __tablename__ = "data_domain"
+
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    primary_org_id: Mapped[int | None] = mapped_column(
+        BigIntFk,
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<DataDomain code={self.code} name={self.name}>"
+
+
+class BusinessObjectDomain(Base):
+    """业务对象附域关联（feat-data-domain-layer 方案 1）。
+
+    主域在 business_object.primary_domain_id；本表只存附域（服务层校验
+    domain_id ≠ primary_domain_id）。双 FK CASCADE：BO 或域删除时联动清理。
+    """
+
+    __tablename__ = "business_object_domain"
+
+    bo_code: Mapped[str] = mapped_column(
+        ForeignKey("business_object.code", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    domain_id: Mapped[str] = mapped_column(
+        ForeignKey("data_domain.code", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    def __repr__(self) -> str:
+        return f"<BusinessObjectDomain bo={self.bo_code} domain={self.domain_id}>"
 
 
 class FeatureDefinition(Base, TimestampMixin):
@@ -870,12 +1024,24 @@ class SessionQueryState(Base, TimestampMixin):
     避免切换数据源后用错 state / 跨用户窃取上下文。
     NULL 列兼容历史无 scope 的旧行。
 
-    M4（方案 A，0128 迁移）：user_id = -1 是墓碑值，把 P0-3 前的 NULL 行 UPDATE 为 -1，
+    M4（方案 A，0131 迁移）：user_id = -1 是墓碑值，把 P0-3 前的 NULL 行 UPDATE 为 -1，
     表示「归属未明的遗留桶，禁止读」。读侧统一 `WHERE user_id != -1` 排除。
-    M5（0129 backfill + is_stub 列）：M4 的 -1 墓碑行在迁移 0129 中被 backfill 为 is_stub=True，
-    进一步走读侧 `WHERE is_stub=false` 过滤。写侧在 userId is None 时设 is_stub=True。
-    is_stub 比 scope 完整度更强的排序信号：is_stub=False 的行（real 行）在任何情况下
-    都优先于 is_stub=True 的行。
+    M5（0129 is_stub 列）：写侧在 userId is None 时设 is_stub=True，读侧 `WHERE is_stub=false`
+    排除 stub 行 —— 真正兜底的是这条 SQL。排序键 `is_stub` 的方向与直觉相反：
+    `_stateRowRank` 返回 `row.is_stub` 而 `_selectStateRow` 取 `max()`，bool 里
+    `True=1 > False=0`，故排序**优先选 stub 行**。读侧无碍（stub 行被 SQL 先排掉）；
+    匿名隔离**不靠**这个排序键，靠的是 `_loadQueryState` 与 `_saveQueryState`
+    两侧在 `userId is None` 时各自追加的 `user_id IS NULL` 过滤（2026-10-22 收紧，
+    读侧后补）—— 候选集在进入排序前就只剩匿名桶，排序键只决定同桶内部的 tiebreak。
+    别把这行键「修正」成 `not is_stub`，那会造成跨用户上下文污染。详见
+    `chat_context._stateRowRank` docstring。
+
+    注意：**不要**以为 0131 造的墓碑会被标成 is_stub=True。迁移链是
+    0127→0129→0130→0131，0129 里那句 `UPDATE ... SET is_stub=true WHERE user_id=-1`
+    跑在 0131 造出 -1 行之前，一行都没命中；墓碑保持 is_stub=False。
+    排除墓碑的唯一有效手段是 `user_id != -1`（读侧 chat_context.py:582 /
+    写侧 :625）。没有补回填迁移：is_stub 的消费点只关心 stub 行，无人依赖墓碑的
+    is_stub 值，补迁移修不了任何行为。
     """
 
     __tablename__ = "session_query_state"
@@ -2386,3 +2552,6 @@ class ReportInstance(Base, TimestampMixin):
             f"<ReportInstance id={self.id} template={self.template_code} "
             f"status={self.status}>"
         )
+
+
+from app.domain import agent_orchestration_models as _agent_orchestration_models  # noqa: E402,F401

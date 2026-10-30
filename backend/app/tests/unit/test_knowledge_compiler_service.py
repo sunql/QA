@@ -24,6 +24,7 @@ import app.services.knowledge_compiler_service as kc_module
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import (
     AuditLog,
+    DataSource,
     IdMapping,
     KpiCatalog,
     OntologyClass,
@@ -305,17 +306,34 @@ async def test_sql_metadata_role_refreshes_linked_kpis(
     dbSession.add(metric)
     await dbSession.commit()
     await dbSession.refresh(metric)
+    # Create a minimal DataSource for FK constraint (F2 §5.4)
+    ds = DataSource(
+        name="KPI_LINKED_TEST_DS",
+        type="postgresql",
+        host="localhost",
+        port=5432,
+        database_name="test",
+        username="test",
+        password_encrypted="test",
+        is_active=True,
+    )
+    dbSession.add(ds)
+    await dbSession.flush()
     kpi = KpiCatalog(
         kpi_code="KPI_TEST_LINKED", kpi_name="采购金额", formula="SUM(amount)",
-        status="DRAFT", metric_id=metric.id,
+        status="DRAFT", metric_id=metric.id, datasource_id=ds.id,
     )
     dbSession.add(kpi)
     await dbSession.commit()
 
     refreshed: list[str] = []
+    refreshedIds: list[int | None] = []
 
-    async def fakeRefreshOne(session: AsyncSession, kpi_code: str) -> None:
+    async def fakeRefreshOne(
+        session: AsyncSession, kpi_code: str, *, kpiId: int | None = None
+    ) -> None:
         refreshed.append(kpi_code)
+        refreshedIds.append(kpiId)
 
     monkeypatch.setattr(
         get_kpi_match_cache(), "refreshOne", fakeRefreshOne
@@ -326,6 +344,8 @@ async def test_sql_metadata_role_refreshes_linked_kpis(
 
     assert role.status == "success"
     assert refreshed == ["KPI_TEST_LINKED"]
+    # 必须带上 kpiId：只按 code 失效摘不掉改名残留（C1）
+    assert refreshedIds == [kpi.id]
     assert "KPI_TEST_LINKED" in (role.detail or "")
 
 

@@ -1,9 +1,16 @@
 /**
- * LoginPage error handling tests (audit-fx-3.3 Finding 10).
+ * LoginPage error handling tests (audit-fx-3.3 Finding 10;
+ * 2026-10-25 fix/login-401-white-screen 重写为 status 契约).
  *
- * RED phase: LoginPage should display i18n-mapped messages from error CODE,
- * not raw error text. Error codes: AUTH_INVALID, AUTH_EXPIRED, AUTH_RATE_LIMITED,
- * E_AUTH_INVALID_PASSWORD, E_AUTH_RATE_LIMITED, E_AUTH_EXPIRED.
+ * 旧版本 mock 的是原始 axios 形状 `{ response: { data: { detail: { code } } } }`
+ * —— 拦截器真实 reject 的是 normalizeError 产出的 AppError（code/status/detail，
+ * 无 .response），且后端登录失败（用户不存在/密码错/账号禁用）统一 401 防枚举，
+ * 不存在 AUTH_EXPIRED / detail.code 形状 —— 假绿。
+ *
+ * 新契约（LoginPage 按 AppError.status 分流）：
+ * - 401 → auth.login.invalidCredentials（用户名或密码错误）
+ * - 429 → auth.login.rateLimited（尝试次数过多，请稍后再试）
+ * - 其余 → auth.login.networkError（网络异常，请稍后重试）
  */
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -45,6 +52,15 @@ vi.mock("../../api/auth", () => ({
 // Test helpers
 // ---------------------------------------------------------------------------
 
+/** 构造拦截器真实 reject 的 AppError 形状（normalizeError 产物）。 */
+function makeAppError(status: number, message = "Request failed"): Error {
+  return Object.assign(new Error(message), {
+    code: "UNKNOWN",
+    status,
+    detail: null,
+  });
+}
+
 function renderLoginPage() {
   return render(
     <MemoryRouter>
@@ -68,21 +84,14 @@ async function fillAndSubmit(username: string, password: string) {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("LoginPage error handling", () => {
+describe("LoginPage error handling（AppError status 契约）", () => {
   beforeEach(() => {
     mockLogin.mockReset();
     mockMessageError.mockReset();
   });
 
-  it("shows i18n message on AUTH_INVALID", async () => {
-    const error = new Error("Request failed") as Error & {
-      response?: { status?: number; data?: { error?: string; detail?: unknown } };
-    };
-    error.response = {
-      status: 401,
-      data: { error: "MSG_INVALID_CREDENTIALS", detail: { code: "AUTH_INVALID" } },
-    };
-    mockLogin.mockRejectedValue(error);
+  it("401（后端登录失败统一防枚举）→ 用户名或密码错误", async () => {
+    mockLogin.mockRejectedValue(makeAppError(401));
 
     renderLoginPage();
     await fillAndSubmit("wrong", "wrong");
@@ -91,63 +100,8 @@ describe("LoginPage error handling", () => {
     expect(mockMessageError).toHaveBeenCalledWith("用户名或密码错误");
   });
 
-  it("shows i18n message on E_AUTH_INVALID_PASSWORD", async () => {
-    const error = new Error("Request failed") as Error & {
-      response?: { status?: number; data?: { error?: string; detail?: unknown } };
-    };
-    error.response = {
-      status: 401,
-      data: { detail: { code: "E_AUTH_INVALID_PASSWORD" } },
-    };
-    mockLogin.mockRejectedValue(error);
-
-    renderLoginPage();
-    await fillAndSubmit("wrong", "wrong");
-
-    expect(mockMessageError).toHaveBeenCalledWith("用户名或密码错误");
-  });
-
-  it("shows '会话已过期，请重新登录' on AUTH_EXPIRED", async () => {
-    const error = new Error("Request failed") as Error & {
-      response?: { status?: number; data?: { error?: string; detail?: unknown } };
-    };
-    error.response = {
-      status: 401,
-      data: { detail: { code: "AUTH_EXPIRED" } },
-    };
-    mockLogin.mockRejectedValue(error);
-
-    renderLoginPage();
-    await fillAndSubmit("user", "expired");
-
-    expect(mockMessageError).toHaveBeenCalledWith("会话已过期，请重新登录");
-  });
-
-  it("shows '会话已过期，请重新登录' on E_AUTH_EXPIRED", async () => {
-    const error = new Error("Request failed") as Error & {
-      response?: { status?: number; data?: { error?: string; detail?: unknown } };
-    };
-    error.response = {
-      status: 401,
-      data: { detail: { code: "E_AUTH_EXPIRED" } },
-    };
-    mockLogin.mockRejectedValue(error);
-
-    renderLoginPage();
-    await fillAndSubmit("user", "expired");
-
-    expect(mockMessageError).toHaveBeenCalledWith("会话已过期，请重新登录");
-  });
-
-  it("shows '请求过于频繁，请稍后再试' on AUTH_RATE_LIMITED", async () => {
-    const error = new Error("Request failed") as Error & {
-      response?: { status?: number; data?: { error?: string; detail?: unknown } };
-    };
-    error.response = {
-      status: 429,
-      data: { error: "MSG_RATE_LIMITED", detail: { code: "AUTH_RATE_LIMITED" } },
-    };
-    mockLogin.mockRejectedValue(error);
+  it("429 限流 → 尝试次数过多，请稍后再试", async () => {
+    mockLogin.mockRejectedValue(makeAppError(429));
 
     renderLoginPage();
     await fillAndSubmit("user", "pass");
@@ -155,19 +109,21 @@ describe("LoginPage error handling", () => {
     expect(mockMessageError).toHaveBeenCalledWith("尝试次数过多，请稍后再试");
   });
 
-  it("shows '请求过于频繁，请稍后再试' on E_AUTH_RATE_LIMITED", async () => {
-    const error = new Error("Request failed") as Error & {
-      response?: { status?: number; data?: { error?: string; detail?: unknown } };
-    };
-    error.response = {
-      status: 429,
-      data: { detail: { code: "E_AUTH_RATE_LIMITED" } },
-    };
-    mockLogin.mockRejectedValue(error);
+  it("网络异常（status=0）→ 网络异常，请稍后重试兜底", async () => {
+    mockLogin.mockRejectedValue(makeAppError(0));
 
     renderLoginPage();
     await fillAndSubmit("user", "pass");
 
-    expect(mockMessageError).toHaveBeenCalledWith("尝试次数过多，请稍后再试");
+    expect(mockMessageError).toHaveBeenCalledWith("网络异常，请稍后重试");
+  });
+
+  it("服务器错误（status=500）→ 同样走 networkError 兜底", async () => {
+    mockLogin.mockRejectedValue(makeAppError(500));
+
+    renderLoginPage();
+    await fillAndSubmit("user", "pass");
+
+    expect(mockMessageError).toHaveBeenCalledWith("网络异常，请稍后重试");
   });
 });

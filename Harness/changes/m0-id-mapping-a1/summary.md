@@ -125,7 +125,27 @@ CLI 冒烟（测试库 `qa_metadata_test`，`APP_ENV=development`）：
   `ROLLBACK` 结束，全程**没有 COMMIT**
 - 拒绝路径（不建连接）：`qa_metadata` 无 `--allow-prod` ⇒ exit 2；`scratch` ⇒ exit 2
 
-## 上线步骤（待用户批准）
+## 上线记录（2026-10-31 已执行）
+
+生产 `qa_metadata` 按下列 6 步执行完毕。执行基线 `c57535c2`（worktree 主机侧运行，
+DSN 经 `127.0.0.1:5433` 直连；生产镜像 `qa-backend` 为烤入 `/app`，未含新脚本）。
+
+| 步 | 动作 | 结果 |
+|---|---|---|
+| 1 | 备份 | `/private/tmp/qa-backups/qa_metadata-20261031-a1.dump`（14M，`pg_restore --list` 可读，104 个 TABLE DATA 段含 `id_mapping`） |
+| 2 | 只读门禁 | `PASS（只读）: 存活类 36，CLASS 映射 36 行（覆盖 ✓ 无悬空 ✓），派生一致 3766 行` |
+| 3 | 回填预演 | `存活类 36，计划 upsert 36 行` |
+| 4 | `--apply --allow-prod` | `存活类 36，扫描 36，受影响行 36`（36 行均为 `DO UPDATE`，写入前核对 `pg_table`/`pg_id` 已全部正确 ⇒ **内容级 no-op**） |
+| 5 | 复跑只读门禁 | 与第 2 步同结果，PASS |
+| 6 | `--full --allow-prod` | `PASS（全量（重跑存活 ✓，幂等 ✓））`；SQL 日志确认哨兵 UPDATE 与幂等重跑之后均为 `ROLLBACK`，**全程无 COMMIT** |
+
+落库后只读核对：`id_mapping` 总行 3766（不变）、CLASS 36、探针残留 0。
+
+生产库存量（写入前）：存活类 36 / 全表类 54；映射分布 CLASS 36 / METRIC 13 /
+PROPERTY 3717；覆盖缺口 0、悬空 0、坏行 0、大小写漂移 0 —— 即上线时映射已齐，
+本次写入只是把同值再 `DO UPDATE` 一遍。
+
+### 上线步骤（本次执行的原步骤）
 
 1. **当日备份**（生产写库前置；本仓既有纪律，脚本不代做）。
 2. 从 fresh worktree 在容器里跑**只读门禁**：`python -m scripts.id_mapping_realdata`。

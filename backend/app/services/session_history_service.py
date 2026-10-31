@@ -35,6 +35,15 @@ from app.domain.error_messages import (
     MSG_EXPORT_CHART_TOTAL_TOO_MANY_PIXELS,
 )
 from app.domain.exceptions import ValidationError
+from app.domain.export_limits import (
+    CHART_IMAGE_DATA_URL_PREFIX,
+    MAX_EXPORT_CHART_IMAGES,
+    MAX_EXPORT_IMAGE_BYTES,
+    MAX_EXPORT_IMAGE_PIXELS,
+    MAX_EXPORT_TOTAL_IMAGE_BYTES,
+    MAX_EXPORT_TOTAL_IMAGE_PIXELS,
+    PNG_MAGIC,
+)
 from app.domain.models import SessionMessage, SessionQueryState, SessionTokenUsage
 from app.domain.schemas import (
     ChatExportChartImage,
@@ -61,26 +70,16 @@ _ANSWER_PREVIEW_LIMIT = 100
 _MAX_TURNS_PER_EXPORT = 500
 _MAX_CONTENT_BYTES = 50_000
 
-# ---- 导出图表位图的抗滥用上界（0105）----------------------------------------
-# 这些是**防御性上界**，不是可调策略（按《魔数治理》「判别不清」档留在源码里）：
-# 新端点首次接收用户提交的二进制，没有上限就等于给了一个「用 base64 灌爆内存/
-# 把 PDF 撑到无法渲染」的入口。
-_MAX_EXPORT_IMAGE_BYTES = 2 * 1024 * 1024        # 单张 PNG 解码后上限
-_MAX_EXPORT_CHART_IMAGES = 200                   # charts 条数上限
-_MAX_EXPORT_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024  # 全部图片解码后总量上限
-# 字节上限**只管压缩后的大小**，管不住解出来有多大：一张 12000×12000 的纯色 PNG
-# 只有 580 KB，字节闸放行、魔数也对，交给 Pillow 却要按 1.44 亿像素分配内存（实测
-# 单张峰值 RSS +2 GB）。而 PIL 默认的 MAX_IMAGE_PIXELS 只在这个量的 2 倍以上才
-# 抛异常，中间这一大段是完全不设防的 —— 所以像素数必须自己卡。
-# 上界取 8M px（≈4000×2000）：前端真实产物是 1600 × 2H（CSS 高度 320 起、960 封顶），
-# 最大约 1600×1920 = 3.07M px，相对 8M 单图上限约 2.6 倍余量；总量取 40M px，把一次
-# 请求的瞬时解码内存压在 ~160 MB。
-_MAX_EXPORT_IMAGE_PIXELS = 8_000_000
-_MAX_EXPORT_TOTAL_IMAGE_PIXELS = 40_000_000
-# 只收 PNG（前端 getDataURL({type:"png"}) 的输出）。前缀 + 魔数双重校验：
-# 只信前缀等于允许「把任意二进制贴个 PNG 标签」送进来。
-_CHART_IMAGE_DATA_URL_PREFIX = "data:image/png;base64,"
-_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+# ---- 导出图表位图的抗滥用上界（0105；2026-10-31 起定义在 domain）-------------
+# 数字放 app/domain/export_limits.py：schemas 在解析阶段就要用同一组上界拒绝
+# 超大请求体，两处各写一份必然漂移。这里只保留本模块惯用的私有别名。
+_MAX_EXPORT_IMAGE_BYTES = MAX_EXPORT_IMAGE_BYTES
+_MAX_EXPORT_CHART_IMAGES = MAX_EXPORT_CHART_IMAGES
+_MAX_EXPORT_TOTAL_IMAGE_BYTES = MAX_EXPORT_TOTAL_IMAGE_BYTES
+_MAX_EXPORT_IMAGE_PIXELS = MAX_EXPORT_IMAGE_PIXELS
+_MAX_EXPORT_TOTAL_IMAGE_PIXELS = MAX_EXPORT_TOTAL_IMAGE_PIXELS
+_CHART_IMAGE_DATA_URL_PREFIX = CHART_IMAGE_DATA_URL_PREFIX
+_PNG_MAGIC = PNG_MAGIC
 
 
 class SessionHistoryService:

@@ -41,6 +41,15 @@ const SNAPSHOT_PIXEL_RATIO = 2;
 export const MAX_EXPORT_PIXELS = 36_000_000;
 
 /**
+ * 单张位图**解码后**的字节上限，与后端 `MAX_EXPORT_IMAGE_BYTES`（2 MiB）对齐。
+ *
+ * 为什么前端也要卡：后端在**解析阶段**按同一上界拒绝整个请求（422），超一张
+ * 就是「导出失败」而不是「少一张图」。正常产物（1600 宽 × ≤1920 高）远到不了
+ * 2 MiB，所以这里先丢图，让报告照常导出来。
+ */
+export const MAX_EXPORT_IMAGE_BYTES = 2 * 1024 * 1024;
+
+/**
  * 单个会话最多读多少条消息去挑图。
  *
  * 必须与**导出侧**的窗口对齐：后端导出只保留**最后 500 轮**（约 1000 条消息），
@@ -131,10 +140,18 @@ function snapshotOptionOf(target: ExportTarget): Record<string, unknown> {
   return defaultChartOption(target.chartOption);
 }
 
-/** 渲染一张；失败返回 null（调用方丢掉该张，不影响其余）。 */
+/** data URL 里 base64 段的**解码后**字节数（估算即可：这是防御性闸门，不是校验）。 */
+function decodedByteLength(imagePng: string): number {
+  const commaIndex = imagePng.indexOf(",");
+  const base64Length = (commaIndex === -1 ? imagePng : imagePng.slice(commaIndex + 1)).length;
+  return Math.floor((base64Length * 3) / 4);
+}
+
+/** 渲染一张；失败或超过单张上限返回 null（调用方丢掉该张，不影响其余）。 */
 async function renderOne(target: ExportTarget): Promise<ExportChartImage | null> {
   const imagePng = await renderChartPng(snapshotOptionOf(target));
   if (!imagePng) return null;
+  if (decodedByteLength(imagePng) > MAX_EXPORT_IMAGE_BYTES) return null;
   return {
     messageId: target.messageId,
     ...(target.stepIndex === undefined ? {} : { stepIndex: target.stepIndex }),
@@ -159,8 +176,8 @@ async function renderAll(
   // 那正是最需要留下痕迹的情形。
   if (rendered.length < targets.length) {
     console.warn(
-      `导出配图：${targets.length} 张中 ${targets.length - rendered.length} 张渲染失败，` +
-        `这些轮次在 PDF 里回落为占位框`
+      `导出配图：${targets.length} 张中 ${targets.length - rendered.length} 张未能导出` +
+        `（渲染失败或超过单张 ${MAX_EXPORT_IMAGE_BYTES} 字节上限），这些轮次在 PDF 里回落为占位框`
     );
   }
   return rendered;

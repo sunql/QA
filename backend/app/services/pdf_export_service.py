@@ -51,6 +51,7 @@ from reportlab.platypus import (
 from reportlab.platypus.flowables import HRFlowable
 
 from app.domain.enums import ChartType
+from app.services.chat_chart_persist import _PERSIST_MAX_TABLE_ROWS
 from app.services.pdf_fonts import ensureCjkFont
 
 logger = logging.getLogger(__name__)
@@ -752,8 +753,10 @@ class ChatExportPdfBuilder:
     def _table_from_chart_option(self, chartOption: dict | None) -> list:
         """``{"columns", "rows"}`` 负载 → 带表头的表格（+ 截断说明）；无从画起返回 []。
 
-        rows 可能已被**落库时**截到 200 行（``truncated: true``，见
-        ``chat_chart_persist._PERSIST_MAX_TABLE_ROWS``）—— 如实标注，不假装是全部。
+        行数在这里**再截一道**：顶层列落库时已被 ``boundedChartOption`` 截到
+        ``_PERSIST_MAX_TABLE_ROWS``，但 ``steps_snapshot`` 的历史数据可能没截过，
+        而 ``build()`` 在 async 端点里同步执行 —— 十万行表格排版期间整个进程的
+        事件循环被占住。截断后如实标注，不假装是全部。
         """
         if not isinstance(chartOption, dict):
             return []
@@ -761,14 +764,15 @@ class ChatExportPdfBuilder:
         rows = chartOption.get("rows")
         if not isinstance(columns, list) or not columns:
             return []
+        dictRows = [row for row in rows or [] if isinstance(row, dict)]
+        keptRows = dictRows[:_PERSIST_MAX_TABLE_ROWS]
         body = [[self._escape_cell(col) for col in columns]]
-        for row in rows or []:
-            if isinstance(row, dict):
-                body.append([self._escape_cell(row.get(col)) for col in columns])
+        for row in keptRows:
+            body.append([self._escape_cell(row.get(col)) for col in columns])
         if len(body) == 1:
             return []
         flowables: list = [self._build_table_flowable(body)]
-        if chartOption.get("truncated"):
+        if chartOption.get("truncated") or len(dictRows) > len(keptRows):
             flowables.append(Paragraph(
                 f"（表格仅显示前 {len(body) - 1} 行，完整结果请回看会话）",
                 self._styles["chart_caption"],

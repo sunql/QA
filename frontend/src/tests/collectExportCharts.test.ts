@@ -19,10 +19,14 @@ vi.mock("../utils/chartSnapshot", async (importOriginal) => {
   };
 });
 
-import { collectExportCharts } from "../utils/collectExportCharts";
+import {
+  collectExportCharts,
+  MAX_EXPORT_IMAGE_BYTES,
+} from "../utils/collectExportCharts";
 import { chartHeightOf } from "../utils/chartLayout";
 
-const PNG = "data:image/png;base64,AA==";
+const PNG_PREFIX = "data:image/png;base64,";
+const PNG = `${PNG_PREFIX}AA==`;
 
 /** 40 类目 ⇒ chartHeightOf 封顶 960（真实高度推断，不 mock）。 */
 const TALL_OPTION = {
@@ -195,6 +199,29 @@ describe("collectExportCharts", () => {
     expect(charts[charts.length - 1].messageId).toBe(20);
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
+  });
+
+  it("单张位图超过后端单张上限时只丢那一张，而不是让整份导出 422", async () => {
+    withResponse([
+      message({ id: 1, chartType: "bar", chartOption: { series: [] } }),
+      message({ id: 2, chartType: "pie", chartOption: { series: [] } }),
+    ]);
+    const oversize = `${PNG_PREFIX}${"A".repeat(MAX_EXPORT_IMAGE_BYTES * 4 / 3 + 8)}`;
+    snapshot.renderChartPng.mockResolvedValueOnce(oversize).mockResolvedValueOnce(PNG);
+
+    const charts = await collectExportCharts("s-1");
+
+    expect(charts).toEqual([{ messageId: 2, imagePng: PNG }]);
+  });
+
+  it("刚好卡在上限内的大图照常带上（预检不能把正常大图也丢掉）", async () => {
+    withResponse([message({ id: 1, chartType: "bar", chartOption: { series: [] } })]);
+    const nearLimit = `${PNG_PREFIX}${"A".repeat(Math.floor(MAX_EXPORT_IMAGE_BYTES * 4 / 3) - 4)}`;
+    snapshot.renderChartPng.mockResolvedValueOnce(nearLimit);
+
+    const charts = await collectExportCharts("s-1");
+
+    expect(charts).toEqual([{ messageId: 1, imagePng: nearLimit }]);
   });
 
   it("拿不到消息流时整份不带图，导出照常（图是增强不是主功能）", async () => {

@@ -29,6 +29,7 @@ from app.domain.schemas import AffinityStatus, ChatResponse, ClassRecallInfo, Hy
 from app.infrastructure.business_db_pool import BusinessDbAdapter
 from app.infrastructure.llm.base_client import BaseLlmClient
 from app.services.audit_service import AuditService
+from app.services.chat_chart_persist import boundedChartOption, boundedTableOption
 from app.services.messages_zh import (
     MSG_CHAT_STEP_AGGREGATION_SKIPPED as _MSG_STEP_AGGREGATION_SKIPPED,
     MSG_CHAT_STEP_EXEC_FAILED_PREFIX as _STEP_EXEC_FAILED_PREFIX,
@@ -287,8 +288,11 @@ def buildStepsSnapshot(
             entry["summary"] = result.summary
             entry["error"] = result.error
             entry["chartType"] = result.chart_type
-            entry["chartOption"] = result.chart_option
-            entry["tableOption"] = result.table_option
+            # 与顶层列同一落库口径：table 负载截到 200 行并置 truncated。只 `jsonSafe`
+            # 会让「列出所有…」的全量结果集原样进 JSONB，而导出 PDF 时它会被全量
+            # 灌进 reportlab（同步排版阻塞事件循环）。
+            entry["chartOption"] = boundedChartOption(result.chart_option)
+            entry["tableOption"] = boundedTableOption(result.table_option)
             entry["visualRationale"] = result.visual_rationale
             entry["queryPlan"] = result.query_plan.to_dict() if result.query_plan else None
         elif getattr(dbRow, "sql", None):

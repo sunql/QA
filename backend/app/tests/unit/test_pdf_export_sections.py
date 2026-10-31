@@ -11,9 +11,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+from pydantic import ValidationError
 from reportlab.platypus import Image as PdfImage
 from reportlab.platypus import KeepTogether, Paragraph, Table
 
+from app.domain.export_limits import MAX_EXPORT_CHART_IMAGES, MAX_EXPORT_IMAGE_BYTES
+from app.domain.schemas import ChatExportChartImage, ChatExportRequest
+from app.services.chat_chart_persist import _PERSIST_MAX_TABLE_ROWS
 from app.services.pdf_export_service import (
     ChatExportPayload,
     ChatExportPdfBuilder,
@@ -233,3 +238,51 @@ class TestAttachStepImages:
         merged = SessionHistoryService.attachChartImages(payload, {(7, 99): b"x"})
 
         assert merged.turns[0].step_charts[0].chart_image is None
+
+
+class TestTableRowCap:
+    """分节图里的 table 负载可能**未经落库截断**。
+
+    顶层 ``chart_option`` 落库前过 ``boundedChartOption``（rows 截到 200），但
+    ``steps_snapshot`` 是另一条写入路径；存量行更不能指望已被截断。渲染侧必须
+    再截一道 —— 否则一份导出会把全量结果集灌进 reportlab，而 ``build`` 在 async
+    端点里同步执行，排版期间整个进程的事件循环被占住。
+    """
+
+    def test_bounds_rows_and_marks_truncated(self) -> None:
+        rows = [{"a": i} for i in range(_PERSIST_MAX_TABLE_ROWS + 50)]
+
+        flowables = ChatExportPdfBuilder()._table_from_chart_option(
+            {"columns": ["a"], "rows": rows}
+        )
+
+        assert isinstance(flowables[0], Table)
+        assert len(flowables[0]._cellvalues) == _PERSIST_MAX_TABLE_ROWS + 1
+        # 截断必须如实标注，不假装是全部
+        assert isinstance(flowables[1], Paragraph)
+        assert "仅显示前" in flowables[1].text
+
+    def test_small_table_has_no_truncation_note(self) -> None:
+        flowables = ChatExportPdfBuilder()._table_from_chart_option(
+            {"columns": ["a"], "rows": [{"a": 1}]}
+        )
+
+        assert len(flowables) == 1
+
+
+class TestExportSchemaLimits:
+    """请求体在**解析阶段**就得有上界。
+
+    service 层的条数/字节闸门都是端点到手之后才跑：100 MB 的 JSON 已经全文读入
+    并建成 pydantic 对象，闸门只能决定「拒绝」，救不了这次解析的开销。
+    """
+
+    def test_rejects_more_than_max_charts(self) -> None:
+        charts = [{"messageId": 1, "imagePng": "x"} for _ in range(MAX_EXPORT_CHART_IMAGES + 1)]
+
+        with pytest.raises(ValidationError):
+            ChatExportRequest(charts=charts)
+
+    def test_rejects_oversized_image_payload(self) -> None:
+        with pytest.raises(ValidationError):
+            ChatExportChartImage(message_id=1, image_png="x" * (MAX_EXPORT_IMAGE_BYTES * 2))

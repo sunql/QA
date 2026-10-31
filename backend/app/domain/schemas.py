@@ -56,6 +56,11 @@ from app.domain.enums import (
     SourceSystem,
 )
 from app.domain.exceptions import ConfigError
+from app.domain.export_limits import (
+    CHART_IMAGE_DATA_URL_PREFIX,
+    MAX_EXPORT_CHART_IMAGES,
+    MAX_EXPORT_IMAGE_BYTES,
+)
 from app.domain.id_mapping import BUSINESS_OBJECT_MAX_LENGTH, EXTERNAL_ID_MAX_LENGTH
 from typing import Annotated, Any, Literal, Mapping
 from pydantic import BeforeValidator
@@ -2222,6 +2227,13 @@ class SessionMessagesResponse(CamelModel):
     )
 
 
+# 单张位图的字符上限 = base64(解码后字节上限) + data URL 前缀 + 余量。解析阶段先
+# 挡住超大请求体；service 仍按**解码后**字节与像素做权威校验。
+_MAX_EXPORT_IMAGE_PNG_CHARS = (
+    MAX_EXPORT_IMAGE_BYTES * 4 // 3 + len(CHART_IMAGE_DATA_URL_PREFIX) + 4
+)
+
+
 class ChatExportChartImage(CamelModel):
     """导出时前端回传的一张图表位图（0105，图表进最终报告）。
 
@@ -2235,7 +2247,11 @@ class ChatExportChartImage(CamelModel):
     step_index: int | None = Field(
         default=None, ge=0, description=MSG_SCHEMA_CHAT_EXPORT_CHART_STEP_INDEX
     )
-    image_png: str = Field(..., description=MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG)
+    image_png: str = Field(
+        ...,
+        max_length=_MAX_EXPORT_IMAGE_PNG_CHARS,
+        description=MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG,
+    )
 
 
 class ChatExportRequest(CamelModel):
@@ -2249,7 +2265,9 @@ class ChatExportRequest(CamelModel):
         default=None, ge=1, description=MSG_SCHEMA_CHAT_EXPORT_MESSAGE_ID
     )
     charts: list[ChatExportChartImage] = Field(
-        default_factory=list, description=MSG_SCHEMA_CHAT_EXPORT_CHARTS
+        default_factory=list,
+        max_length=MAX_EXPORT_CHART_IMAGES,
+        description=MSG_SCHEMA_CHAT_EXPORT_CHARTS,
     )
 
 

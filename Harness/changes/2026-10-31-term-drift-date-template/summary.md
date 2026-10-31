@@ -53,7 +53,7 @@ LLM 直接照抄模板，任何「近 N 个月」都会多算一个月。
 `ITEM_CODE` / `RCV_DATE`；`外部供应商贸易` 夹具同步改 DTL；种子本体类改 DTL。
 新增 `test_supply_qty_term_maps_to_live_dtl_class` 锁死映射类。
 
-### 2.3 词条（生产数据，待执行）
+### 2.3 词条（生产数据，2026-10-31 已执行）
 
 ```sql
 UPDATE term_dictionary
@@ -82,12 +82,28 @@ UPDATE term_dictionary
 1 条是本地测试库残留演示本体（`ItemMaster`）+ embedding 不可用导致召回降级
 （CI 的干净库不含演示数据）。与本批改动无关，已一并修正为可移植断言。
 
-## 4. 部署与冒烟（待执行）
+## 4. 部署与冒烟（2026-10-31 已执行）
 
-- backend 镜像重建（prompt 模板随镜像发布）；术语词条为纯数据，UPDATE 即生效。
-- 冒烟：同一问题「3 月份供货量最多的三家供应商」确认计划 prompt 中
-  `<term_dictionary>` 段映射为 `DWD_GOODS_RECEIPT_DTL` / `RCV_QTY_PUU`，
-  且「近 6 个月」类问题 SQL 使用 -5 到 < 下月 1 号。
+**上线时序**
+
+1. PR #89 以失败集减法通过（PR 失败集 60 ⊂ main 基线 133，净新增 0；
+   main 基线取 e23655e9 全量 run；unit 45min / shard1 60min 超时为基线行为）。
+2. squash 合入 main `2abfbca3`；内容级仲裁 `git diff --quiet origin/main <branch>`
+   为空后删除远端/本地分支。
+3. 生产数据：`term_dictionary` 单事务 UPDATE（id=5），DO 块守卫「行数=1、
+   目标类存活、目标列齐全」。备份：`/private/tmp/qa-backups/term_dictionary-20261031.sql`。
+4. 发版源：fresh worktree `/private/tmp/qa-deploy-1031-termdrift`（detached `2abfbca3`），
+   复制 `docker/.env`；alembic 生产 0138 = 树 0138（无迁移）。
+5. `docker compose build backend` → 镜像探针：`-(N-1)` 命中 2 处、`-5` 示例 1 处、
+   旧 `-N` 下界 0 处 → `up -d backend`。
+
+**冒烟结果**
+
+- `qa-backend` 启动完成（`Application startup complete`），health `ok`。
+- 容器内用生产库跑真实 `renderDictionaryText`：
+  `「供货量」…（类 DWD_GOODS_RECEIPT_DTL、属性 RCV_QTY_PUU、默认 JOIN … ITEM_CODE … RCV_DATE …）`，
+  LINE 不再出现；其余 3 条词条同时渲染正常。
+- 未做真实 LLM 端到端会话（本会话无 admin 口令/登录态），以渲染链路 + 镜像模板探针替代。
 
 ## 5. 未做 / 待议
 

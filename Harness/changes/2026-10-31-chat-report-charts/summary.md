@@ -2,7 +2,7 @@
 
 - **日期**：2026-10-31
 - **分支**：`feat/chat-report-charts`（base `559971f6`）
-- **状态**：**已实施**
+- **状态**：**已发布**（main `e54f9005`，2026-10-31 生产部署）
 - **关联**：[2026-09-30-chart-in-final-report](../2026-09-30-chart-in-final-report/summary.md)（0105：顶层图 = 最后一步）、[2026-10-01-visual-output-strategy](../2026-10-01-visual-output-strategy/summary.md)（0107 反转：汇总纯文字）、[2026-10-31-replay-plan-cards](../2026-10-31-replay-plan-cards/summary.md)（0138：`steps_snapshot`）、[2026-10-30-chat-chart-rendering](../2026-10-30-chat-chart-rendering/summary.md)（图例/数字格式/PNG）
 
 ---
@@ -283,3 +283,40 @@ vitest 自报 `Test Files 6 passed (6) / Tests 163 passed (163)`，Duration 3.15
 ### 类型检查
 
 `npx tsc --noEmit`：**0 错误**（wall `real 4.52s`）。
+
+---
+
+## 11. 同批追加：L4 分析路径回显 SQL
+
+上线前测试发现「为什么…」类归因问题前端没有 SQL 卡片。根因分两层，**第二层才是主因**：
+
+1. 采集层：`final_sql` 只认模型主动输出的 ```final_sql``` / `::final_sql::` 围栏，而 L4
+   提示词从未要求该格式 ⇒ 生产 `session_message.sql_generated` 恒为 NULL，尽管
+   `execute_sql` 确实执行过。改为确定性采集：loop state 新增 `executed_sqls`，只在
+   `execute_read_only` **成功**后 append；loop 结束后 `final_sql` 为空则回显最后一条
+   （`_lastExecutedSql`），`answered` 与 `max_iterations` 两条终止路径都覆盖；显式围栏仍优先；
+   失败/被只读守卫拒绝的 SQL 不采集。
+2. 下发层：`chat_stream_entry.py` 的 preamble 分支只发 `meta / chart / token / done`，
+   **从不发 `sql` 帧**。补发后序列为 `meta → sql → token → done`（有 SQL 时）。
+   非流式路径 `ChatResponse.sql` 本就有值。
+3. `max_iterations` 默认 5 → 10：5 轮只够探表 + 试错 SQL，从未进入写结论的轮次；
+   成本仍由 `cost_budget_usd` 兜底。
+
+测试：`backend/app/tests/unit/test_agent_loop_final_sql.py`（7 条）+ 
+`test_chat_stream_l1_l4.py::test_stream_l4_preamble_emits_sql_frame`（1 条）。采集用例做过
+变异验证（把 append 提前到执行前 ⇒ 两条失败用例变红），证明材料为真。
+
+## 12. 发布
+
+- **合并**：PR #84 squash → main `e54f9005`（2026-10-31）。
+- **镜像**：`qa-system-backend:latest` = `6354d7e5…`、`qa-system-frontend:latest` = `7288b624…`
+  （发版源 = `e54f9005` 的独立 worktree；前端 build 显式 `--build-arg VITE_API_BASE_URL=`，
+  实测 bundle 内无 `localhost:5173/api/v1`）。
+- **切换**：`docker compose stop backend frontend` → `up -d backend frontend`，无迁移
+  （生产 `alembic_version=0138` 与树内 head 一致）。
+- **回滚锚点**：`qa-system-backend:pre-deploy-20261031`（`f330d546…`）、
+  `qa-system-frontend:pre-deploy-20261031`（`f8b698a6…`）。
+- **冒烟**：生产流式 L4 归因题返回 `meta → sql → token → done`，SQL 帧为实际执行的语句，
+  终止原因 `answered`；用户人工验收通过。
+- **CI**：Frontend typecheck + coverage 绿；Backend integration shard 1/3 红，
+  但上一个 main `559971f6` 四个 shard 全红 —— 非本批引入。

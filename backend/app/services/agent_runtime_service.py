@@ -386,11 +386,23 @@ def _cost_for_usage(
     ) / Decimal(1000)
 
 
+def _lastExecutedSql(state: dict) -> str | None:
+    """兜底 final_sql：取 loop 中最后一条**成功执行**的 execute_sql。
+
+    L4 的系统提示词不要求模型输出围栏，实操上模型也几乎不会主动输出
+    ``final_sql`` ⇒ 只靠 `_extract_final_sql` 时前端永远拿不到 SQL。
+    这里以「真正跑通过的那条」为准；执行失败的 SQL 不记录（见
+    `_dispatchSingleTool` 只在 execute_read_only 返回后追加）。
+    """
+    executed = state.get("executed_sqls") or []
+    return executed[-1] if executed else None
+
+
 def _extract_final_sql(messages: list) -> str | None:
     """从对话历史中提取 final_sql。
 
     约定：若 LLM 在最终 answer 中包含 ``final_sql`...` `` 格式，
-    则从中取出 SQL 字符串。
+    则从中取出 SQL 字符串。未命中时由 ``_lastExecutedSql`` 兜底。
     """
     import re
 
@@ -660,8 +672,13 @@ async def _dispatchSingleTool(
     run_id: str | None = None,
     session_id: str | None = None,
     iteration: int = 0,
+    executed_sqls: list[str] | None = None,
 ) -> Any:  # ToolMessage
-    """处理单个 tool_call → ToolMessage。"""
+    """处理单个 tool_call → ToolMessage。
+
+    ``executed_sqls``：成功执行的 SQL 累积列表（调用方持有），
+    供 loop 结束时兜底回填 final_sql；失败的 SQL 不进入。
+    """
     import json
 
     from app.infrastructure.llm.base_client import ToolCall as Tc
@@ -675,6 +692,8 @@ async def _dispatchSingleTool(
             _assert_read_only(sql)
             rows = await executor.execute_read_only(sql)
             rowCount = len(rows)
+            if executed_sqls is not None:
+                executed_sqls.append(sql.strip())
             # 列式 + 行数上限：执行器取全量，只截喂给 LLM 的序列化（rowCount 仍真值）
             from app.services.agent_tools_nl2sql import encodeExecuteSqlResult
 
@@ -728,7 +747,11 @@ async def run_agent_loop(
     llm_client,
     executor,
     ontology,
-    max_iterations: int = 5,
+    # 2026-10-31：5 → 10。「为什么」类归因问题实测耗 5 轮在探表/试错 SQL 上
+    # （list_tables + describe_table×3 + execute_sql×3），第 5 轮就到顶、从未进入
+    # 写结论的轮次，用户只拿到 [L4:max_iterations] 前缀的半句话。成本仍由
+    # cost_budget_usd 兜底（默认 0.5 USD），迭代上限只决定「有预算时能否收敛」。
+    max_iterations: int = 10,
     cost_budget_usd: float = 0.5,
     cost_per_1k_input: float = 0.0,
     cost_per_1k_output: float = 0.0,
@@ -802,6 +825,12 @@ async def run_agent_loop(
         fallback = _extract_last_ai_content(state["messages"])
         if fallback:
             state["answer_text"] = fallback
+
+    # final_sql 兜底：显式围栏优先（answered 分支已取），否则回显最后一条**成功执行**
+    # 的 SQL。实际被消费的终止原因是 answered 与 max_iterations（error / cost_cap 在
+    # chat_l4 侧会降级 L2/L3，final_sql 随之丢弃）；这里统一算，避免两条分支各写一遍。
+    if not state["final_sql"]:
+        state["final_sql"] = _lastExecutedSql(state)
 
     _logLoopEnd(
         user_id=user_id,
@@ -884,6 +913,7 @@ def _initLoopState(question: str) -> dict:
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "tool_calls_made": [],
+        "executed_sqls": [],
         "terminated_reason": "max_iterations",
         "final_sql": None,
         "answer_text": None,
@@ -942,6 +972,7 @@ async def _executePendingToolCalls(*, state: dict, session, executor) -> None:
             run_id=state.get("run_id"),
             session_id=state.get("session_id"),
             iteration=state["iterations"],
+            executed_sqls=state["executed_sqls"],
         )
         state["messages"].append(tm)
 

@@ -71,6 +71,46 @@ describe("collectExportCharts", () => {
     expect(snapshot.renderChartPng).toHaveBeenCalledWith(option);
   });
 
+  it("有 Top-N 视图时截图用截断视图（与屏幕上默认看到的一致）", async () => {
+    const truncated = {
+      yAxis: { type: "category", data: Array.from({ length: 21 }, (_, i) => `C${i}`) },
+      series: [{ type: "bar", data: [] }],
+    };
+    const option = {
+      ...TALL_OPTION,
+      topNOption: truncated,
+      topNMeta: { limit: 20, hidden: 20, total: 40 },
+    };
+    withResponse([message({ id: 7, chartType: "hbar", chartOption: option })]);
+
+    await collectExportCharts("s-1");
+
+    expect(snapshot.renderChartPng).toHaveBeenCalledWith(truncated);
+  });
+
+  it("像素预算按当前显示的（截断）视图算：40 类全量 960 高会少带图", async () => {
+    const truncated = {
+      yAxis: { type: "category", data: Array.from({ length: 21 }, (_, i) => `C${i}`) },
+      series: [{ type: "bar", data: [] }],
+    };
+    const option = {
+      ...TALL_OPTION,
+      topNOption: truncated,
+      topNMeta: { limit: 20, hidden: 20, total: 40 },
+    };
+    withResponse(
+      Array.from({ length: 20 }, (_, index) =>
+        message({ id: index + 1, chartType: "hbar", chartOption: option })
+      )
+    );
+
+    const charts = await collectExportCharts("s-1");
+
+    // 截断视图 684 高 ⇒ 3,200 × 684 = 2.1888M/张 ⇒ 36M / 2.1888M = 16.4 ⇒ 16 张。
+    // 若错用全量 960 高则只剩 11 张 —— 这个差值就是断言本身。
+    expect(charts).toHaveLength(16);
+  });
+
   it("跳过 user 行与 table/kpi（后两者由后端原生排版，比位图清晰）", async () => {
     withResponse([
       message({ id: 1, role: "user" as const, chartType: "bar", chartOption: {} }),

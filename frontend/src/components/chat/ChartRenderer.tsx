@@ -1,7 +1,7 @@
 import ReactECharts from "echarts-for-react";
 import { Button, Collapse, Space, Table, Typography, message } from "antd";
 import { DownloadOutlined } from "@ant-design/icons";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "../../i18n";
 import { useThemeStore } from "../../stores/themeStore";
 import { applyChartTheme } from "../../theme/chartTheme";
@@ -11,6 +11,7 @@ import type { ChartType, TablePayload, VisualRationale } from "../../types/chat"
 import { dataUrlToBlob, downloadBlob, downloadCsv } from "../../utils/download";
 import { renderChartPng } from "../../utils/chartSnapshot";
 import { chartHeightOf } from "../../utils/chartLayout";
+import { topNMetaOf, topNOptionOf } from "../../utils/chartTopN";
 import { visualRationaleText } from "../../utils/visualRationale";
 import KpiCard, { parseKpiPayload } from "./KpiCard";
 
@@ -100,25 +101,36 @@ export default function ChartRenderer({
   // 实时那一轮拿到的是全量 option（截断发生在写库前，作用在副本上），所以线上
   // 不会误报；历史回放读到 `truncated: true` 时才提示，与后端 PDF 口径一致。
   const isTruncatedTable = chartOption?.truncated === true;
+  // Top-N 视图（2026-10-31）：后端把「前 20 + 其他」挂在同一个 option 上，这里只决定
+  // **默认看哪一份**。切换是组件本地 state：不回后端、不改 store，回放/导出不受影响。
+  // 换消息时复位 —— 否则上一张图的全量态会带到下一张（下一张可能根本没有 Top-N）。
+  const topNMeta = useMemo(() => topNMetaOf(chartOption), [chartOption]);
+  const topNView = useMemo(() => topNOptionOf(chartOption), [chartOption]);
+  const [showFullView, setShowFullView] = useState(false);
+  useEffect(() => {
+    setShowFullView(false);
+  }, [chartOption]);
+  const displayOption = !showFullView && topNView ? topNView : chartOption;
   // 决策 6：服务端只发结构，颜色在这一层补（只补色、不改结构；option 来自 store，
   // 必须走不可变路径，否则同一份消息的其它引用会串台）。
   // 数字口径先于主题：formatter 是 JS 函数（JSON 下不来），主题层只补色不碰它。
   const themedOption = useMemo(
     () =>
-      chartOption
+      displayOption
         ? applyChartTheme(
-            applyChartNumberFormat(chartOption, locale),
+            applyChartNumberFormat(displayOption, locale),
             isDark ? DARK_TOKEN : LIGHT_TOKEN
           )
         : null,
-    [chartOption, isDark, locale]
+    [displayOption, isDark, locale]
   );
   const kpiPayload = useMemo(
     () => (isKpi ? parseKpiPayload(chartOption) : null),
     [isKpi, chartOption]
   );
   // 高度随类别数增长：在线与 PNG 导出共用同一函数（见 utils/chartLayout.ts）。
-  const chartHeight = useMemo(() => chartHeightOf(chartOption), [chartOption]);
+  // 用**当前显示的** option —— 21 类和 25 类不该一样高。
+  const chartHeight = useMemo(() => chartHeightOf(displayOption), [displayOption]);
   // 侧栏开合只改 flex 宽度，不触发 window resize —— ECharts 不会自己知道要重绘，
   // 需要观察容器尺寸。宽度 <= 0 是收起过程的过渡态，重绘只会拿到空画布，忽略。
   // （hooks 必须在早退之前：组件会随消息流重挂，早退后挂 hook 直接炸。）
@@ -160,7 +172,8 @@ export default function ChartRenderer({
   // （dataUrlToBlob）再进 Blob，base64 字符串直接写入会产出打不开的文件。
   const handleExportPng = async () => {
     try {
-      const dataUrl = await renderChartPng(chartOption ?? {});
+      // 截图用**当前显示的**视图：用户看到前 20 就导出前 20，切了全量就导全量。
+      const dataUrl = await renderChartPng(displayOption ?? {});
       if (!dataUrl) {
         throw new Error(t("errors.unknownError"));
       }
@@ -212,6 +225,21 @@ export default function ChartRenderer({
               notMerge
             />
           </div>
+          {/* Top-N 切换（2026-10-31）：排名图默认前 20 + 「其他」，这里给出回全量的入口。
+              只改本地 state —— 全量视图本来就在同一份 option 里，不需要再问后端。 */}
+          {topNView && topNMeta ? (
+            <div style={{ display: "flex", justifyContent: "flex-start", marginTop: 4 }}>
+              <Button
+                size="small"
+                type="link"
+                onClick={() => setShowFullView((value) => !value)}
+              >
+                {showFullView
+                  ? t("chartExport.showTopN", { limit: topNMeta.limit })
+                  : t("chartExport.showAll", { total: topNMeta.total })}
+              </Button>
+            </div>
+          ) : null}
           {/* 图下方的折叠明细表（Task 8，决策 2）：默认折叠，展开看原始数字。
               表负载来自 tableOption（后端只在图型附带；TABLE 的表已在 chartOption、
               KPI 不附表，故此处 tableOption 为 null 时整个面板不渲染）。 */}

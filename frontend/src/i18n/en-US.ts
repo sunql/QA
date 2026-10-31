@@ -899,6 +899,8 @@ export const enUS = {
     success: "Exported",
     failed: "Export failed: {message}",
     truncated: "Showing the first {count} rows only (the full result is longer)",
+    showAll: "Show all {total} items",
+    showTopN: "Show top {limit} only",
   },
 
   chatPanel: {

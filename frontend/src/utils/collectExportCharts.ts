@@ -16,6 +16,7 @@ import { loadSessionMessages } from "../api/chatHistory";
 import type { ExportChartImage } from "../api/chatHistory";
 import { asChartOption, normalizeChartType } from "./chartContract";
 import { chartHeightOf } from "./chartLayout";
+import { defaultChartOption } from "./chartTopN";
 import type { ChatMessageRead } from "../types/chatHistory";
 import { needsSnapshot, renderChartPng } from "./chartSnapshot";
 
@@ -62,9 +63,21 @@ function isSnapshotTarget(message: ChatMessageRead): boolean {
   return chartType !== null && needsSnapshot(chartType);
 }
 
+/**
+ * 要截图的 option：**与屏幕上默认展示的一致**（有 Top-N 视图就用截断视图）。
+ * 导出的 PDF 是给人看的成品，画出来的不该是用户没见过的全量长条图；
+ * 高度/像素预算也按同一份算，否则预算与实际位图对不上。
+ */
+function snapshotOptionOf(
+  message: ChatMessageRead
+): Record<string, unknown> | null {
+  const chartOption = asChartOption(message.chartOption);
+  return chartOption ? defaultChartOption(chartOption) : null;
+}
+
 /** 渲染一张；失败返回 null（调用方丢掉该张，不影响其余）。 */
 async function renderOne(message: ChatMessageRead): Promise<ExportChartImage | null> {
-  const chartOption = asChartOption(message.chartOption);
+  const chartOption = snapshotOptionOf(message);
   if (!chartOption) return null;
   const imagePng = await renderChartPng(chartOption);
   return imagePng ? { messageId: message.id, imagePng } : null;
@@ -96,7 +109,7 @@ async function renderAll(
 
 /** 一张图上传后的像素数：1600 宽 × 2H 高（与 `chartSnapshot` 的 800 CSS × 2 对齐）。 */
 function pixelCostOf(message: ChatMessageRead): number {
-  const chartOption = asChartOption(message.chartOption);
+  const chartOption = snapshotOptionOf(message);
   if (!chartOption) return 0;
   return SNAPSHOT_PIXEL_WIDTH * SNAPSHOT_PIXEL_RATIO * chartHeightOf(chartOption);
 }

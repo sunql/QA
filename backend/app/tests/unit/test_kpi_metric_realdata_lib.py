@@ -71,6 +71,8 @@ def test_pattern_allows_dev_and_test_only() -> None:
     assert not ALLOWED_DB_PATTERN.match("qa_metadata_prod")
     assert not ALLOWED_DB_PATTERN.match("postgres")
     assert not ALLOWED_DB_PATTERN.match("qa_metadata_backup")
+    # 前缀相似的近似名不受信：`qa_metadata_test*` 必须是完整名或以 `_` 续名
+    assert not ALLOWED_DB_PATTERN.match("qa_metadata_testing")
 
 
 def test_assert_safe_target_accepts_test_database_without_opt_in() -> None:

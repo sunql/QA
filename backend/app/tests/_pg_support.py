@@ -30,14 +30,35 @@ from app.infrastructure import database as dbModule
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]  # backend/
 _TEST_DB = "qa_metadata_test"
+# 破坏性夹具只允许指向测试库：qa_metadata_test / qa_metadata_test_solo / ..._t16。
+# 必须是完整库名或以 `_` 续名 —— `qa_metadata_testing` 之类的近似名不受信。
+_TEST_DB_PATTERN = re.compile(rf"^{_TEST_DB}($|_)")
 
 _schemaReady = False
 
 
+def assertTestDatabase(url: str) -> None:
+    """库名白名单：conftest 每个用例 TRUNCATE 全库（CASCADE），点错库等于清生产。
+
+    Neo4j / Milvus 的测试夹具早就有同款 fail-fast（`_neo4j_support`、
+    `milvus_isolation`），PG 侧此前没有 —— 手滑把 `TEST_DATABASE_URL` 复制成
+    生产 DSN，整套集成测试会把本体与业务表删干净。
+    """
+    from scripts.kpi_metric_db_guard import databaseNameOf
+
+    name = databaseNameOf(url)
+    if not _TEST_DB_PATTERN.match(name):
+        raise RuntimeError(
+            f"拒绝在非测试库 {name!r} 上跑测试：夹具会 TRUNCATE 全库（CASCADE）。"
+            f"TEST_DATABASE_URL 必须指向 {_TEST_DB}* 库。"
+        )
+
+
 def resolveTestDatabaseUrl() -> str:
-    """解析真实 PG 测试库 URL；未配置真实 PG 时 fail-fast。"""
+    """解析真实 PG 测试库 URL；未配置或指向非测试库时 fail-fast。"""
     explicit = os.environ.get("TEST_DATABASE_URL")
     if explicit:
+        assertTestDatabase(explicit)
         return explicit
     dbUrl = os.environ.get("DATABASE_URL", "")
     if dbUrl.startswith("postgresql"):

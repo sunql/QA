@@ -103,6 +103,58 @@ docker exec \
 - 周期性同步任务（launchd / scheduler）
 - Prometheus 指标 + Alertmanager 行数告警
 
+### id_mapping（统一 ID 映射中枢，A1 / M0-P0.1–P0.3）
+
+**日期**：2026-10-31 · **变更**：[m0-id-mapping-a1](../changes/m0-id-mapping-a1/summary.md)
+（前次：[id-mapping-dto-tighten](../changes/id-mapping-dto-tighten/summary.md)、
+[id-mapping-admin-acl](../changes/id-mapping-admin-acl/summary.md)）
+
+一行 = 一个业务对象在三个存储引擎中的 ID 映射。统一 ID 是三库对齐的唯一锚。
+
+- 列：`unified_id`(PK, `String(128)`)、`business_object`(`String(32)`)、
+  `external_id`(`String(128)`)、`pg_table`(`String(64)`)、`pg_id`(`String(128)`)、
+  `neo4j_node_id`(`String(128)`)、`milvus_collection`(`String(64)`)、
+  `milvus_id`(`String(128)`)、时间戳
+- 唯一约束：`uq_id_mapping_bo_ext (business_object, external_id)`
+- 格式：`unified_id = "obj:{business_object}:{external_id}"`，由
+  `app/domain/id_mapping.py` 的 `buildUnifiedId` / `parseUnifiedId` 派生与反解。
+  分段去空白 + NFC 归一；长度上限与列宽同源（32 / 128 / 128）；拒绝 `:` 与
+  Unicode `Cc`/`Cf`/`Cs`/`Zl`/`Zp`（NUL、零宽、软连字符、双向覆盖、代理项、行分隔符）。
+
+**谁写哪一列**：
+
+| 写入方 | 可写的列 |
+|---|---|
+| `POST /id-mappings`（admin） | `business_object` / `external_id`（其余由服务端派生或留 NULL）；传指针 → 422 |
+| `IdMappingService.register(..., pg_table=, pg_id=)` | 同上 + `pg_table` / `pg_id`（ontology 同步、回填脚本） |
+| `PUT /id-mappings/{id}`（admin，运维改数） | 五个跨库指针列（partial） |
+| A2 / A3 回填 | `neo4j_node_id` / `milvus_collection` / `milvus_id` |
+
+**回填脚本**（`backend/scripts/backfill_id_mapping.py`）：
+
+- 对每个 `ontology_class` 行写 `obj:CLASS:{class_id}`，`pg_table="ontology_class"`、
+  `pg_id=str(class_id)`；`business_object` 用 `CLASS`（不按类名建命名空间）。
+- conflict 路径 `ON CONFLICT (unified_id) DO UPDATE`，**只更新** `pg_table`/`pg_id`；
+  重跑不抹 A2/A3 的 `neo4j_*`/`milvus_*`。
+- **单事务**：全部批次一次提交，中途失败不留「前几批已写」的半状态。
+- 动手前体检（任何写入之前）：`unified_id` 与自身两段不一致 ⇒ `CorruptMappingError`
+  点名报错（否则会撞 `uq_id_mapping_bo_ext` 并在写入中途 IntegrityError）；
+  `business_object` 只差大小写（`class` / `Class`）⇒ `CaseVariantMappingError`，
+  指出 `reconcile_milvus_id_mapping.py` 的小写占位行与合并指引。
+- 默认**预演**，`--apply` 才写；目标库必须命中 `scripts/kpi_metric_db_guard.py` 的
+  deny-by-default 白名单（`qa_metadata` / `qa_metadata_test*`），且 `APP_ENV` 是生产
+  或库名为 `qa_metadata` 时 `--apply` 还需 `--allow-prod`。
+- 门禁 `backend/scripts/id_mapping_realdata.py`：只读模式断言**集合关系**——
+  派生/反解一致、无大小写漂移、每个存活类都有 `CLASS` 映射（覆盖）、每个
+  `CLASS` 映射都指向存在的类（无悬空）。**不是**「总行数 == 存活类数」：表里
+  还有 `PROPERTY` / `METRIC` 行与软删墓碑，计数口径在真实库上恒假，且数相等
+  也抓不到换集。大小写漂移必须在只读阶段挂掉：canonical 行满足覆盖、小写行
+  自身自洽时，拖到 `--apply` 才拒等于白跑一轮上线窗口。只读模式可上生产。
+- `--full` 追加「重跑存活 + 幂等」：哨兵 UPDATE、重跑回填与幂等回填都在
+  **未提交事务**里，断言后 `rollback` ⇒ 全程无 COMMIT，哨兵从不落盘、并发
+  读不到、进程被杀也不留假坐标。代价是所有被回填行持行锁到回滚，类数很大时
+  选窗口执行。目标判定为生产时需 `--allow-prod`。
+
 ## 本体图（Neo4j）
 
 ```

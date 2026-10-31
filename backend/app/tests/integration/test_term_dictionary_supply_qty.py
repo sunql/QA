@@ -9,8 +9,8 @@ B125/B019/B153。结果不一致的根因不是幻觉/温度漂移，而是 LLM 
 修复（按用户选择：最小改动）：把口径写入术语词典，计划阶段以 <term_dictionary>
 块注入 prompt。词典条目包含：
 - term = 「供货量」
-- mapped_class_name = DWD_GOODS_RECEIPT_LINE
-- mapped_property_name = RECEIVED_QTY
+- mapped_class_name = DWD_GOODS_RECEIPT_DTL（LINE 已 tombstone，字段不全）
+- mapped_property_name = RCV_QTY_PUU
 - formula_hint 显式限定 DIM_IMATERIAL.TCLCOD_0 IN ('A02','A03','A04','A05')
 
 本测试锁定整条注入链（术语 → renderDictionaryText → 计划 system prompt）：
@@ -57,14 +57,15 @@ SUPPLY_QTY_TERMS: list[dict] = [
             "(2) 用户明确指定了具体供应商编码或名称"
             "(已知供应商时不限制其物料范围)。"
         ),
-        "mappedClassName": "DWD_GOODS_RECEIPT_LINE",
-        "mappedPropertyName": "RECEIVED_QTY",
+        "mappedClassName": "DWD_GOODS_RECEIPT_DTL",
+        "mappedPropertyName": "RCV_QTY_PUU",
         "formulaHint": (
             "默认 JOIN DIM_IMATERIAL ON DIM_IMATERIAL.ITMREF_0 = "
-            "DWD_GOODS_RECEIPT_LINE.MATERIAL_CODE "
+            "DWD_GOODS_RECEIPT_DTL.ITEM_CODE "
             "WHERE DIM_IMATERIAL.TCLCOD_0 IN "
             "('A02','A03','A04','A05') "
-            "AND DWD_GOODS_RECEIPT_LINE.RECEIPT_DATE 在统计月份范围内。"
+            "AND DWD_GOODS_RECEIPT_DTL.RCV_DATE 在统计月份范围内,"
+            "统计量用 SUM(DWD_GOODS_RECEIPT_DTL.RCV_QTY_PUU)。"
             "【例外】用户已明确指定供应商编码列表时,不应用 TCLCOD_0 过滤。"
         ),
     },
@@ -104,11 +105,11 @@ SUPPLY_QTY_TERMS: list[dict] = [
 
 _DEFAULT_PLAN = (
     '{"target":"查询 3 月份供货量最多的三家供应商",'
-    '"selectedClasses":["DWD_GOODS_RECEIPT_LINE","DIM_IMATERIAL"],'
-    '"selectedProperties":["SUPPLIER_CODE","RECEIVED_QTY","TCLCOD_0"],'
+    '"selectedClasses":["DWD_GOODS_RECEIPT_DTL","DIM_IMATERIAL"],'
+    '"selectedProperties":["SUPPLIER_CODE","RCV_QTY_PUU","TCLCOD_0"],'
     '"conditions":["TCLCOD_0 IN ('"'"'A02'"'"','"'"'A03'"'"','"'"'A04'"'"','"'"'A05'"'"')",'
-    '"RECEIPT_DATE >= '"'"'2026-03-01'"'"'","RECEIPT_DATE < '"'"'2026-04-01'"'"'"],'
-    '"aggregations":[{"alias":"total_qty","function":"SUM","property":"RECEIVED_QTY"}],'
+    '"RCV_DATE >= '"'"'2026-03-01'"'"'","RCV_DATE < '"'"'2026-04-01'"'"'"],'
+    '"aggregations":[{"alias":"total_qty","function":"SUM","property":"RCV_QTY_PUU"}],'
     '"groupBy":["SUPPLIER_CODE"],'
     '"orderBy":[{"column":"total_qty","direction":"DESC"}],'
     '"rowLimit":3}'
@@ -142,12 +143,12 @@ class _PipelineLlm:
             _Resp.content = self._planJson
         elif "生成 SQL 时必须" in system:
             _Resp.content = (
-                "```sql\nSELECT SUPPLIER_CODE, SUM(RECEIVED_QTY) AS total_qty "
-                "FROM ZJTH.DWD_GOODS_RECEIPT_LINE r "
-                "JOIN ZJTH.DIM_IMATERIAL m ON m.ITMREF_0 = r.MATERIAL_CODE "
+                "```sql\nSELECT SUPPLIER_CODE, SUM(RCV_QTY_PUU) AS total_qty "
+                "FROM ZJTH.DWD_GOODS_RECEIPT_DTL r "
+                "JOIN ZJTH.DIM_IMATERIAL m ON m.ITMREF_0 = r.ITEM_CODE "
                 "WHERE m.TCLCOD_0 IN ('A02','A03','A04','A05') "
-                "AND r.RECEIPT_DATE >= DATE '2026-03-01' "
-                "AND r.RECEIPT_DATE < DATE '2026-04-01' "
+                "AND r.RCV_DATE >= DATE '2026-03-01' "
+                "AND r.RCV_DATE < DATE '2026-04-01' "
                 "GROUP BY SUPPLIER_CODE "
                 "ORDER BY total_qty DESC "
                 "FETCH FIRST 3 ROWS ONLY\n```"
@@ -166,8 +167,8 @@ class _FakeAdapter:
         ]
 
 
-def _receiptLineProperties() -> list[OntologyProperty]:
-    """与 seed_ontology 真实管线一致的 DWD_GOODS_RECEIPT_LINE 子集。
+def _receiptDtlProperties() -> list[OntologyProperty]:
+    """与 seed_ontology 真实管线一致的 DWD_GOODS_RECEIPT_DTL 子集。
 
     每次调用返回全新实例：OntologyProperty 是 ORM 实例,跨测试复用会被
     上一测试会话标记持久化(class_id 已赋值),重跑时 flush 因 identity map
@@ -175,27 +176,30 @@ def _receiptLineProperties() -> list[OntologyProperty]:
     """
     return [
         OntologyProperty(
-            property_name="收货单号", data_type="STRING", source_column="RECEIPT_NO"
+            property_name="收货单号", data_type="STRING", source_column="RCV_NO"
         ),
         OntologyProperty(
-            property_name="收货行号", data_type="STRING", source_column="RECEIPT_LINE_NO"
+            property_name="收货行号", data_type="DECIMAL", source_column="RCV_LINE_NO"
         ),
         OntologyProperty(
-            property_name="工厂代码", data_type="STRING", source_column="FACILITY_CODE"
-        ),
-        OntologyProperty(
-            property_name="收货日期", data_type="DATETIME", source_column="RECEIPT_DATE"
+            property_name="收货日期", data_type="DATETIME", source_column="RCV_DATE"
         ),
         OntologyProperty(
             property_name="供应商代码", data_type="STRING", source_column="SUPPLIER_CODE"
         ),
         OntologyProperty(
-            property_name="物料编码", data_type="STRING", source_column="MATERIAL_CODE"
+            property_name="物品代码", data_type="STRING", source_column="ITEM_CODE"
         ),
         OntologyProperty(
             property_name="收货数量",
             data_type="DECIMAL",
-            source_column="RECEIVED_QTY",
+            source_column="RCV_QTY_PUU",
+        ),
+        OntologyProperty(
+            property_name="内部交易代码", data_type="STRING", source_column="INTER_COM_CODE"
+        ),
+        OntologyProperty(
+            property_name="内部交易地点", data_type="STRING", source_column="INTER_SITE_CODE"
         ),
     ]
 
@@ -213,7 +217,7 @@ def _imaterialProperties() -> list[OntologyProperty]:
 
 
 async def _seed(session) -> tuple[LlmConfig, DataSource]:
-    """写入模型配置、数据源、DWD_GOODS_RECEIPT_LINE + DIM_IMATERIAL 本体类。"""
+    """写入模型配置、数据源、DWD_GOODS_RECEIPT_DTL + DIM_IMATERIAL 本体类。"""
     config = LlmConfig(
         model_name="test-model",
         provider="openai",
@@ -232,10 +236,10 @@ async def _seed(session) -> tuple[LlmConfig, DataSource]:
         is_default=True,
     )
     receipt = OntologyClass(
-        class_name="DWD_GOODS_RECEIPT_LINE",
+        class_name="DWD_GOODS_RECEIPT_DTL",
         class_alias="收货明细",
-        source_table="ZJTH.DWD_GOODS_RECEIPT_LINE",
-        properties=_receiptLineProperties(),
+        source_table="ZJTH.DWD_GOODS_RECEIPT_DTL",
+        properties=_receiptDtlProperties(),
     )
     imaterial = OntologyClass(
         class_name="DIM_IMATERIAL",
@@ -308,6 +312,16 @@ def _chat_payload(question: str, datasourceId: int) -> dict:
     return {"sessionId": "s-supply-qty", "question": question, "datasourceId": datasourceId}
 
 
+def _dictionaryBlock(prompt: str) -> str:
+    """截取 <term_dictionary> … </term_dictionary> 段。
+
+    只对词典段断言映射类，避免本体召回段（含其它演示类）造成误判。
+    """
+    start = prompt.index("<term_dictionary>")
+    end = prompt.index("</term_dictionary>", start)
+    return prompt[start:end]
+
+
 _QUESTION = "3 月份供货量最多的三家供应商是哪些"
 
 
@@ -336,13 +350,42 @@ class TestTermDictionarySupplyQtyInject:
         assert "<term_dictionary>" in prompt
         # 渲染格式:- 「term」:definition(类 X、属性 Y、hint)
         assert "「供货量」" in prompt
-        assert "类 DWD_GOODS_RECEIPT_LINE" in prompt
-        assert "属性 RECEIVED_QTY" in prompt
+        assert "类 DWD_GOODS_RECEIPT_DTL" in prompt
+        assert "属性 RCV_QTY_PUU" in prompt
         # formulaHint 关键过滤条件必须在 prompt 中(防 LLM 漏过滤)
-        assert "TCLCOD_0 IN ('A02','A03','A04','A05')" in prompt
+        # 注意：词典经 wrapUntrusted → sanitizeForLlmPrompt，单引号被转义为 &#39;
+        assert "TCLCOD_0 IN (&#39;A02&#39;,&#39;A03&#39;,&#39;A04&#39;,&#39;A05&#39;)" in prompt
         # 关联术语(外协供应商 / 生产型物料)同次注入
         assert "「外协供应商」" in prompt
         assert "「生产型物料」" in prompt
+
+    async def test_supply_qty_term_maps_to_live_dtl_class(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """漂移回归（2026-10-31）：映射类必须是在世的 DWD_GOODS_RECEIPT_DTL。
+
+        DWD_GOODS_RECEIPT_LINE 已 tombstone（valid_to 非空），且没有
+        INTER_COM_CODE / RCV_QTY_PUU；供货量与外部供应商贸易的完整字段
+        （ITEM_CODE / RCV_DATE / RCV_QTY_PUU / INTER_COM_CODE）都在 DTL 上。
+        词典若继续指向 LINE，LLM 换个问法就会落到已下线表，产出第三套结果。
+        """
+        config, ds = await _seed(dbSession)
+        fakeLlm = _installFakes(monkeypatch, config)
+        await _clearTerms(client)
+        await _seedTerms(client, SUPPLY_QTY_TERMS)
+
+        resp = await client.post("/api/v1/chat", json=_chat_payload(_QUESTION, ds.id))
+
+        assert resp.status_code == 200, resp.text
+        prompt = fakeLlm.planSystemPrompt
+        assert prompt is not None
+        block = _dictionaryBlock(prompt)
+        assert "类 DWD_GOODS_RECEIPT_DTL" in block
+        assert "属性 RCV_QTY_PUU" in block
+        assert "DWD_GOODS_RECEIPT_LINE" not in block
+        # JOIN 键与日期列必须落在 DTL 的真实列上
+        assert "DWD_GOODS_RECEIPT_DTL.ITEM_CODE" in block
+        assert "DWD_GOODS_RECEIPT_DTL.RCV_DATE" in block
 
     async def test_no_dictionary_when_table_empty(
         self, client, dbSession, monkeypatch
@@ -359,7 +402,7 @@ class TestTermDictionarySupplyQtyInject:
         assert prompt is not None
         assert "<term_dictionary>" not in prompt
         # 反向断言:无词典时,口径过滤条件不应被「硬塞」进 prompt
-        assert "TCLCOD_0 IN ('A02','A03','A04','A05')" not in prompt
+        assert "TCLCOD_0 IN (&#39;A02&#39;" not in prompt
 
     async def test_formula_hint_uses_correct_class_name(
         self, client, dbSession, monkeypatch
@@ -382,13 +425,15 @@ class TestTermDictionarySupplyQtyInject:
         assert resp.status_code == 200, resp.text
         prompt = fakeLlm.planSystemPrompt
         assert prompt is not None
+        # 只看词典段：本体召回段可能含演示类（如 ItemMaster/ITMMASTER），不属于本用例
+        block = _dictionaryBlock(prompt)
         # 锁:不要回到错误的 ITMMASTER 类名
-        assert "ITMMASTER" not in prompt
+        assert "ITMMASTER" not in block
         # 锁:必须使用正确的 DIM_IMATERIAL
-        assert "DIM_IMATERIAL" in prompt
+        assert "DIM_IMATERIAL" in block
         # 锁:JOIN 表达式必须出现(否则 LLM 无法落地过滤)
-        assert "JOIN DIM_IMATERIAL" in prompt
-        assert "MATERIAL_CODE" in prompt
+        assert "JOIN DIM_IMATERIAL" in block
+        assert "ITEM_CODE" in block
 
     async def test_supply_qty_term_not_outsourced_service(
         self, client, dbSession, monkeypatch
@@ -469,7 +514,7 @@ _EXTERNAL_TRADE_TERM: dict = {
         "(2) 用户明确指定了具体供应商编码或名称"
         "(已知供应商时不限制内部/外部范围)。"
     ),
-    "mappedClassName": "DWD_GOODS_RECEIPT_LINE",
+    "mappedClassName": "DWD_GOODS_RECEIPT_DTL",
     "mappedPropertyName": "INTER_COM_CODE",
     "formulaHint": (
         "默认 WHERE INTER_COM_CODE = '1' AND INTER_SITE_CODE = '1' "
@@ -510,11 +555,11 @@ class TestExternalTradeExplicitSupplierException:
         # term 标题必须出现
         assert "「外部供应商贸易」" in prompt
         # 映射类与属性标签必须出现（LLM 据此找到对应过滤条件）
-        assert "类 DWD_GOODS_RECEIPT_LINE" in prompt
+        assert "类 DWD_GOODS_RECEIPT_DTL" in prompt
         assert "属性 INTER_COM_CODE" in prompt
-        # formula_hint 必须含默认过滤 + 例外条款
-        assert "INTER_COM_CODE = '1'" in prompt
-        assert "INTER_SITE_CODE = '1'" in prompt
+        # formula_hint 必须含默认过滤 + 例外条款（单引号经 L1 转义为 &#39;）
+        assert "INTER_COM_CODE = &#39;1&#39;" in prompt
+        assert "INTER_SITE_CODE = &#39;1&#39;" in prompt
 
     async def test_external_trade_term_contains_explicit_supplier_exception(
         self, client, dbSession, monkeypatch
@@ -576,4 +621,4 @@ class TestExternalTradeExplicitSupplierException:
         assert "「外部供应商贸易」" in prompt
         # 各自过滤条件都必须在 prompt
         assert "TCLCOD_0 IN" in prompt
-        assert "INTER_COM_CODE = '1'" in prompt
+        assert "INTER_COM_CODE = &#39;1&#39;" in prompt

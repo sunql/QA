@@ -245,6 +245,20 @@ renderChartOption(spec, data, *, topN: bool = False) -> dict
 | T5 PDF 分节插图 | `4592a773` | 后端 46 unit + 19 integration；前端 `collectExportCharts` 20 |
 | T6 微软雅黑 | 本提交 | `test_pdf_fonts.py` 7；PDF 相关 53 unit + 25 integration |
 | T7 文档 | 本提交 | 全前端 227 文件 / 2285 用例、`tsc --noEmit` 0 错误 |
+| 审查修复 | `dffb7f4c` | 导出相关 56 unit + 56 integration；前端 227 文件 / 2287 用例 |
+
+**审查修复（`dffb7f4c`）**：`steps_snapshot` 是 T5 新开的一条「落库 → 导出时读回」
+数据通路，审查发现三处缺口：
+
+1. **快照落库口径不一致**：顶层 `chart_option` 过 `boundedChartOption`（rows 截
+   200 并置 `truncated`），快照只 `jsonSafe` ⇒ 十万行明细原样进 JSONB。现两条路径
+   同一口径，且保持不可变（实时响应仍发全量）。
+2. **渲染侧无上界**：存量快照行没截过，而 `build()` 在 async 端点里同步排版 —— 
+   `_table_from_chart_option` 再截一道（`_PERSIST_MAX_TABLE_ROWS`）并如实标注。
+3. **请求体只有 service 级闸门**：`charts` 与 `image_png` 在 pydantic 解析阶段就
+   加上界（200 条 / 单图 2 MiB 解码字符量），上界数字统一在
+   `app/domain/export_limits.py`。前端 `collectExportCharts` 同步预检单张大小，
+   超限只丢那一张，不让整个导出 422。
 
 **部署注意**
 

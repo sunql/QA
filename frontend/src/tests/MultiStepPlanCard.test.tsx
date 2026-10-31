@@ -1,7 +1,7 @@
-/** 多步每步出图（决策 3）：每个 step 挂同一个 ChartRenderer。
+/** 多步计划卡（D2 改版）：折叠头一行摘要 + 展开步骤时间线，**卡内不出图**。
  *
- * 契约：**图跟着步骤走** —— 第 0 步的图不能画在第 1 步下面（所以断言按「有几张图、
- * 各自的数据分别是谁」来钉，而不是笼统地说「有图」）。
+ * 图只出现在最终报告的对应分节（`ReportChartBlock`），计划卡重复出图被移除；
+ * 摘要行回答「几步、成功几、失败几、耗时多少」，不用展开。
  *
  * 注意 antd `Collapse` 默认**不挂载**面板内容：不展开就什么都查不到（不是组件坏了）。
  */
@@ -32,16 +32,25 @@ vi.mock("echarts-for-react", () => ({
 import MultiStepPlanCard from "../components/chat/MultiStepPlanCard";
 import type { MultiStepStep } from "../types/chat";
 
-const PANEL_LABEL = "查看分析计划";
+const SUMMARY_TESTID = "multi-step-summary";
 
 function renderExpanded(
   steps: MultiStepStep[],
   onResume?: (runId: string, fromStepIndex: number, modelId: number | null) => void,
   disabled?: boolean,
-  originalModelId = 1
+  originalModelId = 1,
+  elapsedMs?: number
 ) {
-  render(<MultiStepPlanCard steps={steps} onResume={onResume} disabled={disabled} originalModelId={originalModelId} />);
-  fireEvent.click(screen.getByText(PANEL_LABEL));
+  render(
+    <MultiStepPlanCard
+      steps={steps}
+      onResume={onResume}
+      disabled={disabled}
+      originalModelId={originalModelId}
+      elapsedMs={elapsedMs}
+    />
+  );
+  fireEvent.click(screen.getByTestId(SUMMARY_TESTID));
 }
 
 /**
@@ -73,70 +82,91 @@ function makeStep(overrides: Partial<MultiStepStep> = {}): MultiStepStep {
   };
 }
 
-describe("MultiStepPlanCard 每步出图", () => {
-  it("带图的步骤渲染出自己的图表", () => {
+describe("MultiStepPlanCard 摘要行与卡内无图", () => {
+  // 反向守卫：把 ChartRenderer 放回卡内 ⇒ 本用例红。
+  it("卡内不再渲染每步图表（图只在最终报告对应分节出现）", () => {
     renderExpanded([
-      makeStep({ chartType: "hbar", chartOption: { series: [{ type: "bar", data: [9812] }] } }),
-    ]);
-
-    const chart = screen.getByTestId("echarts-mock");
-    expect(chart.textContent).toContain('"type":"bar"');
-    expect(chart.textContent).toContain("9812");
-  });
-
-  it("没有图的步骤不渲染图表（失败步骤后端不发图表字段）", () => {
-    renderExpanded([makeStep({ stepIndex: 1, status: "error", error: "ORA-00942", chartType: null })]);
-
-    expect(screen.queryByTestId("echarts-mock")).toBeNull();
-  });
-
-  it("KPI 步骤渲染指标卡而非 echarts 画布", () => {
-    renderExpanded([
+      makeStep({ stepIndex: 0, chartType: "hbar", chartOption: { series: [{ type: "bar", data: [9812] }] } }),
       makeStep({
+        stepIndex: 1,
         chartType: "kpi",
         chartOption: { kpi: { label: "总收货量", value: 9812, unit: "件", delta: null } },
       }),
     ]);
 
-    expect(screen.getByText("总收货量")).toBeInTheDocument();
-    expect(screen.getByText("件")).toBeInTheDocument();
     expect(screen.queryByTestId("echarts-mock")).toBeNull();
+    expect(screen.queryByText("总收货量")).toBeNull();
   });
 
-  it("一步有图一步无图时只有一张图（不串到隔壁步骤）", () => {
+  it("只删了图，步骤明细仍在（SQL / 摘要 / 压缩行数）", () => {
     renderExpanded([
-      makeStep({ stepIndex: 0, chartType: "line", chartOption: { series: [{ type: "line", data: [1, 2] }] } }),
-      makeStep({ stepIndex: 1, chartType: null, chartOption: null }),
+      makeStep({ stepIndex: 0, status: "done", summary: "共 3 家供应商" }),
+      makeStep({ stepIndex: 1, status: "compressed", originalRows: 1000, compressedRows: 30 }),
     ]);
 
-    expect(screen.getAllByTestId("echarts-mock")).toHaveLength(1);
-    expect(screen.getByTestId("echarts-mock").textContent).toContain('"type":"line"');
+    // SQL 预览仍是折叠面板（内容不挂载），按入口数量断言两步各有一份
+    expect(screen.getAllByText("查看 SQL")).toHaveLength(2);
+    expect(screen.getByText("共 3 家供应商")).toBeInTheDocument();
+    expect(screen.getByText("数据已压缩（1000 → 30 行）")).toBeInTheDocument();
   });
 
-  it("每步各出自己的图（两张图各自的数据都在，且没有错位）", () => {
-    renderExpanded([
-      makeStep({ stepIndex: 0, chartType: "bar", chartOption: { series: [{ type: "bar", data: [111] }] } }),
-      makeStep({ stepIndex: 1, chartType: "line", chartOption: { series: [{ type: "line", data: [222] }] } }),
-    ]);
+  it("结束态摘要：步数 · 成功 · 失败 · 耗时", () => {
+    render(
+      <MultiStepPlanCard
+        steps={[
+          makeStep({ stepIndex: 0, status: "done" }),
+          makeStep({ stepIndex: 1, status: "compressed", originalRows: 100, compressedRows: 10 }),
+          makeStep({ stepIndex: 2, status: "error", error: "ORA-00942" }),
+        ]}
+        originalModelId={1}
+        elapsedMs={12345}
+      />
+    );
 
-    const charts = screen.getAllByTestId("echarts-mock");
-    expect(charts).toHaveLength(2);
-    expect(charts[0].textContent).toContain("111");
-    expect(charts[1].textContent).toContain("222");
+    // 压缩步算成功（数据被裁过，但那一步本身成功）；12345ms → 12.3秒
+    expect(screen.getByTestId(SUMMARY_TESTID).textContent).toBe("3 步 · 成功 2 · 失败 1 · 12.3秒");
   });
 
-  it("步骤的图渲染自己的 rationale 说明行与折叠数据表（Task 8）", () => {
-    renderExpanded([
-      makeStep({
-        chartType: "hbar",
-        chartOption: { series: [{ type: "bar", data: [9812] }] },
-        tableOption: { columns: ["供应商"], rows: [{ 供应商: "甲" }] },
-        visualRationale: { code: "R11_HBAR_MANY_ROWS", params: { rows: 5 } },
-      }),
-    ]);
+  it("全部成功且无耗时：省略失败与耗时段（历史回放没有时长，不伪造）", () => {
+    render(
+      <MultiStepPlanCard
+        steps={[makeStep({ stepIndex: 0, status: "done" }), makeStep({ stepIndex: 1, status: "compressed" })]}
+        originalModelId={1}
+      />
+    );
 
-    expect(screen.getByText("类目较多（5 项），以横向柱状图呈现，附数据表")).toBeInTheDocument();
-    expect(screen.getByText("数据表")).toBeInTheDocument();
+    expect(screen.getByTestId(SUMMARY_TESTID).textContent).toBe("2 步 · 成功 2");
+  });
+
+  it("运行中摘要显示当前步进度", () => {
+    render(
+      <MultiStepPlanCard
+        steps={[
+          makeStep({ stepIndex: 0, status: "done" }),
+          makeStep({ stepIndex: 1, status: "running" }),
+          makeStep({ stepIndex: 2, status: "pending" }),
+        ]}
+        originalModelId={1}
+        currentStepIndex={1}
+      />
+    );
+
+    expect(screen.getByTestId(SUMMARY_TESTID).textContent).toBe("执行中 (2/3)");
+  });
+
+  it("尚未开始（计划刚下发、全部待执行）显示待执行，而不是「成功 0」", () => {
+    render(
+      <MultiStepPlanCard
+        steps={[
+          makeStep({ stepIndex: 0, status: "pending" }),
+          makeStep({ stepIndex: 1, status: "pending" }),
+          makeStep({ stepIndex: 2, status: "pending" }),
+        ]}
+        originalModelId={1}
+      />
+    );
+
+    expect(screen.getByTestId(SUMMARY_TESTID).textContent).toBe("3 步 · 待执行");
   });
 });
 

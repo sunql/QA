@@ -236,6 +236,7 @@ function MessageItem({
                 <MultiStepPlanCard
                   steps={message.steps}
                   currentStepIndex={message.currentStepIndex}
+                  elapsedMs={message.elapsedMs}
                   originalModelId={message.originalModelId ?? selectedModelId ?? 0}
                   onResume={(runId, fromStepIndex, modelId) =>
                     resumeRun(runId, fromStepIndex, message.id, modelId)

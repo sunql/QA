@@ -14,35 +14,25 @@ SQL 聚合策略：
 
 from __future__ import annotations
 
-import base64
-import binascii
 import logging
-from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.error_messages import (
-    MSG_EXPORT_CHART_COUNT_EXCEEDED,
-    MSG_EXPORT_CHART_IMAGE_INVALID,
-    MSG_EXPORT_CHART_IMAGE_TOO_LARGE,
-    MSG_EXPORT_CHART_IMAGE_TOO_MANY_PIXELS,
-    MSG_EXPORT_CHART_MESSAGE_NOT_FOUND,
-    MSG_EXPORT_CHART_TOTAL_TOO_LARGE,
-    MSG_EXPORT_CHART_TOTAL_TOO_MANY_PIXELS,
-)
-from app.domain.exceptions import ValidationError
 from app.domain.models import SessionMessage, SessionQueryState, SessionTokenUsage
 from app.domain.schemas import (
-    ChatExportChartImage,
     ChatMessageRead,
     ChatSessionListItem,
     SessionMessagesResponse,
 )
-from app.services.pdf_export_service import ChatExportPayload, ChatExportTurn
-from app.services.report_sections import buildReportSections
+from app.services.pdf_export_service import (
+    ChatExportPayload,
+    ChatExportTurn,
+    ExportStepChart,
+)
+from app.services.report_sections import buildReportSections, chartSteps
 
 logger = logging.getLogger(__name__)
 
@@ -55,27 +45,6 @@ _ANSWER_PREVIEW_LIMIT = 100
 # 大 markdown / 长 session 导致 PDF 渲染 OOM 或 CPU 燃尽。limit 由 controller 透传。
 _MAX_TURNS_PER_EXPORT = 500
 _MAX_CONTENT_BYTES = 50_000
-
-# ---- 导出图表位图的抗滥用上界（0105）----------------------------------------
-# 这些是**防御性上界**，不是可调策略（按《魔数治理》「判别不清」档留在源码里）：
-# 新端点首次接收用户提交的二进制，没有上限就等于给了一个「用 base64 灌爆内存/
-# 把 PDF 撑到无法渲染」的入口。
-_MAX_EXPORT_IMAGE_BYTES = 2 * 1024 * 1024        # 单张 PNG 解码后上限
-_MAX_EXPORT_CHART_IMAGES = 200                   # charts 条数上限
-_MAX_EXPORT_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024  # 全部图片解码后总量上限
-# 字节上限**只管压缩后的大小**，管不住解出来有多大：一张 12000×12000 的纯色 PNG
-# 只有 580 KB，字节闸放行、魔数也对，交给 Pillow 却要按 1.44 亿像素分配内存（实测
-# 单张峰值 RSS +2 GB）。而 PIL 默认的 MAX_IMAGE_PIXELS 只在这个量的 2 倍以上才
-# 抛异常，中间这一大段是完全不设防的 —— 所以像素数必须自己卡。
-# 上界取 8M px（≈4000×2000）：前端真实产物是 1600 × 2H（CSS 高度 320 起、960 封顶），
-# 最大约 1600×1920 = 3.07M px，相对 8M 单图上限约 2.6 倍余量；总量取 40M px，把一次
-# 请求的瞬时解码内存压在 ~160 MB。
-_MAX_EXPORT_IMAGE_PIXELS = 8_000_000
-_MAX_EXPORT_TOTAL_IMAGE_PIXELS = 40_000_000
-# 只收 PNG（前端 getDataURL({type:"png"}) 的输出）。前缀 + 魔数双重校验：
-# 只信前缀等于允许「把任意二进制贴个 PNG 标签」送进来。
-_CHART_IMAGE_DATA_URL_PREFIX = "data:image/png;base64,"
-_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
 class SessionHistoryService:
@@ -365,133 +334,6 @@ class SessionHistoryService:
             return await self._buildSingleTurnPayload(session, sessionId, messageId)
         return await self._buildFullSessionPayload(session, sessionId)
 
-    async def resolveChartImages(
-        self,
-        session: AsyncSession,
-        sessionId: str,
-        charts: list[ChatExportChartImage],
-    ) -> dict[int, bytes]:
-        """校验并解码前端回传的图表位图 → ``{messageId: pngBytes}``。
-
-        这是本服务第一次接收**用户提交的二进制**，故在边界处显式失败
-        （任一条不合法 → ``ValidationError`` ⇒ 422）：
-
-        - 条数 / 单张字节 / 总量字节三重上限（见 ``_MAX_EXPORT_*``）；
-        - **单张与总量的像素上限** —— 字节闸管不住解压炸弹（见
-          ``_MAX_EXPORT_IMAGE_PIXELS`` 的注释）；
-        - ``data:image/png;base64,`` 前缀 + PNG 魔数（只信前缀等于允许「任意
-          二进制贴个 PNG 标签」送进来）；
-        - ``messageId`` 必须属于该 session —— **不信任前端传来的 id**，否则可以
-          借导出把别人的图拼进来。报错不回显 id（沿用 HIGH-3 口径，否则 422
-          就成了「这个 id 属不属于这个会话」的枚举探针）。
-
-        重复 messageId 取后者：前端逐条生成不该重复，不值得为这点小事拒掉整份导出。
-        """
-        if len(charts) > _MAX_EXPORT_CHART_IMAGES:
-            raise ValidationError(MSG_EXPORT_CHART_COUNT_EXCEEDED)
-        decoded: dict[int, bytes] = {}
-        totalBytes = 0
-        totalPixels = 0
-        for chart in charts:
-            imageBytes = self._decodeChartImage(chart.image_png)
-            totalBytes += len(imageBytes)
-            # 逐张累加即判：等全部解完再量体，等于让一个请求先把内存占满
-            if totalBytes > _MAX_EXPORT_TOTAL_IMAGE_BYTES:
-                raise ValidationError(MSG_EXPORT_CHART_TOTAL_TOO_LARGE)
-            # 像素同样逐张累加即判，理由同上 —— 只是这条闸拦的是解压炸弹
-            pixelCount = self._pngPixelCount(imageBytes)
-            if pixelCount is None:
-                # 魔数对但读不出 IHDR（截断/畸形）：与其交给 Pillow 赌它报不报错，
-                # 不如在边界上按「不是合法 PNG」拒掉。
-                raise ValidationError(MSG_EXPORT_CHART_IMAGE_INVALID)
-            if pixelCount > _MAX_EXPORT_IMAGE_PIXELS:
-                raise ValidationError(MSG_EXPORT_CHART_IMAGE_TOO_MANY_PIXELS)
-            totalPixels += pixelCount
-            if totalPixels > _MAX_EXPORT_TOTAL_IMAGE_PIXELS:
-                raise ValidationError(MSG_EXPORT_CHART_TOTAL_TOO_MANY_PIXELS)
-            decoded[chart.message_id] = imageBytes
-        if decoded:
-            await self._assertMessagesBelongToSession(
-                session, sessionId, list(decoded)
-            )
-        return decoded
-
-    @staticmethod
-    def _decodeChartImage(dataUrl: str) -> bytes:
-        """单张 data URL → PNG 字节；前缀/大小/魔数任一不合法抛 ``ValidationError``。"""
-        if not dataUrl.startswith(_CHART_IMAGE_DATA_URL_PREFIX):
-            raise ValidationError(MSG_EXPORT_CHART_IMAGE_INVALID)
-        payload = dataUrl[len(_CHART_IMAGE_DATA_URL_PREFIX):]
-        # 先用 base64 的长度反推解码后大小（4 字符 → 3 字节）再解码：反过来等于
-        # 让一个超长字符串先把内存占住，上限就成了摆设。
-        if len(payload) * 3 // 4 > _MAX_EXPORT_IMAGE_BYTES:
-            raise ValidationError(MSG_EXPORT_CHART_IMAGE_TOO_LARGE)
-        try:
-            imageBytes = base64.b64decode(payload, validate=True)
-        except (binascii.Error, ValueError):
-            raise ValidationError(MSG_EXPORT_CHART_IMAGE_INVALID) from None
-        if len(imageBytes) > _MAX_EXPORT_IMAGE_BYTES:
-            raise ValidationError(MSG_EXPORT_CHART_IMAGE_TOO_LARGE)
-        if not imageBytes.startswith(_PNG_MAGIC):
-            raise ValidationError(MSG_EXPORT_CHART_IMAGE_INVALID)
-        return imageBytes
-
-    @staticmethod
-    def _pngPixelCount(imageBytes: bytes) -> int | None:
-        """PNG 的像素数（宽 × 高），从 IHDR 头直接读；头不完整/不合法返回 ``None``。
-
-        **为什么手读头而不是用 Pillow 量尺寸**：像素数必须在这一层卡住，而
-        ``PIL.Image.open`` 一旦打开就已经按解出的尺寸分配过内存了 —— 让它先解码
-        再回头问「你多大」，炸弹早响完了。PNG 的尺寸恒在固定偏移（8 字节签名 +
-        4 字节块长 + 4 字节块类型 ⇒ 偏移 16 起 8 个字节），读 8 字节就够，
-        也不需要为此把 Pillow 变成这个服务的依赖。
-        """
-        if len(imageBytes) < 24 or imageBytes[12:16] != b"IHDR":
-            return None
-        width = int.from_bytes(imageBytes[16:20], "big")
-        height = int.from_bytes(imageBytes[20:24], "big")
-        # 0 是畸形的（PNG 规范要求 ≥1），照 None 处理，别让 0×N 混过像素闸
-        if width <= 0 or height <= 0:
-            return None
-        return width * height
-
-    @staticmethod
-    async def _assertMessagesBelongToSession(
-        session: AsyncSession,
-        sessionId: str,
-        messageIds: list[int],
-    ) -> None:
-        """这些 messageId 必须真的属于该 session；否则 422（不回显 id）。"""
-        stmt = select(SessionMessage.id).where(
-            and_(
-                SessionMessage.session_id == sessionId,
-                SessionMessage.id.in_(messageIds),
-            )
-        )
-        found = (await session.execute(stmt)).scalars().all()
-        if len(set(found)) != len(set(messageIds)):
-            raise ValidationError(MSG_EXPORT_CHART_MESSAGE_NOT_FOUND)
-
-    @staticmethod
-    def attachChartImages(
-        payload: ChatExportPayload,
-        imagesByMessageId: dict[int, bytes],
-    ) -> ChatExportPayload:
-        """把位图按 messageId 挂到对应轮次上（返回新 payload，不改入参）。
-
-        没挂上的位图（该轮被 ``_MAX_TURNS_PER_EXPORT`` 截掉、或前端算错了 id）
-        **静默忽略**：导出是主功能，多出来一张没人要的图不该让它失败。
-        """
-        if not imagesByMessageId:
-            return payload
-        turns = [
-            replace(turn, chart_image=imagesByMessageId[turn.message_id])
-            if turn.message_id in imagesByMessageId
-            else turn
-            for turn in payload.turns
-        ]
-        return replace(payload, turns=turns)
-
     async def _buildFullSessionPayload(
         self,
         session: AsyncSession,
@@ -512,6 +354,8 @@ class SessionHistoryService:
                 SessionMessage.sql_generated,
                 SessionMessage.chart_type,      # 0105：图进导出
                 SessionMessage.chart_option,
+                # 2026-10-31（分节插图）：最终回答的分节块由 content + 快照现算
+                SessionMessage.steps_snapshot,
             )
             .where(SessionMessage.session_id == sessionId)
             .order_by(SessionMessage.id.asc())
@@ -527,21 +371,7 @@ class SessionHistoryService:
         usage_map = await self._fetchUsageMetaByMessage(session, sessionId, [r.id for r in rows])
 
         turns = [
-            ChatExportTurn(
-                user_content=self._truncate(user.content),
-                user_time=user.created_time,
-                assistant_content=self._truncate(asst.content),
-                assistant_time=asst.created_time,
-                message_id=asst.id,          # 0105：位图按 id 对轮次
-                sql=asst.sql_generated,
-                model_name=usage_map.get(asst.id, {}).get("model_name"),
-                tokens_used=usage_map.get(asst.id, {}).get("tokens_used"),
-                cost=usage_map.get(asst.id, {}).get("cost"),
-                # 0105：该轮回答的图表负载（无图为 None）。PDF 里 table/kpi 由后端
-                # 原生画，其余 kind 需要前端回传的 PNG（见 pdf_export_service）。
-                chart_type=asst.chart_type,
-                chart_option=asst.chart_option,
-            )
+            self._turnFromRows(user, asst, usage_map.get(asst.id, {}))
             for user, asst in turn_dict
         ]
         title = self._deriveTitle(turns)
@@ -567,6 +397,7 @@ class SessionHistoryService:
             SessionMessage.sql_generated,
             SessionMessage.chart_type,      # 0105：图进导出
             SessionMessage.chart_option,
+            SessionMessage.steps_snapshot,  # 2026-10-31：分节插图
         ).where(
             and_(
                 SessionMessage.session_id == sessionId,
@@ -616,27 +447,65 @@ class SessionHistoryService:
         else:
             usage_map = await self._fetchUsageMetaByMessage(session, sessionId, [asst_row.id])
             meta = usage_map.get(asst_row.id, {})
-            turns = [
-                ChatExportTurn(
-                    user_content=self._truncate(user_row.content) if user_row else "",
-                    user_time=user_row.created_time if user_row else None,
-                    assistant_content=self._truncate(asst_row.content),
-                    assistant_time=asst_row.created_time,
-                    message_id=asst_row.id,      # 0105：位图按 id 对轮次
-                    sql=asst_row.sql_generated,
-                    model_name=meta.get("model_name"),
-                    tokens_used=meta.get("tokens_used"),
-                    cost=meta.get("cost"),
-                    chart_type=asst_row.chart_type,      # 0105
-                    chart_option=asst_row.chart_option,
-                )
-            ]
+            turns = [self._turnFromRows(user_row, asst_row, meta)]
         title = self._deriveTitle(turns)
         return ChatExportPayload(
             session_id=sessionId,
             title=title,
             generated_at=datetime.now(),
             turns=turns,
+        )
+
+    def _turnFromRows(
+        self, user: Any, asst: Any, usage: dict[str, Any]
+    ) -> ChatExportTurn:
+        """一组 (user, assistant) 行 → 不可变轮次（含分节块与步骤图）。
+
+        分节块用**截断后**的 content 现算：PDF 里印的就是这段文字，分节位置必须与
+        实际排版一致（content 超 ``_MAX_CONTENT_BYTES`` 时两者才可能不同）。
+        """
+        assistantContent = self._truncate(asst.content)
+        reportSections = self._sectionsFor(assistantContent, asst.steps_snapshot)
+        return ChatExportTurn(
+            user_content=self._truncate(user.content) if user is not None else "",
+            user_time=user.created_time if user is not None else None,
+            assistant_content=assistantContent,
+            assistant_time=asst.created_time,
+            message_id=asst.id,          # 0105：位图按 id 对轮次
+            sql=asst.sql_generated,
+            model_name=usage.get("model_name"),
+            tokens_used=usage.get("tokens_used"),
+            cost=usage.get("cost"),
+            # 0105：该轮回答的顶层图表负载（无图为 None）。PDF 里 table/kpi 由后端
+            # 原生画，其余 kind 需要前端回传的 PNG（见 pdf_export_service）。
+            chart_type=asst.chart_type,
+            chart_option=asst.chart_option,
+            # 2026-10-31（分节插图）：多步回答按分节块排版，图按步骤归属。
+            report_sections=reportSections,
+            step_charts=self._stepChartsFor(asst.steps_snapshot) if reportSections else (),
+        )
+
+    @staticmethod
+    def _sectionsFor(content: str, steps: object) -> list[dict] | None:
+        """多步消息的分节块；单步/无快照/无可图步骤 → None（走旧渲染）。
+
+        条件与回放 ``loadFullMessages`` 对齐：只对**多步**算。单步消息也落 1 元素
+        快照，若也算分节，PDF 会同时画顶层图与分节图 —— 同一张图出现两次。
+        """
+        if not isinstance(steps, list) or len(steps) <= 1:
+            return None
+        return buildReportSections(content or "", steps) or None
+
+    @staticmethod
+    def _stepChartsFor(steps: object) -> tuple[ExportStepChart, ...]:
+        """快照里有图的步骤 → 分节插图所需的图结构（判据复用 ``chartSteps``）。"""
+        return tuple(
+            ExportStepChart(
+                step_index=item["stepIndex"],
+                chart_type=item["chartType"],
+                chart_option=item["chartOption"],
+            )
+            for item in chartSteps(steps if isinstance(steps, list) else None)
         )
 
     @staticmethod

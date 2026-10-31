@@ -323,6 +323,9 @@ export interface ChatMessage {
   steps?: MultiStepStep[];
   // 多步报告分块：done 帧 / 非流式响应 / 历史回放回填；缺省走旧纯 Markdown 渲染
   reportSections?: ReportBlock[];
+  // 本轮端到端耗时（毫秒）：done 帧 `latency_ms` 回填，供计划卡摘要显示。
+  // 历史回放没有时长 ⇒ 缺省（不伪造）。
+  elapsedMs?: number;
   // 当前正在执行的步骤序号（step_plan 事件回填）
   currentStepIndex?: number;
   // Phase 1.4：目标表可信度 badge（流式 data_quality 事件回填，可与 queryPlan 一起展示）

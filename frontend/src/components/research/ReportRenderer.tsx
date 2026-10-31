@@ -15,9 +15,13 @@
  * rows 也兼容新 data —— 后端 R3 之后只发 data，但解析器对历史 payload 仍然不破。
  */
 import type { ReactNode } from "react";
-import { useTranslation } from "react-i18next";
+import { useMemo } from "react";
+import { Button } from "antd";
 import EChart from "../EChart";
 import { isChartType } from "../../utils/chartContract";
+import { chartHeightOf } from "../../utils/chartLayout";
+import { useChartDisplayOption } from "../../hooks/useChartDisplayOption";
+import { useTranslation } from "../../i18n";
 import { EvidencePanel } from "./EvidencePanel";
 
 export interface ReportSourceRef {
@@ -148,6 +152,45 @@ function DataTable({ content }: { content: TableContent }) {
   );
 }
 
+/**
+ * 报告里的 ECharts 块：与聊天端 `ChartRenderer` **同一条渲染口径**（D3）。
+ *
+ * - 默认渲染 Top-N 截断视图；有 Top-N 时下方给「显示全部 / 只看前 N」切换；
+ * - 高度按**当前显示的** option 推断（类别一多就长高，不再压扁坐标轴）；
+ * - 数字格式同一套（万/亿缩写 + tooltip 千分位）。
+ *
+ * 切换是组件本地 state，不回后端 —— 报告 payload 里存的仍是落库时那份 option。
+ */
+function ChartBlock({ chart }: { chart: ChartContent }) {
+  const { t } = useTranslation();
+  const sourceOption = useMemo(
+    () => (chart.echartsOption ?? {}) as Record<string, unknown>,
+    [chart.echartsOption]
+  );
+  const { displayOption, formattedOption, topNMeta, showFullView, toggleShowFullView } =
+    useChartDisplayOption(sourceOption);
+  const chartHeight = useMemo(() => chartHeightOf(displayOption), [displayOption]);
+
+  return (
+    <div>
+      <EChart
+        option={formattedOption as unknown as Parameters<typeof EChart>[0]["option"]}
+        height={chartHeight}
+        testId={`report-chart-${chart.chartType ?? "unknown"}`}
+      />
+      {topNMeta ? (
+        <div style={{ display: "flex", justifyContent: "flex-start", marginTop: 4 }}>
+          <Button size="small" type="link" onClick={toggleShowFullView}>
+            {showFullView
+              ? t("chartExport.showTopN", { limit: topNMeta.limit })
+              : t("chartExport.showAll", { total: topNMeta.total })}
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function renderBlock(block: ReportBlock): ReactNode {
   switch (block.type) {
     case "text":
@@ -174,12 +217,7 @@ function renderBlock(block: ReportBlock): ReactNode {
       return (
         <div>
           {chart.title ? <p>{chart.title}</p> : null}
-          {canRenderChart ? (
-            <EChart
-              option={chart.echartsOption as unknown as Parameters<typeof EChart>[0]["option"]}
-              testId={`report-chart-${chart.chartType ?? "unknown"}`}
-            />
-          ) : null}
+          {canRenderChart ? <ChartBlock chart={chart} /> : null}
           <DataTable content={chart} />
         </div>
       );

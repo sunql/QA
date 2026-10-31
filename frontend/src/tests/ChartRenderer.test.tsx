@@ -590,4 +590,96 @@ describe("ChartRenderer", () => {
 
     expect(screen.queryByText("明细清单（无聚合），以表格呈现，不生成图表")).toBeNull();
   });
+
+  // ===== Top-N 视图（2026-10-31）：默认前 20 + 「其他」，可切回全量 =====
+
+  function topNChartOption() {
+    return {
+      yAxis: {
+        type: "category",
+        inverse: true,
+        data: Array.from({ length: 25 }, (_, i) => `S${i}`),
+      },
+      xAxis: { type: "value" },
+      series: [{ type: "bar" }],
+      topNOption: {
+        yAxis: {
+          type: "category",
+          inverse: true,
+          data: [...Array.from({ length: 20 }, (_, i) => `S${i}`), "其他（5 项）"],
+        },
+        xAxis: { type: "value" },
+        series: [{ type: "bar" }],
+      },
+      topNMeta: { limit: 20, hidden: 5, total: 25 },
+    };
+  }
+
+  it("有截断视图时默认画前 20 + 其他，并给出「显示全部」入口", () => {
+    render(<ChartRenderer chartType="hbar" chartOption={topNChartOption()} />);
+
+    const option = JSON.parse(screen.getByTestId("echarts-mock").textContent ?? "{}");
+    expect(option.yAxis.data).toHaveLength(21);
+    expect(option.yAxis.data[20]).toBe("其他（5 项）");
+    expect(option.yAxis.data).not.toContain("S24"); // 全量才有的尾类目
+    expect(screen.getByRole("button", { name: /显示全部 25 项/ })).toBeInTheDocument();
+  });
+
+  it("点「显示全部」切到全量，入口变成「只看前 20 项」", () => {
+    render(<ChartRenderer chartType="hbar" chartOption={topNChartOption()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /显示全部 25 项/ }));
+
+    const option = JSON.parse(screen.getByTestId("echarts-mock").textContent ?? "{}");
+    expect(option.yAxis.data).toHaveLength(25);
+    expect(option.yAxis.data).toContain("S24");
+    expect(option.yAxis.data).not.toContain("其他（5 项）");
+    expect(screen.getByRole("button", { name: /只看前 20 项/ })).toBeInTheDocument();
+  });
+
+  it("高度跟随当前视图（21 类 684 → 25 类 796）", () => {
+    render(<ChartRenderer chartType="hbar" chartOption={topNChartOption()} />);
+
+    expect(screen.getByTestId("echarts-mock").getAttribute("data-height")).toBe("684");
+
+    fireEvent.click(screen.getByRole("button", { name: /显示全部 25 项/ }));
+
+    expect(screen.getByTestId("echarts-mock").getAttribute("data-height")).toBe("796");
+  });
+
+  it("无截断视图时不出切换按钮（反向守卫）", () => {
+    render(
+      <ChartRenderer
+        chartType="hbar"
+        chartOption={{
+          yAxis: { type: "category", data: ["A", "B"] },
+          xAxis: { type: "value" },
+          series: [{ type: "bar" }],
+        }}
+      />
+    );
+
+    expect(screen.queryByRole("button", { name: /显示全部/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /只看前/ })).toBeNull();
+  });
+
+  it("导出 PNG 用当前显示的视图（默认截断，切全量后跟全量）", async () => {
+    const option = topNChartOption();
+    render(<ChartRenderer chartType="hbar" chartOption={option} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /导出 PNG/ }));
+    await waitFor(() => expect(renderChartPngMock).toHaveBeenCalledTimes(1));
+
+    const first = renderChartPngMock.mock.calls[0][0] as { yAxis: { data: string[] } };
+    expect(first.yAxis.data).toHaveLength(21);
+    expect(first.yAxis.data[20]).toBe("其他（5 项）");
+
+    fireEvent.click(screen.getByRole("button", { name: /显示全部 25 项/ }));
+    fireEvent.click(screen.getByRole("button", { name: /导出 PNG/ }));
+    await waitFor(() => expect(renderChartPngMock).toHaveBeenCalledTimes(2));
+
+    const second = renderChartPngMock.mock.calls[1][0] as { yAxis: { data: string[] } };
+    expect(second.yAxis.data).toHaveLength(25);
+    expect(second.yAxis.data).toContain("S24");
+  });
 });

@@ -813,3 +813,53 @@ async def test_chart_unmapped_measure_label_stays_prettified(
     dumped = json.dumps(chart["content"]["echartsOption"], ensure_ascii=False)
     assert "receipt qty" in dumped       # 未命中字典 ⇒ 下划线换空格
     assert "receipt_qty" not in dumped   # identity alias 不再把原始列名钉死在图例上
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-31：研究线报告与聊天共用同一套 Top-N（D3「完全一致」的后端半边）
+# ---------------------------------------------------------------------------
+
+RANKED_ROWS = [{"supplierName": f"S{i:02d}", "qty": 100 - i} for i in range(25)]
+
+
+@pytest.fixture
+async def fakeRankedReportDeps(dbSession):
+    """25 个供应商 + 排名口径的结论文本 ⇒ 图表应带上 Top-N 截断视图。"""
+    svc = ResearchSessionService()
+    row = await svc.createSession(dbSession, userId=1, question="哪些供应商供货最高")
+    turn = await svc.appendTurn(
+        dbSession, sessionId=row.id, role="user", content={"question": "哪些供应商供货最高"}
+    )
+    await svc.saveFinding(
+        dbSession,
+        sessionId=row.id,
+        turnId=turn.id,
+        claimText="供货量最高的供应商集中在 S00 一带",
+        supportingSql="SELECT supplierName, qty FROM t ORDER BY qty DESC",
+        supportingData={"rowCount": 25, "error": None, "rows": [dict(r) for r in RANKED_ROWS]},
+        confidence=0.8,
+    )
+    await dbSession.commit()
+    planner = ReportPlanner(
+        sessionService=svc,
+        llmClientFactory=lambda: FakeLlm(),
+        sessionFactory=lambda: dbSession,
+    )
+    return planner, row.id, turn.id
+
+
+@pytest.mark.asyncio
+async def test_research_chart_inherits_topn_view(fakeRankedReportDeps) -> None:
+    """研究线不自己实现截断：`buildReportChart` 传同一份排名信号，报告直接继承。"""
+    planner, sessionId, turnId = fakeRankedReportDeps
+
+    payload, _ = await planner.compose(None, sessionId=sessionId, turnId=turnId, mode="research")
+
+    chart = next(
+        b for s in payload["sections"] if s["kind"] == "data"
+        for b in s["blocks"] if b["type"] == "chart"
+    )
+    option = chart["content"]["echartsOption"]
+    assert option["topNMeta"] == {"limit": 20, "hidden": 5, "total": 25}
+    assert len(option["topNOption"]["yAxis"]["data"]) == 21
+    assert option["topNOption"]["yAxis"]["data"][-1] == "其他（5 项）"

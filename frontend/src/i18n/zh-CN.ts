@@ -381,7 +381,13 @@ export const zhCN = {
   },
 
   multiStep: {
-    panelLabel: "查看分析计划",
+    // 折叠头摘要（D2 改版）：不展开就能看到步数/成败/耗时
+    summaryTotal: "{total} 步",
+    summarySuccess: "成功 {success}",
+    summaryFailed: "失败 {failed}",
+    summaryRunning: "执行中 ({current}/{total})",
+    summaryPending: "{total} 步 · 待执行",
+    elapsed: "{seconds}秒",
     statusPending: "待执行",
     statusRunning: "执行中",
     statusDone: "已完成",
@@ -904,6 +910,9 @@ export const zhCN = {
     // 落库时表格被截到 200 行（chat_chart_persist._PERSIST_MAX_TABLE_ROWS）。
     // 不说的话，历史回放看起来就是一份「完整」的表，CSV 也照导不误。
     truncated: "表格仅显示前 {count} 行（原始结果更长）",
+    // 排名类图默认只画前 20 类（尾部合成「其他」），这里给出回全量的入口。
+    showAll: "显示全部 {total} 项",
+    showTopN: "只看前 {limit} 项",
   },
 
   chatPanel: {

@@ -10,13 +10,13 @@ from __future__ import annotations
 import base64
 from datetime import UTC, datetime
 
-from app.domain.models import SessionMessage
-from app.services.session_history_service import (
-    _CHART_IMAGE_DATA_URL_PREFIX,
-    _MAX_EXPORT_CHART_IMAGES,
-    _MAX_EXPORT_IMAGE_PIXELS,
-    _MAX_EXPORT_TOTAL_IMAGE_PIXELS,
+from app.domain.export_limits import (
+    CHART_IMAGE_DATA_URL_PREFIX,
+    MAX_EXPORT_CHART_IMAGES,
+    MAX_EXPORT_IMAGE_PIXELS,
+    MAX_EXPORT_TOTAL_IMAGE_PIXELS,
 )
+from app.domain.models import SessionMessage
 from app.tests._png_support import pngDeclaringSize, solidPng
 
 _T0 = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
@@ -31,6 +31,7 @@ async def _seedMessage(
     content: str,
     chartType: str | None = None,
     chartOption: dict | None = None,
+    stepsSnapshot: list[dict] | None = None,
     createdAt: datetime | None = None,
 ) -> SessionMessage:
     msg = SessionMessage(
@@ -39,6 +40,7 @@ async def _seedMessage(
         content=content,
         chart_type=chartType,
         chart_option=chartOption,
+        steps_snapshot=stepsSnapshot,
         created_time=createdAt or _T0,
         updated_time=createdAt or _T0,
     )
@@ -64,7 +66,7 @@ async def _seedTurn(
 
 
 def _dataUrl(png: bytes) -> str:
-    return _CHART_IMAGE_DATA_URL_PREFIX + base64.b64encode(png).decode()
+    return CHART_IMAGE_DATA_URL_PREFIX + base64.b64encode(png).decode()
 
 
 class TestExportChartsApi:
@@ -177,7 +179,7 @@ class TestExportChartsApi:
         """前缀可以伪造，魔数不行。"""
         sid = "s-chart-magic"
         asst = await _seedTurn(dbSession, sid)
-        fake = _CHART_IMAGE_DATA_URL_PREFIX + base64.b64encode(b"PK\x03\x04zip").decode()
+        fake = CHART_IMAGE_DATA_URL_PREFIX + base64.b64encode(b"PK\x03\x04zip").decode()
 
         resp = await client.post(
             f"/api/v1/sessions/{sid}/export.pdf",
@@ -192,7 +194,7 @@ class TestExportChartsApi:
         png = _dataUrl(solidPng(8, 8))
         charts = [
             {"messageId": asst.id, "imagePng": png}
-            for _ in range(_MAX_EXPORT_CHART_IMAGES + 1)
+            for _ in range(MAX_EXPORT_CHART_IMAGES + 1)
         ]
 
         resp = await client.post(
@@ -226,8 +228,8 @@ class TestExportChartsApi:
         asst = await _seedTurn(dbSession, sid)
         # 每张 2800×2800 = 7.84M px（单张上限 8M 之内），6 张 = 47M > 40M 总量
         each = 2800 * 2800
-        assert each < _MAX_EXPORT_IMAGE_PIXELS
-        count = _MAX_EXPORT_TOTAL_IMAGE_PIXELS // each + 1
+        assert each < MAX_EXPORT_IMAGE_PIXELS
+        count = MAX_EXPORT_TOTAL_IMAGE_PIXELS // each + 1
         png = _dataUrl(pngDeclaringSize(2800, 2800))
         charts = [{"messageId": asst.id, "imagePng": png} for _ in range(count)]
 
@@ -248,7 +250,7 @@ class TestExportChartsApi:
         sid = "s-chart-pixels-ok"
         asst = await _seedTurn(dbSession, sid)
         each = 2800 * 2800
-        count = _MAX_EXPORT_TOTAL_IMAGE_PIXELS // each  # 不放 +1：刚好不超
+        count = MAX_EXPORT_TOTAL_IMAGE_PIXELS // each  # 不放 +1：刚好不超
         png = _dataUrl(pngDeclaringSize(2800, 2800))
         charts = [{"messageId": asst.id, "imagePng": png} for _ in range(count)]
 
@@ -302,3 +304,156 @@ class TestExportChartsApi:
 
         assert resp.status_code == 200
         assert resp.content.startswith(b"%PDF-1.")
+
+
+# ---------------------------------------------------------------------------
+# 分节插图（2026-10-31）：位图按 (messageId, stepIndex) 归属，stepIndex 必须
+# 指向该消息快照里**确有图**的一步，否则 422（口径同 messageId 校验，不回显 id）。
+# ---------------------------------------------------------------------------
+
+_SECTION_CONTENT = (
+    "### 步骤 1：各供应商收货量\n华东领先。\n"
+    "### 步骤 2：汇总\n共 3 家供应商。"
+)
+_SECTION_STEPS = [
+    {
+        "stepIndex": 0,
+        "description": "各供应商收货量",
+        "subQuestion": "各供应商的收货量是多少",
+        "aggregationOnly": False,
+        "status": "done",
+        "sql": "SELECT 1",
+        "chartType": "bar",
+        "chartOption": {"series": []},
+    },
+    {
+        "stepIndex": 1,
+        "description": "汇总",
+        "subQuestion": "",
+        "aggregationOnly": True,
+        "status": "done",
+        "sql": None,
+        "chartType": None,
+        "chartOption": None,
+    },
+]
+
+
+async def _seedMultiStepTurn(dbSession, sessionId: str) -> SessionMessage:
+    await _seedMessage(dbSession, sessionId=sessionId, role="user", content="问", createdAt=_T0)
+    return await _seedMessage(
+        dbSession,
+        sessionId=sessionId,
+        role="assistant",
+        content=_SECTION_CONTENT,
+        stepsSnapshot=_SECTION_STEPS,
+        createdAt=_T1,
+    )
+
+
+class TestExportStepChartsApi:
+    async def test_accepts_bitmap_for_a_charted_step(self, client, dbSession) -> None:
+        """分节轮次的图按步骤归属，且真的嵌进了 PDF（不是只把请求收下了）。"""
+        sid = "s-step-img"
+        asst = await _seedMultiStepTurn(dbSession, sid)
+
+        resp = await client.post(
+            f"/api/v1/sessions/{sid}/export.pdf",
+            json={
+                "charts": [
+                    {
+                        "messageId": asst.id,
+                        "stepIndex": 0,
+                        "imagePng": _dataUrl(solidPng(400, 300)),
+                    }
+                ]
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.content.startswith(b"%PDF-1.")
+        assert b"/Subtype /Image" in resp.content
+
+    async def test_rejects_step_index_out_of_range(self, client, dbSession) -> None:
+        """越界 stepIndex → 422；错误信息不回显任何 id（防归属枚举）。"""
+        sid = "s-step-oob"
+        asst = await _seedMultiStepTurn(dbSession, sid)
+
+        resp = await client.post(
+            f"/api/v1/sessions/{sid}/export.pdf",
+            json={
+                "charts": [
+                    {
+                        "messageId": asst.id,
+                        "stepIndex": 5,
+                        "imagePng": _dataUrl(solidPng(8, 8)),
+                    }
+                ]
+            },
+        )
+
+        assert resp.status_code == 422
+        body = str(resp.json())
+        assert str(asst.id) not in body
+        assert sid not in body
+
+    async def test_rejects_step_index_that_has_no_chart(self, client, dbSession) -> None:
+        """汇总步没有图：前端不该给它传位图，传了就是 422（而不是静默忽略）。"""
+        sid = "s-step-nochart"
+        asst = await _seedMultiStepTurn(dbSession, sid)
+
+        resp = await client.post(
+            f"/api/v1/sessions/{sid}/export.pdf",
+            json={
+                "charts": [
+                    {
+                        "messageId": asst.id,
+                        "stepIndex": 1,
+                        "imagePng": _dataUrl(solidPng(8, 8)),
+                    }
+                ]
+            },
+        )
+
+        assert resp.status_code == 422
+
+    async def test_rejects_step_index_on_message_without_snapshot(
+        self, client, dbSession
+    ) -> None:
+        """单步消息没有 steps_snapshot：带 stepIndex 就是算错了归属。"""
+        sid = "s-step-nosnapshot"
+        asst = await _seedTurn(dbSession, sid, chartType="bar", chartOption={"series": []})
+
+        resp = await client.post(
+            f"/api/v1/sessions/{sid}/export.pdf",
+            json={
+                "charts": [
+                    {
+                        "messageId": asst.id,
+                        "stepIndex": 0,
+                        "imagePng": _dataUrl(solidPng(8, 8)),
+                    }
+                ]
+            },
+        )
+
+        assert resp.status_code == 422
+
+    async def test_rejects_negative_step_index(self, client, dbSession) -> None:
+        sid = "s-step-negative"
+        asst = await _seedMultiStepTurn(dbSession, sid)
+
+        resp = await client.post(
+            f"/api/v1/sessions/{sid}/export.pdf",
+            json={
+                "charts": [
+                    {
+                        "messageId": asst.id,
+                        "stepIndex": -1,
+                        "imagePng": _dataUrl(solidPng(8, 8)),
+                    }
+                ]
+            },
+        )
+
+        assert resp.status_code == 422

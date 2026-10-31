@@ -55,6 +55,12 @@ docker/.env
 # Docker volumes
 docker/data/
 
+# PDF 中文字体（微软雅黑不可再分发；运维自备，见 docker/fonts/README.md）
+docker/fonts/*.ttc
+docker/fonts/*.ttf
+backend/fonts/*.ttc
+backend/fonts/*.ttf
+
 # Backup artifacts (scripts/backup_pg.sh 写入；保留 3 天滚动窗口)
 backups/
 *.dump

@@ -19,11 +19,11 @@ import zlib
 import pytest
 
 from app.domain.exceptions import ValidationError
-from app.services.session_history_service import (
-    _CHART_IMAGE_DATA_URL_PREFIX,
-    _MAX_EXPORT_IMAGE_PIXELS,
-    SessionHistoryService,
+from app.domain.export_limits import (
+    CHART_IMAGE_DATA_URL_PREFIX,
+    MAX_EXPORT_IMAGE_PIXELS,
 )
+from app.services.chart_image_validation import decodeChartImage, pngPixelCount
 from app.tests._png_support import pngDeclaringSize, solidPng
 
 # PIL 默认的 MAX_IMAGE_PIXELS（超过它才警告，超过 2 倍才抛异常）
@@ -47,12 +47,12 @@ def _pngWithHeaderDims(width: int, height: int) -> bytes:
 
 
 def _dataUrl(png: bytes) -> str:
-    return _CHART_IMAGE_DATA_URL_PREFIX + base64.b64encode(png).decode()
+    return CHART_IMAGE_DATA_URL_PREFIX + base64.b64encode(png).decode()
 
 
 class TestPngPixelCount:
     def test_reads_real_dimensions(self) -> None:
-        assert SessionHistoryService._pngPixelCount(solidPng(400, 300)) == 120_000
+        assert pngPixelCount(solidPng(400, 300)) == 120_000
 
     def test_reads_declared_dimensions_not_actual(self) -> None:
         """解压炸弹的判据必须是 **IHDR 声明值** —— 那才是 Pillow 会去分配的尺寸。
@@ -62,7 +62,7 @@ class TestPngPixelCount:
         """
         png = pngDeclaringSize(12000, 12000)
 
-        assert SessionHistoryService._pngPixelCount(png) == 144_000_000
+        assert pngPixelCount(png) == 144_000_000
         # 前提：它确实小到能通过 2 MiB 的字节闸，否则测的不是像素闸
         assert len(png) < 2 * 1024 * 1024
 
@@ -70,44 +70,44 @@ class TestPngPixelCount:
         """签名对但第一个块不是 IHDR（非 PNG 或畸形）。"""
         junk = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 4) + b"IDAT" + b"\x00" * 20
 
-        assert SessionHistoryService._pngPixelCount(junk) is None
+        assert pngPixelCount(junk) is None
 
     def test_truncated_header_returns_none(self) -> None:
-        assert SessionHistoryService._pngPixelCount(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d") is None
+        assert pngPixelCount(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d") is None
 
     @pytest.mark.parametrize("width,height", [(0, 8), (8, 0), (0, 0)])
     def test_zero_dimension_returns_none(self, width: int, height: int) -> None:
         """0 是畸形的（PNG 规范要求 ≥1）：照 None 处理，别让 `0×N` 绕过像素闸。"""
-        assert SessionHistoryService._pngPixelCount(_pngWithHeaderDims(width, height)) is None
+        assert pngPixelCount(_pngWithHeaderDims(width, height)) is None
 
 
 class TestDecodeChartImage:
     def test_returns_bytes_for_valid_png(self) -> None:
         png = solidPng(8, 8)
 
-        decoded = SessionHistoryService._decodeChartImage(_dataUrl(png))
+        decoded = decodeChartImage(_dataUrl(png))
 
         assert decoded == png
 
     def test_rejects_missing_prefix(self) -> None:
         with pytest.raises(ValidationError):
-            SessionHistoryService._decodeChartImage("iVBORw0KGgo=")
+            decodeChartImage("iVBORw0KGgo=")
 
     def test_rejects_non_base64_payload(self) -> None:
         with pytest.raises(ValidationError):
-            SessionHistoryService._decodeChartImage(
-                _CHART_IMAGE_DATA_URL_PREFIX + "!!!not base64!!!"
+            decodeChartImage(
+                CHART_IMAGE_DATA_URL_PREFIX + "!!!not base64!!!"
             )
 
     def test_rejects_payload_over_byte_limit_before_decoding(self) -> None:
         """先按长度反推、再解码：反过来等于让超长串先把内存占住，上限就成了摆设。"""
-        oversized = _CHART_IMAGE_DATA_URL_PREFIX + "A" * (4 * 1024 * 1024)
+        oversized = CHART_IMAGE_DATA_URL_PREFIX + "A" * (4 * 1024 * 1024)
 
         with pytest.raises(ValidationError):
-            SessionHistoryService._decodeChartImage(oversized)
+            decodeChartImage(oversized)
 
-    # 「魔数对但 IHDR 读不出来 → 422」不在这一层：``_decodeChartImage`` 只管
-    # 前缀/大小/魔数，IHDR 可读性由 ``resolveChartImages`` 调 ``_pngPixelCount``
+    # 「魔数对但 IHDR 读不出来 → 422」不在这一层：``decodeChartImage`` 只管
+    # 前缀/大小/魔数，IHDR 可读性由 ``resolveChartImages`` 调 ``pngPixelCount``
     # 时判（见 TestPngPixelCount.test_truncated_header_returns_none 与集成
     # test_rejects_png_with_unreadable_ihdr）。
 
@@ -115,4 +115,4 @@ class TestDecodeChartImage:
 def test_pixel_cap_is_below_pillows_own_threshold() -> None:
     """这道闸之所以必须自己设：PIL 默认 MAX_IMAGE_PIXELS 要到 **2 倍**才抛异常，
     中间那一大段（含 144M px 的典型炸弹）完全不设防 —— 不能把防炸弹外包给 Pillow。"""
-    assert _MAX_EXPORT_IMAGE_PIXELS < 2 * _PIL_DEFAULT_MAX_PIXELS
+    assert MAX_EXPORT_IMAGE_PIXELS < 2 * _PIL_DEFAULT_MAX_PIXELS

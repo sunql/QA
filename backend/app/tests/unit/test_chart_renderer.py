@@ -860,3 +860,213 @@ class TestCategoryReadability:
 
         assert "dataZoom" not in option
         assert option["grid"]["bottom"] == 32
+
+
+class TestTopN:
+    """排名类图 > 20 类时，另存一份「前 20 + 其他」的视图；全量 option 逐字不变。
+
+    结构契约：全量 option 保持原样，截断视图挂在 ``topNOption``，元信息挂在
+    ``topNMeta``。二者随 ``chart_option`` JSONB 一起落库，于是回放 / PDF / 研究线
+    不需要各自实现截断（也不会出现四条链路各截各的）。
+    """
+
+    def test_hbar_ranking_embeds_topn_option_and_meta(self) -> None:
+        option = renderChartOption(_spec(ChartType.HBAR), _many_rows(50), topN=True)
+
+        assert option["topNMeta"] == {"limit": 20, "hidden": 30, "total": 50}
+        top = option["topNOption"]
+        assert top["yAxis"]["data"][:20] == [f"S{i:02d}" for i in range(20)]
+        assert top["yAxis"]["data"][-1] == "其他（30 项）"
+        assert len(top["yAxis"]["data"]) == 21
+        # 尾部 S20..S49 的取值是 30..1，合计 465
+        assert top["series"][0]["data"][-1] == 465
+
+    def test_vertical_bar_embeds_topn_on_the_category_axis(self) -> None:
+        option = renderChartOption(_spec(ChartType.BAR), _many_rows(30), topN=True)
+
+        top = option["topNOption"]
+        assert top["xAxis"]["data"][-1] == "其他（10 项）"
+        assert len(top["xAxis"]["data"]) == 21
+
+    def test_topn_view_drops_datazoom_and_restores_grid(self) -> None:
+        option = renderChartOption(_spec(ChartType.HBAR), _many_rows(50), topN=True)
+
+        assert "dataZoom" in option  # 全量视图仍有缩放
+        top = option["topNOption"]
+        assert "dataZoom" not in top
+        assert top["grid"]["bottom"] == 32  # 21 类，无滑块、无双系列图例
+
+    def test_full_option_unchanged_when_topn_enabled(self) -> None:
+        """截断视图是**附加**的：全量 option 必须与不传 topN 时逐键相同。"""
+        base = renderChartOption(_spec(ChartType.HBAR), _many_rows(50))
+        withTopN = renderChartOption(_spec(ChartType.HBAR), _many_rows(50), topN=True)
+
+        stripped = {k: v for k, v in withTopN.items() if k not in {"topNOption", "topNMeta"}}
+        assert stripped == base
+
+    def test_topn_is_off_by_default(self) -> None:
+        option = renderChartOption(_spec(ChartType.HBAR), _many_rows(50))
+
+        assert "topNOption" not in option
+        assert "topNMeta" not in option
+
+    def test_topn_requires_more_than_twenty_categories(self) -> None:
+        boundary = renderChartOption(_spec(ChartType.HBAR), _many_rows(20), topN=True)
+        assert "topNOption" not in boundary
+
+        over = renderChartOption(_spec(ChartType.HBAR), _many_rows(21), topN=True)
+        assert over["topNMeta"] == {"limit": 20, "hidden": 1, "total": 21}
+
+    def test_unordered_rows_do_not_claim_a_topn_view(self) -> None:
+        """SQL 未 ORDER BY 时行序与度量无关：不能把任意 20 个类目标成「前 20」。
+
+        合成「其他」本身没错，错的是**谁进前 20** 由行序而不是度量决定 —— 在排名
+        语境下这是拿随机样本冒充排名。宁可不截断，只发全量图。
+        """
+        rows = _many_rows(50)
+        interleaved = rows[::2] + rows[1::2]
+
+        option = renderChartOption(_spec(ChartType.HBAR), interleaved, topN=True)
+
+        assert "topNOption" not in option
+        assert "topNMeta" not in option
+
+    def test_ascending_rows_still_embed_a_topn_view(self) -> None:
+        """「最低的 N 个」⇒ SQL ORDER BY ASC：行序同样是可信排名，照常截断。"""
+        rows = list(reversed(_many_rows(50)))
+
+        option = renderChartOption(_spec(ChartType.HBAR), rows, topN=True)
+
+        assert option["topNMeta"] == {"limit": 20, "hidden": 30, "total": 50}
+        # 升序后前 20 是 S49..S30（值 1..20），其余 21..50 合计 1065
+        assert option["topNOption"]["series"][0]["data"][-1] == sum(range(21, 51))
+
+    def test_grouped_rows_are_judged_by_category_total(self) -> None:
+        """同一类目多行时看**类目合计**是否单调，而不是逐行取值。"""
+        rows: list[dict] = []
+        for i in range(30):
+            rows.append({"SUPPLIER_NAME": f"S{i:02d}", "RCV_QTY_PUU": 29 - i})
+            rows.append({"SUPPLIER_NAME": f"S{i:02d}", "RCV_QTY_PUU": 1})
+
+        option = renderChartOption(_spec(ChartType.HBAR), rows, topN=True)
+
+        assert option["topNMeta"] == {"limit": 20, "hidden": 10, "total": 30}
+
+    def test_topn_applies_to_pie_and_donut(self) -> None:
+        for kind in (ChartType.PIE, ChartType.DONUT):
+            option = renderChartOption(_spec(kind), _many_rows(30), topN=True)
+            points = option["topNOption"]["series"][0]["data"]
+            assert len(points) == 21, kind
+            assert points[-1]["name"] == "其他（10 项）"
+            assert points[-1]["value"] == sum(range(1, 11))
+
+    @pytest.mark.parametrize(
+        "kind",
+        [ChartType.LINE, ChartType.COMBO, ChartType.SCATTER, ChartType.HEATMAP, ChartType.WATERFALL],
+    )
+    def test_non_ranking_kinds_never_truncate(self, kind: ChartType) -> None:
+        """折线看趋势、散点/热力/瀑布看分布，截尾会篡改图形语义，一律不截断。"""
+        option = renderChartOption(self._specOf(kind), self._manyRowsOf(kind), topN=True)
+
+        assert "topNOption" not in option, kind
+        assert "topNMeta" not in option, kind
+
+    def test_table_is_never_truncated(self) -> None:
+        rows = [{"SUPPLIER_NAME": f"S{i:02d}", "RCV_QTY_PUU": i} for i in range(50)]
+
+        option = renderChartOption(tableSpec(["SUPPLIER_NAME", "RCV_QTY_PUU"]), rows, topN=True)
+
+        assert option == {"columns": ["SUPPLIER_NAME", "RCV_QTY_PUU"], "rows": rows}
+
+    def test_topn_sums_tail_per_group_for_grouped_bar(self) -> None:
+        """分组柱状：尾部按「类目 × 分组」求和，否则「其他」只落在一根柱上。"""
+        rows = [
+            {"SUPPLIER_NAME": f"S{i:02d}", "MATERIAL_NAME": group, "AMT": value}
+            for i in range(30)
+            for group, value in (("M1", i + 1), ("M2", (i + 1) * 10))
+        ]
+        spec = _spec(
+            ChartType.BAR,
+            columns=("SUPPLIER_NAME", "MATERIAL_NAME", "AMT"),
+            dimensions=(_dim("SUPPLIER_NAME"), _dim("MATERIAL_NAME", "物料")),
+            measures=(_measure("AMT", "金额"),),
+            series=(SpecSeries(name="金额", kind="bar", dimension="SUPPLIER_NAME", measure="AMT"),),
+        )
+
+        top = renderChartOption(spec, rows, topN=True)["topNOption"]
+
+        assert top["xAxis"]["data"][-1] == "其他（10 项）"
+        by_name = {entry["name"]: entry for entry in top["series"]}
+        assert by_name["M1"]["data"][-1] == sum(range(21, 31))
+        assert by_name["M2"]["data"][-1] == sum(value * 10 for value in range(21, 31))
+
+    def test_topn_all_missing_tail_stays_null_not_zero(self) -> None:
+        rows = [{"SUPPLIER_NAME": f"S{i:02d}", "RCV_QTY_PUU": i} for i in range(25)]
+        for row in rows[20:]:
+            row["RCV_QTY_PUU"] = None
+
+        option = renderChartOption(_spec(ChartType.HBAR), rows, topN=True)
+
+        assert option["topNOption"]["series"][0]["data"][-1] is None
+
+    def test_topn_does_not_mutate_inputs(self) -> None:
+        rows = _many_rows(50)
+        rows_before = [dict(row) for row in rows]
+        spec = _spec(ChartType.HBAR)
+
+        renderChartOption(spec, rows, topN=True)
+
+        assert rows == rows_before
+        assert spec.columns == ("SUPPLIER_NAME", "RCV_QTY_PUU")
+
+    def _specOf(self, kind: ChartType) -> ChartSpec:
+        if kind is ChartType.LINE:
+            return _spec(
+                ChartType.LINE,
+                columns=("MONTH", "LINE_AMT"),
+                dimensions=(_dim("MONTH", "月份"),),
+                measures=(_measure("LINE_AMT", "金额"),),
+                series=(SpecSeries(name="金额", kind="line", dimension="MONTH", measure="LINE_AMT"),),
+            )
+        if kind is ChartType.COMBO:
+            return _spec(ChartType.COMBO)
+        if kind is ChartType.SCATTER:
+            return _spec(
+                ChartType.SCATTER,
+                columns=("SUPPLIER_NAME", "RCV_QTY_PUU", "LINE_AMT"),
+                measures=(_measure("RCV_QTY_PUU"), _measure("LINE_AMT", "金额")),
+                series=(
+                    SpecSeries(name="供货量", kind="scatter", dimension="SUPPLIER_NAME", measure="RCV_QTY_PUU"),
+                    SpecSeries(name="金额", kind="scatter", dimension="SUPPLIER_NAME", measure="LINE_AMT"),
+                ),
+            )
+        if kind is ChartType.HEATMAP:
+            return _spec(
+                ChartType.HEATMAP,
+                columns=("SUPPLIER_NAME", "MATERIAL_NAME", "AMT"),
+                dimensions=(_dim("SUPPLIER_NAME"), _dim("MATERIAL_NAME", "物料")),
+                measures=(_measure("AMT", "金额"),),
+                series=(SpecSeries(name="金额", kind="heatmap", dimension="SUPPLIER_NAME", measure="AMT"),),
+            )
+        return _spec(
+            ChartType.WATERFALL,
+            columns=("ITEM", "DELTA_AMT"),
+            dimensions=(_dim("ITEM", "项目"),),
+            measures=(_measure("DELTA_AMT", "增减"),),
+            series=(SpecSeries(name="增减", kind="bar", dimension="ITEM", measure="DELTA_AMT"),),
+        )
+
+    def _manyRowsOf(self, kind: ChartType) -> list[dict]:
+        if kind is ChartType.LINE:
+            return [{"MONTH": f"2026-{i + 1:02d}", "LINE_AMT": i} for i in range(30)]
+        if kind is ChartType.SCATTER:
+            return [{"RCV_QTY_PUU": i, "LINE_AMT": i * 10} for i in range(30)]
+        if kind is ChartType.HEATMAP:
+            return [
+                {"SUPPLIER_NAME": f"S{i:02d}", "MATERIAL_NAME": f"M{g}", "AMT": i + g}
+                for i in range(30)
+                for g in range(2)
+            ]
+        if kind is ChartType.WATERFALL:
+            return [{"ITEM": f"I{i:02d}", "DELTA_AMT": i - 15} for i in range(30)]
+        return _many_rows(30)  # COMBO 用默认形状

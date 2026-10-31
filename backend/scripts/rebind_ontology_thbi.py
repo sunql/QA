@@ -632,9 +632,9 @@ async def run(args) -> None:
                     IdMappingCreate(
                         business_object="CLASS",
                         external_id=str(c.id),
-                        pg_table="ontology_class",
-                        pg_id=str(c.id),
                     ),
+                    pg_table="ontology_class",
+                    pg_id=str(c.id),
                 )
                 class_uids[c.id] = mapping.unified_id
         fresh_props = (await session.execute(select(OntologyProperty))).scalars().all()
@@ -648,9 +648,9 @@ async def run(args) -> None:
                     IdMappingCreate(
                         business_object="PROPERTY",
                         external_id=str(p.id),
-                        pg_table="ontology_property",
-                        pg_id=str(p.id),
                     ),
+                    pg_table="ontology_property",
+                    pg_id=str(p.id),
                 )
                 prop_uids[p.id] = mapping.unified_id
 

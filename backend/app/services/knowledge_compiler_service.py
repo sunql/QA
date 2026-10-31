@@ -415,9 +415,9 @@ class KnowledgeCompilerService:
             IdMappingCreate(
                 business_object=businessObject,
                 external_id=str(ontologyId),
-                pg_table=_TYPE_TO_PG_TABLE[objectType],
-                pg_id=str(ontologyId),
             ),
+            pg_table=_TYPE_TO_PG_TABLE[objectType],
+            pg_id=str(ontologyId),
         )
         return created.unified_id
 

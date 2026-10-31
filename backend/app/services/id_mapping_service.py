@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
+from app.domain.id_mapping import buildUnifiedId, parseUnifiedId
 from app.domain.models import IdMapping
 from app.domain.schemas import (
     IdMappingCreate,
@@ -32,12 +33,6 @@ from app.domain.schemas import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-_UNIFIED_ID_TEMPLATE = "obj:{bo}:{ext}"
-
-
-def _make_unified_id(business_object: str, external_id: str) -> str:
-    return _UNIFIED_ID_TEMPLATE.format(bo=business_object, ext=external_id)
 
 
 def _to_read(mapping: IdMapping) -> IdMappingRead:
@@ -64,19 +59,30 @@ class IdMappingService:
     """统一 ID 映射 CRUD。"""
 
     async def register(
-        self, session: AsyncSession, dto: IdMappingCreate
+        self,
+        session: AsyncSession,
+        dto: IdMappingCreate,
+        *,
+        pg_table: str | None = None,
+        pg_id: str | None = None,
     ) -> IdMappingRead:
         """注册新映射。
 
-        unified_id 自动生成：(business_object, external_id) 重复 → 409。
+        unified_id 由服务端派生：(business_object, external_id) 重复 → 409。
+
+        ``pg_table`` / ``pg_id`` 是**服务端显式传入**的 PG 落点（ontology
+        同步、回填脚本），不经 DTO —— 见 ``IdMappingCreate``：跨库指针是三库
+        对齐的结论，不是调用方可声明的输入。neo4j / milvus 落点在此恒留
+        NULL，它们是 A2/A3 回填的产物。
         """
-        unified_id = _make_unified_id(dto.business_object, dto.external_id)
+        unified_id = buildUnifiedId(dto.business_object, dto.external_id)
+        businessObject, externalId = parseUnifiedId(unified_id)
         mapping = IdMapping(
             unified_id=unified_id,
-            business_object=dto.business_object,
-            external_id=dto.external_id,
-            pg_table=dto.pg_table,
-            pg_id=dto.pg_id,
+            business_object=businessObject,
+            external_id=externalId,
+            pg_table=pg_table,
+            pg_id=pg_id,
         )
         session.add(mapping)
         try:
@@ -84,8 +90,8 @@ class IdMappingService:
         except IntegrityError:
             await session.rollback()
             raise ConflictError(
-                f"id_mapping 已存在：business_object={dto.business_object}, "
-                f"external_id={dto.external_id}"
+                f"id_mapping 已存在：business_object={businessObject}, "
+                f"external_id={externalId}"
             )
         await session.commit()
         await session.refresh(mapping)

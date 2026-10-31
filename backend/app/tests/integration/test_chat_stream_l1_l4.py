@@ -329,3 +329,104 @@ async def test_stream_l4_preamble_emits_sql_frame(
     text = resp.text
     assert "event: sql" in text, f"expected sql frame, got: {text[:300]}"
     assert "SELECT 1 FROM dual" in text, f"expected final sql in SSE, got: {text[:300]}"
+
+
+_TRACE_FIXTURE = {
+    "kind": "l4_agent_trace",
+    "status": "answered",
+    "iterations": 2,
+    "totalMs": 1234,
+    "stepCount": 2,
+    "steps": [
+        {
+            "index": 0,
+            "iteration": 0,
+            "tool": "list_tables",
+            "status": "ok",
+            "elapsedMs": 12,
+            "args": {"keyword": "supply"},
+            "resultSummary": {"tableCount": 3},
+        },
+        {
+            "index": 1,
+            "iteration": 0,
+            "tool": "execute_sql",
+            "status": "ok",
+            "elapsedMs": 880,
+            "args": {"tables": ["DTL_SUPPLY"]},
+            "resultSummary": {"rowCount": 12, "columnCount": 3},
+        },
+    ],
+}
+
+
+async def test_stream_l4_preamble_emits_agent_trace_frame(
+    client: AsyncClient,
+    dbSession: AsyncSession,
+    seeded_user: dict,
+    monkeypatch,
+) -> None:
+    """L4 带回 agent_trace 时，流式必须在 token 前下发 agent_trace 帧。"""
+    import app.api.v1.chat as chat_module
+    from app.domain.schemas import ChatResponse
+
+    async def _fakeL4Agent(session, dto, *, user=None):
+        return ChatResponse(
+            answer="[L4:answered] 供货量并未下降。",
+            intent="new_query",
+            sql="SELECT 1 FROM dual",
+            agent_trace=_TRACE_FIXTURE,
+        )
+
+    monkeypatch.setattr(chat_module._service, "_handleNl2SqlAgent", _fakeL4Agent)
+
+    resp = await client.post(
+        "/api/v1/chat/stream",
+        json={
+            "question": "为什么今年5月份各供应商的供货量与往月比差距大",
+            "sessionId": "stream-l4-trace",
+            "datasourceId": seeded_user["datasource_id"],
+        },
+        headers={"X-User-Id": str(seeded_user["user_id"])},
+    )
+
+    assert resp.status_code == 200, resp.text
+    text = resp.text
+    assert "event: agent_trace" in text, f"expected agent_trace frame, got: {text[:300]}"
+    # 顺序契约：meta → agent_trace → sql → token（卡片先于正文）
+    tracePos = text.index("event: agent_trace")
+    assert text.index("event: meta") < tracePos
+    assert tracePos < text.index("event: token")
+    assert '"tool": "list_tables"' in text or '"tool":"list_tables"' in text
+
+
+async def test_stream_l4_without_trace_emits_no_agent_trace_frame(
+    client: AsyncClient,
+    dbSession: AsyncSession,
+    seeded_user: dict,
+    monkeypatch,
+) -> None:
+    """无工具调用（纯文字回答）时不得下发空 agent_trace 帧（前端不出空卡）。"""
+    import app.api.v1.chat as chat_module
+    from app.domain.schemas import ChatResponse
+
+    async def _fakeL4Agent(session, dto, *, user=None):
+        return ChatResponse(
+            answer="[L4:answered] 无需查数。",
+            intent="new_query",
+        )
+
+    monkeypatch.setattr(chat_module._service, "_handleNl2SqlAgent", _fakeL4Agent)
+
+    resp = await client.post(
+        "/api/v1/chat/stream",
+        json={
+            "question": "为什么今年5月份各供应商的供货量与往月比差距大",
+            "sessionId": "stream-l4-no-trace",
+            "datasourceId": seeded_user["datasource_id"],
+        },
+        headers={"X-User-Id": str(seeded_user["user_id"])},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert "event: agent_trace" not in resp.text, resp.text[:300]

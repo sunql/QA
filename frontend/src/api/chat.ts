@@ -5,6 +5,7 @@ import { i18n } from "../i18n";
 import { authHeaders } from "./authHeaders";
 import { asChartOption, asTablePayload, asVisualRationale, normalizeChartType } from "../utils/chartContract";
 import { asReportSections } from "../utils/reportSections";
+import { asAgentTrace } from "../utils/agentTrace";
 import { StreamChunkParser } from "../stores/stream_chunk_parser";
 
 const BASE = "/chat";
@@ -271,6 +272,8 @@ export interface StreamEventHandlers {
   onDataQuality?: (payload: StreamDataQualityPayload) => void;
   // 类召回诊断（2026-09-16）：截断/降级时前端提示
   onClassRecall?: (info: ClassRecallInfo) => void;
+  // L4 执行轨迹（2026-10-31）：事后快照，token 前下发；已过 asAgentTrace 收窄
+  onAgentTrace?: (trace: import("../types/chat").AgentTrace) => void;
 }
 
 /**
@@ -441,6 +444,13 @@ function dispatchFrame(frame: { event: string; data: string }, handlers: StreamE
         handlers.onClassRecall?.(d);
       }
       break;
+    case "agent_trace": {
+      const trace = asAgentTrace(d.trace);
+      if (trace) {
+        handlers.onAgentTrace?.(trace);
+      }
+      break;
+    }
   }
 }
 

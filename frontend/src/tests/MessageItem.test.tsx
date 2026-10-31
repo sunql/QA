@@ -426,6 +426,50 @@ describe("MessageItem 卡片顺序", () => {
     expect(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   }
 
+  it("渲染顺序为 执行轨迹 → 分析计划 → 查询计划 → SQL", () => {
+    renderItem({
+      content: "查询完成。",
+      agentTrace: {
+        kind: "l4_agent_trace",
+        status: "answered",
+        iterations: 1,
+        totalMs: 900,
+        stepCount: 1,
+        steps: [
+          {
+            index: 0,
+            iteration: 0,
+            tool: "execute_sql",
+            status: "ok",
+            elapsedMs: 880,
+            args: { sqlPreview: "SELECT 1" },
+            resultSummary: { rows: 1 },
+          },
+        ],
+      },
+      steps: PLAN_STEPS,
+      queryPlan: {
+        target: "供应商",
+        selectedClasses: ["DIM_SUPPLIER"],
+        selectedProperties: ["NAME"],
+        aggregations: [],
+        groupBy: [],
+        conditions: [],
+        joins: [],
+        sortBy: [],
+      } as never,
+      sql: "SELECT count(*) FROM dim_supplier",
+    });
+
+    const traceCard = screen.getByText(/查看执行轨迹/);
+    const planCard = screen.getByText("查看分析计划");
+    const queryPlanCard = screen.getByText("查看查询计划");
+    const sqlCard = screen.getByText("查看 SQL");
+    assertBefore(traceCard, planCard);
+    assertBefore(planCard, queryPlanCard);
+    assertBefore(queryPlanCard, sqlCard);
+  });
+
   it("渲染顺序为 分析计划 → 查询计划 → SQL", () => {
     renderItem({
       content: "查询完成。",

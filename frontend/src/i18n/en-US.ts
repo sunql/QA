@@ -394,6 +394,16 @@ export const enUS = {
     KPI_DATASOURCE_MISMATCH: "The KPI's bound datasource does not match your currently selected datasource",
   },
 
+  agentTrace: {
+    panelLabel: "View execution trace",
+    summary: "{steps} steps · {iterations} rounds · {duration}",
+    statusAnswered: "Completed",
+    statusMaxIterations: "Iteration limit reached",
+    iterationLabel: "Round {n}",
+    stepFailed: "Failed",
+    truncated: "Trace too long; showing the first 50 steps",
+  },
+
   messageItem: {
     cost: "Cost: ${amount}",
     model: "Model: {name}",

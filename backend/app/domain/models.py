@@ -986,6 +986,14 @@ class SessionMessage(Base, TimestampMixin):
         JSON().with_variant(postgresql.JSONB(), "postgresql"),
         nullable=True,
     )
+    # agent_trace（2026-10-31，L4 执行轨迹卡）：L4 Agent Loop 的工具调用轨迹快照
+    # （工具名 / 参数摘要 / 返回计数 / 耗时 / 成败），由 l4_trace.buildTrace 构造。
+    # 只含摘要，**不含 rows / 工具结果原文**；仅 answered / max_iterations 的 L4
+    # 消息落值，其余路径（L1/L2/L3、闲聊、降级）恒 NULL → 前端无卡。
+    agent_trace: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
+    )
 
     __table_args__ = (
         Index("idx_session_msg_time", "session_id", "created_time"),

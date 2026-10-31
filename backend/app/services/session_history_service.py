@@ -231,6 +231,8 @@ class SessionHistoryService:
                 # 前端据此还原 查询计划卡 与 分析计划卡（刷新/重开会话不再丢）。
                 SessionMessage.query_plan,
                 SessionMessage.steps_snapshot,
+                # L4 执行轨迹（2026-10-31）：刷新/重开会话后还原「执行轨迹卡」。
+                SessionMessage.agent_trace,
             )
             .where(SessionMessage.session_id == sessionId)
             .limit(limit)
@@ -268,6 +270,8 @@ class SessionHistoryService:
                 # 2026-10-31：无计划的行（user 行 / 改动前的存量行）两列均为 NULL → None
                 query_plan=r.query_plan,
                 steps_snapshot=r.steps_snapshot,
+                # L4 执行轨迹（2026-10-31）：无轨迹的行（user 行 / 非 L4 路径）为 NULL
+                agent_trace=r.agent_trace,
                 # 2026-10-31：与实时路径调同一个纯函数，回放与屏幕同源。
                 # 只对**多步**消息算：单步消息也落 1 元素快照（回放计划卡用），
                 # 若也算，回放会同时画顶层图与报告块图 —— 同一张图出现两次。

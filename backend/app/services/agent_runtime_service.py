@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -76,6 +77,9 @@ _READABLE = (
     AgentPermission.READ.value,
     AgentPermission.MASKED_READ.value,
 )
+# 只有这两条终止路径的回答会真正展示给用户；error / cost_cap 会降级 L2/L3，
+# 轨迹卡没有可挂载的消息（2026-10-31 执行轨迹卡决策 4）。
+_TRACEABLE_TERMINATIONS = frozenset({"answered", "max_iterations"})
 
 
 class AgentRuntimeService:
@@ -255,6 +259,9 @@ class AgentLoopResult:
     # L4 的消耗因此整条游离在台账之外。
     prompt_tokens: int
     completion_tokens: int
+    # 执行轨迹快照（2026-10-31，事后「执行轨迹卡」）：只含工具名/参数摘要/
+    # 计数/耗时/状态，不含工具结果原文。尾部默认值保证既有构造点不被破坏。
+    agent_trace: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -673,19 +680,26 @@ async def _dispatchSingleTool(
     session_id: str | None = None,
     iteration: int = 0,
     executed_sqls: list[str] | None = None,
+    trace_steps: list[dict] | None = None,
 ) -> Any:  # ToolMessage
     """处理单个 tool_call → ToolMessage。
 
     ``executed_sqls``：成功执行的 SQL 累积列表（调用方持有），
     供 loop 结束时兜底回填 final_sql；失败的 SQL 不进入。
+
+    ``trace_steps``：执行轨迹收集器（调用方持有）。每次工具执行后追加一条
+    摘要（参数 / 计数 / 耗时 / 成败），供事后「执行轨迹卡」落库与回放。
     """
     import json
 
     from app.infrastructure.llm.base_client import ToolCall as Tc
+    from app.services import l4_trace
 
     tc_adapter = Tc(id=tc.id, name=tc.name, args=tc.args)
+    startedAt = time.monotonic()
 
     rowCount: int | None = None
+    isError = False
     if tc.name == "execute_sql":
         try:
             sql = tc.args.get("sql", "")
@@ -703,6 +717,7 @@ async def _dispatchSingleTool(
                 default=str,
             )
         except Exception as exc:
+            isError = True
             content = json.dumps(
                 {"error": type(exc).__name__, "detail": str(exc)},
                 ensure_ascii=False,
@@ -711,7 +726,21 @@ async def _dispatchSingleTool(
         from app.services.agent_tools_nl2sql import dispatch_tool_call
 
         result = await dispatch_tool_call(tc_adapter, session=session)
+        isError = bool(getattr(result, "is_error", False))
         content = result.content
+
+    if trace_steps is not None:
+        trace_steps.append(
+            l4_trace.buildStep(
+                index=len(trace_steps),
+                iteration=iteration,
+                tool=tc.name,
+                args=tc.args,
+                rawContent=content,
+                isError=isError,
+                elapsedMs=(time.monotonic() - startedAt) * 1000,
+            )
+        )
 
     # 工具结果是 JSON 数据：只转 & < >（引号保留），避免 &quot; 放大 + 保持可读
     safeContent = wrapUntrustedStructured(UntrustedLabel.AGENT_TOOL_RESULT, content)
@@ -773,6 +802,7 @@ async def run_agent_loop(
     from app.services.agent_tools_nl2sql import TOOL_SCHEMAS
 
     _logLoopStart(user_id, question)
+    startedAt = time.monotonic()
 
     state = _initLoopState(question)
     # 探针归因字段：runId 串起逐轮 profile / 工具结果行 / loop_end 汇总
@@ -839,6 +869,23 @@ async def run_agent_loop(
         total_cost=state["total_cost"],
     )
 
+    # 事后执行轨迹（2026-10-31）：只含工具名/参数摘要/计数/耗时/状态；
+    # 没有工具调用（纯文字回答）时不出卡 —— 空轨迹卡是噪声；
+    # error / cost_cap 会降级 L2/L3，轨迹无处挂载 —— 不出快照。
+    from app.services import l4_trace
+
+    traceSteps = state["trace_steps"]
+    agentTrace = (
+        l4_trace.buildTrace(
+            steps=traceSteps,
+            terminatedReason=state["terminated_reason"],
+            iterations=state["iterations"],
+            totalMs=(time.monotonic() - startedAt) * 1000,
+        )
+        if traceSteps and state["terminated_reason"] in _TRACEABLE_TERMINATIONS
+        else None
+    )
+
     from app.services import l4_token_profile
 
     if logger.isEnabledFor(logging.INFO):
@@ -867,6 +914,7 @@ async def run_agent_loop(
         terminated_reason=state["terminated_reason"],
         prompt_tokens=state["prompt_tokens"],
         completion_tokens=state["completion_tokens"],
+        agent_trace=agentTrace,
     )
 
 
@@ -914,6 +962,8 @@ def _initLoopState(question: str) -> dict:
         "completion_tokens": 0,
         "tool_calls_made": [],
         "executed_sqls": [],
+        # 执行轨迹逐步累积（tuple：每步拼接新元组，不原地改历史）
+        "trace_steps": (),
         "terminated_reason": "max_iterations",
         "final_sql": None,
         "answer_text": None,
@@ -962,19 +1012,28 @@ async def _runOneStep(
 
 
 async def _executePendingToolCalls(*, state: dict, session, executor) -> None:
-    """执行 pending tool_calls；in-place 更新 state.tool_calls_made / messages。"""
-    for tc in state.pop("pending_tool_calls", []):
-        state["tool_calls_made"].append(tc.name)
-        tm = await _dispatchSingleTool(
-            tc=tc,
-            session=session,
-            executor=executor,
-            run_id=state.get("run_id"),
-            session_id=state.get("session_id"),
-            iteration=state["iterations"],
-            executed_sqls=state["executed_sqls"],
-        )
-        state["messages"].append(tm)
+    """执行 pending tool_calls；in-place 更新 state.tool_calls_made / messages。
+
+    轨迹收集用局部 list 累积，finally 里一次性回写 tuple —— 中途异常终止时
+    已执行的步骤仍然保留（max_iterations / error 的轨迹恰恰最有诊断价值）。
+    """
+    traceSteps = list(state["trace_steps"])
+    try:
+        for tc in state.pop("pending_tool_calls", []):
+            state["tool_calls_made"].append(tc.name)
+            tm = await _dispatchSingleTool(
+                tc=tc,
+                session=session,
+                executor=executor,
+                run_id=state.get("run_id"),
+                session_id=state.get("session_id"),
+                iteration=state["iterations"],
+                executed_sqls=state["executed_sqls"],
+                trace_steps=traceSteps,
+            )
+            state["messages"].append(tm)
+    finally:
+        state["trace_steps"] = tuple(traceSteps)
 
 
 # monkey-patch onto AgentRuntimeService (keeps original class untouched)

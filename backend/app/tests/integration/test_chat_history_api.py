@@ -33,6 +33,7 @@ async def _seedMessage(
     tableOption: dict | None = None,
     visualRationale: dict | None = None,
     stepsSnapshot: list[dict] | None = None,
+    agentTrace: dict | None = None,
     createdAt: datetime | None = None,
 ) -> SessionMessage:
     """插入一行会话消息（created_time 可指定，便于排序断言）。"""
@@ -46,6 +47,7 @@ async def _seedMessage(
         table_option=tableOption,
         visual_rationale=visualRationale,
         steps_snapshot=stepsSnapshot,
+        agent_trace=agentTrace,
         created_time=createdAt or datetime.now(UTC),
         updated_time=createdAt or datetime.now(UTC),
     )
@@ -332,6 +334,61 @@ class TestChatHistoryMessages:
         # user 行无图：两个字段都存在且为 None（契约字段恒定在场，前端不必判 undefined）
         assert msgs[0]["chartType"] is None
         assert msgs[0]["chartOption"] is None
+
+    async def test_messages_carries_agent_trace_for_replay(
+        self, client, dbSession
+    ) -> None:
+        """L4 执行轨迹（2026-10-31）：回放也要能出执行轨迹卡，不能只活在实时帧里。"""
+        base = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        trace = {
+            "kind": "l4_agent_trace",
+            "status": "answered",
+            "iterations": 2,
+            "totalMs": 1234,
+            "stepCount": 1,
+            "steps": [
+                {
+                    "index": 0,
+                    "iteration": 0,
+                    "tool": "list_tables",
+                    "status": "ok",
+                    "elapsedMs": 12,
+                    "args": {"keyword": "supply"},
+                    "resultSummary": {"tables": 3},
+                }
+            ],
+        }
+        await _seedMessage(
+            dbSession, sessionId="s-trace", role="user", content="Q", createdAt=base
+        )
+        await _seedMessage(
+            dbSession, sessionId="s-trace", role="assistant", content="A",
+            agentTrace=trace, createdAt=base + timedelta(seconds=1),
+        )
+
+        resp = await client.get("/api/v1/sessions/s-trace/messages")
+
+        msgs = resp.json()["messages"]
+        assert msgs[1]["agentTrace"] == trace
+        # user 行无轨迹：契约字段恒定在场（None），前端不必判 undefined
+        assert msgs[0]["agentTrace"] is None
+
+    async def test_messages_agent_trace_is_none_for_legacy_rows(
+        self, client, dbSession
+    ) -> None:
+        """0139 之前的存量行 agent_trace 为 NULL ⇒ 返 None（前端按「无轨迹」渲染）。"""
+        await _seedMessage(
+            dbSession, sessionId="s-trace-legacy", role="user", content="Q",
+            createdAt=datetime(2026, 5, 1, 9, 0, tzinfo=UTC),
+        )
+        await _seedMessage(
+            dbSession, sessionId="s-trace-legacy", role="assistant", content="A",
+            createdAt=datetime(2026, 5, 1, 9, 0, 1, tzinfo=UTC),
+        )
+
+        resp = await client.get("/api/v1/sessions/s-trace-legacy/messages")
+
+        assert resp.json()["messages"][1]["agentTrace"] is None
 
     async def test_messages_chart_fields_are_none_for_legacy_rows(
         self, client, dbSession

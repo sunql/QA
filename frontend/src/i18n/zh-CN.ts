@@ -399,6 +399,16 @@ export const zhCN = {
     KPI_DATASOURCE_MISMATCH: "KPI 指标绑定的数据源与你当前选择的数据源不一致",
   },
 
+  agentTrace: {
+    panelLabel: "查看执行轨迹",
+    summary: "{steps} 步 · {iterations} 轮 · {duration}",
+    statusAnswered: "已完成",
+    statusMaxIterations: "达到轮次上限",
+    iterationLabel: "第 {n} 轮",
+    stepFailed: "失败",
+    truncated: "轨迹过长，仅显示前 50 步",
+  },
+
   messageItem: {
     cost: "成本: ${amount}",
     model: "模型: {name}",

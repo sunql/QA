@@ -1984,6 +1984,12 @@ class ChatResponse(CamelModel):
         default=None,
         description="多步查询各子步骤执行结果",
     )
+    # L4 执行轨迹（2026-10-31）：仅 L4 answered / max_iterations 时填充；
+    # 其余意图为 None（前端据此不渲染 AgentTraceCard）。
+    agent_trace: dict | None = Field(
+        default=None,
+        description="L4 执行轨迹快照（工具名/参数摘要/计数/耗时/状态）",
+    )
     # 2026-10-31（分节报告）：多步最终回答的结构化分块。chart 块只带 stepIndex，
     # 图负载复用 steps[i]，不重复下发。仅多步聚合/降级收尾填充；其余意图为 None。
     report_sections: list[dict] | None = Field(
@@ -2203,6 +2209,12 @@ class ChatMessageRead(CamelModel):
     steps_snapshot: list[dict] | None = Field(
         default=None,
         description="多步/单步消息的回放快照（历史回放用，形状对齐前端 MultiStepStep）",
+    )
+    # L4 执行轨迹（2026-10-31）：工具调用轨迹快照（只含摘要/计数/耗时/状态）。
+    # 仅 L4 answered / max_iterations 的消息有值；其余路径为 None → 前端无卡。
+    agent_trace: dict | None = Field(
+        default=None,
+        description="L4 执行轨迹快照（历史回放用，形状见 l4_trace.buildTrace）",
     )
     # 2026-10-31（分节报告）：回放时由 content + steps_snapshot 现算，不落库。
     # 存量行、非多步行、无可图步骤 → None（前端走旧渲染）。

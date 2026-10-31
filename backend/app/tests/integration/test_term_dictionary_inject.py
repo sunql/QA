@@ -251,7 +251,8 @@ class TestTermDictionaryInject:
         assert "「含税价」" in prompt
         assert "类 SupplierPriceDetail" in prompt
         assert "属性 单价" in prompt
-        assert "价格表号='T10'" in prompt
+        # 词典经 wrapUntrusted → sanitizeForLlmPrompt，单引号被转义为 &#39;
+        assert "价格表号=&#39;T10&#39;" in prompt
         # 地点维度条目与总纲也在词典段内
         assert "「不含税价(地点)」" in prompt
         assert "「供应商报价」" in prompt

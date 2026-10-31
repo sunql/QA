@@ -154,6 +154,11 @@ services:
       dockerfile: docker/Dockerfile.backend
     container_name: qa-backend
     restart: unless-stopped
+    volumes:
+      # PDF 中文字体（2026-10-31）：微软雅黑不可再分发，**不入 git**，由运维把
+      # msyh.ttc / msyhbd.ttc 放进 docker/fonts/（目录本身随仓库存在，见其 README）。
+      # 缺文件时导出回落 STSong-Light，不会失败；只是阅读器可能显示方框。
+      - ./fonts:/app/fonts:ro
     # 容器内配置全部从 docker/.env 注入（SSOT：容器内端口用容器 service 名 + 容器端口）。
     # 本地 dev（容器外跑 uvicorn）用 backend/.env，端口用 localhost:5433（因宿主端口重映射）。
     # 端口契约详见 Harness/wiki/operations-runbook.md「SSOT 端口契约」段。

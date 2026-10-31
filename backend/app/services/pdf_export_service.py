@@ -4,8 +4,8 @@
 （不可变 dataclass），将其渲染为 PDF 字节，不接触 DB / ORM / FastAPI。
 
 实现要点：
-- 中文字体用 reportlab 内置 STSong-Light CID 字体（CIDFont，无需字体文件，
-  任何装了 reportlab 的环境即可用；劣势：不支持斜体/粗体变体）。
+- 中文字体走 ``pdf_fonts.ensureCjkFont()``：优先微软雅黑（TrueType，嵌入子集，
+  任何阅读器都能显示），缺字体文件时回落 reportlab 内置 STSong-Light。
 - Markdown 解析：``markdown`` 库的 python-markdown API 把内容转 HTML；
   我们再用 ``html.parser`` 拆分为 block 节点（标题/段落/列表/引用/代码块/表格），
   每个 block 转 platypus Flowable。直接 ``md.convert(text)`` 返回的 HTML
@@ -36,8 +36,6 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
@@ -53,12 +51,11 @@ from reportlab.platypus import (
 from reportlab.platypus.flowables import HRFlowable
 
 from app.domain.enums import ChartType
+from app.services.pdf_fonts import ensureCjkFont
 
 logger = logging.getLogger(__name__)
 
 
-# 中文 CID 字体（reportlab 内置）；不支持粗体/斜体变体
-_CJK_FONT_NAME = "STSong-Light"
 _MONO_FONT_NAME = "Courier"
 
 # 图表位图在 PDF 里能占的正文框 = 正文可用宽/高 × 此比例。与占位框同宽（0.7），让
@@ -156,16 +153,6 @@ def _sanitize_inline_html(html_str: str) -> str:
         logger.warning("HTML sanitize 失败，降级为 escape 全文")
         return html.escape(html_str)
     return "".join(s.out)
-
-
-def _register_cjk_font_once() -> None:
-    """注册内置中文字体；reportlab 要求显式 registerFont。
-    重复注册会抛 ValueError，因此通过模块属性幂等。
-    """
-    if getattr(_register_cjk_font_once, "_done", False):
-        return
-    pdfmetrics.registerFont(UnicodeCIDFont(_CJK_FONT_NAME))
-    _register_cjk_font_once._done = True  # type: ignore[attr-defined]
 
 
 @dataclass(frozen=True)
@@ -289,7 +276,7 @@ class ChatExportPdfBuilder:
     _MARGIN = 2 * cm
 
     def __init__(self) -> None:
-        _register_cjk_font_once()
+        self._cjk_font = ensureCjkFont()
         self._styles = self._build_styles()
 
     def build(self, payload: ChatExportPayload) -> bytes:
@@ -326,7 +313,7 @@ class ChatExportPdfBuilder:
         body = ParagraphStyle(
             name="Body",
             parent=base["Normal"],
-            fontName=_CJK_FONT_NAME,
+            fontName=self._cjk_font,
             fontSize=10,
             leading=14,
             wordWrap="CJK",
@@ -334,7 +321,7 @@ class ChatExportPdfBuilder:
         title = ParagraphStyle(
             name="DocTitle",
             parent=base["Title"],
-            fontName=_CJK_FONT_NAME,
+            fontName=self._cjk_font,
             fontSize=18,
             leading=22,
             spaceAfter=8,
@@ -667,8 +654,8 @@ class ChatExportPdfBuilder:
         col_width = (self._PAGE_WIDTH - 2 * self._MARGIN) / ncols
         table = Table(data, colWidths=[col_width] * ncols, repeatRows=1)
         style = TableStyle([
-            ("FONT", (0, 0), (-1, 0), _CJK_FONT_NAME, 8),
-            ("FONT", (0, 1), (-1, -1), _CJK_FONT_NAME, 8),
+            ("FONT", (0, 0), (-1, 0), self._cjk_font, 8),
+            ("FONT", (0, 1), (-1, -1), self._cjk_font, 8),
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f5ff")),
             ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#d9d9d9")),
             ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#e8e8e8")),

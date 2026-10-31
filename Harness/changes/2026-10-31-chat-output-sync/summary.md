@@ -2,7 +2,7 @@
 
 - **日期**：2026-10-31
 - **分支**：`feat/chat-output-sync`（base `main` @ `4e535289`）
-- **状态**：设计已确认，实施中
+- **状态**：T1–T7 已完成（见 §8 交付记录），待合并/部署
 - **关联**：[2026-10-31-chat-report-charts](../2026-10-31-chat-report-charts/summary.md)（本批是其 §5「非目标」的下一批）、[feat-pdf-export](../feat-pdf-export/summary.md)
 
 ---
@@ -199,10 +199,11 @@ renderChartOption(spec, data, *, topN: bool = False) -> dict
   - 分节顺序 text→chart→text；无分节回落旧路径
   - step 图缺失 → 占位；table/kpi 原生优先
 - `unit/test_pdf_fonts.py`（新增）
-  - 环境变量文件存在 → `MSYaHei`；缺失/坏路径 → `STSong-Light`
-  - 无粗体文件时 `<b>` 映射回常规
-- `integration/test_export_pdf_api.py`
-  - 带 `stepIndex` 的请求通过；越界 stepIndex → 422
+  - 环境变量文件存在 → `MicrosoftYaHei`；缺失/坏路径 → `STSong-Light`
+  - 无粗体文件时 `<b>` 映射回常规；`.ttc` 走 `subfontIndex=0`
+  - 反向守卫：导出服务样式必须用解析出的家族名（不得再硬编码）
+- `integration/test_session_export_charts.py`（分节用例）
+  - 带 `stepIndex` 的请求通过；越界 / 无图步骤 / 无快照 → 422（不回显 id）
   - 分节消息导出包含分节图（flowable 顺序断言）
 - `integration/test_chat_multi_step.py` / `test_chat_history_api.py`
   - 响应/回放中的 `chartOption` 携带 `topNOption`
@@ -233,3 +234,24 @@ renderChartOption(spec, data, *, topN: bool = False) -> dict
 | 多图轮次 PDF 超页 | 分节轮次拆掉整轮 `KeepTogether` |
 | 微软雅黑缺失 / 许可 | 字体外置不落仓；缺失自动回落 STSong-Light，导出永不失败 |
 | `.ttc` 子字体选择错误 | 固定 `subfontIndex=0`（Microsoft YaHei），单测覆盖注册链路 |
+
+## 8. 交付记录
+
+| Task | 提交 | 验证 |
+|---|---|---|
+| T1/T2 Top-N | 见分支历史（`chart_renderer` / `chartTopN`） | 后端单测 + 前端套件 |
+| T3 计划卡 | `969516cf` | `MultiStepPlanCard.test.tsx` |
+| T4 研究线报告 | `1deed721` | `ResearchReportRenderer.test.tsx` |
+| T5 PDF 分节插图 | `4592a773` | 后端 46 unit + 19 integration；前端 `collectExportCharts` 20 |
+| T6 微软雅黑 | 本提交 | `test_pdf_fonts.py` 7；PDF 相关 53 unit + 25 integration |
+| T7 文档 | 本提交 | 全前端 227 文件 / 2285 用例、`tsc --noEmit` 0 错误 |
+
+**部署注意**
+
+1. 字体文件**不在发布包里**：在部署机 `<部署目录>/docker/fonts/` 放
+   `msyh.ttc`（+可选 `msyhbd.ttc`），再 `docker compose stop backend && up -d backend`
+   —— 新建容器才会应用新挂载。未放文件时导出仍可用，只是回落到 STSong-Light。
+2. 后端与前端**必须同批**：导出契约新增 `stepIndex`、`report_sections` 由后端计算，
+   旧前端只发顶层图 ⇒ 分节轮次里图会落到占位框（不会报错）。
+3. 冒烟：导出一份多步会话 PDF，确认 ①正文为雅黑字形 ②每张图紧跟其步骤标题
+   ③「其他（N 项）」聚合行出现在排名图里。

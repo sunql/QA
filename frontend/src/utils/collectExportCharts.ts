@@ -50,6 +50,16 @@ export const MAX_EXPORT_PIXELS = 36_000_000;
 export const MAX_EXPORT_IMAGE_BYTES = 2 * 1024 * 1024;
 
 /**
+ * 单次导出**全部**位图解码后的字节预算，与后端 `MAX_EXPORT_TOTAL_IMAGE_BYTES`
+ * （20 MiB）对齐并留 20% 余量。
+ *
+ * 为什么像素预算之外还要这一维：矢量化很弱的图（散点、多折线）单张像素不超但
+ * PNG 很大，35 张 600 KB 的图仍在 36M 像素以内，解码字节却已越过 20 MiB ——
+ * 请求发出后端 422，整份导出作废。字节数只有渲染完才知道，所以在渲染后裁剪。
+ */
+export const MAX_EXPORT_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
+
+/**
  * 单个会话最多读多少条消息去挑图。
  *
  * 必须与**导出侧**的窗口对齐：后端导出只保留**最后 500 轮**（约 1000 条消息），
@@ -147,9 +157,17 @@ function decodedByteLength(imagePng: string): number {
   return Math.floor((base64Length * 3) / 4);
 }
 
-/** 渲染一张；失败或超过单张上限返回 null（调用方丢掉该张，不影响其余）。 */
+/** 渲染一张；失败、抛异常或超过单张上限返回 null（调用方丢掉该张，不影响其余）。 */
 async function renderOne(target: ExportTarget): Promise<ExportChartImage | null> {
-  const imagePng = await renderChartPng(snapshotOptionOf(target));
+  let imagePng: string | null;
+  try {
+    imagePng = await renderChartPng(snapshotOptionOf(target));
+  } catch (error: unknown) {
+    // 渲染链内部异常（如离屏容器的 dispose 失败）不能顺着 Promise.all 把整份导出
+    // 打成失败 —— 「一张图失败 = 少一张图」是这条路径的契约。
+    console.warn(`导出配图：messageId=${target.messageId} 渲染异常，已跳过`, error);
+    return null;
+  }
   if (!imagePng) return null;
   if (decodedByteLength(imagePng) > MAX_EXPORT_IMAGE_BYTES) return null;
   return {
@@ -214,6 +232,29 @@ function trimToPixelBudget(targets: ExportTarget[]): ExportTarget[] {
 }
 
 /**
+ * 从最新往旧累加**解码后**字节，超预算即停 —— 与像素预算同一策略：丢最早的一批，
+ * 保住用户眼前这批。渲染完才知道字节数，所以在渲染后裁剪。
+ */
+function trimToByteBudget(images: ExportChartImage[]): ExportChartImage[] {
+  const kept: ExportChartImage[] = [];
+  let totalBytes = 0;
+  for (let index = images.length - 1; index >= 0; index -= 1) {
+    const size = decodedByteLength(images[index].imagePng);
+    if (totalBytes + size > MAX_EXPORT_TOTAL_IMAGE_BYTES) break;
+    totalBytes += size;
+    kept.push(images[index]);
+  }
+  if (kept.length < images.length) {
+    console.warn(
+      `导出配图：总字节预算 ${MAX_EXPORT_TOTAL_IMAGE_BYTES} 已用尽，丢弃最早的 ${
+        images.length - kept.length
+      } 张`
+    );
+  }
+  return kept.reverse();
+}
+
+/**
  * 收集某会话的图表位图。
  *
  * `messageId` 非空时只处理该条（与单条问答导出对齐）。任何一张渲染失败都只是
@@ -248,5 +289,5 @@ export async function collectExportCharts(
       .slice(-MAX_EXPORT_CHARTS)
   );
 
-  return renderAll(targets);
+  return trimToByteBudget(await renderAll(targets));
 }

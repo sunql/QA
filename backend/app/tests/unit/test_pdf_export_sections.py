@@ -18,6 +18,7 @@ from reportlab.platypus import KeepTogether, Paragraph, Table
 
 from app.domain.export_limits import MAX_EXPORT_CHART_IMAGES, MAX_EXPORT_IMAGE_BYTES
 from app.domain.schemas import ChatExportChartImage, ChatExportRequest
+from app.services.chart_image_validation import attachChartImages
 from app.services.chat_chart_persist import _PERSIST_MAX_TABLE_ROWS
 from app.services.pdf_export_service import (
     ChatExportPayload,
@@ -25,7 +26,6 @@ from app.services.pdf_export_service import (
     ChatExportTurn,
     ExportStepChart,
 )
-from app.services.session_history_service import SessionHistoryService
 from app.tests._png_support import solidPng
 
 _T = datetime(2026, 1, 1, 10, 1, tzinfo=UTC)
@@ -69,6 +69,17 @@ def _turn(**overrides) -> ChatExportTurn:
     return ChatExportTurn(**{**base, **overrides})
 
 
+def _flatten(flowables: list) -> list:
+    """展开 KeepTogether 小组 —— 排版单位（标题+图同页）不等于文档顺序。"""
+    out: list = []
+    for item in flowables:
+        if isinstance(item, KeepTogether):
+            out.extend(_flatten(item._content))
+        else:
+            out.append(item)
+    return out
+
+
 def _paragraphTexts(flowables: list) -> list[tuple[int, str]]:
     return [
         (index, item.text)
@@ -85,7 +96,7 @@ class TestSectionedTurnRendering:
         图会落到两节文字之后 ⇒ 本用例红。
         """
         # Act
-        flowables = ChatExportPdfBuilder()._build_turn(1, _turn())
+        flowables = _flatten(ChatExportPdfBuilder()._build_turn(1, _turn()))
 
         # Assert
         image_index = next(
@@ -145,17 +156,31 @@ class TestSectionedTurnRendering:
         ]
         assert len(placeholders) == 2
 
-    def test_only_the_question_header_is_kept_together(self) -> None:
-        """分节轮次不能整轮 KeepTogether：正文、图须是顶层 flowable 才能跨页排版。
+    def test_turn_is_not_wrapped_in_a_single_keep_together(self) -> None:
+        """分节轮次不能整轮 KeepTogether：整轮超过一页会 LayoutError，正文也无法跨页。
 
-        反向守卫：把分节轮次也包回 ``KeepTogether(flowables)`` ⇒ 本用例红。
+        反向守卫：把分节轮次包回 ``KeepTogether(flowables)`` ⇒ 顶层就没有裸
+        flowable 了，本用例红。允许的顶层小组只有「问题头」与「小标题 + 一张位图」。
         """
         flowables = ChatExportPdfBuilder()._build_turn(1, _turn())
 
-        assert isinstance(flowables[0], KeepTogether)
-        assert any(isinstance(item, PdfImage) for item in flowables), (
-            "图必须在顶层 —— 被裹进 KeepTogether 里就查不到，也就无法跨页"
-        )
+        groups = [item for item in flowables if isinstance(item, KeepTogether)]
+        assert groups and flowables[0] is groups[0], "问题头成组且排在最前"
+        loose = [item for item in flowables if not isinstance(item, KeepTogether)]
+        assert len(loose) >= 3, "正文必须在小组之外 —— 整轮包起来就没有裸 flowable 了"
+
+    def test_caption_and_bitmap_stay_in_one_group(self) -> None:
+        """小标题与位图不能被分页拆开：标题悬在页尾、图跑到次页是最难读的排版。"""
+        flowables = ChatExportPdfBuilder()._build_turn(1, _turn())
+
+        groups = [
+            item._content for item in flowables if isinstance(item, KeepTogether)
+        ]
+        assert any(
+            any(isinstance(child, Paragraph) for child in group)
+            and any(isinstance(child, PdfImage) for child in group)
+            for group in groups
+        ), "小标题与位图必须在同一个小组里"
 
     def test_sectioned_turn_builds_a_pdf(self) -> None:
         payload = ChatExportPayload(
@@ -205,7 +230,7 @@ class TestAttachStepImages:
         )
 
         # Act
-        merged = SessionHistoryService.attachChartImages(
+        merged = attachChartImages(
             payload, {(7, 0): png0, (7, 2): png2}
         )
 
@@ -221,7 +246,7 @@ class TestAttachStepImages:
             session_id="s1", title="t", generated_at=_T, turns=[turn]
         )
 
-        merged = SessionHistoryService.attachChartImages(payload, {(7, None): png})
+        merged = attachChartImages(payload, {(7, None): png})
 
         assert merged.turns[0].chart_image == png
         assert merged.turns[0].step_charts[0].chart_image is None
@@ -235,7 +260,7 @@ class TestAttachStepImages:
             turns=[_turn(message_id=7, step_charts=(_stepChart(step_index=0),))],
         )
 
-        merged = SessionHistoryService.attachChartImages(payload, {(7, 99): b"x"})
+        merged = attachChartImages(payload, {(7, 99): b"x"})
 
         assert merged.turns[0].step_charts[0].chart_image is None
 

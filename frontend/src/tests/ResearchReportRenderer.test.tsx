@@ -35,6 +35,7 @@ vi.mock("echarts-for-react", () => ({
 
 import { ReportRenderer } from "../components/research/ReportRenderer";
 import type { ReportPayload } from "../components/research/ReportRenderer";
+import { i18n } from "../i18n";
 
 function makePayload(): ReportPayload {
   return {
@@ -305,6 +306,21 @@ describe("ReportRenderer 与聊天端一致（D3）", () => {
     const tooltip = option.tooltip as { valueFormatter?: (value: unknown) => string };
     expect(typeof tooltip.valueFormatter).toBe("function");
     expect(tooltip.valueFormatter?.(1234567)).toBe("1,234,567");
+  });
+
+  it("非中文界面下数字格式跟随 locale（与聊天端同一条，不是写死 zh）", async () => {
+    await i18n.changeLanguage("en-US");
+    try {
+      renderPayload(makeTopNChartPayload());
+
+      const option = echarts.options[echarts.options.length - 1];
+      const xAxis = option.xAxis as { axisLabel?: { formatter?: (value: unknown) => string } };
+      expect(xAxis.axisLabel?.formatter?.(123456)).toBe("123,456");
+      const tooltip = option.tooltip as { valueFormatter?: (value: unknown) => string };
+      expect(tooltip.valueFormatter?.(1234567)).toBe("1,234,567");
+    } finally {
+      await i18n.changeLanguage("zh-CN");
+    }
   });
 
   // 反向守卫：没有 Top-N 的普通报告图不得凭空长出切换按钮。

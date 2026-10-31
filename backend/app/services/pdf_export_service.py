@@ -7,8 +7,8 @@
 - 中文字体走 ``pdf_fonts.ensureCjkFont()``：优先微软雅黑（TrueType，嵌入子集，
   任何阅读器都能显示），缺字体文件时回落 reportlab 内置 STSong-Light。
 - Markdown 解析：``markdown`` 库的 python-markdown API 把内容转 HTML；
-  我们再用 ``html.parser`` 拆分为 block 节点（标题/段落/列表/引用/代码块/表格），
-  每个 block 转 platypus Flowable。直接 ``md.convert(text)`` 返回的 HTML
+  再用 ``pdf_markdown_html.htmlToBlocks`` 白名单清洗并拆成 block 节点（标题/
+  段落/列表/引用/代码块/表格），每个 block 转 platypus Flowable。直接 ``md.convert(text)`` 返回的 HTML
   给 Paragraph 渲染时不支持表格/列表/嵌套结构。
 - 图表区（0105 起）：**不再一律是占位框**。分三条路：
   1. 有前端回传的 PNG → 直接嵌 ``Image``（像素与前端的图一致）；
@@ -39,7 +39,6 @@ from reportlab.lib.units import cm
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
-    Image as PdfImage,
     KeepTogether,
     PageTemplate,
     Paragraph,
@@ -48,11 +47,15 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from reportlab.platypus import (
+    Image as PdfImage,
+)
 from reportlab.platypus.flowables import HRFlowable
 
 from app.domain.enums import ChartType
 from app.services.chat_chart_persist import _PERSIST_MAX_TABLE_ROWS
 from app.services.pdf_fonts import ensureCjkFont
+from app.services.pdf_markdown_html import htmlToBlocks
 
 logger = logging.getLogger(__name__)
 
@@ -63,98 +66,6 @@ _MONO_FONT_NAME = "Courier"
 # 同一份 PDF 里各轮的图视觉尺度一致；**宽高两轴都用它**，所以是「框」而不是「宽」——
 # 只夹宽度会让窄高图的高度溢出版面。
 _CHART_IMAGE_BOX_RATIO = 0.7
-
-# 支持的 HTML block 标签集合（其它降级为段落）
-_BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "blockquote", "pre", "table", "hr"}
-
-# 安全审查 MEDIUM-4：白名单 inline 标签 + 白名单属性。reportlab Paragraph 支持
-# 的内联标签有限，仅放行 <b>/<i>/<br/>；<font> 仅放行 color/face 属性；其它
-# 标签（含 <a href>）一律剥除，避免钓鱼或误导链接。
-_WHITELIST_INLINE_TAGS = {"b", "i", "br", "font"}
-_WHITELIST_FONT_ATTRS = {"color", "face"}
-_BLOCK_TAGS_ALLOWED = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li",
-                       "blockquote", "pre", "code", "table", "thead", "tbody", "tr",
-                       "th", "td", "hr"}
-_WHITELIST_BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "blockquote", "pre", "table", "hr"}
-
-
-def _sanitize_inline_html(html_str: str) -> str:
-    """白名单 block + inline 标签与属性，其它标签全部剥除。
-
-    解析 HTML 后只输出 block 标签（白名单）+ 选定的 inline 子集；危险标签
-    （如 <script>, <iframe>, <a href javascript:...>）转为纯文本。
-    """
-    # 用一个简单 HTMLParser 重建；非白名单标签全部 escape 为文本
-    class _Sanitizer(HTMLParser):
-        def __init__(self) -> None:
-            super().__init__(convert_charrefs=True)
-            self.out: list[str] = []
-            self._skip_depth = 0  # 处于非白名单标签内时 1+
-
-        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-            if self._skip_depth > 0:
-                # 嵌套在剥除标签内的子标签也剥除
-                if tag in _BLOCK_TAGS_ALLOWED or tag in _WHITELIST_INLINE_TAGS or tag not in (
-                    _WHITELIST_INLINE_TAGS | _BLOCK_TAGS_ALLOWED
-                ):
-                    self._skip_depth += 1
-                    return
-            if tag == "br":
-                self.out.append("<br/>")
-                return
-            if tag in _BLOCK_TAGS_ALLOWED:
-                self.out.append(f"<{tag}>")
-                return
-            if tag in _WHITELIST_INLINE_TAGS:
-                if tag == "font":
-                    attrs_kept = [
-                        (k, v) for k, v in attrs if k in _WHITELIST_FONT_ATTRS and v is not None
-                    ]
-                    attr_str = "".join(
-                        f' {k}="{html.escape(v, quote=True)}"' for k, v in attrs_kept
-                    )
-                    self.out.append(f"<font{attr_str}>")
-                elif tag == "b":
-                    self.out.append("<b>")
-                elif tag == "i":
-                    self.out.append("<i>")
-                return
-            # 非白名单标签（含 script/style/iframe/a）— 跳过其子树
-            if tag not in (_WHITELIST_INLINE_TAGS | _BLOCK_TAGS_ALLOWED):
-                self._skip_depth += 1
-
-        def handle_endtag(self, tag: str) -> None:
-            if tag in _BLOCK_TAGS_ALLOWED:
-                # 配对简单约定：未配对的 end tag 一律忽略
-                # （HTMLParser 不会自动平衡）
-                self.out.append(f"</{tag}>")
-                return
-            if tag in _WHITELIST_INLINE_TAGS:
-                if tag == "font":
-                    self.out.append("</font>")
-                elif tag == "b":
-                    self.out.append("</b>")
-                elif tag == "i":
-                    self.out.append("</i>")
-                return
-            if tag not in (_WHITELIST_INLINE_TAGS | _BLOCK_TAGS_ALLOWED):
-                # 关闭剥除标签 — 仅在跳过栈非空时弹出
-                if self._skip_depth > 0:
-                    self._skip_depth -= 1
-
-        def handle_data(self, data: str) -> None:
-            if self._skip_depth == 0:
-                self.out.append(html.escape(data, quote=False))
-
-    s = _Sanitizer()
-    try:
-        s.feed(html_str)
-        s.close()
-    except Exception:
-        logger.warning("HTML sanitize 失败，降级为 escape 全文")
-        return html.escape(html_str)
-    return "".join(s.out)
-
 
 @dataclass(frozen=True)
 class ExportStepChart:
@@ -208,63 +119,6 @@ class ChatExportPayload:
     title: str
     generated_at: datetime
     turns: list[ChatExportTurn] = field(default_factory=list)
-
-
-# 简易 block 抽取器：扫 markdown→HTML 输出，按 _BLOCK_TAGS 切分为 (tag, inner_html) 列表
-class _BlockExtractor(HTMLParser):
-    """把 HTML 流拆成 block 节点；inline 标签（<b>/<i>/<code>）保留在 inner HTML 里。"""
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.blocks: list[tuple[str, str]] = []  # [(tag, inner_html)]
-        self._stack: list[tuple[str, list[str]]] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _BLOCK_TAGS:
-            self._stack.append((tag, []))
-        else:
-            # inline 标签：作为原始标签重新写出，由 reportlab Paragraph 解析
-            attr_str = "".join(
-                f' {k}="{html.escape(v, quote=True)}"' for k, v in attrs if v is not None
-            )
-            if self._stack:
-                self._stack[-1][1].append(f"<{tag}{attr_str}>")
-            else:
-                # block 外 inline：作为单独段落处理
-                self._stack.append(("p", [f"<{tag}{attr_str}>"]))
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _BLOCK_TAGS and self._stack and self._stack[-1][0] == tag:
-            block_tag, parts = self._stack.pop()
-            self.blocks.append((block_tag, "".join(parts)))
-        else:
-            # inline 标签闭合
-            if self._stack:
-                self._stack[-1][1].append(f"</{tag}>")
-
-    def handle_data(self, data: str) -> None:
-        if self._stack:
-            self._stack[-1][1].append(html.escape(data, quote=False))
-
-
-def _html_to_blocks(html_str: str) -> list[tuple[str, str]]:
-    """把 markdown→HTML 输出拆为 (tag, inner_html) 列表。"""
-
-    # 安全审查 MEDIUM-4：白名单 inline 标签，避免恶意 HTML（reportlab Paragraph
-    # 识别 <font>/<b>/<i>/<br/> 等内联标签，可能被注入 <font color=red> 误导读者）
-    # 通过 attribute 白名单 + tag 白名单双重过滤，非白名单标签直接剥除。
-    html_str = _sanitize_inline_html(html_str)
-    parser = _BlockExtractor()
-    try:
-        parser.feed(html_str)
-        parser.close()
-    except Exception:
-        logger.warning("HTML 解析失败，降级为段落: %s", html_str[:80])
-        return [("p", html.escape(html_str))]
-    # 收尾：未闭合的 stack 强制 flush（markdown 转换结果通常闭合完整）
-    for tag, parts in parser._stack:  # type: ignore[attr-defined]
-        parser.blocks.append((tag, "".join(parts)))
-    return parser.blocks
 
 
 class ChatExportPdfBuilder:
@@ -456,20 +310,24 @@ class ChatExportPdfBuilder:
         step_index = block.get("stepIndex")
         chart = step_charts.get(step_index) if isinstance(step_index, int) else None
         title = block.get("title")
-        out: list[Any] = []
-        if isinstance(title, str) and title.strip():
-            out.append(Paragraph(self._escape_cell(title), self._styles["chart_caption"]))
+        caption = (
+            Paragraph(self._escape_cell(title), self._styles["chart_caption"])
+            if isinstance(title, str) and title.strip()
+            else None
+        )
         if chart is None:
             # 分节块由同一把「有图」的尺生成，走到这里说明数据不一致（老快照/
             # 前端算错）—— 占位比静默丢掉一节更诚实。
-            out.append(self._chart_placeholder_flowable("chart"))
-            return out
-        out.extend(
-            self._chart_flowables_for(
-                chart.chart_type, chart.chart_option, chart.chart_image
-            )
+            return [item for item in (caption, self._chart_placeholder_flowable("chart")) if item]
+        children = self._chart_flowables_for(
+            chart.chart_type, chart.chart_option, chart.chart_image
         )
-        return out
+        # 小标题与**位图**必须同页：图恰好落在页底时，标题会孤零零悬在页尾、
+        # 图跑到次页。只对单张位图成组 —— 原生表格可能跨页，包进 KeepTogether
+        # 会让 reportlab 抛 LayoutError（整份导出变 500）。
+        if caption is not None and len(children) == 1 and isinstance(children[0], PdfImage):
+            return [KeepTogether([caption, children[0]])]
+        return ([caption] if caption is not None else []) + children
 
     def _question_flowables(self, idx: int, turn: ChatExportTurn) -> list[Any]:
         user_time = turn.user_time.strftime("%Y-%m-%d %H:%M:%S") if turn.user_time else "—"
@@ -517,7 +375,7 @@ class ChatExportPdfBuilder:
             logger.warning("Markdown 解析失败，降级为纯文本: %s", content[:80])
             return [Paragraph(html.escape(content), self._styles["body"])]
 
-        blocks = _html_to_blocks(html_str)
+        blocks = htmlToBlocks(html_str)
         flowables: list[Any] = []
         for tag, inner in blocks:
             if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:

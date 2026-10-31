@@ -15,14 +15,13 @@
  * rows 也兼容新 data —— 后端 R3 之后只发 data，但解析器对历史 payload 仍然不破。
  */
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Button } from "antd";
-import { useTranslation } from "react-i18next";
 import EChart from "../EChart";
 import { isChartType } from "../../utils/chartContract";
 import { chartHeightOf } from "../../utils/chartLayout";
-import { topNMetaOf, topNOptionOf } from "../../utils/chartTopN";
-import { applyChartNumberFormat } from "../../theme/chartFormat";
+import { useChartDisplayOption } from "../../hooks/useChartDisplayOption";
+import { useTranslation } from "../../i18n";
 import { EvidencePanel } from "./EvidencePanel";
 
 export interface ReportSourceRef {
@@ -164,15 +163,12 @@ function DataTable({ content }: { content: TableContent }) {
  */
 function ChartBlock({ chart }: { chart: ChartContent }) {
   const { t } = useTranslation();
-  const sourceOption = (chart.echartsOption ?? {}) as Record<string, unknown>;
-  const topNMeta = useMemo(() => topNMetaOf(sourceOption), [sourceOption]);
-  const topNView = useMemo(() => topNOptionOf(sourceOption), [sourceOption]);
-  const [showFullView, setShowFullView] = useState(false);
-  useEffect(() => {
-    setShowFullView(false);
-  }, [sourceOption]);
-  const displayOption = !showFullView && topNView ? topNView : sourceOption;
-  const formattedOption = useMemo(() => applyChartNumberFormat(displayOption), [displayOption]);
+  const sourceOption = useMemo(
+    () => (chart.echartsOption ?? {}) as Record<string, unknown>,
+    [chart.echartsOption]
+  );
+  const { displayOption, formattedOption, topNMeta, showFullView, toggleShowFullView } =
+    useChartDisplayOption(sourceOption);
   const chartHeight = useMemo(() => chartHeightOf(displayOption), [displayOption]);
 
   return (
@@ -182,9 +178,9 @@ function ChartBlock({ chart }: { chart: ChartContent }) {
         height={chartHeight}
         testId={`report-chart-${chart.chartType ?? "unknown"}`}
       />
-      {topNView && topNMeta ? (
+      {topNMeta ? (
         <div style={{ display: "flex", justifyContent: "flex-start", marginTop: 4 }}>
-          <Button size="small" type="link" onClick={() => setShowFullView((value) => !value)}>
+          <Button size="small" type="link" onClick={toggleShowFullView}>
             {showFullView
               ? t("chartExport.showTopN", { limit: topNMeta.limit })
               : t("chartExport.showAll", { total: topNMeta.total })}

@@ -1,17 +1,16 @@
 import ReactECharts from "echarts-for-react";
 import { Button, Collapse, Space, Table, Typography, message } from "antd";
 import { DownloadOutlined } from "@ant-design/icons";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "../../i18n";
 import { useThemeStore } from "../../stores/themeStore";
 import { applyChartTheme } from "../../theme/chartTheme";
-import { applyChartNumberFormat } from "../../theme/chartFormat";
 import { DARK_TOKEN, LIGHT_TOKEN } from "../../theme/tokens";
 import type { ChartType, TablePayload, VisualRationale } from "../../types/chat";
 import { dataUrlToBlob, downloadBlob, downloadCsv } from "../../utils/download";
 import { renderChartPng } from "../../utils/chartSnapshot";
 import { chartHeightOf } from "../../utils/chartLayout";
-import { topNMetaOf, topNOptionOf } from "../../utils/chartTopN";
+import { useChartDisplayOption } from "../../hooks/useChartDisplayOption";
 import { visualRationaleText } from "../../utils/visualRationale";
 import KpiCard, { parseKpiPayload } from "./KpiCard";
 
@@ -84,7 +83,7 @@ export default function ChartRenderer({
   tableOption,
   visualRationale,
 }: ChartRendererProps) {
-  const { t, locale } = useTranslation();
+  const { t } = useTranslation();
   const isDark = useThemeStore((state) => state.isDark);
   const chartRef = useRef<InstanceType<typeof ReactECharts>>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -101,28 +100,16 @@ export default function ChartRenderer({
   // 实时那一轮拿到的是全量 option（截断发生在写库前，作用在副本上），所以线上
   // 不会误报；历史回放读到 `truncated: true` 时才提示，与后端 PDF 口径一致。
   const isTruncatedTable = chartOption?.truncated === true;
-  // Top-N 视图（2026-10-31）：后端把「前 20 + 其他」挂在同一个 option 上，这里只决定
-  // **默认看哪一份**。切换是组件本地 state：不回后端、不改 store，回放/导出不受影响。
-  // 换消息时复位 —— 否则上一张图的全量态会带到下一张（下一张可能根本没有 Top-N）。
-  const topNMeta = useMemo(() => topNMetaOf(chartOption), [chartOption]);
-  const topNView = useMemo(() => topNOptionOf(chartOption), [chartOption]);
-  const [showFullView, setShowFullView] = useState(false);
-  useEffect(() => {
-    setShowFullView(false);
-  }, [chartOption]);
-  const displayOption = !showFullView && topNView ? topNView : chartOption;
+  // Top-N 视图与数字口径收在 `useChartDisplayOption` 里 —— 研究报告共用同一条管线，
+  // 两处各写一遍时 locale 这类参数漏一处就会分叉（2026-10-31 审查 M2）。
+  const { displayOption, formattedOption, topNMeta, showFullView, toggleShowFullView } =
+    useChartDisplayOption(chartOption);
   // 决策 6：服务端只发结构，颜色在这一层补（只补色、不改结构；option 来自 store，
   // 必须走不可变路径，否则同一份消息的其它引用会串台）。
   // 数字口径先于主题：formatter 是 JS 函数（JSON 下不来），主题层只补色不碰它。
   const themedOption = useMemo(
-    () =>
-      displayOption
-        ? applyChartTheme(
-            applyChartNumberFormat(displayOption, locale),
-            isDark ? DARK_TOKEN : LIGHT_TOKEN
-          )
-        : null,
-    [displayOption, isDark, locale]
+    () => (formattedOption ? applyChartTheme(formattedOption, isDark ? DARK_TOKEN : LIGHT_TOKEN) : null),
+    [formattedOption, isDark]
   );
   const kpiPayload = useMemo(
     () => (isKpi ? parseKpiPayload(chartOption) : null),
@@ -227,13 +214,9 @@ export default function ChartRenderer({
           </div>
           {/* Top-N 切换（2026-10-31）：排名图默认前 20 + 「其他」，这里给出回全量的入口。
               只改本地 state —— 全量视图本来就在同一份 option 里，不需要再问后端。 */}
-          {topNView && topNMeta ? (
+          {topNMeta ? (
             <div style={{ display: "flex", justifyContent: "flex-start", marginTop: 4 }}>
-              <Button
-                size="small"
-                type="link"
-                onClick={() => setShowFullView((value) => !value)}
-              >
+              <Button size="small" type="link" onClick={toggleShowFullView}>
                 {showFullView
                   ? t("chartExport.showTopN", { limit: topNMeta.limit })
                   : t("chartExport.showAll", { total: topNMeta.total })}

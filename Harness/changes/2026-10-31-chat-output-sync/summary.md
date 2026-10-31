@@ -260,12 +260,33 @@ renderChartOption(spec, data, *, topN: bool = False) -> dict
    `app/domain/export_limits.py`。前端 `collectExportCharts` 同步预检单张大小，
    超限只丢那一张，不让整个导出 422。
 
+**审查修复 · 第二批（全分支复审 3 MEDIUM / 6 LOW）**
+
+| 编号 | 问题 | 处理 |
+|---|---|---|
+| M1 | Top-N 无条件截断：SQL 没 `ORDER BY` 时任意 20 个类目被标成「前 20」 | `chart_renderer._attachTopN` 先验行序：类目按首序列度量**合计**单调（升或降）才截断，否则原样返回全量视图且不埋 `topNMeta`。`None` 合计不携带排序信息，跳过比较；全 `None` 时按有序处理（保持既有「其他 = 空」语义）。 |
+| M2 | 研究线报告与聊天端各写一套 Top-N + 数字口径，locale 漏传就分叉 | 抽 `hooks/useChartDisplayOption`：Top-N 视图、数字格式（带 locale）、「显示全部」开关全在这一层；`ChartRenderer` 与 `ReportRenderer` 共用。 |
+| M3 | 前端只卡单张 2 MiB，35 张 600 KB 仍会越过后端 20 MiB 总量闸 → 整份 422 | `collectExportCharts.trimToByteBudget`：渲染后按解码字节从最新累加，超预算丢最早几张并告警，上限取后端 90%（16 MiB）。 |
+| L1 | 小标题与位图可能被分页拆开 | `_section_chart_flowables` 只对**单张位图**套 `KeepTogether`。原生表格特意不包：表格可跨页，包进去 reportlab 抛 `LayoutError` → 整份导出 500。 |
+| L2 | `pdf_export_service` 839 行、`session_history_service` 802 行越 800 行上限 | 拆两个纯函数模块：`chart_image_validation`（位图校验/归属/挂载，~215 行）、`pdf_markdown_html`（HTML 白名单清洗 + block 拆分，~164 行）。两文件降到 691 / 598 行；行为不变，仅移动 + 改调用点。`_WHITELIST_BLOCK_TAGS` 随移动删除（全仓无引用）。 |
+| L3 | 导出端点变量名 `imagesByMessageId` 与 docstring 仍写 `[{messageId, imagePng}]`，键早已是 `(messageId, stepIndex)` | 变量改 `imagesByKey`；docstring 补 `stepIndex` 语义、null 含义、422 条件。 |
+| L5 | 部署顺序未写清（前端先上会让分步图整块消失） | §8 部署注意第 2 条改为「后端必须先于前端」。 |
+| L6 | 单张渲染抛异常会顺着 `Promise.all` 打掉整份导出 | `renderOne` 包 try/catch，异常只丢那一张并留 `console.warn`。 |
+
+验证：后端 chart/snapshot 156 + PDF 57 + 导出 integration 34；前端 227 文件 /
+2290 用例、`tsc --noEmit` 0 错误；ruff 对每个改动文件做 HEAD 计数对比，净新增 0
+（两条 SIM102 是随代码搬进 `pdf_markdown_html` 的既有告警，数量不变）。
+
 **部署注意**
 
 1. 字体文件**不在发布包里**：在部署机 `<部署目录>/docker/fonts/` 放
    `msyh.ttc`（+可选 `msyhbd.ttc`），再 `docker compose stop backend && up -d backend`
    —— 新建容器才会应用新挂载。未放文件时导出仍可用，只是回落到 STSong-Light。
-2. 后端与前端**必须同批**：导出契约新增 `stepIndex`、`report_sections` 由后端计算，
-   旧前端只发顶层图 ⇒ 分节轮次里图会落到占位框（不会报错）。
+2. **后端必须先于前端上线**（先 `up -d backend`，再发布前端）。前端这次改成
+   「计划卡片不再自己画分步图，图从 `message.reportSections` 来」—— 这个字段与
+   `stepIndex` 契约都只在新后端上才有。顺序反了的表现是：**分步图整块消失**
+   （卡片里没有了，正文里也还没得渲染）；反过来后端先上则完全兼容 —— 旧前端
+   导出只发顶层图，分节轮次回落占位框，不报错。
+   两者同批发布（后端先生效）即可，无需灰度。
 3. 冒烟：导出一份多步会话 PDF，确认 ①正文为雅黑字形 ②每张图紧跟其步骤标题
    ③「其他（N 项）」聚合行出现在排名图里。

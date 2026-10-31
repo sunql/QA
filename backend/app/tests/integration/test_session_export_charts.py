@@ -10,13 +10,13 @@ from __future__ import annotations
 import base64
 from datetime import UTC, datetime
 
-from app.domain.models import SessionMessage
-from app.services.session_history_service import (
-    _CHART_IMAGE_DATA_URL_PREFIX,
-    _MAX_EXPORT_CHART_IMAGES,
-    _MAX_EXPORT_IMAGE_PIXELS,
-    _MAX_EXPORT_TOTAL_IMAGE_PIXELS,
+from app.domain.export_limits import (
+    CHART_IMAGE_DATA_URL_PREFIX,
+    MAX_EXPORT_CHART_IMAGES,
+    MAX_EXPORT_IMAGE_PIXELS,
+    MAX_EXPORT_TOTAL_IMAGE_PIXELS,
 )
+from app.domain.models import SessionMessage
 from app.tests._png_support import pngDeclaringSize, solidPng
 
 _T0 = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
@@ -66,7 +66,7 @@ async def _seedTurn(
 
 
 def _dataUrl(png: bytes) -> str:
-    return _CHART_IMAGE_DATA_URL_PREFIX + base64.b64encode(png).decode()
+    return CHART_IMAGE_DATA_URL_PREFIX + base64.b64encode(png).decode()
 
 
 class TestExportChartsApi:
@@ -179,7 +179,7 @@ class TestExportChartsApi:
         """前缀可以伪造，魔数不行。"""
         sid = "s-chart-magic"
         asst = await _seedTurn(dbSession, sid)
-        fake = _CHART_IMAGE_DATA_URL_PREFIX + base64.b64encode(b"PK\x03\x04zip").decode()
+        fake = CHART_IMAGE_DATA_URL_PREFIX + base64.b64encode(b"PK\x03\x04zip").decode()
 
         resp = await client.post(
             f"/api/v1/sessions/{sid}/export.pdf",
@@ -194,7 +194,7 @@ class TestExportChartsApi:
         png = _dataUrl(solidPng(8, 8))
         charts = [
             {"messageId": asst.id, "imagePng": png}
-            for _ in range(_MAX_EXPORT_CHART_IMAGES + 1)
+            for _ in range(MAX_EXPORT_CHART_IMAGES + 1)
         ]
 
         resp = await client.post(
@@ -228,8 +228,8 @@ class TestExportChartsApi:
         asst = await _seedTurn(dbSession, sid)
         # 每张 2800×2800 = 7.84M px（单张上限 8M 之内），6 张 = 47M > 40M 总量
         each = 2800 * 2800
-        assert each < _MAX_EXPORT_IMAGE_PIXELS
-        count = _MAX_EXPORT_TOTAL_IMAGE_PIXELS // each + 1
+        assert each < MAX_EXPORT_IMAGE_PIXELS
+        count = MAX_EXPORT_TOTAL_IMAGE_PIXELS // each + 1
         png = _dataUrl(pngDeclaringSize(2800, 2800))
         charts = [{"messageId": asst.id, "imagePng": png} for _ in range(count)]
 
@@ -250,7 +250,7 @@ class TestExportChartsApi:
         sid = "s-chart-pixels-ok"
         asst = await _seedTurn(dbSession, sid)
         each = 2800 * 2800
-        count = _MAX_EXPORT_TOTAL_IMAGE_PIXELS // each  # 不放 +1：刚好不超
+        count = MAX_EXPORT_TOTAL_IMAGE_PIXELS // each  # 不放 +1：刚好不超
         png = _dataUrl(pngDeclaringSize(2800, 2800))
         charts = [{"messageId": asst.id, "imagePng": png} for _ in range(count)]
 

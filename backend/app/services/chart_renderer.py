@@ -642,6 +642,14 @@ def _attachTopN(
     hidden = len(categories) - _TOP_N_LIMIT
     if hidden <= 0:
         return option
+    measureFields = _measureFields(spec)
+    if not measureFields or not _isOrderedByMeasure(rows, categories, catField, measureFields[0]):
+        # 行序不可信（SQL 没 ORDER BY）：任意 20 个类目冒充「前 20」比不截断更糟。
+        logger.info(
+            "图表行序与度量 %s 不单调，跳过 Top-N 截断（SQL 可能缺 ORDER BY）",
+            measureFields[0],
+        )
+        return option
     headSet = set(categories[:_TOP_N_LIMIT])
     kept = [row for row in rows if _asLabel(row.get(catField)) in headSet]
     tail = [row for row in rows if _asLabel(row.get(catField)) not in headSet]
@@ -656,6 +664,36 @@ def _attachTopN(
             "total": len(categories),
         },
     }
+
+
+def _isOrderedByMeasure(
+    rows: list[dict], categories: list[str], catField: str, measureField: str
+) -> bool:
+    """类目按该度量的**合计**单调（升或降，允许并列）⇒ 行序可当「前 N」的依据。
+
+    Top-N 的正确性依赖「行序 == 度量序」：SQL 有 ORDER BY 时成立（降序对应
+    「最多的 N 个」，升序对应「最低的 N 个」）；planner 只出 groupBy 没出排序时
+    DB 返回任意顺序，此时按行序切出的「前 20」是随机样本。宁可不截断，只发全量图。
+
+    同一类目可能有多行（多维组合），所以按类目合计判断，而不是逐行取值 ——
+    否则 `ORDER BY` 按类目汇总排序的分组数据会被误判成无序。
+
+    ``None``（该类目无可用数值）不携带排序信息，跳过不参与比较；全都为 None 时
+    无从证伪，按「有序」处理（保持既有截断行为，「其他」项如实留空而不是补 0）。
+    """
+    buckets: dict[str, list[dict]] = {}
+    for row in rows:
+        buckets.setdefault(_asLabel(row.get(catField)), []).append(row)
+    totals = [
+        total
+        for total in (_sumOf(buckets.get(name, []), measureField) for name in categories)
+        if total is not None
+    ]
+    if len(totals) < 2:
+        return True
+    return all(a >= b for a, b in zip(totals, totals[1:])) or all(
+        a <= b for a, b in zip(totals, totals[1:])
+    )
 
 
 def _otherRows(

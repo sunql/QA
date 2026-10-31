@@ -917,6 +917,41 @@ class TestTopN:
         over = renderChartOption(_spec(ChartType.HBAR), _many_rows(21), topN=True)
         assert over["topNMeta"] == {"limit": 20, "hidden": 1, "total": 21}
 
+    def test_unordered_rows_do_not_claim_a_topn_view(self) -> None:
+        """SQL 未 ORDER BY 时行序与度量无关：不能把任意 20 个类目标成「前 20」。
+
+        合成「其他」本身没错，错的是**谁进前 20** 由行序而不是度量决定 —— 在排名
+        语境下这是拿随机样本冒充排名。宁可不截断，只发全量图。
+        """
+        rows = _many_rows(50)
+        interleaved = rows[::2] + rows[1::2]
+
+        option = renderChartOption(_spec(ChartType.HBAR), interleaved, topN=True)
+
+        assert "topNOption" not in option
+        assert "topNMeta" not in option
+
+    def test_ascending_rows_still_embed_a_topn_view(self) -> None:
+        """「最低的 N 个」⇒ SQL ORDER BY ASC：行序同样是可信排名，照常截断。"""
+        rows = list(reversed(_many_rows(50)))
+
+        option = renderChartOption(_spec(ChartType.HBAR), rows, topN=True)
+
+        assert option["topNMeta"] == {"limit": 20, "hidden": 30, "total": 50}
+        # 升序后前 20 是 S49..S30（值 1..20），其余 21..50 合计 1065
+        assert option["topNOption"]["series"][0]["data"][-1] == sum(range(21, 51))
+
+    def test_grouped_rows_are_judged_by_category_total(self) -> None:
+        """同一类目多行时看**类目合计**是否单调，而不是逐行取值。"""
+        rows: list[dict] = []
+        for i in range(30):
+            rows.append({"SUPPLIER_NAME": f"S{i:02d}", "RCV_QTY_PUU": 29 - i})
+            rows.append({"SUPPLIER_NAME": f"S{i:02d}", "RCV_QTY_PUU": 1})
+
+        option = renderChartOption(_spec(ChartType.HBAR), rows, topN=True)
+
+        assert option["topNMeta"] == {"limit": 20, "hidden": 10, "total": 30}
+
     def test_topn_applies_to_pie_and_donut(self) -> None:
         for kind in (ChartType.PIE, ChartType.DONUT):
             option = renderChartOption(_spec(kind), _many_rows(30), topN=True)

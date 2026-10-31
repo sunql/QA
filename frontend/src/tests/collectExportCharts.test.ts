@@ -22,6 +22,7 @@ vi.mock("../utils/chartSnapshot", async (importOriginal) => {
 import {
   collectExportCharts,
   MAX_EXPORT_IMAGE_BYTES,
+  MAX_EXPORT_TOTAL_IMAGE_BYTES,
 } from "../utils/collectExportCharts";
 import { chartHeightOf } from "../utils/chartLayout";
 
@@ -222,6 +223,38 @@ describe("collectExportCharts", () => {
     const charts = await collectExportCharts("s-1");
 
     expect(charts).toEqual([{ messageId: 1, imagePng: nearLimit }]);
+  });
+
+  it("单张渲染抛异常也只丢那一张（内部异常不能拖垮整份导出）", async () => {
+    withResponse([
+      message({ id: 1, chartType: "bar", chartOption: { series: [] } }),
+      message({ id: 2, chartType: "pie", chartOption: { series: [] } }),
+    ]);
+    snapshot.renderChartPng
+      .mockRejectedValueOnce(new Error("dispose boom"))
+      .mockResolvedValueOnce(PNG);
+
+    await expect(collectExportCharts("s-1")).resolves.toEqual([
+      { messageId: 2, imagePng: PNG },
+    ]);
+  });
+
+  it("总解码字节超预算时从最早的丢起（不让后端 20 MiB 那道闸 422 整份导出）", async () => {
+    withResponse(
+      Array.from({ length: 12 }, (_, index) =>
+        message({ id: index + 1, chartType: "bar", chartOption: { series: [] } })
+      )
+    );
+    // 每张 ≈ 1/12 总预算 +1 字节（单张仍低于 2 MiB 上限）⇒ 12 张合计越界，只装得下 11 张
+    const perImageDecoded = Math.floor(MAX_EXPORT_TOTAL_IMAGE_BYTES / 12) + 1;
+    const big = `${PNG_PREFIX}${"A".repeat(Math.ceil((perImageDecoded * 4) / 3))}`;
+    snapshot.renderChartPng.mockResolvedValue(big);
+
+    const charts = await collectExportCharts("s-1");
+
+    expect(charts.map((chart) => chart.messageId)).toEqual([
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
   });
 
   it("拿不到消息流时整份不带图，导出照常（图是增强不是主功能）", async () => {

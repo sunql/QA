@@ -30,6 +30,7 @@ from app.domain.error_messages import (
     MSG_EXPORT_CHART_IMAGE_TOO_LARGE,
     MSG_EXPORT_CHART_IMAGE_TOO_MANY_PIXELS,
     MSG_EXPORT_CHART_MESSAGE_NOT_FOUND,
+    MSG_EXPORT_CHART_STEP_NOT_FOUND,
     MSG_EXPORT_CHART_TOTAL_TOO_LARGE,
     MSG_EXPORT_CHART_TOTAL_TOO_MANY_PIXELS,
 )
@@ -41,8 +42,12 @@ from app.domain.schemas import (
     ChatSessionListItem,
     SessionMessagesResponse,
 )
-from app.services.pdf_export_service import ChatExportPayload, ChatExportTurn
-from app.services.report_sections import buildReportSections
+from app.services.pdf_export_service import (
+    ChatExportPayload,
+    ChatExportTurn,
+    ExportStepChart,
+)
+from app.services.report_sections import buildReportSections, chartSteps
 
 logger = logging.getLogger(__name__)
 
@@ -370,8 +375,11 @@ class SessionHistoryService:
         session: AsyncSession,
         sessionId: str,
         charts: list[ChatExportChartImage],
-    ) -> dict[int, bytes]:
-        """校验并解码前端回传的图表位图 → ``{messageId: pngBytes}``。
+    ) -> dict[tuple[int, int | None], bytes]:
+        """校验并解码前端回传的图表位图 → ``{(messageId, stepIndex): pngBytes}``。
+
+        ``stepIndex`` 为 None = 该轮顶层图（0105 行为）；非 None = 多步报告的某一
+        步（2026-10-31 分节插图）。
 
         这是本服务第一次接收**用户提交的二进制**，故在边界处显式失败
         （任一条不合法 → ``ValidationError`` ⇒ 422）：
@@ -383,13 +391,16 @@ class SessionHistoryService:
           二进制贴个 PNG 标签」送进来）；
         - ``messageId`` 必须属于该 session —— **不信任前端传来的 id**，否则可以
           借导出把别人的图拼进来。报错不回显 id（沿用 HIGH-3 口径，否则 422
-          就成了「这个 id 属不属于这个会话」的枚举探针）。
+          就成了「这个 id 属不属于这个会话」的枚举探针）；
+        - ``stepIndex`` 必须指向该消息快照里**确有图**的一步（判据与
+          ``buildReportSections`` 同一把尺），否则 422。
 
-        重复 messageId 取后者：前端逐条生成不该重复，不值得为这点小事拒掉整份导出。
+        重复 ``(messageId, stepIndex)`` 取后者：前端逐条生成不该重复，不值得为
+        这点小事拒掉整份导出。
         """
         if len(charts) > _MAX_EXPORT_CHART_IMAGES:
             raise ValidationError(MSG_EXPORT_CHART_COUNT_EXCEEDED)
-        decoded: dict[int, bytes] = {}
+        decoded: dict[tuple[int, int | None], bytes] = {}
         totalBytes = 0
         totalPixels = 0
         for chart in charts:
@@ -409,11 +420,9 @@ class SessionHistoryService:
             totalPixels += pixelCount
             if totalPixels > _MAX_EXPORT_TOTAL_IMAGE_PIXELS:
                 raise ValidationError(MSG_EXPORT_CHART_TOTAL_TOO_MANY_PIXELS)
-            decoded[chart.message_id] = imageBytes
+            decoded[(chart.message_id, chart.step_index)] = imageBytes
         if decoded:
-            await self._assertMessagesBelongToSession(
-                session, sessionId, list(decoded)
-            )
+            await self._assertChartOwnership(session, sessionId, charts)
         return decoded
 
     @staticmethod
@@ -456,41 +465,79 @@ class SessionHistoryService:
         return width * height
 
     @staticmethod
-    async def _assertMessagesBelongToSession(
+    async def _assertChartOwnership(
         session: AsyncSession,
         sessionId: str,
-        messageIds: list[int],
+        charts: list[ChatExportChartImage],
     ) -> None:
-        """这些 messageId 必须真的属于该 session；否则 422（不回显 id）。"""
-        stmt = select(SessionMessage.id).where(
+        """位图的归属必须真实存在；否则 422（不回显任何 id）。
+
+        两次判定：
+        1. ``messageId`` 必须属于该 session；
+        2. 带 ``stepIndex`` 的位图，该步必须在 ``steps_snapshot`` 里且**确有图**
+           （判据与 ``buildReportSections`` 同为 ``chartSteps``）—— 否则前端算错
+           归属时图会挂到「没图的一步」上，PDF 里对应块反而变占位框。
+        """
+        messageIds = {chart.message_id for chart in charts}
+        stmt = select(SessionMessage.id, SessionMessage.steps_snapshot).where(
             and_(
                 SessionMessage.session_id == sessionId,
                 SessionMessage.id.in_(messageIds),
             )
         )
-        found = (await session.execute(stmt)).scalars().all()
-        if len(set(found)) != len(set(messageIds)):
+        snapshots = {
+            row.id: row.steps_snapshot
+            for row in (await session.execute(stmt)).all()
+        }
+        if len(snapshots) != len(messageIds):
             raise ValidationError(MSG_EXPORT_CHART_MESSAGE_NOT_FOUND)
+        chartedSteps = {
+            messageId: {step["stepIndex"] for step in chartSteps(snapshot)}
+            for messageId, snapshot in snapshots.items()
+        }
+        for chart in charts:
+            if chart.step_index is None:
+                continue
+            if chart.step_index not in chartedSteps.get(chart.message_id, set()):
+                raise ValidationError(MSG_EXPORT_CHART_STEP_NOT_FOUND)
 
     @staticmethod
     def attachChartImages(
         payload: ChatExportPayload,
-        imagesByMessageId: dict[int, bytes],
+        imagesByKey: dict[tuple[int, int | None], bytes],
     ) -> ChatExportPayload:
-        """把位图按 messageId 挂到对应轮次上（返回新 payload，不改入参）。
+        """把位图按 ``(messageId, stepIndex)`` 挂到对应轮次/步骤上（返回新 payload）。
+
+        ``stepIndex is None`` → 该轮顶层图；非 None → 分节里那一步的图。
 
         没挂上的位图（该轮被 ``_MAX_TURNS_PER_EXPORT`` 截掉、或前端算错了 id）
         **静默忽略**：导出是主功能，多出来一张没人要的图不该让它失败。
         """
-        if not imagesByMessageId:
+        if not imagesByKey:
             return payload
-        turns = [
-            replace(turn, chart_image=imagesByMessageId[turn.message_id])
-            if turn.message_id in imagesByMessageId
-            else turn
-            for turn in payload.turns
-        ]
-        return replace(payload, turns=turns)
+
+        def withImages(turn: ChatExportTurn) -> ChatExportTurn:
+            if turn.message_id is None:
+                return turn
+            topImage = imagesByKey.get((turn.message_id, None))
+            stepCharts = tuple(
+                replace(
+                    step,
+                    chart_image=imagesByKey[(turn.message_id, step.step_index)],
+                )
+                if (turn.message_id, step.step_index) in imagesByKey
+                else step
+                for step in turn.step_charts
+            )
+            if topImage is None and stepCharts == turn.step_charts:
+                return turn
+            return replace(
+                turn,
+                chart_image=topImage if topImage is not None else turn.chart_image,
+                step_charts=stepCharts,
+            )
+
+        return replace(payload, turns=[withImages(turn) for turn in payload.turns])
 
     async def _buildFullSessionPayload(
         self,
@@ -512,6 +559,8 @@ class SessionHistoryService:
                 SessionMessage.sql_generated,
                 SessionMessage.chart_type,      # 0105：图进导出
                 SessionMessage.chart_option,
+                # 2026-10-31（分节插图）：最终回答的分节块由 content + 快照现算
+                SessionMessage.steps_snapshot,
             )
             .where(SessionMessage.session_id == sessionId)
             .order_by(SessionMessage.id.asc())
@@ -527,21 +576,7 @@ class SessionHistoryService:
         usage_map = await self._fetchUsageMetaByMessage(session, sessionId, [r.id for r in rows])
 
         turns = [
-            ChatExportTurn(
-                user_content=self._truncate(user.content),
-                user_time=user.created_time,
-                assistant_content=self._truncate(asst.content),
-                assistant_time=asst.created_time,
-                message_id=asst.id,          # 0105：位图按 id 对轮次
-                sql=asst.sql_generated,
-                model_name=usage_map.get(asst.id, {}).get("model_name"),
-                tokens_used=usage_map.get(asst.id, {}).get("tokens_used"),
-                cost=usage_map.get(asst.id, {}).get("cost"),
-                # 0105：该轮回答的图表负载（无图为 None）。PDF 里 table/kpi 由后端
-                # 原生画，其余 kind 需要前端回传的 PNG（见 pdf_export_service）。
-                chart_type=asst.chart_type,
-                chart_option=asst.chart_option,
-            )
+            self._turnFromRows(user, asst, usage_map.get(asst.id, {}))
             for user, asst in turn_dict
         ]
         title = self._deriveTitle(turns)
@@ -567,6 +602,7 @@ class SessionHistoryService:
             SessionMessage.sql_generated,
             SessionMessage.chart_type,      # 0105：图进导出
             SessionMessage.chart_option,
+            SessionMessage.steps_snapshot,  # 2026-10-31：分节插图
         ).where(
             and_(
                 SessionMessage.session_id == sessionId,
@@ -616,27 +652,65 @@ class SessionHistoryService:
         else:
             usage_map = await self._fetchUsageMetaByMessage(session, sessionId, [asst_row.id])
             meta = usage_map.get(asst_row.id, {})
-            turns = [
-                ChatExportTurn(
-                    user_content=self._truncate(user_row.content) if user_row else "",
-                    user_time=user_row.created_time if user_row else None,
-                    assistant_content=self._truncate(asst_row.content),
-                    assistant_time=asst_row.created_time,
-                    message_id=asst_row.id,      # 0105：位图按 id 对轮次
-                    sql=asst_row.sql_generated,
-                    model_name=meta.get("model_name"),
-                    tokens_used=meta.get("tokens_used"),
-                    cost=meta.get("cost"),
-                    chart_type=asst_row.chart_type,      # 0105
-                    chart_option=asst_row.chart_option,
-                )
-            ]
+            turns = [self._turnFromRows(user_row, asst_row, meta)]
         title = self._deriveTitle(turns)
         return ChatExportPayload(
             session_id=sessionId,
             title=title,
             generated_at=datetime.now(),
             turns=turns,
+        )
+
+    def _turnFromRows(
+        self, user: Any, asst: Any, usage: dict[str, Any]
+    ) -> ChatExportTurn:
+        """一组 (user, assistant) 行 → 不可变轮次（含分节块与步骤图）。
+
+        分节块用**截断后**的 content 现算：PDF 里印的就是这段文字，分节位置必须与
+        实际排版一致（content 超 ``_MAX_CONTENT_BYTES`` 时两者才可能不同）。
+        """
+        assistantContent = self._truncate(asst.content)
+        reportSections = self._sectionsFor(assistantContent, asst.steps_snapshot)
+        return ChatExportTurn(
+            user_content=self._truncate(user.content) if user is not None else "",
+            user_time=user.created_time if user is not None else None,
+            assistant_content=assistantContent,
+            assistant_time=asst.created_time,
+            message_id=asst.id,          # 0105：位图按 id 对轮次
+            sql=asst.sql_generated,
+            model_name=usage.get("model_name"),
+            tokens_used=usage.get("tokens_used"),
+            cost=usage.get("cost"),
+            # 0105：该轮回答的顶层图表负载（无图为 None）。PDF 里 table/kpi 由后端
+            # 原生画，其余 kind 需要前端回传的 PNG（见 pdf_export_service）。
+            chart_type=asst.chart_type,
+            chart_option=asst.chart_option,
+            # 2026-10-31（分节插图）：多步回答按分节块排版，图按步骤归属。
+            report_sections=reportSections,
+            step_charts=self._stepChartsFor(asst.steps_snapshot) if reportSections else (),
+        )
+
+    @staticmethod
+    def _sectionsFor(content: str, steps: object) -> list[dict] | None:
+        """多步消息的分节块；单步/无快照/无可图步骤 → None（走旧渲染）。
+
+        条件与回放 ``loadFullMessages`` 对齐：只对**多步**算。单步消息也落 1 元素
+        快照，若也算分节，PDF 会同时画顶层图与分节图 —— 同一张图出现两次。
+        """
+        if not isinstance(steps, list) or len(steps) <= 1:
+            return None
+        return buildReportSections(content or "", steps) or None
+
+    @staticmethod
+    def _stepChartsFor(steps: object) -> tuple[ExportStepChart, ...]:
+        """快照里有图的步骤 → 分节插图所需的图结构（判据复用 ``chartSteps``）。"""
+        return tuple(
+            ExportStepChart(
+                step_index=item["stepIndex"],
+                chart_type=item["chartType"],
+                chart_option=item["chartOption"],
+            )
+            for item in chartSteps(steps if isinstance(steps, list) else None)
         )
 
     @staticmethod

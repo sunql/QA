@@ -242,3 +242,124 @@ describe("collectExportCharts", () => {
     expect(peak).toBeLessThanOrEqual(4);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 分节插图（2026-10-31，D1）：多步报告的图要落在它那一节的标题下，因此位图按
+// `(messageId, stepIndex)` 逐块归属；该轮的**顶层图不再截**（分节图才是正文里的图）。
+// ---------------------------------------------------------------------------
+
+const STEP_OPTION_0 = { marker: "step-0" };
+const STEP_OPTION_2 = { marker: "step-2" };
+
+/** 一条带分节块的多步消息：顶层图故意给可区分的 option，用于证明它没被截。 */
+function multiStepMessage(
+  overrides: Partial<ChatMessageRead> = {}
+): ChatMessageRead {
+  return message({
+    id: 7,
+    chartType: "bar",
+    chartOption: { marker: "top-level" },
+    stepsSnapshot: [
+      { stepIndex: 0, chartType: "hbar", chartOption: STEP_OPTION_0 },
+      { stepIndex: 1, chartType: "kpi", chartOption: { kpi: { label: "总量" } } },
+      { stepIndex: 2, chartType: "bar", chartOption: STEP_OPTION_2 },
+    ],
+    reportSections: [
+      { kind: "text", content: "导语" },
+      { kind: "chart", stepIndex: 0, title: "步骤 1" },
+      { kind: "chart", stepIndex: 1, title: "步骤 2" },
+      { kind: "chart", stepIndex: 2, title: "步骤 3" },
+    ],
+    ...overrides,
+  });
+}
+
+describe("collectExportCharts 分节插图", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    snapshot.renderChartPng.mockResolvedValue(PNG);
+    withResponse([]);
+  });
+
+  it("按 (messageId, stepIndex) 逐块截图，并跳过该轮顶层图", async () => {
+    withResponse([multiStepMessage()]);
+
+    const charts = await collectExportCharts("s-1");
+
+    // kpi 步由后端原生排版，不截图；其余两步各一张
+    expect(charts).toEqual([
+      { messageId: 7, stepIndex: 0, imagePng: PNG },
+      { messageId: 7, stepIndex: 2, imagePng: PNG },
+    ]);
+    // 顶层 option 一次都不该被渲染（否则 PDF 会多出一张重复的图）
+    expect(snapshot.renderChartPng).toHaveBeenCalledTimes(2);
+    expect(snapshot.renderChartPng).toHaveBeenNthCalledWith(1, STEP_OPTION_0);
+    expect(snapshot.renderChartPng).toHaveBeenNthCalledWith(2, STEP_OPTION_2);
+  });
+
+  it("没有可分节块时仍走顶层图（回放数据缺 reportSections 的老消息）", async () => {
+    withResponse([
+      multiStepMessage({ reportSections: undefined, chartOption: { marker: "top" } }),
+    ]);
+
+    const charts = await collectExportCharts("s-1");
+
+    expect(charts).toEqual([{ messageId: 7, imagePng: PNG }]);
+    expect(snapshot.renderChartPng).toHaveBeenCalledWith({ marker: "top" });
+  });
+
+  it("分节图也按默认 Top-N 视图截图（与屏幕上看到的一致）", async () => {
+    const truncated = {
+      yAxis: { type: "category", data: Array.from({ length: 21 }, (_, i) => `C${i}`) },
+      series: [{ type: "bar", data: [] }],
+    };
+    withResponse([
+      multiStepMessage({
+        stepsSnapshot: [
+          {
+            stepIndex: 0,
+            chartType: "hbar",
+            chartOption: {
+              ...TALL_OPTION,
+              topNOption: truncated,
+              topNMeta: { limit: 20, hidden: 20, total: 40 },
+            },
+          },
+        ],
+        reportSections: [{ kind: "chart", stepIndex: 0, title: "步骤 1" }],
+      }),
+    ]);
+
+    await collectExportCharts("s-1");
+
+    expect(snapshot.renderChartPng).toHaveBeenCalledWith(truncated);
+  });
+
+  it("分节块指向快照里不存在的步骤时跳过该块，不影响其余", async () => {
+    withResponse([
+      multiStepMessage({
+        reportSections: [
+          { kind: "chart", stepIndex: 0, title: "步骤 1" },
+          { kind: "chart", stepIndex: 9, title: "不存在" },
+        ],
+      }),
+    ]);
+
+    const charts = await collectExportCharts("s-1");
+
+    expect(charts).toEqual([{ messageId: 7, stepIndex: 0, imagePng: PNG }]);
+  });
+
+  it("分节块指向白名单不认识的 chartType 时跳过", async () => {
+    withResponse([
+      multiStepMessage({
+        stepsSnapshot: [{ stepIndex: 0, chartType: "radar-gl", chartOption: { series: [] } }],
+        reportSections: [{ kind: "chart", stepIndex: 0, title: "步骤 1" }],
+      }),
+    ]);
+
+    const charts = await collectExportCharts("s-1");
+
+    expect(charts).toEqual([]);
+  });
+});

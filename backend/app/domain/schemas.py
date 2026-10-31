@@ -142,6 +142,7 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_HISTORY_SESSION_ID,
     MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG,
     MSG_SCHEMA_CHAT_EXPORT_CHART_MESSAGE_ID,
+    MSG_SCHEMA_CHAT_EXPORT_CHART_STEP_INDEX,
     MSG_SCHEMA_CHAT_EXPORT_CHARTS,
     MSG_SCHEMA_CHAT_EXPORT_MESSAGE_ID,
     MSG_SCHEMA_CHAT_LOCKED_MODEL,
@@ -2229,6 +2230,11 @@ class ChatExportChartImage(CamelModel):
     """
 
     message_id: int = Field(..., ge=1, description=MSG_SCHEMA_CHAT_EXPORT_CHART_MESSAGE_ID)
+    # 2026-10-31（分节插图）：多步消息的图按步骤归属。缺省 = 该轮顶层图
+    # （0105 行为不变）。键变为 (messageId, stepIndex)。
+    step_index: int | None = Field(
+        default=None, ge=0, description=MSG_SCHEMA_CHAT_EXPORT_CHART_STEP_INDEX
+    )
     image_png: str = Field(..., description=MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG)
 
 

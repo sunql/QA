@@ -17,6 +17,7 @@ import type { ExportChartImage } from "../api/chatHistory";
 import { asChartOption, normalizeChartType } from "./chartContract";
 import { chartHeightOf } from "./chartLayout";
 import { defaultChartOption } from "./chartTopN";
+import { asReportSections } from "./reportSections";
 import type { ChatMessageRead } from "../types/chatHistory";
 import { needsSnapshot, renderChartPng } from "./chartSnapshot";
 
@@ -56,11 +57,69 @@ const MESSAGE_SCAN_LIMIT = 1000;
  */
 const RENDER_CONCURRENCY = 4;
 
-/** 这条消息是否需要截一张图：assistant 行 + 合法 chartType + 该 kind 走截图。 */
-function isSnapshotTarget(message: ChatMessageRead): boolean {
-  if (message.role !== "assistant") return false;
+/**
+ * 一张待截图的图。`stepIndex` 缺省 = 该轮顶层图（0105 行为）；多步报告的正文图
+ * 按步骤归属 —— PDF 会把它排进对应那一节的标题下（2026-10-31 D1）。
+ */
+interface ExportTarget {
+  messageId: number;
+  stepIndex?: number;
+  chartOption: Record<string, unknown>;
+}
+
+/**
+ * `stepsSnapshot` → `stepIndex → chartOption`。快照是落库的原始 JSON，按系统边界
+ * 逐项收窄：图型必须白名单认识、且该图型走截图（`table` / `kpi` 后端原生排版）。
+ */
+function stepChartOptionsOf(
+  message: ChatMessageRead
+): Map<number, Record<string, unknown>> {
+  const options = new Map<number, Record<string, unknown>>();
+  if (!Array.isArray(message.stepsSnapshot)) return options;
+  for (const raw of message.stepsSnapshot) {
+    if (raw === null || typeof raw !== "object") continue;
+    const step = raw as Record<string, unknown>;
+    const stepIndex = step.stepIndex;
+    if (typeof stepIndex !== "number" || !Number.isInteger(stepIndex)) continue;
+    const chartType = normalizeChartType(step.chartType);
+    const chartOption = asChartOption(step.chartOption);
+    if (chartType === null || chartOption === null || !needsSnapshot(chartType)) {
+      continue;
+    }
+    options.set(stepIndex, chartOption);
+  }
+  return options;
+}
+
+/**
+ * 这条消息要截哪些图。
+ *
+ * 有分节 chart 块 ⇒ 按块逐张（**跳过该轮顶层图**，否则 PDF 正文里同一张图会
+ * 出现两次）；分节块指向快照里没有的步骤时跳过该块 —— 后端对这种块回落占位框，
+ * 不会因为少一张图就导出失败。无分节块 ⇒ 沿用顶层图（老消息 / 单步轮次）。
+ */
+function targetsOf(message: ChatMessageRead): ExportTarget[] {
+  if (message.role !== "assistant") return [];
+  const chartBlocks = (asReportSections(message.reportSections) ?? []).filter(
+    (block) => block.kind === "chart"
+  );
+  if (chartBlocks.length > 0) {
+    const stepOptions = stepChartOptionsOf(message);
+    return chartBlocks.flatMap((block) => {
+      if (block.kind !== "chart") return [];
+      const chartOption = stepOptions.get(block.stepIndex);
+      return chartOption
+        ? [{ messageId: message.id, stepIndex: block.stepIndex, chartOption }]
+        : [];
+    });
+  }
+
   const chartType = normalizeChartType(message.chartType);
-  return chartType !== null && needsSnapshot(chartType);
+  const chartOption = asChartOption(message.chartOption);
+  if (chartType === null || chartOption === null || !needsSnapshot(chartType)) {
+    return [];
+  }
+  return [{ messageId: message.id, chartOption }];
 }
 
 /**
@@ -68,24 +127,24 @@ function isSnapshotTarget(message: ChatMessageRead): boolean {
  * 导出的 PDF 是给人看的成品，画出来的不该是用户没见过的全量长条图；
  * 高度/像素预算也按同一份算，否则预算与实际位图对不上。
  */
-function snapshotOptionOf(
-  message: ChatMessageRead
-): Record<string, unknown> | null {
-  const chartOption = asChartOption(message.chartOption);
-  return chartOption ? defaultChartOption(chartOption) : null;
+function snapshotOptionOf(target: ExportTarget): Record<string, unknown> {
+  return defaultChartOption(target.chartOption);
 }
 
 /** 渲染一张；失败返回 null（调用方丢掉该张，不影响其余）。 */
-async function renderOne(message: ChatMessageRead): Promise<ExportChartImage | null> {
-  const chartOption = snapshotOptionOf(message);
-  if (!chartOption) return null;
-  const imagePng = await renderChartPng(chartOption);
-  return imagePng ? { messageId: message.id, imagePng } : null;
+async function renderOne(target: ExportTarget): Promise<ExportChartImage | null> {
+  const imagePng = await renderChartPng(snapshotOptionOf(target));
+  if (!imagePng) return null;
+  return {
+    messageId: target.messageId,
+    ...(target.stepIndex === undefined ? {} : { stepIndex: target.stepIndex }),
+    imagePng,
+  };
 }
 
 /** 分块渲染，块内并发、块间串行 —— 顺序与入参一致，并发上限为 RENDER_CONCURRENCY。 */
 async function renderAll(
-  targets: ChatMessageRead[]
+  targets: ExportTarget[]
 ): Promise<ExportChartImage[]> {
   const rendered: ExportChartImage[] = [];
   for (let start = 0; start < targets.length; start += RENDER_CONCURRENCY) {
@@ -108,18 +167,18 @@ async function renderAll(
 }
 
 /** 一张图上传后的像素数：1600 宽 × 2H 高（与 `chartSnapshot` 的 800 CSS × 2 对齐）。 */
-function pixelCostOf(message: ChatMessageRead): number {
-  const chartOption = snapshotOptionOf(message);
-  if (!chartOption) return 0;
-  return SNAPSHOT_PIXEL_WIDTH * SNAPSHOT_PIXEL_RATIO * chartHeightOf(chartOption);
+function pixelCostOf(target: ExportTarget): number {
+  return (
+    SNAPSHOT_PIXEL_WIDTH * SNAPSHOT_PIXEL_RATIO * chartHeightOf(snapshotOptionOf(target))
+  );
 }
 
 /**
  * 从最新往旧累加像素，超预算即停 —— 丢掉的是**最早**的消息，保留用户眼前这批
  * （也是导出 PDF 里最后那批）。返回按时间正序，交给渲染层。
  */
-function trimToPixelBudget(targets: ChatMessageRead[]): ChatMessageRead[] {
-  const kept: ChatMessageRead[] = [];
+function trimToPixelBudget(targets: ExportTarget[]): ExportTarget[] {
+  const kept: ExportTarget[] = [];
   let totalPixels = 0;
   for (let index = targets.length - 1; index >= 0; index -= 1) {
     const cost = pixelCostOf(targets[index]);
@@ -164,7 +223,9 @@ export async function collectExportCharts(
 
   const targets = trimToPixelBudget(
     messages
-      .filter((m) => (messageId === undefined || m.id === messageId) && isSnapshotTarget(m))
+      .filter((m) => messageId === undefined || m.id === messageId)
+      // 一条多步消息可以出多张分节图，所以先摊平再限条数
+      .flatMap(targetsOf)
       // 先取**最新**的 MAX_EXPORT_CHARTS 张（绝对条数上限），再按像素预算裁剪：
       // 宁可少带最早的几张，也要让用户眼前这批（也是导出 PDF 里最后那批）有图。
       .slice(-MAX_EXPORT_CHARTS)

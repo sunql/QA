@@ -267,7 +267,7 @@ class TestAttachChartImages:
         )
 
         # Act
-        merged = SessionHistoryService.attachChartImages(payload, {2: png})
+        merged = SessionHistoryService.attachChartImages(payload, {(2, None): png})
 
         # Assert
         assert merged.turns[0].chart_image is None
@@ -280,7 +280,7 @@ class TestAttachChartImages:
             session_id="s1", title="t", generated_at=_ASST_TIME, turns=[_turn(message_id=1)]
         )
 
-        SessionHistoryService.attachChartImages(payload, {1: png})
+        SessionHistoryService.attachChartImages(payload, {(1, None): png})
 
         assert payload.turns[0].chart_image is None
 
@@ -290,7 +290,7 @@ class TestAttachChartImages:
             session_id="s1", title="t", generated_at=_ASST_TIME, turns=[_turn(message_id=1)]
         )
 
-        merged = SessionHistoryService.attachChartImages(payload, {999: b"x"})
+        merged = SessionHistoryService.attachChartImages(payload, {(999, None): b"x"})
 
         assert merged.turns[0].chart_image is None
 

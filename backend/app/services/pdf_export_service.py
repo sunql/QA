@@ -169,6 +169,21 @@ def _register_cjk_font_once() -> None:
 
 
 @dataclass(frozen=True)
+class ExportStepChart:
+    """多步报告里的一步图（2026-10-31，分节插图）。
+
+    分节块只带 ``stepIndex``（图负载不复制，同实时/回放的取舍）；PDF 渲染时按
+    stepIndex 到这里取图与结构。``chart_image`` 由前端按 ``(messageId, stepIndex)``
+    回传后挂上。
+    """
+
+    step_index: int
+    chart_type: str | None
+    chart_option: dict | None = None
+    chart_image: bytes | None = None
+
+
+@dataclass(frozen=True)
 class ChatExportTurn:
     """一对 user + assistant 问答轮次（PDF 中作为一个 KeepTogether 块）。"""
 
@@ -189,6 +204,12 @@ class ChatExportTurn:
     model_name: str | None = None
     tokens_used: int | None = None
     cost: Decimal | None = None
+    # 2026-10-31（分节插图）：多步最终回答的分节块（buildReportSections 现算）。
+    # 非 None 时 PDF 按块顺序排版（文字 → 该步图），此时顶层的
+    # chart_type/chart_option 不再单画（图都在分节里，再画一次就重复了）。
+    report_sections: list[dict] | None = None
+    # 2026-10-31：分节块引用的步骤图（按 step_index 取）。无分节时为空。
+    step_charts: tuple[ExportStepChart, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -381,21 +402,21 @@ class ChatExportPdfBuilder:
             return story
 
         for idx, turn in enumerate(payload.turns, start=1):
-            story.append(self._build_turn(idx, turn))
+            story.extend(self._build_turn(idx, turn))
         return story
 
-    def _build_turn(self, idx: int, turn: ChatExportTurn) -> KeepTogether:
+    def _build_turn(self, idx: int, turn: ChatExportTurn) -> list[Any]:
+        """一轮 → flowables 列表。
+
+        无 ``report_sections``（单步问答 / 存量消息）整轮 ``KeepTogether``，与 0105
+        行为完全一致；有分节时拆开（见 ``_build_sectioned_turn``）。
+        """
+        if turn.report_sections:
+            return self._build_sectioned_turn(idx, turn)
         flowables: list[Any] = []
-        # 用户问题
-        flowables.append(Paragraph(f"#{idx} · 用户", self._styles["role_user"]))
-        user_time = turn.user_time.strftime("%Y-%m-%d %H:%M:%S") if turn.user_time else "—"
-        flowables.append(Paragraph(f"<font color='#666666'>{user_time}</font>", self._styles["meta"]))
-        flowables.extend(self._markdown_to_flowables(turn.user_content))
+        flowables.extend(self._question_flowables(idx, turn))
         # 助手回答
-        flowables.append(Spacer(1, 6))
-        flowables.append(Paragraph(f"#{idx} · 助手", self._styles["role_assistant"]))
-        asst_time = turn.assistant_time.strftime("%Y-%m-%d %H:%M:%S") if turn.assistant_time else "—"
-        flowables.append(Paragraph(f"<font color='#666666'>{asst_time}</font>", self._styles["meta"]))
+        flowables.extend(self._answer_header_flowables(idx, turn))
         flowables.extend(self._markdown_to_flowables(turn.assistant_content))
         # SQL
         if turn.sql:
@@ -406,7 +427,80 @@ class ChatExportPdfBuilder:
         if turn.chart_type:
             flowables.append(Spacer(1, 4))
             flowables.extend(self._chart_flowables(turn))
-        # 元信息：模型/Tokens/成本
+        flowables.extend(self._turnFooter_flowables(turn))
+        return [KeepTogether(flowables)]
+
+    def _build_sectioned_turn(self, idx: int, turn: ChatExportTurn) -> list[Any]:
+        """多步报告：问答头一起、正文与图按分节块顺序流式排版。
+
+        **不整轮 KeepTogether**：多步报告常跨好几页，整轮裹在一起会把整块推到
+        下一页；单块超过一页时 reportlab 直接抛 ``LayoutError``（整份导出 500）。
+        这里只把「用户问题 + 助手标题」保持在一起，其余交给平台分页。
+        """
+        flowables: list[Any] = [
+            KeepTogether(
+                self._question_flowables(idx, turn)
+                + self._answer_header_flowables(idx, turn)
+            )
+        ]
+        step_charts = {chart.step_index: chart for chart in turn.step_charts}
+        for block in turn.report_sections or []:
+            kind = block.get("kind")
+            if kind == "text":
+                content = block.get("content")
+                flowables.extend(
+                    self._markdown_to_flowables(content if isinstance(content, str) else "")
+                )
+            elif kind == "chart":
+                flowables.extend(self._section_chart_flowables(block, step_charts))
+        # 顶层 SQL：多步回答的 SQL 仍是整轮属性，放在正文之后（分节里没有 SQL 块）
+        if turn.sql:
+            flowables.append(Spacer(1, 4))
+            flowables.append(Paragraph("<b>SQL：</b>", self._styles["body"]))
+            flowables.append(self._sql_flowable(turn.sql))
+        flowables.extend(self._turnFooter_flowables(turn))
+        return flowables
+
+    def _section_chart_flowables(
+        self, block: dict, step_charts: dict[int, ExportStepChart]
+    ) -> list[Any]:
+        """一个 chart 分节块 → 图 flowables（缺图/无图就占位，绝不让块消失）。"""
+        step_index = block.get("stepIndex")
+        chart = step_charts.get(step_index) if isinstance(step_index, int) else None
+        title = block.get("title")
+        out: list[Any] = []
+        if isinstance(title, str) and title.strip():
+            out.append(Paragraph(self._escape_cell(title), self._styles["chart_caption"]))
+        if chart is None:
+            # 分节块由同一把「有图」的尺生成，走到这里说明数据不一致（老快照/
+            # 前端算错）—— 占位比静默丢掉一节更诚实。
+            out.append(self._chart_placeholder_flowable("chart"))
+            return out
+        out.extend(
+            self._chart_flowables_for(
+                chart.chart_type, chart.chart_option, chart.chart_image
+            )
+        )
+        return out
+
+    def _question_flowables(self, idx: int, turn: ChatExportTurn) -> list[Any]:
+        user_time = turn.user_time.strftime("%Y-%m-%d %H:%M:%S") if turn.user_time else "—"
+        return [
+            Paragraph(f"#{idx} · 用户", self._styles["role_user"]),
+            Paragraph(f"<font color='#666666'>{user_time}</font>", self._styles["meta"]),
+            *self._markdown_to_flowables(turn.user_content),
+        ]
+
+    def _answer_header_flowables(self, idx: int, turn: ChatExportTurn) -> list[Any]:
+        asst_time = turn.assistant_time.strftime("%Y-%m-%d %H:%M:%S") if turn.assistant_time else "—"
+        return [
+            Spacer(1, 6),
+            Paragraph(f"#{idx} · 助手", self._styles["role_assistant"]),
+            Paragraph(f"<font color='#666666'>{asst_time}</font>", self._styles["meta"]),
+        ]
+
+    def _turnFooter_flowables(self, turn: ChatExportTurn) -> list[Any]:
+        """元信息（模型/Tokens/成本）+ 轮次分隔线。"""
         meta_bits: list[str] = []
         if turn.model_name:
             meta_bits.append(f"模型: {turn.model_name}")
@@ -414,12 +508,13 @@ class ChatExportPdfBuilder:
             meta_bits.append(f"Tokens: {turn.tokens_used}")
         if turn.cost is not None:
             meta_bits.append(f"成本: ${turn.cost:.6f}")
+        flowables: list[Any] = []
         if meta_bits:
             flowables.append(Spacer(1, 4))
             flowables.append(Paragraph(" · ".join(meta_bits), self._styles["meta"]))
         flowables.append(Spacer(1, 10))
         flowables.append(HRFlowable(width="100%", thickness=0.3, color=colors.lightgrey))
-        return KeepTogether(flowables)
+        return flowables
 
     # -------- Markdown → flowables --------
 
@@ -615,19 +710,30 @@ class ChatExportPdfBuilder:
         ``table`` / ``kpi`` 刻意排在图片之前：官方渲染比位图更清晰、可选中，
         且不受截图分辨率与暗色主题影响。
         """
-        if turn.chart_type == ChartType.TABLE.value:
-            table = self._table_from_chart_option(turn.chart_option)
+        return self._chart_flowables_for(
+            turn.chart_type, turn.chart_option, turn.chart_image
+        )
+
+    def _chart_flowables_for(
+        self,
+        chart_type: str | None,
+        chart_option: dict | None,
+        chart_image: bytes | None,
+    ) -> list:
+        """三档降级的具体分派；顶层图与分节图共用同一套（口径必须一致）。"""
+        if chart_type == ChartType.TABLE.value:
+            table = self._table_from_chart_option(chart_option)
             if table:
                 return table
-        if turn.chart_type == ChartType.KPI.value:
-            kpi = self._kpi_flowable(turn.chart_option)
+        if chart_type == ChartType.KPI.value:
+            kpi = self._kpi_flowable(chart_option)
             if kpi:
                 return kpi
-        if turn.chart_image:
-            image = self._chart_image_flowable(turn.chart_image)
+        if chart_image:
+            image = self._chart_image_flowable(chart_image)
             if image is not None:
                 return [image]
-        return [self._chart_placeholder_flowable(turn.chart_type)]
+        return [self._chart_placeholder_flowable(chart_type or "chart")]
 
     def _chart_image_flowable(self, imageBytes: bytes) -> PdfImage | None:
         """PNG 字节 → 等比缩放到正文框内的 ``Image``；解不出图返回 None（降级占位）。

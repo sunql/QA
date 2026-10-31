@@ -273,6 +273,9 @@ MSG_SCHEMA_CHAT_EXPORT_CHARTS = (
 MSG_SCHEMA_CHAT_EXPORT_CHART_MESSAGE_ID = (
     "该位图对应哪条 assistant 消息（SessionMessage 主键）；必须属于该 session"
 )
+MSG_SCHEMA_CHAT_EXPORT_CHART_STEP_INDEX = (
+    "该位图对应多步消息里的哪一步（缺省 = 该轮顶层图）；该步必须确有图"
+)
 MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG = (
     "带 data:image/png;base64, 前缀的 PNG data URL"
 )
@@ -296,6 +299,9 @@ MSG_EXPORT_CHART_IMAGE_TOO_MANY_PIXELS = "单张图表图片分辨率超出上�
 MSG_EXPORT_CHART_TOTAL_TOO_MANY_PIXELS = "图表图片总分辨率超出上限"
 MSG_EXPORT_CHART_COUNT_EXCEEDED = "图表图片数量超出上限"
 MSG_EXPORT_CHART_MESSAGE_NOT_FOUND = "图表图片对应的消息不属于该会话"
+# 2026-10-31（分节插图）：位图按 (messageId, stepIndex) 归属。stepIndex 必须指向
+# 该消息快照里**确有图**的一步；越界/无图的步骤一律拒掉（同样不回显 id）。
+MSG_EXPORT_CHART_STEP_NOT_FOUND = "图表图片对应的步骤不存在或该步骤没有图"
 MSG_HISTORY_EXPORT_FILENAME = "qa-session-{sessionId}.pdf"
 MSG_HISTORY_EXPORT_MESSAGE_FILENAME = "qa-message-{messageId}.pdf"
 MSG_HISTORY_EXPORT_CONTENT_DISPOSITION = "attachment; filename=\"{filename}\""

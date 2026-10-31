@@ -1,7 +1,6 @@
 import { Collapse, Spin, Steps, Tag, Typography } from "antd";
 import type { MultiStepStep, StepStatus } from "../../types/chat";
 import { useTranslation } from "../../i18n";
-import ChartRenderer from "./ChartRenderer";
 import QueryPlanCard from "./QueryPlanCard";
 import ResumeRunButton from "./ResumeRunButton";
 import SqlPreview from "./SqlPreview";
@@ -26,9 +25,47 @@ const STATUS_TAG_COLOR: Record<StepStatus, string> = {
   error: "error",
 };
 
+/**
+ * 折叠头摘要：几步、成功/失败各几、耗时多少 —— 不展开也能读。
+ *
+ * 三种状态互斥：有 running ⇒ 执行中进度；还有 pending（计划刚下发）⇒ 待执行；
+ * 否则即「结束态」，给出成功/失败计数。压缩发生在步骤成功之后 ⇒ 计入成功。
+ */
+function summaryText(
+  t: (key: string, vars?: Record<string, string | number>) => string,
+  steps: MultiStepStep[],
+  elapsedMs?: number
+): string {
+  const total = steps.length;
+  const runningIndex = steps.findIndex((s) => s.status === "running");
+  if (runningIndex >= 0) {
+    return t("multiStep.summaryRunning", { current: runningIndex + 1, total });
+  }
+  if (steps.some((s) => s.status === "pending")) {
+    return t("multiStep.summaryPending", { total });
+  }
+  const success = steps.filter((s) => s.status === "done" || s.status === "compressed").length;
+  const failed = steps.filter((s) => s.status === "error").length;
+  const parts = [
+    t("multiStep.summaryTotal", { total }),
+    t("multiStep.summarySuccess", { success }),
+  ];
+  if (failed > 0) parts.push(t("multiStep.summaryFailed", { failed }));
+  if (elapsedMs != null && Number.isFinite(elapsedMs) && elapsedMs >= 0) {
+    // 保留一位小数：12.3秒比 12秒 更贴近真实等待
+    parts.push(t("multiStep.elapsed", { seconds: Math.round(elapsedMs / 100) / 10 }));
+  }
+  return parts.join(" · ");
+}
+
 interface MultiStepPlanCardProps {
   steps: MultiStepStep[];
   currentStepIndex?: number;
+  /**
+   * 本轮端到端耗时（毫秒），来自流式 `done` 帧的 `latency_ms`。
+   * 历史回放没有时长 ⇒ 缺省，摘要行不显示耗时段（不伪造）。
+   */
+  elapsedMs?: number;
   /** N4 qwen 续跑：该消息首发时使用的模型 id（透传给 ResumeRunButton） */
   originalModelId: number;
   /**
@@ -71,6 +108,7 @@ function StatusBadge({ status }: { status: StepStatus }) {
 export default function MultiStepPlanCard({
   steps,
   currentStepIndex,
+  elapsedMs,
   originalModelId,
   onResume,
   disabled,
@@ -84,7 +122,11 @@ export default function MultiStepPlanCard({
       items={[
         {
           key: "multi-step",
-          label: t("multiStep.panelLabel"),
+          label: (
+            <span data-testid="multi-step-summary" style={{ fontWeight: 500 }}>
+              {summaryText(t, steps, elapsedMs)}
+            </span>
+          ),
           children: (
             <Steps
               size="small"
@@ -145,19 +187,6 @@ export default function MultiStepPlanCard({
                               originalModelId={originalModelId}
                               disabled={disabled}
                               onResume={onResume}
-                            />
-                          </div>
-                        ) : null}
-                        {/* 多步每步出图（决策 3）：每个 step 挂同一个渲染器，
-                            kind/option 由后端决策引擎按该步自己的数据各出一份。
-                            失败步骤不带这两字段，渲染器自己返回 null。 */}
-                        {s.chartType ? (
-                          <div style={{ marginTop: 8 }}>
-                            <ChartRenderer
-                              chartType={s.chartType}
-                              chartOption={s.chartOption}
-                              tableOption={s.tableOption}
-                              visualRationale={s.visualRationale}
                             />
                           </div>
                         ) : null}

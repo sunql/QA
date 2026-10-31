@@ -211,6 +211,9 @@ export interface StreamSummary {
   tokensUsed: number;
   cost: number;
   modelName?: string | null;
+  // 本轮端到端耗时（毫秒，后端 done 帧 `latency_ms`）：计划卡摘要的耗时来源。
+  // 历史回放没有该字段 ⇒ null（不伪造）。
+  latencyMs?: number | null;
   // 会话亲和性（Phase 7）：解锁/闲聊/领域命令为 null
   affinityStatus?: AffinityStatus | null;
   // #207 审查 HIGH 修复：流式 done 事件携带拦截类卡片对象（前端按存在性回填渲染）
@@ -378,6 +381,7 @@ function dispatchFrame(frame: { event: string; data: string }, handlers: StreamE
         tokensUsed: typeof d.tokensUsed === "number" ? d.tokensUsed : 0,
         cost: typeof d.cost === "number" ? d.cost : 0,
         modelName: typeof d.modelName === "string" ? d.modelName : null,
+        latencyMs: typeof d.latency_ms === "number" ? d.latency_ms : null,
         affinityStatus: (d.affinityStatus as AffinityStatus | null) ?? null,
         agentRun: (d.agentRun as StreamSummary["agentRun"]) ?? null,
         supplier360: (d.supplier360 as StreamSummary["supplier360"]) ?? null,

@@ -381,7 +381,13 @@ export const zhCN = {
   },
 
   multiStep: {
-    panelLabel: "查看分析计划",
+    // 折叠头摘要（D2 改版）：不展开就能看到步数/成败/耗时
+    summaryTotal: "{total} 步",
+    summarySuccess: "成功 {success}",
+    summaryFailed: "失败 {failed}",
+    summaryRunning: "执行中 ({current}/{total})",
+    summaryPending: "{total} 步 · 待执行",
+    elapsed: "{seconds}秒",
     statusPending: "待执行",
     statusRunning: "执行中",
     statusDone: "已完成",

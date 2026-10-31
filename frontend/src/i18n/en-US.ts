@@ -376,7 +376,13 @@ export const enUS = {
   },
 
   multiStep: {
-    panelLabel: "View Analysis Plan",
+    // Collapsed header summary (D2 redesign): steps / success / failure / elapsed
+    summaryTotal: "{total} steps",
+    summarySuccess: "{success} succeeded",
+    summaryFailed: "{failed} failed",
+    summaryRunning: "Running ({current}/{total})",
+    summaryPending: "{total} steps · pending",
+    elapsed: "{seconds}s",
     statusPending: "Pending",
     statusRunning: "Running",
     statusDone: "Done",

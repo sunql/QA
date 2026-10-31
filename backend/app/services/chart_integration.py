@@ -51,7 +51,10 @@ async def buildReportChart(
             decision, signals, rows, plan,
             aliasOverrides=aliasOverrides, axisLabels=aliasOverrides,
         )
-        echartsOption = renderChartOption(spec, rows)
+        # 与 chat 端同一条口径：排名语义才挂 Top-N 视图，研究线报告自动继承。
+        echartsOption = renderChartOption(
+            spec, rows, topN=signals.isTopN or signals.hasRankingIntent
+        )
         kindStr = spec.kind.value if hasattr(spec.kind, "value") else str(spec.kind)
         return {
             "title": spec.title,

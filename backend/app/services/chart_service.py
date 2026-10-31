@@ -133,7 +133,11 @@ class ChartService:
                 decision.kind.value,
                 degradeReason,
             )
-        option = renderChartOption(spec, data)
+        # 排名语义（显式降序取前 N，或问题本身就是「最多/最高/排名」）才挂
+        # Top-N 截断视图；普通分组汇总保持全量。
+        option = renderChartOption(
+            spec, data, topN=signals.isTopN or signals.hasRankingIntent
+        )
         # rationale 的 kind 传「决策引擎选出的 kind（降级前的意图）」，不传降级后的
         # spec.kind：否则 DEGRADE_SPEC_INVALID 的文案会渲染成「数据结构不满足 table
         # 的绘图要求」。同理 R_FORCED_CLIENT 传的是被强制的那个 kind。

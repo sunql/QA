@@ -289,3 +289,43 @@ async def test_stream_chitchat_skips_l1_l4(
     assert "routingLayer" not in text, (
         f"chitchat should not include 'routingLayer', got: {text[:200]}"
     )
+
+
+async def test_stream_l4_preamble_emits_sql_frame(
+    client: AsyncClient,
+    dbSession: AsyncSession,
+    seeded_user: dict,
+    monkeypatch,
+) -> None:
+    """L4 命中且带回 final_sql 时，流式必须下发 sql 帧。
+
+    缺陷（2026-10-31 生产实证）：L4 的最终 SQL 只写在 ChatResponse /
+    session_message，SSE 只发 meta/chart/token/done ⇒ 前端拿不到 SQL，
+    消息下不会出现 SqlPreview 卡片。
+    """
+    import app.api.v1.chat as chat_module
+    from app.domain.schemas import ChatResponse
+
+    async def _fakeL4Agent(session, dto, *, user=None):
+        return ChatResponse(
+            answer="[L4:answered] 5 月整体供货量并非下降。",
+            intent="new_query",
+            sql="SELECT 1 FROM dual",
+        )
+
+    monkeypatch.setattr(chat_module._service, "_handleNl2SqlAgent", _fakeL4Agent)
+
+    resp = await client.post(
+        "/api/v1/chat/stream",
+        json={
+            "question": "为什么今年5月份各供应商的供货量与往月比差距大",
+            "sessionId": "stream-l4-sql",
+            "datasourceId": seeded_user["datasource_id"],
+        },
+        headers={"X-User-Id": str(seeded_user["user_id"])},
+    )
+
+    assert resp.status_code == 200, resp.text
+    text = resp.text
+    assert "event: sql" in text, f"expected sql frame, got: {text[:300]}"
+    assert "SELECT 1 FROM dual" in text, f"expected final sql in SSE, got: {text[:300]}"

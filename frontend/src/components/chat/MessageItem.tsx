@@ -15,7 +15,7 @@ import GraphTraversalCard from "./GraphTraversalCard";
 import AgentResponseCard from "./AgentResponseCard";
 import SuggestedAgentCard from "./SuggestedAgentCard";
 import HypothesisPanel from "./HypothesisPanel";
-import type { ChatMessage } from "../../types/chat";
+import type { ChatMessage, MultiStepStep } from "../../types/chat";
 import { useTranslation } from "../../i18n";
 import { visualRationaleText } from "../../utils/visualRationale";
 import { useChatStore } from "../../stores/chatStore";
@@ -48,6 +48,21 @@ function errorTypeHintKey(errorType: string | null | undefined): string | null {
   return Object.prototype.hasOwnProperty.call(ERROR_TYPE_HINT_KEYS, errorType)
     ? ERROR_TYPE_HINT_KEYS[errorType as keyof typeof ERROR_TYPE_HINT_KEYS]
     : null;
+}
+
+/** 分节报告里的一个图块：负载从 steps[stepIndex] 取（不重复下发），取不到整块跳过。 */
+function ReportChartBlock({ step }: { step?: MultiStepStep }) {
+  if (!step?.chartType) return null;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <ChartRenderer
+        chartType={step.chartType}
+        chartOption={step.chartOption}
+        tableOption={step.tableOption}
+        visualRationale={step.visualRationale}
+      />
+    </div>
+  );
 }
 
 const { Paragraph, Text } = Typography;
@@ -192,6 +207,23 @@ function MessageItem({
                 {message.content}
                 <span className="typing-cursor" aria-label={t("messageItem.typing")} />
               </Paragraph>
+            ) : message.reportSections?.length ? (
+              // 2026-10-31：多步报告按「正文 → 该步图 → 下一节」渲染；图负载复用
+              // message.steps，缺失时跳过该块（老消息/半截数据不崩）。
+              <div className="markdown-body">
+                {message.reportSections.map((block, index) =>
+                  block.kind === "text" ? (
+                    <ReactMarkdown key={`text-${index}`} remarkPlugins={[remarkGfm]}>
+                      {block.content}
+                    </ReactMarkdown>
+                  ) : (
+                    <ReportChartBlock
+                      key={`chart-${index}`}
+                      step={message.steps?.find((step) => step.stepIndex === block.stepIndex)}
+                    />
+                  )
+                )}
+              </div>
             ) : (
               <div className="markdown-body">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>

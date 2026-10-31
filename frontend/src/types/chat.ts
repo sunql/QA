@@ -173,6 +173,12 @@ export interface AgentSuggestion {
   reason: string;
 }
 
+// 多步最终报告的分块（2026-10-31）：text 块是 Markdown 正文，chart 块只带
+// stepIndex，图负载复用 steps[stepIndex]（不重复下发）。
+export type ReportBlock =
+  | { kind: "text"; content: string }
+  | { kind: "chart"; stepIndex: number; title?: string | null };
+
 // 后端对话响应（chartOption 为 ECharts option JSON）
 export interface ChatResponse {
   answer: string;
@@ -196,6 +202,8 @@ export interface ChatResponse {
   affinityStatus?: AffinityStatus | null;
   // 多步查询各子步骤结果（仅 intent=multi_step 时填充；单步查询为 null）
   steps?: StepResultRead[] | null;
+  // 多步报告分块（仅多步聚合/降级收尾；其余意图为 null/缺省）
+  reportSections?: ReportBlock[] | null;
   // Phase 1.4：目标表的可信度 badge 列表（顺序对齐 queryPlan.selectedClasses）；
   // 无 selectedClasses / DQ 服务降级时为 null
   dataQuality?: DataQualityBadge[] | null;
@@ -313,6 +321,8 @@ export interface ChatMessage {
   affinityStatus?: AffinityStatus | null;
   // 多步子步骤列表（multi_step_plan 事件建立，随 step_plan/step_result 推进状态）
   steps?: MultiStepStep[];
+  // 多步报告分块：done 帧 / 非流式响应 / 历史回放回填；缺省走旧纯 Markdown 渲染
+  reportSections?: ReportBlock[];
   // 当前正在执行的步骤序号（step_plan 事件回填）
   currentStepIndex?: number;
   // Phase 1.4：目标表可信度 badge（流式 data_quality 事件回填，可与 queryPlan 一起展示）

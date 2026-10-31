@@ -18,22 +18,22 @@ import * as echarts from "echarts";
 import { applyChartTheme } from "../theme/chartTheme";
 import { applyChartNumberFormat } from "../theme/chartFormat";
 import { LIGHT_TOKEN } from "../theme/tokens";
+import { chartHeightOf } from "./chartLayout";
 
-/** 截图画布尺寸（2 倍像素密度由 getDataURL 的 pixelRatio 负责，这里给 CSS 尺寸）。 */
+/** 截图画布宽度（2 倍像素密度由 getDataURL 的 pixelRatio 负责，这里给 CSS 尺寸）。 */
 const SNAPSHOT_WIDTH = 800;
-const SNAPSHOT_HEIGHT = 420;
 
 /** PNG data URL 前缀；后端按此校验，改这里必须同步 `session_history_service`。 */
 export const PNG_DATA_URL_PREFIX = "data:image/png;base64,";
 
 /** 离屏容器：必须在文档流里（ECharts 依赖 getBoundingClientRect），但不可见。 */
-function createOffscreenHost(): HTMLDivElement {
+function createOffscreenHost(height: number): HTMLDivElement {
   const host = document.createElement("div");
   host.style.position = "fixed";
   host.style.left = "-99999px";
   host.style.top = "0";
   host.style.width = `${SNAPSHOT_WIDTH}px`;
-  host.style.height = `${SNAPSHOT_HEIGHT}px`;
+  host.style.height = `${height}px`;
   host.style.pointerEvents = "none";
   host.setAttribute("aria-hidden", "true");
   document.body.appendChild(host);
@@ -57,12 +57,13 @@ export async function renderChartPng(
   chartOption: Record<string, unknown>
 ): Promise<string | null> {
   if (typeof document === "undefined") return null;
-  const host = createOffscreenHost();
+  const height = chartHeightOf(chartOption);
+  const host = createOffscreenHost(height);
   let chart: echarts.ECharts | null = null;
   try {
     chart = echarts.init(host, undefined, {
       width: SNAPSHOT_WIDTH,
-      height: SNAPSHOT_HEIGHT,
+      height,
       renderer: "canvas",
     });
     // 关掉动画：PDF 是静态图，等动画收敛既慢又可能截到中间帧。

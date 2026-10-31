@@ -40,12 +40,13 @@ from app.services.chat_helpers import (
     _failedStepResult,
     _hasDataStepResult,
     _step_result_to_read,
-    buildStepsSnapshot,
+    multiStepSummaryPersistFields,
 )
 from app.services.chat_stream_entry import _overviewStepPayload
 from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
 from app.services.multi_step_retry import ERROR_KIND_PERMANENT
 from app.services.nl2sql_service import _readFloatConfig
+from app.services.report_sections import buildReportSections
 from app.services.think_block import applyThinkPolicy
 from app.services.stream_events import (
     EVENT_DONE,
@@ -262,17 +263,13 @@ class StreamMultiStepMixin:
                     token_cost_usd=float(total_cost),
                     # 汇总步是纯文字、无图；每步的图已在各自 steps 里落库
                     # （0107 补 rationale：顶层不附图，SUMMARY_TEXT_ONLY 解释为什么）。
-                    chart_type=None,
-                    chart_option=None,
-                    table_option=None,
-                    visual_rationale=summaryTextOnlyRationale().to_dict(),
                     # 历史回放计划卡（2026-10-31）：落一份回放快照，刷新/重开
                     # 会话后仍能还原 分析计划 → 分步 SQL → 每步查询计划。
-                    steps_snapshot=buildStepsSnapshot(
+                    **multiStepSummaryPersistFields(
                         plan=multiStepPlan,
                         stepsByIdx=stepsByIdx,
                         completed=completed,
-                        runId=str(run.id) if run is not None else None,
+                        run=run,
                     ),
                 )
                 await self._saveQueryState(
@@ -294,6 +291,7 @@ class StreamMultiStepMixin:
                     if affinity is not None
                     else None
                 )
+                stepReads = [_step_result_to_read(s) for s in completed]
                 yield StreamEvent(EVENT_TOKEN, {"content": agg_content})
                 # v3.1 B6（M7）：流式多步假设后处理——只落库，不进 SSE 帧
                 await self._maybeGenerateHypotheses(
@@ -307,7 +305,9 @@ class StreamMultiStepMixin:
                         "modelName": last_model_name,
                         "latency_ms": int((time.monotonic() - _ms_t0) * 1000),
                         "affinityStatus": affinity_payload,
-                        "steps": [_step_result_to_read(s).model_dump(by_alias=True) for s in completed],
+                        "steps": [s.model_dump(by_alias=True) for s in stepReads],
+                        # 2026-10-31：分节块与最终文本同源现算；图负载不重复下发。
+                        "reportSections": buildReportSections(agg_content, stepReads),
                         # 汇总步不发 step_result（纯文字），SUMMARY_TEXT_ONLY 只能经 done 帧抵达前端
                         "visualRationale": summaryTextOnlyRationale().to_dict(),
                         "suggestedAgent": suggestion.model_dump(mode="json", by_alias=True)

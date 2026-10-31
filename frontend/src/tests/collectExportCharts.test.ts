@@ -19,9 +19,17 @@ vi.mock("../utils/chartSnapshot", async (importOriginal) => {
   };
 });
 
-import { MAX_EXPORT_CHARTS, collectExportCharts } from "../utils/collectExportCharts";
+import { collectExportCharts } from "../utils/collectExportCharts";
+import { chartHeightOf } from "../utils/chartLayout";
 
 const PNG = "data:image/png;base64,AA==";
+
+/** 40 类目 ⇒ chartHeightOf 封顶 960（真实高度推断，不 mock）。 */
+const TALL_OPTION = {
+  yAxis: { type: "category", data: Array.from({ length: 40 }, (_, i) => `C${i}`) },
+  series: [{ type: "bar", data: [] }],
+};
+
 
 function message(overrides: Partial<ChatMessageRead> & { id: number }): ChatMessageRead {
   return {
@@ -117,31 +125,36 @@ describe("collectExportCharts", () => {
     expect(charts).toEqual([{ messageId: 2, imagePng: PNG }]);
   });
 
-  it("超过上限时截断，而不是让后端 422 把整份导出打回", async () => {
+  it("导出按像素预算截断：默认高度图约 35 张封顶，而不是让后端 422 把整份导出打回", async () => {
     withResponse(
-      Array.from({ length: MAX_EXPORT_CHARTS + 5 }, (_, index) =>
+      Array.from({ length: 80 }, (_, index) =>
         message({ id: index + 1, chartType: "bar", chartOption: { series: [] } })
       )
     );
 
     const charts = await collectExportCharts("s-1");
 
-    expect(charts).toHaveLength(MAX_EXPORT_CHARTS);
+    // 默认 320 高：1600 × 2 × 320 = 1.024M px；36M / 1.024M = 35.15 ⇒ 35 张
+    expect(charts).toHaveLength(35);
   });
 
-  it("截断时保留**最新**的若干张，丢掉最早的", async () => {
-    // 导出 PDF 保留的是最后 500 轮；丢最新、留最早会让用户眼前的图全没
-    const total = MAX_EXPORT_CHARTS + 5;
+  it("高图按像素（而不是张数）截断：960 高只留最近 11 张，并只告警一次", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(chartHeightOf(TALL_OPTION)).toBe(960);
     withResponse(
-      Array.from({ length: total }, (_, index) =>
-        message({ id: index + 1, chartType: "bar", chartOption: { series: [] } })
+      Array.from({ length: 20 }, (_, index) =>
+        message({ id: index + 1, chartType: "bar", chartOption: TALL_OPTION })
       )
     );
 
     const charts = await collectExportCharts("s-1");
 
-    expect(charts[0].messageId).toBe(total - MAX_EXPORT_CHARTS + 1);
-    expect(charts[charts.length - 1].messageId).toBe(total);
+    // 36M / 3.072M = 11.7 ⇒ 11 张；丢最早 1..9，保留最新的 10..20
+    expect(charts).toHaveLength(11);
+    expect(charts[0].messageId).toBe(10);
+    expect(charts[charts.length - 1].messageId).toBe(20);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 
   it("拿不到消息流时整份不带图，导出照常（图是增强不是主功能）", async () => {
@@ -167,7 +180,7 @@ describe("collectExportCharts", () => {
   });
 
   it("渲染并发有上限，不会一次建出全部离屏画布", async () => {
-    // 200 张画布 × 约 5.4 MB 后备存储 ≈ 1 GB，中端机器直接卡死
+    // 每块同时建 4 张离屏画布（800 CSS × 动态高度，最高 960），不一次建出全部
     let inFlight = 0;
     let peak = 0;
     snapshot.renderChartPng.mockImplementation(async () => {

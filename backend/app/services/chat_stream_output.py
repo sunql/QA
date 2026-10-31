@@ -161,6 +161,8 @@ class PreambleResult(BaseModel):
     confidence: float | None = None  # KpiMatchResult.confidence
     # L4
     agent_run: dict | None = None
+    # L4 最终 SQL（流式入口据此下发 sql 帧；非流式入口走 full_response.sql）
+    sql: str | None = None
     # L1 cross-datasource mismatch
     datasource_mismatch: bool = False
     mismatch_warning: str | None = None
@@ -261,6 +263,7 @@ class L1L4PreambleMixin:
                     l4.agent_run.model_dump(mode="json", by_alias=True)
                     if l4.agent_run is not None else None
                 ),
+                sql=l4.sql,
                 full_response=l4,
             )
 

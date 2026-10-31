@@ -15,15 +15,28 @@
 import { loadSessionMessages } from "../api/chatHistory";
 import type { ExportChartImage } from "../api/chatHistory";
 import { asChartOption, normalizeChartType } from "./chartContract";
+import { chartHeightOf } from "./chartLayout";
 import type { ChatMessageRead } from "../types/chatHistory";
 import { needsSnapshot, renderChartPng } from "./chartSnapshot";
 
 /**
- * 一次导出最多截多少张图。与后端 `_MAX_EXPORT_CHART_IMAGES`(200) 同量级但留出余量：
- * 超限后端会 422，而「超限就整份导出失败」不是我们想要的降级方式 —— 宁可少带几张
- * 图，也要把报告导出来。前端先截断，后端那道闸只作为对越权调用的防御。
+ * 一次导出最多截多少张图（绝对条数上限）。与后端 `_MAX_EXPORT_CHART_IMAGES`(200)
+ * 同量级但留出余量。**真正的约束通常是像素预算** `MAX_EXPORT_PIXELS` —— 图表高度
+ * 随类别数增长后，几十张 960 高图就能顶到上限。
  */
 export const MAX_EXPORT_CHARTS = 180;
+
+/** 截图位图的像素宽：800 CSS × `pixelRatio` 2。 */
+const SNAPSHOT_PIXEL_WIDTH = 1600;
+
+/** `getDataURL` 的像素密度：图片像素高 = CSS 高度 × 2。 */
+const SNAPSHOT_PIXEL_RATIO = 2;
+
+/**
+ * 单次导出的累计像素预算。后端硬上限 40M（`_MAX_EXPORT_TOTAL_IMAGE_PIXELS`），
+ * 超了整份导出 422；前端取 90% 留余量，宁可少带最早的几张也要让报告导出来。
+ */
+export const MAX_EXPORT_PIXELS = 36_000_000;
 
 /**
  * 单个会话最多读多少条消息去挑图。
@@ -37,8 +50,8 @@ const MESSAGE_SCAN_LIMIT = 1000;
 /**
  * 同时最多渲染几张。**不能一次并发全部**：`renderChartPng` 在 `await` 之前是同步
  * 执行的，`Promise.all` 会在一个不可中断的主线程突发里建出全部离屏容器与 ECharts
- * 实例 —— 每张画布 800×420 CSS、`pixelRatio 2` ⇒ 约 5.4 MB 后备存储，180 张就是
- * 近 1 GB 加 180 个 DOM 节点，中端机器直接卡死甚至 OOM。分块后峰值降到 4 张。
+ * 实例 —— 每张画布 800 CSS 宽 × 动态高度（最高 960）、`pixelRatio 2` 的后备存储，
+ * 几十张一次建出就会卡死甚至 OOM。分块后峰值降到 4 张。
  */
 const RENDER_CONCURRENCY = 4;
 
@@ -81,6 +94,36 @@ async function renderAll(
   return rendered;
 }
 
+/** 一张图上传后的像素数：1600 宽 × 2H 高（与 `chartSnapshot` 的 800 CSS × 2 对齐）。 */
+function pixelCostOf(message: ChatMessageRead): number {
+  const chartOption = asChartOption(message.chartOption);
+  if (!chartOption) return 0;
+  return SNAPSHOT_PIXEL_WIDTH * SNAPSHOT_PIXEL_RATIO * chartHeightOf(chartOption);
+}
+
+/**
+ * 从最新往旧累加像素，超预算即停 —— 丢掉的是**最早**的消息，保留用户眼前这批
+ * （也是导出 PDF 里最后那批）。返回按时间正序，交给渲染层。
+ */
+function trimToPixelBudget(targets: ChatMessageRead[]): ChatMessageRead[] {
+  const kept: ChatMessageRead[] = [];
+  let totalPixels = 0;
+  for (let index = targets.length - 1; index >= 0; index -= 1) {
+    const cost = pixelCostOf(targets[index]);
+    if (totalPixels + cost > MAX_EXPORT_PIXELS) break;
+    totalPixels += cost;
+    kept.push(targets[index]);
+  }
+  if (kept.length < targets.length) {
+    console.warn(
+      `导出配图：像素预算 ${MAX_EXPORT_PIXELS} 已用尽，丢弃最早的 ${
+        targets.length - kept.length
+      } 张`
+    );
+  }
+  return kept.reverse();
+}
+
 /**
  * 收集某会话的图表位图。
  *
@@ -106,11 +149,13 @@ export async function collectExportCharts(
     return [];
   }
 
-  const targets = messages
-    .filter((m) => (messageId === undefined || m.id === messageId) && isSnapshotTarget(m))
-    // 取**最新**的 MAX_EXPORT_CHARTS 张：宁可少带最早的几张，也要让用户
-    // 眼前这批（也是导出 PDF 里最后那批）有图。
-    .slice(-MAX_EXPORT_CHARTS);
+  const targets = trimToPixelBudget(
+    messages
+      .filter((m) => (messageId === undefined || m.id === messageId) && isSnapshotTarget(m))
+      // 先取**最新**的 MAX_EXPORT_CHARTS 张（绝对条数上限），再按像素预算裁剪：
+      // 宁可少带最早的几张，也要让用户眼前这批（也是导出 PDF 里最后那批）有图。
+      .slice(-MAX_EXPORT_CHARTS)
+  );
 
   return renderAll(targets);
 }

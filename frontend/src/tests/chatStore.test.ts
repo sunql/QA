@@ -448,6 +448,64 @@ describe("chatStore", () => {
     expect(state.loading).toBe(false);
   });
 
+  it("流式 done 帧写入 reportSections", async () => {
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      handlers.onToken?.("## 分析报告");
+      handlers.onDone?.({
+        tokensUsed: 10,
+        cost: 0.00001,
+        reportSections: [
+          { kind: "text", content: "## 分析报告" },
+          { kind: "chart", stepIndex: 0, title: "2024 销售额" },
+        ],
+      });
+    });
+    useChatStore.getState().setDatasourceId(1);
+
+    await useChatStore.getState().sendMessage("分步查询", true);
+
+    expect(useChatStore.getState().messages[1].reportSections).toEqual([
+      { kind: "text", content: "## 分析报告" },
+      { kind: "chart", stepIndex: 0, title: "2024 销售额" },
+    ]);
+  });
+
+  it("非流式响应写入 reportSections", async () => {
+    chatApi.sendMessage.mockResolvedValue({
+      answer: "## 分析报告",
+      intent: "multi_step",
+      tokensUsed: 10,
+      cost: 0.00001,
+      reportSections: [{ kind: "text", content: "## 分析报告" }],
+    });
+    useChatStore.getState().setDatasourceId(1);
+
+    await useChatStore.getState().sendMessage("分步查询");
+
+    expect(useChatStore.getState().messages[1].reportSections).toEqual([
+      { kind: "text", content: "## 分析报告" },
+    ]);
+  });
+
+  it("历史回放还原 reportSections", async () => {
+    historyApi.loadSessionMessages.mockResolvedValue({
+      sessionId: "s-history",
+      messages: [
+        {
+          id: 1, role: "assistant", content: "## 分析报告", question: null,
+          sql: null, createdTime: "2026-01-01T00:00:00Z", interrupted: false,
+          reportSections: [{ kind: "text", content: "## 分析报告" }],
+        },
+      ],
+    });
+
+    await useChatStore.getState().loadSessionMessages("s-history");
+
+    expect(useChatStore.getState().messages[0].reportSections).toEqual([
+      { kind: "text", content: "## 分析报告" },
+    ]);
+  });
+
   it("未选择数据源时发送返回错误且不调 API", async () => {
     await useChatStore.getState().sendMessage("查询");
     expect(chatApi.sendMessage).not.toHaveBeenCalled();

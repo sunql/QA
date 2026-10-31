@@ -32,7 +32,9 @@ import type { ChatMessage } from "../types/chat";
 // 的出现与否可以断言 testid，而不必在 jsdom 里实例化 ECharts。
 vi.mock("../components/chat/ChartRenderer", () => ({
   __esModule: true,
-  default: () => <div data-testid="chart-renderer" />,
+  default: (props: { chartType?: string | null }) => (
+    <div data-testid="chart-renderer" data-chart-type={props.chartType ?? ""} />
+  ),
 }));
 
 function renderItem(overrides: Partial<ChatMessage> = {}) {
@@ -776,5 +778,64 @@ describe("MessageItem 图表门控与卡片主题化", () => {
 
     expect(screen.getByRole("status")).toBeInTheDocument();
     expect(screen.getByText("图表生成中…")).toBeInTheDocument();
+  });
+});
+
+describe("MessageItem 分节报告（2026-10-31）", () => {
+  const steps = [
+    {
+      stepIndex: 0,
+      description: "2024 销售额",
+      subQuestion: "2024 年销售额是多少",
+      aggregationOnly: false,
+      status: "done" as const,
+      chartType: "hbar" as const,
+      chartOption: { series: [] },
+    },
+  ];
+
+  it("按块顺序渲染正文与每步图", () => {
+    // 断言文案刻意与 step.description 不同：MultiStepPlanCard 也会渲染步骤描述，
+    // 用同一串文本会让 getByText 命中多个元素（那是测试写法问题，不是被测行为）。
+    renderItem({
+      content: "## 分析报告\n### 步骤 1：年度对比\n### 结论\n增长 20%。",
+      reportSections: [
+        { kind: "text", content: "## 分析报告\n### 步骤 1：年度对比" },
+        { kind: "chart", stepIndex: 0, title: "2024 销售额" },
+        { kind: "text", content: "### 结论\n增长 20%。" },
+      ],
+      steps,
+    });
+
+    expect(screen.getByText(/年度对比/)).toBeInTheDocument();
+    const charts = screen.getAllByTestId("chart-renderer");
+    expect(charts).toHaveLength(1);
+    expect(charts[0].getAttribute("data-chart-type")).toBe("hbar");
+    // 图在结论之前：分节顺序不能被卡片区（计划卡/查询计划）打乱
+    const conclusion = screen.getByText("增长 20%。");
+    expect(
+      charts[0].compareDocumentPosition(conclusion) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
+
+  it("chart 块取不到对应步骤时跳过（不崩、不画空图）", () => {
+    renderItem({
+      content: "### 步骤 1：A",
+      reportSections: [
+        { kind: "text", content: "### 步骤 1：A" },
+        { kind: "chart", stepIndex: 9, title: "缺失" },
+      ],
+      steps,
+    });
+
+    expect(screen.queryByTestId("chart-renderer")).not.toBeInTheDocument();
+  });
+
+  it("reportSections 缺失时走旧 Markdown 渲染（反向守卫）", () => {
+    renderItem({ content: "纯文本回答", steps });
+
+    expect(screen.getByText("纯文本回答")).toBeInTheDocument();
+    expect(screen.queryByTestId("chart-renderer")).not.toBeInTheDocument();
   });
 });

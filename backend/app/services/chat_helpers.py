@@ -22,7 +22,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import DataSource, LlmConfig, SessionQueryState
-from app.domain.multi_step_plan import StepPlan, StepResult
+from app.domain.multi_step_plan import MultiStepPlan, StepPlan, StepResult
 from app.domain.plan_drop import formatPlanDrops
 from app.domain.query_plan import QueryPlan
 from app.domain.schemas import AffinityStatus, ChatResponse, ClassRecallInfo, HypothesisRead
@@ -37,6 +37,8 @@ from app.services.messages_zh import (
     MSG_SPEAKER_ASSISTANT,
     MSG_SPEAKER_USER,
 )
+from app.services.report_sections import buildReportSections
+from app.services.visual_rationale import summaryTextOnlyRationale
 from app.utils.json_safe import jsonSafe
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,7 @@ def _multiStepResponse(
 
     queryPlan：最后一个成功数据步骤的 NL2SQL 查询计划（供前端「总查询计划」渲染）。
     """
+    stepReads = [_step_result_to_read(s, s.query_plan) for s in completed]
     return ChatResponse(
         answer=answer,
         intent="multi_step",
@@ -154,7 +157,9 @@ def _multiStepResponse(
         chartOption=None,
         visual_rationale=visualRationale,
         data=data,
-        steps=[_step_result_to_read(s, s.query_plan) for s in completed],
+        steps=stepReads,
+        # 2026-10-31：分节块由最终文本 + 每步结果现算，不落库。
+        report_sections=buildReportSections(answer, stepReads),
         tokensUsed=tokensUsed,
         cost=float(cost),
         latency_ms=int((time.monotonic() - t0) * 1000),
@@ -278,6 +283,33 @@ def buildStepsSnapshot(
             entry["sql"] = dbRow.sql
         snapshot.append(jsonSafe({k: entry[k] for k in _REPLAY_STEP_KEYS}))
     return snapshot
+
+
+def multiStepSummaryPersistFields(
+    *,
+    plan: MultiStepPlan,
+    stepsByIdx: dict[int, Any],
+    completed: list[StepResult],
+    run: Any,
+) -> dict[str, Any]:
+    """多步汇总消息落库的固定字段（流式/非流式共用，防两路漂移）。
+
+    汇总消息是纯文字：顶层图/表恒空，SUMMARY_TEXT_ONLY 解释为什么没有图；
+    快照供刷新回放还原计划卡与分节图（2026-10-31）。两路各写一份时非流式
+    曾漏落快照 —— 实时正常、回放缺图，这类漂移线上测不出来。
+    """
+    return {
+        "chart_type": None,
+        "chart_option": None,
+        "table_option": None,
+        "visual_rationale": summaryTextOnlyRationale().to_dict(),
+        "steps_snapshot": buildStepsSnapshot(
+            plan=plan,
+            stepsByIdx=stepsByIdx,
+            completed=completed,
+            runId=str(run.id) if run is not None else None,
+        ),
+    }
 
 
 def buildSingleStepSnapshot(

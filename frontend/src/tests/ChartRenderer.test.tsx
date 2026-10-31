@@ -40,13 +40,20 @@ function installResizeObserver(): void {
 vi.mock("echarts-for-react", () => ({
   __esModule: true,
   default: React.forwardRef(function EChartsMock(
-    props: { option?: Record<string, unknown> },
+    props: { option?: Record<string, unknown>; style?: { height?: number } },
     ref: React.ForwardedRef<unknown>
   ) {
     React.useImperativeHandle(ref, () => ({
       getEchartsInstance: () => echartsInstance,
     }));
-    return <div data-testid="echarts-mock">{JSON.stringify(props.option)}</div>;
+    return (
+      <div
+        data-testid="echarts-mock"
+        data-height={String(props.style?.height ?? "")}
+      >
+        {JSON.stringify(props.option)}
+      </div>
+    );
   }),
 }));
 
@@ -129,6 +136,24 @@ describe("ChartRenderer", () => {
     const mock = screen.getByTestId("echarts-mock");
     expect(mock).toBeInTheDocument();
     expect(mock.textContent).toContain("bar");
+  });
+
+  it("横向条形图按类别数增高（30 类 → 936px）", () => {
+    render(
+      <ChartRenderer
+        chartType="hbar"
+        chartOption={{
+          yAxis: {
+            type: "category",
+            data: Array.from({ length: 30 }, (_, i) => `S${i}`),
+          },
+          xAxis: { type: "value" },
+          series: [{ type: "bar", data: 30 }],
+        }}
+      />
+    );
+
+    expect(screen.getByTestId("echarts-mock").getAttribute("data-height")).toBe("936");
   });
 
   it("无类型时渲染为空", () => {

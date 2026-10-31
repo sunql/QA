@@ -616,6 +616,35 @@ describe("api/chat 两个新字段收窄（0107）", () => {
     }
   });
 
+  it("done 帧透传 reportSections：合法块保留，全非法 ⇒ 真实收窄器返回 null", async () => {
+    const sections = [
+      { kind: "text", content: "## 分析报告" },
+      { kind: "chart", stepIndex: 1 },
+    ];
+    const validStream = sseStream(
+      `event: done\ndata: ${JSON.stringify({ tokensUsed: 0, cost: 0, reportSections: sections })}\n\n`
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: validStream }));
+    const valid: Array<{ reportSections?: unknown }> = [];
+    await sendMessageStream(makePayload(), { onDone: (s) => valid.push(s) });
+
+    expect(valid[0].reportSections).toEqual(sections);
+
+    // 文本缺 content、stepIndex 非整数 ⇒ 两个块都被真实 asReportSections 丢弃
+    const invalidStream = sseStream(
+      `event: done\ndata: ${JSON.stringify({
+        tokensUsed: 0,
+        cost: 0,
+        reportSections: [{ kind: "text" }, { kind: "chart", stepIndex: "0" }],
+      })}\n\n`
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: invalidStream }));
+    const invalid: Array<{ reportSections?: unknown }> = [];
+    await sendMessageStream(makePayload(), { onDone: (s) => invalid.push(s) });
+
+    expect(invalid[0].reportSections).toBeNull();
+  });
+
   it("非法 tableOption（rows 非数组）在 chart 事件收窄为 null", async () => {
     const stream = sseStream(
       'event: chart\ndata: {"chartType":"bar","chartOption":{},"tableOption":{"columns":["NAME"],"rows":"oops"},"visualRationale":{"code":"R04_TOPN_HBAR","params":{"rows":5}},"data":[]}\n\n'

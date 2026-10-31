@@ -4,6 +4,7 @@ import type { AffinityStatus, ChatRequest, ChatResponse, ChartType, ClassRecallI
 import { i18n } from "../i18n";
 import { authHeaders } from "./authHeaders";
 import { asChartOption, asTablePayload, asVisualRationale, normalizeChartType } from "../utils/chartContract";
+import { asReportSections } from "../utils/reportSections";
 import { StreamChunkParser } from "../stores/stream_chunk_parser";
 
 const BASE = "/chat";
@@ -224,6 +225,9 @@ export interface StreamSummary {
   // 0107：多步汇总/降级收尾的判断依据（SUMMARY_TEXT_ONLY）。done 帧**不带 tableOption**
   //（多步顶层无表；单步表走 chart 事件）。单步 done 帧也不带此字段（其依据已由 chart 事件下发）。
   visualRationale?: import("../types/chat").VisualRationale | null;
+  // 2026-10-31：多步报告分块（done 帧）；
+  // 注意：本批**不**顺带补 done 帧的 queryPlan 缺口（既有行为，改动会影响卡片出现时机）。
+  reportSections?: import("../types/chat").ReportBlock[] | null;
 }
 
 // data_quality 事件负载（Phase 1.4）：每张 selectedClass 对应一条 badge
@@ -381,6 +385,7 @@ function dispatchFrame(frame: { event: string; data: string }, handlers: StreamE
         graphTraversal: (d.graphTraversal as StreamSummary["graphTraversal"]) ?? null,
         suggestedAgent: (d.suggestedAgent as StreamSummary["suggestedAgent"]) ?? null,
         visualRationale: asVisualRationale(d.visualRationale),
+        reportSections: asReportSections(d.reportSections),
       });
       break;
     case "error":

@@ -48,6 +48,7 @@ from app.services.stream_events import (
     EVENT_ERROR,
     EVENT_META,
     EVENT_PLAN,
+    EVENT_SQL,
     EVENT_TOKEN,
     ErrorType,
     StreamEvent,
@@ -193,6 +194,9 @@ class StreamEntryMixin:
             if preamble.agent_run is not None:
                 meta_frame["agentRun"] = preamble.agent_run
             yield StreamEvent(EVENT_META, meta_frame)
+            # L4 带回的最终 SQL：不发这一帧，前端消息下就没有 SQL 卡片
+            if preamble.sql:
+                yield StreamEvent(EVENT_SQL, {"sql": preamble.sql})
             if preamble.chart_type is not None and preamble.chart_option is not None:
                 yield StreamEvent(EVENT_CHART, {
                     "chartType": preamble.chart_type.value if hasattr(preamble.chart_type, "value") else str(preamble.chart_type),

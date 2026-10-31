@@ -42,6 +42,7 @@ from app.domain.schemas import (
     SessionMessagesResponse,
 )
 from app.services.pdf_export_service import ChatExportPayload, ChatExportTurn
+from app.services.report_sections import buildReportSections
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +67,9 @@ _MAX_EXPORT_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024  # 全部图片解码后总量�
 # 只有 580 KB，字节闸放行、魔数也对，交给 Pillow 却要按 1.44 亿像素分配内存（实测
 # 单张峰值 RSS +2 GB）。而 PIL 默认的 MAX_IMAGE_PIXELS 只在这个量的 2 倍以上才
 # 抛异常，中间这一大段是完全不设防的 —— 所以像素数必须自己卡。
-# 上界取 8M px（≈4000×2000）：前端真实产物是 800×420 × pixelRatio 2 = 1.34M px，
-# 留了近 6 倍余量；总量取 40M px，把一次请求的瞬时解码内存压在 ~160 MB。
+# 上界取 8M px（≈4000×2000）：前端真实产物是 1600 × 2H（CSS 高度 320 起、960 封顶），
+# 最大约 1600×1920 = 3.07M px，相对 8M 单图上限约 2.6 倍余量；总量取 40M px，把一次
+# 请求的瞬时解码内存压在 ~160 MB。
 _MAX_EXPORT_IMAGE_PIXELS = 8_000_000
 _MAX_EXPORT_TOTAL_IMAGE_PIXELS = 40_000_000
 # 只收 PNG（前端 getDataURL({type:"png"}) 的输出）。前缀 + 魔数双重校验：
@@ -266,6 +268,16 @@ class SessionHistoryService:
                 # 2026-10-31：无计划的行（user 行 / 改动前的存量行）两列均为 NULL → None
                 query_plan=r.query_plan,
                 steps_snapshot=r.steps_snapshot,
+                # 2026-10-31：与实时路径调同一个纯函数，回放与屏幕同源。
+                # 只对**多步**消息算：单步消息也落 1 元素快照（回放计划卡用），
+                # 若也算，回放会同时画顶层图与报告块图 —— 同一张图出现两次。
+                report_sections=(
+                    buildReportSections(r.content or "", r.steps_snapshot)
+                    if r.role == "assistant"
+                    and isinstance(r.steps_snapshot, list)
+                    and len(r.steps_snapshot) > 1
+                    else None
+                ) or None,
             )
             for r in rows
         ]

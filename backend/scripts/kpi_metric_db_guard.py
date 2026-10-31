@@ -29,7 +29,7 @@ import re
 # 库名白名单：正式库 qa_metadata（prod 同源） + 隔离测试库 qa_metadata_test*。
 # ⚠️ 改动时必须与调用方（scripts/kpi_metric_backfill.py）行为保持一致 ——
 # 两者共用本模块，不存在第二份正则。
-ALLOWED_DB_PATTERN = re.compile(r"^qa_metadata(_test.*)?$")
+ALLOWED_DB_PATTERN = re.compile(r"^qa_metadata$|^qa_metadata_test($|_)")
 
 # 正式库（prod 同源）库名 —— 提成具名常量，不散落字面量。
 PROD_DB_NAME = "qa_metadata"

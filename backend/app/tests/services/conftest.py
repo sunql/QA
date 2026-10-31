@@ -30,6 +30,8 @@ _ADMIN = CurrentUser(userId="t-admin", roles=(ADMIN_ROLE,), departments=())
 def _resolveTestDbUrl() -> str:
     explicit = os.environ.get("TEST_DATABASE_URL")
     if explicit:
+        # 同一道闸：services 夹具也会 TRUNCATE，点错库同样清生产
+        _pg_support.assertTestDatabase(explicit)
         return explicit
     dbUrl = os.environ.get("DATABASE_URL", "")
     if dbUrl.startswith("postgresql"):

@@ -255,3 +255,31 @@ agent_tool_in_use_orchestration; referencingAgents=['legacy_agent']; orchestrati
 > 事实源：`backend/app/services/agent_tool_config_service.py` 的
 > `_OrchestrationToolInUseConflict`（detail 组装）与
 > `backend/app/api/v1/agent_tools.py` 的 `DELETE /api/v1/agent-tools/{name}` 路由。
+
+## A1 增量：统一 ID 映射 `/api/v1/id-mappings`
+
+**日期**：2026-10-31 · **变更**：[m0-id-mapping-a1](../changes/m0-id-mapping-a1/summary.md)
+（前次：[id-mapping-dto-tighten](../changes/id-mapping-dto-tighten/summary.md)、
+[id-mapping-admin-acl](../changes/id-mapping-admin-acl/summary.md)）
+
+| 端点 | 鉴权 | 说明 |
+|---|---|---|
+| `GET /api/v1/id-mappings?businessObject=&limit=&offset=` | **admin** | 整表/按业务对象列举；`limit` 1–1000，默认 200 |
+| `POST /api/v1/id-mappings` | **admin** | 请求体 `{businessObject, externalId}` → **201**；重复 → **409** |
+| `GET /api/v1/id-mappings/{unified_id}` | 任意登录用户 | 单点读；不存在 → **404** |
+| `PUT /api/v1/id-mappings/{unified_id}` | **admin** | partial，运维改三库指针；不存在 → **404** |
+| `DELETE /api/v1/id-mappings/{unified_id}` | **admin** | → **204**；再次 GET → 404 |
+
+`POST` 语义：
+
+- `unifiedId` 由服务端派生 `obj:{businessObject}:{externalId}`，**不接受**客户端传
+  `unifiedId`；`businessObject` / `externalId` 去空白 + NFC 归一后落库。
+- 任何跨库指针字段（`pgTable` / `pgId` / `neo4jNodeId` / `milvusCollection` /
+  `milvusId`）→ **422**（`extra="forbid"`，不是静默丢弃）：这三库列是三库对齐的
+  结论，不是调用方可声明的输入。
+- 分段含 `:`、控制字符、零宽/格式字符、代理项、行分隔符，或超列宽（32 / 128 / 128）
+  → **422**（`ValidationError` → 域错误 handler）。
+- `(businessObject, externalId)` 重复 → **409**。
+
+> 事实源：`backend/app/api/v1/id_mapping.py`、`backend/app/domain/id_mapping.py`、
+> `backend/app/domain/schemas.py`（`IdMappingCreate` / `IdMappingUpdate`）。

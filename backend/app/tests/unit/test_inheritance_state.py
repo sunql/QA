@@ -72,6 +72,18 @@ class TestParsePlanTime:
         assert result.year == 2025
         assert result.quarter == 2
 
+    def test_quarter_label_with_explicit_year_parses(self) -> None:
+        """plan conditions 可能直接写 2026-Q3 / 2026年第三季度（2026-10-31 补）。"""
+        for conditions in (
+            ["2026-Q3"],
+            ["2026Q3"],
+            ["2026年第3季度"],
+            ["2026年第三季度"],
+        ):
+            result = _parsePlanTime({"conditions": conditions})
+            assert result is not None, conditions
+            assert (result.year, result.quarter) == (2026, 3), conditions
+
     def test_no_time_condition_returns_none(self) -> None:
         """无时间条件 → None。"""
         plan = {
@@ -112,6 +124,14 @@ class TestShiftTimeHint:
         assert shifted is not None
         assert shifted.quarter == 1
         assert shifted.shifted_from == 2025
+
+    def test_previous_quarter_phrasings_shift(self) -> None:
+        """上个季度 / 上一季度 / 前一季度 / 上季 与「上季度」等价。"""
+        hint = TimeHint(year=2025, quarter=2)
+        for phrase in ("上个季度呢", "上一季度呢", "前一季度呢", "上季呢"):
+            shifted = _shiftTimeHint(hint, phrase)
+            assert shifted is not None, phrase
+            assert shifted.quarter == 1, phrase
 
     def test_last_month_question(self) -> None:
         """「上个月呢」→ month 4→3。"""

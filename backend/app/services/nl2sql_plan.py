@@ -197,6 +197,7 @@ async def generateQueryPlan(
     wikiRulesBlock: str | None = None,
     kpiContractText: str | None = None,
     kpiContractBlock: str | None = None,
+    timeScopeFact: str | None = None,
     maxTokens: int = _NL2SQL_MAX_TOKENS_DEFAULT,
     ownerHintMaxClasses: int = _OWNER_HINT_MAX_CLASSES_DEFAULT,
 ) -> PlanResult:
@@ -250,6 +251,7 @@ async def generateQueryPlan(
             wikiRulesBlock=wikiRulesBlock,
             kpiContractText=kpiContractText,
             kpiContractBlock=kpiContractBlock,
+            timeScopeFact=timeScopeFact,
         )
         userPrompt = _buildPlanUserPrompt(
             question, errors,

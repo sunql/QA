@@ -53,6 +53,30 @@ class TestHasTimeScope:
         assert _hasTimeScope("第一季度采购") is True
         assert _hasTimeScope("一季度采购") is True
 
+    def test_matches_relative_quarter_with_ge(self) -> None:
+        """2026-10-31 修：上个季度/这个季度/下个季度 因「个」字漏判。"""
+        for text in (
+            "本季度采购",
+            "上个季度采购",
+            "上一季度采购",
+            "这个季度采购",
+            "下个季度采购",
+            "本季采购",
+            "上季采购",
+        ):
+            assert _hasTimeScope(text) is True, text
+
+    def test_matches_half_year(self) -> None:
+        """上半年/下半年/这半年/近半年 也是时间范围（行数兜底用）。"""
+        for text in (
+            "上半年采购",
+            "下半年采购",
+            "2026年上半年",
+            "这半年采购",
+            "近半年采购",
+        ):
+            assert _hasTimeScope(text) is True, text
+
     def test_matches_relative_time(self) -> None:
         for text in (
             "上月采购额",

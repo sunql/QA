@@ -228,7 +228,9 @@ _TIME_BUCKET_RULE_ORACLE = (
     "按时间粒度分组时对日期列做截断，不要按原始时间戳分组：按月用 "
     "TO_CHAR(日期列,'YYYY-MM') 或 EXTRACT(YEAR FROM 日期列)||'-'||EXTRACT(MONTH FROM 日期列)，"
     "按年用 TO_CHAR(日期列,'YYYY') 或 EXTRACT(YEAR FROM 日期列)，"
-    "按季度用 TO_CHAR(日期列,'YYYY-Q')；并在 SELECT 输出同一截断表达式作为月份/年份列。"
+    "按季度用 TO_CHAR(日期列,'YYYY-\"Q\"Q')（输出如 2026-Q4；"
+    "格式串中的 Q 必须用双引号转义为字面量，否则只输出季度序号如 2026-4）；"
+    "并在 SELECT 输出同一截断表达式作为月份/年份列。"
 )
 _TIME_BUCKET_RULE_POSTGRESQL = (
     "按时间粒度分组时对日期列做截断，不要按原始时间戳分组：按月用 "
@@ -263,6 +265,11 @@ _DATE_ARITHMETIC_RULE_ORACLE = (
     "② 最近 N 天：WHERE date_col >= CURRENT_DATE - N"
     "③ 月度趋势：SELECT TO_CHAR(ADD_MONTHS(CURRENT_DATE, -LEVEL+1), 'YYYY-MM') ... CONNECT BY LEVEL <= N"
     "或：GROUP BY TO_CHAR(ADD_MONTHS(SYSDATE, -rownum+1), 'YYYY-MM') 这种生成序列的方式。"
+    "④ 按季度取范围（本季度/上季度/指定季度，一律按日历年、含起不含止）："
+    "本季度 WHERE date_col >= TRUNC(SYSDATE,'Q') AND date_col < ADD_MONTHS(TRUNC(SYSDATE,'Q'),3)；"
+    "上季度下界 ADD_MONTHS(TRUNC(SYSDATE,'Q'),-3)、上界 TRUNC(SYSDATE,'Q')；"
+    "指定年月的季度直接写起止日（第 N 季度起始月为 3*(N-1)+1，"
+    "如 2026 年第 3 季度为 2026-07-01 至 2026-10-01）。"
     "**绝对禁止**以下函数（在 Oracle 上必然报错）："
     "DATEADD（SQL Server，ORA-00904）、DATEDIFF（SQL Server）、DATEPART、DATE_PART；"
     "DATE_FORMAT（MySQL，ORA-00904）、DATE_SUB / DATE_ADD（MySQL，ORA-00904）、"

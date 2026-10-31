@@ -36,6 +36,7 @@ from app.domain.models import OntologyClass, OntologyJoin
 from app.domain.query_plan import QueryPlan
 from app.infrastructure.business_db_pool import _assert_read_only
 from app.infrastructure.llm.base_client import LlmMessage
+from app.services.chat_helpers import hasInheritedTime
 from app.services.llm_retry_policy import completeWithTransientRetry
 from app.services.messages_zh import (
     MSG_NL2SQL_PLAN_VALIDATION_FAILED,
@@ -99,11 +100,22 @@ from app.services.nl2sql_scope import (
     _hasTimeScope,
 )
 from app.services.think_block import stripThinkBlocks
+from app.services.time_scope_resolver import resolveTimeScopeFact
 
 # 匹配 ```sql ... ``` 或 ``` ... ``` 代码块
 _SQL_FENCE_RE = re.compile(r"```(?:sql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 logger = logging.getLogger(__name__)
+
+
+def _timeScopeFactFor(scopeQuestion: str | None, question: str, priorState: str | None) -> str:
+    """计划与 SQL 阶段同源解析季度/半年口径（主问题+子问题并集）。
+
+    多轮追问（priorState 携带「继承时间」）只注入显式年份口径：相对季度由
+    chat_context 按上一轮时间递减，两边同时注入会冲突。单轮多步的 priorState
+    只是前序步骤结果，不含时间继承，相对季度照常注入。
+    """
+    return resolveTimeScopeFact(scopeQuestion, question, yearAnchoredOnly=hasInheritedTime(priorState))
 
 
 @dataclass(frozen=True)
@@ -401,6 +413,7 @@ class Nl2SqlService:
         fewShot: str | None = None,
         dictionaryText: str | None = None,
         featureCatalogText: str | None = None,
+        timeScopeFact: str | None = None,
     ) -> str:
         """推理阶段 System Prompt：要求模型先输出结构化查询计划 JSON。
 
@@ -415,6 +428,7 @@ class Nl2SqlService:
             context=context, priorState=priorState, fewShot=fewShot,
             dictionaryText=dictionaryText,
             featureCatalogText=featureCatalogText,
+            timeScopeFact=timeScopeFact,
         )
 
     def validatePlan(
@@ -451,12 +465,13 @@ class Nl2SqlService:
         plan: QueryPlan | None = None,
         fewShot: str | None = None,
         prior_cte: str | None = None,
+        timeScopeFact: str | None = None,
     ) -> str:
         """SQL 生成阶段 System Prompt。"""
         return _buildSystemPrompt(
             schemaText, dialect, schemaPrefix,
             context=context, priorState=priorState, plan=plan, fewShot=fewShot,
-            prior_cte=prior_cte,
+            prior_cte=prior_cte, timeScopeFact=timeScopeFact,
         )
 
     def _buildUserPrompt(
@@ -561,6 +576,9 @@ class Nl2SqlService:
             wikiRulesBlock=wikiRulesBlock,
             kpiContractText=await _buildKpiContractOrNone(session, question),
             kpiContractBlock=kpiContractBlock,
+            # 季度/半年口径由服务端确定性解析（主问题+子问题并集），
+            # 不让 LLM 仅凭「今天是 X」自行推算边界（2026-10-31）。
+            timeScopeFact=_timeScopeFactFor(scopeQuestion, question, priorState),
         )
         # 多步子问题常丢失主问题的时间范围（如主问「2025 年采购情况」，
         # 子问题只剩「查各供应商采购额」）→ 并集判定，宁可不限也不误限。
@@ -714,6 +732,8 @@ class Nl2SqlService:
         schemaCfg = await self._readSchemaConfigOrDefault(session)
         refineCfg = await self._readRefineConfigOrDefault(session)
         dialect = resolveDialect(datasourceType, oracle_version)
+        # 季度/半年口径：与计划阶段同源解析（主问题+子问题并集）。
+        timeScopeFact = _timeScopeFactFor(scopeQuestion, question, priorState)
         # SQL 阶段 schema 裁剪（feat-token-prune，2026-09-28）：计划阶段必须看全量
         # 召回类才能选类，但 SQL 阶段手上已有 plan——没有理由再投一遍全部 13~30 个类。
         # 实测（13 类召回 / 选中 2 类）：SQL 阶段 prompt 15,750 → 8,224 tokens，
@@ -756,7 +776,7 @@ class Nl2SqlService:
             systemPrompt = _buildSystemPrompt(
                 schemaText, dialect, schemaPrefix,
                 context=context, priorState=priorState, plan=plan, fewShot=fewShot,
-                prior_cte=prior_cte,
+                prior_cte=prior_cte, timeScopeFact=timeScopeFact,
             )
             userPrompt = _buildUserPrompt(question, errors, executionError, scopeQuestion=scopeQuestion)
             response = await completeWithTransientRetry(

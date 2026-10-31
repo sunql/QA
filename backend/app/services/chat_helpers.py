@@ -41,6 +41,19 @@ from app.utils.json_safe import jsonSafe
 
 logger = logging.getLogger(__name__)
 
+# 多轮状态 prompt 中「继承时间」的标记（chat_context 写入，nl2sql 读取）。
+# 本模块是二者的公共依赖，放这里避免 chat_context ↔ nl2sql_service 循环导入。
+INHERITED_TIME_MARKER = "继承时间："
+
+
+def hasInheritedTime(statePrompt: str | None) -> bool:
+    """statePrompt 是否携带 chat_context 按上一轮时间递减出的「继承时间」。
+
+    用于区分两类 priorState：多轮追问（有时间继承，相对季度必须让路）与
+    单轮多步的前序步骤结果（无时间继承，相对季度仍应按今天注入）。
+    """
+    return bool(statePrompt) and INHERITED_TIME_MARKER in statePrompt
+
 # M3：历史查询计划（session_query_state.last_plan JSONB）解析出现内容级丢弃时的
 # 日志 reason。历史可能来自旧版本或被直写破坏 —— 只上报，**不收紧**解析口径：
 # 收紧会让历史会话整段失败（_buildStatePrompt 拿不到计划、REFINE 直写被误判失败）。

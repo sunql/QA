@@ -27,6 +27,7 @@ from app.services.chat_chart_persist import (
     chartTypeName,
 )
 from app.services.chat_helpers import (
+    INHERITED_TIME_MARKER,
     _clipText,
     _fitPartsToBudget,
     _snapshotRound,
@@ -45,11 +46,18 @@ logger = logging.getLogger(__name__)
 _RE_YEAR = re.compile(r"(?:year|年份|年)\s*(?:=|>=|<=|>|<)\s*(\d{4})", re.IGNORECASE)
 _RE_PERIOD = re.compile(r"period\s*=\s*['\"]?(\d{4})-(\d{2})", re.IGNORECASE)
 _RE_QUARTER = re.compile(r"(?:quarter|季度)\s*=\s*(\d)", re.IGNORECASE)
+# 2026-Q3 / 2026Q3 / 2026年第3季度 / 2026年第三季度（plan 直接写明季度标签）
+_RE_YEAR_QUARTER = re.compile(
+    r"(?P<yearQ>(?:19|20)\d{2})\s*年?\s*-?\s*Q\s*(?P<qNum>[1-4])(?![0-9A-Za-z])"
+    r"|(?P<yearCn>(?:19|20)\d{2})\s*年第?\s*(?P<qCn>[一二三四1-4])\s*季度",
+    re.IGNORECASE,
+)
+_CN_QUARTER_NUM = {"一": 1, "二": 2, "三": 3, "四": 4}
 _RE_MONTH = re.compile(r"(?:month|月份)\s*=\s*(\d{1,2})", re.IGNORECASE)
 
 # 时间递减关键词（启发式，非穷举）
 _LAST_YEAR_PATTERNS = ("去年", "上年", "上一年")
-_LAST_QUARTER_PATTERNS = ("上季度", "上一季", "上个季度")
+_LAST_QUARTER_PATTERNS = ("上季度", "上个季度", "上一季度", "上一季", "上季", "前一季度", "前一季")
 _LAST_MONTH_PATTERNS = ("上个月", "上一月", "上月")
 
 
@@ -108,6 +116,15 @@ def _parsePlanTime(plan: dict[str, Any] | None) -> TimeHint | None:
             return TimeHint(year=int(m_period.group(1)), month=int(m_period.group(2)))
         except (ValueError, IndexError):
             pass
+
+    # 显式季度标签（自带年份，最不易误解，优先于 quarter = N）
+    m_yearQuarter = _RE_YEAR_QUARTER.search(joined)
+    if m_yearQuarter:
+        yearToken = m_yearQuarter.group("yearQ") or m_yearQuarter.group("yearCn")
+        quarterToken = m_yearQuarter.group("qNum") or m_yearQuarter.group("qCn")
+        # 正则已保证 yearToken 为四位数字、quarterToken ∈ {一,二,三,四,1-4}
+        quarter = _CN_QUARTER_NUM[quarterToken] if quarterToken in _CN_QUARTER_NUM else int(quarterToken)
+        return TimeHint(year=int(yearToken), quarter=quarter)
 
     # quarter = N（与 year 同级，同时存在时两者均取）
     m_quarter = _RE_QUARTER.search(joined)
@@ -931,7 +948,7 @@ class ContextMixin:
                 label += f"第{t.quarter}季度"
             elif t.month:
                 label += f"{t.month}月"
-            parts.append(f"  - 继承时间：{label.strip()}")
+            parts.append(f"  - {INHERITED_TIME_MARKER}{label.strip()}")
         if state.inherited_filters:
             filter_parts = [f"{k}={v}" for k, v in state.inherited_filters.items()]
             parts.append(f"  - 继承过滤：{', '.join(filter_parts)}")
@@ -1007,7 +1024,7 @@ def _buildInheritedStateFromSnapshot(snap: dict) -> str:
         elif mo:
             label += f"{mo}月"
         if label:
-            parts.append(f"  - 继承时间：{label.strip()}")
+            parts.append(f"  - {INHERITED_TIME_MARKER}{label.strip()}")
     filters = snap.get("inherited_filters")
     if filters and isinstance(filters, dict):
         filter_parts = [f"{k}={v}" for k, v in filters.items()]

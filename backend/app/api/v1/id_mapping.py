@@ -6,13 +6,16 @@
   GET    /api/v1/id-mappings/{unified_id}           详情
   PUT    /api/v1/id-mappings/{unified_id}          更新三库 ID
   DELETE /api/v1/id-mappings/{unified_id}           删除（204）
+
+鉴权（A1 验收 #5）：整表列举与写入口为运维/后台专用，要求 admin 角色；
+按 unified_id 的单点读对登录用户保持开放。
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 
-from app.dependencies import CurrentUser, getCurrentUser, getDb
+from app.dependencies import CurrentUser, getCurrentUser, getDb, requireAdmin
 from app.domain.exceptions import ConflictError, NotFoundError
 from app.domain.schemas import (
     IdMappingCreate,
@@ -31,7 +34,7 @@ def _svc() -> IdMappingService:
 
 @router.get("", response_model=list[IdMappingRead])
 async def listIdMappings(
-    _user: CurrentUser = Depends(getCurrentUser),
+    _user: CurrentUser = Depends(requireAdmin),
     businessObject: str | None = Query(default=None, alias="businessObject"),
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
@@ -61,7 +64,7 @@ async def listIdMappings(
 )
 async def createIdMapping(
     payload: IdMappingCreate,
-    _user: CurrentUser = Depends(getCurrentUser),
+    _user: CurrentUser = Depends(requireAdmin),
     session=Depends(getDb),
     svc: IdMappingService = Depends(_svc),
 ) -> IdMappingRead:
@@ -88,7 +91,7 @@ async def getIdMapping(
 async def updateIdMapping(
     unified_id: str,
     payload: IdMappingUpdate,
-    _user: CurrentUser = Depends(getCurrentUser),
+    _user: CurrentUser = Depends(requireAdmin),
     session=Depends(getDb),
     svc: IdMappingService = Depends(_svc),
 ) -> IdMappingRead:
@@ -101,7 +104,7 @@ async def updateIdMapping(
 @router.delete("/{unified_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteIdMapping(
     unified_id: str,
-    _user: CurrentUser = Depends(getCurrentUser),
+    _user: CurrentUser = Depends(requireAdmin),
     session=Depends(getDb),
     svc: IdMappingService = Depends(_svc),
 ) -> None:

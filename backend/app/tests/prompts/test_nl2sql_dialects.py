@@ -80,6 +80,26 @@ def test_resolveDialect_Oracle11g_字符串_应走_11g() -> None:
         )
 
 
+def test_日期算术规则_Oracle_最近N个月_模板必须带上下界() -> None:
+    """off-by-one 回归（2026-10-31）：`>= ADD_MONTHS(TRUNC(CURRENT_DATE,'MM'), -N)`
+    会把「最近 N 个月」算成 N+1 个自然月（本月再往前数 N 个月），永远多算一个月。
+    模板必须给出带下界（本月及前 N-1 个月）与上界（< 下月 1 号）的完整示例。
+    """
+    for dialect in (_SQL_DIALECTS_ORACLE_11G, _SQL_DIALECTS_ORACLE_12C):
+        rule = dialect.dateArithmeticRule
+        # 旧的 off-by-one 写法必须消失（否则 LLM 直接照抄就多算一个月）
+        assert "ADD_MONTHS(TRUNC(CURRENT_DATE, 'MM'), -N)" not in rule, (
+            f"Oracle 日期算术模板仍含 off-by-one 写法（实际：{rule!r}）"
+        )
+        # 6 个自然月的正确上下界必须出现：>= 本月-5，且 < 下月 1 号
+        assert "ADD_MONTHS(TRUNC(CURRENT_DATE, 'MM'), -5)" in rule, (
+            f"Oracle 模板必须给出 6 个自然月的下界示例 -5（实际：{rule!r}）"
+        )
+        assert "ADD_MONTHS(TRUNC(CURRENT_DATE, 'MM'), 1)" in rule, (
+            f"Oracle 模板必须给出上界 < 下月 1 号（实际：{rule!r}）"
+        )
+
+
 def test_日期算术规则_Oracle12c_同样_必须含_ADD_MONTHS() -> None:
     """Oracle 12c+ 与 11g 共用日期算术规则（区别只在 LIMIT 子句）。"""
     rule = _SQL_DIALECTS_ORACLE_12C.dateArithmeticRule

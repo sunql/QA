@@ -56,6 +56,7 @@ from app.domain.enums import (
     SourceSystem,
 )
 from app.domain.exceptions import ConfigError
+from app.domain.id_mapping import BUSINESS_OBJECT_MAX_LENGTH, EXTERNAL_ID_MAX_LENGTH
 from typing import Annotated, Any, Literal, Mapping
 from pydantic import BeforeValidator
 
@@ -3972,11 +3973,24 @@ class WikiLinkableTargetOut(BaseModel):
 
 
 class IdMappingCreate(CamelModel):
-    """创建 id_mapping 的请求体。"""
-    business_object: str = Field(..., min_length=1, max_length=32)
-    external_id: str = Field(..., min_length=1, max_length=128)
-    pg_table: str | None = Field(default=None, max_length=64)
-    pg_id: str | None = Field(default=None, max_length=128)
+    """创建 id_mapping 的请求体。
+
+    **刻意不接受跨库落点**（``pgTable`` / ``pgId`` / ``neo4jNodeId`` /
+    ``milvusCollection`` / ``milvusId``）：这三库列是三库对齐的**结论**，不是
+    调用方可声明的输入。若允许传入，回填会按「``milvus_id IS NULL`` = 尚未同步」
+    筛选，被乐观写死的行会被跳过 —— 向量/节点从未创建，行却声称已同步，形成
+    静默的三库漂移。
+
+    ``extra="forbid"``：传了就是 422 显式报错，而不是静默丢弃（静默丢弃会让
+    调用方以为自己写的指针生效了）。服务端需要写 PG 落点时，走
+    ``IdMappingService.register(..., pg_table=, pg_id=)`` 显式关键字参数。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # 宽度上限与 `id_mapping` 列宽同源（`app.domain.id_mapping`），避免两处漂移
+    business_object: str = Field(..., min_length=1, max_length=BUSINESS_OBJECT_MAX_LENGTH)
+    external_id: str = Field(..., min_length=1, max_length=EXTERNAL_ID_MAX_LENGTH)
 
 
 class IdMappingUpdate(CamelModel):

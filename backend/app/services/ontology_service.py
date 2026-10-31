@@ -312,9 +312,9 @@ class OntologyService:
             IdMappingCreate(
                 business_object="CLASS",
                 external_id=str(entity.id),
-                pg_table="ontology_class",
-                pg_id=str(entity.id),
             ),
+            pg_table="ontology_class",
+            pg_id=str(entity.id),
         )
         unified_id = mapping.unified_id
 
@@ -635,9 +635,9 @@ class OntologyService:
                 IdMappingCreate(
                     business_object="CLASS",
                     external_id=str(entity.id),
-                    pg_table="ontology_class",
-                    pg_id=str(entity.id),
                 ),
+                pg_table="ontology_class",
+                pg_id=str(entity.id),
             )
             unified_id = mapping.unified_id
         else:
@@ -719,9 +719,9 @@ class OntologyService:
             IdMappingCreate(
                 business_object="PROPERTY",
                 external_id=str(entity.id),
-                pg_table="ontology_property",
-                pg_id=str(entity.id),
             ),
+            pg_table="ontology_property",
+            pg_id=str(entity.id),
         )
         unified_id = mapping.unified_id
 
@@ -967,9 +967,9 @@ class OntologyService:
             IdMappingCreate(
                 business_object="METRIC",
                 external_id=str(entity.id),
-                pg_table="ontology_metric",
-                pg_id=str(entity.id),
             ),
+            pg_table="ontology_metric",
+            pg_id=str(entity.id),
         )
         unified_id = mapping.unified_id
 
@@ -1843,9 +1843,9 @@ class OntologyService:
                         IdMappingCreate(
                             business_object="CLASS",
                             external_id=str(cls.id),
-                            pg_table="ontology_class",
-                            pg_id=str(cls.id),
                         ),
+                        pg_table="ontology_class",
+                        pg_id=str(cls.id),
                     )
                     cls_uid = mapping.unified_id
                 except Exception as exc:  # noqa: BLE001
@@ -1895,9 +1895,9 @@ class OntologyService:
                         IdMappingCreate(
                             business_object="PROPERTY",
                             external_id=str(prop.id),
-                            pg_table="ontology_property",
-                            pg_id=str(prop.id),
                         ),
+                        pg_table="ontology_property",
+                        pg_id=str(prop.id),
                     )
                     prop_uid = mapping.unified_id
                 except Exception as exc:  # noqa: BLE001

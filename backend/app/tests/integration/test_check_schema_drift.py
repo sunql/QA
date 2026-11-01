@@ -78,10 +78,18 @@ def _runDriftScript(dbUrl: str, *args: str) -> subprocess.CompletedProcess:
 
 
 def _dbUrl() -> str:
-    """真实 PG 测试库 URL（未配置时由 _pg_support fail-fast）。"""
-    from app.tests._pg_support import resolveTestDatabaseUrl
+    """真实 PG 测试库 URL（未配置时由 _pg_support fail-fast）。
 
-    return resolveTestDatabaseUrl()
+    必须先 `_ensureSchema` 把测试库升到 head：新断言 `[db:index] not in combined`
+    要能抓到「迁移建了索引、ORM 忘了声明」，前提是**那些索引真的在 DB 上**。
+    测试库落后 head 时，新迁移的索引还没落库，断言会恒真（假绿）。
+    `_ensureSchema` 是幂等的（进程内只跑一次），测试库已在 head 时是空操作。
+    """
+    from app.tests._pg_support import _ensureSchema, resolveTestDatabaseUrl
+
+    url = resolveTestDatabaseUrl()
+    _ensureSchema(url)
+    return url
 
 
 async def _execSql(dbUrl: str, *statements: str) -> None:
@@ -561,8 +569,7 @@ class TestColumnAndIndexDriftSubprocess:
         这套真实 schema 上就会立刻误报成「ORM 索引缺失」。误报的代价是启动被
         阻断，所以这里把几个典型约束支撑索引**按名字**钉死。
 
-        注意 `[db:index]` **可以**出现：测试库上确实有 23 个 ORM 未声明的历史
-        遗留索引，它们就该被报成非阻断警告。
+        注意 `[db:index]` **不再允许**出现：2026-11-01 的 Schema SSOT 对齐把 33 个「迁移建了、ORM 没声明」的索引全部补进了 ORM，断言因此从「允许出现」收紧为「不允许出现」。
         """
         result = _runDriftScript(db_url)
         combined = result.stdout + result.stderr
@@ -574,6 +581,10 @@ class TestColumnAndIndexDriftSubprocess:
         assert "[orm:column]" not in combined
         assert "[orm:index]" not in combined
         assert "[db:column]" not in combined
+        # 2026-11-01 Schema SSOT 对齐后：DB 多余的列/索引已全部补进 ORM，
+        # 断言从「允许出现」收紧为「不允许出现」—— 新的迁移建了索引却忘了
+        # 补 ORM，会在这里立刻失败（而不是又刷几个月启动日志）。
+        assert "[db:index]" not in combined
 
         # 约束支撑索引必须被认领（真实库上共 130+ 个，漏认就刷屏）
         for name in (

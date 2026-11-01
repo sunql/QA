@@ -76,9 +76,11 @@ def _ensureSchema(url: str) -> None:
         return
     # 库名白名单护栏：下面跑的是 `alembic upgrade head`（DDL）。
     # `resolveTestDatabaseUrl()` 的 DATABASE_URL 分支只改写**库名**、保留**主机**
-    # —— 若 DATABASE_URL 被误配到生产主机上，这行 DDL 就会直接打到生产库。
-    # 白名单 `^qa_metadata_test($|_)` 把它挡在门外（今天两条分支都恒通过，
-    # 这是给未来直接调用 `_ensureSchema` 的人加的护栏）。
+    # —— 若 DATABASE_URL 被误配到生产主机，这行 DDL 会打到那个主机上的同名库。
+    # 白名单 `^qa_metadata_test($|_)` 挡住的是**库名不对**的情况（今天两条分支
+    # 都恒通过，这是给未来直接调用 `_ensureSchema` 的人加的护栏）。
+    # 注意：护栏只看库名、不看主机 —— 生产主机上若恰好有 `qa_metadata_test*` 同名库，
+    # 仍会被放行。主机级防护需另行加（宿主机/容器隔离），不在本护栏范围内。
     assertTestDatabase(url)
     env = dict(os.environ)
     env["DATABASE_URL"] = url

@@ -54,9 +54,13 @@ export async function deleteSessionHistory(sessionId: string): Promise<void> {
   await httpClient.delete(`${BASE}/${sessionId}`);
 }
 
-/** 导出请求体里的一张图表位图（messageId → data:image/png;base64,...）。 */
+/** 导出请求体里的一张图表位图（(messageId, stepIndex) → data:image/png;base64,...）。
+ *
+ * `stepIndex` 缺省 = 该轮顶层图（0105 行为）；多步报告的分节图按步骤归属 ——
+ * 后端据此把图挂到 PDF 里对应那一节的标题下。 */
 export interface ExportChartImage {
   messageId: number;
+  stepIndex?: number;
   imagePng: string;
 }
 

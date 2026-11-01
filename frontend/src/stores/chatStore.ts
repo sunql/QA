@@ -482,6 +482,7 @@ function streamHandlers(
       tokensUsed,
       cost,
       modelName,
+      latencyMs,
       affinityStatus,
       agentRun,
       supplier360,
@@ -498,6 +499,9 @@ function streamHandlers(
             tokensUsed,
             cost,
             modelName: modelName ?? undefined,
+            // 计划卡摘要的耗时：done 帧无 latency_ms（如中继/旧后端）时整段缺省，
+            // 不能写成 0 ——那会把「未知」显示成「0秒」。
+            ...(latencyMs != null ? { elapsedMs: latencyMs } : {}),
             isStreaming: false,
             affinityStatus: affinityStatus ?? null,
             // #207 审查 HIGH 修复：流式 done 事件同样携带拦截类卡片对象
@@ -839,6 +843,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             tokensUsed,
             cost,
             modelName,
+            latencyMs,
             affinityStatus,
             agentRun,
             supplier360,
@@ -856,6 +861,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   tokensUsed,
                   cost,
                   modelName: modelName ?? undefined,
+                  ...(latencyMs != null ? { elapsedMs: latencyMs } : {}),
                   isStreaming: false,
                   affinityStatus: affinityStatus ?? null,
                   agentRun: agentRun ?? null,

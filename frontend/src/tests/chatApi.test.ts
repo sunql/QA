@@ -196,6 +196,26 @@ describe("api/chat", () => {
     expect(JSON.parse(init.body)).toEqual(payload);
   });
 
+  it("sendMessageStream done 帧透传 latency_ms（计划卡摘要的耗时来源）", async () => {
+    const stream = sseStream('event: done\ndata: {"tokensUsed":1,"cost":0,"latency_ms":12345}\n\n');
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const onDone = vi.fn();
+    await sendMessageStream(makePayload(), { onDone });
+
+    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ latencyMs: 12345 }));
+  });
+
+  it("done 帧缺 latency_ms 时为 null（不让回放路径凭空造出耗时）", async () => {
+    const stream = sseStream('event: done\ndata: {"tokensUsed":1,"cost":0}\n\n');
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const onDone = vi.fn();
+    await sendMessageStream(makePayload(), { onDone });
+
+    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ latencyMs: null }));
+  });
+
   it("sendMessageStream error 事件调用 onError（含 detail + errorType）", async () => {
     const stream = sseStream(
       'event: meta\ndata: {"intent":"query"}\n\n',

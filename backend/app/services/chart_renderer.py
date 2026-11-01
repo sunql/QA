@@ -53,6 +53,12 @@ _DATAZOOM_KINDS = frozenset({ChartType.BAR, ChartType.HBAR, ChartType.COMBO})
 # 饼图/环形图之外的 kind 不允许出现 `{d}` 模板变量。
 _PIE_LIKE = frozenset({ChartType.PIE, ChartType.DONUT})
 
+# 2026-10-31：排名类图的默认视图只留前 20 类，尾部合成「其他（N 项）」。
+# 只作用于排名语义成立的图形；折线看趋势、散点/热力/瀑布看分布，截尾会篡改
+# 图形语义，一律不截断。
+_TOP_N_LIMIT = 20
+_TOP_N_KINDS = frozenset({ChartType.BAR, ChartType.HBAR, ChartType.PIE, ChartType.DONUT})
+
 
 # ---------------------------------------------------------------------------
 # 取值助手
@@ -590,17 +596,161 @@ def _walkAndNormalizeFormatters(node: Any) -> Any:
     return node
 
 
-def renderChartOption(spec: ChartSpec, data: list[dict]) -> dict[str, Any]:
-    """把 spec + 数据渲染成图表负载。**全函数，绝不抛错**（异常降级为表格）。"""
+def renderChartOption(
+    spec: ChartSpec, data: list[dict], *, topN: bool = False
+) -> dict[str, Any]:
+    """把 spec + 数据渲染成图表负载。**全函数，绝不抛错**（异常降级为表格）。
+
+    ``topN=True`` 时，若图形是排名语义且类目超过 ``_TOP_N_LIMIT``，额外挂一份
+    「前 20 + 其他」的视图：``topNOption``（完整 option）+ ``topNMeta``
+    （``limit/hidden/total``）。全量 option 逐字不变 —— 截断是**附加**字段，
+    前端切换、PDF 截图、研究线报告都从同一份 JSONB 里读，不需要各自造规则。
+    """
     rows = list(data or [])
+    builder = _BUILDERS.get(spec.kind)
+    if builder is None:
+        logger.warning("渲染器没有 %s 的 builder，降级为表格", spec.kind)
+        return _buildTable(spec, rows)
     try:
-        builder = _BUILDERS.get(spec.kind)
-        if builder is None:
-            logger.warning("渲染器没有 %s 的 builder，降级为表格", spec.kind)
-            return _buildTable(spec, rows)
-        return _normalizeFormatters(builder(spec, rows), spec.kind)
+        option = _normalizeFormatters(builder(spec, rows), spec.kind)
     except Exception:
         logger.warning(
             "渲染 %s 失败，降级为表格负载（数据不丢）", spec.kind, exc_info=True
         )
         return _buildTable(spec, rows)
+    if not topN:
+        return option
+    try:
+        return _attachTopN(spec, rows, builder, option)
+    except Exception:
+        # 截断视图是增强项：构造失败只发全量图，绝不让整张图降级。
+        logger.warning("构造 Top-N 视图失败，退化为全量图", exc_info=True)
+        return option
+
+
+def _attachTopN(
+    spec: ChartSpec,
+    rows: list[dict],
+    builder: Callable[[ChartSpec, list[dict]], dict[str, Any]],
+    option: dict[str, Any],
+) -> dict[str, Any]:
+    """在全量 option 上附加 ``topNOption`` / ``topNMeta``；条件不满足时原样返回。"""
+    catField = _dimensionOf(spec, 0)
+    if spec.kind not in _TOP_N_KINDS or not catField:
+        return option
+    categories = _categories(rows, catField)
+    hidden = len(categories) - _TOP_N_LIMIT
+    if hidden <= 0:
+        return option
+    measureFields = _measureFields(spec)
+    if not measureFields or not _isOrderedByMeasure(rows, categories, catField, measureFields[0]):
+        # 行序不可信（SQL 没 ORDER BY）：任意 20 个类目冒充「前 20」比不截断更糟。
+        logger.info(
+            "图表行序与度量 %s 不单调，跳过 Top-N 截断（SQL 可能缺 ORDER BY）",
+            measureFields[0],
+        )
+        return option
+    headSet = set(categories[:_TOP_N_LIMIT])
+    kept = [row for row in rows if _asLabel(row.get(catField)) in headSet]
+    tail = [row for row in rows if _asLabel(row.get(catField)) not in headSet]
+    synthetic = _otherRows(spec, tail, catField, f"其他（{hidden} 项）")
+    topOption = _normalizeFormatters(builder(spec, kept + synthetic), spec.kind)
+    return {
+        **option,
+        "topNOption": topOption,
+        "topNMeta": {
+            "limit": _TOP_N_LIMIT,
+            "hidden": hidden,
+            "total": len(categories),
+        },
+    }
+
+
+def _isOrderedByMeasure(
+    rows: list[dict], categories: list[str], catField: str, measureField: str
+) -> bool:
+    """类目按该度量的**合计**单调（升或降，允许并列）⇒ 行序可当「前 N」的依据。
+
+    Top-N 的正确性依赖「行序 == 度量序」：SQL 有 ORDER BY 时成立（降序对应
+    「最多的 N 个」，升序对应「最低的 N 个」）；planner 只出 groupBy 没出排序时
+    DB 返回任意顺序，此时按行序切出的「前 20」是随机样本。宁可不截断，只发全量图。
+
+    同一类目可能有多行（多维组合），所以按类目合计判断，而不是逐行取值 ——
+    否则 `ORDER BY` 按类目汇总排序的分组数据会被误判成无序。
+
+    ``None``（该类目无可用数值）不携带排序信息，跳过不参与比较；全都为 None 时
+    无从证伪，按「有序」处理（保持既有截断行为，「其他」项如实留空而不是补 0）。
+    """
+    buckets: dict[str, list[dict]] = {}
+    for row in rows:
+        buckets.setdefault(_asLabel(row.get(catField)), []).append(row)
+    totals = [
+        total
+        for total in (_sumOf(buckets.get(name, []), measureField) for name in categories)
+        if total is not None
+    ]
+    if len(totals) < 2:
+        return True
+    return all(a >= b for a, b in zip(totals, totals[1:])) or all(
+        a <= b for a, b in zip(totals, totals[1:])
+    )
+
+
+def _otherRows(
+    spec: ChartSpec, tail: list[dict], catField: str, otherLabel: str
+) -> list[dict[str, Any]]:
+    """把尾部类目合成「其他」行。
+
+    分组柱状图按「类目 × 其余维度组合」各生成一行 —— 只生成一行会让「其他」
+    整根堆在第一个分组上，另外几个分组凭空缺一格。饼图的其余维度本就不参与
+    渲染（``_buildPieLike`` 只读第一个维度），故恒定合成单行。
+    """
+    if not tail:
+        return []
+    groupFields = _otherGroupFields(spec)
+    measureFields = _measureFields(spec)
+    buckets: dict[tuple[str, ...], list[dict]] = {}
+    for row in tail:
+        key = tuple(_asLabel(row.get(field)) for field in groupFields)
+        buckets.setdefault(key, []).append(row)
+    synthetic: list[dict[str, Any]] = []
+    for key, bucket in buckets.items():
+        other: dict[str, Any] = {field: None for field in spec.columns}
+        other[catField] = otherLabel
+        other.update(zip(groupFields, key))
+        for field in measureFields:
+            other[field] = _sumOf(bucket, field)
+        synthetic.append(other)
+    return synthetic
+
+
+def _otherGroupFields(spec: ChartSpec) -> tuple[str, ...]:
+    """合成行的分组维度 = 第一个维度之外的所有维度（饼图除外，见 ``_otherRows``）。"""
+    if spec.kind in _PIE_LIKE:
+        return ()
+    return tuple(
+        field
+        for field in (_dimensionOf(spec, index) for index in range(1, len(spec.dimensions)))
+        if field
+    )
+
+
+def _measureFields(spec: ChartSpec) -> tuple[str, ...]:
+    """需要求和的字段：series 声明优先，再补 measures（去重保序）。"""
+    fields: list[str] = []
+    for candidate in [entry.measure for entry in spec.series] + [
+        entry.field for entry in spec.measures
+    ]:
+        if candidate and candidate not in fields:
+            fields.append(candidate)
+    return tuple(fields)
+
+
+def _sumOf(rows: list[dict], field: str) -> float | int | None:
+    """尾部合计；全空返回 None（不能补 0 —— 那会造出「其他项为零」的假事实）。"""
+    numbers = [
+        value
+        for value in (toNumber(row.get(field)) for row in rows)
+        if value is not None
+    ]
+    return sum(numbers) if numbers else None

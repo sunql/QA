@@ -254,6 +254,28 @@ describe("chatStore", () => {
     expect(chatApi.sendMessage).not.toHaveBeenCalled();
   });
 
+  it("流式 done 帧的 latency_ms 回填为消息耗时（计划卡摘要）", async () => {
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      handlers.onDone?.({ tokensUsed: 0, cost: 0, latencyMs: 12345 });
+    });
+    useChatStore.getState().setDatasourceId(1);
+    await useChatStore.getState().sendMessage("多步问题", true);
+
+    expect(useChatStore.getState().messages[1].elapsedMs).toBe(12345);
+  });
+
+  // 反向守卫：历史回放没有时长，done 帧缺 latency_ms 时消息上不得出现 elapsedMs
+  // ——否则计划卡会给回放出来的旧回答编一个「0秒」。
+  it("done 帧没有 latency_ms 时不伪造耗时", async () => {
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      handlers.onDone?.({ tokensUsed: 0, cost: 0 });
+    });
+    useChatStore.getState().setDatasourceId(1);
+    await useChatStore.getState().sendMessage("多步问题", true);
+
+    expect(useChatStore.getState().messages[1].elapsedMs).toBeUndefined();
+  });
+
   it("sendMessage 流式 error 事件写入错误消息与 errorType", async () => {
     chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
       handlers.onError?.("数据源 99999 不存在", undefined, "db_connectivity");

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.services.report_sections import buildReportSections
+from app.services.report_sections import buildReportSections, chartSteps
 
 
 def _step(index: int, **overrides):
@@ -123,3 +123,45 @@ def test_supports_snake_case_objects() -> None:
     blocks = buildReportSections("### 步骤 1：2024\n1000 万。", [step])
 
     assert blocks[1] == {"kind": "chart", "stepIndex": 0, "title": "2024 销售额"}
+
+
+# ---------------------------------------------------------------------------
+# chartSteps：导出分节插图按 stepIndex 取该步的图负载。与 buildReportSections
+# 共用「有图」判据，避免两处漂移（一处出块、一处取图，判据必须同一把尺）。
+# ---------------------------------------------------------------------------
+
+
+def test_chart_steps_keeps_only_steps_that_have_a_chart() -> None:
+    steps = [
+        _step(0),
+        _step(1, sql=None, chartType=None, chartOption=None),
+        _step(2),
+    ]
+
+    assert chartSteps(steps) == [
+        {"stepIndex": 0, "chartType": "bar", "chartOption": {"series": []}},
+        {"stepIndex": 2, "chartType": "bar", "chartOption": {"series": []}},
+    ]
+
+
+def test_chart_steps_is_sorted_by_step_index() -> None:
+    assert [s["stepIndex"] for s in chartSteps([_step(2), _step(0)])] == [0, 2]
+
+
+def test_chart_steps_supports_snake_case_objects() -> None:
+    step = SimpleNamespace(
+        step_index=3,
+        sql="SELECT 1",
+        chart_type="kpi",
+        chart_option={"kpi": {"label": "x"}},
+    )
+
+    assert chartSteps([step]) == [
+        {"stepIndex": 3, "chartType": "kpi", "chartOption": {"kpi": {"label": "x"}}}
+    ]
+
+
+def test_chart_steps_returns_empty_for_non_sequence_input() -> None:
+    assert chartSteps(None) == []
+    assert chartSteps("not steps") == []
+    assert chartSteps([]) == []

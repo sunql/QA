@@ -60,5 +60,17 @@ services:
     volumes: !override
       - mysql_data:/var/lib/mysql
 
+  # ===== PDF 中文字体 bind mount 的 SELinux 标签 =====
+  # backend 在基础文件里挂了 `./fonts:/app/fonts:ro`（微软雅黑，见 docker/fonts/README.md）。
+  # CentOS 的 SELinux 默认不让容器读普通标签的宿主目录，必须用 `:z` 让 Docker 给该
+  # 目录打上 container_file_t —— 这就是上面特意去掉 mysql-demo bind mount 的同一条
+  # 约束；字体这里绕不开（文件太大且不可再分发，没法烤进镜像），只能显式 relabel。
+  #
+  # backend 在基础文件里只有这一个卷，所以 `!override` + 重列是安全的；**将来**基础
+  # 文件给 backend 加了新卷，必须同步到这里，否则会在生产被静默剥掉。
+  backend:
+    volumes: !override
+      - ./fonts:/app/fonts:ro,z
+
 volumes:
   ollama_models:

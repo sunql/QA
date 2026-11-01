@@ -4,11 +4,11 @@
 （不可变 dataclass），将其渲染为 PDF 字节，不接触 DB / ORM / FastAPI。
 
 实现要点：
-- 中文字体用 reportlab 内置 STSong-Light CID 字体（CIDFont，无需字体文件，
-  任何装了 reportlab 的环境即可用；劣势：不支持斜体/粗体变体）。
+- 中文字体走 ``pdf_fonts.ensureCjkFont()``：优先微软雅黑（TrueType，嵌入子集，
+  任何阅读器都能显示），缺字体文件时回落 reportlab 内置 STSong-Light。
 - Markdown 解析：``markdown`` 库的 python-markdown API 把内容转 HTML；
-  我们再用 ``html.parser`` 拆分为 block 节点（标题/段落/列表/引用/代码块/表格），
-  每个 block 转 platypus Flowable。直接 ``md.convert(text)`` 返回的 HTML
+  再用 ``pdf_markdown_html.htmlToBlocks`` 白名单清洗并拆成 block 节点（标题/
+  段落/列表/引用/代码块/表格），每个 block 转 platypus Flowable。直接 ``md.convert(text)`` 返回的 HTML
   给 Paragraph 渲染时不支持表格/列表/嵌套结构。
 - 图表区（0105 起）：**不再一律是占位框**。分三条路：
   1. 有前端回传的 PNG → 直接嵌 ``Image``（像素与前端的图一致）；
@@ -36,12 +36,9 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
-    Image as PdfImage,
     KeepTogether,
     PageTemplate,
     Paragraph,
@@ -50,15 +47,19 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from reportlab.platypus import (
+    Image as PdfImage,
+)
 from reportlab.platypus.flowables import HRFlowable
 
 from app.domain.enums import ChartType
+from app.services.chat_chart_persist import _PERSIST_MAX_TABLE_ROWS
+from app.services.pdf_fonts import ensureCjkFont
+from app.services.pdf_markdown_html import htmlToBlocks
 
 logger = logging.getLogger(__name__)
 
 
-# 中文 CID 字体（reportlab 内置）；不支持粗体/斜体变体
-_CJK_FONT_NAME = "STSong-Light"
 _MONO_FONT_NAME = "Courier"
 
 # 图表位图在 PDF 里能占的正文框 = 正文可用宽/高 × 此比例。与占位框同宽（0.7），让
@@ -66,106 +67,19 @@ _MONO_FONT_NAME = "Courier"
 # 只夹宽度会让窄高图的高度溢出版面。
 _CHART_IMAGE_BOX_RATIO = 0.7
 
-# 支持的 HTML block 标签集合（其它降级为段落）
-_BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "blockquote", "pre", "table", "hr"}
+@dataclass(frozen=True)
+class ExportStepChart:
+    """多步报告里的一步图（2026-10-31，分节插图）。
 
-# 安全审查 MEDIUM-4：白名单 inline 标签 + 白名单属性。reportlab Paragraph 支持
-# 的内联标签有限，仅放行 <b>/<i>/<br/>；<font> 仅放行 color/face 属性；其它
-# 标签（含 <a href>）一律剥除，避免钓鱼或误导链接。
-_WHITELIST_INLINE_TAGS = {"b", "i", "br", "font"}
-_WHITELIST_FONT_ATTRS = {"color", "face"}
-_BLOCK_TAGS_ALLOWED = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li",
-                       "blockquote", "pre", "code", "table", "thead", "tbody", "tr",
-                       "th", "td", "hr"}
-_WHITELIST_BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "blockquote", "pre", "table", "hr"}
-
-
-def _sanitize_inline_html(html_str: str) -> str:
-    """白名单 block + inline 标签与属性，其它标签全部剥除。
-
-    解析 HTML 后只输出 block 标签（白名单）+ 选定的 inline 子集；危险标签
-    （如 <script>, <iframe>, <a href javascript:...>）转为纯文本。
+    分节块只带 ``stepIndex``（图负载不复制，同实时/回放的取舍）；PDF 渲染时按
+    stepIndex 到这里取图与结构。``chart_image`` 由前端按 ``(messageId, stepIndex)``
+    回传后挂上。
     """
-    # 用一个简单 HTMLParser 重建；非白名单标签全部 escape 为文本
-    class _Sanitizer(HTMLParser):
-        def __init__(self) -> None:
-            super().__init__(convert_charrefs=True)
-            self.out: list[str] = []
-            self._skip_depth = 0  # 处于非白名单标签内时 1+
 
-        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-            if self._skip_depth > 0:
-                # 嵌套在剥除标签内的子标签也剥除
-                if tag in _BLOCK_TAGS_ALLOWED or tag in _WHITELIST_INLINE_TAGS or tag not in (
-                    _WHITELIST_INLINE_TAGS | _BLOCK_TAGS_ALLOWED
-                ):
-                    self._skip_depth += 1
-                    return
-            if tag == "br":
-                self.out.append("<br/>")
-                return
-            if tag in _BLOCK_TAGS_ALLOWED:
-                self.out.append(f"<{tag}>")
-                return
-            if tag in _WHITELIST_INLINE_TAGS:
-                if tag == "font":
-                    attrs_kept = [
-                        (k, v) for k, v in attrs if k in _WHITELIST_FONT_ATTRS and v is not None
-                    ]
-                    attr_str = "".join(
-                        f' {k}="{html.escape(v, quote=True)}"' for k, v in attrs_kept
-                    )
-                    self.out.append(f"<font{attr_str}>")
-                elif tag == "b":
-                    self.out.append("<b>")
-                elif tag == "i":
-                    self.out.append("<i>")
-                return
-            # 非白名单标签（含 script/style/iframe/a）— 跳过其子树
-            if tag not in (_WHITELIST_INLINE_TAGS | _BLOCK_TAGS_ALLOWED):
-                self._skip_depth += 1
-
-        def handle_endtag(self, tag: str) -> None:
-            if tag in _BLOCK_TAGS_ALLOWED:
-                # 配对简单约定：未配对的 end tag 一律忽略
-                # （HTMLParser 不会自动平衡）
-                self.out.append(f"</{tag}>")
-                return
-            if tag in _WHITELIST_INLINE_TAGS:
-                if tag == "font":
-                    self.out.append("</font>")
-                elif tag == "b":
-                    self.out.append("</b>")
-                elif tag == "i":
-                    self.out.append("</i>")
-                return
-            if tag not in (_WHITELIST_INLINE_TAGS | _BLOCK_TAGS_ALLOWED):
-                # 关闭剥除标签 — 仅在跳过栈非空时弹出
-                if self._skip_depth > 0:
-                    self._skip_depth -= 1
-
-        def handle_data(self, data: str) -> None:
-            if self._skip_depth == 0:
-                self.out.append(html.escape(data, quote=False))
-
-    s = _Sanitizer()
-    try:
-        s.feed(html_str)
-        s.close()
-    except Exception:
-        logger.warning("HTML sanitize 失败，降级为 escape 全文")
-        return html.escape(html_str)
-    return "".join(s.out)
-
-
-def _register_cjk_font_once() -> None:
-    """注册内置中文字体；reportlab 要求显式 registerFont。
-    重复注册会抛 ValueError，因此通过模块属性幂等。
-    """
-    if getattr(_register_cjk_font_once, "_done", False):
-        return
-    pdfmetrics.registerFont(UnicodeCIDFont(_CJK_FONT_NAME))
-    _register_cjk_font_once._done = True  # type: ignore[attr-defined]
+    step_index: int
+    chart_type: str | None
+    chart_option: dict | None = None
+    chart_image: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +103,12 @@ class ChatExportTurn:
     model_name: str | None = None
     tokens_used: int | None = None
     cost: Decimal | None = None
+    # 2026-10-31（分节插图）：多步最终回答的分节块（buildReportSections 现算）。
+    # 非 None 时 PDF 按块顺序排版（文字 → 该步图），此时顶层的
+    # chart_type/chart_option 不再单画（图都在分节里，再画一次就重复了）。
+    report_sections: list[dict] | None = None
+    # 2026-10-31：分节块引用的步骤图（按 step_index 取）。无分节时为空。
+    step_charts: tuple[ExportStepChart, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -201,63 +121,6 @@ class ChatExportPayload:
     turns: list[ChatExportTurn] = field(default_factory=list)
 
 
-# 简易 block 抽取器：扫 markdown→HTML 输出，按 _BLOCK_TAGS 切分为 (tag, inner_html) 列表
-class _BlockExtractor(HTMLParser):
-    """把 HTML 流拆成 block 节点；inline 标签（<b>/<i>/<code>）保留在 inner HTML 里。"""
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.blocks: list[tuple[str, str]] = []  # [(tag, inner_html)]
-        self._stack: list[tuple[str, list[str]]] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _BLOCK_TAGS:
-            self._stack.append((tag, []))
-        else:
-            # inline 标签：作为原始标签重新写出，由 reportlab Paragraph 解析
-            attr_str = "".join(
-                f' {k}="{html.escape(v, quote=True)}"' for k, v in attrs if v is not None
-            )
-            if self._stack:
-                self._stack[-1][1].append(f"<{tag}{attr_str}>")
-            else:
-                # block 外 inline：作为单独段落处理
-                self._stack.append(("p", [f"<{tag}{attr_str}>"]))
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _BLOCK_TAGS and self._stack and self._stack[-1][0] == tag:
-            block_tag, parts = self._stack.pop()
-            self.blocks.append((block_tag, "".join(parts)))
-        else:
-            # inline 标签闭合
-            if self._stack:
-                self._stack[-1][1].append(f"</{tag}>")
-
-    def handle_data(self, data: str) -> None:
-        if self._stack:
-            self._stack[-1][1].append(html.escape(data, quote=False))
-
-
-def _html_to_blocks(html_str: str) -> list[tuple[str, str]]:
-    """把 markdown→HTML 输出拆为 (tag, inner_html) 列表。"""
-
-    # 安全审查 MEDIUM-4：白名单 inline 标签，避免恶意 HTML（reportlab Paragraph
-    # 识别 <font>/<b>/<i>/<br/> 等内联标签，可能被注入 <font color=red> 误导读者）
-    # 通过 attribute 白名单 + tag 白名单双重过滤，非白名单标签直接剥除。
-    html_str = _sanitize_inline_html(html_str)
-    parser = _BlockExtractor()
-    try:
-        parser.feed(html_str)
-        parser.close()
-    except Exception:
-        logger.warning("HTML 解析失败，降级为段落: %s", html_str[:80])
-        return [("p", html.escape(html_str))]
-    # 收尾：未闭合的 stack 强制 flush（markdown 转换结果通常闭合完整）
-    for tag, parts in parser._stack:  # type: ignore[attr-defined]
-        parser.blocks.append((tag, "".join(parts)))
-    return parser.blocks
-
-
 class ChatExportPdfBuilder:
     """把 ChatExportPayload 渲染为 PDF 字节（bytes）。
 
@@ -268,7 +131,7 @@ class ChatExportPdfBuilder:
     _MARGIN = 2 * cm
 
     def __init__(self) -> None:
-        _register_cjk_font_once()
+        self._cjk_font = ensureCjkFont()
         self._styles = self._build_styles()
 
     def build(self, payload: ChatExportPayload) -> bytes:
@@ -305,7 +168,7 @@ class ChatExportPdfBuilder:
         body = ParagraphStyle(
             name="Body",
             parent=base["Normal"],
-            fontName=_CJK_FONT_NAME,
+            fontName=self._cjk_font,
             fontSize=10,
             leading=14,
             wordWrap="CJK",
@@ -313,7 +176,7 @@ class ChatExportPdfBuilder:
         title = ParagraphStyle(
             name="DocTitle",
             parent=base["Title"],
-            fontName=_CJK_FONT_NAME,
+            fontName=self._cjk_font,
             fontSize=18,
             leading=22,
             spaceAfter=8,
@@ -381,21 +244,21 @@ class ChatExportPdfBuilder:
             return story
 
         for idx, turn in enumerate(payload.turns, start=1):
-            story.append(self._build_turn(idx, turn))
+            story.extend(self._build_turn(idx, turn))
         return story
 
-    def _build_turn(self, idx: int, turn: ChatExportTurn) -> KeepTogether:
+    def _build_turn(self, idx: int, turn: ChatExportTurn) -> list[Any]:
+        """一轮 → flowables 列表。
+
+        无 ``report_sections``（单步问答 / 存量消息）整轮 ``KeepTogether``，与 0105
+        行为完全一致；有分节时拆开（见 ``_build_sectioned_turn``）。
+        """
+        if turn.report_sections:
+            return self._build_sectioned_turn(idx, turn)
         flowables: list[Any] = []
-        # 用户问题
-        flowables.append(Paragraph(f"#{idx} · 用户", self._styles["role_user"]))
-        user_time = turn.user_time.strftime("%Y-%m-%d %H:%M:%S") if turn.user_time else "—"
-        flowables.append(Paragraph(f"<font color='#666666'>{user_time}</font>", self._styles["meta"]))
-        flowables.extend(self._markdown_to_flowables(turn.user_content))
+        flowables.extend(self._question_flowables(idx, turn))
         # 助手回答
-        flowables.append(Spacer(1, 6))
-        flowables.append(Paragraph(f"#{idx} · 助手", self._styles["role_assistant"]))
-        asst_time = turn.assistant_time.strftime("%Y-%m-%d %H:%M:%S") if turn.assistant_time else "—"
-        flowables.append(Paragraph(f"<font color='#666666'>{asst_time}</font>", self._styles["meta"]))
+        flowables.extend(self._answer_header_flowables(idx, turn))
         flowables.extend(self._markdown_to_flowables(turn.assistant_content))
         # SQL
         if turn.sql:
@@ -406,7 +269,84 @@ class ChatExportPdfBuilder:
         if turn.chart_type:
             flowables.append(Spacer(1, 4))
             flowables.extend(self._chart_flowables(turn))
-        # 元信息：模型/Tokens/成本
+        flowables.extend(self._turnFooter_flowables(turn))
+        return [KeepTogether(flowables)]
+
+    def _build_sectioned_turn(self, idx: int, turn: ChatExportTurn) -> list[Any]:
+        """多步报告：问答头一起、正文与图按分节块顺序流式排版。
+
+        **不整轮 KeepTogether**：多步报告常跨好几页，整轮裹在一起会把整块推到
+        下一页；单块超过一页时 reportlab 直接抛 ``LayoutError``（整份导出 500）。
+        这里只把「用户问题 + 助手标题」保持在一起，其余交给平台分页。
+        """
+        flowables: list[Any] = [
+            KeepTogether(
+                self._question_flowables(idx, turn)
+                + self._answer_header_flowables(idx, turn)
+            )
+        ]
+        step_charts = {chart.step_index: chart for chart in turn.step_charts}
+        for block in turn.report_sections or []:
+            kind = block.get("kind")
+            if kind == "text":
+                content = block.get("content")
+                flowables.extend(
+                    self._markdown_to_flowables(content if isinstance(content, str) else "")
+                )
+            elif kind == "chart":
+                flowables.extend(self._section_chart_flowables(block, step_charts))
+        # 顶层 SQL：多步回答的 SQL 仍是整轮属性，放在正文之后（分节里没有 SQL 块）
+        if turn.sql:
+            flowables.append(Spacer(1, 4))
+            flowables.append(Paragraph("<b>SQL：</b>", self._styles["body"]))
+            flowables.append(self._sql_flowable(turn.sql))
+        flowables.extend(self._turnFooter_flowables(turn))
+        return flowables
+
+    def _section_chart_flowables(
+        self, block: dict, step_charts: dict[int, ExportStepChart]
+    ) -> list[Any]:
+        """一个 chart 分节块 → 图 flowables（缺图/无图就占位，绝不让块消失）。"""
+        step_index = block.get("stepIndex")
+        chart = step_charts.get(step_index) if isinstance(step_index, int) else None
+        title = block.get("title")
+        caption = (
+            Paragraph(self._escape_cell(title), self._styles["chart_caption"])
+            if isinstance(title, str) and title.strip()
+            else None
+        )
+        if chart is None:
+            # 分节块由同一把「有图」的尺生成，走到这里说明数据不一致（老快照/
+            # 前端算错）—— 占位比静默丢掉一节更诚实。
+            return [item for item in (caption, self._chart_placeholder_flowable("chart")) if item]
+        children = self._chart_flowables_for(
+            chart.chart_type, chart.chart_option, chart.chart_image
+        )
+        # 小标题与**位图**必须同页：图恰好落在页底时，标题会孤零零悬在页尾、
+        # 图跑到次页。只对单张位图成组 —— 原生表格可能跨页，包进 KeepTogether
+        # 会让 reportlab 抛 LayoutError（整份导出变 500）。
+        if caption is not None and len(children) == 1 and isinstance(children[0], PdfImage):
+            return [KeepTogether([caption, children[0]])]
+        return ([caption] if caption is not None else []) + children
+
+    def _question_flowables(self, idx: int, turn: ChatExportTurn) -> list[Any]:
+        user_time = turn.user_time.strftime("%Y-%m-%d %H:%M:%S") if turn.user_time else "—"
+        return [
+            Paragraph(f"#{idx} · 用户", self._styles["role_user"]),
+            Paragraph(f"<font color='#666666'>{user_time}</font>", self._styles["meta"]),
+            *self._markdown_to_flowables(turn.user_content),
+        ]
+
+    def _answer_header_flowables(self, idx: int, turn: ChatExportTurn) -> list[Any]:
+        asst_time = turn.assistant_time.strftime("%Y-%m-%d %H:%M:%S") if turn.assistant_time else "—"
+        return [
+            Spacer(1, 6),
+            Paragraph(f"#{idx} · 助手", self._styles["role_assistant"]),
+            Paragraph(f"<font color='#666666'>{asst_time}</font>", self._styles["meta"]),
+        ]
+
+    def _turnFooter_flowables(self, turn: ChatExportTurn) -> list[Any]:
+        """元信息（模型/Tokens/成本）+ 轮次分隔线。"""
         meta_bits: list[str] = []
         if turn.model_name:
             meta_bits.append(f"模型: {turn.model_name}")
@@ -414,12 +354,13 @@ class ChatExportPdfBuilder:
             meta_bits.append(f"Tokens: {turn.tokens_used}")
         if turn.cost is not None:
             meta_bits.append(f"成本: ${turn.cost:.6f}")
+        flowables: list[Any] = []
         if meta_bits:
             flowables.append(Spacer(1, 4))
             flowables.append(Paragraph(" · ".join(meta_bits), self._styles["meta"]))
         flowables.append(Spacer(1, 10))
         flowables.append(HRFlowable(width="100%", thickness=0.3, color=colors.lightgrey))
-        return KeepTogether(flowables)
+        return flowables
 
     # -------- Markdown → flowables --------
 
@@ -434,7 +375,7 @@ class ChatExportPdfBuilder:
             logger.warning("Markdown 解析失败，降级为纯文本: %s", content[:80])
             return [Paragraph(html.escape(content), self._styles["body"])]
 
-        blocks = _html_to_blocks(html_str)
+        blocks = htmlToBlocks(html_str)
         flowables: list[Any] = []
         for tag, inner in blocks:
             if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
@@ -572,8 +513,8 @@ class ChatExportPdfBuilder:
         col_width = (self._PAGE_WIDTH - 2 * self._MARGIN) / ncols
         table = Table(data, colWidths=[col_width] * ncols, repeatRows=1)
         style = TableStyle([
-            ("FONT", (0, 0), (-1, 0), _CJK_FONT_NAME, 8),
-            ("FONT", (0, 1), (-1, -1), _CJK_FONT_NAME, 8),
+            ("FONT", (0, 0), (-1, 0), self._cjk_font, 8),
+            ("FONT", (0, 1), (-1, -1), self._cjk_font, 8),
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f5ff")),
             ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#d9d9d9")),
             ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#e8e8e8")),
@@ -615,19 +556,30 @@ class ChatExportPdfBuilder:
         ``table`` / ``kpi`` 刻意排在图片之前：官方渲染比位图更清晰、可选中，
         且不受截图分辨率与暗色主题影响。
         """
-        if turn.chart_type == ChartType.TABLE.value:
-            table = self._table_from_chart_option(turn.chart_option)
+        return self._chart_flowables_for(
+            turn.chart_type, turn.chart_option, turn.chart_image
+        )
+
+    def _chart_flowables_for(
+        self,
+        chart_type: str | None,
+        chart_option: dict | None,
+        chart_image: bytes | None,
+    ) -> list:
+        """三档降级的具体分派；顶层图与分节图共用同一套（口径必须一致）。"""
+        if chart_type == ChartType.TABLE.value:
+            table = self._table_from_chart_option(chart_option)
             if table:
                 return table
-        if turn.chart_type == ChartType.KPI.value:
-            kpi = self._kpi_flowable(turn.chart_option)
+        if chart_type == ChartType.KPI.value:
+            kpi = self._kpi_flowable(chart_option)
             if kpi:
                 return kpi
-        if turn.chart_image:
-            image = self._chart_image_flowable(turn.chart_image)
+        if chart_image:
+            image = self._chart_image_flowable(chart_image)
             if image is not None:
                 return [image]
-        return [self._chart_placeholder_flowable(turn.chart_type)]
+        return [self._chart_placeholder_flowable(chart_type or "chart")]
 
     def _chart_image_flowable(self, imageBytes: bytes) -> PdfImage | None:
         """PNG 字节 → 等比缩放到正文框内的 ``Image``；解不出图返回 None（降级占位）。
@@ -659,8 +611,10 @@ class ChatExportPdfBuilder:
     def _table_from_chart_option(self, chartOption: dict | None) -> list:
         """``{"columns", "rows"}`` 负载 → 带表头的表格（+ 截断说明）；无从画起返回 []。
 
-        rows 可能已被**落库时**截到 200 行（``truncated: true``，见
-        ``chat_chart_persist._PERSIST_MAX_TABLE_ROWS``）—— 如实标注，不假装是全部。
+        行数在这里**再截一道**：顶层列落库时已被 ``boundedChartOption`` 截到
+        ``_PERSIST_MAX_TABLE_ROWS``，但 ``steps_snapshot`` 的历史数据可能没截过，
+        而 ``build()`` 在 async 端点里同步执行 —— 十万行表格排版期间整个进程的
+        事件循环被占住。截断后如实标注，不假装是全部。
         """
         if not isinstance(chartOption, dict):
             return []
@@ -668,14 +622,15 @@ class ChatExportPdfBuilder:
         rows = chartOption.get("rows")
         if not isinstance(columns, list) or not columns:
             return []
+        dictRows = [row for row in rows or [] if isinstance(row, dict)]
+        keptRows = dictRows[:_PERSIST_MAX_TABLE_ROWS]
         body = [[self._escape_cell(col) for col in columns]]
-        for row in rows or []:
-            if isinstance(row, dict):
-                body.append([self._escape_cell(row.get(col)) for col in columns])
+        for row in keptRows:
+            body.append([self._escape_cell(row.get(col)) for col in columns])
         if len(body) == 1:
             return []
         flowables: list = [self._build_table_flowable(body)]
-        if chartOption.get("truncated"):
+        if chartOption.get("truncated") or len(dictRows) > len(keptRows):
             flowables.append(Paragraph(
                 f"（表格仅显示前 {len(body) - 1} 行，完整结果请回看会话）",
                 self._styles["chart_caption"],

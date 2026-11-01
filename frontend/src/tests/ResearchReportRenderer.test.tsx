@@ -7,26 +7,35 @@
  * - text → 段落；table → 表格；chart → 表格兜底（v1 chartType=null）；bullet_list → ul/li
  * - 块按 sections[].blocks[] 顺序渲染，每个块带 data-block-type 供顺序断言
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import React from "react";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { ConfigProvider } from "antd";
+
+// 捕获真实传给 ECharts 的 option（JSON.stringify 会丢函数，formatter 断言只能看原对象）
+const echarts = vi.hoisted(() => ({ options: [] as Record<string, unknown>[] }));
 
 // jsdom 无法实例化 ECharts 画布 —— 与 EChart.test.tsx 同模式，占位 div 即可；
 // EChart 外层包裹 div 仍带 testId（`report-chart-<chartType>`），可据其判断是否放行。
 vi.mock("echarts-for-react", () => ({
   __esModule: true,
   default: React.forwardRef(function EChartsMock(
-    props: { option?: Record<string, unknown> },
+    props: { option?: Record<string, unknown>; style?: { height?: number } },
     ref: React.ForwardedRef<unknown>
   ) {
     React.useImperativeHandle(ref, () => ({ getEchartsInstance: () => ({}) }));
-    return <div data-testid="echarts-mock">{JSON.stringify(props.option)}</div>;
+    if (props.option) echarts.options.push(props.option);
+    return (
+      <div data-testid="echarts-mock" data-height={props.style?.height}>
+        {JSON.stringify(props.option)}
+      </div>
+    );
   }),
 }));
 
 import { ReportRenderer } from "../components/research/ReportRenderer";
 import type { ReportPayload } from "../components/research/ReportRenderer";
+import { i18n } from "../i18n";
 
 function makePayload(): ReportPayload {
   return {
@@ -216,5 +225,115 @@ describe("ReportRenderer", () => {
       </ConfigProvider>
     );
     expect(screen.getByTestId("report-chart-bar")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D3：研究线报告与聊天端完全一致（Top-N / 动态高度 / 数字格式）
+// ---------------------------------------------------------------------------
+
+/** 40 类 hbar + 后端挂的 21 类 Top-N 视图（与聊天端落库的同一份 option 形状）。 */
+function makeTopNChartPayload(): ReportPayload {
+  const all = Array.from({ length: 40 }, (_, i) => `供应商${String(i).padStart(2, "0")}`);
+  const truncated = [...all.slice(0, 20), "其他（20 项）"];
+  const base = {
+    tooltip: {},
+    xAxis: { type: "value" },
+    series: [{ type: "bar", data: all.map((_, i) => 100 - i) }],
+  };
+  return makeChartPayload("hbar", {
+    ...base,
+    yAxis: { type: "category", data: all },
+    topNOption: { ...base, yAxis: { type: "category", data: truncated } },
+    topNMeta: { limit: 20, hidden: 20, total: 40 },
+  });
+}
+
+function renderPayload(payload: ReportPayload) {
+  return render(
+    <ConfigProvider>
+      <ReportRenderer payload={payload} />
+    </ConfigProvider>
+  );
+}
+
+function renderedCategories(): unknown[] {
+  const option = JSON.parse(screen.getByTestId("echarts-mock").textContent ?? "{}") as {
+    yAxis?: { data?: unknown[] };
+  };
+  return option.yAxis?.data ?? [];
+}
+
+describe("ReportRenderer 与聊天端一致（D3）", () => {
+  beforeEach(() => {
+    echarts.options.length = 0;
+  });
+
+  it("有 Top-N 视图时默认渲染截断视图（21 类，末项为「其他」）", () => {
+    renderPayload(makeTopNChartPayload());
+
+    const categories = renderedCategories();
+    expect(categories).toHaveLength(21);
+    expect(categories[20]).toBe("其他（20 项）");
+  });
+
+  it("「显示全部 40 项」切到全量，「只看前 20 项」再切回（与聊天端同一控件）", () => {
+    renderPayload(makeTopNChartPayload());
+
+    fireEvent.click(screen.getByText("显示全部 40 项"));
+    expect(renderedCategories()).toHaveLength(40);
+
+    fireEvent.click(screen.getByText("只看前 20 项"));
+    expect(renderedCategories()).toHaveLength(21);
+  });
+
+  it("高度按当前显示的 option 推断：截断 21 类 684、全量 40 类 960", () => {
+    renderPayload(makeTopNChartPayload());
+
+    expect(screen.getByTestId("echarts-mock")).toHaveAttribute("data-height", "684");
+    fireEvent.click(screen.getByText("显示全部 40 项"));
+    expect(screen.getByTestId("echarts-mock")).toHaveAttribute("data-height", "960");
+  });
+
+  it("数字格式与聊天端同一条：value 轴万/亿缩写 + tooltip 千分位", () => {
+    renderPayload(makeTopNChartPayload());
+
+    const option = echarts.options[echarts.options.length - 1];
+    const xAxis = option.xAxis as { axisLabel?: { formatter?: (value: unknown) => string } };
+    expect(typeof xAxis.axisLabel?.formatter).toBe("function");
+    expect(xAxis.axisLabel?.formatter?.(123456)).toBe("12.35万");
+
+    const tooltip = option.tooltip as { valueFormatter?: (value: unknown) => string };
+    expect(typeof tooltip.valueFormatter).toBe("function");
+    expect(tooltip.valueFormatter?.(1234567)).toBe("1,234,567");
+  });
+
+  it("非中文界面下数字格式跟随 locale（与聊天端同一条，不是写死 zh）", async () => {
+    await i18n.changeLanguage("en-US");
+    try {
+      renderPayload(makeTopNChartPayload());
+
+      const option = echarts.options[echarts.options.length - 1];
+      const xAxis = option.xAxis as { axisLabel?: { formatter?: (value: unknown) => string } };
+      expect(xAxis.axisLabel?.formatter?.(123456)).toBe("123,456");
+      const tooltip = option.tooltip as { valueFormatter?: (value: unknown) => string };
+      expect(tooltip.valueFormatter?.(1234567)).toBe("1,234,567");
+    } finally {
+      await i18n.changeLanguage("zh-CN");
+    }
+  });
+
+  // 反向守卫：没有 Top-N 的普通报告图不得凭空长出切换按钮。
+  it("无 Top-N 视图时不渲染切换按钮", () => {
+    renderPayload(
+      makeChartPayload("bar", {
+        xAxis: { type: "category", data: ["10月"] },
+        yAxis: { type: "value" },
+        series: [{ type: "bar", data: [180] }],
+      })
+    );
+
+    expect(screen.queryByText(/显示全部/)).toBeNull();
+    expect(screen.queryByText(/只看前/)).toBeNull();
   });
 });

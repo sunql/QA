@@ -101,10 +101,10 @@ export TEST_NEO4J_URI='bolt://127.0.0.1:7688'
 export TEST_NEO4J_PASSWORD='qa_neo4j_dev_2026'
 PYTHONPATH=/private/tmp/qa-chat-output-zh-labels/backend \
   /Users/sunql/Prejectcode-th/MyWiki/wiki/aicode/qa-system/backend/.venv/bin/python -m pytest \
-  app/tests/integration/test_display_name_resolver.py -q -p no:randomly
+  app/tests/integration/test_upload_size_limit.py -q -p no:randomly
 ```
 
-Expected: 全部通过（该用例会自动 `alembic upgrade head`，同时验证测试库可用）。
+Expected: 全部通过。该用例走 `client` fixture ⇒ 集成 conftest 的 `_pg_support` 会对测试库执行 `alembic upgrade head`（幂等），同时验证测试库可用。
 
 - [ ] **Step 3: 记录基线（本分支改动前的失败集合）**
 

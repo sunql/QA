@@ -26,6 +26,7 @@ from app.domain.enums import ChartType
 from app.domain.query_plan import QueryPlan
 from app.services.chart_decision import (
     ChartDecision,
+    ChartSignals,
     buildChartSignals,
     decideChartKind,
     resolveByLabel,
@@ -34,6 +35,11 @@ from app.services.chart_label import classifySemanticLabel
 from app.services.chart_renderer import renderChartOption
 from app.services.chart_spec_builder import buildSpec
 from app.services.chart_thresholds import loadChartThresholds, loadFullDataThreshold
+from app.services.field_display_resolver import (
+    displayMaps,
+    missingFieldHints,
+    resolveFieldDisplays,
+)
 from app.services.visual_payload import assembleTableOption
 from app.services.visual_rationale import (
     VisualRationale,
@@ -96,7 +102,86 @@ class ChartService:
         thresholds = await loadChartThresholds(session)
         fullDataThreshold = await loadFullDataThreshold(session)
         signals = buildChartSignals(plan, columns, data, question)
+        decision, usage = await self._decideChart(
+            signals=signals,
+            columns=columns,
+            data=data,
+            question=question,
+            thresholds=thresholds,
+            forcedKind=forcedKind,
+            intentKind=intentKind,
+            llmClient=llmClient,
+            modelConfig=modelConfig,
+        )
+        spec, option, tableOption, degradeReason = await self._buildVisual(
+            session=session,
+            plan=plan,
+            columns=columns,
+            data=data,
+            signals=signals,
+            decision=decision,
+            fullDataThreshold=fullDataThreshold,
+        )
+        return self._assembleBuild(
+            decision=decision,
+            spec=spec,
+            option=option,
+            tableOption=tableOption,
+            usage=usage,
+            rowCount=len(data),
+            degradeReason=degradeReason,
+        )
 
+    @staticmethod
+    def _assembleBuild(
+        *,
+        decision: ChartDecision,
+        spec: ChartSpec,
+        option: dict[str, Any],
+        tableOption: dict | None,
+        usage: tuple[int, int, int | None],
+        rowCount: int,
+        degradeReason: str | None,
+    ) -> ChartBuild:
+        """组装 `ChartBuild`：判断依据 + 计费三元组 + spec/decision。"""
+        # rationale 的 kind 传「决策引擎选出的 kind（降级前的意图）」，不传降级后的
+        # spec.kind：否则 DEGRADE_SPEC_INVALID 的文案会渲染成「数据结构不满足 table
+        # 的绘图要求」。同理 R_FORCED_CLIENT 传的是被强制的那个 kind。
+        rationale = buildVisualRationale(
+            ruleId=decision.ruleId,
+            kind=decision.kind,
+            rowCount=rowCount,
+            degradeReason=degradeReason,
+        )
+        promptTokens, completionTokens, cachedTokens = usage
+        return ChartBuild(
+            # 降级后 chartType 必须跟着变成 TABLE：前端按 chartType 分支选渲染器，
+            # 说「hbar」却发 {columns, rows} 会让 ECharts 拿到非法 option 画空白。
+            chartType=spec.kind,
+            option=option,
+            tableOption=tableOption,
+            rationale=rationale,
+            promptTokens=promptTokens,
+            completionTokens=completionTokens,
+            cachedTokens=cachedTokens,
+            decision=decision,
+            spec=spec,
+        )
+
+    @staticmethod
+    async def _decideChart(
+        *,
+        signals: ChartSignals,
+        columns: list[str],
+        data: list[dict],
+        question: str,
+        thresholds: Any,
+        forcedKind: ChartType | None,
+        intentKind: ChartType | None,
+        llmClient: Any,
+        modelConfig: Any,
+    ) -> tuple[ChartDecision, tuple[int, int, int | None]]:
+        """决定图型，返回 `(decision, (promptTokens, completionTokens, cachedTokens))`。"""
         forced = forcedKind or intentKind
         decision = (
             ChartDecision(
@@ -123,8 +208,29 @@ class ChartService:
             completionTokens = labelResult.completionTokens
             cachedTokens = labelResult.cachedTokens
             decision = resolveByLabel(decision, signals, labelResult.label, thresholds)
+        return decision, (promptTokens, completionTokens, cachedTokens)
 
-        spec = buildSpec(decision, signals, data, plan)
+    @staticmethod
+    async def _buildVisual(
+        *,
+        session: Any,
+        plan: QueryPlan | None,
+        columns: list[str],
+        data: list[dict],
+        signals: ChartSignals,
+        decision: ChartDecision,
+        fullDataThreshold: int,
+    ) -> tuple[ChartSpec, dict[str, Any], dict | None, str | None]:
+        """解析显示名 → 构建/校验 spec → 渲染图与明细表负载。"""
+        displays = await resolveFieldDisplays(
+            session, columns=columns, rows=data, plan=plan,
+        )
+        aliasOverrides, units = displayMaps(displays)
+        spec = buildSpec(
+            decision, signals, data, plan,
+            aliasOverrides=aliasOverrides or None,
+            units=units or None,
+        )
         spec, degradeReason = coerceSpec(spec, columns)
         if degradeReason is not None:
             logger.warning(
@@ -138,34 +244,19 @@ class ChartService:
         option = renderChartOption(
             spec, data, topN=signals.isTopN or signals.hasRankingIntent
         )
-        # rationale 的 kind 传「决策引擎选出的 kind（降级前的意图）」，不传降级后的
-        # spec.kind：否则 DEGRADE_SPEC_INVALID 的文案会渲染成「数据结构不满足 table
-        # 的绘图要求」。同理 R_FORCED_CLIENT 传的是被强制的那个 kind。
-        rationale = buildVisualRationale(
-            ruleId=decision.ruleId,
-            kind=decision.kind,
-            rowCount=len(data),
-            degradeReason=degradeReason,
-        )
+        if displays:
+            option = {
+                **option,
+                "fieldHints": missingFieldHints(spec.columnLabels, displays),
+            }
         tableOption = assembleTableOption(
             specKind=spec.kind,
             columns=columns,
             data=data,
             fullDataThreshold=fullDataThreshold,
+            columnLabels=spec.columnLabels,
         )
-        return ChartBuild(
-            # 降级后 chartType 必须跟着变成 TABLE：前端按 chartType 分支选渲染器，
-            # 说「hbar」却发 {columns, rows} 会让 ECharts 拿到非法 option 画空白。
-            chartType=spec.kind,
-            option=option,
-            tableOption=tableOption,
-            rationale=rationale,
-            promptTokens=promptTokens,
-            completionTokens=completionTokens,
-            cachedTokens=cachedTokens,
-            decision=decision,
-            spec=spec,
-        )
+        return spec, option, tableOption, degradeReason
 
     @staticmethod
     def _emptyResult(columns: list[str], data: list[dict]) -> ChartBuild:

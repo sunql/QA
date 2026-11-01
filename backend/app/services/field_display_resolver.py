@@ -52,6 +52,7 @@ __all__ = [
     "SOURCE_NONE",
     "SOURCE_ONTOLOGY_ALIAS",
     "SOURCE_PLAN_ALIAS",
+    "displayMaps",
     "missingFieldHints",
     "resolveFieldDisplays",
 ]
@@ -304,6 +305,27 @@ async def _resolve(
             source=source,
         )
     return displays
+
+
+def displayMaps(
+    displays: Mapping[str, FieldDisplay],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """`FieldDisplay` 映射 → (中文名映射, 单位映射)，两者都只收录非空值。
+
+    两条构建链（chat / 研究）需要同一份映射喂给 `buildSpec`；抽在这里避免两处
+    各自实现导致口径漂移（例如一处把空字符串也算进 override）。
+    """
+    labels = {
+        column: display.label
+        for column, display in displays.items()
+        if display.label
+    }
+    units = {
+        column: display.unit
+        for column, display in displays.items()
+        if display.unit
+    }
+    return labels, units
 
 
 def missingFieldHints(

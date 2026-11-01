@@ -423,6 +423,7 @@ async def _chartContent(view: FindingView, *, session: AsyncSession) -> dict[str
         columns=columns,
         question=view.claimText or "",
         aliasOverrides=aliasOverrides,
+        sourceTable=view.sourceTable,
     )
 
 

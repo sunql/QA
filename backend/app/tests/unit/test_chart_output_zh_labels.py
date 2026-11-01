@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.domain.chart_spec import ChartSpec, coerceSpec, tableSpec
 from app.domain.enums import ChartType
+from app.domain.query_plan import Aggregation, QueryPlan
 from app.services.chart_decision import ChartDecision, buildChartSignals
 from app.services.chart_renderer import renderChartOption
 from app.services.chart_spec_builder import buildSpec
@@ -51,6 +52,64 @@ def test_build_spec_omits_labels_when_unresolved():
     )
     assert spec.columnLabels == {}
     assert spec.measures[0].label == "total qty"
+
+
+def _countOnDimensionPlan() -> QueryPlan:
+    """合法计划形状：COUNT(维度列) 的别名会被 aliasByField 挂到该维度列上。"""
+    return QueryPlan(
+        target="DWD_GOODS_RECEIPT_DTL",
+        groupBy=("SUPPLIER_NAME",),
+        aggregations=(Aggregation(function="COUNT", property="SUPPLIER_NAME", alias="记录数"),),
+    )
+
+
+def _countOnDimensionRows() -> list[dict]:
+    return [
+        {"supplier_name": "B125", "记录数": 12},
+        {"supplier_name": "B019", "记录数": 7},
+    ]
+
+
+def test_dimension_header_ignores_plan_aggregation_alias():
+    """维度列的表头只吃注入的 overrides，不吃 plan 聚合别名（否则两列都叫「记录数」）。"""
+    plan = _countOnDimensionPlan()
+    rows = _countOnDimensionRows()
+    columns = ["supplier_name", "记录数"]
+    spec = buildSpec(
+        _decision(ChartType.BAR),
+        buildChartSignals(plan, columns, rows, ""),
+        rows,
+        plan,
+    )
+    assert "supplier_name" not in spec.columnLabels
+
+
+def test_dimension_header_still_uses_injected_override():
+    """同一形状上，显式注入的 overrides 仍然给维度列表头（能力不缩水）。"""
+    plan = _countOnDimensionPlan()
+    rows = _countOnDimensionRows()
+    columns = ["supplier_name", "记录数"]
+    spec = buildSpec(
+        _decision(ChartType.BAR),
+        buildChartSignals(plan, columns, rows, ""),
+        rows,
+        plan,
+        aliasOverrides={"supplier_name": "供应商"},
+    )
+    assert spec.columnLabels["supplier_name"] == "供应商"
+
+
+def test_units_do_not_double_suffix_labels():
+    """别名已带「（单位）」时不重复拼接。"""
+    spec = buildSpec(
+        _decision(ChartType.BAR),
+        _signals(["supplier_code", "rcv_qty"], _ROWS),
+        _ROWS,
+        aliasOverrides={"rcv_qty": "收货数量（件）"},
+        units={"rcv_qty": "件"},
+    )
+    assert spec.measures[0].label == "收货数量（件）"
+    assert spec.columnLabels["rcv_qty"] == "收货数量（件）"
 
 
 def test_table_spec_carries_labels():

@@ -155,7 +155,10 @@ def _buildDimensions(
 
 
 def _withUnit(label: str, unit: str | None) -> str:
-    return f"{label}（{unit}）" if unit else label
+    """拼「标签（单位）」；标签已带同一单位时**不重复拼接**。"""
+    if not unit or label.endswith(f"（{unit}）"):
+        return label
+    return f"{label}（{unit}）"
 
 
 def _buildMeasures(
@@ -171,18 +174,45 @@ def _buildMeasures(
 
 def _buildColumnLabels(
     columns: tuple[str, ...],
+    dimensions: tuple[SpecDimension, ...],
     aliases: dict[str, str],
+    overrides: Mapping[str, str] | None,
     units: Mapping[str, str],
 ) -> dict[str, str]:
-    """只收录「有中文名或有单位」的列；都没有的列缺键 ⇒ 前端回落原始列名。"""
+    """只收录「有中文名或有单位」的列；都没有的列缺键 ⇒ 前端回落原始列名。
+
+    维度列只吃注入的 overrides（策略与理由见 `_buildLabels`）。
+    """
+    dimensionFields = {d.field for d in dimensions}
+    overrideMap = dict(overrides or {})
     labels: dict[str, str] = {}
     for column in columns:
         unit = units.get(column)
-        alias = aliases.get(column)
+        alias = (overrideMap if column in dimensionFields else aliases).get(column)
         if not alias and not unit:
             continue
         labels[column] = _withUnit(alias or _prettify(column), unit)
     return labels
+
+
+def _buildLabels(
+    signals: ChartSignals,
+    kind: ChartType,
+    aliases: dict[str, str],
+    aliasOverrides: Mapping[str, str] | None,
+    units: Mapping[str, str],
+) -> tuple[tuple[SpecDimension, ...], dict[str, str]]:
+    """维度 + 列显示名（表头/图例）。二者共用一条策略：维度只吃**注入的 overrides**。
+
+    不吃 plan 聚合别名的理由：聚合别名属于**指标**，而它的键是「聚合 property 解析到的
+    结果集列」——`COUNT(<维度列>)`（validatePlan 不要求 property 是数值列）会把别名挂到
+    维度列上。若维度标签/表头也吃合并映射，chat 图表的轴会被静默改名，文本表还会出现
+    两列同名，并误导 `missingFieldHints` 的「该列没有中文名」判断。
+    """
+    overrideMap = dict(aliasOverrides or {})
+    dimensions = _buildDimensions(_dimensionFields(signals, kind), overrideMap)
+    labels = _buildColumnLabels(signals.columns, dimensions, aliases, overrideMap, units)
+    return dimensions, labels
 
 
 def _buildSeries(
@@ -271,7 +301,7 @@ def buildSpec(
     """把决策落到一份完整 spec。纯函数：不改 plan、不改 data、不改 signals。
 
     `aliasOverrides`（关键字专用，默认 None）供**无 QueryPlan** 的报告路径注入
-    「结果集列名 → 显示名」。**维度**标签只由它驱动（见下方注释）：chat 调用形态
+    「结果集列名 → 显示名」。**维度**标签只由它驱动（见 `_buildLabels`）：chat 调用形态
     恒不传 ⇒ 维度标签与既有行为逐字一致，且这是**构造保证**而非巧合 —— 指标标签
     沿用既有「plan 聚合别名优先、overrides 覆盖」的合并映射，行为未变。
 
@@ -280,18 +310,14 @@ def buildSpec(
     `_prettify(field)` 兜底，不是显示名。chat 调用形态恒不传 ⇒ 空 map ⇒ 渲染器不挂
     任何轴名 ⇒ chat 图表 option 逐字不变。
 
-    `units`（关键字专用，默认 None）是「结果集列名 → 单位」。有单位的指标标签变成
-    `中文名（单位）`（系列名随标签走），并汇总进 `ChartSpec.columnLabels` 供表头/
-    图例使用。不传 ⇒ 空 map ⇒ 标签与 `columnLabels` 与既有行为逐字一致。
+    `units`（关键字专用，默认 None）是「结果集列名 → 单位」：指标标签变
+    `中文名（单位）`（系列名随标签走），并汇总进 `ChartSpec.columnLabels` 供表头/图例；
+    维度列只吃 overrides（同轴标签）。不传 ⇒ 空 map ⇒ 指标标签与既有行为逐字一致。
     """
     kind = decision.kind
     unitsMap = dict(units or {})
     aliases = aliasByField(plan, signals.columns, aliasOverrides)
-    # 维度只吃**注入的 overrides**，不吃 plan 聚合别名：聚合别名属于**指标**，而它的键
-    # 是「聚合 property 解析到的结果集列」——`COUNT(<维度列>)`（validatePlan 不要求
-    # property 是数值列）会把别名挂到维度列上，令 chat 图表的轴被静默改名。
-    # 缺省（chat 调用形态）时这里恒为空 map ⇒ 维度标签与既有行为逐字一致。
-    dimensions = _buildDimensions(_dimensionFields(signals, kind), dict(aliasOverrides or {}))
+    dimensions, columnLabels = _buildLabels(signals, kind, aliases, aliasOverrides, unitsMap)
     measures = _buildMeasures(_measureFields(signals, kind), aliases, unitsMap)
 
     return ChartSpec(
@@ -300,7 +326,7 @@ def buildSpec(
         columns=signals.columns,
         dimensions=dimensions,
         measures=measures,
-        columnLabels=_buildColumnLabels(signals.columns, aliases, unitsMap),
+        columnLabels=columnLabels,
         series=_buildSeries(kind, dimensions, measures),
         orientation="horizontal" if kind is ChartType.HBAR else "vertical",
         sort=_buildSort(plan, signals.columns),

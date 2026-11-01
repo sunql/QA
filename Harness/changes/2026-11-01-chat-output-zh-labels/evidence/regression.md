@@ -44,6 +44,7 @@ PYTHONPATH=/private/tmp/qa-chat-output-zh-labels/backend \
 **结果**：`5 passed, 21 warnings in 8.49s`（exit 0）
 
 - 失败 / 错误：0（14 文件合计 **187 passed**）
+- **终审修复后复跑**（`c673b925` 之后，14 文件同一条命令）：`191 passed, 21 warnings in 256.91s`（exit 0）。新增 4 条用例覆盖「单位-only 列仍报缺名」与「第 3 个分组列不吃聚合别名」；**191 passed 为最终数字**。
 - 告警均为 `slowapi` 的 `DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated`，与本次改动无关。
 - 真实 PostgreSQL 5434（`qa_metadata_test_zhlabels`）+ 完整 API 链路；测试库由 Alembic `upgrade head` 建立，未使用 `Base.metadata.create_all`。
 
@@ -63,7 +64,7 @@ npm test -- --run
 ## 3. 基线失败对差
 
 - Task 0 基线（`baseline.txt`）：4 文件定向套件 `82 passed, 0 failed`；`test_upload_size_limit.py` `2 passed`，测试库 `alembic_version = 0138`。
-- 本次后端定向套件（14 文件，`187 passed` / 0 failed）与前端全量（`2297 passed` / 0 failed）均为 0 失败，无需对差。
+- 本次后端定向套件（14 文件，终审修复后 `191 passed` / 0 failed；修复前 `187 passed`）与前端全量（`2297 passed` / 0 failed）均为 0 失败，无需对差。
 - **净新增失败：0**。
 
 ## 4. 说明

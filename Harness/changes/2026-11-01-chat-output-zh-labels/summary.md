@@ -168,7 +168,7 @@ MSG_FIELD_HINT_MISSING_UNIT  = "以下数值字段未定义单位，请在本体
 
 ## 8. 交付记录
 
-- **分支**：`feat/chat-output-zh-labels`（代码基线 `ebd0c471`；功能提交 21 个，不含交付记录文档提交，如 `03aa3653`）
+- **分支**：`feat/chat-output-zh-labels`（代码基线 `ebd0c471`；下表 21 个功能提交 + 1 个终审修复提交，不含交付记录文档提交）
 - **提交**（按时间顺序）：
 
 | # | Commit | 说明 |
@@ -194,13 +194,14 @@ MSG_FIELD_HINT_MISSING_UNIT  = "以下数值字段未定义单位，请在本体
 | 19 | `1f9a2026` | fix: 报告的治理提示复用全块列名映射 |
 | 20 | `2143d6a0` | feat: PDF 导出表头使用字段中文名 |
 | 21 | `537dc798` | feat: 前端表头渲染中文字段名 |
+| 22 | `c673b925` | fix: 单位-only 列不再吞缺名提示 + 分组列不吃聚合别名（终审 Important） |
 
 - **Task 0 基线**（`evidence/baseline.txt`，2026-11-01，`head_commit 01c7c3f7`）：
   - 后端 4 文件定向套件 `82 passed, 0 failed, 0 errors`，`failing_node_ids: none`。
   - `test_upload_size_limit.py` `2 passed`；测试库 `alembic_version = 0138`（== alembic heads），95 张 public 表。
   - 结论：基线全绿，用「净新增失败 0」判定。
 - **最终回归**（详见 `evidence/regression.md`）：
-  - 后端 14 文件定向套件（真实 PG 5434 + 完整 API 链路）：`187 passed, 0 failed`（13 文件批次 `182 passed`，含 `test_chat_stream_api.py` 的流式提示断言；该文件单独跑 `5 passed`，均 exit 0）。
+  - 后端 14 文件定向套件（真实 PG 5434 + 完整 API 链路）：终审修复后复跑 `191 passed, 0 failed`（`c673b925` 前为 `187 passed`；新增 4 条单位-only / 分组列表头用例）。
   - 前端：`npx tsc --noEmit` 0 错误（exit 0）；`npm test -- --run` `227 files passed / 2297 tests passed`（exit 0）。
   - **净新增失败：0**。
 - **已确认偏差（本批不实现）**：

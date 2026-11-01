@@ -300,15 +300,16 @@ def buildSpec(
 ) -> ChartSpec:
     """把决策落到一份完整 spec。纯函数：不改 plan、不改 data、不改 signals。
 
-    `aliasOverrides`（关键字专用，默认 None）供**无 QueryPlan** 的报告路径注入
-    「结果集列名 → 显示名」。**维度**标签只由它驱动（见 `_buildLabels`）：chat 调用形态
-    恒不传 ⇒ 维度标签与既有行为逐字一致，且这是**构造保证**而非巧合 —— 指标标签
-    沿用既有「plan 聚合别名优先、overrides 覆盖」的合并映射，行为未变。
+    `aliasOverrides`（关键字专用，默认 None）是「结果集列名 → 中文名」，由 chat / 研究
+    两条链的字段解析层注入；按本特性的契约，它只携带 ontology / business_aliases /
+    代码字典来源，**绝不携带 plan 聚合别名**（聚合别名只在内部 `aliasByField` 里参与
+    指标标签）。**维度**标签只由它驱动（见 `_buildLabels`）：这是**构造保证**而非巧合 ——
+    指标标签沿用既有「plan 聚合别名优先、overrides 覆盖」的合并映射，行为未变。
 
     `axisLabels`（关键字专用，默认 None）是「维度字段 → 显示名」，只给**渲染器**当轴名
-    用（`ChartSpec.axisLabels`）。它不改 `dimensions[].label` —— 后者在 chat 形态下是
-    `_prettify(field)` 兜底，不是显示名。chat 调用形态恒不传 ⇒ 空 map ⇒ 渲染器不挂
-    任何轴名 ⇒ chat 图表 option 逐字不变。
+    用（`ChartSpec.axisLabels`）。它不改 `dimensions[].label` —— 后者的来源是
+    `aliasOverrides`（解析层中文名）或 `_prettify(field)` 兜底。chat 调用形态不传
+    ⇒ 空 map ⇒ 渲染器不额外挂轴名（轴名仍取 `dimensions[].label`）。
 
     `units`（关键字专用，默认 None）是「结果集列名 → 单位」：指标标签变
     `中文名（单位）`（系列名随标签走），并汇总进 `ChartSpec.columnLabels` 供表头/图例；

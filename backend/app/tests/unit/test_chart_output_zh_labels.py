@@ -8,6 +8,12 @@ from app.domain.query_plan import Aggregation, QueryPlan
 from app.services.chart_decision import ChartDecision, buildChartSignals
 from app.services.chart_renderer import renderChartOption
 from app.services.chart_spec_builder import buildSpec
+from app.services.field_display_resolver import (
+    SOURCE_ONTOLOGY_ALIAS,
+    SOURCE_PLAN_ALIAS,
+    FieldDisplay,
+    displayMaps,
+)
 from app.services.visual_payload import assembleTableOption
 
 _ROWS = [
@@ -151,3 +157,18 @@ def test_assemble_table_option_passes_labels():
     )
     assert payload is not None
     assert payload["columnLabels"] == {"a": "甲"}
+
+
+def test_display_maps_excludes_plan_aggregation_alias_labels():
+    """plan 聚合别名不得进 override：否则 COUNT(维度列) 会改维度表头 + 吞掉缺名提示。"""
+    displays = {
+        "supplier_name": FieldDisplay(
+            label="记录数", unit="次", isNumeric=False, source=SOURCE_PLAN_ALIAS,
+        ),
+        "rcv_qty": FieldDisplay(
+            label="收货数量", unit="件", isNumeric=True, source=SOURCE_ONTOLOGY_ALIAS,
+        ),
+    }
+    labels, units = displayMaps(displays)
+    assert labels == {"rcv_qty": "收货数量"}  # plan 聚合别名被丢弃
+    assert units == {"supplier_name": "次", "rcv_qty": "件"}  # 单位映射不受影响

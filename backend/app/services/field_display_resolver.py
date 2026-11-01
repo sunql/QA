@@ -314,11 +314,17 @@ def displayMaps(
 
     两条构建链（chat / 研究）需要同一份映射喂给 `buildSpec`；抽在这里避免两处
     各自实现导致口径漂移（例如一处把空字符串也算进 override）。
+
+    **plan 聚合别名不进 labels**：`buildSpec` 里维度列的表头只吃注入的 overrides
+    （Task 4 的防改名规则）。若把 `SOURCE_PLAN_ALIAS` 也塞进来，`COUNT(<维度列>)`
+    的中文别名就会改名维度表头，并让 `columnLabels` 误宣称该列已有中文名。指标列
+    不受影响：`buildSpec` 内部仍通过 `aliasByField` 使用 plan 聚合别名。单位映射
+    不按来源过滤。
     """
     labels = {
         column: display.label
         for column, display in displays.items()
-        if display.label
+        if display.label and display.source != SOURCE_PLAN_ALIAS
     }
     units = {
         column: display.unit

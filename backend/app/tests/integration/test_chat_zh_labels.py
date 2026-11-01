@@ -22,7 +22,7 @@ async def _governQty(session, *, alias: str | None, unit: str | None) -> None:
 
 
 class TestChatFieldLabels:
-    async def test_answer_hints_and_column_labels(
+    async def test_column_labels_and_field_hints(
         self, client, dbSession, monkeypatch
     ) -> None:
         config, ds = await _seed(dbSession)

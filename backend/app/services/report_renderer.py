@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from app.services.field_hint_text import composeFieldHintText, mergeFieldHints
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -123,9 +125,14 @@ def escapeCell(value: Any) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
-def mdTable(columns: list[str], rows: list[dict[str, Any]]) -> list[str]:
+def mdTable(
+    columns: list[str],
+    rows: list[dict[str, Any]],
+    columnLabels: dict[str, str] | None = None,
+) -> list[str]:
+    labels = columnLabels or {}
     lines = [
-        "| " + " | ".join(escapeCell(column) for column in columns) + " |",
+        "| " + " | ".join(escapeCell(labels.get(column, column)) for column in columns) + " |",
         "| " + " | ".join("---" for _ in columns) + " |",
     ]
     lines += [
@@ -146,18 +153,35 @@ def renderBlock(block: dict[str, Any]) -> list[str]:
     if kind == BLOCK_BULLET:
         return [f"- {item}" for item in content] + [""]
     if kind == BLOCK_TABLE:
-        return mdTable(content["columns"], content["rows"]) + [""]
+        return mdTable(content["columns"], content["rows"], content.get("columnLabels")) + [""]
     if kind == BLOCK_CHART:
         data = content.get("data") or []
         if not data:
             chartType = content.get("chartType") or "table"
             return ["", f"> {CHART_HINT}（chartType={chartType}）", ""]
         columns = content.get("columns") or (list(data[0].keys()) if data else [])
-        table = mdTable(columns, data)
+        table = mdTable(columns, data, content.get("columnLabels"))
         chartType = content.get("chartType") or "table"
         return [*table, "", f"> {CHART_HINT}（chartType={chartType}）", ""]
     logger.warning("报告 MD 渲染遇到未知块类型，跳过: %s", kind)
     return []
+
+
+def _hintsAndLabels(
+    sections: list[dict[str, Any]],
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    hints: list[Any] = []
+    labels: dict[str, str] = {}
+    for section in sections:
+        for block in section.get("blocks") or []:
+            if block.get("type") != BLOCK_CHART:
+                continue
+            content = block.get("content") or {}
+            hints.append(content.get("fieldHints"))
+            for key, value in (content.get("columnLabels") or {}).items():
+                if isinstance(key, str) and isinstance(value, str):
+                    labels[key] = value
+    return mergeFieldHints(*hints), labels
 
 
 def renderMarkdown(payload: dict[str, Any]) -> str:
@@ -172,4 +196,8 @@ def renderMarkdown(payload: dict[str, Any]) -> str:
         lines += [f"## {section['title']}", ""]
         for block in section["blocks"]:
             lines += renderBlock(block)
+    hints, labels = _hintsAndLabels(payload.get("sections") or [])
+    hintText = composeFieldHintText(hints, columnLabels=labels)
+    if hintText:
+        lines += ["", hintText.strip()]
     return "\n".join(lines).strip() + "\n"

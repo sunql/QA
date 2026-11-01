@@ -140,6 +140,7 @@ class WikiPage(Base, TimestampMixin):
         Index("ix_wiki_page_dimension_status", "dimension", "status"),
         Index("ix_wiki_page_structure_stage", "structure_stage"),
         Index("ix_wiki_page_content_hash", "content_hash"),
+        Index("ix_wiki_page_category_id", "category_id"),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)

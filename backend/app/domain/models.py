@@ -184,6 +184,16 @@ class EmbeddingProvider(Base, TimestampMixin):
     dimension: Mapped[int] = mapped_column(Integer, nullable=False, default=1024)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    __table_args__ = (
+        # 0014 迁移：partial unique —— 只有 is_active 为真的行才参与唯一性。
+        Index(
+            "uq_embedding_provider_active",
+            "is_active",
+            unique=True,
+            postgresql_where=sa_text("is_active"),
+        ),
+    )
+
     def __repr__(self) -> str:
         return (
             f"<EmbeddingProvider id={self.id} name={self.name} "
@@ -277,6 +287,7 @@ class OntologyClass(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("class_name", "version", name="uq_ontology_class_name_version"),
         Index("ix_ontology_class_valid_to", "valid_to"),
+        Index("idx_class_name", "class_name"),
     )
 
     def __repr__(self) -> str:
@@ -336,7 +347,10 @@ class OntologyProperty(Base, TimestampMixin):
         lazy="selectin",
     )
 
-    __table_args__ = (UniqueConstraint("class_id", "property_name", name="uq_class_property"),)
+    __table_args__ = (
+        UniqueConstraint("class_id", "property_name", name="uq_class_property"),
+        Index("idx_property_class", "class_id"),
+    )
 
     def __repr__(self) -> str:
         return f"<OntologyProperty id={self.id} name={self.property_name}>"
@@ -392,6 +406,10 @@ class OntologyMetric(Base, TimestampMixin):
         back_populates="metrics", lazy="selectin"
     )
 
+    __table_args__ = (
+        Index("idx_metric_class", "target_class_id"),
+    )
+
     def __repr__(self) -> str:
         return f"<OntologyMetric id={self.id} name={self.metric_name}>"
 
@@ -418,6 +436,12 @@ class OntologyMetricSource(Base):
         nullable=False,
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    __table_args__ = (
+        # 0137 迁移建的是**唯一约束**（不是唯一索引）⇒ ORM 侧用 UniqueConstraint。
+        UniqueConstraint("metric_id", "class_id", "role", name="uq_metric_source_triple"),
+        Index("ix_metric_source_class_id", "class_id"),
+    )
 
     def __repr__(self) -> str:
         return f"<OntologyMetricSource metric_id={self.metric_id} class_id={self.class_id} role={self.role}>"
@@ -494,6 +518,17 @@ class KpiCatalog(Base, TimestampMixin):
         "OntologyMetric", lazy="selectin"
     )
 
+    __table_args__ = (
+        Index("ix_kpi_catalog_owner", "owner"),
+        Index("ix_kpi_catalog_status", "status"),
+        # 0050 迁移：ARRAY 列的 GIN 索引（默认 array_ops）。
+        Index(
+            "ix_kpi_catalog_semantic_keywords",
+            "semantic_keywords",
+            postgresql_using="gin",
+        ),
+    )
+
     def __repr__(self) -> str:
         return f"<KpiCatalog id={self.id} code={self.kpi_code} status={self.status}>"
 
@@ -515,6 +550,24 @@ class DataLayerRule(Base, TimestampMixin):
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     datasource_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        # 0134 迁移：两条 partial unique —— 手工规则（pattern 为空）全局唯一，
+        # 模式规则（pattern 非空）在同一 layer 内唯一。
+        Index(
+            "uq_layer_rule_manual",
+            "layer",
+            unique=True,
+            postgresql_where=sa_text("pattern IS NULL"),
+        ),
+        Index(
+            "uq_layer_rule_pattern",
+            "layer",
+            "pattern",
+            unique=True,
+            postgresql_where=sa_text("pattern IS NOT NULL"),
+        ),
+    )
 
     def __repr__(self) -> str:
         return f"<DataLayerRule layer={self.layer} pattern={self.pattern}>"
@@ -544,6 +597,16 @@ class BusinessObject(Base, TimestampMixin):
     graph_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_business_object_header_class", "header_class_id"),
+        # 0133 迁移建的是 CREATE UNIQUE INDEX（非唯一约束）⇒ 用 Index(unique=True)。
+        Index(
+            "uq_business_object_header_class",
+            "header_class_id",
+            unique=True,
+        ),
+    )
 
     def __repr__(self) -> str:
         return f"<BusinessObject code={self.code} name={self.name}>"
@@ -646,6 +709,12 @@ class FeatureDefinition(Base, TimestampMixin):
         lazy="selectin",
         cascade="all, delete-orphan",
         passive_deletes=True,
+    )
+
+    __table_args__ = (
+        Index("ix_feature_definition_datasource", "datasource_id"),
+        Index("ix_feature_definition_owner", "owner"),
+        Index("ix_feature_definition_status", "status"),
     )
 
     def __repr__(self) -> str:
@@ -909,7 +978,11 @@ class DataSource(Base, TimestampMixin):
     # Oracle 版本用于 NL2SQL 分页语法判断；11g 用 ROWNUM，12c+ 用 FETCH FIRST
     oracle_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
-    __table_args__ = (UniqueConstraint("name", name="uq_datasource_name"),)
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_datasource_name"),
+        Index("idx_datasource_default", "is_default"),
+        Index("idx_datasource_name", "name"),
+    )
 
     def __repr__(self) -> str:
         return f"<DataSource id={self.id} name={self.name} type={self.type}>"
@@ -1438,6 +1511,21 @@ class EntityMapping(Base, TimestampMixin):
         Index("ix_entity_mapping_enterprise_key", "enterprise_key"),
         Index("ix_entity_mapping_source", "entity_type", "source_system", "source_key"),
         Index("ix_entity_mapping_owner", "owner"),
+        Index("ix_entity_mapping_enterprise_code", "entity_type", "enterprise_code"),
+        Index(
+            "ix_entity_mapping_source_code",
+            "entity_type",
+            "source_system",
+            "source_code",
+        ),
+        # 0086 迁移用裸 SQL 建：GIN + gin_trgm_ops + 仅 SUPPLIER 的 partial 索引。
+        Index(
+            "idx_entity_mapping_supplier_name_trgm",
+            "name",
+            postgresql_using="gin",
+            postgresql_ops={"name": "gin_trgm_ops"},
+            postgresql_where=sa_text("entity_type = 'SUPPLIER'"),
+        ),
     )
 
     def __repr__(self) -> str:
@@ -1516,6 +1604,8 @@ class AuditLog(Base):
             unique=True,
             postgresql_where=sa_text("outbox_id IS NOT NULL"),
         ),
+        Index("idx_audit_log_actor", "actor"),
+        Index("idx_audit_log_created_at", "created_at"),
     )
 
     def __repr__(self) -> str:
@@ -1583,6 +1673,9 @@ class DocumentCatalog(Base, TimestampMixin):
         # 0061 迁移建的是 CREATE UNIQUE INDEX（非唯一约束），故用 Index(unique=True)
         # 而非 UniqueConstraint —— 保持 ORM 与迁移生成的 DDL 形状一致。
         Index("uq_document_catalog_content_hash", "content_hash", unique=True),
+        Index("ix_document_catalog_entity", "document_id"),
+        Index("ix_document_catalog_security", "security_level"),
+        Index("ix_document_catalog_type", "document_type"),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
@@ -1698,6 +1791,11 @@ class AgentDefinition(Base, TimestampMixin):
         lazy="selectin",
     )
 
+    __table_args__ = (
+        Index("ix_agent_definition_owner", "owner"),
+        Index("ix_agent_definition_status", "status"),
+    )
+
     def __repr__(self) -> str:
         return (
             f"<AgentDefinition id={self.id} code={self.agent_code} "
@@ -1788,7 +1886,10 @@ class AgentSchedule(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
 
-    __table_args__ = (Index("ix_agent_schedule_next_run", "is_active", "next_run_at"),)
+    __table_args__ = (
+        Index("ix_agent_schedule_next_run", "is_active", "next_run_at"),
+        Index("ix_agent_schedule_agent", "agent_id"),
+    )
 
     def __repr__(self) -> str:
         return (
@@ -2110,6 +2211,7 @@ class EvaluationReport(Base, TimestampMixin):
             "status",
             postgresql_where=sa_text("status IN ('PENDING','RUNNING')"),
         ),
+        Index("ix_evaluation_report_window", "time_window_end"),
     )
 
     def __repr__(self) -> str:
@@ -2377,9 +2479,9 @@ class L3Acl(Base):
         server_default=sa.func.now(),
     )
 
-    __table_args__ = (
-        Index("ix_l3_acl_user_id", "user_id"),
-    )
+    # 注：`user_id` 上的 `mapped_column(index=True)` 已经生成同名索引
+    # `ix_l3_acl_user_id`；这里不再重复声明 `Index("ix_l3_acl_user_id", "user_id")`
+    # —— 重复声明会让 create_all 发出两条同名 CREATE INDEX（PG 直接报错）。
 
 
 # Re-export Wiki 知识管理 4 表（0053 migration，Phase 8 M1）。同样为了让

@@ -568,6 +568,13 @@ def _validateBusinessAliases(value: list[str] | None) -> list[str] | None:
     return value
 
 
+def _normalizeUnit(value: str | None) -> str | None:
+    """空串/纯空白视作未定义（前端清空输入框会提交 ""）。"""
+    if value is None:
+        return None
+    return value.strip() or None
+
+
 class OntologyPropertyCreate(CamelModel):
     class_id: int
     property_name: str = Field(..., min_length=1, max_length=100)
@@ -584,7 +591,10 @@ class OntologyPropertyCreate(CamelModel):
     ref_class_id: int | None = None
     source_column: str | None = Field(default=None, max_length=100)
 
+    unit: str | None = Field(default=None, max_length=50)
+
     _check_aliases = field_validator("business_aliases")(_validateBusinessAliases)
+    _check_unit = field_validator("unit")(_normalizeUnit)
 
 
 class OntologyPropertyUpdate(CamelModel):
@@ -597,6 +607,7 @@ class OntologyPropertyUpdate(CamelModel):
     is_foreign_key: bool | None = None
     ref_class_id: int | None = None
     source_column: str | None = None
+    unit: str | None = Field(default=None, max_length=50)
     # 值域：本体属性管理页可手动调整 LLM 采纳的值；
     # None 表示不修改；显式空数组 视作清空值域。
     allowed_values: list[str] | None = Field(default=None, max_length=50)
@@ -608,6 +619,7 @@ class OntologyPropertyUpdate(CamelModel):
     regex_pattern: str | None = Field(default=None, max_length=255)
 
     _check_aliases = field_validator("business_aliases")(_validateBusinessAliases)
+    _check_unit = field_validator("unit")(_normalizeUnit)
 
     @field_validator("allowed_values")
     @classmethod
@@ -738,6 +750,7 @@ class OntologyPropertyRead(CamelModel):
     is_foreign_key: bool
     ref_class_id: int | None = None
     source_column: str | None = None
+    unit: str | None = None
     # 值域（LLM 采纳或人工填入）；null 表示未约束。
     # 暴露给本体属性管理页（让用户能看到「已沉淀」的值并手动修正）。
     allowed_values: list[str] | None = None

@@ -694,6 +694,7 @@ class OntologyService:
             is_foreign_key=dto.is_foreign_key,
             ref_class_id=dto.ref_class_id,
             source_column=dto.source_column,
+            unit=dto.unit,
         )
         # 维持会话内关系一致性：不 append 则本会话后续读 cls.properties 拿到陈旧空集合
         # （只写 class_id FK 不会触发 back_populates）。长事务/批量导入会因此漏读新属性。

@@ -60,6 +60,7 @@ export function filterProperties(
       contains(row.propertyName, f.propertyName ?? "") &&
       contains(row.propertyAlias, f.propertyAlias ?? "") &&
       contains(row.sourceColumn, f.sourceColumn ?? "") &&
+      contains(row.unit, f.unit ?? "") &&
       matchSelect(f.classId ?? "", String(row.classId)) &&
       matchSelect(f.dataType ?? "", row.dataType)
   );

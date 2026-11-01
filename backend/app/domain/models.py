@@ -308,6 +308,9 @@ class OntologyProperty(Base, TimestampMixin):
         BigIntFk, ForeignKey("ontology_class.id"), nullable=True
     )
     source_column: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 字段单位（2026-11-01）：chat 输出把单位并入表头/图例（「收货数量（件）」）。
+    # 可空 = 未定义；解析层据此产出「未定义单位」治理提示。
+    unit: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # 值域型字典（feat-dq-rule-auto-generation）：LLM 建议确认后沉淀于此，
     # 推导引擎据此生成 VALIDITY 规则（表引用型字典仍走 ref_class_id）
     allowed_values: Mapped[list[str] | None] = mapped_column(

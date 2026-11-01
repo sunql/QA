@@ -6,11 +6,13 @@
 
 断言：`[db:column]` / `[db:index]` / `[orm:table]` / `[orm:column]` / `[orm:index]` / `[alembic]`
 一律为空；`[db:table]` 允许残留但必须落在显式允许名单里（名单外出现 = 失败 ⇒ 以后新增忘了
-注册的模型模块会被抓到）。另加两条**正向**断言：`uq_metric_source_triple`（约束支撑的唯一
-索引 ⇒ ORM 侧必须用 UniqueConstraint）与 `ix_evaluation_report_status_running`（partial 索引，
-谓词必须是 `status = 'RUNNING'` —— drift **不比较谓词**，只能在这里钉）。比较逻辑复用
-`app/infrastructure/schema_drift.py`，与容器启动期判定**同一份 SSOT**；ORM 侧声明形态由
-`test_orm_schema_ssot.py` 钉，不在此重复。
+注册的模型模块会被抓到）。另加两条**正向**断言：`uq_metric_source_triple`（约束支撑的唯一索引
+⇒ ORM 侧必须用 UniqueConstraint）与 `ix_evaluation_report_status_running`（partial 索引，谓词
+必须含等值形式 `= 'RUNNING'` —— drift **不比较谓词**；PG 把 `IN (...)` 渲染成 `= ANY (ARRAY[...])`，
+**不含** `= 'RUNNING'` ⇒ 能把两者区分开）。比较逻辑复用 `app/infrastructure/schema_drift.py`，
+与容器启动期判定**同一份 SSOT**；ORM 侧声明形态由 `test_orm_schema_ssot.py` 钉，不在此重复。
+另有**防漏断言**：drift 工具的 code 集合是 SSOT，门禁必须覆盖它全部 —— 日后新增一类 code 而
+门禁没跟上 ⇒ 静默漏网 ⇒ 直接判失败。
 
 用法（默认目标 = 5434 `qa_metadata_test`；密码只从环境变量读）：
     cd backend
@@ -29,9 +31,9 @@ import re
 import sys
 from pathlib import Path
 
-# 以 `python scripts/fix_schema_ssot_realdata.py` 直接执行时 sys.path[0] 是 scripts/，
-# 够不到 app 包（脚本执行的 cwd 不进 sys.path），故显式补上 backend 根。否则会命中
-# editable install 指向的**另一个** checkout 的 app 包（口径就错了）。
+# 以 `python scripts/fix_schema_ssot_realdata.py` 直接执行时 sys.path[0] 是 scripts/，够不到
+# app 包（脚本执行的 cwd 不进 sys.path），故显式补上 backend 根。否则会命中 editable install
+# 指向的**另一个** checkout 的 app 包（口径就错了）。
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
@@ -47,19 +49,17 @@ EXIT_OK, EXIT_FAILED, EXIT_ENV_ERROR = 0, 1, 2
 # 库名白名单：只允许测试库（qa_metadata_test 与 qa_metadata_test_* 临时库）
 TEST_DB_NAME_PATTERN = re.compile(r"^qa_metadata_test($|_)")
 
-# 允许残留的「DB 多余表」名单，按库名给出。未在表内的库名 ⇒ 名单为空 ⇒ 任何多余表
-# 都算失败（防「新增模型忘注册」）。
+# 允许残留的「DB 多余表」名单，按库名给出。未在表内的库名 ⇒ 名单为空 ⇒ 任何多余表都算失败
 ALLOWED_EXTRA_TABLES: dict[str, frozenset[str]] = {
     "qa_metadata_test": frozenset({"po_lines_sandbox"}),
     "qa_metadata": frozenset({
         "BPSUPPLIER", "PORDER", "PORDERQ", "evidence_20260930", "knowledge_claim_20260930",
         "ontology_class_pre_pruning_20260918", "session_message_bak_20260930",
-        "session_query_state_20260930", "wiki_page_20260930",
-    }),
+        "session_query_state_20260930", "wiki_page_20260930"}),
 }
 
-# 必须为空的漂移类别（code）：覆盖「ORM 漏声明」与「ORM 声明了 DB 没有」两个方向；仅
-# 「DB 多余表」允许残留（且要落在允许名单里）。
+# 必须为空的漂移类别（code）：覆盖「ORM 漏声明」与「ORM 声明了 DB 没有」两个方向；仅「DB 多余表」
+# 允许残留（且要落在允许名单里）。
 MUST_BE_EMPTY_CODES = (
     "alembic", "missing_table", "missing_column", "missing_index",
     "index_mismatch", "extra_column", "extra_index",
@@ -69,7 +69,12 @@ ALL_CODES = MUST_BE_EMPTY_CODES[:3] + ("extra_table",) + MUST_BE_EMPTY_CODES[3:]
 # 语义特殊、必须正向断言存在的两条索引
 KEY_UNIQUE_INDEX = "uq_metric_source_triple"
 KEY_PARTIAL_INDEX = "ix_evaluation_report_status_running"
+# partial 索引谓词里必须出现的**等值**子串。不能用裸 "RUNNING"：PG 把 `IN (...)` 渲染成
+# `= ANY (ARRAY['PENDING'::text, 'RUNNING'::text])`，里面同样含 "RUNNING" ⇒ 裸子串会放行错误
+# 的谓词；等值形式 `= 'RUNNING'` 只在 `status = 'RUNNING'` 时出现。
+KEY_PARTIAL_PREDICATE = "= 'RUNNING'"
 
+_KEY_INDEX_NAMES = {"names": [KEY_UNIQUE_INDEX, KEY_PARTIAL_INDEX]}
 _KEY_INDEX_DEFS_SQL = text(
     "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = ANY(:names)"
 )
@@ -77,9 +82,11 @@ _KEY_INDEX_DEFS_SQL = text(
 
 def _objectsByCode(issues: list[_drift.DriftIssue]) -> dict[str, list[str]]:
     """把 drift 的聚合 issue 还原成 code → 对象名列表。
-
-    `_formatIssues` 按 code 聚合并用 `", "` 连接；只关心**对象名**，而对象名
-    （表名 / `表.列` / `表.索引`）不含逗号，按逗号切分是安全的。"""
+    `_formatIssues` 按 code 聚合并用 `", "` 连接；只关心**对象名**，而对象名（表名 / `表.列` /
+    `表.索引`）不含逗号，按逗号切分是安全的。
+    已知偏差：`index_mismatch` 的 detail 内含 list repr（如 `ORM=['actor', 'created_at']`），
+    按逗号切分会切成多段 ⇒ 打印出的计数偏高。**不影响判据** —— 判据是「**为空**」而非计数，
+    虚增的计数只出现在展示里，不会放过任何漂移。"""
     grouped: dict[str, list[str]] = {}
     for issue in issues:
         parts = [part.strip() for part in issue.detail.split(",") if part.strip()]
@@ -96,18 +103,15 @@ async def _checkKeyIndexes(engine) -> list[str]:
     if uniqueIndex is None:
         failures.append(f"真实 DB 上没有索引 {KEY_UNIQUE_INDEX}")
     elif not uniqueIndex.isUnique or KEY_UNIQUE_INDEX not in uniqueIndex.constraintNames:
-        failures.append(f"{KEY_UNIQUE_INDEX} 必须是约束支撑的唯一索引"
-                        "（ORM 侧才能用 UniqueConstraint）")
+        failures.append(f"{KEY_UNIQUE_INDEX} 必须是约束支撑的唯一索引（ORM 侧才能用 UniqueConstraint）")
     async with engine.connect() as conn:
-        rows = (await conn.execute(
-            _KEY_INDEX_DEFS_SQL, {"names": [KEY_UNIQUE_INDEX, KEY_PARTIAL_INDEX]}
-        )).mappings().all()
+        rows = (await conn.execute(_KEY_INDEX_DEFS_SQL, _KEY_INDEX_NAMES)).mappings().all()
     defs = {row["indexname"]: row["indexdef"] for row in rows}
     runningDef = defs.get(KEY_PARTIAL_INDEX, "")
     if not runningDef:
         failures.append(f"真实 DB 上没有索引 {KEY_PARTIAL_INDEX}")
-    elif "RUNNING" not in runningDef:
-        failures.append(f"{KEY_PARTIAL_INDEX} 的定义里没有 RUNNING 谓词：{runningDef}")
+    elif KEY_PARTIAL_PREDICATE not in runningDef:
+        failures.append(f"{KEY_PARTIAL_INDEX} 的定义里没有 `{KEY_PARTIAL_PREDICATE}` 等值谓词：{runningDef}")
     return failures
 
 
@@ -119,6 +123,9 @@ async def _runChecks(url: str, dbName: str) -> tuple[list[str], dict[str, list[s
             await conn.execute(text("SELECT 1"))
         grouped = _objectsByCode(await _drift._checkDriftAsync(engine))
         failures: list[str] = []
+        uncoveredCodes = set(_drift._SEVERITY_BY_CODE) - set(ALL_CODES)
+        if uncoveredCodes:
+            failures.append(f"drift 工具新增了 code {sorted(uncoveredCodes)}，本门禁未覆盖 ⇒ 会静默漏网")
         for code in MUST_BE_EMPTY_CODES:
             objects = grouped.get(code, [])
             if objects:
@@ -134,10 +141,8 @@ async def _runChecks(url: str, dbName: str) -> tuple[list[str], dict[str, list[s
 
 
 def _resolveTarget(args: argparse.Namespace) -> tuple[str, str] | None:
-    """解析目标库并做库名白名单检查；不合格返回 None（原因已打印）。
-
-    DSN 来源：CLI 参数 → `TEST_DATABASE_URL`（密码只从环境变量读）。
-    """
+    """解析目标库并做库名白名单检查；不合格返回 None（原因已打印）。DSN 来源：CLI 参数 →
+    `TEST_DATABASE_URL`（密码只从环境变量读）。"""
     url = args.database_url or os.environ.get("TEST_DATABASE_URL", "").strip()
     if not url:
         print("❌ 参数错误：未指定数据库。请传 --database-url 或设置 TEST_DATABASE_URL（默认 5434 qa_metadata_test）", file=sys.stderr)
@@ -152,11 +157,7 @@ def _resolveTarget(args: argparse.Namespace) -> tuple[str, str] | None:
     if TEST_DB_NAME_PATTERN.match(dbName):
         return url, dbName
     if not args.allow_non_test_db:
-        print(
-            f"❌ 目标库 {dbName} 不在测试库白名单（{TEST_DB_NAME_PATTERN.pattern}）。"
-            "确需只读巡检生产同构库时加 --allow-non-test-db。",
-            file=sys.stderr,
-        )
+        print(f"❌ 目标库 {dbName} 不在测试库白名单（{TEST_DB_NAME_PATTERN.pattern}）。确需只读巡检生产同构库时加 --allow-non-test-db。", file=sys.stderr)
         return None
     print(f"⚠️  已显式放行非测试库：{dbName}（只读巡检模式）")
     return url, dbName

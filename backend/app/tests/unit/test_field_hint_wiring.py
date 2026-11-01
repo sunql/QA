@@ -33,8 +33,11 @@ def test_single_step_stream_emits_hint_token():
 def test_multistep_non_stream_merges_step_hints():
     source = _source("chat_multistep.py")
     assert "hintsFromSteps(completed)" in source
+    # 仅出现调用不够：返回值必须写回 agg_content（丢弃返回值同样会落库原文）
+    assert "agg_content = appendFieldHints(" in source
 
 
 def test_multistep_stream_merges_step_hints():
     source = _source("chat_stream_multistep.py")
     assert "hintsFromSteps(completed)" in source
+    assert "agg_content = appendFieldHints(" in source

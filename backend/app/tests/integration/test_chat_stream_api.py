@@ -28,6 +28,15 @@ from app.services.stream_events import (
 )
 from app.tests.integration.test_chat_api import _FakeAdapter, _RouterFor, _seed, _StubEmbeddingService
 
+# `_seed` 的 NAME / QTY 都没有别名、QTY 没有单位 ⇒ 回答末尾的提示是确定性的
+# （Task 6：字段治理提示随正文下发并入落库文本）。
+_BODY_ANSWER = "查询完成，共 2 条记录。"
+_HINT_SUFFIX = (
+    "\n\n字段治理提示\n"
+    "以下字段缺少中文含义，请在「本体 → 属性管理」补充别名：NAME、QTY\n"
+    "以下数值字段未定义单位，请在本体属性中补充「单位」：QTY"
+)
+
 
 class _StreamingPipelineLlm:
     """非流式 complete() 供计划/SQL/chart；流式 completeStream() 供回答。"""
@@ -124,8 +133,8 @@ class TestChatStreamApi:
         assert len(stepResultFrames) == 1
         assert stepResultFrames[0][1]["sql"] is not None
         tokenEvents = [f for f in frames if f[0] == EVENT_TOKEN]
-        # 正文两帧；本种子未治理 NAME/QTY ⇒ 末尾追加一帧字段治理提示（Task 6）
-        assert len(tokenEvents) >= 2
+        # 正文两段 + 一段确定性的字段治理提示（Task 6）——多/少一帧都要红
+        assert len(tokenEvents) == 3
 
         metaData = dict(frames[0][1])
         assert metaData["intent"] == "query"
@@ -141,11 +150,9 @@ class TestChatStreamApi:
         assert chartData["chartType"] == "bar"
         assert chartData["chartOption"] is not None
         assert len(chartData["data"]) == 2
-        # token 增量拼接为完整回答（正文 + 可能的字段治理提示后缀）
+        # token 增量拼接为完整回答：正文 + 确定性的字段治理提示后缀
         answer = "".join(d["content"] for e, d in tokenEvents)
-        assert answer.startswith("查询完成，共 2 条记录。")
-        suffix = answer[len("查询完成，共 2 条记录。"):]
-        assert suffix == "" or suffix.startswith("\n\n字段治理提示")
+        assert answer == _BODY_ANSWER + _HINT_SUFFIX
         # done 携带累计 token（计划/SQL 30 + chart 15 + answer 15）
         doneData = frames[-1][1]
         assert doneData["tokensUsed"] == 60
@@ -196,10 +203,11 @@ class TestChatStreamApi:
     ) -> None:
         config, ds = await _seed(dbSession)
         _installStreamFakes(monkeypatch, config)
-        await client.post(
+        resp = await client.post(
             "/api/v1/chat/stream",
             json={"sessionId": "s1", "question": "各供应商的收货数量汇总", "datasourceId": ds.id},
         )
+        assert resp.status_code == 200, resp.text
 
         from sqlalchemy import select
 
@@ -211,11 +219,14 @@ class TestChatStreamApi:
         msgs = list((await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id))).scalars().all())
         assert len(msgs) == 2
         assert msgs[1].role == "assistant"
-        # 未治理字段 ⇒ 正文后允许字段治理提示后缀（Task 6 接入）
+        # 未治理字段 ⇒ 落库正文必须精确等于「正文 + 确定性提示后缀」
         storedAnswer = msgs[1].content
-        assert storedAnswer.startswith("查询完成，共 2 条记录。")
-        storedSuffix = storedAnswer[len("查询完成，共 2 条记录。"):]
-        assert storedSuffix == "" or storedSuffix.startswith("\n\n字段治理提示")
+        assert storedAnswer == _BODY_ANSWER + _HINT_SUFFIX
+        # 落库与流式所见逐字一致（同一份 answerPieces）
+        streamedAnswer = "".join(
+            d["content"] for e, d in _parseFrames(resp.text) if e == EVENT_TOKEN
+        )
+        assert streamedAnswer == storedAnswer
         # 0105 图表进最终报告：图必须**真的落进库**。只测 schema 与读路径会漏掉
         # 这一层 —— 多处 `_storeSessionMessages` 调用点任何一个漏传，读取侧照样
         # 全绿（读到 None 而已），而导出 PDF 与历史回放会整批没有图。

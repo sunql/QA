@@ -195,6 +195,9 @@ class L4Mixin:
             answer=answer_text,
             intent=IntentType.NEW_QUERY.value,
             sql=result.final_sql,
+            # L4 执行轨迹（2026-10-31）：只含摘要/计数/耗时/状态，随回答一起下发；
+            # 无工具调用（纯文字回答）时为 None → 前端不出卡。
+            agent_trace=result.agent_trace,
         )
         _t0 = time.monotonic()
         await self._storeSessionMessages(
@@ -202,6 +205,7 @@ class L4Mixin:
             routing_layer=ROUTING_LAYER_L4,
             latency_ms=int((time.monotonic() - _t0) * 1000),
             token_cost_usd=float(result.total_cost_usd),
+            agent_trace=result.agent_trace,
         )
         logger.info(
             "L4 agent loop hit: iterations=%d cost=%.4f tool_calls=%s terminated=%s",

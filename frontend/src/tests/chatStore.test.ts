@@ -528,6 +528,73 @@ describe("chatStore", () => {
     ]);
   });
 
+  // L4 执行轨迹（2026-10-31）：三条入口（流式帧 / 非流式响应 / 历史回放）
+  // 都必须把快照回填到消息上，否则卡片只在某一条链路上出现。
+  const TRACE_FIXTURE = {
+    kind: "l4_agent_trace" as const,
+    status: "answered" as const,
+    iterations: 1,
+    totalMs: 900,
+    stepCount: 1,
+    steps: [
+      {
+        index: 0,
+        iteration: 0,
+        tool: "execute_sql",
+        status: "ok" as const,
+        elapsedMs: 880,
+        args: { sqlPreview: "SELECT 1" },
+        resultSummary: { rows: 1 },
+      },
+    ],
+  };
+
+  it("流式 agent_trace 帧写入 agentTrace", async () => {
+    chatApi.sendMessageStream.mockImplementation(async (_payload, handlers) => {
+      handlers.onAgentTrace?.(TRACE_FIXTURE);
+      handlers.onToken?.("查完了");
+      handlers.onDone?.({ tokensUsed: 1, cost: 0 });
+    });
+    useChatStore.getState().setDatasourceId(1);
+
+    await useChatStore.getState().sendMessage("为什么供货量下降", true);
+
+    expect(useChatStore.getState().messages[1].agentTrace).toEqual(TRACE_FIXTURE);
+  });
+
+  it("非流式响应写入 agentTrace（并经白名单收窄）", async () => {
+    chatApi.sendMessage.mockResolvedValue({
+      answer: "查完了",
+      intent: "new_query",
+      tokensUsed: 1,
+      cost: 0,
+      // 系统边界原始 JSON：形状不合法应被收窄成 null，而不是流进渲染层
+      agentTrace: { kind: "l4_agent_trace", status: "weird", steps: [] },
+    });
+    useChatStore.getState().setDatasourceId(1);
+
+    await useChatStore.getState().sendMessage("为什么供货量下降");
+
+    expect(useChatStore.getState().messages[1].agentTrace).toBeNull();
+  });
+
+  it("历史回放还原 agentTrace", async () => {
+    historyApi.loadSessionMessages.mockResolvedValue({
+      sessionId: "s-history",
+      messages: [
+        {
+          id: 1, role: "assistant", content: "查完了", question: null,
+          sql: null, createdTime: "2026-01-01T00:00:00Z", interrupted: false,
+          agentTrace: TRACE_FIXTURE,
+        },
+      ],
+    });
+
+    await useChatStore.getState().loadSessionMessages("s-history");
+
+    expect(useChatStore.getState().messages[0].agentTrace).toEqual(TRACE_FIXTURE);
+  });
+
   it("未选择数据源时发送返回错误且不调 API", async () => {
     await useChatStore.getState().sendMessage("查询");
     expect(chatApi.sendMessage).not.toHaveBeenCalled();

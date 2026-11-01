@@ -29,6 +29,7 @@ import type {
 } from "../types/chat";
 import { asChartOption, asTablePayload, asVisualRationale, normalizeChartType } from "../utils/chartContract";
 import { asReportSections } from "../utils/reportSections";
+import { asAgentTrace } from "../utils/agentTrace";
 import { i18n } from "../i18n";
 import {
   readHistoryPanelOpen,
@@ -216,6 +217,8 @@ function toChatMessage(read: ChatMessageRead): ChatMessage {
     queryPlan: (read.queryPlan ?? null) as ChatMessage["queryPlan"],
     steps: asReplaySteps(read.stepsSnapshot),
     reportSections: asReportSections(read.reportSections) ?? undefined,
+    // L4 执行轨迹卡（2026-10-31）：同是系统边界原始 JSON，收窄失败按「无轨迹」。
+    agentTrace: asAgentTrace(read.agentTrace),
     // 回放出来的消息天然知道自己的落库主键，补上它「导出此条」按钮才会出现。
     // 此前不填：入口只在 dbMessageId 存在时才渲染，于是刷新恢复出来的会话
     // 整段没有单条导出（实时发送的消息仍然没有，见 ChatMessage.dbMessageId 注释）。
@@ -452,6 +455,14 @@ function streamHandlers(
       set((state) => ({
         messages: patchMessage(state.messages, targetId, {
           classRecall: info,
+        }),
+      })),
+    // L4 执行轨迹（agent_trace 帧，token 前到达）：直接回填整段快照。
+    // 快照是一次性的事后总结，不随正文增量变化。
+    onAgentTrace: (trace) =>
+      set((state) => ({
+        messages: patchMessage(state.messages, targetId, {
+          agentTrace: trace,
         }),
       })),
     onToken: (content) =>
@@ -810,6 +821,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               }),
             }));
           },
+          // L4 执行轨迹（agent_trace 帧，token 前到达）：整段快照一次性回填
+          onAgentTrace: (trace) => {
+            if (!isCurrent()) return;
+            set((state) => ({
+              messages: patchLastMessage(state.messages, { agentTrace: trace }),
+            }));
+          },
           onToken: (content) => {
             if (!isCurrent()) return;
             set((state) => {
@@ -897,6 +915,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               data: response.data ?? null,
               queryPlan: response.queryPlan ?? null,
               reportSections: asReportSections(response.reportSections) ?? undefined,
+              // L4 执行轨迹（非流式响应）：系统边界同一条收窄，缺省/非法 = 无卡
+              agentTrace: asAgentTrace(response.agentTrace),
               intent: isIntent(response.intent) ? response.intent : undefined,
               extractedEntities: response.extractedEntities ?? null,
               tokensUsed: response.tokensUsed,

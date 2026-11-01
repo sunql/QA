@@ -535,6 +535,54 @@ describe("sendMessageStream class_recall 事件", () => {
   });
 });
 
+describe("sendMessageStream agent_trace 事件", () => {
+  const TRACE = {
+    kind: "l4_agent_trace",
+    status: "answered",
+    iterations: 2,
+    totalMs: 1234,
+    stepCount: 1,
+    steps: [
+      {
+        index: 0,
+        iteration: 0,
+        tool: "list_tables",
+        status: "ok",
+        elapsedMs: 12,
+        args: { keyword: "supply" },
+        resultSummary: { tables: 3 },
+      },
+    ],
+  };
+
+  it("分发 agent_trace 事件（合法快照经收窄后回调）", async () => {
+    const stream = sseStream(`event: agent_trace\ndata: ${JSON.stringify({ trace: TRACE })}\n\n`);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: unknown[] = [];
+    await sendMessageStream(makePayload(), {
+      onAgentTrace: (trace) => received.push(trace),
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual(TRACE);
+  });
+
+  it("非法轨迹负载（status 不在白名单）不触发回调", async () => {
+    const stream = sseStream(
+      `event: agent_trace\ndata: ${JSON.stringify({ trace: { ...TRACE, status: "error" } })}\n\n`,
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: unknown[] = [];
+    await sendMessageStream(makePayload(), {
+      onAgentTrace: (trace) => received.push(trace),
+    });
+
+    expect(received).toHaveLength(0);
+  });
+});
+
 // ===== Task 7（可视化输出策略）：tableOption / visualRationale 收窄 =====
 // 4 个 api 接入点（normalizeStepResult / normalizeChatResponse / chart 事件 / done 事件）
 // 必须对同一份负载产出同一份收窄结果。共享 fixture + 顺序循环，避免复制断言（加第 5 处时漏掉）。

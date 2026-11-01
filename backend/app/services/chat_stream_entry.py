@@ -43,6 +43,7 @@ from app.services.evidence_record_service import (
 from app.services.intent_service import IntentResult
 from app.services.messages_zh import MSG_INTERNAL_ERROR
 from app.services.stream_events import (
+    EVENT_AGENT_TRACE,
     EVENT_CHART,
     EVENT_DONE,
     EVENT_ERROR,
@@ -194,6 +195,9 @@ class StreamEntryMixin:
             if preamble.agent_run is not None:
                 meta_frame["agentRun"] = preamble.agent_run
             yield StreamEvent(EVENT_META, meta_frame)
+            # L4 执行轨迹（2026-10-31）：事后快照，token 前一次下发；无轨迹不发帧。
+            if preamble.agent_trace:
+                yield StreamEvent(EVENT_AGENT_TRACE, {"trace": preamble.agent_trace})
             # L4 带回的最终 SQL：不发这一帧，前端消息下就没有 SQL 卡片
             if preamble.sql:
                 yield StreamEvent(EVENT_SQL, {"sql": preamble.sql})

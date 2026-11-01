@@ -167,6 +167,32 @@ export interface MultiStepStep {
   originalRows?: number;
   compressedRows?: number;
 }
+// L4 执行轨迹单步（2026-10-31）：只含摘要，不含工具结果原文。
+// status=ok 表示工具成功返回；status=error 时 error 字段带截断后的错误摘要。
+export interface AgentTraceStep {
+  index: number;
+  iteration: number;
+  tool: string;
+  status: "ok" | "error";
+  elapsedMs: number;
+  args: Record<string, unknown>;
+  resultSummary: Record<string, unknown>;
+  error?: string;
+}
+
+// L4 执行轨迹快照（事后卡片）：后端 buildTrace 产出的完整结构。
+// status 只可能来自 L4 loop 的终止原因 answered / max_iterations ——
+// error 与 L2 降级路径不产轨迹（决策 4），故前端不建模这两种。
+export interface AgentTrace {
+  kind: "l4_agent_trace";
+  status: "answered" | "max_iterations";
+  iterations: number;
+  totalMs: number;
+  stepCount: number;
+  steps: AgentTraceStep[];
+  truncated?: boolean;
+}
+
 export interface AgentSuggestion {
   recommendedAgentCode: string;
   confidence: number;
@@ -204,6 +230,8 @@ export interface ChatResponse {
   steps?: StepResultRead[] | null;
   // 多步报告分块（仅多步聚合/降级收尾；其余意图为 null/缺省）
   reportSections?: ReportBlock[] | null;
+  // L4 执行轨迹（2026-10-31）：仅 L4 命中且有工具调用时非 null
+  agentTrace?: AgentTrace | null;
   // Phase 1.4：目标表的可信度 badge 列表（顺序对齐 queryPlan.selectedClasses）；
   // 无 selectedClasses / DQ 服务降级时为 null
   dataQuality?: DataQualityBadge[] | null;
@@ -323,6 +351,8 @@ export interface ChatMessage {
   steps?: MultiStepStep[];
   // 多步报告分块：done 帧 / 非流式响应 / 历史回放回填；缺省走旧纯 Markdown 渲染
   reportSections?: ReportBlock[];
+  // L4 执行轨迹卡（agent_trace 帧 / 非流式响应 / 历史回放回填；缺省不出卡）
+  agentTrace?: AgentTrace | null;
   // 本轮端到端耗时（毫秒）：done 帧 `latency_ms` 回填，供计划卡摘要显示。
   // 历史回放没有时长 ⇒ 缺省（不伪造）。
   elapsedMs?: number;

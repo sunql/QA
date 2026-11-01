@@ -35,6 +35,7 @@ from app.services.chat_helpers import (
     _statePlan,
     streamPersistStateOf,
 )
+from app.utils.json_safe import jsonSafe
 
 logger = logging.getLogger(__name__)
 
@@ -520,6 +521,7 @@ class ContextMixin:
         visual_rationale: dict | None = None,
         query_plan: dict | None = None,
         steps_snapshot: list[dict] | None = None,
+        agent_trace: dict | None = None,
     ) -> None:
         """持久化一轮对话：user + assistant 双写（仅创建新记录，不可变）。
 
@@ -582,6 +584,9 @@ class ContextMixin:
             visual_rationale=visual_rationale,
             query_plan=query_plan,
             steps_snapshot=steps_snapshot,
+            # L4 执行轨迹（2026-10-31）：快照是纯模板数据，仍统一过 jsonSafe，
+            # 防止未来新增字段把 Decimal/日期带进 JSONB 炸整条 INSERT（PR #78 教训）。
+            agent_trace=jsonSafe(agent_trace) if agent_trace is not None else None,
             user_id=chatUserId,
         )
         session.add_all([userMsg, assistantMsg])

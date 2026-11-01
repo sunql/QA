@@ -1,6 +1,6 @@
 """ORM 必须声明迁移建过的一切索引（否则 drift 报 extra_index，autogenerate 提议 DROP）。
 
-2026-11-01 实测：真实库上有 33 个索引「迁移建了、ORM 没声明」，被 drift 判成
+2026-11-02 实测：真实库上有 33 个索引「迁移建了、ORM 没声明」，被 drift 判成
 `extra_index` warning（刷了几个月启动日志）。本文件把这 33 条钉死。
 
 33 = 32 个 `Index` + 1 个 `UniqueConstraint`：

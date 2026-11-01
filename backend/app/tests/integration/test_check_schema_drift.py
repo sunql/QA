@@ -614,7 +614,7 @@ class TestColumnAndIndexDriftSubprocess:
         assert "[orm:column]" not in combined
         assert "[orm:index]" not in combined
         assert "[db:column]" not in combined
-        # 2026-11-01 Schema SSOT 对齐后：DB 多余的列/索引已全部补进 ORM，
+        # 2026-11-02 Schema SSOT 对齐后：DB 多余的列/索引已全部补进 ORM，
         # 断言从「允许出现」收紧为「不允许出现」—— 新的迁移建了索引却忘了
         # 补 ORM，会在这里立刻失败（而不是又刷几个月启动日志）。
         assert "[db:index]" not in combined

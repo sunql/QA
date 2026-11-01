@@ -104,3 +104,74 @@ DRAFT ──┐
 - 评估耗时受业务库 SQL 计划器影响大；snapshot 异步化后才能上 docker compose 冒烟。
 - `progress` JSONB 内层键不被 Pydantic alias_generator 改写，前端先按 snake_case 读（Phase 4 强类型化时切 camelCase）。
 - CheckConstraint 扩为 6 值（migration 0074）；降级路径已写明，alembic downgrade 即可回滚。
+
+## Schema 漂移治理：ORM ↔ Alembic ↔ PostgreSQL 三方对齐
+
+**提交者**：Claude · **日期**：2026-11-02
+**关联变更**：[fix-schema-ssot-alignment](../changes/fix-schema-ssot-alignment/summary.md)
+
+### 1. 三方对齐模型：意图源 / 变更历史 / 事实
+
+- `Base.metadata`（ORM 声明）= 唯一的**意图源** —— 「这个表应该长什么样」；
+- Alembic 迁移链 = **变更历史** —— 意图是怎么一步步落到 DB 上的；
+- 真实 PostgreSQL = **事实** —— 现在实际长什么样。
+
+drift 工具（`app/infrastructure/schema_drift.py`）比对「ORM 声明」与「真实 DB」；
+Alembic 负责把 ORM 声明翻译成 DB 上的 DDL。三者任一不一致都会出问题，且**方向不同**：
+
+- **ORM 漏声明** ⇒ drift 报 `extra_index` / `extra_column`（warning，不阻断）；
+  更危险的是 `alembic autogenerate` 会**反过来提议 DROP**这些对象。
+- **DB 漏建** ⇒ drift 报 `missing_index` / `missing_column`（**blocking**，容器起不来）。
+
+⇒ 「ORM 漏声明」在启动期只是噪音，在迁移期却是**数据丢失级**风险。
+这是漂移治理里最需要盯住的非对称性。
+
+### 2. 本次对齐做了什么
+
+4 处补齐，全部在 **ORM 侧**（零 DDL、零新迁移、零生产写）：
+
+1. **模块注册** —— 4 个模型模块（`mcp_models` / `multi_step_models` / `research_models` /
+   `wiki_graph_insight`）没进 `Base.metadata`，独立 CLI 看不到它们 ⇒ 被误报 `extra_table`，
+   而 `autogenerate` 会提议 **DROP 13 张活表**；
+2. **漏列** —— `knowledge_claim.confidence_level`（迁移 `0100` 已建，ORM 未声明）；
+3. **33 个索引** —— 32 个 `Index` + 1 个 `UniqueConstraint` 补进 `__table_args__`
+   （列序 / unique / method / partial 谓词均对着 `pg_indexes` 实测抄）；
+4. **1 处谓词** —— `ix_evaluation_report_status_running` 的 ORM 谓词由
+   `status IN ('PENDING','RUNNING')` 改回迁移 `0074` 与两个真实库的
+   `status = 'RUNNING'`。
+
+结果：**drift 可见的漂移清零** —— 全新迁移库上 `--strict` 实测 **exit 0**；
+`autogenerate` 的「DROP 13 张活表 + 27 个索引」地雷被拆掉。
+
+### 3. drift 工具的盲区（重要）
+
+drift 工具**只比**：表集合、列名、索引名 + 有序列元组。
+**不比**：列类型、列 comment、索引 unique 标志、**索引谓词**、opclass、排序方向。
+
+而 **alembic 1.18.4 全包不比较索引谓词** —— `postgresql_where` 在整个 alembic 包里出现
+**0** 次，`alembic/ddl/impl.py` 里 `"where"` 出现 **0** 次。
+⇒ 谓词分歧**永远不会被 `alembic check` / autogenerate / drift 报出来**，只能靠专门测试钉住
+（本批新增 `test_running_status_index_predicate_matches_migration`）。
+
+⇒ **「drift 全绿」≠「ORM 与 DB 语义全等」。** 判据要分层看：
+
+| 层 | 谁负责 | 覆盖 |
+|---|---|---|
+| 表 / 列 / 索引的有序列集合 | drift 工具 | 启动期 blocking 门禁 |
+| 列类型 / comment / 约束形状 / 排序方向 | `alembic check`（autogenerate diff） | 迁移级复核，**drift 看不见** |
+| 索引谓词 / opclass | **无自动工具**，只能专用测试 | 靠 `test_orm_schema_ssot.py` |
+
+另注：drift 工具的 `[alembic]` 检查**只比版本号**（DB 的 `alembic_version` vs 代码里的 head），
+**不是** autogenerate 差异检查 —— 所以「`--strict` exit 0」与「`alembic check` 仍 FAILED」
+可以同时成立，两者测的不是一回事。
+
+### 4. 后续纪律
+
+1. **模型与迁移同 PR**：新增 / 修改 ORM 模型必须在**同一个 PR** 里带 Alembic 迁移
+   （见 [`Harness/rules/工程结构.md`](../rules/工程结构.md) 的「变更流程」段），
+   否则启动期校验直接阻断；ORM 与迁移不同步是本次全部漂移的根。
+2. **补声明要照抄实测定义**：ORM 侧补索引声明时，**列序、unique、method（btree/gin）、
+   partial 谓词**都要对着 `pg_indexes` 实测抄，不要凭印象写 —— 抄错的代价是
+   autogenerate 提议重建索引，或把「局部唯一」写成「全局唯一」。
+3. **只读巡检用门禁脚本**：结构一致性用 `backend/scripts/fix_schema_ssot_realdata.py`
+   （**只读**、可重复跑、退出码 0/1/2）复验，不要用 `Base.metadata.create_all` 建表来「对齐」。

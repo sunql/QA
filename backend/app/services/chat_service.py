@@ -87,6 +87,7 @@ from app.services.datasource_service import DataSourceService
 from app.services.kpi_contract_builder import buildKpiContractBlock
 from app.services.kpi_semantic_match_service import KpiMatchResult, KpiSemanticMatchService
 from app.services.embedding_service import EmbeddingService
+from app.services.field_hint_text import appendFieldHints, columnLabelsOf, fieldHintsOf
 from app.services.intent_service import IntentResult, IntentService
 from app.services.visual_rationale import buildVisualRationale
 from app.domain.error_messages import (
@@ -702,6 +703,13 @@ class ChatService(
             answerText = f"{shareWarning}\n\n{answerText}"
         if denominatorWarning:
             answerText = f"{denominatorWarning}\n\n{answerText}"
+        # 字段治理提示（chat 输出中文化）：缺中文名 / 缺单位追加到正文末尾，
+        # 随消息落库 ⇒ PDF 导出、历史回放、研究报告天然继承。无提示时逐字不变。
+        answerText = appendFieldHints(
+            answerText,
+            fieldHintsOf(option),
+            columnLabels=columnLabelsOf(option, tableOption),
+        )
         # 4-1（feat-token-cache）：一次性读 cache hit multiplier，避免 chart/answer
         # 路径上每次 _recordUsage 都查一次。chat_service 入口处读取一次足够。
         cacheHitMultiplier = await _readFloatConfig(

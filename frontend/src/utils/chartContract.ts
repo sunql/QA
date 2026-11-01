@@ -62,7 +62,19 @@ export function asTablePayload(value: unknown): TablePayload | null {
     rows: record.rows as Record<string, unknown>[],
   };
   if (record.truncated === true) payload.truncated = true;
+  const columnLabels = asColumnLabels(record.columnLabels);
+  if (Object.keys(columnLabels).length > 0) payload.columnLabels = columnLabels;
   return payload;
+}
+
+/** 表头显示名收窄：只收「string → 非空 string」的键值；其余忽略。 */
+export function asColumnLabels(value: unknown): Record<string, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const labels: Record<string, string> = {};
+  for (const [key, label] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof label === "string" && label.length > 0) labels[key] = label;
+  }
+  return labels;
 }
 
 /**

@@ -226,6 +226,35 @@ describe("ReportRenderer", () => {
     );
     expect(screen.getByTestId("report-chart-bar")).toBeInTheDocument();
   });
+
+  it("table 块有 columnLabels 时表头用中文名", () => {
+    renderPayload({
+      sessionId: "s",
+      turnId: "t",
+      mode: "research",
+      title: "报告",
+      question: "q",
+      sections: [
+        {
+          id: "1",
+          kind: "data",
+          title: "数据",
+          blocks: [
+            {
+              type: "table",
+              content: {
+                columns: ["rcv_qty"],
+                rows: [{ rcv_qty: 1 }],
+                columnLabels: { rcv_qty: "收货数量（件）" },
+              },
+            },
+          ],
+        },
+      ],
+    });
+    expect(screen.getByText("收货数量（件）")).toBeInTheDocument();
+    expect(screen.queryByText("rcv_qty")).not.toBeInTheDocument();
+  });
 });
 
 // ---------------------------------------------------------------------------

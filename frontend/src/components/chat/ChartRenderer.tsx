@@ -12,6 +12,7 @@ import { renderChartPng } from "../../utils/chartSnapshot";
 import { chartHeightOf } from "../../utils/chartLayout";
 import { useChartDisplayOption } from "../../hooks/useChartDisplayOption";
 import { visualRationaleText } from "../../utils/visualRationale";
+import { asColumnLabels } from "../../utils/chartContract";
 import KpiCard, { parseKpiPayload } from "./KpiCard";
 
 interface ChartRendererProps {
@@ -50,12 +51,14 @@ interface DataTableProps {
   columns: string[];
   rows: Record<string, unknown>[];
   truncated?: boolean;
+  columnLabels?: Record<string, string>;
 }
 
-function DataTable({ columns, rows, truncated }: DataTableProps) {
+function DataTable({ columns, rows, truncated, columnLabels }: DataTableProps) {
   const { t } = useTranslation();
+  const labels = columnLabels ?? {};
   const columnDefs = (columns.length > 0 ? columns : rows.length > 0 ? Object.keys(rows[0]) : []).map(
-    (key) => ({ title: key, dataIndex: key, key })
+    (key) => ({ title: labels[key] ?? key, dataIndex: key, key })
   );
   const tableRows = rows.map((row, index) => ({ ...row, __rowKey: `row-${index}` }));
   return (
@@ -199,7 +202,12 @@ export default function ChartRenderer({
         </div>
       )}
       {isTable ? (
-        <DataTable columns={columnNames} rows={rows} truncated={isTruncatedTable} />
+        <DataTable
+          columns={columnNames}
+          rows={rows}
+          truncated={isTruncatedTable}
+          columnLabels={asColumnLabels(chartOption?.columnLabels)}
+        />
       ) : isKpi && kpiPayload ? (
         <KpiCard kpi={kpiPayload} />
       ) : (
@@ -240,6 +248,7 @@ export default function ChartRenderer({
                       columns={tableOption.columns}
                       rows={tableOption.rows}
                       truncated={tableOption.truncated === true}
+                      columnLabels={tableOption.columnLabels}
                     />
                   ),
                 },

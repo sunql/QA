@@ -682,4 +682,20 @@ describe("ChartRenderer", () => {
     expect(second.yAxis.data).toHaveLength(25);
     expect(second.yAxis.data).toContain("S24");
   });
+
+  it("TABLE 表头用 columnLabels 的中文名，缺键回落原始列名", () => {
+    render(
+      <ChartRenderer
+        chartType="table"
+        chartOption={{
+          columns: ["rcv_qty", "supplier_code"],
+          rows: [{ rcv_qty: 1, supplier_code: "B130" }],
+          columnLabels: { rcv_qty: "收货数量（件）" },
+        }}
+      />
+    );
+    expect(screen.getByText("收货数量（件）")).toBeInTheDocument();
+    expect(screen.getByText("supplier_code")).toBeInTheDocument();
+    expect(screen.queryByText("rcv_qty")).not.toBeInTheDocument();
+  });
 });

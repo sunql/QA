@@ -1,0 +1,256 @@
+"""columnLabels / units 在 spec→renderer→tableOption 链路上的透传。"""
+
+from __future__ import annotations
+
+from app.domain.chart_spec import ChartSpec, coerceSpec, tableSpec
+from app.domain.enums import ChartType
+from app.domain.query_plan import Aggregation, QueryPlan
+from app.services.chart_decision import ChartDecision, buildChartSignals
+from app.services.chart_renderer import renderChartOption
+from app.services.chart_spec_builder import buildSpec, dimensionLikeFields
+from app.services.field_display_resolver import (
+    SOURCE_ONTOLOGY_ALIAS,
+    SOURCE_PLAN_ALIAS,
+    FieldDisplay,
+    displayMaps,
+    missingFieldHints,
+)
+from app.services.visual_payload import assembleTableOption
+
+_ROWS = [
+    {"supplier_code": "B1", "rcv_qty": 3},
+    {"supplier_code": "B2", "rcv_qty": 5},
+    {"supplier_code": "B3", "rcv_qty": 7},
+]
+
+
+def _signals(columns: list[str], rows: list[dict]):
+    """复用生产同一派生入口，避免手搓 ChartSignals（字段多、易漂移）。"""
+    return buildChartSignals(None, columns, rows, "")
+
+
+def _decision(kind: ChartType) -> ChartDecision:
+    return ChartDecision(kind=kind, ruleId="R_TEST", candidates=(), ambiguous=False)
+
+
+def test_build_spec_appends_unit_to_measure_and_series():
+    spec = buildSpec(
+        _decision(ChartType.BAR),
+        _signals(["supplier_code", "rcv_qty"], _ROWS),
+        _ROWS,
+        aliasOverrides={"supplier_code": "供应商编码", "rcv_qty": "收货数量"},
+        units={"rcv_qty": "件"},
+    )
+    assert spec.measures[0].label == "收货数量（件）"
+    assert spec.series[0].name == "收货数量（件）"
+    assert spec.dimensions[0].label == "供应商编码"
+    assert spec.columnLabels == {
+        "supplier_code": "供应商编码",
+        "rcv_qty": "收货数量（件）",
+    }
+
+
+def test_build_spec_omits_labels_when_unresolved():
+    rows = [{"supplier_name": "甲", "total_qty": 3}]
+    spec = buildSpec(
+        _decision(ChartType.BAR),
+        _signals(["supplier_name", "total_qty"], rows),
+        rows,
+    )
+    assert spec.columnLabels == {}
+    assert spec.measures[0].label == "total qty"
+
+
+def _countOnDimensionPlan() -> QueryPlan:
+    """合法计划形状：COUNT(维度列) 的别名会被 aliasByField 挂到该维度列上。"""
+    return QueryPlan(
+        target="DWD_GOODS_RECEIPT_DTL",
+        groupBy=("SUPPLIER_NAME",),
+        aggregations=(Aggregation(function="COUNT", property="SUPPLIER_NAME", alias="记录数"),),
+    )
+
+
+def _countOnDimensionRows() -> list[dict]:
+    return [
+        {"supplier_name": "B125", "记录数": 12},
+        {"supplier_name": "B019", "记录数": 7},
+    ]
+
+
+def test_dimension_header_ignores_plan_aggregation_alias():
+    """维度列的表头只吃注入的 overrides，不吃 plan 聚合别名（否则两列都叫「记录数」）。"""
+    plan = _countOnDimensionPlan()
+    rows = _countOnDimensionRows()
+    columns = ["supplier_name", "记录数"]
+    spec = buildSpec(
+        _decision(ChartType.BAR),
+        buildChartSignals(plan, columns, rows, ""),
+        rows,
+        plan,
+    )
+    assert "supplier_name" not in spec.columnLabels
+
+
+def test_dimension_header_still_uses_injected_override():
+    """同一形状上，显式注入的 overrides 仍然给维度列表头（能力不缩水）。"""
+    plan = _countOnDimensionPlan()
+    rows = _countOnDimensionRows()
+    columns = ["supplier_name", "记录数"]
+    spec = buildSpec(
+        _decision(ChartType.BAR),
+        buildChartSignals(plan, columns, rows, ""),
+        rows,
+        plan,
+        aliasOverrides={"supplier_name": "供应商"},
+    )
+    assert spec.columnLabels["supplier_name"] == "供应商"
+
+
+def test_units_do_not_double_suffix_labels():
+    """别名已带「（单位）」时不重复拼接。"""
+    spec = buildSpec(
+        _decision(ChartType.BAR),
+        _signals(["supplier_code", "rcv_qty"], _ROWS),
+        _ROWS,
+        aliasOverrides={"rcv_qty": "收货数量（件）"},
+        units={"rcv_qty": "件"},
+    )
+    assert spec.measures[0].label == "收货数量（件）"
+    assert spec.columnLabels["rcv_qty"] == "收货数量（件）"
+
+
+def test_table_spec_carries_labels():
+    spec = tableSpec(["a", "b"], columnLabels={"a": "甲"})
+    assert spec.columnLabels == {"a": "甲"}
+
+
+def test_coerce_degrade_preserves_labels():
+    spec = ChartSpec(
+        kind=ChartType.BAR,
+        columns=("a",),
+        columnLabels={"a": "甲"},
+        measures=(),
+    )
+    coerced, reason = coerceSpec(spec, ["a"])
+    assert reason is not None
+    assert coerced.kind is ChartType.TABLE
+    assert coerced.columnLabels == {"a": "甲"}
+
+
+def test_render_table_includes_column_labels():
+    spec = tableSpec(["a"], columnLabels={"a": "甲（件）"})
+    option = renderChartOption(spec, [{"a": 1}])
+    assert option["columnLabels"] == {"a": "甲（件）"}
+
+
+def test_render_table_omits_empty_labels():
+    option = renderChartOption(tableSpec(["a"]), [{"a": 1}])
+    assert "columnLabels" not in option
+
+
+def test_assemble_table_option_passes_labels():
+    payload = assembleTableOption(
+        specKind=ChartType.BAR,
+        columns=["a"],
+        data=[{"a": 1}],
+        fullDataThreshold=100,
+        columnLabels={"a": "甲"},
+    )
+    assert payload is not None
+    assert payload["columnLabels"] == {"a": "甲"}
+
+
+def test_display_maps_excludes_plan_aggregation_alias_labels():
+    """plan 聚合别名不得进 override：否则 COUNT(维度列) 会改维度表头 + 吞掉缺名提示。"""
+    displays = {
+        "supplier_name": FieldDisplay(
+            label="记录数", unit="次", isNumeric=False, source=SOURCE_PLAN_ALIAS,
+        ),
+        "rcv_qty": FieldDisplay(
+            label="收货数量", unit="件", isNumeric=True, source=SOURCE_ONTOLOGY_ALIAS,
+        ),
+    }
+    labels, units = displayMaps(displays)
+    assert labels == {"rcv_qty": "收货数量"}  # plan 聚合别名被丢弃
+    assert units == {"supplier_name": "次", "rcv_qty": "件"}  # 单位映射不受影响
+
+
+def test_missing_field_hints_reports_plan_alias_on_dimension_like():
+    """维度列上的 plan 聚合别名不算中文名 ⇒ 进缺名提示（表头回落原始列名）。"""
+    displays = {
+        "supplier_name": FieldDisplay(
+            label="记录数", unit=None, isNumeric=False, source=SOURCE_PLAN_ALIAS,
+        ),
+    }
+    hints = missingFieldHints(displays, dimensionLike={"supplier_name"})
+    assert hints["missingLabels"] == ["supplier_name"]
+
+
+def test_missing_field_hints_skips_plan_alias_on_measure():
+    """指标列上的 plan 聚合别名就是它真正的中文名（经 aliasByField 落到 label）⇒ 不报缺名。"""
+    displays = {
+        "rcv_qty": FieldDisplay(
+            label="记录数", unit=None, isNumeric=True, source=SOURCE_PLAN_ALIAS,
+        ),
+    }
+    hints = missingFieldHints(displays, dimensionLike=set())
+    assert hints["missingLabels"] == []
+
+
+def test_unit_only_column_keeps_raw_key_and_is_reported():
+    """单位不是中文名：表头 = 原始列名（单位），且该列仍进缺名提示（Finding 1）。"""
+    rows = [{"region": "华东", "qty": 3}, {"region": "华南", "qty": 5}]
+    signals = _signals(["region", "qty"], rows)
+    spec = buildSpec(_decision(ChartType.BAR), signals, rows, units={"qty": "件"})
+    assert spec.columnLabels["qty"] == "qty（件）"
+    # 单位-only 的回落是**原始列名**：`_prettify` 会把下划线换成空格，不算原始键。
+    raw_rows = [{"region": "华东", "rcv_qty": 3}]
+    raw_spec = buildSpec(
+        _decision(ChartType.BAR),
+        _signals(["region", "rcv_qty"], raw_rows),
+        raw_rows,
+        units={"rcv_qty": "件"},
+    )
+    assert raw_spec.columnLabels["rcv_qty"] == "rcv_qty（件）"
+    displays = {
+        "region": FieldDisplay(label=None, unit=None, isNumeric=False, source="none"),
+        "qty": FieldDisplay(label=None, unit="件", isNumeric=True, source="none"),
+    }
+    hints = missingFieldHints(
+        displays, dimensionLike=dimensionLikeFields(signals)
+    )
+    assert "qty" in hints["missingLabels"]
+    assert "qty" not in hints["missingUnits"]
+
+
+def _threeGroupingPlan() -> QueryPlan:
+    """三个分组列 + COUNT(第三个分组列)；聚合别名会挂到第三个分组列上。"""
+    return QueryPlan(
+        target="DWD_GOODS_RECEIPT_DTL",
+        groupBy=("SUPPLIER_NAME", "REGION", "MATERIAL"),
+        aggregations=(
+            Aggregation(function="COUNT", property="MATERIAL", alias="记录数"),
+        ),
+    )
+
+
+def test_table_third_grouping_column_ignores_plan_aggregation_alias():
+    """TABLE 只画前 2 个分组列作轴；第 3 个仍是维度列，不能吃聚合别名（Finding 2）。"""
+    plan = _threeGroupingPlan()
+    rows = [
+        {"supplier_name": "B1", "region": "华东", "material": "M1", "记录数": 2},
+        {"supplier_name": "B2", "region": "华南", "material": "M2", "记录数": 4},
+    ]
+    columns = ["supplier_name", "region", "material", "记录数"]
+    signals = buildChartSignals(plan, columns, rows, "")
+    spec = buildSpec(_decision(ChartType.TABLE), signals, rows, plan)
+    assert "material" not in spec.columnLabels
+    displays = {
+        "material": FieldDisplay(
+            label="记录数", unit=None, isNumeric=False, source=SOURCE_PLAN_ALIAS,
+        ),
+    }
+    hints = missingFieldHints(
+        displays, dimensionLike=dimensionLikeFields(signals)
+    )
+    assert hints["missingLabels"] == ["material"]

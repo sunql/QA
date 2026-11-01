@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 import pydantic
 
-from app.domain.schemas import OntologyPropertyCreate
+from app.domain.schemas import OntologyPropertyCreate, OntologyPropertyUpdate
 
 
 class TestBoundaryValidation:
@@ -42,3 +42,22 @@ class TestBoundaryValidation:
         """未提供别名是合法场景（None 放行）。"""
         dto = OntologyPropertyCreate(class_id=1, property_name="X", data_type="STRING")
         assert dto.business_aliases is None
+
+
+def test_property_create_accepts_unit():
+    dto = OntologyPropertyCreate(
+        class_id=1, property_name="RCV_QTY_PUU", data_type="DECIMAL", unit="件"
+    )
+    assert dto.unit == "件"
+
+
+def test_property_create_blank_unit_normalizes_to_none():
+    dto = OntologyPropertyCreate(
+        class_id=1, property_name="RCV_QTY_PUU", data_type="DECIMAL", unit="   "
+    )
+    assert dto.unit is None
+
+
+def test_property_update_blank_unit_normalizes_to_none():
+    dto = OntologyPropertyUpdate(unit="")
+    assert dto.unit is None

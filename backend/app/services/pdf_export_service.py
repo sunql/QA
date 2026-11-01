@@ -624,7 +624,10 @@ class ChatExportPdfBuilder:
             return []
         dictRows = [row for row in rows or [] if isinstance(row, dict)]
         keptRows = dictRows[:_PERSIST_MAX_TABLE_ROWS]
-        body = [[self._escape_cell(col) for col in columns]]
+        labels = chartOption.get("columnLabels")
+        labelMap = labels if isinstance(labels, dict) else {}
+        header = [labelMap.get(col, col) for col in columns]
+        body = [[self._escape_cell(col) for col in header]]
         for row in keptRows:
             body.append([self._escape_cell(row.get(col)) for col in columns])
         if len(body) == 1:

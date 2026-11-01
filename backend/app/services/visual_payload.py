@@ -1,7 +1,8 @@
 """可视化输出策略的「表」负载装配（纯函数）。
 
 **它是什么**：把 SQL 结果集裁成一张前端能直接渲染的数据表负载（`{"columns",
-"rows", "truncated"}`）。它与 `chart_option` 是同一份 `data` 的**两个投影**：
+"rows", "truncated"}`，有显示名时**附加**可选键 `columnLabels`）。它与
+`chart_option` 是同一份 `data` 的**两个投影**：
 图（ECharts option）给「看趋势/占比」，表（本模块）给「查明细/抄数字」。
 
 **为什么图也要带表**（可视化输出策略，决策 8）：图把数据压缩成形状，用户看不到
@@ -21,6 +22,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from app.domain.enums import ChartType
@@ -32,17 +34,23 @@ def assembleTableOption(
     columns: list[str],
     data: list[dict],
     fullDataThreshold: int,
+    columnLabels: Mapping[str, str] | None = None,
 ) -> dict | None:
     """把结果集裁成数据表负载；TABLE / KPI 返回 None（表已在 chartOption / 不附表）。
 
     `specKind` 必须是 `coerceSpec` **之后**的最终 `spec.kind`（即发出去的
     `chartType`）：降级成 TABLE 时这里必须返 None，否则前端同一份数据会拿到两份表。
+
+    `columnLabels` 是「原始列名 → 表头显示名」，仅在非空时附加；不传 ⇒ 负载逐字不变。
     """
     if specKind is ChartType.TABLE or specKind is ChartType.KPI:
         return None
     rows = data[:fullDataThreshold]
-    return {
+    payload: dict = {
         "columns": list(columns),
         "rows": rows,
         "truncated": len(data) > fullDataThreshold,
     }
+    if columnLabels:
+        payload["columnLabels"] = dict(columnLabels)
+    return payload

@@ -18,7 +18,7 @@ import type { ReactNode } from "react";
 import { useMemo } from "react";
 import { Button } from "antd";
 import EChart from "../EChart";
-import { isChartType } from "../../utils/chartContract";
+import { asColumnLabels, isChartType } from "../../utils/chartContract";
 import { chartHeightOf } from "../../utils/chartLayout";
 import { useChartDisplayOption } from "../../hooks/useChartDisplayOption";
 import { useTranslation } from "../../i18n";
@@ -78,6 +78,8 @@ interface ReportRendererProps {
 interface TableContent {
   columns: string[];
   rows: Record<string, unknown>[];
+  /** 原始列名 → 表头显示名。缺键 = 回落原始列名；旧 payload 无此键。 */
+  columnLabels?: Record<string, string>;
 }
 
 interface ChartContent extends TableContent {
@@ -103,7 +105,8 @@ function asChartContent(value: unknown): ChartContent {
   const chartType =
     typeof value.chartType === "string" && value.chartType.length > 0 ? value.chartType : null;
   const echartsOption = isRecord(value.echartsOption) ? value.echartsOption : null;
-  return { columns, rows, title, chartType, echartsOption };
+  const columnLabels = asColumnLabels(value.columnLabels);
+  return { columns, rows, columnLabels, title, chartType, echartsOption };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -120,7 +123,8 @@ function asTableContent(value: unknown): TableContent {
   const rows = Array.isArray(value.rows)
     ? value.rows.filter(isRecord)
     : [];
-  return { columns: asStringArray(value.columns), rows };
+  const columnLabels = asColumnLabels(value.columnLabels);
+  return { columns: asStringArray(value.columns), rows, columnLabels };
 }
 
 function cellText(value: unknown): string {
@@ -128,14 +132,15 @@ function cellText(value: unknown): string {
 }
 
 function DataTable({ content }: { content: TableContent }) {
-  const { columns, rows } = content;
+  const { columns, rows, columnLabels } = content;
+  const labels = columnLabels ?? {};
   if (columns.length === 0) return null;
   return (
     <table>
       <thead>
         <tr>
           {columns.map((column) => (
-            <th key={column}>{column}</th>
+            <th key={column}>{labels[column] ?? column}</th>
           ))}
         </tr>
       </thead>

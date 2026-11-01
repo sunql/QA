@@ -1,0 +1,27 @@
+BASELINE: all green
+
+date: 2026-11-01
+branch: feat/chat-output-zh-labels
+head_commit: 01c7c3f7a7a31e213c65d002e983c2efe96c8c66
+rebase_note: 2026-11-01 rebase 到 main b368b016（#95 之后）后，本基线提交的新 SHA 为 f869096a（内容不变）；历史 SHA 01c7c3f7 不再可达
+tree_note: backend/app tree at 01c7c3f7 is byte-identical to 1ad35cd5's backend/app (both resolve to tree 219c02b3e96c63eb995c2bc39bdaca9181b58e3a); 1ad35cd5 itself is on feat/chat-output-sync, not this branch
+
+command:
+cd /private/tmp/qa-chat-output-zh-labels/backend
+export TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@127.0.0.1:5434/qa_metadata_test_zhlabels'
+export TEST_NEO4J_URI='bolt://127.0.0.1:7688'
+export TEST_NEO4J_PASSWORD='qa_neo4j_dev_2026'
+PYTHONPATH=/private/tmp/qa-chat-output-zh-labels/backend \
+  /Users/sunql/Prejectcode-th/MyWiki/wiki/aicode/qa-system/backend/.venv/bin/python -m pytest \
+  app/tests/unit/test_chart_spec_builder.py app/tests/unit/test_visual_payload.py \
+  app/tests/unit/test_pdf_export_charts.py app/tests/unit/test_display_name_resolver.py \
+  -q -p no:randomly
+
+result: 82 passed, 0 failed, 0 errors in 29.42s
+failing_node_ids: none
+
+step2_alembic_check:
+  command: pytest app/tests/integration/test_upload_size_limit.py -q -p no:randomly
+  result: 2 passed in 4.55s
+  test_db alembic_version: 0138 (== alembic heads)
+  test_db public table count: 95

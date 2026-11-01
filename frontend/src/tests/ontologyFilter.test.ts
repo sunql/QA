@@ -176,6 +176,15 @@ describe("ontologyFilter 纯函数", () => {
       expect(filterProperties(rows, { sourceColumn: "PRI_0" }).map((r) => r.id)).toEqual([3]);
     });
 
+    it("按单位过滤", () => {
+      const withUnit = [
+        prop({ id: 1, unit: "件" }),
+        prop({ id: 2, unit: "吨" }),
+        prop({ id: 3, unit: null }),
+      ];
+      expect(filterProperties(withUnit, { unit: "吨" }).map((r) => r.id)).toEqual([2]);
+    });
+
     it("按所属类精确过滤", () => {
       expect(filterProperties(rows, { classId: "1" }).map((r) => r.id)).toEqual([1, 2]);
     });

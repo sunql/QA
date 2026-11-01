@@ -33,6 +33,11 @@ from app.services.chat_helpers import (
     buildSingleStepSnapshot,
     streamPersistStateOf,
 )
+from app.services.field_hint_text import (
+    columnLabelsOf,
+    composeFieldHintText,
+    fieldHintsOf,
+)
 from app.services.kpi_contract_reconcile import buildKpiDenominatorWarning
 from app.services.nl2sql_service import _readFloatConfig
 from app.services.nl2sql_semantic_guard import shareAmbiguityWarning
@@ -459,6 +464,16 @@ class StreamQueryMixin:
             if tail:
                 answerPieces.append(tail)
                 yield StreamEvent(EVENT_TOKEN, {"content": tail})
+
+        # 字段治理提示（chat 输出中文化）：先入 answerPieces 再发帧——落库文本
+        # 与前端所见逐字一致；无提示时 hintText 为空，不追加也不发帧。
+        hintText = composeFieldHintText(
+            fieldHintsOf(option),
+            columnLabels=columnLabelsOf(option, tableOption),
+        )
+        if hintText:
+            answerPieces.append(hintText)
+            yield StreamEvent(EVENT_TOKEN, {"content": hintText})
 
         answer = "".join(answerPieces)
         # L2 streaming: totalCost includes SQL + chart + answer LLM costs

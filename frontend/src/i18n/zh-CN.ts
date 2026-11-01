@@ -1675,6 +1675,7 @@ export const zhCN = {
         propertyAlias: "别名",
         dataType: "数据类型",
         sourceColumn: "源字段",
+        unit: "单位",
         flags: "标签",
         actions: "操作",
       },
@@ -1848,6 +1849,8 @@ export const zhCN = {
         propertyAlias: "别名",
         dataType: "数据类型",
         sourceColumn: "源字段",
+        unit: "单位",
+        unitHint: "数值字段的计量单位（如 件 / 吨 / 元）。留空表示未定义，聊天输出会提示补充。",
         isPrimaryKey: "主键",
         isForeignKey: "外键",
         refClassId: "引用类",
@@ -1863,6 +1866,7 @@ export const zhCN = {
         propertyName: "如 customer_name / order_id",
         propertyAlias: "如 客户名称 / 订单ID",
         sourceColumn: "数据库列名",
+        unit: "如 件 / 吨 / 元",
       },
 
       metricLabels: {

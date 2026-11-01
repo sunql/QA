@@ -188,8 +188,14 @@ def _legend(spec: ChartSpec, seriesCount: int) -> dict[str, Any]:
 
 
 def _buildTable(spec: ChartSpec, data: list[dict]) -> dict[str, Any]:
-    """沿用既有 ``{"columns", "rows"}`` 负载 —— TABLE 契约不变，前端表格分支零改动。"""
-    return {"columns": list(spec.columns), "rows": list(data)}
+    """沿用既有 ``{"columns", "rows"}`` 负载；有显示名时**附加** ``columnLabels``。
+
+    附加键而非改 ``columns``：前端仍拿原始列名取值，中文名只影响表头显示。
+    """
+    payload: dict[str, Any] = {"columns": list(spec.columns), "rows": list(data)}
+    if spec.columnLabels:
+        payload["columnLabels"] = dict(spec.columnLabels)
+    return payload
 
 
 def _buildKpi(spec: ChartSpec, data: list[dict]) -> dict[str, Any]:

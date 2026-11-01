@@ -13,6 +13,7 @@
 **无上下文不提示**：既无 plan 也无 sourceTable ⇒ 返回空 map（调用方据此不发提示）。
 
 **绝不抛错**：查询失败记 warning 并返回空 map —— 出图/出表不该被治理数据拖垮。
+读取包在 `begin_nested()` 保存点内：失败只回滚本次查询，调用方事务仍可继续使用。
 """
 
 from __future__ import annotations
@@ -81,14 +82,18 @@ async def resolveFieldDisplays(
     if not class_names and not sourceTable:
         return {}
     try:
-        return await _resolve(
-            session,
-            columns=list(columns),
-            rows=rows,
-            class_names=class_names,
-            source_table=sourceTable,
-            plan=plan,
-        )
+        # 保存点：查询失败只回滚本次读取。直接吞掉 DB 错误会让调用方的 PG 事务
+        # 停在 aborted 状态，同一 session 的后续语句全部 InFailedSQLTransaction ——
+        # 「绝不打断出图」就必须连事务状态一起恢复。
+        async with session.begin_nested():
+            return await _resolve(
+                session,
+                columns=list(columns),
+                rows=rows,
+                class_names=class_names,
+                source_table=sourceTable,
+                plan=plan,
+            )
     except Exception:  # noqa: BLE001 — 治理数据缺失不应打断出图
         logger.warning("字段显示解析失败，全部按未解析处理", exc_info=True)
         return {}

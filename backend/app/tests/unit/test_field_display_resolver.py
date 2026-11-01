@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+from sqlalchemy import text
+
 from app.domain.models import (
     DataSource,
     FeatureDefinition,
@@ -12,6 +15,7 @@ from app.domain.models import (
     OntologyProperty,
 )
 from app.domain.query_plan import Aggregation, QueryPlan
+from app.services import field_display_resolver
 from app.services.field_display_resolver import (
     FieldDisplay,
     missingFieldHints,
@@ -286,6 +290,27 @@ class TestResolveFieldDisplays:
         )
         # 同一名字命中两个不同单位 ⇒ 不猜
         assert displays["plan_qty"].unit is None
+
+    async def test_db_failure_leaves_caller_session_usable(
+        self, dbSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """降级点必须只回滚自己的语句，不污染调用方事务（Task 5 复用请求会话）。"""
+        await _seedClass(dbSession)
+
+        async def _boom(session, class_ids):
+            await session.execute(text("SELECT * FROM table_that_does_not_exist"))
+            return []
+
+        monkeypatch.setattr(field_display_resolver, "_loadProperties", _boom)
+
+        displays = await resolveFieldDisplays(
+            dbSession,
+            columns=["supplier_code"],
+            rows=[{"supplier_code": "B130"}],
+            plan=_plan("SUPPLIER_CODE"),
+        )
+        assert displays == {}
+        assert (await dbSession.execute(text("SELECT 1"))).scalar_one() == 1
 
 
 class TestMissingFieldHints:

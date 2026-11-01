@@ -155,6 +155,35 @@ class TestChartFlowables:
         cell = flowables[0]._cellvalues[1][0]
         assert "&lt;img" in cell.text
 
+    def test_table_header_uses_column_labels(self) -> None:
+        """有 columnLabels 时表头显示中文名（含单位），数据仍按原始列键取值。"""
+        turn = _turn(
+            chart_type="table",
+            chart_option={
+                "columns": ["rcv_qty"],
+                "rows": [{"rcv_qty": 1}],
+                "columnLabels": {"rcv_qty": "收货数量（件）"},
+            },
+        )
+
+        flowables = ChatExportPdfBuilder()._chart_flowables(turn)
+
+        assert isinstance(flowables[0], Table)
+        body = [[cell.text for cell in row] for row in flowables[0]._cellvalues]
+        assert body == [["收货数量（件）"], ["1"]]
+
+    def test_table_header_falls_back_to_column_key(self) -> None:
+        """存量消息没有 columnLabels：表头必须逐字不变（回归守卫）。"""
+        turn = _turn(
+            chart_type="table",
+            chart_option={"columns": ["rcv_qty"], "rows": [{"rcv_qty": 1}]},
+        )
+
+        flowables = ChatExportPdfBuilder()._chart_flowables(turn)
+
+        body = [[cell.text for cell in row] for row in flowables[0]._cellvalues]
+        assert body == [["rcv_qty"], ["1"]]
+
     def test_kpi_kind_renders_native_text_block(self) -> None:
         turn = _turn(
             chart_type="kpi",

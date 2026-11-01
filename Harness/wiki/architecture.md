@@ -141,15 +141,32 @@ Alembic 负责把 ORM 声明翻译成 DB 上的 DDL。三者任一不一致都�
    `status = 'RUNNING'`。
 
 结果：**drift 可见的漂移清零** —— 全新迁移库上 `--strict` 实测 **exit 0**；
-`autogenerate` 的「DROP 13 张活表 + 27 个索引」地雷被拆掉。
+`autogenerate` 的「DROP 活表」地雷被拆掉。
+
+⚠️ **但这不是「无差异」**。用 alembic **1.19.1** 只读跑 `alembic check` 实测（base `7d28d08a`
+→ 本批后 HEAD）：
+
+| 类别 | 本批前（base） | 本批后（HEAD） |
+|---|---|---|
+| `removed table` | 14（13 张未注册活表 + `po_lines_sandbox`） | **0**（全新迁移库口径） |
+| `removed index` | 64 | **6** |
+| `removed column` | 1（`knowledge_claim.confidence_level`） | **0** |
+| `removed check constraint` | 20 | **20（本批未收敛 —— 见下方 §3）** |
+
+`alembic check` 在全新迁移库上仍报 **56 条**残余差异（本批明确不覆盖，需 DDL + 数据迁移
+评估）。详见变更记录
+[`Harness/changes/fix-schema-ssot-alignment/summary.md`](../changes/fix-schema-ssot-alignment/summary.md) §8.6。
 
 ### 3. drift 工具的盲区（重要）
 
 drift 工具**只比**：表集合、列名、索引名 + 有序列元组。
-**不比**：列类型、列 comment、索引 unique 标志、**索引谓词**、opclass、排序方向。
+**不比**：列类型、列 comment、索引 unique 标志、**索引谓词**、opclass、排序方向、
+**CHECK 约束**。
 
-而 **alembic 1.18.4 全包不比较索引谓词** —— `postgresql_where` 在整个 alembic 包里出现
+而 **alembic 1.19.1 全包不比较索引谓词** —— `postgresql_where` 在整个 alembic 包里出现
 **0** 次，`alembic/ddl/impl.py` 里 `"where"` 出现 **0** 次。
+（实测环境 = 项目 venv / `uv.lock` 锁定的 `alembic-1.19.1`；`pyproject.toml` 只写
+`alembic>=1.13.0` ⇒ **升级 alembic 后需重新复核本结论**。）
 ⇒ 谓词分歧**永远不会被 `alembic check` / autogenerate / drift 报出来**，只能靠专门测试钉住
 （本批新增 `test_running_status_index_predicate_matches_migration`）。
 
@@ -159,7 +176,18 @@ drift 工具**只比**：表集合、列名、索引名 + 有序列元组。
 |---|---|---|
 | 表 / 列 / 索引的有序列集合 | drift 工具 | 启动期 blocking 门禁 |
 | 列类型 / comment / 约束形状 / 排序方向 | `alembic check`（autogenerate diff） | 迁移级复核，**drift 看不见** |
+| **CHECK 约束** | `alembic check`（autogenerate diff） | 迁移级复核，**drift 看不见** |
 | 索引谓词 / opclass | **无自动工具**，只能专用测试 | 靠 `test_orm_schema_ssot.py` |
+
+⚠️ **CHECK 约束是当前最危险的一颗雷**（2026-11-02 实测）：DB 侧有 **48 个命名 CHECK 约束**
+（`pg_constraint.contype='c'`），ORM 侧**一个都没声明**；`alembic check` 报出 **20 条
+`removed check constraint`**，而 **drift 工具根本不比较 CHECK 约束** ⇒
+**drift `--strict` 依然 exit 0，没有任何告警**。一旦有人跑
+`alembic revision --autogenerate`，autogenerate 会生成 `op.drop_constraint('ck_*')`
+**把数据校验静默删掉**（`ck_feature_value_not_both_null`、`ck_agent_status`、
+`ck_entity_mapping_entity_type`、`ck_kpi_catalog_status`、`chk_link_granularity` 等 20 个）。
+⇒ **在把 CHECK 约束补进 ORM（或显式决定废弃它们）之前，禁止跑
+`alembic revision --autogenerate`。**
 
 另注：drift 工具的 `[alembic]` 检查**只比版本号**（DB 的 `alembic_version` vs 代码里的 head），
 **不是** autogenerate 差异检查 —— 所以「`--strict` exit 0」与「`alembic check` 仍 FAILED」
@@ -175,3 +203,9 @@ drift 工具**只比**：表集合、列名、索引名 + 有序列元组。
    autogenerate 提议重建索引，或把「局部唯一」写成「全局唯一」。
 3. **只读巡检用门禁脚本**：结构一致性用 `backend/scripts/fix_schema_ssot_realdata.py`
    （**只读**、可重复跑、退出码 0/1/2）复验，不要用 `Base.metadata.create_all` 建表来「对齐」。
+4. **autogenerate 前先看 `alembic check`**：`alembic revision --autogenerate` 会把
+   「ORM 未声明的 DB 对象」直接变成 `drop_*` 操作 —— 目前 DB 侧 48 个命名 CHECK 约束
+   ORM 全未声明（见 §3 的 ⚠️）⇒ **补齐前禁止跑 autogenerate**。
+5. **alembic 升级后复核盲区结论**：`alembic>=1.13.0` 是开放区间，autogenerate 的比较逻辑
+   会随版本变 ⇒ 「alembic 不比较索引谓词」这类结论是**版本相关**的，升级后需重新实测
+   （当前实测版本 **1.19.1**）。

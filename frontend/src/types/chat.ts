@@ -43,6 +43,8 @@ export interface TablePayload {
   rows: Record<string, unknown>[];
   // 仅当后端命中行数上限时存在（absent 时不归一成 false）
   truncated?: boolean;
+  // 原始列名 → 表头显示名（可含单位）。缺键 = 回落原始列名；旧消息无此键。
+  columnLabels?: Record<string, string>;
 }
 
 // 可视化输出策略（Task 7）：「为什么画这个图」的判断依据。code 为后端 ruleId

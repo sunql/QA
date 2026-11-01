@@ -99,15 +99,14 @@ def test_required_indexes_are_declared_in_orm() -> None:
 
 def test_required_unique_constraints_are_declared() -> None:
     """`uq_metric_source_triple` 必须是 UniqueConstraint，不能是 Index。"""
-    table = Base.metadata.tables["ontology_metric_source"]
-    uniqueNames = {
-        constraint.name
-        for constraint in table.constraints
-        if isinstance(constraint, UniqueConstraint)
-    }
-    indexNames = {index.name for index in table.indexes}
-
     for tableName, names in _REQUIRED_UNIQUE_CONSTRAINTS.items():
+        table = Base.metadata.tables[tableName]
+        uniqueNames = {
+            constraint.name
+            for constraint in table.constraints
+            if isinstance(constraint, UniqueConstraint)
+        }
+        indexNames = {index.name for index in table.indexes}
         for name in names:
             assert name in uniqueNames, f"{tableName}.{name} 必须是 UniqueConstraint"
             assert name not in indexNames, f"{tableName}.{name} 不能同时声明成 Index"
@@ -188,3 +187,19 @@ async def test_unique_constraint_columns_match_db_index() -> None:
             assert ormColumns == dbIndex.columns, (
                 f"{tableName}.{name}: ORM={list(ormColumns)} DB={list(dbIndex.columns)}"
             )
+
+
+def test_running_status_index_predicate_matches_migration() -> None:
+    """谓词必须与迁移 0074 / DB 一致：status = 'RUNNING'。
+
+    drift 工具不比较 predicate ⇒ 这条分歧不会自己暴露，只能钉住。
+    """
+    from app.domain.models import EvaluationReport
+
+    indexes = {ix.name: ix for ix in EvaluationReport.__table__.indexes}
+    where = indexes["ix_evaluation_report_status_running"].dialect_options[
+        "postgresql"
+    ].get("where")
+
+    assert where is not None, "部分索引缺少 postgresql_where 谓词"
+    assert str(where) == "status = 'RUNNING'"

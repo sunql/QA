@@ -2209,7 +2209,7 @@ class EvaluationReport(Base, TimestampMixin):
         Index(
             "ix_evaluation_report_status_running",
             "status",
-            postgresql_where=sa_text("status IN ('PENDING','RUNNING')"),
+            postgresql_where=sa_text("status = 'RUNNING'"),
         ),
         Index("ix_evaluation_report_window", "time_window_end"),
     )

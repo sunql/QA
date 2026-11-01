@@ -747,3 +747,9 @@ MSG_KPI_GATE_METRIC_NO_TYPE = "本体指标未配置指标类型（metric_type �
 MSG_KPI_GATE_METRIC_NO_GRAIN = "本体指标未配置结构化粒度键（grain_keys 为空）"
 MSG_KPI_GATE_METRIC_DEGRADED = "本体指标技术形态降级（结构化口径与可执行 SQL 列引用不一致）"
 MSG_KPI_GATE_METRIC_LINKED_MISMATCH = "关联 KPI 口径对账不通过：{items}"
+
+# --- 字段治理提示（2026-11-01，chat 输出中文化） -------------------------------
+MSG_FIELD_HINT_TITLE = "字段治理提示"
+MSG_FIELD_HINT_MISSING_LABEL = "以下字段缺少中文含义，请在「本体 → 属性管理」补充别名：{fields}"
+MSG_FIELD_HINT_MISSING_UNIT = "以下数值字段未定义单位，请在本体属性中补充「单位」：{fields}"
+MSG_FIELD_HINT_TRUNCATED = " 等 {count} 个"

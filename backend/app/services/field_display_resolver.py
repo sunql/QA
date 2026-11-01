@@ -337,11 +337,18 @@ def displayMaps(
 def missingFieldHints(
     columnLabels: Mapping[str, str], displays: Mapping[str, FieldDisplay]
 ) -> dict[str, list[str]]:
-    """未解析出中文名的列 + 无单位的数值列（按输入顺序，便于稳定断言）。"""
+    """未解析出中文名的列 + 无单位的数值列（按输入顺序，便于稳定断言）。
+
+    「有中文名」必须是真名：plan 聚合别名（`SOURCE_PLAN_ALIAS`）不算 —— 它描述的是
+    指标（如 `COUNT(维度列)` 的「记录数」），既进不了维度表头，也不该让该列逃过治理
+    提示。这类列只要没在 `columnLabels` 里，就按缺中文名上报。`columnLabels` 的
+    排除条件保留：指标列经 `buildSpec` 内部 `aliasByField` 拿到标签后仍不误报。
+    """
     missing_labels = [
         column
         for column, display in displays.items()
-        if display.label is None and column not in columnLabels
+        if (display.label is None or display.source == SOURCE_PLAN_ALIAS)
+        and column not in columnLabels
     ]
     missing_units = [
         column

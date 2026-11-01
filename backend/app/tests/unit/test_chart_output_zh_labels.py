@@ -13,6 +13,7 @@ from app.services.field_display_resolver import (
     SOURCE_PLAN_ALIAS,
     FieldDisplay,
     displayMaps,
+    missingFieldHints,
 )
 from app.services.visual_payload import assembleTableOption
 
@@ -172,3 +173,25 @@ def test_display_maps_excludes_plan_aggregation_alias_labels():
     labels, units = displayMaps(displays)
     assert labels == {"rcv_qty": "收货数量"}  # plan 聚合别名被丢弃
     assert units == {"supplier_name": "次", "rcv_qty": "件"}  # 单位映射不受影响
+
+
+def test_missing_field_hints_reports_plan_alias_only_label():
+    """只有 plan 聚合别名的列没有真正的中文含义 ⇒ 进缺名提示（表头回落原始列名）。"""
+    displays = {
+        "supplier_name": FieldDisplay(
+            label="记录数", unit=None, isNumeric=False, source=SOURCE_PLAN_ALIAS,
+        ),
+    }
+    hints = missingFieldHints({}, displays)
+    assert hints["missingLabels"] == ["supplier_name"]
+
+
+def test_missing_field_hints_skips_plan_alias_with_column_label():
+    """同一 display 若已在 columnLabels 里（指标经 aliasByField 拿到标签）⇒ 不报缺名。"""
+    displays = {
+        "supplier_name": FieldDisplay(
+            label="记录数", unit=None, isNumeric=False, source=SOURCE_PLAN_ALIAS,
+        ),
+    }
+    hints = missingFieldHints({"supplier_name": "记录数"}, displays)
+    assert hints["missingLabels"] == []

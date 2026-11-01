@@ -462,7 +462,9 @@ describe("MessageItem 卡片顺序", () => {
     });
 
     const traceCard = screen.getByText(/查看执行轨迹/);
-    const planCard = screen.getByText("查看分析计划");
+    // #93 后 MultiStepPlanCard 改为 Collapse + summaryText 动态摘要，
+    // 不再有「查看分析计划」固定文案；用 testid 锚定同一张卡。
+    const planCard = screen.getByTestId("multi-step-summary");
     const queryPlanCard = screen.getByText("查看查询计划");
     const sqlCard = screen.getByText("查看 SQL");
     assertBefore(traceCard, planCard);

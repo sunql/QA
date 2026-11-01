@@ -7,7 +7,7 @@ from app.domain.enums import ChartType
 from app.domain.query_plan import Aggregation, QueryPlan
 from app.services.chart_decision import ChartDecision, buildChartSignals
 from app.services.chart_renderer import renderChartOption
-from app.services.chart_spec_builder import buildSpec
+from app.services.chart_spec_builder import buildSpec, dimensionLikeFields
 from app.services.field_display_resolver import (
     SOURCE_ONTOLOGY_ALIAS,
     SOURCE_PLAN_ALIAS,
@@ -175,23 +175,82 @@ def test_display_maps_excludes_plan_aggregation_alias_labels():
     assert units == {"supplier_name": "次", "rcv_qty": "件"}  # 单位映射不受影响
 
 
-def test_missing_field_hints_reports_plan_alias_only_label():
-    """只有 plan 聚合别名的列没有真正的中文含义 ⇒ 进缺名提示（表头回落原始列名）。"""
+def test_missing_field_hints_reports_plan_alias_on_dimension_like():
+    """维度列上的 plan 聚合别名不算中文名 ⇒ 进缺名提示（表头回落原始列名）。"""
     displays = {
         "supplier_name": FieldDisplay(
             label="记录数", unit=None, isNumeric=False, source=SOURCE_PLAN_ALIAS,
         ),
     }
-    hints = missingFieldHints({}, displays)
+    hints = missingFieldHints(displays, dimensionLike={"supplier_name"})
     assert hints["missingLabels"] == ["supplier_name"]
 
 
-def test_missing_field_hints_skips_plan_alias_with_column_label():
-    """同一 display 若已在 columnLabels 里（指标经 aliasByField 拿到标签）⇒ 不报缺名。"""
+def test_missing_field_hints_skips_plan_alias_on_measure():
+    """指标列上的 plan 聚合别名就是它真正的中文名（经 aliasByField 落到 label）⇒ 不报缺名。"""
     displays = {
-        "supplier_name": FieldDisplay(
+        "rcv_qty": FieldDisplay(
+            label="记录数", unit=None, isNumeric=True, source=SOURCE_PLAN_ALIAS,
+        ),
+    }
+    hints = missingFieldHints(displays, dimensionLike=set())
+    assert hints["missingLabels"] == []
+
+
+def test_unit_only_column_keeps_raw_key_and_is_reported():
+    """单位不是中文名：表头 = 原始列名（单位），且该列仍进缺名提示（Finding 1）。"""
+    rows = [{"region": "华东", "qty": 3}, {"region": "华南", "qty": 5}]
+    signals = _signals(["region", "qty"], rows)
+    spec = buildSpec(_decision(ChartType.BAR), signals, rows, units={"qty": "件"})
+    assert spec.columnLabels["qty"] == "qty（件）"
+    # 单位-only 的回落是**原始列名**：`_prettify` 会把下划线换成空格，不算原始键。
+    raw_rows = [{"region": "华东", "rcv_qty": 3}]
+    raw_spec = buildSpec(
+        _decision(ChartType.BAR),
+        _signals(["region", "rcv_qty"], raw_rows),
+        raw_rows,
+        units={"rcv_qty": "件"},
+    )
+    assert raw_spec.columnLabels["rcv_qty"] == "rcv_qty（件）"
+    displays = {
+        "region": FieldDisplay(label=None, unit=None, isNumeric=False, source="none"),
+        "qty": FieldDisplay(label=None, unit="件", isNumeric=True, source="none"),
+    }
+    hints = missingFieldHints(
+        displays, dimensionLike=dimensionLikeFields(signals)
+    )
+    assert "qty" in hints["missingLabels"]
+    assert "qty" not in hints["missingUnits"]
+
+
+def _threeGroupingPlan() -> QueryPlan:
+    """三个分组列 + COUNT(第三个分组列)；聚合别名会挂到第三个分组列上。"""
+    return QueryPlan(
+        target="DWD_GOODS_RECEIPT_DTL",
+        groupBy=("SUPPLIER_NAME", "REGION", "MATERIAL"),
+        aggregations=(
+            Aggregation(function="COUNT", property="MATERIAL", alias="记录数"),
+        ),
+    )
+
+
+def test_table_third_grouping_column_ignores_plan_aggregation_alias():
+    """TABLE 只画前 2 个分组列作轴；第 3 个仍是维度列，不能吃聚合别名（Finding 2）。"""
+    plan = _threeGroupingPlan()
+    rows = [
+        {"supplier_name": "B1", "region": "华东", "material": "M1", "记录数": 2},
+        {"supplier_name": "B2", "region": "华南", "material": "M2", "记录数": 4},
+    ]
+    columns = ["supplier_name", "region", "material", "记录数"]
+    signals = buildChartSignals(plan, columns, rows, "")
+    spec = buildSpec(_decision(ChartType.TABLE), signals, rows, plan)
+    assert "material" not in spec.columnLabels
+    displays = {
+        "material": FieldDisplay(
             label="记录数", unit=None, isNumeric=False, source=SOURCE_PLAN_ALIAS,
         ),
     }
-    hints = missingFieldHints({"supplier_name": "记录数"}, displays)
-    assert hints["missingLabels"] == []
+    hints = missingFieldHints(
+        displays, dimensionLike=dimensionLikeFields(signals)
+    )
+    assert hints["missingLabels"] == ["material"]

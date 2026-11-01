@@ -49,6 +49,25 @@ class TestChatFieldLabels:
         assert hints["missingLabels"] == ["NAME"]
         assert hints["missingUnits"] == []
 
+    async def test_unit_only_column_is_still_reported_missing_label(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """单位不是中文名：表头仍显示「列名（单位）」，但该列必须进缺名提示。"""
+        config, ds = await _seed(dbSession)
+        await _governQty(dbSession, alias=None, unit="件")
+        _installFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat", json=_chat_payload("各供应商的收货数量汇总", ds.id)
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        assert body["tableOption"]["columnLabels"]["QTY"] == "QTY（件）"
+        hints = body["chartOption"]["fieldHints"]
+        assert "QTY" in hints["missingLabels"]
+        assert hints["missingUnits"] == []
+
     async def test_no_hint_when_every_field_governed(
         self, client, dbSession, monkeypatch
     ) -> None:

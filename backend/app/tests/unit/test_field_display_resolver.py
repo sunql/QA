@@ -320,6 +320,15 @@ class TestMissingFieldHints:
             "b": FieldDisplay(label=None, unit=None, isNumeric=False, source="none"),
             "c": FieldDisplay(label=None, unit=None, isNumeric=True, source="none"),
         }
-        hints = missingFieldHints({"a": "甲"}, displays)
+        hints = missingFieldHints(displays, dimensionLike=set())
         assert hints["missingLabels"] == ["b", "c"]
         assert hints["missingUnits"] == ["a", "c"]
+
+    def test_unit_only_numeric_column_still_reports_missing_label(self) -> None:
+        """单位不是中文名：只有单位的列仍进缺名提示（单位提示则不报）。"""
+        displays = {
+            "qty": FieldDisplay(label=None, unit="件", isNumeric=True, source="none"),
+        }
+        hints = missingFieldHints(displays, dimensionLike=set())
+        assert hints["missingLabels"] == ["qty"]
+        assert hints["missingUnits"] == []

@@ -128,6 +128,16 @@ def _axisFields(signals: ChartSignals) -> tuple[str, ...]:
     return signals.timeColumns[:1]
 
 
+def dimensionLikeFields(signals: ChartSignals) -> frozenset[str]:
+    """非指标列（维度/时间/ETL）：只吃注入的 overrides，绝不消费 plan 聚合别名。
+
+    用「全部非指标列」而不是 `_dimensionFields()` 的切片：后者按图型决定画几根轴，
+    TABLE 只取前 2 个分组列，第 3 个及以后会漏进 `aliases` 分支被聚合别名改名。
+    也不用 `signals.dimensions`：双射折叠会把维度从该元组里删掉，但列仍在结果集里。
+    """
+    return frozenset(signals.columns) - frozenset(signals.measures)
+
+
 def _dimensionFields(signals: ChartSignals, kind: ChartType) -> tuple[str, ...]:
     """spec 的 dimensions 字段（按 kind 决定要几根轴）。"""
     if kind is ChartType.HEATMAP:
@@ -174,24 +184,24 @@ def _buildMeasures(
 
 def _buildColumnLabels(
     columns: tuple[str, ...],
-    dimensions: tuple[SpecDimension, ...],
+    dimensionLike: frozenset[str],
     aliases: dict[str, str],
     overrides: Mapping[str, str] | None,
     units: Mapping[str, str],
 ) -> dict[str, str]:
     """只收录「有中文名或有单位」的列；都没有的列缺键 ⇒ 前端回落原始列名。
 
-    维度列只吃注入的 overrides（策略与理由见 `_buildLabels`）。
+    维度列只吃注入的 overrides（策略与理由见 `_buildLabels`）。单位拼出的标签
+    （`qty（件）`）不是中文名，所以缺名时回落**原始列名**而不是 `_prettify` 后的形态。
     """
-    dimensionFields = {d.field for d in dimensions}
     overrideMap = dict(overrides or {})
     labels: dict[str, str] = {}
     for column in columns:
         unit = units.get(column)
-        alias = (overrideMap if column in dimensionFields else aliases).get(column)
+        alias = (overrideMap if column in dimensionLike else aliases).get(column)
         if not alias and not unit:
             continue
-        labels[column] = _withUnit(alias or _prettify(column), unit)
+        labels[column] = _withUnit(alias or column, unit)
     return labels
 
 
@@ -211,7 +221,9 @@ def _buildLabels(
     """
     overrideMap = dict(aliasOverrides or {})
     dimensions = _buildDimensions(_dimensionFields(signals, kind), overrideMap)
-    labels = _buildColumnLabels(signals.columns, dimensions, aliases, overrideMap, units)
+    labels = _buildColumnLabels(
+        signals.columns, dimensionLikeFields(signals), aliases, overrideMap, units
+    )
     return dimensions, labels
 
 

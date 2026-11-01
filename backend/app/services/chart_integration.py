@@ -18,7 +18,7 @@ from app.domain.chart_spec import ChartSpec
 from app.domain.query_plan import QueryPlan
 from app.services.chart_decision import buildChartSignals, decideChartKind
 from app.services.chart_renderer import renderChartOption
-from app.services.chart_spec_builder import buildSpec
+from app.services.chart_spec_builder import buildSpec, dimensionLikeFields
 from app.services.chart_thresholds import loadChartThresholds
 from app.services.field_display_resolver import (
     displayMaps,
@@ -109,7 +109,7 @@ async def _chartPayload(
         "echartsOption": echartsOption,
         "columnLabels": dict(spec.columnLabels),
         "fieldHints": (
-            missingFieldHints(spec.columnLabels, displays)
+            missingFieldHints(displays, dimensionLike=dimensionLikeFields(signals))
             if displays
             else None
         ),

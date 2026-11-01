@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -335,20 +335,23 @@ def displayMaps(
 
 
 def missingFieldHints(
-    columnLabels: Mapping[str, str], displays: Mapping[str, FieldDisplay]
+    displays: Mapping[str, FieldDisplay], *, dimensionLike: Collection[str]
 ) -> dict[str, list[str]]:
     """未解析出中文名的列 + 无单位的数值列（按输入顺序，便于稳定断言）。
 
-    「有中文名」必须是真名：plan 聚合别名（`SOURCE_PLAN_ALIAS`）不算 —— 它描述的是
-    指标（如 `COUNT(维度列)` 的「记录数」），既进不了维度表头，也不该让该列逃过治理
-    提示。这类列只要没在 `columnLabels` 里，就按缺中文名上报。`columnLabels` 的
-    排除条件保留：指标列经 `buildSpec` 内部 `aliasByField` 拿到标签后仍不误报。
+    **「有中文名」看 `display.label`，不看「是否出现在 columnLabels 里」**：表头可以
+    只由单位拼出来（`qty（件）`），那不代表该列有中文名，仍须提示用户补充别名。
+
+    规则：`display.label is None`，或该列是**非指标列**（`dimensionLike`）却只拿到
+    plan 聚合别名（`SOURCE_PLAN_ALIAS`）。后者描述的是指标（如 `COUNT(维度列)` 的
+    「记录数」），既进不了维度表头，也不该让维度列逃过治理。指标列不受此条约束：
+    其 plan 聚合别名就是它的中文名（`buildSpec` 经 `aliasByField` 落到 label）。
     """
     missing_labels = [
         column
         for column, display in displays.items()
-        if (display.label is None or display.source == SOURCE_PLAN_ALIAS)
-        and column not in columnLabels
+        if display.label is None
+        or (display.source == SOURCE_PLAN_ALIAS and column in dimensionLike)
     ]
     missing_units = [
         column

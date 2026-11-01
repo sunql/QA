@@ -33,7 +33,7 @@ from app.services.chart_decision import (
 )
 from app.services.chart_label import classifySemanticLabel
 from app.services.chart_renderer import renderChartOption
-from app.services.chart_spec_builder import buildSpec
+from app.services.chart_spec_builder import buildSpec, dimensionLikeFields
 from app.services.chart_thresholds import loadChartThresholds, loadFullDataThreshold
 from app.services.field_display_resolver import (
     displayMaps,
@@ -247,7 +247,9 @@ class ChartService:
         if displays:
             option = {
                 **option,
-                "fieldHints": missingFieldHints(spec.columnLabels, displays),
+                "fieldHints": missingFieldHints(
+                    displays, dimensionLike=dimensionLikeFields(signals)
+                ),
             }
         tableOption = assembleTableOption(
             specKind=spec.kind,

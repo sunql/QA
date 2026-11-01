@@ -11,7 +11,11 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from app.services.field_hint_text import composeFieldHintText, mergeFieldHints
+from app.services.field_hint_text import (
+    columnLabelsOf,
+    composeFieldHintText,
+    mergeFieldHints,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,17 +175,14 @@ def _hintsAndLabels(
     sections: list[dict[str, Any]],
 ) -> tuple[dict[str, list[str]], dict[str, str]]:
     hints: list[Any] = []
-    labels: dict[str, str] = {}
+    payloads: list[Any] = []
     for section in sections:
         for block in section.get("blocks") or []:
-            if block.get("type") != BLOCK_CHART:
-                continue
-            content = block.get("content") or {}
-            hints.append(content.get("fieldHints"))
-            for key, value in (content.get("columnLabels") or {}).items():
-                if isinstance(key, str) and isinstance(value, str):
-                    labels[key] = value
-    return mergeFieldHints(*hints), labels
+            content = block.get("content")
+            payloads.append(content)
+            if block.get("type") == BLOCK_CHART and isinstance(content, dict):
+                hints.append(content.get("fieldHints"))
+    return mergeFieldHints(*hints), columnLabelsOf(*payloads)
 
 
 def renderMarkdown(payload: dict[str, Any]) -> str:

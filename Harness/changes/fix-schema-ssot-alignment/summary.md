@@ -229,11 +229,25 @@ ORM 谓词原写成 `status IN ('PENDING','RUNNING')`，而迁移 `0074_dq_eval_
   （`ix_drift_probe` 索引 + `menu_config.drift_probe_col` 列），避免上一次 pytest 被
   SIGINT 打断后留下残渣导致误红。
 
-### 6.3 覆盖率
+### 6.3 真实数据门禁脚本 `backend/scripts/fix_schema_ssot_realdata.py` 的两条加强断言
+
+本脚本额外钉住了两件「drift 工具看不见」的事：
+
+- **谓词断言收紧为等值形式** —— 检查 `ix_evaluation_report_status_running` 的真实 `indexdef`
+  里是否含 `= 'RUNNING'`。**不能用裸 `RUNNING`**：PG 把 `IN (...)` 渲染成
+  `= ANY (ARRAY['PENDING'::text, 'RUNNING'::text])`，里面同样含 `RUNNING` ⇒ 裸子串会放行
+  ORM 原来那个错谓词（`status IN ('PENDING','RUNNING')`）。等值形式只匹配
+  `status = 'RUNNING'`（实测 indexdef：`WHERE ((status)::text = 'RUNNING'::text)`），
+  能把两者区分开。判定逻辑的本地验证输出见 §8.7。
+- **code 集合防漏断言** —— drift 工具的 `_SEVERITY_BY_CODE` 是 code 的 SSOT，门禁启动时比对
+  自己的 `ALL_CODES` 是否覆盖全部 8 个 code；日后 drift 新增一类 code 而门禁没跟上 ⇒
+  直接判失败（退出码 1，走失败项列表），不会静默漏网。
+
+### 6.4 覆盖率
 
 本批只改 ORM 声明与测试，不含业务逻辑分支；新增 / 修改测试全部通过（见 §8 的实测输出）。
 
-### 6.4 测试纪律（本批门禁口径）
+### 6.5 测试纪律（本批门禁口径）
 
 - 真实 PostgreSQL，**不用 sqlite 内存库**、**不用 `Base.metadata.create_all`**；
 - 每条 pytest 都导出 `TEST_DATABASE_URL`（`postgresql+asyncpg://`）+ `TEST_NEO4J_URI`
@@ -294,6 +308,11 @@ EXIT=0
 
 （全新库 `alembic_version` = `0140`，`public` schema 下 95 张表。验证库已 `DROP DATABASE` 清理。）
 
+> **本轮（评审修复轮）已原地复跑一次**：重新建 `qa_metadata_test_ssot` → `alembic upgrade head`
+> exit 0 → `schema_drift --strict` exit 0 → 跑 `alembic check`（exit 255，用于 §8.6 的差异计数复核）
+> → 门禁脚本在该全新库上 **8 类漂移全 0（含 `extra_table=0`）**、exit 0 → 复跑后删除该临时库。
+> 5434 `qa_metadata_test` 与 5433 `qa_metadata` 两个常驻库全程只读，未建未删未改。
+
 ### 8.3 共享测试库 5434 drift 输出（实测，逐字）
 
 ```
@@ -312,7 +331,7 @@ WARNING __main__: 仅发现 DB 多余对象（历史残留，1 类），默认�
 
 ⇒ 无 `[db:column]`、无 `[db:index]`。
 
-### 8.5 定向回归（实测，逐字）
+### 8.5 定向回归（**Task 6 实测，逐字**；Task 7 未改后端代码，故未重跑）
 
 ```
 55 passed, 21 warnings in 48.16s
@@ -335,23 +354,65 @@ python3 -m pytest app/tests/unit/test_domain_model_registration.py \
 ### 8.6 `alembic check` 残余差异（重要）
 
 全新库上 `alembic check` **仍然 FAILED**（exit 255），报出下列**本批明确不覆盖**的残余差异 ——
-它们需要改 DB 结构（DDL）或改迁移历史，超出「补 ORM 声明」的边界：
+它们需要改 DB 结构（DDL）或改迁移历史，超出「补 ORM 声明」的边界。
+
+**计数口径**：`alembic check` 输出里的**实质差异行数**（同一次运行、同一份日志、同一分类方式）：
+
+```
+9  Detected changed index
+7  Detected type change from
+7  Detected added unique constraint
+6  Detected removed index
+6  Detected column comment
+1  Detected NOT NULL on column 'l3_acl.granted_at'
+─────────────────────────────
+= 36 条实质差异（另 77 条 "Detected sequence named ..." 是序列提示，不是差异）
+```
+
+**这个 36 是本轮自己重数过的**（不是引用别处）：在全新临时库 `qa_metadata_test_ssot` 上重跑
+`alembic check`（exit 255），再按 `Detected <类别>` 前缀逐类统计：
+
+```bash
+for pat in "changed index" "removed index" "added unique constraint" \
+           "type change from" "column comment" "NOT NULL on column" "sequence named"; do
+  printf "%-28s %s\n" "$pat" "$(grep -c "Detected $pat" /tmp/alembic_check_ssot.log)"
+done
+# 实质差异合计
+grep -cE "Detected (changed index|removed index|added unique constraint|type change from|column comment|NOT NULL on column)" /tmp/alembic_check_ssot.log
+# → 36
+# removed table / removed column
+grep -cE "Detected (removed table|removed column)" /tmp/alembic_check_ssot.log
+# → 0
+```
+
+按语义归并则是 **30 项**（9 + 6 + 1 + 7 + 1 + 6）：其中 6 项「唯一约束 ↔ 唯一索引的形状
+差异」各由 **2 行**提示构成（1 个 `removed index` + 1 个 `added unique constraint`），
+所以 6 项形状差异 = 6 个 `removed index` + 其中 6 个 `added unique constraint`；
+第 7 个 `added unique constraint` 是独立的一条（DB 有、ORM 无）。
+**下文一律用「36 条」这个口径**（= alembic 输出的实质差异行数）。
 
 | 残余类别 | 数量 | 举例 |
 |---|---|---|
 | changed index（排序方向，DB 是 `DESC` 而 ORM 是普通列） | 9 | `ix_audit_log_actor`、`ix_audit_log_entity`、`ix_feature_def_history_feature_changed`、`ix_knowledge_conflict_open`、`ix_kpi_history_kpi_revision`、`ix_learning_feedback_time`、`ix_structure_suggestion_page`、`ix_structure_suggestion_pending`、`ix_wiki_token_usage_mechanism_time` |
-| 唯一约束 ↔ 唯一索引的**形状**差异（DB 用唯一索引、ORM 用 `UniqueConstraint`，语义相同但 alembic 认为要重建） | 6 | `uq_data_lineage_edge`、`uq_entity_mapping_entity_source`、`uq_feature_definition_name`、`uq_feature_value_dedup`、`uq_id_mapping_bo_ext`、`uq_kpi_catalog_code` |
-| 新增 unique constraint（DB 有、ORM 无） | 1 | `uq_doc_entity_rel` |
-| 列类型变更 | 7 | `document_entity_relation.entity_type` VARCHAR(30)→(20)；`l3_acl.user_id` / `granted_by` INTEGER→BIGINT；`l3_acl.granted_at` TIMEST→无时区且改 NOT NULL；`wiki_token_usage.compile_task_id` BIGINT→INTEGER；`data_quality_violation_sample.sample_pk_values` JSONB→JSON；`session_query_state.inheritance_snapshot` JSON→JSON |
+| 唯一约束 ↔ 唯一索引的**形状**差异（DB 用唯一索引、ORM 用 `UniqueConstraint`，语义相同但 alembic 认为要重建）。**口径：每条形状差异 = 2 行提示** —— 1 个 `removed index` + 1 个 `added unique constraint` | 6 条 = **12 行** | `uq_data_lineage_edge`、`uq_entity_mapping_entity_source`、`uq_feature_definition_name`、`uq_feature_value_dedup`、`uq_id_mapping_bo_ext`、`uq_kpi_catalog_code` |
+| 新增 unique constraint（DB 有、ORM 无）—— 7 个 `added unique constraint` 里的**第 7 个** | 1 | `uq_doc_entity_rel`（列：`document_id, entity_type, entity_key, relation_type`） |
+| 列类型变更 | 7 | `data_quality_violation_sample.sample_pk_values` JSONB→JSON；`document_entity_relation.entity_type` VARCHAR(30)→String(20)；`l3_acl.user_id` / `granted_by` INTEGER→BigInteger；`l3_acl.granted_at` TIMESTAMP(tz=True)→DateTime；`session_query_state.inheritance_snapshot` JSON→JSON；`wiki_token_usage.compile_task_id` BIGINT→Integer |
+| NOT NULL 变化 | 1 | `l3_acl.granted_at`（改 NOT NULL） |
 | 列 comment 差异 | 6 | `data_quality_rule.rule_params`、`knowledge_claim.authority_department`、`knowledge_claim.source_version`、`session_query_state.user_id`、`session_query_state.inheritance_snapshot`、`wiki_page.authority_department` |
 | **removed table / removed column** | **0** | ← **这正是本批拆掉的地雷**：本批前是「提议 DROP 13 张活表 + 27 个索引 + 1 列」，现在是 **0** |
+| **合计（实质差异行数）** | **36** | 另 77 条 `Detected sequence named ...` 是序列提示，不计入 |
+
+> 附注：6 条形状差异里的 `added unique constraint` 有 2 条名字显示为 `None`
+> （`uq_feature_definition_name` 对 `('feature_name',)`、`uq_kpi_catalog_code` 对 `('kpi_code',)`）——
+> 因为 ORM 侧的 `UniqueConstraint` 无名而 DB 侧索引有名，正是 §2.1 里那条「约束支撑索引按列集合
+> 匹配、不比名字」的归一化规则所覆盖的情况。
 
 ⇒ **本批的完成定义不是「ORM == DB 全等」，而是「drift 工具可见的漂移归零」。**
 上表那些类型 / 约束 / comment 差异属于**另一个项目**（需 DDL + 数据迁移评估），
 本批不碰，也不为它们写迁移。
 
 ⇒ **边界说明**：drift 工具的 `[alembic]` 检查**只比版本号**（DB 的 `alembic_version`
-vs 代码里的 head），**不是** autogenerate 差异检查 —— 所以 `alembic check` 的这 30 条残余差异，
+vs 代码里的 head），**不是** autogenerate 差异检查 —— 所以 `alembic check` 的这 36 条残余差异，
 drift 工具**根本看不见**。这解释了为什么 `--strict` 能 exit 0 而 `alembic check` 仍然 FAILED。
 
 ### 8.7 真实数据验证脚本输出（新增 `backend/scripts/fix_schema_ssot_realdata.py`）
@@ -362,7 +423,10 @@ TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@127.0.0.1:5434/qa
   python3 scripts/fix_schema_ssot_realdata.py
 ```
 
-实测输出（逐字，**只读**，未改动任何对象）：
+以下三段**全部是脚本的完整输出（逐字全文，无省略）**，全部**只读**、未改动任何对象；
+均为当前脚本版本（谓词断言收紧 + code 覆盖防漏断言后）的实测输出。
+
+**① 5434 `qa_metadata_test`（默认路径）**：
 
 ```
 target.db        = qa_metadata_test
@@ -380,25 +444,55 @@ drift.extra_index     = 0
 EXIT=0
 ```
 
-脚本自身的失败路径也已实测（退出码语义 0/1/2）：
+**② 5433 `qa_metadata`（显式 `--allow-non-test-db`，只读巡检；9 张表全部落在允许名单内）**：
+
+```
+⚠️  已显式放行非测试库：qa_metadata（只读巡检模式）
+target.db        = qa_metadata
+target.allowlist = ['BPSUPPLIER', 'PORDER', 'PORDERQ', 'evidence_20260930', 'knowledge_claim_20260930', 'ontology_class_pre_pruning_20260918', 'session_message_bak_20260930', 'session_query_state_20260930', 'wiki_page_20260930']
+drift.alembic         = 0
+drift.missing_table   = 0
+drift.missing_column  = 0
+drift.extra_table     = 9
+drift.missing_index   = 0
+drift.index_mismatch  = 0
+drift.extra_column    = 0
+drift.extra_index     = 0
+
+✅ Schema SSOT 对齐真实数据验证通过（只读，未改动任何对象）
+EXIT=0
+```
+
+**③ 失败路径（退出码语义 0/1/2；每条都是该场景的完整输出）**：
 
 ```
 $ # 指向非测试库、不加开关 → 拒绝（exit 2）
 ❌ 目标库 qa_metadata 不在测试库白名单（^qa_metadata_test($|_)）。确需只读巡检生产同构库时加 --allow-non-test-db。
 EXIT=2
 
-$ # 指向生产同构库 5433、显式 --allow-non-test-db → 通过（exit 0，9 张表全部落在允许名单内）
-⚠️  已显式放行非测试库：qa_metadata（只读巡检模式）
-target.db        = qa_metadata
-drift.extra_table     = 9
-drift.extra_column    = 0
-drift.extra_index     = 0
-✅ Schema SSOT 对齐真实数据验证通过（只读，未改动任何对象）
-EXIT=0
-
 $ # DSN 协议不对 → 拒绝（exit 2）
 ❌ 参数错误：DSN 必须是 postgresql+asyncpg://（项目仅 asyncpg）
 EXIT=2
+
+$ # 未设 TEST_DATABASE_URL 且不传参 → 拒绝（exit 2）
+❌ 参数错误：未指定数据库。请传 --database-url 或设置 TEST_DATABASE_URL（默认 5434 qa_metadata_test）
+EXIT=2
+```
+
+**门禁自身的两条新断言的判定逻辑（纯本地验证，无 DB 写）**：
+
+```
+=== 1) 谓词断言 ===
+  等值形式 = 'RUNNING'             → 断言通过? True   (期望 True)
+  IN 形式 = ANY(ARRAY[...])      → 断言通过? False   (期望 False)
+
+=== 2) 防漏断言 ===
+  drift code 集合 (8) = ['alembic', 'extra_column', 'extra_index', 'extra_table', 'index_mismatch', 'missing_column', 'missing_index', 'missing_table']
+  门禁 ALL_CODES (8) = ['alembic', 'extra_column', 'extra_index', 'extra_table', 'index_mismatch', 'missing_column', 'missing_index', 'missing_table']
+  未覆盖 = []；多余 = []
+  模拟新增 'type_mismatch' 后未覆盖 = ['type_mismatch']
+
+✅ 两处新断言的判定逻辑验证通过
 ```
 
 ### 8.8 明确未做的事（本批边界）
@@ -406,7 +500,7 @@ EXIT=2
 - **不部署**（零 DDL、零生产写）。
 - **不清理**备份表与业务表：`BPSUPPLIER`、`PORDER`、`PORDERQ`、`*_20260930`、
   `ontology_class_pre_pruning_20260918`（5433 上残留的 9 张表就是它们）。
-- **不写迁移**去收敛 §8.6 的 30 条 `alembic check` 残余差异（需 DDL + 数据迁移评估，另立项）。
+- **不写迁移**去收敛 §8.6 的 36 条 `alembic check` 残余差异（需 DDL + 数据迁移评估，另立项）。
 - **不拆** `app/domain/models.py`（已 2698 行，超 800 行上限）—— 拆分是独立重构，另立项。
 - **不修** `research_models` 的循环 FK `SAWarning`（需 `use_alter=True` + 迁移，另立项）。
 
@@ -433,13 +527,15 @@ EXIT=2
 - [x] frontmatter 元数据齐全（日期 / 作者 / Phase / 状态 / 关联变更 / 迁移版本 / MEMORY）
 - [x] 9 段都非空，无 TBD/TODO/待补 占位
 - [x] 第 2 段 ≥ 2 个候选方案对比（A / B / C 三案 + 取舍表 + 根因与修复方案）
-- [ ] 第 3 段迁移文件名 ≤ 32 字符 —— **不适用**：本批零 DDL、零新迁移，`迁移版本` 字段写「无」
-- [ ] 第 7 段触发了 security-reviewer 则必填 CRITICAL/HIGH/MEDIUM/LOW 至少 1 项 ——
-      **不适用**：本批不涉及认证 / 密钥 / SQL Guard / 用户输入 / 外部 API / 文件操作 /
-      加解密 / 支付，未触发 security-reviewer；§7 已写清本批的安全相关变更与「不触发」判定
-- [ ] 第 8 段 docker compose 冒烟命令 + 输出贴出 —— **本批不部署**（零 DDL、零生产写），
-      故不跑 compose 冒烟；替代验收为 §8.2 全新迁移库 `--strict` exit 0 + §8.7 真实数据
-      门禁脚本 exit 0（两者都是真实 PostgreSQL 上的实测输出）
+- [x] 第 3 段迁移文件名 ≤ 32 字符 —— **N/A（不适用）**：已核对，本批零 DDL、零新迁移，
+      `迁移版本` 字段写「无」，不存在迁移文件名
+- [x] 第 7 段触发了 security-reviewer 则必填 CRITICAL/HIGH/MEDIUM/LOW 至少 1 项 ——
+      **N/A（不适用）**：已核对触发条件，本批不涉及认证 / 密钥 / SQL Guard / 用户输入 /
+      外部 API / 文件操作 / 加解密 / 支付，未触发 security-reviewer；§7 已写清本批的安全相关
+      变更与「不触发」判定
+- [x] 第 8 段 docker compose 冒烟命令 + 输出贴出 —— **N/A（不适用）**：已核对，**本批不部署**
+      （零 DDL、零生产写），故不跑 compose 冒烟；替代验收为 §8.2 全新迁移库 `--strict` exit 0
+      + §8.7 真实数据门禁脚本 exit 0（两者都是真实 PostgreSQL 上的实测输出）
 - [x] 第 9 段 ≥ 3 个跨文件链接（关联变更 / Wiki / Rules / Memory 中至少 3 个）
 - [x] 相关 wiki 文档已更新（架构 → `Harness/wiki/architecture.md` 新增漂移治理章节）
 - [x] 至少 1 条 MEMORY 索引已在 `~/.claude/projects/.../memory/MEMORY.md` 添加
@@ -447,4 +543,5 @@ EXIT=2
       （`backend/scripts/fix_schema_ssot_realdata.py`，exit 0，输出见 §8.7）
 
 > 上述任一项未打勾 → code-review 打回 → 不允许合。
-> 本清单的 3 个留空项都在上面写明了「为什么不适用 / 为什么被替代」，不是漏做。
+> 本清单 **10 项全部已勾选**；其中 3 项标 **N/A（不适用）** —— 语义是「已逐条核对、确认本变更
+> 不适用」，不是「做过了」也不是「未满足」。

@@ -1839,16 +1839,11 @@ Expected: FAIL — `KeyError: 'columnLabels'`（明细表负载还没有列头�
         displays = await resolveFieldDisplays(
             session, columns=columns, rows=data, plan=plan,
         )
-        aliasOverrides = {
-            column: display.label
-            for column, display in displays.items()
-            if display.label
-        }
-        units = {
-            column: display.unit
-            for column, display in displays.items()
-            if display.unit
-        }
+        # displayMaps 只把「本体别名 / 业务别名 / 代码字典」的中文名放进 labels；
+        # source == SOURCE_PLAN_ALIAS 的标签被排除 —— 聚合别名只允许经 buildSpec
+        # 内部的 aliasByField 作用于指标列，绝不能进维度列的 override（否则
+        # `COUNT(<维度列>)` 的别名会把维度表头改名，并压掉该列的「缺中文名」提示）。
+        aliasOverrides, units = displayMaps(displays)
 ```
 
 `buildSpec` 调用改为：
@@ -1881,12 +1876,13 @@ Expected: FAIL — `KeyError: 'columnLabels'`（明细表负载还没有列头�
 
 ```python
 from app.services.field_display_resolver import (
+    displayMaps,
     missingFieldHints,
     resolveFieldDisplays,
 )
 ```
 
-**行为校验**：`aliasOverrides` 现在会包含本体中文名，因此**维度**标签也可能变中文（这是本特性的目标）。兼容性不变量是「**既无单位、也无可解析中文名** ⇒ `aliasOverrides` 为空 ⇒ 输出与改动前逐字一致」：LLM 聚合别名（`plan_alias`）与 `DISPLAY_COLUMN_DICT` 在改动前就参与 `_prettify`/标签，它们不引入新差异；只有新增的本体单位与本体中文名才会改变输出。
+**行为校验**：`aliasOverrides` 现在会包含本体中文名，因此**维度**标签也可能变中文（这是本特性的目标）。聚合别名（`plan_alias`）**不得**进入 override —— 指标列的中文别名由 `buildSpec` 内部的 `aliasByField` 提供，维度列只吃 override。兼容性不变量是「**既无单位、也无可解析的 ontology/business/dict 中文名** ⇒ override 为空 ⇒ 输出与改动前逐字一致」；只有新增的单位与本体中文名才会改变输出。
 
 - [ ] **Step 4: `chart_integration.buildReportChart`**
 
@@ -1897,20 +1893,14 @@ from app.services.field_display_resolver import (
             session, columns=list(columns), rows=rows, plan=plan,
             sourceTable=sourceTable,
         )
-        units = {
-            column: display.unit
-            for column, display in displays.items()
-            if display.unit
-        }
+        resolvedLabels, units = displayMaps(displays)
         mergedOverrides = {
             **{k: v for k, v in (aliasOverrides or {}).items() if v},
-            **{
-                column: display.label
-                for column, display in displays.items()
-                if display.label
-            },
+            **resolvedLabels,
         }
 ```
+
+（`displayMaps` 已排除 `plan_alias` 来源；本函数通常 `plan=None`，排除逻辑对其无副作用。）
 
 `buildSpec` 调用改为：
 

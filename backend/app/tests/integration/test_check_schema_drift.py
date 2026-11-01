@@ -561,6 +561,26 @@ class TestColumnAndIndexDriftSubprocess:
     def db_url(self) -> str:
         return _dbUrl()
 
+    @pytest.fixture(autouse=True)
+    def _cleanDriftProbes(self, db_url: str) -> None:
+        """清掉本类自己造的两个探针对象（防「上一轮 pytest 被 SIGINT 打断」残留）。
+
+        `ix_drift_probe`（menu_config 的索引）与 `drift_probe_col`（menu_config 的列）
+        由本类的两个 warning 用例创建，正常路径都在 `finally` 里删掉；但 pytest 被
+        SIGINT 打断时 `finally` 可能来不及跑，探针会留在共享测试库上 —— 下一轮的
+        健康用例会因 `[db:index] menu_config.ix_drift_probe` / `[db:column]
+        menu_config.drift_probe_col` **因无关原因**变红。
+
+        只清这两个探针，不碰别的对象；DDL 落在测试库上（不违反「零生产写」）。
+        """
+        asyncio_run(
+            _execSql(
+                db_url,
+                "DROP INDEX IF EXISTS ix_drift_probe",
+                "ALTER TABLE menu_config DROP COLUMN IF EXISTS drift_probe_col",
+            )
+        )
+
     def test_healthy_db_has_no_column_or_index_drift(self, db_url: str) -> None:
         """健康库上不得报出任何「ORM 声明却缺失」的对象 —— **假阳性守卫**。
 
@@ -569,12 +589,25 @@ class TestColumnAndIndexDriftSubprocess:
         这套真实 schema 上就会立刻误报成「ORM 索引缺失」。误报的代价是启动被
         阻断，所以这里把几个典型约束支撑索引**按名字**钉死。
 
-        注意 `[db:index]` **不再允许**出现：2026-11-01 的 Schema SSOT 对齐把 33 个「迁移建了、ORM 没声明」的索引全部补进了 ORM，断言因此从「允许出现」收紧为「不允许出现」。
+        注意 `[db:index]` **不再允许**出现：Schema SSOT 对齐把当时所有「迁移建了、ORM 没声明」的索引都补进了 ORM，断言因此从「允许出现」收紧为「不允许出现」。
         """
         result = _runDriftScript(db_url)
         combined = result.stdout + result.stderr
 
         assert result.returncode == 0, combined
+
+        # 正向断言：下面那几条否定断言**不是空转** —— drift 检查器确实跑过
+        # 并输出了结论。drift 模块有两个「非阻断」出口，这里取源码里的稳定前缀
+        # （不把 "%d 类" 这种可变计数写死）：
+        #   - 无任何 issue → app/infrastructure/schema_drift.py:612
+        #     "Schema drift 检查通过：ORM 与 DB 一致（表 / 列 / 索引）。"
+        #   - 只有非阻断 warning → app/infrastructure/schema_drift.py:637
+        #     "仅发现 DB 多余对象（历史残留，%d 类），默认不阻断启动。"
+        # 将来 drift 模块若改了输出格式（或干脆不再打印任何东西），这条会红，
+        # 而不是让上面几条 `not in` 集体空转通过。
+        assert (
+            "Schema drift 检查通过" in combined or "仅发现 DB 多余对象" in combined
+        ), f"drift 检查器没有输出任何结论，否定断言会空转:\n{combined}"
 
         # ORM 声明的东西一个都不能被判缺失，否则会误阻断启动
         assert "[orm:table]" not in combined
@@ -586,7 +619,7 @@ class TestColumnAndIndexDriftSubprocess:
         # 补 ORM，会在这里立刻失败（而不是又刷几个月启动日志）。
         assert "[db:index]" not in combined
 
-        # 约束支撑索引必须被认领（真实库上共 130+ 个，漏认就刷屏）
+        # 约束支撑索引必须被认领（真实库上有上百个，漏认就刷屏）
         for name in (
             "menu_config.menu_config_pkey",
             "menu_config.uq_menu_config_code",
@@ -692,7 +725,7 @@ class TestStartupSeverityPolicy:
     """启动阻断策略必须与 CLI 一致（否则 warning 会把容器挡在门外）。
 
     背景：扩展列/索引粒度之前，`main.py` 对**任何** issue 都 `raise`，而 CLI
-    却按 severity 区分 —— 两者不一致。真实库上存在 26 个 ORM 未声明的历史索引，
+    却按 severity 区分 —— 两者不一致。真实库上曾存在 ORM 未声明的历史索引，
     若把「DB 多出」也算 blocking，容器将永远起不来。
     """
 

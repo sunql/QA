@@ -1735,7 +1735,7 @@ git commit -m "feat: ChartSpec 增加 columnLabels 与单位并入标签"
 **Interfaces:**
 - Consumes: `resolveFieldDisplays` / `missingFieldHints`（Task 2）、`columnLabels` 链路（Task 4）。
 - Produces:
-  - chat 的 `chart_option` 带 `columnLabels` + `fieldHints`；`table_option` 带 `columnLabels`。
+  - chat 的 `table_option` 带 `columnLabels`；`chart_option` 带 `fieldHints`（TABLE 图的 `chart_option` 另有 `columnLabels`，其余图型没有——列头断言一律读 `table_option`）。
   - `buildReportChart(..., sourceTable=None)` 的返回 dict 带 `columnLabels` + `fieldHints`（有值时）。
 
 - [ ] **Step 1: 写失败集成测试**
@@ -1782,8 +1782,10 @@ class TestChatFieldLabels:
 
         # 图例：series 名带中文 + 单位
         assert body["chartOption"]["series"][0]["name"] == "收货数量（件）"
-        # 表头映射：只收录治理过的列，未治理列缺键 ⇒ 前端回落原始列名
-        labels = body["chartOption"]["columnLabels"]
+        # 表头映射：只收录治理过的列，未治理列缺键 ⇒ 前端回落原始列名。
+        # 本用例是 bar 图：`columnLabels` 挂在明细表负载 `tableOption` 上，
+        # 柱状图的 `chartOption` 只有 series/坐标轴，没有 `columnLabels`。
+        labels = body["tableOption"]["columnLabels"]
         assert labels["QTY"] == "收货数量（件）"
         assert "NAME" not in labels
         # 治理提示：NAME 缺中文含义；QTY 有单位 ⇒ 不缺单位
@@ -1885,7 +1887,7 @@ from app.services.field_display_resolver import (
 )
 ```
 
-**行为校验**：`aliasOverrides` 现在会包含本体中文名，因此**维度**标签也可能变中文（这是本特性的目标）；没有任何本体治理数据时 `displays` 的 label 全为 None ⇒ `aliasOverrides` 为空 ⇒ 与改动前逐字一致。
+**行为校验**：`aliasOverrides` 现在会包含本体中文名，因此**维度**标签也可能变中文（这是本特性的目标）。兼容性不变量是「**既无单位、也无可解析中文名** ⇒ `aliasOverrides` 为空 ⇒ 输出与改动前逐字一致」：LLM 聚合别名（`plan_alias`）与 `DISPLAY_COLUMN_DICT` 在改动前就参与 `_prettify`/标签，它们不引入新差异；只有新增的本体单位与本体中文名才会改变输出。
 
 - [ ] **Step 4: `chart_integration.buildReportChart`**
 

@@ -1,7 +1,7 @@
 # 变更：AIChatService 输出中文化（表头/图例中文名 + 数值单位 + 治理提示）
 
 - **日期**：2026-11-01
-- **分支**：`feat/chat-output-zh-labels`（base `main` @ `af0ccc9a`）
+- **分支**：`feat/chat-output-zh-labels`（base `main` @ `b368b016`（#95 之后）；rebase 前曾基于 `af0ccc9a`）
 - **状态**：已实施，定向回归全绿，待合并
 - **关联**：[2026-10-31-chat-output-sync](../2026-10-31-chat-output-sync/summary.md)（同一批图表/表格渲染链的下一批）
 
@@ -124,7 +124,11 @@ MSG_FIELD_HINT_MISSING_UNIT  = "以下数值字段未定义单位，请在本体
 
 ### 4.4 单位治理
 
-- 迁移 `0139_ontology_property_unit`：`ontology_property.unit VARCHAR(50) NULL`。
+- 迁移 `0140_ontology_property_unit`：`ontology_property.unit VARCHAR(50) NULL`。
+  **撞号重编号**：初版编号 0139，与 `feat/l4-agent-trace` 的 0139
+  （`session_message.agent_trace`，已先合 main #95 且已上生产）撞 revision id；
+  合并部署会静默跳过本迁移并使生产轨迹特性回退，故按「单链递增」重编号为
+  0140、`down_revision="0139"`。
 - `OntologyProperty`（ORM）、`OntologyPropertyCreate/Update/Read`（schemas）、`ontology_service` 透传；空串视作未定义。
 - 前端 `PropertyTab.tsx` 表单 + 列表列 + `zh-CN` / `en-US` i18n（「单位」/「Unit」）。
 
@@ -168,41 +172,44 @@ MSG_FIELD_HINT_MISSING_UNIT  = "以下数值字段未定义单位，请在本体
 
 ## 8. 交付记录
 
-- **分支**：`feat/chat-output-zh-labels`（代码基线 `ebd0c471`；下表 21 个功能提交 + 1 个终审修复提交，不含交付记录文档提交）
-- **提交**（按时间顺序）：
+- **分支**：`feat/chat-output-zh-labels`（rebase 后 base 为 main `b368b016`（#95 之后）；下表 21 个功能提交 + 1 个终审修复提交 + 1 个 CI 修复提交 + 1 个撞号重编号提交，不含交付记录文档提交。rebase 前全部提交曾以旧 SHA 存在，旧 SHA 不可再引用）
+- **提交**（按时间顺序，rebase 后 SHA）：
 
 | # | Commit | 说明 |
 |---|---|---|
-| 1 | `01c7c3f7` | docs: 修正计划中的测试文件路径与前端测试命令 |
-| 2 | `f91f4e6f` | test: 记录 chat 输出中文化基线 |
-| 3 | `3c4829d0` | feat: 本体属性增加 unit 字段（表头/图例单位来源） |
-| 4 | `3e6de8c5` | feat: 新增字段中文名/单位解析层 |
-| 5 | `6db054bd` | fix: 解析层失败时回滚到保存点，避免污染调用方事务 |
-| 6 | `e89191aa` | feat: 字段治理提示文案模块 |
-| 7 | `120f4729` | feat: ChartSpec 增加 columnLabels 与单位并入标签 |
-| 8 | `670fa79c` | docs: 修正计划中柱状图的列头断言位置与兼容性表述 |
-| 9 | `1c6d3da8` | fix: 维度列表头不被聚合别名覆盖，单位不重复拼接 |
-| 10 | `db2a5dcb` | feat: chat/研究构建链注入字段中文名与单位 |
-| 11 | `45406da4` | docs: 正文提示断言从 Task 5 挪到 Task 6 |
-| 12 | `4e495a52` | test: 正文提示断言留给 Task 6 接入后再断言 |
-| 13 | `9567d7a7` | fix: 聚合别名不进入维度表头 override |
-| 14 | `028a6b7e` | docs: 计划明确聚合别名不进入维度表头 override |
-| 15 | `45abfc85` | fix: 仅聚合别名的列也算缺中文名，进治理提示 |
-| 16 | `3978d98f` | feat: 四条回答装配路径追加字段治理提示 |
-| 17 | `e3b2353c` | test: 流式提示断言改为精确匹配，多步锚点要求回写 |
-| 18 | `18f3e3f1` | feat: 研究报告表头中文名与治理提示 |
-| 19 | `1f9a2026` | fix: 报告的治理提示复用全块列名映射 |
-| 20 | `2143d6a0` | feat: PDF 导出表头使用字段中文名 |
-| 21 | `537dc798` | feat: 前端表头渲染中文字段名 |
-| 22 | `c673b925` | fix: 单位-only 列不再吞缺名提示 + 分组列不吃聚合别名（终审 Important） |
+| 1 | `f869096a` | docs: 修正计划中的测试文件路径与前端测试命令 |
+| 2 | `12763944` | test: 记录 chat 输出中文化基线 |
+| 3 | `456d942c` | feat: 本体属性增加 unit 字段（表头/图例单位来源） |
+| 4 | `9467961b` | feat: 新增字段中文名/单位解析层 |
+| 5 | `3bc05593` | fix: 解析层失败时回滚到保存点，避免污染调用方事务 |
+| 6 | `3ed54122` | feat: 字段治理提示文案模块 |
+| 7 | `c53f6024` | feat: ChartSpec 增加 columnLabels 与单位并入标签 |
+| 8 | `dcd365d8` | docs: 修正计划中柱状图的列头断言位置与兼容性表述 |
+| 9 | `e2376796` | fix: 维度列表头不被聚合别名覆盖，单位不重复拼接 |
+| 10 | `ed873d76` | feat: chat/研究构建链注入字段中文名与单位 |
+| 11 | `8259a5d2` | docs: 正文提示断言从 Task 5 挪到 Task 6 |
+| 12 | `40e7a396` | test: 正文提示断言留给 Task 6 接入后再断言 |
+| 13 | `19390591` | fix: 聚合别名不进入维度表头 override |
+| 14 | `43894e82` | docs: 计划明确聚合别名不进入维度表头 override |
+| 15 | `3ca150c9` | fix: 仅聚合别名的列也算缺中文名，进治理提示 |
+| 16 | `17270bfe` | feat: 四条回答装配路径追加字段治理提示 |
+| 17 | `46967a28` | test: 流式提示断言改为精确匹配，多步锚点要求回写 |
+| 18 | `ed3fd34d` | feat: 研究报告表头中文名与治理提示 |
+| 19 | `8fb93a3f` | fix: 报告的治理提示复用全块列名映射 |
+| 20 | `43515538` | feat: PDF 导出表头使用字段中文名 |
+| 21 | `1851d2e7` | feat: 前端表头渲染中文字段名 |
+| 22 | `ad685dfb` | fix: 单位-only 列不再吞缺名提示 + 分组列不吃聚合别名（终审 Important） |
+| 23 | `92ab8737` | test: 治理 think_hide/stream_disconnect fixture 字段，消除治理提示干扰（CI 净新增失败修复） |
+| 24 | `44e13b8c` | fix: 迁移重编号 0139→0140（与 l4-agent-trace 撞号消解） |
 
-- **Task 0 基线**（`evidence/baseline.txt`，2026-11-01，`head_commit 01c7c3f7`）：
+- **Task 0 基线**（`evidence/baseline.txt`，2026-11-01，`head_commit f869096a`（rebase 后 SHA，原 `01c7c3f7`））：
   - 后端 4 文件定向套件 `82 passed, 0 failed, 0 errors`，`failing_node_ids: none`。
-  - `test_upload_size_limit.py` `2 passed`；测试库 `alembic_version = 0138`（== alembic heads），95 张 public 表。
+  - `test_upload_size_limit.py` `2 passed`；测试库 `alembic_version = 0138`（基线时点 == alembic heads），95 张 public 表。
   - 结论：基线全绿，用「净新增失败 0」判定。
+- **合并前重组**（2026-11-01）：发现本批迁移 0139 与 `feat/l4-agent-trace` 的 0139 撞号（后者已上生产）。先合 #95（含 main 冲突消解：保留 #93 计划卡动态摘要文案，轨迹卡序测试改 testid 锚定），本分支 rebase 到 `b368b016`，迁移重编号 0140。
 - **最终回归**（详见 `evidence/regression.md`）：
-  - 后端 14 文件定向套件（真实 PG 5434 + 完整 API 链路）：终审修复后复跑 `191 passed, 0 failed`（`c673b925` 前为 `187 passed`；新增 4 条单位-only / 分组列表头用例）。
-  - 前端：`npx tsc --noEmit` 0 错误（exit 0）；`npm test -- --run` `227 files passed / 2297 tests passed`（exit 0）。
+  - 后端 16 文件定向套件（真实 PG 5434 + 完整 API 链路，测试库重建于 0140）：rebase 后复跑 `201 passed, 0 failed`。
+  - 前端：`npx tsc --noEmit` 0 错误（exit 0）；`npm test -- --run` `2320 passed`（含 #95 合入新增用例；原 2297 + 23）（exit 0）。
   - **净新增失败：0**。
 - **已确认偏差（本批不实现）**：
   1. **`EvidencePanel` 的 `TopNTable` 表头保持英文**。证据摘要 `trySummarizeEvidence` 是纯函数、没有 DB 会话，本批无法接入字段显示解析，因此证据面板列头继续显示原始列名；后续可由 `report_planner` 在 evidence payload 里携带 `columnLabels` 再统一。

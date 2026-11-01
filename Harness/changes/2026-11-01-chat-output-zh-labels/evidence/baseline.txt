@@ -3,6 +3,7 @@ BASELINE: all green
 date: 2026-11-01
 branch: feat/chat-output-zh-labels
 head_commit: 01c7c3f7a7a31e213c65d002e983c2efe96c8c66
+rebase_note: 2026-11-01 rebase 到 main b368b016（#95 之后）后，本基线提交的新 SHA 为 f869096a（内容不变）；历史 SHA 01c7c3f7 不再可达
 tree_note: backend/app tree at 01c7c3f7 is byte-identical to 1ad35cd5's backend/app (both resolve to tree 219c02b3e96c63eb995c2bc39bdaca9181b58e3a); 1ad35cd5 itself is on feat/chat-output-sync, not this branch
 
 command:

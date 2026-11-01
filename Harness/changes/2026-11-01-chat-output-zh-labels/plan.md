@@ -35,7 +35,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `backend/alembic/versions/0139_ontology_property_unit.py` | 给 `ontology_property` 加 `unit` 列 |
+| `backend/alembic/versions/0140_ontology_property_unit.py` | 给 `ontology_property` 加 `unit` 列 |
 | `backend/app/services/field_display_resolver.py` | 列名 → 中文名/单位/是否数值（批量查询、不抛错） |
 | `backend/app/services/field_hint_text.py` | `fieldHints` 合并 + 提示文案拼装（纯函数） |
 | `backend/app/tests/unit/test_field_display_resolver.py` | 解析层单测（真实 PG） |
@@ -123,7 +123,7 @@ Expected: 全绿。若已有红，记录失败集合到 `Harness/changes/2026-11
 ### Task 1: `ontology_property.unit` 端到端
 
 **Files:**
-- Create: `backend/alembic/versions/0139_ontology_property_unit.py`
+- Create: `backend/alembic/versions/0140_ontology_property_unit.py`
 - Modify: `backend/app/domain/models.py`（`OntologyProperty`，`source_column` 之后）
 - Modify: `backend/app/domain/schemas.py`（`OntologyPropertyCreate` / `Update` / `Read`）
 - Modify: `backend/app/services/ontology_service.py:686-697`（`createProperty` 显式字段）
@@ -190,7 +190,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0139"
+revision = "0140"  # 初版 0139 与 l4-agent-trace 撞号，合并前重编号（down_revision="0139"）
 down_revision = "0138"
 branch_labels = None
 depends_on = None
@@ -351,7 +351,7 @@ PYTHONPATH=/private/tmp/qa-chat-output-zh-labels/backend \
   app/tests/integration/test_ontology_property_unit.py -q -p no:randomly
 ```
 
-Expected: PASS（测试库自动迁移到 `0139`）。
+Expected: PASS（测试库自动迁移到 `0140`）。
 
 - [ ] **Step 9: 前端类型 + 表单**
 
@@ -442,7 +442,7 @@ Expected: tsc 0 错误；ontology 相关 vitest 全绿（若 `PropertyTab` 现�
 
 ```bash
 cd /private/tmp/qa-chat-output-zh-labels
-git add backend/alembic/versions/0139_ontology_property_unit.py \
+git add backend/alembic/versions/0140_ontology_property_unit.py \
         backend/app/domain/models.py backend/app/domain/schemas.py \
         backend/app/services/ontology_service.py \
         backend/app/tests/unit/test_ontology_property.py \

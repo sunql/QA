@@ -82,7 +82,7 @@ def _resolveColumn(name: str | None, columns: tuple[str, ...]) -> str | None:
     return None
 
 
-def _aliasByField(
+def aliasByField(
     plan: QueryPlan | None,
     columns: tuple[str, ...],
     overrides: Mapping[str, str] | None = None,
@@ -255,7 +255,7 @@ def buildSpec(
     任何轴名 ⇒ chat 图表 option 逐字不变。
     """
     kind = decision.kind
-    aliases = _aliasByField(plan, signals.columns, aliasOverrides)
+    aliases = aliasByField(plan, signals.columns, aliasOverrides)
     # 维度只吃**注入的 overrides**，不吃 plan 聚合别名：聚合别名属于**指标**，而它的键
     # 是「聚合 property 解析到的结果集列」——`COUNT(<维度列>)`（validatePlan 不要求
     # property 是数值列）会把别名挂到维度列上，令 chat 图表的轴被静默改名。

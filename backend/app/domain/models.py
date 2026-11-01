@@ -2581,3 +2581,16 @@ class ReportInstance(Base, TimestampMixin):
 
 
 from app.domain import agent_orchestration_models as _agent_orchestration_models  # noqa: E402,F401
+
+# Re-export 研究线 / 多步 / 图谱洞察 / MCP 调用日志表（0067、0084、0111–0138）。
+# 与上面那些 re-export 同理由：**Schema drift 校验与 alembic autogenerate 都靠
+# Base.metadata 看见这些表**。漏掉任何一个的后果分两种：
+# - 独立 CLI（`python -m app.infrastructure.schema_drift`）只 import 本模块
+#   ⇒ 该模块的表在 CLI 下全部不可见，被误报成 `extra_table`；
+#   应用进程只会丢失「别处也没被 import」的模块
+#   （改前只有 `mcp_call_log`）；
+# - `alembic autogenerate` 看不见 ⇒ 反过来提议 DROP 这些表。
+from app.domain import mcp_models as _mcp_models  # noqa: E402,F401
+from app.domain import multi_step_models as _multi_step_models  # noqa: E402,F401
+from app.domain import research_models as _research_models  # noqa: E402,F401
+from app.domain import wiki_graph_insight as _wiki_graph_insight  # noqa: E402,F401

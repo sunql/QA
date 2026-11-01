@@ -1788,12 +1788,11 @@ class TestChatFieldLabels:
         labels = body["tableOption"]["columnLabels"]
         assert labels["QTY"] == "收货数量（件）"
         assert "NAME" not in labels
-        # 治理提示：NAME 缺中文含义；QTY 有单位 ⇒ 不缺单位
+        # 结构化提示：NAME 缺中文含义；QTY 有单位 ⇒ 不缺单位
+        # （回答正文末尾的提示文案由 Task 6 接入，断言也放在 Task 6）
         hints = body["chartOption"]["fieldHints"]
         assert hints["missingLabels"] == ["NAME"]
         assert hints["missingUnits"] == []
-        assert "字段治理提示" in body["answer"]
-        assert "NAME" in body["answer"]
 
     async def test_no_hint_when_every_field_governed(
         self, client, dbSession, monkeypatch
@@ -1810,7 +1809,7 @@ class TestChatFieldLabels:
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert "字段治理提示" not in body["answer"]
+        # 全部已治理 ⇒ 两类提示都为空；正文不追加任何字符（正文断言见 Task 6）
         assert body["chartOption"]["fieldHints"] == {
             "missingLabels": [],
             "missingUnits": [],
@@ -1830,7 +1829,7 @@ PYTHONPATH=/private/tmp/qa-chat-output-zh-labels/backend \
   app/tests/integration/test_chat_zh_labels.py -q -p no:randomly
 ```
 
-Expected: FAIL — `KeyError: 'columnLabels'` / `字段治理提示` 不在回答里。
+Expected: FAIL — `KeyError: 'columnLabels'`（明细表负载还没有列头映射）/ `KeyError: 'fieldHints'`（`chartOption` 还没有结构化提示）。
 
 - [ ] **Step 3: `chart_service.buildChart`**
 
@@ -1987,9 +1986,10 @@ git commit -m "feat: chat/研究构建链注入字段中文名与单位"
 - Modify: `backend/app/services/chat_multistep.py:698-712`
 - Modify: `backend/app/services/chat_stream_multistep.py:238-243`
 - Test: `backend/app/tests/unit/test_field_hint_wiring.py`（新建，纯函数级断言 + 源码锚点守卫）
+- Test: `backend/app/tests/integration/test_chat_zh_labels.py`（扩展：正文末尾提示的端到端断言）
 
 **Interfaces:**
-- Consumes: `appendFieldHints` / `composeFieldHintText` / `fieldHintsOf` / `columnLabelsOf` / `hintsFromSteps`（Task 3）。
+- Consumes: `appendFieldHints` / `composeFieldHintText` / `fieldHintsOf` / `columnLabelsOf` / `hintsFromSteps`（Task 3）；`test_chat_zh_labels.py` 里既有的 `_governQty` 与 `test_chat_api` 的 `_seed` / `_installFakes` / `_chat_payload`（Task 5）。
 - Produces: 最终回答正文末尾带提示；流式路径多发一个 `token` 帧，落库文本与前端所见一致。
 
 - [ ] **Step 1: 写失败测试**
@@ -2000,8 +2000,8 @@ git commit -m "feat: chat/研究构建链注入字段中文名与单位"
 """回答装配点的接入守卫（源码级锚点）。
 
 这些路径各自需要 LLM / DB / 流式管线才能跑通，模块级单测成本远高于收益；
-真正的内容断言由 Task 5 的集成用例覆盖。这里用源码锚点锁住「四个装配点都调了
-同一个入口」，防止后续重构时漏接一路。
+真正的内容断言由本任务的集成用例覆盖（单步非流式一路）。这里用源码锚点锁住
+「四个装配点都调了同一个入口」，防止后续重构时漏接一路。
 """
 
 from __future__ import annotations
@@ -2039,15 +2039,59 @@ def test_multistep_stream_merges_step_hints():
     assert "hintsFromSteps(completed)" in source
 ```
 
+同一文件（`backend/app/tests/integration/test_chat_zh_labels.py`）追加**正文级**断言 —— 这两条才是「提示真的进了回答、且没多进」的实质证据（Task 5 只断言了结构化 `fieldHints`）：
+
+```python
+class TestAnswerFieldHints:
+    async def test_answer_appends_hint_for_missing_label_and_unit(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        # 只治理中文名、不治理单位 ⇒ 两类提示同时命中
+        await _governQty(dbSession, alias="收货数量", unit=None)
+        _installFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat", json=_chat_payload("各供应商的收货数量汇总", ds.id)
+        )
+        assert resp.status_code == 200, resp.text
+        answer = resp.json()["answer"]
+
+        assert answer.endswith(
+            "\n\n字段治理提示\n"
+            "以下字段缺少中文含义，请在「本体 → 属性管理」补充别名：NAME\n"
+            "以下数值字段未定义单位，请在本体属性中补充「单位」：收货数量"
+        )
+
+    async def test_answer_has_no_hint_when_every_field_governed(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        await dbSession.execute(
+            update(OntologyProperty).values(property_alias="已治理")
+        )
+        await _governQty(dbSession, alias="已治理", unit="件")
+        _installFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat", json=_chat_payload("各供应商的收货数量汇总", ds.id)
+        )
+        assert resp.status_code == 200, resp.text
+        assert "字段治理提示" not in resp.json()["answer"]
+```
+
+（`update` / `OntologyProperty` 的 import 复用 Task 5 已在该文件里加好的那两条。）
+
 - [ ] **Step 2: 运行确认失败**
 
 ```bash
 PYTHONPATH=/private/tmp/qa-chat-output-zh-labels/backend \
   /Users/sunql/Prejectcode-th/MyWiki/wiki/aicode/qa-system/backend/.venv/bin/python -m pytest \
-  app/tests/unit/test_field_hint_wiring.py -q -p no:randomly
+  app/tests/unit/test_field_hint_wiring.py app/tests/integration/test_chat_zh_labels.py \
+  -q -p no:randomly
 ```
 
-Expected: FAIL（四个断言全失败）。
+Expected: FAIL — 四个源码锚点全失败；集成用例 `test_answer_appends_hint_for_missing_label_and_unit` 因回答末尾没有提示而失败（`test_answer_has_no_hint_when_every_field_governed` 此时会真空通过，属预期）。
 
 - [ ] **Step 3: 单步非流式**
 
@@ -2124,7 +2168,8 @@ Expected: PASS。若流式既有断言依赖回答结尾精确匹配，改为断
 cd /private/tmp/qa-chat-output-zh-labels
 git add backend/app/services/chat_service.py backend/app/services/chat_stream_query.py \
         backend/app/services/chat_multistep.py backend/app/services/chat_stream_multistep.py \
-        backend/app/tests/unit/test_field_hint_wiring.py
+        backend/app/tests/unit/test_field_hint_wiring.py \
+        backend/app/tests/integration/test_chat_zh_labels.py
 git commit -m "feat: 四条回答装配路径追加字段治理提示"
 ```
 

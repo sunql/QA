@@ -108,7 +108,8 @@ class TestChatStreamApi:
         frames = _parseFrames(resp.text)
         events = [e for e, _ in frames]
         # 2026-08-16：单步查询也下发执行计划事件：
-        # meta → class_recall → multi_step_plan → step_plan → plan → sql → chart → token×2 → step_result → done
+        # meta → class_recall → multi_step_plan → step_plan → plan → sql → chart
+        # → token×2（正文）+ [字段治理提示帧] → step_result → done
         assert events[0] == EVENT_META
         assert events[1] == EVENT_CLASS_RECALL
         assert events[2] == EVENT_MULTI_STEP_PLAN
@@ -123,7 +124,8 @@ class TestChatStreamApi:
         assert len(stepResultFrames) == 1
         assert stepResultFrames[0][1]["sql"] is not None
         tokenEvents = [f for f in frames if f[0] == EVENT_TOKEN]
-        assert len(tokenEvents) == 2
+        # 正文两帧；本种子未治理 NAME/QTY ⇒ 末尾追加一帧字段治理提示（Task 6）
+        assert len(tokenEvents) >= 2
 
         metaData = dict(frames[0][1])
         assert metaData["intent"] == "query"
@@ -139,9 +141,11 @@ class TestChatStreamApi:
         assert chartData["chartType"] == "bar"
         assert chartData["chartOption"] is not None
         assert len(chartData["data"]) == 2
-        # token 增量拼接为完整回答
+        # token 增量拼接为完整回答（正文 + 可能的字段治理提示后缀）
         answer = "".join(d["content"] for e, d in tokenEvents)
-        assert answer == "查询完成，共 2 条记录。"
+        assert answer.startswith("查询完成，共 2 条记录。")
+        suffix = answer[len("查询完成，共 2 条记录。"):]
+        assert suffix == "" or suffix.startswith("\n\n字段治理提示")
         # done 携带累计 token（计划/SQL 30 + chart 15 + answer 15）
         doneData = frames[-1][1]
         assert doneData["tokensUsed"] == 60
@@ -207,7 +211,11 @@ class TestChatStreamApi:
         msgs = list((await dbSession.execute(select(SessionMessage).order_by(SessionMessage.id))).scalars().all())
         assert len(msgs) == 2
         assert msgs[1].role == "assistant"
-        assert msgs[1].content == "查询完成，共 2 条记录。"
+        # 未治理字段 ⇒ 正文后允许字段治理提示后缀（Task 6 接入）
+        storedAnswer = msgs[1].content
+        assert storedAnswer.startswith("查询完成，共 2 条记录。")
+        storedSuffix = storedAnswer[len("查询完成，共 2 条记录。"):]
+        assert storedSuffix == "" or storedSuffix.startswith("\n\n字段治理提示")
         # 0105 图表进最终报告：图必须**真的落进库**。只测 schema 与读路径会漏掉
         # 这一层 —— 多处 `_storeSessionMessages` 调用点任何一个漏传，读取侧照样
         # 全绿（读到 None 而已），而导出 PDF 与历史回放会整批没有图。

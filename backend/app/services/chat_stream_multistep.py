@@ -43,6 +43,7 @@ from app.services.chat_helpers import (
     multiStepSummaryPersistFields,
 )
 from app.services.chat_stream_entry import _overviewStepPayload
+from app.services.field_hint_text import appendFieldHints, hintsFromSteps
 from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
 from app.services.multi_step_retry import ERROR_KIND_PERMANENT
 from app.services.nl2sql_service import _readFloatConfig
@@ -235,6 +236,12 @@ class StreamMultiStepMixin:
                 )
                 # Think_Hide（feat-think-hide）：汇总答案按系统参数剥离 <think> 思维链
                 agg_content = await applyThinkPolicy(session, agg_resp[0].content)
+                # 字段治理提示（chat 输出中文化）：汇总各数据步的 hints/labels 追加
+                # 到正文末尾；该路径先落库再现帧 ⇒ 无需额外发帧。
+                stepHints, stepLabels = hintsFromSteps(completed)
+                agg_content = appendFieldHints(
+                    agg_content, stepHints, columnLabels=stepLabels,
+                )
                 agg_config = agg_resp[1]
                 agg_pt = agg_resp[0].promptTokens
                 agg_ct = agg_resp[0].completionTokens

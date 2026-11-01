@@ -69,3 +69,41 @@ class TestChatFieldLabels:
             "missingLabels": [],
             "missingUnits": [],
         }
+
+
+class TestAnswerFieldHints:
+    async def test_answer_appends_hint_for_missing_label_and_unit(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        # 只治理中文名、不治理单位 ⇒ 两类提示同时命中
+        await _governQty(dbSession, alias="收货数量", unit=None)
+        _installFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat", json=_chat_payload("各供应商的收货数量汇总", ds.id)
+        )
+        assert resp.status_code == 200, resp.text
+        answer = resp.json()["answer"]
+
+        assert answer.endswith(
+            "\n\n字段治理提示\n"
+            "以下字段缺少中文含义，请在「本体 → 属性管理」补充别名：NAME\n"
+            "以下数值字段未定义单位，请在本体属性中补充「单位」：收货数量"
+        )
+
+    async def test_answer_has_no_hint_when_every_field_governed(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        await dbSession.execute(
+            update(OntologyProperty).values(property_alias="已治理")
+        )
+        await _governQty(dbSession, alias="已治理", unit="件")
+        _installFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat", json=_chat_payload("各供应商的收货数量汇总", ds.id)
+        )
+        assert resp.status_code == 200, resp.text
+        assert "字段治理提示" not in resp.json()["answer"]

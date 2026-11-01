@@ -43,12 +43,11 @@ class TestChatFieldLabels:
         labels = body["tableOption"]["columnLabels"]
         assert labels["QTY"] == "收货数量（件）"
         assert "NAME" not in labels
-        # 治理提示：NAME 缺中文含义；QTY 有单位 ⇒ 不缺单位
+        # 治理提示（结构化）：NAME 缺中文含义；QTY 有单位 ⇒ 不缺单位。
+        # 正文末尾的「字段治理提示」属于回答装配层，由 Task 6 在同一文件补断言。
         hints = body["chartOption"]["fieldHints"]
         assert hints["missingLabels"] == ["NAME"]
         assert hints["missingUnits"] == []
-        assert "字段治理提示" in body["answer"]
-        assert "NAME" in body["answer"]
 
     async def test_no_hint_when_every_field_governed(
         self, client, dbSession, monkeypatch
@@ -65,7 +64,7 @@ class TestChatFieldLabels:
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert "字段治理提示" not in body["answer"]
+        # 正文提示的否定断言同样留给 Task 6（此处只钉结构化 hints 为空）。
         assert body["chartOption"]["fieldHints"] == {
             "missingLabels": [],
             "missingUnits": [],

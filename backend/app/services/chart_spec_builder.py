@@ -154,10 +154,35 @@ def _buildDimensions(
     )
 
 
-def _buildMeasures(fields: tuple[str, ...], aliases: dict[str, str]) -> tuple[SpecMeasure, ...]:
+def _withUnit(label: str, unit: str | None) -> str:
+    return f"{label}（{unit}）" if unit else label
+
+
+def _buildMeasures(
+    fields: tuple[str, ...],
+    aliases: dict[str, str],
+    units: Mapping[str, str],
+) -> tuple[SpecMeasure, ...]:
     return tuple(
-        SpecMeasure(field=f, label=aliases.get(f) or _prettify(f)) for f in fields
+        SpecMeasure(field=f, label=_withUnit(aliases.get(f) or _prettify(f), units.get(f)))
+        for f in fields
     )
+
+
+def _buildColumnLabels(
+    columns: tuple[str, ...],
+    aliases: dict[str, str],
+    units: Mapping[str, str],
+) -> dict[str, str]:
+    """只收录「有中文名或有单位」的列；都没有的列缺键 ⇒ 前端回落原始列名。"""
+    labels: dict[str, str] = {}
+    for column in columns:
+        unit = units.get(column)
+        alias = aliases.get(column)
+        if not alias and not unit:
+            continue
+        labels[column] = _withUnit(alias or _prettify(column), unit)
+    return labels
 
 
 def _buildSeries(
@@ -241,6 +266,7 @@ def buildSpec(
     *,
     aliasOverrides: Mapping[str, str] | None = None,
     axisLabels: Mapping[str, str] | None = None,
+    units: Mapping[str, str] | None = None,
 ) -> ChartSpec:
     """把决策落到一份完整 spec。纯函数：不改 plan、不改 data、不改 signals。
 
@@ -253,15 +279,20 @@ def buildSpec(
     用（`ChartSpec.axisLabels`）。它不改 `dimensions[].label` —— 后者在 chat 形态下是
     `_prettify(field)` 兜底，不是显示名。chat 调用形态恒不传 ⇒ 空 map ⇒ 渲染器不挂
     任何轴名 ⇒ chat 图表 option 逐字不变。
+
+    `units`（关键字专用，默认 None）是「结果集列名 → 单位」。有单位的指标标签变成
+    `中文名（单位）`（系列名随标签走），并汇总进 `ChartSpec.columnLabels` 供表头/
+    图例使用。不传 ⇒ 空 map ⇒ 标签与 `columnLabels` 与既有行为逐字一致。
     """
     kind = decision.kind
+    unitsMap = dict(units or {})
     aliases = aliasByField(plan, signals.columns, aliasOverrides)
     # 维度只吃**注入的 overrides**，不吃 plan 聚合别名：聚合别名属于**指标**，而它的键
     # 是「聚合 property 解析到的结果集列」——`COUNT(<维度列>)`（validatePlan 不要求
     # property 是数值列）会把别名挂到维度列上，令 chat 图表的轴被静默改名。
     # 缺省（chat 调用形态）时这里恒为空 map ⇒ 维度标签与既有行为逐字一致。
     dimensions = _buildDimensions(_dimensionFields(signals, kind), dict(aliasOverrides or {}))
-    measures = _buildMeasures(_measureFields(signals, kind), aliases)
+    measures = _buildMeasures(_measureFields(signals, kind), aliases, unitsMap)
 
     return ChartSpec(
         kind=kind,
@@ -269,6 +300,7 @@ def buildSpec(
         columns=signals.columns,
         dimensions=dimensions,
         measures=measures,
+        columnLabels=_buildColumnLabels(signals.columns, aliases, unitsMap),
         series=_buildSeries(kind, dimensions, measures),
         orientation="horizontal" if kind is ChartType.HBAR else "vertical",
         sort=_buildSort(plan, signals.columns),

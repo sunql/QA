@@ -119,6 +119,9 @@ class ChartSpec:
     stacked: bool = False
     kpi: SpecKpi | None = None
     specVersion: int = field(default=SPEC_VERSION)
+    # 原始列名 → 表头/图例显示名（可含单位）。缺键 = 回落原始列名。
+    # 降级成 TABLE 时必须保留：降级是「画不出来」，不是「丢掉中文名」。
+    columnLabels: Mapping[str, str] = field(default_factory=dict)
     # 维度字段 → 显示名（轴名用）。报告路径注入；chat 形态为空 map ⇒ 渲染负载逐字不变。
     # 不读 SpecDimension.label：那个 label 在 chat 形态下是 `_prettify(field)` 兜底（英文
     # 列名美化），照读会把英文轴名强行加到 chat 图上。渲染器还会屏蔽恒等映射（见
@@ -126,9 +129,17 @@ class ChartSpec:
     axisLabels: Mapping[str, str] = field(default_factory=dict)
 
 
-def tableSpec(columns: list[str] | tuple[str, ...]) -> ChartSpec:
+def tableSpec(
+    columns: list[str] | tuple[str, ...],
+    *,
+    columnLabels: Mapping[str, str] | None = None,
+) -> ChartSpec:
     """构造 TABLE spec —— 也是所有降级路径的终点。"""
-    return ChartSpec(kind=ChartType.TABLE, columns=tuple(columns))
+    return ChartSpec(
+        kind=ChartType.TABLE,
+        columns=tuple(columns),
+        columnLabels=dict(columnLabels or {}),
+    )
 
 
 def _allReferencedFields(spec: ChartSpec) -> list[str]:
@@ -199,4 +210,4 @@ def coerceSpec(
     reason = validateSpec(spec, columns)
     if reason is None:
         return spec, None
-    return tableSpec(columns), reason
+    return tableSpec(columns, columnLabels=spec.columnLabels), reason

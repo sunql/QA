@@ -59,13 +59,13 @@ Alembic 迁移（`op.create_index` / `op.execute` 建出来的），所以正确
 > ② 「纠正为『无差异』」不成立 —— `alembic check` 仍报 **56 条**残余（全新迁移库口径）。
 > 实测口径（alembic **1.19.1**，只读 `alembic check`，日志见 §8.6）：
 >
-> | 类别 | 本批前（base `7d28d08a`） | 本批后（HEAD `c618e060`） |
+> | 类别 | 本批前（base `7d28d08a`） | 本批后（HEAD；**ORM 侧自 `c618e060` 起未再变动** —— 其后的 commit 只改文档与注释） |
 > |---|---|---|
 > | `removed index` | **64** | **6** |
-> | `removed table` | **14**（13 张未注册活表 + 测试残留 `po_lines_sandbox`） | **1**（仅 5434 上测试自建的 `po_lines_sandbox`；**全新迁移库上 = 0**） |
+> | `removed table` | **14**（13 张未注册活表 + 测试残留 `po_lines_sandbox`） | **1**（5434 共享库口径：仅测试自建的 `po_lines_sandbox`；**全新迁移库上 = 0**） |
 > | `removed column` | **1**（`knowledge_claim.confidence_level`） | **0** |
 > | `removed unique constraint` | 1（`uq_metric_source_triple`） | **0** |
-> | `removed check constraint` | 20 | **20（本批未收敛 —— 见 §8.8 的地雷条目）** |
+> | `removed check constraint` | 20 | **20（本批未收敛 —— 见 §8.8.1 的地雷条目）** |
 >
 > ⇒ 本批的真实成果是「**drift 工具可见的**表 / 列 / 索引漂移归零」，**不是**「无差异」：
 > `alembic check` 在全新迁移库上仍报 **56 条**残余差异（§8.6），本批明确不覆盖。
@@ -504,7 +504,7 @@ grep -o "Detected [a-z ]*" /tmp/alembic_check_1191.log | sed 's/ *$//' | sort | 
 | NOT NULL 变化 | 1 | 1 | 1 行 = 1 项 |
 | 列 comment 差异 | 6 | 6 | 1 行 = 1 项 |
 | **小计（不含 CHECK 约束）** | **36** | **30** | 36 − 6 = 30（只有形状差异那 6 项各占 2 行） |
-| **removed check constraint** | **20** | **20**（**单列，不参与上面的折算**） | 1 行 = 1 项；每条对应 DB 侧 1 个命名 CHECK 约束 |
+| **removed check constraint** | **20** | **20**（**单列，不参与上面的折算**） | 1 行 = 1 项；每条对应 DB 侧 1 个**ORM 尚未声明**的命名 CHECK 约束（DB 共 48 个，ORM 已声明 28 个） |
 | **合计（全新迁移库口径）** | **56** | **50** | 36 + 20 = 56 行；30 + 20 = 50 项 |
 
 ⇒ **「30 项」这个数字是对的，但只覆盖前 36 行**；20 条 CHECK 约束**未**归并进 30
@@ -513,9 +513,9 @@ grep -o "Detected [a-z ]*" /tmp/alembic_check_1191.log | sed 's/ *$//' | sort | 
 
 #### 8.6.2 残余类别明细
 
-| 残余类别 | 数量 | 举例 |
+| 残余类别 | 数量 | 对象 / 举例 |
 |---|---|---|
-| **removed check constraint**（DB 有命名 CHECK 约束、ORM 侧**完全没有声明**）—— **drift 工具根本不比较 CHECK 约束 ⇒ 这 20 条对 drift 完全隐形**，详见 §8.8 的地雷条目 | **20** | `ck_feature_value_not_both_null`、`ck_agent_status`、`ck_entity_mapping_entity_type`、`ck_kpi_catalog_status`、`chk_link_granularity`、`ck_agent_permission`、`ck_agent_response_latency`、`ck_agent_run_log_status`、`ck_agent_trigger_type`、`ck_audit_outbox_attempts_nonneg`、`ck_business_object_code_upper`、`ck_data_lineage_refresh_frequency`、`ck_data_lineage_source_layer`、`ck_data_lineage_target_layer`、`ck_doc_rel_entity_key_nonempty`、`ck_document_security_level`、`ck_document_status`、`ck_entity_mapping_match_rule`、`ck_entity_mapping_source_system`、`ck_feature_definition_status` |
+| **removed check constraint**（DB 侧 48 个命名 CHECK 约束里，**ORM 侧已声明 28 个、缺这 20 个**）—— **drift 工具根本不比较 CHECK 约束 ⇒ 补没补 CHECK 约束，drift 都看不出来**，详见 §8.8.1 的地雷条目 | **20** | `ck_feature_value_not_both_null`、`ck_agent_status`、`ck_entity_mapping_entity_type`、`ck_kpi_catalog_status`、`chk_link_granularity`、`ck_agent_permission`、`ck_agent_response_latency`、`ck_agent_run_log_status`、`ck_agent_trigger_type`、`ck_audit_outbox_attempts_nonneg`、`ck_business_object_code_upper`、`ck_data_lineage_refresh_frequency`、`ck_data_lineage_source_layer`、`ck_data_lineage_target_layer`、`ck_doc_rel_entity_key_nonempty`、`ck_document_security_level`、`ck_document_status`、`ck_entity_mapping_match_rule`、`ck_entity_mapping_source_system`、`ck_feature_definition_status` |
 | changed index（排序方向，DB 是 `DESC` 而 ORM 是普通列） | 9 | `ix_audit_log_actor`、`ix_audit_log_entity`、`ix_feature_def_history_feature_changed`、`ix_knowledge_conflict_open`、`ix_kpi_history_kpi_revision`、`ix_learning_feedback_time`、`ix_structure_suggestion_page`、`ix_structure_suggestion_pending`、`ix_wiki_token_usage_mechanism_time` |
 | 唯一约束 ↔ 唯一索引的**形状**差异（DB 用唯一索引、ORM 用 `UniqueConstraint`，语义相同但 alembic 认为要重建）。**口径：每条形状差异 = 2 行提示** —— 1 个 `removed index` + 1 个 `added unique constraint` | 6 条 = **12 行** | `uq_data_lineage_edge`、`uq_entity_mapping_entity_source`、`uq_feature_definition_name`、`uq_feature_value_dedup`、`uq_id_mapping_bo_ext`、`uq_kpi_catalog_code` |
 | 新增 unique constraint（DB 有、ORM 无）—— 7 个 `added unique constraint` 里的**第 7 个** | 1 | `uq_doc_entity_rel`（列：`document_id, entity_type, entity_key, relation_type`） |
@@ -638,10 +638,16 @@ EXIT=2
 **这是本批留在系统里最危险的一颗雷**，比 §8.6 里其它残余差异都严重：
 
 - **事实**：DB 侧（5434 `qa_metadata_test`，`pg_constraint.contype='c'`）有 **48 个命名 CHECK 约束**，
-  ORM 侧**一个都没声明**。`alembic check`（1.19.1）因此报出 **20 条
-  `Detected removed check constraint ...`**（alembic 只报它认为「ORM 缺失」的那一部分）。
+  **ORM 侧已声明 28 个**（分布在 **13 张表**：`agent_orchestration_binding` / `_profile` / `_run` /
+  `_step` / `_usage` 共 17 个，`agent_tool_config`、`audit_log`、`data_quality_score`、
+  `evaluation_report`、`evaluation_report_schedule`、`mcp_call_log`（3 个）、`permission_grant`、
+  `wiki_ontology_link`（`chk_link_type` / `chk_link_weight`）），
+  **缺 20 个** ⇒ **48 − 28 = 20**。这 20 个与 `alembic check`（1.19.1）报出的
+  **20 条 `Detected removed check constraint ...`** 集合**完全一致**（已实测比对，两边都无差集）。
+  ⚠️ 补的时候**不要重复添加已声明的那 28 个** —— 那会把工作量与风险量级都记错。
 - **为什么 drift 看不见**：**drift 工具根本不比较 CHECK 约束**（它只比表集合、列名、
-  索引名 + 有序列元组）⇒ 这 20 条对 drift **完全隐形** ⇒ **drift `--strict` 依然 exit 0**，
+  索引名 + 有序列元组）⇒ **补没补 CHECK 约束，drift 都看不出来**
+  （drift 检测不到 CHECK 约束的缺失）⇒ **drift `--strict` 依然 exit 0**，
   门禁脚本也照样 exit 0，**没有任何告警**。
 - **为什么危险**：一旦有人跑 `alembic revision --autogenerate`，autogenerate 会为这 20 个
   约束生成 `op.drop_constraint('ck_*')` ⇒ **把数据校验静默删掉**，而 drift 仍然 exit 0
@@ -656,8 +662,9 @@ EXIT=2
   `ck_doc_rel_entity_key_nonempty`、`ck_document_security_level`、`ck_document_status`、
   `ck_entity_mapping_match_rule`、`ck_entity_mapping_source_system`、
   `ck_feature_definition_status`。
-- **下一批必须做的**：**先把 CHECK 约束补进 ORM**（`__table_args__` 的 `CheckConstraint`，
-  表达式对着 `pg_get_constraintdef` 实测抄），**或**明确决定废弃它们并写迁移显式删除 ——
+- **下一批必须做的**：**先把缺的 20 个 CHECK 约束补进 ORM**（`__table_args__` 的
+  `CheckConstraint`，表达式对着 `pg_get_constraintdef` 实测抄；**已声明的那 28 个不要重复添加**），
+  **或**明确决定废弃它们并写迁移显式删除 ——
   两者选一，但**必须显式决策**。
 - **在此之前的硬规矩**：**禁止**跑 `alembic revision --autogenerate`**。
 

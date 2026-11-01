@@ -11,6 +11,7 @@ CLI 只 import `app.domain.models`，所以「谁没被 models.py 导入」谁�
 from __future__ import annotations
 
 from app.domain.models import Base
+from app.domain.wiki_models import KnowledgeClaim
 
 
 def test_mcp_call_log_is_registered() -> None:
@@ -39,3 +40,16 @@ def test_registration_does_not_change_existing_table_count() -> None:
     """反向守卫：注册只增不减，且不得把既有表挤掉。"""
     assert "users" in Base.metadata.tables
     assert "knowledge_claim" in Base.metadata.tables
+
+
+def test_knowledge_claim_declares_confidence_level() -> None:
+    """0100 加的列必须进 ORM，否则 autogenerate 会把它当多余列 DROP。"""
+    columns = KnowledgeClaim.__table__.columns
+
+    assert "confidence_level" in columns
+    assert columns["confidence_level"].type.length == 10
+    assert columns["confidence_level"].nullable is True
+    # comment 必须与迁移 0100 完全一致，否则 autogenerate 提议 alter_column。
+    assert columns["confidence_level"].comment == (
+        "离散置信度等级 HIGH/MEDIUM/LOW/REFUSE（v3.1 §12.2，读路径现算，此列留作缓存）"
+    )

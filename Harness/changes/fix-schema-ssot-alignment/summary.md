@@ -218,7 +218,14 @@ ORM 谓词原写成 `status IN ('PENDING','RUNNING')`，而迁移 `0074_dq_eval_
 
 ### 6.1 新增测试
 
-**`backend/app/tests/integration/test_orm_schema_ssot.py`**（真实 PostgreSQL，5434 `qa_metadata_test`）：
+**`backend/app/tests/unit/test_orm_schema_ssot.py`**（真实 PostgreSQL，5434 `qa_metadata_test`）：
+
+> **为什么在 `unit/` 而不是 `integration/`**：不是风格偏好，是 **CI 分片稳定性**问题，
+> 详见 §8.9。`integration/` 目录的文件清单被 CI 的 round-robin 分片直接消费，
+> 在该目录**新增任何一个文件**都会把其后所有文件的分片序号整体挪一位 ⇒ 既有测试的
+> 分片归属全变 ⇒ 依赖「同分片内文件顺序」的既有测试会突然红。
+> 本文件只读结构、不需要业务数据，放 `unit/` 后 `integration/` 的文件清单回到 base
+> 的字节级一致 ⇒ 分片归属逐文件还原 ⇒ 净新增失败归零。
 
 - `test_required_indexes_are_declared_in_orm` —— 32 个 `Index` 逐条出现在 ORM `table.indexes` 里。
 - `test_required_unique_constraints_are_declared` —— `uq_metric_source_triple` 必须是
@@ -285,7 +292,7 @@ TEST_NEO4J_URI='bolt://127.0.0.1:7688' \
 TEST_NEO4J_PASSWORD='qa_neo4j_dev_2026' \
 /Users/sunql/Prejectcode-th/MyWiki/wiki/aicode/qa-system/backend/.venv/bin/python -m pytest \
   app/tests/unit/test_domain_model_registration.py \
-  app/tests/integration/test_orm_schema_ssot.py \
+  app/tests/unit/test_orm_schema_ssot.py \
   app/tests/integration/test_check_schema_drift.py \
   app/tests/integration/test_user_orm_matches_schema.py -q \
   --cov=app.domain.models --cov=app.domain.wiki_models --cov=app.domain.wiki_learning_models \
@@ -424,7 +431,7 @@ TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@127.0.0.1:5434/qa
 TEST_NEO4J_URI='bolt://127.0.0.1:7688' \
 TEST_NEO4J_PASSWORD='qa_neo4j_dev_2026' \
 python3 -m pytest app/tests/unit/test_domain_model_registration.py \
-       app/tests/integration/test_orm_schema_ssot.py \
+       app/tests/unit/test_orm_schema_ssot.py \
        app/tests/integration/test_check_schema_drift.py \
        app/tests/integration/test_user_orm_matches_schema.py -q -p no:randomly
 ```
@@ -667,6 +674,67 @@ EXIT=2
   **或**明确决定废弃它们并写迁移显式删除 ——
   两者选一，但**必须显式决策**。
 - **在此之前的硬规矩**：**禁止**跑 `alembic revision --autogenerate`**。
+
+---
+
+### 8.9 ⚠️ CI 分片重排陷阱：本批新增 1 个 integration 文件 ⇒ 5 条净新增失败（已定位并规避）
+
+**背景**：PR #97 首轮 CI 相对 main 基线出现 **5 条净新增失败**。按仓库合并判据
+（「失败集合对差，净新增为空才合并」，不等 CI 变绿）必须先归零才可合并。
+
+**CI 分片机制**（`.github/workflows/ci.yml`，`backend-integration` job）：
+
+```bash
+mapfile -t all_tests < <(find app/tests/integration -name 'test_*.py' -print | sort)
+shard_tests=()
+for ((i=${{ matrix.shard }}; i<${#all_tests[@]}; i+=4)); do
+  shard_tests+=("${all_tests[$i]}")
+done
+```
+
+⇒ 分片归属 = **排序后下标 mod 4**。**在 `integration/` 目录新增任何一个文件**，
+其后所有文件的下标整体 +1 ⇒ 分片归属整体轮转一位 ⇒ 既有测试的**同分片邻居全变**。
+本批新增 `test_orm_schema_ssot.py` 后，integration 文件数 **314 → 315**，
+于是 base 的 shard 0 尾部整体挪到 shard 1。
+
+**两条净新增失败的根因（均已本地复现，非推测）**：
+
+| 失败 | 报错 | 根因 |
+|---|---|---|
+| `test_rag_api.py` × 4 | `MilvusException: (code=800, message=database not found[database=qa_ci])` | `qa_ci` 逻辑库由 `ensureIsolatedDatabase()` **惰性**创建，而只有 3 个 integration 文件会调它（`test_insert_embeddings_dual.py` / `test_reconcile_milvus_id_mapping.py` / `test_search_type_routed.py`，经 `milvusCleanClient` 夹具 → `dropOntologyCollectionsForTest()`）。base 里 `test_insert_embeddings_dual.py`（下标 168）与 `test_rag_api.py`（下标 236）**同在 shard 0 且前者先跑** ⇒ 库被建好；HEAD 里 `test_rag_api.py`（下标 237）挪到 shard 1，而 **shard 1 里一个创建者都没有**（已用 awk 逐文件核对）⇒ `qa_ci` 从未被创建 |
+| `test_reconcile_neo4j_id_mapping.py::test_reconcile_reports_clean_when_both_sides_align` | `AssertionError: expected 0 diff, got 3` | 该用例要求图谱在**开始时**干净，但 `neo4jCleanDriver` 只在**teardown** 清图、不在 setup 清。shard 1 里更早跑过的文件留下的 Class 节点（带 `unified_id`）被 reconcile 读成 3 条差异 |
+
+**本地复现记录（Neo4j 那条）**：往测试实例 `bolt://127.0.0.1:7688` 手工建 3 个带
+`unified_id` 的 Class 节点（`obj:supplier:RESIDUE1` / `obj:material:RESIDUE2` /
+`obj:customer:RESIDUE3`），重跑该用例 ⇒ **逐字复现** `expected 0 diff, got 3`；
+清空后重跑 ⇒ 通过。（测试自身的 teardown 会清干净，复现后已确认图谱无残留。）
+
+**与本批代码的关系**：本批改动只有 **ORM 元数据 + 文档 + 只读脚本**，**不碰 Milvus / Neo4j**
+⇒ 这 5 条**不是本批引入的回归**，而是**分片重排暴露出的既有顺序依赖**。
+
+**处置**：把 `test_orm_schema_ssot.py` 从 `integration/` 挪到 `unit/`
+（该文件只读结构、不需要业务数据；`unit/` 的 conftest 同样强制真实 PostgreSQL）。
+挪完之后 `integration/` 的文件清单**回到与 base 字节级一致**（已用 `git ls-tree` 双侧核对：
+HEAD 与 base 的 integration 测试文件清单**各 314 个、逐名相同、`diff` 为空**）
+⇒ **每个文件的分片归属逐个还原** ⇒ 那 5 条净新增失败随之消失，且**不需要改动任何共享夹具**。
+
+**遗留（未修，属另一批 —— 下一个人往 `integration/` 加文件会再踩一次）**：
+
+- `test_rag_api.py` 隐式依赖「同分片里更早的文件建过 `qa_ci` 库」；
+  根治方向：把 `ensureIsolatedDatabase()` 提到 `integration/conftest.py` 的
+  **session 级 autouse 夹具**，让任何分片都自带该库。
+- `neo4jCleanDriver` 只在 teardown 清图、不在 setup 清 ⇒ 首个用到它的用例会吃到上一个
+  文件的残留；根治方向：让它在 `yield` **之前**也清一次。
+- CI 的 round-robin 分片本身对「新增文件」不稳定（改一个清单就全量重排）；
+  根治方向：改成**按文件名哈希**分片或维护一份**显式分片清单**。
+  本批**不做**这三项 —— 改共享夹具与 CI 分片策略影响面大，且与本批
+  「零 DDL、零生产写、只补 ORM 声明」的边界无关。
+
+**另注**：挪到 `unit/` 后，本文件仍被 `unit/conftest.py` 的 autouse 夹具
+（`warmBusinessObjectRegistry` → `dbSession` → `seedEngine` → `_truncateAll`）接管
+⇒ **共享测试库仍会被 TRUNCATE**（与 `integration/` 的 `warmAgentCaches` 同构）。
+即「挪目录」解决的是**分片稳定性**，**不是**「TRUNCATE 共享库」这条隐患 ——
+后者要靠给该文件一个不继承截断型 autouse 的独立夹具作用域来根治，仍未做。
 
 ---
 

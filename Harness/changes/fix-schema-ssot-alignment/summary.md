@@ -658,7 +658,7 @@ EXIT=2
 
 #### 8.8.1 ⚠️ 地雷：20 条 `removed check constraint`（**已于下一批处理完**）
 
-> **✅ 已处理（2026-11-02 下一批）**：见
+> **✅ 已处理（2026-11-02 下一批）**：PR **#98** → squash → `main` commit **`29a63b80`**（CI 失败集合对差净新增 0，**本批不部署**）。见
 > [fix-schema-check-constraints](../fix-schema-check-constraints/summary.md)。
 > 20 条 CHECK 约束已全部补进 ORM（另修 `ck_audit_log_action` 漏 `'RESTORE'`），
 > `alembic check` 的 `removed check constraint` **20 → 0**，

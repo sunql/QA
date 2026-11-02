@@ -3,7 +3,7 @@
 - **日期**：2026-11-02
 - **作者**：Claude
 - **Phase**：Phase 10 工程治理（Schema 漂移治理 · 承上一批）
-- **状态**：draft
+- **状态**：done（已合并到 `main` —— PR #98 → squash `29a63b80`，2026-11-02；**本批不部署**）
 - **关联变更**：[fix-schema-ssot-alignment](../fix-schema-ssot-alignment/summary.md)（上一批，PR #97 → `ef90ea10`）
 - **迁移版本**：无（本批零生产 DDL、零新迁移、零生产写）
 - **MEMORY**：[../../../../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-schema-check-constraints.md](../../../../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-schema-check-constraints.md)
@@ -236,7 +236,9 @@ PG 对同一份表达式解析出的表达式树相同 ⇒ 渲染结果可比。
 | `test_orm_check_constraints.py` | **3 passed** |
 | `test_orm_schema_ssot.py` + `test_domain_model_registration.py` + 触及模型的业务单测（business_object / data_lineage / document / entity_mapping / kpi_catalog / wiki_link / sync_entity_mapping）+ `test_check_schema_drift.py`（integration）+ `test_user_orm_matches_schema.py`（integration） | **148 passed（unit）+ 42 passed（integration）** |
 
-> ⚠️ **后端全量 unit 套件不可作门禁**（已知 27min / 28 红基线全在 `test_refine_shortcuts.py`）
+> ⚠️ **后端全量 unit 套件不可作门禁**（本地裸跑 27min / 28 红基线全在 `test_refine_shortcuts.py`；
+> CI 上 `backend-unit` job 实测 **42 分钟 / 17 红**，`timeout-minutes: 45` ⇒ 余量仅 ~7%，
+> 详见「后续项」第 7 条与 §10.2）
 > ⇒ 只跑定向（本批即如此）。新增文件放 **`unit/`** 而非 `integration/`：
 > CI 的 integration 分片 = `find app/tests/integration -name 'test_*.py' | sort` 后按**下标 mod 4** 取
 > ⇒ 在 `integration/` 新增文件会让其后所有文件的分片归属整体轮转一位（见 §8.3 与
@@ -279,6 +281,17 @@ I-2（渲染集合硬断言）。
 | **L1** | Low | 变更记录里写了**明文 DSN** | 改为占位形式（`<PG 测试库 DSN>`），口令不落文档 |
 | **L5** | Low | 库没到 head 时，断言会报一堆看不懂的名字差异 | 加**前置条件检查**（`alembic_version` 必须在代码 head 集合内，否则给一句人话） |
 | **M-4** | Medium | 本文件继承了 `unit/conftest.py` 的 autouse 截断（TRUNCATE 共享库 5434） | **显式文档化**（本文件 docstring + §6.3 尾注 + 「后续项」第 5 条）⇒ 属仓库级遗留项，本批不另开夹具路径 |
+
+#### 复审后的收尾修复（commit `06eb0591`，合并前最后一批）
+
+scoped 复审结论 = **APPROVE**（前 8 条全部 CLOSED），仍留下 1 Medium + 3 Low，已全部修正：
+
+| 编号 | 级别 | 问题 | 处置 |
+|---|---|---|---|
+| **N-1** | Medium | `ALTER TABLE` 失败后 PG 把事务标记为 aborted，`finally` 里的 `DROP` 随即报 `current transaction is aborted` ⇒ 这个**误导性错误会顶替掉真正的根因**（如 `UndefinedColumnError`） | `except` 分支先 `await conn.rollback()` 让原始异常冒泡；`finally` 的清理单独 `try/except` 吞掉（探针表只在会话 `pg_temp` 里，连接关闭即消失）⇒ 实测引用不存在列时直接报 `UndefinedColumnError: column "nonexistent_col_xyz" does not exist` |
+| **N-2** | Low | 未使用的 `create_async_engine` 导入（ruff F401） | 删除 |
+| **N-3** | Low | 标识符白名单用 `^…$` —— Python 的 `$` 还匹配「结尾换行符之前」，`'ok\n'` 会被放行 | 改成 `\A…\Z` |
+| **N-5** | Low | 探针侧查询未过滤 `contype` ⇒ PG 17 把 NOT NULL 搬进 `pg_constraint` 后会以「缺少 []」的迷惑消息炸出来 | 补 `AND c.contype = 'c'`，与 DB 侧查询对称 |
 
 #### 仍然有效的既有护栏（本次一并复用 / 强化）
 
@@ -373,6 +386,71 @@ EXIT=0
 
 ---
 
+## 10. 合并与发布记录
+
+**合并**：PR **#98** → **squash** → `main` commit **`29a63b80`**（2026-11-02T05:54:00Z），
+父提交 `9be8e13a`。分支 `fix/schema-check-constraints`（3 个 commit）已删（远端 + 本地）。
+
+### 10.1 CI 判定（失败集合对差，不等 CI 变绿）
+
+main 基线 run `41376713507`（`9be8e13a`）vs 本 PR run `41387329353`（`06eb0591`）：
+
+| job | main 基线失败数 | PR 失败数 | 净新增 | 由红转绿 |
+|---|---|---|---|---|
+| integration shard 0 | 17 | 17 | **0** | 0 |
+| integration shard 1 | 37 | 37 | **0** | 0 |
+| integration shard 2 | 22 | 22 | **0** | 0 |
+| integration shard 3 | 33 | 33 | **0** | 0 |
+| unit | 17 | 17 | **0** | 0 |
+| frontend | — | success | — | — |
+| **并集** | **126** | **126** | **0** | **0** |
+
+unit 套件整体耗时也几乎一致（基线 `17 failed, 5418 passed, 1 skipped in 42:22`
+vs 本 PR `17 failed, **5421** passed, 1 skipped in 42:17`）⇒ **+3 passed 正是本批新增的 3 条用例**，
+失败集合逐条相同、无一进出一出。
+
+### 10.2 unit job 首次撞 45 分钟超时（已复跑，非回归）
+
+本 PR run 的 **unit job 第一次被取消**：`backend-unit` 的 `timeout-minutes: 45`，
+而该套件基线就要跑 **42 分钟**（余量仅 ~7%）。首轮跑到 **82%** 被取消（`##[error]The operation was canceled.`），
+job 结论 = `cancelled`（不是 `failure`）。
+
+**判据：这是 runner 变慢，不是本批引入的回归**，取证两条：
+
+1. **失败标记逐字符对齐**：把两次的 pytest 进度标记流（`.` / `F` / `s` 拼接）拉平比较，
+   base 的 17 个 `F` 位置 = `[1307, 1310, 1311, 1314, 1406, 1410, 1685, 2008, 2009, 2068, 2649, 2985, 2988, 3853, 4291, 4292, 4293]`，
+   PR 的 = `[1307, 1310, 1311, 1314, 1406, 1410, 1685, 2008, 2009, 2068, 2649, 2985, 2988, 3853, **4294, 4295, 4296**]`
+   ⇒ 前 15 个**完全一致**，后 3 个整体**偏移 +3**（正好 = 本批新增的 3 条用例插在 ~79% 处）
+   ⇒ 取消之前**没有任何新增失败**。
+2. **慢是全局的、不是某一段**：每 72 个用例的耗时从基线的 ~32s 变成 ~41s（**+28%**），
+   且**从第 1% 就开始慢**（首块 53s → 64s）⇒ 与本批新增文件的位置（~79%）无关。
+
+**处置**：用 `POST /repos/sunql/QA/actions/jobs/<job_id>/rerun` **单独复跑 unit job**
+（run attempt 2，43 分钟跑完 100%，结论 `failure` 与基线同）⇒ 拿到完整失败集合做上表对差。
+（`concurrency: cancel-in-progress: true` ⇒ 推送新 commit 会自动取消上一轮 run，这是首轮被取消的**另一半原因**
+—— 上一个 run `41384248067` 同样被标 `cancelled`。）
+
+⚠️ **这条超时脆弱性是仓库级遗留项**，已登记进「后续项」第 7 条：unit 套件耗时已经贴着 CI 的 45 分钟上限，
+任何 runner 抖动都会把 job 打成 `cancelled`（**而不是 `failure`**）⇒ 做失败集合对差时，
+**`cancelled` 的 job 必须复跑**，否则该 job 的失败集合是空的，会造成「净新增 0」的假象。
+
+### 10.3 删分支前的内容级仲裁
+
+`origin/main^{tree}` 与分支 tip `06eb0591^{tree}` 均为 **`04fe39eb20cfd9b941ac8271834a204964c831b5`**
+（字节级一致）、`git diff --stat` 为空 ⇒ squash 未丢内容 ⇒ 删分支安全。
+
+### 10.4 部署
+
+**本批不部署**（零 DDL、零生产写）—— ORM 侧改动随**下次常规发版**生效。
+这 20 条约束 DB 上本来就存在 ⇒ 运行时校验行为**完全不变**；唯一新增的 DDL 是测试库内的会话级临时探针表。
+
+### 10.5 评审
+
+最终 scoped 复审 = **APPROVE**（0 Critical / 0 Important）；复审后追加的 1 Medium + 3 Low 已全部修正
+（commit `06eb0591`，见 §7.1 末表）。
+
+---
+
 ## 明确不做 / 边界
 
 - ❌ **不写 Alembic 迁移**、**不改任何生产 DDL**、零生产写
@@ -417,3 +495,9 @@ EXIT=0
    且**全部**是显式命名的 `ck_*` / `chk_*`（无 PG 自动命名、无未覆盖项）⇒
    守卫覆盖 = DB 侧 CHECK 约束的 **100%**。
    口径：`pg_constraint.contype='c'` 且表在 `public` schema。
+7. **CI 的 `backend-unit` job 已贴着超时上限**：`timeout-minutes: 45`，而该套件基线实测 **42 分钟**
+   （余量 ~7%）⇒ runner 抖动 10% 就会把 job 打成 **`cancelled`**（不是 `failure`），
+   失败集合为空 ⇒ 失败集合对差会误判成「净新增 0」。
+   ⇒ ① **对差时凡 `cancelled` 的 job 必须复跑**再取集合；
+   ② 根治方向：把 unit 套件按目录拆成多个 job（与 integration 的分片同理），
+   或把 `backend-unit` 的 `timeout-minutes` 放宽 —— 属独立立项，本批只登记不实施。

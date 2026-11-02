@@ -5,6 +5,12 @@ Phase 1 包含 llm_config 与 session_token_usage。
 
 约定：ORM 列属性使用 snake_case，与设计稿 SQL 列名（model_name、session_id 等）对齐。
 JSON 契约的 camelCase 由 Pydantic schema 的 alias_generator 负责。
+
+CHECK 约束约定：本文件里每一条 `CheckConstraint` 都是**迁移已经建在 DB 上的约束**
+（ORM 侧漏声明 ⇒ `alembic autogenerate` 会反过来提议 `drop_constraint` 把数据校验删掉）。
+表达式照抄 `pg_get_constraintdef` 的实测定义，并由
+`app/tests/unit/test_orm_check_constraints.py` 做 PG 规范化逐字节比对
+（alembic 1.19.1 只比 CHECK 约束的名字、不比表达式 ⇒ 表达式写错它不会报）。
 """
 
 from __future__ import annotations
@@ -527,7 +533,6 @@ class KpiCatalog(Base, TimestampMixin):
             "semantic_keywords",
             postgresql_using="gin",
         ),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "status IN ('DRAFT','PUBLISHED','DEPRECATED')",
             name="ck_kpi_catalog_status",
@@ -611,7 +616,6 @@ class BusinessObject(Base, TimestampMixin):
             "header_class_id",
             unique=True,
         ),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "code = upper(code)",
             name="ck_business_object_code_upper",
@@ -725,7 +729,6 @@ class FeatureDefinition(Base, TimestampMixin):
         Index("ix_feature_definition_datasource", "datasource_id"),
         Index("ix_feature_definition_owner", "owner"),
         Index("ix_feature_definition_status", "status"),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "status IN ('DRAFT','ACTIVE','DEPRECATED')",
             name="ck_feature_definition_status",
@@ -775,7 +778,6 @@ class FeatureValue(Base):
             name="uq_feature_value_dedup",
         ),
         Index("ix_feature_value_feature_id", "feature_id"),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "value IS NOT NULL OR value_text IS NOT NULL",
             name="ck_feature_value_not_both_null",
@@ -869,7 +871,6 @@ class AuditOutbox(Base):
             "processed_at",
             postgresql_where=sa_text("processed_at IS NOT NULL"),
         ),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "attempts >= 0",
             name="ck_audit_outbox_attempts_nonneg",
@@ -1466,7 +1467,6 @@ class DataLineage(Base, TimestampMixin):
         Index("ix_data_lineage_source", "source_layer", "source_system", "source_object"),
         Index("ix_data_lineage_target", "target_layer", "target_system", "target_object"),
         Index("ix_data_lineage_active", "is_active"),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "source_layer IN ('SOURCE_SYSTEM','ODS','DWD','DWS','ADS','KPI','AI')",
             name="ck_data_lineage_source_layer",
@@ -1564,7 +1564,6 @@ class EntityMapping(Base, TimestampMixin):
             postgresql_ops={"name": "gin_trgm_ops"},
             postgresql_where=sa_text("entity_type = 'SUPPLIER'"),
         ),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "entity_type IN ('SUPPLIER','MATERIAL','PO','GR','IQC','NCR')",
             name="ck_entity_mapping_entity_type",
@@ -1729,7 +1728,6 @@ class DocumentCatalog(Base, TimestampMixin):
         Index("ix_document_catalog_entity", "document_id"),
         Index("ix_document_catalog_security", "security_level"),
         Index("ix_document_catalog_type", "document_type"),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "security_level IN ('L1','L2','L3')",
             name="ck_document_security_level",
@@ -1793,7 +1791,6 @@ class DocumentEntityRelation(Base):
         ),
         Index("ix_doc_rel_entity", "entity_type", "entity_key"),
         Index("ix_doc_rel_document", "document_id"),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "length(entity_key) > 0",
             name="ck_doc_rel_entity_key_nonempty",
@@ -1861,7 +1858,6 @@ class AgentDefinition(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_agent_definition_owner", "owner"),
         Index("ix_agent_definition_status", "status"),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "status IN ('active','draft','deprecated')",
             name="ck_agent_status",
@@ -1921,7 +1917,6 @@ class AgentAccessPolicy(Base):
         ),
         Index("ix_agent_policy_agent", "agent_id"),
         Index("ix_agent_policy_object", "data_object", "data_layer"),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "permission IN ('read','masked_read','forbidden','forbidden_write')",
             name="ck_agent_permission",
@@ -2021,7 +2016,6 @@ class AgentRunLog(Base):
     __table_args__ = (
         Index("ix_agent_run_log_schedule", "schedule_id"),
         Index("ix_agent_run_log_agent", "agent_code", "started_at"),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "status IN ('success','error')",
             name="ck_agent_run_log_status",
@@ -2659,7 +2653,6 @@ class WikiOntologyLink(Base):
             "weight >= 0 AND weight <= 1",
             name="chk_link_weight",
         ),
-        # 迁移建的 CHECK 约束：ORM 漏声明 ⇒ alembic autogenerate 会提议 DROP。
         CheckConstraint(
             "chunk_id IS NULL OR length(chunk_id) <= 64",
             name="chk_link_granularity",

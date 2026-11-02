@@ -71,7 +71,10 @@ async def dbSession(client: AsyncClient) -> AsyncIterator[AsyncSession]:
 # ---------------------------------------------------------------------------
 # Neo4j fixtures（M0 Unified ID：从 conftest_neo4j.py 合并）
 # 约定：
-#   - 每个测试启动前清空 Class / Property / Metric 三类节点
+#   - 清空 Class / Property / Metric 三类节点发生在**测试结束后**（teardown，`yield` 之后），
+#     **不是启动前** ⇒ 同一分片里更早文件留下的残留会进入首个用到本夹具的用例
+#     （CI 分片按 `find ... | sort` 下标 mod 4 切分 ⇒ 哪些文件同分片会随目录变动而变，
+#     详见 Harness/changes/fix-schema-ssot-alignment/summary.md §8.9）
 #   - **连接目标必须来自 TEST_NEO4J_URI**（独立测试实例），未配置即 fail-fast ——
 #     见 _neo4j_support.py。2026-10-03 事故：此夹具用 settings.neo4jUri 的默认值
 #     bolt://localhost:7687（= 生产容器）执行了 DETACH DELETE，清空线上图谱。

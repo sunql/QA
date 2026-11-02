@@ -34,7 +34,6 @@ from pathlib import Path
 
 from sqlalchemy import CheckConstraint, text
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.ext.asyncio.engine import AsyncConnection
 
 from app.domain.models import Base
@@ -50,15 +49,20 @@ _DB_CONSTRAINTS_SQL = text(
     "WHERE c.contype = 'c' AND n.nspname = 'public'"
 )
 
+# `contype = 'c'` 与上面的 DB 侧查询对称：探针表当前一条约束都没有
+# （`LIKE` 不复制 CHECK 约束），但 PG 17 把 NOT NULL 也搬进了 `pg_constraint`
+# ⇒ 不加这个过滤，将来会以「缺少 []」的迷惑消息炸出来。
 _PROBE_CONSTRAINTS_SQL = text(
     "SELECT c.conname, pg_get_constraintdef(c.oid) FROM pg_constraint c "
-    "WHERE c.conrelid = to_regclass(:probe)"
+    "WHERE c.conrelid = to_regclass(:probe) AND c.contype = 'c'"
 )
 
 # SQL 标识符白名单：与 `app/services/data_quality_evaluators/_common.py` 的
 # `validate_identifier` 同规则（^[A-Za-z_][A-Za-z0-9_]*$）。表名 / 约束名会被
 # 拼进 DDL 文本，必须先过这一关。
-_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# 用 \A / \Z 而非 ^ / $：Python 的 `$` 还会匹配「结尾换行符之前」，
+# `'ok\n'` 会被放行 —— 与「必须是合法 SQL 标识符」的承诺不符。
+_IDENTIFIER_PATTERN = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
 
 # 表达式里不允许出现的片段：分号（拆语句）、`--` / `/*`（注释）、
 # `$$`（美元引号）。ORM 表达式由代码作者书写，不是用户输入，但这条守卫
@@ -182,8 +186,18 @@ async def _renderOrmConstraints(
             rows = (await conn.execute(_PROBE_CONSTRAINTS_SQL, {"probe": probe})).all()
             for constraintName, definition in rows:
                 rendered[(tableName, constraintName)] = definition
+        except Exception:
+            # PG 已把事务标记为 aborted ⇒ 此时再执行任何语句都会报
+            # "current transaction is aborted"，那个误导性错误会**顶替**掉
+            # 真正的根因（如 UndefinedColumnError）。先回滚，让原始异常冒泡。
+            await conn.rollback()
+            raise
         finally:
-            await conn.exec_driver_sql(f"DROP TABLE IF EXISTS {probe}")
+            try:
+                await conn.exec_driver_sql(f"DROP TABLE IF EXISTS {probe}")
+            except Exception:  # noqa: BLE001 - 清理失败不得掩盖主异常
+                # 探针表只在会话的 pg_temp 里，连接关闭即消失 ⇒ 清理失败无害。
+                pass
     return rendered
 
 

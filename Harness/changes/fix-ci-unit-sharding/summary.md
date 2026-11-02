@@ -388,8 +388,9 @@ UNIT_SHARD_DONE shard=3 status=1
 
 ### 8.4 合并与发布
 
-- **合并**：`fix/ci-unit-sharding` → `main`，**squash merge**（PR #99）。
-  落地 SHA 见 `git log --oneline -1 main`（squash 提交信息含 `(#99)`）。
+- **合并**：`fix/ci-unit-sharding` → `main`，**squash merge**（PR #99）
+  ⇒ 落地 **`ede1f6c8`**（`fix: backend-unit 改 4 分片 job（消除超时取消导致的「假净新增 0」）`）。
+  内容级仲裁：`git diff 50003b2f ede1f6c8` = **空** ⇒ 合并结果与被验证的分支 tip **逐字节一致**。
 - **不部署**：本批零 DDL、零生产写、不新增 Alembic 迁移 ⇒ **合并后不部署**。
   CI 配置与工具函数随下次常规发版生效即可（CI 本身即刻生效）。
 

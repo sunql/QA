@@ -151,7 +151,7 @@ Alembic 负责把 ORM 声明翻译成 DB 上的 DDL。三者任一不一致都�
 | `removed table` | 14（13 张未注册活表 + `po_lines_sandbox`） | **0**（**全新迁移库口径**；5434 共享库上 = **1** —— `po_lines_sandbox`，测试自建的残留） |
 | `removed index` | 64 | **6** |
 | `removed column` | 1（`knowledge_claim.confidence_level`） | **0** |
-| `removed check constraint` | 20 | **20（本批未收敛 —— 见下方 §3）** |
+| `removed check constraint` | 20 | **0**（本批未收敛；**已于下一批补齐** —— 见下方 §3.1） |
 
 `alembic check` 在全新迁移库上仍报 **56 条**残余差异（本批明确不覆盖，需 DDL + 数据迁移
 评估）。详见变更记录
@@ -176,10 +176,11 @@ drift 工具**只比**：表集合、列名、索引名 + 有序列元组。
 |---|---|---|
 | 表 / 列 / 索引的有序列集合 | drift 工具 | 启动期 blocking 门禁 |
 | 列类型 / comment / 约束形状 / 排序方向 | `alembic check`（autogenerate diff） | 迁移级复核，**drift 看不见** |
-| **CHECK 约束** | `alembic check`（autogenerate diff） | 迁移级复核，**drift 检测不到 CHECK 约束的缺失** |
+| **CHECK 约束** | `alembic check`（autogenerate diff，**只比名字不比表达式**） | 迁移级复核，**drift 检测不到 CHECK 约束的缺失** |
 | 索引谓词 / opclass | **无自动工具**，只能专用测试 | 靠 `backend/app/tests/unit/test_orm_schema_ssot.py` |
 
-⚠️ **CHECK 约束是当前最危险的一颗雷**（2026-11-02 实测）：DB 侧有 **48 个命名 CHECK 约束**
+⚠️ **CHECK 约束曾是当前最危险的一颗雷**（2026-11-02 实测，**已在下一批处理完 ⇒ 见 §3.1**）：
+DB 侧有 **48 个命名 CHECK 约束**
 （`pg_constraint.contype='c'`），**ORM 侧已声明 28 个**（分布在 **13 张表**：
 `agent_orchestration_binding` / `_profile` / `_run` / `_step` / `_usage` 共 17 个，
 `agent_tool_config`、`audit_log`、`data_quality_score`、`evaluation_report`、
@@ -196,6 +197,40 @@ drift 工具**只比**：表集合、列名、索引名 + 有序列元组。
 ⇒ **在把缺的 CHECK 约束补进 ORM（或显式决定废弃它们）之前，禁止跑
 `alembic revision --autogenerate`。**（补的时候**不要重复添加已声明的那 28 个**。）
 
+### 3.1 CHECK 约束：补齐了，但「只比名字」这件事仍是坑（2026-11-02 下一批）
+
+**已收敛**：20 个缺失的命名 CHECK 约束已全部补进 ORM（另修 `audit_log.ck_audit_log_action`
+漏掉的 `'RESTORE'`）⇒ ORM 侧 **28 → 48**，与 DB 侧数量与内容双向对齐；
+`alembic check` 的 `removed check constraint` **20 → 0**
+（全新迁移库实质差异 56 → **36**）。
+详见 [`fix-schema-check-constraints`](../changes/fix-schema-check-constraints/summary.md)。
+
+⚠️ **但 alembic 1.19.1 只比 CHECK 约束的「名字」，不比「表达式内容」** ——
+它只报「DB 有、ORM 没有」的名字 ⇒ **只把名字补进去就能让告警归零**，
+而表达式少一个枚举值 / 比较方向写反，**alembic 不会报**；drift 更是根本不比较 CHECK 约束。
+⇒ **只靠 `alembic check` 验收 CHECK 约束 = 假绿。**
+
+⇒ 唯一可靠的表达式比对办法是**让 PostgreSQL 自己渲染**（别用 Python 正则归一化，
+PG 的类型提升 / 隐式 cast / `ANY(ARRAY[…])` 展开无法穷举，越写越容易假绿）：
+
+```sql
+CREATE TEMP TABLE pg_temp._ckprobe_<tbl> (LIKE public.<tbl>);   -- LIKE 默认【不】复制 CHECK 约束
+ALTER TABLE pg_temp._ckprobe_<tbl> ADD CONSTRAINT <name> CHECK (<ORM 表达式原文>);
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = to_regclass('pg_temp._ckprobe_<tbl>');
+```
+
+⚠️ **探针表名必须带 `pg_temp.` 前缀，且两处 DROP 都要带 `IF EXISTS`** ——
+裸名会按 `search_path` 解析，万一 `public` 下有同名表，`DROP TABLE IF EXISTS <裸名>` 会**误删真表**；
+不带 `IF EXISTS` 则中途失败会留下残留表污染 `alembic check`（本批实际踩过一次）。
+
+守卫落在 `backend/app/tests/unit/test_orm_check_constraints.py`（DB→ORM、ORM→DB、表达式一致性
+三条用例）。⇒ **新增 / 修改 CHECK 约束时，必须跑这条守卫**，不能只看 `alembic check`。
+
+⚠️ **「禁止 `alembic revision --autogenerate`」依然成立**：`ck_*` 的 DROP 提议已拆，
+但残余 36 条差异里仍有破坏性提议（7 条 `ALTER COLUMN … TYPE`、
+6 条唯一约束 ↔ 唯一索引的 `DROP CONSTRAINT` + `ADD CONSTRAINT`、
+9 条 `DROP INDEX` + `CREATE INDEX`）⇒ **迁移必须手写**，不要依赖 autogenerate。
+
 另注：drift 工具的 `[alembic]` 检查**只比版本号**（DB 的 `alembic_version` vs 代码里的 head），
 **不是** autogenerate 差异检查 —— 所以「`--strict` exit 0」与「`alembic check` 仍 FAILED」
 可以同时成立，两者测的不是一回事。
@@ -211,8 +246,17 @@ drift 工具**只比**：表集合、列名、索引名 + 有序列元组。
 3. **只读巡检用门禁脚本**：结构一致性用 `backend/scripts/fix_schema_ssot_realdata.py`
    （**只读**、可重复跑、退出码 0/1/2）复验，不要用 `Base.metadata.create_all` 建表来「对齐」。
 4. **autogenerate 前先看 `alembic check`**：`alembic revision --autogenerate` 会把
-   「ORM 未声明的 DB 对象」直接变成 `drop_*` 操作 —— 目前 DB 侧 48 个命名 CHECK 约束里
-   **ORM 缺 20 个**（已声明 28 个，见 §3 的 ⚠️）⇒ **补齐前禁止跑 autogenerate**。
-5. **alembic 升级后复核盲区结论**：`alembic>=1.13.0` 是开放区间，autogenerate 的比较逻辑
+   「ORM 未声明的 DB 对象」直接变成 `drop_*` 操作 —— CHECK 约束已补齐（§3.1），
+   但残余 36 条差异里仍有 `ALTER COLUMN … TYPE` / `DROP CONSTRAINT` / `DROP INDEX`
+   ⇒ **在残余差异归零前仍禁止跑 autogenerate，迁移必须手写**。
+5. **改 CHECK 约束要跑表达式守卫**：`alembic check` 只比名字 ⇒ 表达式写错它不报。
+   改完 ORM 的 `CheckConstraint` 后跑
+   `pytest app/tests/unit/test_orm_check_constraints.py`（PG 规范化逐字节比）。
+6. **新测试文件放 `unit/` 不放 `integration/`**：CI 的 integration 分片 =
+   `find app/tests/integration -name 'test_*.py' | sort` 后按**下标 mod 4** 取
+   ⇒ 在 `integration/` 加文件会让其后所有文件的分片归属整体轮转一位
+   ⇒ 依赖「同分片内文件执行顺序」的既有测试会突然红。详见
+   [`Harness/rules/测试规范.md`](../rules/测试规范.md) 的「⚠️ 目录分片稳定性」条。
+7. **alembic 升级后复核盲区结论**：`alembic>=1.13.0` 是开放区间，autogenerate 的比较逻辑
    会随版本变 ⇒ 「alembic 不比较索引谓词」这类结论是**版本相关**的，升级后需重新实测
    （当前实测版本 **1.19.1**）。

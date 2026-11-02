@@ -14,6 +14,13 @@
 > 已用 `ls` 在仓库正式落点实测：**5/6/7/9 级都不存在，只有 8 级命中**
 > （模板里写的 5 级指向 `wiki/.claude/…`，不存在）。
 
+> 📌 **后续批次进展（2026-11-02）**：本批 §8.6 残余差异里的 **20 条
+> `removed check constraint`** 已在下一批收敛（见
+> [fix-schema-check-constraints](../fix-schema-check-constraints/summary.md)）——
+> ORM 侧命名 CHECK 约束 28 → 48，`alembic check` 的 `removed check constraint` **20 → 0**，
+> 全新迁移库实质差异 56 → **36**。
+> **本文件其余数字一律保留为本批当时的实测快照**，不回改。
+
 ---
 
 ## 1. 需求
@@ -649,7 +656,14 @@ EXIT=2
 - **不拆** `app/domain/models.py`（已 2698 行，超 800 行上限）—— 拆分是独立重构，另立项。
 - **不修** `research_models` 的循环 FK `SAWarning`（需 `use_alter=True` + 迁移，另立项）。
 
-#### 8.8.1 ⚠️ 地雷：20 条 `removed check constraint`（下一批必须先处理）
+#### 8.8.1 ⚠️ 地雷：20 条 `removed check constraint`（**已于下一批处理完**）
+
+> **✅ 已处理（2026-11-02 下一批）**：见
+> [fix-schema-check-constraints](../fix-schema-check-constraints/summary.md)。
+> 20 条 CHECK 约束已全部补进 ORM（另修 `ck_audit_log_action` 漏 `'RESTORE'`），
+> `alembic check` 的 `removed check constraint` **20 → 0**，
+> 并新增表达式级守卫（PG 规范化逐字节比）防止「只补名字」的假绿。
+> 下面保留本批当时的原始取证，作为「为什么这条地雷严重」的记录。
 
 **这是本批留在系统里最危险的一颗雷**，比 §8.6 里其它残余差异都严重：
 
@@ -682,7 +696,12 @@ EXIT=2
   `CheckConstraint`，表达式对着 `pg_get_constraintdef` 实测抄；**已声明的那 28 个不要重复添加**），
   **或**明确决定废弃它们并写迁移显式删除 ——
   两者选一，但**必须显式决策**。
+  → **已按第一条执行**（2026-11-02，详见
+  [fix-schema-check-constraints](../fix-schema-check-constraints/summary.md)）。
 - **在此之前的硬规矩**：**禁止**跑 `alembic revision --autogenerate`**。
+  → **`ck_*` 的 DROP 提议已拆**；但**该硬规矩依然成立** ——
+  残余 36 条差异里仍有破坏性提议（7 条 `ALTER COLUMN … TYPE`、
+  6 条唯一约束 ↔ 唯一索引的 `DROP CONSTRAINT` + `ADD CONSTRAINT`、9 条 `DROP INDEX` + `CREATE INDEX`）。
 
 ---
 

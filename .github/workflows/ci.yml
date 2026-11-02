@@ -133,8 +133,14 @@ jobs:
   backend-integration:
     name: Backend / integration shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 实测最坏分片 49 分 48 秒（shard 2）⇒ 60 分钟上限的余量只有 **1.21 倍**，
+    # runner 抖动 12% 就判 cancelled；而 **cancelled 的 job 失败集合是空的**
+    # ⇒ 「失败集合对差」会得出「净新增 0」的**假结论**。
+    # ⇒ 上限提到 90 分钟（余量 ~1.8 倍），与 unit 分片（40 分钟 / 余量 2.1 倍）同一量级。
+    timeout-minutes: 90
     strategy:
+      # 必须 fail-fast: false：一个分片失败若取消其余分片，被取消分片的失败集合
+      # 同样是空的 ⇒ 又一次假「净新增 0」。
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3]
@@ -219,12 +225,46 @@ jobs:
       - name: Migrate test database
         run: uv run alembic upgrade head
       - name: Run integration shard
+        # ⚠️ 本 job 的分片归属仍是「排序后下标 mod 4」（**刻意不改**）：
+        # integration/ 确实有跨文件副作用（Milvus `qa_ci` 库惰性创建、Neo4j 残留
+        # Class 节点），换哈希分片会移动 241/314 个文件的归属 ⇒ 必须先根治那些副作用。
+        # 详见 Harness/changes/fix-ci-integration-hardening/summary.md。
         shell: bash
+        env:
+          # 走 env 而不是把 ${{ matrix.shard }} 插进脚本正文：
+          # GH Actions 会先把 ${{ }} 展开成**脚本文本**再交给 bash 解析。
+          SHARD: ${{ matrix.shard }}
         run: |
-          mapfile -t all_tests < <(find app/tests/integration -name 'test_*.py' -print | sort)
+          # ⚠️ 用命令替换而不是进程替换：进程替换的退出码会被 mapfile 吞掉
+          # （mapfile 恒返回 0），清单生成一失败就静默变成「空数组」。
+          # 空数组喂给 pytest = 「不带任何路径参数」⇒ pytest 回落到
+          # testpaths=["app/tests"] ⇒ **整个 unit+integration+e2e 套件被收进来**
+          # ⇒ 本 job 没有 unit 那套环境 ⇒ 报错并超时 ⇒ job 变 cancelled
+          # ⇒ 失败集合为空 ⇒ 又一次假「净新增 0」。
+          # （GH Actions 的 `shell: bash` 默认带 `-e -o pipefail` ⇒ find 失败会传播。）
+          all_tests=$(find app/tests/integration -name 'test_*.py' -print | sort) || {
+            echo "::error::integration 测试文件清单生成失败"
+            exit 1
+          }
+          if [ -z "$all_tests" ]; then
+            echo "::error::未找到任何 integration 测试文件"
+            exit 1
+          fi
+          mapfile -t all_test_files <<< "$all_tests"
           shard_tests=()
-          for ((i=${{ matrix.shard }}; i<${#all_tests[@]}; i+=4)); do
-            shard_tests+=("${all_tests[$i]}")
+          for ((i=$SHARD; i<${#all_test_files[@]}; i+=4)); do
+            shard_tests+=("${all_test_files[$i]}")
           done
-          printf 'Shard ${{ matrix.shard }}: %d test files\n' "${#shard_tests[@]}"
-          uv run pytest "${shard_tests[@]}" -q -p no:randomly
+          if [ "${#shard_tests[@]}" -eq 0 ]; then
+            echo "::error::shard=$SHARD 分到 0 个测试文件 —— 拒绝执行 pytest（空参数会让 pytest 收集整个 app/tests 树）"
+            exit 1
+          fi
+          printf 'Shard %s: %d test files\n' "$SHARD" "${#shard_tests[@]}"
+          # pytest 失败也要走完下面的标记：`|| status=$?` 在 `set -e` 下不会触发 errexit。
+          status=0
+          uv run pytest "${shard_tests[@]}" -q -p no:randomly || status=$?
+          # 完成标记：**日志里缺这个标记 ⇒ 该 job 是在跑完前被取消的**
+          # ⇒ 它的失败集合是空的，不能参与「失败集合对差」，必须复跑该 job。
+          # 标记里带 status：status=0 ⇒ 真绿；status!=0 ⇒ 真红（失败集合可用）。
+          echo "INTEGRATION_SHARD_DONE shard=$SHARD status=$status"
+          exit "$status"

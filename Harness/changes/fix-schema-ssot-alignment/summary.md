@@ -3,7 +3,7 @@
 - **日期**：2026-11-02
 - **作者**：Claude
 - **Phase**：Phase 10 工程治理（Schema 漂移治理）
-- **状态**：in-review
+- **状态**：done（已合并到 `main` —— PR #97 → squash `ef90ea10`，2026-11-02；**本批不部署**）
 - **关联变更**：[fix-schema-drift-two-dbs](../fix-schema-drift-two-dbs/summary.md)
 - **迁移版本**：无（本批零 DDL、零新迁移）
 - **MEMORY**：[../../../../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-schema-ssot-alignment.md](../../../../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-schema-ssot-alignment.md)
@@ -764,6 +764,41 @@ HEAD 与 base 的 integration 测试文件清单**各 314 个、逐名相同、`
 - 关联变更（predecessor）：[`Harness/changes/fix-schema-drift-two-dbs/summary.md`](../fix-schema-drift-two-dbs/summary.md)。
 - 数据模型：[`Harness/wiki/data-model.md`](../../wiki/data-model.md)（§3.2 对照表的交叉核对来源；
   本次**未修改**该文件 —— `knowledge_claim.confidence_level` 未收录是既有缺口，另立项）。
+
+---
+
+## 10. 合并与发布记录
+
+**合并**：PR **#97** → **squash** → `main` commit **`ef90ea10`**（2026-11-02T02:10:26Z），
+父提交 `7d28d08a`。分支 `feat/schema-ssot-alignment`（16 个 commit）已删（远端 + 本地）。
+
+**CI 判定（失败集合对差，不等 CI 变绿）** —— main 基线 run `41298068815`（`7d28d08a`）
+vs 本 PR run `41371802896`（`9d0768fa`）：
+
+| job | main 基线失败数 | PR 失败数 | 净新增 | 由红转绿 |
+|---|---|---|---|---|
+| integration shard 0 | 17 | 17 | **0** | 0 |
+| integration shard 1 | 37 | 37 | **0** | 0 |
+| integration shard 2 | 23 | 22 | **0** | **1** |
+| integration shard 3 | 34 | 34 | **0** | 0 |
+| unit | 17 | 17 | **0** | 0 |
+| frontend | — | success | — | — |
+| **并集** | **128** | **127** | **0** | **1** |
+
+转绿的那一条正是本批的目标用例
+`app/tests/integration/test_check_schema_drift.py::TestColumnAndIndexDriftSubprocess::test_healthy_db_has_no_column_or_index_drift`
+—— 它在 main 基线上一直接连红，本 PR 首次把它变成绿的，即「drift 可见漂移归零」在 CI 上的直接证据。
+（首轮 CI 曾因 §8.9 的分片重排出现 **5 条净新增失败**，已通过把测试文件挪到 `unit/` 归零。）
+
+**删分支前的内容级仲裁**：`origin/main^{tree}` 与分支 tip `9d0768fa^{tree}` 均为
+`867786f85382105ef787fd1f61048cb9686616e9`（字节级一致）、`git diff --stat` 为空
+⇒ squash 未丢内容 ⇒ 删分支安全。
+
+**部署**：**本批不部署**（零 DDL、零生产写）—— ORM 侧改动随**下次常规发版**生效。
+生产侧在下次发版前会继续刷「DB 多余对象」warning（**非阻断**，不影响容器启动）。
+
+**评审**：最终全分支 scoped review = **APPROVE**（0 Critical / 0 Important / 8 Minor），
+8 条 Minor 已全部修正（commit `9d0768fa`，逐条见 §8.9 与 `Harness/rules/测试规范.md`）。
 
 ---
 

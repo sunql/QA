@@ -177,7 +177,7 @@ drift 工具**只比**：表集合、列名、索引名 + 有序列元组。
 | 表 / 列 / 索引的有序列集合 | drift 工具 | 启动期 blocking 门禁 |
 | 列类型 / comment / 约束形状 / 排序方向 | `alembic check`（autogenerate diff） | 迁移级复核，**drift 看不见** |
 | **CHECK 约束** | `alembic check`（autogenerate diff） | 迁移级复核，**drift 检测不到 CHECK 约束的缺失** |
-| 索引谓词 / opclass | **无自动工具**，只能专用测试 | 靠 `test_orm_schema_ssot.py` |
+| 索引谓词 / opclass | **无自动工具**，只能专用测试 | 靠 `backend/app/tests/unit/test_orm_schema_ssot.py` |
 
 ⚠️ **CHECK 约束是当前最危险的一颗雷**（2026-11-02 实测）：DB 侧有 **48 个命名 CHECK 约束**
 （`pg_constraint.contype='c'`），**ORM 侧已声明 28 个**（分布在 **13 张表**：

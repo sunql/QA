@@ -10,7 +10,8 @@
 ⇒ ORM 侧必须用 UniqueConstraint）与 `ix_evaluation_report_status_running`（partial 索引，谓词
 必须含等值形式 `= 'RUNNING'` —— drift **不比较谓词**；PG 把 `IN (...)` 渲染成 `= ANY (ARRAY[...])`，
 **不含** `= 'RUNNING'` ⇒ 能把两者区分开）。比较逻辑复用 `app/infrastructure/schema_drift.py`，
-与容器启动期判定**同一份 SSOT**；ORM 侧声明形态由 `test_orm_schema_ssot.py` 钉，不在此重复。
+与容器启动期判定**同一份 SSOT**；ORM 侧声明形态由
+`backend/app/tests/unit/test_orm_schema_ssot.py` 钉，不在此重复。
 另有**防漏断言**：drift 工具的 code 集合是 SSOT，门禁必须覆盖它全部 —— 日后新增一类 code 而
 门禁没跟上 ⇒ 静默漏网 ⇒ 直接判失败。
 

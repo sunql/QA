@@ -224,7 +224,8 @@ ORM 谓词原写成 `status IN ('PENDING','RUNNING')`，而迁移 `0074_dq_eval_
 > 详见 §8.9。`integration/` 目录的文件清单被 CI 的 round-robin 分片直接消费，
 > 在该目录**新增任何一个文件**都会把其后所有文件的分片序号整体挪一位 ⇒ 既有测试的
 > 分片归属全变 ⇒ 依赖「同分片内文件顺序」的既有测试会突然红。
-> 本文件只读结构、不需要业务数据，放 `unit/` 后 `integration/` 的文件清单回到 base
+> 本文件只读结构、**需要库已迁移到 head 的 schema**（拿 `Base.metadata` 与真实 PG 结构比对）、
+> **不需要任何业务数据**，放 `unit/` 后 `integration/` 的文件清单回到 base
 > 的字节级一致 ⇒ 分片归属逐文件还原 ⇒ 净新增失败归零。
 
 - `test_required_indexes_are_declared_in_orm` —— 32 个 `Index` 逐条出现在 ORM `table.indexes` 里。
@@ -312,6 +313,14 @@ TOTAL                                 1072     68    94%
 Required test coverage of 80.0% reached. Total coverage: 93.66%
 55 passed, 21 warnings in 22.35s
 ```
+
+> **口径说明（路径与产出的对应关系）**：上面命令里 `test_orm_schema_ssot.py` 的路径写的是
+> **挪动后的** `app/tests/unit/...`，而这段「实测输出（原文）」采集自**挪动前**（该文件当时在
+> `integration/`）的那次运行 —— 挪动只改目录、不改文件内容（`git mv`，0 内容变更）。
+> 挪动后已重跑同一组 4 个文件（`app/tests/unit/test_orm_schema_ssot.py` +
+> `test_domain_model_registration.py` + `test_check_schema_drift.py` +
+> `test_user_orm_matches_schema.py`）⇒ **55 passed、21 warnings**（与上表同一结果集）；
+> 覆盖率表覆盖的 3 个 ORM 模块未受挪动影响（挪动只改测试文件的目录，不改被测代码与断言）。
 
 **结论**：三个模块的覆盖率 **93% / 95% / 96%**，合计 **94%（93.66%）**，
 **全部 ≥ 80% 门槛**（`Required test coverage of 80.0% reached`）。
@@ -677,7 +686,7 @@ EXIT=2
 
 ---
 
-### 8.9 ⚠️ CI 分片重排陷阱：本批新增 1 个 integration 文件 ⇒ 5 条净新增失败（已定位并规避）
+### 8.9 ⚠️ CI 分片重排陷阱（非部署项）：本批新增 1 个 integration 文件 ⇒ 5 条净新增失败（已定位并规避）
 
 **背景**：PR #97 首轮 CI 相对 main 基线出现 **5 条净新增失败**。按仓库合并判据
 （「失败集合对差，净新增为空才合并」，不等 CI 变绿）必须先归零才可合并。
@@ -693,16 +702,20 @@ done
 ```
 
 ⇒ 分片归属 = **排序后下标 mod 4**。**在 `integration/` 目录新增任何一个文件**，
-其后所有文件的下标整体 +1 ⇒ 分片归属整体轮转一位 ⇒ 既有测试的**同分片邻居全变**。
-本批新增 `test_orm_schema_ssot.py` 后，integration 文件数 **314 → 315**，
-于是 base 的 shard 0 尾部整体挪到 shard 1。
+其后所有文件的下标整体 +1 ⇒ 既有测试的**同分片邻居全变**。
+本批新增 `test_orm_schema_ssot.py`（排序落在 `test_ontology_unified_id.py` 之后、
+`test_preamble_concurrent_isolation.py` 之前，即 base 的 **0 基下标 234**）后，
+integration 文件数 **314 → 315** ⇒ **base 下标 ≥ 234 的 80 个文件**下标 +1，
+归属从 shard `s` 轮转到 shard `(s+1) mod 4`；**base 下标 ≤ 233 的 234 个文件分片归属不变**。
+（例：`test_rag_api.py` base 下标 236 → shard 0，HEAD 下标 237 → shard 1；
+`test_insert_embeddings_dual.py` base 下标 168 < 234 ⇒ 仍在 shard 0。）
 
 **两条净新增失败的根因（均已本地复现，非推测）**：
 
 | 失败 | 报错 | 根因 |
 |---|---|---|
 | `test_rag_api.py` × 4 | `MilvusException: (code=800, message=database not found[database=qa_ci])` | `qa_ci` 逻辑库由 `ensureIsolatedDatabase()` **惰性**创建，而只有 3 个 integration 文件会调它（`test_insert_embeddings_dual.py` / `test_reconcile_milvus_id_mapping.py` / `test_search_type_routed.py`，经 `milvusCleanClient` 夹具 → `dropOntologyCollectionsForTest()`）。base 里 `test_insert_embeddings_dual.py`（下标 168）与 `test_rag_api.py`（下标 236）**同在 shard 0 且前者先跑** ⇒ 库被建好；HEAD 里 `test_rag_api.py`（下标 237）挪到 shard 1，而 **shard 1 里一个创建者都没有**（已用 awk 逐文件核对）⇒ `qa_ci` 从未被创建 |
-| `test_reconcile_neo4j_id_mapping.py::test_reconcile_reports_clean_when_both_sides_align` | `AssertionError: expected 0 diff, got 3` | 该用例要求图谱在**开始时**干净，但 `neo4jCleanDriver` 只在**teardown** 清图、不在 setup 清。shard 1 里更早跑过的文件留下的 Class 节点（带 `unified_id`）被 reconcile 读成 3 条差异 |
+| `test_reconcile_neo4j_id_mapping.py::test_reconcile_reports_clean_when_both_sides_align` | `AssertionError: expected 0 diff, got 3` | 该用例要求图谱在**开始时**干净，但 `neo4jCleanDriver` 只在**teardown** 清图、不在 setup 清。shard 1 里更早跑过的文件留下的 Class 节点（带 `unified_id`）被 reconcile 读成 3 条差异。**具体是哪个文件留下残留尚未定位**（本批只复现了机制，未逐文件定位污染源） |
 
 **本地复现记录（Neo4j 那条）**：往测试实例 `bolt://127.0.0.1:7688` 手工建 3 个带
 `unified_id` 的 Class 节点（`obj:supplier:RESIDUE1` / `obj:material:RESIDUE2` /

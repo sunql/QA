@@ -451,6 +451,58 @@ job 结论 = `cancelled`（不是 `failure`）。
 
 ---
 
+## 11. 残余差异的运行时影响评估（2026-11-02，只读）
+
+> 对应「后续项」第 1 条。用户要求：**先确认有没有运行时影响；没有就记录下来、提醒排期**。
+> 本节是那次评估的结论，**本批未做任何实现**。
+
+### 11.1 评估口径
+
+- 对象：5433 生产同构库（**只读**）上 `alembic check` 实测报出的 **40 条**差异
+  （全新迁移库上是 36 条；差额来自各库自身的历史状态，如备份表、外键是否真的建上）。
+- 方法：逐条回到**代码**里找「今天会不会报错」，而不是只看 DDL 文本。
+- alembic 消息方向已核实（读 `alembic/autogenerate/compare/constraints.py` 与 `types.py` 源码）：
+  - `Detected type change from X to Y` ⇒ **X = DB 侧类型，Y = ORM 侧类型**；
+  - `Detected NOT NULL on column` ⇒ **ORM 侧是 NOT NULL**（DB 侧可空），
+    方向与直觉相反，别读反。
+
+### 11.2 结论：**对运行时无影响**（今天不改一行代码也不会报错）
+
+| 组 | 条数 | 判定 | 依据 |
+|---|---|---|---|
+| **A** 唯一索引 ↔ 唯一约束 | 6 组 | **无影响** | 全仓唯一的 `ON CONFLICT ON CONSTRAINT` 是 `scripts/seed_rbac.py:113` 的 `constraint="user_roles_pkey"`（PK，无关）；其余 upsert 一律用 `index_elements=[...]`（列推断，索引/约束都认）；unique index 与 unique constraint 都报 `unique_violation`；NULL 语义相同；drift 工具按列集合认领（`app/infrastructure/schema_drift.py:268-277`） |
+| **B** 列类型变更 | 7 | **6 条无影响**；`entity_type`、`compile_task_id` 属**收窄方向**，但生产同构库上 `document_entity_relation` 与 `wiki_token_usage` 均为**空表**（实测 `entity_type` 最大长度 0）⇒ 现在收窄也不炸 | `entity_type` 有 FK `fk_document_entity_relation_entity_type` → `business_object.code VARCHAR(20)` + Pydantic `len(code) > 20` 校验 ⇒ 存不进 >20 的值；`compile_task_id` 恒为 `wiki_compile_task.id`（BIGSERIAL 从 1 起） |
+| **C** `l3_acl.granted_at` NOT NULL | 1 | **无影响** | 方向是 **ORM=NOT NULL / DB=可空**；`l3_acl` 在生产同构库上 **0 行**；且**全仓没有任何代码往 `l3_acl` 插入**（只有 `app/services/document_clearance.py:36` 读一行） | 
+| **D** 外键 | 3 | **无影响** | ORM 多 2 条（`wiki_compile_task.selected_model_id` / `fallback_model_id` → **`llm_config.id`**，非 `wiki_compile_task.id`）；DB 多 1 条（`wiki_token_usage.compile_task_id` → `wiki_compile_task.id`，**`ON DELETE SET NULL`**）。`llm_config` 只有**软删除**（`app/api/v1/model_config.py:69-76`）；`wiki_compile_task` **没有任何删除路径**（无 DELETE 路由，只有 `scripts/reset_business_data.sql` 的 `TRUNCATE … CASCADE`）⇒ 缺 FK / 有 FK 都不会炸 | 
+| **E** 索引排序方向（DB 有 DESC、ORM 无） | 10 | **无影响**（只影响 planner） | drift 工具读 `pg_index.indkey`（**不含方向**）⇒ 启动门禁根本看不见这 10 条；单列索引 ASC/DESC 等价（PG 可反向扫描），多列索引丢了 DESC 最多是计划变差 | 
+| **F** 列注释 | 6 | **无影响** | 纯元数据；唯一读注释的代码 `app/services/schema_introspection_service.py:629-648` 打的是**外部业务库**，不是本库元数据表 |
+
+### 11.3 真正要 DDL 的只有 6 条；**另有 16 条零 DDL 可清**
+
+- **零 DDL 可清（性价比最高，但本批不做）**：
+  - **E 的 10 条** ⇒ ORM 侧改成仓库**既有惯例** `Index("ix_x", sa_text("col DESC"))`
+    （样板见 `app/domain/wiki_learning_models.py:200-204`、`app/domain/mcp_models.py:86-98`）。
+    ⚠️ 该写法会被 drift 工具与 `test_orm_schema_ssot.py` 跳过（表达式索引不可比）⇒ 改完 `alembic check` 归零，
+    但**换来的是「表达式索引失去列序守卫」**——这是取舍，不是纯收益。
+  - **F 的 6 条** ⇒ ORM 侧补 `comment="..."`（纯元数据注解，无 DDL）。
+- **必须 DDL 的 6 条**：`sample_pk_values` JSONB→JSON（⚠️ 迁移必须同时把
+  `server_default` 从 `'[]'::jsonb` 改成 `'[]'::json`，否则 PG 报
+  *"default for column cannot be cast automatically to type json"*）、
+  `entity_type` 收窄、`l3_acl.user_id`/`granted_by` 放宽、`compile_task_id` 收窄、
+  `l3_acl.granted_at` 加 NOT NULL、`wiki_compile_task` 两条 FK。
+
+### 11.4 后续 DDL 的两个已知陷阱（写迁移时必须处理）
+
+1. **A 组若改成「ORM 为真」** ⇒ 需要 `op.drop_index` + `op.create_unique_constraint`，
+   而 **6 个既有迁移的 downgrade 里已有 `op.drop_index(<同名>)`**（`0020`、`0021`、`0023`、`0027`、`0097`）
+   ⇒ 回滚会报 "index does not exist"。**改成「DB 为真」（ORM 声明 `Index(unique=True)`）则零 DDL。**
+2. **两个 partial unique 索引绝不能改成约束**：`uq_knowledge_conflict_open`
+   （`app/domain/wiki_learning_models.py:379-391`）、`uq_structure_suggestion_pending`
+   （同文件 `:446-452`）—— 它们的 `ON CONFLICT` 推断依赖 partial 谓词，
+   改成约束会直接报 *"no unique or exclusion constraint matching"*。
+
+---
+
 ## 明确不做 / 边界
 
 - ❌ **不写 Alembic 迁移**、**不改任何生产 DDL**、零生产写
@@ -482,6 +534,14 @@ job 结论 = `cancelled`（不是 `failure`）。
 ## 后续项
 
 1. **`alembic check` 的 36 条残余差异**（需 DDL + 数据迁移评估）⇒ 另立项目。
+   ✅ **运行时影响已评估完毕（2026-11-02，见 §11）：对运行时无影响**（今天不改一行代码也不会报错；
+   收窄方向的那几条在生产同构库上对应表**均为空表**）。
+   ⇒ **可安全排期**。拆成两件事：
+   ① **零 DDL 的 16 条**（10 条索引 DESC + 6 条列注释）⇒ 只改 ORM；
+   ② **必须 DDL 的 6 条**（见 §11.3）⇒ 手写迁移，**禁止 autogenerate**，
+      且必须处理 §11.4 的两个陷阱。
+   ⚠️ ①不是纯收益：把 DESC 索引改成 `sa_text("… DESC")` 后，drift 工具与
+   `test_orm_schema_ssot.py` 会**跳过**这些表达式索引 ⇒ 失去列序守卫。
 2. **`app/domain/models.py` 已 2786 行**（超 800 行上限 3.5 倍）⇒ 拆分另案。
 3. **表达式索引的列序没有自动化覆盖**（`ix_wiki_import_task_created` 的列序在 drift 与
    `test_orm_schema_ssot.py` 里双双被跳过）⇒ 补一条针对该索引的专门断言。
@@ -501,3 +561,8 @@ job 结论 = `cancelled`（不是 `failure`）。
    ⇒ ① **对差时凡 `cancelled` 的 job 必须复跑**再取集合；
    ② 根治方向：把 unit 套件按目录拆成多个 job（与 integration 的分片同理），
    或把 `backend-unit` 的 `timeout-minutes` 放宽 —— 属独立立项，本批只登记不实施。
+   ✅ **② 已实施（2026-11-02）**：`backend-unit` 改为 **4 个分片 job**
+   （路径 sha256 稳定哈希分片，见
+   [`fix-ci-unit-sharding`](../fix-ci-unit-sharding/summary.md)），`timeout-minutes` 30、
+   `fail-fast: false`、每个分片跑完打印 `UNIT_SHARD_DONE shard=N`
+   ⇒ 缺该标记即说明该 job 被取消，**其失败集合不可参与对差，必须复跑**。

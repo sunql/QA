@@ -36,9 +36,22 @@ jobs:
         run: npm run test:coverage
 
   backend-unit:
-    name: Backend / unit
+    name: Backend / unit shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 单分片实测最坏 14.1 分钟（shard 3，**本地 5 进程并行抢同一个 PG** 的保守值，
+    # CI 里 4 个分片各占一台 runner、各用一个独立库 ⇒ 不会互相拖慢）。
+    # 加上 CI 侧 setup（uv sync + alembic upgrade head + pytest 启动）约 4 分钟
+    # ⇒ 最坏 ~19 分钟；上限给到 40 分钟 ⇒ **余量 2.2 倍**（旧配置只有 1.07 倍）。
+    # 旧配置是「整个套件塞一个 job + 45 分钟上限」，而基线就要 42 分钟 ⇒ 余量仅 7%
+    # ⇒ runner 抖动 10% 就判 cancelled；而 cancelled 的 job 失败集合是**空的**
+    # ⇒ 「失败集合对差」会得出「净新增 0」的**假结论**。
+    timeout-minutes: 40
+    strategy:
+      # 必须 fail-fast: false：一个分片失败若取消其余分片，被取消分片的失败集合
+      # 同样是空的 ⇒ 又一次假「净新增 0」。
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     services:
       postgres:
         image: postgres:16-alpine
@@ -73,14 +86,49 @@ jobs:
         run: uv sync --frozen --extra dev
       - name: Migrate test database
         run: uv run alembic upgrade head
-      - name: Run unit suite
+      - name: Run unit shard
         # 不做任何 deselect：本地实测（2026-10-30）main @ 1b9f4f71 上
         # test_refine_shortcuts 已 59/59 全绿（旧「28 红基线」已过时，不得据此豁免）；
         # 另有 14 条在 main 上即红的既有失败（test_chat_service 4 / stream 2 /
         # datasource_pool 2 / dependencies 1 / intent_classify_order 1 /
         # no_sqlite_fallback 1 / rate_limit 3）—— CI 首跑会如实暴露，
         # 修复属独立批次，不用 deselect 掩盖（防假绿）。
-        run: uv run pytest app/tests/unit -q -p no:randomly
+        #
+        # 分片用**路径稳定哈希**（app/utils/ci_shard.py），不用「排序后下标 mod N」：
+        # 后者增删一个文件会让其后所有文件的分片归属整体轮转一位
+        # （Harness/rules/测试规范.md 记录 integration/ 因此爆过两次）。
+        shell: bash
+        env:
+          # 走 env 而不是把 ${{ matrix.shard }} 直接插进脚本正文：
+          # GH Actions 会先把 ${{ }} 展开成**脚本文本**再交给 bash 解析，
+          # 将来矩阵若改成动态来源（fromJSON(needs...)），插值就成了注入面。
+          SHARD: ${{ matrix.shard }}
+        run: |
+          # ⚠️ 用命令替换而不是进程替换：进程替换的退出码会被 mapfile 吞掉
+          # （mapfile 恒返回 0），分片生成器一失败就变成「空数组」。
+          # 空数组喂给 pytest = 「不带任何路径参数」⇒ pytest 回落到
+          # testpaths=["app/tests"] ⇒ **整个 unit+integration+e2e 套件被收进来**
+          # ⇒ 本 job 没有 neo4j/milvus 服务 ⇒ 报错并超时 ⇒ job 变 cancelled
+          # ⇒ 失败集合为空 ⇒ 又一次假「净新增 0」。
+          shard_list=$(uv run python -m app.utils.ci_shard \
+            --root app/tests/unit --shards 4 --shard "$SHARD") || {
+              echo "::error::分片清单生成失败（shard=$SHARD）"
+              exit 1
+            }
+          if [ -z "$shard_list" ]; then
+            echo "::error::shard=$SHARD 分到 0 个测试文件 —— 拒绝执行 pytest（空参数会让 pytest 收集整个 app/tests 树）"
+            exit 1
+          fi
+          mapfile -t shard_tests <<< "$shard_list"
+          printf 'Shard %s: %d test files\n' "$SHARD" "${#shard_tests[@]}"
+          # pytest 失败也要走完下面的标记：`|| status=$?` 在 `set -e` 下不会触发 errexit。
+          status=0
+          uv run pytest "${shard_tests[@]}" -q -p no:randomly || status=$?
+          # 完成标记：**日志里缺这个标记 ⇒ 该 job 是在跑完前被取消的**
+          # ⇒ 它的失败集合是空的，不能参与「失败集合对差」，必须复跑该 job。
+          # 标记里带 status：status=0 ⇒ 真绿；status!=0 ⇒ 真红（失败集合可用）。
+          echo "UNIT_SHARD_DONE shard=$SHARD status=$status"
+          exit "$status"
 
   backend-integration:
     name: Backend / integration shard ${{ matrix.shard }}

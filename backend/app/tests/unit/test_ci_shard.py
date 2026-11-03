@@ -229,6 +229,51 @@ def test_shards_are_reasonably_balanced() -> None:
         assert worst <= limit, f"shards={shardCount} 最重分片占比 {worst:.2%} > {limit:.2%}"
 
 
+def test_cli_can_emit_nul_separated_list() -> None:
+    """`--nul` 必须输出 **NUL 分隔**的清单（供 `mapfile -d ''` 消费）。
+
+    ⚠️ 为什么需要 NUL：换行分隔时，文件名里含换行/空格就会被 `mapfile` 拆开
+    ⇒ 静默丢文件（或多出假文件）⇒ 分片内容与预期不符。
+    ⚠️ 为什么必须落临时文件而不是命令替换：**命令替换会剥掉 NUL 字节**
+    ⇒ 拿不到 NUL 分隔的列表（NUL 清单只能走 stdout 重定向到文件）。
+    """
+    plain = _runCli(
+        "--root",
+        _UNIT_ROOT_REL.as_posix(),
+        "--shards",
+        "4",
+        "--shard",
+        "2",
+    )
+    assert plain.returncode == 0, plain.stderr
+
+    nul = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "app.utils.ci_shard",
+            "--root",
+            _UNIT_ROOT_REL.as_posix(),
+            "--shards",
+            "4",
+            "--shard",
+            "2",
+            "--nul",
+        ],
+        cwd=_BACKEND_DIR,
+        capture_output=True,
+        check=False,
+        timeout=_SUBPROCESS_TIMEOUT_SEC,
+    )
+
+    assert nul.returncode == 0, nul.stderr.decode("utf-8", errors="replace")
+    assert nul.stdout.endswith(b"\0"), "NUL 清单必须以 NUL 结尾"
+    entries = [item for item in nul.stdout.split(b"\0") if item]
+    assert entries, "分片 2 不应为空"
+    # 与换行模式必须是**同一批文件**（`--nul` 只改分隔符，不改内容）
+    assert [item.decode("utf-8") for item in entries] == plain.stdout.splitlines()
+
+
 def test_cli_rejects_out_of_range_shard() -> None:
     """越界的 --shard 必须非零退出，而不是静默跑空分片。"""
     result = _runCli(

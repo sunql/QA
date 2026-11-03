@@ -421,10 +421,17 @@ def test_assessJob_flags_failure_without_detail() -> None:
     两种情况下失败集合都**不可信** ⇒ 拿它对差会得出「净新增 0」的假结论。
 
     ⇒ 早期版本只把它记成一个 ⚠️ 提醒、仍输出「可合并」，那是同一族假绿。
+
+    ⚠️ **fixture 不得被别的规则遮蔽**（变异取证 M6 实测）：汇总行若写
+    `1 failed, 0 passed in 1.00s` ⇒「汇总行失败数 vs 解析出的失败 ID 数」那条
+    交叉核对（1 ≠ 0）会**先**把 job 判成不可用 ⇒ 关掉本条规则照样绿 ⇒
+    **恒绿守卫**。⇒ 汇总行改成 `1 error in 1.00s`：error 数 > 0 ⇒ 交叉核对按
+    规则**跳过**（error 的 ID 出现在 `ERROR` 行而非 `FAILED` 行）⇒ 只剩本条规则
+    能把 job 判成不可用 ⇒ 关掉它就转红。
     """
     log = "\n".join(
         [
-            f"{_TIMESTAMPED}1 failed, 0 passed in 1.00s",
+            f"{_TIMESTAMPED}1 error in 1.00s",
             f"{_TIMESTAMPED}INTEGRATION_SHARD_DONE shard=0 status=1",
         ]
     )
@@ -750,8 +757,19 @@ def test_assessJob_rejects_invalid_shard_sentinel() -> None:
 
 
 def test_assessJob_rejects_marker_with_mismatched_family() -> None:
-    """unit 分片的日志里出现 `INTEGRATION_SHARD_DONE` ⇒ 标记不可信 ⇒ 不可用。"""
-    log = f"{_TIMESTAMPED}INTEGRATION_SHARD_DONE shard=0 status=0"
+    """unit 分片的日志里出现 `INTEGRATION_SHARD_DONE` ⇒ 标记不可信 ⇒ 不可用。
+
+    ⚠️ **fixture 必须带 pytest 收尾汇总行**（变异取证 M5 实测）：没有汇总行时
+    「日志里没有 pytest 的收尾汇总行」那条规则会**先**把 job 判成不可用
+    ⇒ 关掉「标记族名/分片号交叉校验」照样绿 ⇒ **恒绿守卫**。
+    ⇒ 带上一行汇总行后，**只剩**交叉校验能把 job 判成不可用 ⇒ 关掉它就转红。
+    """
+    log = "\n".join(
+        [
+            f"{_TIMESTAMPED}5431 passed, 1 skipped in 812.34s",
+            f"{_TIMESTAMPED}INTEGRATION_SHARD_DONE shard=0 status=0",
+        ]
+    )
 
     assessment = assessJob(_job(name="Backend / unit shard 0", conclusion="success"), log)
 
@@ -760,8 +778,17 @@ def test_assessJob_rejects_marker_with_mismatched_family() -> None:
 
 
 def test_assessJob_rejects_marker_with_mismatched_shard_index() -> None:
-    """分片 0 的日志里出现 `UNIT_SHARD_DONE shard=1` ⇒ 标记不可信 ⇒ 不可用。"""
-    log = f"{_TIMESTAMPED}UNIT_SHARD_DONE shard=1 status=0"
+    """分片 0 的日志里出现 `UNIT_SHARD_DONE shard=1` ⇒ 标记不可信 ⇒ 不可用。
+
+    ⚠️ 同上：fixture 必须带 pytest 收尾汇总行，否则会被「缺汇总行」那条规则遮蔽
+    ⇒ 交叉校验就不再是唯一原因（变异取证 M5 实测）。
+    """
+    log = "\n".join(
+        [
+            f"{_TIMESTAMPED}5431 passed, 1 skipped in 812.34s",
+            f"{_TIMESTAMPED}UNIT_SHARD_DONE shard=1 status=0",
+        ]
+    )
 
     assessment = assessJob(_job(name="Backend / unit shard 0", conclusion="success"), log)
 

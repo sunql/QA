@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.utils import ci_surface
 
 
@@ -45,6 +47,49 @@ def test_detectCiSurfaceChanges_covers_every_tool_module() -> None:
     flagged = ci_surface.detectCiSurfaceChanges(changed)
 
     assert set(flagged) == set(changed)
+
+
+def test_detectCiSurfaceChanges_covers_judgment_and_report_modules() -> None:
+    """**判定模块**（`ci_judge.py`）与**报告模块**（`ci_report.py`）也必须算 CI 相关面。
+
+    ⚠️ 这两个模块是判据工具**拆分时新增**的 —— 拆完必须同步进相关面清单，
+    否则「拆分」这个动作本身就凿出了一个新的洞：
+
+    - 改 `ci_judge.py` 就能改「什么算跑完了 / 什么算不可信」⇒ 例如把
+      `_COMPLETED_STATUSES` 放宽 ⇒ **被取消的 job**（失败集合是空的）
+      被判成「可用」⇒ 参与对差 ⇒ 假「净新增 0」；
+    - 改 `ci_report.py` 就能把「净新增失败用例」清单从报告里抹掉
+      ⇒ 操作者看到「可合并」却看不到新增了哪些 ⇒ 「把失败藏起来」。
+
+    ⇒ 工具的**每一个**模块都必须在清单里。
+    """
+    changed = (
+        "backend/app/utils/ci_judge.py",
+        "backend/app/utils/ci_report.py",
+    )
+
+    flagged = ci_surface.detectCiSurfaceChanges(changed)
+
+    assert set(flagged) == set(changed)
+
+
+def test_every_ci_tool_module_is_in_the_surface_list() -> None:
+    """工具目录里**每一个** `ci_*.py` 都必须在相关面清单里。
+
+    枚举式清单的通病：新增模块时忘了把它加进去 ⇒ 守卫**静默失效**
+    （本批就踩过：`ci_judge.py` / `ci_report.py` 是拆分时新增的，
+    一开始没进清单 ⇒ 改判定逻辑不会被判「不可比」）。
+
+    ⇒ 改成**从文件系统反查**：清单漏了谁，本用例直接转红。
+    """
+    toolDir = Path(__file__).resolve().parents[2] / "utils"
+    moduleNames = sorted(path.name for path in toolDir.glob("ci_*.py"))
+    assert moduleNames, "没找到任何 ci_*.py 模块（路径写错了？）"
+
+    expected = {f"backend/app/utils/{name}" for name in moduleNames}
+    flagged = ci_surface.detectCiSurfaceChanges(sorted(expected))
+
+    assert set(flagged) == expected
 
 
 def test_detectCiSurfaceChanges_ignores_unrelated_files() -> None:

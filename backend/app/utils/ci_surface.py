@@ -30,6 +30,13 @@ from app.utils.ci_text import sanitizeForReport
 # ⚠️ 工具自身的模块也在列：改 `ci_failure_set.py` 就能直接改判定逻辑
 # ⇒ 失败集合与基线不可比 ⇒ 必须人工确认。
 #
+# ⚠️ 这份清单必须**覆盖工具的每一个模块**（守卫 `test_ci_surface.py::
+# test_every_ci_tool_module_is_in_the_surface_list` 从文件系统反查 ⇒ 漏一个就转红）：
+# - `ci_judge.py` 装着**判定逻辑**（什么算「跑完了」/「不可信」）
+#   ⇒ 改它就能把「被取消的 job」判成「可用」⇒ 空的失败集合参与对差；
+# - `ci_report.py` 装着**报告渲染**
+#   ⇒ 改它就能把「净新增失败用例」清单从报告里抹掉 ⇒ 操作者看不到新增了什么。
+#
 # ⚠️ conftest / pytest 配置必须按**任意深度**判定（不能枚举「今天有哪几个」）：
 # pytest 会从 rootdir 往下**逐层**收集 conftest ⇒ `backend/app/conftest.py`
 # 对 `backend/app/tests/**` 全部生效 ⇒ 枚举式判定会漏掉新加的那一层
@@ -45,7 +52,7 @@ _CI_SURFACE_PATTERNS = (
     # 依赖锁定文件：改了依赖版本 ⇒ 测试环境变了 ⇒ 失败集合不再可比
     r"^backend/(?:pyproject\.toml|uv\.lock)$",
     r"^backend/app/tests/(?:_pg_support|milvus_isolation)\.py$",
-    r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface|head|pytest_log)\.py$",
+    r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface|head|pytest_log|judge|report)\.py$",
 )
 
 # 拉取失败时可能被抛出的异常类型（`gh` 调用 + JSON 解析）。

@@ -72,6 +72,36 @@ def _bashTooOld() -> bool:
     return version < (_MIN_BASH_MAJOR, _MIN_BASH_MINOR)
 
 
+def _bashFunctionBody(script: str, name: str) -> str:
+    """抽出 bash 函数体（按行扫描到**同缩进**的结束 `}`）。
+
+    ⚠️ **不能**用 `script.split("fail_shard() {", 1)[1].split("\\n          }", 1)[0]`：
+    YAML 的块标量 `run: |` 在解析时会把内容**去缩进** ⇒ 函数结尾的 `}` 落在**第 0 列**
+    ⇒ 那个模式**永远匹配不到** ⇒ `split` 返回**整段脚本**
+    ⇒ 断言「函数体里有标记」恒成立 ⇒ **空转守卫**（本批评审 MEDIUM-4）。
+
+    ⇒ 改成按行扫描 + **同缩进**的 `}` 收尾；找不到函数 / 找不到结束括号就**报错**
+    （而不是默默返回整段脚本 ⇒ 那正是空转的成因）。
+    """
+    lines = script.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line.strip() == f"{name}() {{":
+            start = index
+            break
+    if start is None:
+        raise AssertionError(f"脚本里找不到函数 {name}() {{")
+
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    body: list[str] = []
+    for line in lines[start + 1 :]:
+        lineIndent = len(line) - len(line.lstrip())
+        if line.strip() == "}" and lineIndent == indent:
+            return "\n".join(body)
+        body.append(line)
+    raise AssertionError(f"函数 {name} 没有找到同缩进的结束括号")
+
+
 @pytest.fixture(scope="module")
 def workflow() -> dict:
     """解析后的 workflow（模块级缓存，避免每个用例重复读盘）。"""
@@ -101,6 +131,12 @@ def unitStep(workflow: dict) -> dict:
     steps = [step for step in workflow["jobs"][_UNIT_JOB_NAME]["steps"] if step.get("name") == _UNIT_STEP_NAME]
     assert len(steps) == 1, f"找不到 {_UNIT_STEP_NAME} 步骤"
     return steps[0]
+
+
+@pytest.fixture(scope="module")
+def unitRunBody(unitStep: dict) -> str:
+    """`Run unit shard` 步骤的 run 块正文（行为部分要原样拿去跑）。"""
+    return unitStep["run"]
 
 
 # --------------------------------------------------------------------------
@@ -227,8 +263,12 @@ def test_every_failure_path_emits_the_marker(runBody: str) -> None:
 
     assert exitStatements == {"exit 4", 'exit "$status"'}
     # 统一失败出口里必须打标记
-    failShardBody = runBody.split("fail_shard() {", 1)[1].split("\n          }", 1)[0]
+    failShardBody = _bashFunctionBody(runBody, "fail_shard")
     assert _MARKER in failShardBody
+    # 反空转（MEDIUM-4）：函数体**不得**包含脚本末尾那句 `exit "$status"`
+    # —— 它在函数**外面**。若抽取失败返回了整段脚本，这一行必失败
+    # ⇒ 证明边界真的被找到了，而不是「split 没匹配上 ⇒ 整段都算函数体」。
+    assert 'exit "$status"' not in failShardBody
     # L10：行内 `exit`（`foo; exit 1` / `&& exit 1`）不算上面的「整行 exit」集合，
     # 但同样绕过统一出口 ⇒ 必须在**可执行行**层面再查一遍。
     executableLines = [
@@ -253,8 +293,11 @@ def test_unit_step_marks_failure_paths(unitStep: dict) -> None:
     但原因不同 ⇒ 必须能区分。
     """
     body = unitStep["run"]
-    failUnitBody = body.split("fail_unit() {", 1)[1].split("\n          }", 1)[0]
+    failUnitBody = _bashFunctionBody(body, "fail_unit")
     assert _UNIT_MARKER in failUnitBody
+    # 反空转（MEDIUM-4）：函数体不得包含脚本末尾那句 `exit "$status"`
+    # （它在函数外面）⇒ 抽取失败返回整段脚本时，本行必失败。
+    assert 'exit "$status"' not in failUnitBody
 
 
 def test_unit_marker_shard_number_is_validated(unitStep: dict) -> None:
@@ -289,6 +332,92 @@ def test_unit_step_has_no_stray_exit(unitStep: dict) -> None:
     for line in executableLines:
         if re.search(r"\bexit\b", line):
             assert line in ("exit 4", 'exit "$status"'), f"发现未走统一出口的 exit：{line}"
+
+
+# --------------------------------------------------------------------------
+# 静态部分：unit 与 integration 的**对称硬化**（L-2 / L-3 / L-9 / L-11）
+# --------------------------------------------------------------------------
+
+
+def test_unit_step_declares_shard_count_matching_matrix(workflow: dict, unitStep: dict) -> None:
+    """unit 侧也必须声明 `SHARD_COUNT`，且与 `matrix.shard` 的**长度**一致。
+
+    理由与 integration 侧相同：不一致 ⇒ 要么有分片永远轮不到，
+    要么下标越界切出空分片 ⇒ 空分片 ⇒ pytest 回落到 `testpaths` 收全树
+    ⇒ 假绿。
+    """
+    matrixShards = workflow["jobs"][_UNIT_JOB_NAME]["strategy"]["matrix"]["shard"]
+
+    assert "SHARD_COUNT" in unitStep["env"], "unit 步骤必须声明 SHARD_COUNT"
+    assert int(unitStep["env"]["SHARD_COUNT"]) == len(matrixShards)
+
+
+def test_unit_run_passes_shard_count_to_the_shard_tool(unitStep: dict) -> None:
+    """分片总数必须**由 `SHARD_COUNT` 传给分片工具**，不能写死字面量。
+
+    写死 ⇒ 矩阵从 4 改成 8 时脚本仍按 4 分片 ⇒ 4 号分片永远空跑
+    （空分片 ⇒ pytest 收全树 ⇒ 假绿），或分片内容与预期不符。
+    """
+    body = unitStep["run"]
+
+    assert re.search(r'--shards\s+"\$SHARD_COUNT"', body) is not None, (
+        "分片工具的 --shards 必须传 \"$SHARD_COUNT\"，不能写死字面量"
+    )
+    assert re.search(r"--shards\s+\d", body) is None, "分片总数不得写死为字面量"
+
+
+def test_unit_run_uses_nul_separated_file_list(unitStep: dict) -> None:
+    """unit 的分片清单也必须 **NUL 分隔**（与 integration 同款）。
+
+    换行分隔 ⇒ 文件名里含换行/空格就被拆开 ⇒ 静默丢文件
+    ⇒ 分片内容与预期不符（且丢的是哪几个还没人知道）。
+    ⚠️ NUL 清单**只能落临时文件**：命令替换会剥掉 NUL 字节。
+
+    ⚠️ 断言必须锚在**真实调用**上（变异取证 M25 实证）：
+    脚本的注释里出现过 `--nul` 字面量（解释「为什么只能落文件」），
+    若只断言 `"--nul" in body` ⇒ 把真实调用里的 `--nul` 删掉也照样绿
+    ⇒ 恒绿守卫。下面用整条调用形态的正则锚定。
+    """
+    body = unitStep["run"]
+
+    invocation = re.search(
+        r"--root\s+app/tests/unit\s+--shards\s+\"\$SHARD_COUNT\"\s+"
+        r"--shard\s+\"\$shard_index\"\s+--nul",
+        body,
+    )
+    assert invocation is not None, "分片工具调用必须带 --nul（NUL 分隔输出）"
+    assert re.search(r"mapfile\s+-d\s+''\s+-t\s+shard_tests\s+<\s+\"\$list_file\"", body) is not None, (
+        "必须用 mapfile -d '' -t shard_tests < \"$list_file\" 读 NUL 清单"
+    )
+    assert "list_file=$(mktemp)" in body, "NUL 清单必须落临时文件（命令替换会剥掉 NUL）"
+    assert not re.search(r"shard_list=\$\(", body), "不得用命令替换装清单（会剥掉 NUL 字节）"
+
+
+def test_both_jobs_use_invalid_shard_sentinel(runBody: str, unitStep: dict) -> None:
+    """分片号非法时，完成标记必须打**哨兵值 -1**，不能打 0。
+
+    打 0 ⇒ 工具看到的是「shard 0 的正常标记」⇒ 真实原因（分片号非法）
+    被掩盖成「标记与 job 不符」；更糟的是「打 0」是在**谎报**本 job 的分片号。
+
+    ⇒ 未校验前一律用 -1 占位，校验通过后才覆盖成真实分片号；
+    工具侧 `ci_pytest_log.INVALID_SHARD = -1` 会把这种标记判成
+    「CI 脚本判定分片号非法 ⇒ 该 job 一个用例都没跑」。
+    """
+    for label, body in (("integration", runBody), ("unit", unitStep["run"])):
+        assert "shard_index=-1" in body, f"{label} 侧未用 -1 作为非法分片号占位"
+        assert "shard_index=0" not in body, f"{label} 侧仍在用 0 占位（会谎报分片号）"
+
+
+def test_both_jobs_trap_temp_file_cleanup(runBody: str, unitStep: dict) -> None:
+    """临时清单文件必须用 `trap ... EXIT` 兜底清理。
+
+    脚本中途被 `set -e` 打断、或被信号杀死时，临时文件会留下；
+    `trap` 保证无论走哪条出口（含 `fail_*` 的 `exit`）都清掉。
+    """
+    for label, body in (("integration", runBody), ("unit", unitStep["run"])):
+        assert re.search(r"trap\s+'rm -f \"\$list_file\"'\s+EXIT", body) is not None, (
+            f"{label} 侧缺少 trap 清理临时清单文件"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -368,6 +497,14 @@ exit "${STUB_PYTEST_EXIT:-0}"
 """
 
 
+def _readNulFile(path: Path) -> tuple[str, ...]:
+    """读 NUL 分隔的文件 ⇒ 实参元组（保住含空格/换行的文件名边界）。"""
+    if not path.exists():
+        return ()
+    raw = path.read_bytes()
+    return tuple(item.decode("utf-8", errors="replace") for item in raw.split(b"\0") if item)
+
+
 class _RunResult:
     """一次脚本执行的结果。"""
 
@@ -376,13 +513,7 @@ class _RunResult:
         self.stdout = completed.stdout
         self.stderr = completed.stderr
         self.pytestCalled = argvFile.exists()
-        if argvFile.exists():
-            raw = argvFile.read_bytes()
-            self.pytestArgv = tuple(
-                item.decode("utf-8", errors="replace") for item in raw.split(b"\0") if item
-            )
-        else:
-            self.pytestArgv = ()
+        self.pytestArgv = _readNulFile(argvFile)
 
 
 @pytest.fixture
@@ -557,3 +688,223 @@ def test_step_preserves_newline_containing_filename(runStep) -> None:
 
     assert result.exitCode == 0
     assert "app/tests/integration/test_gen_05\nwith newline.py" in result.pytestArgv
+
+
+# --------------------------------------------------------------------------
+# 行为部分：backend-unit 分片步骤（与 integration 同款纪律）
+# --------------------------------------------------------------------------
+
+_STUB_UV_UNIT = """#!/bin/bash
+# 区分两种调用：
+#   `uv run pytest <files> ...`            ⇒ 记录实参，按 STUB_PYTEST_EXIT 退出
+#   `uv run python -m app.utils.ci_shard …` ⇒ 输出分片清单（NUL 分隔）
+is_pytest=0
+for arg in "$@"; do
+  if [ "$arg" = "pytest" ]; then is_pytest=1; fi
+done
+if [ "$is_pytest" = "1" ]; then
+  printf '%s\\0' "$@" > "$STUB_UV_ARGV_FILE"
+  exit "${STUB_PYTEST_EXIT:-0}"
+fi
+
+# ---- 分片清单调用：契约检查 ----
+seen_nul=0
+seen_root=0
+shards=""
+shard=""
+prev=""
+for arg in "$@"; do
+  case "$arg" in
+    --nul) seen_nul=1 ;;
+    app/tests/unit) seen_root=1 ;;
+  esac
+  if [ "$prev" = "--shards" ]; then shards="$arg"; fi
+  if [ "$prev" = "--shard" ]; then shard="$arg"; fi
+  prev="$arg"
+done
+if [ "$seen_nul" != "1" ] || [ "$seen_root" != "1" ]; then
+  echo "stub-uv: ci_shard 调用形态不符（nul=$seen_nul root=$seen_root）" >&2
+  exit 64
+fi
+printf '%s\\0' "$shards" "$shard" > "$STUB_SHARD_ARGV_FILE"
+case "${STUB_SHARD_MODE:-ok}" in
+  fail) exit 1 ;;
+  empty) exit 0 ;;
+esac
+count="${STUB_SHARD_COUNT:-3}"
+i=0
+while [ "$i" -lt "$count" ]; do
+  case "$i" in
+    1) printf 'app/tests/unit/test_gen_01 with space.py\\0' ;;
+    2) printf 'app/tests/unit/test_gen_02\\nwith newline.py\\0' ;;
+    *) printf 'app/tests/unit/test_gen_%02d.py\\0' "$i" ;;
+  esac
+  i=$((i + 1))
+done
+"""
+
+
+class _UnitRunResult:
+    """一次 unit 步骤执行的结果。"""
+
+    def __init__(
+        self,
+        completed: subprocess.CompletedProcess[str],
+        argvFile: Path,
+        shardArgvFile: Path,
+    ) -> None:
+        self.exitCode = completed.returncode
+        self.stdout = completed.stdout
+        self.stderr = completed.stderr
+        self.pytestCalled = argvFile.exists()
+        self.pytestArgv = _readNulFile(argvFile)
+        # 分片工具的实参（`--shards` / `--shard` 的值）⇒ 验证参数真的传下去了
+        self.shardArgv = _readNulFile(shardArgvFile)
+
+
+@pytest.fixture
+def runUnitStep(unitRunBody: str, tmp_path: Path):
+    """跑一次 YAML 里 `Run unit shard` 的 run 块（假 uv）。"""
+
+    def _run(
+        *,
+        shard: str = "0",
+        shardCount: str = "4",
+        shardMode: str = "ok",
+        shardEntries: int = 3,
+        pytestExit: int = 0,
+    ) -> _UnitRunResult:
+        stubDir = tmp_path / "bin"
+        stubDir.mkdir(exist_ok=True)
+        stubPath = stubDir / "uv"
+        stubPath.write_text(_STUB_UV_UNIT, encoding="utf-8")
+        stubPath.chmod(0o755)
+
+        scriptPath = tmp_path / "unit_step.sh"
+        scriptPath.write_text(unitRunBody, encoding="utf-8")
+        argvFile = tmp_path / "uv_argv.txt"
+        shardArgvFile = tmp_path / "shard_argv.txt"
+
+        env = dict(os.environ)
+        env.update(
+            {
+                "PATH": f"{stubDir}{os.pathsep}{env.get('PATH', '')}",
+                "SHARD": shard,
+                "SHARD_COUNT": shardCount,
+                "STUB_SHARD_MODE": shardMode,
+                "STUB_SHARD_COUNT": str(shardEntries),
+                "STUB_PYTEST_EXIT": str(pytestExit),
+                "STUB_UV_ARGV_FILE": str(argvFile),
+                "STUB_SHARD_ARGV_FILE": str(shardArgvFile),
+            }
+        )
+        completed = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(scriptPath)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_SCRIPT_TIMEOUT_SEC,
+            cwd=tmp_path,
+            env=env,
+        )
+        return _UnitRunResult(completed, argvFile, shardArgvFile)
+
+    return _run
+
+
+@requiresBash44
+def test_unit_step_reports_green_run_with_marker(runUnitStep) -> None:
+    """unit 分片全绿 ⇒ 退出码 0 + 标记 `status=0`。"""
+    result = runUnitStep(pytestExit=0)
+
+    assert result.exitCode == 0
+    assert "UNIT_SHARD_DONE shard=0 status=0" in result.stdout
+    assert result.pytestCalled is True
+
+
+@requiresBash44
+def test_unit_step_reports_red_run_with_marker(runUnitStep) -> None:
+    """unit 分片真红 ⇒ 退出码 1 + 标记 `status=1`（真红的失败集合**可用**）。"""
+    result = runUnitStep(pytestExit=1)
+
+    assert result.exitCode == 1
+    assert "UNIT_SHARD_DONE shard=0 status=1" in result.stdout
+    assert result.pytestCalled is True
+
+
+@requiresBash44
+def test_unit_step_rejects_non_numeric_shard_with_sentinel(runUnitStep) -> None:
+    """分片号非法 ⇒ 退出码 4 + 标记 `shard=-1`（哨兵）+ pytest 没被调用。
+
+    ⚠️ 标记必须是 **-1** 而不是 0：打 0 等于谎报「我是 0 号分片」
+    ⇒ 工具会把真实原因（分片号非法）掩盖成「标记与 job 名不符」。
+    """
+    result = runUnitStep(shard="abc")
+
+    assert result.exitCode == 4
+    assert "UNIT_SHARD_DONE shard=-1 status=4" in result.stdout
+    assert result.pytestCalled is False
+
+
+@requiresBash44
+def test_unit_step_rejects_shard_index_out_of_range(runUnitStep) -> None:
+    """分片号越界（≥ SHARD_COUNT）⇒ 退出码 4 + pytest 没被调用。"""
+    result = runUnitStep(shard="4", shardCount="4")
+
+    assert result.exitCode == 4
+    assert result.pytestCalled is False
+
+
+@requiresBash44
+def test_unit_step_fails_hard_when_shard_list_generation_fails(runUnitStep) -> None:
+    """分片清单生成失败 ⇒ 退出码 4 + **打了标记** + **pytest 没被调用**。"""
+    result = runUnitStep(shardMode="fail")
+
+    assert result.exitCode == 4
+    assert "UNIT_SHARD_DONE shard=0 status=4" in result.stdout
+    assert result.pytestCalled is False
+
+
+@requiresBash44
+def test_unit_step_fails_hard_when_shard_is_empty(runUnitStep) -> None:
+    """空分片 ⇒ 退出码 4 + 标记 + pytest 没被调用。
+
+    空分片若放行，pytest 会不带路径参数 ⇒ 回落到 `testpaths=["app/tests"]`
+    ⇒ 把 unit+integration+e2e 全收进来 ⇒ 本 job 没有那套环境 ⇒ 超时
+    ⇒ job 变 cancelled ⇒ 失败集合为空 ⇒ 假「净新增 0」。
+    """
+    result = runUnitStep(shardEntries=0)
+
+    assert result.exitCode == 4
+    assert "UNIT_SHARD_DONE shard=0 status=4" in result.stdout
+    assert result.pytestCalled is False
+
+
+@requiresBash44
+def test_unit_step_passes_shard_count_to_shard_tool(runUnitStep) -> None:
+    """`SHARD_COUNT` 必须真的传给分片工具（脚本里写死 4 的话本例会转红）。"""
+    result = runUnitStep(shard="2", shardCount="4")
+
+    assert result.exitCode == 0
+    assert result.shardArgv == ("4", "2")
+
+
+@requiresBash44
+def test_unit_step_preserves_space_containing_filename(runUnitStep) -> None:
+    """含空格的文件名必须**原样**作为单个实参传给 pytest（NUL 分隔才保得住）。"""
+    result = runUnitStep()
+
+    assert result.exitCode == 0
+    assert "app/tests/unit/test_gen_01 with space.py" in result.pytestArgv
+
+
+@requiresBash44
+def test_unit_step_preserves_newline_containing_filename(runUnitStep) -> None:
+    """含换行的文件名必须**原样**作为一个实参传给 pytest。
+
+    换行分隔的实现会把它拆成两个实参 ⇒ 这里立刻转红。
+    """
+    result = runUnitStep()
+
+    assert result.exitCode == 0
+    assert "app/tests/unit/test_gen_02\nwith newline.py" in result.pytestArgv

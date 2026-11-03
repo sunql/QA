@@ -103,20 +103,33 @@ jobs:
           # GH Actions 会先把 ${{ }} 展开成**脚本文本**再交给 bash 解析，
           # 将来矩阵若改成动态来源（fromJSON(needs...)），插值就成了注入面。
           SHARD: ${{ matrix.shard }}
+          # 分片总数：**必须与上面 matrix.shard 的长度一致**。
+          # 守卫：backend/app/tests/unit/test_ci_integration_step.py 断言两者一致
+          # —— 不一致 ⇒ 要么有分片永远轮不到，要么下标越界切出空分片
+          # ⇒ 空分片 ⇒ pytest 回落到 testpaths 收全树 ⇒ 假绿。
+          # ⇒ 脚本把它传给分片工具（**不写死 4**）：写死 ⇒ 矩阵改了而脚本没改
+          # ⇒ 新增的分片永远空跑（空分片 ⇒ 收全树 ⇒ 假绿）。
+          SHARD_COUNT: "4"
         run: |
-          # ⚠️ 用命令替换而不是进程替换：进程替换的退出码会被 mapfile 吞掉
-          # （mapfile 恒返回 0），分片生成器一失败就变成「空数组」。
-          # 空数组喂给 pytest = 「不带任何路径参数」⇒ pytest 回落到
-          # testpaths=["app/tests"] ⇒ **整个 unit+integration+e2e 套件被收进来**
-          # ⇒ 本 job 没有 neo4j/milvus 服务 ⇒ 报错并超时 ⇒ job 变 cancelled
-          # ⇒ 失败集合为空 ⇒ 又一次假「净新增 0」。
+          # ⚠️ 清单走 **NUL 分隔 + 临时文件**（与 integration 同款），三条各自的坑：
+          #   ① **命令替换会剥掉 NUL 字节** ⇒ `list=$(... --nul)` 拿到的 NUL 已被删
+          #      ⇒ NUL 清单只能走 stdout 重定向到文件；
+          #   ② **进程替换的退出码会被 mapfile 吞掉**（mapfile 恒返回 0）
+          #      ⇒ 分片生成器一失败就变成「空数组」；
+          #   ③ 空数组喂给 pytest = 「不带任何路径参数」⇒ pytest 回落到
+          #      testpaths=["app/tests"] ⇒ **整个 unit+integration+e2e 套件被收进来**
+          #      ⇒ 本 job 没有 neo4j/milvus 服务 ⇒ 报错并超时 ⇒ job 变 cancelled
+          #      ⇒ 失败集合为空 ⇒ 又一次假「净新增 0」。
           # 完成标记里的分片号必须是**已校验的数值**：
           # `SHARD` 来自 matrix，而 workflow 文件本身 PR 可改 ⇒ `SHARD` 可能是任意
           # 文本（含换行 ⇒ 可在日志里伪造一行完成标记）；而工具的标记正则是
-          # `shard=(\d+)` ⇒ 非数字会让标记解析不出来（判「缺完成标记」⇒ 不可用，
+          # `shard=(-?\d+)` ⇒ 非数字会让标记解析不出来（判「缺完成标记」⇒ 不可用，
           # 虽然 fail-closed，但真实原因「分片号非法」在日志里却像「被取消」）。
-          # ⇒ 未校验前一律用 0 占位，校验通过后才覆盖。
-          shard_index=0
+          # ⇒ 未校验前一律用 **-1** 占位（**不是 0**）：打 0 等于谎报「我是 0 号分片」
+          # ⇒ 工具会把真实原因（分片号非法）掩盖成「标记与 job 名不符」。
+          #    工具侧 `ci_pytest_log.INVALID_SHARD = -1` 会把它判成
+          #    「CI 脚本判定分片号非法 ⇒ 该 job 一个用例都没跑」。
+          shard_index=-1
           fail_unit() {
             # ::error:: 的消息体必须转义 % / \r / \n（GH workflow 命令协议）：
             # 消息里若带这些字符会被协议吞掉或截断 ⇒ 日志里看不到真实原因。
@@ -136,14 +149,30 @@ jobs:
             fail_unit "SHARD 必须是不超过 3 位的非负整数（实际：$SHARD）"
           fi
           shard_index=$((10#$SHARD))
-          shard_list=$(uv run python -m app.utils.ci_shard \
-            --root app/tests/unit --shards 4 --shard "$shard_index") || {
+          # 分片总数同样必须校验（workflow 文件本身 PR 可改 ⇒ SHARD_COUNT 也可能是垃圾）。
+          if ! [[ "$SHARD_COUNT" =~ ^[0-9]{1,3}$ ]] || [ "$SHARD_COUNT" -lt 1 ]; then
+            fail_unit "SHARD_COUNT 必须是不超过 3 位的正整数（实际：$SHARD_COUNT）"
+          fi
+          if [ "$shard_index" -ge "$SHARD_COUNT" ]; then
+            fail_unit "shard=$shard_index 超出分片总数 $SHARD_COUNT"
+          fi
+          # ---- 清单生成：NUL 分隔 + 退出码可捕获 ----
+          # ⚠️ mktemp 失败也必须走 fail_unit：裸 `list_file=$(mktemp)` 在 set -e 下
+          # 会让脚本**直接退出而不打标记** ⇒ 工具判「无标记 = 被取消」⇒ 原因失真。
+          list_file=$(mktemp) || fail_unit "创建临时清单文件失败（mktemp）"
+          # 临时文件用 trap 兜底清理：无论走哪条出口（含 fail_unit 的 exit）都清掉。
+          trap 'rm -f "$list_file"' EXIT
+          uv run python -m app.utils.ci_shard \
+            --root app/tests/unit --shards "$SHARD_COUNT" --shard "$shard_index" --nul > "$list_file" || {
             fail_unit "分片清单生成失败（shard=$shard_index）"
           }
-          if [ -z "$shard_list" ]; then
+          # ⚠️ 空分片必须硬失败：空数组喂给 pytest = 「不带任何路径参数」
+          # ⇒ pytest 回落到 testpaths=["app/tests"] ⇒ 整个套件被收进来 ⇒ 假绿。
+          if [ ! -s "$list_file" ]; then
             fail_unit "shard=$shard_index 分到 0 个测试文件 —— 拒绝执行 pytest（空参数会让 pytest 收集整个 app/tests 树）"
           fi
-          mapfile -t shard_tests <<< "$shard_list"
+          mapfile -d '' -t shard_tests < "$list_file"
+          rm -f "$list_file"
           printf 'Shard %s: %d test files\n' "$shard_index" "${#shard_tests[@]}"
           # pytest 失败也要走完下面的标记：`|| status=$?` 在 `set -e` 下不会触发 errexit。
           status=0
@@ -274,10 +303,13 @@ jobs:
           # 完成标记里的分片号必须是**已校验的数值**（与 unit 侧同理）：
           # `SHARD` 来自 matrix，而 workflow 文件本身 PR 可改 ⇒ `SHARD` 可能是任意
           # 文本（含换行 ⇒ 可在日志里伪造一行完成标记）；而工具的标记正则是
-          # `shard=(\d+)` ⇒ 非数字会让标记解析不出来（判「缺完成标记」⇒ 不可用，
+          # `shard=(-?\d+)` ⇒ 非数字会让标记解析不出来（判「缺完成标记」⇒ 不可用，
           # 虽然 fail-closed，但真实原因「分片号非法」在日志里却像「被取消」）。
-          # ⇒ 未校验前一律用 0 占位，校验通过后才覆盖。
-          shard_index=0
+          # ⇒ 未校验前一律用 **-1** 占位（**不是 0**）：打 0 等于谎报「我是 0 号分片」
+          # ⇒ 工具会把真实原因（分片号非法）掩盖成「标记与 job 名不符」。
+          #    工具侧 `ci_pytest_log.INVALID_SHARD = -1` 会把它判成
+          #    「CI 脚本判定分片号非法 ⇒ 该 job 一个用例都没跑」。
+          shard_index=-1
           fail_shard() {
             # ::error:: 的消息体必须转义 % / \r / \n（GH workflow 命令协议）：
             # 消息里若带这些字符会被协议吞掉或截断 ⇒ 日志里看不到真实原因；
@@ -315,12 +347,13 @@ jobs:
           # ⚠️ mktemp 失败也必须走 fail_shard：裸 `list_file=$(mktemp)` 在 set -e 下
           # 会让脚本**直接退出而不打标记** ⇒ 工具判「无标记 = 被取消」⇒ 原因失真。
           list_file=$(mktemp) || fail_shard "创建临时清单文件失败（mktemp）"
+          # 临时文件用 trap 兜底清理：无论走哪条出口（含 fail_shard 的 exit、
+          # 或中途被 set -e 打断）都清掉 ⇒ 清理只有一个机制，不靠每条分支手写 rm。
+          trap 'rm -f "$list_file"' EXIT
           find app/tests/integration -name 'test_*.py' -print0 | sort -z > "$list_file" || {
-            rm -f "$list_file"
             fail_shard "integration 测试文件清单生成失败"
           }
           if [ ! -s "$list_file" ]; then
-            rm -f "$list_file"
             fail_shard "未找到任何 integration 测试文件"
           fi
           mapfile -d '' -t all_test_files < "$list_file"

@@ -965,7 +965,9 @@ PR run 的 8 个分片 job **全部**打出了符合协议的完成标记，工�
 | **integration shard 2** | **50:38** | **48 min** |
 | Frontend | 10:26 | — |
 
-⇒ 五轮观测里**单片最慢 48 分钟**，距旧 60 分钟上限余量 **1.25×**、距本批新设的 90 分钟上限余量 **1.88×**
+⇒ 本轮最慢单片 = integration shard 2：pytest 步 **48 分钟**、job 墙钟 **50 分 38 秒**；
+连同 §8.3 记录的四轮（最坏 49 分 40 秒），**五轮观测的最坏单片 job 墙钟 = 50 分 38 秒**
+⇒ 距旧 60 分钟上限余量 **1.18×**、距本批新设的 90 分钟上限余量 **1.78×**
 ⇒ 60 → 90 分钟的上限调整**由实测支撑**（§8.3）。
 
 **工具的第一次 post-merge 判定：NEW_FAILURES（净新增 1 条）**
@@ -1063,10 +1065,11 @@ EXIT=0
    Milvus 2.x 的删除对已加载视图不可见 ⇒ 第二次扫描可能仍看到旧行 ⇒ `written2 == 1`。
    仓库早已把它记成已知偶发（MEMORY `qa-system-milvus-3-collection-refactor.md`），
    本次在 CI 上首次以「净新增 1 条」的形式显形（§8.2③）。
-   **合并后的观测（§8.6）**：同一份测试代码在 5 轮 CI 上 **fail 4 / pass 1**（基线 attempt1 fail、
-   PR attempt1 fail、PR attempt2 pass、合并后 main attempt1 fail、main attempt2 pass）
-   ⇒ 同一 commit 上**双向翻转** ⇒ 确认是可见性竞态，不是单调累积（MEMORY
+   **合并后的观测（§8.6，可直接核对的只有这两条）**：**同一个 commit**（`a37e4c09`）上，
+   integration shard 3 的失败数 **36 条（attempt 1，含本用例）→ 35 条（attempt 2，定向复跑，不含）**
+   ⇒ **双向翻转** ⇒ 确认是可见性竞态，不是单调累积（MEMORY
    `qa-system-milvus-delete-visibility-flake.md` 里另外两条同名族用例是**单调累积**，签名不同）。
+   合前 PR 侧 attempt1/attempt2 的翻转见 §8.2⑤（PR attempt1 shard3 = 36 → attempt2 = 35）。
    修法候选：delete 后 `release` + `load`（MEMORY `qa-system-m0-p04-sync-gap-fix.md` 实测
    `release + load collection → query → data: [] ← 真删了`），或用随机业务 id 避免残留单调累加。
    ⚠️ **不在本批修**：改 `scripts/backfill_milvus_external_id.py` 会牵动 Milvus 生产侧

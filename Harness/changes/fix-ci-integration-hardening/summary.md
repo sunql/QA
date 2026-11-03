@@ -666,7 +666,7 @@ $ python3 /tmp/qa_pytest_shim/run_ci_tests.py \
 
 ## 8. 合并与发布记录
 
-### 8.1 两次 run
+### 8.1 两次原始 run（均已各自复跑一次，见 §8.2④⑤）
 
 | | run id | head | 结论 | 墙钟 |
 |---|---|---|---|---|
@@ -676,7 +676,10 @@ $ python3 /tmp/qa_pytest_shim/run_ci_tests.py \
 两次 run 的 **job 名集合完全相同**（Frontend + unit shard 0…3 + integration shard 0…3，共 9 个）
 ⇒ 覆盖等价判据通过。
 
-### 8.2 合并判据实测：**工具拒判 + 手工对差 + 基线复跑**
+⚠️ 基线的 `ci.yml`（`d24c462e`）**没有** `INTEGRATION_SHARD_DONE` 标记，
+PR 的**有** ⇒ **两侧的 CI 相关面不同** ⇒ 这正是 §8.2① 工具拒判的直接原因。
+
+### 8.2 合并判据实测：**工具拒判 + 手工对差 + 两侧各复跑一次**
 
 **① 工具直接跑 ⇒ 拒判（`UNUSABLE_JOBS`，退出码 2）**
 
@@ -919,18 +922,21 @@ PR run 的 8 个分片 job **全部**打出了符合协议的完成标记，工�
 
 **⚠️ 合并授权的真实缺口（§7.3 威胁模型的现状核查）**
 
-本次实测仓库配置：
+本次实测仓库配置（**合并前**的 `main`）：
 
-| 机制 | 现状 |
-|---|---|
-| `main` 分支保护 | **无**（`branches/main/protection` → 404 `Branch not protected`） |
-| 必需状态检查 | **无**（`required_status_checks: null`） |
-| `.github/CODEOWNERS` | **不存在**（`contents/.github/CODEOWNERS` → 404） |
+| 机制 | 合并前 `main` | 合并后 `main` |
+|---|---|---|
+| `main` 分支保护 | **无**（`branches/main/protection` → 404 `Branch not protected`） | **仍无**（属仓库设置，本 PR 未涉及） |
+| 必需状态检查 | **无**（`required_status_checks: null`） | **仍无** |
+| `.github/CODEOWNERS` | **不存在**（`contents/.github/CODEOWNERS` → 404） | **存在**（本 PR 新增：覆盖 `.github/workflows/` + 工具 9 个模块 + 6 个守卫文件，owner `@sunql`） |
 
-⇒ 也就是说：**任何人提一个改 `ci.yml` 的 PR，都可以在没有任何必需检查、无人 review 的情况下被合并**，
+⇒ **CODEOWNERS 落地了，但没有分支保护它就不生效**：GitHub 只在分支开启了
+「Require review from Code Owners」时才会真的去请求复核；
+`main` 现在既无分支保护、又无必需状态检查 ⇒
+**任何人提一个改 `ci.yml` 的 PR，都可以在无人 review、无必需检查的情况下被合并**，
 而本批的工具恰恰**无法防住这一手**（§7.3 的结论：日志解析对「能改测试代码的 PR 作者」不是可信边界）。
 ⇒ 本批交付的「失败集合对差」目前只是**人可用的判据**，不是**强制闸门**。
-⇒ 落地这三件套是独立立项（见「后续项」第 5 条），**不在本批范围**。
+⇒ 补齐分支保护 + 必需状态检查是独立立项（见「后续项」第 5 条），**不在本批范围**。
 
 <!--MERGE_RESULT-->
 
@@ -952,15 +958,16 @@ PR run 的 8 个分片 job **全部**打出了符合协议的完成标记，工�
    在 GitHub runner 上确实读不到），不能假设。⇒ 在此之前，合并授权必须依赖
    保护分支 + 必需状态检查 + `.github/CODEOWNERS`，**不能只信工具的退出码**。
 4. **`_runGh` 的整体截止**（L-12）—— 见 §7.4 第 2 条。
-5. **把「失败集合对差」从「人可用的判据」变成「强制闸门」**（本批**未做**，独立立项）——
-   现状：仓库 **没有 `main` 分支保护、没有必需状态检查、没有 `.github/CODEOWNERS`**
-   （§8.5 实测）⇒ 本批交付的工具目前只能靠人自觉执行。
-   落地顺序：① 建 `.github/CODEOWNERS`（至少覆盖 `.github/workflows/`）；
-   ② 给 `main` 开分支保护，把 `backend-unit` / `backend-integration` 设为**必需状态检查**；
+5. **把「失败集合对差」从「人可用的判据」变成「强制闸门」**（本批**部分完成**，剩余独立立项）——
+   本批已落地 `.github/CODEOWNERS`（覆盖 `.github/workflows/` + 工具 9 个模块 + 6 个守卫文件）。
+   但 **`main` 没有分支保护 ⇒ CODEOWNERS 不生效**（GitHub 只在开启
+   「Require review from Code Owners」时才请求复核），且**没有必需状态检查**（§8.5 实测）。
+   剩余落地顺序：① 给 `main` 开分支保护 + 开启「Require review from Code Owners」；
+   ② 把 `backend-unit` / `backend-integration` 设为**必需状态检查**；
    ③ 把「失败集合对差」接到一个必需检查上（合并前跑，净新增非 0 ⇒ 失败）。
    ⚠️ ③ 落地前**必须**先解决本批遗留的结构性问题：**基线早于完成标记协议 ⇒ 工具会一直拒判**
-   ⇒ ① 和 ② 落地后，基线侧（历史 commit）仍不可比 ⇒ 需要一条「重跑基线」的规定
-   （例如以 main 的**最新一次 run** 为基线，而不是「PR 分叉点的那次 run」）。
+   ⇒ 需要一条「基线怎么取」的规定（例如以 main 的**最新一次 run** 为基线，
+   而不是「PR 分叉点的那次 run」；或让基线侧也带上完成标记）。
 6. **`test_backfill_is_idempotent` 的 Milvus 删除可见性偶发**（本批**未修**，独立立项）——
    现象：`backfill()` 里 `collection.delete()` 之后**没有 flush / release**，
    Milvus 2.x 的删除对已加载视图不可见 ⇒ 第二次扫描可能仍看到旧行 ⇒ `written2 == 1`。

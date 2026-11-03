@@ -900,7 +900,7 @@ PR run 的 8 个分片 job **全部**打出了符合协议的完成标记，工�
 
 | 判据 | 结果 | 依据 |
 |---|---|---|
-| 工具结论 | **不可合并（UNUSABLE_JOBS，退出码 2）** | 基线侧 integration 4 个分片缺完成标记 ⇒ 失败集合不可信 ⇒ 结构上不可比（§8.2⑥） |
+| 工具结论 | **不可合并（UNUSABLE_JOBS，退出码 2）** | 基线侧 integration 4 个分片缺完成标记 ⇒ 失败集合不可信 ⇒ 结构上不可比（§8.2⑥）。⚠️ 这是**合并前**的结论；换成「有完成标记」的基线后，工具在合并后给出 **MERGEABLE**（§8.6） |
 | 配对复跑对差（基线 attempt 2 vs PR attempt 2） | **净新增 0 / 净丢失 0**（integration 122 = 122，unit 17 = 17） | §8.2⑤ |
 | 同一份代码两次运行（PR attempt 1 vs attempt 2） | 差异**随运行翻转** ⇒ 非确定性 | §8.2⑤ |
 | 结构排除 | PR 在 `backend/app` 只动 9 个工具模块 + 8 个 unit 守卫；integration 分片成分/顺序/用例总数逐片相同 | §8.2③ |
@@ -938,7 +938,97 @@ PR run 的 8 个分片 job **全部**打出了符合协议的完成标记，工�
 ⇒ 本批交付的「失败集合对差」目前只是**人可用的判据**，不是**强制闸门**。
 ⇒ 补齐分支保护 + 必需状态检查是独立立项（见「后续项」第 5 条），**不在本批范围**。
 
-<!--MERGE_RESULT-->
+### 8.6 合并结果（post-merge 实测，工具自己给出结论性判定）
+
+**合并事实**
+
+| 项 | 值 |
+|---|---|
+| PR | #100（`sunql/QA`） |
+| 合并方式 | squash merge（仓库 `delete_branch_on_merge=false` ⇒ 分支须手工删） |
+| 合并提交 | `a37e4c09cd8b17f3be4ab3562077c86a155298ea`（main 上的唯一一条） |
+| 合并时间 | 2026-11-03T12:23:32Z |
+| PR 分支 tip | `ce2eb894b5d14e4494b88bae608a12732d45256b` |
+| 远端分支 | 已删（`DELETE repos/sunql/QA/git/refs/heads/feat/ci-integration-sharding` → 204；复查 `branches/...` → 404） |
+| **内容级仲裁** | **squash 未丢任何内容**：合并提交与 PR 分支 tip 的 **tree sha 相同**（`8707ec643fc242208f4b5a2c85265bfe17b3bf14`）⇒ 两者是同一份内容的两种提交历史（tree sha 是全仓内容的 Merkle 根 ⇒ 内容相等即 tree 相等，反之不成立） |
+| 部署 | **不部署**（本批零生产 DDL、零生产写、无新 Alembic 迁移；与 PR #98 / #99 同口径） |
+
+**post-merge main 的 CI run**：`41635311610`（head `a37e4c09`，push 触发）。
+9 个 job 全部完成（4 unit + 4 integration + 前端），整轮 **12:23:34 → 13:14:16Z（50 分 42 秒）**。
+
+| job | attempt 1 墙钟 | pytest 步 |
+|---|---|---|
+| unit shard 0 / 1 / 2 / 3 | 11:08 / 13:08 / 13:32 / 14:44 | — |
+| integration shard 1 | 13:14 | 11 min |
+| integration shard 3 | 28:07 | 26 min |
+| integration shard 0 | 36:47 | 34 min |
+| **integration shard 2** | **50:38** | **48 min** |
+| Frontend | 10:26 | — |
+
+⇒ 五轮观测里**单片最慢 48 分钟**，距旧 60 分钟上限余量 **1.25×**、距本批新设的 90 分钟上限余量 **1.88×**
+⇒ 60 → 90 分钟的上限调整**由实测支撑**（§8.3）。
+
+**工具的第一次 post-merge 判定：NEW_FAILURES（净新增 1 条）**
+
+```
+结论：不可合并（NEW_FAILURES）
+基线 run 41615791158（head 91c08e14…）：失败 139 条
+PR    run 41635311610（head a37e4c09…）：失败 140 条
+净新增 1 条 / 净丢失 0 条
+原因：净新增失败 1 条：app/tests/integration/test_reconcile_milvus_id_mapping.py::test_backfill_is_idempotent
+```
+
+逐 job 分解：**两侧 9 个 job 全部「可用」**（唯一差异在 integration shard 3：base 35 条 / pr 36 条；
+其余 8 个 job 逐条相同 —— unit 9/4/1/3、integration 17/44/26、前端 0）⇒
+差异就是那一条 Milvus 用例，与 §8.2③ 记录的根因完全一致。
+⇒ **工具不做抖动容忍**：它分不清「第 1 次出现的回归」与「第 4 次翻转的已知偶发」，
+按设计 fail-closed ⇒ 报 `NEW_FAILURES`。
+
+**定向复跑（只复跑争议所在的一片）**
+
+```
+POST /repos/sunql/QA/actions/jobs/125914904062/rerun   # Backend / integration shard 3
+```
+
+⚠️ 两个实测要点（下次直接照抄）：
+
+1. 复跑后 run 的 attempt +1，**9 个 job 全部换成新 job id**；被复跑的那一片是新 job，
+   其余 8 片沿用 attempt 1 的结论与日志 ⇒ **job 名集合不变 ⇒ 工具的「覆盖等价」守卫照常过**。
+   ⇒ 复跑一片只要 ~26 min，比整轮 ~50 min 省一半。
+2. **轮询必须重新取 job id**：旧 id 会一直返回 `completed / attempt=1` 的终态 ⇒ 误判「已结束」。
+
+shard 3 attempt 2：job `13:19:56 → 13:45:56Z`（26 分），pytest 步 `13:22:09 → 13:45:52Z`（23 分 43 秒）。
+
+**工具的最终判定：MERGEABLE（退出码 0）**
+
+```
+结论：可合并（MERGEABLE）
+基线 run 41615791158（head 91c08e14…）：失败 139 条
+PR    run 41635311610（head a37e4c09…）：失败 139 条
+净新增 0 条 / 净丢失 0 条
+  - [基线] integration shard 3：可用，失败 35 条   [PR] integration shard 3：可用，失败 35 条
+  - 其余 8 个 job 两侧逐条相同；两侧 9 个 job 全部「可用」
+EXIT=0
+```
+
+⇒ **合并判据由工具自己给出：净新增 0 ⇒ 可合并。**
+⇒ 这一次工具能出结论，靠的是**基线换成带完成标记的 run**（PR run attempt 2）：
+合并前用「无标记的老基线」它只能拒判（§8.2⑥），合并后两侧都有标记 ⇒ 结构可比 ⇒ 结论可出。
+⇒ 顺带把 §8.2⑥ 留下的缺口补上了：**「工具给不出结论」≠「这批不干净」**，
+只要把基线换成**同一个完成标记协议下**的 run，工具就能给出可执行的判定。
+
+⚠️ **本批的工具行为必须记进后续项**：在红基线上，工具**没有任何抖动容忍** ⇒
+只要有 1 条已知偶发用例翻转，它就判 `NEW_FAILURES` ⇒
+**实操口径 = 先看那 1~2 条是不是已知抖动；是则定向复跑，不是则当真回归处理**。
+⇒ 工具若要能在红基线上直接可用，需要补一条「已知偶发用例白名单 / 复跑 N 次取交集」的机制（独立立项）。
+
+⚠️ **本次工具判定的时效约束**：工具的「新鲜度守卫」只作用于 **pr 侧**
+（要求 pr run 的 head sha == 该分支当前 head）⇒
+**必须先跑工具、后提交文档**；一旦先往 main 提交任何东西，main 的 head 就前移，
+工具会把这次 run 判成「已过期（PR 推了新 commit）」⇒ 结论作废。
+本节结论是在 main 仍停在 `a37e4c09` 时取得的；**本节文档本身是之后才提交的**。
+
+
 
 ## 后续项
 
@@ -966,14 +1056,25 @@ PR run 的 8 个分片 job **全部**打出了符合协议的完成标记，工�
    ② 把 `backend-unit` / `backend-integration` 设为**必需状态检查**；
    ③ 把「失败集合对差」接到一个必需检查上（合并前跑，净新增非 0 ⇒ 失败）。
    ⚠️ ③ 落地前**必须**先解决本批遗留的结构性问题：**基线早于完成标记协议 ⇒ 工具会一直拒判**
-   ⇒ 需要一条「基线怎么取」的规定（例如以 main 的**最新一次 run** 为基线，
-   而不是「PR 分叉点的那次 run」；或让基线侧也带上完成标记）。
+   ⇒ 需要一条「基线怎么取」的规定。§8.6 已给出实证答案：**基线必须取「同一个完成标记协议下」的 run**
+   （本批用 PR run 的 attempt 2，工具即给出 MERGEABLE）；「PR 分叉点的那次 run」若早于协议就会拒判。
 6. **`test_backfill_is_idempotent` 的 Milvus 删除可见性偶发**（本批**未修**，独立立项）——
    现象：`backfill()` 里 `collection.delete()` 之后**没有 flush / release**，
    Milvus 2.x 的删除对已加载视图不可见 ⇒ 第二次扫描可能仍看到旧行 ⇒ `written2 == 1`。
    仓库早已把它记成已知偶发（MEMORY `qa-system-milvus-3-collection-refactor.md`），
    本次在 CI 上首次以「净新增 1 条」的形式显形（§8.2③）。
+   **合并后的观测（§8.6）**：同一份测试代码在 5 轮 CI 上 **fail 4 / pass 1**（基线 attempt1 fail、
+   PR attempt1 fail、PR attempt2 pass、合并后 main attempt1 fail、main attempt2 pass）
+   ⇒ 同一 commit 上**双向翻转** ⇒ 确认是可见性竞态，不是单调累积（MEMORY
+   `qa-system-milvus-delete-visibility-flake.md` 里另外两条同名族用例是**单调累积**，签名不同）。
    修法候选：delete 后 `release` + `load`（MEMORY `qa-system-m0-p04-sync-gap-fix.md` 实测
    `release + load collection → query → data: [] ← 真删了`），或用随机业务 id 避免残留单调累加。
    ⚠️ **不在本批修**：改 `scripts/backfill_milvus_external_id.py` 会牵动 Milvus 生产侧
    （19530 是生产 Milvus），与本批「零生产写」的口径冲突。
+7. **工具补「抖动容忍」**（本批**未做**，独立立项）——
+   实测：红基线上工具**没有任何抖动容忍**，1 条已知偶发用例翻转即判 `NEW_FAILURES`（§8.6），
+   必须人工识别「这 1 条是不是已知抖动」再定向复跑才能收敛。
+   候选机制：① 已知偶发用例白名单（带失效日期）；② 对差时对**净新增集合**自动复跑 N 次取交集；
+   ③ 报告里把「与上一次同 commit 的 run 相比的翻转」标成独立一类结论。
+   ⚠️ 白名单机制与 §7.3 的威胁模型直接相关：白名单若由 PR 作者自己加 ⇒ 等于给了绕过闸门的后门
+   ⇒ 白名单必须**只允许在 main 上由 CODEOWNER 维护**（前提是先给 main 开分支保护，见后续项 5）。

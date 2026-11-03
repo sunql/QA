@@ -18,6 +18,11 @@
 用法（CI 里就是这么用的）：
 
     uv run python -m app.utils.ci_shard --root app/tests/unit --shards 4 --shard 2
+
+CI 实际消费的是 **NUL 分隔**版本（`--nul`，走 stdout 重定向到临时文件）：
+
+    uv run python -m app.utils.ci_shard --root app/tests/unit --shards 4 --shard 2 --nul > "$list_file"
+    mapfile -d '' -t shard_tests < "$list_file"
 """
 
 from __future__ import annotations
@@ -79,6 +84,12 @@ def listShardFiles(root: str | Path, shardCount: int, shardIndex: int) -> list[s
 def main(argv: list[str] | None = None) -> int:
     """CLI 入口：打印指定分片的测试文件路径，每行一个。
 
+    `--nul` 改成 **NUL 分隔**（供 `mapfile -d ''` 消费）——
+    换行分隔时文件名里含换行/空格就会被拆开 ⇒ 静默丢文件。
+
+    ⚠️ NUL 清单**只能用 stdout 重定向到临时文件**：
+    **命令替换会剥掉 NUL 字节** ⇒ `list=$(... --nul)` 拿到的 NUL 已被删除。
+
     失败一律走 `parser.error`（退出码 2 + 一行人话），**不吐 traceback** ——
     CI 直接消费这个 stdout，traceback 会把日志搅浑。
     """
@@ -86,6 +97,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", required=True, help="测试目录，例如 app/tests/unit")
     parser.add_argument("--shards", required=True, type=int, help="分片总数")
     parser.add_argument("--shard", required=True, type=int, help="本 job 负责的分片号（0 起）")
+    parser.add_argument(
+        "--nul",
+        action="store_true",
+        help="用 NUL 分隔输出（供 `mapfile -d ''` 消费；只能走 stdout 重定向，不能走命令替换）",
+    )
     args = parser.parse_args(argv)
 
     if args.shards < 1:
@@ -99,6 +115,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(error))
     except ValueError as error:
         parser.error(str(error))
+
+    if args.nul:
+        sys.stdout.write("".join(f"{path}\0" for path in paths))
+        return 0
 
     for path in paths:
         print(path)

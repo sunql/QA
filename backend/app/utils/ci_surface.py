@@ -23,19 +23,29 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from app.utils.ci_gh import fetchChangedFiles, fetchRunHeadSha
-from app.utils.ci_text import redactSecrets, sanitizeForReport
+from app.utils.ci_text import sanitizeForReport
 
 # 「CI 相关面」：改了这些文件 ⇒ 两次 run 的失败集合**不再可比**。
 #
 # ⚠️ 工具自身的模块也在列：改 `ci_failure_set.py` 就能直接改判定逻辑
 # ⇒ 失败集合与基线不可比 ⇒ 必须人工确认。
+#
+# ⚠️ conftest / pytest 配置必须按**任意深度**判定（不能枚举「今天有哪几个」）：
+# pytest 会从 rootdir 往下**逐层**收集 conftest ⇒ `backend/app/conftest.py`
+# 对 `backend/app/tests/**` 全部生效 ⇒ 枚举式判定会漏掉新加的那一层
+# ⇒ PR 在那里挂 `pytest_collection_modifyitems` 剔除失败用例
+# ⇒ 失败集合与基线完全相同 ⇒ 假「净新增 0」⇒ 而 CI 还全绿。
 _CI_SURFACE_PATTERNS = (
     r"^\.github/workflows/",
-    r"^backend/conftest\.py$",
-    r"^backend/app/tests/(?:[^/]+/)*conftest\.py$",
+    # 任意深度的 conftest / pytest 配置（basename 判定 ⇒ 新加一层也照样命中）
+    r"(?:^|.*/)conftest\.py$",
+    r"(?:^|.*/)pytest\.ini$",
+    r"(?:^|.*/)setup\.cfg$",
+    r"(?:^|.*/)tox\.ini$",
+    # 依赖锁定文件：改了依赖版本 ⇒ 测试环境变了 ⇒ 失败集合不再可比
+    r"^backend/(?:pyproject\.toml|uv\.lock)$",
     r"^backend/app/tests/(?:_pg_support|milvus_isolation)\.py$",
-    r"^backend/(?:pyproject\.toml|pytest\.ini|setup\.cfg|tox\.ini)$",
-    r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface)\.py$",
+    r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface|head|pytest_log)\.py$",
 )
 
 # 拉取失败时可能被抛出的异常类型（`gh` 调用 + JSON 解析）。
@@ -92,7 +102,7 @@ def resolveCiSurface(repo: str, baseRunId: str, prRunId: str) -> CiSurfaceInfo:
             baseSha=None,
             prSha=None,
             changedFiles=(),
-            error=f"拉取 run 的 head_sha 失败：{sanitizeForReport(redactSecrets(str(error)))}",
+            error=f"拉取 run 的 head_sha 失败：{sanitizeForReport(str(error))}",
         )
     try:
         changedFiles = fetchChangedFiles(repo, baseSha, prSha)
@@ -101,7 +111,7 @@ def resolveCiSurface(repo: str, baseRunId: str, prRunId: str) -> CiSurfaceInfo:
             baseSha=baseSha,
             prSha=prSha,
             changedFiles=(),
-            error=f"拉取两次 run 之间的改动文件清单失败：{sanitizeForReport(redactSecrets(str(error)))}",
+            error=f"拉取两次 run 之间的改动文件清单失败：{sanitizeForReport(str(error))}",
         )
     return CiSurfaceInfo(
         baseSha=baseSha,

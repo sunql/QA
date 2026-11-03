@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from app.utils.ci_text import (
     redactSecrets,
-    sanitizeAndRedact,
     sanitizeForReport,
     stripControlChars,
 )
@@ -141,11 +140,37 @@ def test_redactSecrets_masks_whole_dsn_including_host() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_sanitizeAndRedact_removes_control_chars_before_redacting() -> None:
+def test_sanitizeForReport_removes_control_chars_before_redacting() -> None:
     """顺序不能换：攻击者用控制字符把 `=` 拆开，必须先剔控制字符再脱敏。"""
     raw = "POSTGRES_PASSWORD\x1b=qa_pg_dev_2026"
 
-    cleaned = sanitizeAndRedact(raw)
+    cleaned = sanitizeForReport(raw)
 
     assert "qa_pg_dev_2026" not in cleaned
     assert "\x1b" not in cleaned
+
+
+def test_sanitizeForReport_redacts_before_truncating() -> None:
+    """脱敏必须在截断**之前** ⇒ 横跨截断边界的凭据不会漏出半截。
+
+    旧实现是「净化 → 截断」：一个 260 字符的凭据会在脱敏**之前**被砍到 200
+    字符 ⇒ 脱敏正则看到的是半截凭据（`TOKEN=AAAA…` 里的值被截短）
+    ⇒ 打码正则仍会命中，但**凭据前缀会随字段一起进报告**；
+    而若凭据形态本身跨边界（值里含空格 ⇒ 匹配不到整条）就彻底漏出去。
+
+    ⇒ 唯一正确的顺序是：剔控制字符 → **脱敏** → 截断。
+    """
+    secretValue = "s3cr3t " + "A" * 250
+    raw = f"TOKEN={secretValue}"
+
+    cleaned = sanitizeForReport(raw)
+
+    assert "s3cr3t" not in cleaned
+    assert "TOKEN=" not in cleaned
+
+
+def test_sanitizeForReport_redacts_secrets() -> None:
+    """净化入口**必须自带脱敏** —— 否则调用点漏一处就漏一份凭据。"""
+    cleaned = sanitizeForReport("gh stderr: password: hunter2")
+
+    assert "hunter2" not in cleaned

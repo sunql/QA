@@ -23,35 +23,69 @@
    **标记照样打印** ⇒ 旧实现判「跑完了、真红、失败集合为空」⇒ 结论「可合并」。）
 4. **真红但零失败明细 ⇒ 不可信。** `status=1` 却一条 `FAILED`/`ERROR` 都没有 ⇒
    失败集合是空的 ⇒ 同样会让对差得出假的「净新增 0」。
-5. **`status=1` 但日志里没有 pytest 的收尾汇总行 ⇒ 不可信。**
+5. **日志里没有 pytest 的收尾汇总行 ⇒ 不可信（对 `status=0` 与 `status=1` 一视同仁）。**
    pytest 只有在**整个 session 跑完**时才会打出收尾汇总行（`2 failed, 118 passed in 812.34s`）。
    一个用例里 `os._exit(1)` 就能让 pytest **中途夭折**却留下退出码 1 ⇒
-   CI 脚本照样打出 `status=1` ⇒ 但失败集合只是**前半截** ⇒ 净新增 0 是假的。
-6. **日志行带时间戳前缀。** GH Actions 的日志每行形如
+   CI 脚本照样打出 `status=1` ⇒ 但失败集合只是**前半截** ⇒ 净新增 0 是假的；
+   `os._exit(0)` 同理留下「真绿」⇒ 失败集合是**空的** ⇒ 净新增 0 也是假的。
+   ⇒ 汇总行是「跑完了」的**唯一旁证**，**必须**两侧都要求。
+6. **汇总行里的失败数与日志里解析出的失败用例 ID 数必须一致。**
+   汇总行的 `N failed` 是 pytest 自己算的，我们是另算一遍 ⇒ 两个数对不上
+   ⇒ 说明日志被截断或失败行格式不认识 ⇒ 失败集合不完整 ⇒ 不可信。
+7. **日志行带时间戳前缀。** GH Actions 的日志每行形如
    `2026-11-02T07:10:13.4960640Z FAILED app/tests/x.py::test_y`
    ⇒ 正则**不能锚定** `^FAILED`（那样一条都匹配不到）。
-7. **`comm` 要求两侧同序同 collation。** python `sorted()`（码位序）与
+8. **`comm` 要求两侧同序同 collation。** python `sorted()`（码位序）与
    `sort -u`（locale 序）不同序时，`comm` 会输出**两边都非空**的假差异。
    ⇒ 本模块在 Python 里直接做集合差，**不依赖 shell `comm`**。
-8. **两次 run 必须跑同一批 job。** PR 少跑一个分片 ⇒ 失败集合只会**变小** ⇒
+9. **两次 run 必须跑同一批 job。** PR 少跑一个分片 ⇒ 失败集合只会**变小** ⇒
    「净新增 0」是假的（而且 GitHub 上 CI 还会是**全绿** ⇒ 连二次防线都没有）。
    ⇒ 两侧 job 名集合不等价 ⇒ 直接判「对差不成立」。
-9. **两次 run 必须是不同的 run，且各自真的有 job。**
+10. **两次 run 必须是不同的 run，且各自真的有 job。**
    `--base-run` 与 `--pr-run` 填成同一个 id ⇒ 自比自 ⇒ 失败集合必然相同
    ⇒ 「净新增 0」是假的；某侧 run 一个 job 都没有（id 指错 / workflow 没跑起来）
    ⇒ 失败集合是空集 ⇒ 同样假的。
-10. **job 名必须符合分片协议。** job 名含 `unit` / `integration` / `shard`
+11. **job 名必须符合分片协议。** job 名含 `unit` / `integration` / `shard`
     却不匹配已知协议（`Backend / unit shard N`）⇒ 说明协议被改过 ⇒ 不可信。
     日志里出现分片完成标记、但 job 名不符合协议 ⇒ 同理不可信（不能降级成
     「非分片 job」）。
-11. **报告里的一切外部字符串都要净化。** 日志与 workflow 的 `name:` 都由 PR 作者
+12. **报告里的一切外部字符串都要净化。** 日志与 workflow 的 `name:` 都由 PR 作者
     可控 ⇒ 可能含 ANSI/OSC 转义序列（改写剪贴板、擦除已打印的结论行 ⇒ 伪造报告）。
     ⇒ 打印前统一剔除控制字符并截断。
-12. **`gh` 的 stderr 可能带凭据。** job-logs 端点 302 到 Azure Blob 的 SAS 签名 URL；
+13. **`gh` 的 stderr 可能带凭据。** job-logs 端点 302 到 Azure Blob 的 SAS 签名 URL；
     `GH_DEBUG=api` 时还会 dump 请求头 ⇒ 落进报告前统一打码。
-13. **PR 改了「CI 相关面」⇒ 失败集合不再可比。** 见 `app.utils.ci_surface`：
+14. **PR 改了「CI 相关面」⇒ 失败集合不再可比。** 见 `app.utils.ci_surface`：
     PR 可以通过 conftest / workflow / 分片清单让失败用例**根本不产生 FAILED 行**
     ⇒ 假「净新增 0」⇒ 而 CI 还全绿 ⇒ 没有二次防线。
+15. **PR run 必须跑的就是 PR 当前那版代码。** PR 又推了新 commit 而操作者
+    拿的是上一次 push 的 run ⇒ 对差的是**旧代码** ⇒ 「净新增 0」是假的
+    （而 GitHub 上最新那次 CI 可能已经红了，没人看）。见 `app.utils.ci_head`。
+
+⚠️ 威胁模型的边界（务必读，别把它当成「防住了所有假绿」）
+------------------------------------------------------------------
+本工具解析的是 **pytest 的 stdout**，而 stdout 由 PR 作者**完全可控**
+（测试里可以 `print` 任何东西）。⇒ 这里的判据只能拦住**「意外」的假绿**
+（分片被取消、pytest 中途夭折、日志被截断、被信号杀死），
+**拦不住**「蓄意」伪造 —— 作者完全可以打印一条假的收尾汇总行 / 假的完成标记，
+让「失败集合是空的」看起来像「失败集合是完整的」。
+
+⇒ 真正的合并授权**必须**落在仓库侧的三件事上：
+**受保护分支 + 必需状态检查 + `.github/workflows/` 的 CODEOWNERS 审查**
+（见 `Harness/rules/开发流程规范.md`）。本工具是**辅助判据**，不是唯一防线。
+
+模块分工（判定 / 呈现 / 适配各自分开，便于逐层加守卫与做变异取证）：
+
+=============================== ================================================
+模块                             职责
+=============================== ================================================
+`app.utils.ci_failure_set`      本模块：CLI、参数、退出码、报告打印
+`app.utils.ci_judge`            判定：job 可用性、失败集合、对差、结论
+`app.utils.ci_report`           呈现：人读报告（净化、行数上界、指纹）
+`app.utils.ci_pytest_log`       日志解析原语：失败 ID、完成标记、收尾汇总行
+`app.utils.ci_head`             PR run 新鲜度（服务端事实，不受日志控制）
+`app.utils.ci_gh` / `ci_text`   gh 适配 / 净化与脱敏
+`app.utils.ci_surface`          「CI 相关面」判定
+=============================== ================================================
 
 用法（本地，人工执行）::
 
@@ -66,7 +100,8 @@
 0     净新增 0 且所有 job 可用且覆盖等价 ⇒ 可合并
 1     净新增失败非空 ⇒ 不可合并
 2     存在不可用 job ⇒ 必须复跑后再对差
-3     运行错误（gh 调用失败、参数非法、两侧 run 相同、某侧无 job 等）
+3     运行错误（gh 调用失败、参数非法、两侧 run 相同、某侧无 job、
+      **PR run 已过期**等）
 4     两次 run 的 job 集合不等价 ⇒ 对差不成立 ⇒ 人工确认
 5     净丢失失败用例非空 ⇒ 须人工确认不是「把失败藏起来了」
 6     PR 改了 CI 相关面 ⇒ 失败集合不可比 ⇒ 须人工确认
@@ -76,66 +111,36 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import re
 import subprocess
 import sys
-from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from app.utils.ci_gh import (
-    fetchJobLog,
-    fetchJobPayloads,
-    validateRepo,
-    validateRunId,
+from app.utils.ci_gh import validateRepo, validateRunId
+from app.utils.ci_head import HeadFreshness, resolveHeadFreshness
+from app.utils.ci_judge import (
+    _REASON_COVERAGE,
+    _REASON_NEEDS_REVIEW,
+    CiJob,
+    FailureDiff,
+    JobAssessment,
+    Verdict,
+    assessJob,
+    collectRunFailures,
+    collectRunFromGithub,
+    diffFailureSets,
+    verdictFor,
 )
+from app.utils.ci_pytest_log import (
+    extractFailureIds,
+    parseShardDoneMarkers,
+)
+from app.utils.ci_report import renderReport
 from app.utils.ci_surface import CiSurfaceInfo, detectCiSurfaceChanges, resolveCiSurface
-from app.utils.ci_text import redactSecrets, sanitizeForReport
+from app.utils.ci_text import sanitizeForReport
 
-# 失败用例 ID 的形状：**nodeid**（含 `::`）或**测试目录下的 .py 文件**。
-# 刻意收紧：日志里常有 `FAILED to reach the Milvus host, retrying` 这类散文，
-# 宽正则 `FAILED\s+(\S+)` 会把 `to` 当成失败用例 ID ⇒ 报出无意义的「净新增失败」
-# ⇒ 误判回归、白白卡住合并。
-_TEST_ID = r"(?:\S+::\S+|[\w./-]*tests?/[\w./-]*\.py)"
-# pytest 失败行：`FAILED <nodeid> [- reason]`
-_FAILURE_PATTERN = re.compile(rf"FAILED\s+({_TEST_ID})")
-# pytest 收集期错误行：`ERROR <nodeid|file.py> [- reason]`
-_ERROR_PATTERN = re.compile(rf"ERROR\s+({_TEST_ID})")
-# 分片完成标记：`UNIT_SHARD_DONE shard=1 status=1` / `INTEGRATION_SHARD_DONE shard=2 status=0`
-_MARKER_PATTERN = re.compile(r"([A-Z][A-Z0-9_]*_SHARD_DONE)\s+shard=(\d+)\s+status=(-?\d+)")
-# 从 job 名推出期望的完成标记：`Backend / unit shard 0` ⇒ `UNIT_SHARD_DONE` + shard=0。
-# 非分片 job（`Frontend / typecheck + coverage`）⇒ None（**不要求标记**）。
-_JOB_MARKER_PATTERN = re.compile(r"(?i)\b(unit|integration)\b\s+shard\s+(\d+)\s*$")
-# job 名里出现这些词 ⇒ 它**看起来**是分片 job ⇒ 必须符合上面的协议。
-# （协议被改过 / job 被换掉 ⇒ 不可信 ⇒ 不能降级成「非分片 job」。）
-_SHARD_LIKE_PATTERN = re.compile(r"(?i)\b(unit|integration|shard)\b")
-# pytest 的**收尾汇总行**：`2 failed, 118 passed in 812.34s`（`-q` 下无 `=` 装饰）。
-# 只有 pytest 跑完整个 session 才会打这一行 ⇒ 它是「跑完了」的第二个证据。
-_PYTEST_SUMMARY_PATTERN = re.compile(
-    r"(?i)(?:no tests ran|\d+\s+(?:failed|passed|errors?|skipped|xfailed|xpassed))"
-    r"[^\n]*\bin\s+\d+(?:\.\d+)?s\b"
-)
-
-# job 结论里，「跑完了且结果可信」的两种
-_TRUSTED_CONCLUSIONS = frozenset({"success", "failure"})
-# 结论与 marker 期望的对应关系
-_CONCLUSION_BY_SUCCESS = {"success": True, "failure": False}
-
-# pytest 退出码里，**代表「跑完了」**的只有这两个：
-# 0 = 全部通过；1 = 有用例失败（跑完了，失败集合完整）。
-# 其余（2 中断 / 3 内部错误 / 4 用法错误 / 5 未收集到用例 / 128+N 被信号杀死）
-# 都意味着「没跑完」或「等于没跑」⇒ 失败集合不可信。
-_COMPLETED_STATUSES = frozenset({0, 1})
-# 128+N = 被信号 N 杀死（137=SIGKILL、143=SIGTERM）
-_SIGNAL_EXIT_BASE = 128
-
-# 结论码
-_REASON_MERGEABLE = "MERGEABLE"
-_REASON_NEW_FAILURES = "NEW_FAILURES"
-_REASON_UNUSABLE = "UNUSABLE_JOBS"
-_REASON_COVERAGE = "COVERAGE_MISMATCH"
-_REASON_NEEDS_REVIEW = "NEEDS_REVIEW"
+# 结论码（判定侧的四个在 `ci_judge`；这两个只有 CLI 用得到）
 _REASON_CI_SURFACE = "CI_SURFACE_CHANGED"
+_REASON_STALE_RUN = "STALE_RUN"
 
 # 拉取 CI 数据时可能被抛出的异常类型（gh 调用 + JSON 解析）。
 _FETCH_ERRORS = (
@@ -147,489 +152,25 @@ _FETCH_ERRORS = (
     subprocess.SubprocessError,
 )
 
-
-@dataclass(frozen=True)
-class CiJob:
-    """CI run 里的一个 job。"""
-
-    jobId: int
-    name: str
-    conclusion: str
-
-
-@dataclass(frozen=True)
-class ShardDoneMarker:
-    """分片完成标记。"""
-
-    name: str
-    shard: int
-    status: int
-
-
-@dataclass(frozen=True)
-class JobAssessment:
-    """单个 job 的可用性判定结果。"""
-
-    job: CiJob
-    marker: ShardDoneMarker | None
-    failureIds: tuple[str, ...]
-    isUsable: bool
-    unusableReason: str | None
-    hasFailureWithoutDetail: bool
-    markerCount: int = 0
-
-
-@dataclass(frozen=True)
-class FailureDiff:
-    """两次 run 的失败集合之差。"""
-
-    baseCount: int
-    prCount: int
-    added: tuple[str, ...]
-    removed: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class Verdict:
-    """合并判据的结论。"""
-
-    canMerge: bool
-    blockingReason: str | None
-    reasonCode: str = _REASON_MERGEABLE
-
-
-# ---------------------------------------------------------------------------
-# 失败用例抽取与完成标记解析
-# ---------------------------------------------------------------------------
-
-
-def extractFailureIds(logText: str) -> frozenset[str]:
-    """从 job 日志里抽出失败用例 ID。
-
-    正则**非锚定**：GH Actions 日志每行带 `2026-11-02T07:10:13.4960640Z ` 前缀，
-    锚定 `^FAILED` 会一条都匹配不到。
-    """
-    found = {match.group(1) for match in _FAILURE_PATTERN.finditer(logText)}
-    found.update(match.group(1) for match in _ERROR_PATTERN.finditer(logText))
-    return frozenset(found)
-
-
-def parseShardDoneMarkers(logText: str) -> list[ShardDoneMarker]:
-    """抽取日志里的分片完成标记（按出现顺序，通常 0 或 1 个）。"""
-    return [
-        ShardDoneMarker(name=match.group(1), shard=int(match.group(2)), status=int(match.group(3)))
-        for match in _MARKER_PATTERN.finditer(logText)
-    ]
-
-
-def _hasPytestSummary(logText: str) -> bool:
-    """日志里有没有 pytest 的收尾汇总行（= pytest 跑完了整个 session）。"""
-    return _PYTEST_SUMMARY_PATTERN.search(logText) is not None
-
-
-# ---------------------------------------------------------------------------
-# 单个 job 的可用性判定
-# ---------------------------------------------------------------------------
-
-
-def _markerMismatchReason(job: CiJob, marker: ShardDoneMarker) -> str | None:
-    """结论与标记互相矛盾时给出原因；一致则返回 None。"""
-    expectedSuccess = _CONCLUSION_BY_SUCCESS.get(job.conclusion)
-    if expectedSuccess is None:
-        return None
-    markerSaysSuccess = marker.status == 0
-    if expectedSuccess == markerSaysSuccess:
-        return None
-    return (
-        f"job 结论为 {job.conclusion}，但完成标记写着 status={marker.status} ⇒ 两者矛盾，不可信"
-    )
-
-
-def _incompleteRunReason(marker: ShardDoneMarker) -> str | None:
-    """完成标记的 status 表明「pytest 没跑完」时给出原因。
-
-    pytest 退出码：0=全绿 / 1=有失败（**这两个都代表跑完了**）/
-    2=中断 / 3=内部错误 / 4=用法错误 / 5=未收集到用例；
-    128+N = 被信号 N 杀死（137=SIGKILL、143=SIGTERM）。
-    ⇒ 只有 0 与 1 的失败集合可信。
-    """
-    status = marker.status
-    if status in _COMPLETED_STATUSES:
-        return None
-    if status >= _SIGNAL_EXIT_BASE or status < 0:
-        return (
-            f"完成标记 status={status} ⇒ pytest 被信号杀死（没跑完）"
-            "⇒ 失败集合是空的 ⇒ 不可信"
-        )
-    if status == 5:
-        return (
-            "完成标记 status=5 ⇒ pytest 未收集到任何用例（等于没跑）"
-            "⇒ 失败集合是空的 ⇒ 不可信"
-        )
-    return (
-        f"完成标记 status={status} ⇒ pytest 未正常跑完（2=中断 / 3=内部错误 / 4=用法错误）"
-        "⇒ 失败集合不可信 ⇒ 需先修掉上面的报错再重跑"
-    )
-
-
-def _expectedMarkerFor(jobName: str) -> tuple[str, int] | None:
-    """从 job 名推出期望的完成标记（族名 + 分片号）。
-
-    job 名形如 `Backend / unit shard 0` ⇒ 期望 `UNIT_SHARD_DONE` + shard=0。
-    **非分片 job**（`Frontend / typecheck + coverage`）⇒ 返回 None ——
-    它没有标记协议，不能因为「缺标记」就判它不可用
-    （否则真实 run 上退出码 0 永远不可达 ⇒ 工具直接不可用）。
-    """
-    match = _JOB_MARKER_PATTERN.search(jobName)
-    if match is None:
-        return None
-    return f"{match.group(1).upper()}_SHARD_DONE", int(match.group(2))
-
-
-def _judgeNonShardJob(job: CiJob, markers: list[ShardDoneMarker]) -> str | None:
-    """「不符合分片协议」的 job 的判定；没问题则返回 None。
-
-    两条硬规则：
-
-    1. 日志里**有**分片完成标记 ⇒ job 名被改过（或 job 被换成了另一个）
-       ⇒ 不能按「非分片 job」降级处理，否则会拿一个**没跑完**
-       （`status∉{0,1}`）的失败集合去对差。
-    2. job 名**看起来**是分片 job（含 `unit` / `integration` / `shard`）
-       却不匹配协议 ⇒ 协议被改过 ⇒ 不可信。
-    """
-    if markers:
-        return (
-            f"日志里有分片完成标记（{markers[-1].name} shard={markers[-1].shard}），"
-            f"但 job「{sanitizeForReport(job.name)}」不符合分片协议 ⇒ 不可信"
-        )
-    if _SHARD_LIKE_PATTERN.search(job.name):
-        return (
-            "job 名含 unit/integration/shard 但不符合已知分片协议"
-            f"（job「{sanitizeForReport(job.name)}」）⇒ 不可信"
-        )
-    return None
-
-
-def _judgeShardJob(
-    job: CiJob,
-    markers: list[ShardDoneMarker],
-    extractedIds: tuple[str, ...],
-    logText: str,
-    expectedMarker: tuple[str, int],
-) -> tuple[ShardDoneMarker | None, str | None]:
-    """「符合分片协议」的 job 的判定 ⇒ 返回 (标记, 原因)；原因 None ⇒ 可用。"""
-    if len(markers) > 1:
-        # pytest 的 stdout 由 PR 作者可控（测试里可以 print）⇒ 可以伪造标记。
-        # 真标记只会在最后打一次 ⇒ 出现多条 ⇒ 必须人工确认。
-        return None, (
-            f"日志里出现 {len(markers)} 条分片完成标记 ⇒ 疑似有伪造标记"
-            "（pytest 输出由 PR 作者可控）⇒ 不可信"
-        )
-    if not markers:
-        return None, (
-            "日志里缺少分片完成标记（形如 `X_SHARD_DONE shard=N status=<退出码>`）"
-            "⇒ 该 job 没跑完，失败集合不可用"
-        )
-    marker = markers[-1]
-    reason = _markerMismatchReason(job, marker)
-    if reason is None and (marker.name != expectedMarker[0] or marker.shard != expectedMarker[1]):
-        reason = (
-            f"完成标记 {marker.name} shard={marker.shard} 与 job「{sanitizeForReport(job.name)}」"
-            f"期望的 {expectedMarker[0]} shard={expectedMarker[1]} 不符 ⇒ 不可信"
-        )
-    if reason is None:
-        reason = _incompleteRunReason(marker)
-    if reason is None and marker.status == 1 and not _hasPytestSummary(logText):
-        reason = (
-            "完成标记显示 pytest 真红（status=1），但日志里没有 pytest 的收尾汇总行"
-            "（形如 `2 failed, 118 passed in 812.34s`）⇒ 无法确认 pytest 跑完了整个 session"
-            "⇒ 失败集合可能只覆盖前半截 ⇒ 不可信"
-        )
-    if reason is None and marker.status != 0 and not extractedIds:
-        reason = (
-            "完成标记显示 pytest 真红（status=1），但日志里一条 FAILED/ERROR 都没有"
-            "⇒ 失败集合是空的 ⇒ 不可信"
-        )
-    return marker, reason
-
-
-def assessJob(
-    job: CiJob,
-    logText: str,
-    logFetchError: str | None = None,
-) -> JobAssessment:
-    """判定单个 job 的失败集合**是否可用**。
-
-    不可用 ⇒ 它的失败集合是空的（`cancelled` / `skipped` / 没跑完 / 被信号杀死），
-    拿它对差会得出假的「净新增 0」⇒ 必须复跑该 job。
-    """
-    markers = parseShardDoneMarkers(logText)
-    extractedIds = tuple(sorted(extractFailureIds(logText)))
-    expectedMarker = _expectedMarkerFor(job.name)
-
-    reason: str | None = None
-    marker: ShardDoneMarker | None = None
-    failureIds = extractedIds
-
-    if job.conclusion not in _TRUSTED_CONCLUSIONS:
-        reason = f"job 结论为 {job.conclusion}（失败集合是空的，不可用于对差 ⇒ 必须复跑该 job）"
-    elif expectedMarker is None:
-        reason = _judgeNonShardJob(job, markers)
-        if reason is None and job.conclusion == "failure" and not extractedIds:
-            # 真正的非分片 job（如 frontend）：真红但抽不出失败明细
-            # （vitest 的失败格式本工具不解析）⇒ 用一个**跨 run 稳定的不透明 ID**
-            # 顶替 ⇒ 两次 run 可比，且「PR 把它弄红了」会作为净新增失败被看见。
-            failureIds = (f"job:{job.name}",)
-    else:
-        marker, reason = _judgeShardJob(job, markers, extractedIds, logText, expectedMarker)
-
-    if reason is not None and logFetchError is not None:
-        reason = f"{reason}（日志拉取失败：{logFetchError}）"
-
-    isUsable = reason is None
-    hasFailureWithoutDetail = bool(marker is not None and marker.status == 1 and not extractedIds)
-
-    return JobAssessment(
-        job=job,
-        marker=marker,
-        failureIds=failureIds,
-        isUsable=isUsable,
-        unusableReason=reason,
-        hasFailureWithoutDetail=hasFailureWithoutDetail,
-        markerCount=len(markers),
-    )
-
-
-# ---------------------------------------------------------------------------
-# 整轮 run 的汇总与对差
-# ---------------------------------------------------------------------------
-
-
-def _unionUsableFailures(assessments: Iterable[JobAssessment]) -> frozenset[str]:
-    """可用 job 的失败集合取并集（不可用 job 的失败集合**不计入**）。"""
-    return frozenset(
-        failureId
-        for item in assessments
-        if item.isUsable
-        for failureId in item.failureIds
-    )
-
-
-def collectRunFailures(
-    jobs: Iterable[CiJob],
-    logs: Mapping[int, str],
-) -> tuple[frozenset[str], tuple[JobAssessment, ...]]:
-    """汇总一轮 run 的失败集合（**只取可用 job** 的）与逐 job 判定。"""
-    assessments = tuple(assessJob(job, logs.get(job.jobId, "")) for job in jobs)
-    return _unionUsableFailures(assessments), assessments
-
-
-def diffFailureSets(base: frozenset[str], pr: frozenset[str]) -> FailureDiff:
-    """两个失败集合之差。
-
-    在 Python 里做集合差，**不依赖 shell `comm`** —— `comm` 要求两侧同序同 collation，
-    python `sorted()`（码位序）与 `sort -u`（locale 序）不同序时会输出两边都非空的假差异。
-    """
-    return FailureDiff(
-        baseCount=len(base),
-        prCount=len(pr),
-        added=tuple(sorted(pr - base)),
-        removed=tuple(sorted(base - pr)),
-    )
-
-
-def _describeUnusable(assessments: Iterable[JobAssessment]) -> str:
-    return "; ".join(
-        f"{sanitizeForReport(item.job.name)}(job={item.job.jobId}): {item.unusableReason}"
-        for item in assessments
-        if not item.isUsable and item.unusableReason is not None
-    )
-
-
-def _coverageMismatchReason(
-    baseAssessments: Iterable[JobAssessment],
-    prAssessments: Iterable[JobAssessment],
-) -> str | None:
-    """两次 run 的 job 名集合不等价时给出原因；等价则返回 None。
-
-    **job 名**（不是 job id）才是可比维度 —— 两次 run 的 job id 必然不同，
-    而 job 名里带着分片号（`Backend / integration shard 2`）。
-    """
-    baseNames = frozenset(item.job.name for item in baseAssessments)
-    prNames = frozenset(item.job.name for item in prAssessments)
-    missing = sorted(baseNames - prNames)
-    extra = sorted(prNames - baseNames)
-    if not missing and not extra:
-        return None
-    return (
-        "两次 run 跑的 job 集合不等价 ⇒ 失败集合不可比："
-        f"基线有而 PR 没有：{missing or '无'}；PR 有而基线没有：{extra or '无'}"
-        "（PR 少跑 job ⇒ 失败集合只会变小 ⇒ 「净新增 0」是假的，且 CI 可能全绿）"
-    )
-
-
-def verdictFor(
-    diff: FailureDiff,
-    baseAssessments: Iterable[JobAssessment],
-    prAssessments: Iterable[JobAssessment],
-) -> Verdict:
-    """给出合并判据的结论。
-
-    **只要有任何一个 job 不可用，或两次 run 覆盖不等价，就不能输出「可合并」** ——
-    即使净新增为空。这正是「假净新增 0」的根因所在。
-    """
-    baseTuple = tuple(baseAssessments)
-    prTuple = tuple(prAssessments)
-    unusable = [item for item in (*baseTuple, *prTuple) if not item.isUsable]
-    if unusable:
-        return Verdict(
-            canMerge=False,
-            blockingReason=(
-                f"存在不可用 job（失败集合不可信 ⇒ 必须复跑后重新对差）：{_describeUnusable(unusable)}"
-            ),
-            reasonCode=_REASON_UNUSABLE,
-        )
-    coverageReason = _coverageMismatchReason(baseTuple, prTuple)
-    if coverageReason is not None:
-        return Verdict(
-            canMerge=False,
-            blockingReason=coverageReason,
-            reasonCode=_REASON_COVERAGE,
-        )
-    if diff.added:
-        return Verdict(
-            canMerge=False,
-            blockingReason=f"净新增失败 {len(diff.added)} 条：{', '.join(diff.added)}",
-            reasonCode=_REASON_NEW_FAILURES,
-        )
-    if diff.removed:
-        # 净丢失**不等于**回归（可能是「顺手修好了」），但规则要求人工确认
-        # 不是「把失败藏起来了」⇒ 单列成「需人工确认」，不与净新增混为一谈。
-        return Verdict(
-            canMerge=False,
-            blockingReason=(
-                f"净丢失失败用例 {len(diff.removed)} 条 ⇒ 须人工确认不是「把失败藏起来了」"
-            ),
-            reasonCode=_REASON_NEEDS_REVIEW,
-        )
-    return Verdict(canMerge=True, blockingReason=None, reasonCode=_REASON_MERGEABLE)
-
-
-# ---------------------------------------------------------------------------
-# gh 适配（把 run 的 job 拉下来逐个判定）
-# ---------------------------------------------------------------------------
-
-
-def _toCiJobs(rawItems: Iterable[dict]) -> list[CiJob]:
-    """把 gh 返回的 job dict 转成 `CiJob`。"""
-    jobs: list[CiJob] = []
-    for item in rawItems:
-        if "id" not in item:
-            raise ValueError(f"gh 返回的 job 缺少 id 字段：{item}")
-        jobs.append(
-            CiJob(
-                jobId=int(item["id"]),
-                name=str(item.get("name", "")),
-                conclusion=str(item.get("conclusion") or ""),
-            )
-        )
-    return jobs
-
-
-def collectRunFromGithub(repo: str, runId: str) -> tuple[frozenset[str], tuple[JobAssessment, ...]]:
-    """从 GitHub 拉一轮 run 的失败集合与逐 job 判定。
-
-    **逐个 job 拉日志、拉完立刻判定并丢弃原文** ⇒ 内存里最多留一份日志，
-    而不是把一轮 run 的所有日志同时留在内存里（integration 日志可达数十 MB/份）。
-    """
-    jobs = _toCiJobs(fetchJobPayloads(repo, runId))
-    assessments: list[JobAssessment] = []
-    for job in jobs:
-        logFetchError: str | None = None
-        try:
-            logText = fetchJobLog(repo, job.jobId)
-        except RuntimeError as error:
-            # 日志拉不到（如尚未归档 / token 失效）⇒ 视为空日志 ⇒ 判定为
-            # 「缺完成标记 ⇒ 不可用」。**失败原因必须带进判定**，否则操作者
-            # 分不清「还在跑」与「gh 挂了」。
-            logText = ""
-            logFetchError = sanitizeForReport(redactSecrets(str(error)))
-        assessments.append(assessJob(job, logText, logFetchError))
-    return _unionUsableFailures(assessments), tuple(assessments)
-
-
-# ---------------------------------------------------------------------------
-# 报告
-# ---------------------------------------------------------------------------
-
-
-def _reportFailureId(failureId: str) -> str:
-    """失败用例 ID 的报告形态：净化后的可读 ID + 原始 ID 的指纹。
-
-    指纹用于在被净化后仍能唯一定位同一个用例（净化会抹掉控制字符，
-    两个不同的原始 ID 可能净化成同一个可读串）。
-    """
-    cleaned = sanitizeForReport(failureId)
-    if cleaned == failureId:
-        return cleaned
-    digest = hashlib.sha256(failureId.encode("utf-8")).hexdigest()[:8]
-    return f"{cleaned} [sha256:{digest}]"
-
-
-def renderReport(
-    baseRunId: str,
-    prRunId: str,
-    baseFailures: frozenset[str],
-    prFailures: frozenset[str],
-    diff: FailureDiff,
-    baseAssessments: Iterable[JobAssessment],
-    prAssessments: Iterable[JobAssessment],
-    verdict: Verdict,
-    baseSha: str | None = None,
-    prSha: str | None = None,
-) -> str:
-    """人读的结论文本。
-
-    **一切外部字符串都过 `sanitizeForReport`** —— 否则 PR 作者可以在测试里 print
-    一条带 ANSI 的「失败用例 ID」，用 CSI 序列擦掉已打印的结论行 ⇒ 伪造报告。
-    ⚠️ 净化必须覆盖**每一个**插入点：漏掉一处（实测漏在 `status` 字段的
-    `unusableReason` 上）就等于留了一条 OSC 52 注入通道。
-    ⇒ 收尾再整体过一遍 `redactSecrets`（凭据可能出现在失败用例 ID 里，
-    例如有人把 token 写进了测试名）。
-    """
-    baseTuple = tuple(baseAssessments)
-    prTuple = tuple(prAssessments)
-    baseShaText = sanitizeForReport(baseSha) if baseSha else "未知"
-    prShaText = sanitizeForReport(prSha) if prSha else "未知"
-    lines = [
-        f"结论：{'可合并' if verdict.canMerge else '不可合并'}（{verdict.reasonCode}）",
-        f"基线 run {sanitizeForReport(baseRunId)}（head {baseShaText}）：失败 {len(baseFailures)} 条",
-        f"PR    run {sanitizeForReport(prRunId)}（head {prShaText}）：失败 {len(prFailures)} 条",
-        f"净新增 {len(diff.added)} 条 / 净丢失 {len(diff.removed)} 条",
-    ]
-    if verdict.blockingReason is not None:
-        lines.append(f"原因：{sanitizeForReport(verdict.blockingReason)}")
-    if diff.removed:
-        lines.append("⚠️ 净丢失失败用例 ⇒ 须人工确认不是「把失败藏起来了」：")
-        lines.extend(f"  - {_reportFailureId(failureId)}" for failureId in diff.removed)
-    for runLabel, assessments in (("基线", baseTuple), ("PR", prTuple)):
-        for item in assessments:
-            reason = item.unusableReason if item.unusableReason is not None else ""
-            status = "可用" if item.isUsable else f"不可用（{sanitizeForReport(reason)}）"
-            lines.append(
-                f"  - [{runLabel}] {sanitizeForReport(item.job.name)} "
-                f"[{sanitizeForReport(item.job.conclusion)}]：{status}，失败 {len(item.failureIds)} 条"
-            )
-            if item.hasFailureWithoutDetail:
-                lines.append("      ⚠️ 该 job 真红但没有 FAILED 行 ⇒ 失败集合为空 ⇒ 不可信")
-            if item.markerCount > 1:
-                lines.append(
-                    f"      ⚠️ 日志里出现 {item.markerCount} 条完成标记 ⇒ 疑似有伪造标记 ⇒ 不可信"
-                )
-    if diff.added:
-        lines.append("净新增失败用例：")
-        lines.extend(f"  + {_reportFailureId(failureId)}" for failureId in diff.added)
-    return redactSecrets("\n".join(lines))
+# ⚠️ 再导出（向后兼容）：既有调用方与测试从本模块导入判定 API。
+# 这些名字**必须**是模块级全局 ⇒ 测试可以 `monkeypatch.setattr(ci_failure_set, ...)`
+# 替换掉它们（`main()` 走全局查找 ⇒ 替换生效）。
+__all__ = [
+    "CiJob",
+    "FailureDiff",
+    "JobAssessment",
+    "Verdict",
+    "assessJob",
+    "collectRunFailures",
+    "collectRunFromGithub",
+    "diffFailureSets",
+    "extractFailureIds",
+    "main",
+    "parseShardDoneMarkers",
+    "renderReport",
+    "sanitizeForReport",
+    "verdictFor",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -690,12 +231,20 @@ def _applyCiSurfaceGuard(
     )
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI 入口。
+@dataclass(frozen=True)
+class RunComparison:
+    """两侧 run 的对差素材（收拢参数，避免到处传 8 个位置参数）。"""
 
-    退出码：0 可合并 / 1 净新增失败 / 2 存在不可用 job / 3 运行错误 /
-    4 覆盖不等价 / 5 净丢失失败待人工确认 / 6 CI 相关面被改动（集合不可比）。
-    """
+    baseRunId: str
+    prRunId: str
+    baseFailures: frozenset[str]
+    prFailures: frozenset[str]
+    baseAssessments: tuple[JobAssessment, ...]
+    prAssessments: tuple[JobAssessment, ...]
+
+
+def _parseArgs(argv: list[str] | None) -> argparse.Namespace:
+    """解析 CLI 参数。"""
     parser = argparse.ArgumentParser(
         prog="app.utils.ci_failure_set",
         description="对差两次 CI run 的失败用例集合，给出合并判据结论",
@@ -709,54 +258,70 @@ def main(argv: list[str] | None = None) -> int:
         help="PR 确实改动了 CI 相关文件（workflow / conftest / pytest 配置 / 分片清单）"
         "⇒ 失败集合不可比，此参数表示已人工确认无影响",
     )
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
 
-    invalidReason = _invalidArgumentReason(args.repo, args.base_run, args.pr_run)
-    if invalidReason is not None:
-        print(f"错误：{invalidReason}", file=sys.stderr)
-        return 3
 
-    try:
-        baseFailures, baseAssessments = collectRunFromGithub(args.repo, args.base_run)
-        prFailures, prAssessments = collectRunFromGithub(args.repo, args.pr_run)
-    except _FETCH_ERRORS as error:
-        # 注意：不要用 `::error::` 前缀 —— 那是 GH Actions 的 workflow command，
-        # 本工具是本地 CLI；一旦输出被贴进 Actions 日志就会变成一条注解。
-        print(f"错误：拉取 CI 日志失败：{redactSecrets(str(error))}", file=sys.stderr)
-        return 3
+def _collectBothRuns(
+    repo: str,
+    baseRunId: str,
+    prRunId: str,
+) -> tuple[frozenset[str], tuple[JobAssessment, ...], frozenset[str], tuple[JobAssessment, ...]]:
+    """拉两侧 run 的失败集合与逐 job 判定（失败时抛 `_FETCH_ERRORS` 里的异常）。"""
+    baseFailures, baseAssessments = collectRunFromGithub(repo, baseRunId)
+    prFailures, prAssessments = collectRunFromGithub(repo, prRunId)
+    return baseFailures, baseAssessments, prFailures, prAssessments
 
-    if not baseAssessments or not prAssessments:
-        print(
-            "错误：有一侧的 run 一个 job 都没有（run id 指错 / workflow 没跑起来 / "
-            "job 列表尚未归档）⇒ 失败集合是空集 ⇒ 对差不成立",
-            file=sys.stderr,
+
+def _resolveFreshness(repo: str, prRunId: str, prSha: str | None) -> HeadFreshness:
+    """PR run 新鲜度判定（取不到 run 的 head sha 时**不拦**，只留提示）。
+
+    取不到 `prSha` 说明「CI 相关面」那一轮拉取就失败了 ⇒ 那一侧的守卫
+    （`CI_SURFACE_CHANGED`，退出码 6）本来就会拦下 ⇒ 这里不必重复拦，
+    只把「判不出来」这件事明示在报告里。
+    """
+    if prSha is None:
+        return HeadFreshness(
+            isFresh=True,
+            reason=None,
+            note=(
+                "取不到 PR run 的 head sha ⇒ 无法自动核对 run 是否最新"
+                "（请人工确认用的是最新一次 push 的 run）"
+            ),
         )
-        return 3
+    return resolveHeadFreshness(repo, prRunId, prSha)
 
-    surface = resolveCiSurface(args.repo, args.base_run, args.pr_run)
-    diff = diffFailureSets(baseFailures, prFailures)
-    verdict = verdictFor(diff, baseAssessments, prAssessments)
-    verdict = _applyCiSurfaceGuard(verdict, surface, args.allow_ci_changes)
 
-    try:
-        report = renderReport(
-            args.base_run,
-            args.pr_run,
-            baseFailures,
-            prFailures,
-            diff,
-            baseAssessments,
-            prAssessments,
-            verdict,
-            surface.baseSha,
-            surface.prSha,
+def _applyFreshnessGuard(verdict: Verdict, freshness: HeadFreshness) -> Verdict:
+    """PR run 新鲜度守卫：run 已过期 ⇒ 对差的是旧代码 ⇒ 不可判「可合并」。
+
+    **只看 PR 侧** —— 基线侧是 main 上的一次快照，main 往前走不影响它的可用性。
+    """
+    if freshness.isFresh:
+        return verdict
+    return Verdict(
+        canMerge=False,
+        blockingReason=freshness.reason,
+        reasonCode=_REASON_STALE_RUN,
+    )
+
+
+def _reportNotes(surface: CiSurfaceInfo, freshness: HeadFreshness, allowCiChanges: bool) -> list[str]:
+    """报告里要显式留痕的提示（「不拦但必须让人看见」的那几件事）。"""
+    notes: list[str] = []
+    if freshness.note is not None:
+        notes.append(freshness.note)
+    if allowCiChanges:
+        notes.append(
+            "已用 --allow-ci-changes 豁免「CI 相关面被改动」的守卫"
+            "（PR 改了 workflow / conftest / pytest 配置 ⇒ 失败集合原则上不可比）"
         )
-    except Exception as error:  # noqa: BLE001 —— 报告渲染失败不能当成「可合并」
-        # 渲染异常 ⇒ 结论不可见 ⇒ 绝不能落到 `return 0`（假绿）。
-        print(f"错误：渲染报告失败：{redactSecrets(str(error))}", file=sys.stderr)
-        return 3
-    print(report)
+    if surface.error is not None:
+        notes.append(f"CI 相关面判定失败：{surface.error}")
+    return notes
 
+
+def _exitCodeFor(verdict: Verdict, comparison: RunComparison) -> int:
+    """结论 ⇒ 退出码。"""
     if verdict.canMerge:
         return 0
     if verdict.reasonCode == _REASON_COVERAGE:
@@ -765,10 +330,104 @@ def main(argv: list[str] | None = None) -> int:
         return 5
     if verdict.reasonCode == _REASON_CI_SURFACE:
         return 6
+    if verdict.reasonCode == _REASON_STALE_RUN:
+        return 3
     # 「不可用」优先于「净新增失败」：基线侧或 PR 侧只要有一个 job 不可用，
     # 结论就必须是「必须复跑」⇒ 退出码 2。
-    unusable = [item for item in (*baseAssessments, *prAssessments) if not item.isUsable]
+    unusable = [
+        item for item in (*comparison.baseAssessments, *comparison.prAssessments) if not item.isUsable
+    ]
     return 2 if unusable else 1
+
+
+def _printReport(
+    comparison: RunComparison,
+    diff: FailureDiff,
+    verdict: Verdict,
+    surface: CiSurfaceInfo,
+    notes: list[str],
+) -> bool:
+    """渲染并打印报告；渲染失败 ⇒ 返回 False（**绝不能**落到「可合并」）。"""
+    try:
+        report = renderReport(
+            comparison.baseRunId,
+            comparison.prRunId,
+            comparison.baseFailures,
+            comparison.prFailures,
+            diff,
+            comparison.baseAssessments,
+            comparison.prAssessments,
+            verdict,
+            surface.baseSha,
+            surface.prSha,
+            notes,
+        )
+    except Exception as error:  # noqa: BLE001 —— 报告渲染失败不能当成「可合并」
+        # 渲染异常 ⇒ 结论不可见 ⇒ 绝不能落到 `return 0`（假绿）。
+        print(f"错误：渲染报告失败：{sanitizeForReport(str(error))}", file=sys.stderr)
+        return False
+    print(report)
+    return True
+
+
+def _loadComparison(repo: str, baseRunId: str, prRunId: str) -> RunComparison | None:
+    """拉两侧 run 的对差素材；拉取失败或某侧无 job ⇒ 打印错误并返回 None。"""
+    try:
+        baseFailures, baseAssessments, prFailures, prAssessments = _collectBothRuns(
+            repo, baseRunId, prRunId
+        )
+    except _FETCH_ERRORS as error:
+        # 注意：不要用 `::error::` 前缀 —— 那是 GH Actions 的 workflow command，
+        # 本工具是本地 CLI；一旦输出被贴进 Actions 日志就会变成一条注解。
+        print(f"错误：拉取 CI 日志失败：{sanitizeForReport(str(error))}", file=sys.stderr)
+        return None
+
+    if not baseAssessments or not prAssessments:
+        print(
+            "错误：有一侧的 run 一个 job 都没有（run id 指错 / workflow 没跑起来 / "
+            "job 列表尚未归档）⇒ 失败集合是空集 ⇒ 对差不成立",
+            file=sys.stderr,
+        )
+        return None
+
+    return RunComparison(
+        baseRunId=baseRunId,
+        prRunId=prRunId,
+        baseFailures=baseFailures,
+        prFailures=prFailures,
+        baseAssessments=baseAssessments,
+        prAssessments=prAssessments,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI 入口。
+
+    退出码：0 可合并 / 1 净新增失败 / 2 存在不可用 job / 3 运行错误（含 run 已过期）/
+    4 覆盖不等价 / 5 净丢失失败待人工确认 / 6 CI 相关面被改动（集合不可比）。
+    """
+    args = _parseArgs(argv)
+
+    invalidReason = _invalidArgumentReason(args.repo, args.base_run, args.pr_run)
+    if invalidReason is not None:
+        print(f"错误：{invalidReason}", file=sys.stderr)
+        return 3
+
+    comparison = _loadComparison(args.repo, args.base_run, args.pr_run)
+    if comparison is None:
+        return 3
+
+    surface = resolveCiSurface(args.repo, args.base_run, args.pr_run)
+    freshness = _resolveFreshness(args.repo, args.pr_run, surface.prSha)
+    diff = diffFailureSets(comparison.baseFailures, comparison.prFailures)
+    verdict = verdictFor(diff, comparison.baseAssessments, comparison.prAssessments)
+    verdict = _applyFreshnessGuard(verdict, freshness)
+    verdict = _applyCiSurfaceGuard(verdict, surface, args.allow_ci_changes)
+    notes = _reportNotes(surface, freshness, args.allow_ci_changes)
+
+    if not _printReport(comparison, diff, verdict, surface, notes):
+        return 3
+    return _exitCodeFor(verdict, comparison)
 
 
 if __name__ == "__main__":

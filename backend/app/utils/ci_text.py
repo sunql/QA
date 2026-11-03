@@ -4,11 +4,11 @@
 （CI 相关面判定）、`ci_failure_set`（对差工具）共用 ⇒ 放在一起才能保证
 **脱敏规则只有一份**（两处各写一份必然漂移 ⇒ 漏脱敏）。
 
-两道工序的**顺序不能换**：
+两道工序的**顺序不能换**（`sanitizeForReport` 是唯一的对外入口，三道一起做）：
 
-1. 先剔控制字符（`sanitizeAndRedact` / `renderReport` 的逐字段净化）——
-   否则攻击者可以用控制字符把 `=` 或 `:` 拆开、骗过脱敏正则；
-2. 再脱敏。
+1. 先剔控制字符 —— 否则攻击者可以用控制字符把 `=` 或 `:` 拆开、骗过脱敏正则；
+2. 再脱敏 —— 脱敏必须**在截断之前**，否则横跨截断边界的凭据会漏出半截；
+3. 最后截断（单个字段上限 200 字符）。
 
 ⚠️ 关键词类脱敏正则**不能**用 `\\b` 起头：`_` 是单词字符 ⇒ `POSTGRES_PASSWORD=`
 的 `PASSWORD` 前面是 `_`，`\\b` 匹配不到 ⇒ 实测 `POSTGRES_PASSWORD=ci-postgres-only`
@@ -71,21 +71,6 @@ def stripControlChars(text: str) -> str:
     return _CONTROL_CHARS.sub("", text)
 
 
-def sanitizeForReport(text: str) -> str:
-    """把来自日志 / workflow 的字符串净化后再打印。
-
-    日志内容由 PR 作者可控（测试里的 `print`）⇒ 可能含 ANSI / CSI / OSC 序列：
-    - OSC 52 可改写维护者终端的剪贴板；
-    - CSI 序列（`\\x1b[2K\\r`）可擦除报告里已打印的行 ⇒ **伪造出「结论：可合并」**。
-
-    ⇒ 报告里的一切外部字符串都必须过这道净化。
-    """
-    cleaned = stripControlChars(text)
-    if len(cleaned) > _MAX_REPORT_FIELD_LEN:
-        cleaned = cleaned[:_MAX_REPORT_FIELD_LEN] + "…（已截断）"
-    return cleaned
-
-
 def redactSecrets(text: str) -> str:
     """把可能出现的凭据打码。
 
@@ -100,10 +85,22 @@ def redactSecrets(text: str) -> str:
     return cleaned
 
 
-def sanitizeAndRedact(text: str) -> str:
-    """净化（剔控制字符）**再**脱敏。
+def sanitizeForReport(text: str) -> str:
+    """把来自日志 / workflow 的字符串净化后再打印。
 
-    两道工序的顺序不能换：先剔控制字符（否则攻击者可以用控制字符把
-    `=` 或 `:` 拆开、骗过脱敏正则），再脱敏。
+    日志内容由 PR 作者可控（测试里的 `print`）⇒ 可能含 ANSI / CSI / OSC 序列：
+    - OSC 52 可改写维护者终端的剪贴板；
+    - CSI 序列（`\\x1b[2K\\r`）可擦除报告里已打印的行 ⇒ **伪造出「结论：可合并」**。
+
+    ⇒ 报告里的一切外部字符串都必须过这道净化。
+
+    ⚠️ **三道工序的顺序不能换**：剔控制字符 → **脱敏** → 截断。
+    - 先剔控制字符：否则攻击者可以用控制字符把 `=` 或 `:` 拆开、骗过脱敏正则；
+    - **再脱敏**：脱敏必须发生在截断**之前** —— 否则横跨截断边界的凭据
+      会以半截形态漏出去（2026-11-03 安全审查 M-2 实测）；
+    - 最后截断：报告里单个字段上限 200 字符。
     """
-    return redactSecrets(stripControlChars(text))
+    cleaned = redactSecrets(stripControlChars(text))
+    if len(cleaned) > _MAX_REPORT_FIELD_LEN:
+        cleaned = cleaned[:_MAX_REPORT_FIELD_LEN] + "…（已截断）"
+    return cleaned

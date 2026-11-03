@@ -38,6 +38,7 @@ from app.utils.ci_failure_set import (
     sanitizeForReport,
     verdictFor,
 )
+from app.utils.ci_head import HeadFreshness
 from app.utils.ci_surface import CiSurfaceInfo
 
 # GH Actions 的真实日志行形状：行首是 ISO 时间戳 + 空格
@@ -77,6 +78,28 @@ def _greenLog(family: str = "UNIT", shard: int = 0) -> str:
 
 _RED_LOG = _redLog()
 _GREEN_LOG = _greenLog()
+
+
+def _redLogWithExtra(
+    family: str = "UNIT",
+    shard: int = 0,
+    extraNodeId: str = "app/tests/unit/test_new.py::test_x",
+) -> str:
+    """一份「比基线多一个失败用例」的日志。
+
+    **汇总行的失败数必须同步 +1** —— 真实 run 里 pytest 自己算这个数
+    （`3 failed, …`）⇒ 只加 FAILED 行而不改汇总行，会被「汇总行失败数 vs
+    解析出的失败 ID 数」那条交叉核对判为不一致 ⇒ fixture 失真。
+    """
+    return "\n".join(
+        [
+            f"{_TIMESTAMPED}FAILED app/tests/unit/test_chat_service.py::test_reply - assert 1 == 2",
+            f"{_TIMESTAMPED}FAILED app/tests/unit/test_rate_limit.py::test_burst - AssertionError",
+            f"{_TIMESTAMPED}FAILED {extraNodeId} - assert 0 == 1",
+            f"{_TIMESTAMPED}3 failed, 118 passed, 3 skipped in 812.34s",
+            f"{_TIMESTAMPED}{family}_SHARD_DONE shard={shard} status=1",
+        ]
+    )
 
 
 def _job(jobId: int = 1, name: str = "Backend / unit shard 0", conclusion: str = "failure") -> CiJob:
@@ -281,6 +304,115 @@ def test_assessJob_rejects_red_run_without_pytest_summary() -> None:
     assert "汇总行" in assessment.unusableReason
 
 
+def test_assessJob_rejects_green_run_without_pytest_summary() -> None:
+    """**status=0（真绿）也必须有 pytest 收尾汇总行 ⇒ 否则不可信 ⇒ 不可用。**
+
+    旧实现只在 `status=1` 时要求汇总行 ⇒ 「真绿」这一侧是空的：可一个用例里
+    `os._exit(0)` 就让 pytest **中途夭折**却留下退出码 0 ⇒ CI 脚本照样打出
+    `status=0` ⇒ 该分片**一条用例都没跑完**却贡献一个空失败集合 ⇒
+    对差得出假的「净新增 0」⇒ 而 GitHub 上 CI 还**全绿** ⇒ 没有二次防线。
+
+    这条是 2026-11-03 两路 review（安全审查 C-1 / 代码审查 HIGH-1）共同指出的
+    假绿通道：汇总行是「pytest 跑完了整个 session」的**唯一**旁证，
+    只在红的那侧要求 ⇒ 绿的那侧完全没有证据。
+    """
+    log = "\n".join(
+        [
+            f"{_TIMESTAMPED}platform linux -- Python 3.13.0, pytest-8.3.4",
+            f"{_TIMESTAMPED}UNIT_SHARD_DONE shard=0 status=0",
+        ]
+    )
+
+    assessment = assessJob(_job(conclusion="success"), log)
+
+    assert assessment.isUsable is False
+    assert assessment.unusableReason is not None
+    assert "汇总行" in assessment.unusableReason
+
+
+def test_assessJob_rejects_summary_failure_count_mismatch() -> None:
+    """汇总行说的失败数与日志里解析出的失败用例 ID 数**对不上** ⇒ 不可信。
+
+    汇总行（`2 failed, 118 passed in 812.34s`）里的失败数是 pytest **自己**算的；
+    我们解析出的 FAILED 行数是**另算**的。两者必须一致，否则说明
+    「日志被截断」或「失败行格式不认识」⇒ 失败集合不完整 ⇒ 对差出的
+    「净新增 0」是假的。
+
+    方向一（汇总行说 2 个、日志里只有 1 个）：日志被截断。
+    方向二（汇总行说 1 个、日志里有 2 个）：有失败行没被认出来。
+    """
+    log = "\n".join(
+        [
+            f"{_TIMESTAMPED}FAILED app/tests/unit/test_x.py::test_y - assert 1 == 2",
+            f"{_TIMESTAMPED}2 failed, 118 passed in 812.34s",
+            f"{_TIMESTAMPED}UNIT_SHARD_DONE shard=0 status=1",
+        ]
+    )
+
+    assessment = assessJob(_job(), log)
+
+    assert assessment.isUsable is False
+    assert assessment.unusableReason is not None
+    assert "不一致" in assessment.unusableReason
+
+
+def test_assessJob_rejects_summary_failure_count_overflow() -> None:
+    """反向不一致（汇总行说 1 个、日志里有 2 个 FAILED 行）同样要拦下。"""
+    log = "\n".join(
+        [
+            f"{_TIMESTAMPED}FAILED app/tests/unit/test_x.py::test_y - assert 1 == 2",
+            f"{_TIMESTAMPED}FAILED app/tests/unit/test_z.py::test_w - assert 3 == 4",
+            f"{_TIMESTAMPED}1 failed, 118 passed in 812.34s",
+            f"{_TIMESTAMPED}UNIT_SHARD_DONE shard=0 status=1",
+        ]
+    )
+
+    assessment = assessJob(_job(), log)
+
+    assert assessment.isUsable is False
+    assert assessment.unusableReason is not None
+    assert "不一致" in assessment.unusableReason
+
+
+def test_assessJob_accepts_summary_failure_count_match() -> None:
+    """反向守卫：汇总行与失败明细**一致**时不得误拦（否则会白卡合并）。"""
+    log = "\n".join(
+        [
+            f"{_TIMESTAMPED}FAILED app/tests/unit/test_x.py::test_y - assert 1 == 2",
+            f"{_TIMESTAMPED}FAILED app/tests/unit/test_z.py::test_w - assert 3 == 4",
+            f"{_TIMESTAMPED}2 failed, 118 passed in 812.34s",
+            f"{_TIMESTAMPED}UNIT_SHARD_DONE shard=0 status=1",
+        ]
+    )
+
+    assessment = assessJob(_job(), log)
+
+    assert assessment.isUsable is True
+    assert assessment.unusableReason is None
+
+
+def test_assessJob_skips_count_check_when_log_has_errors() -> None:
+    """汇总行里带 error 数时**不做**失败数交叉核对（error 不计入 failed）。
+
+    pytest 的「1 failed, 1 error」里 error 是收集期/拆解期错误，它的用例 ID
+    会出现在 `ERROR` 行而非 `FAILED` 行 ⇒ 拿 failed 数去比「FAILED+ERROR 的总数」
+    必然对不上 ⇒ 会误拦真实 run ⇒ 只在**没有 error** 时才做这项核对。
+    """
+    log = "\n".join(
+        [
+            f"{_TIMESTAMPED}FAILED app/tests/unit/test_x.py::test_y - assert 1 == 2",
+            f"{_TIMESTAMPED}ERROR app/tests/unit/test_broken.py - ImportError",
+            f"{_TIMESTAMPED}1 failed, 1 error, 118 passed in 812.34s",
+            f"{_TIMESTAMPED}UNIT_SHARD_DONE shard=0 status=1",
+        ]
+    )
+
+    assessment = assessJob(_job(), log)
+
+    assert assessment.isUsable is True
+    assert assessment.unusableReason is None
+
+
 def test_assessJob_flags_failure_without_detail() -> None:
     """真红但一条 FAILED 行都没有 ⇒ 失败集合是**空的** ⇒ 必须判为不可用。
 
@@ -441,7 +573,7 @@ def test_verdict_is_blocked_when_new_failures_appear() -> None:
     jobs = [_job(jobId=1, name="Backend / unit shard 0", conclusion="failure")]
     baseFailures, baseAssessments = collectRunFailures(jobs, {1: _RED_LOG})
     prFailures, prAssessments = collectRunFailures(
-        jobs, {1: _RED_LOG + "\nFAILED app/tests/unit/test_new.py::test_x"}
+        jobs, {1: _redLogWithExtra()}
     )
 
     verdict = verdictFor(diffFailureSets(baseFailures, prFailures), baseAssessments, prAssessments)
@@ -594,6 +726,27 @@ def test_verdict_is_mergeable_when_run_contains_frontend_job() -> None:
 # --------------------------------------------------------------------------
 # 完成标记与 job 名必须对得上
 # --------------------------------------------------------------------------
+
+
+def test_assessJob_rejects_invalid_shard_sentinel() -> None:
+    """完成标记 `shard=-1` ⇒ CI 脚本判定**分片号非法** ⇒ 该 job 一个用例都没跑。
+
+    ⇒ 它的失败集合是空的 ⇒ 参与对差只会掩盖真实失败 ⇒ 必须判为不可用。
+    （哨兵值是 CI 脚本与工具之间的约定：见 `.github/workflows/ci.yml` 的
+    `shard_index=-1`；旧实现打 0 ⇒ 这里会被误判成「标记与 job 不符」，
+    真实原因「分片号非法」被掩盖 ⇒ 操作者会去查错方向。）
+    """
+    logText = "\n".join(
+        [
+            f"{_TIMESTAMPED}UNIT_SHARD_DONE shard=-1 status=4",
+        ]
+    )
+
+    assessment = assessJob(_job(), logText)
+
+    assert assessment.isUsable is False
+    assert assessment.unusableReason is not None
+    assert "分片号非法" in assessment.unusableReason
 
 
 def test_assessJob_rejects_marker_with_mismatched_family() -> None:
@@ -852,6 +1005,23 @@ def _stubCiSurface(
     )
 
 
+def _stubHeadFreshness(
+    monkeypatch: pytest.MonkeyPatch,
+    isFresh: bool = True,
+    reason: str | None = None,
+    note: str | None = None,
+) -> None:
+    """把「PR run 新鲜度判定」换成固定结果（避免真调 gh 查分支 head）。
+
+    默认新鲜 ⇒ CLI 用例只需关注失败集合对差本身。
+    """
+    monkeypatch.setattr(
+        ci_failure_set,
+        "resolveHeadFreshness",
+        lambda repo, runId, runSha: HeadFreshness(isFresh=isFresh, reason=reason, note=note),
+    )
+
+
 def _stubGithub(
     monkeypatch: pytest.MonkeyPatch,
     baseResult: tuple[frozenset[str], tuple[JobAssessment, ...]],
@@ -859,6 +1029,7 @@ def _stubGithub(
 ) -> None:
     """把 `collectRunFromGithub` 换成固定返回值（避免真调 gh）。"""
     _stubCiSurface(monkeypatch, ())
+    _stubHeadFreshness(monkeypatch)
 
     def fake(repo: str, runId: str):
         return baseResult if runId == "111" else prResult
@@ -887,7 +1058,7 @@ def test_main_returns_one_when_new_failures(monkeypatch: pytest.MonkeyPatch) -> 
     baseResult = collectRunFailures(baseJobs, {1: _RED_LOG})
     prJobs = [_job(jobId=1, name="Backend / unit shard 0", conclusion="failure")]
     prResult = collectRunFailures(
-        prJobs, {1: _RED_LOG + "\nFAILED app/tests/unit/test_new.py::test_x"}
+        prJobs, {1: _redLogWithExtra()}
     )
     _stubGithub(monkeypatch, baseResult, prResult)
 
@@ -1056,3 +1227,66 @@ def test_main_returns_six_when_changed_files_cannot_be_fetched(monkeypatch: pyte
     exitCode = ci_failure_set.main(["--repo", "sunql/QA", "--base-run", "111", "--pr-run", "222"])
 
     assert exitCode == 6
+
+
+# --------------------------------------------------------------------------
+# PR run 新鲜度（run 跑的必须就是 PR 当前那版代码）
+# --------------------------------------------------------------------------
+
+
+def test_main_returns_three_when_pr_run_is_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR run **已过期**（PR 又推了新 commit）⇒ 对差的是旧代码 ⇒ 退出码 3。
+
+    这是 2026-11-03 代码审查 M-1 指出的漏洞：工具把 `surface.prSha` 印在报告里
+    却**从不**与 PR 当前 head 比较 ⇒ 拿上一次 push 的 run 对差会得出「净新增 0」，
+    而 GitHub 上最新那次 CI 可能已经红了、没人看。
+    """
+    result = _oneRedShard()
+    _stubGithub(monkeypatch, result, result)
+    _stubHeadFreshness(
+        monkeypatch,
+        isFresh=False,
+        reason="PR run 222 跑的是 aaaa…，而分支当前 head 已是 bbbb… ⇒ run 已过期",
+    )
+
+    exitCode = ci_failure_set.main(["--repo", "sunql/QA", "--base-run", "111", "--pr-run", "222"])
+
+    assert exitCode == 3
+
+
+def test_main_surfaces_fork_note_in_report(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """fork PR 判不出新鲜度 ⇒ 不拦，但**必须在报告里明示**（唯一一处「判不出来不拦」）。"""
+    result = _oneRedShard()
+    _stubGithub(monkeypatch, result, result)
+    _stubHeadFreshness(
+        monkeypatch,
+        isFresh=True,
+        note="PR 来自 fork 仓库 ⇒ 无法自动核对 run 是否最新 ⇒ 请人工确认",
+    )
+
+    exitCode = ci_failure_set.main(["--repo", "sunql/QA", "--base-run", "111", "--pr-run", "222"])
+    report = capsys.readouterr().out
+
+    assert exitCode == 0
+    assert "请人工确认" in report
+
+
+def test_main_surfaces_allow_ci_changes_note(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """用了 `--allow-ci-changes` ⇒ 报告里必须留痕（豁免不是静默的）。"""
+    result = _oneRedShard()
+    _stubGithub(monkeypatch, result, result)
+    _stubCiSurface(monkeypatch, (".github/workflows/ci.yml",))
+
+    exitCode = ci_failure_set.main(
+        ["--repo", "sunql/QA", "--base-run", "111", "--pr-run", "222", "--allow-ci-changes"]
+    )
+    report = capsys.readouterr().out
+
+    assert exitCode == 0
+    assert "allow-ci-changes" in report

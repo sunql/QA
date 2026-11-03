@@ -17,8 +17,9 @@ import json
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 
-from app.utils.ci_text import redactSecrets, sanitizeForReport
+from app.utils.ci_text import sanitizeForReport
 
 # gh 单次调用的超时上限（秒）。没有它，gh 在没凭据时会挂住直到 CI 超时。
 _GH_TIMEOUT_SEC = 300
@@ -32,6 +33,23 @@ _MAX_STDERR_LEN = 2048
 _REPO_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 _RUN_ID_PATTERN = re.compile(r"^[0-9]+$")
 _SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+# 分支名（会被拼进 `repos/{repo}/commits/{branch}` 路径）：
+# 只允许 GitHub 分支名的常规字符 ⇒ 排除 `..`（路径穿越）与空格/换行。
+_BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._/-]{0,254}$")
+
+# GitHub compare API 的 `files` 数组上限：**最多 300 项**。
+# `--paginate` 只对 commits 分页，**不会**补齐 files ⇒ 命中上限必须报错，
+# 否则「PR 改了多少文件」这件事会被**静默截断** ⇒ CI 相关面改动可能隐身。
+_COMPARE_FILES_LIMIT = 300
+
+
+@dataclass(frozen=True)
+class RunHeadInfo:
+    """一轮 run 的 head 信息。"""
+
+    headSha: str
+    headBranch: str
+    headRepo: str
 
 
 def _runGh(args: list[str]) -> str:
@@ -53,7 +71,7 @@ def _runGh(args: list[str]) -> str:
         env=env,
     )
     if completed.returncode != 0:
-        stderr = redactSecrets(sanitizeForReport(completed.stderr.strip()))[:_MAX_STDERR_LEN]
+        stderr = sanitizeForReport(completed.stderr.strip())[:_MAX_STDERR_LEN]
         raise RuntimeError(f"gh {' '.join(args)} 失败（退出码 {completed.returncode}）：{stderr}")
     return completed.stdout
 
@@ -118,10 +136,16 @@ def fetchJobLog(repo: str, jobId: int) -> str:
 
     `--allow-escape-sequences` 是必需的：GH Actions 的日志含终端转义序列，
     不加这个 flag `gh api` 会直接报错拒绝输出。
+
+    ⚠️ `jobId` **必须自己校验**（它会被拼进 API 路径）：
+    `"../../runs/12345"` 会拼出 `repos/{repo}/actions/jobs/../../runs/12345/logs`
+    ⇒ 服务端规范化后打到**另一个端点**（与 `--repo ../..` 同一族）。
     """
     invalidReason = validateRepo(repo)
     if invalidReason is not None:
         raise ValueError(invalidReason)
+    if isinstance(jobId, bool) or not isinstance(jobId, int) or jobId <= 0:
+        raise ValueError(f"job id 非法（应为正整数）：{sanitizeForReport(str(jobId))}")
     return _runGh(["api", f"repos/{repo}/actions/jobs/{jobId}/logs", "--allow-escape-sequences"])
 
 
@@ -142,6 +166,45 @@ def fetchRunHeadSha(repo: str, runId: str) -> str:
     return sha
 
 
+def fetchRunHeadInfo(repo: str, runId: str) -> RunHeadInfo:
+    """取一轮 run 的 head commit / 分支名 / 分支所在仓库。
+
+    `head_repository.full_name` 用来区分「同仓 PR」与「fork PR」：
+    fork 的分支不在本仓库 ⇒ 没法查它的当前 head ⇒ 新鲜度判定要另作处理。
+    """
+    invalidReason = validateRepo(repo) or validateRunId(runId)
+    if invalidReason is not None:
+        raise ValueError(invalidReason)
+    payload = _runGh(["api", f"repos/{repo}/actions/runs/{runId}"])
+    data = json.loads(payload)
+    headSha = str(data.get("head_sha") or "")
+    if not _SHA_PATTERN.match(headSha):
+        raise ValueError(f"run {runId} 的 head_sha 形态异常：{sanitizeForReport(headSha)}")
+    headBranch = str(data.get("head_branch") or "")
+    headRepoData = data.get("head_repository") or {}
+    headRepo = str(headRepoData.get("full_name") or "") if isinstance(headRepoData, dict) else ""
+    return RunHeadInfo(headSha=headSha, headBranch=headBranch, headRepo=headRepo)
+
+
+def fetchBranchHeadSha(repo: str, branch: str) -> str:
+    """取某个分支**当前**的 head commit sha。
+
+    ⚠️ `branch` 会被拼进 API 路径 ⇒ 必须校验（分支名来自 GitHub，
+    对 fork PR 而言是**外部可控**的 ⇒ 不能当可信输入）。
+    """
+    invalidReason = validateRepo(repo)
+    if invalidReason is not None:
+        raise ValueError(invalidReason)
+    if not _BRANCH_PATTERN.match(branch) or ".." in branch:
+        raise ValueError(f"分支名非法：{sanitizeForReport(branch)}")
+    payload = _runGh(["api", f"repos/{repo}/commits/{branch}"])
+    data = json.loads(payload)
+    sha = str(data.get("sha") or "")
+    if not _SHA_PATTERN.match(sha):
+        raise ValueError(f"分支 {branch} 的 head sha 形态异常：{sanitizeForReport(sha)}")
+    return sha
+
+
 def fetchChangedFiles(repo: str, baseSha: str, headSha: str) -> tuple[str, ...]:
     """取两个 commit 之间的改动文件清单。"""
     invalidReason = validateRepo(repo)
@@ -157,7 +220,13 @@ def fetchChangedFiles(repo: str, baseSha: str, headSha: str) -> tuple[str, ...]:
 
 
 def _parseChangedFiles(payload: str) -> tuple[str, ...]:
-    """从 compare 响应里取出改动文件名（合并分页）。"""
+    """从 compare 响应里取出改动文件名（合并分页）。
+
+    ⚠️ compare API 的 `files` 数组**最多 300 项**（`--paginate` 只对 commits
+    分页，**不会**补齐 files）⇒ 命中上限必须**报错**，不能当成「就这些文件」
+    ⇒ 否则一个改了 300+ 文件的大 PR 里混着 `.github/workflows/ci.yml`
+    也会被漏掉 ⇒ CI 相关面守卫放行 ⇒ 假「净新增 0」。
+    """
     parsed = json.loads(payload)
     pages = parsed if isinstance(parsed, list) else [parsed]
     names: list[str] = []
@@ -167,4 +236,9 @@ def _parseChangedFiles(payload: str) -> tuple[str, ...]:
         for item in page.get("files") or []:
             if isinstance(item, dict) and "filename" in item:
                 names.append(str(item["filename"]))
+    if len(names) >= _COMPARE_FILES_LIMIT:
+        raise ValueError(
+            f"改动文件数达到 compare API 的上限（{_COMPARE_FILES_LIMIT}）⇒ 清单被截断，"
+            "无法判定 PR 是否改动了 CI 相关面 ⇒ 须人工确认"
+        )
     return tuple(names)

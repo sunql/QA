@@ -51,6 +51,55 @@ def test_detectCiSurfaceChanges_ignores_unrelated_files() -> None:
     assert ci_surface.detectCiSurfaceChanges(("backend/app/services/chat_service.py",)) == ()
 
 
+def test_detectCiSurfaceChanges_flags_conftest_at_any_depth() -> None:
+    """**任何深度**的 `conftest.py` 都必须算 CI 相关面。
+
+    旧实现只枚举了 `backend/conftest.py` 与 `backend/app/tests/**/conftest.py`
+    ⇒ 漏掉 `backend/app/conftest.py` —— 而 pytest 会从 rootdir 往下**逐层**
+    收集 conftest ⇒ 那一层的 `pytest_collection_modifyitems` 对
+    `backend/app/tests/**` 全部生效 ⇒ PR 在那里剔除失败用例
+    ⇒ 失败集合与基线完全相同 ⇒ 假「净新增 0」⇒ 而 CI 还全绿。
+
+    ⇒ 判定必须改成**正向规则**（basename 是 conftest.py 就算），
+    而不是枚举「今天有哪几个 conftest」。
+    """
+    changed = (
+        "backend/app/conftest.py",
+        "backend/app/tests/unit/conftest.py",
+        "backend/conftest.py",
+        "conftest.py",
+    )
+
+    flagged = ci_surface.detectCiSurfaceChanges(changed)
+
+    assert set(flagged) == set(changed)
+
+
+def test_detectCiSurfaceChanges_flags_pytest_config_at_any_depth() -> None:
+    """`pytest.ini` / `setup.cfg` / `tox.ini` 同样按**任意深度**判定。
+
+    这些文件能改 `testpaths` / `addopts`（如加 `--deselect`）⇒ 失败用例
+    根本不产生 FAILED 行 ⇒ 与 conftest 同族。
+    """
+    changed = (
+        "backend/pytest.ini",
+        "backend/app/tests/unit/pytest.ini",
+        "backend/app/tests/integration/setup.cfg",
+        "backend/tox.ini",
+    )
+
+    flagged = ci_surface.detectCiSurfaceChanges(changed)
+
+    assert set(flagged) == set(changed)
+
+
+def test_detectCiSurfaceChanges_flags_uv_lock() -> None:
+    """`backend/uv.lock` 改了依赖版本 ⇒ 测试环境变了 ⇒ 失败集合不再可比。"""
+    flagged = ci_surface.detectCiSurfaceChanges(("backend/uv.lock",))
+
+    assert flagged == ("backend/uv.lock",)
+
+
 def test_resolveCiSurface_returns_error_instead_of_raising(monkeypatch) -> None:
     """拉取失败**不能抛异常** —— 失败要以 `error` 字段返回。
 

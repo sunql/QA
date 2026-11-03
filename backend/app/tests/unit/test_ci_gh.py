@@ -46,6 +46,24 @@ def test_fetchJobLog_rejects_malformed_repo() -> None:
         ci_gh.fetchJobLog("bad;repo", 1)
 
 
+def test_fetchJobLog_rejects_non_integer_job_id() -> None:
+    """`jobId` 会被拼进 API 路径 ⇒ 必须自己校验（不能只在 CLI 校验）。
+
+    `fetchJobLog` 的模块纪律写得很清楚：「每个会拼 URL 的函数自己校验」，
+    但 `jobId` 之前是直接插值的 ⇒ `"../../runs/12345"` 能拼出
+    `repos/{repo}/actions/jobs/../../runs/12345/logs`
+    ⇒ 服务端规范化后打到**另一个端点**（与 `--repo ../..` 同一族）。
+    """
+    with pytest.raises(ValueError):
+        ci_gh.fetchJobLog("sunql/QA", "../../runs/12345")
+
+
+def test_fetchJobLog_rejects_non_positive_job_id() -> None:
+    for badId in (0, -1):
+        with pytest.raises(ValueError):
+            ci_gh.fetchJobLog("sunql/QA", badId)
+
+
 def test_fetchRunHeadSha_rejects_malformed_sha() -> None:
     """run 返回的 head_sha 形态异常 ⇒ 拒绝（它会被拼进 compare 路径）。"""
 
@@ -108,6 +126,30 @@ def test_parseChangedFiles_merges_paginated_pages() -> None:
     )
 
     assert ci_gh._parseChangedFiles(payload) == ("a.py", "b.py")
+
+
+def test_parseChangedFiles_rejects_truncated_file_list() -> None:
+    """compare API 最多返回 **300** 个文件 ⇒ 静默截断会让 CI 相关面改动隐身。
+
+    GitHub 的 `repos/{repo}/compare/{base}...{head}` 响应里 `files` 数组
+    **最多 300 项**（`--paginate` 只对 commits 分页，**不会**补齐 files）
+    ⇒ 一个改了 300+ 文件的大 PR 里若混着一个 `.github/workflows/ci.yml`
+    或 `conftest.py`，我们只会看到前 300 个 ⇒ 守卫放行 ⇒ 假「净新增 0」。
+
+    ⇒ 命中上限必须**报错**（⇒ 调用方走「判定不出来 ⇒ 保守拦下」），
+    不能当成「就这些文件」。
+    """
+    payload = json.dumps({"files": [{"filename": f"f{i}.py"} for i in range(300)]})
+
+    with pytest.raises(ValueError):
+        ci_gh._parseChangedFiles(payload)
+
+
+def test_parseChangedFiles_accepts_file_list_below_the_cap() -> None:
+    """反向守卫：299 个文件是正常情况，不得误拦。"""
+    payload = json.dumps({"files": [{"filename": f"f{i}.py"} for i in range(299)]})
+
+    assert len(ci_gh._parseChangedFiles(payload)) == 299
 
 
 # --------------------------------------------------------------------------

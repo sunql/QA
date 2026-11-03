@@ -666,7 +666,273 @@ $ python3 /tmp/qa_pytest_shim/run_ci_tests.py \
 
 ## 8. 合并与发布记录
 
-（待填：合并判据实测、CI 墙钟、完成标记纪律、合并与发布）
+### 8.1 两次 run
+
+| | run id | head | 结论 | 墙钟 |
+|---|---|---|---|---|
+| 基线（main） | `41410777033` | `d24c462e` | failure（**已知红基线**，~139 条） | 49 分 49 秒 |
+| PR | `41615791158` | `91c08e14` | failure（红基线 + 本批判定） | 44 分 08 秒 |
+
+两次 run 的 **job 名集合完全相同**（Frontend + unit shard 0…3 + integration shard 0…3，共 9 个）
+⇒ 覆盖等价判据通过。
+
+### 8.2 合并判据实测：**工具拒判 + 手工对差 + 基线复跑**
+
+**① 工具直接跑 ⇒ 拒判（`UNUSABLE_JOBS`，退出码 2）**
+
+```
+结论：不可合并（UNUSABLE_JOBS）
+基线 run 41410777033（head d24c462e4b9e14b09c1661583cae7f3564b12f04）：失败 17 条
+PR    run 41615791158（head 91c08e14408718d027804a246c54f20982c1360e）：失败 139 条
+净新增 122 条 / 净丢失 0 条
+原因：存在不可用 job（失败集合不可信 ⇒ 必须复跑后重新对差）：
+  Backend / integration shard 2(job=125871813294): 日志里缺少分片完成标记（形如 `X_SHARD_DONE shard=N status=<退出码>`）⇒ 该 job 没跑完，失败集合不可用
+  …
+提示：已用 --allow-ci-changes 豁免「CI 相关面被改动」的守卫（PR 改了 workflow / conftest / pytest 配置 ⇒ 失败集合原则上不可比）
+```
+
+⚠️ **工具读的是 run 的「当前 attempt」** ⇒ 两侧都复跑之后，上面的数字会变：
+attempt 1 对 attempt 1 时是「PR 140 条 / 净新增 123 条」，
+复跑后是「PR 139 条 / 净新增 122 条」（PR attempt 1 的 integration 是 123 条、attempt 2 是 122 条）。
+⇒ **「净新增」的绝对值随 attempt 变，但「工具拒判」这个结论不变** ——
+因为基线侧 integration 的 4 个分片**永远**缺完成标记（main 的 `ci.yml` 早于本协议）。
+
+**这不是工具坏了，是它按设计正确地拒绝了**：基线的 `ci.yml`（`d24c462e`）**还没有**
+`INTEGRATION_SHARD_DONE` 标记 ⇒ 4 个 integration 分片在基线侧全部「不可用」⇒ 它们的失败集合**不计入**
+⇒ 「基线 17 条（只有 unit）vs PR 139 条」必然对出 122 条假的「净新增」。
+⇒ **基线早于完成标记协议 ⇒ 失败集合不可比 ⇒ 必须复跑基线**（工具的提示原文：「必须复跑后重新对差」）。
+⚠️ 但**复跑基线也解决不了**（复跑沿用同一个 commit 的同一份 workflow ⇒ 还是没有标记）——
+真正能解决的只有「以**合并后**的 main run 为基线」（届时两侧都有标记），
+或按「后续项」第 5 条把基线定义改成「main 的最新一次 run」。
+
+**② 手工对差（绕开标记限制，直接抽两侧 integration 分片的失败 ID）**
+
+| | 基线（attempt 1） | PR |
+|---|---|---|
+| integration shard 0 | 17 | 17 |
+| integration shard 1 | 44 | 44 |
+| integration shard 2 | 26 | 26 |
+| integration shard 3 | **35** | **36** |
+| 合计 | **122** | **123** |
+| unit 四个分片 | 9 / 4 / 1 / 3 = **17** | 9 / 4 / 1 / 3 = **17**（净新增 0，净丢失 0） |
+
+⇒ 唯一的差异落在 **integration shard 3 的 1 条**：
+`app/tests/integration/test_reconcile_milvus_id_mapping.py::test_backfill_is_idempotent`
+（`assert written2 == 0` 实得 `1`）。
+
+**③ 归因：这 1 条与本 PR 无关（结构上不可能 + 复跑实证）**
+
+- **结构上不可能**：本 PR 在 `backend/app` 下的全部改动 = **17 个文件**：
+  **9 个工具模块**（8 个新增 + `ci_shard.py` 修改）＋ **8 个 unit 守卫文件**（7 个新增 + `test_ci_shard.py` 修改）
+  （`git diff --name-status d24c462e HEAD -- backend/app` 只有 `A` 与 2 个 `M`，
+  **没有任何 integration 测试文件、没有任何运行时业务代码被改**）。
+- **分片成分逐片相同**：CI 脚本打的 `Shard N: M test files` 两侧逐片比对 ——
+  integration **79 / 79 / 78 / 78，两侧完全一致**（unit 因新增 7 个守卫文件而 +1/+4/+1/+1，符合预期）。
+  ⇒ integration shard 3 跑的是**同一批 78 个文件、同一 pytest 参数**。
+- **不是只有文件数相同，用例总数与执行顺序也逐片相同**（把「同成分」从推断升级为实测）：
+
+  | integration 分片 | 侧 | 文件数 | pytest 收尾（failed / passed / skipped / warnings / errors） | 已收集用例数 |
+  |---|---|---|---|---|
+  | shard 0 | 基线 | 79 | 17 / 707 / 18 / 1174 / — | 742 |
+  | shard 0 | PR | 79 | 17 / 707 / 18 / 1174 / — | 742 |
+  | shard 1 | 基线 | 79 | 37 / 606 / — / 490 / 7 | 643 |
+  | shard 1 | PR | 79 | 37 / 606 / — / 480 / 7 | 643 |
+  | shard 2 | 基线 | 78 | 22 / 683 / 2 / 503 / 4 | 707 |
+  | shard 2 | PR | 78 | 22 / 683 / 2 / 503 / 4 | 707 |
+  | shard 3 | 基线 | 78 | 33 / 601 / 11 / 1365 / 2 | 645 |
+  | shard 3 | PR | 78 | **34** / **600** / 11 / 1375 / 2 | 645 |
+
+  （已收集用例数 = failed + passed + skipped；`errors` 是**收集期错误**，不计入已收集数。）
+  ⇒ shard 3 两侧**已收集用例数完全相同**（645），恰好一条从 passed 翻成 failed。
+  ⚠️ warnings 数在运行间会漂：shard 1 基线 attempt 1 = 490、基线复跑 = 480、PR = 480；
+  shard 3 基线 = 1365、PR = 1375 ⇒ **警告计数不能当指纹用**。
+- **执行顺序逐条同位**：把两侧 shard 3 日志里 pytest 的 `short test summary` 按出现顺序抽出来对齐 ——
+  去掉 warnings 摘要里的非用例行后，基线 **35** 条真实用例 ID、PR **36** 条，
+  **两侧逐条同位**，唯一插入项就是 PR 侧那条 Milvus 用例，
+  且它落在**与基线相同的序号位置**（基线第 18 条之后）⇒
+  **不是「分片排序漂移」**（排序漂移会让整条列表错位，也会让 shard 之间的用例归属漂移）。
+- **失败机理本身是状态/时序敏感（根因已钉死）**：`backfill()` 对每行先 `collection.delete(id == …)`
+  再 `collection.insert(...)` + `flush()`；**delete 之后没有 flush/release**。
+  Milvus 2.x 的删除对**已加载视图**不可见（`flush` 只保证落盘，不保证查询端已应用 delete buffer）——
+  仓库自己的实测记录（MEMORY `qa-system-m0-p04-sync-gap-fix.md`）：
+  `DELETE → [wait 8s] stats 仍 1 → release + load collection → query → data: [] ← 真删了`。
+  ⇒ 第二次扫描若仍能看到那条已删但可见性未收敛的旧行（`external_id` 为空），
+  就会再写 1 行 ⇒ `written2 == 1`。**这与本 PR 改的东西完全无关**。
+- **仓库早就把这条用例记成已知偶发**（MEMORY `qa-system-milvus-3-collection-refactor.md`，2026-09-29，**早于本 PR**）：
+  「M7 backfill 后 `test_backfill_is_idempotent` 在全套件跑时偶发失败（delete + reinsert 可见性延迟），
+  单独跑 PASS。**不是回归**，是已知 Milvus 2.x 限制。」
+  ⇒ 本次是**已知问题再次显形**，不是本 PR 引入的新失败。
+- **复跑实证**：`gh run rerun 41410777033 --failed`（在 **main 的代码与 workflow** 上复跑）⇒ 结果见 §8.2④。
+
+**④ 基线复跑（`gh run rerun 41410777033 --failed`，在 main 的代码与 workflow 上重跑）**
+
+复跑的是**同一个 run 的 attempt 2**（GitHub 重跑沿用原 commit `d24c462e` 与原 workflow 文件）⇒
+**基线侧依然没有 `INTEGRATION_SHARD_DONE` 标记** ⇒ **工具仍然拒判**（这一步的结论不变，
+它证明的是「基线侧的结构性限制不会因为复跑而消失」）。
+
+手工对差（job id 显式钉住 attempt-2 的 8 个分片）：
+
+| | 基线 attempt 1 | 基线 attempt 2（复跑） | PR attempt 1 |
+|---|---|---|---|
+| integration shard 0 | 17 | **17** | 17 |
+| integration shard 1 | 44 | **44** | 44 |
+| integration shard 2 | 26 | **26** | 26 |
+| integration shard 3 | 35 | **35** | **36** |
+| integration 合计 | 122 | **122** | 123 |
+| unit 四个分片 | 17 | **17** | 17 |
+
+**基线复跑逐片、逐数、逐汇总行地复现了 attempt 1**（shard 0 `17 failed, 707 passed, 18 skipped`、
+shard 1 `37 failed, 606 passed, 480 warnings, 7 errors`、shard 2 `22 failed, 683 passed, 2 skipped`、
+shard 3 `33 failed, 601 passed, 11 skipped, 1365 warnings, 2 errors`）⇒
+**基线是稳定可复现的红基线**，不是「某次抽风的基线」。
+⇒ 复跑后重新对差：**净新增仍然只有那 1 条 Milvus 用例，净丢失 0**。
+
+**⑤ PR 侧对称复跑（`gh run rerun 41615791158 --failed`）—— 决定性实验**
+
+在 **PR 自己的代码与 workflow** 上重跑一遍（attempt 2）。若该用例再次失败 ⇒ 可能是本 PR 引入；
+若这次通过 ⇒ **同一份代码两次结果不同 ⇒ 必是非确定性偶发**。
+
+| | PR attempt 1 | PR attempt 2（复跑） |
+|---|---|---|
+| integration shard 0 | 17 | 17 |
+| integration shard 1 | 44 | 44 |
+| integration shard 2 | 26 | 26 |
+| integration shard 3 | **36** | **35** |
+| integration 合计 | 123 | 122 |
+| unit 合计 | 17 | 17 |
+
+⇒ **shard 3 的失败数从 36 掉回 35**，那条 Milvus 用例**这次通过了**。
+⇒ **同一 commit（`91c08e14`）、同一 workflow、同一套分片，两次运行结果不同**
+⇒ **该用例是非确定性偶发，不是本 PR 引入的回归**。
+
+**配对复跑对差（两次复跑条件相同：基线 attempt 2 vs PR attempt 2）**
+
+| | 基线 attempt 2 | PR attempt 2 | 净新增 | 净丢失 |
+|---|---|---|---|---|
+| integration（4 分片合计） | 122 | 122 | **0** | **0** |
+| unit（4 分片合计） | 17 | 17 | **0** | **0** |
+
+⇒ **合并判据（失败集合对差，净新增为空）在配对条件下成立。**
+
+**⑥ 工具本体的判定（配对复跑，仍旧拒判）**
+
+```
+结论：不可合并（UNUSABLE_JOBS）
+基线 run 41410777033（head d24c462e…）：失败 17 条
+PR    run 41615791158（head 91c08e14…）：失败 139 条
+净新增 122 条 / 净丢失 0 条
+原因：存在不可用 job（失败集合不可信 ⇒ 必须复跑后重新对差）：
+  Backend / integration shard 2(job=125871813294): 日志里缺少分片完成标记…⇒ 该 job 没跑完，失败集合不可用
+```
+
+**「净新增 122 条」是伪数**：基线侧的 4 个 integration 分片被判「不可用」⇒ 它们的 122 条失败
+**不计入** ⇒ 只剩基线的 17 条 unit 失败 vs PR 的 139 条 ⇒ 必然对出 122 条假的「净新增」。
+⇒ **工具的判定是正确的**：它拒绝在「基线侧失败集合不可信」时输出「可合并」。
+⇒ 工具自己的逐 job 分解同时印证了 §8.2⑤：**PR 侧 8 个分片全部「可用」**，
+基线侧只有 unit 的 4 个「可用」（integration 4 个不可用）⇒ **不可比性只来自基线，不来自 PR**。
+
+⚠️ **本 PR 的合并授权不能由工具给出**（基线早于完成标记协议 ⇒ 结构上不可比），
+只能由「配对复跑 + 手工对差」给出 —— 这正是 §7.3 威胁模型里说的：
+**工具的退出码不是授权，授权必须由保护分支 + 必需状态检查 + CODEOWNERS 承担**，
+而本仓库**这三样目前都没有**（见 §8.5）。
+
+### 8.3 CI 墙钟与超时上限
+
+| job | 基线 | PR |
+|---|---|---|
+| Frontend / typecheck + coverage | 10 分 39 秒 | 8 分 47 秒 |
+| unit shard 0 | 15 分 44 秒 | 16 分 28 秒 |
+| unit shard 1 | 23 分 51 秒 | 13 分 37 秒 |
+| unit shard 2 | 12 分 42 秒 | 10 分 54 秒 |
+| unit shard 3 | 15 分 20 秒 | 20 分 18 秒 |
+| integration shard 0 | 31 分 18 秒 | 36 分 58 秒 |
+| integration shard 1 | 18 分 48 秒 | 16 分 54 秒 |
+| integration shard 2 | **49 分 29 秒** | 43 分 36 秒 |
+| integration shard 3 | 29 分 55 秒 | 26 分 21 秒 |
+| **整轮** | **49 分 49 秒** | **44 分 08 秒** |
+
+⇒ integration shard 2 的实测最坏值 **49 分 29 秒** 对旧上限 **60 分钟**，余量只有 **1.21 倍**
+（runner 抖动 12% 就判 `cancelled` ⇒ 失败集合为空 ⇒ 又一次假「净新增 0」）。
+本批把 integration 的 `timeout-minutes` 从 60 提到 **90**（余量 ~1.8 倍），与 unit 分片
+（40 分钟上限 / 最坏 23 分 51 秒 / 余量 1.7 倍）同一量级 ⇒ **有实测支撑，不是拍脑袋**。
+
+**复跑两轮的墙钟（job 起止时刻，含 checkout + migrate）**
+
+| job | 基线 attempt 2 | PR attempt 2 |
+|---|---|---|
+| Frontend / typecheck + coverage | —（未重跑，success 不重跑） | —（未重跑） |
+| unit shard 0 | 15 分 10 秒 | 14 分 15 秒 |
+| unit shard 1 | 10 分 17 秒 | 13 分 38 秒 |
+| unit shard 2 | 13 分 34 秒 | 13 分 23 秒 |
+| unit shard 3 | 15 分 33 秒 | 15 分 11 秒 |
+| integration shard 0 | 31 分 11 秒 | 36 分 32 秒 |
+| integration shard 1 | 15 分 50 秒 | 18 分 30 秒 |
+| integration shard 2 | 44 分 30 秒 | **49 分 40 秒** |
+| integration shard 3 | 27 分 02 秒 | 44 分 38 秒 |
+| **整轮** | **44 分 31 秒** | **49 分 41 秒** |
+
+⇒ 四轮实测的 integration 最坏值 = **49 分 40 秒**（PR attempt 2 的 shard 2）。
+⇒ 对旧上限 60 分钟，余量仍是 **1.21 倍** ⇒ **90 分钟的新上限有第二轮实测支撑**；
+若没有这次扩容，这三个超 44 分钟的分片在并发抢 runner 时随时可能被 `cancelled`。
+
+### 8.4 完成标记纪律（实测）
+
+PR run 的 8 个分片 job **全部**打出了符合协议的完成标记，工具逐 job 判定**全部「可用」**：
+
+| job | 完成标记 | 收尾汇总行 |
+|---|---|---|
+| unit shard 0…3 | `UNIT_SHARD_DONE shard=N status=1` ×4 | 均有 |
+| integration shard 0…3 | `INTEGRATION_SHARD_DONE shard=N status=1` ×4 | 均有 |
+
+- **标记数 = 1**：没有出现「多条标记 ⇒ 疑似伪造」的判定；
+- **标记 shard 号与 job 名一致**（无 `-1` 哨兵 ⇒ 分片号校验通过）；
+- **结论与标记不矛盾**（`conclusion=failure` ⇔ `status=1`）；
+- **汇总行失败数 == 解析出的失败 ID 数**（含 error 的分片按规则**跳过**这项交叉核对 ——
+  shard 3 汇总 `34 failed … 2 errors` ⇒ 失败 ID 36 条 = 34 failed + 2 errors ✅ 自洽）。
+⇒ 协议在本批**首次全量生效**（基线的 integration 侧一个标记都没有）。
+
+### 8.5 合并与发布
+
+**合并判据（唯一口径：失败集合对差，净新增为空才合并）**
+
+| 判据 | 结果 | 依据 |
+|---|---|---|
+| 工具结论 | **不可合并（UNUSABLE_JOBS，退出码 2）** | 基线侧 integration 4 个分片缺完成标记 ⇒ 失败集合不可信 ⇒ 结构上不可比（§8.2⑥） |
+| 配对复跑对差（基线 attempt 2 vs PR attempt 2） | **净新增 0 / 净丢失 0**（integration 122 = 122，unit 17 = 17） | §8.2⑤ |
+| 同一份代码两次运行（PR attempt 1 vs attempt 2） | 差异**随运行翻转** ⇒ 非确定性 | §8.2⑤ |
+| 结构排除 | PR 在 `backend/app` 只动 9 个工具模块 + 8 个 unit 守卫；integration 分片成分/顺序/用例总数逐片相同 | §8.2③ |
+| 根因 | Milvus 删除可见性（`collection.delete()` 后无 flush；仓库早已把该用例记为已知偶发） | §8.2③ |
+
+⇒ **判据结论：净新增 0 ⇒ 允许合并。**
+⚠️ 注意判据的**形式**与**内容**在这里分叉：工具按设计拒绝输出「可合并」，
+而人工对差给出「净新增 0」。本批选后者，理由是**不可比性只来自基线一侧**
+（工具自己的逐 job 分解已经证明 PR 侧 8 个分片全部「可用」），
+且「净新增」那 1 条已被三轮独立证据（结构 / 顺序 / 同码复跑）证明与本 PR 无关。
+
+**发布口径**
+
+- 本批 **零生产 DDL、零生产写操作、不新增 Alembic 迁移**
+  （改动只在 `.github/workflows/ci.yml` + `backend/app/utils/ci_*.py` + unit 守卫 + 文档）
+  ⇒ **合并后不部署**（与 PR #98 / #99 同口径）。
+- 合并方式：**squash merge**（PR #100 → `main`），保证 main 上是单条提交。
+- 合并后：删远程分支 `feat/ci-integration-sharding`（仓库 `delete_branch_on_merge=false` ⇒ 需手工删）。
+
+**⚠️ 合并授权的真实缺口（§7.3 威胁模型的现状核查）**
+
+本次实测仓库配置：
+
+| 机制 | 现状 |
+|---|---|
+| `main` 分支保护 | **无**（`branches/main/protection` → 404 `Branch not protected`） |
+| 必需状态检查 | **无**（`required_status_checks: null`） |
+| `.github/CODEOWNERS` | **不存在**（`contents/.github/CODEOWNERS` → 404） |
+
+⇒ 也就是说：**任何人提一个改 `ci.yml` 的 PR，都可以在没有任何必需检查、无人 review 的情况下被合并**，
+而本批的工具恰恰**无法防住这一手**（§7.3 的结论：日志解析对「能改测试代码的 PR 作者」不是可信边界）。
+⇒ 本批交付的「失败集合对差」目前只是**人可用的判据**，不是**强制闸门**。
+⇒ 落地这三件套是独立立项（见「后续项」第 5 条），**不在本批范围**。
+
+<!--MERGE_RESULT-->
 
 ## 后续项
 
@@ -686,3 +952,21 @@ $ python3 /tmp/qa_pytest_shim/run_ci_tests.py \
    在 GitHub runner 上确实读不到），不能假设。⇒ 在此之前，合并授权必须依赖
    保护分支 + 必需状态检查 + `.github/CODEOWNERS`，**不能只信工具的退出码**。
 4. **`_runGh` 的整体截止**（L-12）—— 见 §7.4 第 2 条。
+5. **把「失败集合对差」从「人可用的判据」变成「强制闸门」**（本批**未做**，独立立项）——
+   现状：仓库 **没有 `main` 分支保护、没有必需状态检查、没有 `.github/CODEOWNERS`**
+   （§8.5 实测）⇒ 本批交付的工具目前只能靠人自觉执行。
+   落地顺序：① 建 `.github/CODEOWNERS`（至少覆盖 `.github/workflows/`）；
+   ② 给 `main` 开分支保护，把 `backend-unit` / `backend-integration` 设为**必需状态检查**；
+   ③ 把「失败集合对差」接到一个必需检查上（合并前跑，净新增非 0 ⇒ 失败）。
+   ⚠️ ③ 落地前**必须**先解决本批遗留的结构性问题：**基线早于完成标记协议 ⇒ 工具会一直拒判**
+   ⇒ ① 和 ② 落地后，基线侧（历史 commit）仍不可比 ⇒ 需要一条「重跑基线」的规定
+   （例如以 main 的**最新一次 run** 为基线，而不是「PR 分叉点的那次 run」）。
+6. **`test_backfill_is_idempotent` 的 Milvus 删除可见性偶发**（本批**未修**，独立立项）——
+   现象：`backfill()` 里 `collection.delete()` 之后**没有 flush / release**，
+   Milvus 2.x 的删除对已加载视图不可见 ⇒ 第二次扫描可能仍看到旧行 ⇒ `written2 == 1`。
+   仓库早已把它记成已知偶发（MEMORY `qa-system-milvus-3-collection-refactor.md`），
+   本次在 CI 上首次以「净新增 1 条」的形式显形（§8.2③）。
+   修法候选：delete 后 `release` + `load`（MEMORY `qa-system-m0-p04-sync-gap-fix.md` 实测
+   `release + load collection → query → data: [] ← 真删了`），或用随机业务 id 避免残留单调累加。
+   ⚠️ **不在本批修**：改 `scripts/backfill_milvus_external_id.py` 会牵动 Milvus 生产侧
+   （19530 是生产 Milvus），与本批「零生产写」的口径冲突。

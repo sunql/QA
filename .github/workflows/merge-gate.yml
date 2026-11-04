@@ -67,10 +67,13 @@ jobs:
           set -uo pipefail
           CHECK_NAME="merge-gate / failure-set-diff"
 
-          # 基线：main 上最新完成的 push run（同完成标记协议）
+          # 基线：main 上最新完成的 push run（同完成标记协议）。
+          # 跳过 conclusion=cancelled 的 run：ci.yml 的 cancel-in-progress 会在新 main push
+          # 时取消上一轮 ⇒ 被取消的 run 的 job 没有完成标记 ⇒ 拿它当基线必判 UNUSABLE，
+          # main 刚推送后的窗口期内会误拦所有 PR（2026-11-05 run 41882361045 实证）。
           BASE_RUN_ID="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&status=completed&per_page=1" \
-            --jq '.workflow_runs[0].id // empty')"
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&status=completed&per_page=10" \
+            --jq '[.workflow_runs[] | select(.conclusion != "cancelled")][0].id // empty')"
           if [ -z "${BASE_RUN_ID}" ]; then
             report="找不到 main 的已完成 CI run ⇒ 无基线可比（fail-closed）。等 main 的 push run 完成后再试。"
             code=3

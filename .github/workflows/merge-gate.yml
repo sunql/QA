@@ -1,0 +1,80 @@
+# CI 合并判据的强制闸门（判据全文见 Harness/rules/测试规范.md「CI 合并判据」）。
+# 在 CI workflow 完成后自动跑「失败集合对差」工具，把结论落成 check run；
+# main 分支保护把 check `merge-gate / failure-set-diff` 设为必需
+# ⇒ 净新增失败非 0 / 存在不可用 job 的 PR 无法合并。
+#
+# 安全性质（威胁模型见测试规范）：
+# - workflow_run 语义保证本文件与工具代码**始终取自默认分支** ⇒ PR 无法篡改闸门本身；
+# - 故意**不传 --allow-ci-changes**：PR 改了 CI 相关面 ⇒ 退出码 6 ⇒ failure。
+#   人工仲裁确认「分片归属未变」后，由 bypass 账号显式合并（solo 仓库的显式越权口）；
+# - 退出码 5（净丢失待人工确认）同样判 failure，人工确认后同上。
+# - 基线取法（2026-11-05 定死）：**同一完成标记协议下** main 的最新完成 run
+#   （`branch=main`、`event=push`、`status=completed`）；更早协议的 run 会拒判 UNUSABLE_JOBS。
+name: merge-gate
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  actions: read
+  checks: write
+  contents: read
+
+concurrency:
+  group: merge-gate-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  failure-set-diff:
+    # 只对「CI 的 pull_request run」出裁决；main 的 push run 是未来的基线，不裁决。
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run failure-set diff and report the required check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -uo pipefail
+          CHECK_NAME="merge-gate / failure-set-diff"
+
+          # 基线：main 上最新完成的 push run（同完成标记协议）
+          BASE_RUN_ID="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&status=completed&per_page=1" \
+            --jq '.workflow_runs[0].id // empty')"
+          if [ -z "${BASE_RUN_ID}" ]; then
+            report="找不到 main 的已完成 CI run ⇒ 无基线可比（fail-closed）。等 main 的 push run 完成后再试。"
+            code=3
+          else
+            report="$(cd backend && python3 -m app.utils.ci_failure_set \
+              --repo "${GITHUB_REPOSITORY}" \
+              --base-run "${BASE_RUN_ID}" --pr-run "${PR_RUN_ID}" 2>&1)"
+            code=$?
+          fi
+
+          case "${code}" in
+            0) conclusion="success"; title="净新增 0 ⇒ 可合并" ;;
+            *) conclusion="failure"; title="退出码 ${code} ⇒ 不可合并（净新增 / 不可用 job / 待人工确认）" ;;
+          esac
+
+          # check-run 摘要截前 8000 字符（报告以「结论」行开头，必须保留头部）
+          printf '%s' "${report}" | head -c 8000 > /tmp/gate_report.txt
+          jq -n \
+            --arg name "${CHECK_NAME}" \
+            --arg sha "${HEAD_SHA}" \
+            --arg conclusion "${conclusion}" \
+            --arg title "${title}" \
+            --rawfile text /tmp/gate_report.txt \
+            '{name: $name, head_sha: $sha, status: "completed", conclusion: $conclusion,
+              output: {title: $title, summary: $text}}' > /tmp/gate_payload.json
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/check-runs" --input /tmp/gate_payload.json \
+            --jq '{name, conclusion, html_url}'
+
+          # check 已落库；工作流的红绿跟随工具结论，便于一眼看到闸门状态
+          exit "${code}"

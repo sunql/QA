@@ -47,10 +47,12 @@ jobs:
           # 实测（2026-11-04/05）：run 级已 completed 后，job 列表的 conclusion 仍为 null
           # 长达 13-18 分钟 ⇒ 工具会把它们判成 UNUSABLE_JOBS。
           # 收敛前不裁决；30 分钟仍不收敛就放行给工具（fail-closed：照样判 UNUSABLE）。
+          # 注意：本步骤在 GitHub 默认 shell `bash -e` 下运行 ⇒ 对 gh api 的每次调用
+          # 都要 `|| 兜底`，单次网络抖动不得杀掉整个等待循环。
           for i in $(seq 1 30); do
             NULLS="$(gh api \
               "repos/${GITHUB_REPOSITORY}/actions/runs/${PR_RUN_ID}/jobs?per_page=20" \
-              --jq '[.jobs[] | select(.conclusion == null)] | length')"
+              --jq '[.jobs[] | select(.conclusion == null)] | length')" || NULLS=1
             echo "attempt ${i}: null_conclusion_jobs=${NULLS}"
             [ "${NULLS}" = "0" ] && exit 0
             sleep 60
@@ -64,6 +66,12 @@ jobs:
           PR_RUN_ID: ${{ github.event.workflow_run.id }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
+          # 本步骤在 GitHub 默认 shell `bash -e` 下运行。**第一条铁律**：
+          # 凡「预期可能失败」的命令一律 `|| 兜底` —— 直接写
+          # `report="$(可能失败的命令)"` 会在命令替换非零时被 -e 当场杀掉整步，
+          # 导致 check 不落库、退出码还不对（2026-11-05 gate 首跑实证：
+          # 工具判 UNUSABLE 退出码 2，但 -e 在赋值处就把步骤杀了，
+          # 既没有 check 也没有任何输出 ⇒ 闸门对所有 PR 死锁）。
           set -uo pipefail
           CHECK_NAME="merge-gate / failure-set-diff"
 
@@ -73,24 +81,27 @@ jobs:
           # main 刚推送后的窗口期内会误拦所有 PR（2026-11-05 run 41882361045 实证）。
           BASE_RUN_ID="$(gh api \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&status=completed&per_page=10" \
-            --jq '[.workflow_runs[] | select(.conclusion != "cancelled")][0].id // empty')"
+            --jq '[.workflow_runs[] | select(.conclusion != "cancelled")][0].id // empty')" || BASE_RUN_ID=""
           if [ -z "${BASE_RUN_ID}" ]; then
             report="找不到 main 的已完成 CI run ⇒ 无基线可比（fail-closed）。等 main 的 push run 完成后再试。"
             code=3
           else
+            code=0
             report="$(cd backend && python3 -m app.utils.ci_failure_set \
               --repo "${GITHUB_REPOSITORY}" \
-              --base-run "${BASE_RUN_ID}" --pr-run "${PR_RUN_ID}" 2>&1)"
-            code=$?
+              --base-run "${BASE_RUN_ID}" --pr-run "${PR_RUN_ID}" 2>&1)" || code=$?
           fi
+          echo "tool_exit_code=${code}"
 
           case "${code}" in
             0) conclusion="success"; title="净新增 0 ⇒ 可合并" ;;
             *) conclusion="failure"; title="退出码 ${code} ⇒ 不可合并（净新增 / 不可用 job / 待人工确认）" ;;
           esac
 
-          # check-run 摘要截前 8000 字符（报告以「结论」行开头，必须保留头部）
-          printf '%s' "${report}" | head -c 8000 > /tmp/gate_report.txt
+          # check-run 摘要截前 8000 字符（报告以「结论」行开头，必须保留头部）。
+          # `|| true` 压住两处 -e/pipefail 雷：报告超 8000 字节时 printf 收 SIGPIPE
+          # （退出码 141）会被 pipefail 判失败 ⇒ 又被 -e 杀掉整步（同上，check 不落库）。
+          printf '%s' "${report}" | head -c 8000 > /tmp/gate_report.txt || true
           jq -n \
             --arg name "${CHECK_NAME}" \
             --arg sha "${HEAD_SHA}" \

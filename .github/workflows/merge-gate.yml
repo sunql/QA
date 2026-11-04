@@ -31,9 +31,29 @@ jobs:
     # 只对「CI 的 pull_request run」出裁决；main 的 push run 是未来的基线，不裁决。
     if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 收敛等待最长 30 分钟 + 工具跑 ~5 分钟
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
+      - name: Wait for job-level conclusions to converge (API eventual consistency)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          # 实测（2026-11-04/05）：run 级已 completed 后，job 列表的 conclusion 仍为 null
+          # 长达 13-18 分钟 ⇒ 工具会把它们判成 UNUSABLE_JOBS。
+          # 收敛前不裁决；30 分钟仍不收敛就放行给工具（fail-closed：照样判 UNUSABLE）。
+          for i in $(seq 1 30); do
+            NULLS="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${PR_RUN_ID}/jobs?per_page=20" \
+              --jq '[.jobs[] | select(.conclusion == null)] | length')"
+            echo "attempt ${i}: null_conclusion_jobs=${NULLS}"
+            [ "${NULLS}" = "0" ] && exit 0
+            sleep 60
+          done
+          echo "job conclusion 30 分钟未收敛 ⇒ 交给工具判 UNUSABLE_JOBS（fail-closed）"
+          exit 0
 
       - name: Run failure-set diff and report the required check
         env:

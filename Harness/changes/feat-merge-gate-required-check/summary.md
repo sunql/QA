@@ -34,6 +34,7 @@ CODEOWNERS 落地但不生效。本批把判据接进 GitHub 必需检查。
 |---|---|---|
 | gate 首跑几乎必然误判 UNUSABLE | job 级 API 最终一致性延迟：run 级已 completed，job `conclusion` 仍 null **13–18 分钟**（PR #101/#102 两次实测） | 跑工具前轮询 job conclusion 全部收敛（上限 30 分钟；不收敛放行给工具 fail-closed）（PR #103） |
 | 同名 check 竞态 | job 自带 check 与 API 创建的 check 同名 ⇒ 必需检查按名字匹配时撞最新一个是竞态 | 去掉 job 级 `name:`，API check 是该名字唯一来源（本 PR） |
+| 基线选中被取消的 run | `cancel-in-progress`：新 main push 取消上一轮 main run（run `41882361045` 实证）⇒ 其 job 无完成标记 ⇒ 拿它当基线必判 UNUSABLE ⇒ main 刚推送后的窗口期误拦所有 PR | 基线选择跳过 `conclusion=cancelled` 的 run（本 PR） |
 | 滞后时长记录失真 | MEMORY 早前记「~4 分钟内收敛」 | 实测 13/18 分钟，已更正（MEMORY + 测试规范） |
 
 ## 验证证据（合并后回填）

@@ -445,16 +445,20 @@ $ pytest app/tests/unit/test_ci_failure_set.py app/tests/unit/test_ci_text.py \
 
 ### 6.2 「守卫不是假绿」的变异取证（28 组）
 
-脚本：`/tmp/ci_mutation_evidence.py` —— 对**单点**做变异，跑对应守卫，断言它**转红**，
+脚本：`backend/scripts/ci_mutation_evidence.py`（2026-11-04 从 /tmp 临时脚本迁入仓库）——
+对**单点**做变异，跑对应守卫，断言它**转红**，
 然后**逐字节还原**该文件（还原后 `git diff` 必须为空 ⇒ 建立在未被污染的代码上）。
 
-复现：
+复现（在仓库根执行；需 `TEST_DATABASE_URL` / `TEST_NEO4J_URI` / `TEST_NEO4J_PASSWORD`
+环境契约，凭据不入库、由执行环境提供）：
 
 ```bash
-cd /private/tmp/qa-schema-ssot
-python3 /tmp/ci_mutation_evidence.py            # 全部 28 组
-python3 /tmp/ci_mutation_evidence.py M5 M6      # 只跑指定组
+python3 backend/scripts/ci_mutation_evidence.py            # 全部 28 组
+python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 ```
+
+**2026-11-04 迁入仓库后复验**（在合并内容上全量重跑）：
+`✓ M1 … ✓ M28，合计 28 组变异，净漏 0`；跑完 `git status` 除本脚本自身外零改动（锚点文件逐字节还原）。
 
 **M1–M12（继承自已合入的 12 组；模块拆分后锚点跟着搬家）**
 

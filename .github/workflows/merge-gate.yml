@@ -28,6 +28,9 @@ concurrency:
 
 jobs:
   failure-set-diff:
+    # 不设 job 级 name:：job 自带的 check 会与下面 API 创建的
+    # `merge-gate / failure-set-diff` 同名，必需检查按名字匹配时撞最新的一个是竞态。
+    # API 创建的 check 是该名字的唯一来源。
     # 只对「CI 的 pull_request run」出裁决；main 的 push run 是未来的基线，不裁决。
     if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest

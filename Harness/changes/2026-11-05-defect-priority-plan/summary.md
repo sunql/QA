@@ -354,7 +354,39 @@ Milvus 的可见性收敛前又查到了那条 `external_id` 为空的旧行，�
 **闸门产物 vs 人工结论的关系**：闸门给出的是「机器可复算的事实」（净新增 0、净丢失 1）；
 「净丢失是否可接受」按设计就是人工判断项（退出码 5 的分支）⇒ 以上仲裁即为该判断的正式记录。
 
-### 10.5 最终判定
+### 10.5 第三次判定：`CI_SURFACE_CHANGED`（闸门的比较基准失真）
+
+第三次判定（head `97047b8b`，run `42072165293`）的失败集合与基线**完全相等**
+（基线 run `41961157752` 140 条 / PR 140 条，**净新增 0 / 净丢失 0**），
+但闸门判 `CI_SURFACE_CHANGED`（退出码 6），理由是「PR 改动了 CI 相关面」。
+
+**这是闸门比较基准失真造成的假阳性**，根因是本分支的**历史形状**：
+
+- 本分支有一个合成提交 `f6210201 "sync: remote main b6e809a2 tree (API 重建)"`，
+  它的 **tree 与 `b6e809a2` 完全相同**（都是 `7373074c…`）但**是另一个 commit**
+  ⇒ `b6e809a2` **不是**本分支的祖先 ⇒ `merge-base(b6e809a2, HEAD) = 4e535289`（老底座）；
+- 闸门的 CI 面检查取 `GET /repos/{o}/{r}/compare/{baseSha}...{headSha}`（**三点** diff，
+  见 `backend/app/utils/ci_gh.py::fetchChangedFiles`）⇒ 三点 diff 从老底座起算
+  ⇒ 把 **main 自己的** `.github/workflows/ci.yml`、`.github/workflows/merge-gate.yml`、
+  `backend/app/tests/_pg_support.py`、`backend/app/tests/integration/conftest.py`、
+  `backend/app/utils/ci_*.py` 全算成「本 PR 改的」；
+- 而本批**真实净变更**（两点 diff `git diff origin/main HEAD`）只有 11 个文件，
+  **CI 面命中 0 个**（断言：`.github/workflows/`、`conftest.py`、`backend/app/utils/ci_*`、
+  `pytest.ini`、`setup.cfg`、`tox.ini`、`pyproject.toml`、`uv.lock`、`_pg_support.py` 全部无命中）。
+
+**处置：把分支历史改对，不绕过闸门** —— `git rebase --onto b6e809a2 f6210201`
+（丢掉那个合成 commit，把 7 个真提交重放到 main 的 tip 上）。重放后：
+
+- **tree 完全不变**（`c07602dc…` 前后一致 ⇒ **零内容变化**，只是祖先关系变了）；
+- `merge-base(b6e809a2, HEAD) = b6e809a2` ⇒ 三点 diff = 11 个目标文件、CI 面命中 0
+  ⇒ 闸门的比较基准恢复有效。
+
+**给下一批的教训（N6）**：用「重建 main 的 tree 的合成提交」来同步分支，会让 main 的 tip
+**不是**分支的祖先 ⇒ 一切以 `compare/<base>...<head>` 取改动文件的守卫
+（闸门的 CI 面检查就是其中之一）都会失真。**分支应以 main 的 tip 为底座起**，
+不要用「重建 tree 的合成提交」同步。
+
+### 10.6 最终判定
 
 见本节下方的合并回填（合并后由 main 上的回填提交补齐）。
 

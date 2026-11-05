@@ -116,6 +116,7 @@
 | N1 | PG / MySQL 缺「近 N 个月」窗口模板 | 只给 PG/MySQL 问「近 6 个月」仍多算且与 Oracle 口径不一致 | 先做**业务口径确认**（PG/MySQL 要滚动月还是自然月），再决定是否统一到自然月 |
 | N2 | UI 无法清理 MEASURE 的残留分母 | 表单不渲染分母行 ⇒ 无清空入口；改型已能清，但「本来就是 MEASURE + 残留」清不掉 | 待产品口径：是否禁止 MEASURE 携带分母 / 服务端做「类型 ⇔ 分母」归一 / 清理历史遗留行 |
 | N3 | 指标写接口无 `requireAdmin` / 归属校验（`backend/app/api/v1/ontology.py:343-355`） | security-reviewer 指出，属**既有**问题 | 与本批无关，另立项（写入口的越权面） |
+| N6 | 闸门的 CI 面检查用 `compare/<base>...<head>`（三点 diff）取改动文件 | 分支若用「重建 main 的 tree 的合成提交」同步，main 的 tip 就不是分支的祖先 ⇒ 三点 diff 把 main 自己的 CI 文件算成「PR 改的」⇒ 假 `CI_SURFACE_CHANGED`（本批实证，见 `summary.md` §10.5） | 两条：① 分支一律以 main 的 tip 为底座起，不用合成提交同步；② 工具侧改为按**净变更**（两点）取文件，或显式用 merge-base 语义并排除「与 base 同 tree 的合成提交」 |
 
 ## 九、执行记录（2026-11-05）
 

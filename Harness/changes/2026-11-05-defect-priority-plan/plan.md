@@ -62,7 +62,7 @@
 | B2 | 残余 36 条 alembic 差异（16 条零 DDL + 6 条需 DDL） | 已评估无运行时影响，排期 **2026-11-09** |
 | B3 | 不可伪造证据（当前 stdout 可控 ⇒ 挡得住偶然假绿、挡不住蓄意伪造） | 未启动 |
 | B4 | `_runGh` 调用加截止时间 | 未启动 |
-| B7 | 抖动容忍（白名单类机制，只许 main 上 CODEOWNER 维护） | 未启动（依赖分支保护，已就位） |
+| B7 | 抖动容忍（白名单类机制，只许 main 上 CODEOWNER 维护） | **下一批第一优先**（2026-11-06 更新）：闸门不做抖动容忍 ⇒ 基线侧那条 Milvus 竞态用例会随机挡掉**约一半**的 PR；且 B7 要改 `ci_*.py` 与 `merge-gate.yml` ⇒ 落在 CI 面 ⇒ 闸门必判 `CI_SURFACE_CHANGED` ⇒ **B7 自身落地依赖 owner 越权口 ⇒ 必须先于把 `enforce_admins` 收回去**，顺序不能反（见 `summary.md` §10.6 / N7） |
 | C1 | PR #92（docs/deploy-prod-1031）收口 | 仍 open / blocked |
 | C2 | 5 个 diverged 旧分支盘点 | 未启动 |
 

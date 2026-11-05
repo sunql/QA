@@ -320,7 +320,41 @@ PG / MySQL 的首句同时加了一句显式警告（防 LLM 拿「加减写法�
    （`test_reconcile_milvus_id_mapping.py::test_backfill_is_idempotent`：基线红、PR attempt 2 绿），
    属 Milvus 侧 flake —— 本批 diff 与 Milvus 无关。
 
-### 10.4 最终判定
+### 10.4 净丢失 1 条的人工仲裁（2026-11-06）
+
+换 sha 后的第一次判定（run `42061730479`，head `7f5faac8`）结论是
+**净新增 0 条 / 净丢失 1 条 ⇒ `NEEDS_REVIEW`（退出码 5，闸门判 failure）**。
+按闸门设计，退出码 5 是「须人工确认不是把失败藏起来了」，不是回归。
+本节记录该条的人工仲裁结论与证据。
+
+**净丢失的那一条**：`app/tests/integration/test_reconcile_milvus_id_mapping.py::test_backfill_is_idempotent`
+
+| 侧 | 结论 | 证据 |
+|---|---|---|
+| 基线（main，run `41961157752`，job `127027985627`，shard 3） | **失败** | `assert written2 == 0` 实得 `1`（`test_reconcile_milvus_id_mapping.py:187`），日志时间 `2026-11-05T03:46:28Z` |
+| PR（head `7f5faac8`，run `42061730479`，job `127364941043`，shard 3） | **通过** | 同一测试不在该 job 的 `FAILED` / `ERROR` / `SKIPPED` 清单里（只出现在 warnings 汇总段） |
+
+**它为什么是 flake（机制）**：`backend/scripts/backfill_milvus_external_id.py` 的 backfill 动作是
+「删掉旧 Milvus 行（auto-id 主键）→ 带 `external_id` 重新插入」。第二次 backfill 若在
+Milvus 的可见性收敛前又查到了那条 `external_id` 为空的旧行，就会再写一次 ⇒ `written2 == 1`。
+该竞态由 Milvus 的可见性/延迟决定，与代码改动无关。
+
+**为什么本批不可能是「把失败藏起来」**：
+
+1. 本批 diff 与 Milvus、ontology 向量同步、`id_mapping` **完全无关**
+   （后端只改了 `backend/app/services/nl2sql_dialects.py` 的 prompt 模板；
+   其余是前端 `metricTechnique.ts` 等 4 个 UI 文件 + 文档）；
+2. 本批 diff **一个 integration 测试文件都没碰** ⇒ 失败用例的断言、夹具、执行顺序均未变；
+3. 两次 run 的该 job 日志里**同样出现 2 条** `Milvus 类向量自动同步失败 … Embedding 缺少 API Key`
+   ⇒ 环境等价，差异只在竞态落点；
+4. 净新增为 **0** ⇒ 本批没有把任何原本绿的用例弄红。
+
+⇒ **仲裁结论：净丢失 1 条 = 基线侧的 Milvus 可见性竞态（flake），不是回归，也不是本批隐藏失败。**
+
+**闸门产物 vs 人工结论的关系**：闸门给出的是「机器可复算的事实」（净新增 0、净丢失 1）；
+「净丢失是否可接受」按设计就是人工判断项（退出码 5 的分支）⇒ 以上仲裁即为该判断的正式记录。
+
+### 10.5 最终判定
 
 见本节下方的合并回填（合并后由 main 上的回填提交补齐）。
 

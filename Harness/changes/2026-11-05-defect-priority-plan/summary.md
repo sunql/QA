@@ -7,7 +7,7 @@
 - **关联变更**：[2026-10-31-term-drift-date-template](../2026-10-31-term-drift-date-template/summary.md)（自然月窗口修复，本次补齐天级同族）、[2026-10-28-kpi-metric-technical-form](../2026-10-28-kpi-metric-technical-form/summary.md)（measure 结构化）
 - **迁移版本**：无（本批零 DDL）
 - **计划**：[plan.md](./plan.md)（今日待办计划）
-- **MEMORY**：[qa-system-natural-month-window](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-natural-month-window.md)、[qa-system-measure-edit-clears-denominator](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-measure-edit-clears-denominator.md)
+- **MEMORY**：[qa-system-natural-month-window](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-natural-month-window.md)、[qa-system-measure-edit-clears-denominator](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-measure-edit-clears-denominator.md)、[qa-system-merge-gate-rerun-procedure](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-merge-gate-rerun-procedure.md)
 
 ---
 
@@ -268,6 +268,61 @@ PG / MySQL 的首句同时加了一句显式警告（防 LLM 拿「加减写法�
 - 关联变更（predecessor）：[2026-10-31-term-drift-date-template](../2026-10-31-term-drift-date-template/summary.md)、
   [2026-10-28-kpi-metric-technical-form](../2026-10-28-kpi-metric-technical-form/summary.md)
 - 关联变更（successor）：待 ④–⑦ 与第二梯队立项
+
+## 10. CI 闸门实操记录（2026-11-05，本批合并过程）
+
+本批合并判据走 `merge-gate / failure-set-diff`（main 已启用分支保护、必需检查含它、
+`enforce_admins=true` ⇒ 绕过必须是显式越权，本批不走这条路）。过程本身暴露了闸门链路的
+三个事实，全部记在这里，避免下次重复踩。
+
+### 10.1 第一次判定：UNUSABLE_JOBS（净新增 0，但不可用）
+
+- 现象：PR run `42034609557`（attempt 1）判 `UNUSABLE_JOBS`；报告同时给出「净新增 0 条 / 净丢失 36 条」。
+- 根因：`Backend / integration shard 3` 结论是 `cancelled` —— 它撞了 job 级 `timeout-minutes: 90`
+  被杀（13:19:54Z 起跑，14:50:08Z 被杀）。**cancelled ⇒ 一个用例都没跑完 ⇒ 失败集合是空的**
+  ⇒ 不能拿它跟基线对差。
+- 判为 flake 的依据：基线 run（41961157752）里同一分片只用了 23 min；且本批 diff
+  **一个 integration 测试文件都没碰**（后端只改 `nl2sql_dialects.py` 的 prompt 文本，
+  测试只动 `app/tests/prompts/`）⇒ 与本批改动无关。
+- 「净丢失 36 条」是 cancelled 的**必然假象**：基线里 shard 3 的 36 条失败在 PR 侧是空集，
+  于是全被算成「丢失」。⇒ **cancelled 情形下「净丢失」那一栏是噪声，不是回归信号。**
+
+### 10.2 复跑后的两次判定：闸门链路的三个事实
+
+复跑方式：`gh run rerun 42034609557`（**整轮**，attempt 2）。复跑后闸门**触发了两次**（相隔 29 秒）：
+
+| 判定 | 时刻(UTC) | 读到的 job 列表 | 结论 |
+|---|---|---|---|
+| #1 | 15:55:34 | **上一 attempt**（`shard 3` 仍 `cancelled`，job=127270071084） | UNUSABLE_JOBS（**假不可用**） |
+| #2 | 15:56:03 | attempt 2（`shard 3` = failure 36 条；PR 合计 **140 条 = 基线 140 条**） | COVERAGE_MISMATCH（**假净新增**） |
+
+三个事实：
+
+1. **run 级 `completed` 早于 job 列表切到新 attempt**（API 滞后）⇒ 判定 #1 读到的仍是上一 attempt
+   的 job ⇒ 又一次假「不可用」。
+2. **闸门自己的 check run 会留在 head sha 上**：每次判定都用 `POST /check-runs` 在 head sha 上新建
+   一个名为 `merge-gate / failure-set-diff` 的 check run。判定 #2 把它当成「PR 多跑的一个 job」
+   ⇒ `COVERAGE_MISMATCH` + 假净新增 `job:merge-gate / failure-set-diff`。
+   ⇒ **同一个 sha 上只有「第一次判定」可能是干净的**；复跑后的再判定必然被自己的残留污染。
+3. **`DELETE /repos/{o}/{r}/check-runs/{id}` 对已完成的 check run 返回 404**（只能删 queued/in_progress）
+   ⇒ 残留清不掉 ⇒ 只能靠「换 sha + 全新 run」绕过。
+
+### 10.3 恢复流程（下次照做）
+
+1. 先看每个 job 的 `conclusion`：`cancelled` ⇒ 失败集合为空 ⇒ 该 job 必须复跑；
+   `failure` 但耗时异常（撞 `timeout-minutes`）⇒ 同样复跑。
+2. **整轮复跑**：`gh run rerun <run_id>`。**不要**只复跑单个 job ——
+   `ci_failure_set` 取 job 列表用 `runs/{id}/jobs`（默认只给最新 attempt），
+   单 job 复跑会让最新 attempt 里只剩那一个 job ⇒ 与基线的 job 名集合不等价 ⇒ COVERAGE_MISMATCH。
+3. **复跑后仍被自己的残留污染时**：换 sha（推一个新提交）换一个新 run ⇒ 新 sha 上没有残留 check run
+   ⇒ 第一次判定就是干净的。本批据此再推一提交。
+4. 抖动：工具**不做抖动容忍**（单条失败翻转也判不可合并）。本批实测到一处翻转
+   （`test_reconcile_milvus_id_mapping.py::test_backfill_is_idempotent`：基线红、PR attempt 2 绿），
+   属 Milvus 侧 flake —— 本批 diff 与 Milvus 无关。
+
+### 10.4 最终判定
+
+见本节下方的合并回填（合并后由 main 上的回填提交补齐）。
 
 ---
 

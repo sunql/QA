@@ -116,3 +116,27 @@
 | N1 | PG / MySQL 缺「近 N 个月」窗口模板 | 只给 PG/MySQL 问「近 6 个月」仍多算且与 Oracle 口径不一致 | 先做**业务口径确认**（PG/MySQL 要滚动月还是自然月），再决定是否统一到自然月 |
 | N2 | UI 无法清理 MEASURE 的残留分母 | 表单不渲染分母行 ⇒ 无清空入口；改型已能清，但「本来就是 MEASURE + 残留」清不掉 | 待产品口径：是否禁止 MEASURE 携带分母 / 服务端做「类型 ⇔ 分母」归一 / 清理历史遗留行 |
 | N3 | 指标写接口无 `requireAdmin` / 归属校验（`backend/app/api/v1/ontology.py:343-355`） | security-reviewer 指出，属**既有**问题 | 与本批无关，另立项（写入口的越权面） |
+
+## 九、执行记录（2026-11-05）
+
+| 项 | 结果 |
+|---|---|
+| ①「最近 N 天」窗口 | **已修**：Oracle/PG/MySQL 三方言模板统一为「下界 -(N-1) + 上界 +1」；三方言各一条整段子句断言；变异取证 4 项全红（改前 PG 那条是假绿） |
+| ②MEASURE 编辑清空历史分母 | **已修**：三条规则（暴露⇒表单值 / 原比率改型⇒清空 / 原来就不需要⇒原样回传）+ `sanitizeMeasureSpec`（只带 schema 允许的 5 键、返回新对象） |
+| ③L4 回放还原 steps | **本批不做**（PR #78 已修）；MEMORY 索引行已更正 |
+| 本批 diff | 11 个文件（后端 2 + 前端 4 + 文档 5）；相对 `origin/main` 的净变更已核对（`git diff origin/main HEAD`） |
+| 测试证据 | 后端 153 passed；前端定向 36 passed；前端邻近套件 101 passed；`npx tsc --noEmit` exit 0 |
+| 合并判据 | 失败集合对差、净新增为空才合并（不等 CI 变绿）；见 `summary.md` §10 的闸门实操记录 |
+| 部署 | **不部署**（零 DDL、零生产写、零生产读） |
+
+### 9.1 闸门实操结论（引 `summary.md` §10）
+
+本批合并卡在 `merge-gate / failure-set-diff` 的 `UNUSABLE_JOBS` 上，根因是
+`Backend / integration shard 3` 撞 `timeout-minutes: 90` 被杀（cancelled ⇒ 失败集合为空），
+属 CI 基础设施 flake（基线同分片 23 min，且本批未碰任何 integration 测试文件）。
+复跑过程中另暴露闸门链路的三个事实（API 滞后、闸门自己的 check run 留在 head sha 上、
+已完成的 check run 删不掉）⇒ 已在 `summary.md` §10.2/§10.3 记成可复用流程，
+并落 MEMORY（`qa-system-merge-gate-rerun-procedure`）。
+
+⇒ 下一批候选 **N4**：`merge-gate` 工具应把「闸门自己创建的 check run」排除出 job 列表
+（或闸门改为 UPDATE 已有 check run 而不是每次 POST 新的），否则同一个 sha 上闸门只有第一次判定可用。

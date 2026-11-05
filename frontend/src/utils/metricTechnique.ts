@@ -67,7 +67,38 @@ export function needsDenominatorMeasure(metricType: string | undefined): boolean
 
 /** 分母的表单取值 + 指标类型（决定表单有没有暴露分母行）。 */
 export interface DenominatorMeasureInput extends MeasureFormValues {
+  /** 表单里当前选中的指标类型。 */
   metricType: string | undefined;
+  /**
+   * 库里**原来**的指标类型（编辑场景；新建时为 undefined）。
+   *
+   * 需要它来区分两种「表单没暴露分母行」：
+   * - 原来是 MEASURE ⇒ 这一行从来没渲染过 ⇒ 用户没碰过 ⇒ 原样回传（不破坏）；
+   * - 原来是 RATIO/DIFFERENCE、这次改成了别的类型 ⇒ **改型本身就是「不要分母」的意图**
+   *   ⇒ 显式清空（与修复前的行为一致）。
+   */
+  originalMetricType?: string | undefined;
+}
+
+/**
+ * 原样回传库里的 measure，但**只保留后端 schema 允许的 5 个键**，并返回**新对象**。
+ *
+ * 为什么裁剪：后端 `MeasureSpecSchema` 是 `extra="forbid"` ⇒ JSONB 里若带了
+ * schema 之外的键，回传时整个请求会被 422 拒掉 —— 比「静默清空」更糟（用户连改名都存不了）。
+ * 为什么复制：下游若原地改 payload，不该连带改到从接口拿到的指标对象。
+ */
+export function sanitizeMeasureSpec(
+  spec: MeasureSpec | null | undefined,
+): MeasureSpec | null {
+  if (!spec) return null;
+  const raw = spec as unknown as Record<string, unknown>;
+  return {
+    agg: typeof raw.agg === "string" ? raw.agg : "",
+    expr: typeof raw.expr === "string" ? raw.expr : null,
+    filter: typeof raw.filter === "string" ? raw.filter : null,
+    class_id: typeof raw.class_id === "number" ? raw.class_id : null,
+    class_alias: typeof raw.class_alias === "string" ? raw.class_alias : null,
+  };
 }
 
 /**
@@ -79,16 +110,23 @@ export interface DenominatorMeasureInput extends MeasureFormValues {
  * 整块替换 JSONB）就会把库里的历史分母连同 `class_id` / `class_alias` 一起抹掉 ——
  * 用户从没见过这个字段，却因为点了一次「保存」而丢数据。
  *
- * 规则：
- * - 表单**暴露**了分母行 ⇒ 表单值说了算（用户显式清空 ⇒ `null`，是合法意图）；
- * - 表单**没暴露**分母行 ⇒ 原样回传 `existing`（不破坏）。
+ * 三条规则（按顺序）：
+ * 1. 表单**暴露**了分母行（当前类型是 RATIO / DIFFERENCE）⇒ 表单值说了算
+ *    （用户显式清空 ⇒ `null`，是合法意图）；
+ * 2. 当前类型不需要分母、但**原类型**需要（本次把比率/差值改成了别的类型）
+ *    ⇒ 改型本身就是「不要分母」的意图 ⇒ 显式清空（与修复前行为一致）；
+ * 3. 原类型也不需要分母 ⇒ 这一行**从来没渲染过** ⇒ 用户没碰过 ⇒ 原样回传
+ *    （不破坏；经 `sanitizeMeasureSpec` 裁剪到后端 schema 允许的 5 个键并返回新对象）。
  */
 export function resolveDenominatorMeasure(
   values: DenominatorMeasureInput,
   existing: MeasureSpec | null | undefined,
 ): MeasureSpec | null {
-  if (!needsDenominatorMeasure(values.metricType)) {
-    return existing ?? null;
+  if (needsDenominatorMeasure(values.metricType)) {
+    return toMeasureSpec(values, existing);
   }
-  return toMeasureSpec(values, existing);
+  if (needsDenominatorMeasure(values.originalMetricType)) {
+    return null;
+  }
+  return sanitizeMeasureSpec(existing);
 }

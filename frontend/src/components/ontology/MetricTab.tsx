@@ -92,6 +92,11 @@ const EMPTY_METRIC_FORM: MetricFormValues = {
 interface ExistingMeasures {
   numerator: MeasureSpec | null;
   denominator: MeasureSpec | null;
+  /**
+   * 库里的原指标类型 —— 分母取值规则需要它区分
+   * 「这行从来没渲染过」（原样回传）与「本次把比率改成了别的类型」（显式清空）。
+   */
+  metricType?: MetricType;
 }
 
 function parseDimensionDefaults(raw: string): Record<string, string> | undefined {
@@ -125,6 +130,7 @@ function buildMetricPayload(
     denominatorMeasure: resolveDenominatorMeasure(
       {
         metricType: values.metricType,
+        originalMetricType: existing.metricType,
         agg: values.denominatorAgg,
         expr: values.denominatorExpr,
         filter: values.denominatorFilter,
@@ -214,6 +220,7 @@ export default function MetricTab({ classes }: MetricTabProps) {
     existingMeasures.current = {
       numerator: record.numeratorMeasure,
       denominator: record.denominatorMeasure,
+      metricType: record.metricType,
     };
     setEditing(record);
     void form.setFieldsValue({

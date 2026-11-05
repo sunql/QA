@@ -86,7 +86,8 @@ const mockMeasureWithHistoricalDenominator: OntologyMetric = {
   },
 };
 
-const api = vi.hoisted(() => ({  listMetrics: vi.fn(),
+const api = vi.hoisted(() => ({
+  listMetrics: vi.fn(),
   createMetric: vi.fn(),
   updateMetric: vi.fn(),
   deleteMetric: vi.fn(),
@@ -294,6 +295,33 @@ describe("MetricTab — 编辑流", () => {
       class_id: 8,
       class_alias: "OrderItem",
     });
+  });
+
+  it("把比率改成度量型时清空分母（改型就是「不要分母」的意图）", async () => {
+    api.listMetrics.mockResolvedValue([mockMetricWithMeasure]);
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByText("订单金额");
+
+    const editBtn = screen.getAllByRole("button").find((b) =>
+      (b.textContent || "").replace(/\s+/g, "").includes("编辑"),
+    );
+    expect(editBtn).toBeDefined();
+    await user.click(editBtn!);
+
+    // 比率 → 度量：分母行当场被卸载，validateFields 不再返回分母字段。
+    // 此时若「原样回传」，库里会留下一个用户看不见也清不掉的残留分母
+    //（发布闸门会因它对不上 formula 而 409）⇒ 改型本身即视为显式清空。
+    const typeSelect = await screen.findByLabelText("指标类型");
+    await user.click(typeSelect);
+    await user.click(await screen.findByTitle("度量"));
+
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateMetric).toHaveBeenCalled());
+    const payload = api.updateMetric.mock.calls[0][1];
+    expect(payload.metricType).toBe("MEASURE");
+    expect(payload.denominatorMeasure).toBeNull();
   });
 });
 

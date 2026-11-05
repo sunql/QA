@@ -708,4 +708,13 @@ reason=… total=… kept=… odsFiltered=… truncated=…`。此前降级是 `
   ⇒ 口径修在 **prompt 模板层**，不动解析器；
 - 也**不**加 SQL 守卫去拦 `CURRENT_DATE - N` —— 会误伤合法的「N 天前」参考点（如 `CURRENT_DATE - 30` 作为基准列）。
 
+**已知缺口（2026-11-05 记录，勿当已修）**：
+- **PG / MySQL 仍没有「近 N 个月」的窗口模板** —— 自然月口径目前**只有 Oracle** 有（2026-10-31 修的只是 Oracle）。
+  对 PG / MySQL 数据源问「近 6 个月」，LLM 仍会用规则首句教的 `- INTERVAL 'N' MONTH`（**滚动月**）：
+  既比 Oracle 的自然月口径多算一点，**语义也与之不一致**（今天 PG/MySQL 是滚动月，Oracle 是自然月）。
+- 这不是单纯漏抄模板：**把它改成自然月是语义变更** ⇒ 需要业务口径确认后再动，别顺手改。
+  下一批候选已记入 `Harness/changes/2026-11-05-defect-priority-plan/plan.md`。
+
 **回归**：`backend/app/tests/prompts/test_nl2sql_dialects.py`（Oracle 自然月 1 条 + Oracle/PG/MySQL 天级 3 条）。
+⚠️ 天级 3 条断言的是**整段子句**（`_normalized()` 压空白后 `find(...)`），不是零散片段 ——
+片段断言会被说明文字与示例行喂饱，模板回退成 off-by-one 也照样绿（假绿）。已做变异取证。

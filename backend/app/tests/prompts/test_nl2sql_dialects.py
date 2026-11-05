@@ -19,6 +19,15 @@ from app.services.nl2sql_dialects import (
 )
 
 
+def _normalized(rule: str) -> str:
+    """把规则里的连续空白压成单个空格。
+
+    用途：断言**整段子句**（如 `date_col >= ... AND date_col < ...`）而不是零散片段。
+    片段断言会被说明文字、示例行喂饱 —— 模板回退成 off-by-one 也照样绿（假绿）。
+    """
+    return " ".join(rule.split())
+
+
 def test_日期算术规则_Oracle_必须含_ADD_MONTHS_或_INTERVAL() -> None:
     """Oracle 没有 DATEADD/DATE_SUB，必须用 ADD_MONTHS 或 INTERVAL。"""
     rule = _SQL_DIALECTS_ORACLE_11G.dateArithmeticRule
@@ -112,13 +121,13 @@ def test_日期算术规则_Oracle_最近N天_模板必须用_N减1_且带上界
         assert "CURRENT_DATE - N" not in rule, (
             f"Oracle 日期算术模板仍含 off-by-one 写法「CURRENT_DATE - N」（实际：{rule!r}）"
         )
-        # 下界必须是 -(N-1)：今天及前 N-1 天，共 N 天
-        assert "CURRENT_DATE - (N-1)" in rule, (
-            f"Oracle 模板必须给出「最近 N 天」的下界 -(N-1)（实际：{rule!r}）"
-        )
-        # 上界必须给：< CURRENT_DATE + 1 ⇒ 含今天全天、排除未来
-        assert "CURRENT_DATE + 1" in rule, (
-            f"Oracle 模板必须给出「最近 N 天」的上界 CURRENT_DATE + 1（实际：{rule!r}）"
+        # ⚠️ 断言必须落在**整段 WHERE 子句**上，不能只断言零散片段：
+        # 「CURRENT_DATE - (N-1)」「CURRENT_DATE + 1」这类子串也会被说明文字或
+        # 示例行满足 ⇒ 只断言片段时，模板回退成 off-by-one 也照样绿（假绿）。
+        assert _normalized(rule).find(
+            "WHERE date_col >= CURRENT_DATE - (N-1) AND date_col < CURRENT_DATE + 1"
+        ) >= 0, (
+            f"Oracle 模板必须给出完整窗口子句（下界 -(N-1) + 上界 +1）（实际：{rule!r}）"
         )
 
 
@@ -129,12 +138,13 @@ def test_日期算术规则_PostgreSQL_最近N天_必须带_N减1_下界与上�
     """
     rule = DialectRegistry.default().resolve(DataSourceType.POSTGRESQL).dateArithmeticRule
     assert "最近 N 天" in rule, f"PG 规则必须覆盖「最近 N 天」窗口（实际：{rule!r}）"
-    assert "N-1" in rule, f"PG 规则必须给出 N-1 的下界（实际：{rule!r}）"
-    assert "INTERVAL '1 day'" in rule, (
-        f"PG 规则必须用 INTERVAL '1 day' 表达天级窗口（实际：{rule!r}）"
-    )
-    assert "INTERVAL '1 day'" in rule and "CURRENT_DATE" in rule, (
-        f"PG 规则的天级窗口必须以 CURRENT_DATE 为基准（实际：{rule!r}）"
+    # ⚠️ 必须断言**整段子句**：只断言 "N-1" / "INTERVAL '1 day'" 会被说明文字与
+    # 示例行满足 ⇒ 模板下界回退成 off-by-one、或删掉上界，用例照样绿（假绿）。
+    assert _normalized(rule).find(
+        "date_col >= CURRENT_DATE - (N-1) * INTERVAL '1 day' "
+        "AND date_col < CURRENT_DATE + INTERVAL '1 day'"
+    ) >= 0, (
+        f"PG 规则必须给出完整窗口子句（下界 N-1 天 + 上界 +1 天）（实际：{rule!r}）"
     )
 
 
@@ -142,11 +152,12 @@ def test_日期算术规则_MySQL_最近N天_必须带_N减1_下界与上界() -
     """同族回归（2026-11-05）：MySQL 规则同样必须给出「最近 N 天」的完整窗口模板。"""
     rule = DialectRegistry.default().resolve(DataSourceType.MYSQL).dateArithmeticRule
     assert "最近 N 天" in rule, f"MySQL 规则必须覆盖「最近 N 天」窗口（实际：{rule!r}）"
-    assert "INTERVAL (N-1) DAY" in rule, (
-        f"MySQL 规则必须给出 N-1 的下界写法（实际：{rule!r}）"
-    )
-    assert "DATE_ADD(CURRENT_DATE, INTERVAL 1 DAY)" in rule, (
-        f"MySQL 规则必须给出上界 DATE_ADD(CURRENT_DATE, INTERVAL 1 DAY)（实际：{rule!r}）"
+    # ⚠️ 同上：断言整段子句，避免说明文字/示例行把弱断言喂饱（假绿）。
+    assert _normalized(rule).find(
+        "date_col >= DATE_SUB(CURRENT_DATE, INTERVAL (N-1) DAY) "
+        "AND date_col < DATE_ADD(CURRENT_DATE, INTERVAL 1 DAY)"
+    ) >= 0, (
+        f"MySQL 规则必须给出完整窗口子句（下界 N-1 天 + 上界 +1 天）（实际：{rule!r}）"
     )
 
 

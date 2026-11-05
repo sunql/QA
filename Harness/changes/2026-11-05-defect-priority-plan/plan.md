@@ -84,15 +84,19 @@
 | ③ | 标注「已修（PR #78）」，MEMORY 索引行更正 |
 | 本批整体 | 定向测试全绿；邻近套件**净新增失败 0**；零 DDL、零生产写；不部署 |
 
-## 六、文件清单（预计）
+## 六、文件清单（完工后回填 —— 计划期快照与落地结果的漂移）
 
 | 文件 | 动作 |
 |---|---|
-| `backend/app/services/nl2sql_dialects.py` | 改：Oracle「最近 N 天」模板；补 PG / MySQL 的「最近 N 天」模板 |
-| `backend/app/tests/prompts/test_nl2sql_dialects.py` | 改：新增「最近 N 天」模板回归用例 |
-| `frontend/src/utils/metricTechnique.ts` | 改：新增「表单未暴露分母时原样回传 existing」的解析函数 |
-| `frontend/src/components/ontology/MetricTab.tsx` | 改：`buildMetricPayload` 调用新函数 |
-| `frontend/src/tests/MetricTab.test.tsx` | 改：新增「MEASURE 携带历史分母编辑保存」回归用例 |
+| `backend/app/services/nl2sql_dialects.py` | 改：Oracle「最近 N 天」模板；补 PG / MySQL 的「最近 N 天」模板 + 首句窗口警告；去掉 PG/MySQL 的孤号「②」 |
+| `backend/app/tests/prompts/test_nl2sql_dialects.py` | 改：新增「最近 N 天」模板回归用例（断言**整段子句**）+ `_normalized()` 辅助 |
+| `frontend/src/utils/metricTechnique.ts` | 改：新增 `needsDenominatorMeasure` / `resolveDenominatorMeasure` / `sanitizeMeasureSpec` |
+| `frontend/src/components/ontology/MetricTechniqueForm.tsx` | 改：改用 `needsDenominatorMeasure`，删本地常量（计划期漏列） |
+| `frontend/src/components/ontology/MetricTab.tsx` | 改：`buildMetricPayload` 调用新函数；`ExistingMeasures` 增加 `metricType`（库中原类型） |
+| `frontend/src/tests/metricTechnique.test.ts` | 新建：纯函数契约（计划期漏列） |
+| `frontend/src/tests/MetricTab.test.tsx` | 改：新增 2 条端到端（度量型带历史分母编辑保存 / 比率改度量型清空分母） |
+| `Harness/wiki/nl2sql-engine.md` | 改：补「相对时间窗口契约」段（计划期漏列） |
+| `Harness/wiki/kpi-metric-technical-form.md` | 改：补 §15 前端编辑契约（计划期漏列） |
 | `Harness/changes/2026-11-05-defect-priority-plan/summary.md` | 新建：本批 SSOT（完工时写） |
 | `Harness/changes/2026-11-05-defect-priority-plan/plan.md` | 新建：本文件（今日待办计划） |
 
@@ -102,3 +106,13 @@
 - 不做生产写 / 生产读（含 Milvus 19530、Neo4j 生产、Oracle 生产库）。
 - 不跑全量后端 unit 套件做门禁（已知 27min / 28 红基线）⇒ 只跑定向套件。
 - 不部署（零 DDL、零生产写；改动随下次常规发版生效）。
+- **不改 PG / MySQL 的「近 N 个月」口径**（见下「下一批候选」）—— 那不是漏抄模板，是**语义变更**，
+  需业务口径确认（今天 PG/MySQL 是滚动月，Oracle 是自然月）。
+
+## 八、本批暴露的下一批候选（2026-11-05 记录）
+
+| # | 项 | 依据 | 处置建议 |
+|---|---|---|---|
+| N1 | PG / MySQL 缺「近 N 个月」窗口模板 | 只给 PG/MySQL 问「近 6 个月」仍多算且与 Oracle 口径不一致 | 先做**业务口径确认**（PG/MySQL 要滚动月还是自然月），再决定是否统一到自然月 |
+| N2 | UI 无法清理 MEASURE 的残留分母 | 表单不渲染分母行 ⇒ 无清空入口；改型已能清，但「本来就是 MEASURE + 残留」清不掉 | 待产品口径：是否禁止 MEASURE 携带分母 / 服务端做「类型 ⇔ 分母」归一 / 清理历史遗留行 |
+| N3 | 指标写接口无 `requireAdmin` / 归属校验（`backend/app/api/v1/ontology.py:343-355`） | security-reviewer 指出，属**既有**问题 | 与本批无关，另立项（写入口的越权面） |

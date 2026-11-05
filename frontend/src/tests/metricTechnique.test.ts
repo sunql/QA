@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   toMeasureSpec,
   fromMeasureSpec,
+  resolveDenominatorMeasure,
+  needsDenominatorMeasure,
   EMPTY_MEASURE_FORM,
 } from "../utils/metricTechnique";
 
@@ -47,8 +49,7 @@ describe("toMeasureSpec", () => {
   });
 });
 
-describe("fromMeasureSpec", () => {
-  it("非对象 ⇒ 空表单", () => {
+describe("fromMeasureSpec", () => {  it("非对象 ⇒ 空表单", () => {
     expect(fromMeasureSpec(null)).toEqual(EMPTY_MEASURE_FORM);
     expect(fromMeasureSpec("x")).toEqual(EMPTY_MEASURE_FORM);
   });
@@ -67,5 +68,68 @@ describe("fromMeasureSpec", () => {
     expect(back?.agg).toBe("SUM");
     expect(back?.expr).toBe("QTY");
     expect(back?.filter).toBeNull();
+  });
+});
+
+/** 库里的历史分母（回填脚本写入，带 class_id / class_alias）。 */
+const historicalDenominator = {
+  agg: "COUNT",
+  expr: "ORDER_ID",
+  filter: null,
+  class_id: 8,
+  class_alias: "OrderItem",
+};
+
+describe("needsDenominatorMeasure", () => {
+  it("比率 / 差值需要分母", () => {
+    expect(needsDenominatorMeasure("RATIO")).toBe(true);
+    expect(needsDenominatorMeasure("DIFFERENCE")).toBe(true);
+  });
+
+  it("度量型不需要分母（表单不渲染分母行）", () => {
+    expect(needsDenominatorMeasure("MEASURE")).toBe(false);
+    expect(needsDenominatorMeasure(undefined)).toBe(false);
+  });
+});
+
+describe("resolveDenominatorMeasure", () => {
+  it("表单未暴露分母行（MEASURE）⇒ 原样回传历史分母，不清空", () => {
+    // 表单没渲染分母 ⇒ 字段未注册 ⇒ 表单值是 undefined，
+    // 若当成「用户清空」提交 null，后端整块替换 JSONB ⇒ 历史分母被抹掉。
+    const result = resolveDenominatorMeasure(
+      { metricType: "MEASURE", agg: undefined, expr: undefined, filter: undefined },
+      historicalDenominator,
+    );
+    expect(result).toEqual(historicalDenominator);
+  });
+
+  it("表单未暴露分母行且库里没有分母 ⇒ null", () => {
+    const result = resolveDenominatorMeasure(
+      { metricType: "MEASURE", agg: undefined, expr: undefined, filter: undefined },
+      null,
+    );
+    expect(result).toBeNull();
+  });
+
+  it("表单暴露了分母行（比率）⇒ 表单值说了算（显式清空 ⇒ null）", () => {
+    const result = resolveDenominatorMeasure(
+      { metricType: "RATIO", agg: undefined, expr: "ORDER_ID", filter: "" },
+      historicalDenominator,
+    );
+    expect(result).toBeNull();
+  });
+
+  it("表单暴露了分母行（比率）⇒ 回传表单值并保留 class_id / class_alias", () => {
+    const result = resolveDenominatorMeasure(
+      { metricType: "RATIO", agg: "count", expr: "ORDER_ID", filter: "" },
+      historicalDenominator,
+    );
+    expect(result).toEqual({
+      agg: "COUNT",
+      expr: "ORDER_ID",
+      filter: null,
+      class_id: 8,
+      class_alias: "OrderItem",
+    });
   });
 });

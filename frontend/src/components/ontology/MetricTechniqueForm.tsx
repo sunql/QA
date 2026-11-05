@@ -7,9 +7,7 @@ import {
   METRIC_TYPE_OPTIONS,
 } from "../../types/ontology";
 import { useTranslation } from "../../i18n";
-
-/** 需要分母的指标类型（比率 / 差值），与后端 kpi_metric_reconcile 一致。 */
-const TYPES_REQUIRING_DENOMINATOR = new Set(["RATIO", "DIFFERENCE"]);
+import { needsDenominatorMeasure } from "../../utils/metricTechnique";
 
 /** 结构化度量允许的聚合（与后端 _MEASURE_AGG_ALLOWED 一致；≠ AggFunction）。 */
 const MEASURE_AGG_OPTIONS = ["SUM", "COUNT", "AVG", "COUNT_DISTINCT"].map((value) => ({
@@ -173,7 +171,7 @@ export interface MetricTechniqueFormProps {
  */
 export default function MetricTechniqueForm({ form }: MetricTechniqueFormProps) {
   const metricType = Form.useWatch("metricType", form) as string | undefined;
-  const needsDenominator = TYPES_REQUIRING_DENOMINATOR.has(metricType ?? "");
+  const needsDenominator = needsDenominatorMeasure(metricType);
 
   return (
     <>

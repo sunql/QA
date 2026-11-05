@@ -64,8 +64,29 @@ const mockMetricWithMeasure: OntologyMetric = {
   },
 };
 
-const api = vi.hoisted(() => ({
-  listMetrics: vi.fn(),
+/**
+ * 度量型指标，但库里带着历史分母（回填脚本 / 由比率改型而来）。
+ *
+ * `MetricTechniqueForm` 只对 RATIO/DIFFERENCE 渲染分母行 ⇒ MEASURE 下分母字段
+ * **从未注册到 antd 表单** ⇒ `validateFields` 不返回它 ⇒ 表单值是 undefined。
+ * 若前端把 undefined 当成「用户清空」提交 `null`，后端（整块替换 JSONB）就会把
+ * 库里的历史分母连同 `class_id` / `class_alias` 一起抹掉 —— 用户从没见过这个字段，
+ * 却因为点了一次「保存」而丢数据。
+ */
+const mockMeasureWithHistoricalDenominator: OntologyMetric = {
+  ...mockMetric,
+  metricType: "MEASURE",
+  numeratorMeasure: { agg: "SUM", expr: "QTY", filter: null, class_id: 7, class_alias: "Order" },
+  denominatorMeasure: {
+    agg: "COUNT",
+    expr: "ORDER_ID",
+    filter: null,
+    class_id: 8,
+    class_alias: "OrderItem",
+  },
+};
+
+const api = vi.hoisted(() => ({  listMetrics: vi.fn(),
   createMetric: vi.fn(),
   updateMetric: vi.fn(),
   deleteMetric: vi.fn(),
@@ -242,6 +263,37 @@ describe("MetricTab — 编辑流", () => {
     expect(payload.denominatorMeasure?.class_alias).toBe("OrderItem");
     expect(payload.denominatorMeasure?.agg).toBe("COUNT");
     expect(payload.denominatorMeasure?.expr).toBe("ORDER_ID");
+  });
+
+  it("度量型指标带历史分母时，编辑保存原样回传分母（表单没暴露它，不能当成清空）", async () => {
+    api.listMetrics.mockResolvedValue([mockMeasureWithHistoricalDenominator]);
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByText("订单金额");
+
+    const editBtn = screen.getAllByRole("button").find((b) =>
+      (b.textContent || "").replace(/\s+/g, "").includes("编辑"),
+    );
+    expect(editBtn).toBeDefined();
+    await user.click(editBtn!);
+
+    // 只改指标名 —— 分母字段压根不在表单里，用户没碰过它。
+    const nameInput = await screen.findByLabelText("指标名");
+    await user.clear(nameInput);
+    await user.type(nameInput, "订单金额改");
+
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateMetric).toHaveBeenCalled());
+    const payload = api.updateMetric.mock.calls[0][1];
+    // 逐字段相等：含 class_id / class_alias（回填脚本写入的源类信息）。
+    expect(payload.denominatorMeasure).toEqual({
+      agg: "COUNT",
+      expr: "ORDER_ID",
+      filter: null,
+      class_id: 8,
+      class_alias: "OrderItem",
+    });
   });
 });
 

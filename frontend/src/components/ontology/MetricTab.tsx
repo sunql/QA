@@ -40,7 +40,7 @@ import { filterMetrics } from "../../utils/ontologyFilter";
 import type { FilterValues } from "../../utils/ontologyFilter";
 import { classOptions } from "./classOptions";
 import MetricTechniqueForm from "./MetricTechniqueForm";
-import { fromMeasureSpec, toMeasureSpec } from "../../utils/metricTechnique";
+import { fromMeasureSpec, resolveDenominatorMeasure, toMeasureSpec } from "../../utils/metricTechnique";
 
 interface MetricFormValues {
   metricName: string;
@@ -122,8 +122,9 @@ function buildMetricPayload(
       { agg: values.numeratorAgg, expr: values.numeratorExpr, filter: values.numeratorFilter },
       existing.numerator,
     ),
-    denominatorMeasure: toMeasureSpec(
+    denominatorMeasure: resolveDenominatorMeasure(
       {
+        metricType: values.metricType,
         agg: values.denominatorAgg,
         expr: values.denominatorExpr,
         filter: values.denominatorFilter,

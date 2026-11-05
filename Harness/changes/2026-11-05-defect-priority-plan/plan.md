@@ -117,6 +117,7 @@
 | N2 | UI 无法清理 MEASURE 的残留分母 | 表单不渲染分母行 ⇒ 无清空入口；改型已能清，但「本来就是 MEASURE + 残留」清不掉 | 待产品口径：是否禁止 MEASURE 携带分母 / 服务端做「类型 ⇔ 分母」归一 / 清理历史遗留行 |
 | N3 | 指标写接口无 `requireAdmin` / 归属校验（`backend/app/api/v1/ontology.py:343-355`） | security-reviewer 指出，属**既有**问题 | 与本批无关，另立项（写入口的越权面） |
 | N6 | 闸门的 CI 面检查用 `compare/<base>...<head>`（三点 diff）取改动文件 | 分支若用「重建 main 的 tree 的合成提交」同步，main 的 tip 就不是分支的祖先 ⇒ 三点 diff 把 main 自己的 CI 文件算成「PR 改的」⇒ 假 `CI_SURFACE_CHANGED`（本批实证，见 `summary.md` §10.5） | 两条：① 分支一律以 main 的 tip 为底座起，不用合成提交同步；② 工具侧改为按**净变更**（两点）取文件，或显式用 merge-base 语义并排除「与 base 同 tree 的合成提交」 |
+| N7 | `merge-gate.yml` 预设的「bypass 账号」在**个人仓库**里不存在 | 安装分支保护时用了 `enforce_admins: true` 且无 bypass 名单 ⇒ exit 5 分支要求的「人工确认后显式合并」**无路可走**；个人仓库又不支持 `bypass_pull_request_allowances.users`（GitHub 报 `Only organization repositories can have users and team restrictions`）⇒ 只能靠 `enforce_admins`（本批实证，见 `summary.md` §10.6） | 已按 GitHub 原生表达装成 `enforce_admins: false`（owner 越权口），其余策略不变。**代价**：必需检查对 owner 变成软约束 ⇒ **必须先实现 B7 再考虑收紧**（B7 改的是 CI 面 ⇒ 落地本身要靠这条越权口 ⇒ 顺序不能反） |
 
 ## 九、执行记录（2026-11-05）
 
@@ -128,6 +129,7 @@
 | 本批 diff | 11 个文件（后端 2 + 前端 4 + 文档 5）；相对 `origin/main` 的净变更已核对（`git diff origin/main HEAD`） |
 | 测试证据 | 后端 153 passed；前端定向 36 passed；前端邻近套件 101 passed；`npx tsc --noEmit` exit 0 |
 | 合并判据 | 失败集合对差、净新增为空才合并（不等 CI 变绿）；见 `summary.md` §10 的闸门实操记录 |
+| 合并 | **已合并**（2026-11-06）：squash → main `6bef7b6a`；闸门最终判 `NEEDS_REVIEW`（净新增 0 / 净丢失 1），按 `merge-gate.yml` 自述的 exit 5 分支做人工仲裁后由 owner 越权口显式合并；内容级仲裁通过（合并 tree == 分支 tree，净变更恰 11 个文件）；详见 `summary.md` §10.6 |
 | 部署 | **不部署**（零 DDL、零生产写、零生产读） |
 
 ### 9.1 闸门实操结论（引 `summary.md` §10）

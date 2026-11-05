@@ -691,3 +691,30 @@ reason=… total=… kept=… odsFiltered=… truncated=…`。此前降级是 `
 - 相关表不在 15 个 hits 里 → 召回问题（走多路召回）。
 
 配套可观测性：`/chat` 响应已带 `classRecall` 诊断字段（mode/hitCount/classCount/truncated），前端在截断/降级时向用户展示提示（2026-09-16 落地）。
+
+## 相对时间窗口契约（近 N 个月 / 近 N 天）
+
+方言日期算术规则（`app/services/nl2sql_dialects.py` 的 `dateArithmeticRule`）是 LLM 照抄的模板：
+**滚动窗口必须给出「下界 -(N-1) + 上界」的完整写法** —— 少一个单位就是 N+1 的偏差，
+少上界则把未来数据也算进来。
+
+| 口径 | 正确写法 | 历史错误写法 |
+|---|---|---|
+| 近 N 个月（自然月，含本月共 N 个） | Oracle：`date_col >= ADD_MONTHS(TRUNC(CURRENT_DATE,'MM'), -(N-1)) AND date_col < ADD_MONTHS(TRUNC(CURRENT_DATE,'MM'), 1)` | `>= ADD_MONTHS(TRUNC(CURRENT_DATE,'MM'), -N)` ⇒ **多算一个月**（2026-10-31 修） |
+| 近 N 天（含今天共 N 天） | Oracle：`date_col >= CURRENT_DATE - (N-1) AND date_col < CURRENT_DATE + 1`；PostgreSQL：`date_col >= CURRENT_DATE - (N-1) * INTERVAL '1 day' AND date_col < CURRENT_DATE + INTERVAL '1 day'`；MySQL：`date_col >= DATE_SUB(CURRENT_DATE, INTERVAL (N-1) DAY) AND date_col < DATE_ADD(CURRENT_DATE, INTERVAL 1 DAY)` | `>= CURRENT_DATE - N` ⇒ **多算一天**，且无上界（2026-11-05 修） |
+
+**边界（勿越界）**：
+- `app/services/time_scope_resolver.py` **刻意不解析**滚动窗口（「近 N 天」滚动 vs 自然边界有业务歧义）
+  ⇒ 口径修在 **prompt 模板层**，不动解析器；
+- 也**不**加 SQL 守卫去拦 `CURRENT_DATE - N` —— 会误伤合法的「N 天前」参考点（如 `CURRENT_DATE - 30` 作为基准列）。
+
+**已知缺口（2026-11-05 记录，勿当已修）**：
+- **PG / MySQL 仍没有「近 N 个月」的窗口模板** —— 自然月口径目前**只有 Oracle** 有（2026-10-31 修的只是 Oracle）。
+  对 PG / MySQL 数据源问「近 6 个月」，LLM 仍会用规则首句教的 `- INTERVAL 'N' MONTH`（**滚动月**）：
+  既比 Oracle 的自然月口径多算一点，**语义也与之不一致**（今天 PG/MySQL 是滚动月，Oracle 是自然月）。
+- 这不是单纯漏抄模板：**把它改成自然月是语义变更** ⇒ 需要业务口径确认后再动，别顺手改。
+  下一批候选已记入 `Harness/changes/2026-11-05-defect-priority-plan/plan.md`。
+
+**回归**：`backend/app/tests/prompts/test_nl2sql_dialects.py`（Oracle 自然月 1 条 + Oracle/PG/MySQL 天级 3 条）。
+⚠️ 天级 3 条断言的是**整段子句**（`_normalized()` 压空白后 `find(...)`），不是零散片段 ——
+片段断言会被说明文字与示例行喂饱，模板回退成 off-by-one 也照样绿（假绿）。已做变异取证。

@@ -300,3 +300,44 @@ KPI: DRAFT → PUBLISHED  ⟸ 必须同时满足：
 **灰度风险**：prod 无 KPI 开关行 ⇒ 代码默认 Tier B 注入 **True**、闸门 **False**、Tier A **False**。今天因 12/12 mismatch，块为空、注入不生效；风险窗口在**治理列对齐之后**打开（注入自动生效，无需翻开关）。上线前须显式二选一（先写 `false` 再开 / 接受默认）。
 
 证据：[`realdata-run.txt`](../changes/2026-10-28-kpi-metric-technical-form/realdata-run.txt)、[变更 SSOT §10/§11](../changes/2026-10-28-kpi-metric-technical-form/summary.md)、[回填审核清单](../../../docs/kpi-metric-backfill-review.md)。
+
+## 15. 前端编辑契约：measure 的「不破坏」规则（2026-11-05）
+
+`ontology_metric.numerator_measure` / `denominator_measure` 是 JSONB，后端更新是**整块替换**：
+`ontology_service.updateMetric` 写的是 `dto.denominator_measure.model_dump() if dto.denominator_measure else None`
+⇒ 前端提交 `null` = **真的清空**。前端因此有两条硬规则：
+
+1. **派生字段不推导、只回传**：`class_id` / `class_alias` 由回填脚本写入（权威在脚本，不在前端），
+   编辑时原样带回（`utils/metricTechnique.ts::toMeasureSpec` 的 `existing` 参数）。
+2. **表单没渲染的字段 ≠ 用户清空**：分母行只对 `RATIO` / `DIFFERENCE` 渲染；
+   `MEASURE` 下分母字段**从未注册**到 antd 表单 ⇒ `validateFields` 只回**已注册**字段 ⇒ 返回 `undefined`
+   ⇒ 若当成「空 = 清空」提交 `null`，**用户只改个名字也会抹掉历史分母及其 `class_id` / `class_alias`**。
+   ⇒ `utils/metricTechnique.ts::resolveDenominatorMeasure`：**三条**规则（顺序敏感）：
+
+   | 情形 | 判据 | 取值 |
+   |---|---|---|
+   | 表单暴露了分母行 | 当前类型 ∈ {RATIO, DIFFERENCE} | 表单值说了算（显式清空 ⇒ `null`） |
+   | 原来是比率、这次改成别的类型 | 原类型 ∈ {RATIO, DIFFERENCE} 且当前类型 ∉ | **显式清空**（`null`）—— 改型本身就是「不要分母」的意图 |
+   | 原来也不需要分母 | 原类型 ∉ {RATIO, DIFFERENCE} | 原样回传 `existing`（不破坏） |
+
+   第二条不是可有可无的：少了它，RATIO→MEASURE 改型会留下一个**用户看不见也清不掉**的残留分母
+   ⇒ `kpi_metric_reconcile.structuredColumns()` 把它的列算进比对 ⇒ `VERDICT_MISMATCH` ⇒
+   `degraded=true` ⇒ 发布闸门 409，而报错指向一个 UI 上不存在的字段。
+
+3. **回传只带后端 schema 允许的键**：后端 `MeasureSpecSchema` 是 `extra="forbid"`
+   ⇒ JSONB 里若带 schema 之外的键，原样回传会让**整个保存 422**（比静默清空更糟）。
+   ⇒ `utils/metricTechnique.ts::sanitizeMeasureSpec`：只回传 `agg` / `expr` / `filter` /
+   `class_id` / `class_alias`，并返回**新对象**（不可变：下游原地改 payload 不该改到 API 响应对象）。
+
+**已知缺口（2026-11-05 记录，治本需产品口径）**：UI 上**无法清理** MEASURE 指标的残留分母
+（表单不渲染分母行 ⇒ 没有清空入口）。绕行：先改成 `RATIO` → 清空 → 改回 `MEASURE`；或直接改库。
+是否禁止 MEASURE 携带分母、是否在服务端做「类型 ⇔ 分母」归一、是否清理历史遗留行
+⇒ **产品语义未决，本批不替业务做决定**。
+
+**回归**：`frontend/src/tests/metricTechnique.test.ts`（纯函数契约：`needsDenominatorMeasure` 2 条、
+`resolveDenominatorMeasure` 8 条、`sanitizeMeasureSpec` 2 条）
++ `frontend/src/tests/MetricTab.test.tsx`（端到端 2 条：度量型带历史分母编辑保存 ⇒ 分母逐字段相等；
+**把比率改成度量型 ⇒ 分母清空**）。
+
+**测试 fixture 纪律**：要测「分母**可编辑**时的回传」（含 `class_id`/`class_alias` 对称断言）fixture 必须是
+`RATIO`；测「表单没暴露分母 ⇒ 不得清空」才用 `MEASURE` + 非空分母。两条用例别混。

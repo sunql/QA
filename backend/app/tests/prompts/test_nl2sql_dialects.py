@@ -100,6 +100,56 @@ def test_日期算术规则_Oracle_最近N个月_模板必须带上下界() -> N
         )
 
 
+def test_日期算术规则_Oracle_最近N天_模板必须用_N减1_且带上界() -> None:
+    """off-by-one 回归（2026-11-05）：`WHERE date_col >= CURRENT_DATE - N`
+    把「最近 N 天」算成 N+1 天（今天再往前数 N 天），永远多算一天；
+    而且没有上界 ⇒ 今天之后的未来数据也会被算进来。
+    模板必须给出 -(N-1) 的下界与上界。
+    """
+    for dialect in (_SQL_DIALECTS_ORACLE_11G, _SQL_DIALECTS_ORACLE_12C):
+        rule = dialect.dateArithmeticRule
+        # 旧的 off-by-one 写法必须消失（否则 LLM 直接照抄就多算一天）
+        assert "CURRENT_DATE - N" not in rule, (
+            f"Oracle 日期算术模板仍含 off-by-one 写法「CURRENT_DATE - N」（实际：{rule!r}）"
+        )
+        # 下界必须是 -(N-1)：今天及前 N-1 天，共 N 天
+        assert "CURRENT_DATE - (N-1)" in rule, (
+            f"Oracle 模板必须给出「最近 N 天」的下界 -(N-1)（实际：{rule!r}）"
+        )
+        # 上界必须给：< CURRENT_DATE + 1 ⇒ 含今天全天、排除未来
+        assert "CURRENT_DATE + 1" in rule, (
+            f"Oracle 模板必须给出「最近 N 天」的上界 CURRENT_DATE + 1（实际：{rule!r}）"
+        )
+
+
+def test_日期算术规则_PostgreSQL_最近N天_必须带_N减1_下界与上界() -> None:
+    """同族回归（2026-11-05）：PostgreSQL 规则原本只给「加减」写法，
+    没说窗口口径 ⇒ LLM 照 `日期列 - INTERVAL 'N' DAY` 写就会多算一天。
+    规则必须给出 N-1 的下界与上界模板。
+    """
+    rule = DialectRegistry.default().resolve(DataSourceType.POSTGRESQL).dateArithmeticRule
+    assert "最近 N 天" in rule, f"PG 规则必须覆盖「最近 N 天」窗口（实际：{rule!r}）"
+    assert "N-1" in rule, f"PG 规则必须给出 N-1 的下界（实际：{rule!r}）"
+    assert "INTERVAL '1 day'" in rule, (
+        f"PG 规则必须用 INTERVAL '1 day' 表达天级窗口（实际：{rule!r}）"
+    )
+    assert "INTERVAL '1 day'" in rule and "CURRENT_DATE" in rule, (
+        f"PG 规则的天级窗口必须以 CURRENT_DATE 为基准（实际：{rule!r}）"
+    )
+
+
+def test_日期算术规则_MySQL_最近N天_必须带_N减1_下界与上界() -> None:
+    """同族回归（2026-11-05）：MySQL 规则同样必须给出「最近 N 天」的完整窗口模板。"""
+    rule = DialectRegistry.default().resolve(DataSourceType.MYSQL).dateArithmeticRule
+    assert "最近 N 天" in rule, f"MySQL 规则必须覆盖「最近 N 天」窗口（实际：{rule!r}）"
+    assert "INTERVAL (N-1) DAY" in rule, (
+        f"MySQL 规则必须给出 N-1 的下界写法（实际：{rule!r}）"
+    )
+    assert "DATE_ADD(CURRENT_DATE, INTERVAL 1 DAY)" in rule, (
+        f"MySQL 规则必须给出上界 DATE_ADD(CURRENT_DATE, INTERVAL 1 DAY)（实际：{rule!r}）"
+    )
+
+
 def test_日期算术规则_Oracle12c_同样_必须含_ADD_MONTHS() -> None:
     """Oracle 12c+ 与 11g 共用日期算术规则（区别只在 LIMIT 子句）。"""
     rule = _SQL_DIALECTS_ORACLE_12C.dateArithmeticRule

@@ -575,3 +575,45 @@ FAILED app/tests/integration/test_reconcile_milvus_id_mapping.py::test_backfill_
 
 ⚠️ 教训：分片归属只能按 **byte-order** 推（`python3 -c "sorted(files).index(...)"`），
 **不能用 macOS 的 `sort -z`**；下标推错 ⇒ 会去查错分片的日志 ⇒ 误判「用例没跑」。
+
+---
+
+## PR-B：退休抖动白名单里那一条
+
+**分支**：`chore/retire-milvus-backfill-flaky-whitelist`（base = `origin/main` = `87f8e8e6`）
+**改动**：`.github/ci-known-flaky-tests.json` 的 `entries` ⇒ `[]`（文件保留）。
+
+退休的那一条（2026-11-06 签发）：
+
+```json
+{
+  "nodeId": "app/tests/integration/test_reconcile_milvus_id_mapping.py::test_backfill_is_idempotent",
+  "reason": "Milvus 可见性竞态：…… 第二次 backfill 若在 Milvus 可见性收敛前又查到 external_id 为空的旧行 ⇒ written2 == 1 ⇒ 用例随机红。",
+  "since": "2026-11-06"
+}
+```
+
+### 依据
+
+1. **根因已消除（机制层面，不是「看起来好了」）**：该条目的 `reason` 写的随机性来源
+   （delete 的可见性窗口）已被本批修掉 —— 回填脚本现在在复扫前做
+   `release() + load()` + **阻塞等装载完成**（`milvus_client.refreshCollection`），
+   这是 2026-09-27 实测中**唯一**能让 delete 立即可见的机制
+   （`consistency_level="Strong"` 与 `flush()` 都无效，见
+   `Harness/changes/fix-milvus-delete-visibility/summary.md`）。
+   ⇒ 「第二次 backfill 查到还没被删掉的旧行」这个前提不再成立。
+2. **CI 上的自然对照**：同一轮 CI 里，`main`（未修）shard 3 红
+   （`assert 1 == 0`）、PR（已修）shard 3 绿 ⇒ 失败集合对差 **净新增 0 / 净丢失 1**，
+   净丢失的正是这条（见上文「闸门仲裁记录」）。
+
+### 残余风险与回退
+
+- 证据是**一次**绿；本仓库不本地跑 Milvus 抖动用例（19530 是生产容器）⇒ 无法本地重复。
+- 若它**再次偶发红**：闸门会照常拦（净新增 1 ⇒ 退出码 1）⇒ 届时按 B7 规则④
+  「该用例所在文件本次未被改动 ⇒ 豁免生效」重新加回条目即可，
+  其余 PR 不会被随机挡住；改动该文件的 PR 仍会被拦（那才是需要人看的情况）。
+
+### 合并路径
+
+改 `.github/ci-known-flaky-tests.json` 属 **CI 相关面**（`app/utils/ci_surface.py` 的模式表命中）
+⇒ 闸门必判 **6**（`CI_SURFACE_CHANGED`）⇒ 走 owner 越权口显式合并。

@@ -62,7 +62,7 @@
 | B2 | 残余 36 条 alembic 差异（16 条零 DDL + 6 条需 DDL） | 已评估无运行时影响，排期 **2026-11-09** |
 | B3 | 不可伪造证据（当前 stdout 可控 ⇒ 挡得住偶然假绿、挡不住蓄意伪造） | 未启动 |
 | B4 | `_runGh` 调用加截止时间 | 未启动 |
-| B7 | 抖动容忍（白名单类机制，只许 main 上 CODEOWNER 维护） | **已实施**（2026-11-06，PR #108，`Harness/changes/2026-11-06-merge-gate-flake-whitelist/summary.md`）：对称豁免 + 精确 node ID + 失败关闭 + 报告显式可见 + **④ 豁免条件化在「该用例所在文件本次未被改动」**；白名单文件 `.github/ci-known-flaky-tests.json` 属 CI 相关面且由 CODEOWNER 维护，闸门 workflow **显式** checkout 默认分支 ⇒ PR 不能自我豁免。⚠️ 落地**依赖 owner 越权口**（`enforce_admins: false`）⇒ **仍必须先于把 `enforce_admins` 收回去**，顺序不能反（见 `summary.md` §10.6 / N7） |
+| B7 | 抖动容忍（白名单类机制，只许 main 上 CODEOWNER 维护） | **已实施并合并**（2026-11-06，PR #108 → main `88599b19`，`Harness/changes/2026-11-06-merge-gate-flake-whitelist/summary.md`）：对称豁免 + 精确 node ID + 失败关闭 + 报告显式可见 + **④ 豁免条件化在「该用例所在文件本次未被改动」**；白名单文件 `.github/ci-known-flaky-tests.json` 属 CI 相关面且由 CODEOWNER 维护，闸门 workflow **显式** checkout 默认分支 ⇒ PR 不能自我豁免。⚠️ 落地**依赖 owner 越权口**（`enforce_admins: false`）⇒ **仍必须先于把 `enforce_admins` 收回去**，顺序不能反（见 `summary.md` §10.6 / N7） |
 | C1 | PR #92（docs/deploy-prod-1031）收口 | 仍 open / blocked |
 | C2 | 5 个 diverged 旧分支盘点 | 未启动 |
 
@@ -131,6 +131,18 @@
 | 合并判据 | 失败集合对差、净新增为空才合并（不等 CI 变绿）；见 `summary.md` §10 的闸门实操记录 |
 | 合并 | **已合并**（2026-11-06）：squash → main `6bef7b6a`；闸门最终判 `NEEDS_REVIEW`（净新增 0 / 净丢失 1），按 `merge-gate.yml` 自述的 exit 5 分支做人工仲裁后由 owner 越权口显式合并；内容级仲裁通过（合并 tree == 分支 tree，净变更恰 11 个文件）；详见 `summary.md` §10.6 |
 | 部署 | **不部署**（零 DDL、零生产写、零生产读） |
+
+### 9.2 B7 批合并回填（2026-11-06）
+
+| 项 | 结果 |
+|---|---|
+| B7 抖动容忍白名单 | **已合并**（PR #108 → squash main `88599b19`）：对称豁免 + **四条硬约束**（含④「豁免条件化在用例所在文件本次未被改动」）；白名单 `.github/ci-known-flaky-tests.json` 属 CI 相关面 + CODEOWNER 维护 + workflow 显式 checkout 默认分支 ⇒ PR 不能自我豁免 |
+| 闸门最终判定 | 退出码 **6**（`CI_SURFACE_CHANGED`，本批改 CI 相关面 ⇒ 预期路径）；基线 `42092597549`（attempt 2）失败 **139** 条 / PR `42239883087` 失败 **139** 条 ⇒ **净新增 0 / 净丢失 0** |
+| 人工仲裁（退出码 6） | **分片归属未变**：9 个分片逐片条数两侧完全一致（unit 9/4/1/3、int 17/44/26/35、frontend 0）⇒ 失败集合可比 ⇒ 仲裁通过 ⇒ 由 owner 越权口显式合并 |
+| 中途假净新增 | 基线 attempt 1 的 `integration shard 3` 结论 `cancelled`（撞 90 min 超时）⇒ 失败集合为空 ⇒ 35 条「净新增」全是假净新增 ⇒ **整轮** `gh run rerun`（不能只复跑单个 job）后恢复 |
+| 内容级仲裁 | 合并 tree 与分支 tip tree **逐 blob 一致**（各 2566 个 blob，零差异）；相对 base `5a7ac461` 净变更恰 22 个文件（+4499 / −142）⇒ 可安全删分支 |
+| 部署 | **不部署**（零 DDL、零生产写、零生产读；闸门在 GitHub 上跑 ⇒ 合并即生效） |
+| 顺序约束 | B7 已落地 ⇒ 「把 `enforce_admins` 收回去」**现在才可排期**；⚠️ 收紧前必须先确认「涉及 CI 相关面的改动」有明确的人工合并通道，否则变成「谁都不能改闸门」的死锁（见 B7 `summary.md` §11.4） |
 
 ### 9.1 闸门实操结论（引 `summary.md` §10）
 

@@ -546,13 +546,86 @@ PR    run 42061730479（head 97047b8b…）：失败 1 条
 
 ---
 
+## 11. 合并回填（2026-11-06 实操）
+
+### 11.1 闸门复判证据（最终判定）
+
+| 项 | 值 |
+|---|---|
+| 基线 run | `42092597549`（head `5a7ac461`，attempt **2** = 整轮复跑） |
+| PR run | `42239883087`（head `e4c09e28`） |
+| check | `merge-gate / failure-set-diff`（id `127993467931`） |
+| 基线失败 | **139** 条 |
+| PR 失败 | **139** 条 |
+| **净新增 / 净丢失** | **0 / 0** |
+| 闸门结论 | `CI_SURFACE_CHANGED`（**退出码 6** ⇒ failure） |
+| check 标题 | 「退出码 6 ⇒ 不可合并（净新增 / 不可用 job / 待人工确认）」 |
+
+**第一次判的却是退出码 2（UNUSABLE_JOBS），不是 6** —— 根因是**基线侧**：
+基线 run attempt 1 的 `Backend / integration shard 3` 结论是 `cancelled`（撞 `timeout-minutes: 90`）
+⇒ 该 job 的失败集合是**空的** ⇒ 不可用于对差
+⇒ 那 35 条「净新增」全是**假净新增**（恰好等于 PR 侧 shard 3 的 35 条）。
+⇒ 处置：`gh run rerun 42092597549`（**整轮**复跑；**不能**只复跑单个 job ——
+单 job 复跑会让最新 attempt 只剩 1 个 job ⇒ 覆盖等价判据误判 `COVERAGE_MISMATCH`）
+⇒ attempt 2 的 9 个 job **无一 `cancelled`** ⇒ 闸门得以正常对差。
+
+### 11.2 人工仲裁（退出码 6 分支）
+
+`merge-gate.yml` 对退出码 6 的自述口径是「人工仲裁确认**分片归属未变**后，由 bypass 账号显式合并」
+⇒ 分片归属逐片核对：
+
+| 分片 | 基线 attempt 2 | PR attempt 1 |
+|---|---|---|
+| unit shard 0 | 9 | 9 |
+| unit shard 1 | 4 | 4 |
+| unit shard 2 | 1 | 1 |
+| unit shard 3 | 3 | 3 |
+| integration shard 0 | 17 | 17 |
+| integration shard 1 | 44 | 44 |
+| integration shard 2 | 26 | 26 |
+| integration shard 3 | 35 | 35 |
+| Frontend / typecheck + coverage | 0（success） | 0（success） |
+| **合计** | **139** | **139** |
+
+⇒ 逐片条数**完全一致** ⇒ **分片归属未变** ⇒ 失败集合可比 ⇒ 仲裁通过。
+⇒ 且「净新增 0 / 净丢失 0」是**工具自己的对差结论**，不是人工推断。
+
+⚠️ 本次**没有**触发白名单豁免：白名单里那一条
+（`app/tests/integration/test_reconcile_milvus_id_mapping.py::test_backfill_is_idempotent`）
+在两侧**同结论**（都没进失败集合）⇒ 无需豁免 ⇒ 报告里没有「已知抖动豁免」段。
+⚠️ 这**不能**被读成「白名单没生效」：**白名单只在两侧结论不一致时才起作用**——
+它的作用是「把两侧不一致的那一条从对差里剔除」；两侧一致时它是**空操作**。
+
+### 11.3 合并与内容级仲裁
+
+| 项 | 值 |
+|---|---|
+| 合并方式 | `gh pr merge 108 --squash --admin`（owner 越权口；`enforce_admins: false`） |
+| main tip | **`88599b19`** |
+| 内容级仲裁 | 合并后的 tree 与分支 tip tree **逐 blob 完全一致**：两边各 **2566** 个 blob，`diff` **零差异** |
+| 净变更 | 相对 base `5a7ac461` 恰 **22 个文件**（+4499 / −142） |
+| 部署 | **不部署**（零 DDL、零生产写、零生产读） |
+
+⇒ squash 没丢内容 ⇒ 分支可安全删除。
+
+### 11.4 顺序约束（仍然成立，且已落地）
+
+B7 落地**依赖 owner 越权口**（`enforce_admins: false`）：
+本批改了 `ci_*.py` + `.github/` ⇒ 落在 CI 相关面 ⇒ 闸门必判 `CI_SURFACE_CHANGED` ⇒ 只能走越权口。
+⇒ **现在 B7 已在 main 上** ⇒ 「把 `enforce_admins` 收回去」这条后续项才**可以**开始排期；
+⚠️ 但收紧**之前**必须先确认：**此后所有涉及 CI 相关面的改动**
+（闸门代码本身、白名单文件、CODEOWNERS、CI workflow）都有一条**明确的人工合并通道**
+⇒ 否则会变成「谁都不能改闸门」的死锁。
+
+---
+
 ## SSOT 校验清单（合并前必查）
 
 - [x] frontmatter 元数据齐全（日期 / 作者 / Phase / 状态 / 关联变更 / 迁移版本 / MEMORY）
 - [x] 9 段都非空，无 TBD/TODO/待补 占位
 - [x] 第 2 段 ≥ 2 个候选方案对比（A / B / C）+ 第二个决策点（读不到 ⇒ 失败关闭）
 - [x] 第 3 段无迁移（零 DDL）⇒ 迁移文件名校验不适用
-- [ ] 第 7 段填齐（见下）
+- [x] 第 7 段填齐（见 §7）
 - [x] 第 8 段：本地端到端冒烟输出已贴出（**不部署**，理由已写明）
 - [x] 第 9 段 ≥ 3 个跨文件链接（关联变更 / Rules / MEMORY / 代码）
 - [x] 相关 wiki 已更新（`Harness/rules/开发流程规范.md` 第 10 条 + `测试规范.md` 工具化清单）

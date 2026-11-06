@@ -226,17 +226,34 @@ def _parseChangedFiles(payload: str) -> tuple[str, ...]:
     分页，**不会**补齐 files）⇒ 命中上限必须**报错**，不能当成「就这些文件」
     ⇒ 否则一个改了 300+ 文件的大 PR 里混着 `.github/workflows/ci.yml`
     也会被漏掉 ⇒ CI 相关面守卫放行 ⇒ 假「净新增 0」。
+
+    ⚠️ 上限按 **条目数**计，不是按「名字个数」计：改名会让**一个**条目产出
+    **两个**名字 ⇒ 按名字数计会提前触发（误拦）；按条目数计才是 compare API
+    真实的截断边界。
+
+    ⚠️ **改名必须带上旧路径**（`previous_filename`）：GitHub 对一次改名只给
+    **一个**条目（新路径 `filename` + 旧路径 `previous_filename`）
+    ⇒ 只取 `filename` 的话旧路径从清单里消失
+    ⇒ 把 `.github/ci-known-flaky-tests.json` 改名成 `docs/notes.json`
+    就能让它逃出「CI 相关面」判定 ⇒ **静默绕过**退出码 6 的人工仲裁。
     """
     parsed = json.loads(payload)
     pages = parsed if isinstance(parsed, list) else [parsed]
     names: list[str] = []
+    itemCount = 0
     for page in pages:
         if not isinstance(page, dict):
             raise ValueError(f"gh 返回了意料之外的 JSON 结构：{type(page).__name__}")
         for item in page.get("files") or []:
-            if isinstance(item, dict) and "filename" in item:
+            if not isinstance(item, dict):
+                continue
+            itemCount += 1
+            if "filename" in item:
                 names.append(str(item["filename"]))
-    if len(names) >= _COMPARE_FILES_LIMIT:
+            previous = item.get("previous_filename")
+            if previous is not None and str(previous) not in names:
+                names.append(str(previous))
+    if itemCount >= _COMPARE_FILES_LIMIT:
         raise ValueError(
             f"改动文件数达到 compare API 的上限（{_COMPARE_FILES_LIMIT}）⇒ 清单被截断，"
             "无法判定 PR 是否改动了 CI 相关面 ⇒ 须人工确认"

@@ -199,3 +199,52 @@ async def test_backfill_then_reconcile_yields_zero_diff(
     report = await reconcile(dbSession)
 
     assert report.diff_count == 0, f"diff after backfill: {report.rows}"
+
+
+async def test_backfill_leaves_no_row_with_empty_external_id(
+    milvusSeedExternalId, dbSession: AsyncSession
+):
+    """回填后不得再有 external_id 为空的行，且同一 ontology_id 只剩一行。
+
+    `test_backfill_is_idempotent` 断言的是「第二次 written == 0」——那是**间接**证据
+    （第二次没东西可写，可能是因为扫描逻辑漏了，而不是因为 delete 已可见）。
+    这里直接钉住**后置条件**：回填完成后，三个集合里都扫不到 external_id 为空的行。
+
+    Milvus 的 delete 走 Proxy → DML channel → DataNode → QueryNode 三段异步管道，
+    flush() 只持久化、不保证 QueryNode 已应用 delta binlog ⇒ 脚本必须 release+load
+    才让旧行真正消失（详见 scripts/backfill_milvus_external_id.py 模块说明）。
+
+    去重断言**只针对本次种入的 ontology_id**（5001/5002/5003）：脚本的职责是
+    「一行换一行」，**不做**跨行的去重（见 plan.md §五）；断言范围一旦扩到
+    集合里所有行，就会因为脚本承诺之外的历史残留而误红。
+    """
+    from app.infrastructure.milvus_client import (
+        queryClassEmbeddings,
+        queryMetricEmbeddings,
+        queryPropertyEmbeddings,
+    )
+    from scripts.backfill_milvus_external_id import backfill
+
+    await _truncate_id_mapping(dbSession)
+    await backfill(dbSession)
+
+    seededByQuery = (
+        (queryClassEmbeddings, "class", 5001),
+        (queryPropertyEmbeddings, "property", 5002),
+        (queryMetricEmbeddings, "metric", 5003),
+    )
+    for query_fn, typeName, seededOntologyId in seededByQuery:
+        rows = query_fn()
+        residue = [r for r in rows if not r.get("external_id")]
+        assert not residue, f"回填后仍有 external_id 为空的行：{residue}"
+        sameOntologyId = [
+            r for r in rows if r.get("ontology_id") == seededOntologyId
+        ]
+        assert len(sameOntologyId) == 1, (
+            f"ontology_id={seededOntologyId} 出现 {len(sameOntologyId)} 行"
+            f"（delete 不可见 ⇒ 残留重复向量）：{sameOntologyId}"
+        )
+        expectedExternalId = f"obj:{typeName}:{seededOntologyId}"
+        assert sameOntologyId[0].get("external_id") == expectedExternalId, (
+            f"回填后的 external_id 不符：{sameOntologyId[0]}，期望 {expectedExternalId}"
+        )

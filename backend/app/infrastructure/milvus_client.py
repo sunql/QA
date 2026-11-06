@@ -590,33 +590,72 @@ def queryWikiPageChunks(
     )
 
 
-def refreshWikiCollection() -> None:
-    """测试专用：release + load 强制 QueryNode 刷新 wiki collection.
+# release + load 之后等待 QueryNode 装载完成的上限（秒）。超时抛异常。
+_REFRESH_LOAD_TIMEOUT_SECONDS = 60.0
+
+
+def refreshCollection(collection: Collection, *, waitForLoad: bool = True) -> None:
+    """release + load：强制 QueryNode 重装 segment + delta binlog，使 delete 立即可见。
 
     Milvus delete buffer 走 ``Proxy → DML channel → DataNode → QueryNode``
     三段异步管道；``flush()`` 仅持久化（Growing → Sealed → 对象存储），
     不保证 QueryNode 已加载并应用 delta binlog。**实测在 collection 默认
     Bounded（5s 容忍窗口）下，per-request ``consistency_level="Strong"`` 不能
-    立即看到 delete 后状态**。
+    立即看到 delete 后状态**（2026-09-27 实测）。
 
     **release + load** 强制 QueryNode 重新装载 segment + delta binlog，
     delete 立即对后续 query 可见（实测 < 3s 完成）。
 
-    **生产对账不要用** —— 2-3s 延迟过大。仅集成测试 delete-then-query 验证场景。
+    代价：release 与 load 之间该集合处于**未加载**状态（约 2-3s）⇒ 该窗口内
+    针对该集合的检索**拿不到正常结果**（Milvus 2.x 下可能直接报「集合未加载」，
+    也可能等服务端重载）⇒ **必须在维护窗口执行**。⇒ **仅用于一次性维护脚本与
+    集成测试的 delete-then-query 验证场景**，不用于在线业务路径。
+
+    前置条件：等待调用固定打在 ``_connAlias()`` 这一个别名上 ⇒ 调用方必须保证
+    目标集合挂在该别名下（本仓库只有一个别名 ``ontology_milvus``）。
+
+    Args:
+        collection: 已连上目标 database 的集合句柄。
+        waitForLoad: 是否**阻塞**等待装载完成。默认 ``True``。
+            ``load()`` 只是发一个请求就返回，不等装载完成 ⇒ 需要「刷新完再查」的
+            场景必须用默认的阻塞版。传 ``False`` 则是**非阻塞**版（保持
+            ``refreshWikiCollection`` / ``refreshDocumentCollection`` 改动前的
+            原语义 —— 那两个 helper 不等装载完成）。
+
+    Raises:
+        Exception: release / load / 等待装载完成失败时向上抛 —— 刷新没成功
+            必须让调用方知道，绝不静默继续。
     """
-    collection = ensureWikiPageCollection()
     collection.release()
     collection.load()
+    if not waitForLoad:
+        return
+    utility.wait_for_loading_complete(
+        collection.name,
+        timeout=_REFRESH_LOAD_TIMEOUT_SECONDS,
+        using=_connAlias(),
+    )
+
+
+def refreshWikiCollection() -> None:
+    """测试专用：release + load 强制 QueryNode 刷新 wiki collection.
+
+    语义见 ``refreshCollection``（三段异步管道 / flush 只持久化 /
+    Bounded 窗口下 Strong 也无效）。
+
+    ⚠️ 保持**改动前的非阻塞语义**（不等装载完成）—— 本 helper 的既有集成用例
+    （``test_milvus_wiki_fields.py``）依赖这个时序，不得因本次重构而改变。
+    """
+    refreshCollection(ensureWikiPageCollection(), waitForLoad=False)
 
 
 def refreshDocumentCollection() -> None:
     """测试专用：release + load 强制 QueryNode 刷新 document collection.
 
-    见 ``refreshWikiCollection`` 注释；语义一致，仅用于 document 集合。
+    见 ``refreshCollection`` 注释；语义一致，仅用于 document 集合。
+    ⚠️ 同 ``refreshWikiCollection``：保持非阻塞（原语义）。
     """
-    collection = ensureDocumentCollection()
-    collection.release()
-    collection.load()
+    refreshCollection(ensureDocumentCollection(), waitForLoad=False)
 
 
 # ---------------------------------------------------------------------------

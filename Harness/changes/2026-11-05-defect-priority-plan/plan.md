@@ -117,7 +117,8 @@
 | N2 | UI 无法清理 MEASURE 的残留分母 | 表单不渲染分母行 ⇒ 无清空入口；改型已能清，但「本来就是 MEASURE + 残留」清不掉 | 待产品口径：是否禁止 MEASURE 携带分母 / 服务端做「类型 ⇔ 分母」归一 / 清理历史遗留行 |
 | N3 | 指标写接口无 `requireAdmin` / 归属校验（`backend/app/api/v1/ontology.py:343-355`） | security-reviewer 指出，属**既有**问题 | 与本批无关，另立项（写入口的越权面） |
 | N6 | 闸门的 CI 面检查用 `compare/<base>...<head>`（三点 diff）取改动文件 | 分支若用「重建 main 的 tree 的合成提交」同步，main 的 tip 就不是分支的祖先 ⇒ 三点 diff 把 main 自己的 CI 文件算成「PR 改的」⇒ 假 `CI_SURFACE_CHANGED`（本批实证，见 `summary.md` §10.5） | 两条：① 分支一律以 main 的 tip 为底座起，不用合成提交同步；② 工具侧改为按**净变更**（两点）取文件，或显式用 merge-base 语义并排除「与 base 同 tree 的合成提交」 |
-| N7 | `merge-gate.yml` 预设的「bypass 账号」在**个人仓库**里不存在 | 安装分支保护时用了 `enforce_admins: true` 且无 bypass 名单 ⇒ exit 5 分支要求的「人工确认后显式合并」**无路可走**；个人仓库又不支持 `bypass_pull_request_allowances.users`（GitHub 报 `Only organization repositories can have users and team restrictions`）⇒ 只能靠 `enforce_admins`（本批实证，见 `summary.md` §10.6） | 已按 GitHub 原生表达装成 `enforce_admins: false`（owner 越权口），其余策略不变。**代价**：必需检查对 owner 变成软约束 ⇒ **必须先实现 B7 再考虑收紧**（B7 改的是 CI 面 ⇒ 落地本身要靠这条越权口 ⇒ 顺序不能反） |
+| N7 | `merge-gate.yml` 预设的「bypass 账号」在**个人仓库**里不存在 | 安装分支保护时用了 `enforce_admins: true` 且无 bypass 名单 ⇒ exit 5 分支要求的「人工确认后显式合并」**无路可走**；个人仓库又不支持 `bypass_pull_request_allowances.users`（GitHub 报 `Only organization repositories can have users and team restrictions`）⇒ 只能靠 `enforce_admins`（本批实证，见 `summary.md` §10.6） | 已按 GitHub 原生表达装成 `enforce_admins: false`（owner 越权口），其余策略不变。**代价**：必需检查对 owner 变成软约束 ⇒ **必须先实现 B7 再考虑收紧**（B7 改的是 CI 面 ⇒ 落地本身要靠这条越权口 ⇒ 顺序不能反）。**2026-11-06 更新**：B7 已合并（main `88599b19`）⇒ 这条顺序约束**已解除**，但收紧方案见 N8 |
+| N8 | 把 `enforce_admins` 收回去（恢复 owner 的硬约束） | B7 已落地 ⇒ 顺序约束解除；但直接改回 `true` ⇒ **任何**改 CI 相关面的 PR（闸门代码本身、白名单文件、CODEOWNERS、CI workflow）都判退出码 6 = failure ⇒ **谁都不能合并** ⇒ 死锁 | **不要直接翻开关**。先设计「涉及 CI 相关面的改动」的**明确人工合并通道**（候选：闸门在「改动面仅限 CI 相关面 且 改动者为仓库唯一 owner」时给出带说明的人工裁决出口；或引入 CODEOWNER 复核要求；或给白名单/闸门改动单独的、显式记录的放行机制）。通道落地并验证后，才用 `PUT` 改回 `enforce_admins: true`（**PATCH 一律 404**） |
 
 ## 九、执行记录（2026-11-05）
 

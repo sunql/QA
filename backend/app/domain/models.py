@@ -5,6 +5,12 @@ Phase 1 包含 llm_config 与 session_token_usage。
 
 约定：ORM 列属性使用 snake_case，与设计稿 SQL 列名（model_name、session_id 等）对齐。
 JSON 契约的 camelCase 由 Pydantic schema 的 alias_generator 负责。
+
+CHECK 约束约定：本文件里每一条 `CheckConstraint` 都是**迁移已经建在 DB 上的约束**
+（ORM 侧漏声明 ⇒ `alembic autogenerate` 会反过来提议 `drop_constraint` 把数据校验删掉）。
+表达式照抄 `pg_get_constraintdef` 的实测定义，并由
+`app/tests/unit/test_orm_check_constraints.py` 做 PG 规范化逐字节比对
+（alembic 1.19.1 只比 CHECK 约束的名字、不比表达式 ⇒ 表达式写错它不会报）。
 """
 
 from __future__ import annotations
@@ -184,6 +190,16 @@ class EmbeddingProvider(Base, TimestampMixin):
     dimension: Mapped[int] = mapped_column(Integer, nullable=False, default=1024)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    __table_args__ = (
+        # 0014 迁移：partial unique —— 只有 is_active 为真的行才参与唯一性。
+        Index(
+            "uq_embedding_provider_active",
+            "is_active",
+            unique=True,
+            postgresql_where=sa_text("is_active"),
+        ),
+    )
+
     def __repr__(self) -> str:
         return (
             f"<EmbeddingProvider id={self.id} name={self.name} "
@@ -277,6 +293,7 @@ class OntologyClass(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("class_name", "version", name="uq_ontology_class_name_version"),
         Index("ix_ontology_class_valid_to", "valid_to"),
+        Index("idx_class_name", "class_name"),
     )
 
     def __repr__(self) -> str:
@@ -308,6 +325,9 @@ class OntologyProperty(Base, TimestampMixin):
         BigIntFk, ForeignKey("ontology_class.id"), nullable=True
     )
     source_column: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 字段单位（2026-11-01）：chat 输出把单位并入表头/图例（「收货数量（件）」）。
+    # 可空 = 未定义；解析层据此产出「未定义单位」治理提示。
+    unit: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # 值域型字典（feat-dq-rule-auto-generation）：LLM 建议确认后沉淀于此，
     # 推导引擎据此生成 VALIDITY 规则（表引用型字典仍走 ref_class_id）
     allowed_values: Mapped[list[str] | None] = mapped_column(
@@ -333,7 +353,10 @@ class OntologyProperty(Base, TimestampMixin):
         lazy="selectin",
     )
 
-    __table_args__ = (UniqueConstraint("class_id", "property_name", name="uq_class_property"),)
+    __table_args__ = (
+        UniqueConstraint("class_id", "property_name", name="uq_class_property"),
+        Index("idx_property_class", "class_id"),
+    )
 
     def __repr__(self) -> str:
         return f"<OntologyProperty id={self.id} name={self.property_name}>"
@@ -389,6 +412,10 @@ class OntologyMetric(Base, TimestampMixin):
         back_populates="metrics", lazy="selectin"
     )
 
+    __table_args__ = (
+        Index("idx_metric_class", "target_class_id"),
+    )
+
     def __repr__(self) -> str:
         return f"<OntologyMetric id={self.id} name={self.metric_name}>"
 
@@ -415,6 +442,12 @@ class OntologyMetricSource(Base):
         nullable=False,
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    __table_args__ = (
+        # 0137 迁移建的是**唯一约束**（不是唯一索引）⇒ ORM 侧用 UniqueConstraint。
+        UniqueConstraint("metric_id", "class_id", "role", name="uq_metric_source_triple"),
+        Index("ix_metric_source_class_id", "class_id"),
+    )
 
     def __repr__(self) -> str:
         return f"<OntologyMetricSource metric_id={self.metric_id} class_id={self.class_id} role={self.role}>"
@@ -491,6 +524,21 @@ class KpiCatalog(Base, TimestampMixin):
         "OntologyMetric", lazy="selectin"
     )
 
+    __table_args__ = (
+        Index("ix_kpi_catalog_owner", "owner"),
+        Index("ix_kpi_catalog_status", "status"),
+        # 0050 迁移：ARRAY 列的 GIN 索引（默认 array_ops）。
+        Index(
+            "ix_kpi_catalog_semantic_keywords",
+            "semantic_keywords",
+            postgresql_using="gin",
+        ),
+        CheckConstraint(
+            "status IN ('DRAFT','PUBLISHED','DEPRECATED')",
+            name="ck_kpi_catalog_status",
+        ),
+    )
+
     def __repr__(self) -> str:
         return f"<KpiCatalog id={self.id} code={self.kpi_code} status={self.status}>"
 
@@ -512,6 +560,24 @@ class DataLayerRule(Base, TimestampMixin):
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     datasource_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        # 0134 迁移：两条 partial unique —— 手工规则（pattern 为空）全局唯一，
+        # 模式规则（pattern 非空）在同一 layer 内唯一。
+        Index(
+            "uq_layer_rule_manual",
+            "layer",
+            unique=True,
+            postgresql_where=sa_text("pattern IS NULL"),
+        ),
+        Index(
+            "uq_layer_rule_pattern",
+            "layer",
+            "pattern",
+            unique=True,
+            postgresql_where=sa_text("pattern IS NOT NULL"),
+        ),
+    )
 
     def __repr__(self) -> str:
         return f"<DataLayerRule layer={self.layer} pattern={self.pattern}>"
@@ -541,6 +607,20 @@ class BusinessObject(Base, TimestampMixin):
     graph_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_business_object_header_class", "header_class_id"),
+        # 0133 迁移建的是 CREATE UNIQUE INDEX（非唯一约束）⇒ 用 Index(unique=True)。
+        Index(
+            "uq_business_object_header_class",
+            "header_class_id",
+            unique=True,
+        ),
+        CheckConstraint(
+            "code = upper(code)",
+            name="ck_business_object_code_upper",
+        ),
+    )
 
     def __repr__(self) -> str:
         return f"<BusinessObject code={self.code} name={self.name}>"
@@ -645,6 +725,16 @@ class FeatureDefinition(Base, TimestampMixin):
         passive_deletes=True,
     )
 
+    __table_args__ = (
+        Index("ix_feature_definition_datasource", "datasource_id"),
+        Index("ix_feature_definition_owner", "owner"),
+        Index("ix_feature_definition_status", "status"),
+        CheckConstraint(
+            "status IN ('DRAFT','ACTIVE','DEPRECATED')",
+            name="ck_feature_definition_status",
+        ),
+    )
+
     def __repr__(self) -> str:
         return (
             f"<FeatureDefinition id={self.id} name={self.feature_name} "
@@ -688,6 +778,10 @@ class FeatureValue(Base):
             name="uq_feature_value_dedup",
         ),
         Index("ix_feature_value_feature_id", "feature_id"),
+        CheckConstraint(
+            "value IS NOT NULL OR value_text IS NOT NULL",
+            name="ck_feature_value_not_both_null",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -776,6 +870,10 @@ class AuditOutbox(Base):
             "ix_audit_outbox_processed",
             "processed_at",
             postgresql_where=sa_text("processed_at IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "attempts >= 0",
+            name="ck_audit_outbox_attempts_nonneg",
         ),
     )
 
@@ -906,7 +1004,11 @@ class DataSource(Base, TimestampMixin):
     # Oracle 版本用于 NL2SQL 分页语法判断；11g 用 ROWNUM，12c+ 用 FETCH FIRST
     oracle_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
-    __table_args__ = (UniqueConstraint("name", name="uq_datasource_name"),)
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_datasource_name"),
+        Index("idx_datasource_default", "is_default"),
+        Index("idx_datasource_name", "name"),
+    )
 
     def __repr__(self) -> str:
         return f"<DataSource id={self.id} name={self.name} type={self.type}>"
@@ -983,6 +1085,14 @@ class SessionMessage(Base, TimestampMixin):
         nullable=True,
     )
     steps_snapshot: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
+    )
+    # agent_trace（2026-10-31，L4 执行轨迹卡）：L4 Agent Loop 的工具调用轨迹快照
+    # （工具名 / 参数摘要 / 返回计数 / 耗时 / 成败），由 l4_trace.buildTrace 构造。
+    # 只含摘要，**不含 rows / 工具结果原文**；仅 answered / max_iterations 的 L4
+    # 消息落值，其余路径（L1/L2/L3、闲聊、降级）恒 NULL → 前端无卡。
+    agent_trace: Mapped[dict[str, Any] | None] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"),
         nullable=True,
     )
@@ -1357,6 +1467,18 @@ class DataLineage(Base, TimestampMixin):
         Index("ix_data_lineage_source", "source_layer", "source_system", "source_object"),
         Index("ix_data_lineage_target", "target_layer", "target_system", "target_object"),
         Index("ix_data_lineage_active", "is_active"),
+        CheckConstraint(
+            "source_layer IN ('SOURCE_SYSTEM','ODS','DWD','DWS','ADS','KPI','AI')",
+            name="ck_data_lineage_source_layer",
+        ),
+        CheckConstraint(
+            "target_layer IN ('SOURCE_SYSTEM','ODS','DWD','DWS','ADS','KPI','AI')",
+            name="ck_data_lineage_target_layer",
+        ),
+        CheckConstraint(
+            "refresh_frequency IN ('REALTIME','HOURLY','DAILY','WEEKLY')",
+            name="ck_data_lineage_refresh_frequency",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -1427,6 +1549,33 @@ class EntityMapping(Base, TimestampMixin):
         Index("ix_entity_mapping_enterprise_key", "enterprise_key"),
         Index("ix_entity_mapping_source", "entity_type", "source_system", "source_key"),
         Index("ix_entity_mapping_owner", "owner"),
+        Index("ix_entity_mapping_enterprise_code", "entity_type", "enterprise_code"),
+        Index(
+            "ix_entity_mapping_source_code",
+            "entity_type",
+            "source_system",
+            "source_code",
+        ),
+        # 0086 迁移用裸 SQL 建：GIN + gin_trgm_ops + 仅 SUPPLIER 的 partial 索引。
+        Index(
+            "idx_entity_mapping_supplier_name_trgm",
+            "name",
+            postgresql_using="gin",
+            postgresql_ops={"name": "gin_trgm_ops"},
+            postgresql_where=sa_text("entity_type = 'SUPPLIER'"),
+        ),
+        CheckConstraint(
+            "entity_type IN ('SUPPLIER','MATERIAL','PO','GR','IQC','NCR')",
+            name="ck_entity_mapping_entity_type",
+        ),
+        CheckConstraint(
+            "source_system IN ('ERP','SRM','QMS','MDM','PLM')",
+            name="ck_entity_mapping_source_system",
+        ),
+        CheckConstraint(
+            "match_rule IN ('MDM_MASTER','BUSINESS_KEY','MAPPING')",
+            name="ck_entity_mapping_match_rule",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -1487,7 +1636,9 @@ class AuditLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "action IN ('CREATE','UPDATE','DELETE',"
+            # 'RESTORE' 是 DB 上的既有取值（ORM 漏写 ⇒ 表达式与 DB 不一致，
+            # 且 alembic 不比较 CHECK 表达式 ⇒ 只会静默漂移）。
+            "action IN ('CREATE','UPDATE','DELETE','RESTORE',"
             "'auth.login','auth.login_failed','auth.logout',"
             "'auth.password_changed','user.password_reset')",
             name="ck_audit_log_action",
@@ -1505,6 +1656,8 @@ class AuditLog(Base):
             unique=True,
             postgresql_where=sa_text("outbox_id IS NOT NULL"),
         ),
+        Index("idx_audit_log_actor", "actor"),
+        Index("idx_audit_log_created_at", "created_at"),
     )
 
     def __repr__(self) -> str:
@@ -1572,6 +1725,17 @@ class DocumentCatalog(Base, TimestampMixin):
         # 0061 迁移建的是 CREATE UNIQUE INDEX（非唯一约束），故用 Index(unique=True)
         # 而非 UniqueConstraint —— 保持 ORM 与迁移生成的 DDL 形状一致。
         Index("uq_document_catalog_content_hash", "content_hash", unique=True),
+        Index("ix_document_catalog_entity", "document_id"),
+        Index("ix_document_catalog_security", "security_level"),
+        Index("ix_document_catalog_type", "document_type"),
+        CheckConstraint(
+            "security_level IN ('L1','L2','L3')",
+            name="ck_document_security_level",
+        ),
+        CheckConstraint(
+            "status IN ('ACTIVE','EXPIRED','ARCHIVED')",
+            name="ck_document_status",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
@@ -1627,6 +1791,10 @@ class DocumentEntityRelation(Base):
         ),
         Index("ix_doc_rel_entity", "entity_type", "entity_key"),
         Index("ix_doc_rel_document", "document_id"),
+        CheckConstraint(
+            "length(entity_key) > 0",
+            name="ck_doc_rel_entity_key_nonempty",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -1687,6 +1855,23 @@ class AgentDefinition(Base, TimestampMixin):
         lazy="selectin",
     )
 
+    __table_args__ = (
+        Index("ix_agent_definition_owner", "owner"),
+        Index("ix_agent_definition_status", "status"),
+        CheckConstraint(
+            "status IN ('active','draft','deprecated')",
+            name="ck_agent_status",
+        ),
+        CheckConstraint(
+            "response_latency IN ('realtime','batch')",
+            name="ck_agent_response_latency",
+        ),
+        CheckConstraint(
+            "trigger_type IN ('user_question','scheduled','event')",
+            name="ck_agent_trigger_type",
+        ),
+    )
+
     def __repr__(self) -> str:
         return (
             f"<AgentDefinition id={self.id} code={self.agent_code} "
@@ -1732,6 +1917,10 @@ class AgentAccessPolicy(Base):
         ),
         Index("ix_agent_policy_agent", "agent_id"),
         Index("ix_agent_policy_object", "data_object", "data_layer"),
+        CheckConstraint(
+            "permission IN ('read','masked_read','forbidden','forbidden_write')",
+            name="ck_agent_permission",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -1777,7 +1966,10 @@ class AgentSchedule(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
 
-    __table_args__ = (Index("ix_agent_schedule_next_run", "is_active", "next_run_at"),)
+    __table_args__ = (
+        Index("ix_agent_schedule_next_run", "is_active", "next_run_at"),
+        Index("ix_agent_schedule_agent", "agent_id"),
+    )
 
     def __repr__(self) -> str:
         return (
@@ -1824,6 +2016,10 @@ class AgentRunLog(Base):
     __table_args__ = (
         Index("ix_agent_run_log_schedule", "schedule_id"),
         Index("ix_agent_run_log_agent", "agent_code", "started_at"),
+        CheckConstraint(
+            "status IN ('success','error')",
+            name="ck_agent_run_log_status",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -2097,8 +2293,9 @@ class EvaluationReport(Base, TimestampMixin):
         Index(
             "ix_evaluation_report_status_running",
             "status",
-            postgresql_where=sa_text("status IN ('PENDING','RUNNING')"),
+            postgresql_where=sa_text("status = 'RUNNING'"),
         ),
+        Index("ix_evaluation_report_window", "time_window_end"),
     )
 
     def __repr__(self) -> str:
@@ -2366,9 +2563,9 @@ class L3Acl(Base):
         server_default=sa.func.now(),
     )
 
-    __table_args__ = (
-        Index("ix_l3_acl_user_id", "user_id"),
-    )
+    # 注：`user_id` 上的 `mapped_column(index=True)` 已经生成同名索引
+    # `ix_l3_acl_user_id`；这里不再重复声明 `Index("ix_l3_acl_user_id", "user_id")`
+    # —— 重复声明会让 create_all 发出两条同名 CREATE INDEX（PG 直接报错）。
 
 
 # Re-export Wiki 知识管理 4 表（0053 migration，Phase 8 M1）。同样为了让
@@ -2455,6 +2652,10 @@ class WikiOntologyLink(Base):
         CheckConstraint(
             "weight >= 0 AND weight <= 1",
             name="chk_link_weight",
+        ),
+        CheckConstraint(
+            "chunk_id IS NULL OR length(chunk_id) <= 64",
+            name="chk_link_granularity",
         ),
     )
 
@@ -2570,3 +2771,16 @@ class ReportInstance(Base, TimestampMixin):
 
 
 from app.domain import agent_orchestration_models as _agent_orchestration_models  # noqa: E402,F401
+
+# Re-export 研究线 / 多步 / 图谱洞察 / MCP 调用日志表（0067、0084、0111–0138）。
+# 与上面那些 re-export 同理由：**Schema drift 校验与 alembic autogenerate 都靠
+# Base.metadata 看见这些表**。漏掉任何一个的后果分两种：
+# - 独立 CLI（`python -m app.infrastructure.schema_drift`）只 import 本模块
+#   ⇒ 该模块的表在 CLI 下全部不可见，被误报成 `extra_table`；
+#   应用进程只会丢失「别处也没被 import」的模块
+#   （改前只有 `mcp_call_log`）；
+# - `alembic autogenerate` 看不见 ⇒ 反过来提议 DROP 这些表。
+from app.domain import mcp_models as _mcp_models  # noqa: E402,F401
+from app.domain import multi_step_models as _multi_step_models  # noqa: E402,F401
+from app.domain import research_models as _research_models  # noqa: E402,F401
+from app.domain import wiki_graph_insight as _wiki_graph_insight  # noqa: E402,F401

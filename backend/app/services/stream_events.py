@@ -65,6 +65,7 @@ EVENT_STEP_PLAN = "step_plan"    # 多步：每个子步骤的计划（含 descr
 EVENT_STEP_RESULT = "step_result"  # 多步：每个子步骤的执行结果（sql + data + summary）
 EVENT_STEP_COMPRESSED = "step_compressed"  # 多步：某个**更早**的步被上下文压缩（Task 9 徽章）
 EVENT_DATA_QUALITY = "data_quality"  # Phase 1.4：目标表的可信度 badge 列表（每张 selectedClass 一条）
+EVENT_AGENT_TRACE = "agent_trace"  # L4：工具调用轨迹快照（事后执行轨迹卡；token 前下发）
 EVENT_CLASS_RECALL = "class_recall"  # 类召回诊断（2026-09-16）：截断/降级时前端提示
 
 

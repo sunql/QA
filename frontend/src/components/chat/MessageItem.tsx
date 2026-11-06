@@ -3,6 +3,7 @@ import { Alert, Button, Card, Collapse, Space, Tag, Typography } from "antd";
 import { FilePdfOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import AgentTraceCard from "./AgentTraceCard";
 import QueryPlanCard from "./QueryPlanCard";
 import MultiStepPlanCard from "./MultiStepPlanCard";
 import SqlPreview from "./SqlPreview";
@@ -229,13 +230,20 @@ function MessageItem({
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
               </div>
             )}
-            {/* 卡片固定阅读顺序（2026-10-31 用户反馈）：分析计划 → 查询计划 → SQL。
-                单步问题三张卡同时出现，顺序必须与流式事件到达顺序解耦。 */}
+            {/* 卡片固定阅读顺序：执行轨迹（2026-10-31）→ 分析计划 → 查询计划 → SQL。
+                单步/L4 问题多张卡同时出现，顺序必须与流式事件到达顺序解耦：
+                轨迹是「怎么查的」，先于「查什么（计划）」与「查到了什么（SQL）」。 */}
+            {message.agentTrace && message.agentTrace.steps.length ? (
+              <div style={{ marginTop: 8 }}>
+                <AgentTraceCard trace={message.agentTrace} />
+              </div>
+            ) : null}
             {message.steps && message.steps.length ? (
               <div style={{ marginTop: 8 }}>
                 <MultiStepPlanCard
                   steps={message.steps}
                   currentStepIndex={message.currentStepIndex}
+                  elapsedMs={message.elapsedMs}
                   originalModelId={message.originalModelId ?? selectedModelId ?? 0}
                   onResume={(runId, fromStepIndex, modelId) =>
                     resumeRun(runId, fromStepIndex, message.id, modelId)

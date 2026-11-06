@@ -376,7 +376,13 @@ export const enUS = {
   },
 
   multiStep: {
-    panelLabel: "View Analysis Plan",
+    // Collapsed header summary (D2 redesign): steps / success / failure / elapsed
+    summaryTotal: "{total} steps",
+    summarySuccess: "{success} succeeded",
+    summaryFailed: "{failed} failed",
+    summaryRunning: "Running ({current}/{total})",
+    summaryPending: "{total} steps · pending",
+    elapsed: "{seconds}s",
     statusPending: "Pending",
     statusRunning: "Running",
     statusDone: "Done",
@@ -392,6 +398,16 @@ export const enUS = {
     compressedRows: "Data compressed ({from} → {to} rows)",
     // F2：KPI datasource mismatch warning (code used as i18n key, not raw backend text)
     KPI_DATASOURCE_MISMATCH: "The KPI's bound datasource does not match your currently selected datasource",
+  },
+
+  agentTrace: {
+    panelLabel: "View execution trace",
+    summary: "{steps} steps · {iterations} rounds · {duration}",
+    statusAnswered: "Completed",
+    statusMaxIterations: "Iteration limit reached",
+    iterationLabel: "Round {n}",
+    stepFailed: "Failed",
+    truncated: "Trace too long; showing the first 50 steps",
   },
 
   messageItem: {
@@ -899,6 +915,8 @@ export const enUS = {
     success: "Exported",
     failed: "Export failed: {message}",
     truncated: "Showing the first {count} rows only (the full result is longer)",
+    showAll: "Show all {total} items",
+    showTopN: "Show top {limit} only",
   },
 
   chatPanel: {
@@ -1637,6 +1655,7 @@ export const enUS = {
         propertyAlias: "Alias",
         dataType: "Data Type",
         sourceColumn: "Source Column",
+        unit: "Unit",
         flags: "Flags",
         actions: "Actions",
       },
@@ -1806,6 +1825,8 @@ export const enUS = {
         propertyAlias: "Alias",
         dataType: "Data Type",
         sourceColumn: "Source Column",
+        unit: "Unit",
+        unitHint: "Unit of measure for numeric fields (e.g. pcs / ton / CNY). Leave blank if undefined; chat output will prompt for it.",
         isPrimaryKey: "Primary Key",
         isForeignKey: "Foreign Key",
         refClassId: "Referenced Class",
@@ -1821,6 +1842,7 @@ export const enUS = {
         propertyName: "e.g. customer_name / order_id",
         propertyAlias: "e.g. Customer Name / Order ID",
         sourceColumn: "Database column name",
+        unit: "e.g. pcs / ton / CNY",
       },
       metricLabels: {
         metricName: "Metric Name",

@@ -104,3 +104,159 @@ DRAFT ──┐
 - 评估耗时受业务库 SQL 计划器影响大；snapshot 异步化后才能上 docker compose 冒烟。
 - `progress` JSONB 内层键不被 Pydantic alias_generator 改写，前端先按 snake_case 读（Phase 4 强类型化时切 camelCase）。
 - CheckConstraint 扩为 6 值（migration 0074）；降级路径已写明，alembic downgrade 即可回滚。
+
+## Schema 漂移治理：ORM ↔ Alembic ↔ PostgreSQL 三方对齐
+
+**提交者**：Claude · **日期**：2026-11-02
+**关联变更**：[fix-schema-ssot-alignment](../changes/fix-schema-ssot-alignment/summary.md)
+
+### 1. 三方对齐模型：意图源 / 变更历史 / 事实
+
+- `Base.metadata`（ORM 声明）= 唯一的**意图源** —— 「这个表应该长什么样」；
+- Alembic 迁移链 = **变更历史** —— 意图是怎么一步步落到 DB 上的；
+- 真实 PostgreSQL = **事实** —— 现在实际长什么样。
+
+drift 工具（`app/infrastructure/schema_drift.py`）比对「ORM 声明」与「真实 DB」；
+Alembic 负责把 ORM 声明翻译成 DB 上的 DDL。三者任一不一致都会出问题，且**方向不同**：
+
+- **ORM 漏声明** ⇒ drift 报 `extra_index` / `extra_column`（warning，不阻断）；
+  更危险的是 `alembic autogenerate` 会**反过来提议 DROP**这些对象。
+- **DB 漏建** ⇒ drift 报 `missing_index` / `missing_column`（**blocking**，容器起不来）。
+
+⇒ 「ORM 漏声明」在启动期只是噪音，在迁移期却是**数据丢失级**风险。
+这是漂移治理里最需要盯住的非对称性。
+
+### 2. 本次对齐做了什么
+
+4 处补齐，全部在 **ORM 侧**（零 DDL、零新迁移、零生产写）：
+
+1. **模块注册** —— 4 个模型模块（`mcp_models` / `multi_step_models` / `research_models` /
+   `wiki_graph_insight`）没进 `Base.metadata`，独立 CLI 看不到它们 ⇒ 被误报 `extra_table`，
+   而 `autogenerate` 会提议 **DROP 13 张活表**；
+2. **漏列** —— `knowledge_claim.confidence_level`（迁移 `0100` 已建，ORM 未声明）；
+3. **33 个索引** —— 32 个 `Index` + 1 个 `UniqueConstraint` 补进 `__table_args__`
+   （列序 / unique / method / partial 谓词均对着 `pg_indexes` 实测抄）；
+4. **1 处谓词** —— `ix_evaluation_report_status_running` 的 ORM 谓词由
+   `status IN ('PENDING','RUNNING')` 改回迁移 `0074` 与两个真实库的
+   `status = 'RUNNING'`。
+
+结果：**drift 可见的漂移清零** —— 全新迁移库上 `--strict` 实测 **exit 0**；
+`autogenerate` 的「DROP 活表」地雷被拆掉。
+
+⚠️ **但这不是「无差异」**。用 alembic **1.19.1** 只读跑 `alembic check` 实测（base `7d28d08a`
+→ 本批后 HEAD）：
+
+| 类别 | 本批前（base） | 本批后（HEAD；ORM 侧自 `c618e060` 起未再变动） |
+|---|---|---|
+| `removed table` | 14（13 张未注册活表 + `po_lines_sandbox`） | **0**（**全新迁移库口径**；5434 共享库上 = **1** —— `po_lines_sandbox`，测试自建的残留） |
+| `removed index` | 64 | **6** |
+| `removed column` | 1（`knowledge_claim.confidence_level`） | **0** |
+| `removed check constraint` | 20 | **0**（本批未收敛；**已于下一批补齐** —— 见下方 §3.1） |
+
+`alembic check` 在全新迁移库上仍报 **56 条**残余差异（本批明确不覆盖，需 DDL + 数据迁移
+评估）。详见变更记录
+[`Harness/changes/fix-schema-ssot-alignment/summary.md`](../changes/fix-schema-ssot-alignment/summary.md) §8.6。
+
+### 3. drift 工具的盲区（重要）
+
+drift 工具**只比**：表集合、列名、索引名 + 有序列元组。
+**不比**：列类型、列 comment、索引 unique 标志、**索引谓词**、opclass、排序方向、
+**CHECK 约束**。
+
+而 **alembic 1.19.1 全包不比较索引谓词** —— `postgresql_where` 在整个 alembic 包里出现
+**0** 次，`alembic/ddl/impl.py` 里 `"where"` 出现 **0** 次。
+（实测环境 = 项目 venv / `uv.lock` 锁定的 `alembic-1.19.1`；`pyproject.toml` 只写
+`alembic>=1.13.0` ⇒ **升级 alembic 后需重新复核本结论**。）
+⇒ 谓词分歧**永远不会被 `alembic check` / autogenerate / drift 报出来**，只能靠专门测试钉住
+（本批新增 `test_running_status_index_predicate_matches_migration`）。
+
+⇒ **「drift 全绿」≠「ORM 与 DB 语义全等」。** 判据要分层看：
+
+| 层 | 谁负责 | 覆盖 |
+|---|---|---|
+| 表 / 列 / 索引的有序列集合 | drift 工具 | 启动期 blocking 门禁 |
+| 列类型 / comment / 约束形状 / 排序方向 | `alembic check`（autogenerate diff） | 迁移级复核，**drift 看不见** |
+| **CHECK 约束** | `alembic check`（autogenerate diff，**只比名字不比表达式**） | 迁移级复核，**drift 检测不到 CHECK 约束的缺失** |
+| 索引谓词 / opclass | **无自动工具**，只能专用测试 | 靠 `backend/app/tests/unit/test_orm_schema_ssot.py` |
+
+⚠️ **CHECK 约束曾是当前最危险的一颗雷**（2026-11-02 实测，**已在下一批处理完 ⇒ 见 §3.1**）：
+DB 侧有 **48 个命名 CHECK 约束**
+（`pg_constraint.contype='c'`），**ORM 侧已声明 28 个**（分布在 **13 张表**：
+`agent_orchestration_binding` / `_profile` / `_run` / `_step` / `_usage` 共 17 个，
+`agent_tool_config`、`audit_log`、`data_quality_score`、`evaluation_report`、
+`evaluation_report_schedule`、`mcp_call_log`（3 个）、`permission_grant`、
+`wiki_ontology_link`（`chk_link_type` / `chk_link_weight`）），
+**缺 20 个**（48 − 28 = 20）⇒ `alembic check` 报出的 **20 条 `removed check constraint`**
+与「ORM 未声明的那 20 个」集合**完全一致**（已实测比对）。
+而 **drift 工具根本不比较 CHECK 约束** ⇒ **补没补 CHECK 约束，drift 都看不出来**
+（drift 检测不到 CHECK 约束的缺失）⇒
+**drift `--strict` 依然 exit 0，没有任何告警**。一旦有人跑
+`alembic revision --autogenerate`，autogenerate 会生成 `op.drop_constraint('ck_*')`
+**把数据校验静默删掉**（`ck_feature_value_not_both_null`、`ck_agent_status`、
+`ck_entity_mapping_entity_type`、`ck_kpi_catalog_status`、`chk_link_granularity` 等 20 个）。
+⇒ **在把缺的 CHECK 约束补进 ORM（或显式决定废弃它们）之前，禁止跑
+`alembic revision --autogenerate`。**（补的时候**不要重复添加已声明的那 28 个**。）
+
+### 3.1 CHECK 约束：补齐了，但「只比名字」这件事仍是坑（2026-11-02 下一批）
+
+**已收敛**：20 个缺失的命名 CHECK 约束已全部补进 ORM（另修 `audit_log.ck_audit_log_action`
+漏掉的 `'RESTORE'`）⇒ ORM 侧 **28 → 48**，与 DB 侧数量与内容双向对齐；
+`alembic check` 的 `removed check constraint` **20 → 0**
+（全新迁移库实质差异 56 → **36**）。
+详见 [`fix-schema-check-constraints`](../changes/fix-schema-check-constraints/summary.md)。
+
+⚠️ **但 alembic 1.19.1 只比 CHECK 约束的「名字」，不比「表达式内容」** ——
+它只报「DB 有、ORM 没有」的名字 ⇒ **只把名字补进去就能让告警归零**，
+而表达式少一个枚举值 / 比较方向写反，**alembic 不会报**；drift 更是根本不比较 CHECK 约束。
+⇒ **只靠 `alembic check` 验收 CHECK 约束 = 假绿。**
+
+⇒ 唯一可靠的表达式比对办法是**让 PostgreSQL 自己渲染**（别用 Python 正则归一化，
+PG 的类型提升 / 隐式 cast / `ANY(ARRAY[…])` 展开无法穷举，越写越容易假绿）：
+
+```sql
+CREATE TEMP TABLE pg_temp._ckprobe_<tbl> (LIKE public.<tbl>);   -- LIKE 默认【不】复制 CHECK 约束
+ALTER TABLE pg_temp._ckprobe_<tbl> ADD CONSTRAINT <name> CHECK (<ORM 表达式原文>);
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = to_regclass('pg_temp._ckprobe_<tbl>');
+```
+
+⚠️ **探针表名必须带 `pg_temp.` 前缀，且两处 DROP 都要带 `IF EXISTS`** ——
+裸名会按 `search_path` 解析，万一 `public` 下有同名表，`DROP TABLE IF EXISTS <裸名>` 会**误删真表**；
+不带 `IF EXISTS` 则中途失败会留下残留表污染 `alembic check`（本批实际踩过一次）。
+
+守卫落在 `backend/app/tests/unit/test_orm_check_constraints.py`（DB→ORM、ORM→DB、表达式一致性
+三条用例）。⇒ **新增 / 修改 CHECK 约束时，必须跑这条守卫**，不能只看 `alembic check`。
+
+⚠️ **「禁止 `alembic revision --autogenerate`」依然成立**：`ck_*` 的 DROP 提议已拆，
+但残余 36 条差异里仍有破坏性提议（7 条 `ALTER COLUMN … TYPE`、
+6 条唯一约束 ↔ 唯一索引的 `DROP CONSTRAINT` + `ADD CONSTRAINT`、
+9 条 `DROP INDEX` + `CREATE INDEX`）⇒ **迁移必须手写**，不要依赖 autogenerate。
+
+另注：drift 工具的 `[alembic]` 检查**只比版本号**（DB 的 `alembic_version` vs 代码里的 head），
+**不是** autogenerate 差异检查 —— 所以「`--strict` exit 0」与「`alembic check` 仍 FAILED」
+可以同时成立，两者测的不是一回事。
+
+### 4. 后续纪律
+
+1. **模型与迁移同 PR**：新增 / 修改 ORM 模型必须在**同一个 PR** 里带 Alembic 迁移
+   （见 [`Harness/rules/工程结构.md`](../rules/工程结构.md) 的「变更流程」段），
+   否则启动期校验直接阻断；ORM 与迁移不同步是本次全部漂移的根。
+2. **补声明要照抄实测定义**：ORM 侧补索引声明时，**列序、unique、method（btree/gin）、
+   partial 谓词**都要对着 `pg_indexes` 实测抄，不要凭印象写 —— 抄错的代价是
+   autogenerate 提议重建索引，或把「局部唯一」写成「全局唯一」。
+3. **只读巡检用门禁脚本**：结构一致性用 `backend/scripts/fix_schema_ssot_realdata.py`
+   （**只读**、可重复跑、退出码 0/1/2）复验，不要用 `Base.metadata.create_all` 建表来「对齐」。
+4. **autogenerate 前先看 `alembic check`**：`alembic revision --autogenerate` 会把
+   「ORM 未声明的 DB 对象」直接变成 `drop_*` 操作 —— CHECK 约束已补齐（§3.1），
+   但残余 36 条差异里仍有 `ALTER COLUMN … TYPE` / `DROP CONSTRAINT` / `DROP INDEX`
+   ⇒ **在残余差异归零前仍禁止跑 autogenerate，迁移必须手写**。
+5. **改 CHECK 约束要跑表达式守卫**：`alembic check` 只比名字 ⇒ 表达式写错它不报。
+   改完 ORM 的 `CheckConstraint` 后跑
+   `pytest app/tests/unit/test_orm_check_constraints.py`（PG 规范化逐字节比）。
+6. **新测试文件放 `unit/` 不放 `integration/`**：CI 的 integration 分片 =
+   `find app/tests/integration -name 'test_*.py' | sort` 后按**下标 mod 4** 取
+   ⇒ 在 `integration/` 加文件会让其后所有文件的分片归属整体轮转一位
+   ⇒ 依赖「同分片内文件执行顺序」的既有测试会突然红。详见
+   [`Harness/rules/测试规范.md`](../rules/测试规范.md) 的「⚠️ 目录分片稳定性」条。
+7. **alembic 升级后复核盲区结论**：`alembic>=1.13.0` 是开放区间，autogenerate 的比较逻辑
+   会随版本变 ⇒ 「alembic 不比较索引谓词」这类结论是**版本相关**的，升级后需重新实测
+   （当前实测版本 **1.19.1**）。

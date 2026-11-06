@@ -56,6 +56,11 @@ from app.domain.enums import (
     SourceSystem,
 )
 from app.domain.exceptions import ConfigError
+from app.domain.export_limits import (
+    CHART_IMAGE_DATA_URL_PREFIX,
+    MAX_EXPORT_CHART_IMAGES,
+    MAX_EXPORT_IMAGE_BYTES,
+)
 from app.domain.id_mapping import BUSINESS_OBJECT_MAX_LENGTH, EXTERNAL_ID_MAX_LENGTH
 from typing import Annotated, Any, Literal, Mapping
 from pydantic import BeforeValidator
@@ -142,6 +147,7 @@ from app.domain.error_messages import (
     MSG_SCHEMA_CHAT_HISTORY_SESSION_ID,
     MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG,
     MSG_SCHEMA_CHAT_EXPORT_CHART_MESSAGE_ID,
+    MSG_SCHEMA_CHAT_EXPORT_CHART_STEP_INDEX,
     MSG_SCHEMA_CHAT_EXPORT_CHARTS,
     MSG_SCHEMA_CHAT_EXPORT_MESSAGE_ID,
     MSG_SCHEMA_CHAT_LOCKED_MODEL,
@@ -562,6 +568,13 @@ def _validateBusinessAliases(value: list[str] | None) -> list[str] | None:
     return value
 
 
+def _normalizeUnit(value: str | None) -> str | None:
+    """空串/纯空白视作未定义（前端清空输入框会提交 ""）。"""
+    if value is None:
+        return None
+    return value.strip() or None
+
+
 class OntologyPropertyCreate(CamelModel):
     class_id: int
     property_name: str = Field(..., min_length=1, max_length=100)
@@ -578,7 +591,10 @@ class OntologyPropertyCreate(CamelModel):
     ref_class_id: int | None = None
     source_column: str | None = Field(default=None, max_length=100)
 
+    unit: str | None = Field(default=None, max_length=50)
+
     _check_aliases = field_validator("business_aliases")(_validateBusinessAliases)
+    _check_unit = field_validator("unit")(_normalizeUnit)
 
 
 class OntologyPropertyUpdate(CamelModel):
@@ -591,6 +607,7 @@ class OntologyPropertyUpdate(CamelModel):
     is_foreign_key: bool | None = None
     ref_class_id: int | None = None
     source_column: str | None = None
+    unit: str | None = Field(default=None, max_length=50)
     # 值域：本体属性管理页可手动调整 LLM 采纳的值；
     # None 表示不修改；显式空数组 视作清空值域。
     allowed_values: list[str] | None = Field(default=None, max_length=50)
@@ -602,6 +619,7 @@ class OntologyPropertyUpdate(CamelModel):
     regex_pattern: str | None = Field(default=None, max_length=255)
 
     _check_aliases = field_validator("business_aliases")(_validateBusinessAliases)
+    _check_unit = field_validator("unit")(_normalizeUnit)
 
     @field_validator("allowed_values")
     @classmethod
@@ -732,6 +750,7 @@ class OntologyPropertyRead(CamelModel):
     is_foreign_key: bool
     ref_class_id: int | None = None
     source_column: str | None = None
+    unit: str | None = None
     # 值域（LLM 采纳或人工填入）；null 表示未约束。
     # 暴露给本体属性管理页（让用户能看到「已沉淀」的值并手动修正）。
     allowed_values: list[str] | None = None
@@ -1984,6 +2003,12 @@ class ChatResponse(CamelModel):
         default=None,
         description="多步查询各子步骤执行结果",
     )
+    # L4 执行轨迹（2026-10-31）：仅 L4 answered / max_iterations 时填充；
+    # 其余意图为 None（前端据此不渲染 AgentTraceCard）。
+    agent_trace: dict | None = Field(
+        default=None,
+        description="L4 执行轨迹快照（工具名/参数摘要/计数/耗时/状态）",
+    )
     # 2026-10-31（分节报告）：多步最终回答的结构化分块。chart 块只带 stepIndex，
     # 图负载复用 steps[i]，不重复下发。仅多步聚合/降级收尾填充；其余意图为 None。
     report_sections: list[dict] | None = Field(
@@ -2204,6 +2229,12 @@ class ChatMessageRead(CamelModel):
         default=None,
         description="多步/单步消息的回放快照（历史回放用，形状对齐前端 MultiStepStep）",
     )
+    # L4 执行轨迹（2026-10-31）：工具调用轨迹快照（只含摘要/计数/耗时/状态）。
+    # 仅 L4 answered / max_iterations 的消息有值；其余路径为 None → 前端无卡。
+    agent_trace: dict | None = Field(
+        default=None,
+        description="L4 执行轨迹快照（历史回放用，形状见 l4_trace.buildTrace）",
+    )
     # 2026-10-31（分节报告）：回放时由 content + steps_snapshot 现算，不落库。
     # 存量行、非多步行、无可图步骤 → None（前端走旧渲染）。
     report_sections: list[dict] | None = Field(
@@ -2221,6 +2252,13 @@ class SessionMessagesResponse(CamelModel):
     )
 
 
+# 单张位图的字符上限 = base64(解码后字节上限) + data URL 前缀 + 余量。解析阶段先
+# 挡住超大请求体；service 仍按**解码后**字节与像素做权威校验。
+_MAX_EXPORT_IMAGE_PNG_CHARS = (
+    MAX_EXPORT_IMAGE_BYTES * 4 // 3 + len(CHART_IMAGE_DATA_URL_PREFIX) + 4
+)
+
+
 class ChatExportChartImage(CamelModel):
     """导出时前端回传的一张图表位图（0105，图表进最终报告）。
 
@@ -2229,7 +2267,16 @@ class ChatExportChartImage(CamelModel):
     """
 
     message_id: int = Field(..., ge=1, description=MSG_SCHEMA_CHAT_EXPORT_CHART_MESSAGE_ID)
-    image_png: str = Field(..., description=MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG)
+    # 2026-10-31（分节插图）：多步消息的图按步骤归属。缺省 = 该轮顶层图
+    # （0105 行为不变）。键变为 (messageId, stepIndex)。
+    step_index: int | None = Field(
+        default=None, ge=0, description=MSG_SCHEMA_CHAT_EXPORT_CHART_STEP_INDEX
+    )
+    image_png: str = Field(
+        ...,
+        max_length=_MAX_EXPORT_IMAGE_PNG_CHARS,
+        description=MSG_SCHEMA_CHAT_EXPORT_CHART_IMAGE_PNG,
+    )
 
 
 class ChatExportRequest(CamelModel):
@@ -2243,7 +2290,9 @@ class ChatExportRequest(CamelModel):
         default=None, ge=1, description=MSG_SCHEMA_CHAT_EXPORT_MESSAGE_ID
     )
     charts: list[ChatExportChartImage] = Field(
-        default_factory=list, description=MSG_SCHEMA_CHAT_EXPORT_CHARTS
+        default_factory=list,
+        max_length=MAX_EXPORT_CHART_IMAGES,
+        description=MSG_SCHEMA_CHAT_EXPORT_CHARTS,
     )
 
 

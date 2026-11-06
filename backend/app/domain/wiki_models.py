@@ -140,6 +140,7 @@ class WikiPage(Base, TimestampMixin):
         Index("ix_wiki_page_dimension_status", "dimension", "status"),
         Index("ix_wiki_page_structure_stage", "structure_stage"),
         Index("ix_wiki_page_content_hash", "content_hash"),
+        Index("ix_wiki_page_category_id", "category_id"),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
@@ -297,6 +298,14 @@ class KnowledgeClaim(Base):
     object_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     object_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), nullable=True)
+    # 0100：置信度等级（与 confidence 数值并存；NULL = 未评级）。
+    # 必须声明，否则 alembic autogenerate 会把它当多余列 DROP。
+    # comment 与迁移 0100 逐字一致，否则 autogenerate 提议 alter_column。
+    confidence_level: Mapped[str | None] = mapped_column(
+        String(10),
+        nullable=True,
+        comment="离散置信度等级 HIGH/MEDIUM/LOW/REFUSE（v3.1 §12.2，读路径现算，此列留作缓存）",
+    )
     authority_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # v3.1 §4.13 治理：组织归属（独立于 page 的 authority_department，claim 级记录
     # 便于按部门筛选冲突）。学习回路完全不引用本字段。

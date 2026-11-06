@@ -163,6 +163,9 @@ class PreambleResult(BaseModel):
     agent_run: dict | None = None
     # L4 最终 SQL（流式入口据此下发 sql 帧；非流式入口走 full_response.sql）
     sql: str | None = None
+    # L4 执行轨迹（2026-10-31）：流式入口据此在 token 前下发 agent_trace 帧；
+    # 非流式入口走 full_response.agentTrace。
+    agent_trace: dict | None = None
     # L1 cross-datasource mismatch
     datasource_mismatch: bool = False
     mismatch_warning: str | None = None
@@ -264,6 +267,7 @@ class L1L4PreambleMixin:
                     if l4.agent_run is not None else None
                 ),
                 sql=l4.sql,
+                agent_trace=l4.agent_trace,
                 full_response=l4,
             )
 

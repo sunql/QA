@@ -228,8 +228,10 @@ e2e 已按本决定断言多步 `charts.length === 0`（**与决定一致，不�
 
 ```
 POST /api/v1/sessions/{sessionId}/export.pdf
-{ "messageId": 123, "charts": [{ "messageId": 123, "imagePng": "data:image/png;base64,..." }] }
+{ "messageId": 123, "charts": [{ "messageId": 123, "stepIndex": 0, "imagePng": "data:image/png;base64,..." }] }
 ```
+
+`stepIndex` 缺省 = 该轮顶层图；多步报告的分节图按步骤归属（见「导出分节插图」）。
 
 `charts` 缺省为空 ⇒ 等价于旧行为。**图缺失不影响导出本身的成败**（导出是主功能，图是增强）。
 边界校验（超限一律 422）：单图解码后 ≤ 2 MB、条数 ≤ 200、总量 ≤ 20 MB、单图 ≤ 8 M px、
@@ -274,6 +276,38 @@ reportlab 会在 `doc.build()` 里抛 `LayoutError` —— 那已经出了 `_cha
   1 元素快照；去掉这个门会让同一张图被画两次。
 - **部分回退**：成功但未被正文引用的可出图步骤补到 `### 关键图表`；空输入返回
   `[]`（前端据此按旧渲染处理，不当作「有新分节」）。
+
+## 导出分节插图（2026-10-31）
+
+导出 PDF 里每张分节图**落在它那一节的标题下**，而不是全部堆在文末。
+
+- **位图按 `(messageId, stepIndex)` 归属**：`ChatExportChartImage.step_index`（`ge=0`，
+  缺省 = 顶层图）。服务端只接受**确有图**的步骤 —— 校验直接复用
+  `report_sections.chartSteps()`（与分节块同一个「有图」判据），否则同一份快照会被
+  两套规则解释成不同集合，出现「块在、图没有」的静默错位。
+- **`report_sections` 由服务端现算**（`content` + `steps_snapshot`，`len > 1` 才算），
+  用的是**截断后**的正文，分节位置与打印出来的文字一致；单步轮次照旧走文末顶层图。
+- **排版：只有问答头进 `KeepTogether`**。整轮锁在一起会在分节报告跨页时抛
+  `LayoutError` ⇒ 整份导出 500。顺序是「正文 → 该节图表」逐块 `extend`，最后才是
+  顶层 SQL 与页脚。
+- **前端 `collectExportCharts`**：有分节 chart 块的多步消息**逐块截图并跳过顶层图**
+  （否则同一张图出现两次）；块指向快照里没有的步骤 / 图型不可截时跳过该块，后端自会
+  回落占位框。条数与像素预算仍按**默认 Top-N 视图**计算（与屏幕一致）。
+- 三档降级不变：`原生 table/kpi > PNG > 占位框`，且每个分节块都走同一函数
+  `_chart_flowables_for`，不会出现「有的节有图有的节没有」。
+
+## PDF 中文字体：微软雅黑（2026-10-31）
+
+- 统一入口 `services/pdf_fonts.py::ensureCjkFont()`：会话导出与评估报告导出共用。
+  显式 `PDF_CJK_FONT_PATH` / `PDF_CJK_BOLD_FONT_PATH` → `/app/fonts/msyh.ttc` →
+  仓库 `docker/fonts/` → `backend/fonts/`。`.ttc` 取 `subfontIndex=0`。
+- 为什么换：STSong-Light 是 CID 字体，**不嵌字形**，没装 FontPack 的阅读器显示方框；
+  雅黑会被嵌入子集。字体不可再分发 ⇒ **不入 git**（`.gitignore` 已挡），运维放到
+  `docker/fonts/`，compose 只读挂到 `/app/fonts`（CentOS overlay 用 `:ro,z` 做
+  SELinux relabel）。
+- **缺文件 / 文件损坏一律回落 STSong-Light 并打日志**，导出不失败 —— 字体是外观，
+  不是主功能。`getSampleStyleSheet` 的家族名经 `registerFontFamily` 注册，`<b>`
+  指向粗体文件（缺粗体时映射回正体），`<i>` 也用正体（雅黑无斜体）。
 
 ## 图表高度与多类别可读性（2026-10-31）
 

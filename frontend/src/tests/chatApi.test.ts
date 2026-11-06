@@ -196,6 +196,26 @@ describe("api/chat", () => {
     expect(JSON.parse(init.body)).toEqual(payload);
   });
 
+  it("sendMessageStream done 帧透传 latency_ms（计划卡摘要的耗时来源）", async () => {
+    const stream = sseStream('event: done\ndata: {"tokensUsed":1,"cost":0,"latency_ms":12345}\n\n');
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const onDone = vi.fn();
+    await sendMessageStream(makePayload(), { onDone });
+
+    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ latencyMs: 12345 }));
+  });
+
+  it("done 帧缺 latency_ms 时为 null（不让回放路径凭空造出耗时）", async () => {
+    const stream = sseStream('event: done\ndata: {"tokensUsed":1,"cost":0}\n\n');
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const onDone = vi.fn();
+    await sendMessageStream(makePayload(), { onDone });
+
+    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ latencyMs: null }));
+  });
+
   it("sendMessageStream error 事件调用 onError（含 detail + errorType）", async () => {
     const stream = sseStream(
       'event: meta\ndata: {"intent":"query"}\n\n',
@@ -509,6 +529,54 @@ describe("sendMessageStream class_recall 事件", () => {
     const received: unknown[] = [];
     await sendMessageStream(makePayload(), {
       onClassRecall: (info) => received.push(info),
+    });
+
+    expect(received).toHaveLength(0);
+  });
+});
+
+describe("sendMessageStream agent_trace 事件", () => {
+  const TRACE = {
+    kind: "l4_agent_trace",
+    status: "answered",
+    iterations: 2,
+    totalMs: 1234,
+    stepCount: 1,
+    steps: [
+      {
+        index: 0,
+        iteration: 0,
+        tool: "list_tables",
+        status: "ok",
+        elapsedMs: 12,
+        args: { keyword: "supply" },
+        resultSummary: { tables: 3 },
+      },
+    ],
+  };
+
+  it("分发 agent_trace 事件（合法快照经收窄后回调）", async () => {
+    const stream = sseStream(`event: agent_trace\ndata: ${JSON.stringify({ trace: TRACE })}\n\n`);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: unknown[] = [];
+    await sendMessageStream(makePayload(), {
+      onAgentTrace: (trace) => received.push(trace),
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual(TRACE);
+  });
+
+  it("非法轨迹负载（status 不在白名单）不触发回调", async () => {
+    const stream = sseStream(
+      `event: agent_trace\ndata: ${JSON.stringify({ trace: { ...TRACE, status: "error" } })}\n\n`,
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const received: unknown[] = [];
+    await sendMessageStream(makePayload(), {
+      onAgentTrace: (trace) => received.push(trace),
     });
 
     expect(received).toHaveLength(0);

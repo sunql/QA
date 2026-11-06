@@ -41,6 +41,8 @@ export interface ChatMessageRead {
   stepsSnapshot?: unknown;
   // 2026-10-31：后端回放时现算的分节块；同是系统边界原始 JSON
   reportSections?: unknown;
+  // L4 执行轨迹快照（2026-10-31）：系统边界原始 JSON，由 chatStore 过 asAgentTrace 收窄
+  agentTrace?: unknown;
 }
 
 // 会话消息流响应（对齐后端 SessionMessagesResponse）

@@ -381,7 +381,13 @@ export const zhCN = {
   },
 
   multiStep: {
-    panelLabel: "查看分析计划",
+    // 折叠头摘要（D2 改版）：不展开就能看到步数/成败/耗时
+    summaryTotal: "{total} 步",
+    summarySuccess: "成功 {success}",
+    summaryFailed: "失败 {failed}",
+    summaryRunning: "执行中 ({current}/{total})",
+    summaryPending: "{total} 步 · 待执行",
+    elapsed: "{seconds}秒",
     statusPending: "待执行",
     statusRunning: "执行中",
     statusDone: "已完成",
@@ -397,6 +403,16 @@ export const zhCN = {
     compressedRows: "数据已压缩（{from} → {to} 行）",
     // F2：KPI 数据源不一致警告（按 code 作为 i18n 键名，不存后端中文原文）
     KPI_DATASOURCE_MISMATCH: "KPI 指标绑定的数据源与你当前选择的数据源不一致",
+  },
+
+  agentTrace: {
+    panelLabel: "查看执行轨迹",
+    summary: "{steps} 步 · {iterations} 轮 · {duration}",
+    statusAnswered: "已完成",
+    statusMaxIterations: "达到轮次上限",
+    iterationLabel: "第 {n} 轮",
+    stepFailed: "失败",
+    truncated: "轨迹过长，仅显示前 50 步",
   },
 
   messageItem: {
@@ -904,6 +920,9 @@ export const zhCN = {
     // 落库时表格被截到 200 行（chat_chart_persist._PERSIST_MAX_TABLE_ROWS）。
     // 不说的话，历史回放看起来就是一份「完整」的表，CSV 也照导不误。
     truncated: "表格仅显示前 {count} 行（原始结果更长）",
+    // 排名类图默认只画前 20 类（尾部合成「其他」），这里给出回全量的入口。
+    showAll: "显示全部 {total} 项",
+    showTopN: "只看前 {limit} 项",
   },
 
   chatPanel: {
@@ -1656,6 +1675,7 @@ export const zhCN = {
         propertyAlias: "别名",
         dataType: "数据类型",
         sourceColumn: "源字段",
+        unit: "单位",
         flags: "标签",
         actions: "操作",
       },
@@ -1829,6 +1849,8 @@ export const zhCN = {
         propertyAlias: "别名",
         dataType: "数据类型",
         sourceColumn: "源字段",
+        unit: "单位",
+        unitHint: "数值字段的计量单位（如 件 / 吨 / 元）。留空表示未定义，聊天输出会提示补充。",
         isPrimaryKey: "主键",
         isForeignKey: "外键",
         refClassId: "引用类",
@@ -1844,6 +1866,7 @@ export const zhCN = {
         propertyName: "如 customer_name / order_id",
         propertyAlias: "如 客户名称 / 订单ID",
         sourceColumn: "数据库列名",
+        unit: "如 件 / 吨 / 元",
       },
 
       metricLabels: {

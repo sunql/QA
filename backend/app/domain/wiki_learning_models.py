@@ -197,6 +197,11 @@ class WikiImportTask(Base):
     __tablename__ = "wiki_import_task"
     __table_args__ = (
         Index("ix_wiki_import_task_status", "status"),
+        # DB 实际是 `created_time DESC`（实测 pg_get_indexdef）。
+        # 必须用 sa_text 表达式形式而不是普通列：普通列声明会让 alembic autogenerate
+        # 认为 ORM 与 DB 的列签名不同（反射侧是 col.desc()）⇒ 提议 drop+create。
+        # 仓库既有惯例见 mcp_models.py 的 `sa_text("created_at DESC")`。
+        Index("ix_wiki_import_task_created", saText("created_time DESC")),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
@@ -269,6 +274,7 @@ class WikiTokenUsage(Base):
     __table_args__ = (
         Index("ix_wiki_token_usage_mechanism_time", "mechanism", "request_time"),
         Index("ix_wiki_token_usage_task", "import_task_id"),
+        Index("ix_wiki_token_usage_compile_task", "compile_task_id"),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)

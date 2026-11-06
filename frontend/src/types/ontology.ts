@@ -86,6 +86,7 @@ export interface OntologyProperty {
   isForeignKey: boolean;
   refClassId: number | null;
   sourceColumn: string | null;
+  unit?: string | null;
   createdTime: string | null;
   updatedTime: string | null;
   // 值域（LLM 采纳或人工填入）；null 表示未约束。
@@ -112,6 +113,7 @@ export interface OntologyPropertyCreate {
   isForeignKey?: boolean;
   refClassId?: number;
   sourceColumn?: string;
+  unit?: string;
 }
 
 export interface OntologyPropertyUpdate {
@@ -124,6 +126,8 @@ export interface OntologyPropertyUpdate {
   // 清空引用类只能靠显式 null，否则用户清掉选择器后旧 ref_class_id 残留。
   refClassId?: number | null;
   sourceColumn?: string;
+  // null/"" = 清空（后端归一为 None）；undefined = 不修改。
+  unit?: string | null;
   // 说明：让管理页可手动修正 LLM 采纳的值。
   // null 表示不修改；空数组 视作清空值域；非空数组 写入 ontology_property.allowed_values。
   allowedValues?: string[] | null;

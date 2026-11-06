@@ -16,6 +16,8 @@ import { loadSessionMessages } from "../api/chatHistory";
 import type { ExportChartImage } from "../api/chatHistory";
 import { asChartOption, normalizeChartType } from "./chartContract";
 import { chartHeightOf } from "./chartLayout";
+import { defaultChartOption } from "./chartTopN";
+import { asReportSections } from "./reportSections";
 import type { ChatMessageRead } from "../types/chatHistory";
 import { needsSnapshot, renderChartPng } from "./chartSnapshot";
 
@@ -39,6 +41,25 @@ const SNAPSHOT_PIXEL_RATIO = 2;
 export const MAX_EXPORT_PIXELS = 36_000_000;
 
 /**
+ * 单张位图**解码后**的字节上限，与后端 `MAX_EXPORT_IMAGE_BYTES`（2 MiB）对齐。
+ *
+ * 为什么前端也要卡：后端在**解析阶段**按同一上界拒绝整个请求（422），超一张
+ * 就是「导出失败」而不是「少一张图」。正常产物（1600 宽 × ≤1920 高）远到不了
+ * 2 MiB，所以这里先丢图，让报告照常导出来。
+ */
+export const MAX_EXPORT_IMAGE_BYTES = 2 * 1024 * 1024;
+
+/**
+ * 单次导出**全部**位图解码后的字节预算，与后端 `MAX_EXPORT_TOTAL_IMAGE_BYTES`
+ * （20 MiB）对齐并留 20% 余量。
+ *
+ * 为什么像素预算之外还要这一维：矢量化很弱的图（散点、多折线）单张像素不超但
+ * PNG 很大，35 张 600 KB 的图仍在 36M 像素以内，解码字节却已越过 20 MiB ——
+ * 请求发出后端 422，整份导出作废。字节数只有渲染完才知道，所以在渲染后裁剪。
+ */
+export const MAX_EXPORT_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
+
+/**
  * 单个会话最多读多少条消息去挑图。
  *
  * 必须与**导出侧**的窗口对齐：后端导出只保留**最后 500 轮**（约 1000 条消息），
@@ -55,24 +76,110 @@ const MESSAGE_SCAN_LIMIT = 1000;
  */
 const RENDER_CONCURRENCY = 4;
 
-/** 这条消息是否需要截一张图：assistant 行 + 合法 chartType + 该 kind 走截图。 */
-function isSnapshotTarget(message: ChatMessageRead): boolean {
-  if (message.role !== "assistant") return false;
-  const chartType = normalizeChartType(message.chartType);
-  return chartType !== null && needsSnapshot(chartType);
+/**
+ * 一张待截图的图。`stepIndex` 缺省 = 该轮顶层图（0105 行为）；多步报告的正文图
+ * 按步骤归属 —— PDF 会把它排进对应那一节的标题下（2026-10-31 D1）。
+ */
+interface ExportTarget {
+  messageId: number;
+  stepIndex?: number;
+  chartOption: Record<string, unknown>;
 }
 
-/** 渲染一张；失败返回 null（调用方丢掉该张，不影响其余）。 */
-async function renderOne(message: ChatMessageRead): Promise<ExportChartImage | null> {
+/**
+ * `stepsSnapshot` → `stepIndex → chartOption`。快照是落库的原始 JSON，按系统边界
+ * 逐项收窄：图型必须白名单认识、且该图型走截图（`table` / `kpi` 后端原生排版）。
+ */
+function stepChartOptionsOf(
+  message: ChatMessageRead
+): Map<number, Record<string, unknown>> {
+  const options = new Map<number, Record<string, unknown>>();
+  if (!Array.isArray(message.stepsSnapshot)) return options;
+  for (const raw of message.stepsSnapshot) {
+    if (raw === null || typeof raw !== "object") continue;
+    const step = raw as Record<string, unknown>;
+    const stepIndex = step.stepIndex;
+    if (typeof stepIndex !== "number" || !Number.isInteger(stepIndex)) continue;
+    const chartType = normalizeChartType(step.chartType);
+    const chartOption = asChartOption(step.chartOption);
+    if (chartType === null || chartOption === null || !needsSnapshot(chartType)) {
+      continue;
+    }
+    options.set(stepIndex, chartOption);
+  }
+  return options;
+}
+
+/**
+ * 这条消息要截哪些图。
+ *
+ * 有分节 chart 块 ⇒ 按块逐张（**跳过该轮顶层图**，否则 PDF 正文里同一张图会
+ * 出现两次）；分节块指向快照里没有的步骤时跳过该块 —— 后端对这种块回落占位框，
+ * 不会因为少一张图就导出失败。无分节块 ⇒ 沿用顶层图（老消息 / 单步轮次）。
+ */
+function targetsOf(message: ChatMessageRead): ExportTarget[] {
+  if (message.role !== "assistant") return [];
+  const chartBlocks = (asReportSections(message.reportSections) ?? []).filter(
+    (block) => block.kind === "chart"
+  );
+  if (chartBlocks.length > 0) {
+    const stepOptions = stepChartOptionsOf(message);
+    return chartBlocks.flatMap((block) => {
+      if (block.kind !== "chart") return [];
+      const chartOption = stepOptions.get(block.stepIndex);
+      return chartOption
+        ? [{ messageId: message.id, stepIndex: block.stepIndex, chartOption }]
+        : [];
+    });
+  }
+
+  const chartType = normalizeChartType(message.chartType);
   const chartOption = asChartOption(message.chartOption);
-  if (!chartOption) return null;
-  const imagePng = await renderChartPng(chartOption);
-  return imagePng ? { messageId: message.id, imagePng } : null;
+  if (chartType === null || chartOption === null || !needsSnapshot(chartType)) {
+    return [];
+  }
+  return [{ messageId: message.id, chartOption }];
+}
+
+/**
+ * 要截图的 option：**与屏幕上默认展示的一致**（有 Top-N 视图就用截断视图）。
+ * 导出的 PDF 是给人看的成品，画出来的不该是用户没见过的全量长条图；
+ * 高度/像素预算也按同一份算，否则预算与实际位图对不上。
+ */
+function snapshotOptionOf(target: ExportTarget): Record<string, unknown> {
+  return defaultChartOption(target.chartOption);
+}
+
+/** data URL 里 base64 段的**解码后**字节数（估算即可：这是防御性闸门，不是校验）。 */
+function decodedByteLength(imagePng: string): number {
+  const commaIndex = imagePng.indexOf(",");
+  const base64Length = (commaIndex === -1 ? imagePng : imagePng.slice(commaIndex + 1)).length;
+  return Math.floor((base64Length * 3) / 4);
+}
+
+/** 渲染一张；失败、抛异常或超过单张上限返回 null（调用方丢掉该张，不影响其余）。 */
+async function renderOne(target: ExportTarget): Promise<ExportChartImage | null> {
+  let imagePng: string | null;
+  try {
+    imagePng = await renderChartPng(snapshotOptionOf(target));
+  } catch (error: unknown) {
+    // 渲染链内部异常（如离屏容器的 dispose 失败）不能顺着 Promise.all 把整份导出
+    // 打成失败 —— 「一张图失败 = 少一张图」是这条路径的契约。
+    console.warn(`导出配图：messageId=${target.messageId} 渲染异常，已跳过`, error);
+    return null;
+  }
+  if (!imagePng) return null;
+  if (decodedByteLength(imagePng) > MAX_EXPORT_IMAGE_BYTES) return null;
+  return {
+    messageId: target.messageId,
+    ...(target.stepIndex === undefined ? {} : { stepIndex: target.stepIndex }),
+    imagePng,
+  };
 }
 
 /** 分块渲染，块内并发、块间串行 —— 顺序与入参一致，并发上限为 RENDER_CONCURRENCY。 */
 async function renderAll(
-  targets: ChatMessageRead[]
+  targets: ExportTarget[]
 ): Promise<ExportChartImage[]> {
   const rendered: ExportChartImage[] = [];
   for (let start = 0; start < targets.length; start += RENDER_CONCURRENCY) {
@@ -87,26 +194,26 @@ async function renderAll(
   // 那正是最需要留下痕迹的情形。
   if (rendered.length < targets.length) {
     console.warn(
-      `导出配图：${targets.length} 张中 ${targets.length - rendered.length} 张渲染失败，` +
-        `这些轮次在 PDF 里回落为占位框`
+      `导出配图：${targets.length} 张中 ${targets.length - rendered.length} 张未能导出` +
+        `（渲染失败或超过单张 ${MAX_EXPORT_IMAGE_BYTES} 字节上限），这些轮次在 PDF 里回落为占位框`
     );
   }
   return rendered;
 }
 
 /** 一张图上传后的像素数：1600 宽 × 2H 高（与 `chartSnapshot` 的 800 CSS × 2 对齐）。 */
-function pixelCostOf(message: ChatMessageRead): number {
-  const chartOption = asChartOption(message.chartOption);
-  if (!chartOption) return 0;
-  return SNAPSHOT_PIXEL_WIDTH * SNAPSHOT_PIXEL_RATIO * chartHeightOf(chartOption);
+function pixelCostOf(target: ExportTarget): number {
+  return (
+    SNAPSHOT_PIXEL_WIDTH * SNAPSHOT_PIXEL_RATIO * chartHeightOf(snapshotOptionOf(target))
+  );
 }
 
 /**
  * 从最新往旧累加像素，超预算即停 —— 丢掉的是**最早**的消息，保留用户眼前这批
  * （也是导出 PDF 里最后那批）。返回按时间正序，交给渲染层。
  */
-function trimToPixelBudget(targets: ChatMessageRead[]): ChatMessageRead[] {
-  const kept: ChatMessageRead[] = [];
+function trimToPixelBudget(targets: ExportTarget[]): ExportTarget[] {
+  const kept: ExportTarget[] = [];
   let totalPixels = 0;
   for (let index = targets.length - 1; index >= 0; index -= 1) {
     const cost = pixelCostOf(targets[index]);
@@ -118,6 +225,29 @@ function trimToPixelBudget(targets: ChatMessageRead[]): ChatMessageRead[] {
     console.warn(
       `导出配图：像素预算 ${MAX_EXPORT_PIXELS} 已用尽，丢弃最早的 ${
         targets.length - kept.length
+      } 张`
+    );
+  }
+  return kept.reverse();
+}
+
+/**
+ * 从最新往旧累加**解码后**字节，超预算即停 —— 与像素预算同一策略：丢最早的一批，
+ * 保住用户眼前这批。渲染完才知道字节数，所以在渲染后裁剪。
+ */
+function trimToByteBudget(images: ExportChartImage[]): ExportChartImage[] {
+  const kept: ExportChartImage[] = [];
+  let totalBytes = 0;
+  for (let index = images.length - 1; index >= 0; index -= 1) {
+    const size = decodedByteLength(images[index].imagePng);
+    if (totalBytes + size > MAX_EXPORT_TOTAL_IMAGE_BYTES) break;
+    totalBytes += size;
+    kept.push(images[index]);
+  }
+  if (kept.length < images.length) {
+    console.warn(
+      `导出配图：总字节预算 ${MAX_EXPORT_TOTAL_IMAGE_BYTES} 已用尽，丢弃最早的 ${
+        images.length - kept.length
       } 张`
     );
   }
@@ -151,11 +281,13 @@ export async function collectExportCharts(
 
   const targets = trimToPixelBudget(
     messages
-      .filter((m) => (messageId === undefined || m.id === messageId) && isSnapshotTarget(m))
+      .filter((m) => messageId === undefined || m.id === messageId)
+      // 一条多步消息可以出多张分节图，所以先摊平再限条数
+      .flatMap(targetsOf)
       // 先取**最新**的 MAX_EXPORT_CHARTS 张（绝对条数上限），再按像素预算裁剪：
       // 宁可少带最早的几张，也要让用户眼前这批（也是导出 PDF 里最后那批）有图。
       .slice(-MAX_EXPORT_CHARTS)
   );
 
-  return renderAll(targets);
+  return trimToByteBudget(await renderAll(targets));
 }

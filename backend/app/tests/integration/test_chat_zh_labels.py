@@ -1,0 +1,128 @@
+"""chat 输出中文化端到端（真实 PG + 完整 API 链路）。"""
+
+from __future__ import annotations
+
+from sqlalchemy import update
+
+from app.domain.models import OntologyProperty
+from app.tests.integration.test_chat_api import (
+    _chat_payload,
+    _installFakes,
+    _seed,
+)
+
+
+async def _governQty(session, *, alias: str | None, unit: str | None) -> None:
+    await session.execute(
+        update(OntologyProperty)
+        .where(OntologyProperty.property_name == "QTY")
+        .values(property_alias=alias, unit=unit)
+    )
+    await session.commit()
+
+
+class TestChatFieldLabels:
+    async def test_column_labels_and_field_hints(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        await _governQty(dbSession, alias="收货数量", unit="件")
+        _installFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat", json=_chat_payload("各供应商的收货数量汇总", ds.id)
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        # 图例：series 名带中文 + 单位
+        assert body["chartOption"]["series"][0]["name"] == "收货数量（件）"
+        # 表头映射：只收录治理过的列，未治理列缺键 ⇒ 前端回落原始列名。
+        # 本用例是 bar 图：`columnLabels` 挂在明细表负载 `tableOption` 上，
+        # 柱状图的 `chartOption` 只有 series/坐标轴，没有 `columnLabels`。
+        labels = body["tableOption"]["columnLabels"]
+        assert labels["QTY"] == "收货数量（件）"
+        assert "NAME" not in labels
+        # 治理提示（结构化）：NAME 缺中文含义；QTY 有单位 ⇒ 不缺单位。
+        # 正文末尾的「字段治理提示」属于回答装配层，由 Task 6 在同一文件补断言。
+        hints = body["chartOption"]["fieldHints"]
+        assert hints["missingLabels"] == ["NAME"]
+        assert hints["missingUnits"] == []
+
+    async def test_unit_only_column_is_still_reported_missing_label(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        """单位不是中文名：表头仍显示「列名（单位）」，但该列必须进缺名提示。"""
+        config, ds = await _seed(dbSession)
+        await _governQty(dbSession, alias=None, unit="件")
+        _installFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat", json=_chat_payload("各供应商的收货数量汇总", ds.id)
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        assert body["tableOption"]["columnLabels"]["QTY"] == "QTY（件）"
+        hints = body["chartOption"]["fieldHints"]
+        assert "QTY" in hints["missingLabels"]
+        assert hints["missingUnits"] == []
+
+    async def test_no_hint_when_every_field_governed(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        await dbSession.execute(
+            update(OntologyProperty).values(property_alias="已治理")
+        )
+        await _governQty(dbSession, alias="已治理", unit="件")
+        _installFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat", json=_chat_payload("各供应商的收货数量汇总", ds.id)
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # 正文提示的否定断言同样留给 Task 6（此处只钉结构化 hints 为空）。
+        assert body["chartOption"]["fieldHints"] == {
+            "missingLabels": [],
+            "missingUnits": [],
+        }
+
+
+class TestAnswerFieldHints:
+    async def test_answer_appends_hint_for_missing_label_and_unit(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        # 只治理中文名、不治理单位 ⇒ 两类提示同时命中
+        await _governQty(dbSession, alias="收货数量", unit=None)
+        _installFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat", json=_chat_payload("各供应商的收货数量汇总", ds.id)
+        )
+        assert resp.status_code == 200, resp.text
+        answer = resp.json()["answer"]
+
+        assert answer.endswith(
+            "\n\n字段治理提示\n"
+            "以下字段缺少中文含义，请在「本体 → 属性管理」补充别名：NAME\n"
+            "以下数值字段未定义单位，请在本体属性中补充「单位」：收货数量"
+        )
+
+    async def test_answer_has_no_hint_when_every_field_governed(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        config, ds = await _seed(dbSession)
+        await dbSession.execute(
+            update(OntologyProperty).values(property_alias="已治理")
+        )
+        await _governQty(dbSession, alias="已治理", unit="件")
+        _installFakes(monkeypatch, config)
+
+        resp = await client.post(
+            "/api/v1/chat", json=_chat_payload("各供应商的收货数量汇总", ds.id)
+        )
+        assert resp.status_code == 200, resp.text
+        assert "字段治理提示" not in resp.json()["answer"]

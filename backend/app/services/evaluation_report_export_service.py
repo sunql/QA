@@ -4,8 +4,8 @@
 
 - 服务只接收 immutable payload（``EvaluationReportExportPayload`` dataclass），不
   接触 DB/ORM/FastAPI；与 ``pdf_export_service.ChatExportPdfBuilder`` 风格一致。
-- 中文字体复用 ``pdf_export_service._register_cjk_font_once`` 提供的
-  STSong-Light CID 字体（reportlab 内置，免依赖字体文件）。
+- 中文字体复用 ``pdf_fonts.ensureCjkFont()``（会话导出同一口径：优先微软雅黑，
+  缺字体文件回落 STSong-Light）。
 - Excel 用 openpyxl Workbook；多 Sheet：Summary / Rules / Samples（可选）。
 - 报告 PDF 内的「图表」用文字+表格占位，不重画 echarts——避免重新跑 SQL 的
   性能风险 + 跨平台字体不一致。
@@ -34,7 +34,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from app.services.pdf_export_service import _register_cjk_font_once
+from app.services.pdf_fonts import ensureCjkFont
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +81,7 @@ class EvaluationReportPdfBuilder:
     """将 ``EvaluationReportExportPayload`` 渲染为 PDF 字节。"""
 
     def __init__(self) -> None:
-        _register_cjk_font_once()
-        cjk = "STSong-Light"
+        cjk = ensureCjkFont()
         self._styles = getSampleStyleSheet()
         self._styles.add(
             ParagraphStyle(

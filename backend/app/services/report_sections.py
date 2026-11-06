@@ -48,6 +48,29 @@ def _chartBlock(step: Any) -> dict[str, Any]:
     return {"kind": "chart", "stepIndex": int(index), "title": title}
 
 
+def chartSteps(steps: Sequence[Any] | None) -> list[dict[str, Any]]:
+    """有图的步骤 → ``[{stepIndex, chartType, chartOption}]``，按 stepIndex 升序。
+
+    导出 PDF 的分节插图用：``report_sections`` 只给 stepIndex，图负载要另行按
+    stepIndex 取（与实时/回放一样「图不复制」）。判据复用 ``_hasChart`` —— 出块的
+    地方和取图的地方必须是同一把尺，否则会出现「有块无图」的占位框。
+    """
+    if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes)):
+        return []
+    out: list[dict[str, Any]] = []
+    for step in steps:
+        index = _field(step, "step_index", "stepIndex")
+        if isinstance(index, int) and _hasChart(step):
+            out.append(
+                {
+                    "stepIndex": index,
+                    "chartType": _field(step, "chart_type", "chartType"),
+                    "chartOption": _field(step, "chart_option", "chartOption"),
+                }
+            )
+    return sorted(out, key=lambda item: item["stepIndex"])
+
+
 def _splitSections(
     text: str, byIndex: Mapping[int, Any]
 ) -> tuple[list[dict[str, Any]], set[int]]:

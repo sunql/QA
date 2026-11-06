@@ -42,6 +42,7 @@ interface PropertyFormValues {
   propertyAlias: string;
   dataType: DataType;
   sourceColumn: string;
+  unit: string;
   isPrimaryKey: boolean;
   isForeignKey: boolean;
   // 引用类（外键指向的类）。undefined = 未设置；后端 ref_class_id 可空。
@@ -54,6 +55,7 @@ const EMPTY_PROPERTY_FORM: PropertyFormValues = {
   propertyAlias: "",
   dataType: "STRING",
   sourceColumn: "",
+  unit: "",
   isPrimaryKey: false,
   isForeignKey: false,
   refClassId: undefined,
@@ -116,6 +118,7 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
     { key: "propertyName", label: t("forms.ontology.propertyLabels.propertyName") },
     { key: "propertyAlias", label: t("forms.ontology.propertyLabels.propertyAlias") },
     { key: "sourceColumn", label: t("forms.ontology.propertyLabels.sourceColumn") },
+    { key: "unit", label: t("forms.ontology.propertyLabels.unit") },
     {
       key: "classId",
       label: t("forms.ontology.propertyLabels.classId"),
@@ -145,6 +148,7 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
       propertyAlias: record.propertyAlias ?? "",
       dataType: record.dataType as DataType,
       sourceColumn: record.sourceColumn ?? "",
+      unit: record.unit ?? "",
       isPrimaryKey: record.isPrimaryKey,
       isForeignKey: record.isForeignKey,
       refClassId: record.refClassId ?? undefined,
@@ -178,6 +182,7 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
         propertyAlias: values.propertyAlias || undefined,
         dataType: values.dataType,
         sourceColumn: values.sourceColumn || undefined,
+        unit: values.unit || undefined,
         isPrimaryKey: values.isPrimaryKey,
         isForeignKey: values.isForeignKey,
         refClassId: values.refClassId,
@@ -188,6 +193,8 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
           propertyAlias: payload.propertyAlias,
           dataType: payload.dataType,
           sourceColumn: payload.sourceColumn,
+          // 显式 null = 清空（undefined 会被 axios 丢弃 ⇒ 后端 exclude_unset 静默保留旧单位）。
+          unit: values.unit || null,
           isPrimaryKey: payload.isPrimaryKey,
           isForeignKey: payload.isForeignKey,
           // ⚠️ 必须显式传 null 而非 undefined：后端 OntologyPropertyUpdate 走
@@ -230,6 +237,7 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
       render: (dt: DataType) => t(`enums.dataType.${dt}`),
     },
     { title: t("forms.ontology.propertyColumns.sourceColumn"), dataIndex: "sourceColumn" },
+    { title: t("forms.ontology.propertyColumns.unit"), dataIndex: "unit", width: 90 },
     {
       title: t("forms.ontology.propertyColumns.flags"),
       width: 100,
@@ -350,6 +358,17 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
                 label={t("forms.ontology.propertyLabels.sourceColumn")}
               >
                 <Input placeholder={t("forms.ontology.propertyPlaceholders.sourceColumn")} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item
+                name="unit"
+                label={t("forms.ontology.propertyLabels.unit")}
+                tooltip={t("forms.ontology.propertyLabels.unitHint")}
+              >
+                <Input placeholder={t("forms.ontology.propertyPlaceholders.unit")} />
               </Form.Item>
             </Col>
           </Row>

@@ -15,15 +15,15 @@ from reportlab.platypus import Image as PdfImage
 from reportlab.platypus import Paragraph, Table
 
 from app.domain.exceptions import ValidationError
+from app.domain.export_limits import (
+    CHART_IMAGE_DATA_URL_PREFIX,
+    MAX_EXPORT_IMAGE_BYTES,
+)
+from app.services.chart_image_validation import attachChartImages, decodeChartImage
 from app.services.pdf_export_service import (
     ChatExportPayload,
     ChatExportPdfBuilder,
     ChatExportTurn,
-)
-from app.services.session_history_service import (
-    _CHART_IMAGE_DATA_URL_PREFIX,
-    _MAX_EXPORT_IMAGE_BYTES,
-    SessionHistoryService,
 )
 from app.tests._png_support import solidPng
 
@@ -42,7 +42,7 @@ def _turn(**overrides) -> ChatExportTurn:
 
 
 def _dataUrl(png: bytes) -> str:
-    return _CHART_IMAGE_DATA_URL_PREFIX + base64.b64encode(png).decode()
+    return CHART_IMAGE_DATA_URL_PREFIX + base64.b64encode(png).decode()
 
 
 class TestDecodeChartImage:
@@ -51,7 +51,7 @@ class TestDecodeChartImage:
         png = solidPng(8, 8)
 
         # Act
-        decoded = SessionHistoryService._decodeChartImage(_dataUrl(png))
+        decoded = decodeChartImage(_dataUrl(png))
 
         # Assert
         assert decoded == png
@@ -60,7 +60,7 @@ class TestDecodeChartImage:
         """裸 base64（没有 data:image/png;base64, 前缀）不算合法输入。"""
         png = solidPng(8, 8)
         with pytest.raises(ValidationError):
-            SessionHistoryService._decodeChartImage(
+            decodeChartImage(
                 base64.b64encode(png).decode()
             )
 
@@ -68,22 +68,22 @@ class TestDecodeChartImage:
         """只信前缀等于允许「任意二进制贴个 PNG 标签」送进来 —— 魔数必须校验。"""
         notPng = base64.b64encode(b"PK\x03\x04 this is a zip").decode()
         with pytest.raises(ValidationError):
-            SessionHistoryService._decodeChartImage(
-                _CHART_IMAGE_DATA_URL_PREFIX + notPng
+            decodeChartImage(
+                CHART_IMAGE_DATA_URL_PREFIX + notPng
             )
 
     def test_rejects_invalid_base64(self) -> None:
         with pytest.raises(ValidationError):
-            SessionHistoryService._decodeChartImage(
-                _CHART_IMAGE_DATA_URL_PREFIX + "!!!not base64!!!"
+            decodeChartImage(
+                CHART_IMAGE_DATA_URL_PREFIX + "!!!not base64!!!"
             )
 
     def test_rejects_image_over_per_image_limit(self) -> None:
         """超限要在**解码之前**按 base64 长度判掉，否则上限挡不住内存占用。"""
-        oversize = base64.b64encode(b"\x00" * (_MAX_EXPORT_IMAGE_BYTES + 1)).decode()
+        oversize = base64.b64encode(b"\x00" * (MAX_EXPORT_IMAGE_BYTES + 1)).decode()
         with pytest.raises(ValidationError):
-            SessionHistoryService._decodeChartImage(
-                _CHART_IMAGE_DATA_URL_PREFIX + oversize
+            decodeChartImage(
+                CHART_IMAGE_DATA_URL_PREFIX + oversize
             )
 
 
@@ -154,6 +154,35 @@ class TestChartFlowables:
         # 值以转义后的字面量渲染，未被当成标签
         cell = flowables[0]._cellvalues[1][0]
         assert "&lt;img" in cell.text
+
+    def test_table_header_uses_column_labels(self) -> None:
+        """有 columnLabels 时表头显示中文名（含单位），数据仍按原始列键取值。"""
+        turn = _turn(
+            chart_type="table",
+            chart_option={
+                "columns": ["rcv_qty"],
+                "rows": [{"rcv_qty": 1}],
+                "columnLabels": {"rcv_qty": "收货数量（件）"},
+            },
+        )
+
+        flowables = ChatExportPdfBuilder()._chart_flowables(turn)
+
+        assert isinstance(flowables[0], Table)
+        body = [[cell.text for cell in row] for row in flowables[0]._cellvalues]
+        assert body == [["收货数量（件）"], ["1"]]
+
+    def test_table_header_falls_back_to_column_key(self) -> None:
+        """存量消息没有 columnLabels：表头必须逐字不变（回归守卫）。"""
+        turn = _turn(
+            chart_type="table",
+            chart_option={"columns": ["rcv_qty"], "rows": [{"rcv_qty": 1}]},
+        )
+
+        flowables = ChatExportPdfBuilder()._chart_flowables(turn)
+
+        body = [[cell.text for cell in row] for row in flowables[0]._cellvalues]
+        assert body == [["rcv_qty"], ["1"]]
 
     def test_kpi_kind_renders_native_text_block(self) -> None:
         turn = _turn(
@@ -267,7 +296,7 @@ class TestAttachChartImages:
         )
 
         # Act
-        merged = SessionHistoryService.attachChartImages(payload, {2: png})
+        merged = attachChartImages(payload, {(2, None): png})
 
         # Assert
         assert merged.turns[0].chart_image is None
@@ -280,7 +309,7 @@ class TestAttachChartImages:
             session_id="s1", title="t", generated_at=_ASST_TIME, turns=[_turn(message_id=1)]
         )
 
-        SessionHistoryService.attachChartImages(payload, {1: png})
+        attachChartImages(payload, {(1, None): png})
 
         assert payload.turns[0].chart_image is None
 
@@ -290,7 +319,7 @@ class TestAttachChartImages:
             session_id="s1", title="t", generated_at=_ASST_TIME, turns=[_turn(message_id=1)]
         )
 
-        merged = SessionHistoryService.attachChartImages(payload, {999: b"x"})
+        merged = attachChartImages(payload, {(999, None): b"x"})
 
         assert merged.turns[0].chart_image is None
 
@@ -299,7 +328,7 @@ class TestAttachChartImages:
             session_id="s1", title="t", generated_at=_ASST_TIME, turns=[_turn(message_id=1)]
         )
 
-        assert SessionHistoryService.attachChartImages(payload, {}) == payload
+        assert attachChartImages(payload, {}) == payload
 
 
 class TestBuildPdfWithCharts:

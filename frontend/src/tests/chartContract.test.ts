@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  asColumnLabels,
   asTablePayload,
   asVisualRationale,
 } from "../utils/chartContract";
@@ -43,6 +44,34 @@ describe("asTablePayload — 明细表负载收窄", () => {
     const result = asTablePayload(payload);
     expect(result).toEqual({ columns: ["NAME"], rows: [] });
     expect(result).not.toHaveProperty("truncated");
+  });
+
+  it("columnLabels 收窄后透传；非法值被丢弃", () => {
+    const payload = {
+      columns: ["QTY"],
+      rows: [{ QTY: 1 }],
+      columnLabels: { QTY: "收货数量（件）", BAD: 1, EMPTY: "" },
+    };
+    expect(asTablePayload(payload)).toEqual({
+      columns: ["QTY"],
+      rows: [{ QTY: 1 }],
+      columnLabels: { QTY: "收货数量（件）" },
+    });
+  });
+
+  it("无 columnLabels 时结果不含该键（旧消息）", () => {
+    expect(asTablePayload({ columns: ["QTY"], rows: [] })).not.toHaveProperty("columnLabels");
+  });
+});
+
+describe("asColumnLabels — 表头显示名收窄", () => {
+  it("只收「string → 非空 string」的键值", () => {
+    expect(asColumnLabels({ a: "甲", b: 2, c: "" })).toEqual({ a: "甲" });
+  });
+
+  it("非普通对象 → 空对象", () => {
+    expect(asColumnLabels(null)).toEqual({});
+    expect(asColumnLabels(["a"])).toEqual({});
   });
 });
 

@@ -18,8 +18,13 @@ from app.domain.chart_spec import ChartSpec
 from app.domain.query_plan import QueryPlan
 from app.services.chart_decision import buildChartSignals, decideChartKind
 from app.services.chart_renderer import renderChartOption
-from app.services.chart_spec_builder import buildSpec
+from app.services.chart_spec_builder import buildSpec, dimensionLikeFields
 from app.services.chart_thresholds import loadChartThresholds
+from app.services.field_display_resolver import (
+    displayMaps,
+    missingFieldHints,
+    resolveFieldDisplays,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,37 +37,83 @@ async def buildReportChart(
     question: str = "",
     plan: QueryPlan | None = None,
     aliasOverrides: Mapping[str, str] | None = None,
+    sourceTable: str | None = None,
 ) -> dict[str, Any]:
     """报告侧 chart 构建。返回 chat-style 形态（kind/columns/data/echartsOption）。
 
     永不抛错：决策引擎/渲染任一环节失败 → 退化为 TABLE 兜底。
 
     `aliasOverrides`（默认 None）：「结果集列名 → 显示名」，报告无 QueryPlan 时
-    由调用方注入，否则图表标签只能是英文列名。
+    由调用方注入，否则图表标签只能是英文列名。`sourceTable`（默认 None）供字段
+    解析层在无 plan 时按来源表找回本体中文名与单位；解析结果叠在 `aliasOverrides`
+    之上（同一列两者都有时以本体为准）。
     """
     if not rows or not columns:
         return _emptyChart(columns)
 
     try:
-        signals = buildChartSignals(plan, list(columns), rows, question)
-        thresholds = await loadChartThresholds(session)
-        decision = decideChartKind(signals, thresholds)
-        spec: ChartSpec = buildSpec(
-            decision, signals, rows, plan,
-            aliasOverrides=aliasOverrides, axisLabels=aliasOverrides,
+        return await _chartPayload(
+            session,
+            rows=rows,
+            columns=columns,
+            question=question,
+            plan=plan,
+            aliasOverrides=aliasOverrides,
+            sourceTable=sourceTable,
         )
-        echartsOption = renderChartOption(spec, rows)
-        kindStr = spec.kind.value if hasattr(spec.kind, "value") else str(spec.kind)
-        return {
-            "title": spec.title,
-            "chartType": kindStr,
-            "columns": list(columns),
-            "data": rows,  # R3-B 统一键名为 'data'
-            "echartsOption": echartsOption,
-        }
     except Exception:  # noqa: BLE001 — 报告渲染失败退化为 TABLE，不让整份报告炸
         logger.warning("buildReportChart 失败，退化为 TABLE 兜底", exc_info=True)
         return _emptyChart(columns, fallback_rows=rows)
+
+
+async def _chartPayload(
+    session: AsyncSession,
+    *,
+    rows: list[dict[str, Any]],
+    columns: list[str],
+    question: str,
+    plan: QueryPlan | None,
+    aliasOverrides: Mapping[str, str] | None,
+    sourceTable: str | None,
+) -> dict[str, Any]:
+    """真正的 chart 负载装配；异常交给 `buildReportChart` 兜底为 TABLE。"""
+    signals = buildChartSignals(plan, list(columns), rows, question)
+    thresholds = await loadChartThresholds(session)
+    decision = decideChartKind(signals, thresholds)
+    displays = await resolveFieldDisplays(
+        session, columns=list(columns), rows=rows, plan=plan,
+        sourceTable=sourceTable,
+    )
+    resolvedLabels, units = displayMaps(displays)
+    # 本体解析出的中文名优先于调用方注入的显示名（同一列两者都有时以本体为准）。
+    mergedOverrides = {
+        **{k: v for k, v in (aliasOverrides or {}).items() if v},
+        **resolvedLabels,
+    }
+    spec: ChartSpec = buildSpec(
+        decision, signals, rows, plan,
+        aliasOverrides=mergedOverrides or None,
+        axisLabels=mergedOverrides or None,
+        units=units or None,
+    )
+    # 与 chat 端同一条口径：排名语义才挂 Top-N 视图，研究线报告自动继承。
+    echartsOption = renderChartOption(
+        spec, rows, topN=signals.isTopN or signals.hasRankingIntent
+    )
+    kindStr = spec.kind.value if hasattr(spec.kind, "value") else str(spec.kind)
+    return {
+        "title": spec.title,
+        "chartType": kindStr,
+        "columns": list(columns),
+        "data": rows,  # R3-B 统一键名为 'data'
+        "echartsOption": echartsOption,
+        "columnLabels": dict(spec.columnLabels),
+        "fieldHints": (
+            missingFieldHints(displays, dimensionLike=dimensionLikeFields(signals))
+            if displays
+            else None
+        ),
+    }
 
 
 def _emptyChart(

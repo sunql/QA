@@ -1,0 +1,151 @@
+# CI 合并判据的强制闸门（判据全文见 Harness/rules/测试规范.md「CI 合并判据」）。
+# 在 CI workflow 完成后自动跑「失败集合对差」工具，把结论落成 check run；
+# main 分支保护把 check `merge-gate / failure-set-diff` 设为必需
+# ⇒ 净新增失败非 0 / 存在不可用 job 的 PR 无法合并。
+#
+# 安全性质（威胁模型见测试规范）：
+# - workflow_run 语义保证本文件与工具代码**始终取自默认分支** ⇒ PR 无法篡改闸门本身；
+# - 故意**不传 --allow-ci-changes**：PR 改了 CI 相关面 ⇒ 退出码 6 ⇒ failure。
+#   人工仲裁确认「分片归属未变」后，由 bypass 账号显式合并（solo 仓库的显式越权口）；
+# - 退出码 5（净丢失待人工确认）同样判 failure，人工确认后同上。
+# - 基线取法（2026-11-05 定死）：**同一完成标记协议下** main 的最新完成 run
+#   （`branch=main`、`event=push`、`status=completed`）；更早协议的 run 会拒判 UNUSABLE_JOBS。
+name: merge-gate
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  actions: read
+  checks: write
+  contents: read
+
+concurrency:
+  group: merge-gate-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  failure-set-diff:
+    # 不设 job 级 name:：job 自带的 check 会与下面 API 创建的
+    # `merge-gate / failure-set-diff` 同名，必需检查按名字匹配时撞最新的一个是竞态。
+    # API 创建的 check 是该名字的唯一来源。
+    # 只对「CI 的 pull_request run」出裁决；main 的 push run 是未来的基线，不裁决。
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    # 收敛等待最长 30 分钟 + 工具跑 ~5 分钟
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # ⚠️ 必须**显式**指向默认分支。
+          # `workflow_run` 语义下 `github.sha` / `github.ref` 本来就指向默认分支
+          # ⇒ 默认检出的就是 main 的版本；但那是 action 的**隐含默认**。
+          # 这里写出来 = 契约 ⇒ 「已知抖动白名单只认 main 上的版本」
+          # ⇒ **PR 不能给自己开豁免**。
+          # 守卫：`backend/app/tests/unit/test_ci_merge_gate_workflow.py`
+          #   ::test_checkout_targets_the_default_branch_explicitly
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Wait for job-level conclusions to converge (API eventual consistency)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          # 实测（2026-11-04/05）：run 级已 completed 后，job 列表的 conclusion 仍为 null
+          # 长达 13-18 分钟 ⇒ 工具会把它们判成 UNUSABLE_JOBS。
+          # 收敛前不裁决；30 分钟仍不收敛就放行给工具（fail-closed：照样判 UNUSABLE）。
+          # 注意：本步骤在 GitHub 默认 shell `bash -e` 下运行 ⇒ 对 gh api 的每次调用
+          # 都要 `|| 兜底`，单次网络抖动不得杀掉整个等待循环。
+          for i in $(seq 1 30); do
+            NULLS="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${PR_RUN_ID}/jobs?per_page=20" \
+              --jq '[.jobs[] | select(.conclusion == null)] | length')" || NULLS=1
+            echo "attempt ${i}: null_conclusion_jobs=${NULLS}"
+            [ "${NULLS}" = "0" ] && exit 0
+            sleep 60
+          done
+          echo "job conclusion 30 分钟未收敛 ⇒ 交给工具判 UNUSABLE_JOBS（fail-closed）"
+          exit 0
+
+      - name: Run failure-set diff and report the required check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          # 本步骤在 GitHub 默认 shell `bash -e` 下运行。**第一条铁律**：
+          # 凡「预期可能失败」的命令一律 `|| 兜底` —— 直接写
+          # `report="$(可能失败的命令)"` 会在命令替换非零时被 -e 当场杀掉整步，
+          # 导致 check 不落库、退出码还不对（2026-11-05 gate 首跑实证：
+          # 工具判 UNUSABLE 退出码 2，但 -e 在赋值处就把步骤杀了，
+          # 既没有 check 也没有任何输出 ⇒ 闸门对所有 PR 死锁）。
+          set -uo pipefail
+          CHECK_NAME="merge-gate / failure-set-diff"
+
+          # 基线：main 上最新完成的 push run（同完成标记协议）。
+          # 跳过 conclusion=cancelled 的 run：ci.yml 的 cancel-in-progress 会在新 main push
+          # 时取消上一轮 ⇒ 被取消的 run 的 job 没有完成标记 ⇒ 拿它当基线必判 UNUSABLE，
+          # main 刚推送后的窗口期内会误拦所有 PR（2026-11-05 run 41882361045 实证）。
+          BASE_RUN_ID="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&status=completed&per_page=10" \
+            --jq '[.workflow_runs[] | select(.conclusion != "cancelled")][0].id // empty')" || BASE_RUN_ID=""
+          if [ -z "${BASE_RUN_ID}" ]; then
+            report="找不到 main 的已完成 CI run ⇒ 无基线可比（fail-closed）。等 main 的 push run 完成后再试。"
+            code=3
+          else
+            code=0
+            report="$(cd backend && python3 -m app.utils.ci_failure_set \
+              --repo "${GITHUB_REPOSITORY}" \
+              --base-run "${BASE_RUN_ID}" --pr-run "${PR_RUN_ID}" \
+              --gate-title-file /tmp/gate_title.txt 2>&1)" || code=$?
+          fi
+          echo "tool_exit_code=${code}"
+
+          case "${code}" in
+            0) conclusion="success"; title="净新增 0 ⇒ 可合并" ;;
+            *) conclusion="failure"; title="退出码 ${code} ⇒ 不可合并（净新增 / 不可用 job / 待人工确认）" ;;
+          esac
+
+          # ⚠️ **已知抖动豁免必须出现在标题里**（对称豁免的代价：PR 侧确定性弄红
+          # 白名单用例也不拦 ⇒ 唯一的提示若只躺在 summary 正文里，GitHub UI 上
+          # 人先看到的仍是「绿色对勾 + 净新增 0 ⇒ 可合并」⇒ 真相被盖住）。
+          #
+          # ⚠️ 2026-11-06 安全评审 L-2：标题必须走**独立文件**（`--gate-title-file`），
+          # 不能从人读的报告正文里 grep —— 报告是给人读的文本 ⇒ 改一下渲染
+          # （加缩进、换前缀、把标题挪到会被截断的尾部）就静默失效
+          # ⇒ 豁免提示从标题里消失 ⇒ **真相被盖住**且无人察觉。
+          # 工具没写这个文件（退出码非 0 / 没豁免）⇒ 沿用上面的标题。
+          TOOL_TITLE=""
+          if [ -f /tmp/gate_title.txt ]; then
+            TOOL_TITLE="$(cat /tmp/gate_title.txt || true)"
+          fi
+          if [ -n "${TOOL_TITLE}" ]; then
+            title="${TOOL_TITLE}"
+            echo "gate_title=${TOOL_TITLE}"
+          fi
+
+          # check-run 摘要的字节窗口（报告以「结论」行开头，必须保留头部）。
+          # ⚠️ 窗口必须**大于**工具自己的报告上限（`ci_report.MAX_REPORT_BYTES` = 20000）：
+          # 截断必须由工具负责（它会明示「报告已截断」并把提示放在头部），
+          # workflow 只搬运 ⇒ 否则 workflow 按字节二次砍尾 ⇒ **静默**丢掉证据
+          # （2026-11-06 代码评审 M-1 实测：净新增失败清单被整段挤出摘要）。
+          # 守卫：`backend/app/tests/unit/test_ci_merge_gate_workflow.py`
+          #   ::test_merge_gate_summary_window_is_wider_than_the_report_cap
+          # `|| true` 压住两处 -e/pipefail 雷：报告超窗口字节时 printf 收 SIGPIPE
+          # （退出码 141）会被 pipefail 判失败 ⇒ 又被 -e 杀掉整步（同上，check 不落库）。
+          printf '%s' "${report}" | head -c 30000 > /tmp/gate_report.txt || true
+          jq -n \
+            --arg name "${CHECK_NAME}" \
+            --arg sha "${HEAD_SHA}" \
+            --arg conclusion "${conclusion}" \
+            --arg title "${title}" \
+            --rawfile text /tmp/gate_report.txt \
+            '{name: $name, head_sha: $sha, status: "completed", conclusion: $conclusion,
+              output: {title: $title, summary: $text}}' > /tmp/gate_payload.json
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/check-runs" --input /tmp/gate_payload.json \
+            --jq '{name, conclusion, html_url}'
+
+          # check 已落库；工作流的红绿跟随工具结论，便于一眼看到闸门状态
+          exit "${code}"

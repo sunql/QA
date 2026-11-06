@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from app.domain.multi_step_plan import MultiStepPlan, StepPlan, StepResult
+from app.services.chat_chart_persist import _PERSIST_MAX_TABLE_ROWS
 from app.services.chat_helpers import buildSingleStepSnapshot, buildStepsSnapshot
 
 
@@ -87,6 +88,33 @@ class TestBuildStepsSnapshot:
         snapshot = buildStepsSnapshot(plan=plan, stepsByIdx={}, completed=completed, runId=None)
         assert snapshot[0]["chartType"] == "bar"
         assert snapshot[0]["chartOption"] == {"series": []}
+
+    def test_oversized_table_payload_is_bounded_like_top_level(self):
+        """快照与顶层同一落库口径：table rows 截到 200 并置 truncated。
+
+        顶层 ``chart_option`` 落库前过 ``boundedChartOption``，快照这条路径原先
+        只做了 ``jsonSafe`` ⇒ 十万行明细会原样写进 JSONB，导出 PDF 时再全量
+        灌进 reportlab。不可变：原始 chart_option 不能被就地截断（实时响应仍发全量）。
+        """
+        plan = _plan(StepPlan(index=0, description="A", sub_question="A?"))
+        rows = [{"a": i} for i in range(_PERSIST_MAX_TABLE_ROWS + 5)]
+        chartOption = {"columns": ["a"], "rows": rows}
+        rendered = [_result(0, sql="SELECT 1", chart_type="table", chart_option=chartOption)]
+
+        snapshot = buildStepsSnapshot(plan=plan, stepsByIdx={}, completed=rendered, runId=None)
+
+        assert len(snapshot[0]["chartOption"]["rows"]) == _PERSIST_MAX_TABLE_ROWS
+        assert snapshot[0]["chartOption"]["truncated"] is True
+        assert len(rows) == _PERSIST_MAX_TABLE_ROWS + 5
+
+    def test_oversized_table_option_is_bounded_too(self):
+        plan = _plan(StepPlan(index=0, description="A", sub_question="A?"))
+        tableOption = {"columns": ["a"], "rows": [{"a": i} for i in range(_PERSIST_MAX_TABLE_ROWS + 1)]}
+        completed = [_result(0, sql="SELECT 1", table_option=tableOption)]
+
+        snapshot = buildStepsSnapshot(plan=plan, stepsByIdx={}, completed=completed, runId=None)
+
+        assert len(snapshot[0]["tableOption"]["rows"]) == _PERSIST_MAX_TABLE_ROWS
 
     def test_step_missing_everything_still_emits_pending_placeholder_shape(self):
         """run 被 kill switch 关掉时 DB 行与结果都可能缺：入口仍要给该步一个

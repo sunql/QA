@@ -514,3 +514,64 @@ class TestTableOptionAndRationale:
         assert build.chartType is ChartType.TABLE
         assert build.tableOption is None
         assert build.rationale.code == "R00_EMPTY_TABLE"
+
+
+_RANKED_ROWS = [
+    {"SUPPLIER_NAME": f"S{i:02d}", "RCV_QTY_PUU": 100 - i} for i in range(30)
+]
+
+
+class TestTopNView:
+    """Top-N 的**触发面**在门面：只有排名语义才挂截断视图。
+
+    渲染器只负责「给了 topN 就切前 20」，判定排名意图是决策层的职责 —— 这两件事
+    分开测，服务端才不会因为「数据碰巧很多类」就把趋势图/分布图截断。
+    """
+
+    async def test_desc_row_limited_ranking_embeds_the_truncated_view(self) -> None:
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_RANKED_ROWS,
+            plan=_plan(
+                groupBy=("SUPPLIER_NAME",),
+                sortBy=(SortSpec(property="RCV_QTY_PUU", direction="desc"),),
+                rowLimit=30,
+            ),
+        )
+
+        assert build.option["topNMeta"] == {"limit": 20, "hidden": 10, "total": 30}
+        assert build.option["topNOption"]["series"][0]["data"][-1] == sum(
+            row["RCV_QTY_PUU"] for row in _RANKED_ROWS[20:]
+        )
+
+    async def test_ranking_question_without_row_limit_still_embeds(self) -> None:
+        """没有 rowLimit 但问题带排名词：同样截断（用户要的是「谁最多」）。"""
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_RANKED_ROWS,
+            plan=_plan(groupBy=("SUPPLIER_NAME",)),
+            question="供货量最高的供应商",
+        )
+
+        assert build.option["topNMeta"]["total"] == 30
+
+    async def test_plain_grouped_query_keeps_the_full_view(self) -> None:
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_RANKED_ROWS,
+            plan=_plan(groupBy=("SUPPLIER_NAME",)),
+            question="按供应商统计供货量",
+        )
+
+        assert "topNMeta" not in build.option
+        assert "topNOption" not in build.option
+
+    async def test_ranking_within_the_limit_keeps_the_full_view(self) -> None:
+        build = await _build(
+            columns=["SUPPLIER_NAME", "RCV_QTY_PUU"],
+            data=_RANKED_ROWS[:15],
+            plan=_plan(groupBy=("SUPPLIER_NAME",)),
+            question="供货量最高的供应商",
+        )
+
+        assert "topNMeta" not in build.option

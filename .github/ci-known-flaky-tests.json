@@ -1,0 +1,9 @@
+{
+  "entries": [
+    {
+      "nodeId": "app/tests/integration/test_reconcile_milvus_id_mapping.py::test_backfill_is_idempotent",
+      "reason": "Milvus 可见性竞态：backfill = 删旧行（auto-id 主键）+ 带 external_id 重插；第二次 backfill 若在 Milvus 可见性收敛前又查到 external_id 为空的旧行 ⇒ written2 == 1 ⇒ 用例随机红。2026-11-06 PR #107 实证：同一份代码、两次 run 给出不同结论（基线红 / PR 绿）。",
+      "since": "2026-11-06"
+    }
+  ]
+}

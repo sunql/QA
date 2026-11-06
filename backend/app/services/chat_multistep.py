@@ -51,6 +51,7 @@ from app.services.chat_helpers import (
     _StepRun,
     multiStepSummaryPersistFields,
 )
+from app.services.field_hint_text import appendFieldHints, hintsFromSteps
 from app.services.messages_zh import (
     MSG_MULTI_STEP_DEGRADE_FAILED,
     MSG_MULTI_STEP_DEGRADE_PARTIAL,
@@ -696,6 +697,12 @@ class MultiStepMixin:
                 )
                 # Think_Hide（feat-think-hide）：汇总答案按系统参数剥离 <think> 思维链
                 agg_content = await applyThinkPolicy(session, agg_resp[0].content)
+                # 字段治理提示（chat 输出中文化）：汇总各数据步的 hints/labels 追加
+                # 到正文末尾；随后直接落库 ⇒ 落库文本与前端所见一致。
+                stepHints, stepLabels = hintsFromSteps(completed)
+                agg_content = appendFieldHints(
+                    agg_content, stepHints, columnLabels=stepLabels,
+                )
                 agg_config = agg_resp[1]
                 agg_pt = agg_resp[0].promptTokens
                 agg_ct = agg_resp[0].completionTokens

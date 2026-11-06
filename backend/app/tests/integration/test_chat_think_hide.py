@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import json
 
-from sqlalchemy import text
+from sqlalchemy import text, update
 
+from app.domain.models import OntologyProperty
 from app.infrastructure.llm.base_client import StreamChunk
 from app.tests.integration.test_chat_api import (
     _FakeAdapter,
@@ -37,6 +38,25 @@ async def _seedThinkHide(dbSession, value: str) -> None:
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
         ),
         {"value": value},
+    )
+    await dbSession.commit()
+
+
+async def _governChatFields(dbSession) -> None:
+    """治理 NAME/QTY 的中文名与单位。
+
+    中文化特性会在回答末尾追加「字段治理提示」；本套件只断言 think 块的
+    剥离/透传，与治理提示无关，因此把 fixture 字段治理掉，保持既有断言不变。
+    """
+    await dbSession.execute(
+        update(OntologyProperty)
+        .where(OntologyProperty.property_name == "NAME")
+        .values(property_alias="名称")
+    )
+    await dbSession.execute(
+        update(OntologyProperty)
+        .where(OntologyProperty.property_name == "QTY")
+        .values(property_alias="数量", unit="件")
     )
     await dbSession.commit()
 
@@ -77,6 +97,7 @@ def _install(monkeypatch, config) -> None:
 class TestThinkHideNonStream:
     async def test_default_missing_row_passthrough(self, client, dbSession, monkeypatch) -> None:
         config, ds = await _seed(dbSession)
+        await _governChatFields(dbSession)
         _install(monkeypatch, config)
         resp = await client.post(
             "/api/v1/chat",
@@ -88,6 +109,7 @@ class TestThinkHideNonStream:
 
     async def test_value_one_strips_think_block(self, client, dbSession, monkeypatch) -> None:
         config, ds = await _seed(dbSession)
+        await _governChatFields(dbSession)
         await _seedThinkHide(dbSession, "1")
         _install(monkeypatch, config)
         resp = await client.post(
@@ -99,6 +121,7 @@ class TestThinkHideNonStream:
 
     async def test_value_zero_passthrough(self, client, dbSession, monkeypatch) -> None:
         config, ds = await _seed(dbSession)
+        await _governChatFields(dbSession)
         await _seedThinkHide(dbSession, "0")
         _install(monkeypatch, config)
         resp = await client.post(
@@ -113,6 +136,7 @@ class TestThinkHideNonStream:
     ) -> None:
         """落库的 assistant 消息必须与下发内容一致（不能流里剥了、库里还是原文）。"""
         config, ds = await _seed(dbSession)
+        await _governChatFields(dbSession)
         await _seedThinkHide(dbSession, "1")
         _install(monkeypatch, config)
         resp = await client.post(
@@ -166,6 +190,7 @@ def _tokenText(resp_text: str) -> tuple[str, bool]:
 class TestThinkHideStream:
     async def test_stream_default_passthrough(self, client, dbSession, monkeypatch) -> None:
         config, ds = await _seed(dbSession)
+        await _governChatFields(dbSession)
         _installStream(monkeypatch, config)
         resp = await client.post(
             "/api/v1/chat/stream",
@@ -180,6 +205,7 @@ class TestThinkHideStream:
         self, client, dbSession, monkeypatch,
     ) -> None:
         config, ds = await _seed(dbSession)
+        await _governChatFields(dbSession)
         await _seedThinkHide(dbSession, "1")
         _installStream(monkeypatch, config)
         resp = await client.post(

@@ -426,6 +426,52 @@ describe("MessageItem 卡片顺序", () => {
     expect(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   }
 
+  it("渲染顺序为 执行轨迹 → 分析计划 → 查询计划 → SQL", () => {
+    renderItem({
+      content: "查询完成。",
+      agentTrace: {
+        kind: "l4_agent_trace",
+        status: "answered",
+        iterations: 1,
+        totalMs: 900,
+        stepCount: 1,
+        steps: [
+          {
+            index: 0,
+            iteration: 0,
+            tool: "execute_sql",
+            status: "ok",
+            elapsedMs: 880,
+            args: { sqlPreview: "SELECT 1" },
+            resultSummary: { rows: 1 },
+          },
+        ],
+      },
+      steps: PLAN_STEPS,
+      queryPlan: {
+        target: "供应商",
+        selectedClasses: ["DIM_SUPPLIER"],
+        selectedProperties: ["NAME"],
+        aggregations: [],
+        groupBy: [],
+        conditions: [],
+        joins: [],
+        sortBy: [],
+      } as never,
+      sql: "SELECT count(*) FROM dim_supplier",
+    });
+
+    const traceCard = screen.getByText(/查看执行轨迹/);
+    // #93 后 MultiStepPlanCard 改为 Collapse + summaryText 动态摘要，
+    // 不再有「查看分析计划」固定文案；用 testid 锚定同一张卡。
+    const planCard = screen.getByTestId("multi-step-summary");
+    const queryPlanCard = screen.getByText("查看查询计划");
+    const sqlCard = screen.getByText("查看 SQL");
+    assertBefore(traceCard, planCard);
+    assertBefore(planCard, queryPlanCard);
+    assertBefore(queryPlanCard, sqlCard);
+  });
+
   it("渲染顺序为 分析计划 → 查询计划 → SQL", () => {
     renderItem({
       content: "查询完成。",
@@ -442,7 +488,7 @@ describe("MessageItem 卡片顺序", () => {
       } as never,
       sql: "SELECT count(*) FROM dim_supplier",
     });
-    const planCard = screen.getByText("查看分析计划");
+    const planCard = screen.getByTestId("multi-step-summary");
     const queryPlanCard = screen.getByText("查看查询计划");
     const sqlCard = screen.getByText("查看 SQL");
     assertBefore(planCard, queryPlanCard);
@@ -520,7 +566,7 @@ describe("MessageItem 续跑失败横幅", () => {
     // 原正文还在（isError 路径会把它换掉）
     expect(screen.getByText("上一轮的有效回答")).toBeInTheDocument();
     // 计划卡也还在 —— 展开后普通失败步的续跑按钮仍可点第二次
-    fireEvent.click(screen.getByText("查看分析计划"));
+    fireEvent.click(screen.getByTestId("multi-step-summary"));
     expect(screen.getByTestId("resume-run")).toBeInTheDocument();
   });
 
@@ -612,7 +658,7 @@ describe("MessageItem 换模型续跑（N4 接缝）", () => {
       originalModelId: 2,
       steps: [FAILED_STEP] as any,
     });
-    fireEvent.click(screen.getByText("查看分析计划"));
+    fireEvent.click(screen.getByTestId("multi-step-summary"));
   }
 
   it("选「原模型续跑」→ resumeRun 收到 modelId=null", async () => {

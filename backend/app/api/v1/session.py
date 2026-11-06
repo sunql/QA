@@ -53,6 +53,7 @@ from app.domain.schemas import (
 )
 from app.infrastructure.database import getDb
 from app.infrastructure.rate_limit import limiter, rateLimitValue
+from app.services.chart_image_validation import attachChartImages, resolveChartImages
 from app.services.pdf_export_service import ChatExportPdfBuilder
 from app.services.session_history_service import SessionHistoryService
 from app.services.token_usage_service import TokenUsageService
@@ -237,9 +238,15 @@ async def exportSessionPdf(
         messageId: 非空时只导出该 assistant 消息 + 上一条 user 消息（按 id 升序）。
                    必须属于该 session；否则 404。
         charts:    前端用**同一份**已经渲染过的 chartOption 离屏导出的 PNG 列表
-                   ``[{messageId, imagePng}]``。服务端不重画 ECharts（那会是第二套
-                   渲染器，与前端必然长得不一样）。为空 ⇒ 图回落占位框，**不影响
-                   导出本身成败**。
+                   ``[{messageId, stepIndex?, imagePng}]``。服务端不重画 ECharts
+                   （那会是第二套渲染器，与前端必然长得不一样）。为空 ⇒ 图回落
+                   占位框，**不影响导出本身成败**。
+
+                   ``stepIndex`` 缺省 = 该轮的顶层图；带值时按
+                   ``(messageId, stepIndex)`` 归属到多步报告的对应分节，PDF 会把它
+                   排在那一节的标题下。指向不存在步骤的图被忽略（不影响其余）。
+                   ``imagePng`` 必须是 ``data:image/png;base64,`` 前缀的 PNG；
+                   解码失败、超出条数/字节/像素上界 ⇒ 422（见 `export_limits`）。
 
     响应：application/pdf（attachment 触发下载）；文件名含 sessionId 或 messageId。
     会话无任何消息 → 404（与 DELETE 行为对齐）。
@@ -264,8 +271,9 @@ async def exportSessionPdf(
     # 图表位图先校验解码再挂上去；不合法 → 422（边界处显式失败，见 service）。
     # 放在 buildExportPayload 之后：会话本身不存在/无消息该报 404，不该被图片问题掩盖。
     if body.charts:
-        imagesByMessageId = await svc.resolveChartImages(session, sessionId, body.charts)
-        payload = svc.attachChartImages(payload, imagesByMessageId)
+        # 键是 (messageId, stepIndex)：多步报告的图按步骤归属，stepIndex=None 是顶层图
+        imagesByKey = await resolveChartImages(session, sessionId, body.charts)
+        payload = attachChartImages(payload, imagesByKey)
 
     builder = ChatExportPdfBuilder()
     pdf_bytes = builder.build(payload)

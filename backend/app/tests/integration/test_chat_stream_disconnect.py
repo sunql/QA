@@ -23,9 +23,9 @@ import json
 from collections.abc import Callable
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
-from app.domain.models import SessionMessage, SessionQueryState
+from app.domain.models import OntologyProperty, SessionMessage, SessionQueryState
 from app.infrastructure.llm.base_client import StreamChunk
 from app.services.messages_zh import MSG_STREAM_INTERRUPTED_EMPTY
 from app.tests._testapp import buildTestApp
@@ -150,6 +150,19 @@ async def _drive(dbSession, monkeypatch, asgiApp, *, disconnectWhen, sessionId: 
     import app.api.v1.chat as chat_module
 
     config, ds = await _seed(dbSession)
+    # 治理 fixture 字段（NAME 别名 / QTY 别名+单位）：中文化特性会往回答末尾
+    # 追加「字段治理提示」，本套件断言的是断连落库时序，与提示无关。
+    await dbSession.execute(
+        update(OntologyProperty)
+        .where(OntologyProperty.property_name == "NAME")
+        .values(property_alias="名称")
+    )
+    await dbSession.execute(
+        update(OntologyProperty)
+        .where(OntologyProperty.property_name == "QTY")
+        .values(property_alias="数量", unit="件")
+    )
+    await dbSession.commit()
     _installStreamFakes(monkeypatch, config)
     # 回答流换成「每块之间挂起」的版本，否则取消只在整段回答产出后才送达
     monkeypatch.setattr(chat_module._service, "_llmFactory", lambda c: _SuspendingAnswerLlm())

@@ -57,14 +57,14 @@
 
 | # | 项 | 状态 |
 |---|---|---|
-| A1 | merge-gate「净新增拦截」证明（缺一个含真失败的 PR 取证） | **下一批第一优先**（2026-11-07 定）：B7 批只证明了「净新增 0 时闸门怎么判」，**从未证明「PR 真有失败时闸门确实拦住」** ⇒ 用**探针 PR** 取证：故意失败的**新测试文件**（不进 CI 相关面 ⇒ 不触发 `CI_SURFACE_CHANGED`）⇒ 期望闸门判 `NEW_FAILURES`（退出码 1）+ 必需检查 failure + `mergeStateStatus: BLOCKED` ⇒ 取证后**关闭 PR、不合并**（零代码改动、零合并风险） |
+| A1 | merge-gate「净新增拦截」证明（缺一个含真失败的 PR 取证） | **已取证完成**（2026-11-07，探针 PR #109 → **已关闭、绝不合并**、分支已删）：闸门 check `128027482407` **conclusion=failure**、title「退出码 1 ⇒ 不可合并」、summary 首行「结论：不可合并（NEW_FAILURES）」；基线 `42249797523`（main `06f56d48`）失败 **139** 条 / PR `42249940998` 失败 **140** 条 ⇒ **净新增 1 条 / 净丢失 0 条**，唯一净新增 = `app/tests/unit/test_a1_merge_gate_probe.py::test_a1_probe_intentional_new_failure`；PR `mergeable: MERGEABLE`（无冲突）+ `mergeStateStatus: BLOCKED`（被唯一必需检查挡下）⇒ **证据缺口补齐**：B7 批只证明「净新增 0 时怎么判」，本批补上「PR 真有失败时确实拦住」。证据见 `summary.md` §11.1 |
 | B1 | integration 分片改哈希分组（当前按文件序 ⇒ 改文件即换分片归属） | 未启动 |
 | B2 | 残余 36 条 alembic 差异（16 条零 DDL + 6 条需 DDL） | 已评估无运行时影响，排期 **2026-11-09** |
 | B3 | 不可伪造证据（当前 stdout 可控 ⇒ 挡得住偶然假绿、挡不住蓄意伪造） | 未启动 |
 | B4 | `_runGh` 调用加截止时间 | 未启动 |
 | B7 | 抖动容忍（白名单类机制，只许 main 上 CODEOWNER 维护） | **已实施并合并**（2026-11-06，PR #108 → main `88599b19`，`Harness/changes/2026-11-06-merge-gate-flake-whitelist/summary.md`）：对称豁免 + 精确 node ID + 失败关闭 + 报告显式可见 + **④ 豁免条件化在「该用例所在文件本次未被改动」**；白名单文件 `.github/ci-known-flaky-tests.json` 属 CI 相关面且由 CODEOWNER 维护，闸门 workflow **显式** checkout 默认分支 ⇒ PR 不能自我豁免。⚠️ 落地**依赖 owner 越权口**（`enforce_admins: false`）⇒ **仍必须先于把 `enforce_admins` 收回去**，顺序不能反（见 `summary.md` §10.6 / N7） |
-| C1 | PR #92（docs/deploy-prod-1031）收口 | 仍 open / blocked |
-| C2 | 5 个 diverged 旧分支盘点 | 未启动 |
+| C1 | PR #92（docs/deploy-prod-1031）收口 | **已合并**（2026-11-07 → main `81b865af`）：分支已 `merge origin/main` **重建**（tip `e9e87f0c`）⇒ `git diff origin/main HEAD` 恰 1 个文件（1031 生产发版记录，**原不在 main** ⇒ 必须合）；**未 force-push**（用 merge 保住 PR 历史）；闸门 check `128032047830` **conclusion=success**（「净新增 0 ⇒ 可合并」；基线 139 / PR 140，**计入对差 139** ⇒ 净新增 0 / 净丢失 0）；内容级仲裁：squash tree 与分支 tip tree **零差异**；main 净变更恰 **1 文件 +101 行**；分支已删 ⇒ **远端现只剩 `main`** |
+| C2 | 5 个 diverged 旧分支盘点 | **已完成**（2026-11-07）：内容级仲裁后 **4 条删除**（`docs/deploy-prod-1101-zhlabels` / `feat/chat-output-sync` / `feat/chat-output-zh-labels` / `feat/l4-agent-trace`，全部内容已在 main）、**1 条转 C1**（`docs/deploy-prod-1031`，已合并并删分支）；**远端分支现只剩 `main`**。仲裁口径与 tip SHA 留档见 `summary.md` §11.2 |
 
 ## 四、三条执行纪律
 
@@ -144,6 +144,17 @@
 | 内容级仲裁 | 合并 tree 与分支 tip tree **逐 blob 一致**（各 2566 个 blob，零差异）；相对 base `5a7ac461` 净变更恰 22 个文件（+4499 / −142）⇒ 可安全删分支 |
 | 部署 | **不部署**（零 DDL、零生产写、零生产读；闸门在 GitHub 上跑 ⇒ 合并即生效） |
 | 顺序约束 | B7 已落地 ⇒ 「把 `enforce_admins` 收回去」**现在才可排期**；⚠️ 收紧前必须先确认「涉及 CI 相关面的改动」有明确的人工合并通道，否则变成「谁都不能改闸门」的死锁（见 B7 `summary.md` §11.4） |
+
+### 9.3 A1 取证 + 分支盘点收口（2026-11-07）
+
+| 项 | 结果 |
+|---|---|
+| A1 探针 | **已取证**：探针 PR #109（head `6ba97fc7`）的闸门 check `128027482407` 判 **退出码 1 / `NEW_FAILURES`**（conclusion=failure）⇒ 基线 139 / PR 140 ⇒ **净新增 1、净丢失 0**，唯一净新增就是探针用例 ⇒ PR `mergeStateStatus: BLOCKED`。**取证后关闭 PR（未合并）+ 删分支**（探针内容不进 main） |
+| 探针为何不叫 `test_ci_*.py` | `test_ci_*.py` 落「CI 相关面」⇒ 闸门先判 `CI_SURFACE_CHANGED`（退出码 6）⇒ 取不到 `NEW_FAILURES` 的证据 ⇒ 探针文件名必须避开 `test_ci_*` |
+| C2 分支盘点 | 远端 5 条 diverged 分支：**4 条内容已在 main ⇒ 删除**；`docs/deploy-prod-1031` 的 1 个发版记录文件**不在 main** ⇒ 转 C1 合并 |
+| C2 仲裁口径 | 逐分支「分支 tip 的 squash 提交 vs 分支 tip tree」逐 blob 比对 ⇒ 三条**零差异**；`feat/chat-output-sync` 仅 1 个文件有差，且方向是 **main 更新**（分支是旧版「待执行」，main 是新版「已执行」+ 实操细节）⇒ 分支无 main 缺失的内容 |
+| 远端分支现状 | 只剩 `main` + `docs/deploy-prod-1031`（+ 探针分支已删） |
+| 部署 | **不部署**（本批零 DDL、零生产写、零生产读） |
 
 ### 9.1 闸门实操结论（引 `summary.md` §10）
 

@@ -462,6 +462,115 @@ Milvus 的可见性收敛前又查到了那条 `external_id` 为空的旧行，�
 
 ---
 
+## 11. A1 取证与分支盘点收口（2026-11-07）
+
+### 11.1 A1：merge-gate「净新增拦截」取证（探针 PR #109）
+
+**缺口是什么**：B7 批（PR #108）只证明了「**净新增 0** 时闸门怎么判」，
+**从未证明「PR 侧真的有新增失败时，闸门确实会拦住」** ⇒ 强制闸门的核心威慑力缺一格实证。
+
+**探针设计**（三个约束都是有意为之）：
+
+| 设计 | 原因 |
+|---|---|
+| 新建 `backend/app/tests/unit/test_a1_merge_gate_probe.py`，只含一条 `assert False` | 让 PR 侧失败集合**恰好比基线多 1 条**，且那一条一眼可辨 |
+| 文件名**刻意不叫** `test_ci_*.py` | `test_ci_*.py` 落「CI 相关面」⇒ 闸门会先判 `CI_SURFACE_CHANGED`（退出码 6）⇒ 取不到 `NEW_FAILURES` 的证据（混淆成另一个失败模式） |
+| 探针只存在于探针分支 | 取证后即删 ⇒ **零代码改动、零合并风险** |
+
+**闸门判定（决定性证据，原文）**：
+
+| 项 | 值 |
+|---|---|
+| check | `merge-gate / failure-set-diff`，check run id **`128027482407`** |
+| conclusion | **failure** |
+| title | `退出码 1 ⇒ 不可合并（净新增 / 不可用 job / 待人工确认）` |
+| summary 首行 | `结论：不可合并（NEW_FAILURES）` |
+| 基线 | run `42249797523`（main head `06f56d48`）失败 **139** 条 |
+| PR 侧 | run `42249940998`（head `6ba97fc7`）失败 **140** 条 |
+| 对差 | **净新增 1 条 / 净丢失 0 条** |
+| 唯一净新增 | `app/tests/unit/test_a1_merge_gate_probe.py::test_a1_probe_intentional_new_failure` |
+| PR 状态 | `mergeable: MERGEABLE`（**无冲突**）· `mergeStateStatus: **BLOCKED**`（被唯一必需检查挡下） |
+
+**分片归属两侧逐片一致**（保证失败集合可比，净新增 1 条只可能来自探针本身）：
+
+| 分片 | 基线 | PR 侧 |
+|---|---|---|
+| unit shard 0 | 9 | **10** ← 探针落在这里 |
+| unit shard 1 / 2 / 3 | 4 / 1 / 3 | 4 / 1 / 3 |
+| integration shard 0 / 1 / 2 / 3 | 17 / 44 / 26 / 35 | 17 / 44 / 26 / 35 |
+| Frontend / typecheck + coverage | 0 | 0 |
+
+**本地佐证**（同一工作树、同一 env 契约）：
+
+```
+$ pytest app/tests/unit/test_a1_merge_gate_probe.py -q
+FAILED app/tests/unit/test_a1_merge_gate_probe.py::test_a1_probe_intentional_new_failure
+1 failed in 0.83s
+```
+
+⚠️ 顺带记一条**环境契约**：`backend/app/tests/unit/conftest.py` 在**收集前**要求
+`TEST_DATABASE_URL`（或 `DATABASE_URL` 指向真实 PostgreSQL），**缺了直接 `RuntimeError`**（不是 skip）
+⇒ 连「故意失败」这种纯逻辑用例也会以 **ERROR** 而非 FAILED 落进失败集合 ⇒
+本地复现探针时**必须**带上测试库 env（`postgresql+asyncpg://…`），否则测的就不是同一条路径了。
+
+**收尾**：PR #109 已**关闭**（附取证说明评论）· 探针分支 `probe/a1-gate-blocks-real-failure` 已删（远端 + 本地）· **未合并**。
+
+### 11.2 C2：远端分支盘点与内容级仲裁（2026-11-07）
+
+远端除 `main` 外共 5 条分支。仲裁口径统一为「**该分支内容是否已在 main**」，
+方法 = 逐文件比较 blob（`git rev-parse <ref>:<file>`），并对有差异的文件再看**差异方向**
+（谁更新），避免把「main 更新」误判成「分支有独有内容」。
+
+| 分支 | tip SHA | 仲裁结论 | 处置 |
+|---|---|---|---|
+| `feat/l4-agent-trace` | `71bdeb649df1` | 与其 squash 提交 `b368b016`（PR #95）**tree 逐 blob 零差异** ⇒ 已合入 main | **删除** |
+| `feat/chat-output-zh-labels` | `c06b016d04df` | 与其 squash 提交 `0e248bca`（PR #94）**tree 逐 blob 零差异** ⇒ 已合入 main | **删除** |
+| `docs/deploy-prod-1101-zhlabels` | `6c419784e249` | 唯一新增文件 `Harness/changes/2026-11-01-chat-output-zh-labels/deploy-prod-1101.md` 在 main 与分支的 **blob 同为 `3ea40cbe…`** ⇒ 已合入 main | **删除** |
+| `feat/chat-output-sync` | `1ad35cd5d0a6` | 与其 squash 提交 `af0ccc9a`（PR #93）**仅 1 个文件有差**：`Harness/changes/2026-10-31-term-drift-date-template/summary.md`；差异方向 = **main 更新**（main 是「2026-10-31 已执行」+ 部署/冒烟实操细节，分支是更旧的「待执行」计划稿）⇒ **分支没有 main 缺失的内容** | **删除** |
+| `docs/deploy-prod-1031` | `2e88a573…`（后 `e9e87f0c`） | 唯一新增文件 `Harness/changes/2026-10-31-prod-deploy-1031/deploy-prod-1031.md`（1031 生产发版记录）**不在 main** ⇒ 内容有价值 | **转 C1 合并**（已合并 → main `81b865af`，分支已删；见 §11.3） |
+
+> **tip SHA 留档**（可恢复）：`71bdeb649df14fbdd2a6a487d884082514411072` / `c06b016d04df6846d8e1f71b9bd3c33ad25656e9` /
+> `6c419784e24940668493274c03855de97fa9c68f` / `1ad35cd5d0a603dbf28a869460d109c01a235da7`。
+> 删的是**引用**，对象仍在 git 对象库 ⇒ 需要时可按 SHA 恢复。
+
+⚠️ **方法论提醒（本次差点踩）**：`git diff --numstat origin/main origin/<branch>` 的 `+N` **不等于**
+「分支有 main 缺失的功能」——它只说明**那一行文本不同**。`feat/chat-output-sync` 的
+`chart_service.py +24/-117`、`models.py +8/-222` 等看起来像「分支独有内容」，
+实为**分支落后于 main**（main 后来改了同一批文件）⇒ 必须**看方向**（main→分支 vs 分支→main）
++ 对照该分支的 **squash 提交**（真正的合入证据），不能只看 numstat 的加号。
+
+### 11.3 C1：PR #92 收口（docs/deploy-prod-1031）—— **已合并**
+
+| 项 | 值 |
+|---|---|
+| 分支重建 | 在 worktree `/private/tmp/qa-docs-1031` 上 `git merge origin/main`（**不 force-push**，保住 PR #92 的历史与 diff 形状）⇒ tip `e9e87f0c` |
+| 重建后差异 | `git diff --name-only origin/main HEAD` = **恰 1 个文件**（那份发版记录）⇒ PR 面保持极小，闸门判据天然可比 |
+| 闸门判定 | check `128032047830` ⇒ **conclusion=success**，title「净新增 0 ⇒ 可合并（含 1 条已知抖动豁免，其中 PR 侧命中 1 条 ⇒ 请人工确认不是确定性回归）」；基线 `42249797523` 失败 **139** / PR `42250845758` 失败 **140**（**计入对差 139**）⇒ **净新增 0 / 净丢失 0** |
+| 合并 | **已合并**（2026-11-07）→ squash main **`81b865af`**；PR 面仅 1 个文件、**未触碰** Milvus 抖动用例所在文件 ⇒ 白名单「PR 侧命中」不是本 PR 引入的确定性回归 |
+| 内容级仲裁 | squash `81b865af` 的 tree 与分支 tip `e9e87f0c` 的 tree **逐 blob 零差异**；main 相对合并前 base 的净变更恰 **1 文件 +101 行** ⇒ 可安全删分支（已删） |
+| 部署 | **不部署**（文档批，零 DDL、零生产写） |
+
+> **顺带补上了 B7 的另一半证据**：B7 批（PR #108）两侧**同结论** ⇒ 白名单是空操作 ⇒
+> 当时只能写「**不等于机制失效**」。本次 PR #92 的 run 里
+> `app/tests/integration/test_reconcile_milvus_id_mapping.py::test_backfill_is_idempotent`
+> **在 PR 侧进了失败集合** ⇒ 白名单**真的生效**（该条被剔除后才得到「PR 140 / 计入对差 139」）
+> ⇒ **B7 的「对称豁免」路径首次被实证命中**（不是靠两侧都绿蒙混过关）。
+>
+> ⚠️ 报告同时给出「请人工确认不是确定性回归」——本 PR 只改 1 个 `.md`，**没碰**
+> `test_reconcile_milvus_id_mapping.py` 也没碰 `backfill_milvus_external_id.py`
+> ⇒ 该抖动与本 PR 无因果 ⇒ 确认通过。
+> ⇒ 顺带把「⑦ 测试侧根因」这条**待办**的紧迫性坐实了：这条抖动还在随机咬人，
+> 根治它才能把白名单里那一条**退休**（否则每次都要人工确认）。
+
+### 11.4 本批不做
+
+- **不改闸门判据**（本批只取证，不动 `ci_*.py` / `.github/`）。
+- **不动 `enforce_admins`**：N8 的前置条件（CI 相关面改动的人工合并通道）仍未设计 ⇒ 保持 `false`。
+- **不跑全量后端 unit 套件做门禁**（27min / 28 红基线，见 MEMORY）；本批只做定向复现 + 闸门自带的对差。
+- **不碰 Milvus / 生产库**：探针只改了一条纯逻辑 unit 用例；本批零 DDL、零生产写、零生产读。
+
+---
+
 ## SSOT 校验清单（合并前必查）
 
 - [x] frontmatter 元数据齐全（日期 / 作者 / Phase / 状态 / 关联变更 / 迁移版本 / MEMORY）

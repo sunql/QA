@@ -38,6 +38,15 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          # ⚠️ 必须**显式**指向默认分支。
+          # `workflow_run` 语义下 `github.sha` / `github.ref` 本来就指向默认分支
+          # ⇒ 默认检出的就是 main 的版本；但那是 action 的**隐含默认**。
+          # 这里写出来 = 契约 ⇒ 「已知抖动白名单只认 main 上的版本」
+          # ⇒ **PR 不能给自己开豁免**。
+          # 守卫：`backend/app/tests/unit/test_ci_merge_gate_workflow.py`
+          #   ::test_checkout_targets_the_default_branch_explicitly
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Wait for job-level conclusions to converge (API eventual consistency)
         env:
@@ -89,7 +98,8 @@ jobs:
             code=0
             report="$(cd backend && python3 -m app.utils.ci_failure_set \
               --repo "${GITHUB_REPOSITORY}" \
-              --base-run "${BASE_RUN_ID}" --pr-run "${PR_RUN_ID}" 2>&1)" || code=$?
+              --base-run "${BASE_RUN_ID}" --pr-run "${PR_RUN_ID}" \
+              --gate-title-file /tmp/gate_title.txt 2>&1)" || code=$?
           fi
           echo "tool_exit_code=${code}"
 
@@ -98,10 +108,34 @@ jobs:
             *) conclusion="failure"; title="退出码 ${code} ⇒ 不可合并（净新增 / 不可用 job / 待人工确认）" ;;
           esac
 
-          # check-run 摘要截前 8000 字符（报告以「结论」行开头，必须保留头部）。
-          # `|| true` 压住两处 -e/pipefail 雷：报告超 8000 字节时 printf 收 SIGPIPE
+          # ⚠️ **已知抖动豁免必须出现在标题里**（对称豁免的代价：PR 侧确定性弄红
+          # 白名单用例也不拦 ⇒ 唯一的提示若只躺在 summary 正文里，GitHub UI 上
+          # 人先看到的仍是「绿色对勾 + 净新增 0 ⇒ 可合并」⇒ 真相被盖住）。
+          #
+          # ⚠️ 2026-11-06 安全评审 L-2：标题必须走**独立文件**（`--gate-title-file`），
+          # 不能从人读的报告正文里 grep —— 报告是给人读的文本 ⇒ 改一下渲染
+          # （加缩进、换前缀、把标题挪到会被截断的尾部）就静默失效
+          # ⇒ 豁免提示从标题里消失 ⇒ **真相被盖住**且无人察觉。
+          # 工具没写这个文件（退出码非 0 / 没豁免）⇒ 沿用上面的标题。
+          TOOL_TITLE=""
+          if [ -f /tmp/gate_title.txt ]; then
+            TOOL_TITLE="$(cat /tmp/gate_title.txt || true)"
+          fi
+          if [ -n "${TOOL_TITLE}" ]; then
+            title="${TOOL_TITLE}"
+            echo "gate_title=${TOOL_TITLE}"
+          fi
+
+          # check-run 摘要的字节窗口（报告以「结论」行开头，必须保留头部）。
+          # ⚠️ 窗口必须**大于**工具自己的报告上限（`ci_report.MAX_REPORT_BYTES` = 20000）：
+          # 截断必须由工具负责（它会明示「报告已截断」并把提示放在头部），
+          # workflow 只搬运 ⇒ 否则 workflow 按字节二次砍尾 ⇒ **静默**丢掉证据
+          # （2026-11-06 代码评审 M-1 实测：净新增失败清单被整段挤出摘要）。
+          # 守卫：`backend/app/tests/unit/test_ci_merge_gate_workflow.py`
+          #   ::test_merge_gate_summary_window_is_wider_than_the_report_cap
+          # `|| true` 压住两处 -e/pipefail 雷：报告超窗口字节时 printf 收 SIGPIPE
           # （退出码 141）会被 pipefail 判失败 ⇒ 又被 -e 杀掉整步（同上，check 不落库）。
-          printf '%s' "${report}" | head -c 8000 > /tmp/gate_report.txt || true
+          printf '%s' "${report}" | head -c 30000 > /tmp/gate_report.txt || true
           jq -n \
             --arg name "${CHECK_NAME}" \
             --arg sha "${HEAD_SHA}" \

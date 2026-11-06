@@ -113,8 +113,16 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 
+from app.utils.ci_flakes import (
+    FlakeEntry,
+    FlakeExemption,
+    applyFlakeExemptions,
+    defaultWhitelistPath,
+    loadFlakeWhitelist,
+)
 from app.utils.ci_gh import validateRepo, validateRunId
 from app.utils.ci_head import HeadFreshness, resolveHeadFreshness
 from app.utils.ci_judge import (
@@ -258,6 +266,18 @@ def _parseArgs(argv: list[str] | None) -> argparse.Namespace:
         help="PR 确实改动了 CI 相关文件（workflow / conftest / pytest 配置 / 分片清单）"
         "⇒ 失败集合不可比，此参数表示已人工确认无影响",
     )
+    parser.add_argument(
+        "--flake-whitelist",
+        default=str(defaultWhitelistPath()),
+        help="已知抖动白名单文件路径（默认：仓库根 .github/ci-known-flaky-tests.json）"
+        "⇒ 读不到 / 非法 ⇒ 失败关闭（退出码 3），绝不退化成空白名单",
+    )
+    parser.add_argument(
+        "--gate-title-file",
+        default=None,
+        help="把 check 标题写进这个**独立文件**（闸门用它覆盖 check 的标题）"
+        "⇒ 标题不依赖「人读报告正文」的格式 ⇒ 报告怎么改都不影响它",
+    )
     return parser.parse_args(argv)
 
 
@@ -346,6 +366,10 @@ def _printReport(
     verdict: Verdict,
     surface: CiSurfaceInfo,
     notes: list[str],
+    exemptions: tuple[FlakeExemption, ...] = (),
+    rawBaseCount: int | None = None,
+    rawPrCount: int | None = None,
+    gateTitle: str | None = None,
 ) -> bool:
     """渲染并打印报告；渲染失败 ⇒ 返回 False（**绝不能**落到「可合并」）。"""
     try:
@@ -361,13 +385,52 @@ def _printReport(
             surface.baseSha,
             surface.prSha,
             notes,
+            exemptions,
+            rawBaseCount,
+            rawPrCount,
         )
     except Exception as error:  # noqa: BLE001 —— 报告渲染失败不能当成「可合并」
         # 渲染异常 ⇒ 结论不可见 ⇒ 绝不能落到 `return 0`（假绿）。
         print(f"错误：渲染报告失败：{sanitizeForReport(str(error))}", file=sys.stderr)
         return False
     print(report)
+    if gateTitle is not None:
+        # ⚠️ **仅供人读（display-only）**：check 标题的**机器通道**是
+        # `--gate-title-file` 指明的那个**独立文件**（SR-L-2：闸门不得从人读的
+        # 报告正文里 grep 标题 ⇒ 报告一改就静默失效）。
+        # 这一行只让**直接看 stdout** 的人也能看到豁免条数；它**不是**机器通道。
+        print(f"gate-title: {gateTitle}")
     return True
+
+
+def _gateTitle(
+    code: int,
+    exemptions: tuple[FlakeExemption, ...],
+) -> str | None:
+    """给 GitHub check 的**标题**（人第一眼看到的东西）⇒ 豁免必须出现在标题里。
+
+    ⚠️ 为什么标题里必须有它：对称豁免的代价是「PR 侧确定性弄红白名单用例也不拦」
+    ⇒ 唯一的提示原本只躺在 check summary 正文里（要展开才看得到），
+    而 GitHub UI 上人先看到的是**标题 + 绿色对勾** ⇒ 「干净、可合并」会盖住真相。
+
+    ⇒ 标题里带上豁免条数；**PR 侧新增红**时额外点明（那一类必须人工确认）。
+    非 0 退出码不给标题（沿用 workflow 里按退出码生成的「退出码 N ⇒ 不可合并」）。
+
+    ⚠️ 2026-11-06 代码评审 L-1：只数「**PR 侧新增红**」（基线不红、PR 红了）。
+    两侧都红是**最典型**的抖动形态 ⇒ 却每次都报「请人工确认不是确定性回归」
+    ⇒ 告警变噪音 ⇒ 真告警被淹没。
+    """
+    if code != 0:
+        return None
+    prSideCount = sum(1 for item in exemptions if item.inPr and not item.inBase)
+    if not exemptions:
+        return None
+    if prSideCount > 0:
+        return (
+            f"净新增 0 ⇒ 可合并（含 {len(exemptions)} 条已知抖动豁免，"
+            f"其中 PR 侧命中 {prSideCount} 条 ⇒ 请人工确认不是确定性回归）"
+        )
+    return f"净新增 0 ⇒ 可合并（含 {len(exemptions)} 条已知抖动豁免）"
 
 
 def _loadComparison(repo: str, baseRunId: str, prRunId: str) -> RunComparison | None:
@@ -400,11 +463,84 @@ def _loadComparison(repo: str, baseRunId: str, prRunId: str) -> RunComparison | 
     )
 
 
+def _loadFlakeEntries(whitelistPath: str) -> tuple[FlakeEntry, ...] | None:
+    """读已知抖动白名单；读不到 / 非法 ⇒ 打印错误并返回 None（**失败关闭**）。
+
+    白名单是**判据的一部分** ⇒ 判据读不出来 ⇒「不知道」不等于「没有」⇒ 保守拦下。
+    绝不能在这里退化成「空白名单」（那等于把「读不出来」当成「没有抖动」）。
+
+    ⚠️ 捕 **`Exception`** 而不是只捕 `FlakeWhitelistError`（2026-11-06 安全审查 L-1）：
+    别的异常（`OSError` / `KeyError` / `MemoryError` …）会**逃出**本函数
+    ⇒ CLI 裸 traceback + 退出码 **1**（1 的语义是「净新增失败」⇒ 操作者查错方向）。
+    ⇒ 任何异常形态都归到「读不出来」⇒ 退出码 3。
+    """
+    try:
+        return loadFlakeWhitelist(Path(whitelistPath))
+    except Exception as error:  # noqa: BLE001 —— 判据读不出来 ⇒ 一律失败关闭
+        print(f"错误：{sanitizeForReport(str(error))}", file=sys.stderr)
+        return None
+
+
+def _unmatchedWhitelistNote(
+    entries: tuple[FlakeEntry, ...],
+    exemptions: tuple[FlakeExemption, ...],
+    skipped: tuple[FlakeExemption, ...] = (),
+) -> str | None:
+    """白名单里有条目**这次没命中失败集合** ⇒ 提示可能已失效 / 拼错。
+
+    没有这条提示的话，一个拼错的 node ID 会**静默失效**：白名单看起来在管事，
+    实际那条抖动照样随机挡人，而报告里看不出「有条目一直没生效」。
+
+    ⚠️ 2026-11-06 代码评审 M-6：旧实现按 `len(entries) - len(exemptions)`
+    算「未命中」⇒ 把 **`skipped`**（命中了失败集合、但因所在文件被改动而
+    **未生效豁免**）也算成未命中 ⇒ 报告会说「本次命中 0 条，未命中 1 条
+    ⇒ 建议清理」⇒ 操作者据此删掉一条**仍然活着**的抖动条目
+    ⇒ 随机挡人的老毛病**静默复活**（B7 存在的目的被推翻）。
+    ⇒ 「命中失败集合」= 生效豁免 + 因文件被改动而未生效。
+    """
+    matchedCount = len(exemptions) + len(skipped)
+    unmatchedCount = len(entries) - matchedCount
+    if unmatchedCount <= 0:
+        return None
+    return (
+        f"白名单共 {len(entries)} 条，本次命中失败集合 {matchedCount} 条"
+        f"（生效豁免 {len(exemptions)} 条 / 因所在文件被改动而未生效 {len(skipped)} 条），"
+        f"未命中 {unmatchedCount} 条（可能已失效或拼写错误 ⇒ 建议清理）"
+    )
+
+
+def _skippedExemptionNotes(skipped: tuple[FlakeExemption, ...]) -> list[str]:
+    """「本来会豁免、但因条件不满足而没豁免」的条目 ⇒ 报告里必须**明示**。
+
+    条件 = 「该用例所在文件在本次 PR 中被改动」。
+    ⇒ 不静默：否则操作者看到的是「白名单里有它却没生效」，却不知道为什么。
+    """
+    return [
+        f"白名单用例 {sanitizeForReport(item.nodeId)} 所在文件本次被改动 "
+        "⇒ 该豁免未生效 ⇒ 该用例的失败照常计入判据"
+        "（请人工确认它仍然是抖动，而不是被这次改动引入的确定性回归）"
+        for item in skipped
+    ]
+
+
+def _writeGateTitle(path: Path, title: str) -> None:
+    """把 check 标题写进**独立文件**（闸门据此覆盖 check 的标题）。
+
+    ⚠️ 为什么不从「人读报告正文」里 grep：报告是给人看的文本 ⇒ 改一下渲染
+    （加缩进、换前缀、把标题挪到被截断的尾部）就静默失效 ⇒ 豁免提示从标题里消失
+    ⇒ 对称豁免的代价重新被「绿色对勾」盖住。
+
+    ⚠️ **不自动建父目录**：路径写错（父目录不存在）必须**响亮地失败**
+    ⇒ 调用方拿退出码 3 ⇒ 闸门以失败告终，而不是「标题悄悄没写出来」。
+    """
+    path.write_text(title, encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI 入口。
 
-    退出码：0 可合并 / 1 净新增失败 / 2 存在不可用 job / 3 运行错误（含 run 已过期）/
-    4 覆盖不等价 / 5 净丢失失败待人工确认 / 6 CI 相关面被改动（集合不可比）。
+    退出码：0 可合并 / 1 净新增失败 / 2 存在不可用 job / 3 运行错误（含 run 已过期、
+    白名单读不到）/ 4 覆盖不等价 / 5 净丢失失败待人工确认 / 6 CI 相关面被改动（集合不可比）。
     """
     args = _parseArgs(argv)
 
@@ -413,21 +549,66 @@ def main(argv: list[str] | None = None) -> int:
         print(f"错误：{invalidReason}", file=sys.stderr)
         return 3
 
+    entries = _loadFlakeEntries(args.flake_whitelist)
+    if entries is None:
+        return 3
+
     comparison = _loadComparison(args.repo, args.base_run, args.pr_run)
     if comparison is None:
         return 3
 
+    # ⚠️ 「CI 相关面」必须**先**判定：豁免要条件化在「该用例所在文件本次未被改动」
+    # ⇒ 需要改动文件清单（`surface.changedFiles`）。
+    # 判定不出来（`surface.error` 非空）⇒ 清单未知 ⇒ 照常豁免
+    # ⇒ 由「CI 相关面」守卫以退出码 6 兜住（语义仍是「须人工确认」，不是「净新增失败」）。
     surface = resolveCiSurface(args.repo, args.base_run, args.pr_run)
+    changedFiles = None if surface.error is not None else surface.changedFiles
+
+    # 豁免只影响「对差」：先剔除已知抖动用例，再算差集 ⇒ 判据里不再有噪声。
+    # 不可用 job 判定 / 覆盖等价 / CI 相关面 / 新鲜度判定都**不看**白名单
+    # ⇒ 白名单不能用来掩盖「job 没跑完」「少跑了分片」「改了 conftest」。
+    outcome = applyFlakeExemptions(
+        comparison.baseFailures,
+        comparison.prFailures,
+        entries,
+        changedFiles=changedFiles,
+    )
+    counted = replace(comparison, baseFailures=outcome.baseFailures, prFailures=outcome.prFailures)
+
     freshness = _resolveFreshness(args.repo, args.pr_run, surface.prSha)
-    diff = diffFailureSets(comparison.baseFailures, comparison.prFailures)
+    diff = diffFailureSets(outcome.baseFailures, outcome.prFailures)
     verdict = verdictFor(diff, comparison.baseAssessments, comparison.prAssessments)
     verdict = _applyFreshnessGuard(verdict, freshness)
     verdict = _applyCiSurfaceGuard(verdict, surface, args.allow_ci_changes)
     notes = _reportNotes(surface, freshness, args.allow_ci_changes)
+    unmatchedNote = _unmatchedWhitelistNote(entries, outcome.exemptions, outcome.skipped)
+    if unmatchedNote is not None:
+        notes.append(unmatchedNote)
+    notes.extend(_skippedExemptionNotes(outcome.skipped))
 
-    if not _printReport(comparison, diff, verdict, surface, notes):
+    code = _exitCodeFor(verdict, comparison)
+    title = _gateTitle(code, outcome.exemptions)
+    if not _printReport(
+        counted,
+        diff,
+        verdict,
+        surface,
+        notes,
+        outcome.exemptions,
+        outcome.rawBaseCount,
+        outcome.rawPrCount,
+        title,
+    ):
         return 3
-    return _exitCodeFor(verdict, comparison)
+    if args.gate_title_file is not None and title is not None:
+        try:
+            _writeGateTitle(Path(args.gate_title_file), title)
+        except OSError as error:
+            # 标题是「豁免可见性」的**唯一**载体 ⇒ 写不出来就保守拦下
+            # （与「报告渲染失败 ⇒ 3」同一纪律：结论不可见即不可合并）。
+            print(f"错误：写 gate 标题文件失败：{sanitizeForReport(str(error))}", file=sys.stderr)
+            return 3
+    return code
 
 
 if __name__ == "__main__":

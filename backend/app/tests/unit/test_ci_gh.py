@@ -152,6 +152,68 @@ def test_parseChangedFiles_accepts_file_list_below_the_cap() -> None:
     assert len(ci_gh._parseChangedFiles(payload)) == 299
 
 
+def test_parseChangedFiles_keeps_the_previous_path_of_a_rename() -> None:
+    """**改名**时旧路径必须一起进清单（`previous_filename`）。
+
+    ⚠️ GitHub compare 对一次改名只给**一个**条目：新路径在 `filename`，
+    旧路径在 `previous_filename` ⇒ 只取 `filename` 的话**旧路径从清单里消失**。
+
+    ⇒ 攻击路径（2026-11-06 安全审查 H-1 实测）：把
+    `.github/ci-known-flaky-tests.json` **改名**成 `docs/notes.json`
+    ⇒ 白名单数据文件不再出现在改动清单里 ⇒ 「CI 相关面」守卫看不到它
+    ⇒ **静默绕过**退出码 6 的人工仲裁 ⇒ 而改名本身在 GitHub UI 上很不起眼。
+    """
+    payload = json.dumps(
+        {
+            "files": [
+                {
+                    "filename": "docs/notes.json",
+                    "previous_filename": ".github/ci-known-flaky-tests.json",
+                }
+            ]
+        }
+    )
+
+    assert ci_gh._parseChangedFiles(payload) == (
+        "docs/notes.json",
+        ".github/ci-known-flaky-tests.json",
+    )
+
+
+def test_parseChangedFiles_counts_items_not_names_for_the_cap() -> None:
+    """上限按 **条目数**计，不是按「名字个数」计。
+
+    改名会让**一个**条目产出**两个**名字 ⇒ 若按名字数计，150 个改名条目
+    = 300 个名字 ⇒ 早就撞上 compare API 的 300 项上限（清单早被服务端截断）
+    却仍然放行 ⇒ 「改动文件清单不完整」这件事被静默吞掉。
+    """
+    payload = json.dumps(
+        {
+            "files": [
+                {"filename": f"new{i}.py", "previous_filename": f"old{i}.py"}
+                for i in range(300)
+            ]
+        }
+    )
+
+    with pytest.raises(ValueError):
+        ci_gh._parseChangedFiles(payload)
+
+
+def test_parseChangedFiles_accepts_renamed_files_below_the_cap() -> None:
+    """反向守卫：299 个**改名**条目（598 个名字）仍应放行（按条目数计）。"""
+    payload = json.dumps(
+        {
+            "files": [
+                {"filename": f"new{i}.py", "previous_filename": f"old{i}.py"}
+                for i in range(299)
+            ]
+        }
+    )
+
+    assert len(ci_gh._parseChangedFiles(payload)) == 598
+
+
 # --------------------------------------------------------------------------
 # gh 调用本身
 # --------------------------------------------------------------------------

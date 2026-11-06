@@ -26,11 +26,28 @@ backend/app/utils/ci_gh.py            @sunql
 backend/app/utils/ci_surface.py       @sunql
 backend/app/utils/ci_head.py          @sunql
 backend/app/utils/ci_pytest_log.py    @sunql
+backend/app/utils/ci_flakes.py        @sunql
+
+# ---- 已知抖动白名单**数据文件**（它直接决定「哪些失败用例不作判据」⇒ 改它 = 改判据）----
+.github/ci-known-flaky-tests.json    @sunql
+
+# ---- CODEOWNERS **自己**（改授权面 = 换授权人 ⇒ 必须人工复核）----
+# 个人仓库的 CODEOWNERS 没有强制力（装不了 users bypass）⇒ 这是链上仅剩的人工检查点。
+/.github/CODEOWNERS                  @sunql
 
 # ---- 守卫用例（改守卫 = 解除守卫）----
 backend/app/tests/unit/test_ci_failure_set.py     @sunql
+backend/app/tests/unit/test_ci_failure_set_flakes.py @sunql
 backend/app/tests/unit/test_ci_text.py            @sunql
 backend/app/tests/unit/test_ci_gh.py              @sunql
 backend/app/tests/unit/test_ci_surface.py         @sunql
 backend/app/tests/unit/test_ci_shard.py           @sunql
+backend/app/tests/unit/test_ci_head.py            @sunql
+backend/app/tests/unit/test_ci_report.py          @sunql
+backend/app/tests/unit/test_ci_flakes.py          @sunql
+backend/app/tests/unit/test_ci_codeowners.py      @sunql
+backend/app/tests/unit/test_ci_merge_gate_workflow.py @sunql
 backend/app/tests/unit/test_ci_integration_step.py @sunql
+
+# ---- 守卫用例的**共享替身**（改替身 = 改守卫的观测对象 ⇒ 同属「解除守卫」面）----
+backend/app/tests/unit/_ci_gate_support.py        @sunql

@@ -8,9 +8,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from app.utils import ci_surface
+from app.utils import ci_gh, ci_surface
 
 
 def test_detectCiSurfaceChanges_flags_workflow_and_conftest() -> None:
@@ -195,3 +196,123 @@ def test_resolveCiSurface_reports_compare_failure(monkeypatch) -> None:
     assert info.error is not None
     assert info.baseSha == "a" * 40
     assert info.changedFiles == ()
+
+
+def test_detectCiSurfaceChanges_flags_flake_whitelist_data_file() -> None:
+    """**白名单数据文件**本身也属于 CI 相关面。
+
+    白名单直接决定「哪些失败用例不作判据」⇒ 改它 = 改判据
+    ⇒ 与工具模块同族：PR 改白名单 ⇒ 退出码 6 ⇒ 须人工确认。
+
+    兜底不止这一层：闸门 workflow 由 `workflow_run` 触发 ⇒ checkout 检出的
+    是**默认分支** ⇒ PR 分支里的白名单改动**根本不生效**。
+    """
+    changed = (".github/ci-known-flaky-tests.json",)
+
+    flagged = ci_surface.detectCiSurfaceChanges(changed)
+
+    assert set(flagged) == set(changed)
+
+
+def test_detectCiSurfaceChanges_flags_guard_test_files() -> None:
+    """**守卫用例本身**属于 CI 相关面 ⇒ 改守卫 = 解除守卫。
+
+    攻击路径：PR 把「拒绝文件级 node ID」那条断言删掉 ⇒ 白名单就能塞进
+    文件级 ID ⇒ 一个文件的失败全部豁免 ⇒ 而**守卫自己不会再红**
+    （断言被删了）⇒ CI 全绿 ⇒ 没有二次防线。
+
+    ⇒ 这两类文件（守卫用例 + 授权面）是这条链上**仅剩的人工检查点**
+    ⇒ 必须在 CI 相关面里。
+    """
+    changed = (
+        "backend/app/tests/unit/test_ci_flakes.py",
+        "backend/app/tests/unit/test_ci_failure_set.py",
+        "backend/app/tests/unit/test_ci_report.py",
+    )
+
+    flagged = ci_surface.detectCiSurfaceChanges(changed)
+
+    assert set(flagged) == set(changed)
+
+
+def test_detectCiSurfaceChanges_flags_codeowners() -> None:
+    """**CODEOWNERS** 属于 CI 相关面 ⇒ 改授权面 = 换复核人。
+
+    个人仓库的 CODEOWNERS 没有强制力（装不了 users bypass）⇒ 它是**唯一**
+    的人工复核点 ⇒ 把某条 CI 路径的复核人去掉 ⇒ 判据就没人把关了。
+    """
+    changed = (".github/CODEOWNERS",)
+
+    flagged = ci_surface.detectCiSurfaceChanges(changed)
+
+    assert set(flagged) == set(changed)
+
+
+def test_renaming_a_ci_surface_file_is_still_detected() -> None:
+    """**改名**也算「改了 CI 相关面」—— 组合守卫（真实攻击路径）。
+
+    2026-11-06 安全审查 H-1 实测：GitHub compare 对改名只给**一个**条目
+    （新路径 `filename` + 旧路径 `previous_filename`）⇒ 旧实现只取 `filename`
+    ⇒ 把 `.github/ci-known-flaky-tests.json` 改名成 `docs/notes.json`
+    就能让它从改动清单里消失 ⇒ **静默绕过**退出码 6 的人工仲裁
+    （实测：`flagged=False`）。
+
+    ⇒ 本用例钉的是**整条链**：compare 解析 → 改动清单 → CI 相关面判定。
+    """
+    payload = json.dumps(
+        {
+            "files": [
+                {
+                    "filename": "docs/notes.json",
+                    "previous_filename": ".github/ci-known-flaky-tests.json",
+                }
+            ]
+        }
+    )
+
+    changed = ci_gh._parseChangedFiles(payload)
+    flagged = ci_surface.detectCiSurfaceChanges(changed)
+
+    assert ".github/ci-known-flaky-tests.json" in flagged
+
+
+def test_detectCiSurfaceChanges_flags_guard_test_files_at_any_depth() -> None:
+    """守卫用例在**任意深度**都算 CI 相关面。
+
+    旧清单只认 `backend/app/tests/unit/test_ci_*.py` ⇒ 把守卫挪到
+    `backend/app/tests/integration/test_ci_x.py` 就同时逃出
+    ①「CI 相关面」判定 与 ②CODEOWNERS 反查（后者也只扫 `unit/` 目录）
+    ⇒ **改守卫 = 解除守卫**，而没人复核。
+
+    ⇒ 与 conftest / pytest 配置同款纪律：**按 basename 判定，不枚举目录**。
+    """
+    changed = (
+        "backend/app/tests/integration/test_ci_guard.py",
+        "backend/app/tests/unit/test_ci_flakes.py",
+        "backend/app/tests/e2e/test_ci_e2e_guard.py",
+    )
+
+    flagged = ci_surface.detectCiSurfaceChanges(changed)
+
+    assert set(flagged) == set(changed)
+
+
+def test_detectCiSurfaceChanges_flags_the_shared_guard_support_module() -> None:
+    """守卫用例的**共享替身**属于 CI 相关面 ⇒ 改替身 = 改守卫的观测对象。
+
+    攻击路径：`_ci_gate_support.py` 提供 `stubShards` / `redLogWith` 等替身
+    ⇒ PR 把 `redLogWith` 改成**永远返回空失败集合**
+    ⇒ 所有「失败集合对差」用例都看到「净新增 0」⇒ 守卫**恒绿**
+    ⇒ 而守卫自己不会再红（断言被替身骗过）⇒ 没有二次防线。
+
+    ⇒ 替身文件与守卫用例**同族** ⇒ 必须一起进 CI 相关面。
+    """
+    changed = (
+        "backend/app/tests/unit/_ci_gate_support.py",
+        "backend/app/tests/unit/_agent_orchestration_runner_support.py",
+    )
+
+    flagged = ci_surface.detectCiSurfaceChanges(changed)
+
+    assert "backend/app/tests/unit/_ci_gate_support.py" in flagged
+    assert "backend/app/tests/unit/_agent_orchestration_runner_support.py" not in flagged

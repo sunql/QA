@@ -52,7 +52,32 @@ _CI_SURFACE_PATTERNS = (
     # 依赖锁定文件：改了依赖版本 ⇒ 测试环境变了 ⇒ 失败集合不再可比
     r"^backend/(?:pyproject\.toml|uv\.lock)$",
     r"^backend/app/tests/(?:_pg_support|milvus_isolation)\.py$",
-    r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface|head|pytest_log|judge|report)\.py$",
+    r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface|head|pytest_log|judge|report|flakes)\.py$",
+    # 已知抖动白名单**数据文件**：它直接决定「哪些失败用例不作判据」
+    # ⇒ 改它 = 改判据 ⇒ 与工具模块同族，必须人工确认。
+    r"^\.github/ci-known-flaky-tests\.json$",
+    # ⚠️ **守卫用例本身**与**授权面本身**也在 CI 相关面里（2026-11-06 两路 review 共同指出）：
+    # - 改守卫用例 = **解除守卫**（把「拒绝文件级 ID」那条断言删掉 ⇒ 白名单就能塞文件级 ID）；
+    #   而守卫被改软之后**它自己不会再红** ⇒ CI 全绿 ⇒ 没有二次防线
+    #   （CODEOWNERS 的注释早就写了「改守卫 = 解除守卫」，只是没落到这份清单里）。
+    # - 改 CODEOWNERS = **换授权人**（把某条 CI 路径的复核人去掉 ⇒ 判据不再有人把关）。
+    # ⇒ 个人仓库的 CODEOWNERS 没有强制力（装不了 users bypass）⇒ 这两类文件是
+    #   这条链上**仅剩的人工检查点** ⇒ 必须在 CI 相关面里。
+    #
+    # ⚠️ 守卫用例必须按**任意深度**判定（与 conftest 同款纪律）：
+    # 旧清单只认 `backend/app/tests/unit/test_ci_*.py` ⇒ 把守卫挪到
+    # `backend/app/tests/integration/test_ci_x.py` 就同时逃出
+    # ①「CI 相关面」判定 与 ②CODEOWNERS 反查（后者也只扫 `unit/`）
+    # ⇒ **改守卫 = 解除守卫**，而没有人复核。
+    r"^backend/app/tests/(?:.*/)?test_ci_.*\.py$",
+    # ⚠️ 守卫用例的**共享替身**（`_ci_*_support.py`）与守卫用例**同族**：
+    # 替身提供「失败集合」「分片划分」等观测对象 ⇒ 改替身就能让守卫**恒绿**
+    #   （例如把 `redLogWith` 改成永远返回空失败集合 ⇒ 全部对差用例看到「净新增 0」）
+    # ⇒ 与守卫用例一样进 CI 相关面。
+    # 刻意只认 `_ci_*_support.py`（CI 专属）⇒ 不误伤 `_agent_orchestration_runner_support.py`
+    # 这类与判据无关的通用替身。
+    r"^backend/app/tests/(?:.*/)?_ci_.*_support\.py$",
+    r"^\.github/CODEOWNERS$",
 )
 
 # 拉取失败时可能被抛出的异常类型（`gh` 调用 + JSON 解析）。

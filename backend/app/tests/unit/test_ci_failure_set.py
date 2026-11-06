@@ -25,10 +25,32 @@ from __future__ import annotations
 
 import pytest
 
+from app.tests.unit._ci_gate_support import (
+    TIMESTAMPED as _TIMESTAMPED,
+)
+from app.tests.unit._ci_gate_support import (
+    greenLog as _greenLog,
+)
+from app.tests.unit._ci_gate_support import (
+    job as _job,
+)
+from app.tests.unit._ci_gate_support import (
+    oneRedShard as _oneRedShard,
+)
+from app.tests.unit._ci_gate_support import (
+    redLog as _redLog,
+)
+from app.tests.unit._ci_gate_support import (
+    stubCiSurface as _stubCiSurface,
+)
+from app.tests.unit._ci_gate_support import (
+    stubGithub as _stubGithub,
+)
+from app.tests.unit._ci_gate_support import (
+    stubHeadFreshness as _stubHeadFreshness,
+)
 from app.utils import ci_failure_set
 from app.utils.ci_failure_set import (
-    CiJob,
-    JobAssessment,
     assessJob,
     collectRunFailures,
     diffFailureSets,
@@ -38,44 +60,8 @@ from app.utils.ci_failure_set import (
     sanitizeForReport,
     verdictFor,
 )
-from app.utils.ci_head import HeadFreshness
-from app.utils.ci_surface import CiSurfaceInfo
 
 # GH Actions 的真实日志行形状：行首是 ISO 时间戳 + 空格
-_TIMESTAMPED = "2026-11-02T07:10:13.4960640Z "
-
-
-def _redLog(family: str = "UNIT", shard: int = 0) -> str:
-    """一份「分片跑完但红了」的日志片段（真实形状）。
-
-    **完成标记的族名与分片号必须与 job 名对齐**（job 名 `Backend / unit shard 0`
-    ⇒ 标记 `UNIT_SHARD_DONE shard=0`）—— 实现会交叉校验两者 ⇒ fixture 不对齐时，
-    用例会因为「标记与 job 不符」而变红，测不到本来要测的那件事。
-
-    **必须带 pytest 的收尾汇总行**（`2 failed, … in …s`）—— 真红（status=1）
-    而没有汇总行 ⇒ 无法确认 pytest 跑完了整个 session ⇒ 判定为不可用。
-    """
-    return "\n".join(
-        [
-            f"{_TIMESTAMPED}platform linux -- Python 3.13.0, pytest-8.3.4",
-            f"{_TIMESTAMPED}FAILED app/tests/unit/test_chat_service.py::test_reply - assert 1 == 2",
-            f"{_TIMESTAMPED}FAILED app/tests/unit/test_rate_limit.py::test_burst - AssertionError",
-            f"{_TIMESTAMPED}2 failed, 118 passed, 3 skipped in 812.34s",
-            f"{_TIMESTAMPED}{family}_SHARD_DONE shard={shard} status=1",
-        ]
-    )
-
-
-def _greenLog(family: str = "UNIT", shard: int = 0) -> str:
-    """一份「分片跑完且全绿」的日志片段。"""
-    return "\n".join(
-        [
-            f"{_TIMESTAMPED}5431 passed, 1 skipped in 812.34s",
-            f"{_TIMESTAMPED}{family}_SHARD_DONE shard={shard} status=0",
-        ]
-    )
-
-
 _RED_LOG = _redLog()
 _GREEN_LOG = _greenLog()
 
@@ -100,10 +86,6 @@ def _redLogWithExtra(
             f"{_TIMESTAMPED}{family}_SHARD_DONE shard={shard} status=1",
         ]
     )
-
-
-def _job(jobId: int = 1, name: str = "Backend / unit shard 0", conclusion: str = "failure") -> CiJob:
-    return CiJob(jobId=jobId, name=name, conclusion=conclusion)
 
 
 # --------------------------------------------------------------------------
@@ -1009,64 +991,6 @@ def test_renderReport_shows_run_head_shas() -> None:
 # --------------------------------------------------------------------------
 # CLI 退出码契约
 # --------------------------------------------------------------------------
-
-
-def _stubCiSurface(
-    monkeypatch: pytest.MonkeyPatch,
-    changedFiles: tuple[str, ...],
-    error: str | None = None,
-) -> None:
-    """把「CI 相关面判定」换成固定结果（避免真调 gh 的 compare API）。
-
-    默认给空清单 ⇒ CI 相关面守卫不触发 ⇒ CLI 用例只需关注失败集合对差本身。
-    """
-    monkeypatch.setattr(
-        ci_failure_set,
-        "resolveCiSurface",
-        lambda repo, baseRunId, prRunId: CiSurfaceInfo(
-            baseSha="a" * 40,
-            prSha="b" * 40,
-            changedFiles=changedFiles,
-            error=error,
-        ),
-    )
-
-
-def _stubHeadFreshness(
-    monkeypatch: pytest.MonkeyPatch,
-    isFresh: bool = True,
-    reason: str | None = None,
-    note: str | None = None,
-) -> None:
-    """把「PR run 新鲜度判定」换成固定结果（避免真调 gh 查分支 head）。
-
-    默认新鲜 ⇒ CLI 用例只需关注失败集合对差本身。
-    """
-    monkeypatch.setattr(
-        ci_failure_set,
-        "resolveHeadFreshness",
-        lambda repo, runId, runSha: HeadFreshness(isFresh=isFresh, reason=reason, note=note),
-    )
-
-
-def _stubGithub(
-    monkeypatch: pytest.MonkeyPatch,
-    baseResult: tuple[frozenset[str], tuple[JobAssessment, ...]],
-    prResult: tuple[frozenset[str], tuple[JobAssessment, ...]],
-) -> None:
-    """把 `collectRunFromGithub` 换成固定返回值（避免真调 gh）。"""
-    _stubCiSurface(monkeypatch, ())
-    _stubHeadFreshness(monkeypatch)
-
-    def fake(repo: str, runId: str):
-        return baseResult if runId == "111" else prResult
-
-    monkeypatch.setattr(ci_failure_set, "collectRunFromGithub", fake)
-
-
-def _oneRedShard() -> tuple[frozenset[str], tuple[JobAssessment, ...]]:
-    jobs = [_job(jobId=1, name="Backend / unit shard 0", conclusion="failure")]
-    return collectRunFailures(jobs, {1: _RED_LOG})
 
 
 def test_main_returns_zero_when_mergeable(monkeypatch: pytest.MonkeyPatch) -> None:

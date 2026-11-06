@@ -27,10 +27,10 @@
 | ① | 「最近 N 天」时间窗口多算一天（Oracle 日期算术模板下界写成 `-N`，且缺上界） | NL2SQL 生成的 SQL 口径错 ⇒ 所有「近 N 天」类问句结果偏大 | **本批实施** |
 | ② | MEASURE 类型指标编辑保存 ⇒ 历史分母（及 `class_id`/`class_alias`）被清空 | 前端 `buildMetricPayload` 显式提交 `denominatorMeasure: null` ⇒ 后端整块替换 JSONB ⇒ 用户已录入的度量定义丢失 | **本批实施** |
 | ③ | L4 历史回放不还原 `steps` | 研究线回放看不到多步过程 | **已修**（PR #78 / main `37f72a76`，快照落库 `session_message.query_plan` / `steps_snapshot`，迁移 0138）⇒ 本批不做；MEMORY 索引行过期，需更正 |
-| ④ | 研究入口 UX 7 项缺口 | 研究线可用性 | 待立项 |
+| ④ | 研究入口 UX 7 项缺口 | 研究线可用性 | **已修**（2026-10-05，`feat-research-entry-ux-fixes`，`Harness/changes/feat-research-entry-ux-fixes/summary.md`）：7 项全部落地；其中 5 项是「能力已在、暴露缺失」（数据已到 store / 后端已就绪，只是没渲染/没回显）⇒ **本批不做**（⚠️ 该计划表原写「待立项」= **过期**，2026-11-07 更正） |
 | ⑤ | THBI 业务图回填（404 根因=子图为空） | 业务图谱页面 | 待立项（**生产写，须用户先批准 SQL**） |
-| ⑥ | 测试会删生产 Milvus / Neo4j 数据 | 一次误跑即掉线上数据 | 待立项（需先做环境隔离） |
-| ⑦ | Milvus delete-visibility | 向量删除不生效 | 待立项（**需单独授权碰生产 19530**） |
+| ⑥ | 测试会删生产 Milvus / Neo4j 数据 | 一次误跑即掉线上数据 | **已修**：Milvus 侧（2026-09-30）独立逻辑库 `qa_test` + `_guardIsolatedDatabase()` 硬守卫；Neo4j 侧（2026-10-03）`TEST_NEO4J_URI` **fail-fast** + `installTestNeo4jEnv` + `assertAppNeo4jIsIsolated` 三层 ⇒ **本批不做**（⚠️ 该计划表原写「待立项」= **过期**，2026-11-07 更正） |
+| ⑦ | Milvus delete-visibility | 向量删除不生效 | 待立项（**下一批第二优先**，2026-11-07 复核后细化）。范围要**拆两半**：<br>· **测试侧（可先做，零生产风险）**：`backfill_milvus_external_id.py` 的 delete 后缺 `release`+`load` ⇒ 3 个抖动用例（`test_backfill_is_idempotent` 等）⇒ 修好后 B7 白名单里那一条可以**退休**（止血 → 根治的闭环）；另两个「固定业务 id ⇒ 单调累积」的用例改随机 id。<br>· **产品侧（需口径，先别做）**：`wiki_vector_service.syncPage` 先 delete 再 insert ⇒ 删除可见性延迟期间**检索可能拿到旧 chunk** ⇒ 这是**用户可见的真缺陷**，但修法（delete 后 `release`+`load` / 轮询等待可见 / 一致性级别）各有延迟与语义代价 ⇒ 需产品口径确认 ⇒ 单独立项 |
 
 ### ① 的根因与范围
 
@@ -57,7 +57,7 @@
 
 | # | 项 | 状态 |
 |---|---|---|
-| A1 | merge-gate「净新增拦截」证明（缺一个含真失败的 PR 取证） | 未完成（后续项 7 顺带取证） |
+| A1 | merge-gate「净新增拦截」证明（缺一个含真失败的 PR 取证） | **下一批第一优先**（2026-11-07 定）：B7 批只证明了「净新增 0 时闸门怎么判」，**从未证明「PR 真有失败时闸门确实拦住」** ⇒ 用**探针 PR** 取证：故意失败的**新测试文件**（不进 CI 相关面 ⇒ 不触发 `CI_SURFACE_CHANGED`）⇒ 期望闸门判 `NEW_FAILURES`（退出码 1）+ 必需检查 failure + `mergeStateStatus: BLOCKED` ⇒ 取证后**关闭 PR、不合并**（零代码改动、零合并风险） |
 | B1 | integration 分片改哈希分组（当前按文件序 ⇒ 改文件即换分片归属） | 未启动 |
 | B2 | 残余 36 条 alembic 差异（16 条零 DDL + 6 条需 DDL） | 已评估无运行时影响，排期 **2026-11-09** |
 | B3 | 不可伪造证据（当前 stdout 可控 ⇒ 挡得住偶然假绿、挡不住蓄意伪造） | 未启动 |

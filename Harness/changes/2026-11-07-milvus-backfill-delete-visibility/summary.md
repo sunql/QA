@@ -505,3 +505,73 @@ python3 /tmp/milvus_backfill_mutation_sweep.py  →  ✅ 全部变异均被至�
 
 PR-B（退休白名单那条）改的是 `.github/ci-known-flaky-tests.json` ⇒ 属 CI 相关面 ⇒
 闸门必判 **6**（`CI_SURFACE_CHANGED`）⇒ 走 owner 越权口显式合并。
+
+---
+
+## 闸门仲裁记录：PR-A 退出码 5（净丢失 1 条）
+
+**check-run**：`merge-gate / failure-set-diff`，id `128105617242`
+（`conclusion=failure`，标题「退出码 5 ⇒ 不可合并（净新增 / 不可用 job / 待人工确认）」）。
+
+**闸门读数**：
+
+| 项 | 基线 | PR |
+|---|---|---|
+| run | `42259464993`（head `865463d9`） | `42273074270`（head `40ec6300`） |
+| 失败条数 | **140** | **139** |
+| 失败集合对差 | — | **净新增 0 / 净丢失 1** |
+
+**净丢失的那 1 条** = `app/tests/integration/test_reconcile_milvus_id_mapping.py::test_backfill_is_idempotent`
+—— 恰好是本批立项要消灭的那条抖动。
+
+### 三件套证伪（确认不是「把失败藏起来了」）
+
+**(a) 用例确实执行了，而且通过了**（不是被 skip、不是没收集）：
+
+- 基线 integration shard 3 汇总行：`34 failed, 600 passed, 11 skipped, 1375 warnings, 2 errors in 1487.76s`
+- PR integration shard 3 汇总行：`33 failed, 602 passed, 11 skipped, 1395 warnings, 2 errors in 2405.54s`
+- `skipped` 两侧都是 11 ⇒ 该用例**没有被跳过**；
+  `passed` 600 → 602 = **+2**：新增的 `test_backfill_leaves_no_row_with_empty_external_id`（+1）
+  ＋ `test_backfill_is_idempotent` 由红转绿（+1）。
+- pytest `-q` 只给失败用例打 `FAILED` 前缀；PR 日志里该用例名只出现在
+  **warnings 汇总的收集清单**中（71 → 75 次提及，均无 `FAILED` 前缀），
+  失败摘要里没有它 ⇒ 它跑了且过了。
+
+**(b) 基线侧确实是偶发红，且就是那个抖动签名**：
+
+```
+FAILED app/tests/integration/test_reconcile_milvus_id_mapping.py::test_backfill_is_idempotent - assert 1 == 0
+```
+
+`assert 1 == 0` 即「第二跑仍有 1 行没被回填」⇒ 正是 delete 可见性窗口内复扫的形态
+（见 §1 的三段异步管道）。失败集合对差后，**两侧的全部差异只有这一条**
+（`diff` 基线 34 条 vs PR 33 条 ⇒ 少的就是它，其余 33 条逐条相同）⇒
+本 PR 没有掩盖任何别的失败，也没有引入任何新失败。
+
+**(c) 不是靠改弱断言换来的绿**：
+
+1. diff 中 `test_backfill_is_idempotent` 的**用例体未被修改** ——
+   本次对该集成文件的唯一删除是那一行
+   `assert report.diff_count == 0, f"diff after backfill: {report.rows}"` 的
+   **尾随空白差异**（已用 `od -c` 逐字节确认，断言文本一字未改）。
+2. 本次 diff **确实触碰了该用例的责任代码路径**：`backend/scripts/**`（回填脚本重写）
+   与 `backend/app/infrastructure/milvus_client.py`（新增 `refreshCollection`）⇒
+   结果变好是因为行为变了，不是因为断言变松了。
+3. 判据本身没有被绕过：B7 规则④因「该文件本次被改动」而让白名单豁免**失效**
+   ⇒ 这条用例**照常计入判据**，没有躲在白名单后面。
+
+⇒ 结论：**净丢失 1 条 = 抖动消失的正面证据**，不是回归，也不是藏失败 ⇒ 人工仲裁放行。
+
+### 分片归属推导（一处更正）
+
+本批一度用「macOS 上 `find … | sort -z` 的下标」推导分片，得 244 ⇒ 判 shard 0，
+与实测（该文件在 **shard 3** 的日志里）矛盾。查因：
+
+- CI（Ubuntu，GNU coreutils）用的是 `find … -print0 | sort -z`；
+  **GNU `sort -z` 在 C.UTF-8 下按字节序排**，而 **macOS 的 BSD `sort -z` 走本地 locale 排序**，
+  两者从下标 20 起就分叉（`test_agent_orchestration_runner_recovery.py` vs `…_pause.py`）。
+- 按**字节序**重算：该文件下标 **243** ⇒ `243 mod 4 = 3` ⇒ **shard 3** ✓ 与实测一致；
+  分片文件数也对得上（各 shard 78/79，CI 日志 `Shard 3: 78 test files`）。
+
+⚠️ 教训：分片归属只能按 **byte-order** 推（`python3 -c "sorted(files).index(...)"`），
+**不能用 macOS 的 `sort -z`**；下标推错 ⇒ 会去查错分片的日志 ⇒ 误判「用例没跑」。

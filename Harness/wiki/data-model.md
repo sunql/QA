@@ -155,6 +155,29 @@ docker exec \
   读不到、进程被杀也不留假坐标。代价是所有被回填行持行锁到回滚，类数很大时
   选窗口执行。目标判定为生产时需 `--allow-prod`。
 
+**Milvus 3 集合的 `external_id` 回填**（`backend/scripts/backfill_milvus_external_id.py`）：
+
+- 目标：把 `ontology_class_embeddings` / `ontology_property_embeddings` /
+  `ontology_metric_embeddings` 里 `external_id == ""` 的行补成 `obj:{type}:{ontology_id}`，
+  同时写 PG `id_mapping` 占位行（`ON CONFLICT (business_object, external_id) DO NOTHING`）。
+- **delete 可见性是硬约束**：Milvus 的 delete 走
+  `Proxy → DML channel → DataNode → QueryNode` 三段异步管道，`flush()` 只持久化
+  （Growing → Sealed → 对象存储），**不保证** QueryNode 已应用 delta binlog；
+  collection 默认 Bounded（5s 容忍窗口）下 per-request
+  `consistency_level="Strong"` 也**不能**立即看到 delete 后状态（2026-09-27 实测，
+  见 [fix-milvus-delete-visibility](../changes/fix-milvus-delete-visibility/summary.md)）。
+  ⇒ 脚本在 `insert + flush` 之后强制 `release + load`
+  （`app/infrastructure/milvus_client.py::refreshCollection`），并**复扫校验**：
+  旧行仍可见 ⇒ 抛错，**不返回可能撒谎的 `written`**。
+- **定位必须按行自己的 auto-id**：同一 `ontology_id` 可能有多行（历史 delete 不可见
+  留下的残留重复行），旧实现按 `ontology_id` 建索引来取「要重插的内容」⇒
+  **取错内容**（delete 一直按行自身的 auto-id 打，**位置是对的**；错的是重插时
+  取到了同 `ontology_id` 的另一行）⇒ 重插出内容相同的重复向量。
+  ⇒ 现行实现按行自身 auto-id 索引，两处（delete 与取内容）用同一行。
+- 代价：`release + load` 期间该集合处于**未加载**状态（约 2-3s）⇒ 该窗口内针对
+  该集合的检索**拿不到正常结果**（可能直接报「集合未加载」）⇒ **必须在维护窗口执行**
+  ⇒ 仅用于一次性维护脚本与集成测试的 delete-then-query 验证场景，**不用于在线业务路径**。
+
 ## 本体图（Neo4j）
 
 ```

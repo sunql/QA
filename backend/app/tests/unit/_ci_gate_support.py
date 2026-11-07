@@ -53,18 +53,38 @@ def stubCiSurface(
     monkeypatch: pytest.MonkeyPatch,
     changedFiles: tuple[str, ...],
     error: str | None = None,
+    netChangedFiles: tuple[str, ...] | None = None,
+    unattributedCiFiles: tuple[str, ...] = (),
+    baseTrustError: str | None = None,
+    mainAdvanceFiles: tuple[str, ...] = (),
+    mainTipSha: str | None = "a" * 40,
 ) -> None:
     """把「CI 相关面判定」换成固定结果（避免真调 gh 的 compare API）。
 
     默认给空清单 ⇒ CI 相关面守卫不触发 ⇒ CLI 用例只需关注失败集合对差本身。
+
+    ⚠️ 三个清单的分工（2026-11-07 N6 第三版）：
+    - `changedFiles` = `P` = PR **自己**改的文件（**措辞**用）；
+    - `mainAdvanceFiles` = `A` = main 的内容推进（**措辞**用）；
+    - `netChangedFiles` = **判定集合** = `A ∪ P`。
+
+    ⚠️ `netChangedFiles` 默认与 `changedFiles` 相同（`None` ⇒ 取 `changedFiles`）：
+    老调用方只给 `changedFiles` ⇒ 判定集合 = PR 的改动 ⇒ 仍然会看到
+    「CI 相关面被改动 ⇒ 拦下」，语义不变。
     """
+    resolvedNet = changedFiles if netChangedFiles is None else netChangedFiles
     monkeypatch.setattr(
         ci_failure_set,
         "resolveCiSurface",
         lambda repo, baseRunId, prRunId: CiSurfaceInfo(
             baseSha="a" * 40,
             prSha="b" * 40,
+            mainTipSha=mainTipSha,
             changedFiles=changedFiles,
+            mainAdvanceFiles=mainAdvanceFiles,
+            netChangedFiles=resolvedNet,
+            unattributedCiFiles=unattributedCiFiles,
+            baseTrustError=baseTrustError,
             error=error,
         ),
     )

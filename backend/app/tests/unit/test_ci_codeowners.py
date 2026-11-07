@@ -103,6 +103,28 @@ def test_flake_whitelist_data_file_has_a_codeowner() -> None:
     assert _FLAKE_WHITELIST in owned
 
 
+def test_the_mutation_evidence_script_has_a_codeowner() -> None:
+    """**变异取证脚本**必须有 CODEOWNER —— 它决定「哪些变异算转红」。
+
+    攻击路径（2026-11-07 安全评审 MEDIUM-3）：改这个脚本，把「转红」判据从
+    「pytest 退出码 1」放宽成「退出码非 0」⇒ 收集失败（退出码 2）也算转红
+    ⇒ 取证全绿 ⇒ **守卫恒绿**且没人复核。
+
+    ⇒ 它与工具模块、守卫用例**同族** ⇒ 必须进授权面。
+
+    ⚠️ 清单（`ci_mutation_cases.py`，纯数据）与跑者**同族**：
+    改清单可以把某组变异指向一个没人守的地方 ⇒ 照样恒绿 ⇒ 两者都要有 CODEOWNER。
+    """
+    owned = _ownedPaths()
+
+    for relPath in (
+        "backend/scripts/ci_mutation_evidence.py",
+        "backend/scripts/ci_mutation_cases.py",
+    ):
+        assert (_REPO_ROOT / relPath).is_file(), f"找不到变异取证脚本：{relPath}"
+        assert relPath in owned, f"{relPath} 没有 CODEOWNER（改它就能让守卫恒绿）"
+
+
 # ---------------------------------------------------------------------------
 # 2026-11-06 代码评审 M-5：CODEOWNERS 是「**最后匹配者生效**」
 # ---------------------------------------------------------------------------
@@ -191,6 +213,8 @@ def test_the_effective_owner_of_every_controlled_path_is_the_expected_one() -> N
         for path in (_REPO_ROOT / "backend" / "app" / "tests").rglob("_ci_*_support.py")
     }
     controlledPaths |= {_FLAKE_WHITELIST}
+    controlledPaths |= {"backend/scripts/ci_mutation_evidence.py"}
+    controlledPaths |= {"backend/scripts/ci_mutation_cases.py"}
     controlledPaths |= {".github/CODEOWNERS"}
     assert controlledPaths, "受控路径集合为空（路径写错了？）"
 

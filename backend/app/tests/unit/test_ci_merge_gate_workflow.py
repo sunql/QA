@@ -233,6 +233,28 @@ def test_merge_gate_never_passes_dangerous_flags_in_any_job() -> None:
     )
 
 
+def test_merge_gate_base_run_query_only_picks_push_runs() -> None:
+    """基线必须限定 **event=push**（2026-11-07 安全评审 HIGH-1）。
+
+    GitHub 的 `runs?branch=<name>` 过滤匹配的是 `head_branch`、**不区分事件**
+    （实测：`branch=feat/merge-gate-flake-whitelist` 返回的是 `event=pull_request`
+    的 run）⇒ 一个**名叫 main 的 fork 分支**发起的 PR 也会命中 `branch=main`
+    ⇒ 它的 run 可能被当成「main 的基线」⇒ 基线 = 攻击者自己的代码
+    ⇒ 失败集合对差被中和 ⇒ 闸门失去意义。
+
+    ⇒ 查询串必须带 `event=push`，**且** jq 必须再筛一次 `.event == "push"`
+    （双保险：查询参数可能被服务端忽略 ⇒ jq 侧独立把关）。
+    """
+    script = _executableScript()
+
+    assert "event=push" in script, (
+        "基线查询没有限定 event=push ⇒ PR run 可能被当成 main 的基线"
+    )
+    assert re.search(r"select\(\s*\.event\s*==\s*[\"']push[\"']", script) is not None, (
+        "基线查询的 jq 没有再筛一次 .event == 'push' ⇒ 只靠查询参数不够"
+    )
+
+
 def test_merge_gate_summary_window_is_wider_than_the_report_cap() -> None:
     """摘要的字节窗口必须**大于**工具自己的报告上限 ⇒ 工具不会被 workflow 二次截断。
 
@@ -251,4 +273,132 @@ def test_merge_gate_summary_window_is_wider_than_the_report_cap() -> None:
     assert windowBytes > MAX_REPORT_BYTES, (
         f"摘要窗口 {windowBytes} 字节 ≤ 报告上限 {MAX_REPORT_BYTES} 字节"
         "⇒ workflow 会二次截断工具的报告 ⇒ 截断变成静默的"
+    )
+
+
+def test_merge_gate_base_run_is_bounded_by_the_pr_run_dispatch_time() -> None:
+    """基线必须是「**PR 的 CI 事件派发之前**」的 main run（2026-11-07 N6）。
+
+    ⚠️ PR 的 CI 跑的是 `refs/pull/N/merge`（= main 与 PR 头合并出来的 commit）
+    ⇒ 它执行的是**PR 事件派发那一刻的 main**（合并 commit 在派发时就被冻结）。
+    ⇒ 基线若取「闸门跑的那一刻 main 上最新的 run」⇒ 基线树含 main 的后续改动
+    （尤其是 CI 文件）⇒ 两次 run 跑的代码**天然不同**
+    ⇒ **系统性假拦**（实测 PR #92/#94/#95/#107 的净变更 CI 命中 1/29/29/17，
+      而它们真正的三点归因命中是 **0**）。
+
+    ⇒ 查询必须带「`created_at` ≤ PR run 的 `created_at`」这个条件。
+    """
+    script = _executableScript()
+
+    assert "PR_RUN_CREATED_AT" in script, (
+        "闸门没有把 PR run 的 created_at 传进基线查询 ⇒ 基线可能取到 PR CI 之后的 main"
+    )
+    assert re.search(r"created_at\s*<=", script) is not None, (
+        "基线查询没有用 `created_at <=` 限定时间窗 ⇒ 基线可能取到 PR CI 之后的 main"
+    )
+
+
+def test_merge_gate_exposes_the_pr_run_created_at_to_the_diff_step() -> None:
+    """PR run 的 `created_at` 必须**注入到**跑工具的那一步的环境变量里。
+
+    ⚠️ 只在别的步骤里出现（哪怕是注释）都不算 ⇒ 断言的是**这一步的 env**。
+    """
+    steps = [
+        step
+        for step in _steps()
+        if "ci_failure_set" in str(step.get("run", ""))
+    ]
+    assert steps, "闸门里没有跑工具的步骤？"
+
+    env = steps[0].get("env") or {}
+    assert "PR_RUN_CREATED_AT" in env, (
+        "跑工具的步骤没有注入 PR_RUN_CREATED_AT ⇒ 基线时间窗无从限定"
+    )
+
+
+def test_merge_gate_fails_closed_when_the_pr_run_start_time_is_missing() -> None:
+    """拿不到 PR run 的开跑时间 ⇒ 必须**判不出基线**（fail-closed）。
+
+    ⚠️ 空字符串会让 jq 的 `.created_at <= ""` **恒真**（任何时间戳都 > ""）
+    ⇒ 基线退化成「main 上最新的 run」⇒ 又变回**系统性假拦**
+    ⇒ 所以必须显式判空，而不是把空值直接喂给 jq。
+    """
+    script = _executableScript()
+
+    assert re.search(r'if\s+\[\s*-z\s+"\$\{PR_RUN_CREATED_AT\}"\s*\]', script) is not None, (
+        "闸门没有判 PR_RUN_CREATED_AT 为空 ⇒ 空值会让时间窗恒真 ⇒ 基线退化成最新 main run"
+    )
+
+
+def test_merge_gate_uses_created_at_not_run_started_at() -> None:
+    """基线时间窗的上界必须取 **`created_at`**（事件派发时刻），不是 `run_started_at`。
+
+    ⚠️ 2026-11-07 代码评审 CRITICAL-1：`pull_request` 事件的**合并 commit
+    在事件派发那一刻就被冻结**了 ⇒ 复跑（re-run）**不会**重新计算它
+    ⇒ 复跑检出的仍是**同一个**合并 commit ⇒ 它的 main 侧底座是
+    **派发那一刻**的 main。
+
+    实测（PR #105 run `41908498247`）：`created_at=2026-11-04T20:38:19Z`、
+    `run_started_at=2026-11-04T22:24:11Z`（attempt=2）；合并 commit `57a267a9`
+    的第一父 = `83581e10`（= 派发那一刻的 main）；attempt-2 的 job 日志写着
+    `git fetch … +57a267a93f…:refs/remotes/pull/105/merge`。
+
+    ⇒ 上界锚 `run_started_at` ⇒ 基线取到**派发之后**的 main
+    ⇒ 基线树 ≠ 执行树（执行树用的是派发那一刻的 main）
+    ⇒ 两次 run 的 CI 定义可能不同 ⇒ 失败集合不可比 ⇒ **fail-open**。
+
+    ⇒ `workflow_run` 事件载荷里必须取 `created_at`。
+    """
+    steps = [
+        step
+        for step in _steps()
+        if "ci_failure_set" in str(step.get("run", ""))
+    ]
+    assert steps, "闸门里没有跑工具的步骤？"
+
+    env = steps[0].get("env") or {}
+    assert "PR_RUN_CREATED_AT" in env, (
+        "跑工具的步骤没有注入 PR_RUN_CREATED_AT ⇒ 基线时间窗无从限定"
+    )
+    value = str(env["PR_RUN_CREATED_AT"])
+    assert "created_at" in value, (
+        f"基线时间窗的上界没有取 created_at：{value!r}"
+        "⇒ 基线可能取到 PR 事件派发之后的 main ⇒ 基线树 ≠ 执行树 ⇒ fail-open"
+    )
+    assert "run_started_at" not in value, (
+        f"基线时间窗的上界用了 run_started_at：{value!r}"
+        "⇒ 复跑时取到的是更晚的 main ⇒ 两次 run 的 CI 定义可能不同却判「可合并」"
+        "⇒ fail-open"
+    )
+
+
+def test_merge_gate_leaves_the_main_tip_to_the_tool() -> None:
+    """`M_T`（PR run 的 main 侧底座）必须由**工具**独立取。
+
+    ⚠️ 闸门的 `BASE_RUN_ID`（基线 run）与工具要的 `M_T`（PR run 开跑那一刻的
+    main tip）是**两件不同的事**：前者是「拿来对差的 run」，后者是「PR 那次
+    合并用的 main 侧底座」。
+    ⇒ 闸门若把 `M_T` 代取后传给工具，工具侧就**没有独立复核的机会**
+    ⇒ 「基线 = fork 上同名 main 分支」那个洞会重新打开。
+
+    ⇒ 契约：闸门**不传** `M_T`，由工具自己走 main 的 push run 列表取。
+    """
+    steps = [
+        step
+        for step in _steps()
+        if "ci_failure_set" in str(step.get("run", ""))
+    ]
+    assert steps, "闸门里没有跑工具的步骤？"
+
+    env = steps[0].get("env") or {}
+    offending = [key for key in env if "MAIN_TIP" in key.upper()]
+    assert not offending, (
+        f"闸门把 M_T 传给了工具（{offending}）⇒ 工具失去独立复核 M_T 的机会"
+    )
+
+    from app.utils import ci_gh, ci_surface
+
+    assert hasattr(ci_gh, "fetchMainTipShaAt"), "工具侧没有取 M_T 的入口"
+    assert hasattr(ci_surface, "fetchMainTipShaAt"), (
+        "ci_surface 没有引用取 M_T 的入口 ⇒ M_T 的来源不受工具侧复核"
     )

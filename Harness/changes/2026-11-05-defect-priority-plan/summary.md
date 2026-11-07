@@ -386,6 +386,52 @@ Milvus 的可见性收敛前又查到了那条 `external_id` 为空的旧行，�
 （闸门的 CI 面检查就是其中之一）都会失真。**分支应以 main 的 tip 为底座起**，
 不要用「重建 tree 的合成提交」同步。
 
+> ✅ **2026-11-07 已修（N6，工具侧）**：闸门的 CI 相关面**判定集合**改成
+> 「两次 run 的**净变更**」（Trees API 树对树）∩「CI 相关面清单」，
+> 三点 diff 只保留作**归因措辞**（「PR 改了」vs「归因不到本 PR」）
+> ⇒ 合成提交不再影响判定（口径实测差 14 倍：三点 158 vs 净变更 11）
+> ⇒ 且堵掉「main 改了 CI 而 PR 没跟上 ⇒ 两次 run 的 CI 定义不同 ⇒ 不可比」
+> 这个交集判法的 fail-open 洞。
+> 详见 [2026-11-07-merge-gate-net-diff-ci-surface/summary.md](../2026-11-07-merge-gate-net-diff-ci-surface/summary.md)。
+> ⚠️ 上面「分支应以 main 的 tip 为底座起」这条**过程规则**已写进
+> `Harness/rules/开发流程规范.md` 第 4 条（工具无法强制 ⇒ 靠流程）。
+>
+> ⚠️ **2026-11-07 追加（同一批 N6 的第二、第三个洞，评审发现并已修）**：上面那版「净变更」修法里，
+> 净变更的**第二棵树**取的是 **PR 头** ⇒ 而 `ci.yml` 的三个 `actions/checkout`
+> **都不带 `with: ref:`** ⇒ PR 的 CI 实际检出的是 `refs/pull/N/merge`
+> ⇒ 它跑的是 **merge(main@run 时点, PR 头)**（实证 PR #111：run 的 `head_sha` = PR 头
+> `1d226997…`，而 job 日志写着 `HEAD is now at 23db713 Merge 1d226997… into 87f8e8e6…`）
+> ⇒ 拿 PR 头去比 ⇒ ① main 改了 CI 文件 ⇒ **系统性假拦**
+> （实测 PR #92/#94/#95/#107 的净变更 CI 命中 1/29/29/17，而三点归因命中 **0**）；
+> ② 更糟 —— **fail-open**：PR 头树与基线树**同样旧** ⇒ 差异为空 ⇒ 判「没改」
+> ⇒ 而 PR run 实际跑的是合并后的**新** CI ⇒ 两次 run 的 CI 定义不同 ⇒ **判不出来**。
+> ⇒ **第二版**（改取「测试合并 commit 的 tree」）**也被否**：`pulls/{n}.merge_commit_sha` 是
+> `refs/pull/N/merge` 的**当前值**（main 一推进就漂移；PR 合并后 404）
+> ⇒ **回溯历史 run 时根本取不到**。
+> ⇒ **第三版（定稿）**：判定集合 = **`A ∪ P`** ——
+> `A` = main 在 `[M_base, M_T]` 的内容推进、`P` = PR 自己改的文件、
+> `M_T` = **PR run 事件派发那一刻 main 的 tip**（上界取 PR run 的 **`created_at`（事件派发时刻）**
+> + 120 秒宽限）。
+> 原理：合并结果的树逐路径看 = 「**PR 动过就取 PR 的版本，否则取 `M_T` 的版本**」
+> ⇒ 路径级差异 = `A ∪ P` ⇒ **完全不需要**那个临时 ref。
+> ⇒ **两边都不能少**：只算 `P` ⇒ fail-open；只算 `A` ⇒ PR 改了判据却看不见 ⇒ 假放行。
+> ⇒ **基线取法同步收紧**：基线 = **PR 的 CI 事件派发之前** main 上最新完成的 push run
+> （workflow 侧 `created_at <=` 窗口）⇒ 因为 PR run 执行的是「PR CI 事件派发那一刻的 main」
+> ⇒ 基线若取了**之后**才推的 main ⇒ 两次 run 天然不同 ⇒ 又是假拦。
+> ⚠️⚠️ **第四版（2026-11-07 代码评审 CRITICAL-1）修正时间锚点**：第三版写「用
+> `run_started_at`，不用 `created_at`」——**实测推翻了那个前提**：`pull_request` 事件的
+> **合并 commit 在事件派发那一刻就被冻结** ⇒ 复跑**不会**重新计算它 ⇒ 复跑检出的仍是
+> **同一个**合并 commit ⇒ 它的 main 侧底座是**派发那一刻**的 main
+> （实测 PR #105 run `41908498247` attempt=2：`created_at=20:38:19Z`、`run_started_at=22:24:11Z`，
+> 合并 commit `57a267a9` 的 committer.date=`20:38:18Z`、第一父=`83581e10`）⇒
+> 上界必须锚 **`created_at`**；锚 `run_started_at` ⇒ `M_base` 与 `M_T` 双双落到更晚的 main
+> ⇒ `A=∅` ⇒ 两次 run 实际跑的 CI 定义不同却判「可合并」⇒ **fail-open**。
+> ⇒ **工具侧与 workflow 侧必须同时换锚**；`mainTipCutoff` 的两个时间戳改成 **keyword-only**
+> （本次缺陷的成因正是「位置传参 + 锚点写反」⇒ 传反了**不会报错**）。
+> ⇒ **判不出 `M_T` ⇒ 判定不出来（退出码 6），不许退回 PR 头**。
+> ⇒ 三个洞一起堵上；详见
+> [2026-11-07-merge-gate-net-diff-ci-surface/summary.md](../2026-11-07-merge-gate-net-diff-ci-surface/summary.md)。
+
 ### 10.6 最终判定与合并（2026-11-06）
 
 **最终判定**：head `25ee900b`（run `42082013206`）判 `NEEDS_REVIEW`（退出码 5）

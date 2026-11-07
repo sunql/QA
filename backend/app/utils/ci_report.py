@@ -84,22 +84,33 @@ def _headerLines(
     reasonCode: str,
     countedBaseCount: int | None = None,
     countedPrCount: int | None = None,
+    mainTipSha: str | None = None,
 ) -> list[str]:
     """报告头：结论 + 两侧 run 的标识与失败数。
 
     「失败 N 条」= **原始**条数；「计入对差 M 条」= 剔除已知抖动豁免后**真正参与对差**的条数。
     两者相等时只给一个数（不制造噪音）；不等时必须给两个数 —— 差额由豁免明细解释。
+
+    ⚠️ `mainTipSha` = PR run 开跑那一刻 main 的 tip（= 那次合并的 main 侧底座）
+    ⇒ PR 的 CI 实际跑的是 **merge(main@该 commit, PR 头)** ⇒ 人必须能看见它
+    ⇒ 否则「两次 run 的 CI 定义是否相同」这件事无从核对。
     """
     baseShaText = sanitizeForReport(baseSha) if baseSha else "未知"
     prShaText = sanitizeForReport(prSha) if prSha else "未知"
-    return [
+    lines = [
         f"结论：{verdictLabel}（{reasonCode}）",
         f"基线 run {sanitizeForReport(baseRunId)}（head {baseShaText}）："
         f"{_failureCountText(baseFailureCount, countedBaseCount)}",
         f"PR    run {sanitizeForReport(prRunId)}（head {prShaText}）："
         f"{_failureCountText(prFailureCount, countedPrCount)}",
-        f"净新增 {addedCount} 条 / 净丢失 {removedCount} 条",
     ]
+    if mainTipSha:
+        lines.append(
+            f"PR run 的 main 侧底座（{sanitizeForReport(mainTipSha)}）："
+            "PR 的 CI 实际跑的是 merge(main@该 commit, PR 头)"
+        )
+    lines.append(f"净新增 {addedCount} 条 / 净丢失 {removedCount} 条")
+    return lines
 
 
 def _failureCountText(rawCount: int, countedCount: int | None) -> str:
@@ -208,6 +219,7 @@ def _assembleLines(
     exemptions: Iterable = (),
     rawBaseCount: int | None = None,
     rawPrCount: int | None = None,
+    mainTipSha: str | None = None,
 ) -> list[str]:
     """报告的正文行（顺序即阅读顺序：结论 → 原因 → 提示 → **差异清单** → 豁免 → job 明细）。
 
@@ -237,6 +249,7 @@ def _assembleLines(
         verdict.reasonCode,
         len(baseFailures),
         len(prFailures),
+        mainTipSha,
     )
     if verdict.blockingReason is not None:
         lines.append(f"原因：{sanitizeForReport(verdict.blockingReason)}")
@@ -270,6 +283,7 @@ def renderReport(
     exemptions: Iterable = (),
     rawBaseCount: int | None = None,
     rawPrCount: int | None = None,
+    mainTipSha: str | None = None,
 ) -> str:
     """人读的结论文本。
 
@@ -302,6 +316,7 @@ def renderReport(
         exemptions,
         rawBaseCount,
         rawPrCount,
+        mainTipSha,
     )
     lines = _capReport(lines)
     return redactSecrets("\n".join(lines))

@@ -120,6 +120,7 @@ def test_the_mutation_evidence_script_has_a_codeowner() -> None:
     for relPath in (
         "backend/scripts/ci_mutation_evidence.py",
         "backend/scripts/ci_mutation_cases.py",
+        "backend/scripts/ci_mutation_cases_core.py",
     ):
         assert (_REPO_ROOT / relPath).is_file(), f"找不到变异取证脚本：{relPath}"
         assert relPath in owned, f"{relPath} 没有 CODEOWNER（改它就能让守卫恒绿）"

@@ -267,6 +267,9 @@ def _mainTipMismatchNote(surface: CiSurfaceInfo) -> str | None:
     理由：报告的每个字段都会被 `sanitizeForReport` 截到 **200 字符**
     ⇒ 事实 + 处置塞进同一个字符串 ⇒ 处置被截掉 ⇒ 操作者只看到「拦」
     ⇒ 看不到该做什么 ⇒ 白跑一轮。
+
+    ⚠️⚠️ **调用方必须条件化**（`_isCiSurfaceChange`，第三轮评审 M-1）：
+    只在**判出 CI 相关面变更**时出现 —— `M_base ≠ M_T` 是常态 ⇒ 无条件出现就是噪音。
     """
     if surface.baseSha is None or surface.mainTipSha is None:
         return None
@@ -405,6 +408,16 @@ def _applyFreshnessGuard(verdict: Verdict, freshness: HeadFreshness) -> Verdict:
     )
 
 
+def _isCiSurfaceChange(surface: CiSurfaceInfo) -> bool:
+    """**判出了 CI 相关面变更**吗（判定集合 `A ∪ P` ∩ 清单非空）。
+
+    ⚠️ 第三轮评审 M-1：`M_base ≠ M_T` 是**常态**（main 一直在推进）
+    ⇒ 底座不一致的提示**只在判出 CI 相关面变更时**才有意义；
+    无条件出现就是噪音 ⇒ 提示被无视 ⇒ 处置办法也跟着失效。
+    """
+    return bool(detectCiSurfaceChanges(surface.netChangedFiles))
+
+
 def _reportNotes(surface: CiSurfaceInfo, freshness: HeadFreshness, allowCiChanges: bool) -> list[str]:
     """报告里要显式留痕的提示（「不拦但必须让人看见」的那几件事）。"""
     notes: list[str] = []
@@ -421,10 +434,11 @@ def _reportNotes(surface: CiSurfaceInfo, freshness: HeadFreshness, allowCiChange
             f"{list(surface.unattributedCiFiles)}"
             "（通常是 main 改了 CI 文件、PR 分支没跟上 ⇒ 这两次 run 跑的 CI 定义不同）"
         )
-    mismatchNote = _mainTipMismatchNote(surface)
-    if mismatchNote is not None:
-        notes.append(mismatchNote)
-        notes.append(_mainTipRemedyNote())
+    if _isCiSurfaceChange(surface):
+        mismatchNote = _mainTipMismatchNote(surface)
+        if mismatchNote is not None:
+            notes.append(mismatchNote)
+            notes.append(_mainTipRemedyNote())
     if surface.error is not None:
         notes.append(f"CI 相关面判定失败：{surface.error}")
     return notes

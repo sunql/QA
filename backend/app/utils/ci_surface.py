@@ -50,7 +50,7 @@
 
 ⚠️ **`M_T` 取两条腿**（2026-11-07 安全评审 HIGH-2）：
 「main 的 push run 列表」这条腿有两个**漏检**方向 ——
-main 的那次 push **没触发** workflow、或它的 run **创建得晚**（排队 > 宽限）
+main 的那次 push **没触发** workflow、或它的 run **创建得晚**（错过时间窗）
 ⇒ `M_T` 偏旧 ⇒ `A` 腿漏掉 main 的推进 ⇒ 两次 run 的 CI 定义可能其实不同
 ⇒ 失败集合不可比 ⇒ 却判「可合并」⇒ **fail-open**。
 ⇒ 第二条腿走 **commits API**（不依赖 run 列表）⇒ 补上那两个洞；
@@ -155,9 +155,10 @@ _CI_SURFACE_PATTERNS = (
     # 它决定「哪些变异能转红」⇒ 改它就能让守卫**恒绿**（把「转红」判据改成
     # 「退出码非 0」即可 ⇒ 收集失败也算「转红」⇒ 取证全绿）
     # ⇒ 与守卫用例同族 ⇒ 必须进 CI 相关面 + CODEOWNERS。
-    # ⚠️ 清单（`ci_mutation_cases.py`，纯数据）与跑者（`ci_mutation_evidence.py`）
+    # ⚠️ 清单（`ci_mutation_cases.py` + 拆出的核心批 `ci_mutation_cases_core.py`，
+    # 纯数据）与跑者（`ci_mutation_evidence.py`）
     # **同族**：改清单可以把某组变异改成「改一个没人守的地方」⇒ 照样恒绿。
-    r"^backend/scripts/ci_mutation_(?:evidence|cases)\.py$",
+    r"^backend/scripts/ci_mutation_(?:evidence|cases|cases_core)\.py$",
     # 已知抖动白名单**数据文件**：它直接决定「哪些失败用例不作判据」
     # ⇒ 改它 = 改判据 ⇒ 与工具模块同族，必须人工确认。
     r"^\.github/ci-known-flaky-tests\.json$",
@@ -205,6 +206,18 @@ _CI_SURFACE_PATTERNS = (
     r"^frontend/(?:.*/)?tsconfig[\w.-]*\.json$",
     # vitest 的 setupFiles（断言的公共前置 ⇒ 改它就能让断言不生效）
     r"^frontend/(?:.*/)?setup[\w.-]*\.[tj]sx?$",
+    # ⚠️ vitest 2.x **自动发现**的 workspace/projects 配置（第三轮安全评审 C-1）：
+    # `vitest` 在配置目录根探测 `vitest.workspace.*` / `vitest.projects.*`
+    # （扩展名 ts/mts/cts/js/mjs/cjs/json）；存在时**取代**根 `vitest.config.ts`
+    # 的项目解析 ⇒ project 的 `test.exclude` 能把失败用例整个排除掉 ⇒ 前端 job
+    # 假绿 ⇒ 假「净新增 0」。名字形态既不符合 `*.config.*` 也不符合 `tsconfig*`
+    # ⇒ 必须单独认（任意深度，vitest 只探根但按任意深度判定更稳）。
+    r"^frontend/(?:.*/)?vitest\.(?:workspace|projects)\.(?:ts|mts|cts|js|mjs|cjs|json)$",
+    # `tsc -b` 的增量编译产物（`tsconfig.node.json` 是 composite ⇒ tsbuildinfo
+    # 决定「哪些文件要重新类型检查」⇒ 改它可让类型检查跳过文件）
+    r"^frontend/(?:.*/)?[\w.-]+\.tsbuildinfo$",
+    # npm 的安装行为（registry / script-shell）⇒ 装出来的依赖环境变了 ⇒ 失败集合不可比
+    r"^frontend/\.npmrc$",
     # ⚠️ **复合 action**（`.github/actions/**`）：workflow 可以 `uses:` 它
     # ⇒ 改它的脚本 = 改 CI 的执行内容 ⇒ 必须人工复核。
     r"^\.github/actions/",
@@ -335,7 +348,7 @@ def _fetchRunHeads(
     """取两次 run 的 head 信息 ⇒ `(baseInfo, prInfo, error)`。
 
     ⚠️ 失败**不抛异常** ⇒ 以 `error` 字符串返回 ⇒ 调用方走「判定不出来」的分支。
-    ⚠️ PR run 要的是**完整**信息（`run_started_at` 决定 `M_T` 的取数上界）
+    ⚠️ PR run 要的是**完整**信息（`created_at` 决定 `M_T` 的取数上界）
     ⇒ 不能只取 `head_sha`。
     """
     try:

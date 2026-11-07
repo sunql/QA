@@ -49,6 +49,16 @@ frontend/vite.config.ts                   @sunql
 frontend/vite.config.js                   @sunql
 frontend/vitest.config.ts                 @sunql
 frontend/playwright.config.ts             @sunql
+# ⚠️ vitest 2.x **自动发现**的 workspace/projects 配置（第三轮安全评审 C-1）：
+# 存在时取代根 `vitest.config.ts` 的项目解析 ⇒ project 的 `test.exclude`
+# 能把失败用例整个排除掉 ⇒ 假「净新增 0」。仓库里现在没有这类文件
+# ⇒ 这两条通配管的是**未来文件**（有人新增 ⇒ 反查守卫会红）。
+frontend/vitest.workspace.*               @sunql
+frontend/vitest.projects.*                @sunql
+# ⚠️ `tsc -b` 的增量编译产物（composite ⇒ tsbuildinfo 决定哪些文件要重新类型检查）
+frontend/tsconfig.node.tsbuildinfo        @sunql
+# ⚠️ npm 的安装行为（registry / script-shell）⇒ 装出来的依赖环境变了 ⇒ 失败集合不可比
+frontend/.npmrc                           @sunql
 frontend/tsconfig.json                    @sunql
 frontend/tsconfig.node.json               @sunql
 frontend/src/tests/setup.ts               @sunql
@@ -61,8 +71,9 @@ backend/alembic.ini                   @sunql
 
 # ---- 变异取证脚本（它决定「哪些变异能转红」⇒ 改它就能让守卫恒绿）----
 # 清单（纯数据）与跑者同族：改清单可以把某组变异指向没人守的地方 ⇒ 照样恒绿。
-backend/scripts/ci_mutation_cases.py      @sunql
-backend/scripts/ci_mutation_evidence.py   @sunql
+backend/scripts/ci_mutation_cases.py       @sunql
+backend/scripts/ci_mutation_cases_core.py  @sunql
+backend/scripts/ci_mutation_evidence.py    @sunql
 
 # ---- CODEOWNERS **自己**（改授权面 = 换授权人 ⇒ 必须人工复核）----
 # 个人仓库的 CODEOWNERS 没有强制力（装不了 users bypass）⇒ 这是链上仅剩的人工检查点。

@@ -342,7 +342,7 @@ def test_merge_gate_exposes_the_pr_run_created_at_to_the_diff_step() -> None:
 
 
 def test_merge_gate_fails_closed_when_the_pr_run_start_time_is_missing() -> None:
-    """拿不到 PR run 的开跑时间 ⇒ 必须**判不出基线**（fail-closed）。
+    """拿不到 PR run 的**事件派发时间**（`created_at`）⇒ 必须**判不出基线**（fail-closed）。
 
     ⚠️ 空字符串会让 jq 的 `.created_at <= ""` **恒真**（任何时间戳都 > ""）
     ⇒ 基线退化成「main 上最新的 run」⇒ 又变回**系统性假拦**
@@ -400,7 +400,7 @@ def test_merge_gate_uses_created_at_not_run_started_at() -> None:
 def test_merge_gate_leaves_the_main_tip_to_the_tool() -> None:
     """`M_T`（PR run 的 main 侧底座）必须由**工具**独立取。
 
-    ⚠️ 闸门的 `BASE_RUN_ID`（基线 run）与工具要的 `M_T`（PR run 开跑那一刻的
+    ⚠️ 闸门的 `BASE_RUN_ID`（基线 run）与工具要的 `M_T`（PR run 事件派发那一刻的
     main tip）是**两件不同的事**：前者是「拿来对差的 run」，后者是「PR 那次
     合并用的 main 侧底座」。
     ⇒ 闸门若把 `M_T` 代取后传给工具，工具侧就**没有独立复核的机会**

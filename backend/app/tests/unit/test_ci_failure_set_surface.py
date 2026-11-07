@@ -23,15 +23,11 @@ from app.tests.unit._ci_gate_support import (
     FLAKY_FILE_IN_REPO,
     FLAKY_NODE_ID,
     STABLE_NODE_ID,
+    oneRedShard as _oneRedShard,
     stubCiSurface,
+    stubGithub as _stubGithub,
     stubShards,
     writeWhitelistFile,
-)
-from app.tests.unit._ci_gate_support import (
-    oneRedShard as _oneRedShard,
-)
-from app.tests.unit._ci_gate_support import (
-    stubGithub as _stubGithub,
 )
 from app.utils import ci_failure_set
 

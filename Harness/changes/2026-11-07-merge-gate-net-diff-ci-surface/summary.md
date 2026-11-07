@@ -393,6 +393,35 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 - workflow 侧的 jq **独立复核** `head_branch == "main"` / `status == "completed"`
   ⇒ 不信任服务端已过滤（新增守卫 `test_merge_gate_base_run_query_rechecks_the_run_fields_in_jq`）。
 - 报告与文档里的「开跑时刻」措辞统一改成「**事件派发时刻**」（代码评审 MEDIUM-5）。
+  ⚠️ 第三轮评审 L-1 复核发现三处残留（`test_ci_merge_gate_workflow.py` 两条 docstring、
+  `ci_mutation_cases.py` 批注）⇒ 第六版已一并收口。
+
+#### 2.10.7 ⚠️ vitest workspace 自动发现文件（第三轮安全评审 **C-1**，2026-11-08）
+
+- **问题**：vitest 2.x 在配置目录根**自动探测** `vitest.workspace.*` / `vitest.projects.*`
+  （扩展名 ts/mts/cts/js/mjs/cjs/json；`WORKSPACES_NAMES` 实测于
+  `node_modules/vitest/dist/chunks/constants.*.js`）。存在时 `resolveWorkspace`
+  **不再走**根 `vitest.config.ts` 的项目解析 ⇒ project 配置里的
+  `test.exclude` 能把失败用例**整个排除掉**。
+  ⇒ PR 作者只新增**一个**文件 `frontend/vitest.workspace.ts`（不碰任何现有文件）
+  ⇒ 前端 job 假绿 ⇒ 失败集合与基线相同 ⇒ 假「净新增 0」
+  ⇒ 而这批名字**既不符合** `*.config.*` 也**不符合** `tsconfig*` ⇒
+  ② 第五版的四条前端模式全 MISS；③ CODEOWNERS 无条目；④ 反查守卫的
+  `_CONFIG_NAME_PATTERN` 同样看不见 ⇒ **第五版堵住的同一条绕过链换了个文件名又通了**。
+- **现在**（四处，缺一不可）：
+  ① `_CI_SURFACE_PATTERNS` 增
+     `frontend/(?:.*/)?vitest\.(?:workspace|projects)\.(?:ts|mts|cts|js|mjs|cjs|json)$`（任意深度）；
+  ② `.github/CODEOWNERS` 增 `frontend/vitest.workspace.*` / `frontend/vitest.projects.*`
+     两条**通配**条目 —— 仓库里**现在没有**这类文件 ⇒ 通配管的是**未来文件**；
+  ③ 反查守卫增 `_WORKSPACE_NAME_PATTERN`（扫描器认得出 workspace 名字形态）+
+     `test_the_vitest_workspace_entries_are_covered_by_codeowners`
+     （对**还不存在的名字**直接断言 `_effectiveOwner` ⇒ 有人删通配条目立刻红）
+     ⇒ 为此前端 CODEOWNERS 守卫从「路径字面出现过」升级为**生效归属**判定
+     （复用 `test_ci_codeowners._effectiveOwner`）；
+  ④ 变异取证新增 M66（删清单条目）/ M67（扫描器认不出）。
+- **同批顺带收口**（第三轮评审 L-1 / L-2，防御纵深）：
+  `*.tsbuildinfo`（composite 项目的增量编译产物 ⇒ 决定哪些文件要重新类型检查）
+  与 `frontend/.npmrc`（npm 安装行为）也进清单与 CODEOWNERS。
 
 ### 2.6 抖动豁免的前置条件也改用判定集合
 
@@ -404,20 +433,21 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 
 | 文件 | 动作 |
 |---|---|
-| `backend/app/utils/ci_gh.py` | 重写：新增 Trees API 链路（`fetchTreePathShas` / `_parseTreePathShas` / `_buildTreeFileMap` / `_assertTreeIsRecursive` / `_diffTreePathShas` / `fetchNetChangedFiles`）、`fetchMergeBaseSha` / `_parseMergeBaseSha`；`fetchChangedFiles` 改为「merge-base 树 vs head 树」；**删除** `_parseChangedFiles` 与 300 项上限逻辑；所有外部输入加形态校验（repo / run id / sha / branch）。**第三版**：`RunHeadInfo` 增 `event` / `createdAt` / `runStartedAt` 三字段；新增 `mainTipCutoff` / `fetchMainTipShaAt` / `_parseMainTipSha` / `_considerMainRun`（`M_T` 的取数链路）与 `_MAIN_TIP_GRACE_SECONDS = 120`。**第四版（CRITICAL-1）**：`mainTipCutoff` 的**锚点从 `run_started_at` 换成 `created_at`（事件派发时刻）**、参数改成 **keyword-only**（`createdAt=` / `runStartedAt=`）⇒ 杜绝「位置传参写反」；`created_at` 缺失才回退 `run_started_at`，两者皆缺 ⇒ 抛错（判定不出来）；**删除**第二版整条「测试合并 commit」链路（`PullMergeInfo` / `fetchPullMergeInfo` / `_findOpenPullNumber` / `_parseOpenPullNumbers` / `_fetchPullMergeCommitSha` / `_fetchCommitTreeAndParent`）——`refs/pull/N/merge` 是临时 ref，**回溯历史 run 时取不到**（§1.3）。**第五版**：**删除** `_MAIN_TIP_GRACE_SECONDS`（宽限 ⇒ 与闸门侧不对称 ⇒ 假拦）；`mainTipCutoff` **只接 `createdAt`**（**删掉** `runStartedAt` ⇒ 缺失即 fail-closed，不回退）；新增 `fetchMainFirstParentTipAt` / `_parseFirstParentTip`（**第一父链腿**）+ `_MAX_FIRST_PARENT_HOPS`（超限报错） |
-| `backend/app/utils/ci_surface.py` | `CiSurfaceInfo` 增 `netChangedFiles` / `unattributedCiFiles` / `baseTrustError` / `mainAdvanceFiles` / `mainTipSha`；新增 `_baseTrustError`（三条硬条件）。**第三版**：判定集合改为 `A ∪ P`（`_buildSurface` 里 `judgment = set(mainAdvance) | set(prChanged)`）；新增 `_fetchMainTipSha` / `_fetchMainAdvanceFiles` / `_fetchPrChangedFiles`；**删除**第二版的 `_fetchMergeInfo` / `_fetchAttributionFiles` / `_fetchComparedFiles` 与 `prMergeSha` / `prMergeBaseSha` 两字段。**第四版（CRITICAL-1）**：`_fetchMainTips` 的 cutoff 改用 `mainTipCutoff(createdAt=prInfo.createdAt)`（**具名传**）⇒ 锚点与工具侧一致。**第五版**：`_CI_SURFACE_PATTERNS` 增**前端 CI 定义**路径（package / lock / `*.config.*` / `tsconfig*.json` / setup 文件）⇒ 堵住「前端绕过链」；新增 `_baselineAncestorError`（祖先核对 ⇒ 否则 fail-closed 退出码 3）与 `_fetchMainTips` 的**两腿并集**（run 腿 + 第一父链腿） |
+| `backend/app/utils/ci_gh.py` | 重写：新增 Trees API 链路（`fetchTreePathShas` / `_parseTreePathShas` / `_buildTreeFileMap` / `_assertTreeIsRecursive` / `_diffTreePathShas` / `fetchNetChangedFiles`）、`fetchMergeBaseSha` / `_parseMergeBaseSha`；`fetchChangedFiles` 改为「merge-base 树 vs head 树」；**删除** `_parseChangedFiles` 与 300 项上限逻辑；所有外部输入加形态校验（repo / run id / sha / branch）。**第三版**：`RunHeadInfo` 增 `event` / `createdAt` / `runStartedAt` 三字段；新增 `mainTipCutoff` / `fetchMainTipShaAt` / `_parseMainTipSha` / `_considerMainRun`（`M_T` 的取数链路）与 `_MAIN_TIP_GRACE_SECONDS = 120`。**第四版（CRITICAL-1）**：`mainTipCutoff` 的**锚点从 `run_started_at` 换成 `created_at`（事件派发时刻）**、参数改成 **keyword-only**（`createdAt=` / `runStartedAt=`）⇒ 杜绝「位置传参写反」；`created_at` 缺失才回退 `run_started_at`，两者皆缺 ⇒ 抛错（判定不出来）；**删除**第二版整条「测试合并 commit」链路（`PullMergeInfo` / `fetchPullMergeInfo` / `_findOpenPullNumber` / `_parseOpenPullNumbers` / `_fetchPullMergeCommitSha` / `_fetchCommitTreeAndParent`）——`refs/pull/N/merge` 是临时 ref，**回溯历史 run 时取不到**（§1.3）。**第五版**：**删除** `_MAIN_TIP_GRACE_SECONDS`（宽限 ⇒ 与闸门侧不对称 ⇒ 假拦）；`mainTipCutoff` **只接 `createdAt`**（**删掉** `runStartedAt` ⇒ 缺失即 fail-closed，不回退）；新增 `fetchMainFirstParentTipAt` / `_parseCommitEntries`（**第一父链腿**）+ `_MAX_FIRST_PARENT_HOPS`（超限报错） |
+| `backend/app/utils/ci_surface.py` | `CiSurfaceInfo` 增 `netChangedFiles` / `unattributedCiFiles` / `baseTrustError` / `mainAdvanceFiles` / `mainTipSha`；新增 `_baseTrustError`（三条硬条件）。**第三版**：判定集合改为 `A ∪ P`（`_buildSurface` 里 `judgment = set(mainAdvance) | set(prChanged)`）；新增 `_fetchMainTipSha` / `_fetchMainAdvanceFiles` / `_fetchPrChangedFiles`；**删除**第二版的 `_fetchMergeInfo` / `_fetchAttributionFiles` / `_fetchComparedFiles` 与 `prMergeSha` / `prMergeBaseSha` 两字段。**第四版（CRITICAL-1）**：`_fetchMainTips` 的 cutoff 改用 `mainTipCutoff(createdAt=prInfo.createdAt)`（**具名传**）⇒ 锚点与工具侧一致。**第五版**：`_CI_SURFACE_PATTERNS` 增**前端 CI 定义**路径（package / lock / `*.config.*` / `tsconfig*.json` / setup 文件）⇒ 堵住「前端绕过链」；新增 `_baselineAncestorError`（祖先核对 ⇒ 否则 fail-closed 退出码 3）与 `_fetchMainTips` 的**两腿并集**（run 腿 + 第一父链腿）。**第六版（评审 C-1）**：`_CI_SURFACE_PATTERNS` 再增 `vitest.workspace.*` / `vitest.projects.*`（vitest 2.x **自动发现**、存在时取代根配置的项目解析）+ `*.tsbuildinfo` + `frontend/.npmrc`（§2.10.7） |
 | `backend/app/utils/ci_failure_set.py` | 判定集合改为 `detectCiSurfaceChanges(surface.netChangedFiles)`；`_ciSurfaceReason` 分「PR 改了」/「归因不到本 PR」两种措辞；豁免前置条件改用 `netChangedFiles`；基线不可信 ⇒ 退出码 3；报告 notes 增「归因不到本 PR」条目。**第三版**：`_mergeBaseMismatchNote` 改用 `surface.mainTipSha`（不再是 `prMergeBaseSha`）。**第五版**：底座不一致的**事实与处置拆成两条 note**（`_mainTipMismatchNote` / `_mainTipRemedyNote`）⇒ 处置不被 200 字符截断；**处置改为「推一个新 commit 到 PR 分支」**（不复跑 ⇒ 复跑无效，见 §2.9）；底座不一致的**事实不再拼进 reason 字符串** |
 | `.github/workflows/merge-gate.yml` | 基线 run 查询限定 `event=push` + jq 复核 `.event == "push"`。**第二版**：基线取法加**时间上界** —— 只认 `created_at <= PR run 的时间戳` 的 main push run（用**独立 jq 二进制**的 `--arg` 传时间戳；`gh --jq` 不支持 `--arg`）；**`PR_RUN_CREATED_AT` 为空 ⇒ 显式 fail-closed**。**第三版**：时间戳取 `run_started_at`。**第四版（CRITICAL-1）**：改取 **`created_at`（事件派发时刻）** —— `PR_RUN_CREATED_AT: ${{ github.event.workflow_run.created_at }}`（合并 commit 在派发时冻结 ⇒ 复跑不动它 ⇒ 上界必须锚派发时刻，详见 §2.7.1） |
-| `.github/CODEOWNERS` | 新增 `backend/app/tests/unit/test_ci_main_tip_note.py` / `test_ci_main_tip.py` / `test_ci_mutation_evidence.py` / `test_ci_failure_set_surface.py` 与 `backend/scripts/ci_mutation_cases.py` 的 CODEOWNER（新增守卫文件**必须**有 CODEOWNER ⇒ 否则 `test_ci_codeowners.py` 的反向守卫会红 ⇒ 缺口本身会挡住合并）。**第五版**：新增 **`frontend/` 前缀条目**（`frontend/vite.config.ts` / `frontend/vite.config.js` 等）⇒ 堵住「前端 CI 定义改了没人复核」的绕过链（安全评审 CRITICAL-1）；并给新守卫 `backend/app/tests/unit/test_ci_surface_frontend_reverse.py` 加 CODEOWNER |
-| `backend/scripts/ci_mutation_evidence.py` | M27 锚点对齐现状；新增 M29–M36 八组；**第二版新增 M37–M47**；**第三版重锚 M37–M47 并新增 M48–M55**；**第四版重锚 M46/M48/M49/M50/M39 并新增 M56–M58**；**第五版重锚 M48/M49/M50/M57/M58 并新增 M59–M65**（共 **65** 组）。并把 `run_case` 的判据从**布尔**改成**三态**（`red` / `green` / `inconclusive`）——只有 pytest 退出码 **1** 才算「转红」，2/3/4/5 一律判「没跑起来」⇒ 取证失败（不是转红）。**第五版**：新增 `_failureMarkerFound` ⇒ 退出码 1 时**还必须**在输出里找到**这条用例自己的**失败标记（`FAILED <nodeid>` 整行匹配）⇒ 否则「别的用例失败」会被算成「这条守卫转红」（代码评审 MEDIUM-4）。**收尾拆分**：清单（55 组数据）移到 `backend/scripts/ci_mutation_cases.py`，本文件只留**跑者**（改坏 → 跑用例 → 判三态）——拆分前 826 行 ⇒ 超 800 行上限 ⇒ 拆后 159 + 695 行 |
-| `backend/scripts/ci_mutation_cases.py` | **收尾新建**：变异的**纯数据**清单（与跑者**同族** ⇒ 同进 CI 相关面 + CODEOWNERS）；**第四版**增到 58 组，**第五版**增到 **65** 组 |
+| `.github/CODEOWNERS` | 新增 `backend/app/tests/unit/test_ci_main_tip_note.py` / `test_ci_main_tip.py` / `test_ci_mutation_evidence.py` / `test_ci_failure_set_surface.py` 与 `backend/scripts/ci_mutation_cases.py` 的 CODEOWNER（新增守卫文件**必须**有 CODEOWNER ⇒ 否则 `test_ci_codeowners.py` 的反向守卫会红 ⇒ 缺口本身会挡住合并）。**第五版**：新增 **`frontend/` 前缀条目**（`frontend/vite.config.ts` / `frontend/vite.config.js` 等）⇒ 堵住「前端 CI 定义改了没人复核」的绕过链（安全评审 CRITICAL-1）；并给新守卫 `backend/app/tests/unit/test_ci_surface_frontend_reverse.py` 加 CODEOWNER。**第六版（评审 C-1）**：增 `frontend/vitest.workspace.*` / `frontend/vitest.projects.*` **通配**条目（管**未来文件**）与 `frontend/tsconfig.node.tsbuildinfo` / `frontend/.npmrc`（§2.10.7） |
+| `backend/scripts/ci_mutation_cases_core.py`（**第六版收尾新建**，评审 M-3） | M1–M36（继承批 + 模块拆分批 + workflow 批 + 净变更批）的纯数据；与 `ci_mutation_cases.py` **同族** ⇒ 同进 `ci_surface.py` 清单（enum 增 `cases_core`）与 CODEOWNERS、`test_ci_codeowners.py` 的按名断言 |
+| `backend/scripts/ci_mutation_evidence.py` | M27 锚点对齐现状；新增 M29–M36 八组；**第二版新增 M37–M47**；**第三版重锚 M37–M47 并新增 M48–M55**；**第四版重锚 M46/M48/M49/M50/M39 并新增 M56–M58**；**第五版重锚 M48/M49/M50/M57/M58 并新增 M59–M65**（共 **65** 组）。**第六版新增 M66–M67（共 67 组，§2.10.7）**。并把 `run_case` 的判据从**布尔**改成**三态**（`red` / `green` / `inconclusive`）——只有 pytest 退出码 **1** 才算「转红」，2/3/4/5 一律判「没跑起来」⇒ 取证失败（不是转红）。**第五版**：新增 `_failureMarkerFound` ⇒ 退出码 1 时**还必须**在输出里找到**这条用例自己的**失败标记（`FAILED <nodeid>` 整行匹配）⇒ 否则「别的用例失败」会被算成「这条守卫转红」（代码评审 MEDIUM-4）。**收尾拆分**：清单（55 组数据）移到 `backend/scripts/ci_mutation_cases.py`，本文件只留**跑者**（改坏 → 跑用例 → 判三态）——拆分前 826 行 ⇒ 超 800 行上限 ⇒ 拆后 159 + 695 行 |
+| `backend/scripts/ci_mutation_cases.py` | **收尾新建**：变异的**纯数据**清单（与跑者**同族** ⇒ 同进 CI 相关面 + CODEOWNERS）；**第四版**增到 58 组，**第五版**增到 **65** 组，**第六版**增到 **67** 组（M66/M67，§2.10.7）。**第六版收尾拆分（评审 M-3）**：M1–M36 移到 `ci_mutation_cases_core.py`（`MUTATIONS = MUTATIONS_CORE + [...]`），本文件留 M37–M67 ⇒ 拆后 499 + 393 行（拆前 893 行）；拆分不碰任何变异锚点 ⇒ 取证无需重锚 |
 | `backend/app/tests/unit/test_ci_gh.py` | 树解析 / merge-base / 三点语义 / 无 300 上限 / 改名 四个小节；树不变式 3 条；`truncated` 的载荷改成**带嵌套路径**。**第三版**：`RunHeadInfo` 增两字段后 `_headInfo` 同步；`test_parseTreePathShas_rejects_a_string_false_truncated_flag` 随文件拆分搬回本文件 |
 | `backend/app/tests/unit/test_ci_main_tip.py` | **第三版新建**：`mainTipCutoff`（**第四版**：优先 `created_at` / 回退 `run_started_at` / 两者皆缺则抛错 / **必须 keyword-only 传**）、`_parseMainTipSha`（三条硬条件 + 时间窗 + 分页）、`fetchMainTipShaAt`（查询串 + `--paginate --slurp`）；**第四版新增 PR #105 复跑锚点的离线回放**（证明夹具有鉴别力：错锚给出另一个答案） |
-| `backend/app/tests/unit/test_ci_surface.py` | **第三版重写**（737 行）：判定集合 = `A ∪ P`、`M_T` 的取法与 fail-closed、归因措辞 |
+| `backend/app/tests/unit/test_ci_surface.py` | **第三版重写**（初稿 737 行，第五/六版评审后增至 906 行）：判定集合 = `A ∪ P`、`M_T` 的取法与 fail-closed、归因措辞 |
 | `backend/app/tests/unit/test_ci_main_tip_note.py` | **第三版新建**：基线 ≠ `M_T` ⇒ 报告里必须有提示**与处置办法**；同底座 ⇒ **不**出现该提示（反向守卫）；「归因不到本 PR」必须如实说 |
 | `backend/app/tests/unit/test_ci_mutation_evidence.py` | **第三版新建**：钉住 `run_case` 的**三态**语义（退出码 0/1/2/3/4/5 各自的判定）——防止把「用例没跑起来」冒充成「守卫抓到了变异」|
 | `backend/app/tests/unit/test_ci_merge_gate_workflow.py` | 「基线查询只取 push run」1 条；基线取「PR CI 事件派发之前」的 run 1 条；`PR_RUN_CREATED_AT` 暴露给 diff 步骤 1 条；空时间戳 fail-closed 1 条；**第四版**：**必须取 `created_at`、不得取 `run_started_at`** 1 条；**`M_T` 必须由工具独立取** 1 条；**第五版**：jq **独立复核** `head_branch == "main"` / `status == "completed"` / `head_repository` 1 条 |
-| `backend/app/tests/unit/test_ci_surface_frontend_reverse.py` | **第五版新建**：前端 CI 定义文件的**反查守卫** —— 从 `frontend/` 的实际文件与 `vitest.config.ts` 声明的 setupFiles 反查 ⇒ 新增配置文件必须入 `_CI_SURFACE_PATTERNS` ⇒ 堵住「换掉前端测试口径 ⇒ 失败集合不可比 ⇒ 假净新增 0」的绕过链（安全评审 CRITICAL-1） |
+| `backend/app/tests/unit/test_ci_surface_frontend_reverse.py` | **第五版新建**：前端 CI 定义文件的**反查守卫** —— 从 `frontend/` 的实际文件与 `vitest.config.ts` 声明的 setupFiles 反查 ⇒ 新增配置文件必须入 `_CI_SURFACE_PATTERNS` ⇒ 堵住「换掉前端测试口径 ⇒ 失败集合不可比 ⇒ 假净新增 0」的绕过链（安全评审 CRITICAL-1）。**第六版（评审 C-1）**：扫描器增 `_WORKSPACE_NAME_PATTERN`（vitest 自动发现的 workspace/projects）与 `*.tsbuildinfo` / `.npmrc`；CODEOWNERS 守卫从「路径字面出现过」升级为**生效归属**（复用 `test_ci_codeowners._effectiveOwner`）；新增 3 条（workspace 文件判成 CI 相关面 / 对还不存在的名字断言 CODEOWNERS 通配 / 扫描器非空转） |
 | `backend/app/tests/unit/test_ci_head.py` | `RunHeadInfo` 增 `createdAt` / `runStartedAt` 后 `_headInfo` 同步 |
 | `backend/app/tests/unit/_ci_gate_support.py` | `stubCiSurface` 增 `netChangedFiles` / `unattributedCiFiles` / `baseTrustError` / `mainAdvanceFiles` / `mainTipSha` 参数 |
 | `backend/app/tests/unit/test_ci_failure_set.py` / `test_ci_failure_set_flakes.py` | **收尾拆分**：新增的三条（「归因不到本 PR ⇒ 退出码 6」「基线不可信 ⇒ 退出码 3」「两侧任一侧改过的文件 ⇒ 不豁免」）移到新文件 `test_ci_failure_set_surface.py` ⇒ 两个原文件回到各自的基线行数（1243 / 782，**前者本就超 800 行上限，属既有欠账，本批不使其更糟**）|
@@ -543,6 +573,20 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 >    ⇒ **假取证**。⇒ `run_case` 必须是**三态**（M54）。
 >    ⇒ 且退出码 1 时还要确认**输出里有该用例名**（否则是「别的用例失败」）。
 
+### 4.2.4 第六版新增 2 组（M66–M67，第三轮安全评审 C-1）
+
+| # | 变异 | 期望转红的用例 | 实测 |
+|---|---|---|---|
+| M66 | 清单删掉 `vitest.workspace/projects` 条目（⇒ 自动发现文件绕过链复活） | `test_vitest_workspace_and_projects_files_are_ci_surfaces` | **转红** ✔ |
+| M67 | 反查扫描器认不出 workspace 名字形态（`match` → `False`） | `test_the_workspace_scanner_is_not_vacuous` | **转红** ✔ |
+
+⇒ **第六版全量重跑（67 组，2026-11-08，拆分后清单）**：**合计 67 组变异，净漏 0**
+（`python3 backend/scripts/ci_mutation_evidence.py`，退出码 0；含 M26 重锚后的复跑）。
+⇒ M66 钉「清单条目本身」，M67 钉「反查守卫的扫描能力」——缺一条，C-1 的链就还通着。
+⇒ **拆分后复跑是必须的**：M-3 把 M1–M36 挪进 `ci_mutation_cases_core.py`、M26 重锚
+（`SHARD_COUNT: "4"` 在 ci.yml 出现两次 ⇒ 用 unit 块特有注释行消歧），
+任何一处漂移都会表现为「锚点找不到 ⇒ 取证失败」⇒ 实测 67/67 锚点齐全且全部转红。
+
 ### 4.3 真实 API 取证
 
 - Trees API 接受 **commit sha**（不必先查 tree sha）：`GET /repos/{o}/{r}/git/trees/{sha}?recursive=1`。
@@ -604,6 +648,17 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
   （见 N7 / N8：个人仓库装不了 users bypass）。
 - **没有**实现「分支一律以 main 的 tip 为底座起」的**强制机制**（工具无法强制）
   ⇒ 只写进 `Harness/rules/开发流程规范.md` 作为过程规则。
+- ⚠️ **删除/削弱普通测试文件仍是 fail-open 方向**（第三轮安全评审的结构性附注，2026-11-08）：
+  基线里通过的用例被 PR **删除 / 改成 skip / 断言削弱** ⇒ PR run 不产生该失败
+  ⇒ 净新增与净丢失都为空 ⇒ 对差看不见。普通测试文件**不在** CI 相关面、也**不在** CODEOWNERS
+  ⇒ 属于仓库已声明的威胁模型上限（「挡不住作者主动伪造 stdout」，`Harness/rules/测试规范.md`）
+  ⇒ 不是本批引入 ⇒ 若要收口需设计「删除/改名测试文件」的检测
+  （compare 的 `status` 目前不进 `CiSurfaceInfo`）⇒ **另立项**，本批不做。
+- ⚠️ **`ci_gh.py`（839 行）与 `test_ci_surface.py`（906 行）超 800 行上限未拆**（第三轮评审 M-3，部分接受）：
+  `ci_mutation_cases.py`（纯数据、无锚点落点）已拆；但这两个文件的私有 helper（`_runGh` / `_SHA_PATTERN` /
+  `_parseIsoTimestamp` / 各 stub）被多层**紧耦合**引用 ⇒ 批内拆分要动安全闸门的实现与守卫结构
+  ⇒ 有**锚点腐烂**风险（每个锚点都逐字钉在现行实现上）⇒ 拆分**另立项**在无评审压力时做。
+  参照 `chat_multistep` 853 行豁免先例（`qa-system-chat-multistep-line-cap-exemption`）。
 - **没有**处理 N5（净丢失只能给 `NEEDS_REVIEW`）、N8（收紧 `enforce_admins` 的前置通道）。
 - 本批**不部署**（零 DDL、零生产写）。
 

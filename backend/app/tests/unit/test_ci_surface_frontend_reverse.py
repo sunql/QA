@@ -25,11 +25,11 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path
 
+from app.tests.unit.test_ci_codeowners import _effectiveOwner
 from app.utils.ci_surface import detectCiSurfaceChanges
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -46,6 +46,16 @@ _LOCK_NAMES = frozenset(
 )
 _TSCONFIG_NAME_PATTERN = re.compile(r"^tsconfig[\w.-]*\.json$")
 _SETUP_NAME_PATTERN = re.compile(r"^setup[\w.-]*\.[tj]sx?$")
+# ⚠️ vitest 2.x **自动发现**的 workspace/projects 配置文件（第三轮安全评审 C-1）：
+# `vitest` 在配置目录根按 `WORKSPACES_NAMES = ["vitest.workspace", "vitest.projects"]`
+# 探测，扩展名 `ts/mts/cts/js/mjs/cjs/json`；存在时**取代**根 `vitest.config.ts`
+# 的项目解析 ⇒ project 的 `test.exclude` 能把失败用例整个排除掉
+# ⇒ 名字形态既不符合 `*.config.*` 也不符合 `tsconfig*` ⇒ 必须单独认。
+_WORKSPACE_NAME_PATTERN = re.compile(
+    r"^vitest\.(?:workspace|projects)\.(?:ts|mts|cts|js|mjs|cjs|json)$"
+)
+_BUILDINFO_NAME_PATTERN = re.compile(r"^[\w.-]+\.tsbuildinfo$")
+_EXTRA_DEFINITION_NAMES = frozenset({".npmrc"})
 
 
 def _frontendFilesUnder(root: Path, prefix: str) -> set[str]:
@@ -76,6 +86,9 @@ def _frontendCiDefinitionFiles(root: Path, prefix: str) -> set[str]:
             or _CONFIG_NAME_PATTERN.match(name)
             or _TSCONFIG_NAME_PATTERN.match(name)
             or _SETUP_NAME_PATTERN.match(name)
+            or _WORKSPACE_NAME_PATTERN.match(name)
+            or _BUILDINFO_NAME_PATTERN.match(name)
+            or name in _EXTRA_DEFINITION_NAMES
         ):
             candidates.add(relPath)
     return candidates
@@ -152,11 +165,13 @@ def test_the_frontend_ci_files_are_actually_flagged() -> None:
             "frontend/playwright.config.ts",
             "frontend/tsconfig.json",
             "frontend/tsconfig.node.json",
+            "frontend/tsconfig.node.tsbuildinfo",
+            "frontend/.npmrc",
             "frontend/src/tests/setup.ts",
         )
     )
 
-    assert len(hits) == 8, f"前端 CI 定义文件没被判成 CI 相关面：{hits}"
+    assert len(hits) == 10, f"前端 CI 定义文件没被判成 CI 相关面：{hits}"
 
 
 def test_a_nested_frontend_config_is_flagged(tmp_path: Path) -> None:
@@ -199,25 +214,65 @@ def test_a_lock_file_under_a_nested_directory_is_found(tmp_path: Path) -> None:
 def test_the_frontend_ci_definition_files_are_covered_by_codeowners() -> None:
     """前端 CI 定义文件必须有 CODEOWNER（清单是判据，授权面是复核落点）。
 
-    ⚠️ `CODEOWNERS` 是**最后匹配者生效**⇒ 只看「出现过」不够 ⇒ 这里查
-    路径是否在文件里；生效归属由 `test_ci_codeowners.py` 单独兜。
+    ⚠️ CODEOWNERS 是**最后匹配者生效**，且支持通配 ⇒ 不能只看「路径字面在
+    文件里出现过」（`frontend/vitest.workspace.*` 这类通配条目管的是**还不存在**的
+    未来文件）⇒ 按 `_effectiveOwner` 算**生效归属**。
     """
-    codeownersPath = _REPO_ROOT / ".github" / "CODEOWNERS"
-    owned: set[str] = set()
-    for rawLine in codeownersPath.read_text(encoding="utf-8").splitlines():
-        line = rawLine.strip()
-        if not line or line.startswith("#"):
-            continue
-        owned.add(line.split()[0])
-
     definitionFiles = _frontendCiDefinitionFiles(_FRONTEND_DIR, "frontend") | _vitestSetupFiles()
     assert definitionFiles, "没扫到任何前端 CI 定义文件（扫描逻辑坏了？）"
 
     missing = sorted(
-        path for path in definitionFiles if path not in owned and f"/{path}" not in owned
+        path for path in definitionFiles if _effectiveOwner(path) != "@sunql"
     )
 
     assert not missing, f"这些前端 CI 定义文件没有 CODEOWNER：{missing}"
+
+
+def test_the_vitest_workspace_entries_are_covered_by_codeowners() -> None:
+    """vitest 自动发现的 workspace/projects 文件必须在授权面里（评审 C-1）。
+
+    ⚠️ 仓库里**现在没有**这类文件（没有就不扫得到，上面那条守卫管不到）
+    ⇒ 通配条目「管未来文件」的责任必须有人钉住 ⇒ 对**还不存在的名字**直接断言
+    生效归属 —— 有人删掉 `frontend/vitest.workspace.*` 这条 ⇒ 这里立刻红。
+    """
+    for name in (
+        "frontend/vitest.workspace.ts",
+        "frontend/vitest.workspace.mts",
+        "frontend/vitest.workspace.json",
+        "frontend/vitest.projects.js",
+        "frontend/vitest.projects.cjs",
+    ):
+        assert _effectiveOwner(name) == "@sunql", f"{name} 不在 CODEOWNERS 授权面里"
+
+
+def test_vitest_workspace_and_projects_files_are_ci_surfaces() -> None:
+    """**正面断言**：vitest 自动发现的 workspace/projects 文件判成 CI 相关面（C-1）。
+
+    存在 workspace 文件时 vitest **不再走**根 `vitest.config.ts` 的项目解析
+    ⇒ project 的 `test.exclude` 能把失败用例整个排除 ⇒ 前端 job 假绿
+    ⇒ 失败集合对差判「净新增 0」⇒ **完整绕过链**。
+    """
+    hits = detectCiSurfaceChanges(
+        (
+            "frontend/vitest.workspace.ts",
+            "frontend/vitest.workspace.mts",
+            "frontend/vitest.workspace.json",
+            "frontend/vitest.projects.js",
+            "frontend/vitest.projects.cjs",
+            "frontend/packages/ui/vitest.workspace.ts",
+        )
+    )
+
+    assert len(hits) == 6, f"vitest workspace/projects 文件没被判成 CI 相关面：{hits}"
+
+
+def test_the_workspace_scanner_is_not_vacuous(tmp_path: Path) -> None:
+    """反查守卫对 workspace 名字形态**真的扫得到**（不是恒绿）。"""
+    (tmp_path / "vitest.workspace.ts").write_text("export default []\n", encoding="utf-8")
+
+    found = _frontendCiDefinitionFiles(tmp_path, "frontend")
+
+    assert "frontend/vitest.workspace.ts" in found, f"扫描器没认出 workspace 文件：{sorted(found)}"
 
 
 def test_the_vitest_setup_files_declared_are_read_from_the_real_config() -> None:
@@ -229,4 +284,7 @@ def test_the_vitest_setup_files_declared_are_read_from_the_real_config() -> None
     setupFiles = _vitestSetupFiles()
 
     assert setupFiles, "vitest.config.ts 里没读到 setupFiles ⇒ 反查守卫恒绿"
-    assert json.dumps(sorted(setupFiles)), "setupFiles 解析成了空集"
+
+    # ⚠️ 2026-11-08 第三轮评审 L-2：原第二条断言写成了
+    # `assert json.dumps(sorted(setupFiles))` —— `json.dumps([])` 是 `"[]"`，
+    # **恒真** ⇒ 是一条什么都没验的空断言，已删除（上一行才是有效断言）。

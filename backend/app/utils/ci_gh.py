@@ -101,7 +101,7 @@ class RunHeadInfo:
     更糟的是闸门侧若同样用它取基线 ⇒ 基线树与执行树都落到那个更晚的 main
     ⇒ `A` 变成空集 ⇒ 两次 run 实际跑的 CI 定义不同却判「可合并」⇒ **fail-open**。
 
-    ⇒ 只作 `created_at` 缺失时的**兜底**（偏保守 ⇒ 宁可多仲裁一次）。
+    ⇒ **不**作 `created_at` 缺失时的兜底（缺失 ⇒ fail-closed，见 `mainTipCutoff`）。
     """
 
 
@@ -282,8 +282,8 @@ def fetchBranchHeadSha(repo: str, branch: str) -> str:
 #      「第二棵树」可能**不是**那次 run 实际执行的树 ⇒ 假拦 + fail-open；
 #   ② PR 合并后该 ref 消失（实测 404）⇒ 历史 run 的合并树无法回溯。
 #
-# ⇒ 改用「main 的 push run 列表」反推：`M_T` = 不晚于（PR run **事件派发时刻**
-#   + 宽限）的**最新一次 main push run** 的 head sha。
+# ⇒ 改用「main 的 push run 列表」反推：`M_T` = 不晚于 PR run **事件派发时刻**
+#   （`created_at` 原值，无宽限）的**最新一次 main push run** 的 head sha。
 #   实测（PR #111）：PR run `42281369007` 派发于 `2026-11-06T19:38:13Z`，
 #   之前最新的 main push run = `87f8e8e6…`（run `42281237159`，创建于 19:37:16Z）
 #   ⇒ 正是 job 日志里的合并底座

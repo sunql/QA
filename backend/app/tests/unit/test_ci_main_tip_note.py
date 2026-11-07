@@ -118,6 +118,35 @@ def test_main_does_not_report_a_mismatch_when_the_base_is_the_same_commit(
     assert "不是 PR run 的 main 侧底座" not in report
 
 
+def test_main_does_not_report_a_mismatch_when_no_ci_surface_changed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """底座不同但**没判出 CI 相关面变更** ⇒ 同样**不**出现提示（第三轮评审 M-1）。
+
+    `M_base ≠ M_T` 是**常态**（main 一直在推进）——规则文档写的是
+    「提示只在判出 CI 相关面变更时出现」⇒ 没判出时出现就是噪音
+    ⇒ 提示变噪音就会被无视 ⇒ 提示失效（恰好毁掉处置办法的可信度）。
+    """
+    result = _oneRedShard()
+    _stubGithub(monkeypatch, result, result)
+    _stubCiSurface(
+        monkeypatch,
+        changedFiles=("docs/readme.md",),
+        netChangedFiles=(),  # 判定集合不含任何 CI 文件 ⇒ 不判 CI 相关面变更
+        mainTipSha="z" * 40,  # 底座不同（常态）
+    )
+
+    exitCode = ci_failure_set.main(
+        ["--repo", "sunql/QA", "--base-run", "111", "--pr-run", "222"]
+    )
+    report = capsys.readouterr().out
+
+    assert exitCode == 0
+    assert "不是 PR run 的 main 侧底座" not in report
+    assert "推一个新 commit 到 PR 分支" not in report
+
+
 def test_main_reports_the_main_side_base_in_the_header(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

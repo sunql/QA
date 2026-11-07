@@ -159,6 +159,10 @@ _CI_SURFACE_PATTERNS = (
     # 纯数据）与跑者（`ci_mutation_evidence.py`）
     # **同族**：改清单可以把某组变异改成「改一个没人守的地方」⇒ 照样恒绿。
     r"^backend/scripts/ci_mutation_(?:evidence|cases|cases_core)\.py$",
+    # ⚠️ **测试库断言的依赖模块**（第六轮复审 LOW-1）：`_pg_support.assertTestDatabase`
+    # （每个 DB 夹具都走）import 它的 `databaseNameOf` ⇒ 改它 = 改「测试必须连哪个库」
+    # 的守卫口径 ⇒ 与测试基建同族。
+    r"^backend/scripts/kpi_metric_db_guard\.py$",
     # 已知抖动白名单**数据文件**：它直接决定「哪些失败用例不作判据」
     # ⇒ 改它 = 改判据 ⇒ 与工具模块同族，必须人工确认。
     r"^\.github/ci-known-flaky-tests\.json$",
@@ -237,6 +241,13 @@ _CI_SURFACE_PATTERNS = (
     # 删 NOT NULL ⇒ 失败集合与基线相同 ⇒ 假「净新增 0」；它甚至能在 pytest 收集前
     # 改写盘上的测试文件。只有 `alembic.ini` 在清单里而 env.py 不在 ⇒ 完整绕过链。
     r"^backend/alembic/env\.py$",
+    # ⚠️ **迁移脚本本体**（第六轮复审 HIGH-1）：`alembic upgrade head` 会执行
+    # `backend/alembic/versions/` 里**每个 revision 的 `upgrade()` —— 同样是 pytest
+    # 收集前的任意 Python（140 个文件，且工程规则要求每个 ORM 变更都带迁移 ⇒
+    # 这是常规路径不是偏门）⇒ PR 用迁移塑形测试库 / 删改测试文件 ⇒ 假「净新增 0」。
+    # ⚠️ 方向代价：迁移文件入清单 ⇒ main 侧合了迁移、PR 没跟上也会判 6（假拦）
+    # ⇒ 本设计明确偏好假拦而不是 fail-open（与两腿并集同一方向）。
+    r"^backend/alembic/versions/[\w.-]+\.py$",
     # ⚠️ **backend/.env**（第五轮安全评审 MEDIUM-2）：conftest 里
     # `load_dotenv(override=True)` ⇒ 被**强制 add 进仓库**的 `.env` 会覆盖 CI 注入的
     # 全部变量（DATABASE_URL / TEST_DATABASE_URL / MILVUS_TEST_DB_NAME / MINIO_*…）；
@@ -250,11 +261,16 @@ _CI_SURFACE_PATTERNS = (
     # marker 依赖 ⇒ 失败集合不可比 ⇒ 却判「可合并」。
     r"^backend/\.python-version$",
     r"^backend/uv\.toml$",
-    # ⚠️ **seed 脚本**（第五轮安全评审 LOW-5）：unit conftest 的 autouse 夹具逐个
-    # import `scripts/seed_*`（business_objects / data_domain / feature_rules…）
+    # ⚠️ **仓库根的 uv.toml**（第六轮复审 MEDIUM-1）：uv 沿**工作目录的父链**发现配置
+    # ⇒ CI 在 `backend/` 里跑 uv，仓库根的 `uv.toml`（父目录）一样被读 ⇒ 只新增一个
+    # 根级文件就能换掉解释器/依赖配置。（父级 `.python-version` 实测**不**被认 ⇒ 只补这个。）
+    r"^uv\.toml$",
+    # ⚠️ **seed 脚本**（第五轮安全评审 LOW-5；第六轮复审 MEDIUM-2 扩到 `backend/` 根）：
+    # unit conftest 的 autouse 夹具逐个 import `scripts/seed_*`，且 conftest **模块级**
+    # `import seed_ontology`（收集前执行 ⇒ 任意代码）；`backend/seed_models.py` 同族
     # ⇒ 换成假 seed = 换掉测试库的初始状态与 registry 内容 ⇒ PR 引入的失败
     # 不出现 ⇒ 失败集合与基线相同 ⇒ 与 `_pg_support`（已入清单）同族。
-    r"^backend/scripts/seed_[\w.-]+\.py$",
+    r"^backend/(?:scripts/)?seed_[\w.-]+\.py$",
 )
 
 # 拉取失败时可能被抛出的异常类型（`gh` 调用 + JSON 解析）。

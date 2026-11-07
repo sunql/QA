@@ -233,6 +233,18 @@ def test_the_effective_owner_of_every_controlled_path_is_the_expected_one() -> N
         str(path.relative_to(_REPO_ROOT))
         for path in (_REPO_ROOT / "backend" / "scripts").glob("seed_*.py")
     }
+    # 第六轮复审（HIGH-1 / MEDIUM-1 / MEDIUM-2 / LOW-1）：迁移脚本本体、仓库根 uv.toml、
+    # backend/ 根的 seed 同族、测试库断言的依赖模块。
+    controlledPaths |= {
+        str(path.relative_to(_REPO_ROOT))
+        for path in (_REPO_ROOT / "backend" / "alembic" / "versions").glob("*.py")
+    }
+    controlledPaths |= {"uv.toml"}
+    controlledPaths |= {
+        str(path.relative_to(_REPO_ROOT))
+        for path in (_REPO_ROOT / "backend").glob("seed_*.py")
+    }
+    controlledPaths |= {"backend/scripts/kpi_metric_db_guard.py"}
     assert controlledPaths, "受控路径集合为空（路径写错了？）"
 
     wrong = {

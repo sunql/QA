@@ -1,4 +1,4 @@
-"""CI 判据守卫的**变异清单**（纯数据，76 组 = 核心批 + N6 批 + 第四轮 HIGH-1 批 + 第五轮安全评审批）。
+"""CI 判据守卫的**变异清单**（纯数据，80 组 = 核心批 + N6 批 + 第四/五轮批 + 第六轮复审批）。
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
@@ -12,7 +12,7 @@ M1–M36（继承批 + 模块拆分批 + workflow 批 + 净变更批）在 `ci_m
 
 用法（在仓库根或任意子目录执行均可，脚本按自身位置自动定位仓库根）：
 
-    python3 backend/scripts/ci_mutation_evidence.py            # 全部 76 组
+    python3 backend/scripts/ci_mutation_evidence.py            # 全部 80 组
     python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 """
 
@@ -613,7 +613,63 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
         "M76",
         "backend",
         "app/utils/ci_surface.py",
+        'r"^backend/(?:scripts/)?seed_[\\w.-]+\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    # ---------- M77–M80：2026-11-08 第六轮复审「环境杠杆补漏」批 ----------
+    # - HIGH-1：迁移脚本本体 `backend/alembic/versions/*.py` —— `alembic upgrade head`
+    #   执行每个 revision 的 `upgrade()`（pytest 收集前的任意 Python，140 个文件，
+    #   工程规则要求每个 ORM 变更都带迁移 ⇒ 常规路径）；
+    # - MEDIUM-1：仓库根 `uv.toml` —— uv 沿工作目录父链发现配置（CI 在 backend/ 跑 uv）；
+    # - MEDIUM-2：`backend/seed_ontology.py` —— conftest **模块级** import ⇒ 收集前执行；
+    # - LOW-1：`backend/scripts/kpi_metric_db_guard.py` —— `_pg_support.assertTestDatabase`
+    #   的依赖（改它 = 改「测试必须连哪个库」的守卫口径）。
+    (
+        "M77",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/alembic/versions/[\\w.-]+\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M78",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^uv\\.toml$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M79",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/(?:scripts/)?seed_[\\w.-]+\\.py$",',
         'r"^backend/scripts/seed_[\\w.-]+\\.py$",',
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M80",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/scripts/kpi_metric_db_guard\\.py$",',
         "",
         (
             "app/tests/unit/test_ci_surface.py::"

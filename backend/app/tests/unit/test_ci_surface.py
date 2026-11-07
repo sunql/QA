@@ -761,27 +761,37 @@ def test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_
 
 
 def test_the_round5_environment_lever_files_are_actually_flagged() -> None:
-    """**正面断言**：第五轮安全评审的「环境定义杠杆」文件确实被判成 CI 相关面。
+    """**正面断言**：第五/六轮评审的「环境定义杠杆」文件确实被判成 CI 相关面。
 
     这些文件都在 CI 里**真正被执行或加载**（不是名义配置）⇒ 换掉它们 =
     换掉测试环境 ⇒ 失败集合不可比 ⇒ 却可能判「净新增 0」。反查守卫认不出
-    「仓库里现在没有的文件」⇒ 这批按路径**正面**钉住（M70–M72 / M76 变异）。
+    「仓库里现在没有的文件」⇒ 这批按路径**正面**钉住（M70–M80 变异）。
     """
     levers = (
-        # HIGH-1：CI 两个 job 前都执行 `alembic upgrade head`，env.py 是真正跑迁移的脚本。
+        # 第五轮 HIGH-1：CI 两个 job 前都执行 `alembic upgrade head`，env.py 是真正跑迁移的脚本。
         "backend/alembic/env.py",
-        # MEDIUM-2：conftest `load_dotenv(override=True)` ⇒ 覆盖 CI 注入的全部变量。
+        # 第六轮 HIGH-1：迁移脚本本体 —— `upgrade()` 执行的也是收集前的任意 Python。
+        "backend/alembic/versions/0140_ontology_property_unit.py",
+        "backend/alembic/versions/b1ea6cb32588_run_state.py",
+        # 第五轮 MEDIUM-2：conftest `load_dotenv(override=True)` ⇒ 覆盖 CI 注入的全部变量。
         "backend/.env",
         "backend/.env.local",
-        # MEDIUM-3：uv 按 `.python-version` / `uv.toml` 选解释器 ⇒ 盖过 setup-python。
+        # 第五轮 MEDIUM-3 + 第六轮 MEDIUM-1：uv 按 .python-version / uv.toml（含仓库根）
+        # 选解释器 ⇒ 盖过 setup-python（uv 沿父链发现配置）。
         "backend/.python-version",
         "backend/uv.toml",
-        # LOW-5：塑形测试库 / registry 的测试基建与 seed 脚本。
+        "uv.toml",
+        # 第五轮 LOW-5 + 第六轮 MEDIUM-2：塑形测试库 / registry 的测试基建与 seed 脚本
+        # （backend/ 根的 seed_ontology 由 conftest **模块级** import ⇒ 收集前执行）。
         "backend/app/tests/_neo4j_support.py",
         "backend/app/tests/_testapp.py",
         "backend/scripts/seed_business_objects.py",
         "backend/scripts/seed_data_domain.py",
         "backend/scripts/seed_feature_rules.py",
+        "backend/seed_ontology.py",
+        "backend/seed_models.py",
+        # 第六轮 LOW-1：测试库断言的依赖模块。
+        "backend/scripts/kpi_metric_db_guard.py",
     )
 
     hits = ci_surface.detectCiSurfaceChanges(levers)

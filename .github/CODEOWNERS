@@ -76,6 +76,9 @@ backend/alembic.ini                   @sunql
 # ⚠️ `env.py` 是真正建 engine、跑迁移的脚本 —— CI workspace 里的任意 Python
 # （第五轮安全评审 HIGH-1：可在 run_migrations 后追加 DDL ⇒ 塑形测试库）。
 backend/alembic/env.py                @sunql
+# ⚠️ 迁移脚本本体：`alembic upgrade head` 执行每个 revision 的 `upgrade()`
+# —— pytest 收集前的任意 Python（第六轮复审 HIGH-1）。通配条目管未来文件。
+backend/alembic/versions/*.py         @sunql
 
 # ---- 测试基建（autouse 夹具 / `alembic upgrade` 由它们塑形测试库与 registry）----
 # 第五轮安全评审 LOW-5：`_neo4j_support` / `_testapp` / seed 脚本与已入清单的
@@ -85,6 +88,11 @@ backend/app/tests/_neo4j_support.py     @sunql
 backend/app/tests/_testapp.py           @sunql
 backend/app/tests/milvus_isolation.py   @sunql
 backend/scripts/seed_*.py               @sunql
+# ⚠️ `backend/` 根的 seed 同族（conftest **模块级** import seed_ontology ⇒ 收集前执行；
+# 第六轮复审 MEDIUM-2）。
+backend/seed_*.py                       @sunql
+# ⚠️ 测试库断言的依赖模块（`_pg_support.assertTestDatabase` import 它的 `databaseNameOf`）。
+backend/scripts/kpi_metric_db_guard.py  @sunql
 
 # ---- 环境定义文件（第五轮安全评审 MEDIUM-2 / MEDIUM-3）----
 # `backend/.env` 被 conftest `load_dotenv(override=True)` 读 ⇒ 覆盖 CI 注入的全部变量
@@ -94,6 +102,9 @@ backend/.env                          @sunql
 backend/.env.*                        @sunql
 backend/.python-version               @sunql
 backend/uv.toml                       @sunql
+# ⚠️ uv 沿工作目录父链发现配置 ⇒ CI 在 backend/ 跑 uv 时**仓库根**的 uv.toml 也被读
+# （第六轮复审 MEDIUM-1；父级 .python-version 实测不被认）。
+/uv.toml                              @sunql
 
 # ---- 变异取证脚本（它决定「哪些变异能转红」⇒ 改它就能让守卫恒绿）----
 # 清单（纯数据）与跑者同族：改清单可以把某组变异指向没人守的地方 ⇒ 照样恒绿。

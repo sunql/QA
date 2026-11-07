@@ -741,12 +741,15 @@ def test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_
 
     与 `test_every_ci_tool_module_is_in_the_surface_list` 同款纪律 ——
     清单漏了谁，从文件系统反查时直接转红。
+    （2026-11-08 第五轮安全评审 LOW-6：`cases_core` 拆出后这里曾漏 ——
+    从 enum 里去掉 `|cases_core` 会让本用例红 ⇒ M69。）
     """
     scriptsDir = Path(__file__).resolve().parents[3] / "scripts"
 
     for relPath in (
         "backend/scripts/ci_mutation_evidence.py",
         "backend/scripts/ci_mutation_cases.py",
+        "backend/scripts/ci_mutation_cases_core.py",
     ):
         assert (scriptsDir / Path(relPath).name).exists(), (
             f"变异取证脚本不在预期位置（{relPath}）⇒ 清单可能已经过期"
@@ -755,6 +758,35 @@ def test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_
         flagged = ci_surface.detectCiSurfaceChanges((relPath,))
 
         assert flagged == (relPath,), f"{relPath} 没被算进 CI 相关面"
+
+
+def test_the_round5_environment_lever_files_are_actually_flagged() -> None:
+    """**正面断言**：第五轮安全评审的「环境定义杠杆」文件确实被判成 CI 相关面。
+
+    这些文件都在 CI 里**真正被执行或加载**（不是名义配置）⇒ 换掉它们 =
+    换掉测试环境 ⇒ 失败集合不可比 ⇒ 却可能判「净新增 0」。反查守卫认不出
+    「仓库里现在没有的文件」⇒ 这批按路径**正面**钉住（M70–M72 / M76 变异）。
+    """
+    levers = (
+        # HIGH-1：CI 两个 job 前都执行 `alembic upgrade head`，env.py 是真正跑迁移的脚本。
+        "backend/alembic/env.py",
+        # MEDIUM-2：conftest `load_dotenv(override=True)` ⇒ 覆盖 CI 注入的全部变量。
+        "backend/.env",
+        "backend/.env.local",
+        # MEDIUM-3：uv 按 `.python-version` / `uv.toml` 选解释器 ⇒ 盖过 setup-python。
+        "backend/.python-version",
+        "backend/uv.toml",
+        # LOW-5：塑形测试库 / registry 的测试基建与 seed 脚本。
+        "backend/app/tests/_neo4j_support.py",
+        "backend/app/tests/_testapp.py",
+        "backend/scripts/seed_business_objects.py",
+        "backend/scripts/seed_data_domain.py",
+        "backend/scripts/seed_feature_rules.py",
+    )
+
+    hits = ci_surface.detectCiSurfaceChanges(levers)
+
+    assert len(hits) == len(levers), f"环境杠杆文件没被判成 CI 相关面：{set(levers) - set(hits)}"
 
 
 def test_the_judgment_set_is_the_union_not_just_one_side() -> None:

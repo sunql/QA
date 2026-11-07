@@ -1,4 +1,4 @@
-"""CI 判据守卫的**变异清单**（纯数据，67 组 = 核心批 + N6 批）。
+"""CI 判据守卫的**变异清单**（纯数据，76 组 = 核心批 + N6 批 + 第四轮 HIGH-1 批 + 第五轮安全评审批）。
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
@@ -12,7 +12,7 @@ M1–M36（继承批 + 模块拆分批 + workflow 批 + 净变更批）在 `ci_m
 
 用法（在仓库根或任意子目录执行均可，脚本按自身位置自动定位仓库根）：
 
-    python3 backend/scripts/ci_mutation_evidence.py            # 全部 67 组
+    python3 backend/scripts/ci_mutation_evidence.py            # 全部 76 组
     python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 """
 
@@ -484,6 +484,22 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
         ),
         1,
     ),
+    # ---------- M68：2026-11-08 第四轮代码评审 HIGH-1「npm-shrinkwrap 优先于 lockfile」批 ----------
+    # npm 的 arborist：`data = sw || lock` ⇒ 有 shrinkwrap 则 package-lock.json **被忽略**
+    # ⇒ 只新增一个 shrinkwrap 就能换掉前端依赖树 ⇒ vitest 版本可能整个变化
+    # ⇒ 失败集合不可比 ⇒ 却判「可合并」⇒ fail-open。
+    (
+        "M68",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^frontend/(?:package\\.json|package-lock\\.json|npm-shrinkwrap\\.json|pnpm-lock\\.yaml|pnpm-workspace\\.yaml)$",',
+        'r"^frontend/(?:package\\.json|package-lock\\.json|pnpm-lock\\.yaml|pnpm-workspace\\.yaml)$",',
+        (
+            "app/tests/unit/test_ci_surface_frontend_reverse.py::"
+            "test_the_frontend_ci_files_are_actually_flagged"
+        ),
+        1,
+    ),
     (
         "M67",
         "backend",
@@ -493,6 +509,115 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
         (
             "app/tests/unit/test_ci_surface_frontend_reverse.py::"
             "test_the_workspace_scanner_is_not_vacuous"
+        ),
+        1,
+    ),
+    # ---------- M69–M76：2026-11-08 第五轮安全评审「环境定义杠杆」批 ----------
+    #
+    # ⚠️ 背景：CI 在 unit / integration 两个 job 前**真正执行或加载**的文件里，
+    # 有一批不在 CI 相关面 ⇒ 只新增/改写一个文件就能换掉测试环境
+    # ⇒ 失败集合不可比 ⇒ 却判「可合并」⇒ fail-open。
+    # - HIGH-1：`backend/alembic/env.py` —— CI 两个 job 前都跑 `alembic upgrade head`，
+    #   env.py 是真正建 engine、跑迁移的任意 Python（可在 run_migrations 后追加 DDL）；
+    # - MEDIUM-2：`backend/.env` —— conftest `load_dotenv(override=True)` ⇒ 覆盖 CI 注入
+    #   的全部变量（`.gitignore` 拦不住 `git add -f`）；
+    # - MEDIUM-3：`backend/.python-version` / `uv.toml` —— uv 拿它选解释器，
+    #   盖过 setup-python 的 3.13；
+    # - LOW-5：`_neo4j_support` / `_testapp` / seed 脚本 —— 塑形测试库与 registry；
+    # - LOW-6：M-3 拆分后 `cases_core` 没有正向用例钉住。
+    (
+        "M69",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases|cases_core)\\.py$",',
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases)\\.py$",',
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_file"
+        ),
+        1,
+    ),
+    (
+        "M70",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/alembic/env\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M71",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/\\.env(?:\\.[\\w.-]+)?$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M72",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/\\.python-version$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M73",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^frontend/\\.env(?:\\.[\\w.-]+)?$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface_frontend_reverse.py::"
+            "test_the_frontend_ci_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M74",
+        "backend",
+        "app/tests/unit/test_ci_surface_frontend_reverse.py",
+        "or _ENV_NAME_PATTERN.match(name)",
+        "or False",
+        (
+            "app/tests/unit/test_ci_surface_frontend_reverse.py::"
+            "test_the_env_scanner_is_not_vacuous"
+        ),
+        1,
+    ),
+    (
+        "M75",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/app/tests/(?:_pg_support|_neo4j_support|_testapp|milvus_isolation)\\.py$",',
+        'r"^backend/app/tests/(?:_pg_support|milvus_isolation)\\.py$",',
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M76",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/scripts/seed_[\\w.-]+\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
         ),
         1,
     ),

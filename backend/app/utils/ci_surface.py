@@ -149,7 +149,7 @@ _CI_SURFACE_PATTERNS = (
     # ⇒ 守卫 `test_ci_surface_reverse.py::test_every_compose_file_used_by_the_workflows_is_a_ci_surface`
     # 从 workflow 里反查引用到的 compose ⇒ 新增一份 compose 也会被要求入清单。
     r"^docker/docker-compose[\w.-]*\.ya?ml$",
-    r"^backend/app/tests/(?:_pg_support|milvus_isolation)\.py$",
+    r"^backend/app/tests/(?:_pg_support|_neo4j_support|_testapp|milvus_isolation)\.py$",
     r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface|head|pytest_log|judge|report|flakes)\.py$",
     # ⚠️ **变异取证脚本**（2026-11-07 安全评审 MEDIUM-3）：
     # 它决定「哪些变异能转红」⇒ 改它就能让守卫**恒绿**（把「转红」判据改成
@@ -199,7 +199,9 @@ _CI_SURFACE_PATTERNS = (
     # ⇒ **这是一条完整的绕过链** ⇒ 清单必须覆盖前端的 CI 定义文件。
     # ⇒ 反查守卫 `test_ci_surface_frontend_reverse.py` 从 `frontend/` 的实际文件
     #   与 `vitest.config.ts` 声明的 setupFiles 反查 ⇒ 新增配置文件必须入清单。
-    r"^frontend/(?:package\.json|package-lock\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml)$",
+    # ⚠️ `npm-shrinkwrap.json` 优先于 `package-lock.json`（npm 语义：有它则 lockfile 被
+    # 忽略）⇒ 只新增一个 shrinkwrap 就能换掉前端依赖树（第四轮评审 HIGH-1）。
+    r"^frontend/(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml)$",
     # 任意深度的 `*.config.*`（vite / vitest / playwright / eslint…）
     r"^frontend/(?:.*/)?[\w.-]+\.config\.[\w.]+$",
     # 任意深度的 `tsconfig*.json`（`npm exec -- tsc -b` 的编译口径）
@@ -218,12 +220,41 @@ _CI_SURFACE_PATTERNS = (
     r"^frontend/(?:.*/)?[\w.-]+\.tsbuildinfo$",
     # npm 的安装行为（registry / script-shell）⇒ 装出来的依赖环境变了 ⇒ 失败集合不可比
     r"^frontend/\.npmrc$",
+    # ⚠️ vitest 以 mode `test` 解析 Vite 配置 ⇒ 会加载 `frontend/.env` / `.env.test`
+    # （第五轮安全评审 LOW-4）。现在唯一被读的是 `VITE_API_BASE_URL` ⇒ 影响潜伏，
+    # 但任何将来按 `VITE_*` 门控的行为都能被这份没人盯的文件改写 ⇒ 提前入清单。
+    r"^frontend/\.env(?:\.[\w.-]+)?$",
     # ⚠️ **复合 action**（`.github/actions/**`）：workflow 可以 `uses:` 它
     # ⇒ 改它的脚本 = 改 CI 的执行内容 ⇒ 必须人工复核。
     r"^\.github/actions/",
     # ⚠️ **alembic 配置**（`backend/alembic.ini`）：改它 = 改迁移的执行口径
     # ⇒ integration 分片跑 `alembic upgrade head` ⇒ 环境变了 ⇒ 失败集合不可比。
     r"^backend/alembic\.ini$",
+    # ⚠️ **alembic env.py**（第五轮安全评审 HIGH-1）：CI 在 unit / integration 两个 job
+    # 前都跑 `alembic upgrade head`，而 env.py 是**真正建 engine、跑迁移**的脚本 ——
+    # 它是 CI workspace 里的任意 Python：可以在 `context.run_migrations()` 之后追加
+    # DDL（pytest 的 `_ensureSchema` 还会再执行一次）⇒ PR 给失败的用例补列 /
+    # 删 NOT NULL ⇒ 失败集合与基线相同 ⇒ 假「净新增 0」；它甚至能在 pytest 收集前
+    # 改写盘上的测试文件。只有 `alembic.ini` 在清单里而 env.py 不在 ⇒ 完整绕过链。
+    r"^backend/alembic/env\.py$",
+    # ⚠️ **backend/.env**（第五轮安全评审 MEDIUM-2）：conftest 里
+    # `load_dotenv(override=True)` ⇒ 被**强制 add 进仓库**的 `.env` 会覆盖 CI 注入的
+    # 全部变量（DATABASE_URL / TEST_DATABASE_URL / MILVUS_TEST_DB_NAME / MINIO_*…）；
+    # `APP_ENV` / `SECRET_KEY` / `SESSION_BUDGET` 是 load **之后**才 setdefault
+    # ⇒ 文件也赢 ⇒ 能把会暴露 bug 的断言环境整个换掉。`.gitignore` 拦不住 `git add -f`
+    # ⇒ 必须在 CI 相关面 + CODEOWNERS 里。`.env.example` 也一并认（同族，宁多勿漏）。
+    r"^backend/\.env(?:\.[\w.-]+)?$",
+    # ⚠️ **uv 的解释器选择**（第五轮安全评审 MEDIUM-3）：uv 会按项目里的
+    # `.python-version` / `uv.toml` 选解释器（**盖过** setup-python 装的 3.13）
+    # ⇒ 只新增一个文件就能把两个 pytest job 换到 3.12 + lock 按 3.12 解析的
+    # marker 依赖 ⇒ 失败集合不可比 ⇒ 却判「可合并」。
+    r"^backend/\.python-version$",
+    r"^backend/uv\.toml$",
+    # ⚠️ **seed 脚本**（第五轮安全评审 LOW-5）：unit conftest 的 autouse 夹具逐个
+    # import `scripts/seed_*`（business_objects / data_domain / feature_rules…）
+    # ⇒ 换成假 seed = 换掉测试库的初始状态与 registry 内容 ⇒ PR 引入的失败
+    # 不出现 ⇒ 失败集合与基线相同 ⇒ 与 `_pg_support`（已入清单）同族。
+    r"^backend/scripts/seed_[\w.-]+\.py$",
 )
 
 # 拉取失败时可能被抛出的异常类型（`gh` 调用 + JSON 解析）。

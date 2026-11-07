@@ -42,7 +42,8 @@ _SKIP_DIR_NAMES = frozenset({"node_modules", "dist", ".git", ".vite", "coverage"
 # ⇒ 不认 `.d.ts`（类型声明文件，不是配置源）⇒ 也不认 `vite.config.d.ts`。
 _CONFIG_NAME_PATTERN = re.compile(r"^[\w.-]+\.config\.(?:js|mjs|cjs|ts|mts|cts|jsx|tsx)$")
 _LOCK_NAMES = frozenset(
-    {"package.json", "package-lock.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"}
+    # npm-shrinkwrap.json：npm 语义下**优先于** package-lock.json ⇒ 必须盯（第四轮 HIGH-1）。
+    {"package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"}
 )
 _TSCONFIG_NAME_PATTERN = re.compile(r"^tsconfig[\w.-]*\.json$")
 _SETUP_NAME_PATTERN = re.compile(r"^setup[\w.-]*\.[tj]sx?$")
@@ -55,6 +56,9 @@ _WORKSPACE_NAME_PATTERN = re.compile(
     r"^vitest\.(?:workspace|projects)\.(?:ts|mts|cts|js|mjs|cjs|json)$"
 )
 _BUILDINFO_NAME_PATTERN = re.compile(r"^[\w.-]+\.tsbuildinfo$")
+# ⚠️ `.env` / `.env.test`（第五轮安全评审 LOW-4）：vitest 以 mode `test` 解析
+# Vite 配置 ⇒ 会从 `frontend/` 加载这两个文件 ⇒ 按 `VITE_*` 门控的行为都能被改写。
+_ENV_NAME_PATTERN = re.compile(r"^\.env(?:\.[\w.-]+)?$")
 _EXTRA_DEFINITION_NAMES = frozenset({".npmrc"})
 
 
@@ -87,6 +91,7 @@ def _frontendCiDefinitionFiles(root: Path, prefix: str) -> set[str]:
             or _TSCONFIG_NAME_PATTERN.match(name)
             or _SETUP_NAME_PATTERN.match(name)
             or _WORKSPACE_NAME_PATTERN.match(name)
+            or _ENV_NAME_PATTERN.match(name)
             or _BUILDINFO_NAME_PATTERN.match(name)
             or name in _EXTRA_DEFINITION_NAMES
         ):
@@ -160,6 +165,8 @@ def test_the_frontend_ci_files_are_actually_flagged() -> None:
         (
             "frontend/package.json",
             "frontend/package-lock.json",
+            # npm-shrinkwrap.json：npm 语义下**优先于** package-lock（第四轮评审 HIGH-1）。
+            "frontend/npm-shrinkwrap.json",
             "frontend/vitest.config.ts",
             "frontend/vite.config.ts",
             "frontend/playwright.config.ts",
@@ -167,11 +174,14 @@ def test_the_frontend_ci_files_are_actually_flagged() -> None:
             "frontend/tsconfig.node.json",
             "frontend/tsconfig.node.tsbuildinfo",
             "frontend/.npmrc",
+            # vitest mode `test` 会加载的 env 文件（第五轮评审 LOW-4）。
+            "frontend/.env",
+            "frontend/.env.test",
             "frontend/src/tests/setup.ts",
         )
     )
 
-    assert len(hits) == 10, f"前端 CI 定义文件没被判成 CI 相关面：{hits}"
+    assert len(hits) == 13, f"前端 CI 定义文件没被判成 CI 相关面：{hits}"
 
 
 def test_a_nested_frontend_config_is_flagged(tmp_path: Path) -> None:
@@ -273,6 +283,29 @@ def test_the_workspace_scanner_is_not_vacuous(tmp_path: Path) -> None:
     found = _frontendCiDefinitionFiles(tmp_path, "frontend")
 
     assert "frontend/vitest.workspace.ts" in found, f"扫描器没认出 workspace 文件：{sorted(found)}"
+
+
+def test_the_env_scanner_is_not_vacuous(tmp_path: Path) -> None:
+    """反查守卫对 `.env` / `.env.test` 名字形态**真的扫得到**（不是恒绿）。
+
+    仓库里现在**没有**这类文件 ⇒ `test_every_frontend_ci_definition_file_is_a_ci_surface`
+    扫不到它们 ⇒ 必须造一个证明扫描器认得（第五轮评审 LOW-4 ⇒ M74）。
+    """
+    (tmp_path / ".env.test").write_text("VITE_API_BASE_URL=\n", encoding="utf-8")
+
+    found = _frontendCiDefinitionFiles(tmp_path, "frontend")
+
+    assert "frontend/.env.test" in found, f"扫描器没认出 env 文件：{sorted(found)}"
+
+    missing = _missingCiSurfacePaths(found)
+
+    assert not missing, f"扫描出来的 env 文件不在 CI 相关面里：{missing}"
+
+
+def test_the_frontend_env_entries_are_covered_by_codeowners() -> None:
+    """`frontend/.env*` 必须在授权面里（仓库里现在没有 ⇒ 通配条目管未来文件）。"""
+    for name in ("frontend/.env", "frontend/.env.test", "frontend/.env.local"):
+        assert _effectiveOwner(name) == "@sunql", f"{name} 不在 CODEOWNERS 授权面里"
 
 
 def test_the_vitest_setup_files_declared_are_read_from_the_real_config() -> None:

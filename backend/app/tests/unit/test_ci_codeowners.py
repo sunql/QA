@@ -216,7 +216,23 @@ def test_the_effective_owner_of_every_controlled_path_is_the_expected_one() -> N
     controlledPaths |= {_FLAKE_WHITELIST}
     controlledPaths |= {"backend/scripts/ci_mutation_evidence.py"}
     controlledPaths |= {"backend/scripts/ci_mutation_cases.py"}
+    controlledPaths |= {"backend/scripts/ci_mutation_cases_core.py"}
     controlledPaths |= {".github/CODEOWNERS"}
+    # 第五轮安全评审（HIGH-1 / MEDIUM-2 / MEDIUM-3 / LOW-5）：CI 真正执行或加载的
+    # 环境定义杠杆 —— env.py、.env、解释器选择、测试基建与 seed 脚本。
+    controlledPaths |= {"backend/alembic/env.py"}
+    controlledPaths |= {"backend/.env", "backend/.env.example"}
+    controlledPaths |= {"backend/.python-version", "backend/uv.toml"}
+    controlledPaths |= {
+        "backend/app/tests/_pg_support.py",
+        "backend/app/tests/_neo4j_support.py",
+        "backend/app/tests/_testapp.py",
+        "backend/app/tests/milvus_isolation.py",
+    }
+    controlledPaths |= {
+        str(path.relative_to(_REPO_ROOT))
+        for path in (_REPO_ROOT / "backend" / "scripts").glob("seed_*.py")
+    }
     assert controlledPaths, "受控路径集合为空（路径写错了？）"
 
     wrong = {

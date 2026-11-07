@@ -31,6 +31,50 @@ backend/app/utils/ci_flakes.py        @sunql
 # ---- 已知抖动白名单**数据文件**（它直接决定「哪些失败用例不作判据」⇒ 改它 = 改判据）----
 .github/ci-known-flaky-tests.json    @sunql
 
+# ---- **前端 CI 定义**（2026-11-07 安全评审 CRITICAL-1）----
+# `ci.yml` 的 `Frontend / typecheck + coverage` 是**非分片** job
+# ⇒ 它失败时只产出**不透明**的失败 ID（`job:<job 名>`）⇒ 前端的失败**照样进**对差
+# ⇒ 而前端测试的「定义」文件（vitest 的 exclude / setupFiles / coverage 阈值、
+#    npm scripts、锁文件、tsconfig）改一改就能让失败用例**根本不失败**
+# ⇒ 失败集合与基线完全相同 ⇒ 假「净新增 0」⇒ 而 CI 还全绿。
+# ⇒ 这些文件与后端闸门工具**同族**：改它 = 解除「CI 相关面」这道闸。
+frontend/package.json                     @sunql
+frontend/package-lock.json                @sunql
+frontend/pnpm-lock.yaml                   @sunql
+frontend/pnpm-workspace.yaml              @sunql
+frontend/vite.config.ts                   @sunql
+# ⚠️ `vite.config.js` 是**被提交进仓库的编译产物**（`vite.config.ts` 的 tsc 输出）
+# ⇒ 但 vite 的配置解析顺序里 `.js` **优先于** `.ts`
+# ⇒ 它随时可能被真正加载 ⇒ 改它 = 改前端的构建口径 ⇒ 必须在 CI 相关面里。
+frontend/vite.config.js                   @sunql
+frontend/vitest.config.ts                 @sunql
+frontend/playwright.config.ts             @sunql
+# ⚠️ vitest 2.x **自动发现**的 workspace/projects 配置（第三轮安全评审 C-1）：
+# 存在时取代根 `vitest.config.ts` 的项目解析 ⇒ project 的 `test.exclude`
+# 能把失败用例整个排除掉 ⇒ 假「净新增 0」。仓库里现在没有这类文件
+# ⇒ 这两条通配管的是**未来文件**（有人新增 ⇒ 反查守卫会红）。
+frontend/vitest.workspace.*               @sunql
+frontend/vitest.projects.*                @sunql
+# ⚠️ `tsc -b` 的增量编译产物（composite ⇒ tsbuildinfo 决定哪些文件要重新类型检查）
+frontend/tsconfig.node.tsbuildinfo        @sunql
+# ⚠️ npm 的安装行为（registry / script-shell）⇒ 装出来的依赖环境变了 ⇒ 失败集合不可比
+frontend/.npmrc                           @sunql
+frontend/tsconfig.json                    @sunql
+frontend/tsconfig.node.json               @sunql
+frontend/src/tests/setup.ts               @sunql
+
+# ---- 复合 action（workflow 的 `uses:` 目标 ⇒ 改它 = 改 CI 的执行内容）----
+/.github/actions/                     @sunql
+
+# ---- alembic 配置（integration 分片跑 `alembic upgrade head` ⇒ 改它 = 改环境）----
+backend/alembic.ini                   @sunql
+
+# ---- 变异取证脚本（它决定「哪些变异能转红」⇒ 改它就能让守卫恒绿）----
+# 清单（纯数据）与跑者同族：改清单可以把某组变异指向没人守的地方 ⇒ 照样恒绿。
+backend/scripts/ci_mutation_cases.py       @sunql
+backend/scripts/ci_mutation_cases_core.py  @sunql
+backend/scripts/ci_mutation_evidence.py    @sunql
+
 # ---- CODEOWNERS **自己**（改授权面 = 换授权人 ⇒ 必须人工复核）----
 # 个人仓库的 CODEOWNERS 没有强制力（装不了 users bypass）⇒ 这是链上仅剩的人工检查点。
 /.github/CODEOWNERS                  @sunql
@@ -38,15 +82,21 @@ backend/app/utils/ci_flakes.py        @sunql
 # ---- 守卫用例（改守卫 = 解除守卫）----
 backend/app/tests/unit/test_ci_failure_set.py     @sunql
 backend/app/tests/unit/test_ci_failure_set_flakes.py @sunql
+backend/app/tests/unit/test_ci_failure_set_surface.py @sunql
 backend/app/tests/unit/test_ci_text.py            @sunql
 backend/app/tests/unit/test_ci_gh.py              @sunql
 backend/app/tests/unit/test_ci_surface.py         @sunql
+backend/app/tests/unit/test_ci_surface_reverse.py @sunql
+backend/app/tests/unit/test_ci_surface_frontend_reverse.py @sunql
 backend/app/tests/unit/test_ci_shard.py           @sunql
 backend/app/tests/unit/test_ci_head.py            @sunql
 backend/app/tests/unit/test_ci_report.py          @sunql
 backend/app/tests/unit/test_ci_flakes.py          @sunql
 backend/app/tests/unit/test_ci_codeowners.py      @sunql
 backend/app/tests/unit/test_ci_merge_gate_workflow.py @sunql
+backend/app/tests/unit/test_ci_main_tip_note.py @sunql
+backend/app/tests/unit/test_ci_main_tip.py  @sunql
+backend/app/tests/unit/test_ci_mutation_evidence.py @sunql
 backend/app/tests/unit/test_ci_integration_step.py @sunql
 
 # ---- 守卫用例的**共享替身**（改替身 = 改守卫的观测对象 ⇒ 同属「解除守卫」面）----

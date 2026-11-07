@@ -8,8 +8,14 @@
 # - 故意**不传 --allow-ci-changes**：PR 改了 CI 相关面 ⇒ 退出码 6 ⇒ failure。
 #   人工仲裁确认「分片归属未变」后，由 bypass 账号显式合并（solo 仓库的显式越权口）；
 # - 退出码 5（净丢失待人工确认）同样判 failure，人工确认后同上。
-# - 基线取法（2026-11-05 定死）：**同一完成标记协议下** main 的最新完成 run
+# - 基线取法（2026-11-05 定死、2026-11-07 N6 修订、2026-11-07 CRITICAL-1 再修订）：
+#   **同一完成标记协议下**，**在 PR 的 CI 事件派发之前** main 上最新完成的 run
 #   （`branch=main`、`event=push`、`status=completed`）；更早协议的 run 会拒判 UNUSABLE_JOBS。
+#   ⚠️ 为什么要加「PR 事件派发之前」：PR 的 CI 跑的是 `refs/pull/N/merge`
+#     （= main 与 PR 头合并出来的 commit）⇒ 它执行的是**PR 事件派发那一刻的 main**
+#     （合并 commit 在派发时就被冻结 ⇒ 复跑不会重新计算它 ⇒ 复跑检出的仍是同一个）。
+#     基线若取了之后才推的 main ⇒ 两次 run 跑的代码天然不同 ⇒ **系统性假拦**
+#     （实测 PR #92/#94/#95/#107 的净变更 CI 命中 1/29/29/17，真归因命中 **0**）。
 name: merge-gate
 
 on:
@@ -74,6 +80,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_RUN_ID: ${{ github.event.workflow_run.id }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PR_RUN_CREATED_AT: ${{ github.event.workflow_run.created_at }}
         run: |
           # 本步骤在 GitHub 默认 shell `bash -e` 下运行。**第一条铁律**：
           # 凡「预期可能失败」的命令一律 `|| 兜底` —— 直接写
@@ -84,15 +91,78 @@ jobs:
           set -uo pipefail
           CHECK_NAME="merge-gate / failure-set-diff"
 
-          # 基线：main 上最新完成的 push run（同完成标记协议）。
+          # 基线：main 上**在 PR 的 CI 事件派发之前**最新完成的 push run（同完成标记协议）。
+          #
+          # ⚠️ 2026-11-07 N6：**为什么不能取「闸门跑的那一刻 main 上最新的 run」**：
+          # PR 的 CI 跑的是 `refs/pull/N/merge`（main 与 PR 头合并出来的 commit）
+          # ⇒ 它执行的是**PR 事件派发那一刻的 main**。
+          # 若基线取了**之后**才推的 main ⇒ 基线树含 main 的后续改动（尤其是 CI 文件）
+          # ⇒ 而 PR run 的树不含 ⇒ 「两次 run 跑的代码不同」被放大
+          # ⇒ **系统性假拦**（实测 PR #92/#94/#95/#107 的净变更 CI 命中 1/29/29/17，
+          #   而它们真正的三点归因命中是 **0**）。
+          # ⇒ 基线必须取「PR 事件派发**之前**」的 main。
+          #
+          # ⚠️ 2026-11-07 代码评审 CRITICAL-1：时间上界用 **`created_at`**（事件派发时刻），
+          # **不是** `run_started_at` ——
+          # `pull_request` 事件的**合并 commit 在事件派发那一刻就被冻结**了
+          # ⇒ 复跑（re-run）**不会**重新计算它 ⇒ 复跑检出的仍是**同一个**合并 commit
+          # ⇒ 它的 main 侧底座是**派发那一刻**的 main。
+          # 实测（PR #105 run `41908498247`，attempt=2）：`created_at=2026-11-04T20:38:19Z`、
+          # `run_started_at=2026-11-04T22:24:11Z`；合并 commit `57a267a9` 的
+          # committer.date = `20:38:18Z`、第一父 = `83581e10`；attempt-2 的 job 日志写着
+          # `git fetch … +57a267a93f…:refs/remotes/pull/105/merge` ⇒ **同一个**合并 commit。
+          # ⇒ 用 `run_started_at` ⇒ 基线取到**派发之后**的 main ⇒ 基线树 ≠ 执行树
+          # ⇒ 两次 run 实际跑的 CI 定义不同却判「可合并」⇒ **fail-open**。
+          # ⇒ 工具侧（`ci_gh.mainTipCutoff`）用**同一个**锚点 ⇒ 两边必须一致。
+          #
           # 跳过 conclusion=cancelled 的 run：ci.yml 的 cancel-in-progress 会在新 main push
           # 时取消上一轮 ⇒ 被取消的 run 的 job 没有完成标记 ⇒ 拿它当基线必判 UNUSABLE，
           # main 刚推送后的窗口期内会误拦所有 PR（2026-11-05 run 41882361045 实证）。
-          BASE_RUN_ID="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&status=completed&per_page=10" \
-            --jq '[.workflow_runs[] | select(.conclusion != "cancelled")][0].id // empty')" || BASE_RUN_ID=""
+          #
+          # ⚠️ 2026-11-07 安全评审 HIGH-1：**必须限定 event=push**。
+          # GitHub 的 `runs?branch=<name>` 过滤匹配的是 `head_branch`、**不区分事件**
+          # （实测：`branch=feat/merge-gate-flake-whitelist` 返回的是
+          # `event=pull_request` 的 run）⇒ 一个**名叫 main 的 fork 分支**发起的 PR
+          # 也会命中 `branch=main` ⇒ 它的 run 可能被当成「main 的基线」
+          # ⇒ 基线 = 攻击者自己的代码 ⇒ 失败集合对差被中和。
+          # ⇒ 查询串加 `event=push` + jq 再筛一次 `.event == "push"`（双保险：
+          #   工具侧还会独立复核一遍，见 ci_surface._baseTrustError）。
+          #
+          # ⚠️ 时间戳比较：GitHub 的 `created_at` 形如 `2026-11-07T01:23:45Z`
+          # ⇒ 同格式的 ISO8601 字符串**字典序 == 时序** ⇒ jq 里可直接 `<=`。
+          # ⚠️ 用**独立的 jq 二进制**（而不是 `gh --jq`）⇒ 时间窗能通过 `--arg`
+          #   传进去（`gh --jq` 不支持 `--arg`）⇒ 不用把时间戳拼进 jq 程序
+          #   （拼进去 = 引号地狱 + 时间戳含特殊字符时的注入面）。
+          # ⚠️ `jq` 是 ubuntu-latest 的预装工具；万一缺失 ⇒ 判不出来 ⇒ fail-closed。
+          # ⚠️ 返回的 run 列表按 `created_at` **倒序** ⇒ 过滤后取 `[0]`
+          #   = 「不晚于 PR 事件派发的最新一次 main push run」。
+          # ⚠️ `--paginate --slurp` 取**全部**页：PR 可能比较旧 ⇒ 目标基线
+          #   可能在第一页之外 ⇒ 只取一页会漏 ⇒ 过滤后为空 ⇒ 误判「没有基线」。
+          BASE_RUN_ID=""
+          if [ -z "${PR_RUN_CREATED_AT}" ]; then
+            # 拿不到 PR run 的事件派发时间 ⇒ 算不出「派发之前」⇒ 判不出基线 ⇒ fail-closed。
+            # ⚠️ 空字符串会让 jq 的 `.created_at <= ""` **恒真**
+            # ⇒ 基线退化成「main 上最新的 run」⇒ 又变回系统性假拦。
+            echo "PR_RUN_CREATED_AT 为空 ⇒ 无法限定基线时间窗（fail-closed）"
+          elif command -v jq >/dev/null 2>&1; then
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&per_page=100" \
+              --paginate --slurp > /tmp/main_push_runs.json || echo "[]" > /tmp/main_push_runs.json
+            # ⚠️ 2026-11-07 安全评审 MEDIUM-3 / 代码评审 LOW-3：jq 侧**独立复核**
+            #   `head_branch` / `head_repository` / `status`（不能只靠查询串）：
+            #   `runs?branch=main` 匹配的是 `head_branch`、**不区分事件**
+            #   ⇒ 一个**名叫 main 的 fork 分支**也会命中 ⇒ 基线可能变成攻击者自己的代码。
+            #   ⇒ 仓库名比较用**大小写不敏感**（GitHub 的仓库名大小写不敏感，
+            #   实测 API 侧会原样返回 `Sunql/QA` 这类形态 ⇒ 严格相等会把**合法基线**
+            #   判成不可信 ⇒ 闸门对所有 PR 死锁）。
+            BASE_RUN_ID="$(jq -r --arg cutoff "${PR_RUN_CREATED_AT}" --arg repo "${GITHUB_REPOSITORY}" \
+              '[.[] | .workflow_runs[] | select(.event == "push" and .head_branch == "main" and .status == "completed" and .conclusion != "cancelled" and ((.head_repository.full_name // "") | ascii_downcase) == ($repo | ascii_downcase) and .created_at <= $cutoff)][0].id // empty' \
+              /tmp/main_push_runs.json)" || BASE_RUN_ID=""
+          fi
           if [ -z "${BASE_RUN_ID}" ]; then
-            report="找不到 main 的已完成 CI run ⇒ 无基线可比（fail-closed）。等 main 的 push run 完成后再试。"
+            # ⚠️ 用 printf 的**格式串**而不是把时间戳拼进双引号字符串（引号/反斜杠
+            #   一旦出现在值里就会破坏字符串边界）⇒ 报告文本不会因为取值而变形。
+            report="$(printf '找不到在 PR CI 事件派发（%s）之前完成的 main CI run ⇒ 无基线可比（fail-closed）。等 main 的 push run 完成后再试。' "${PR_RUN_CREATED_AT}")"
             code=3
           else
             code=0

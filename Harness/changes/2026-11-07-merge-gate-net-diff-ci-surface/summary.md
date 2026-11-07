@@ -169,7 +169,7 @@ GitHub 的 `runs?branch=<name>` 过滤匹配的是 `head_branch`、**不区分�
 | 记号 | 含义 | 取法 |
 |---|---|---|
 | `M_base` | 基线 run 的 head sha | 基线 run 的 `head_sha` |
-| `M_T` | **PR run 开跑那一刻 main 的 tip**（= 那次合并的 main 侧底座） | 见下面的「`M_T` 怎么取」 |
+| `M_T` | **PR run 事件派发那一刻 main 的 tip**（= 那次合并的 main 侧底座） | 见下面的「`M_T` 怎么取」（**两条腿**：run 腿 + 第一父链腿） |
 | `P` | **PR 自己**改的文件 | `diff(merge_base(M_T, PR 头), PR 头)`（三点语义） |
 
 **判定集合**：
@@ -199,16 +199,18 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 
 ⇒ 必须算 **`A ∪ P`**。
 
-**`M_T` 怎么取**（`ci_gh.fetchMainTipShaAt`）：
+**`M_T` 怎么取**（`ci_gh.fetchMainTipShaAt` + `ci_gh.fetchMainFirstParentTipAt`，**两条腿**）：
 
-1. 上界 = **PR run 的 `created_at`（事件派发时刻）+ 120 秒宽限**
-   （`_MAIN_TIP_GRACE_SECONDS = 120`）。
+1. 上界 = **PR run 的 `created_at`（事件派发时刻）**，**原值、**不加宽限**
+   （第五版起 `+120s` 宽限已删除 ⇒ 见 §2.10.1）。
    ⚠️⚠️ **必须用 `created_at` 而不是 `run_started_at`**（2026-11-07 代码评审 CRITICAL-1）：
    `pull_request` 事件的**合并 commit 在事件派发那一刻就被冻结**了
    ⇒ 复跑（re-run）**不会**重新计算它 ⇒ 复跑检出的仍是**同一个**合并 commit
    ⇒ 它的 main 侧底座是**派发那一刻**的 main ⇒ 上界必须锚**派发时刻**。
    （早期版本误判「复跑会在新时刻重新检出 ⇒ 该用 `run_started_at`」——
    **实测推翻了这个前提**，见 §2.7.1。）
+   ⚠️ **`created_at` 缺失 ⇒ 判定不出来（fail-closed）**，**不回退 `run_started_at`**
+   （第五版；闸门侧同样 fail-closed ⇒ 两边上界必须一致 ⇒ 见 §2.10.1）。
 2. 取 **main 的 push run 列表**（`GET /repos/{o}/{r}/actions/runs?branch=main&event=push`），
    逐条过**三条硬条件**（缺一不可）：
    - `event == "push"`（查询串可能被服务端忽略 ⇒ 工具侧独立复核）；
@@ -217,6 +219,12 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
      严格相等会把**合法基线**判成不可信 ⇒ 误判退出码 3 ⇒ 白拦）。
 3. 再过时间窗：`created_at <= cutoff` ⇒ 取**最新**的一条的 `head_sha`。
 4. 一条都不合格 ⇒ **报错**（判定不出来）⇒ **不许随便返回一个 sha**。
+5. **第一父链腿**（第五版新增，`fetchMainFirstParentTipAt`）：从 **main 的当前 tip** 出发，
+   沿 **`parents[0]`** 回溯，直到 commit 的 committer 日期 ≤ 上界 ⇒ 得到 main **主线**
+   在该时刻的 tip ⇒ **侧提交永远不在主线**上 ⇒ 天然排除「侧提交日期早于上界、
+   但它进 main 的时刻在上界之后」这类假拦。⚠️ **不许用 `commits?sha=main&until=<上界>`**
+   —— 它返回的可能是**侧提交** ⇒ 它的 diff 不是 main 的推进 ⇒ **假拦 + 归因错误**。
+6. `A` 取**两条腿的并集**（第五版；并集只会**偏大**不会偏小 ⇒ 方向是「假拦」而非 fail-open）。
 
 ⚠️ **`M_T` 取不到 ⇒ 判定不出来 ⇒ 退出码 6，不许退回 PR 头**
 —— 退回 PR 头 = 把 §1.2 的两个洞带回来。
@@ -258,14 +266,17 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 ⇒ **工具侧（`ci_gh.mainTipCutoff`）与 workflow 侧（`PR_RUN_CREATED_AT`）必须同时换锚**：
 一边换一边不换 ⇒ 同样 fail-open（基线树 ≠ 执行树）。
 
-⚠️ **`mainTipCutoff` 的两个时间戳必须 keyword-only 传**：
+⚠️ **`mainTipCutoff` 的时间戳必须 keyword-only 传**：
 这次的缺陷正是「**位置传参 + 锚点写反**」⇒ 两个时间戳**都是合法值**
 ⇒ 传反了**不会报错** ⇒ 判定静默用错锚点。
-⇒ 改成 `mainTipCutoff(*, createdAt: str, runStartedAt: str)`
-⇒ 顺序再也没法搞错（守卫：`test_mainTipCutoff_requires_explicitly_named_timestamps`）。
+⇒ 第五版后签名是 **`mainTipCutoff(*, createdAt: str)`**（**只剩一个**参数）
+⇒ 顺序再也没法搞错（守卫：`test_mainTipCutoff_requires_explicitly_named_timestamps`）；
+⇒ 传旧的 `runStartedAt=` ⇒ **直接 `TypeError`**（不许悄悄忽略）。
 
-⚠️ **`created_at` 缺失时回退 `run_started_at`**（偏保守 ⇒ 宁可多仲裁一次）；
-两者都没有 ⇒ **判定不出来**（抛错 ⇒ 工具侧转成退出码 3）。
+⚠️⚠️ **`created_at` 缺失 ⇒ 判定不出来（fail-closed）**，**不再回退 `run_started_at`**
+（第五版，代码评审 MEDIUM-3）：闸门侧**没有**这个回退（`PR_RUN_CREATED_AT` 为空 ⇒
+直接 fail-closed）⇒ 工具侧若回退 ⇒ 两边上界不同 ⇒ 基线树 ≠ 执行树 ⇒ **fail-open**。
+⇒ **两边必须同时 fail-closed**。
 
 ### 2.8 基线取法同步收紧（workflow 侧）
 
@@ -281,11 +292,107 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 ### 2.9 底座核对（`M_base` vs `M_T`）
 
 - 若 **基线 run 的 commit ≠ `M_T`** ⇒ main 在基线之后推进过 ⇒ 两次 run 的 CI 定义可能不同
-  ⇒ 报告里必须**提示 + 给出处置办法**：「**重新运行 PR 的 CI**」（让它合上最新的 main），
-  而不是让操作者直接放行。
+  ⇒ 报告里必须**提示 + 给出处置办法**：「**推一个新 commit 到 PR 分支**」
+  （或 rebase 到最新 main / 重开 PR）以产生一次**新的 CI 事件派发」。
+- ⚠️⚠️ **不许提示「重新运行 PR 的 CI」**（第五版，代码评审 HIGH-1）：
+  `pull_request` 事件的**合并 commit 在派发那一刻就被冻结**了
+  ⇒ 复跑（re-run）**不会**重新计算它 ⇒ 复跑检出的仍是**同一个**合并 commit
+  ⇒ 判定依旧不成立 ⇒ 照着这句话做会**白跑一轮**还拿不到新结论。
+  ⇒ 反向守卫：`test_the_report_does_not_advise_a_bare_rerun`。
+- ⚠️ **事实与处置必须分成两行**（第五版）：`ci_failure_set._mainTipMismatchNote`（事实）
+  与 `_mainTipRemedyNote`（处置）各占一条 note。理由：报告的每个字段都被
+  `sanitizeForReport` 截到 **200 字符** ⇒ 事实 + 处置塞进同一个字符串 ⇒ 处置被截掉
+  ⇒ 操作者只看到「拦」⇒ 看不到该做什么 ⇒ 白跑一轮。
+  ⇒ 同理，**底座不一致的事实不许拼进 reason 字符串**（`reason` 本身也被截到 200 字符
+  ⇒ 拼进去必然把「⇒ 对差不成立」截掉 ⇒ 反而更难读）。
 - ⚠️ 这条提示**只在判出 CI 相关面变更时**出现（第三版里 `M_base ≠ M_T` 是**常态**
   —— main 一直在推进 ⇒ 无条件提示就是噪音 ⇒ 提示一旦变成噪音就会被无视 ⇒ 提示就失效）。
   ⇒ 反向守卫：`M_base == M_T` 时**不得**出现该提示。
+
+### 2.9.1 ⚠️ 第五版：祖先关系核对（`M_base` 必须是 `M_T` 的祖先）
+
+`ci_surface._baselineAncestorError`：**`merge_base(M_base, M_T) == M_base`** 才算通过。
+
+- **为什么必须查**（安全评审 HIGH-2）：基线 run 挑的是「派发之前完成的 main push run」
+  ⇒ 正常情况下它的 commit 一定在 main 主线上、且早于底座 ⇒ 是底座的祖先。
+  ⇒ **不是**祖先只有两种可能，两种都致命：
+  ① **main 被 force-push / 改写** ⇒ 基线树与执行树分属两条历史 ⇒ 不可比；
+  ② 基线挑错了（挑到派发**之后**才创建的 run）⇒ `A` 腿算出「main 回退了」
+  ⇒ 漏掉 main 的真实推进 ⇒ **fail-open**。
+- ⇒ 判不出 ⇒ **fail-closed（退出码 3：基线不可信 ⇒ 须复跑）**，不许「算个差集凑合」。
+- 守卫：`test_resolveCiSurface_fails_closed_when_the_base_is_not_an_ancestor`。
+
+### 2.10 ⚠️ 第五版（2026-11-07 第二轮评审后的修订）
+
+> 第四版之后又跑了一轮 `code-reviewer`（WARNING）与 `security-reviewer`（**BLOCK**）。
+> 本节记录那一轮关掉的洞。
+
+#### 2.10.1 上界**不加宽限**、且**不回退**（代码评审 MEDIUM-1 / MEDIUM-3）
+
+- **旧**：工具侧上界 = `created_at + 120s`（`_MAIN_TIP_GRACE_SECONDS`），
+  且 `created_at` 缺失时**回退** `run_started_at`。
+- **问题**：
+  ① 闸门侧（`merge-gate.yml`）取基线用的上界是 `PR_RUN_CREATED_AT`（**无宽限**）
+  ⇒ 工具侧多给 2 分钟 ⇒ 工具侧的 `M_T` 比闸门侧的基线**更新**
+  ⇒ `A` 腿把「派发之后 main 才推进的 CI 改动」也算进来 ⇒ **判定集偏大 ⇒ 假拦**
+  （main 在 PR 派发后 2 分钟内推进过就中招）；
+  ② 闸门侧**没有**回退 ⇒ 工具侧回退 ⇒ 两边上界不同 ⇒ 基线树 ≠ 执行树 ⇒ **fail-open**。
+- **现在**：工具侧上界 = `created_at` **原值**；`created_at` 缺失 ⇒ **fail-closed**。
+  ⇒ **两边必须同一个上界、同一个比较符、同一种失败方式。**
+
+#### 2.10.2 `M_T` 的**第一父链腿**（安全评审 HIGH-1）
+
+- **旧**：只有 run 腿（main 的 push run 列表）。main 的那次 push **没触发** workflow、
+  或它的 run **创建得太晚** ⇒ run 腿偏旧 ⇒ `A` 漏算 main 的推进 ⇒ **fail-open**。
+- **现在**：`fetchMainFirstParentTipAt` —— 从 **main 的当前 tip** 出发，沿 **`parents[0]`**
+  回溯，直到 commit 的 committer 日期 ≤ 上界。
+  ⇒ 得到的必然是 **main 主线**在该时刻的 tip ⇒ **侧提交永远不在主线**上。
+- ⚠️ **不许用 `commits?sha=main&until=<上界>`**（第四版曾用它，叫「commit-date 腿」）：
+  它返回的是「从 main 可达、日期 ≤ 上界的最新提交」⇒ **可能是侧提交**
+  ⇒ 它的 diff 不是 main 的推进 ⇒ **假拦 + 归因错误**。
+- ⚠️ 回溯跳数有上限（`_MAX_FIRST_PARENT_HOPS`）⇒ 超限**报错**（fail-closed）。
+- ⚠️ 历史条目畸形（日期 / sha / parents 形态异常）⇒ **报错**，不静默跳过
+  ⇒ 静默跳过 = 那条提交从历史里消失 ⇒ 回溯链断掉 ⇒ 拿到的 tip 是错的 ⇒ **fail-open**。
+- **`A` = 两条腿的**并集** ⇒ 谁漏掉的那一段，另一条兜住
+  ⇒ 并集只会**偏大**不会偏小 ⇒ 方向是「假拦」而不是 fail-open。
+
+#### 2.10.3 祖先关系核对（安全评审 HIGH-2）
+
+见 §2.9.1。
+
+#### 2.10.4 ⚠️ 前端 CI 面纳入判定（安全评审 **CRITICAL-1**）
+
+- **问题**：`_CI_SURFACE_PATTERNS` 里**没有任何前端路径** ⇒ 一个 PR 可以把
+  `frontend/vitest.config.ts` / `package.json` / `package-lock.json` / `tsconfig.json` /
+  `src/setupTests.ts` 全部改掉，而**前端 job 仍然进入失败集合对差**
+  （它以 `job:Frontend / typecheck + coverage` 这个不透明 ID 出现）
+  ⇒ 前端 CI 的口径（收集哪些用例、覆盖率阈值）被换掉 ⇒ 失败集合不可比
+  ⇒ **且 CODEOWNERS 没有 `frontend/` 条目 ⇒ 没人复核 ⇒ 完整绕过链**。
+- **现在**：
+  ① `_CI_SURFACE_PATTERNS` 增前端配置路径；
+  ② `.github/CODEOWNERS` 增 `frontend/` 前缀条目（含 `frontend/vite.config.ts`
+     与 `frontend/vite.config.js`——后者是**被提交进仓库的编译产物**，
+     但 vite 的配置解析顺序里 `.js` **优先于** `.ts` ⇒ 它随时可能被真正加载
+     ⇒ 改它 = 改前端的构建口径）；
+  ③ 新增**反向守卫** `backend/app/tests/unit/test_ci_surface_frontend_reverse.py`
+     （它自己也必须有 CODEOWNER ⇒ 否则 `test_ci_codeowners.py` 的反向守卫会红）。
+
+#### 2.10.5 变异取证的失败标记必须**属于这条用例**（代码评审 MEDIUM-4）
+
+- **旧**：退出码为 1 时只判「输出里含 `case` 字符串」。
+- **问题**：① 文件级用例只判「输出里含文件名」⇒ 那是 pytest 的**路径前缀**，
+  **任意**上下文（收集进度行、warning）都满足 ⇒ 别的用例失败会被算成「这条守卫转红」
+  ⇒ **假取证**；② 用例级只判「含用例名」⇒ `test_x` 是 `test_x_extra` 的**子串**
+  ⇒ 同名兄弟用例失败会被算成命中 ⇒ 同样是假取证。
+- **现在**：要求 pytest 的**短摘要行**里出现 `FAILED <nodeid>` / `ERROR <nodeid>`
+  （**整行匹配**：nodeid 后面必须跟空白或行尾 ⇒ 不能是更长 nodeid 的前缀），
+  文件级则要求 `FAILED <file>::…`。
+
+#### 2.10.6 其它小修
+
+- workflow 侧的 jq **独立复核** `head_branch == "main"` / `status == "completed"`
+  ⇒ 不信任服务端已过滤（新增守卫 `test_merge_gate_base_run_query_rechecks_the_run_fields_in_jq`）。
+- 报告与文档里的「开跑时刻」措辞统一改成「**事件派发时刻**」（代码评审 MEDIUM-5）。
 
 ### 2.6 抖动豁免的前置条件也改用判定集合
 
@@ -297,23 +404,24 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 
 | 文件 | 动作 |
 |---|---|
-| `backend/app/utils/ci_gh.py` | 重写：新增 Trees API 链路（`fetchTreePathShas` / `_parseTreePathShas` / `_buildTreeFileMap` / `_assertTreeIsRecursive` / `_diffTreePathShas` / `fetchNetChangedFiles`）、`fetchMergeBaseSha` / `_parseMergeBaseSha`；`fetchChangedFiles` 改为「merge-base 树 vs head 树」；**删除** `_parseChangedFiles` 与 300 项上限逻辑；所有外部输入加形态校验（repo / run id / sha / branch）。**第三版**：`RunHeadInfo` 增 `event` / `createdAt` / `runStartedAt` 三字段；新增 `mainTipCutoff` / `fetchMainTipShaAt` / `_parseMainTipSha` / `_considerMainRun`（`M_T` 的取数链路）与 `_MAIN_TIP_GRACE_SECONDS = 120`。**第四版（CRITICAL-1）**：`mainTipCutoff` 的**锚点从 `run_started_at` 换成 `created_at`（事件派发时刻）**、参数改成 **keyword-only**（`createdAt=` / `runStartedAt=`）⇒ 杜绝「位置传参写反」；`created_at` 缺失才回退 `run_started_at`，两者皆缺 ⇒ 抛错（判定不出来）；**删除**第二版整条「测试合并 commit」链路（`PullMergeInfo` / `fetchPullMergeInfo` / `_findOpenPullNumber` / `_parseOpenPullNumbers` / `_fetchPullMergeCommitSha` / `_fetchCommitTreeAndParent`）——`refs/pull/N/merge` 是临时 ref，**回溯历史 run 时取不到**（§1.3） |
-| `backend/app/utils/ci_surface.py` | `CiSurfaceInfo` 增 `netChangedFiles` / `unattributedCiFiles` / `baseTrustError` / `mainAdvanceFiles` / `mainTipSha`；新增 `_baseTrustError`（三条硬条件）。**第三版**：判定集合改为 `A ∪ P`（`_buildSurface` 里 `judgment = set(mainAdvance) | set(prChanged)`）；新增 `_fetchMainTipSha` / `_fetchMainAdvanceFiles` / `_fetchPrChangedFiles`；**删除**第二版的 `_fetchMergeInfo` / `_fetchAttributionFiles` / `_fetchComparedFiles` 与 `prMergeSha` / `prMergeBaseSha` 两字段。**第四版（CRITICAL-1）**：`_fetchMainTips` 的 cutoff 改用 `mainTipCutoff(createdAt=prInfo.createdAt, runStartedAt=prInfo.runStartedAt)`（**具名传**）⇒ 锚点与工具侧一致 |
-| `backend/app/utils/ci_failure_set.py` | 判定集合改为 `detectCiSurfaceChanges(surface.netChangedFiles)`；`_ciSurfaceReason` 分「PR 改了」/「归因不到本 PR」两种措辞；豁免前置条件改用 `netChangedFiles`；基线不可信 ⇒ 退出码 3；报告 notes 增「归因不到本 PR」条目。**第三版**：`_mergeBaseMismatchNote` 改用 `surface.mainTipSha`（不再是 `prMergeBaseSha`） |
+| `backend/app/utils/ci_gh.py` | 重写：新增 Trees API 链路（`fetchTreePathShas` / `_parseTreePathShas` / `_buildTreeFileMap` / `_assertTreeIsRecursive` / `_diffTreePathShas` / `fetchNetChangedFiles`）、`fetchMergeBaseSha` / `_parseMergeBaseSha`；`fetchChangedFiles` 改为「merge-base 树 vs head 树」；**删除** `_parseChangedFiles` 与 300 项上限逻辑；所有外部输入加形态校验（repo / run id / sha / branch）。**第三版**：`RunHeadInfo` 增 `event` / `createdAt` / `runStartedAt` 三字段；新增 `mainTipCutoff` / `fetchMainTipShaAt` / `_parseMainTipSha` / `_considerMainRun`（`M_T` 的取数链路）与 `_MAIN_TIP_GRACE_SECONDS = 120`。**第四版（CRITICAL-1）**：`mainTipCutoff` 的**锚点从 `run_started_at` 换成 `created_at`（事件派发时刻）**、参数改成 **keyword-only**（`createdAt=` / `runStartedAt=`）⇒ 杜绝「位置传参写反」；`created_at` 缺失才回退 `run_started_at`，两者皆缺 ⇒ 抛错（判定不出来）；**删除**第二版整条「测试合并 commit」链路（`PullMergeInfo` / `fetchPullMergeInfo` / `_findOpenPullNumber` / `_parseOpenPullNumbers` / `_fetchPullMergeCommitSha` / `_fetchCommitTreeAndParent`）——`refs/pull/N/merge` 是临时 ref，**回溯历史 run 时取不到**（§1.3）。**第五版**：**删除** `_MAIN_TIP_GRACE_SECONDS`（宽限 ⇒ 与闸门侧不对称 ⇒ 假拦）；`mainTipCutoff` **只接 `createdAt`**（**删掉** `runStartedAt` ⇒ 缺失即 fail-closed，不回退）；新增 `fetchMainFirstParentTipAt` / `_parseFirstParentTip`（**第一父链腿**）+ `_MAX_FIRST_PARENT_HOPS`（超限报错） |
+| `backend/app/utils/ci_surface.py` | `CiSurfaceInfo` 增 `netChangedFiles` / `unattributedCiFiles` / `baseTrustError` / `mainAdvanceFiles` / `mainTipSha`；新增 `_baseTrustError`（三条硬条件）。**第三版**：判定集合改为 `A ∪ P`（`_buildSurface` 里 `judgment = set(mainAdvance) | set(prChanged)`）；新增 `_fetchMainTipSha` / `_fetchMainAdvanceFiles` / `_fetchPrChangedFiles`；**删除**第二版的 `_fetchMergeInfo` / `_fetchAttributionFiles` / `_fetchComparedFiles` 与 `prMergeSha` / `prMergeBaseSha` 两字段。**第四版（CRITICAL-1）**：`_fetchMainTips` 的 cutoff 改用 `mainTipCutoff(createdAt=prInfo.createdAt)`（**具名传**）⇒ 锚点与工具侧一致。**第五版**：`_CI_SURFACE_PATTERNS` 增**前端 CI 定义**路径（package / lock / `*.config.*` / `tsconfig*.json` / setup 文件）⇒ 堵住「前端绕过链」；新增 `_baselineAncestorError`（祖先核对 ⇒ 否则 fail-closed 退出码 3）与 `_fetchMainTips` 的**两腿并集**（run 腿 + 第一父链腿） |
+| `backend/app/utils/ci_failure_set.py` | 判定集合改为 `detectCiSurfaceChanges(surface.netChangedFiles)`；`_ciSurfaceReason` 分「PR 改了」/「归因不到本 PR」两种措辞；豁免前置条件改用 `netChangedFiles`；基线不可信 ⇒ 退出码 3；报告 notes 增「归因不到本 PR」条目。**第三版**：`_mergeBaseMismatchNote` 改用 `surface.mainTipSha`（不再是 `prMergeBaseSha`）。**第五版**：底座不一致的**事实与处置拆成两条 note**（`_mainTipMismatchNote` / `_mainTipRemedyNote`）⇒ 处置不被 200 字符截断；**处置改为「推一个新 commit 到 PR 分支」**（不复跑 ⇒ 复跑无效，见 §2.9）；底座不一致的**事实不再拼进 reason 字符串** |
 | `.github/workflows/merge-gate.yml` | 基线 run 查询限定 `event=push` + jq 复核 `.event == "push"`。**第二版**：基线取法加**时间上界** —— 只认 `created_at <= PR run 的时间戳` 的 main push run（用**独立 jq 二进制**的 `--arg` 传时间戳；`gh --jq` 不支持 `--arg`）；**`PR_RUN_CREATED_AT` 为空 ⇒ 显式 fail-closed**。**第三版**：时间戳取 `run_started_at`。**第四版（CRITICAL-1）**：改取 **`created_at`（事件派发时刻）** —— `PR_RUN_CREATED_AT: ${{ github.event.workflow_run.created_at }}`（合并 commit 在派发时冻结 ⇒ 复跑不动它 ⇒ 上界必须锚派发时刻，详见 §2.7.1） |
-| `.github/CODEOWNERS` | 新增 `backend/app/tests/unit/test_ci_main_tip_note.py` / `test_ci_main_tip.py` / `test_ci_mutation_evidence.py` / `test_ci_failure_set_surface.py` 与 `backend/scripts/ci_mutation_cases.py` 的 CODEOWNER（新增守卫文件**必须**有 CODEOWNER ⇒ 否则 `test_ci_codeowners.py` 的反向守卫会红 ⇒ 缺口本身会挡住合并）|
-| `backend/scripts/ci_mutation_evidence.py` | M27 锚点对齐现状；新增 M29–M36 八组；**第二版新增 M37–M47**；**第三版重锚 M37–M47 并新增 M48–M55**；**第四版重锚 M46/M48/M49/M50/M39 并新增 M56–M58**（共 **58** 组）。并把 `run_case` 的判据从**布尔**改成**三态**（`red` / `green` / `inconclusive`）——只有 pytest 退出码 **1** 才算「转红」，2/3/4/5 一律判「没跑起来」⇒ 取证失败（不是转红）。**收尾拆分**：清单（55 组数据）移到 `backend/scripts/ci_mutation_cases.py`，本文件只留**跑者**（改坏 → 跑用例 → 判三态）——拆分前 826 行 ⇒ 超 800 行上限 ⇒ 拆后 159 + 695 行 |
-| `backend/scripts/ci_mutation_cases.py` | **收尾新建**：变异的**纯数据**清单（与跑者**同族** ⇒ 同进 CI 相关面 + CODEOWNERS）；**第四版**增到 **58** 组 |
+| `.github/CODEOWNERS` | 新增 `backend/app/tests/unit/test_ci_main_tip_note.py` / `test_ci_main_tip.py` / `test_ci_mutation_evidence.py` / `test_ci_failure_set_surface.py` 与 `backend/scripts/ci_mutation_cases.py` 的 CODEOWNER（新增守卫文件**必须**有 CODEOWNER ⇒ 否则 `test_ci_codeowners.py` 的反向守卫会红 ⇒ 缺口本身会挡住合并）。**第五版**：新增 **`frontend/` 前缀条目**（`frontend/vite.config.ts` / `frontend/vite.config.js` 等）⇒ 堵住「前端 CI 定义改了没人复核」的绕过链（安全评审 CRITICAL-1）；并给新守卫 `backend/app/tests/unit/test_ci_surface_frontend_reverse.py` 加 CODEOWNER |
+| `backend/scripts/ci_mutation_evidence.py` | M27 锚点对齐现状；新增 M29–M36 八组；**第二版新增 M37–M47**；**第三版重锚 M37–M47 并新增 M48–M55**；**第四版重锚 M46/M48/M49/M50/M39 并新增 M56–M58**；**第五版重锚 M48/M49/M50/M57/M58 并新增 M59–M65**（共 **65** 组）。并把 `run_case` 的判据从**布尔**改成**三态**（`red` / `green` / `inconclusive`）——只有 pytest 退出码 **1** 才算「转红」，2/3/4/5 一律判「没跑起来」⇒ 取证失败（不是转红）。**第五版**：新增 `_failureMarkerFound` ⇒ 退出码 1 时**还必须**在输出里找到**这条用例自己的**失败标记（`FAILED <nodeid>` 整行匹配）⇒ 否则「别的用例失败」会被算成「这条守卫转红」（代码评审 MEDIUM-4）。**收尾拆分**：清单（55 组数据）移到 `backend/scripts/ci_mutation_cases.py`，本文件只留**跑者**（改坏 → 跑用例 → 判三态）——拆分前 826 行 ⇒ 超 800 行上限 ⇒ 拆后 159 + 695 行 |
+| `backend/scripts/ci_mutation_cases.py` | **收尾新建**：变异的**纯数据**清单（与跑者**同族** ⇒ 同进 CI 相关面 + CODEOWNERS）；**第四版**增到 58 组，**第五版**增到 **65** 组 |
 | `backend/app/tests/unit/test_ci_gh.py` | 树解析 / merge-base / 三点语义 / 无 300 上限 / 改名 四个小节；树不变式 3 条；`truncated` 的载荷改成**带嵌套路径**。**第三版**：`RunHeadInfo` 增两字段后 `_headInfo` 同步；`test_parseTreePathShas_rejects_a_string_false_truncated_flag` 随文件拆分搬回本文件 |
 | `backend/app/tests/unit/test_ci_main_tip.py` | **第三版新建**：`mainTipCutoff`（**第四版**：优先 `created_at` / 回退 `run_started_at` / 两者皆缺则抛错 / **必须 keyword-only 传**）、`_parseMainTipSha`（三条硬条件 + 时间窗 + 分页）、`fetchMainTipShaAt`（查询串 + `--paginate --slurp`）；**第四版新增 PR #105 复跑锚点的离线回放**（证明夹具有鉴别力：错锚给出另一个答案） |
 | `backend/app/tests/unit/test_ci_surface.py` | **第三版重写**（737 行）：判定集合 = `A ∪ P`、`M_T` 的取法与 fail-closed、归因措辞 |
 | `backend/app/tests/unit/test_ci_main_tip_note.py` | **第三版新建**：基线 ≠ `M_T` ⇒ 报告里必须有提示**与处置办法**；同底座 ⇒ **不**出现该提示（反向守卫）；「归因不到本 PR」必须如实说 |
 | `backend/app/tests/unit/test_ci_mutation_evidence.py` | **第三版新建**：钉住 `run_case` 的**三态**语义（退出码 0/1/2/3/4/5 各自的判定）——防止把「用例没跑起来」冒充成「守卫抓到了变异」|
-| `backend/app/tests/unit/test_ci_merge_gate_workflow.py` | 「基线查询只取 push run」1 条；基线取「PR CI 事件派发之前」的 run 1 条；`PR_RUN_CREATED_AT` 暴露给 diff 步骤 1 条；空时间戳 fail-closed 1 条；**第四版**：**必须取 `created_at`、不得取 `run_started_at`** 1 条；**`M_T` 必须由工具独立取** 1 条 |
+| `backend/app/tests/unit/test_ci_merge_gate_workflow.py` | 「基线查询只取 push run」1 条；基线取「PR CI 事件派发之前」的 run 1 条；`PR_RUN_CREATED_AT` 暴露给 diff 步骤 1 条；空时间戳 fail-closed 1 条；**第四版**：**必须取 `created_at`、不得取 `run_started_at`** 1 条；**`M_T` 必须由工具独立取** 1 条；**第五版**：jq **独立复核** `head_branch == "main"` / `status == "completed"` / `head_repository` 1 条 |
+| `backend/app/tests/unit/test_ci_surface_frontend_reverse.py` | **第五版新建**：前端 CI 定义文件的**反查守卫** —— 从 `frontend/` 的实际文件与 `vitest.config.ts` 声明的 setupFiles 反查 ⇒ 新增配置文件必须入 `_CI_SURFACE_PATTERNS` ⇒ 堵住「换掉前端测试口径 ⇒ 失败集合不可比 ⇒ 假净新增 0」的绕过链（安全评审 CRITICAL-1） |
 | `backend/app/tests/unit/test_ci_head.py` | `RunHeadInfo` 增 `createdAt` / `runStartedAt` 后 `_headInfo` 同步 |
 | `backend/app/tests/unit/_ci_gate_support.py` | `stubCiSurface` 增 `netChangedFiles` / `unattributedCiFiles` / `baseTrustError` / `mainAdvanceFiles` / `mainTipSha` 参数 |
 | `backend/app/tests/unit/test_ci_failure_set.py` / `test_ci_failure_set_flakes.py` | **收尾拆分**：新增的三条（「归因不到本 PR ⇒ 退出码 6」「基线不可信 ⇒ 退出码 3」「两侧任一侧改过的文件 ⇒ 不豁免」）移到新文件 `test_ci_failure_set_surface.py` ⇒ 两个原文件回到各自的基线行数（1243 / 782，**前者本就超 800 行上限，属既有欠账，本批不使其更糟**）|
-| `Harness/rules/开发流程规范.md` | 第 4 条：判定集合表 + 三条硬纪律 + 基线可信性 + 豁免前置条件 + 「分支以 main 的 tip 为底座起」的过程规则 |
+| `Harness/rules/开发流程规范.md` | 第 4 条：判定集合表 + 三条硬纪律 + 基线可信性 + 豁免前置条件 + 「分支以 main 的 tip 为底座起」的过程规则。**第五版**：上界**不加宽限**、`mainTipCutoff` 只接 `createdAt`、**第一父链腿**的取法与禁忌、**祖先关系核对**、处置办法改为「推一个新 commit」 |
 | `Harness/changes/2026-11-05-defect-priority-plan/plan.md` / `summary.md` | N6 行更新为最终设计 |
 
 **本批零 DDL、零生产写、零生产读。**
@@ -322,12 +430,18 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 
 ### 4.1 测试
 
-`pytest app/tests/unit -k 'ci_'`：**337 passed / 19 skipped / 0 failed**（19 skipped 全部是
+`pytest app/tests/unit -k 'ci_'`：**361 passed / 19 skipped / 0 failed**（19 skipped 全部是
 「行为部分需要 bash ≥ 4.4」的本机限制，CI 必跑）。
+（第四版基线：337 passed / 19 skipped；第五版新增 **24** 条 ⇒ **净新增失败 0**。）
 
 - 第三版新增用例：`test_ci_surface.py`（重写，34 条）、`test_ci_main_tip.py`（新建，17 条）、
   `test_ci_main_tip_note.py`（新建，4 条）、`test_ci_mutation_evidence.py`（新建，7 条）、
   `test_ci_merge_gate_workflow.py`（+2 条）、`test_ci_codeowners.py`（+1 条）。
+- **第五版新增用例**：`test_ci_surface_frontend_reverse.py`（**新建**）、
+  `test_ci_main_tip.py`（+5 条：第一父链腿）、`test_ci_surface.py`（+2 条：并集 / 祖先核对）、
+  `test_ci_mutation_evidence.py`（+3 条：失败标记必须属于这条用例）、
+  `test_ci_merge_gate_workflow.py`（+1 条：jq 独立复核）、
+  `test_ci_main_tip_note.py`（+1 条：处置不得是「重新运行 PR 的 CI」）。
 - **净新增失败 0**（main 基线本身是红的 ⇒ 判据是**失败集合对差**，不是「变绿」）。
 
 ### 4.2 变异取证（守卫的验收标准 = 「守卫会红」≠「守卫在测你想测的东西」）
@@ -374,6 +488,12 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 
 ⇒ **58 组变异（M1–M58）全部被守卫抓住** ⇒ 净漏 **0**（其中本批新锚/新守卫 = M37–M58）。
 
+> ⚠️ **第五版重锚说明**：上表里 M48/M49/M50 的**锚点与目标用例已随第五版过期** ——
+> M48 现打「上界不加宽限」（`test_mainTipCutoff_applies_no_grace_window`）、
+> M49 现打「不回退 `run_started_at`」（`test_mainTipCutoff_does_not_fall_back_to_run_started_at`）、
+> M50 现打「surface 级 fail-closed」（`test_resolveCiSurface_fails_closed_when_the_pr_run_has_no_timestamp`）；
+> M57/M58 的锚点同步更新。全量重跑见 §4.2.3。
+
 ### 4.2.2 第四版重锚 + 新增 3 组（M56–M58）
 
 | # | 变异 | 期望转红的用例 | 实测 |
@@ -386,6 +506,22 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 ⇒ M58 覆盖「**防止位置传参把锚点写反**」（本次缺陷的真正成因）。
 
 全量重跑 `backend/scripts/ci_mutation_evidence.py`（**58 组**）：**合计 58 组变异，净漏 0**。
+
+### 4.2.3 第五版重锚 + 新增 7 组（M59–M65）
+
+| # | 变异 | 期望转红的用例 | 实测 |
+|---|---|---|---|
+| M59 | `A` 退回**单腿**（丢掉并集 ⇒ 漏掉另一条腿推进的那段） | `test_the_union_of_the_legs_is_actually_exercised` | **转红** ✔ |
+| M60 | 去掉**祖先核对**（`if mergeBase != baseSha:` → `if False:`） | `test_resolveCiSurface_fails_closed_when_the_base_is_not_an_ancestor` | **转红** ✔ |
+| M61 | 祖先核对**报错被吞掉**（`return None`） | `test_resolveCiSurface_fails_closed_when_the_ancestor_check_cannot_be_run` | **转红** ✔ |
+| M62 | 第一父链腿取 `parents[-1]` ⇒ **侧提交**进主线 | `test_fetchMainFirstParentTipAt_never_returns_a_side_commit` | **转红** ✔ |
+| M63 | 回溯跳数上限放大到 `10 ** 9`（⇒ 不报错、无限回溯） | `test_fetchMainFirstParentTipAt_raises_when_the_chain_is_too_long` | **转红** ✔ |
+| M64 | 畸形日期被容忍 ⇒ 当成 1970 epoch | `test_fetchMainFirstParentTipAt_raises_on_a_malformed_history` | **转红** ✔ |
+| M65 | workflow 的 jq 去掉 `status == "completed"` 复核 | `test_merge_gate_base_run_query_rechecks_the_run_fields_in_jq` | **转红** ✔ |
+
+⇒ 全量重跑（**65 组**）：**合计 65 组变异，净漏 0**。
+⇒ M62/M63/M64 覆盖「**第一父链腿不许拿侧提交、不许无限回溯、不许容忍畸形条目**」
+⇒ 每一个都是 fail-open 方向的洞。
 
 > ⚠️ **全量首跑曾报「净漏 1」（M39）** —— 不是守卫漏网，是**变异锚点过期**：
 > `M_T` 改成「两条腿」之后，`_fetchMainTips` 里那段「取不到就退回 PR 头」的源码**已被重写**
@@ -437,19 +573,28 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
   ⇒ 判定集合是该差异的**超集** ⇒ 偏保守（可能多拦一次，**不会漏判**）。
 - ⚠️ **没有**逐字核对 `M_T` 与 run 当时用的合并底座是否**同一个 commit** ——
   那个 commit 已被 GitHub 回收（§1.3）⇒ 只能用「不晚于上界的**最新** main push run」作代理
-  ⇒ 若 main 在 PR run 的那 120 秒宽限内又推了一次，`M_T` 会**偏新** ⇒ `A` 偏大 ⇒ 偏保守。
+  ⇒ 若 main 的 push run 的 `created_at` **晚于** 派发时刻（排队）但在第一父链上已可见
+  ⇒ `M_T` 由**第一父链腿**兜住 ⇒ run 腿的偏差由并集吸收 ⇒ 偏保守。
 - ⚠️ **`M_T` 取两条腿，各自都可能偏旧（2026-11-07 安全评审 HIGH-2）**：
   - **run 腿**（main 的 push run 列表）：main 的那次 push **没触发** workflow、
-    或它的 run **创建得太晚**（排队 > 宽限）⇒ 偏旧 ⇒ `A` 漏算 ⇒ fail-open；
-  - **commit-date 腿**（commits API）：commit 日期 ≠ push 时刻（rebase / 时钟偏斜）⇒ 也可能偏旧。
+    或它的 run **创建得太晚** ⇒ 偏旧 ⇒ `A` 漏算 ⇒ fail-open；
+  - **第一父链腿**（`fetchMainFirstParentTipAt`）：committer 日期 ≠ 进 main 的时刻
+    （侧提交进主线）⇒ 单独看也可能偏旧（但它只在主线上 ⇒ 不会混入侧提交的 diff）。
   ⇒ `A` 取**两条腿的并集** ⇒ 谁漏掉的那一段，另一条兜住。
   ⚠️ 两条腿都偏旧**且偏到同一处**时仍会漏 ⇒ 残留窗口。
-- ⚠️ **前端 CI 面不在本批的判定范围内**（明确裁决，不是遗漏）：
+- ⚠️ **畸形的 `created_at`**（main push run 的时间戳解析失败）⇒ 第五版**报错**（fail-closed），
+  不静默跳过 —— 静默跳过 = 那条 run 从候选里消失 ⇒ 可能取到错的 `M_T`。
+  （PR 侧 `created_at` 缺失同样 fail-closed，见 §2.10.1。）
+- ⚠️ **fork PR 的新鲜度守卫被跳过**（安全评审 MEDIUM-2，遗留）：`_considerMainRun` 的
+  `head_repository` 硬条件在 fork PR 场景下照常生效 ⇒ 基线不会落到 fork；
+  但 **PR run 本身**若来自 fork，其 `created_at` 与派发时刻的关系**未额外校验** ⇒ 残留窗口极小，暂不处理。
+- ⚠️ **前端 CI 面的「按用例」失败集合仍不在本批范围**（第五版已把前端**配置文件**
+  纳入 CI 相关面与 CODEOWNERS，堵住绕过链 ⇒ 见 §2.10.4；但 vitest 的**失败明细**
+  仍不被解析 ⇒ 前端 job 只以一个不透明 ID 参与对差）：
   `ci.yml` 的 `Frontend / typecheck + coverage` 是**非分片 job** ⇒ 本工具**不解析** vitest 的
   失败明细 ⇒ 它在失败集合里只以**一个不透明 ID**（`job:Frontend / typecheck + coverage`）出现。
-  ⇒ 「改前端测试配置（`frontend/vitest.config.ts` / `package.json` / `tsconfig.json`）
-  ⇒ 哪些用例被收集、覆盖率阈值是多少」**不在**「CI 相关面清单」里 ⇒ 本闸门**不会**因它判退出码 6。
-  ⇒ 后果：前端测试配置的改动只会被**失败集合对差**以「job 整体红/绿」的形式体现
+  ⇒ 后果：前端测试配置的改动现在**会**判退出码 6（配置文件在 CI 相关面清单里）；
+  但**测试代码本身**的改动只会被**失败集合对差**以「job 整体红/绿」的形式体现
   ⇒ 若改配置让前端 job 由红转绿 ⇒ 表现为「**净丢失**」（退出码 5，仍须人工确认）
   ⇒ **不会静默放行**；但若改动让 job 仍红 ⇒ 失败集合不变 ⇒ 判「净新增 0」⇒ **对差看不见它**。
   ⇒ 要根治需要给前端 job 也做「按用例 ID 的失败集合」⇒ 那是**另一个立项**（要写 vitest 失败解析器），

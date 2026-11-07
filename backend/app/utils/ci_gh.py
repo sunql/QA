@@ -18,7 +18,7 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from app.utils.ci_text import sanitizeForReport
 
@@ -45,16 +45,16 @@ _ISO_TIMESTAMP_PATTERN = re.compile(
     r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
 )
 
-# 「PR run 开跑时刻」的**宽限秒数**。
+# 「沿 main 的第一父链回溯」的**最大跳数**（防无限回溯 ⇒ 判不出来）。
 #
-# ⚠️ 为什么要宽限：main 的 push run 的 `created_at` 与 push 动作本身存在**秒级滞后**
-#   ⇒ 若严格按 `run_started_at` 取 main 的 tip，可能取到**更早**的 main
-#   ⇒ 那次合并实际用的 main 底座落在判定集之外 ⇒ **fail-open**（main 改了 CI 文件
-#   而 PR 没跟上 ⇒ 两次 run 的 CI 定义不同 ⇒ 失败集合不可比 ⇒ 判不出来）。
-# ⇒ 工具侧多给 2 分钟宽限 ⇒ 取到的 main tip **不早于**实际底座 ⇒ 保守（宁可多仲裁一次）。
-# ⚠️ 代价：main 在 PR run 开跑后 2 分钟内推进过 ⇒ 判定集偏大 ⇒ 可能多判一次
-#   ⇒ 处置办法是「重新运行 PR 的 CI」（见 `Harness/rules/开发流程规范.md`）。
-_MAIN_TIP_GRACE_SECONDS = 120
+# ⚠️ 为什么要有上限：main 高速推进时，回溯到「事件派发那一刻」的 tip 可能要几十跳
+#   ⇒ 而每跳都要一次 API 调用 ⇒ 必须封顶 ⇒ 超上限 ⇒ 报错（fail-closed），
+#   **不能**「回溯到跳不动为止然后拿个错的 sha 当底座」⇒ 那会让 `A` 腿算错 ⇒ fail-open。
+_MAX_FIRST_PARENT_HOPS = 100
+
+# 一次取回 main 的近期提交历史的条数（够覆盖「回溯到派发时刻」即可，
+# 超出部分按需单个补取）。
+_MAIN_HISTORY_PAGE_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -274,7 +274,7 @@ def fetchBranchHeadSha(repo: str, branch: str) -> str:
 #
 # ⚠️ **为什么需要它**：`ci.yml` 对 `pull_request` 触发，三个 `actions/checkout`
 #   **都不带 `with: ref:`** ⇒ 检出 `refs/pull/N/merge` ⇒ PR 的 CI 跑的是
-#   **merge(main@开跑时刻, PR 头)** ⇒ 判定「两次 run 的 CI 定义是否相同」
+#   **merge(main@事件派发时刻, PR 头)** ⇒ 判定「两次 run 的 CI 定义是否相同」
 #   必须知道那次合并用的 **main 侧底座**。
 #
 # ⚠️ **为什么不用 `pulls/{n}.merge_commit_sha`**：
@@ -317,8 +317,8 @@ def _parseIsoTimestamp(value: str) -> datetime | None:
     return parsed
 
 
-def mainTipCutoff(*, createdAt: str, runStartedAt: str) -> datetime:
-    """PR run 的「main tip 取数上界」= **事件派发时刻** + 宽限。
+def mainTipCutoff(*, createdAt: str) -> datetime:
+    """PR run 的「main tip 取数上界」= **事件派发时刻**（`created_at`），**不加宽限**。
 
     ⚠️ 上界必须锚在 **`created_at`**（事件派发时刻），不是 `run_started_at`：
     `pull_request` 事件的**合并 commit 在派发那一刻就被冻结**了
@@ -337,22 +337,25 @@ def mainTipCutoff(*, createdAt: str, runStartedAt: str) -> datetime:
     而闸门侧若同样用它取基线 ⇒ 基线树与执行树都落到那个更晚的 main
     ⇒ `A` 变成空集 ⇒ 两次 run 实际跑的 CI 定义不同却判「可合并」⇒ **fail-open**。
 
-    ⚠️ **参数是 keyword-only**：这次的缺陷正是「位置传参 + 锚点写反」
-    ⇒ 两个时间戳都是合法值 ⇒ 传反了**不会报错** ⇒ 判定静默用错锚点。
-    ⇒ 具名传 ⇒ 顺序再也没法搞错。
+    ⚠️⚠️ **2026-11-07 代码评审 MEDIUM-1：宽限已删除**（原来 `+120s`）：
+    闸门侧（`merge-gate.yml`）取基线用的上界是 `PR_RUN_CREATED_AT`（**无宽限**）
+    ⇒ 工具侧多给 2 分钟 ⇒ 工具侧的 `M_T` 比闸门侧的基线**更新**
+    ⇒ `A` 腿把「派发之后 main 才推进的 CI 改动」也算进来
+    ⇒ **判定集偏大 ⇒ 假拦**（main 在 PR 派发后 2 分钟内推进过就中招）。
+    ⇒ 两边必须**同一个上界、同一个比较符** ⇒ 工具侧也用 `created_at` 原值。
 
-    ⇒ `created_at` 缺失时才回退 `run_started_at`（偏保守 ⇒ 宁可多仲裁一次）；
-    两者都没有 ⇒ 判定不出来。
+    ⚠️ **`created_at` 缺失 ⇒ 判定不出来**（不再回退 `run_started_at`）：
+    闸门侧没有回退（`PR_RUN_CREATED_AT` 为空 ⇒ 直接 fail-closed）
+    ⇒ 工具侧若回退 ⇒ 两边上界不同 ⇒ 又是「基线树 ≠ 执行树」⇒ fail-open。
+    ⇒ **两边必须同时 fail-closed**。
     """
-    started = _parseIsoTimestamp(createdAt)
-    if started is None:
-        started = _parseIsoTimestamp(runStartedAt)
-    if started is None:
+    dispatched = _parseIsoTimestamp(createdAt)
+    if dispatched is None:
         raise ValueError(
-            "PR run 的 created_at / run_started_at 都缺失或形态异常"
+            "PR run 的 created_at 缺失或形态异常"
             " ⇒ 算不出 main 侧的取数上界 ⇒ 判定不出来"
         )
-    return started + timedelta(seconds=_MAIN_TIP_GRACE_SECONDS)
+    return dispatched
 
 
 def fetchMainTipShaAt(repo: str, cutoffIso: str) -> str:
@@ -450,78 +453,138 @@ def _considerMainRun(
 
 
 # --------------------------------------------------------------------------
-# main 的 tip：**第二条腿**（不依赖 run 列表）
+# main 的 tip：**第二条腿**（沿 main 的**第一父链**回溯，不依赖 run 列表）
 # --------------------------------------------------------------------------
 #
 # ⚠️ **为什么要有第二条腿**（2026-11-07 安全评审 HIGH-2）：
 # `M_T` 若只从「main 的 push run 列表」反推，有两个**漏检**方向 ——
 # ① main 的那次 push **没触发** workflow ⇒ run 列表里根本没有它 ⇒ `M_T` 偏旧；
-# ② 那次 push 的 run **创建得晚**（排队 / 延迟 > 宽限）⇒ 落在上界之外 ⇒ `M_T` 偏旧。
+# ② 那次 push 的 run **创建得晚**（晚于事件派发那一刻）⇒ 落在上界之外 ⇒ `M_T` 偏旧。
 # ⇒ 偏旧 ⇒ `A` 腿漏掉 main 的推进 ⇒ 两次 run 的 CI 定义可能其实**不同**
 # ⇒ 失败集合不可比 ⇒ 却判「可合并」⇒ **fail-open**。
 #
-# ⇒ 第二条腿直接问 commits API「main 在那一刻到哪」，**完全不依赖 run 列表**
-# ⇒ 补上 ① ② 两个洞。
+# ⚠️⚠️ **第二条腿为什么必须沿「第一父链」**（2026-11-07 代码评审 MEDIUM-2）：
+# 原来的实现是 `commits?sha=main&until=<上界>` ⇒ 它返回的是
+# 「**从 main 可达**、且 commit 日期 ≤ 上界的最新一次提交」
+# ⇒ 那个提交**可能是侧提交**（后来被 merge 进 main 的分支上的提交，
+#    作者日期早于上界、但它进 main 的时刻在上界之后）
+# ⇒ 它的 diff **不是** main 在那一刻的推进 ⇒ 把它算进 `A` 腿 ⇒ **假拦**
+# （且归因会把 main 自己的 CI 改动说成「与本 PR 无关的 CI 面差异」）。
+#
+# ⇒ 改成：从 **main 的当前 tip** 出发，沿 **`parents[0]`**（第一父）回溯，
+#   直到 commit 的日期 ≤ 上界 ⇒ 得到的必然是 **main 主线**在该时刻的 tip
+# ⇒ 侧提交**永远不在主线**上 ⇒ 天然排除。
 #
 # ⚠️ 两条腿**取并集**用（见 `ci_surface.py`）：commit 日期 ≠ push 时刻
-#   （rebase / 时钟偏斜）⇒ 第二条腿自己也会偏旧 ⇒ 单用任何一条都会漏。
+#   （rebase / 时钟偏斜）⇒ 第二条腿自己也会偏旧/偏新 ⇒ 单用任何一条都会漏。
 # ⇒ 谁漏掉的那一段，另一条兜住。
 
 
-def _utcZuluTimestamp(cutoffIso: str) -> str:
-    """把取数上界规范化成 UTC 的 `...Z` 形态。
+def _fetchMainTipRefSha(repo: str) -> str:
+    """取 **main 分支当前 tip** 的 commit sha（走 git ref，不靠提交列表的首条）。"""
+    payload = _runGh(["api", f"repos/{repo}/git/ref/heads/main"])
+    parsed = json.loads(payload)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"gh 返回了意料之外的 JSON 结构：{type(parsed).__name__}")
+    sha = str((parsed.get("object") or {}).get("sha") or "")
+    if not _SHA_PATTERN.match(sha):
+        raise ValueError(f"main 的 tip sha 形态异常：{sanitizeForReport(sha)}")
+    return sha
 
-    ⚠️ **必须用 `Z` 形态**：ISO 的 `+00:00` 里的 `+` 在 query string 里
-    会被解码成**空格** ⇒ `until=2026-11-06T19:40:13 00:00` ⇒ 服务端拿到的是
-    一个**非法**的上界 ⇒ 要么报错、要么按「无上界」处理 ⇒ 取到 main 的**最新**。
-    ⇒ 统一转成 `Z`（没有 `+`，不需要 URL 编码）。
+
+def _parseCommitEntries(entries: object) -> dict[str, tuple[datetime, str | None]]:
+    """把 commits 响应解析成 `sha → (提交日期, 第一父 sha)` 的映射。
+
+    ⚠️ **畸形条目一律报错**（fail-closed）：静默跳过 = 那条提交从历史里消失
+    ⇒ 回溯链断掉 ⇒ 拿到的 tip 是错的 ⇒ `A` 腿算错 ⇒ fail-open。
     """
-    parsed = _parseIsoTimestamp(cutoffIso)
-    if parsed is None:
-        raise ValueError(f"取数上界形态异常：{sanitizeForReport(cutoffIso)}")
-    return parsed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not isinstance(entries, list):
+        raise ValueError(f"gh 返回了意料之外的 JSON 结构：{type(entries).__name__}")
+    history: dict[str, tuple[datetime, str | None]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError(f"commit 条目不是对象：{type(entry).__name__}")
+        sha = str(entry.get("sha") or "")
+        if not _SHA_PATTERN.match(sha):
+            raise ValueError(f"commit 的 sha 形态异常：{sanitizeForReport(sha)}")
+        commitData = entry.get("commit")
+        dateRaw = ""
+        if isinstance(commitData, dict):
+            committer = commitData.get("committer")
+            if isinstance(committer, dict):
+                dateRaw = str(committer.get("date") or "")
+        committed = _parseIsoTimestamp(dateRaw)
+        if committed is None:
+            raise ValueError(f"commit 的 committer.date 形态异常：{sanitizeForReport(dateRaw)}")
+        parents = entry.get("parents")
+        if not isinstance(parents, list):
+            raise ValueError(f"commit 的 parents 形态异常：{type(parents).__name__}")
+        firstParent: str | None = None
+        if parents:
+            first = parents[0]
+            firstParent = str((first or {}).get("sha") or "") if isinstance(first, dict) else ""
+            if not _SHA_PATTERN.match(firstParent):
+                raise ValueError(f"commit 的第一父 sha 形态异常：{sanitizeForReport(firstParent)}")
+        history[sha] = (committed, firstParent)
+    return history
 
 
-def fetchMainTipShaByCommitDate(repo: str, cutoffIso: str) -> str:
-    """取「commit 日期不晚于 `cutoffIso` 的、main 分支上最新的一次提交」的 sha。
+def _fetchMainHistory(repo: str) -> dict[str, tuple[datetime, str | None]]:
+    """取 main 的近期提交历史（`sha → (日期, 第一父)`）。
+
+    ⚠️ 一次取回一页（`_MAIN_HISTORY_PAGE_SIZE` 条）⇒ 回溯链基本都在里面；
+    超出部分由 `_fetchCommitEntry` 单个补取。
+    """
+    payload = _runGh(
+        [
+            "api",
+            f"repos/{repo}/commits?sha=main&per_page={_MAIN_HISTORY_PAGE_SIZE}",
+        ]
+    )
+    history = _parseCommitEntries(json.loads(payload))
+    if not history:
+        raise ValueError("main 的提交历史为空 ⇒ 算不出 main 侧底座 ⇒ 判定不出来")
+    return history
+
+
+def _fetchCommitEntry(repo: str, sha: str) -> tuple[datetime, str | None]:
+    """单个取回某个 commit 的（日期, 第一父）。"""
+    payload = _runGh(["api", f"repos/{repo}/commits/{sha}"])
+    history = _parseCommitEntries([json.loads(payload)])
+    entry = history.get(sha)
+    if entry is None:
+        raise ValueError(f"commit {sha[:12]}… 的响应里没有它自己 ⇒ 判定不出来")
+    return entry
+
+
+def fetchMainFirstParentTipAt(repo: str, cutoffIso: str) -> str:
+    """取「main 主线在 `cutoffIso` 那一刻的 tip」的 sha（沿第一父链回溯）。
 
     ⚠️ 这条腿**不依赖 run 列表** ⇒ main 的 push 没触发 workflow、
-    或它的 run 创建得太晚，都不会让它偏旧（见本节上方的说明）。
+    或它的 run 创建得晚于事件派发，都不会让它偏旧（见本节上方的说明）。
     """
     invalidReason = validateRepo(repo)
     if invalidReason is not None:
         raise ValueError(invalidReason)
-    cutoff = _utcZuluTimestamp(cutoffIso)
-    payload = _runGh(
-        [
-            "api",
-            f"repos/{repo}/commits?sha=main&until={cutoff}&per_page=1",
-        ]
+    cutoff = _parseIsoTimestamp(cutoffIso)
+    if cutoff is None:
+        raise ValueError(f"取数上界形态异常：{sanitizeForReport(cutoffIso)}")
+    history = _fetchMainHistory(repo)
+    current = _fetchMainTipRefSha(repo)
+    for _ in range(_MAX_FIRST_PARENT_HOPS):
+        entry = history.get(current)
+        if entry is None:
+            entry = _fetchCommitEntry(repo, current)
+        committed, firstParent = entry
+        if committed <= cutoff:
+            return current
+        if firstParent is None:
+            return current
+        current = firstParent
+    raise ValueError(
+        f"沿 main 的第一父链回溯超过 {_MAX_FIRST_PARENT_HOPS} 跳"
+        " ⇒ 算不出 main 在该时刻的 tip ⇒ 判定不出来"
     )
-    return _parseMainTipShaByCommitDate(payload, cutoff)
-
-
-def _parseMainTipShaByCommitDate(payload: str, cutoffIso: str) -> str:
-    """从 commits 响应里取第一条（= main 在上界之前的最新一次提交）的 sha。
-
-    ⚠️ **空列表 = 判不出来**（不是「main 没有推进」）：上界早于仓库的
-    第一次提交、或 API 形态变了 ⇒ 都不能当成「没推进」⇒ 报错（fail-closed）。
-    """
-    parsed = json.loads(payload)
-    if not isinstance(parsed, list):
-        raise ValueError(f"gh 返回了意料之外的 JSON 结构：{type(parsed).__name__}")
-    if not parsed:
-        raise ValueError(
-            f"main 在 {sanitizeForReport(cutoffIso)} 之前没有任何提交"
-            " ⇒ 算不出 main 的推进上界 ⇒ 判定不出来"
-        )
-    head = parsed[0]
-    if not isinstance(head, dict):
-        raise ValueError(f"commit 条目不是对象：{type(head).__name__}")
-    sha = str(head.get("sha") or "")
-    if not _SHA_PATTERN.match(sha):
-        raise ValueError(f"main 的 head commit sha 形态异常：{sanitizeForReport(sha)}")
-    return sha
 
 
 # --------------------------------------------------------------------------

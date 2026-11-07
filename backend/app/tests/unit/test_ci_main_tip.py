@@ -88,36 +88,52 @@ def test_mainTipCutoff_prefers_created_at() -> None:
     而闸门侧若同样用它取基线 ⇒ 基线树与执行树都落到那个更晚的 main
     ⇒ `A` 变成空集 ⇒ 两次 run 实际跑的 CI 定义不同却判「可合并」⇒ **fail-open**。
     """
-    cutoff = ci_gh.mainTipCutoff(
-        createdAt="2026-11-04T20:38:19Z", runStartedAt="2026-11-04T22:24:11Z"
-    )
+    cutoff = ci_gh.mainTipCutoff(createdAt="2026-11-04T20:38:19Z")
 
-    assert cutoff.isoformat().startswith("2026-11-04T20:40:19")
+    assert cutoff.isoformat().startswith("2026-11-04T20:38:19")
 
 
-def test_mainTipCutoff_falls_back_to_run_started_at() -> None:
-    """`created_at` 缺失 ⇒ 回退 `run_started_at`（偏保守 ⇒ 宁可多仲裁一次）。"""
-    cutoff = ci_gh.mainTipCutoff(createdAt="", runStartedAt="2026-11-05T19:18:21Z")
+def test_mainTipCutoff_applies_no_grace_window() -> None:
+    """上界 = 锚点**原值**，**不加宽限**。
 
-    assert cutoff.isoformat().startswith("2026-11-05T19:20:21")
-
-
-def test_mainTipCutoff_applies_the_grace_window() -> None:
-    """上界 = 锚点 + **120 秒宽限**。
-
-    ⚠️ 为什么要有宽限：main 的 push run 的 `created_at` 与 push 动作本身存在
-    **秒级滞后** ⇒ 严格按锚点取可能取到**更早**的 main ⇒ 那次合并实际用的
-    main 底座落在判定集之外 ⇒ 两次 run 的 CI 定义可能其实不同 ⇒ **fail-open**。
-    ⇒ 多给 2 分钟 ⇒ 取到的 main tip **不早于**实际底座 ⇒ 保守。
+    ⚠️ 2026-11-07 代码评审 MEDIUM-1：闸门侧（`merge-gate.yml`）取基线用的
+    上界是 `PR_RUN_CREATED_AT`（**无宽限**）⇒ 工具侧若多给 2 分钟
+    ⇒ 工具侧的 `M_T` 比闸门侧的基线**更新**
+    ⇒ `A` 腿把「派发之后 main 才推进的 CI 改动」也算进来
+    ⇒ **判定集偏大 ⇒ 假拦**（main 在 PR 派发后 2 分钟内推进过就中招）。
+    ⇒ 两边必须**同一个上界、同一个比较符** ⇒ 工具侧也用 `created_at` 原值。
     """
     anchor = ci_gh._parseIsoTimestamp("2026-11-04T20:38:19Z")
     assert anchor is not None
 
-    cutoff = ci_gh.mainTipCutoff(
-        createdAt="2026-11-04T20:38:19Z", runStartedAt="2026-11-04T22:24:11Z"
-    )
+    cutoff = ci_gh.mainTipCutoff(createdAt="2026-11-04T20:38:19Z")
 
-    assert (cutoff - anchor).total_seconds() == 120
+    assert cutoff == anchor, "上界多加了宽限 ⇒ 与闸门侧不同 ⇒ 假拦"
+
+
+def test_mainTipCutoff_does_not_fall_back_to_run_started_at() -> None:
+    """`created_at` 缺失 ⇒ **不**回退 ⇒ 判定不出来（fail-closed）。
+
+    ⚠️ 2026-11-07 代码评审 MEDIUM-3（fail-closed 对称）：
+    闸门侧（`merge-gate.yml`）没有回退 —— `PR_RUN_CREATED_AT` 为空
+    ⇒ 直接 fail-closed（退出码 3）⇒ 工具侧若回退 `run_started_at`
+    ⇒ 两边的上界不同 ⇒ 基线树 ≠ 执行树 ⇒ **fail-open**。
+    ⇒ **两边必须同时 fail-closed**。
+    """
+    with pytest.raises(ValueError):
+        ci_gh.mainTipCutoff(createdAt="")
+
+
+def test_mainTipCutoff_rejects_the_removed_run_started_at_parameter() -> None:
+    """`runStartedAt` 这个参数**已被删除** ⇒ 传它必须报错（而不是被静默忽略）。
+
+    ⚠️ 静默忽略 = 调用方以为自己传了兜底 ⇒ 实际没有 ⇒ 两侧上界不同
+    ⇒ 又是「基线树 ≠ 执行树」⇒ fail-open。
+    """
+    with pytest.raises(TypeError):
+        ci_gh.mainTipCutoff(  # type: ignore[call-arg]
+            createdAt="2026-11-04T20:38:19Z", runStartedAt="2026-11-04T22:24:11Z"
+        )
 
 
 def test_mainTipCutoff_requires_explicitly_named_timestamps() -> None:
@@ -130,17 +146,17 @@ def test_mainTipCutoff_requires_explicitly_named_timestamps() -> None:
     ⇒ 改成 keyword-only ⇒ 传参顺序再也没法搞错。
     """
     with pytest.raises(TypeError):
-        ci_gh.mainTipCutoff("2026-11-04T20:38:19Z", "2026-11-04T22:24:11Z")  # type: ignore[misc]
+        ci_gh.mainTipCutoff("2026-11-04T20:38:19Z")  # type: ignore[misc]
 
 
-def test_mainTipCutoff_raises_when_both_timestamps_are_missing() -> None:
-    """两个时间戳都没有 ⇒ 算不出上界 ⇒ 判定不出来（不能当成「无上界」）。
+def test_mainTipCutoff_raises_when_created_at_is_missing() -> None:
+    """`created_at` 没有 ⇒ 算不出上界 ⇒ 判定不出来（不能当成「无上界」）。
 
     ⚠️ 空上界会让「不晚于上界」恒真 ⇒ `M_T` 退化成「main 上最新的 run」
     ⇒ 两次 run 的代码差异被放大 ⇒ **系统性假拦**。
     """
     with pytest.raises(ValueError):
-        ci_gh.mainTipCutoff(createdAt="", runStartedAt="")
+        ci_gh.mainTipCutoff(createdAt="")
 
 
 def test_the_pr105_rerun_anchor_picks_the_dispatch_time_main_tip() -> None:
@@ -154,9 +170,9 @@ def test_the_pr105_rerun_anchor_picks_the_dispatch_time_main_tip() -> None:
       `8411697e` 的 run 创建于 `22:23:53Z`（run `41924916158`，那次 main 只改了
       `.github/workflows/merge-gate.yml`）。
 
-    ⇒ 上界锚 `created_at`（+ 宽限 120s ⇒ `20:40:19Z`）⇒ 只命中 `19:49:02Z`
+    ⇒ 上界锚 `created_at`（`20:38:19Z`）⇒ 只命中 `19:49:02Z`
       那次 run ⇒ `M_T` = `83581e10` = 合并 commit 的第一父 ⇒ **一致**。
-    ⇒ 锚 `run_started_at`（⇒ `22:26:11Z`）⇒ 会命中 `22:23:53Z` 那次
+    ⇒ 锚 `run_started_at`（⇒ `22:24:11Z`）⇒ 会命中 `22:23:53Z` 那次
       ⇒ `M_T` = `8411697e` ≠ 实际执行树的底座 ⇒ `A` 被算空 ⇒ fail-open。
     """
     payload = _runsPayload(
@@ -166,9 +182,7 @@ def test_the_pr105_rerun_anchor_picks_the_dispatch_time_main_tip() -> None:
         ]
     )
 
-    cutoff = ci_gh.mainTipCutoff(
-        createdAt="2026-11-04T20:38:19Z", runStartedAt="2026-11-04T22:24:11Z"
-    )
+    cutoff = ci_gh.mainTipCutoff(createdAt="2026-11-04T20:38:19Z")
     sha = ci_gh._parseMainTipSha(payload, cutoff.isoformat(), "sunql/QA")
 
     assert sha == "8" * 40, (
@@ -178,12 +192,147 @@ def test_the_pr105_rerun_anchor_picks_the_dispatch_time_main_tip() -> None:
 
     # 对照：锚点若换成复跑的开跑时刻 ⇒ 取到的是**另一个** commit
     # ⇒ 这条 fixture 确实有区分力（否则上面那条断言是恒真的）。
-    wrongCutoff = ci_gh.mainTipCutoff(
-        createdAt="2026-11-04T22:24:11Z", runStartedAt="2026-11-04T22:24:11Z"
-    )
+    wrongCutoff = ci_gh.mainTipCutoff(createdAt="2026-11-04T22:24:11Z")
     wrongSha = ci_gh._parseMainTipSha(payload, wrongCutoff.isoformat(), "sunql/QA")
 
     assert wrongSha == "4" * 40, "锚点换错时结果没变 ⇒ 这条 fixture 没有区分力"
+
+
+# --------------------------------------------------------------------------
+# 第二条腿：沿 main 的**第一父链**回溯（2026-11-07 代码评审 MEDIUM-2）
+# --------------------------------------------------------------------------
+
+
+def _commitEntry(
+    sha: str,
+    committedAt: str,
+    parents: list[str] | None = None,
+) -> dict:
+    """`GET /repos/{o}/{r}/commits` 响应里的一条 commit。"""
+    return {
+        "sha": sha,
+        "commit": {"committer": {"date": committedAt}},
+        "parents": [{"sha": parent} for parent in (parents or [])],
+    }
+
+
+def _stubMainHistory(
+    monkeypatch: pytest.MonkeyPatch,
+    tipSha: str,
+    history: list[dict],
+) -> None:
+    """把 `_runGh` 换成走「git ref + commits 列表」的假实现。"""
+    historyPayload = json.dumps(history)
+
+    def fakeRunGh(args: list[str]) -> str:
+        path = args[1]
+        if path.endswith("/git/ref/heads/main"):
+            return json.dumps({"object": {"sha": tipSha}})
+        if "/commits?" in path:
+            return historyPayload
+        raise AssertionError(f"测试里没准备这个 API 路径：{path}")
+
+    monkeypatch.setattr(ci_gh, "_runGh", fakeRunGh)
+
+
+def test_fetchMainFirstParentTipAt_walks_back_to_the_first_commit_before_the_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """沿第一父链回溯 ⇒ 取到「日期 ≤ 上界」的**主线** commit。
+
+    ⚠️ 为什么不能直接用 `commits?sha=main&until=<上界>`：它返回的是
+    「从 main **可达**、且日期 ≤ 上界的最新提交」⇒ 那个提交**可能是侧提交**
+    （后来被 merge 进 main 的分支上的提交，作者日期早于上界、但它进 main 的
+    时刻在上界之后）⇒ 它的 diff **不是** main 在那一刻的推进 ⇒ **假拦**。
+    """
+    tip = "f" * 40
+    middle = "e" * 40
+    base = "d" * 40
+    _stubMainHistory(
+        monkeypatch,
+        tip,
+        [
+            _commitEntry(tip, "2026-11-06T19:39:00Z", [middle]),
+            _commitEntry(middle, "2026-11-06T19:37:00Z", [base]),
+            _commitEntry(base, "2026-11-06T19:30:00Z"),
+        ],
+    )
+
+    sha = ci_gh.fetchMainFirstParentTipAt("sunql/QA", "2026-11-06T19:38:13+00:00")
+
+    assert sha == middle
+
+
+def test_fetchMainFirstParentTipAt_never_returns_a_side_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """侧提交（第二父）**永远不在主线**上 ⇒ 不得被回溯链选中。
+
+    ⚠️ 这是「侧提交危害」的**正面回归**：旧实现（`commits?until=`）会返回
+    侧提交 ⇒ 它的 diff 不是 main 的推进 ⇒ 假拦 + 归因错误。
+    """
+    tip = "a" * 40
+    mainLine = "b" * 40
+    sideCommit = "c" * 40
+    _stubMainHistory(
+        monkeypatch,
+        tip,
+        [
+            # tip 的**第一父**是主线 commit，**第二父**是日期更早的侧提交
+            _commitEntry(tip, "2026-11-06T19:39:00Z", [mainLine, sideCommit]),
+            _commitEntry(mainLine, "2026-11-06T19:37:00Z"),
+            _commitEntry(sideCommit, "2026-11-06T19:35:00Z"),
+        ],
+    )
+
+    sha = ci_gh.fetchMainFirstParentTipAt("sunql/QA", "2026-11-06T19:38:13+00:00")
+
+    assert sha == mainLine, "回溯链走到了侧提交 ⇒ 那是 main 的旁支，不是主线"
+
+
+def test_fetchMainFirstParentTipAt_raises_on_a_malformed_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """历史条目畸形 ⇒ **报错**（fail-closed），不静默跳过。
+
+    ⚠️ 静默跳过 = 那条提交从历史里消失 ⇒ 回溯链断掉 ⇒ 拿到的 tip 是错的
+    ⇒ `A` 腿算错 ⇒ **fail-open**。
+    """
+    _stubMainHistory(monkeypatch, "a" * 40, [_commitEntry("a" * 40, "not-a-time")])
+
+    with pytest.raises(ValueError):
+        ci_gh.fetchMainFirstParentTipAt("sunql/QA", "2026-11-06T19:38:13+00:00")
+
+
+def test_fetchMainFirstParentTipAt_raises_on_an_empty_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """历史为空 ⇒ 算不出底座 ⇒ 报错（fail-closed）。"""
+    _stubMainHistory(monkeypatch, "a" * 40, [])
+
+    with pytest.raises(ValueError):
+        ci_gh.fetchMainFirstParentTipAt("sunql/QA", "2026-11-06T19:38:13+00:00")
+
+
+def test_fetchMainFirstParentTipAt_raises_when_the_chain_is_too_long(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回溯跳数超上限 ⇒ 报错（fail-closed）。
+
+    ⚠️ 不能「回溯到跳不动为止然后拿个错的 sha 当底座」⇒ 那会让 `A` 腿算错
+    ⇒ fail-open。
+    """
+    chainLength = ci_gh._MAX_FIRST_PARENT_HOPS + 2
+    shas = [f"{index:040x}" for index in range(chainLength)]
+    history = [
+        _commitEntry(shas[index], "2026-11-06T19:39:00Z", [shas[index + 1]])
+        for index in range(chainLength - 1)
+    ]
+    history.append(_commitEntry(shas[-1], "2026-11-06T19:39:00Z", []))
+    _stubMainHistory(monkeypatch, shas[0], history)
+
+    with pytest.raises(ValueError):
+        ci_gh.fetchMainFirstParentTipAt("sunql/QA", "2026-11-06T19:38:13+00:00")
 
 
 def test_parseMainTipSha_takes_the_latest_run_not_later_than_the_cutoff() -> None:

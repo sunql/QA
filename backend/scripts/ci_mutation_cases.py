@@ -1,4 +1,4 @@
-"""CI 判据守卫的**变异清单**（纯数据，58 组）。
+"""CI 判据守卫的**变异清单**（纯数据，65 组）。
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
@@ -10,7 +10,7 @@
 
 用法（在仓库根或任意子目录执行均可，脚本按自身位置自动定位仓库根）：
 
-    python3 backend/scripts/ci_mutation_evidence.py            # 全部 58 组
+    python3 backend/scripts/ci_mutation_evidence.py            # 全部 65 组
     python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 """
 
@@ -564,19 +564,11 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M48",
         "backend",
         "app/utils/ci_gh.py",
-        (
-            "    started = _parseIsoTimestamp(createdAt)\n"
-            "    if started is None:\n"
-            "        started = _parseIsoTimestamp(runStartedAt)"
-        ),
-        (
-            "    started = _parseIsoTimestamp(runStartedAt)\n"
-            "    if started is None:\n"
-            "        started = _parseIsoTimestamp(createdAt)"
-        ),
+        "    return dispatched",
+        "    return datetime.fromtimestamp(dispatched.timestamp() + 120, tz=UTC)",
         (
             "app/tests/unit/test_ci_main_tip.py::"
-            "test_mainTipCutoff_prefers_created_at"
+            "test_mainTipCutoff_applies_no_grace_window"
         ),
         1,
     ),
@@ -584,32 +576,44 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M49",
         "backend",
         "app/utils/ci_gh.py",
-        "    return started + timedelta(seconds=_MAIN_TIP_GRACE_SECONDS)",
-        "    return started",
+        (
+            "    dispatched = _parseIsoTimestamp(createdAt)\n"
+            "    if dispatched is None:\n"
+            "        raise ValueError(\n"
+            '            "PR run 的 created_at 缺失或形态异常"\n'
+            '            " ⇒ 算不出 main 侧的取数上界 ⇒ 判定不出来"\n'
+            "        )"
+        ),
+        (
+            "    dispatched = _parseIsoTimestamp(createdAt)\n"
+            "    if dispatched is None:\n"
+            "        dispatched = datetime.now(tz=UTC)"
+        ),
         (
             "app/tests/unit/test_ci_main_tip.py::"
-            "test_mainTipCutoff_applies_the_grace_window"
+            "test_mainTipCutoff_does_not_fall_back_to_run_started_at"
         ),
         1,
     ),
     (
         "M50",
         "backend",
-        "app/utils/ci_gh.py",
+        "app/utils/ci_surface.py",
         (
-            "    if started is None:\n"
-            "        raise ValueError(\n"
-            '            "PR run 的 created_at / run_started_at 都缺失或形态异常"\n'
-            '            " ⇒ 算不出 main 侧的取数上界 ⇒ 判定不出来"\n'
-            "        )"
+            "    try:\n"
+            "        cutoff = mainTipCutoff(createdAt=prInfo.createdAt)\n"
+            "    except ValueError as error:\n"
+            "        return None, sanitizeForReport(str(error))"
         ),
         (
-            "    if started is None:\n"
-            "        return datetime.now(tz=UTC)"
+            "    try:\n"
+            "        cutoff = mainTipCutoff(createdAt=prInfo.createdAt)\n"
+            "    except ValueError:\n"
+            "        cutoff = mainTipCutoff(createdAt=prInfo.runStartedAt)"
         ),
         (
-            "app/tests/unit/test_ci_main_tip.py::"
-            "test_mainTipCutoff_raises_when_both_timestamps_are_missing"
+            "app/tests/unit/test_ci_surface.py::"
+            "test_resolveCiSurface_fails_closed_when_the_pr_run_has_no_timestamp"
         ),
         1,
     ),
@@ -709,8 +713,8 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M57",
         "backend",
         "app/utils/ci_surface.py",
-        "            createdAt=prInfo.createdAt, runStartedAt=prInfo.runStartedAt",
-        "            createdAt=prInfo.runStartedAt, runStartedAt=prInfo.createdAt",
+        "        cutoff = mainTipCutoff(createdAt=prInfo.createdAt)",
+        "        cutoff = mainTipCutoff(createdAt=prInfo.runStartedAt)",
         (
             "app/tests/unit/test_ci_surface.py::"
             "test_resolveCiSurface_derives_the_main_tip_cutoff_from_created_at"
@@ -721,11 +725,123 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M58",
         "backend",
         "app/utils/ci_gh.py",
-        "def mainTipCutoff(*, createdAt: str, runStartedAt: str) -> datetime:",
-        "def mainTipCutoff(createdAt: str, runStartedAt: str) -> datetime:",
+        "def mainTipCutoff(*, createdAt: str) -> datetime:",
+        "def mainTipCutoff(createdAt: str) -> datetime:",
         (
             "app/tests/unit/test_ci_main_tip.py::"
             "test_mainTipCutoff_requires_explicitly_named_timestamps"
+        ),
+        1,
+    ),
+    # ---------- M59–M65：2026-11-07 N6 第三版「两条腿取并集 + 祖先核对 + 主线回溯」批 ----------
+    #
+    # ⚠️ 背景：`M_T`（PR run 的 main 侧底座）有**两条**取法，各自都可能偏旧
+    # ⇒ 单用一条会漏掉 main 的推进 ⇒ 两次 run 的 CI 定义可能其实不同
+    # ⇒ 失败集合不可比 ⇒ 却判「可合并」⇒ **fail-open**。
+    # ⇒ `A` 腿取**两条腿的并集**；且基线必须是底座的**祖先**（否则 fail-closed）。
+    (
+        "M59",
+        "backend",
+        "app/utils/ci_surface.py",
+        (
+            "        byFirstParent = (\n"
+            "            byRunBased\n"
+            "            if firstParentTipSha == mainTipSha\n"
+            "            else fetchNetChangedFiles(repo, baseSha, firstParentTipSha)\n"
+            "        )"
+        ),
+        "        byFirstParent = byRunBased",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_union_of_the_legs_is_actually_exercised"
+        ),
+        1,
+    ),
+    (
+        "M60",
+        "backend",
+        "app/utils/ci_surface.py",
+        "    if mergeBase != baseSha:",
+        "    if False:",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_resolveCiSurface_fails_closed_when_the_base_is_not_an_ancestor"
+        ),
+        1,
+    ),
+    (
+        "M61",
+        "backend",
+        "app/utils/ci_surface.py",
+        (
+            "    except _FETCH_ERRORS as error:\n"
+            '        return f"无法核对基线与 main 侧底座的祖先关系：'
+            '{sanitizeForReport(str(error))}"'
+        ),
+        (
+            "    except _FETCH_ERRORS:\n"
+            "        return None"
+        ),
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_resolveCiSurface_fails_closed_when_the_ancestor_check_cannot_be_run"
+        ),
+        1,
+    ),
+    (
+        "M62",
+        "backend",
+        "app/utils/ci_gh.py",
+        "            first = parents[0]",
+        "            first = parents[-1]",
+        (
+            "app/tests/unit/test_ci_main_tip.py::"
+            "test_fetchMainFirstParentTipAt_never_returns_a_side_commit"
+        ),
+        1,
+    ),
+    (
+        "M63",
+        "backend",
+        "app/utils/ci_gh.py",
+        "    for _ in range(_MAX_FIRST_PARENT_HOPS):",
+        "    for _ in range(10 ** 9):",
+        (
+            "app/tests/unit/test_ci_main_tip.py::"
+            "test_fetchMainFirstParentTipAt_raises_when_the_chain_is_too_long"
+        ),
+        1,
+    ),
+    (
+        "M64",
+        "backend",
+        "app/utils/ci_gh.py",
+        (
+            "        committed = _parseIsoTimestamp(dateRaw)\n"
+            "        if committed is None:\n"
+            "            raise ValueError("
+            'f"commit 的 committer.date 形态异常：{sanitizeForReport(dateRaw)}")'
+        ),
+        (
+            "        committed = _parseIsoTimestamp(dateRaw)\n"
+            "        if committed is None:\n"
+            '            committed = _parseIsoTimestamp("1970-01-01T00:00:00Z")'
+        ),
+        (
+            "app/tests/unit/test_ci_main_tip.py::"
+            "test_fetchMainFirstParentTipAt_raises_on_a_malformed_history"
+        ),
+        1,
+    ),
+    (
+        "M65",
+        "repo",
+        ".github/workflows/merge-gate.yml",
+        '.status == "completed" and ',
+        "",
+        (
+            "app/tests/unit/test_ci_merge_gate_workflow.py::"
+            "test_merge_gate_base_run_query_rechecks_the_run_fields_in_jq"
         ),
         1,
     ),

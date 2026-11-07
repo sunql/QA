@@ -148,12 +148,21 @@ jobs:
             gh api \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&per_page=100" \
               --paginate --slurp > /tmp/main_push_runs.json || echo "[]" > /tmp/main_push_runs.json
-            BASE_RUN_ID="$(jq -r --arg cutoff "${PR_RUN_CREATED_AT}" \
-              '[.[] | .workflow_runs[] | select(.event == "push" and .conclusion != "cancelled" and .created_at <= $cutoff)][0].id // empty' \
+            # ⚠️ 2026-11-07 安全评审 MEDIUM-3 / 代码评审 LOW-3：jq 侧**独立复核**
+            #   `head_branch` / `head_repository` / `status`（不能只靠查询串）：
+            #   `runs?branch=main` 匹配的是 `head_branch`、**不区分事件**
+            #   ⇒ 一个**名叫 main 的 fork 分支**也会命中 ⇒ 基线可能变成攻击者自己的代码。
+            #   ⇒ 仓库名比较用**大小写不敏感**（GitHub 的仓库名大小写不敏感，
+            #   实测 API 侧会原样返回 `Sunql/QA` 这类形态 ⇒ 严格相等会把**合法基线**
+            #   判成不可信 ⇒ 闸门对所有 PR 死锁）。
+            BASE_RUN_ID="$(jq -r --arg cutoff "${PR_RUN_CREATED_AT}" --arg repo "${GITHUB_REPOSITORY}" \
+              '[.[] | .workflow_runs[] | select(.event == "push" and .head_branch == "main" and .status == "completed" and .conclusion != "cancelled" and ((.head_repository.full_name // "") | ascii_downcase) == ($repo | ascii_downcase) and .created_at <= $cutoff)][0].id // empty' \
               /tmp/main_push_runs.json)" || BASE_RUN_ID=""
           fi
           if [ -z "${BASE_RUN_ID}" ]; then
-            report="找不到在 PR CI 事件派发（${PR_RUN_CREATED_AT}）之前完成的 main CI run ⇒ 无基线可比（fail-closed）。等 main 的 push run 完成后再试。"
+            # ⚠️ 用 printf 的**格式串**而不是把时间戳拼进双引号字符串（引号/反斜杠
+            #   一旦出现在值里就会破坏字符串边界）⇒ 报告文本不会因为取值而变形。
+            report="$(printf '找不到在 PR CI 事件派发（%s）之前完成的 main CI run ⇒ 无基线可比（fail-closed）。等 main 的 push run 完成后再试。' "${PR_RUN_CREATED_AT}")"
             code=3
           else
             code=0

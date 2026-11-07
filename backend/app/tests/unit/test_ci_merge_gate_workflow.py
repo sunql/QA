@@ -255,6 +255,31 @@ def test_merge_gate_base_run_query_only_picks_push_runs() -> None:
     )
 
 
+def test_merge_gate_base_run_query_rechecks_the_run_fields_in_jq() -> None:
+    """jq 侧必须**独立复核** `head_branch` / `head_repository` / `status`。
+
+    ⚠️ 2026-11-07 代码评审 LOW-3：查询串里的 `branch=main&status=completed`
+    **不能**当防线 ——
+    - `runs?branch=<name>` 匹配的是 `head_branch`、**不区分事件**
+      ⇒ 一个**名叫 main 的 fork 分支**也会命中；
+    - `status=completed` 是**查询参数**，服务端可能忽略 ⇒ 拿一个**还在跑**的 run
+      当基线 ⇒ 它的 job 没有完成标记 ⇒ 失败集合为空 ⇒ 对差出假「净新增 0」。
+
+    ⇒ 这三个字段必须在 jq 的 `select(...)` 里**再筛一遍**（双保险）。
+    """
+    script = _executableScript()
+
+    assert re.search(r"\.head_branch\s*==\s*[\"']main[\"']", script) is not None, (
+        "jq 没有独立复核 head_branch ⇒ 一个叫 main 的 fork 分支会被当成基线"
+    )
+    assert re.search(r"\.status\s*==\s*[\"']completed[\"']", script) is not None, (
+        "jq 没有独立复核 status ⇒ 还在跑的 run 可能被当成基线"
+    )
+    assert "head_repository" in script, (
+        "jq 没有独立复核 head_repository ⇒ 基线可能来自 fork 仓库"
+    )
+
+
 def test_merge_gate_summary_window_is_wider_than_the_report_cap() -> None:
     """摘要的字节窗口必须**大于**工具自己的报告上限 ⇒ 工具不会被 workflow 二次截断。
 

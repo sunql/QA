@@ -31,6 +31,34 @@ backend/app/utils/ci_flakes.py        @sunql
 # ---- 已知抖动白名单**数据文件**（它直接决定「哪些失败用例不作判据」⇒ 改它 = 改判据）----
 .github/ci-known-flaky-tests.json    @sunql
 
+# ---- **前端 CI 定义**（2026-11-07 安全评审 CRITICAL-1）----
+# `ci.yml` 的 `Frontend / typecheck + coverage` 是**非分片** job
+# ⇒ 它失败时只产出**不透明**的失败 ID（`job:<job 名>`）⇒ 前端的失败**照样进**对差
+# ⇒ 而前端测试的「定义」文件（vitest 的 exclude / setupFiles / coverage 阈值、
+#    npm scripts、锁文件、tsconfig）改一改就能让失败用例**根本不失败**
+# ⇒ 失败集合与基线完全相同 ⇒ 假「净新增 0」⇒ 而 CI 还全绿。
+# ⇒ 这些文件与后端闸门工具**同族**：改它 = 解除「CI 相关面」这道闸。
+frontend/package.json                     @sunql
+frontend/package-lock.json                @sunql
+frontend/pnpm-lock.yaml                   @sunql
+frontend/pnpm-workspace.yaml              @sunql
+frontend/vite.config.ts                   @sunql
+# ⚠️ `vite.config.js` 是**被提交进仓库的编译产物**（`vite.config.ts` 的 tsc 输出）
+# ⇒ 但 vite 的配置解析顺序里 `.js` **优先于** `.ts`
+# ⇒ 它随时可能被真正加载 ⇒ 改它 = 改前端的构建口径 ⇒ 必须在 CI 相关面里。
+frontend/vite.config.js                   @sunql
+frontend/vitest.config.ts                 @sunql
+frontend/playwright.config.ts             @sunql
+frontend/tsconfig.json                    @sunql
+frontend/tsconfig.node.json               @sunql
+frontend/src/tests/setup.ts               @sunql
+
+# ---- 复合 action（workflow 的 `uses:` 目标 ⇒ 改它 = 改 CI 的执行内容）----
+/.github/actions/                     @sunql
+
+# ---- alembic 配置（integration 分片跑 `alembic upgrade head` ⇒ 改它 = 改环境）----
+backend/alembic.ini                   @sunql
+
 # ---- 变异取证脚本（它决定「哪些变异能转红」⇒ 改它就能让守卫恒绿）----
 # 清单（纯数据）与跑者同族：改清单可以把某组变异指向没人守的地方 ⇒ 照样恒绿。
 backend/scripts/ci_mutation_cases.py      @sunql
@@ -48,6 +76,7 @@ backend/app/tests/unit/test_ci_text.py            @sunql
 backend/app/tests/unit/test_ci_gh.py              @sunql
 backend/app/tests/unit/test_ci_surface.py         @sunql
 backend/app/tests/unit/test_ci_surface_reverse.py @sunql
+backend/app/tests/unit/test_ci_surface_frontend_reverse.py @sunql
 backend/app/tests/unit/test_ci_shard.py           @sunql
 backend/app/tests/unit/test_ci_head.py            @sunql
 backend/app/tests/unit/test_ci_report.py          @sunql

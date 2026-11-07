@@ -96,8 +96,9 @@ from dataclasses import dataclass
 from app.utils.ci_gh import (
     RunHeadInfo,
     fetchChangedFiles,
+    fetchMainFirstParentTipAt,
     fetchMainTipShaAt,
-    fetchMainTipShaByCommitDate,
+    fetchMergeBaseSha,
     fetchNetChangedFiles,
     fetchRunHeadInfo,
     mainTipCutoff,
@@ -182,6 +183,34 @@ _CI_SURFACE_PATTERNS = (
     # 这类与判据无关的通用替身。
     r"^backend/app/tests/(?:.*/)?_ci_.*_support\.py$",
     r"^\.github/CODEOWNERS$",
+    # ⚠️⚠️ **前端 CI 定义**（2026-11-07 安全评审 CRITICAL-1 ⇒ **本批不得合并**）：
+    # `ci.yml` 的 `Frontend / typecheck + coverage` 是一个**非分片** job
+    # ⇒ 它失败时只产出一个**不透明**的失败 ID（`job:<job 名>`）
+    # ⇒ **前端的失败照样进失败集合对差**（不是「前端不管」）。
+    # ⇒ 而前端的「测试定义」文件原先**一条都不在**清单里 ⇒ PR 可以：
+    #   ① 在 `frontend/vitest.config.ts` 的 `exclude` 里加一条 ⇒ 把失败的用例排除掉
+    #      ⇒ 前端 job 变绿 ⇒ 失败集合与基线**完全相同** ⇒ 假「净新增 0」；
+    #   ② 改 `frontend/src/tests/setup.ts`（setupFiles）让断言被跳过；
+    #   ③ 改 `frontend/package.json` 的 `test:coverage` 脚本 / `package-lock.json`
+    #      （依赖版本）绕过 coverage 门禁或换掉测试框架版本；
+    #   ④ 改 `frontend/tsconfig*.json`（`tsc -b` 的编译口径）让类型检查形同虚设。
+    # ⇒ 而 `.github/CODEOWNERS` 里**没有任何 `frontend/` 条目** ⇒ 复核人也不存在
+    # ⇒ **这是一条完整的绕过链** ⇒ 清单必须覆盖前端的 CI 定义文件。
+    # ⇒ 反查守卫 `test_ci_surface_frontend_reverse.py` 从 `frontend/` 的实际文件
+    #   与 `vitest.config.ts` 声明的 setupFiles 反查 ⇒ 新增配置文件必须入清单。
+    r"^frontend/(?:package\.json|package-lock\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml)$",
+    # 任意深度的 `*.config.*`（vite / vitest / playwright / eslint…）
+    r"^frontend/(?:.*/)?[\w.-]+\.config\.[\w.]+$",
+    # 任意深度的 `tsconfig*.json`（`npm exec -- tsc -b` 的编译口径）
+    r"^frontend/(?:.*/)?tsconfig[\w.-]*\.json$",
+    # vitest 的 setupFiles（断言的公共前置 ⇒ 改它就能让断言不生效）
+    r"^frontend/(?:.*/)?setup[\w.-]*\.[tj]sx?$",
+    # ⚠️ **复合 action**（`.github/actions/**`）：workflow 可以 `uses:` 它
+    # ⇒ 改它的脚本 = 改 CI 的执行内容 ⇒ 必须人工复核。
+    r"^\.github/actions/",
+    # ⚠️ **alembic 配置**（`backend/alembic.ini`）：改它 = 改迁移的执行口径
+    # ⇒ integration 分片跑 `alembic upgrade head` ⇒ 环境变了 ⇒ 失败集合不可比。
+    r"^backend/alembic\.ini$",
 )
 
 # 拉取失败时可能被抛出的异常类型（`gh` 调用 + JSON 解析）。
@@ -323,7 +352,7 @@ def _fetchRunHeads(
 
 
 def _fetchMainTips(repo: str, prInfo: RunHeadInfo) -> tuple[tuple[str, str] | None, str | None]:
-    """取 `M_T` 的**两条腿** ⇒ `((run 腿, commit-date 腿), error)`。
+    """取 `M_T` 的**两条腿** ⇒ `((run 腿, 第一父链腿), error)`。
 
     ⚠️ 上界锚 **`created_at`**（事件派发时刻），不是 `run_started_at`：
     `pull_request` 事件的**合并 commit 在派发那一刻就被冻结**了
@@ -334,17 +363,21 @@ def _fetchMainTips(repo: str, prInfo: RunHeadInfo) -> tuple[tuple[str, str] | No
     的第一父 = `83581e10`（= 派发那一刻的 main）；attempt-2 的 job 日志写着
     `git fetch … +57a267a93f…:refs/remotes/pull/105/merge`。
 
+    ⚠️ **上界与闸门侧完全一致**（2026-11-07 代码评审 MEDIUM-1）：
+    闸门侧（`merge-gate.yml`）取基线用的上界 = `PR_RUN_CREATED_AT`（**无宽限**）
+    ⇒ 工具侧若多给宽限 ⇒ `M_T` 比基线更新 ⇒ `A` 腿偏大 ⇒ **假拦**
+    ⇒ 两边必须同一个上界、同一个比较符（`<=`）⇒ 工具侧也用 `created_at` 原值。
+
     ⚠️ **两条腿都要取**（2026-11-07 安全评审 HIGH-2）：
-    - **run 腿**（main 的 push run 列表）：main 的那次 push **没触发** workflow、
-      或它的 run **创建得太晚**（排队 > 宽限）⇒ 偏旧 ⇒ `A` 腿漏算 ⇒ fail-open；
-    - **commit-date 腿**（commits API）：commit 日期 ≠ push 时刻
-      （rebase / 时钟偏斜）⇒ 自己也可能偏旧。
+    - **run 腿**（main 的 push run 列表）：锚在 **push 时刻** ⇒ 最贴近「底座」；
+      但 main 的那次 push **没触发** workflow、或它的 run **创建得晚于派发**
+      ⇒ 偏旧 ⇒ `A` 腿漏算 ⇒ fail-open；
+    - **第一父链腿**（沿 main 主线回溯）：不依赖 run 列表 ⇒ 补上上面那个洞；
+      但它锚在 **commit 日期**上 ⇒ 与 push 时刻有偏差 ⇒ 自己也会偏。
     ⇒ `A` 腿取**两条腿的并集** ⇒ 谁漏掉的那一段，另一条兜住。
     """
     try:
-        cutoff = mainTipCutoff(
-            createdAt=prInfo.createdAt, runStartedAt=prInfo.runStartedAt
-        )
+        cutoff = mainTipCutoff(createdAt=prInfo.createdAt)
     except ValueError as error:
         return None, sanitizeForReport(str(error))
     cutoffIso = cutoff.isoformat()
@@ -356,17 +389,41 @@ def _fetchMainTips(repo: str, prInfo: RunHeadInfo) -> tuple[tuple[str, str] | No
             f"不是 PR 头）：{sanitizeForReport(str(error))}"
         )
     try:
-        commitDateSha = fetchMainTipShaByCommitDate(repo, cutoffIso)
+        firstParentSha = fetchMainFirstParentTipAt(repo, cutoffIso)
     except _FETCH_ERRORS as error:
         return None, (
-            "无法确定 main 的推进上界（commits API 取不到 main 在那一刻的 tip）"
+            "无法确定 main 的推进上界（沿 main 主线回溯取不到该时刻的 tip）"
             f"：{sanitizeForReport(str(error))}"
         )
-    return (runBasedSha, commitDateSha), None
+    return (runBasedSha, firstParentSha), None
+
+
+def _baselineAncestorError(repo: str, baseSha: str, mainTipSha: str) -> str | None:
+    """基线 commit 必须是「main 侧底座」的祖先，否则对差的前提不成立。
+
+    ⚠️ **为什么必须查**（2026-11-07 安全评审 HIGH-2）：
+    基线 run 挑的是「派发之前完成的 main push run」⇒ 正常情况下它的 commit
+    一定在 main 主线上、且早于底座 ⇒ 是底座的祖先。
+    ⇒ **不是**祖先只有两种可能，两种都致命：
+    ① **main 被 force-push / 改写** ⇒ 基线树与执行树分属两条历史 ⇒ 不可比；
+    ② 基线挑错了（比如挑到派发**之后**才创建的 run）⇒ 基线比执行树还新
+    ⇒ `A` 腿算出「main 回退了」⇒ 漏掉 main 的真实推进 ⇒ **fail-open**。
+    ⇒ 判不出 ⇒ **fail-closed**（退出码 3：基线不可信 ⇒ 须复跑）。
+    """
+    try:
+        mergeBase = fetchMergeBaseSha(repo, baseSha, mainTipSha)
+    except _FETCH_ERRORS as error:
+        return f"无法核对基线与 main 侧底座的祖先关系：{sanitizeForReport(str(error))}"
+    if mergeBase != baseSha:
+        return (
+            f"基线 commit（{baseSha[:12]}…）不是 main 侧底座（{mainTipSha[:12]}…）的祖先"
+            " ⇒ main 可能被改写（force-push）或基线挑错 ⇒ 两次 run 的失败集合不可比"
+        )
+    return None
 
 
 def _fetchMainAdvanceFiles(
-    repo: str, baseSha: str, mainTipSha: str, commitDateTipSha: str
+    repo: str, baseSha: str, mainTipSha: str, firstParentTipSha: str
 ) -> tuple[tuple[str, ...] | None, str | None]:
     """取 `A` = main 在 `[M_base, M_T]` 之间的内容推进 ⇒ `(files, error)`。
 
@@ -374,20 +431,25 @@ def _fetchMainAdvanceFiles(
     各自都可能偏旧 ⇒ 单用一条会漏掉 main 的推进 ⇒ 两次 run 的 CI 定义
     可能其实不同 ⇒ 失败集合不可比 ⇒ **fail-open**。
     ⇒ 并集 = 「两条腿各自认为 main 推进了什么」的合集 ⇒ 漏的那条由另一条兜住。
+
+    ⚠️ **并集只会偏大、不会偏小** ⇒ 方向是「假拦」而不是 fail-open：
+    - run 腿锚 push 时刻、第一父链腿锚 commit 日期 ⇒ 两者都可能在对方之后；
+    - 第一父链腿**只在 main 主线上** ⇒ 不会把侧提交的 diff 混进来
+      ⇒ 假拦的来源只剩「main 确实推进过」，那是**真实**的不可比因素。
     """
     try:
         byRunBased = fetchNetChangedFiles(repo, baseSha, mainTipSha)
-        byCommitDate = (
+        byFirstParent = (
             byRunBased
-            if commitDateTipSha == mainTipSha
-            else fetchNetChangedFiles(repo, baseSha, commitDateTipSha)
+            if firstParentTipSha == mainTipSha
+            else fetchNetChangedFiles(repo, baseSha, firstParentTipSha)
         )
     except _FETCH_ERRORS as error:
         return None, (
             "拉取 main 的内容推进清单失败："
             f"{sanitizeForReport(str(error))}"
         )
-    return tuple(sorted(set(byRunBased) | set(byCommitDate))), None
+    return tuple(sorted(set(byRunBased) | set(byFirstParent))), None
 
 
 def _fetchPrChangedFiles(
@@ -440,8 +502,20 @@ def resolveCiSurface(repo: str, baseRunId: str, prRunId: str) -> CiSurfaceInfo:
     mainTips, error = _fetchMainTips(repo, prInfo)
     if error is not None or mainTips is None:
         return _emptySurface(baseSha, prSha, error or "取 main 的 tip 失败")
-    mainTipSha, commitDateTipSha = mainTips
-    mainAdvance, error = _fetchMainAdvanceFiles(repo, baseSha, mainTipSha, commitDateTipSha)
+    mainTipSha, firstParentTipSha = mainTips
+    # ⚠️ **基线必须是 main 侧底座的祖先**（2026-11-07 安全评审 HIGH-2）：
+    #   不是 ⇒ 要么 main 被改写（force-push）、要么基线挑到了比执行树还新的 run
+    #   ⇒ 两种情况下 `A` 腿都不可信 ⇒ **fail-closed**（退出码 3）。
+    ancestorError = _baselineAncestorError(repo, baseSha, mainTipSha)
+    if ancestorError is not None:
+        return _emptySurface(
+            baseSha,
+            prSha,
+            f"基线 run 不可信：{ancestorError}",
+            baseTrustError=ancestorError,
+            mainTipSha=mainTipSha,
+        )
+    mainAdvance, error = _fetchMainAdvanceFiles(repo, baseSha, mainTipSha, firstParentTipSha)
     if error is not None or mainAdvance is None:
         return _emptySurface(baseSha, prSha, error or "取 main 的内容推进失败", mainTipSha=mainTipSha)
     prChanged, error = _fetchPrChangedFiles(repo, mainTipSha, prSha)

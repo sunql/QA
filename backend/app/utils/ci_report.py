@@ -91,7 +91,7 @@ def _headerLines(
     「失败 N 条」= **原始**条数；「计入对差 M 条」= 剔除已知抖动豁免后**真正参与对差**的条数。
     两者相等时只给一个数（不制造噪音）；不等时必须给两个数 —— 差额由豁免明细解释。
 
-    ⚠️ `mainTipSha` = PR run 开跑那一刻 main 的 tip（= 那次合并的 main 侧底座）
+    ⚠️ `mainTipSha` = PR run **事件派发**那一刻 main 的 tip（= 那次合并的 main 侧底座）
     ⇒ PR 的 CI 实际跑的是 **merge(main@该 commit, PR 头)** ⇒ 人必须能看见它
     ⇒ 否则「两次 run 的 CI 定义是否相同」这件事无从核对。
     """

@@ -330,20 +330,31 @@ def _patchRuns(
     baseInfo: ci_gh.RunHeadInfo | None = None,
     prInfo: ci_gh.RunHeadInfo | None = None,
     mainTipSha: str = "e" * 40,
+    firstParentTipSha: str | None = None,
 ) -> None:
     """把两次 run 的 head 信息与 main 的 tip（`M_T`）换成固定值。"""
     resolvedBase = baseInfo or _baseInfo()
     resolvedPr = prInfo or _prInfo()
+    # ⚠️ **两条腿默认给不同的 sha**（2026-11-07 安全评审 HIGH-1）：
+    # 两条腿若返回同一个 sha ⇒ 并集退化成单腿 ⇒ 「union 退化成单腿」这个
+    # 回归**永远测不出来**（守卫恒绿）⇒ 那是 fail-open 方向 ⇒ 必须让
+    # 默认替身就产出两个不同的底座。
+    resolvedFirstParent = firstParentTipSha or ("c" * 40)
 
     def fakeHeadInfo(repo: str, runId: str) -> ci_gh.RunHeadInfo:
         return resolvedBase if runId == _BASE_RUN_ID else resolvedPr
 
     monkeypatch.setattr(ci_surface, "fetchRunHeadInfo", fakeHeadInfo)
     monkeypatch.setattr(ci_surface, "fetchMainTipShaAt", lambda repo, cutoffIso: mainTipSha)
-    # ⚠️ `M_T` 有**两条腿**（run 腿 + commit-date 腿）⇒ 两条都得替掉
-    # ⇒ 否则 commit-date 那条腿会真的去 shell 调 `gh`（网络 + 副作用）。
+    # ⚠️ `M_T` 有**两条腿**（run 腿 + 第一父链腿）⇒ 两条都得替掉
+    # ⇒ 否则第一父链那条腿会真的去 shell 调 `gh`（网络 + 副作用）。
     monkeypatch.setattr(
-        ci_surface, "fetchMainTipShaByCommitDate", lambda repo, cutoffIso: mainTipSha
+        ci_surface, "fetchMainFirstParentTipAt", lambda repo, cutoffIso: resolvedFirstParent
+    )
+    # ⚠️ **祖先关系核对**（2026-11-07 安全评审 HIGH-2）：基线必须是 main 侧底座的
+    #   祖先 ⇒ 默认替身返回「基线就是 merge-base」⇒ 正常路径。
+    monkeypatch.setattr(
+        ci_surface, "fetchMergeBaseSha", lambda repo, baseSha, headSha: baseSha
     )
 
 
@@ -436,12 +447,15 @@ def test_resolveCiSurface_uses_the_main_tip_as_the_merge_base_side(monkeypatch) 
 
 
 def test_resolveCiSurface_compares_the_main_advance_against_the_baseline_tree(monkeypatch) -> None:
-    """`A` = 树对树差 `M_base` ↔ `M_T` ⇒ 基线树与 main 的推进两端都要对。"""
-    captured: dict[str, str] = {}
+    """`A` = 树对树差 `M_base` ↔ `M_T` ⇒ 基线树与 main 的推进两端都要对。
+
+    ⚠️ `M_T` 有**两条腿**（run 腿 + 第一父链腿）⇒ 差分被调用**两次**
+    ⇒ 断言要落在「**两次都拿基线树当底**」上，而不是「只调了一次」。
+    """
+    captured: list[tuple[str, str]] = []
 
     def fakeNet(repo: str, baseSha: str, headSha: str) -> tuple[str, ...]:
-        captured["base"] = baseSha
-        captured["head"] = headSha
+        captured.append((baseSha, headSha))
         return ()
 
     _patchRuns(monkeypatch, mainTipSha="e" * 40)
@@ -450,8 +464,11 @@ def test_resolveCiSurface_compares_the_main_advance_against_the_baseline_tree(mo
 
     ci_surface.resolveCiSurface("sunql/QA", _BASE_RUN_ID, _PR_RUN_ID)
 
-    assert captured["base"] == "a" * 40
-    assert captured["head"] == "e" * 40
+    # 两条腿的底都是基线树（`M_base`）。
+    assert captured, "根本没有做树对树差分"
+    assert all(base == "a" * 40 for base, _ in captured), captured
+    # 两条腿的头分别是 run 腿与第一父链腿（默认替身给的是**不同**的 sha）。
+    assert {head for _, head in captured} == {"e" * 40, "c" * 40}, captured
 
 
 def test_resolveCiSurface_reports_the_main_tip_it_used(monkeypatch) -> None:
@@ -508,11 +525,12 @@ def test_resolveCiSurface_derives_the_main_tip_cutoff_from_created_at(monkeypatc
 
     ci_surface.resolveCiSurface("sunql/QA", _BASE_RUN_ID, _PR_RUN_ID)
 
-    # 宽限 120 秒 ⇒ 上界 = created_at（事件派发时刻）+ 120s
-    assert captured["cutoff"].startswith("2026-11-04T20:40:19")
-    # ⚠️ 绝不能是 run_started_at + 宽限（那是**派发之后**的时刻
+    # ⚠️ 上界 = `created_at`（事件派发时刻）**原值**（**不加宽限**）
+    #    ⇒ 与闸门侧（`merge-gate.yml` 的 `PR_RUN_CREATED_AT`）**完全一致**。
+    assert captured["cutoff"].startswith("2026-11-04T20:38:19")
+    # ⚠️ 绝不能是 run_started_at（那是**派发之后**的时刻
     #    ⇒ 取到更晚的 main ⇒ 基线树 ≠ 执行树 ⇒ fail-open）
-    assert not captured["cutoff"].startswith("2026-11-04T22:26:11")
+    assert not captured["cutoff"].startswith("2026-11-04T22:24:11")
 
 
 def test_resolveCiSurface_fails_closed_when_the_main_tip_is_unknown(monkeypatch) -> None:
@@ -765,3 +783,124 @@ def test_the_judgment_set_is_the_union_not_just_one_side() -> None:
     }
     # 归因不到本 PR 的 = 判定集里的 CI 文件 − PR 自己改的 CI 文件
     assert surface.unattributedCiFiles == (".github/workflows/ci.yml",)
+
+
+# --------------------------------------------------------------------------
+# 两条腿取**并集**（2026-11-07 安全评审 HIGH-1）
+# --------------------------------------------------------------------------
+
+
+def test_the_main_advance_is_the_union_of_both_legs(monkeypatch) -> None:
+    """`A` = **两条腿各自算出的推进的并集** —— 任一条腿的成果都不能丢。
+
+    ⚠️ 2026-11-07 安全评审 HIGH-1：`M_T` 有两条取法（run 腿 / 第一父链腿），
+    各自都可能偏旧 ⇒ 单用一条会漏掉 main 的推进 ⇒ 两次 run 的 CI 定义
+    可能其实不同 ⇒ 失败集合不可比 ⇒ 却判「可合并」⇒ **fail-open**。
+
+    ⇒ 本用例让**两条腿返回不同的 sha**、各自带**不同的**推进文件
+    ⇒ 判定集必须包含**两边都有**。
+    """
+    _patchRuns(monkeypatch, mainTipSha="e" * 40, firstParentTipSha="c" * 40)
+
+    def fakeNet(repo: str, baseSha: str, headSha: str) -> tuple[str, ...]:
+        if headSha == "e" * 40:
+            return (".github/workflows/ci.yml",)
+        return ("frontend/vitest.config.ts",)
+
+    monkeypatch.setattr(ci_surface, "fetchNetChangedFiles", fakeNet)
+    monkeypatch.setattr(ci_surface, "fetchChangedFiles", lambda repo, baseSha, headSha: ())
+
+    info = ci_surface.resolveCiSurface("sunql/QA", _BASE_RUN_ID, _PR_RUN_ID)
+
+    assert info.error is None
+    assert set(info.mainAdvanceFiles) == {
+        ".github/workflows/ci.yml",
+        "frontend/vitest.config.ts",
+    }, "并集退化成了单腿 ⇒ 漏掉一条腿的推进 ⇒ fail-open"
+
+
+def test_the_union_of_the_legs_is_actually_exercised(monkeypatch) -> None:
+    """反向守卫：**只算一条腿**的实现必须在这条用例上转红。
+
+    ⚠️ 「守卫会红」≠「守卫在测你想测的东西」：若两条腿恰好返回同一个 sha
+    （或两条腿算出的推进恰好相同）⇒ 并集与单腿**不可区分** ⇒ 守卫恒绿。
+    ⇒ 本用例显式让两条腿产出**不同的**结果 ⇒ 单腿实现必然漏掉一条。
+    """
+    _patchRuns(monkeypatch, mainTipSha="e" * 40, firstParentTipSha="c" * 40)
+
+    def fakeNet(repo: str, baseSha: str, headSha: str) -> tuple[str, ...]:
+        if headSha == "e" * 40:
+            return ("backend/app/utils/ci_shard.py",)
+        return (".github/workflows/ci.yml",)
+
+    monkeypatch.setattr(ci_surface, "fetchNetChangedFiles", fakeNet)
+    monkeypatch.setattr(ci_surface, "fetchChangedFiles", lambda repo, baseSha, headSha: ())
+
+    info = ci_surface.resolveCiSurface("sunql/QA", _BASE_RUN_ID, _PR_RUN_ID)
+
+    # 只算 run 腿 ⇒ 漏掉 `.github/workflows/ci.yml` ⇒ 失败集合不可比却不拦 ⇒ fail-open
+    assert ".github/workflows/ci.yml" in info.mainAdvanceFiles
+    assert "backend/app/utils/ci_shard.py" in info.mainAdvanceFiles
+
+
+# --------------------------------------------------------------------------
+# 基线必须是 main 侧底座的**祖先**（2026-11-07 安全评审 HIGH-2）
+# --------------------------------------------------------------------------
+
+
+def test_resolveCiSurface_fails_closed_when_the_base_is_not_an_ancestor(monkeypatch) -> None:
+    """基线**不是** main 侧底座的祖先 ⇒ `A` 腿不可信 ⇒ **fail-closed**。
+
+    ⚠️ 不是祖先只有两种可能，两种都致命：
+    ① **main 被 force-push / 改写** ⇒ 基线树与执行树分属两条历史 ⇒ 不可比；
+    ② 基线挑错了（挑到派发**之后**才创建的 run）⇒ 基线比执行树还新
+    ⇒ `A` 腿算出「main 回退了」⇒ 漏掉 main 的真实推进 ⇒ **fail-open**。
+    ⇒ 判不出 ⇒ 退出码 3（`baseTrustError` 非空）⇒ 须复跑。
+    """
+    _patchRuns(monkeypatch)
+    monkeypatch.setattr(
+        ci_surface, "fetchMergeBaseSha", lambda repo, baseSha, headSha: "f" * 40
+    )
+
+    info = ci_surface.resolveCiSurface("sunql/QA", _BASE_RUN_ID, _PR_RUN_ID)
+
+    assert info.baseTrustError is not None
+    assert "祖先" in info.baseTrustError
+    assert info.error is not None
+    assert info.netChangedFiles == ()
+
+
+def test_resolveCiSurface_fails_closed_when_the_ancestor_check_cannot_be_run(
+    monkeypatch,
+) -> None:
+    """祖先关系**核对不了**（API 挂了）⇒ 同样 fail-closed（不得当成「是祖先」）。"""
+    _patchRuns(monkeypatch)
+
+    def boom(repo: str, baseSha: str, headSha: str) -> str:
+        raise RuntimeError("compare 挂了")
+
+    monkeypatch.setattr(ci_surface, "fetchMergeBaseSha", boom)
+
+    info = ci_surface.resolveCiSurface("sunql/QA", _BASE_RUN_ID, _PR_RUN_ID)
+
+    assert info.baseTrustError is not None
+    assert "compare 挂了" in info.baseTrustError
+    assert info.netChangedFiles == ()
+
+
+def test_resolveCiSurface_does_not_diff_when_the_base_is_not_an_ancestor(monkeypatch) -> None:
+    """祖先关系不成立 ⇒ **不再**去采集改动清单（`A` 腿本来就不可信）。"""
+
+    def boom(repo: str, baseSha: str, headSha: str) -> tuple[str, ...]:
+        raise AssertionError("祖先关系不成立时不该再采集改动清单")
+
+    _patchRuns(monkeypatch)
+    monkeypatch.setattr(
+        ci_surface, "fetchMergeBaseSha", lambda repo, baseSha, headSha: "f" * 40
+    )
+    monkeypatch.setattr(ci_surface, "fetchChangedFiles", boom)
+    monkeypatch.setattr(ci_surface, "fetchNetChangedFiles", boom)
+
+    info = ci_surface.resolveCiSurface("sunql/QA", _BASE_RUN_ID, _PR_RUN_ID)
+
+    assert info.baseTrustError is not None

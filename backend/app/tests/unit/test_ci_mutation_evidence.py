@@ -36,6 +36,7 @@ from scripts import ci_mutation_evidence
 
 _CASE = "app/tests/unit/test_ci_surface.py::test_some_guard_case"
 _CASE_NAME = "test_some_guard_case"
+_FILE_CASE = "app/tests/unit/test_ci_surface.py"
 
 
 class _FakeCompleted:
@@ -152,3 +153,68 @@ def test_run_case_treats_an_exit_code_without_the_case_name_as_inconclusive(
 
     assert verdict == "inconclusive"
     assert _CASE_NAME in detail
+
+
+# --------------------------------------------------------------------------
+# MEDIUM-4：**裸文件名 / 裸用例名都不算数**（2026-11-07 代码评审）
+# --------------------------------------------------------------------------
+
+
+def test_run_case_rejects_a_file_level_case_whose_file_did_not_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """文件级用例：**别的**用例失败 ⇒ 不算这条守卫转红。
+
+    ⚠️ 原判据是「输出里含 `test_ci_surface.py`」⇒ 那只是 pytest 的**路径前缀**
+    ⇒ 收集进度行、warning 里也会出现 ⇒ **别的**用例失败会被算成命中
+    ⇒ **假取证**（取证报告全绿，而这条守卫根本没被测过）。
+    """
+    _stubRun(
+        monkeypatch,
+        _FakeCompleted(
+            1,
+            stdout=(
+                "FAILED app/tests/unit/test_other.py::test_b - boom\n"
+                "collected 12 items / app/tests/unit/test_ci_surface.py\n"
+            ),
+        ),
+    )
+
+    verdict, _ = ci_mutation_evidence.run_case(_FILE_CASE, {})
+
+    assert verdict == "inconclusive", "别的用例失败被算成了这条守卫转红"
+
+
+def test_run_case_accepts_a_file_level_case_whose_own_file_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """反向守卫：文件级用例**自己文件里**有用例失败 ⇒ 确实转红 ⇒ `red`."""
+    _stubRun(
+        monkeypatch,
+        _FakeCompleted(1, stdout="FAILED app/tests/unit/test_ci_surface.py::test_a - boom"),
+    )
+
+    verdict, _ = ci_mutation_evidence.run_case(_FILE_CASE, {})
+
+    assert verdict == "red"
+
+
+def test_run_case_rejects_a_sibling_case_whose_name_only_extends_the_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """用例级：**同名兄弟**（`test_x_extra`）失败 ⇒ 不算 `test_x` 转红。
+
+    ⚠️ 原判据是「输出里含用例名」⇒ `test_x` 是 `test_x_extra` 的**子串**
+    ⇒ 同名兄弟失败会被算成命中 ⇒ 假取证。
+    """
+    _stubRun(
+        monkeypatch,
+        _FakeCompleted(
+            1,
+            stdout="FAILED app/tests/unit/test_ci_surface.py::test_some_guard_case_extra - boom",
+        ),
+    )
+
+    verdict, _ = ci_mutation_evidence.run_case(_CASE, {})
+
+    assert verdict == "inconclusive", "同名兄弟用例失败被算成了这条守卫转红"

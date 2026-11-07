@@ -217,7 +217,7 @@ def _applyCiSurfaceGuard(
     """CI 相关面守卫：两次 run 的 **CI 相关面代码不同** ⇒ 失败集合不可比 ⇒ 不可判「可合并」。
 
     ⚠️ 判定的集合是「**两次 run 实际跑的那两份代码**的差异」
-    （= `A ∪ P`：`A` = main 从基线到 PR run 开跑那一刻的内容推进、
+    （= `A ∪ P`：`A` = main 从基线到 PR run **事件派发**那一刻的内容推进、
     `P` = PR 自己改的文件），**不是**「PR 相对分叉点改了什么」：
     - 只用「PR 改了哪些」⇒ 会**漏掉**「main 改了 CI 文件、PR 分支没跟上」
       这一类 ⇒ 那两次 run 跑的 CI 定义本来就不同 ⇒ 失败集合不可比 ⇒ 却判「可合并」；
@@ -258,11 +258,15 @@ def _mainTipMismatchNote(surface: CiSurfaceInfo) -> str | None:
     """基线 run 跑的 commit 与「PR run 的 main 侧底座」不是同一个时给出提示。
 
     ⚠️ 为什么这件事要让人看见：PR 的 CI run 跑的是
-    **merge(main@开跑时刻, PR 头)** ⇒ 它的 main 侧底座 = `M_T`。
+    **merge(main@事件派发时刻, PR 头)** ⇒ 它的 main 侧底座 = `M_T`。
     基线 run 若是**别的** main commit ⇒ main 在基线之后推进过
-    ⇒ 两次 run 的 CI 定义可能不同 ⇒ 失败集合原则上不可比
-    ⇒ 判出来「CI 相关面变更」时，处置办法是
-    **重新运行 PR 的 CI**（让它合上最新的 main），而不是直接放行。
+    ⇒ 两次 run 的 CI 定义可能不同 ⇒ 失败集合原则上不可比。
+
+    ⚠️⚠️ **本函数只讲事实，不讲处置**（2026-11-07 代码评审 HIGH-1）：
+    处置在 `_mainTipRemedyNote` 里，**分成两行**。
+    理由：报告的每个字段都会被 `sanitizeForReport` 截到 **200 字符**
+    ⇒ 事实 + 处置塞进同一个字符串 ⇒ 处置被截掉 ⇒ 操作者只看到「拦」
+    ⇒ 看不到该做什么 ⇒ 白跑一轮。
     """
     if surface.baseSha is None or surface.mainTipSha is None:
         return None
@@ -272,29 +276,47 @@ def _mainTipMismatchNote(surface: CiSurfaceInfo) -> str | None:
         f"基线 run 跑的 commit（{surface.baseSha[:12]}…）"
         f"不是 PR run 的 main 侧底座（{surface.mainTipSha[:12]}…）"
         "⇒ main 在基线之后推进过 ⇒ 两次 run 的 CI 定义可能不同"
-        "⇒ 若判「CI 相关面变更」，请重新运行 PR 的 CI（让它合上最新的 main）"
+    )
+
+
+def _mainTipRemedyNote() -> str:
+    """处置办法：**推一个新 commit** ⇒ 产生一次**新的 CI 事件派发**。
+
+    ⚠️⚠️ **不能叫操作者「重新运行 PR 的 CI」**（2026-11-07 代码评审 HIGH-1）：
+    `pull_request` 事件的**合并 commit 在事件派发那一刻就被冻结**了
+    ⇒ 复跑（re-run）**不会**重新计算它 ⇒ 复跑检出的仍是**同一个**合并 commit
+    ⇒ 判定依旧不成立 ⇒ 照着这句话做会**白跑一轮**还拿不到新结论。
+    实测（PR #105 run `41908498247`，attempt=2）：复跑仍执行
+    `57a267a93f…`（= attempt-1 的那个合并 commit），其第一父仍是派发那一刻的 main。
+    ⇒ 正确的处置 = **推一个新 commit**（产生新的事件派发 ⇒ 新的合并 commit
+    ⇒ 新的 main 侧底座）。
+    """
+    return (
+        "处置：若判「CI 相关面变更」，请**推一个新 commit 到 PR 分支**"
+        "（或 rebase 到最新 main / 重开 PR）以产生一次**新的 CI 事件派发**"
+        "；⚠️ **单纯复跑 run 无效**（合并 commit 在派发那一刻已冻结）"
     )
 
 
 def _ciSurfaceReason(surface: CiSurfaceInfo, ciChanges: tuple[str, ...]) -> str:
-    """CI 相关面命中时的措辞：**归因得到 PR 就说 PR，改归因不到就如实说**。"""
+    """CI 相关面命中时的措辞：**归因得到 PR 就说 PR，改归因不到就如实说**。
+
+    ⚠️ **不把「main 侧底座不同」拼进这条 reason**（2026-11-07）：
+    reason 本身会被截到 200 字符 ⇒ 拼进去必然把「⇒ 对差不成立」截掉
+    ⇒ 反而更难读。⇒ 事实与处置各自单独成行（`_reportNotes`）。
+    """
     attributed = detectCiSurfaceChanges(surface.changedFiles)
-    mismatch = _mainTipMismatchNote(surface)
     if attributed:
-        reason = (
+        return (
             "PR 改动了 CI 相关面 ⇒ 两次 run 的失败集合不可比 ⇒ 对差不成立："
             f"{list(attributed)}"
         )
-    else:
-        reason = (
-            "两次 run 跑的 CI 相关面不同、但归因不到本 PR"
-            f"（{list(ciChanges)}）"
-            "⇒ 通常是 main 改了 CI 文件、PR 分支没跟上"
-            "⇒ 这两次 run 跑的 CI 定义本身不同 ⇒ 失败集合不可比 ⇒ 对差不成立"
-        )
-    if mismatch is not None:
-        reason = f"{reason}（{mismatch}）"
-    return reason
+    return (
+        "两次 run 跑的 CI 相关面不同、但归因不到本 PR"
+        f"（{list(ciChanges)}）"
+        "⇒ 通常是 main 改了 CI 文件、PR 分支没跟上"
+        "⇒ 这两次 run 跑的 CI 定义本身不同 ⇒ 失败集合不可比 ⇒ 对差不成立"
+    )
 
 
 @dataclass(frozen=True)
@@ -402,6 +424,7 @@ def _reportNotes(surface: CiSurfaceInfo, freshness: HeadFreshness, allowCiChange
     mismatchNote = _mainTipMismatchNote(surface)
     if mismatchNote is not None:
         notes.append(mismatchNote)
+        notes.append(_mainTipRemedyNote())
     if surface.error is not None:
         notes.append(f"CI 相关面判定失败：{surface.error}")
     return notes
@@ -696,6 +719,33 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
 
+def _reportAndFinish(
+    decision: _Decision,
+    comparison: RunComparison,
+    surface: CiSurfaceInfo,
+    gateTitleFile: str | None,
+) -> int:
+    """渲染报告 + 落闸门标题 ⇒ 返回退出码（3 = 报告/落盘失败）。"""
+    code = _exitCodeFor(decision.verdict, comparison)
+    title = _gateTitle(code, decision.outcome.exemptions)
+    if not _printReport(
+        decision.counted,
+        decision.diff,
+        decision.verdict,
+        surface,
+        list(decision.notes),
+        decision.outcome.exemptions,
+        decision.outcome.rawBaseCount,
+        decision.outcome.rawPrCount,
+        title,
+    ):
+        return 3
+    writeCode = _writeGateTitleIfNeeded(gateTitleFile, title)
+    if writeCode != 0:
+        return writeCode
+    return code
+
+
 def _runMain(argv: list[str] | None = None) -> int:
     """`main` 的实际流程（异常兜底在 `main` 里）。"""
     args = _parseArgs(argv)
@@ -730,24 +780,7 @@ def _runMain(argv: list[str] | None = None) -> int:
         args.pr_run,
         args.allow_ci_changes,
     )
-    code = _exitCodeFor(decision.verdict, comparison)
-    title = _gateTitle(code, decision.outcome.exemptions)
-    if not _printReport(
-        decision.counted,
-        decision.diff,
-        decision.verdict,
-        surface,
-        list(decision.notes),
-        decision.outcome.exemptions,
-        decision.outcome.rawBaseCount,
-        decision.outcome.rawPrCount,
-        title,
-    ):
-        return 3
-    writeCode = _writeGateTitleIfNeeded(args.gate_title_file, title)
-    if writeCode != 0:
-        return writeCode
-    return code
+    return _reportAndFinish(decision, comparison, surface, args.gate_title_file)
 
 
 if __name__ == "__main__":

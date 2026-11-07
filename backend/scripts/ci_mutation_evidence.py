@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -71,6 +72,29 @@ def replaceOccurrence(source: str, original: str, mutated: str, occurrence: int)
     return source[:index] + mutated + source[index + len(original) :]
 
 
+def _failureMarkerFound(combined: str, case: str) -> bool:
+    """输出里必须有**这条用例**的失败标记（不是「文件里随便哪个失败」）。
+
+    ⚠️ 2026-11-07 代码评审 MEDIUM-4：**裸文件名 / 裸用例名都不算数**。
+    - 文件级用例（`app/tests/unit/test_ci_surface.py`）原先只判
+      「输出里含 `test_ci_surface.py`」⇒ 那是 pytest 的**路径前缀**，
+      **任意**上下文（收集进度行、warning）都满足 ⇒ 别的用例失败会被算成
+      「这条守卫转红」⇒ **假取证**。
+    - 用例级用例原先只判「输出里含用例名」⇒ `test_x` 是 `test_x_extra` 的
+      **子串** ⇒ 同名兄弟用例失败会被算成命中 ⇒ 同样是假取证。
+
+    ⇒ 现在要求 pytest 的**短摘要行**里出现 `FAILED <nodeid>` / `ERROR <nodeid>`
+    （**整行匹配**：nodeid 后面必须跟空白或行尾 ⇒ 不能是更长 nodeid 的前缀），
+    文件级则要求 `FAILED <file>::…`。
+    """
+    if "::" in case:
+        pattern = rf"^(?:FAILED|ERROR) {re.escape(case)}(?:\s|$)"
+    else:
+        # 文件级：必须是**该文件下的某个 nodeid** 失败（`FAILED <file>::test_x`）
+        pattern = rf"^(?:FAILED|ERROR) {re.escape(case)}::\S+(?:\s|$)"
+    return re.search(pattern, combined, flags=re.MULTILINE) is not None
+
+
 def run_case(case: str, env: dict[str, str]) -> tuple[str, str]:
     """跑一条守卫用例 ⇒ `(verdict, detail)`。
 
@@ -78,7 +102,7 @@ def run_case(case: str, env: dict[str, str]) -> tuple[str, str]:
 
     | verdict | pytest 退出码 | 含义 |
     |---|---|---|
-    | `"red"` | **1** | **有断言失败** ⇒ 变异被守卫抓到了 ✔ |
+    | `"red"` | **1** | **这条用例没通过**（断言失败或报错）⇒ 变异被守卫抓到了 ✔ |
     | `"green"` | 0 | 守卫仍然绿 ⇒ 变异**没**被抓住 ⇒ 取证失败 |
     | `"inconclusive"` | 2 / 3 / 4 / 5 | 用例**根本没跑起来**（收尾错误 / 内部错误 / 用法错 / 没收集到用例） |
 
@@ -86,7 +110,8 @@ def run_case(case: str, env: dict[str, str]) -> tuple[str, str]:
     收集阶段就报错）冒充成「守卫抓到了变异」⇒ **假取证** ⇒ 取证报告全绿而
     守卫其实根本没被测过。⇒ 2/3/4/5 一律判 `inconclusive`（**取证失败**，不是转红）。
 
-    ⚠️ 另外必须确认**该用例确实被执行**：退出码 1 时还要看输出里有没有它的名字
+    ⚠️ 另外必须确认**该用例确实被执行且确实是它没过**（MEDIUM-4）：
+    退出码 1 时还要在输出里找到**它自己的**失败标记
     ⇒ 否则「别的用例失败」会被算成「这条用例转红」。
     """
     completed = subprocess.run(
@@ -100,7 +125,6 @@ def run_case(case: str, env: dict[str, str]) -> tuple[str, str]:
     )
     output = completed.stdout[-800:]
     combined = completed.stdout + completed.stderr
-    caseName = case.split("::")[-1]
     if completed.returncode == 0:
         return "green", output
     if completed.returncode != _PYTEST_EXIT_ASSERTION_FAILED:
@@ -109,10 +133,11 @@ def run_case(case: str, env: dict[str, str]) -> tuple[str, str]:
             f"pytest 退出码 {completed.returncode}（不是 {_PYTEST_EXIT_ASSERTION_FAILED}）"
             f" ⇒ 用例没跑起来 ⇒ 不能算「转红」\n{output}",
         )
-    if caseName not in combined:
+    if not _failureMarkerFound(combined, case):
         return (
             "inconclusive",
-            f"pytest 退出码 1，但输出里没有用例名 {caseName!r} ⇒ 不是它失败\n{output}",
+            f"pytest 退出码 1，但输出里没有 {case!r} 自己的失败标记"
+            f" ⇒ 不是它失败\n{output}",
         )
     return "red", output
 

@@ -761,11 +761,16 @@ def test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_
 
 
 def test_the_round5_environment_lever_files_are_actually_flagged() -> None:
-    """**正面断言**：第五/六轮评审的「环境定义杠杆」文件确实被判成 CI 相关面。
+    """**正面断言**：第五/六/七轮评审的「环境定义杠杆」文件确实被判成 CI 相关面。
 
     这些文件都在 CI 里**真正被执行或加载**（不是名义配置）⇒ 换掉它们 =
     换掉测试环境 ⇒ 失败集合不可比 ⇒ 却可能判「净新增 0」。反查守卫认不出
     「仓库里现在没有的文件」⇒ 这批按路径**正面**钉住（M70–M80 变异）。
+
+    ⚠️ 本文件钉的是 **20 个路径**（其中 `.env` 家族 / `.python-version` / `uv.toml`
+    等部分是**形态钉**——仓库里现在没有这些文件，断言的是清单 pattern 的**接受面**）；
+    `frontend/.env` / `.env.test` 两条形态钉在
+    `test_ci_surface_frontend_reverse.py` 的正面断言里（合计口径见 summary §2.10.10）。
     """
     levers = (
         # 第五轮 HIGH-1：CI 两个 job 前都执行 `alembic upgrade head`，env.py 是真正跑迁移的脚本。
@@ -773,6 +778,16 @@ def test_the_round5_environment_lever_files_are_actually_flagged() -> None:
         # 第六轮 HIGH-1：迁移脚本本体 —— `upgrade()` 执行的也是收集前的任意 Python。
         "backend/alembic/versions/0140_ontology_property_unit.py",
         "backend/alembic/versions/b1ea6cb32588_run_state.py",
+        # 第七轮 HIGH-2：alembic 接受 `[^/]+` 的 revision 文件名（`+` 实测会被 import）
+        # ⇒ 清单必须同宽；这条是**形态钉**（文件尚不存在）。
+        "backend/alembic/versions/0141_probe+shape.py",
+        # 第七轮 HIGH-1：`scripts.*` 包 init —— conftest / `_pg_support` 的
+        # `from scripts.… import …` 都先执行它（收集前）。
+        "backend/scripts/__init__.py",
+        # 第七轮 MEDIUM：pytest prepend 导入链上的测试包 init（现在是空文件，
+        # 未来子目录由通配管）。
+        "backend/app/tests/__init__.py",
+        "backend/app/tests/unit/__init__.py",
         # 第五轮 MEDIUM-2：conftest `load_dotenv(override=True)` ⇒ 覆盖 CI 注入的全部变量。
         "backend/.env",
         "backend/.env.local",

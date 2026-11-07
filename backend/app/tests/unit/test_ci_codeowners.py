@@ -245,6 +245,13 @@ def test_the_effective_owner_of_every_controlled_path_is_the_expected_one() -> N
         for path in (_REPO_ROOT / "backend").glob("seed_*.py")
     }
     controlledPaths |= {"backend/scripts/kpi_metric_db_guard.py"}
+    # 第七轮复审（HIGH-1 / MEDIUM）：scripts 包 init（conftest/_pg_support 的
+    # `from scripts.… import …` 都先执行它）与 pytest prepend 导入链上的测试包 init。
+    controlledPaths |= {"backend/scripts/__init__.py"}
+    controlledPaths |= {
+        str(path.relative_to(_REPO_ROOT))
+        for path in (_REPO_ROOT / "backend" / "app" / "tests").rglob("__init__.py")
+    }
     assert controlledPaths, "受控路径集合为空（路径写错了？）"
 
     wrong = {

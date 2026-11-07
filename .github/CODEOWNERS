@@ -93,6 +93,13 @@ backend/scripts/seed_*.py               @sunql
 backend/seed_*.py                       @sunql
 # ⚠️ 测试库断言的依赖模块（`_pg_support.assertTestDatabase` import 它的 `databaseNameOf`）。
 backend/scripts/kpi_metric_db_guard.py  @sunql
+# ⚠️ scripts 包 init（第七轮复审 HIGH-1）：任何 `from scripts.… import …`（conftest、
+# `_pg_support`、单测）都先执行它 ⇒ 收集前的任意 Python（里面已有模块级 import）。
+backend/scripts/__init__.py             @sunql
+# ⚠️ 测试包 init（第七轮复审 MEDIUM）：pytest prepend 导入链上的包 init，收集前执行；
+# 现在是空文件 ⇒ 未来子目录由 `**` 通配管。
+backend/app/tests/__init__.py           @sunql
+backend/app/tests/**/__init__.py        @sunql
 
 # ---- 环境定义文件（第五轮安全评审 MEDIUM-2 / MEDIUM-3）----
 # `backend/.env` 被 conftest `load_dotenv(override=True)` 读 ⇒ 覆盖 CI 注入的全部变量

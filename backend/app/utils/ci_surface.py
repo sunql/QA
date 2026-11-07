@@ -243,11 +243,27 @@ _CI_SURFACE_PATTERNS = (
     r"^backend/alembic/env\.py$",
     # ⚠️ **迁移脚本本体**（第六轮复审 HIGH-1）：`alembic upgrade head` 会执行
     # `backend/alembic/versions/` 里**每个 revision 的 `upgrade()` —— 同样是 pytest
-    # 收集前的任意 Python（140 个文件，且工程规则要求每个 ORM 变更都带迁移 ⇒
+    # 收集前的任意 Python（139 个文件，且工程规则要求每个 ORM 变更都带迁移 ⇒
     # 这是常规路径不是偏门）⇒ PR 用迁移塑形测试库 / 删改测试文件 ⇒ 假「净新增 0」。
     # ⚠️ 方向代价：迁移文件入清单 ⇒ main 侧合了迁移、PR 没跟上也会判 6（假拦）
     # ⇒ 本设计明确偏好假拦而不是 fail-open（与两腿并集同一方向）。
-    r"^backend/alembic/versions/[\w.-]+\.py$",
+    # ⚠️ **文件名形态**（第七轮复审 HIGH-2）：alembic 1.19.1 的
+    # `_only_source_rev_file = (?!\.\#|__init__)(.*\.py)$` ⇒ 除了 `__init__` / `.#`
+    # 两个前缀，**任何**非 `/` 字符都被接受（`+ ~ 空格 @ ! #` 实测都会被 import）
+    # ⇒ 清单必须用 `[^/]+` 而不是 `[\w.-]+`，否则 `0141_foo+bar.py` 这类
+    # 合法 revision 名逃出闸门（CODEOWNERS 的 `*` 本就跨不过 `/`，不受影响）。
+    r"^backend/alembic/versions/[^/]+\.py$",
+    # ⚠️ **scripts 包 init**（第七轮复审 HIGH-1）：`backend/scripts/__init__.py`
+    # 第 6 行模块级 `from scripts.seed_business_objects import …`；unit/integration
+    # conftest 与 `_pg_support`、`test_kpi_metric_backfill_plan.py` 都 `from scripts.…
+    # import …` ⇒ **任何** `scripts.*` 的 import 都先执行包 init ⇒ 收集前的任意
+    # Python（注册 pytest 钩子 / 改 stdout 都能做）。
+    r"^backend/scripts/__init__\.py$",
+    # ⚠️ **测试包 init**（第七轮复审 MEDIUM）：pytest 的 prepend 导入模式经
+    # `importlib.import_module("app.tests.unit.conftest")` 加载 ⇒ 沿途所有包
+    # `__init__.py`（现在是 7 个空文件）在收集前执行 ⇒ 塞进 import 时代码 = 与
+    # conftest 同级的杠杆。通配管未来子目录。
+    r"^backend/app/tests/(?:[^/]+/)*__init__\.py$",
     # ⚠️ **backend/.env**（第五轮安全评审 MEDIUM-2）：conftest 里
     # `load_dotenv(override=True)` ⇒ 被**强制 add 进仓库**的 `.env` 会覆盖 CI 注入的
     # 全部变量（DATABASE_URL / TEST_DATABASE_URL / MILVUS_TEST_DB_NAME / MINIO_*…）；

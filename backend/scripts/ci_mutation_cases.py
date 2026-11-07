@@ -1,4 +1,4 @@
-"""CI 判据守卫的**变异清单**（纯数据，80 组 = 核心批 + N6 批 + 第四/五轮批 + 第六轮复审批）。
+"""CI 判据守卫的**变异清单**（纯数据，83 组 = 核心批 + N6 批 + 第四/五轮批 + 第六/七轮复审批）。
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
@@ -12,7 +12,7 @@ M1–M36（继承批 + 模块拆分批 + workflow 批 + 净变更批）在 `ci_m
 
 用法（在仓库根或任意子目录执行均可，脚本按自身位置自动定位仓库根）：
 
-    python3 backend/scripts/ci_mutation_evidence.py            # 全部 80 组
+    python3 backend/scripts/ci_mutation_evidence.py            # 全部 83 组
     python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 """
 
@@ -623,7 +623,7 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
     ),
     # ---------- M77–M80：2026-11-08 第六轮复审「环境杠杆补漏」批 ----------
     # - HIGH-1：迁移脚本本体 `backend/alembic/versions/*.py` —— `alembic upgrade head`
-    #   执行每个 revision 的 `upgrade()`（pytest 收集前的任意 Python，140 个文件，
+    #   执行每个 revision 的 `upgrade()`（pytest 收集前的任意 Python，139 个文件，
     #   工程规则要求每个 ORM 变更都带迁移 ⇒ 常规路径）；
     # - MEDIUM-1：仓库根 `uv.toml` —— uv 沿工作目录父链发现配置（CI 在 backend/ 跑 uv）；
     # - MEDIUM-2：`backend/seed_ontology.py` —— conftest **模块级** import ⇒ 收集前执行；
@@ -633,7 +633,7 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
         "M77",
         "backend",
         "app/utils/ci_surface.py",
-        'r"^backend/alembic/versions/[\\w.-]+\\.py$",',
+        'r"^backend/alembic/versions/[^/]+\\.py$",',
         "",
         (
             "app/tests/unit/test_ci_surface.py::"
@@ -670,6 +670,52 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
         "backend",
         "app/utils/ci_surface.py",
         'r"^backend/scripts/kpi_metric_db_guard\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    # ---------- M81–M83：2026-11-08 第七轮复审「收集前执行的包 init + revision 文件名形态」批 ----------
+    # - HIGH-1：`backend/scripts/__init__.py` —— 任何 `from scripts.… import …`
+    #   （unit/integration conftest、_pg_support、单测）都先执行包 init ⇒ 收集前任意
+    #   Python（注册 pytest 钩子 / 改 stdout 都行）；此前清单与 CODEOWNERS 双 MISS；
+    # - HIGH-2：versions pattern 从 `[\w.-]+` **放宽**到 `[^/]+`（alembic 1.19.1 的
+    #   `_only_source_rev_file` 只排除 `__init__`/`.#` 前缀 ⇒ `0141_foo+bar.py` 会被
+    #   import 却逃出窄清单）。M77 只钉「删除」，钉不住「形态收窄」⇒ M82 把它改回
+    #   窄形态必须转红；M77 锚点已同步为宽行原文（第七轮，同 M76 重锚的手法）；
+    # - MEDIUM：`backend/app/tests/**/__init__.py` —— pytest prepend 导入链上的包
+    #   init（现在 7 个空文件，收集前执行 ⇒ 塞 import 时代码 = conftest 同级杠杆）。
+    (
+        "M81",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/scripts/__init__\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M82",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/alembic/versions/[^/]+\\.py$",',
+        'r"^backend/alembic/versions/[\\w.-]+\\.py$",',
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M83",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/app/tests/(?:[^/]+/)*__init__\\.py$",',
         "",
         (
             "app/tests/unit/test_ci_surface.py::"

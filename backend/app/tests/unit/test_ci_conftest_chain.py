@@ -265,6 +265,45 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
         "    @classmethod\n    def model_rebuild(cls):\n        pass\n\n"
         "def get_x():\n    return X\n\nget_x().model_rebuild()\n"
     ),
+    # ---- 第十六轮（5H + 2M）收口 fixtures ----
+    # H-1：vararg/kwarg 注解也是求值位置（首轮只扫 posonly/args/kwonly）
+    "vararg_annotation": 'import sys\ndef f(*args: sys.path.insert(0, "x")):\n    ...\n',
+    "kwarg_annotation": 'import sys\ndef f(**kw: sys.path.insert(0, "x")):\n    ...\n',
+    # H-2：模块根级重绑定绕过别名链（_t = sys 后 _t.path.insert）
+    "module_root_binding": "import sys\n_t = sys\n_r = _t.path.insert(0, 'x')\n",
+    # H-2：__dict__ 下标拿模块命名空间
+    "dict_subscript": "import sys\n_m = sys.__dict__['modules']\n",
+    # M-1：拒绝根模块的星号导入（__all__ 动态展开 fail-closed 的前提）
+    "star_from_denied": "from os import *\nenviron['HOOK'] = '1'\n",
+    # H-3：metaclass 经 **kwargs 展开（kw.arg is None，静态不可判）
+    "metaclass_kwargs": 'class M(type):\n    pass\n\nclass X(**{"metaclass": M}):\n    pass\n',
+    # H-3：钩子定义藏在分支臂里
+    "init_subclass_in_branch": (
+        "class Base:\n    if True:\n        def __init_subclass__(cls):\n            cls.hooked = True\n"
+    ),
+    # H-3：钩子名经属性再绑定（Store 位置在 _REBIND_DENIED_ATTRS）
+    "hook_attr_rebind": "class Base:\n    pass\n\nBase.__init_subclass__ = None\n",
+    # H-3：基类是求值表达式（__mro_entries__ 途径）
+    # 基类是求值表达式（__mro_entries__ 途径）—— 不带钩子 def，
+    # 保证「基类 Call」检查是该 fixture 的独占判别点（否则 M130 变异不转红）
+    "base_call": (
+        "def get_x():\n    return ()\n\nclass Y(get_x()):\n    pass\n"
+    ),
+    # H-3：type.__setattr__ 在 Assign 位置改类
+    "type_setattr_assign": (
+        "class B:\n    pass\n\n_r = type.__setattr__(B, '__init_subclass__', None)\n"
+    ),
+    # H-4：被跳过的函数体经模块级调用执行
+    "called_def": "import sys\ndef m():\n    sys.path.insert(0, 'x')\n\n_x = m()\n",
+    # H-4：IIFE lambda
+    "lambda_iife": "import sys\n_h = (lambda: sys.path.insert(0, 'x'))()\n",
+    # H-4：PEP 562 模块级 __getattr__（收集前钩子）
+    "module_getattr": (
+        "import importlib\n\n\ndef __getattr__(name):\n"
+        "    return importlib.import_module('app.evil')\n"
+    ),
+    # LOW-2 补：允许方法名经属性再绑定也不放行
+    "allowed_method_rebind": "class X:\n    pass\n\nX.model_rebuild = None\n",
 }
 
 
@@ -295,6 +334,12 @@ _CLEAN_SOURCES: dict[str, str] = {
     # 字段名恰好与拒绝清单同名（Store 上下文）不是引用（第十四轮校准实证）
     "field_named_input": "class M:\n    input: str = 'x'\n",
     "field_named_eval": "class N:\n    eval: int = 0\n",
+    # match 的 guard 不进结构白名单（M-2 修复），良性 guard 必须放行
+    "match_guard_benign": "match 1:\n    case _ if 1 > 0:\n        pass\n",
+    # 第十六轮 M-2：结构白名单补齐的语句形态必须放行
+    "augassign": "COUNT = 0\nCOUNT += 1\n",
+    "type_alias": "type Alias = int\n",
+    "global_stmt": "X = 1\n\ndef f():\n    global X\n    X = 2\n",
 }
 
 
@@ -336,8 +381,10 @@ _ARM_SOURCES: dict[str, str] = {
         "with nullcontext():\n    logging.basicConfig(level=1)\n"
     ),
     "match_body": "import logging\nmatch 1:\n    case 1:\n        logging.basicConfig(level=1)\n",
+    # match 的 guard 是表达式不是语句（第十六轮 M-2 修复）：结构白名单不再扫 guard，
+    # 其内容改由拒绝扫描（_iterExecNodes 全子树）覆盖 ⇒ 本臂改用拒绝轴 evil 钉住。
     "match_guard": (
-        "import logging\nmatch 1:\n    case _ if logging.getLogger('x'):\n        pass\n"
+        "import sys\nmatch 1:\n    case _ if sys.path.insert(0, 'x'):\n        pass\n"
     ),
     "class_body": "import logging\nclass C:\n    logging.basicConfig(level=1)\n",
 }
@@ -411,3 +458,47 @@ def test_class_body_imports_are_derived(tmp_path: Path) -> None:
     assert "backend/app/inner.py" in closure, (
         "类体 import 没被派生 —— 类体作用域展开被删除/退化？"
     )
+
+
+def test_dual_form_module_derives_both_leaves(tmp_path: Path) -> None:
+    """同目录同时有 `foo.py` 与 `foo/__init__.py` ⇒ **两个叶子都进闭包**（第十五轮 H-5）。
+
+    CPython `FileFinder` 先试包目录再试 `.py`：派生器若二选一（尤其优先 `.py`），
+    攻击者保留无害 `foo.py`、新增恶意 `foo/__init__.py` 即可让真实执行点逃出闭包。
+    收超集只会让闭包偏大（fail-closed 方向）。
+    """
+    backend = tmp_path / "backend"
+    (backend / "app").mkdir(parents=True)
+    (backend / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (backend / "app" / "foo.py").write_text("X = 1\n", encoding="utf-8")
+    (backend / "app" / "foo").mkdir()
+    (backend / "app" / "foo" / "__init__.py").write_text(
+        "import sys\nsys.path.insert(0, 'x')\n", encoding="utf-8"
+    )
+    (backend / "conftest.py").write_text("import app.foo\n", encoding="utf-8")
+
+    mapping = preCollectionImportPaths(backend)
+    derived = {path for files in mapping.values() for path in files}
+
+    assert "backend/app/foo.py" in derived, f".py 叶子丢失：{sorted(derived)}"
+    assert "backend/app/foo/__init__.py" in derived, (
+        f"包目录叶子丢失 —— 双形态退回了二选一（H-5 回归）：{sorted(derived)}"
+    )
+
+
+def test_dynamic_all_raises_fail_closed(tmp_path: Path) -> None:
+    """`__all__` 非静态字面量 ⇒ 派生必须抛错（第十五轮 M-1：动态星号展开 fail-open）。
+
+    CPython 实测 `from X import *` 会连带 import `__all__` 里的子模块；静态展开
+    判不了 ⇒ 宁可炸出来人工裁决，也不静默漏边。
+    """
+    backend = tmp_path / "backend"
+    (backend / "app").mkdir(parents=True)
+    (backend / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (backend / "app" / "star.py").write_text(
+        "__all__ = [name for name in ('x',)]\n", encoding="utf-8"
+    )
+    (backend / "conftest.py").write_text("from app.star import *\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="__all__"):
+        preCollectionImportPaths(backend)

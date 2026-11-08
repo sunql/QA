@@ -81,7 +81,11 @@ _ALLOWED_STATEMENTS = (
     ast.AsyncFunctionDef,
     ast.Assign,
     ast.AnnAssign,
+    ast.AugAssign,
+    ast.Global,
+    ast.Nonlocal,
     ast.Pass,
+    getattr(ast, "TypeAlias", None),
 )
 
 # 收集前执行的**已知钩子机制**（按根链拒绝，denylist 而非 purity 宣称：
@@ -121,6 +125,10 @@ _DENIED_ROOTS = (
     "shutil",
     "socket",
     "signal",
+    "vars",
+    "type.__setattr__",
+    "object.__setattr__",
+    "object.__getattribute__",
 )
 
 # 顶层裸表达式（Expr-Call）只允许这些方法名，且**接收者必须是裸 Name**
@@ -130,7 +138,33 @@ _ALLOWED_EXPR_METHODS = ("model_rebuild",)
 
 # 类体里的「类创建钩子」：class 语句执行（import 期）时就会跑（第十三轮 HIGH-2）。
 # 描述符 `__get__`/`__set__` 不算——那是实例访问期执行，不是类创建期。
-_CLASS_CREATION_HOOK_NAMES = ("__init_subclass__", "__set_name__", "__class_getitem__")
+_CLASS_CREATION_HOOK_NAMES = (
+    "__init_subclass__",
+    "__set_name__",
+    "__class_getitem__",
+    "__mro_entries__",
+)
+
+# `from X import *` 的 X 根模块在这批里 ⇒ 星号导入整个拒绝（第十五轮 HIGH-2/
+# M-1：星号把拒绝根的名字直接灌进模块命名空间，`from os import *` 后裸写
+# `environ[...] = ...` 静态追不到 ⇒ 只能从源头拒。真实闭包 0 条星号导入。）
+_DENIED_STAR_ROOTS = (
+    "os",
+    "sys",
+    "subprocess",
+    "importlib",
+    "ctypes",
+    "runpy",
+    "builtins",
+    "shutil",
+    "socket",
+    "signal",
+    "_pytest",
+    "monkeypatch",
+)
+
+# Store 到这些属性名 = 对允许机制的再绑定/劫持（第十五轮 H-3/H-4）。
+_REBIND_DENIED_ATTRS = (*_CLASS_CREATION_HOOK_NAMES, *_ALLOWED_EXPR_METHODS)
 
 
 def _dottedChain(node: ast.expr) -> str | None:
@@ -159,8 +193,9 @@ def _moduleScopeStatements(body: list[ast.stmt]):
         yield node
         if isinstance(node, ast.Match):
             for case in node.cases:
-                if case.guard:
-                    yield from _moduleScopeStatements([case.guard])
+                # guard 是表达式不是语句，不进结构白名单（第十五轮 M-2：进白名单
+                # 会让任何带 guard 的模块级 match 假红）；其表达式由拒绝扫描经
+                # `_iterExecNodes`（全子树）覆盖。
                 yield from _moduleScopeStatements(case.body)
         elif isinstance(node, _BRANCH_TYPES):
             yield from _moduleScopeStatements(node.body)
@@ -186,9 +221,24 @@ def _aliasMap(body: list[ast.stmt]) -> dict[str, str]:
             for alias in stmt.names:
                 if alias.asname:
                     aliases[alias.asname] = alias.name
+                else:
+                    root = alias.name.split(".")[0]
+                    aliases[root] = root
         elif isinstance(stmt, ast.ImportFrom) and stmt.level == 0 and stmt.module:
             for alias in stmt.names:
-                aliases[alias.asname or alias.name] = f"{stmt.module}.{alias.name}"
+                if alias.name != "*":  # 星号导入的名字静态未知（源头由星号拒绝管）
+                    aliases[alias.asname or alias.name] = f"{stmt.module}.{alias.name}"
+        elif (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and isinstance(stmt.value, ast.Name)
+        ):
+            # 模块根再绑定：`_t = sys` ⇒ `_t.path.insert(...)` 要能追到 sys.path
+            # （第十五轮 HIGH-2；只传播静态可判定的裸 Name 单赋值，按语句序覆盖）。
+            source = aliases.get(stmt.value.id)
+            if source:
+                aliases[stmt.targets[0].id] = source
     return aliases
 
 
@@ -207,7 +257,12 @@ def _iterExecNodes(node: ast.AST):
         for d in (*args.defaults, *args.kw_defaults):
             if d is not None:
                 yield from _iterExecNodes(d)
-        for a in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+        argNodes: tuple[ast.arg, ...] = (*args.posonlyargs, *args.args, *args.kwonlyargs)
+        if args.vararg is not None:
+            argNodes = (*argNodes, args.vararg)
+        if args.kwarg is not None:
+            argNodes = (*argNodes, args.kwarg)
+        for a in argNodes:
             if a.annotation:
                 yield from _iterExecNodes(a.annotation)
         if getattr(node, "returns", None):
@@ -222,7 +277,11 @@ def _resolveModuleFiles(backendRoot: Path, moduleName: str) -> tuple[str, ...]:
     """模块名 → import 它会执行的**全部**仓库相对文件（祖先包 init 链 + 叶子）。
 
     `app.domain.models` → `app/__init__.py`、`app/domain/__init__.py`（存在的才收）
-    + `app/domain/models.py`（叶子；纯模块优先于包，与「先试 .py 再试包」一致）。
+    + 叶子（`app/domain/models.py` 与/或 `app/domain/models/__init__.py`）。
+    **双形态都存在时两个都收**（第十五轮 HIGH-5）：CPython 的 `FileFinder` 在同一
+    目录**先试包目录再试 .py**，此前派生器优先 `.py` 的方向与它相反 ⇒ 攻击者
+    保留无害 `foo.py`、新增恶意 `foo/__init__.py` 即可让真实执行点逃出闭包；
+    收超集只会让闭包偏大（fail-closed 方向）。
     """
     parts = moduleName.split(".")
     out: list[str] = []
@@ -234,7 +293,7 @@ def _resolveModuleFiles(backendRoot: Path, moduleName: str) -> tuple[str, ...]:
     leafInit = backendRoot.joinpath(*parts, "__init__.py")
     if leafPy.is_file():
         out.append(leafPy.relative_to(backendRoot.parent).as_posix())
-    elif leafInit.is_file():
+    if leafInit.is_file():
         out.append(leafInit.relative_to(backendRoot.parent).as_posix())
     return tuple(out)
 
@@ -266,7 +325,10 @@ def _allEntries(backendRoot: Path, moduleName: str) -> tuple[str, ...]:
     """模块 `__all__` 清单里的字符串（`from X import *` 会连带 import 的子模块名）。
 
     只认模块级 `__all__ = [...]` / `+= [...]` 里能静态看到的字符串常量；
-    动态构造 ⇒ 空集（fail-open 只影响派生广度，钩子检测仍兜底）。"""
+    **存在 `__all__` 但无法静态判定 ⇒ 抛错**（第十五轮 M-1：动态 `__all__` 的
+    星号展开会漏掉真实会被 import 的子模块 ⇒ 那是 fail-open 洞，不是「广度」
+    问题 —— CPython 实测会连带 import `__all__` 里的子模块）。真实闭包 61 处
+    `__all__` 全部为静态字面量 ⇒ 零代价。"""
     files = _resolveModuleFiles(backendRoot, moduleName)
     if not files:
         return ()
@@ -279,10 +341,18 @@ def _allEntries(backendRoot: Path, moduleName: str) -> tuple[str, ...]:
         if not any(getattr(t, "id", None) == "__all__" for t in targets):
             continue
         value = stmt.value
-        elts = value.elts if isinstance(value, (ast.List, ast.Tuple)) else ()
-        entries.extend(
-            e.value for e in elts if isinstance(e, ast.Constant) and isinstance(e.value, str)
-        )
+        if not isinstance(value, (ast.List, ast.Tuple)):
+            raise RuntimeError(
+                f"{moduleName} 的 __all__ 是动态构造（{ast.unparse(value)[:40]}），"
+                "无法静态展开星号导入 ⇒ fail-closed"
+            )
+        for e in value.elts:
+            if not (isinstance(e, ast.Constant) and isinstance(e.value, str)):
+                raise RuntimeError(
+                    f"{moduleName} 的 __all__ 含非常量元素（{ast.unparse(e)[:40]}）"
+                    " ⇒ fail-closed"
+                )
+            entries.append(e.value)
     return tuple(entries)
 
 
@@ -428,6 +498,10 @@ def _denyMessage(node: ast.AST, aliases: dict[str, str]) -> str | None:
         chain = _dottedChain(node)
         if chain is None:
             return None
+        if "__dict__" in chain.split("."):
+            # `sys.__dict__["modules"]`：__dict__ 抹掉静态链尾 ⇒ 整条链拒绝
+            # （第十五轮 HIGH-2；真实闭包 0 处模块级 __dict__ 访问）
+            return chain
         root, _, rest = chain.partition(".")
         target = aliases.get(root, root)
         full = f"{target}.{rest}" if rest else target
@@ -436,18 +510,55 @@ def _denyMessage(node: ast.AST, aliases: dict[str, str]) -> str | None:
 
 
 def _classCreationHookMessages(stmt: ast.ClassDef) -> tuple[tuple[int, str], ...]:
-    """类**创建**（import 期）就会执行的钩子位置（第十三轮 HIGH-2）。"""
+    """类**创建**（import 期）就会执行的钩子位置（第十三轮 HIGH-2 / 第十五轮 H-3）。
+
+    覆盖：`metaclass=` 关键字、`**{...}` 展开（kw.arg is None ⇒ metaclass
+    静态不可判 ⇒ 一律拒）、基类是调用/星号表达式（`__mro_entries__` 在类创建
+    期执行）、类体**任意嵌套深度**（含分支包裹）的钩子名定义。"""
     out: list[tuple[int, str]] = []
     for kw in stmt.keywords:
-        if kw.arg == "metaclass":
+        if kw.arg is None:
+            out.append((stmt.lineno, "类创建钩子 **kwargs 展开（metaclass 静态不可判）"))
+        elif kw.arg == "metaclass":
             out.append((stmt.lineno, f"类创建钩子 metaclass= {ast.unparse(kw.value)[:40]}"))
-    for node in stmt.body:
+    for base in stmt.bases:
+        if isinstance(base, (ast.Call, ast.Starred)):
+            out.append(
+                (base.lineno, f"类基类是求值表达式 {ast.unparse(base)[:40]}（__mro_entries__ 途径）")
+            )
+    for node in _moduleScopeStatements(list(stmt.body)):
         if (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name in _CLASS_CREATION_HOOK_NAMES
         ):
             out.append((node.lineno, f"类创建钩子 {node.name}"))
     return tuple(out)
+
+
+def _moduleLevelDefs(body: list[ast.stmt]):
+    """模块级（含分支体内）的 def 定义节点；类体不算（方法要等调用/实例化）。
+
+    与 `_moduleScopeStatements` 的差别：不递归进 ClassDef 体（类体里的 def 是
+    方法），但**会**收 If/Try 等分支体里的 def（import 期定义）。"""
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield node
+        if isinstance(node, ast.Match):
+            for case in node.cases:
+                yield from _moduleLevelDefs(case.body)
+        elif isinstance(node, _BRANCH_TYPES):
+            yield from _moduleLevelDefs(node.body)
+            for handler in getattr(node, "handlers", []):
+                yield from _moduleLevelDefs(handler.body)
+            yield from _moduleLevelDefs(getattr(node, "orelse", []))
+            yield from _moduleLevelDefs(getattr(node, "finalbody", []))
+
+
+_MAX_CALLEE_DEPTH = 8
+
+# PEP 562 的模块级 `__getattr__`/`__dir__`：包 init 里定义它 + 另一文件
+# `from pkg import missing` 就会在收集前执行其体（第十五轮 H-4 实测）。
+_MODULE_GETATTR_NAMES = ("__getattr__", "__dir__")
 
 
 def findImportTimeHooks(path: Path) -> tuple[str, ...]:
@@ -457,8 +568,14 @@ def findImportTimeHooks(path: Path) -> tuple[str, ...]:
     - 结构白名单：语句形态是否定义性（Expr 只放 docstring 与裸 Name 接收者的
       `model_rebuild()`）；
     - 根链拒绝：对**每条**语句的 import 期表达式统一跑（If.test / except 类型 /
-      装饰器 / 默认值 / 注解 / with item / match guard 全覆盖），先过别名映射。
-    再加类创建钩子（metaclass / `__init_subclass__` 族）。
+      装饰器 / 默认值 / 注解（含 *args/**kwargs）/ with item / match guard
+      全覆盖），先过别名映射（含模块根再绑定传播）。
+    再加：类创建钩子（metaclass / `__init_subclass__` 族 / 基类求值）、
+    **import 期被调用的同模块 def/lambda 体**（第十五轮 H-4：`_x = m()`、IIFE、
+    本地装饰器都在 import 期执行函数体 —— 解析一层模块级 def，带 visited 防环
+    与深度上限；嵌套函数体内的调用不追，文档化局限）、模块级 `__getattr__` /
+    `__dir__`（PEP 562 收集前钩子）、来自拒绝根的星号导入、对钩子/允许方法
+    属性名的再绑定。
     守卫用它在传递闭包上断言内容不变式（第十二轮复审 HIGH-2/MEDIUM-4）。
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -472,15 +589,66 @@ def findImportTimeHooks(path: Path) -> tuple[str, ...]:
             seen.add(message)
             hooks.append(message)
 
+    defs: dict[str, ast.AST] = {d.name: d for d in _moduleLevelDefs(tree.body)}
+    for stmt in _moduleScopeStatements(tree.body):
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and isinstance(stmt.value, ast.Lambda)
+        ):
+            defs.setdefault(stmt.targets[0].id, stmt.value)
+    visited: set[int] = set()
+
+    def scanCallee(callee: ast.AST, depth: int) -> None:
+        if depth > _MAX_CALLEE_DEPTH or id(callee) in visited:
+            return
+        visited.add(id(callee))
+        if isinstance(callee, ast.Lambda):
+            scanExec(_iterExecNodes(callee.body), depth)
+            return
+        for stmt in callee.body:
+            scanExec(_iterExecNodes(stmt), depth)
+
+    def scanExec(nodes, depth: int) -> None:
+        for node in nodes:
+            detail = _denyMessage(node, aliases)
+            if detail:
+                add(getattr(node, "lineno", 0), f"顶层引用 {detail}")
+            if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+                if node.attr in _REBIND_DENIED_ATTRS:
+                    add(getattr(node, "lineno", 0), f"顶层再绑定 {node.attr}")
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for dec in getattr(node, "decorator_list", []):
+                    if isinstance(dec, ast.Name) and dec.id in defs:
+                        scanCallee(defs[dec.id], depth + 1)
+            if isinstance(node, ast.Call):
+                callee: ast.AST | None = None
+                if isinstance(node.func, ast.Lambda):
+                    callee = node.func  # IIFE：lambda 体在 import 期执行
+                elif isinstance(node.func, ast.Name):
+                    callee = defs.get(node.func.id)
+                if callee is not None:
+                    scanCallee(callee, depth + 1)
+
     for stmt in _moduleScopeStatements(tree.body):
         problem = _structuralProblem(stmt)
         if problem:
             add(stmt.lineno, problem)
-        for node in _iterExecNodes(stmt):
-            detail = _denyMessage(node, aliases)
-            if detail:
-                add(getattr(node, "lineno", stmt.lineno), f"顶层引用 {detail}")
+        if (
+            isinstance(stmt, ast.ImportFrom)
+            and stmt.level == 0
+            and stmt.module
+            and stmt.names[0].name == "*"
+        ):
+            root = stmt.module.split(".")[0]
+            if root in _DENIED_STAR_ROOTS:
+                add(stmt.lineno, f"星号导入拒绝根模块 {root}")
+        scanExec(_iterExecNodes(stmt), 0)
         if isinstance(stmt, ast.ClassDef):
             for line, detail in _classCreationHookMessages(stmt):
                 add(line, detail)
+    for d in _moduleLevelDefs(tree.body):
+        if d.name in _MODULE_GETATTR_NAMES:
+            add(d.lineno, f"模块级 {d.name}（PEP 562 收集前钩子）")
     return tuple(hooks)

@@ -142,6 +142,7 @@ backend/uv.toml                       @sunql
 backend/scripts/ci_mutation_cases.py       @sunql
 backend/scripts/ci_mutation_cases_core.py  @sunql
 backend/scripts/ci_mutation_cases_r14.py   @sunql
+backend/scripts/ci_mutation_cases_r16.py   @sunql
 backend/scripts/ci_mutation_evidence.py    @sunql
 
 # ---- CODEOWNERS **自己**（改授权面 = 换授权人 ⇒ 必须人工复核）----

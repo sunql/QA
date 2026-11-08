@@ -911,6 +911,22 @@ _EXPECTED_HOOK_POSITIONS: dict[str, str] = {
     "staticmethod_member": "line 3",
 }
 
+# 第二十四轮全量取证净漏 5（M133/M154/M178/M180/M200）：第二十四轮新增的
+# fail-closed 兜底臂（func-form else / 装饰器裸名静态不可判）把五条精识臂的
+# fixture 罩住了 —— 变异后守卫落到兜底仍拦 ⇒ 只断言非空假绿（「冗余 deny 线」
+# 第四例，M172/M183/M186 同族）。M158/M159 的「归位」原则从**位置**扩展到
+# **根链/形态文本**：精识臂的独占贡献是指认钩子根链（sys.path）或可执行目标
+# 形态（下标取可调用）；兜底只报「静态不可判」不指认 ⇒ 文本归位断言即判别点。
+# （M154 不能用 "sys.path"：下标臂本身拒在调用点不指认根链 ⇒ 用臂专属形态文本；
+#   也不能用裸 "下标"——兜底报文的形态枚举里恰好含「下标」二字。）
+_EXPECTED_HOOK_ROOTS: dict[str, str] = {
+    "lambda_iife": "sys.path",
+    "subscript_call": "下标取可调用",
+    "class_alias_bare_decorator": "sys.path",
+    "instance_decorator": "sys.path",
+    "class_direct_decorator": "sys.path",
+}
+
 
 @pytest.mark.parametrize("case", sorted(_EVIL_POSITION_SOURCES))
 def test_hook_positions_are_denied(tmp_path: Path, case: str) -> None:
@@ -929,6 +945,13 @@ def test_hook_positions_are_denied(tmp_path: Path, case: str) -> None:
         assert any(
             expected in hook for hook in hooks
         ), f"{case} 的拒绝没有归位到钩子真实位置（{expected}）：{hooks}"
+    # 第二十四轮：精识臂被兜底罩住时（M133/M154/M178/M180/M200 实证）拒绝文本
+    # 不再指认钩子根链/可执行目标形态 ⇒ 文本归位断言（见 _EXPECTED_HOOK_ROOTS 注释）。
+    expectedRoot = _EXPECTED_HOOK_ROOTS.get(case)
+    if expectedRoot is not None:
+        assert any(
+            expectedRoot in hook for hook in hooks
+        ), f"{case} 的拒绝没有归位到钩子根链/形态（{expectedRoot}）：{hooks}"
 
 
 # 定义性构造必须**放行**（守卫双向：检测器收紧过头 = 闭包内容不变式假红）。
@@ -1225,3 +1248,160 @@ def test_deep_nesting_recursion_fail_closed(tmp_path: Path) -> None:
 
     assert hooks, "深嵌套文件没有返回 fail-closed hook 行 ⇒ 包装层失效"
     assert "fail-closed" in hooks[0]
+
+
+# ============================================================================
+# 第二十三轮评审修复（第二十四轮）：C-4 sink 赋值形态 / C-5·C-6 模块根属性
+# 再绑定 / H-1 被调形态 fail-closed / H-2 装饰器 fail-closed。每组 deny 配
+# 一条 clean 反向锚（真实闭包校准通过的同形态），防止 deny 加宽变 vacuous。
+# ============================================================================
+
+_EVIL_R24_SOURCES: dict[str, str] = {
+    # C-4：拒绝根成员**赋值形态**调用（此前只有裸表达式/裸调用形态被拦）。
+    # 判别线 = _DENIED_ROOTS 的 "os.chdir" 条目（chdir 不在 _DENIED_CALL_ATTRS
+    # ⇒ 本 fixture 是该条的独占判别；remove/unlink 等有 call-attrs 兜底，
+    # 不能当根条目的判别）。
+    "os_chdir_assign": (
+        "import os\n"
+        "_r = os.chdir('/tmp')\n"
+    ),
+    "os_remove_assign": (
+        "import os\n"
+        "_r = os.remove('/tmp/whatever')\n"
+    ),
+    # C-4：动态根（Call 接收者）上的 sink 成员
+    "path_write_text": (
+        "from pathlib import Path\n"
+        "_r = Path('/tmp/whatever').write_text('boom')\n"
+    ),
+    # C-4：unknown 接收者（外部构造赋出的名字）上的 sink 成员
+    # （_DENIED_CALL_ATTRS 臂）。⚠️ 接收者必须落 unknown：Call 接收者
+    # （`get_handler().unlink()`）会先撞上「动态接收者 fail-closed」既有
+    # 线 ⇒ 本线拿不到独占判别（第二十四轮探针实证）。
+    "unknown_recv_sink": (
+        "from pathlib import Path\n"
+        "_p = Path('/tmp/whatever')\n"
+        "_r = _p.unlink()\n"
+    ),
+    # C-5：模块根属性再绑定（别名解析出的根 ⇒ 接口可被换假）
+    "module_root_attr_rebind": (
+        "import logging\n"
+        "logging.getLogger = lambda name: None\n"
+    ),
+    # C-5：sys.stdout 再绑定（拒绝根成员 Store）
+    "sys_stdout_rebind": (
+        "import sys\n"
+        "sys.stdout = open('/tmp/whatever', 'w')\n"
+    ),
+    # H-1：被扫函数体内、被调形态静态不可判（IfExp 作被调）。
+    # 宿主函数必须真的被扫（模块级 `_r = entry()` 进入 callTargets 扫描）
+    # —— 函数体不可达 ⇒ dispatch 根本不经过 ⇒ fixture 假绿。
+    "fn_callee_ifexp": (
+        "import sys\n"
+        "def pick():\n"
+        "    return None\n"
+        "def entry():\n"
+        "    _r = (pick if True else None)()\n"
+        "_r = entry()\n"
+    ),
+    # H-2：from-import 的项目代码作裸名装饰器（别名解析到 app. 根）
+    "cross_file_project_decorator": (
+        "from app.evil import hook\n"
+        "@hook\n"
+        "def f():\n"
+        "    pass\n"
+    ),
+    # H-2：未 import、非内置白名单的裸名装饰器（静态不可判）
+    "unresolvable_bare_decorator": (
+        "@ghost\n"
+        "def f():\n"
+        "    pass\n"
+    ),
+    # H-2：项目模块属性装饰器（Call/Attribute 形态解析到 app. 根）
+    "project_attr_decorator": (
+        "import app.mod\n"
+        "@app.mod.hook\n"
+        "def f():\n"
+        "    pass\n"
+    ),
+}
+
+_CLEAN_R24_SOURCES: dict[str, str] = {
+    # 第二十四轮校准实证的真实形态：嵌套 Call 作被调（pydantic 注册式）——
+    # 内层 Call 经同一分派递归判定 ⇒ 外层不重复拒（H-1 例外臂的锚）。
+    "nested_call_callee": (
+        "def field_validator(key):\n"
+        "    def deco(fn):\n"
+        "        return fn\n"
+        "    return deco\n"
+        "def _v(v):\n"
+        "    return v\n"
+        "class M:\n"
+        "    _check = field_validator('x')(_v)\n"
+    ),
+    # H-2 白名单：内置装饰器三件套
+    "builtin_decorators": (
+        "class C:\n"
+        "    @staticmethod\n"
+        "    def s():\n"
+        "        return 1\n"
+        "    @classmethod\n"
+        "    def c(cls):\n"
+        "        return 2\n"
+        "    @property\n"
+        "    def p(self):\n"
+        "        return 3\n"
+    ),
+    # H-2：from-import 的外部模块装饰器（别名解析为外部根 ⇒ 放行）
+    "from_import_external_decorator": (
+        "from functools import lru_cache\n"
+        "@lru_cache(maxsize=2)\n"
+        "def f():\n"
+        "    return 1\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_EVIL_R24_SOURCES))
+def test_round24_deny_rules_are_enforced(tmp_path: Path, case: str) -> None:
+    """第二十四轮新 deny 线逐形态钉住（C-4/C-5/H-1/H-2）。
+
+    每条线的变异判别点：对应 deny 臂被删/条件反转 ⇒ 该 fixture 放行 ⇒ 红。
+    """
+    path = tmp_path / "m.py"
+    path.write_text(_EVIL_R24_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    # 只断言非空：各 deny 线报文格式不一（拒绝根线是「顶层引用 X」、
+    # fail-closed 臂另有措辞）；防 vacuous 由 M204–M215 变异取证承担。
+    assert hooks, f"{case} 没被认出 ⇒ 对应 deny 线失效"
+
+
+@pytest.mark.parametrize("case", sorted(_CLEAN_R24_SOURCES))
+def test_round24_clean_forms_pass(tmp_path: Path, case: str) -> None:
+    """第二十四轮 deny 加宽的反向锚：真实闭包里的合法形态必须放行。
+
+    deny 臂加宽到误伤这些形态 ⇒ 校准/本用例红（防 vacuous 反向）。
+    """
+    path = tmp_path / "m.py"
+    path.write_text(_CLEAN_R24_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    assert hooks == (), f"{case} 被误报：{hooks}"
+
+
+def test_analyzer_primitives_not_swapped_in_process() -> None:
+    """C-6 腰带锚：守卫自己的解析原语未被进程内换假。
+
+    C-6 场景（payload 先执行再换掉 ast.parse/Path.read_text 让分析器失明）
+    的上游逃逸已被 C-4 deny 扩展关闭；本条是独立于扫描逻辑的完整性断言
+    —— 原语被换 ⇒ 本测试直接红，不需要经过扫描。
+    """
+    import ast
+    from pathlib import Path
+
+    assert ast.parse.__module__ == "ast"
+    assert Path.read_text.__module__ == "pathlib"
+    assert ast.walk.__module__ == "ast"

@@ -151,6 +151,25 @@ _CI_SURFACE_PATTERNS = (
     r"^docker/docker-compose[\w.-]*\.ya?ml$",
     r"^backend/app/tests/(?:_pg_support|_neo4j_support|_testapp|milvus_isolation)\.py$",
     r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface|head|pytest_log|judge|report|flakes|conftest_chain)\.py$",
+    # ⚠️ **字节码夹带**（第二十三轮评审 C-1）：`.gitignore` 只影响普通 `git add`，
+    # `git add -f` 可强制跟踪 `__pycache__/` 下的 `.pyc`；`PYTHONDONTWRITEBYTECODE=1`
+    # 只禁写不禁读 ⇒ import 仍优先使用合法 pyc；CHECKED_HASH 头只校验**源文件**
+    # 哈希、marshal 正文可任意伪造 ⇒ 换掉任何 ci_* 工具的行为且本清单看不见。
+    # `.pyc` / `__pycache__/` 一律 CI 相关面（闸门 exit 6）。⚠️ 匹配用的是
+    # `re.match`（锚定**开头**）⇒ 后缀/任意深度的形态必须写 `(?:^|.*/)` 或
+    # `.*` 前缀，否则深层路径永不命中（第二十四轮探针实证：`r"\.pyc$"`
+    # 与 `r"(?:^|/)__pycache__/"` 对 `backend/**` 下的路径零命中）。
+    r".*\.pyc$",
+    r"(?:^|.*/)__pycache__/",
+    # ⚠️ **同名包目录遮蔽**（第二十三轮评审 C-2）：Python 中同名包（含
+    # `__init__.py`）优先于同名模块 ⇒ `backend/app/utils/ci_shard/__init__.py`
+    # 会被 `python -m app.utils.ci_shard` 先执行（不带 `__init__.py` 的
+    # namespace 目录不会遮蔽——模块文件胜出）。包目录下任何文件都入面。
+    r"^backend/app/utils/ci_[^/]+/",
+    # ⚠️ `-m` 执行 ci 工具前先执行父包 init（第二十三轮评审 C-3）：
+    # `python -m app.utils.ci_shard` 先 import `app` / `app.utils` 并执行其
+    # `__init__.py` ⇒ 在 shard 选择之前就能改写测试文件。
+    r"^backend/app/utils/__init__\.py$",
     # ⚠️ **变异取证脚本**（2026-11-07 安全评审 MEDIUM-3）：
     # 它决定「哪些变异能转红」⇒ 改它就能让守卫**恒绿**（把「转红」判据改成
     # 「退出码非 0」即可 ⇒ 收集失败也算「转红」⇒ 取证全绿）
@@ -159,10 +178,12 @@ _CI_SURFACE_PATTERNS = (
     # 第十三轮复审拆出的 R14 批 `ci_mutation_cases_r14.py`，纯数据；
     # 第十六轮收口批 `ci_mutation_cases_r16.py`，纯数据；
     # 第十八轮收口批 `ci_mutation_cases_r18.py`，纯数据；
-    # 第二十轮收口批 `ci_mutation_cases_r20.py`，纯数据）
+    # 第二十轮收口批 `ci_mutation_cases_r20.py`，纯数据；
+    # 第二十二轮收口批 `ci_mutation_cases_r21.py`，纯数据；
+    # 第二十四轮收口批 `ci_mutation_cases_r23.py`，纯数据）
     # 与跑者（`ci_mutation_evidence.py`）
     # **同族**：改清单可以把某组变异改成「改一个没人守的地方」⇒ 照样恒绿。
-    r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21)?)\.py$",
+    r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23)?)\.py$",
     # ⚠️ **测试库断言的依赖模块**（第六轮复审 LOW-1）：`_pg_support.assertTestDatabase`
     # （每个 DB 夹具都走）import 它的 `databaseNameOf` ⇒ 改它 = 改「测试必须连哪个库」
     # 的守卫口径 ⇒ 与测试基建同族。

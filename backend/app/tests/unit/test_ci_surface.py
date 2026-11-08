@@ -101,6 +101,29 @@ def test_every_ci_tool_module_is_in_the_surface_list() -> None:
     assert set(flagged) == expected
 
 
+def test_round23_smuggling_path_classes_are_ci_surface() -> None:
+    """第二十三轮评审 C-1/C-2/C-3 的四类夹带路径必须入 CI 相关面。
+
+    每条 pattern 的变异判别点：对应 pattern 行被删 ⇒ 该路径类放行 ⇒ 本用例红。
+    （lever 与 `test_every_ci_tool_module_is_in_the_surface_list` 同思路：
+    不枚举清单内容，钉住「这类路径必须命中」。）
+    """
+    smuggled = (
+        "backend/app/utils/ci_shard.pyc",          # C-1：字节码（M204 判别）
+        # C-1：__pycache__ 目录（M205 判别）——⚠️ 用**非 .pyc** 文件名，
+        # 否则 `.*\.pyc$` 也会命中 ⇒ M205 变异后仍入面（判别不独占）
+        "backend/app/utils/__pycache__/keep.txt",
+        "deep/nested/__pycache__/x.py",
+        "backend/app/utils/ci_shard/__init__.py",   # C-2：同名包遮蔽
+        "backend/app/utils/ci_shard/_impl.py",      # C-2：包目录任意文件
+        "backend/app/utils/__init__.py",            # C-3：父包 init
+    )
+
+    flagged = ci_surface.detectCiSurfaceChanges(smuggled)
+
+    assert set(flagged) == set(smuggled)
+
+
 def test_detectCiSurfaceChanges_ignores_unrelated_files() -> None:
     assert ci_surface.detectCiSurfaceChanges(("backend/app/services/chat_service.py",)) == ()
 

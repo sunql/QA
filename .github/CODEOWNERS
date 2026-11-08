@@ -146,7 +146,7 @@ backend/scripts/ci_mutation_cases_r16.py   @sunql
 backend/scripts/ci_mutation_cases_r18.py   @sunql
 backend/scripts/ci_mutation_cases_r20.py   @sunql
 backend/scripts/ci_mutation_cases_r21.py   @sunql
-backend/scripts/ci_mutation_cases_r21.py   @sunql
+backend/scripts/ci_mutation_cases_r23.py   @sunql
 backend/scripts/ci_mutation_evidence.py    @sunql
 
 # ---- CODEOWNERS **自己**（改授权面 = 换授权人 ⇒ 必须人工复核）----

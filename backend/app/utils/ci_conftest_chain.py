@@ -120,6 +120,45 @@ _DENIED_ROOTS = (
     "sys.settrace",
     "sys.setprofile",
     "sys.audit",
+    # 第二十三轮评审 C-4/C-5：进程/文件系统/证据通道 sink——赋值式
+    # （`_r = os.remove('x')`）此前逃逸（顶层裸调用被结构规则拦、赋值式只查
+    # 拒绝根 ⇒ 清单没有就放行）。这批根在真实 76 文件闭包 0 处（校准实证）。
+    "os.remove",
+    "os.unlink",
+    "os.rename",
+    "os.replace",
+    "os.rmdir",
+    "os.makedirs",
+    "os.removedirs",
+    "os.chdir",
+    "os.fchdir",
+    "os.truncate",
+    "os.putenv",
+    "os.unsetenv",
+    "os.open",
+    "os.read",
+    "os.write",
+    "os.fdopen",
+    "os.dup",
+    "os.dup2",
+    "os._exit",
+    "os.abort",
+    "os.kill",
+    "sys.exit",
+    "sys.stdout",
+    "sys.stderr",
+    "sys.__stdout__",
+    "sys.__stderr__",
+    # 第二十三轮评审 C-5：pytest reporter 重绑 + `os._exit(0)` 可把失败集合
+    # 任意伪造（FAILED 行抑制 + 伪汇总行 + exit 0）——`pytest` 根不能整个拒
+    # （conftest 链大量 `pytest.fixture`），钉 reporter 入口。
+    "pytest.TerminalReporter",
+    # 第二十三轮评审 C-6：分析器自致盲——`ast.parse` / `Path.read_text` 被换
+    # 成假实现后检测器对自己看到空 AST。这批属性 Store 由下方「模块根属性
+    # 再绑定」规则统一拒绝，这里钉全模块根（真实闭包 0 处，校准实证）。
+    "ast",
+    "io",
+    "tempfile",
     "os.environ",
     "os.system",
     "os.popen",
@@ -185,7 +224,55 @@ _DYNAMIC_DENIED_SEGMENTS = (
     "system",
     "popen",
     "argv",
+    # （第二十四轮：C-4 的 sink 成员段扩展在此回退——实证冗余。动态根
+    # **调用**走 Call 分派的「动态接收者 ⇒ fail-closed」（第十九轮既有
+    # 线），`Path(...)` 这类外部构造接收者实测落 unknown ⇒ 由
+    # `_DENIED_CALL_ATTRS` 管（M209 判别）。两条既有线全覆盖 ⇒ 段集扩展
+    # 拿不到独占变异判别，且是死代码 ⇒ 删。）
 )
+
+# 第二十三轮评审 C-4 余量：**unknown 接收者**上的文件系统/进程 sink 成员
+# （外部构造/外部模块名作接收者，成员解析不出 ⇒ 此前静默放行 ⇒ 仍拒）。
+# 刻意不含 `write`/`writelines`（太通用——文件句柄只能来自被拒的
+# `open`/`sys.stdout`/`Path(...).write_text`，这些已有各自的拒绝线；
+# `.write` 进集会误伤真实闭包）。真实 76 文件闭包 0 处（校准实证）。
+_DENIED_CALL_ATTRS = frozenset(
+    {
+        "remove",
+        "unlink",
+        "rename",
+        "replace",
+        "rmdir",
+        "makedirs",
+        "removedirs",
+        "write_text",
+        "write_bytes",
+        "putenv",
+        "unsetenv",
+        "_exit",
+        "abort",
+        "kill",
+        "truncate",
+    }
+)
+
+# 第二十三轮评审 H-2：装饰器在 def/class 语句执行期被调用 ⇒ 装饰器表达式
+# 本身就是 import 期执行的代码。裸名装饰器只放行 Python 内置三件套；
+# 经别名解析落到项目代码（app./scripts.）或拒绝链的一律拒；未 import、
+# 非内置、无任何静态绑定的裸名 = 静态不可判 ⇒ fail-closed。真实 76 文件
+# 闭包校准：Name 装饰器仅 classmethod/staticmethod/property（内置）+
+# abstractmethod/functools.lru_cache（from-import ⇒ 别名解析为外部根），
+# Call/Attribute 装饰器 57 处根全部是 pytest/dataclasses/functools/abc 等
+# 外部模块（change 记录 §2.10.20）⇒ 本规则零假红。
+_DECORATOR_BUILTIN_ALLOW = frozenset(
+    {
+        "classmethod",
+        "staticmethod",
+        "property",
+    }
+)
+
+_PROJECT_DECORATOR_ROOTS = ("app", "scripts")
 
 # 顶层裸表达式（Expr-Call）只允许这些方法名，且**接收者必须是裸 Name**
 # （`get_module().model_rebuild()` 这类动态接收者是结构问题——第十三轮 LOW-2；
@@ -1386,6 +1473,23 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
             if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
                 if node.attr in _REBIND_DENIED_ATTRS:
                     add(getattr(node, "lineno", 0), f"顶层再绑定 {node.attr}")
+                else:
+                    # 第二十三轮评审 C-5/C-6：**模块根属性再绑定**——
+                    # `sys.stdout = None` / `ast.parse = _fake` /
+                    # `pytest.TerminalReporter.summary_failures = ...` /
+                    # `Path.read_text = ...`（根是 import 别名）把 stdlib/
+                    # 工具模块的接口换成假实现 ⇒ 证据通道与分析器双双致盲。
+                    # 根是 import 别名 ⇒ 拒（与成员名无关，fail-closed）；
+                    # `self.x = 1` / `_p.attr = 1`（根非 import 名）不受影响
+                    # （真实 76 文件闭包模块级 Attribute Store 0 处，校准实证）。
+                    chain = _dottedChain(node)
+                    if chain:
+                        root = chain.partition(".")[0]
+                        if root in aliases or _isForbidden(root):
+                            add(
+                                getattr(node, "lineno", 0),
+                                f"模块根属性再绑定 {chain} ⇒ 接口可被换假 ⇒ fail-closed",
+                            )
             if (
                 isinstance(
                     node,
@@ -1475,6 +1579,29 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                         scanCallee(callTargets[dec.id], depth + 1)
                     else:
                         # `@D.deco`：装饰器在 def/class 语句执行期被调用
+                        # 第二十三轮评审 H-2：Call/Attribute 装饰器解析根，
+                        # 落到项目代码或拒绝链 ⇒ 装饰期执行项目代码 ⇒ 拒。
+                        # 裸名（Name）装饰器**不**在这里判——由下方第二段
+                        # if 链（实例/类别名/本地类/不透明/裸名 fail-closed）
+                        # 独占判定，保证每条 deny 臂的变异判别点独占。
+                        decTarget = (
+                            dec.func
+                            if isinstance(dec, ast.Call)
+                            else (None if isinstance(dec, ast.Name) else dec)
+                        )
+                        decChain = _dottedChain(decTarget) if decTarget is not None else None
+                        if decChain is not None:
+                            decRootName = decChain.split(".")[0]
+                            decResolved = aliases.get(decRootName, decRootName)
+                            if (
+                                decResolved.split(".")[0] in _PROJECT_DECORATOR_ROOTS
+                                or _isForbidden(decChain)
+                            ):
+                                add(
+                                    dec.lineno,
+                                    f"装饰器 {decChain} 解析到项目/禁止代码（{decResolved}）"
+                                    " ⇒ 装饰期执行 ⇒ fail-closed",
+                                )
                         decAmbiguity: set[str] = set()
                         member = _decoratorMember(
                             dec, localClasses, callTargets, classAliases, decAmbiguity
@@ -1505,6 +1632,29 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                                 scanCallee(hook, depth + 1)
                         elif dec.id in opaqueNames:
                             add(dec.lineno, "不透明绑定的名字作装饰器 ⇒ 装饰期执行 ⇒ fail-closed")
+                        else:
+                            # 第二十三轮评审 H-2：裸名装饰器 fail-closed。
+                            # 走到这里 = 该名不在实例/类别名/本地类/不透明
+                            # 绑定里：要么经别名解析（from-import）要么完全
+                            # 无静态绑定。解析到项目根/拒绝链 ⇒ 拒；完全无
+                            # 绑定且非内置白名单 ⇒ 静态不可判 ⇒ 拒。
+                            decResolvedName = aliases.get(dec.id)
+                            if decResolvedName is None:
+                                if dec.id not in _DECORATOR_BUILTIN_ALLOW:
+                                    add(
+                                        dec.lineno,
+                                        "装饰器裸名静态不可判（未 import 且非内置白名单）"
+                                        " ⇒ 装饰期执行 ⇒ fail-closed",
+                                    )
+                            elif (
+                                decResolvedName.split(".")[0] in _PROJECT_DECORATOR_ROOTS
+                                or _isForbidden(decResolvedName)
+                            ):
+                                add(
+                                    dec.lineno,
+                                    f"装饰器 {dec.id} 解析到项目/禁止代码（{decResolvedName}）"
+                                    " ⇒ 装饰期执行 ⇒ fail-closed",
+                                )
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Attribute):
                     # 调用路径对 func Attribute 的读取有决定权（成员已解析/
@@ -1642,6 +1792,33 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                                 node.lineno,
                                 "本地类/实例上未定义的成员调用 ⇒ 继承/property 途径 ⇒ fail-closed",
                             )
+                    else:
+                        # unknown 接收者（成员解析不出）：sink 成员仍拒
+                        # （第二三轮评审 C-4 余量——`_p = Path('x'); _r =
+                        # _p.unlink()` 赋值式逃逸），其余放行（真实闭包的
+                        # dict.get 等形态，校准约束）。
+                        if node.func.attr in _DENIED_CALL_ATTRS:
+                            add(
+                                node.lineno,
+                                f"成员调用 .{node.func.attr} 是文件系统/进程 sink ⇒ fail-closed",
+                            )
+                else:
+                    # 第二十三轮评审 H-1：Call 分派此前只认 Name/Attribute/
+                    # Lambda/Subscript 四形态，其余（IfExp/NamedExpr/Call/
+                    # BinOp/…作被调）**静默跳过** ⇒ `(m if True else None)()`
+                    # 在被扫函数体里逃逸（顶层裸调用被结构规则拦，赋值/
+                    # 被调体内可达）。fail-closed：不认识的被调形态一律拒。
+                    # **例外**：func 本身是 Call（`f()(...)` 注册式）——内层
+                    # Call 是子节点，经同一分派递归判定，最深处静态不可判
+                    # 的形态才会落回这里 ⇒ 外层不重复拒（第二十四轮校准实
+                    # 证：真实闭包仅 schemas.py 的 field_validator 链一形
+                    # 态，4 处）。
+                    if not isinstance(node.func, ast.Call):
+                        add(
+                            node.lineno,
+                            "被调形态静态不可判"
+                            "（非裸名/成员/lambda/下标/嵌套调用）⇒ fail-closed",
+                        )
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)

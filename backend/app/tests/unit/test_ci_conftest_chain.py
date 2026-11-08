@@ -314,12 +314,17 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
     # HIGH-1：__getattribute__ 链（任意属性通道；拒绝根里没有 sys.__getattribute__，
     # 只有禁止 dunder 段检查能抓）
     "dunder_getattribute": "import sys\n_r = sys.__getattribute__('path').insert(0, 'x')\n",
-    # HIGH-1：from-import 的 dunder 符号（Name 位置经别名解析进禁止段检查）
+    # HIGH-1：from-import 的 dunder 符号（Name 位置经别名解析进禁止段检查）。
+    # 刻意用 List 包裹裸名 Load：直赋值 `_r = __getattribute__` 会触发
+    # 「模块根再绑定传播 + Store 分支拒绝」把 M137 的别名解析线罩成假绿；
+    # `.insert(...)` 调用链会被动态根洗白检查先拦（第二十二轮两度实证）。
     "getattr_via_from_import": (
-        "from sys import __getattribute__\n_r = __getattribute__('path').insert(0, 'x')\n"
+        "from sys import __getattribute__\n_r = [__getattribute__]\n"
     ),
-    # HIGH-1：裸名 __builtins__（__main__ 里它本身是 dict，只能当根拒）
-    "builtins_subscript": "_b = __builtins__['exec']\n_r = _b('import sys')\n",
+    # HIGH-1：裸名 __builtins__（__main__ 里它本身是 dict，只能当根拒）。
+    # 刻意止步于下标取值：后续 `_b(...)` 会触发「不透明名被调用」兜底线，
+    # 同样把 M138 的拒绝根线罩成假绿（第二十二轮实证）。
+    "builtins_subscript": "_b = __builtins__['exec']\n",
     # HIGH-3：调用目标的名字别名（_f = m 后 _f()）
     "called_def_alias": (
         "import sys\ndef m():\n    sys.path.insert(0, 'x')\n\n_f = m\n_x = _f()\n"
@@ -574,6 +579,336 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
         "_x = X()\n"
         "_r = _x.nope()\n"
     ),
+    # ---- 第二十二轮（第二十一轮复审 2C + 9H + 2M + 1L）收口 fixtures ----
+    # C1：守卫模块根链（rebind 守卫函数让内容不变式空转）
+    "guard_module_import": (
+        "import app.utils.ci_conftest_chain as _c\n"
+        "_r = _c.findImportTimeHooks\n"
+    ),
+    # C2：动态根属性链的危险后缀段（[os][0].environ 洗白）
+    "dynamic_env_launder": "import os\n_l = [os]\n_r = _l[0].environ\n",
+    "dynamic_path_launder": "import sys\n_l = [sys]\n_r = _l[0].path\n",
+    # H1：本地类别名实例化（_c = X; _c()）
+    "class_alias_call": (
+        "import sys\n"
+        "class X:\n"
+        "    def __init__(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "_c = X\n"
+        "_x = _c()\n"
+    ),
+    # H1：本地类别名作装饰器接收者（@_D.deco）
+    "class_alias_decorator": (
+        # 类别名的**成员**装饰器（`@_D.deco`）：判别点= _decoratorMember 的
+        # classAliases 回退（M203）。裸名装饰器形态见 class_alias_bare_decorator。
+        "import sys\n"
+        "class D:\n"
+        "    def deco(self, f):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return f\n"
+        "_D = D\n"
+        "@_D.deco\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    "class_alias_bare_decorator": (
+        # 类别名作**裸名**装饰器（`@_D`）⇒ 装饰 = 实例化 ⇒ __init__ 在
+        # import 期执行；判别点= scanExec 装饰器臂的 classAliases 分支（M178）。
+        # _decoratorMember 只处理 Attribute 形态 ⇒ 裸名只走这一条线（独占）。
+        "import sys\n"
+        "class D:\n"
+        "    def __init__(self, f):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "_D = D\n"
+        "@_D\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    # H2：可调用实例 _x()（__call__ 体 import 期执行）。⚠️ 调用必须藏在
+    # 被扫函数体内（装饰器函数 _d 的体）：顶层裸 `_x()` 会被「顶层表达式」
+    # 结构白名单线兜住 ⇒ 破坏 M179 判别点独占性（solo 取证实证）。
+    "callable_instance_call": (
+        "import sys\n"
+        "class X:\n"
+        "    def __call__(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "_x = X()\n"
+        "def _d(f):\n"
+        "    _x()\n"
+        "    return f\n"
+        "@_d\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    # H2：可调用实例作装饰器（@_x ⇒ __call__）
+    "instance_decorator": (
+        "import sys\n"
+        "class X:\n"
+        "    def __call__(self, f):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return f\n"
+        "_x = X()\n"
+        "@_x\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    # H3：实例化结果的属性读取（X().p ⇒ property getter）
+    "ctor_property_read": (
+        "import sys\n"
+        "class X:\n"
+        "    @property\n"
+        "    def p(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return 1\n"
+        "_r = X().p\n"
+    ),
+    # H4：super() 接收者（继承链返回对象静态不可判）
+    "super_receiver_call": (
+        "import sys\n"
+        "class A:\n"
+        "    def m(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "class B(A):\n"
+        "    def __init__(self):\n"
+        "        super().m()\n"
+        "_b = B()\n"
+    ),
+    # H5：实例属性赋值（__setattr__）。⚠️ 类体必须全干净：载荷放 __init__
+    # 会被实例化钩子线（_instantiationHooks）兜住 ⇒ 破坏 M183 判别点独占性
+    # （solo 取证实证）；判别点= 赋值语句本身的 fail-closed 拒绝。
+    "instance_setattr_store": (
+        "class X:\n"
+        "    v = 1\n"
+        "_x = X()\n"
+        "_x.attr = 1\n"
+    ),
+    # H5：f-string 插值（__format__）
+    "fstring_format": (
+        "import sys\n"
+        "class X:\n"
+        "    def __format__(self, spec):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return ''\n"
+        "_r = f'{X()}'\n"
+    ),
+    # H5：dict 键（__hash__）
+    "dict_key_hash": (
+        "import sys\n"
+        "class X:\n"
+        "    def __hash__(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return 0\n"
+        "_r = {X(): 1}\n"
+    ),
+    # H5：元组解包迭代（__iter__/__next__）
+    "tuple_unpack_iter": (
+        "import sys\n"
+        "class X:\n"
+        "    def __iter__(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "_x = X()\n"
+        "_a, _b = _x\n"
+    ),
+    # H6：成员绑定歧义（条件两臂同名方法，第一臂良性 ⇒ 只有歧义线能抓）
+    "member_conditional_arm": (
+        "import sys\n"
+        "class X:\n"
+        "    if True:\n"
+        "        def m(self):\n"
+        "            pass\n"
+        "    else:\n"
+        "        def m(self):\n"
+        "            sys.path.insert(0, 'x')\n"
+        "_x = X()\n"
+        "_r = _x.m()\n"
+    ),
+    # H6：实例化钩子绑定歧义（条件两臂 __init__，第一臂良性）
+    "hook_conditional_arm": (
+        "import sys\n"
+        "class X:\n"
+        "    if True:\n"
+        "        def __init__(self):\n"
+        "            pass\n"
+        "    else:\n"
+        "        def __init__(self):\n"
+        "            sys.path.insert(0, 'x')\n"
+        "_x = X()\n"
+    ),
+    # H7：type 别名链（_u = _t，_t = type）
+    "type_alias_chain": (
+        "import sys\n"
+        "_t = type\n"
+        "_u = _t\n"
+        "X = _u('X', (), {'m': lambda s: sys.path.insert(0, 'x')})\n"
+    ),
+    # H8：类体 with 作用于本地类实例（__enter__/__exit__）
+    "class_body_with_instance": (
+        "import sys\n"
+        "class X:\n"
+        "    def __enter__(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return self\n"
+        "    def __exit__(self, *a):\n"
+        "        return False\n"
+        "class C:\n"
+        "    _x = X()\n"
+        "    with _x:\n"
+        "        pass\n"
+    ),
+    # H8：类体真值判定（__bool__）
+    "class_body_truthiness": (
+        "import sys\n"
+        "class X:\n"
+        "    def __bool__(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return True\n"
+        "class C:\n"
+        "    _x = X()\n"
+        "    if _x:\n"
+        "        pass\n"
+    ),
+    # H9：函数体内局部类遮蔽模块类（实例化目标静态不可判）
+    "fn_local_class_shadow": (
+        "import sys\n"
+        "class X:\n"
+        "    pass\n"
+        "def m():\n"
+        "    class X:\n"
+        "        def __init__(self):\n"
+        "            sys.path.insert(0, 'x')\n"
+        "    return X()\n"
+        "_x = m()\n"
+    ),
+    # H9：函数体内局部类（非遮蔽）实例化（__init__ 体被调）
+    "fn_local_class_call": (
+        "import sys\n"
+        "def m():\n"
+        "    class C:\n"
+        "        def __init__(self):\n"
+        "            sys.path.insert(0, 'x')\n"
+        "    return C()\n"
+        "_x = m()\n"
+    ),
+    # H9：被调函数体内 with 作用于实例（语句级检查）
+    "callee_with_instance": (
+        "import sys\n"
+        "class Ctx:\n"
+        "    pass\n"
+        "def m():\n"
+        "    _c = Ctx()\n"
+        "    with _c:\n"
+        "        pass\n"
+        "_x = m()\n"
+    ),
+    # M2：函数体内 import 别名重绑定（e → os.environ）
+    "fn_local_import_alias": (
+        "def m():\n"
+        "    from os import environ as e\n"
+        "    e['HOOK'] = '1'\n"
+        "_x = m()\n"
+    ),
+    # M1：不透明绑定传播（IfExp 值 ⇒ _g 不可判 ⇒ 调用 fail-closed）。
+    # ⚠️ 调用必须藏在被扫函数体内：顶层裸 `_g()` 会被「顶层表达式」结构
+    # 白名单线兜住 ⇒ 破坏 M196 判别点独占性（solo 取证实证）。
+    "opaque_ifexp_call": (
+        "import sys\n"
+        "def f1():\n"
+        "    sys.path.insert(0, 'x')\n"
+        "def f2():\n"
+        "    pass\n"
+        "_g = f1 if True else f2\n"
+        "def _d(f):\n"
+        "    _g()\n"
+        "    return f\n"
+        "@_d\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    # 不透明绑定的名字被调用（_p = _d.get('f')）。调用同样藏进被扫函数体
+    # （理由同 opaque_ifexp_call，M197 判别点独占性）。
+    "opaque_name_call": (
+        "_d = {}\n"
+        "_p = _d.get('f')\n"
+        "def _d2(f):\n"
+        "    _p()\n"
+        "    return f\n"
+        "@_d2\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    # 不透明绑定的名字作装饰器
+    "opaque_name_decorator": (
+        "_d = {}\n"
+        "_p = _d.get('f')\n"
+        "@_p\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    # 不透明绑定的容器下标赋值（__setitem__ 静态不可判）
+    "opaque_subscript_store": (
+        "_d = {}\n"
+        "_e = _d.get('x')\n"
+        "_e['K'] = 'V'\n"
+    ),
+    # H6：函数体内局部类多重定义（先恶后良 ⇒ 只有 None 线能抓）
+    "fn_local_class_redef": (
+        "import sys\n"
+        "def m():\n"
+        "    class C:\n"
+        "        def __init__(self):\n"
+        "            sys.path.insert(0, 'x')\n"
+        "    class C:\n"
+        "        def __init__(self):\n"
+        "            pass\n"
+        "    return C()\n"
+        "_x = m()\n"
+    ),
+    # H6：装饰器成员绑定歧义（@_D.deco 两臂，第一臂良性）
+    "decorator_member_ambiguous": (
+        "import sys\n"
+        "class D:\n"
+        "    if True:\n"
+        "        def deco(self, f):\n"
+        "            return f\n"
+        "    else:\n"
+        "        def deco(self, f):\n"
+        "            sys.path.insert(0, 'x')\n"
+        "            return f\n"
+        "_D = D\n"
+        "@_D.deco\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    # H6：嵌套类钩子绑定歧义（Outer.Inner 的 __init__ 两臂，第一臂良性）
+    "nested_class_hook_ambiguous": (
+        "import sys\n"
+        "class Outer:\n"
+        "    class Inner:\n"
+        "        if True:\n"
+        "            def __init__(self):\n"
+        "                pass\n"
+        "        else:\n"
+        "            def __init__(self):\n"
+        "                sys.path.insert(0, 'x')\n"
+        "_x = Outer.Inner()\n"
+    ),
+    # 本地类直接作装饰器（@X ⇒ 实例化钩子）
+    "class_direct_decorator": (
+        "import sys\n"
+        "class X:\n"
+        "    def __init__(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "@X\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+}
+
+# 第二十二轮 M158/M159：拒绝必须归位到钩子真实位置（精识臂的独占贡献；
+# 兜底 fail-closed 只会拒在调用点 ⇒ 位置断言是这两条精识线的变异判别点）。
+_EXPECTED_HOOK_POSITIONS: dict[str, str] = {
+    "init_name_assign": "line 3",
+    "staticmethod_member": "line 3",
 }
 
 
@@ -586,6 +921,14 @@ def test_hook_positions_are_denied(tmp_path: Path, case: str) -> None:
     hooks = findImportTimeHooks(path)
 
     assert hooks, f"{case} 位置的 import 期钩子没被认出 —— 检测器有位置盲区"
+    # 第二十二轮：精识臂（类体钩子绑定的 Name/描述符识别）被关时守卫会
+    # 退到「fail-closed 拒在调用点」——仍然拦但不指认钩子真实位置 ⇒ 只断言
+    # 非空会假绿（M158/M159 实证）。这两个 fixture 额外钉死归位。
+    expected = _EXPECTED_HOOK_POSITIONS.get(case)
+    if expected is not None:
+        assert any(
+            expected in hook for hook in hooks
+        ), f"{case} 的拒绝没有归位到钩子真实位置（{expected}）：{hooks}"
 
 
 # 定义性构造必须**放行**（守卫双向：检测器收紧过头 = 闭包内容不变式假红）。
@@ -635,6 +978,39 @@ _CLEAN_SOURCES: dict[str, str] = {
         "        return 1\n"
         "_x = X()\n"
         "_r = _x.refresh()\n"
+    ),
+    # ---- 第二十二轮良性惯用法（fail-closed 不得误伤）----
+    # 模块级容器字面量构造 + 方法调用（不透明豁免：Dict/List/Set 不记）
+    "container_literal_methods": (
+        "HANDLERS = {'a': 1, 'b': 2}\n"
+        "_k = tuple(HANDLERS.keys())\n"
+        "_n = len(HANDLERS)\n"
+    ),
+    # 类别名链但目标类体良性（_c = X; _c() ⇒ __init__ 体被扫后放行）
+    "class_alias_clean": (
+        "class X:\n"
+        "    def __init__(self):\n"
+        "        self.v = 1\n"
+        "_c = X\n"
+        "_x = _c()\n"
+    ),
+    # dict 值位放本地类实例（值位不是协议位；实例化钩子线已覆盖 __init__）
+    "dict_value_instance": (
+        "class Rule:\n"
+        "    def __init__(self, op):\n"
+        "        self.op = op\n"
+        "RULES = {'A': Rule('lt'), 'B': Rule('gt')}\n"
+    ),
+    # 函数体内局部类遮蔽模块类、体良性（遮蔽是确定性语义 ⇒ 覆盖层解析后放行）
+    "fn_local_class_clean": (
+        "class X:\n"
+        "    pass\n"
+        "def m():\n"
+        "    class X:\n"
+        "        def __init__(self):\n"
+        "            self.v = 1\n"
+        "    return X()\n"
+        "_x = m()\n"
     ),
 }
 
@@ -802,3 +1178,50 @@ def test_dynamic_all_raises_fail_closed(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="__all__"):
         preCollectionImportPaths(backend)
+
+
+# ---- 第二十二轮 L1：AST 规模预算 / 递归溢出 fail-closed ----
+
+
+def test_ast_node_budget_fail_closed(tmp_path: Path) -> None:
+    """超预算大文件的整文件 hook 行（M199 锚点：预算条件被删 ⇒ 红）。
+
+    预算线的判别点：节点数超 `_MAX_AST_NODES` ⇒ 返回整文件 fail-closed 行，
+    而不是部分分析（部分分析 = 大文件里藏的钩子逃出）。变异把条件关掉 ⇒
+    大文件被正常分析（体是定义性的）⇒ 无 hook ⇒ 本用例红。
+    """
+    from app.utils.ci_conftest_chain import _MAX_AST_NODES
+
+    # ~4 节点/行（Assign + Name + Store + Constant）⇒ 行数取预算 / 4 再放宽，
+    # 确保**计数**超线而单测体积可控；内容全部是定义性赋值
+    # （否则预算线之外的线也会红）。
+    lineCount = _MAX_AST_NODES // 4 + 1000
+    body = "".join(f"_v{i} = {i}\n" for i in range(lineCount))
+    path = tmp_path / "big.py"
+    path.write_text(body, encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    assert hooks, "超预算大文件没有返回 fail-closed hook 行 ⇒ 预算线失效"
+    assert "fail-closed" in hooks[0]
+
+
+def test_deep_nesting_recursion_fail_closed(tmp_path: Path) -> None:
+    """深嵌套 AST 的 RecursionError 转 hook 行（M200 锚点：包装被删 ⇒ 红）。
+
+    深属性链（5000 段）解析没问题，但递归遍历助手（_iterExecNodes/
+    _resolveMember）会溢出；包装层把异常转成显式 hook 行。
+    变异把 `return _findImportTimeHooksImpl(path)` 改成 `return ()` ⇒
+    RecursionError 直接炸穿 ⇒ 本用例以异常态失败（计入转红）。
+    （缩进嵌套不可用：CPython 硬限 100 层缩进，Parse 阶段就 IndentationError；
+    括号嵌套同样在 Parse 阶段被 SyntaxError 拦下——都到不了检测器的递归。）
+    """
+    chain = "a" + ".b" * 5000
+    body = f"_r = {chain}.m()\n"
+    path = tmp_path / "deep.py"
+    path.write_text(body, encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    assert hooks, "深嵌套文件没有返回 fail-closed hook 行 ⇒ 包装层失效"
+    assert "fail-closed" in hooks[0]

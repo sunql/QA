@@ -54,28 +54,48 @@ R18_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         1,
     ),
     # H-4：接收者感知白名单——本地类同名成员体扫描；成员解析行被关
-    # ⇒ 本地类重定义 model_rebuild 逃出。（第二十轮重锚：_receiverMember 并入
-    # _resolveMember，成员缺失 + model_rebuild 豁免 ⇒ 转红判别仍独占。）
+    # ⇒ 本地类重定义 model_rebuild 逃出。（第二十二轮重锚：_resolveMember
+    # 改带 ambiguity 三态后旧行消失；锚 Name 接收者臂的收尾 return——
+    # 8 空格缩进与 Call 接收者臂 12 空格的同文行可区分，前置行一起钉。）
     (
         "M140",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        '        return _classMember(cls, func.attr, callTargets), "local"',
-        '        return None, "local"',
+        "\n".join(
+            [
+                '            return None, "dynamic"',
+                '        return member, "local"',
+            ]
+        ),
+        "\n".join(
+            [
+                '            return None, "dynamic"',
+                '        return None, "local"',
+            ]
+        ),
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[model_rebuild_local_override]"),
         1,
     ),
     # H-2：类实例化跑 `__init__`（`_x = X()`）；实例化钩子循环被关
-    # ⇒ class_instantiation_init fixture 红。（第二十轮重锚：循环改多行。）
+    # ⇒ class_instantiation_init fixture 红。（第二十二轮重锚：循环改带
+    # instAmbiguity 三态参数；classes 覆盖层臂有同构循环，用 instAmbiguity
+    # 实参行区分。）
     (
         "M141",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "                            for hook in _instantiationHooks(\n"
-        "                                localClasses[node.func.id], callTargets\n"
-        "                            ):\n"
-        "                                scanCallee(hook, depth + 1)",
-        "                            pass",
+        "\n".join(
+            [
+                "                            instAmbiguity: set[str] = set()",
+                "                            for hook in _instantiationHooks(",
+                "                                localClasses[node.func.id], callTargets, instAmbiguity",
+                "                            ):",
+                "                                scanCallee(hook, depth + 1)",
+            ]
+        ),
+        # mut 只删钩子扫描循环、保留 instAmbiguity 声明——后续 `if instAmbiguity:`
+        # 还要引用（删声明 ⇒ NameError 崩检测器，那不是「放行」是「炸穿」）。
+        "                            instAmbiguity: set[str] = set()",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[class_instantiation_init]"),
         1,
     ),
@@ -164,15 +184,15 @@ R18_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         1,
     ),
     # H-2：装饰器经类成员执行方法体（`@D.deco` 装饰在 import 期运行）；
-    # 成员解析被关 ⇒ decorator_class_member fixture 红。（第二十轮重锚：
-    # 主循环预扫与 scanExec 两处共用 _decoratorMember 单点 ⇒ 锚 helper 的
-    # 解析行，死一处=死两处。）
+    # 成员解析被关 ⇒ decorator_class_member fixture 红。（第二十二轮重锚：
+    # _decoratorMember 改带 classAliases/ambiguity 参数后旧行消失；锚 helper
+    # 的解析 return（dec.attr 实参全文件唯一），死一处=死两处。）
     (
         "M150",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "        return _classMember(localClasses[dec.value.id], dec.attr, callTargets)",
-        "        return None",
+        "            return _classMember(cls, dec.attr, callTargets, ambiguity)",
+        "            return None",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[decorator_class_member]"),
         1,
     ),

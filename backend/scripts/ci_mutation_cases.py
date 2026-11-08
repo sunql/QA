@@ -9,7 +9,8 @@ M1–M36（继承批 + 模块拆分批 + workflow 批 + 净变更批）在 `ci_m
 `ci_mutation_cases_r14.py`，M122–M136（第十五/十六轮收口批）在
 `ci_mutation_cases_r16.py`，M137–M151（第十八轮收口批）在
 `ci_mutation_cases_r18.py`，M152–M174（第二十轮收口批）在
-`ci_mutation_cases_r20.py` —— 文件超 800 行上限才拆。
+`ci_mutation_cases_r20.py`，M175 起（第二十二轮收口批）在
+`ci_mutation_cases_r21.py` —— 文件超 800 行上限才拆。
 
 ⚠️ **本文件与跑者同属「CI 相关面」**（改了它就能让守卫恒绿）
 ⇒ 必须同时进 `.github/CODEOWNERS` 与 `ci_surface.py` 的 `_CI_SURFACE_PATTERNS`。
@@ -27,10 +28,12 @@ from scripts.ci_mutation_cases_r14 import R14_MUTATIONS
 from scripts.ci_mutation_cases_r16 import R16_MUTATIONS
 from scripts.ci_mutation_cases_r18 import R18_MUTATIONS
 from scripts.ci_mutation_cases_r20 import R20_MUTATIONS
+from scripts.ci_mutation_cases_r21 import R21_MUTATIONS
 
 # (编号, 作用域, 文件, 原文, 变异后, 期望转红的用例, occurrence)
 MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = (
-    MUTATIONS_CORE + R14_MUTATIONS + R16_MUTATIONS + R18_MUTATIONS + R20_MUTATIONS + [
+    MUTATIONS_CORE + R14_MUTATIONS + R16_MUTATIONS + R18_MUTATIONS + R20_MUTATIONS
+    + R21_MUTATIONS + [
 
     # ---------- M37–M55：2026-11-07 N6「判定集合必须落在两次 run 实际跑的树上」批 ----------
     #
@@ -539,7 +542,8 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = (
         "M69",
         "backend",
         "app/utils/ci_surface.py",
-        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20)?)\\.py$",',
+        # 第二十二轮重锚：新增 `_r21` 批后 pattern 行随之加宽（M69 锚随行更新）。
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21)?)\\.py$",',
         'r"^backend/scripts/ci_mutation_(?:evidence|cases)\\.py$",',
         (
             "app/tests/unit/test_ci_surface.py::"
@@ -880,8 +884,23 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = (
         "M94",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "    return tuple(hooks)",
-        "    return ()",
+        # 第二十二轮重锚：裸 `    return tuple(hooks)` 现在出现 2 次
+        #（_instantiationHooks 与 _findImportTimeHooksImpl 的收尾），
+        # occurrence 1 会被新函数偷走（锚漂移）——用前置行钉死 Impl 收尾。
+        # mut 保留 add 行：删掉会让前置 if 失去函数体 ⇒ IndentationError
+        #（那是「炸穿」不是「放行」，不算有效变异取证）。
+        "\n".join(
+            [
+                '            add(d.lineno, f"模块级 {d.name}（PEP 562 收集前钩子）")',
+                "    return tuple(hooks)",
+            ]
+        ),
+        "\n".join(
+            [
+                '            add(d.lineno, f"模块级 {d.name}（PEP 562 收集前钩子）")',
+                "    return ()",
+            ]
+        ),
         (
             "app/tests/unit/test_ci_conftest_chain.py::"
             "test_import_time_hook_detector_is_not_vacuous"

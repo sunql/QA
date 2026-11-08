@@ -74,11 +74,13 @@ R20_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         1,
     ),
     # 构造器接收者（`X().m()`）的本地类成员解析被关 ⇒ ctor 改名体逃出。
+    # （第二十二轮重锚：第 round-22 批给 `_classMember` 串接 `ambiguity` 参数，
+    # 旧锚行加了第 4 参——H6 成员歧义 fail-closed 的载体；锚随行更新。）
     (
         "M157",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "            member = _classMember(localClasses[recv.func.id], func.attr, callTargets)",
+        "            member = _classMember(localClasses[recv.func.id], func.attr, callTargets, ambiguity)",
         "            member = None",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[ctor_member_call]"),
         1,
@@ -248,16 +250,10 @@ R20_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[instance_as_arg]"),
         1,
     ),
-    # 实例属性读（`_x.p` ⇒ @property getter）；instanceVars 臂被关 ⇒ 逃出。
-    (
-        "M172",
-        "backend",
-        "app/utils/ci_conftest_chain.py",
-        "                and node.value.id in instanceVars",
-        "                and False",
-        (_CHAIN_GUARD + "::test_hook_positions_are_denied[instance_property_read]"),
-        1,
-    ),
+    # M172 已退休（第二十二轮）：其锚线（实例属性读取独立 deny 块）与
+    # 第二十二轮 H3 块（`_usesLocalInstance`，M181 钉）条件严格超集重复
+    # ⇒ 双线同拦拿不到独占变异取证；冗余 deny 块已从守卫删除，`_x.p`
+    # 形态由 H3 块统一拒绝，fixture instance_property_read 保留。
     # PEP 562 经元组解包/with/for 目标绑定（Store-Name walk）；walk 臂被关
     # ⇒ `__getattr__, _x = (lambda, 1)` 逃出。
     (

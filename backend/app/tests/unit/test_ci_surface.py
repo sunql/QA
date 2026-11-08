@@ -173,6 +173,7 @@ def test_detectCiSurfaceChanges_flags_the_mutation_evidence_script() -> None:
         "backend/scripts/ci_mutation_cases_r16.py",
         "backend/scripts/ci_mutation_cases_r18.py",
         "backend/scripts/ci_mutation_cases_r20.py",
+        "backend/scripts/ci_mutation_cases_r21.py",
     ):
         flagged = ci_surface.detectCiSurfaceChanges((relPath,))
 
@@ -755,6 +756,7 @@ def test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_
         "backend/scripts/ci_mutation_cases.py",
         "backend/scripts/ci_mutation_cases_core.py",
         "backend/scripts/ci_mutation_cases_r20.py",
+        "backend/scripts/ci_mutation_cases_r21.py",
         "backend/scripts/ci_mutation_cases_r14.py",
         "backend/scripts/ci_mutation_cases_r16.py",
         "backend/scripts/ci_mutation_cases_r18.py",

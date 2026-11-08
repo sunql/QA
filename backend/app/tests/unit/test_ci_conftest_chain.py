@@ -259,11 +259,15 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
     # HIGH-2 类创建钩子
     "metaclass": "class M(type):\n    pass\n\nclass X(metaclass=M):\n    pass\n",
     "init_subclass": "class Base:\n    def __init_subclass__(cls):\n        cls.hooked = True\n",
-    # LOW-2：动态接收者的「允许方法名」不放行
+    # LOW-2：动态接收者的「允许方法名」不放行。
+    # ⚠️ 第二十轮 fixture 改构造器接收者形态：原 get_x() 工厂形态会被
+    # 「动态接收者 fail-closed」线（M153 的线）罩住 ⇒ 顶层豁免行的
+    # 「裸名接收者」约束失去独占判别点。本地类实例化不在动态拒绝之列、
+    # model_rebuild 成员良性 ⇒ 顶层规则的 Name 接收者约束成为唯一拦线。
     "dynamic_receiver": (
         "class X:\n"
         "    @classmethod\n    def model_rebuild(cls):\n        pass\n\n"
-        "def get_x():\n    return X\n\nget_x().model_rebuild()\n"
+        "X().model_rebuild()\n"
     ),
     # ---- 第十六轮（5H + 2M）收口 fixtures ----
     # H-1：vararg/kwarg 注解也是求值位置（首轮只扫 posonly/args/kwonly）
@@ -289,9 +293,11 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
     "base_call": (
         "def get_x():\n    return ()\n\nclass Y(get_x()):\n    pass\n"
     ),
-    # H-3：type.__setattr__ 在 Assign 位置改类
-    "type_setattr_assign": (
-        "class B:\n    pass\n\n_r = type.__setattr__(B, '__init_subclass__', None)\n"
+    # H-3：调用式改类（第二十轮重锚：`type.__setattr__` 根条目被第十九轮的
+    # `__setattr__` 禁段 supersede ⇒ 纯纵深防御无独占判别点，改钉 `setattr`
+    # 裸名根——不带 dunder 段、且顶层表达式规则不适用（赋值形态））
+    "builtin_setattr_call": (
+        "class B:\n    pass\n\n_r = setattr(B, '__init_subclass__', None)\n"
     ),
     # H-4：被跳过的函数体经模块级调用执行
     "called_def": "import sys\ndef m():\n    sys.path.insert(0, 'x')\n\n_x = m()\n",
@@ -381,6 +387,193 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
         "import sys\nclass D:\n    @staticmethod\n    def deco(cls):\n"
         "        sys.path.insert(0, 'x')\n        return cls\n\n@D.deco\nclass C:\n    pass\n"
     ),
+    # ---- 第十九/二十轮复审收口 fixtures（每条对准一个检测点；排他性见变异组 M152–M174）----
+    # HIGH-1：动态根属性链摸到禁段（lambda.__globals__）——最小链，避免 __builtins__ 根另判
+    "lambda_globals_spine": "_g = (lambda: 0).__globals__\n",
+    # HIGH-2：本地 def 工厂做接收者 ⇒ 成员不可静态解析
+    "dynamic_receiver_local_factory": (
+        "import sys\n"
+        "class X:\n"
+        "    def refresh(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "def make():\n"
+        "    return X()\n"
+        "_r = make().refresh()\n"
+    ),
+    # HIGH-3（绕过面）：下标取函数再调用
+    "subscript_call": (
+        "import sys\n"
+        "def f():\n"
+        "    sys.path.insert(0, 'x')\n"
+        "_d = {'f': f}\n"
+        "_r = _d['f']()\n"
+    ),
+    # HIGH-3：构造器接收者上的本地类成员调用（X().model_rebuild() 改名体）
+    "ctor_member_call": (
+        "import sys\n"
+        "class X:\n"
+        "    @classmethod\n"
+        "    def model_rebuild(cls):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "_r = X().model_rebuild()\n"
+    ),
+    # HIGH-2：setattr 禁段（object.__setattr__ 走根拒绝，sys.__setattr__ 走段拒绝）
+    "setattr_segment": "import sys\n_r = sys.__setattr__('path', [])\n",
+    # HIGH-3（重命名面）：实例变量上的本地类方法调用（model_rebuild 改名/换接收者）
+    "instance_method_call": (
+        "import sys\n"
+        "class X:\n"
+        "    @classmethod\n"
+        "    def model_rebuild(cls):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "_x = X()\n"
+        "_x.model_rebuild()\n"
+    ),
+    # HIGH-4：类体名字绑定函数（__init__ = evil）
+    "init_name_assign": (
+        "import sys\n"
+        "def evil(self):\n"
+        "    sys.path.insert(0, 'x')\n"
+        "class X:\n"
+        "    __init__ = evil\n"
+        "_x = X()\n"
+    ),
+    # HIGH-4：staticmethod/classmethod 包装
+    "staticmethod_member": (
+        "import sys\n"
+        "def evil():\n"
+        "    sys.path.insert(0, 'x')\n"
+        "class Y:\n"
+        "    model_rebuild = staticmethod(evil)\n"
+        "Y.model_rebuild()\n"
+    ),
+    # HIGH-4：type() 三参别名（_t = type 绕过真名判定）
+    "type_alias_three_arg": (
+        "import sys\n"
+        "def hook(self):\n"
+        "    sys.path.insert(0, 'x')\n"
+        "_t = type\n"
+        "X = _t('X', (), {'__init__': hook})\n"
+        "_x = X()\n"
+    ),
+    # HIGH-5：条件重定义 ⇒ 被调解析有歧义
+    "cond_redef": (
+        "import sys\n"
+        "if True:\n"
+        "    def m():\n"
+        "        sys.path.insert(0, 'x')\n"
+        "else:\n"
+        "    def m():\n"
+        "        pass\n"
+        "_x = m()\n"
+    ),
+    # HIGH-5：类重定义 ⇒ 实例化目标有歧义
+    "class_redef": (
+        "import sys\n"
+        "class X:\n"
+        "    def __init__(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "_x = X()\n"
+        "class X:\n"
+        "    pass\n"
+    ),
+    # HIGH-5：装饰器引用尚未被覆盖绑定的旧名字
+    "decorator_prev_binding": (
+        "import sys\n"
+        "def m(f):\n"
+        "    sys.path.insert(0, 'x')\n"
+        "    return f\n"
+        "\n"
+        "@m\n"
+        "def m():\n"
+        "    pass\n"
+    ),
+    # HIGH-5：lambda 重定义 ⇒ 被调解析有歧义
+    "lambda_redef": (
+        "import sys\n"
+        "_h = lambda: sys.path.insert(0, 'x')\n"
+        "_h = lambda: None\n"
+        "_x = _h()\n"
+    ),
+    # MEDIUM-3：实例下标 ⇒ __getitem__
+    "instance_subscript": (
+        "import sys\n"
+        "class X:\n"
+        "    def __getitem__(self, k):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "_x = X()\n"
+        "_y = _x[0]\n"
+    ),
+    # MEDIUM-3：实例真值判定 ⇒ __bool__/__len__
+    "instance_truthiness": (
+        "import sys\n"
+        "class X:\n"
+        "    def __bool__(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return False\n"
+        "_x = X()\n"
+        "if _x:\n"
+        "    pass\n"
+    ),
+    # MEDIUM-3：实例作为调用实参 ⇒ __iter__/__len__ 等协议方法
+    "instance_as_arg": (
+        "import sys\n"
+        "class X:\n"
+        "    def __iter__(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return iter(())\n"
+        "_r = list(X())\n"
+    ),
+    # MEDIUM-4：PEP 562 __getattr__ 经元组解包绑定
+    "pep562_tuple_unpack": "__getattr__, _x = (lambda name: [], 1)\n",
+    # MEDIUM-4：PEP 562 __getattr__ 经 from-import 别名绑定
+    "pep562_import_alias": "from x import y as __getattr__\n",
+    # MEDIUM-1：lambda 装饰器（装饰期执行 lambda 体）
+    "lambda_decorator": (
+        "import sys\n"
+        "@(lambda f: (sys.path.insert(0, 'x'), f)[1])\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    # MEDIUM-2：被调链深超上限 ⇒ fail-closed（静默截断=漏检）
+    "callee_depth_cap": (
+        "import sys\n"
+        "def f1():\n    f2()\n"
+        "def f2():\n    f3()\n"
+        "def f3():\n    f4()\n"
+        "def f4():\n    f5()\n"
+        "def f5():\n    f6()\n"
+        "def f6():\n    f7()\n"
+        "def f7():\n    f8()\n"
+        "def f8():\n    f9()\n"
+        "def f9():\n    sys.path.insert(0, 'x')\n"
+        "_x = f1()\n"
+    ),
+    # MEDIUM-5：sys.meta_path 安装 import 钩子
+    "meta_path_install": (
+        "import sys\n"
+        "class F:\n"
+        "    pass\n"
+        "_r = sys.meta_path.insert(0, F())\n"
+    ),
+    # MEDIUM-3：实例属性读 ⇒ @property getter
+    "instance_property_read": (
+        "import sys\n"
+        "class X:\n"
+        "    @property\n"
+        "    def p(self):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return 1\n"
+        "_x = X()\n"
+        "_r = _x.p\n"
+    ),
+    # 收口：本地接收者上未定义成员的调用（继承属性不可静态排除 ⇒ fail-closed）
+    "missing_member_call": (
+        "class X:\n"
+        "    pass\n"
+        "_x = X()\n"
+        "_r = _x.nope()\n"
+    ),
 }
 
 
@@ -417,6 +610,32 @@ _CLEAN_SOURCES: dict[str, str] = {
     "augassign": "COUNT = 0\nCOUNT += 1\n",
     "type_alias": "type Alias = int\n",
     "global_stmt": "X = 1\n\ndef f():\n    global X\n    X = 2\n",
+    # ---- 第十九/二十轮收口对应的良性惯用法（fail-closed 不得误伤）----
+    # 字面量方法调用：接收者是 Constant ⇒ 无法承载钩子
+    "str_join": "S = \",\".join(['a', 'b'])\n",
+    # 导入构造器的属性链：BigInteger().with_variant(...) 是仓内真实惯用法
+    "imported_ctor_chain": (
+        "from sqlalchemy import BigInteger, Integer\n"
+        "P = BigInteger().with_variant(Integer, 'sqlite')\n"
+    ),
+    # 本地类上无 override 的 model_rebuild ⇒ 成员缺失但 attr 在豁免清单
+    "local_model_rebuild_inherit": "class M:\n    pass\n\nM.model_rebuild()\n",
+    # 导入函数返回值的链式调用：getLogger(...).setLevel(...)。注意必须是赋值
+    # 形态——裸顶层调用语句本就被「顶层表达式」规则拒绝（与本 fixture 无关）
+    "imported_result_call": (
+        "import logging\n"
+        "RESULT = logging.getLogger('x').setLevel(10)\n"
+    ),
+    # 本地 lambda 直接调用：callTargets 命中 ⇒ 体内被扫，良性 ⇒ 放行
+    "lambda_call_plain": "_f = lambda: 1\n_x = _f()\n",
+    # 实例方法调用、成员已定义且体良性 ⇒ 扫描后放行
+    "instance_method_clean": (
+        "class X:\n"
+        "    def refresh(self):\n"
+        "        return 1\n"
+        "_x = X()\n"
+        "_r = _x.refresh()\n"
+    ),
 }
 
 

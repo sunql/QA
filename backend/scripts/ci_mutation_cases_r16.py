@@ -111,14 +111,17 @@ R16_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[base_call]"),
         1,
     ),
-    # H-3：`type.__setattr__` / `object.__setattr__` 在拒绝清单里（Assign 位置改类）。
+    # H-3：拒绝根里的调用式改类通道。（第二十轮重锚：第十九轮把 `__setattr__`
+    # 加进禁止 dunder 段集后，`type.__setattr__`/`object.__setattr__` 根条目被
+    # 段集线 supersede ⇒ 纯纵深防御无独占判别点（solo 全量实评测 M131 净漏）；
+    # 改钉 `setattr` 裸名根——不带 dunder 段、赋值形态绕开顶层表达式规则。）
     (
         "M131",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        '    "type.__setattr__",',
+        '    "setattr",',
         '    "",',
-        (_CHAIN_GUARD + "::test_hook_positions_are_denied[type_setattr_assign]"),
+        (_CHAIN_GUARD + "::test_hook_positions_are_denied[builtin_setattr_call]"),
         1,
     ),
     # H-4：被跳过的函数体经模块级调用执行（同模块 def 的一层被调解析）。
@@ -132,13 +135,14 @@ R16_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[called_def]"),
         1,
     ),
-    # H-4：IIFE lambda（`(lambda: sys.path.insert(...))()`）。
+    # H-4：IIFE lambda（`(lambda: sys.path.insert(...))()`）。（第二十轮重锚：
+    # 该臂由 if 改 elif。）
     (
         "M133",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "                if isinstance(node.func, ast.Lambda):",
-        "                if False:",
+        "                elif isinstance(node.func, ast.Lambda):",
+        "                elif False:",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[lambda_iife]"),
         1,
     ),

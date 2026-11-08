@@ -54,24 +54,28 @@ R18_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         1,
     ),
     # H-4：接收者感知白名单——本地类同名成员体扫描；成员解析行被关
-    # ⇒ 本地类重定义 model_rebuild 逃出。
+    # ⇒ 本地类重定义 model_rebuild 逃出。（第二十轮重锚：_receiverMember 并入
+    # _resolveMember，成员缺失 + model_rebuild 豁免 ⇒ 转红判别仍独占。）
     (
         "M140",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "    return _classMember(cls, func.attr)",
-        "    return None",
+        '        return _classMember(cls, func.attr, callTargets), "local"',
+        '        return None, "local"',
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[model_rebuild_local_override]"),
         1,
     ),
     # H-2：类实例化跑 `__init__`（`_x = X()`）；实例化钩子循环被关
-    # ⇒ class_instantiation_init fixture 红。
+    # ⇒ class_instantiation_init fixture 红。（第二十轮重锚：循环改多行。）
     (
         "M141",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "                        for hook in _instantiationHooks(localClasses[node.func.id]):",
-        "                        for hook in ():",
+        "                            for hook in _instantiationHooks(\n"
+        "                                localClasses[node.func.id], callTargets\n"
+        "                            ):\n"
+        "                                scanCallee(hook, depth + 1)",
+        "                            pass",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[class_instantiation_init]"),
         1,
     ),
@@ -148,36 +152,41 @@ R18_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         1,
     ),
     # H-2：嵌套类实例化（`Outer.Inner()`）；成员是嵌套类的分支被关
-    # ⇒ nested_class_instantiation fixture 红。
+    # ⇒ nested_class_instantiation fixture 红。（第二十轮重锚：if → elif，
+    # 8 空格版属于 _resolveMember 的 Attribute 链分支，不能混锚。）
     (
         "M146",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "                    if isinstance(member, ast.ClassDef):",
-        "                    if False:",
+        "                    elif isinstance(member, ast.ClassDef):",
+        "                    elif False:",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[nested_class_instantiation]"),
         1,
     ),
     # H-2：装饰器经类成员执行方法体（`@D.deco` 装饰在 import 期运行）；
-    # 成员解析被关 ⇒ decorator_class_member fixture 红。
+    # 成员解析被关 ⇒ decorator_class_member fixture 红。（第二十轮重锚：
+    # 主循环预扫与 scanExec 两处共用 _decoratorMember 单点 ⇒ 锚 helper 的
+    # 解析行，死一处=死两处。）
     (
         "M150",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "                        member = _classMember(localClasses[dec.value.id], dec.attr)",
-        "                        member = None",
+        "        return _classMember(localClasses[dec.value.id], dec.attr, callTargets)",
+        "        return None",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[decorator_class_member]"),
         1,
     ),
     # ---------- M145/M151：HIGH-5 + 语句序 ----------
     # H-5：PEP 562 模块级 `__getattr__`/`__dir__` 的赋值/注解形态
     # （pytest 自身收集即触发）；检查被关 ⇒ module_getattr_assign fixture 红。
+    # （第二十轮重锚：applyBinding 旧检查并入 _pep562BindingProblem 主循环
+    # 接线，旧锚行已不存在。）
     (
         "M145",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        '            if any(getattr(t, "id", None) in _MODULE_GETATTR_NAMES for t in targets):',
-        "            if False:",
+        "            pep = _pep562BindingProblem(stmt)",
+        "            pep = None",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[module_getattr_assign]"),
         1,
     ),

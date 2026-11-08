@@ -13,7 +13,6 @@ from pathlib import Path
 import dotenv
 import pytest
 import pytest_asyncio
-import seed_ontology
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # 加载 .env 到环境变量，使 subprocess（alembic）能读到 DATABASE_URL
@@ -47,7 +46,14 @@ async def seedEngine(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[asy
     返回 (factory, engine)，seed() 内部会调用 engine.dispose()。
     测试可直接用 factory() 开新 session 做 assert。
     覆盖根 conftest 的 sqlite fixtures。
+
+    ⚠️ `import seed_ontology` 放在夹具体内而不是模块级（第十二轮复审 HIGH-2 的
+    廉价收口）：conftest 的模块级 import 在**任何测试收集之前**执行 ⇒ 模块级写它
+    会把 seed_ontology 及其整条 import 链（neo4j_client / ontology_service / …）
+    全部变成收集前执行的代码。夹具体内 import 只在用到 seed 的用例上执行。
     """
+    import seed_ontology  # noqa: PLC0415 —— 见上，不能提前到模块级
+
     url = _resolveTestDbUrl()
     _pg_support._ensureSchema(url)
     engine = await _pg_support._newEngine()

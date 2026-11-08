@@ -537,7 +537,7 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 | LOW-1 | summary 变更清单孤儿行 | 第八轮我自己的 Edit 把 `ci_mutation_cases_core.py` 行写残（只留行首、无第二列） | 已修：并入真实行并补 M27 重锚说明 |
 | LOW-2 | lever 测试 docstring 过期 | 写着「M70–M84」/「21 路径」 | 更正为 M70–M90 / 27 路径 / §2.10.13 |
 | LOW-3 | 注释措辞两处 | 「本文件」指代不明；pkg_root 写成 `resolve_package_path` 结果本身（实际是其**父目录**） | 措辞更正 |
-| LOW-4 | `test_ci_surface.py` 979 行超 800 | 既有欠账（评审轮次逐轮加钉所致），不在本轮拆 | §5 记账 |
+| LOW-4 | `test_ci_surface.py` 979 行超 800 | 既有欠账（评审轮次逐轮加钉所致），不在本轮拆 | §5 记账（第十二轮 +9 行至 988，仍不拆） |
 
 - **豁免清单仲裁（MEDIUM-1 的设计决策）**：5 个产品模块
   （`dependencies.py` / `domain/models.py` / `llm/embedding_provider_factory.py` /
@@ -554,23 +554,60 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 - **正面断言口径**：lever 测试现钉 **27 个路径**（仍 **7 条形态钉**）；派生守卫另钉
   harness 5 文件的反向断言（**不许**豁免 + **必须**命中）（合计口径见 §2.10.10–§2.10.13）。
 
+#### 2.10.14 ⚠️ 祖先包 init 链 + 传递闭包**内容不变式**（第十二轮复审收口，2026-11-08）
+
+第十二轮复审（对第九轮修复后的树，595 行 diff）判 **BLOCK：2 HIGH + 2 MEDIUM + 2 LOW** ——
+全部打在派生守卫**自身的健全性**上（正是请它攻的方向）：
+
+| 级别 | 洞 | 机制 | 修法 |
+|---|---|---|---|
+| HIGH-1 | **祖先包 init 链未派生** | `from app.domain.models import X` 会**先执行** `app/domain/__init__.py` —— 派生器只解析叶子模块 ⇒ `app/domain/__init__.py`、`app/services/__init__.py`、`app/models/__init__.py`、`app/infrastructure/llm/__init__.py` 四个中间包 init 全部逃出守卫（枚举式修法第四次落空的同族形态：这次是「派生器自己少看一层」） | `_resolveModuleFiles` 解析**整条祖先链**（存在的才收）+ 4 条 pattern 入清单 + CODEOWNERS + lever 正面断言 + **M92**（祖先链退化 `range(1, len(parts))` → `range(0, 0)` ⇒ 守卫红）+ **M96–M99**（逐条删 4 条新 pattern ⇒ lever 红） |
+| HIGH-2 | **传递闭包止于 conftest 顶层** | 落点模块自己的 import 链也在收集前执行：`app.domain.models` 又拉起 `models/rbac`、`wiki_*_models` 等数十个文件（实测 **76** 个文件、其中 **58** 个是传递才到达的产品文件）。全入清单 ⇒ 日常 ORM / 服务 PR 全判退出码 6 ⇒ 假拦代价不成比例 | **内容不变式**取代逐文件枚举：`findImportTimeHooks(path)` —— 模块顶层语句**白名单**（导入/定义/赋值/pass/docstring/受控 If-Try）+ **钩子机制 denylist**（`sys.path` / `sys.modules` / `os.environ` / `importlib` / `setattr` / `eval` / `exec` / `open` / `_pytest` / `monkeypatch` / `subprocess` … 按根链拒绝；顶层裸表达式只放行 `model_rebuild`）。⚠️ 这**不是 purity 宣称**：纯构造（getLogger / frozenset / re.compile / 单例）是常态，全拒会在真实树上假红 **36/76** —— 所以白名单语句形态 + 只拒绝已知钩子机制。守卫：闭包内每个文件要么被 CI 面钉住、要么 `findImportTimeHooks == ()`；实测 **76/76 全过** + **M93**（闭包掏空 ⇒ 正向钉 `len ≥ 60` + `domain/models.py ∈ 闭包` ⇒ 红）+ **M94**（检测器掏空 ⇒ 合成 evil/clean 双向单元钉 ⇒ 红） |
+| MEDIUM-3 | **If/Try 包裹的 import 与 `pytest_plugins` 不可见** | `try: import app.config`（分支体在收集前同样执行）与 `pytest_plugins = ["app.plug"]`（插件声明也在收集前加载）都只看 `tree.body` 顶层的派生器看不见 | `_moduleScopeStatements` 对 If/Try/With/AsyncWith/For/While 的 body/handlers/orelse/finalbody **递归展开**；`pytest_plugins` 字符串/清单赋值一并解析（前缀过滤）+ **M95**（递归关闭 `if False:` ⇒ 合成树守卫红） |
+| MEDIUM-4 | **豁免清单内容盲** | 豁免理由写的是「模块级代码是定义性的」⇒ 那是**宣称**不是被钉住的事实 ⇒ 有人往豁免文件里塞钩子，守卫照样绿 | 豁免 5 文件**全在传递闭包内** ⇒ `findImportTimeHooks` 检查对它们**同样生效**（守卫测试 docstring 明示；往豁免文件塞 `sys.path` 注入 ⇒ 闭包守卫红） |
+| LOW-5 | **CI 面 ⊆ CODEOWNERS 未派生** | 两份人工清单会漂移：文件进了 `_CI_SURFACE_PATTERNS`（改它 = 退出码 6）却没有 owner ⇒ 仲裁通道无人被请求复核 | 派生守卫 `test_every_ci_surface_file_in_the_pre_collection_closure_has_a_codeowner`：闭包 ∩ CI 面 ⇒ `_effectiveOwner` 必须非空 |
+| LOW-6 | `parents[4]` 脆性 + 叶子优先顺序 | `Path(__file__).resolve().parents[4]` 在文件移动时静默指错（fail-open 方向）；`.py`-先于-`__init__.py` 与 CPython 相反（CPython 先试包再试模块）——但仓库内**不存在**同一模块名同时有 `.py` 与包两种形态 ⇒ 无实害 | **接受，暂不修**（§5 记账）：`parents[4]` 有测试内 `assert mapping` 非空兜底（指错 ⇒ 派生为空 ⇒ 红）；双形态先例出现时再调 |
+
+**设计决策（HIGH-1 vs HIGH-2 的不同处置）**：4 个包 init 走**清单**（它们是罕见编辑的
+harness 杠杆，退出码 6 代价低）；58 个传递产品文件走**内容不变式**（它们是日常 ORM /
+服务 PR 的必改文件，入清单 = 假拦洪灾）。两条腿合起来把 HIGH-1 的洞类从「靠枚举」
+变成「靠派生 + 内容约束」，且约束被变异取证钉死（M92–M99）。
+
+**附带收口**：`unit/conftest.py` 的 `import seed_ontology` 从**模块级**移入 `seedEngine`
+**夹具体**（HIGH-2 的廉价收口）—— conftest 模块级 import 在任何测试收集之前执行 ⇒
+模块级写它会把 seed_ontology 及其整条链（neo4j_client / ontology_service / …）全变成
+收集前执行的代码；移入夹具体后实测 seed 链掉出闭包。conftest 本体已在 CI 面清单
+（任意深度 conftest pattern）⇒ 改动本身有授权落点。
+
+**实测口径**（守卫运行时派生，非枚举）：level-1 落点 **18**（4 个 conftest）、传递闭包
+**76**（58 个传递产品文件）、钩子 **0**。⚠️ `app/models/__init__.py` **没有** level-1 落点
+（无 conftest 直接 import `app.models.*`）—— 它经 `dependencies.py` 的传递链进入闭包，
+钉法与前三者不同（M92 钉 3 个 level-1 祖先 init；`models/__init__` 由闭包断言 + M98 pattern
+删除钉住）。
+
+- **变异总数**：91 → **99**（M92–M95 打派生器/闭包/检测器/递归四个实现点；M96–M99 逐条删
+  4 条新 pattern）。锚点 **99/99**；solo **8/8 转红、净漏 0**；终跑见 §4.2.10。
+- **正面断言口径**：lever 测试现钉 **31 个路径**（仍 **7 条形态钉**）；
+  `pytest -k ci_` **375 passed / 19 skipped**（+5 条新守卫，净新增失败 0）。
+
 ## 3. 变更清单
 
 | 文件 | 动作 |
 |---|---|
 | `backend/app/utils/ci_gh.py` | 重写：新增 Trees API 链路（`fetchTreePathShas` / `_parseTreePathShas` / `_buildTreeFileMap` / `_assertTreeIsRecursive` / `_diffTreePathShas` / `fetchNetChangedFiles`）、`fetchMergeBaseSha` / `_parseMergeBaseSha`；`fetchChangedFiles` 改为「merge-base 树 vs head 树」；**删除** `_parseChangedFiles` 与 300 项上限逻辑；所有外部输入加形态校验（repo / run id / sha / branch）。**第三版**：`RunHeadInfo` 增 `event` / `createdAt` / `runStartedAt` 三字段；新增 `mainTipCutoff` / `fetchMainTipShaAt` / `_parseMainTipSha` / `_considerMainRun`（`M_T` 的取数链路）与 `_MAIN_TIP_GRACE_SECONDS = 120`。**第四版（CRITICAL-1）**：`mainTipCutoff` 的**锚点从 `run_started_at` 换成 `created_at`（事件派发时刻）**、参数改成 **keyword-only**（`createdAt=` / `runStartedAt=`）⇒ 杜绝「位置传参写反」；`created_at` 缺失才回退 `run_started_at`，两者皆缺 ⇒ 抛错（判定不出来）；**删除**第二版整条「测试合并 commit」链路（`PullMergeInfo` / `fetchPullMergeInfo` / `_findOpenPullNumber` / `_parseOpenPullNumbers` / `_fetchPullMergeCommitSha` / `_fetchCommitTreeAndParent`）——`refs/pull/N/merge` 是临时 ref，**回溯历史 run 时取不到**（§1.3）。**第五版**：**删除** `_MAIN_TIP_GRACE_SECONDS`（宽限 ⇒ 与闸门侧不对称 ⇒ 假拦）；`mainTipCutoff` **只接 `createdAt`**（**删掉** `runStartedAt` ⇒ 缺失即 fail-closed，不回退）；新增 `fetchMainFirstParentTipAt` / `_parseCommitEntries`（**第一父链腿**）+ `_MAX_FIRST_PARENT_HOPS`（超限报错） |
-| `backend/app/utils/ci_surface.py` | `CiSurfaceInfo` 增 `netChangedFiles` / `unattributedCiFiles` / `baseTrustError` / `mainAdvanceFiles` / `mainTipSha`；新增 `_baseTrustError`（三条硬条件）。**第三版**：判定集合改为 `A ∪ P`（`_buildSurface` 里 `judgment = set(mainAdvance) | set(prChanged)`）；新增 `_fetchMainTipSha` / `_fetchMainAdvanceFiles` / `_fetchPrChangedFiles`；**删除**第二版的 `_fetchMergeInfo` / `_fetchAttributionFiles` / `_fetchComparedFiles` 与 `prMergeSha` / `prMergeBaseSha` 两字段。**第四版（CRITICAL-1）**：`_fetchMainTips` 的 cutoff 改用 `mainTipCutoff(createdAt=prInfo.createdAt)`（**具名传**）⇒ 锚点与工具侧一致。**第五版**：`_CI_SURFACE_PATTERNS` 增**前端 CI 定义**路径（package / lock / `*.config.*` / `tsconfig*.json` / setup 文件）⇒ 堵住「前端绕过链」；新增 `_baselineAncestorError`（祖先核对 ⇒ 否则 fail-closed 退出码 3）与 `_fetchMainTips` 的**两腿并集**（run 腿 + 第一父链腿）。**第六版（评审 C-1）**：`_CI_SURFACE_PATTERNS` 再增 `vitest.workspace.*` / `vitest.projects.*`（vitest 2.x **自动发现**、存在时取代根配置的项目解析）+ `*.tsbuildinfo` + `frontend/.npmrc`（§2.10.7）；**第四轮评审（HIGH-1）**：lockfile 交替组加 `npm-shrinkwrap.json`（npm 语义下**优先于** package-lock ⇒ 只新增一个文件就能换掉前端依赖树）（§2.10.8）。**第五轮安全评审（§2.10.9）**：增 `backend/alembic/env.py`（CI 真正跑迁移的任意 Python）、`backend/.env` 家族（conftest `override=True` 覆盖 CI 注入变量）、`backend/.python-version` / `uv.toml`（uv 选解释器盖过 setup-python）、`frontend/.env` 家族、`backend/scripts/seed_*.py` 通配；supports 行扩为 `_pg_support|_neo4j_support|_testapp|milvus_isolation`。**第六轮复审（§2.10.10）**：增 `backend/alembic/versions/*.py` 通配（`upgrade head` 逐个执行的脚本本体）、仓库根 `uv\.toml`（uv 父链发现）、seed pattern 扩成 `backend/(?:scripts/)?seed_…`（conftest 模块级 import 的 `backend/` 根同族）、`backend/scripts/kpi_metric_db_guard\.py`（`assertTestDatabase` 的依赖）。**第七轮复审（§2.10.11）**：versions pattern 放宽 `[^/]+`（alembic 文件名接受面）、增 `backend/scripts/__init__.py` 与 `backend/app/tests/(?:[^/]+/)*__init__\.py$` 通配。**第八轮复审（§2.10.12）**：增 `backend/__init__\.py$`（现在不存在，但新增它就把 pytest prepend 的 pkg_root 顶到仓库根 ⇒ 收集前执行 —— 形态钉管未来文件）。**第九轮复审（§2.10.13）**：增 `backend/app/__init__\.py$`（prepend 链上**现存且每次执行**的最高一层包 init —— 第八轮钉了不存在的、漏了在链上的）与 conftest 收集前 import 的 harness 配置文件（config / infrastructure 包 init 与 database / security 包 init 与 crypto）；utils enum 增 `conftest_chain`（新派生器模块入清单） |
+| `backend/app/utils/ci_surface.py` | `CiSurfaceInfo` 增 `netChangedFiles` / `unattributedCiFiles` / `baseTrustError` / `mainAdvanceFiles` / `mainTipSha`；新增 `_baseTrustError`（三条硬条件）。**第三版**：判定集合改为 `A ∪ P`（`_buildSurface` 里 `judgment = set(mainAdvance) | set(prChanged)`）；新增 `_fetchMainTipSha` / `_fetchMainAdvanceFiles` / `_fetchPrChangedFiles`；**删除**第二版的 `_fetchMergeInfo` / `_fetchAttributionFiles` / `_fetchComparedFiles` 与 `prMergeSha` / `prMergeBaseSha` 两字段。**第四版（CRITICAL-1）**：`_fetchMainTips` 的 cutoff 改用 `mainTipCutoff(createdAt=prInfo.createdAt)`（**具名传**）⇒ 锚点与工具侧一致。**第五版**：`_CI_SURFACE_PATTERNS` 增**前端 CI 定义**路径（package / lock / `*.config.*` / `tsconfig*.json` / setup 文件）⇒ 堵住「前端绕过链」；新增 `_baselineAncestorError`（祖先核对 ⇒ 否则 fail-closed 退出码 3）与 `_fetchMainTips` 的**两腿并集**（run 腿 + 第一父链腿）。**第六版（评审 C-1）**：`_CI_SURFACE_PATTERNS` 再增 `vitest.workspace.*` / `vitest.projects.*`（vitest 2.x **自动发现**、存在时取代根配置的项目解析）+ `*.tsbuildinfo` + `frontend/.npmrc`（§2.10.7）；**第四轮评审（HIGH-1）**：lockfile 交替组加 `npm-shrinkwrap.json`（npm 语义下**优先于** package-lock ⇒ 只新增一个文件就能换掉前端依赖树）（§2.10.8）。**第五轮安全评审（§2.10.9）**：增 `backend/alembic/env.py`（CI 真正跑迁移的任意 Python）、`backend/.env` 家族（conftest `override=True` 覆盖 CI 注入变量）、`backend/.python-version` / `uv.toml`（uv 选解释器盖过 setup-python）、`frontend/.env` 家族、`backend/scripts/seed_*.py` 通配；supports 行扩为 `_pg_support|_neo4j_support|_testapp|milvus_isolation`。**第六轮复审（§2.10.10）**：增 `backend/alembic/versions/*.py` 通配（`upgrade head` 逐个执行的脚本本体）、仓库根 `uv\.toml`（uv 父链发现）、seed pattern 扩成 `backend/(?:scripts/)?seed_…`（conftest 模块级 import 的 `backend/` 根同族）、`backend/scripts/kpi_metric_db_guard\.py`（`assertTestDatabase` 的依赖）。**第七轮复审（§2.10.11）**：versions pattern 放宽 `[^/]+`（alembic 文件名接受面）、增 `backend/scripts/__init__.py` 与 `backend/app/tests/(?:[^/]+/)*__init__\.py$` 通配。**第八轮复审（§2.10.12）**：增 `backend/__init__\.py$`（现在不存在，但新增它就把 pytest prepend 的 pkg_root 顶到仓库根 ⇒ 收集前执行 —— 形态钉管未来文件）。**第九轮复审（§2.10.13）**：增 `backend/app/__init__\.py$`（prepend 链上**现存且每次执行**的最高一层包 init —— 第八轮钉了不存在的、漏了在链上的）与 conftest 收集前 import 的 harness 配置文件（config / infrastructure 包 init 与 database / security 包 init 与 crypto）；utils enum 增 `conftest_chain`（新派生器模块入清单）。**第十二轮复审（§2.10.14）**：增 4 条**祖先包 init** pattern（`app/domain/__init__\.py$` / `app/models/__init__\.py$` / `app/services/__init__\.py$` / `app/infrastructure/llm/__init__\.py$`）—— `from app.domain.models import X` 会先执行祖先 init 链，落点由派生器整链解析、各自一条 pattern ⇒ 删除型变异可逐个钉（M96–M99） |
 | `backend/app/utils/ci_failure_set.py` | 判定集合改为 `detectCiSurfaceChanges(surface.netChangedFiles)`；`_ciSurfaceReason` 分「PR 改了」/「归因不到本 PR」两种措辞；豁免前置条件改用 `netChangedFiles`；基线不可信 ⇒ 退出码 3；报告 notes 增「归因不到本 PR」条目。**第三版**：`_mergeBaseMismatchNote` 改用 `surface.mainTipSha`（不再是 `prMergeBaseSha`）。**第五版**：底座不一致的**事实与处置拆成两条 note**（`_mainTipMismatchNote` / `_mainTipRemedyNote`）⇒ 处置不被 200 字符截断；**处置改为「推一个新 commit 到 PR 分支」**（不复跑 ⇒ 复跑无效，见 §2.9）；底座不一致的**事实不再拼进 reason 字符串** |
 | `.github/workflows/merge-gate.yml` | 基线 run 查询限定 `event=push` + jq 复核 `.event == "push"`。**第二版**：基线取法加**时间上界** —— 只认 `created_at <= PR run 的时间戳` 的 main push run（用**独立 jq 二进制**的 `--arg` 传时间戳；`gh --jq` 不支持 `--arg`）；**`PR_RUN_CREATED_AT` 为空 ⇒ 显式 fail-closed**。**第三版**：时间戳取 `run_started_at`。**第四版（CRITICAL-1）**：改取 **`created_at`（事件派发时刻）** —— `PR_RUN_CREATED_AT: ${{ github.event.workflow_run.created_at }}`（合并 commit 在派发时冻结 ⇒ 复跑不动它 ⇒ 上界必须锚派发时刻，详见 §2.7.1） |
-| `.github/CODEOWNERS` | 新增 `backend/app/tests/unit/test_ci_main_tip_note.py` / `test_ci_main_tip.py` / `test_ci_mutation_evidence.py` / `test_ci_failure_set_surface.py` 与 `backend/scripts/ci_mutation_cases.py` 的 CODEOWNER（新增守卫文件**必须**有 CODEOWNER ⇒ 否则 `test_ci_codeowners.py` 的反向守卫会红 ⇒ 缺口本身会挡住合并）。**第五版**：新增 **`frontend/` 前缀条目**（`frontend/vite.config.ts` / `frontend/vite.config.js` 等）⇒ 堵住「前端 CI 定义改了没人复核」的绕过链（安全评审 CRITICAL-1）；并给新守卫 `backend/app/tests/unit/test_ci_surface_frontend_reverse.py` 加 CODEOWNER。**第六版（评审 C-1）**：增 `frontend/vitest.workspace.*` / `frontend/vitest.projects.*` **通配**条目（管**未来文件**）与 `frontend/tsconfig.node.tsbuildinfo` / `frontend/.npmrc`（§2.10.7）；**第四轮评审（HIGH-1）**：增 `frontend/npm-shrinkwrap.json`（§2.10.8）。**第五轮安全评审（§2.10.9）**：增 `backend/alembic/env.py`、`backend/.env` / `backend/.env.*`、`backend/.python-version` / `backend/uv.toml`、`frontend/.env` / `frontend/.env.*`、`backend/app/tests/_pg_support.py` / `_neo4j_support.py` / `_testapp.py` / `milvus_isolation.py` 与 `backend/scripts/seed_*.py`（这批此前**无授权落点**）。**第六轮复审（§2.10.10）**：增 `backend/alembic/versions/*.py`（通配管未来迁移）、`/uv.toml`、`backend/seed_*.py`（根级同族）与 `backend/scripts/kpi_metric_db_guard.py`。**第七轮复审（§2.10.11）**：增 `backend/scripts/__init__.py`、`backend/app/tests/__init__.py` + `backend/app/tests/**/__init__.py`。**第八轮复审（§2.10.12）**：增 `backend/__init__.py`（现在不存在 —— 形态钉管未来文件）。**第九轮复审（§2.10.13）**：增 `backend/app/__init__.py`（链上现存却被漏的最高一层包 init）与 `backend/app/config.py` / `backend/app/infrastructure/__init__.py` / `backend/app/infrastructure/database.py` / `backend/app/infrastructure/security/__init__.py` / `backend/app/infrastructure/security/crypto.py`（conftest 收集前 import 链上的 harness 配置文件）；增 `backend/app/utils/ci_conftest_chain.py`（它决定守卫看到哪些落点 ⇒ 改它就能让守卫漏报）与 `backend/app/tests/unit/test_ci_conftest_chain.py`（派生守卫本体） |
+| `.github/CODEOWNERS` | 新增 `backend/app/tests/unit/test_ci_main_tip_note.py` / `test_ci_main_tip.py` / `test_ci_mutation_evidence.py` / `test_ci_failure_set_surface.py` 与 `backend/scripts/ci_mutation_cases.py` 的 CODEOWNER（新增守卫文件**必须**有 CODEOWNER ⇒ 否则 `test_ci_codeowners.py` 的反向守卫会红 ⇒ 缺口本身会挡住合并）。**第五版**：新增 **`frontend/` 前缀条目**（`frontend/vite.config.ts` / `frontend/vite.config.js` 等）⇒ 堵住「前端 CI 定义改了没人复核」的绕过链（安全评审 CRITICAL-1）；并给新守卫 `backend/app/tests/unit/test_ci_surface_frontend_reverse.py` 加 CODEOWNER。**第六版（评审 C-1）**：增 `frontend/vitest.workspace.*` / `frontend/vitest.projects.*` **通配**条目（管**未来文件**）与 `frontend/tsconfig.node.tsbuildinfo` / `frontend/.npmrc`（§2.10.7）；**第四轮评审（HIGH-1）**：增 `frontend/npm-shrinkwrap.json`（§2.10.8）。**第五轮安全评审（§2.10.9）**：增 `backend/alembic/env.py`、`backend/.env` / `backend/.env.*`、`backend/.python-version` / `backend/uv.toml`、`frontend/.env` / `frontend/.env.*`、`backend/app/tests/_pg_support.py` / `_neo4j_support.py` / `_testapp.py` / `milvus_isolation.py` 与 `backend/scripts/seed_*.py`（这批此前**无授权落点**）。**第六轮复审（§2.10.10）**：增 `backend/alembic/versions/*.py`（通配管未来迁移）、`/uv.toml`、`backend/seed_*.py`（根级同族）与 `backend/scripts/kpi_metric_db_guard.py`。**第七轮复审（§2.10.11）**：增 `backend/scripts/__init__.py`、`backend/app/tests/__init__.py` + `backend/app/tests/**/__init__.py`。**第八轮复审（§2.10.12）**：增 `backend/__init__.py`（现在不存在 —— 形态钉管未来文件）。**第九轮复审（§2.10.13）**：增 `backend/app/__init__.py`（链上现存却被漏的最高一层包 init）与 `backend/app/config.py` / `backend/app/infrastructure/__init__.py` / `backend/app/infrastructure/database.py` / `backend/app/infrastructure/security/__init__.py` / `backend/app/infrastructure/security/crypto.py`（conftest 收集前 import 链上的 harness 配置文件）；增 `backend/app/utils/ci_conftest_chain.py`（它决定守卫看到哪些落点 ⇒ 改它就能让守卫漏报）与 `backend/app/tests/unit/test_ci_conftest_chain.py`（派生守卫本体）。**第十二轮复审（§2.10.14）**：增 4 条祖先包 init 条目（`backend/app/domain/__init__.py` / `backend/app/models/__init__.py` / `backend/app/services/__init__.py` / `backend/app/infrastructure/llm/__init__.py`）+ 新派生守卫 `test_every_ci_surface_file_in_the_pre_collection_closure_has_a_codeowner`（闭包 ∩ CI 面 ⇒ 必有生效 owner，堵两份人工清单漂移） |
 | `backend/scripts/ci_mutation_cases_core.py`（**第六版收尾新建**，评审 M-3） | M1–M36（继承批 + 模块拆分批 + workflow 批 + 净变更批）的纯数据；与 `ci_mutation_cases.py` **同族** ⇒ 同进 `ci_surface.py` 清单（enum 增 `cases_core`）与 CODEOWNERS、`test_ci_codeowners.py` 的按名断言。**第九轮复审**：M27 锚点同步为加宽后的 utils enum 行原文（行加 `conftest_chain` ⇒ 不改则锚点找不到） |
 | `backend/scripts/ci_mutation_evidence.py` | M27 锚点对齐现状；新增 M29–M36 八组；**第二版新增 M37–M47**；**第三版重锚 M37–M47 并新增 M48–M55**；**第四版重锚 M46/M48/M49/M50/M39 并新增 M56–M58**；**第五版重锚 M48/M49/M50/M57/M58 并新增 M59–M65**（共 **65** 组）。**第六版新增 M66–M67（共 67 组，§2.10.7）**；**第四轮评审新增 M68（共 68 组，§2.10.8）**；**第五轮安全评审新增 M69–M76（共 76 组，§2.10.9）**；**第六轮复审新增 M77–M80（共 80 组，§2.10.10）**。并把 `run_case` 的判据从**布尔**改成**三态**（`red` / `green` / `inconclusive`）——只有 pytest 退出码 **1** 才算「转红」，2/3/4/5 一律判「没跑起来」⇒ 取证失败（不是转红）。**第五版**：新增 `_failureMarkerFound` ⇒ 退出码 1 时**还必须**在输出里找到**这条用例自己的**失败标记（`FAILED <nodeid>` 整行匹配）⇒ 否则「别的用例失败」会被算成「这条守卫转红」（代码评审 MEDIUM-4）。**收尾拆分**：清单（55 组数据）移到 `backend/scripts/ci_mutation_cases.py`，本文件只留**跑者**（改坏 → 跑用例 → 判三态）——拆分前 826 行 ⇒ 超 800 行上限 ⇒ 拆后 159 + 695 行 |
-| `backend/scripts/ci_mutation_cases.py` | **收尾新建**：变异的**纯数据**清单（与跑者**同族** ⇒ 同进 CI 相关面 + CODEOWNERS）；**第四版**增到 58 组，**第五版**增到 **65** 组，**第六版**增到 **67** 组（M66/M67，§2.10.7）。**第六版收尾拆分（评审 M-3）**：M1–M36 移到 `ci_mutation_cases_core.py`（`MUTATIONS = MUTATIONS_CORE + [...]`），本文件留 M37 起 ⇒ 拆后 499 + 393 行（拆前 893 行）；拆分不碰任何变异锚点 ⇒ 取证无需重锚。**第四轮评审**：新增 **M68**（§2.10.8，共 **68** 组）。**第五轮安全评审**：新增 **M69–M76**（§2.10.9，共 **76** 组）。**第六轮复审**：M76 锚点同步为扩宽后的 seed 行原文（行本身扩宽 ⇒ 不改则锚点找不到）+ 新增 **M77–M80**（§2.10.10，共 **80** 组）。**第七轮复审**：M77 锚点同步为放宽后的 versions 行原文 + 新增 **M81–M83**（§2.10.11，共 **83** 组）。**第八轮复审**：新增 **M84**（§2.10.12，共 **84** 组）。**第九轮复审**：新增 **M85–M91**（§2.10.13，共 **91** 组） |
+| `backend/scripts/ci_mutation_cases.py` | **收尾新建**：变异的**纯数据**清单（与跑者**同族** ⇒ 同进 CI 相关面 + CODEOWNERS）；**第四版**增到 58 组，**第五版**增到 **65** 组，**第六版**增到 **67** 组（M66/M67，§2.10.7）。**第六版收尾拆分（评审 M-3）**：M1–M36 移到 `ci_mutation_cases_core.py`（`MUTATIONS = MUTATIONS_CORE + [...]`），本文件留 M37 起 ⇒ 拆后 499 + 393 行（拆前 893 行）；拆分不碰任何变异锚点 ⇒ 取证无需重锚。**第四轮评审**：新增 **M68**（§2.10.8，共 **68** 组）。**第五轮安全评审**：新增 **M69–M76**（§2.10.9，共 **76** 组）。**第六轮复审**：M76 锚点同步为扩宽后的 seed 行原文（行本身扩宽 ⇒ 不改则锚点找不到）+ 新增 **M77–M80**（§2.10.10，共 **80** 组）。**第七轮复审**：M77 锚点同步为放宽后的 versions 行原文 + 新增 **M81–M83**（§2.10.11，共 **83** 组）。**第八轮复审**：新增 **M84**（§2.10.12，共 **84** 组）。**第九轮复审**：新增 **M85–M91**（§2.10.13，共 **91** 组）。**第十二轮复审**：新增 **M92–M99**（§2.10.14，共 **99** 组；M92–M95 打派生器/闭包/检测器/递归四个实现点，M96–M99 逐条删 4 条祖先 init pattern） |
 | `backend/app/tests/unit/test_ci_gh.py` | 树解析 / merge-base / 三点语义 / 无 300 上限 / 改名 四个小节；树不变式 3 条；`truncated` 的载荷改成**带嵌套路径**。**第三版**：`RunHeadInfo` 增两字段后 `_headInfo` 同步；`test_parseTreePathShas_rejects_a_string_false_truncated_flag` 随文件拆分搬回本文件 |
 | `backend/app/tests/unit/test_ci_main_tip.py` | **第三版新建**：`mainTipCutoff`（**第四版**：优先 `created_at` / 回退 `run_started_at` / 两者皆缺则抛错 / **必须 keyword-only 传**）、`_parseMainTipSha`（三条硬条件 + 时间窗 + 分页）、`fetchMainTipShaAt`（查询串 + `--paginate --slurp`）；**第四版新增 PR #105 复跑锚点的离线回放**（证明夹具有鉴别力：错锚给出另一个答案） |
-| `backend/app/tests/unit/test_ci_surface.py` | **第三版重写**（初稿 737 行，第五/六版评审后增至 906 行，第九轮复审后 979 行 —— 超 800 上限属既有欠账，见 §5）：判定集合 = `A ∪ P`、`M_T` 的取法与 fail-closed、归因措辞。**第八轮复审（§2.10.12）**：lever 测试增 `backend/__init__.py` 形态钉（现 21 路径 / 7 形态钉）+ docstring 变异范围更正 M70–M84；`test_ci_codeowners.py` 的 `controlledPaths` 增 `backend/__init__.py`。**第九轮复审（§2.10.13）**：lever 测试增 `backend/app/__init__.py` 与 5 个 harness 配置文件（现 **27 路径** / 7 形态钉）+ 变异范围更正 M70–M90；`test_ci_codeowners.py` 的 `controlledPaths` 增这 6 个路径 |
-| `backend/app/utils/ci_conftest_chain.py`（**第九轮复审新建**，§2.10.13） | conftest 收集前 import 链的**派生器**（84 行）：AST 扫描所有 conftest 的模块级 `app.*` / `scripts.*` 导入并解析为仓库相对文件路径 —— 逐轮枚举文件名已被实证连漏三层 ⇒ 改为派生，conftest 新增模块级 import 必须改守卫（守卫在 CI 相关面 + CODEOWNERS）。同进 utils enum + CODEOWNERS + **M91**（掏空派生器 ⇒ 派生守卫须红） |
-| `backend/app/tests/unit/test_ci_conftest_chain.py`（**第九轮复审新建**，§2.10.13） | 派生式守卫（83 行）：每个派生落点**要么**在 `_CI_SURFACE_PATTERNS`、**要么**在显式豁免清单 `_EXEMPT_PRE_COLLECTION_IMPORTS`（产品代码 5 文件，附仲裁理由；改清单 = 改守卫 ⇒ 必须复核）+ 反向守卫（harness 配置文件不许进豁免、必须在清单） |
+| `backend/app/tests/unit/test_ci_surface.py` | **第三版重写**（初稿 737 行，第五/六版评审后增至 906 行，第九轮复审后 979 行 —— 超 800 上限属既有欠账，见 §5）：判定集合 = `A ∪ P`、`M_T` 的取法与 fail-closed、归因措辞。**第八轮复审（§2.10.12）**：lever 测试增 `backend/__init__.py` 形态钉（现 21 路径 / 7 形态钉）+ docstring 变异范围更正 M70–M84；`test_ci_codeowners.py` 的 `controlledPaths` 增 `backend/__init__.py`。**第九轮复审（§2.10.13）**：lever 测试增 `backend/app/__init__.py` 与 5 个 harness 配置文件（现 **27 路径** / 7 形态钉）+ 变异范围更正 M70–M90；`test_ci_codeowners.py` 的 `controlledPaths` 增这 6 个路径。**第十二轮复审（§2.10.14）**：lever 测试增 4 条祖先包 init（现 **31 路径** / 仍 7 形态钉）+ 变异范围更正 M70–M99；`test_ci_codeowners.py` 的 `controlledPaths` 增这 4 个路径 + 新派生守卫（闭包 ∩ CI 面 ⇒ 必有 owner） |
+| `backend/app/utils/ci_conftest_chain.py`（**第九轮复审新建**，§2.10.13） | conftest 收集前 import 链的**派生器**：AST 扫描所有 conftest 的模块级 `app.*` / `scripts.*` 导入并解析为仓库相对文件路径 —— 逐轮枚举文件名已被实证连漏三层 ⇒ 改为派生，conftest 新增模块级 import 必须改守卫（守卫在 CI 相关面 + CODEOWNERS）。同进 utils enum + CODEOWNERS + **M91**（掏空派生器 ⇒ 派生守卫须红）。**第十二轮复审重写（§2.10.14，84 → 277 行）**：`_resolveModuleFiles` 解析**整条祖先包 init 链**（HIGH-1）；新增 `_moduleScopeStatements`（If/Try/With/AsyncWith/For/While 分支递归展开 + 类体）与 `pytest_plugins` 字符串/清单解析（MEDIUM-3）；新增 `transitivePreCollectionPaths`（沿 import 边 BFS 到不动点的传递闭包，实测 76 文件）；新增 `findImportTimeHooks`（语句白名单 + 钩子机制根链 denylist 的 import 期代码检测器，顶层裸表达式只放行 `model_rebuild`；76 文件实测 0 钩子）；M92–M95 分别钉四个实现点 |
+| `backend/app/tests/unit/test_ci_conftest_chain.py`（**第九轮复审新建**，§2.10.13） | 派生式守卫：每个派生落点**要么**在 `_CI_SURFACE_PATTERNS`、**要么**在显式豁免清单 `_EXEMPT_PRE_COLLECTION_IMPORTS`（产品代码 5 文件，附仲裁理由；改清单 = 改守卫 ⇒ 必须复核）+ 反向守卫（harness 配置文件不许进豁免、必须在清单）。**第十二轮复审重写（§2.10.14，2 → 6 条守卫）**：`test_derivation_includes_parent_package_inits`（3 个 level-1 祖先 init ∈ 派生集 + `models/__init__` ∈ 闭包且被钉，M92）；`test_transitive_closure_files_are_surface_or_hook_free`（`len ≥ 60` + `domain/models.py ∈ 闭包` 正向钉 + 逐文件「被钉或无钩子」，M93 + MEDIUM-4 豁免内容不变式）；`test_import_time_hook_detector_is_not_vacuous`（evil `sys.path.insert` 必须认出 + clean `getLogger/frozenset` 必须放行，M94）；`test_scope_recursion_and_plugins_are_derived`（合成 backend 树：try 包裹的 import 与 pytest_plugins 都被派生，M95） |
+| `backend/app/tests/unit/conftest.py`（**第十二轮复审改**，§2.10.14） | `import seed_ontology` 从**模块级**移入 `seedEngine` **夹具体**（HIGH-2 廉价收口）：conftest 模块级 import 在任何测试收集之前执行 ⇒ 模块级写它会把 seed_ontology 及整条链（neo4j_client / ontology_service / …）全变成收集前执行的代码；移入后实测 seed 链掉出传递闭包。conftest 本体已在 CI 面清单（任意深度 pattern）⇒ 改动有授权落点 |
 | `backend/app/tests/unit/test_ci_main_tip_note.py` | **第三版新建**：基线 ≠ `M_T` ⇒ 报告里必须有提示**与处置办法**；同底座 ⇒ **不**出现该提示（反向守卫）；「归因不到本 PR」必须如实说 |
 | `backend/app/tests/unit/test_ci_mutation_evidence.py` | **第三版新建**：钉住 `run_case` 的**三态**语义（退出码 0/1/2/3/4/5 各自的判定）——防止把「用例没跑起来」冒充成「守卫抓到了变异」|
 | `backend/app/tests/unit/test_ci_merge_gate_workflow.py` | 「基线查询只取 push run」1 条；基线取「PR CI 事件派发之前」的 run 1 条；`PR_RUN_CREATED_AT` 暴露给 diff 步骤 1 条；空时间戳 fail-closed 1 条；**第四版**：**必须取 `created_at`、不得取 `run_started_at`** 1 条；**`M_T` 必须由工具独立取** 1 条；**第五版**：jq **独立复核** `head_branch == "main"` / `status == "completed"` / `head_repository` 1 条 |
@@ -587,9 +624,9 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 
 ### 4.1 测试
 
-`pytest app/tests/unit -k 'ci_'`：**361 passed / 19 skipped / 0 failed**（19 skipped 全部是
+`pytest app/tests -k 'ci_'`：**375 passed / 19 skipped / 0 failed**（19 skipped 全部是
 「行为部分需要 bash ≥ 4.4」的本机限制，CI 必跑）。
-（第四版基线：337 passed / 19 skipped；第五版新增 **24** 条 ⇒ **净新增失败 0**。）
+（第四版基线：337 passed / 19 skipped；第九轮 370；第十二轮新增 **5** 条守卫 ⇒ **净新增失败 0**。）
 
 - 第三版新增用例：`test_ci_surface.py`（重写，34 条）、`test_ci_main_tip.py`（新建，17 条）、
   `test_ci_main_tip_note.py`（新建，4 条）、`test_ci_mutation_evidence.py`（新建，7 条）、
@@ -790,6 +827,28 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 ⇒ **新增 8 组 solo（2026-11-08）：8/8 转红、净漏 0**；
 ⇒ **第九轮复审后终跑（91 组，2026-11-08）：合计 91 组变异，净漏 0（§2.10.13）**
 
+### 4.2.10 第十二轮复审新增 8 组（M92–M99，2026-11-08）
+
+锚点核对 **99/99** 齐全（`/tmp/n6_anchor_check.py`，从 `backend/` 跑）。
+
+| 组 | 变异 | 期望转红 | 实测 |
+|---|---|---|---|
+| M92 | `ci_conftest_chain._resolveModuleFiles` 祖先链 `range(1, len(parts))` → `range(0, 0)`（HIGH-1：只解析叶子 ⇒ 3 个 level-1 祖先 init 消失） | `test_derivation_includes_parent_package_inits` | **转红** ✔ |
+| M93 | `transitivePreCollectionPaths` 终行 `return tuple(sorted(closure))` → `return ()`（HIGH-2：闭包掏空 ⇒ 内容不变式对空集空转） | `test_transitive_closure_files_are_surface_or_hook_free` | **转红** ✔ |
+| M94 | `findImportTimeHooks` 终行 `return tuple(hooks)` → `return ()`（MEDIUM-4：检测器掏空 ⇒ 钩子全放行） | `test_import_time_hook_detector_is_not_vacuous` | **转红** ✔ |
+| M95 | `_moduleScopeStatements` 递归分支 `if isinstance(node, (ast.If, ast.Try, …))` → `if False:`（MEDIUM-3：try 包裹的 import / pytest_plugins 派生消失） | `test_scope_recursion_and_plugins_are_derived` | **转红** ✔ |
+| M96 | 清单删 `backend/app/domain/__init__\.py$` 行 | lever 测试 | **转红** ✔ |
+| M97 | 清单删 `backend/app/services/__init__\.py$` 行 | lever 测试 | **转红** ✔ |
+| M98 | 清单删 `backend/app/models/__init__\.py$` 行 | lever 测试 | **转红** ✔ |
+| M99 | 清单删 `backend/app/infrastructure/llm/__init__\.py$` 行 | lever 测试 | **转红** ✔ |
+
+⇒ **新增 8 组 solo（2026-11-08）：8/8 转红、净漏 0**；
+⇒ **第十二轮复审后终跑（99 组，2026-11-08）：合计 99 组变异，净漏 0（§2.10.14）**
+
+⚠️ **正向钉防空转的教训**（M93 差点假绿）：对「更小的派生结果」断言守卫，变异后集合变空 ⇒
+断言全体通过 ⇒ 假绿。三条内容守卫各带**正向钉**：派生守卫钉 3 个具体祖先 init ∈ 派生集、
+闭包守卫钉 `len ≥ 60` + `domain/models.py ∈ 闭包`、检测器钉「evil 必须认出 **且** clean 必须放行」。
+
 ### 4.3 真实 API 取证
 
 - Trees API 接受 **commit sha**（不必先查 tree sha）：`GET /repos/{o}/{r}/git/trees/{sha}?recursive=1`。
@@ -835,6 +894,11 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
 - ⚠️ **fork PR 的新鲜度守卫被跳过**（安全评审 MEDIUM-2，遗留）：`_considerMainRun` 的
   `head_repository` 硬条件在 fork PR 场景下照常生效 ⇒ 基线不会落到 fork；
   但 **PR run 本身**若来自 fork，其 `created_at` 与派发时刻的关系**未额外校验** ⇒ 残留窗口极小，暂不处理。
+- ⚠️ **派生器的两处脆性**（第十二轮复审 LOW-6，接受）：`test_ci_conftest_chain.py` 的
+  `Path(__file__).resolve().parents[4]` 在文件移动时会静默指错 —— 有测试内「派生结果非空」
+  断言兜底（指错 ⇒ 派生为空 ⇒ 红，fail-closed 方向）；`_resolveModuleFiles` 的
+  `.py`-先于-`__init__.py` 叶子优先序与 CPython 相反，但仓库内**不存在**同一模块名
+  同时有 `.py` 与包两种形态 ⇒ 无实害；双形态先例出现时再调。
 - ⚠️ **前端 CI 面的「按用例」失败集合仍不在本批范围**（第五版已把前端**配置文件**
   纳入 CI 相关面与 CODEOWNERS，堵住绕过链 ⇒ 见 §2.10.4；但 vitest 的**失败明细**
   仍不被解析 ⇒ 前端 job 只以一个不透明 ID 参与对差）：
@@ -857,7 +921,7 @@ PR 的 CI 跑的 commit 是 `merge(M_T, PR 头)`，其**树**逐路径看是：
   ⇒ 属于仓库已声明的威胁模型上限（「挡不住作者主动伪造 stdout」，`Harness/rules/测试规范.md`）
   ⇒ 不是本批引入 ⇒ 若要收口需设计「删除/改名测试文件」的检测
   （compare 的 `status` 目前不进 `CiSurfaceInfo`）⇒ **另立项**，本批不做。
-- ⚠️ **`ci_gh.py`（839 行）与 `test_ci_surface.py`（979 行）超 800 行上限未拆**（第三轮评审 M-3，部分接受）：
+- ⚠️ **`ci_gh.py`（839 行）与 `test_ci_surface.py`（第九轮 979 行 → 第十二轮 988 行）超 800 行上限未拆**（第三轮评审 M-3，部分接受）：
   `ci_mutation_cases.py`（纯数据、无锚点落点）已拆；但这两个文件的私有 helper（`_runGh` / `_SHA_PATTERN` /
   `_parseIsoTimestamp` / 各 stub）被多层**紧耦合**引用 ⇒ 批内拆分要动安全闸门的实现与守卫结构
   ⇒ 有**锚点腐烂**风险（每个锚点都逐字钉在现行实现上）⇒ 拆分**另立项**在无评审压力时做。

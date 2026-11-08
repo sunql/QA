@@ -765,13 +765,13 @@ def test_the_round5_environment_lever_files_are_actually_flagged() -> None:
 
     这些文件都在 CI 里**真正被执行或加载**（不是名义配置）⇒ 换掉它们 =
     换掉测试环境 ⇒ 失败集合不可比 ⇒ 却可能判「净新增 0」。反查守卫认不出
-    「仓库里现在没有的文件」⇒ 这批按路径**正面**钉住（M70–M90 变异）。
+    「仓库里现在没有的文件」⇒ 这批按路径**正面**钉住（M70–M99 变异）。
 
-    ⚠️ 本文件钉的是 **27 个路径**（其中 `.env` 家族 / `.python-version` / `uv.toml` /
+    ⚠️ 本文件钉的是 **31 个路径**（其中 `.env` 家族 / `.python-version` / `uv.toml` /
     versions 形态钉 / `backend/__init__.py` 等 **7 条是形态钉**——仓库里现在没有这些
     文件，断言的是清单 pattern 的**接受面**）；`frontend/.env` / `.env.test` 两条
     形态钉在 `test_ci_surface_frontend_reverse.py` 的正面断言里（合计口径见
-    summary §2.10.10–§2.10.13）。
+    summary §2.10.10–§2.10.14）。
     """
     levers = (
         # 第五轮 HIGH-1：CI 两个 job 前都执行 `alembic upgrade head`，env.py 是真正跑迁移的脚本。
@@ -804,6 +804,15 @@ def test_the_round5_environment_lever_files_are_actually_flagged() -> None:
         "backend/app/infrastructure/database.py",
         "backend/app/infrastructure/security/__init__.py",
         "backend/app/infrastructure/security/crypto.py",
+        # 第十二轮 HIGH-1：conftest `from app.domain.models import …` 会**先执行**
+        # 祖先包 init 链（`ci_conftest_chain._resolveModuleFiles` 派生、
+        # `test_ci_conftest_chain.py` 正面钉住）；`app/models/__init__.py` 虽无
+        # level-1 落点，但经 `dependencies.py` 传递链进入闭包，一并钉住（M96–M99
+        # 各自一条 pattern ⇒ 删除型变异可逐个钉）。
+        "backend/app/domain/__init__.py",
+        "backend/app/models/__init__.py",
+        "backend/app/services/__init__.py",
+        "backend/app/infrastructure/llm/__init__.py",
         # 第五轮 MEDIUM-2：conftest `load_dotenv(override=True)` ⇒ 覆盖 CI 注入的全部变量。
         "backend/.env",
         "backend/.env.local",

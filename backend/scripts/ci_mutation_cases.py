@@ -1,4 +1,4 @@
-"""CI 判据守卫的**变异清单**（纯数据，91 组 = 核心批 + N6 批 + 第四/五轮批 + 第六–九轮复审批）。
+"""CI 判据守卫的**变异清单**（纯数据，99 组 = 核心批 + N6 批 + 第四/五轮批 + 第六–九轮复审批 + 第十二轮收口批）。
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
@@ -12,7 +12,7 @@ M1–M36（继承批 + 模块拆分批 + workflow 批 + 净变更批）在 `ci_m
 
 用法（在仓库根或任意子目录执行均可，脚本按自身位置自动定位仓库根）：
 
-    python3 backend/scripts/ci_mutation_evidence.py            # 全部 91 组
+    python3 backend/scripts/ci_mutation_evidence.py            # 全部 99 组
     python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 """
 
@@ -831,6 +831,110 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
         (
             "app/tests/unit/test_ci_conftest_chain.py::"
             "test_every_pre_collection_conftest_import_is_ci_surface_or_reviewed"
+        ),
+        1,
+    ),
+    # ---------- M92–M99：2026-11-08 第十二轮复审收口「祖先包 init 链 + 传递闭包内容不变式」批 ----------
+    # - HIGH-1（M92 + M96–M99）：祖先链解析只解析叶子 ⇒ `app/domain/__init__.py`
+    #   等中间包 init 全部逃出派生守卫；4 条新 pattern 行逐条删除 ⇒ lever 测试须红。
+    # - HIGH-2（M93）：传递闭包 BFS 掏空 ⇒ 内容不变式守卫对空集空转（正向钉：
+    #   len ≥ 60 + `backend/app/domain/models.py` ∈ 闭包 ⇒ 塌缩即红）。
+    # - MEDIUM-3（M95）：If/Try 分支递归与 `pytest_plugins` 派生被关 ⇒ 合成树守卫红。
+    # - MEDIUM-4 / M94：钩子检测器掏空 ⇒ 内容不变式对一切文件空转；
+    #   检测器自身的双向单元钉（钩子必须认出、纯构造必须放行）须红。
+    (
+        "M92",
+        "backend",
+        "app/utils/ci_conftest_chain.py",
+        "    for i in range(1, len(parts)):",
+        "    for i in range(0, 0):",
+        (
+            "app/tests/unit/test_ci_conftest_chain.py::"
+            "test_derivation_includes_parent_package_inits"
+        ),
+        1,
+    ),
+    (
+        "M93",
+        "backend",
+        "app/utils/ci_conftest_chain.py",
+        "    return tuple(sorted(closure))",
+        "    return ()",
+        (
+            "app/tests/unit/test_ci_conftest_chain.py::"
+            "test_transitive_closure_files_are_surface_or_hook_free"
+        ),
+        1,
+    ),
+    (
+        "M94",
+        "backend",
+        "app/utils/ci_conftest_chain.py",
+        "    return tuple(hooks)",
+        "    return ()",
+        (
+            "app/tests/unit/test_ci_conftest_chain.py::"
+            "test_import_time_hook_detector_is_not_vacuous"
+        ),
+        1,
+    ),
+    (
+        "M95",
+        "backend",
+        "app/utils/ci_conftest_chain.py",
+        "        if isinstance(node, (ast.If, ast.Try, ast.With, ast.AsyncWith, ast.For, ast.While)):",
+        "        if False:",
+        (
+            "app/tests/unit/test_ci_conftest_chain.py::"
+            "test_scope_recursion_and_plugins_are_derived"
+        ),
+        1,
+    ),
+    (
+        "M96",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/app/domain/__init__\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M97",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/app/models/__init__\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M98",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/app/services/__init__\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M99",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/app/infrastructure/llm/__init__\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
         ),
         1,
     ),

@@ -117,6 +117,13 @@ backend/app/infrastructure/__init__.py  @sunql
 backend/app/infrastructure/database.py  @sunql
 backend/app/infrastructure/security/__init__.py  @sunql
 backend/app/infrastructure/security/crypto.py    @sunql
+# ⚠️ 祖先包 init 链（第十二轮复审 HIGH-1）：conftest `from app.domain.models import …`
+# 会**先执行** `app/domain/__init__.py` 等中间包 init（收集前任意 Python）；
+# 落点由 ci_conftest_chain._resolveModuleFiles 派生（含整条祖先链）并由其守卫钉住。
+backend/app/domain/__init__.py          @sunql
+backend/app/models/__init__.py          @sunql
+backend/app/services/__init__.py        @sunql
+backend/app/infrastructure/llm/__init__.py  @sunql
 
 # ---- 环境定义文件（第五轮安全评审 MEDIUM-2 / MEDIUM-3）----
 # `backend/.env` 被 conftest `load_dotenv(override=True)` 读 ⇒ 覆盖 CI 注入的全部变量

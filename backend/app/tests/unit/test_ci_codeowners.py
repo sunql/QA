@@ -265,6 +265,14 @@ def test_the_effective_owner_of_every_controlled_path_is_the_expected_one() -> N
         "backend/app/infrastructure/security/__init__.py",
         "backend/app/infrastructure/security/crypto.py",
     }
+    # 第十二轮复审（HIGH-1）：conftest 收集前 import 链的**祖先包 init**
+    # （`ci_conftest_chain` 派生 + `test_ci_conftest_chain.py` 钉住）。
+    controlledPaths |= {
+        "backend/app/domain/__init__.py",
+        "backend/app/models/__init__.py",
+        "backend/app/services/__init__.py",
+        "backend/app/infrastructure/llm/__init__.py",
+    }
     assert controlledPaths, "受控路径集合为空（路径写错了？）"
 
     wrong = {
@@ -285,3 +293,29 @@ def test_a_trailing_catch_all_would_take_the_ownership_away() -> None:
     """
     assert _patternMatches("*", "backend/app/utils/ci_flakes.py")
     assert _patternMatches("*", ".github/CODEOWNERS")
+
+
+def test_every_ci_surface_file_in_the_pre_collection_closure_has_a_codeowner() -> None:
+    """派生守卫（第十二轮 LOW-5）：CI 相关面清单里「收集前闭包」内的文件必须有 owner。
+
+    CI 相关面与 CODEOWNERS 是两份人工维护的清单 ⇒ 会漂移：某文件进了
+    `_CI_SURFACE_PATTERNS`（改它 = 退出码 6）却没有 owner ⇒ 仲裁通道无人被请求复核。
+    这里用 `ci_conftest_chain.transitivePreCollectionPaths` **派生**收集前会执行的
+    文件集，对其中被 CI 相关面钉住的每一个断言 `_effectiveOwner` 非空 —— 新增
+    pattern 而忘加 CODEOWNERS 会在派生集扩到该文件时自动红。
+    """
+    from app.utils.ci_conftest_chain import transitivePreCollectionPaths
+    from app.utils.ci_surface import detectCiSurfaceChanges
+
+    backendRoot = _REPO_ROOT / "backend"
+    closure = transitivePreCollectionPaths(backendRoot)
+    assert len(closure) >= 60, f"闭包塌缩（派生器被掏空？）：{len(closure)}"
+
+    ownerless = [
+        path
+        for path in closure
+        if detectCiSurfaceChanges((path,)) and _effectiveOwner(path) is None
+    ]
+    assert not ownerless, (
+        f"这些 CI 相关面文件（收集前闭包内）在 CODEOWNERS 里没有 owner：{ownerless}"
+    )

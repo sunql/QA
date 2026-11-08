@@ -287,6 +287,14 @@ _CI_SURFACE_PATTERNS = (
     r"^backend/app/infrastructure/database\.py$",
     r"^backend/app/infrastructure/security/__init__\.py$",
     r"^backend/app/infrastructure/security/crypto\.py$",
+    # ⚠️ **祖先包 init 链**（第十二轮复审 HIGH-1）：`from app.domain.models import X`
+    # 会**先执行** `app/domain/__init__.py` 再执行叶子模块 —— 第九轮的派生只解析
+    # 叶子 ⇒ 这些中间包 init 全部逃出。现已由派生器解析整条祖先链（M92 钉住），
+    # 实测链上的 4 个中间包 init 逐个入清单（各自一条 pattern ⇒ 删除型变异可逐个钉）。
+    r"^backend/app/domain/__init__\.py$",
+    r"^backend/app/models/__init__\.py$",
+    r"^backend/app/services/__init__\.py$",
+    r"^backend/app/infrastructure/llm/__init__\.py$",
     # ⚠️ **backend/.env**（第五轮安全评审 MEDIUM-2）：conftest 里
     # `load_dotenv(override=True)` ⇒ 被**强制 add 进仓库**的 `.env` 会覆盖 CI 注入的
     # 全部变量（DATABASE_URL / TEST_DATABASE_URL / MILVUS_TEST_DB_NAME / MINIO_*…）；

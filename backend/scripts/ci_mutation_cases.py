@@ -1,4 +1,4 @@
-"""CI 判据守卫的**变异清单**（纯数据，84 组 = 核心批 + N6 批 + 第四/五轮批 + 第六/七/八轮复审批）。
+"""CI 判据守卫的**变异清单**（纯数据，91 组 = 核心批 + N6 批 + 第四/五轮批 + 第六–九轮复审批）。
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
@@ -12,7 +12,7 @@ M1–M36（继承批 + 模块拆分批 + workflow 批 + 净变更批）在 `ci_m
 
 用法（在仓库根或任意子目录执行均可，脚本按自身位置自动定位仓库根）：
 
-    python3 backend/scripts/ci_mutation_evidence.py            # 全部 84 组
+    python3 backend/scripts/ci_mutation_evidence.py            # 全部 91 组
     python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 """
 
@@ -739,6 +739,98 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
         (
             "app/tests/unit/test_ci_surface.py::"
             "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    # ---------- M85–M91：2026-11-08 第九轮复审「app 包 init + 派生式 import 链守卫」批 ----------
+    # - HIGH-1：`backend/app/__init__.py` —— conftest 以 `app.tests.unit.conftest` 导入
+    #   ⇒ 这是 pytest prepend 链上**现存且每次都执行**的最高一层包 init（第八轮钉了
+    #   尚不存在的 `backend/__init__.py`，却漏了这层真在链上的）。
+    # - MEDIUM-1：conftest 模块级 import 的 harness 配置文件（settings / engine /
+    #   crypto）import 即执行；M85–M90 逐条删除新 pattern 行 ⇒ lever 测试须红。
+    # - M91（结构性收口）：`ci_conftest_chain.preCollectionImportPaths` 是派生式守卫的
+    #   数据源 ⇒ 掏空它（返回空 dict）⇒ `test_ci_conftest_chain` 的派生守卫必须红。
+    (
+        "M85",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/app/__init__\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M86",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/app/config\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M87",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/app/infrastructure/__init__\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M88",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/app/infrastructure/database\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M89",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/app/infrastructure/security/__init__\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M90",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/app/infrastructure/security/crypto\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    (
+        "M91",
+        "backend",
+        "app/utils/ci_conftest_chain.py",
+        "    return result",
+        "    return {}",
+        (
+            "app/tests/unit/test_ci_conftest_chain.py::"
+            "test_every_pre_collection_conftest_import_is_ci_surface_or_reviewed"
         ),
         1,
     ),

@@ -273,7 +273,7 @@ MUTATIONS_CORE: list[tuple[str, str, str, str, str, str, int]] = [
         "M27",
         "backend",
         "app/utils/ci_surface.py",
-        '    r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface|head|pytest_log|judge|report|flakes)\\.py$",',
+        '    r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface|head|pytest_log|judge|report|flakes|conftest_chain)\\.py$",',
         '    r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface|head|pytest_log)\\.py$",',
         "app/tests/unit/test_ci_surface.py::test_detectCiSurfaceChanges_covers_judgment_and_report_modules",
         1,

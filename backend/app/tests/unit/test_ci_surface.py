@@ -761,17 +761,17 @@ def test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_
 
 
 def test_the_round5_environment_lever_files_are_actually_flagged() -> None:
-    """**正面断言**：第五/六/七轮评审的「环境定义杠杆」文件确实被判成 CI 相关面。
+    """**正面断言**：第五–九轮评审的「环境定义杠杆」文件确实被判成 CI 相关面。
 
     这些文件都在 CI 里**真正被执行或加载**（不是名义配置）⇒ 换掉它们 =
     换掉测试环境 ⇒ 失败集合不可比 ⇒ 却可能判「净新增 0」。反查守卫认不出
-    「仓库里现在没有的文件」⇒ 这批按路径**正面**钉住（M70–M84 变异）。
+    「仓库里现在没有的文件」⇒ 这批按路径**正面**钉住（M70–M90 变异）。
 
-    ⚠️ 本文件钉的是 **21 个路径**（其中 `.env` 家族 / `.python-version` / `uv.toml` /
+    ⚠️ 本文件钉的是 **27 个路径**（其中 `.env` 家族 / `.python-version` / `uv.toml` /
     versions 形态钉 / `backend/__init__.py` 等 **7 条是形态钉**——仓库里现在没有这些
     文件，断言的是清单 pattern 的**接受面**）；`frontend/.env` / `.env.test` 两条
     形态钉在 `test_ci_surface_frontend_reverse.py` 的正面断言里（合计口径见
-    summary §2.10.10–§2.10.12）。
+    summary §2.10.10–§2.10.13）。
     """
     levers = (
         # 第五轮 HIGH-1：CI 两个 job 前都执行 `alembic upgrade head`，env.py 是真正跑迁移的脚本。
@@ -790,8 +790,20 @@ def test_the_round5_environment_lever_files_are_actually_flagged() -> None:
         "backend/app/tests/__init__.py",
         "backend/app/tests/unit/__init__.py",
         # 第八轮 HIGH-1：`backend/__init__.py` 现在**不存在** —— 新增它就把 pytest
-        # prepend 的 pkg_root 顶到仓库根 ⇒ 本文件（现在也还不存在）在任何收集前执行。
+        # prepend 的 pkg_root 顶到仓库根 ⇒ `backend/__init__.py`（现在也还不存在）
+        # 在任何收集前执行。
         "backend/__init__.py",
+        # 第九轮 HIGH-1：`backend/app/__init__.py` —— conftest 以 `app.…` 导入 ⇒
+        # 这是 prepend 链上**现存且每次都执行**的最高一层包 init。
+        "backend/app/__init__.py",
+        # 第九轮 MEDIUM-1：conftest 模块级 import 的 harness 配置文件（settings /
+        # engine / crypto）—— import 即执行；落点由 `ci_conftest_chain` 派生、
+        # `test_ci_conftest_chain.py` 钉住，这里正面再钉一遍。
+        "backend/app/config.py",
+        "backend/app/infrastructure/__init__.py",
+        "backend/app/infrastructure/database.py",
+        "backend/app/infrastructure/security/__init__.py",
+        "backend/app/infrastructure/security/crypto.py",
         # 第五轮 MEDIUM-2：conftest `load_dotenv(override=True)` ⇒ 覆盖 CI 注入的全部变量。
         "backend/.env",
         "backend/.env.local",

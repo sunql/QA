@@ -150,7 +150,7 @@ _CI_SURFACE_PATTERNS = (
     # 从 workflow 里反查引用到的 compose ⇒ 新增一份 compose 也会被要求入清单。
     r"^docker/docker-compose[\w.-]*\.ya?ml$",
     r"^backend/app/tests/(?:_pg_support|_neo4j_support|_testapp|milvus_isolation)\.py$",
-    r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface|head|pytest_log|judge|report|flakes)\.py$",
+    r"^backend/app/utils/ci_(?:shard|failure_set|text|gh|surface|head|pytest_log|judge|report|flakes|conftest_chain)\.py$",
     # ⚠️ **变异取证脚本**（2026-11-07 安全评审 MEDIUM-3）：
     # 它决定「哪些变异能转红」⇒ 改它就能让守卫**恒绿**（把「转红」判据改成
     # 「退出码非 0」即可 ⇒ 收集失败也算「转红」⇒ 取证全绿）
@@ -265,12 +265,28 @@ _CI_SURFACE_PATTERNS = (
     # conftest 同级的杠杆。通配管未来子目录。
     r"^backend/app/tests/(?:[^/]+/)*__init__\.py$",
     # ⚠️ **backend 包 init**（第八轮复审 HIGH-1）：现在**不存在**，但 PR 新增这一个
-    # 文件就把 pytest prepend 的 `resolve_package_path`（向上找最后一个含
-    # `__init__.py` 的目录）顶到仓库根 ⇒ conftest 改以 `backend.app.tests.unit.conftest`
-    # 导入 ⇒ **`backend/__init__.py` 在任何收集之前执行**（无需改任何现有文件 ——
-    # 现有 `app.*` 导入在 sys.path 注入 backend/ 后照常工作）⇒ 与 `tests/**/__init__`
-    # 同一机制、链上更高一层。形态钉 + M84（文件尚不存在 ⇒ 正面断言钉 pattern 接受面）。
+    # 文件就把 pytest prepend 的 pkg_root（`resolve_package_path` 向上找最后一个含
+    # `__init__.py` 的目录，pkg_root 取其**父目录**）顶到仓库根 ⇒ conftest 改以
+    # `backend.app.tests.unit.conftest` 导入 ⇒ **`backend/__init__.py` 在任何收集
+    # 之前执行**（无需改任何现有文件 —— 现有 `app.*` 导入在 sys.path 注入 backend/
+    # 后照常工作）⇒ 与 `tests/**/__init__` 同一机制、链上更高一层。形态钉 + M84
+    # （文件尚不存在 ⇒ 正面断言钉 pattern 接受面）。
     r"^backend/__init__\.py$",
+    # ⚠️ **backend/app 包 init**（第九轮复审 HIGH-1）：conftest 以 `app.tests.unit.conftest`
+    # 导入 ⇒ **`backend/app/__init__.py` 是 pytest prepend 链上现存且每次都执行**的
+    # 最高一层包 init（第八轮钉了尚不存在的 `backend/__init__.py`，却漏了这层**真在
+    # 链上**的）—— import 任何 `app.*` 模块都先执行它 ⇒ 收集前的任意 Python。
+    r"^backend/app/__init__\.py$",
+    # ⚠️ **conftest 收集前 import 的 harness 配置文件**（第九轮复审 MEDIUM-1）：
+    # conftest 的模块级 import 在任何收集之前执行 —— settings（与 `.env` 同一交互面）、
+    # engine（测试库连接塑形）、crypto（SECRET 派生）都是 import 即执行的杠杆；
+    # 落点由 `ci_conftest_chain.preCollectionImportPaths` **派生**、由
+    # `test_ci_conftest_chain.py` 钉住（结构性收口 —— 逐轮枚举已被实证连漏三层）。
+    r"^backend/app/config\.py$",
+    r"^backend/app/infrastructure/__init__\.py$",
+    r"^backend/app/infrastructure/database\.py$",
+    r"^backend/app/infrastructure/security/__init__\.py$",
+    r"^backend/app/infrastructure/security/crypto\.py$",
     # ⚠️ **backend/.env**（第五轮安全评审 MEDIUM-2）：conftest 里
     # `load_dotenv(override=True)` ⇒ 被**强制 add 进仓库**的 `.env` 会覆盖 CI 注入的
     # 全部变量（DATABASE_URL / TEST_DATABASE_URL / MILVUS_TEST_DB_NAME / MINIO_*…）；

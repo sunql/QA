@@ -27,6 +27,9 @@ backend/app/utils/ci_surface.py       @sunql
 backend/app/utils/ci_head.py          @sunql
 backend/app/utils/ci_pytest_log.py    @sunql
 backend/app/utils/ci_flakes.py        @sunql
+# ⚠️ conftest 收集前 import 链的派生器（第九轮复审 MEDIUM-1）：它决定守卫看到哪些
+# 落点 ⇒ 改它就能让守卫漏报 ⇒ 与其他 ci_* 模块同族。
+backend/app/utils/ci_conftest_chain.py  @sunql
 
 # ---- 已知抖动白名单**数据文件**（它直接决定「哪些失败用例不作判据」⇒ 改它 = 改判据）----
 .github/ci-known-flaky-tests.json    @sunql
@@ -103,6 +106,17 @@ backend/app/tests/**/__init__.py        @sunql
 # ⚠️ backend 包 init（第八轮复审 HIGH-1）：现在不存在，但新增它就把 pytest prepend
 # 的 pkg_root 顶到仓库根 ⇒ conftest 以 `backend.…` 导入 ⇒ 本文件在任何收集前执行。
 backend/__init__.py                     @sunql
+# ⚠️ app 包 init（第九轮复审 HIGH-1）：conftest 以 `app.…` 导入 ⇒ 这是 prepend 链上
+# **现存且每次都执行**的最高一层包 init（收集前任意 Python）。
+backend/app/__init__.py                 @sunql
+# ⚠️ conftest 收集前 import 的 harness 配置文件（第九轮复审 MEDIUM-1）：
+# settings（与 .env 同一交互面）/ engine（测试库连接）/ crypto（SECRET 派生）
+# 都是 import 即执行的杠杆；落点由 ci_conftest_chain 派生并由其守卫钉住。
+backend/app/config.py                   @sunql
+backend/app/infrastructure/__init__.py  @sunql
+backend/app/infrastructure/database.py  @sunql
+backend/app/infrastructure/security/__init__.py  @sunql
+backend/app/infrastructure/security/crypto.py    @sunql
 
 # ---- 环境定义文件（第五轮安全评审 MEDIUM-2 / MEDIUM-3）----
 # `backend/.env` 被 conftest `load_dotenv(override=True)` 读 ⇒ 覆盖 CI 注入的全部变量
@@ -145,6 +159,7 @@ backend/app/tests/unit/test_ci_main_tip_note.py @sunql
 backend/app/tests/unit/test_ci_main_tip.py  @sunql
 backend/app/tests/unit/test_ci_mutation_evidence.py @sunql
 backend/app/tests/unit/test_ci_integration_step.py @sunql
+backend/app/tests/unit/test_ci_conftest_chain.py   @sunql
 
 # ---- 守卫用例的**共享替身**（改替身 = 改守卫的观测对象 ⇒ 同属「解除守卫」面）----
 backend/app/tests/unit/_ci_gate_support.py        @sunql

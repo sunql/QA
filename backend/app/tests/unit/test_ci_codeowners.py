@@ -255,6 +255,16 @@ def test_the_effective_owner_of_every_controlled_path_is_the_expected_one() -> N
     # 第八轮复审（HIGH-1）：backend 包 init —— 现在不存在，但新增它就把 pytest
     # prepend 的 pkg_root 顶到仓库根 ⇒ 任何收集前执行（形态钉，管未来文件）。
     controlledPaths |= {"backend/__init__.py"}
+    # 第九轮复审（HIGH-1 + MEDIUM-1）：app 包 init（prepend 链上现存且每次执行的一层）
+    # 与 conftest 收集前 import 的 harness 配置文件（settings / engine / crypto）。
+    controlledPaths |= {"backend/app/__init__.py"}
+    controlledPaths |= {
+        "backend/app/config.py",
+        "backend/app/infrastructure/__init__.py",
+        "backend/app/infrastructure/database.py",
+        "backend/app/infrastructure/security/__init__.py",
+        "backend/app/infrastructure/security/crypto.py",
+    }
     assert controlledPaths, "受控路径集合为空（路径写错了？）"
 
     wrong = {

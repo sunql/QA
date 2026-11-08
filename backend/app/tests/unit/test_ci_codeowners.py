@@ -121,6 +121,7 @@ def test_the_mutation_evidence_script_has_a_codeowner() -> None:
         "backend/scripts/ci_mutation_evidence.py",
         "backend/scripts/ci_mutation_cases.py",
         "backend/scripts/ci_mutation_cases_core.py",
+        "backend/scripts/ci_mutation_cases_r14.py",
     ):
         assert (_REPO_ROOT / relPath).is_file(), f"找不到变异取证脚本：{relPath}"
         assert relPath in owned, f"{relPath} 没有 CODEOWNER（改它就能让守卫恒绿）"
@@ -217,6 +218,7 @@ def test_the_effective_owner_of_every_controlled_path_is_the_expected_one() -> N
     controlledPaths |= {"backend/scripts/ci_mutation_evidence.py"}
     controlledPaths |= {"backend/scripts/ci_mutation_cases.py"}
     controlledPaths |= {"backend/scripts/ci_mutation_cases_core.py"}
+    controlledPaths |= {"backend/scripts/ci_mutation_cases_r14.py"}
     controlledPaths |= {".github/CODEOWNERS"}
     # 第五轮安全评审（HIGH-1 / MEDIUM-2 / MEDIUM-3 / LOW-5）：CI 真正执行或加载的
     # 环境定义杠杆 —— env.py、.env、解释器选择、测试基建与 seed 脚本。

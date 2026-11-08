@@ -141,6 +141,7 @@ backend/uv.toml                       @sunql
 # 清单（纯数据）与跑者同族：改清单可以把某组变异指向没人守的地方 ⇒ 照样恒绿。
 backend/scripts/ci_mutation_cases.py       @sunql
 backend/scripts/ci_mutation_cases_core.py  @sunql
+backend/scripts/ci_mutation_cases_r14.py   @sunql
 backend/scripts/ci_mutation_evidence.py    @sunql
 
 # ---- CODEOWNERS **自己**（改授权面 = 换授权人 ⇒ 必须人工复核）----

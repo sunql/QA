@@ -1,27 +1,31 @@
-"""CI 判据守卫的**变异清单**（纯数据，99 组 = 核心批 + N6 批 + 第四/五轮批 + 第六–九轮复审批 + 第十二轮收口批）。
+"""CI 判据守卫的**变异清单**（纯数据，121 组 = 核心批 + N6 批 + 第四/五轮批 + 第六–九轮复审批 + 第十二轮收口批 + 第十三/十四轮收口批）。
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
 本文件只放**数据**：每组变异 = (编号, 作用域, 文件, 原文, 变异后, 期望转红的用例, occurrence)。
 跑者（改坏 → 跑用例 → 判三态）在 `backend/scripts/ci_mutation_evidence.py`。
 M1–M36（继承批 + 模块拆分批 + workflow 批 + 净变更批）在 `ci_mutation_cases_core.py`，
-本文件从 M37（N6 批）起 —— 两个文件都超 800 行上限才拆。
+本文件从 M37（N6 批）起，M100–M121（第十三/十四轮收口批）在
+`ci_mutation_cases_r14.py` —— 文件超 800 行上限才拆。
 
 ⚠️ **本文件与跑者同属「CI 相关面」**（改了它就能让守卫恒绿）
 ⇒ 必须同时进 `.github/CODEOWNERS` 与 `ci_surface.py` 的 `_CI_SURFACE_PATTERNS`。
 
 用法（在仓库根或任意子目录执行均可，脚本按自身位置自动定位仓库根）：
 
-    python3 backend/scripts/ci_mutation_evidence.py            # 全部 99 组
+    python3 backend/scripts/ci_mutation_evidence.py            # 全部 121 组
     python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 """
 
 from __future__ import annotations
 
 from scripts.ci_mutation_cases_core import MUTATIONS_CORE
+from scripts.ci_mutation_cases_r14 import R14_MUTATIONS
 
 # (编号, 作用域, 文件, 原文, 变异后, 期望转红的用例, occurrence)
-MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
+MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = (
+    MUTATIONS_CORE + R14_MUTATIONS + [
+
     # ---------- M37–M55：2026-11-07 N6「判定集合必须落在两次 run 实际跑的树上」批 ----------
     #
     # ⚠️ 背景（实测）：`ci.yml` 对 `pull_request` 触发，三个 `actions/checkout`
@@ -529,7 +533,7 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
         "M69",
         "backend",
         "app/utils/ci_surface.py",
-        'r"^backend/scripts/ci_mutation_(?:evidence|cases|cases_core)\\.py$",',
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14)?)\\.py$",',
         'r"^backend/scripts/ci_mutation_(?:evidence|cases)\\.py$",',
         (
             "app/tests/unit/test_ci_surface.py::"
@@ -882,8 +886,8 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
         "M95",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "        if isinstance(node, (ast.If, ast.Try, ast.With, ast.AsyncWith, ast.For, ast.While)):",
-        "        if False:",
+        "        elif isinstance(node, _BRANCH_TYPES):",
+        "        elif False:",
         (
             "app/tests/unit/test_ci_conftest_chain.py::"
             "test_scope_recursion_and_plugins_are_derived"
@@ -938,4 +942,4 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
         ),
         1,
     ),
-]
+])

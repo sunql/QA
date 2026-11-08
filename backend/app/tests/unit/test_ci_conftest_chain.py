@@ -1,23 +1,41 @@
-"""conftest 收集前 import 链的**派生式**守卫（第九轮复审 MEDIUM-1 + 第十二轮收口）。
+"""conftest 收集前 import 链的**派生式**守卫（第九/十二/十三/十四轮复审收口）。
 
 枚举式清单已被实证连漏三层（`scripts/__init__` → `backend/__init__`（尚不存在）
 → `backend/app/__init__`（一直在链上却三处全漏））⇒ 本守卫不枚举文件，而是
 **派生**：用 `ci_conftest_chain.preCollectionImportPaths` 扫出所有 conftest 的
-模块级 `app.*` / `scripts.*` 导入落点（**含祖先包 init 链** —— 第十二轮复审
-HIGH-1：`from app.domain.models import X` 会先执行 `app/domain/__init__.py`），
-断言每个落点**要么**被 `detectCiSurfaceChanges` 命中（在 CI 相关面清单里）
-**要么**在底部的显式豁免清单里。
+模块级导入落点（**含祖先包 init 链** —— 第十二轮复审 HIGH-1：`from
+app.domain.models import X` 会先执行 `app/domain/__init__.py`），断言每个落点
+**要么**被 `detectCiSurfaceChanges` 命中（在 CI 相关面清单里）**要么**在底部
+的显式豁免清单里。
 
 ⇒ 未来任何 conftest 新增模块级 import，都必须改这份守卫（本文件在 CI 相关面 +
   CODEOWNERS 里 ⇒ 必须复核）或把落点加进清单 ⇒ 链条被冻结在复核之下。
 ⇒ 变异取证：M91（掏空派生器）、M92（只解析叶子、丢祖先 init 链）⇒ 守卫须红。
 
-第十二轮复审 HIGH-2 的传递闭包 + 内容不变式见文件后半（M93/M94/M95）。
+第十二轮复审 HIGH-2 的传递闭包 + 内容不变式见文件中部（M93/M94/M95）。
+
+第十三轮复审 HIGH-1/2/3 的收口（M100–M121）：
+- **位置全覆盖**：import 期求值不只发生在「语句本身」—— Assign 值、If.test、
+  except 类型、装饰器参数、默认值、注解、with item、match guard 都在收集前
+  执行 ⇒ 每个位置一条 evil fixture（`test_hook_positions_are_denied`）；
+  结构白名单与根链拒绝**解耦** ⇒ 另有**分支臂内**结构问题的逐臂测试
+  （`test_structural_problem_in_every_branch_arm_is_caught` —— MEDIUM-2 的
+  逐臂判别：M95/M111–M114 各自只杀一条臂 ⇒ 各自的参数必须红）。
+- **别名**：`import sys as s` / `from os import environ as e` / `from sys
+  import path` 后裸写 `path.insert(...)` ⇒ 根链先过别名映射再匹配拒绝清单。
+- **派生边**：相对导入、`from X import *`（展开 `__all__`）、任意能解析到
+  backend/ 下文件的顶层前缀、`pytest_plugins +=`（M106–M110）。
+- **类创建钩子**：`metaclass=` 与 `__init_subclass__` 族在 class 语句执行
+  （import 期）时就会跑（M116/M117）。
+- **检测范围口径**：检测器覆盖 conftest 链闭包；**测试模块自身的模块级产品
+  import 不在派生范围**（change 记录 §5 残余清单 —— 与「普通测试文件削弱」同类）。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 
 from app.utils.ci_conftest_chain import (
     findImportTimeHooks,
@@ -213,3 +231,183 @@ def test_scope_recursion_and_plugins_are_derived(tmp_path: Path) -> None:
         "backend/app/config.py",
         "backend/app/plug.py",
     }, f"try 分支 import / pytest_plugins 没被派生：{derived}"
+
+
+# ---- 第十三/十四轮复审收口：位置全覆盖 / 别名 / 类创建钩子 / 派生边 ----
+
+# 结构上允许（或位于允许形态内部）、只有**根链拒绝**能抓住的 import 期钩子。
+# 每个位置一条 fixture（第十三轮 HIGH-1；MEDIUM-1 的 Assign 位置含在内）。
+_EVIL_POSITION_SOURCES: dict[str, str] = {
+    "assign_value": "import sys\nX = sys.path.insert(0, 'x')\n",
+    "if_test": "import sys\nif sys.path.insert(0, 'x') or True:\n    pass\n",
+    "handler_type": "try:\n    pass\nexcept __import__('os'):\n    pass\n",
+    "decorator_arg": (
+        "import sys\n"
+        "def deco(f):\n    return f\n\n"
+        "@deco(sys.path.insert(0, 'x'))\n"
+        "def g():\n    pass\n"
+    ),
+    "default_value": "import sys\ndef f(x=sys.path.insert(0, 'x')):\n    pass\n",
+    "annotation": "import sys\ndef f(x: sys.modules['evil']) -> None:\n    pass\n",
+    "with_item": "with open('x') as f:\n    pass\n",
+    "subscript_chain": "import sys\nsys.modules['evil'] = object()\n",
+    # HIGH-2 别名：结构干净的位置（Assign / 别名重绑定），只有别名解析能抓住
+    "import_alias": "import sys as s\nX = s.path.insert(0, 'x')\n",
+    "from_alias": "from os import environ as e\ne['HOOK'] = '1'\n",
+    "from_bare": "from sys import path\nX = path[0]\n",
+    "alias_store": "from os import environ as e\ne = 2\n",
+    # HIGH-2 类创建钩子
+    "metaclass": "class M(type):\n    pass\n\nclass X(metaclass=M):\n    pass\n",
+    "init_subclass": "class Base:\n    def __init_subclass__(cls):\n        cls.hooked = True\n",
+    # LOW-2：动态接收者的「允许方法名」不放行
+    "dynamic_receiver": (
+        "class X:\n"
+        "    @classmethod\n    def model_rebuild(cls):\n        pass\n\n"
+        "def get_x():\n    return X\n\nget_x().model_rebuild()\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_EVIL_POSITION_SOURCES))
+def test_hook_positions_are_denied(tmp_path: Path, case: str) -> None:
+    """每个 import 期求值位置都必须被根链拒绝/结构白名单抓住（M100/M101/M119 锚点）。"""
+    path = tmp_path / "m.py"
+    path.write_text(_EVIL_POSITION_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    assert hooks, f"{case} 位置的 import 期钩子没被认出 —— 检测器有位置盲区"
+
+
+# 定义性构造必须**放行**（守卫双向：检测器收紧过头 = 闭包内容不变式假红）。
+_CLEAN_SOURCES: dict[str, str] = {
+    "getLogger": "import logging\nLOG = logging.getLogger(__name__)\n",
+    "os_path_read": "import os\nP = os.path.join('a', 'b')\n",
+    "pathlib": "from pathlib import Path\nP = Path('x')\n",
+    "model_rebuild_bare": (
+        "class X:\n"
+        "    @classmethod\n    def model_rebuild(cls):\n        pass\n\nX.model_rebuild()\n"
+    ),
+    # 函数/方法/lambda 体要等调用才执行 —— 体内的钩子不算 import 期
+    "method_body": "import sys\nclass C:\n    def m(self):\n        sys.path.insert(0, 'x')\n",
+    "function_body": "import sys\ndef m():\n    sys.path.insert(0, 'x')\n",
+    "lambda_body": "import os\nF = lambda x: os.environ.get(x)\n",
+    # 字段名恰好与拒绝清单同名（Store 上下文）不是引用（第十四轮校准实证）
+    "field_named_input": "class M:\n    input: str = 'x'\n",
+    "field_named_eval": "class N:\n    eval: int = 0\n",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_CLEAN_SOURCES))
+def test_definitional_constructs_pass(tmp_path: Path, case: str) -> None:
+    """定义性构造必须放行（M104/M105 锚点：body 跳过 / Load-ctx 判定被删 ⇒ 红）。"""
+    path = tmp_path / "m.py"
+    path.write_text(_CLEAN_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    assert hooks == (), f"{case} 被误报：{hooks}"
+
+
+# 结构问题（顶层裸表达式）逐**臂**放置 —— MEDIUM-2 逐臂判别：M95/M111–M114
+# 各自只杀一条臂的展开 ⇒ 各自的参数必须红（basicConfig 不在拒绝清单里，
+# 唯一的抓手是 `_moduleScopeStatements` 把臂内语句展开成结构检查）。
+_ARM_SOURCES: dict[str, str] = {
+    "top_level": "import logging\nlogging.basicConfig(level=1)\n",
+    "if_body": "import logging\nif True:\n    logging.basicConfig(level=1)\n",
+    "if_orelse": (
+        "import logging\nif False:\n    pass\nelse:\n    logging.basicConfig(level=1)\n"
+    ),
+    "try_body": "import logging\ntry:\n    logging.basicConfig(level=1)\nexcept OSError:\n    pass\n",
+    "handler_body": (
+        "import logging\ntry:\n    pass\nexcept OSError:\n    logging.basicConfig(level=1)\n"
+    ),
+    "try_orelse": (
+        "import logging\ntry:\n    pass\nexcept OSError:\n    pass\n"
+        "else:\n    logging.basicConfig(level=1)\n"
+    ),
+    "try_final": (
+        "import logging\ntry:\n    pass\nfinally:\n    logging.basicConfig(level=1)\n"
+    ),
+    "for_body": "import logging\nfor _ in []:\n    logging.basicConfig(level=1)\n",
+    "while_body": "import logging\nwhile False:\n    logging.basicConfig(level=1)\n",
+    "with_body": (
+        "from contextlib import nullcontext\nimport logging\n"
+        "with nullcontext():\n    logging.basicConfig(level=1)\n"
+    ),
+    "match_body": "import logging\nmatch 1:\n    case 1:\n        logging.basicConfig(level=1)\n",
+    "match_guard": (
+        "import logging\nmatch 1:\n    case _ if logging.getLogger('x'):\n        pass\n"
+    ),
+    "class_body": "import logging\nclass C:\n    logging.basicConfig(level=1)\n",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_ARM_SOURCES))
+def test_structural_problem_in_every_branch_arm_is_caught(tmp_path: Path, case: str) -> None:
+    """每条分支臂里的顶层裸表达式都必须被结构白名单抓住（M95/M111–M114 锚点）。"""
+    path = tmp_path / "m.py"
+    path.write_text(_ARM_SOURCES[case], encoding="utf-8")
+
+    assert findImportTimeHooks(path), f"{case} 里的顶层裸表达式没被认出 —— 分支展开有盲区"
+
+
+def test_derivation_covers_relative_star_and_any_top_prefix(tmp_path: Path) -> None:
+    """第十三轮 HIGH-3 派生边（M106–M110 锚点）：相对导入按所在包拼绝对名、
+    `from X import *` 展开 `__all__`、任意能解析到 backend/ 下文件的顶层前缀
+    都派生（不再硬编码 app/scripts）、`pytest_plugins +=` 同样算插件声明。"""
+    backend = tmp_path / "backend"
+    (backend / "tools").mkdir(parents=True)
+    (backend / "tools" / "__init__.py").write_text("", encoding="utf-8")
+    (backend / "tools" / "helper.py").write_text("H = 1\n", encoding="utf-8")
+    # ⚠️ `solo` 只能从 Import 语句边到达（from-import 边不含它）⇒ M109 的判别点
+    (backend / "tools" / "solo.py").write_text("O = 1\n", encoding="utf-8")
+    pkg = backend / "app" / "pkg"
+    pkg.mkdir(parents=True)
+    (backend / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "__init__.py").write_text("__all__ = ['sub']\n", encoding="utf-8")
+    (pkg / "sub.py").write_text("S = 1\n", encoding="utf-8")
+    (backend / "app" / "sibling.py").write_text("B = 1\n", encoding="utf-8")
+    (backend / "app" / "plug.py").write_text("P = 1\n", encoding="utf-8")
+    (backend / "app" / "conftest.py").write_text(
+        "from app.pkg import *\n"
+        "from . import sibling\n"
+        "from ..tools import helper\n"
+        "import tools.helper\n"
+        "import tools.solo\n"
+        "pytest_plugins += ['app.plug']\n",
+        encoding="utf-8",
+    )
+
+    mapping = preCollectionImportPaths(backend)
+
+    assert len(mapping) == 1, f"conftest 没被扫到：{mapping}"
+    derived = {path for files in mapping.values() for path in files}
+    assert derived == {
+        "backend/app/__init__.py",
+        "backend/app/pkg/__init__.py",
+        "backend/app/pkg/sub.py",
+        "backend/app/sibling.py",
+        "backend/tools/__init__.py",
+        "backend/tools/helper.py",
+        "backend/tools/solo.py",
+        "backend/app/plug.py",
+    }, f"派生边缺失或多出：{sorted(derived)}"
+
+
+def test_class_body_imports_are_derived(tmp_path: Path) -> None:
+    """类体 import 也在收集前执行（M115 锚点：类体作用域展开被删 ⇒ 本测试红）。"""
+    backend = tmp_path / "backend"
+    (backend / "app").mkdir(parents=True)
+    (backend / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (backend / "app" / "inner.py").write_text("I = 1\n", encoding="utf-8")
+    (backend / "app" / "classy.py").write_text(
+        "class C:\n    import app.inner\n", encoding="utf-8"
+    )
+    (backend / "conftest.py").write_text("import app.classy\n", encoding="utf-8")
+
+    closure = transitivePreCollectionPaths(backend)
+
+    assert "backend/app/inner.py" in closure, (
+        "类体 import 没被派生 —— 类体作用域展开被删除/退化？"
+    )

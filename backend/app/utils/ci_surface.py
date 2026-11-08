@@ -155,10 +155,11 @@ _CI_SURFACE_PATTERNS = (
     # 它决定「哪些变异能转红」⇒ 改它就能让守卫**恒绿**（把「转红」判据改成
     # 「退出码非 0」即可 ⇒ 收集失败也算「转红」⇒ 取证全绿）
     # ⇒ 与守卫用例同族 ⇒ 必须进 CI 相关面 + CODEOWNERS。
-    # ⚠️ 清单（`ci_mutation_cases.py` + 拆出的核心批 `ci_mutation_cases_core.py`，
-    # 纯数据）与跑者（`ci_mutation_evidence.py`）
+    # ⚠️ 清单（`ci_mutation_cases.py` + 拆出的核心批 `ci_mutation_cases_core.py`、
+    # 第十三轮复审拆出的 R14 批 `ci_mutation_cases_r14.py`，纯数据）
+    # 与跑者（`ci_mutation_evidence.py`）
     # **同族**：改清单可以把某组变异改成「改一个没人守的地方」⇒ 照样恒绿。
-    r"^backend/scripts/ci_mutation_(?:evidence|cases|cases_core)\.py$",
+    r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14)?)\.py$",
     # ⚠️ **测试库断言的依赖模块**（第六轮复审 LOW-1）：`_pg_support.assertTestDatabase`
     # （每个 DB 夹具都走）import 它的 `databaseNameOf` ⇒ 改它 = 改「测试必须连哪个库」
     # 的守卫口径 ⇒ 与测试基建同族。

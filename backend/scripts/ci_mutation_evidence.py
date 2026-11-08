@@ -3,9 +3,10 @@
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
-⚠️ 本文件**只放跑者**（改坏 → 跑用例 → 判三态）；**99 组**变异的清单在
+⚠️ 本文件**只放跑者**（改坏 → 跑用例 → 判三态）；**121 组**变异的清单在
 `backend/scripts/ci_mutation_cases.py`（M37 起）+ `ci_mutation_cases_core.py`
-（M1–M36，纯数据）—— 拆开是为了文件都不超 800 行上限。
+（M1–M36，纯数据）+ `ci_mutation_cases_r14.py`（M100–M121）——
+拆开是为了文件都不超 800 行上限。
 
 扩展说明：
 - 支持 **repo 根路径**（`.github/workflows/ci.yml`）—— 作用域 `repo`；

@@ -1,4 +1,4 @@
-"""CI 判据守卫的**变异清单**（纯数据，83 组 = 核心批 + N6 批 + 第四/五轮批 + 第六/七轮复审批）。
+"""CI 判据守卫的**变异清单**（纯数据，84 组 = 核心批 + N6 批 + 第四/五轮批 + 第六/七/八轮复审批）。
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
@@ -12,7 +12,7 @@ M1–M36（继承批 + 模块拆分批 + workflow 批 + 净变更批）在 `ci_m
 
 用法（在仓库根或任意子目录执行均可，脚本按自身位置自动定位仓库根）：
 
-    python3 backend/scripts/ci_mutation_evidence.py            # 全部 83 组
+    python3 backend/scripts/ci_mutation_evidence.py            # 全部 84 组
     python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 """
 
@@ -716,6 +716,25 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = MUTATIONS_CORE + [
         "backend",
         "app/utils/ci_surface.py",
         'r"^backend/app/tests/(?:[^/]+/)*__init__\\.py$",',
+        "",
+        (
+            "app/tests/unit/test_ci_surface.py::"
+            "test_the_round5_environment_lever_files_are_actually_flagged"
+        ),
+        1,
+    ),
+    # ---------- M84：2026-11-08 第八轮复审「backend 包 init」批 ----------
+    # - HIGH-1：`backend/__init__.py` 现在**不存在**，但 PR 新增这一个文件就把
+    #   pytest prepend 的 `resolve_package_path` 顶到仓库根 ⇒ conftest 改以
+    #   `backend.app.tests.unit.conftest` 导入 ⇒ 本文件在任何收集之前执行
+    #   （现有 `app.*` 导入在该文件注入 sys.path 后照常工作）—— 与
+    #   `tests/**/__init__` 同一机制、链上更高一层，且是**全新路径**、此前
+    #   清单与 CODEOWNERS 双 MISS。
+    (
+        "M84",
+        "backend",
+        "app/utils/ci_surface.py",
+        'r"^backend/__init__\\.py$",',
         "",
         (
             "app/tests/unit/test_ci_surface.py::"

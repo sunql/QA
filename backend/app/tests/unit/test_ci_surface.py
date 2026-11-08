@@ -765,12 +765,13 @@ def test_the_round5_environment_lever_files_are_actually_flagged() -> None:
 
     这些文件都在 CI 里**真正被执行或加载**（不是名义配置）⇒ 换掉它们 =
     换掉测试环境 ⇒ 失败集合不可比 ⇒ 却可能判「净新增 0」。反查守卫认不出
-    「仓库里现在没有的文件」⇒ 这批按路径**正面**钉住（M70–M80 变异）。
+    「仓库里现在没有的文件」⇒ 这批按路径**正面**钉住（M70–M84 变异）。
 
-    ⚠️ 本文件钉的是 **20 个路径**（其中 `.env` 家族 / `.python-version` / `uv.toml`
-    等部分是**形态钉**——仓库里现在没有这些文件，断言的是清单 pattern 的**接受面**）；
-    `frontend/.env` / `.env.test` 两条形态钉在
-    `test_ci_surface_frontend_reverse.py` 的正面断言里（合计口径见 summary §2.10.10）。
+    ⚠️ 本文件钉的是 **21 个路径**（其中 `.env` 家族 / `.python-version` / `uv.toml` /
+    versions 形态钉 / `backend/__init__.py` 等 **7 条是形态钉**——仓库里现在没有这些
+    文件，断言的是清单 pattern 的**接受面**）；`frontend/.env` / `.env.test` 两条
+    形态钉在 `test_ci_surface_frontend_reverse.py` 的正面断言里（合计口径见
+    summary §2.10.10–§2.10.12）。
     """
     levers = (
         # 第五轮 HIGH-1：CI 两个 job 前都执行 `alembic upgrade head`，env.py 是真正跑迁移的脚本。
@@ -788,6 +789,9 @@ def test_the_round5_environment_lever_files_are_actually_flagged() -> None:
         # 未来子目录由通配管）。
         "backend/app/tests/__init__.py",
         "backend/app/tests/unit/__init__.py",
+        # 第八轮 HIGH-1：`backend/__init__.py` 现在**不存在** —— 新增它就把 pytest
+        # prepend 的 pkg_root 顶到仓库根 ⇒ 本文件（现在也还不存在）在任何收集前执行。
+        "backend/__init__.py",
         # 第五轮 MEDIUM-2：conftest `load_dotenv(override=True)` ⇒ 覆盖 CI 注入的全部变量。
         "backend/.env",
         "backend/.env.local",

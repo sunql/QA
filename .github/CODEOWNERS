@@ -100,6 +100,9 @@ backend/scripts/__init__.py             @sunql
 # 现在是空文件 ⇒ 未来子目录由 `**` 通配管。
 backend/app/tests/__init__.py           @sunql
 backend/app/tests/**/__init__.py        @sunql
+# ⚠️ backend 包 init（第八轮复审 HIGH-1）：现在不存在，但新增它就把 pytest prepend
+# 的 pkg_root 顶到仓库根 ⇒ conftest 以 `backend.…` 导入 ⇒ 本文件在任何收集前执行。
+backend/__init__.py                     @sunql
 
 # ---- 环境定义文件（第五轮安全评审 MEDIUM-2 / MEDIUM-3）----
 # `backend/.env` 被 conftest `load_dotenv(override=True)` 读 ⇒ 覆盖 CI 注入的全部变量

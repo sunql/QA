@@ -252,6 +252,9 @@ def test_the_effective_owner_of_every_controlled_path_is_the_expected_one() -> N
         str(path.relative_to(_REPO_ROOT))
         for path in (_REPO_ROOT / "backend" / "app" / "tests").rglob("__init__.py")
     }
+    # 第八轮复审（HIGH-1）：backend 包 init —— 现在不存在，但新增它就把 pytest
+    # prepend 的 pkg_root 顶到仓库根 ⇒ 任何收集前执行（形态钉，管未来文件）。
+    controlledPaths |= {"backend/__init__.py"}
     assert controlledPaths, "受控路径集合为空（路径写错了？）"
 
     wrong = {

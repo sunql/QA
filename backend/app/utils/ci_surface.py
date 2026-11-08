@@ -264,6 +264,13 @@ _CI_SURFACE_PATTERNS = (
     # `__init__.py`（现在是 7 个空文件）在收集前执行 ⇒ 塞进 import 时代码 = 与
     # conftest 同级的杠杆。通配管未来子目录。
     r"^backend/app/tests/(?:[^/]+/)*__init__\.py$",
+    # ⚠️ **backend 包 init**（第八轮复审 HIGH-1）：现在**不存在**，但 PR 新增这一个
+    # 文件就把 pytest prepend 的 `resolve_package_path`（向上找最后一个含
+    # `__init__.py` 的目录）顶到仓库根 ⇒ conftest 改以 `backend.app.tests.unit.conftest`
+    # 导入 ⇒ **`backend/__init__.py` 在任何收集之前执行**（无需改任何现有文件 ——
+    # 现有 `app.*` 导入在 sys.path 注入 backend/ 后照常工作）⇒ 与 `tests/**/__init__`
+    # 同一机制、链上更高一层。形态钉 + M84（文件尚不存在 ⇒ 正面断言钉 pattern 接受面）。
+    r"^backend/__init__\.py$",
     # ⚠️ **backend/.env**（第五轮安全评审 MEDIUM-2）：conftest 里
     # `load_dotenv(override=True)` ⇒ 被**强制 add 进仓库**的 `.env` 会覆盖 CI 注入的
     # 全部变量（DATABASE_URL / TEST_DATABASE_URL / MILVUS_TEST_DB_NAME / MINIO_*…）；

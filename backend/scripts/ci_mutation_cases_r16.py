@@ -49,14 +49,15 @@ R16_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[module_root_binding]"),
         1,
     ),
-    # H-2：`__dict__` 下标（`sys.__dict__["modules"]`）在别名解析**之前**短路；
-    # 短路被关 ⇒ dict_subscript fixture 红。
+    # H-2：`__dict__` 下标（`sys.__dict__["modules"]`）经统一 `_isForbidden` 的
+    # 禁止 dunder 段检查拒绝；段检查被关 ⇒ dict_subscript fixture 红。
+    # （第十八轮重锚：旧 `__dict__` 短路行已被 `_isForbidden` 取代。）
     (
         "M125",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        '        if "__dict__" in chain.split("."):',
-        "        if False:",
+        '    return any(seg in _FORBIDDEN_DUNDER_SEGMENTS for seg in chain.split("."))',
+        "    return False",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[dict_subscript]"),
         1,
     ),
@@ -121,12 +122,13 @@ R16_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         1,
     ),
     # H-4：被跳过的函数体经模块级调用执行（同模块 def 的一层被调解析）。
+    # （第十八轮重锚：`defs` 全字典改为语句序 `callTargets`。）
     (
         "M132",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "                    callee = defs.get(node.func.id)",
-        "                    callee = None",
+        "                        callee = callTargets.get(node.func.id)",
+        "                        callee = None",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[called_def]"),
         1,
     ),

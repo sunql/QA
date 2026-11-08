@@ -304,6 +304,83 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
     ),
     # LOW-2 补：允许方法名经属性再绑定也不放行
     "allowed_method_rebind": "class X:\n    pass\n\nX.model_rebuild = None\n",
+    # ---- 第十八轮（第十七轮复审 5H + 1L）收口 fixtures ----
+    # HIGH-1：__getattribute__ 链（任意属性通道；拒绝根里没有 sys.__getattribute__，
+    # 只有禁止 dunder 段检查能抓）
+    "dunder_getattribute": "import sys\n_r = sys.__getattribute__('path').insert(0, 'x')\n",
+    # HIGH-1：from-import 的 dunder 符号（Name 位置经别名解析进禁止段检查）
+    "getattr_via_from_import": (
+        "from sys import __getattribute__\n_r = __getattribute__('path').insert(0, 'x')\n"
+    ),
+    # HIGH-1：裸名 __builtins__（__main__ 里它本身是 dict，只能当根拒）
+    "builtins_subscript": "_b = __builtins__['exec']\n_r = _b('import sys')\n",
+    # HIGH-3：调用目标的名字别名（_f = m 后 _f()）
+    "called_def_alias": (
+        "import sys\ndef m():\n    sys.path.insert(0, 'x')\n\n_f = m\n_x = _f()\n"
+    ),
+    # HIGH-3：语句序 —— 调用点之前定义的那个被执行（最后定义者胜 ⇒ 漏扫）
+    "called_def_before_redef": (
+        "import sys\ndef m():\n    sys.path.insert(0, 'x')\n\n_x = m()\n\ndef m():\n    pass\n"
+    ),
+    # HIGH-3：lambda 的名字别名（_g = _h 后 _g()）
+    "called_lambda_alias": (
+        "import sys\n_h = lambda: sys.path.insert(0, 'x')\n_g = _h\n_x = _g()\n"
+    ),
+    # HIGH-4：本地类重定义 model_rebuild（白名单形态，只有成员体扫描能抓）
+    "model_rebuild_local_override": (
+        "import sys\n"
+        "class X:\n"
+        "    @classmethod\n    def model_rebuild(cls):\n        sys.path.insert(0, 'x')\n\n"
+        "X.model_rebuild()\n"
+    ),
+    # HIGH-2：类实例化跑 __init__
+    "class_instantiation_init": (
+        "import sys\nclass X:\n    def __init__(self):\n        sys.path.insert(0, 'x')\n\n_x = X()\n"
+    ),
+    # HIGH-2：实例方法调用（Assign 位置，结构白名单不拦 ⇒ 只有成员体扫描能抓）
+    "class_member_call": (
+        "import sys\nclass X:\n    def refresh(self):\n        sys.path.insert(0, 'x')\n\n"
+        "_r = X().refresh()\n"
+    ),
+    # HIGH-2：嵌套类实例化（Outer.Inner()）
+    "nested_class_instantiation": (
+        "import sys\nclass Outer:\n    class Inner:\n        def __init__(self):\n"
+        "            sys.path.insert(0, 'x')\n\n_x = Outer.Inner()\n"
+    ),
+    # HIGH-2：类体钩子名赋值形态（classmethod(lambda ...)）
+    "init_subclass_assign": (
+        "class Base:\n    __init_subclass__ = classmethod(lambda cls, **kw: None)\n\n"
+        "class Sub(Base):\n    pass\n"
+    ),
+    # HIGH-2：with 作用于本地类实例（__enter__/__exit__ 隐式 dunder）
+    "with_local_instance": (
+        "import sys\nclass C:\n    def __enter__(self):\n        sys.path.insert(0, 'x')\n"
+        "    def __exit__(self, *a):\n        return False\n\nwith C():\n    pass\n"
+    ),
+    # HIGH-2：就地运算符作用于本地类实例（__iadd__ 隐式 dunder）
+    "augassign_local_instance": "import sys\nclass X:\n    pass\n\n_x = X()\n_x += 1\n",
+    # HIGH-2：模块级三参 type() 动态建类（dict 里的可调用体追不完 ⇒ fail-closed）
+    "type_three_arg": "def hook(self):\n    pass\n\nX = type('X', (), {'__init__': hook})\n",
+    # HIGH-2：类体描述符赋值触发 __set_name__（`attr = D()`；被类创建钩子 def
+    # 形态检查抓住 —— setter 扫描分支纯纵深防御，无独占判别点，见 M147 注）
+    "set_name_via_descriptor": (
+        "import sys\nclass D:\n    def __set_name__(self, owner, name):\n"
+        "        sys.path.insert(0, 'x')\n\nclass Y:\n    attr = D()\n"
+    ),
+    # HIGH-5：PEP 562 钩子的赋值/注解形态（绑定本身即收集前钩子，体良性也拒）
+    "module_getattr_assign": "__getattr__ = lambda name: []\n",
+    "module_getattr_annassign": "__getattr__: object = lambda name: []\n",
+    # HIGH-2：for 作用于本地类实例（__iter__/__next__ 隐式 dunder；
+    # 独占落点：只有 For-iter 分支能抓，体里无可调用物）
+    "for_local_instance": (
+        "import sys\nclass It:\n    def __iter__(self):\n        sys.path.insert(0, 'x')\n"
+        "        return iter(())\n\nfor _ in It():\n    pass\n"
+    ),
+    # HIGH-2：装饰器经类成员执行方法体（@D.deco —— 装饰在 import 期运行）
+    "decorator_class_member": (
+        "import sys\nclass D:\n    @staticmethod\n    def deco(cls):\n"
+        "        sys.path.insert(0, 'x')\n        return cls\n\n@D.deco\nclass C:\n    pass\n"
+    ),
 }
 
 
@@ -496,7 +573,11 @@ def test_dynamic_all_raises_fail_closed(tmp_path: Path) -> None:
     (backend / "app").mkdir(parents=True)
     (backend / "app" / "__init__.py").write_text("", encoding="utf-8")
     (backend / "app" / "star.py").write_text(
-        "__all__ = [name for name in ('x',)]\n", encoding="utf-8"
+        # ⚠️ 必须是 set 字面量（第十七轮 LOW-1）：ListComp 会让变异副本在
+        # `.elts` 上 AttributeError（异常型转红 = 非独占判别）；ast.Set 有
+        # .elts ⇒ 变异副本静默放行（干净的 fail-open），转红才锚定在
+        # 「fail-closed 条件被移除」本身。
+        "__all__ = {'x'}\n", encoding="utf-8"
     )
     (backend / "conftest.py").write_text("from app.star import *\n", encoding="utf-8")
 

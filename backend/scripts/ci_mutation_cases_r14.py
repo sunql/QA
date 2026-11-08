@@ -147,8 +147,18 @@ R14_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M111",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "    for node in body:\n        yield node\n        if isinstance(node, ast.Match):",
-        "    for node in body:\n        yield node\n        if False:",
+        # 第十八轮重锚：`_classBodyStatements` 复制了同形态（for/yield/Match），
+        # 锚点带上 docstring 尾句（`方法体不看` 唯一）作独占落点。
+        "    类体单独按同一规则看（类体语句也是 import 时执行）；方法体不看。\n"
+        '    """\n'
+        "    for node in body:\n"
+        "        yield node\n"
+        "        if isinstance(node, ast.Match):",
+        "    类体单独按同一规则看（类体语句也是 import 时执行）；方法体不看。\n"
+        '    """\n'
+        "    for node in body:\n"
+        "        yield node\n"
+        "        if False:",
         (_CHAIN_GUARD + "::test_structural_problem_in_every_branch_arm_is_caught[match_body]"),
         1,
     ),
@@ -237,7 +247,8 @@ R14_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M121",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "        if aliased and _isDeniedChain(aliased):",
+        # 第十八轮重锚：拒绝判定统一进 `_isForbidden`（禁止 dunder 段 + 拒绝清单）。
+        "        if aliased and _isForbidden(aliased):",
         "        if False:",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[alias_store]"),
         1,

@@ -33,6 +33,24 @@
   「能解析到 backend/ 下文件」的任意模块都派生（解析不到的名字在
   `_resolveModuleFiles` 自然返回空集）。
 
+第十七轮复审（BLOCK 5H+1L，全带 PoC 与闭包校准）再补五路（第十八轮落地）：
+- **禁止 dunder 段（HIGH-1）**：`sys.__getattribute__(...)`、`cls.__class__`
+  爬链、`sys.__dict__[...]`——点分链**任意段**命中 `_FORBIDDEN_DUNDER_SEGMENTS`
+  即拒（此前只有字面量 `__dict__` 段短路，且 Name 位置只查拒绝根）；裸名
+  `__builtins__` 入拒绝根。
+- **类实例化/方法调用执行方法体（HIGH-2）**：`_x = X()` 跑
+  `__new__`/`__init__`/`__post_init__`；`X.m()`/`X().m()`/`@D.deco` 跑同名
+  方法体；嵌套类 `Outer.Inner()` 同理；类体钩子名**赋值形态**
+  （`__init_subclass__ = classmethod(lambda ...)`）拒绝；with/for/就地运算符
+  作用于本地类实例（隐式 dunder 无显式 Call 节点）与模块级三参 `type()`
+  fail-closed。类体描述符赋值 `attr = D()` 追 D 的 `__set_name__`。
+- **调用目标按语句序（HIGH-3）**：`_f = m`、`_g = _h` 名字别名与「调用点之前
+  定义的那个 def」都追（全量 dict 是"最后定义者胜"，会漏重定义前的调用）。
+- **`model_rebuild` 白名单接收者感知（HIGH-4）**：本地类重定义了同名方法 ⇒
+  调用扫其体（白名单只对「没有本地同名定义」的机制调用放行）。
+- **PEP 562 钩子的赋值/注解形态（HIGH-5）**：模块级
+  `__getattr__ = lambda ...` 与 def 形态一样是收集前钩子，一律拒。
+
 **检测范围（口径，勿过度声明）**：本模块检测的是 **conftest 收集前 import
 链的闭包**。**测试模块自身的模块级产品 import 不在派生范围**——那需要把闭包
 扩到全部测试文件（实测 465 个、其中十余个一次性脚本带真实 `sys.path.insert`
@@ -129,6 +147,9 @@ _DENIED_ROOTS = (
     "type.__setattr__",
     "object.__setattr__",
     "object.__getattribute__",
+    # 第十七轮 HIGH-1：裸名 `__builtins__['exec']`（`__main__` 里它本身是 dict，
+    # 不带点分链 ⇒ 只能当根拒；与 getattr/vars/globals 同族的任意代码通道）
+    "__builtins__",
 )
 
 # 顶层裸表达式（Expr-Call）只允许这些方法名，且**接收者必须是裸 Name**
@@ -182,6 +203,31 @@ def _dottedChain(node: ast.expr) -> str | None:
 
 def _isDeniedChain(chain: str) -> bool:
     return any(chain == root or chain.startswith(f"{root}.") for root in _DENIED_ROOTS)
+
+
+# 点分链**任意段**命中即拒的 dunder（第十七轮 HIGH-1）：它们把静态链抹掉
+# （`sys.__dict__[...]`）或提供任意属性/代码执行通道（`sys.__getattribute__(...)`、
+# `cls.__class__` 层层爬、`__globals__`/`__code__`/`__subclasses__`）。以前只有
+# 字面量 `__dict__` 段短路，`sys.__getattribute__` 这类链整个逃出。
+# `__builtins__` 不在此列——裸名场景由 _DENIED_ROOTS 管（变异 M138 独占落点）。
+# 真实闭包校准：76 文件里这些段在模块级出现 0 次（change 记录 §2.10.18）。
+_FORBIDDEN_DUNDER_SEGMENTS = (
+    "__dict__",
+    "__getattribute__",
+    "__class__",
+    "__globals__",
+    "__code__",
+    "__subclasses__",
+    "__mro__",
+    "__bases__",
+)
+
+
+def _isForbidden(chain: str) -> bool:
+    """拒绝清单命中，或链上任一段是抹掉静态链/任意执行通道的 dunder。"""
+    if _isDeniedChain(chain):
+        return True
+    return any(seg in _FORBIDDEN_DUNDER_SEGMENTS for seg in chain.split("."))
 
 
 def _moduleScopeStatements(body: list[ast.stmt]):
@@ -482,30 +528,31 @@ def _structuralProblem(stmt: ast.stmt) -> str | None:
 
 
 def _denyMessage(node: ast.AST, aliases: dict[str, str]) -> str | None:
-    """根链拒绝判定：命中拒绝清单 ⇒ 返回真名链（第十三轮 HIGH-2 先过别名）。"""
+    """根链拒绝判定：命中拒绝清单/禁止 dunder 段 ⇒ 返回真名链（先过别名）。"""
     if isinstance(node, ast.Name):
         if isinstance(node.ctx, ast.Load):
             target = aliases.get(node.id, node.id)
-            return target if _isDeniedChain(target) else None
+            return target if _isForbidden(target) else None
         # Store/Del：只认「import 进来的别名」的重绑定（`from os import environ
         # as e` 后 `e = 2`）；裸同名赋值/字段注解（如字段恰好叫 input）是假红
         # —— 第十四轮校准实证，不查。
         aliased = aliases.get(node.id)
-        if aliased and _isDeniedChain(aliased):
+        if aliased and _isForbidden(aliased):
             return aliased
         return None
     if isinstance(node, ast.Attribute):
         chain = _dottedChain(node)
         if chain is None:
             return None
-        if "__dict__" in chain.split("."):
-            # `sys.__dict__["modules"]`：__dict__ 抹掉静态链尾 ⇒ 整条链拒绝
-            # （第十五轮 HIGH-2；真实闭包 0 处模块级 __dict__ 访问）
+        if _isForbidden(chain):
+            # `sys.__getattribute__` / `sys.__dict__[...]`：禁止段抹掉静态链尾
+            # ⇒ 整条链拒绝（第十七轮 HIGH-1：别名解析前后各查一遍——解析可能
+            # 换掉根，解析后的 full 再查一次段）
             return chain
         root, _, rest = chain.partition(".")
         target = aliases.get(root, root)
         full = f"{target}.{rest}" if rest else target
-        return full if _isDeniedChain(full) else None
+        return full if _isForbidden(full) else None
     return None
 
 
@@ -532,6 +579,13 @@ def _classCreationHookMessages(stmt: ast.ClassDef) -> tuple[tuple[int, str], ...
             and node.name in _CLASS_CREATION_HOOK_NAMES
         ):
             out.append((node.lineno, f"类创建钩子 {node.name}"))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            # 第十七轮 HIGH-2：钩子名的**赋值/注解形态**同样在类创建期执行
+            # （`__init_subclass__ = classmethod(lambda cls, **kw: ...)`、
+            # `__set_name__ = lambda self, owner, name: ...`）——以前只认 def 形态。
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(getattr(t, "id", None) in _CLASS_CREATION_HOOK_NAMES for t in targets):
+                out.append((node.lineno, f"类创建钩子赋值形态 {ast.unparse(node)[:40]}"))
     return tuple(out)
 
 
@@ -560,6 +614,122 @@ _MAX_CALLEE_DEPTH = 8
 # `from pkg import missing` 就会在收集前执行其体（第十五轮 H-4 实测）。
 _MODULE_GETATTR_NAMES = ("__getattr__", "__dir__")
 
+# 类实例化在 import 期执行的方法体（第十七轮 HIGH-2）：`_x = X()` 跑
+# `__new__`/`__init__`，dataclass 再跑 `__post_init__`。真实闭包 18 处本地类
+# 实例化扫这些方法体新增 0 条红（change 记录 §2.10.18 校准）。
+_INSTANCE_HOOK_NAMES = ("__new__", "__init__", "__post_init__")
+
+
+def _classBodyStatements(body: list[ast.stmt]):
+    """类体作用域：分支递归、**嵌套类体不递归**（其成员不是外层类的属性）。
+
+    与 `_moduleScopeStatements` 的差别：不递归进嵌套 ClassDef——
+    `_classMember` 找的是「外层类身上可 `X.attr` 访问的成员」。"""
+    for node in body:
+        yield node
+        if isinstance(node, ast.Match):
+            for case in node.cases:
+                yield from _classBodyStatements(case.body)
+        elif isinstance(node, _BRANCH_TYPES):
+            yield from _classBodyStatements(node.body)
+            for handler in getattr(node, "handlers", []):
+                yield from _classBodyStatements(handler.body)
+            yield from _classBodyStatements(getattr(node, "orelse", []))
+            yield from _classBodyStatements(getattr(node, "finalbody", []))
+
+
+def _moduleLevelClasses(body: list[ast.stmt]):
+    """模块级（含分支体内）的 class 定义；类体里的嵌套类不算（非模块全局名）。"""
+    for node in body:
+        if isinstance(node, ast.ClassDef):
+            yield node
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue  # 函数体不看（类定义在函数体内不进模块命名空间）
+        if isinstance(node, ast.Match):
+            for case in node.cases:
+                yield from _moduleLevelClasses(case.body)
+        elif isinstance(node, _BRANCH_TYPES):
+            yield from _moduleLevelClasses(node.body)
+            for handler in getattr(node, "handlers", []):
+                yield from _moduleLevelClasses(handler.body)
+            yield from _moduleLevelClasses(getattr(node, "orelse", []))
+            yield from _moduleLevelClasses(getattr(node, "finalbody", []))
+
+
+def _classMember(cls: ast.ClassDef, name: str) -> ast.AST | None:
+    """类体里名字为 name 的成员定义节点（方法 def / lambda 绑定 / 嵌套类）。"""
+    for node in _classBodyStatements(list(cls.body)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return node
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if (
+                any(getattr(t, "id", None) == name for t in targets)
+                and isinstance(node.value, ast.Lambda)
+            ):
+                return node.value
+    return None
+
+
+def _instantiationHooks(cls: ast.ClassDef) -> tuple[ast.AST, ...]:
+    """实例化（import 期 `_x = X()`）会执行的方法定义节点。"""
+    members = (_classMember(cls, name) for name in _INSTANCE_HOOK_NAMES)
+    return tuple(m for m in members if m is not None and not isinstance(m, ast.ClassDef))
+
+
+def _receiverMember(func: ast.Attribute, localClasses: dict[str, ast.ClassDef]) -> ast.AST | None:
+    """Attribute 调用 `X.m()` / `X().m()` 的接收者解析到本地类成员。
+
+    接收者是本地类名或「本地类实例化调用」⇒ 返回同名成员（def / lambda /
+    嵌套类）；否则 None（import 进来的类——如 pydantic 模型——不解析，
+    `model_rebuild()` 白名单机制保持原样，第十七轮 HIGH-4 的本地重定义
+    场景由「本地类有同名定义则扫其体」覆盖）。"""
+    recv = func.value
+    if isinstance(recv, ast.Name):
+        cls = localClasses.get(recv.id)
+    elif isinstance(recv, ast.Call) and isinstance(recv.func, ast.Name):
+        cls = localClasses.get(recv.func.id)
+    else:
+        return None
+    if cls is None:
+        return None
+    return _classMember(cls, func.attr)
+
+
+def _usesLocalInstance(expr: ast.expr, localClasses: dict[str, ast.ClassDef], instanceVars: set[str]) -> bool:
+    """表达式子树里出现本地类实例化或已知实例变量。"""
+    for node in ast.walk(expr):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in localClasses:
+            return True
+        if isinstance(node, ast.Name) and node.id in instanceVars:
+            return True
+    return False
+
+
+def _instanceExecProblem(stmt: ast.stmt, localClasses: dict[str, ast.ClassDef], instanceVars: set[str]) -> str | None:
+    """模块级 with/for/就地运算符作用于本地类实例 ⇒ 隐式 dunder 在 import 期执行。
+
+    `__enter__`/`__exit__`/`__iter__`/`__next__`/`__iadd__` 不对应任何显式
+    Call 节点，静态只能整段 fail-closed（真实闭包这些形态 0 处）。"""
+    if isinstance(stmt, (ast.With, ast.AsyncWith)):
+        if any(
+            _usesLocalInstance(item.context_expr, localClasses, instanceVars)
+            for item in stmt.items
+        ):
+            return "模块级 with 作用于本地类实例 ⇒ __enter__/__exit__ 在 import 期执行 ⇒ fail-closed"
+    elif isinstance(stmt, (ast.For, ast.AsyncFor)):
+        if _usesLocalInstance(stmt.iter, localClasses, instanceVars):
+            return "模块级 for 迭代本地类实例 ⇒ __iter__/__next__ 在 import 期执行 ⇒ fail-closed"
+    elif isinstance(stmt, ast.AugAssign):
+        if _usesLocalInstance(stmt.target, localClasses, instanceVars) or _usesLocalInstance(
+            stmt.value, localClasses, instanceVars
+        ):
+            return "模块级就地运算符作用于本地类实例 ⇒ __iadd__ 等 dunder 在 import 期执行 ⇒ fail-closed"
+    return None
+
 
 def findImportTimeHooks(path: Path) -> tuple[str, ...]:
     """模块顶层「定义性之外」的 import 期代码（空 tuple = 定义性）。
@@ -569,17 +739,32 @@ def findImportTimeHooks(path: Path) -> tuple[str, ...]:
       `model_rebuild()`）；
     - 根链拒绝：对**每条**语句的 import 期表达式统一跑（If.test / except 类型 /
       装饰器 / 默认值 / 注解（含 *args/**kwargs）/ with item / match guard
-      全覆盖），先过别名映射（含模块根再绑定传播）。
-    再加：类创建钩子（metaclass / `__init_subclass__` 族 / 基类求值）、
-    **import 期被调用的同模块 def/lambda 体**（第十五轮 H-4：`_x = m()`、IIFE、
-    本地装饰器都在 import 期执行函数体 —— 解析一层模块级 def，带 visited 防环
-    与深度上限；嵌套函数体内的调用不追，文档化局限）、模块级 `__getattr__` /
-    `__dir__`（PEP 562 收集前钩子）、来自拒绝根的星号导入、对钩子/允许方法
-    属性名的再绑定。
+      全覆盖），先过别名映射（含模块根再绑定传播），链上任一段命中
+      `_FORBIDDEN_DUNDER_SEGMENTS` 即拒（第十七轮 HIGH-1）。
+    再加：类创建钩子（metaclass / `__init_subclass__` 族的 def 与**赋值**形态 /
+    基类求值）、**import 期被调用的同模块 def/lambda 体**（按**语句序**解析
+    调用目标：`_f = m`、`_g = _h` 名字别名与「调用点之前定义的那个」都追——
+    第十七轮 HIGH-3）、**本地类实例化/方法调用执行的方法体**（`_x = X()` 跑
+    `__new__`/`__init__`/`__post_init__`，`X.m()`/`X().m()`/`@D.deco` 跑同名
+    方法体，嵌套类 `Outer.Inner()` 同理；类体钩子名赋值形态、with/for/就地
+    运算符作用于本地类实例、模块级三参 `type()` 一律 fail-closed——第十七轮
+    HIGH-2/HIGH-4）、模块级 `__getattr__`/`__dir__`（PEP 562 收集前钩子，
+    def 与赋值/注解形态都拒——第十七轮 HIGH-5）、来自拒绝根的星号导入、
+    对钩子/允许方法属性名的再绑定。
+    局限（文档化）：嵌套函数体内的调用不追；模块 docstring「方法体不看」指
+    **未被调用**的方法（clean fixture `method_body` 钉住）——被 import 期
+    实例化/调用执行的方法体在本函数覆盖范围内。
     守卫用它在传递闭包上断言内容不变式（第十二轮复审 HIGH-2/MEDIUM-4）。
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     aliases = _aliasMap(tree.body)
+    localClasses = {c.name: c for c in _moduleLevelClasses(tree.body)}
+    classBodyIds = {
+        id(s)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        for s in node.body
+    }
     hooks: list[str] = []
     seen: set[str] = set()
 
@@ -589,15 +774,44 @@ def findImportTimeHooks(path: Path) -> tuple[str, ...]:
             seen.add(message)
             hooks.append(message)
 
-    defs: dict[str, ast.AST] = {d.name: d for d in _moduleLevelDefs(tree.body)}
-    for stmt in _moduleScopeStatements(tree.body):
-        if (
-            isinstance(stmt, ast.Assign)
-            and len(stmt.targets) == 1
-            and isinstance(stmt.targets[0], ast.Name)
-            and isinstance(stmt.value, ast.Lambda)
+    # 调用目标按**语句序**登记（第十七轮 HIGH-3：全量 dict 是"最后定义者胜"，
+    # `def m: evil / _x = m() / def m: pass` 会解析到第二个 def ⇒ 漏扫；
+    # `_f = m`、`_g = _h` 的名字别名此前根本不登记 ⇒ 同样漏）。
+    callTargets: dict[str, ast.AST] = {}
+    instanceVars: set[str] = set()
+
+    def applyBinding(stmt: ast.stmt) -> None:
+        if id(stmt) in classBodyIds:
+            return  # 类体绑定不是模块全局名（方法/类属性）
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            callTargets[stmt.name] = stmt
+            return
+        if not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            return
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        value = stmt.value
+        if value is None:
+            return
+        if isinstance(value, ast.Lambda):
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    callTargets[t.id] = value
+        elif isinstance(value, ast.Name):
+            bound = callTargets.get(value.id)
+            if bound is not None:
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        callTargets[t.id] = bound
+        elif (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id in localClasses
         ):
-            defs.setdefault(stmt.targets[0].id, stmt.value)
+            # 本地类实例化 ⇒ 记实例变量（with/for/就地运算符 dunder 的判据）
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    instanceVars.add(t.id)
+
     visited: set[int] = set()
 
     def scanCallee(callee: ast.AST, depth: int) -> None:
@@ -620,16 +834,46 @@ def findImportTimeHooks(path: Path) -> tuple[str, ...]:
                     add(getattr(node, "lineno", 0), f"顶层再绑定 {node.attr}")
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 for dec in getattr(node, "decorator_list", []):
-                    if isinstance(dec, ast.Name) and dec.id in defs:
-                        scanCallee(defs[dec.id], depth + 1)
+                    if isinstance(dec, ast.Name) and dec.id in callTargets:
+                        scanCallee(callTargets[dec.id], depth + 1)
+                    elif (
+                        isinstance(dec, ast.Attribute)
+                        and isinstance(dec.value, ast.Name)
+                        and dec.value.id in localClasses
+                    ):
+                        # `@D.deco`：装饰器在 def/class 语句执行期被调用
+                        member = _classMember(localClasses[dec.value.id], dec.attr)
+                        if member is not None and not isinstance(member, ast.ClassDef):
+                            scanCallee(member, depth + 1)
             if isinstance(node, ast.Call):
-                callee: ast.AST | None = None
                 if isinstance(node.func, ast.Lambda):
-                    callee = node.func  # IIFE：lambda 体在 import 期执行
+                    scanCallee(node.func, depth + 1)  # IIFE：lambda 体在 import 期执行
                 elif isinstance(node.func, ast.Name):
-                    callee = defs.get(node.func.id)
-                if callee is not None:
-                    scanCallee(callee, depth + 1)
+                    if node.func.id in localClasses:
+                        # 本地类实例化：__new__/__init__/__post_init__ 在 import 期执行
+                        for hook in _instantiationHooks(localClasses[node.func.id]):
+                            scanCallee(hook, depth + 1)
+                    else:
+                        callee = callTargets.get(node.func.id)
+                        if callee is not None:
+                            scanCallee(callee, depth + 1)
+                elif isinstance(node.func, ast.Attribute):
+                    member = _receiverMember(node.func, localClasses)
+                    if isinstance(member, ast.ClassDef):
+                        # 嵌套类实例化（Outer.Inner()）
+                        for hook in _instantiationHooks(member):
+                            scanCallee(hook, depth + 1)
+                    elif member is not None:
+                        scanCallee(member, depth + 1)
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "type"
+                and len(node.args) >= 3
+            ):
+                # `X = type('X', (), {...})` 动态建类：dict 里的可调用体静态
+                # 追不完 ⇒ fail-closed（真实闭包 0 处）
+                add(node.lineno, "模块级三参 type() 动态建类 ⇒ fail-closed")
 
     for stmt in _moduleScopeStatements(tree.body):
         problem = _structuralProblem(stmt)
@@ -644,10 +888,35 @@ def findImportTimeHooks(path: Path) -> tuple[str, ...]:
             root = stmt.module.split(".")[0]
             if root in _DENIED_STAR_ROOTS:
                 add(stmt.lineno, f"星号导入拒绝根模块 {root}")
+        applyBinding(stmt)
         scanExec(_iterExecNodes(stmt), 0)
+        if (
+            isinstance(stmt, (ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.AugAssign))
+            and id(stmt) not in classBodyIds
+        ):
+            problem = _instanceExecProblem(stmt, localClasses, instanceVars)
+            if problem:
+                add(stmt.lineno, problem)
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and id(stmt) not in classBodyIds:
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            if any(getattr(t, "id", None) in _MODULE_GETATTR_NAMES for t in targets):
+                # 第十七轮 HIGH-5：PEP 562 钩子的赋值/注解形态（lambda 等）
+                add(stmt.lineno, "模块级 __getattr__/__dir__ 绑定（PEP 562 收集前钩子）")
         if isinstance(stmt, ast.ClassDef):
             for line, detail in _classCreationHookMessages(stmt):
                 add(line, detail)
+            for node in stmt.body:
+                # 类体描述符赋值 `attr = D()` ⇒ D 的 `__set_name__` 在类创建期执行
+                if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    value = node.value
+                    if (
+                        isinstance(value, ast.Call)
+                        and isinstance(value.func, ast.Name)
+                        and value.func.id in localClasses
+                    ):
+                        setter = _classMember(localClasses[value.func.id], "__set_name__")
+                        if setter is not None:
+                            scanCallee(setter, 0)
     for d in _moduleLevelDefs(tree.body):
         if d.name in _MODULE_GETATTR_NAMES:
             add(d.lineno, f"模块级 {d.name}（PEP 562 收集前钩子）")

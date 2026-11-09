@@ -627,6 +627,17 @@ MSG_BUSINESS_OBJECT_DOMAIN_CONFLICT = (
 )
 
 # =============================================================================
+# feat-semantic-release P1b：语义发布 Registry
+# =============================================================================
+
+MSG_SEMANTIC_RELEASE_NOT_FOUND = "语义发布 {releaseId} 不存在"
+MSG_SEMANTIC_RELEASE_ID_INVALID = "语义发布 id 必须为正整数（收到 {releaseId}）"
+MSG_SEMANTIC_RELEASE_LIMIT_RANGE = "分页参数 limit 必须在 {min}~{max} 之间（收到 {value}）"
+MSG_SEMANTIC_RELEASE_OFFSET_RANGE = "分页参数 offset 必须在 {min}~{max} 之间（收到 {value}）"
+MSG_SEMANTIC_RELEASE_DOMAIN_INVALID = "数据域编码「{code}」非法（须为 1~{max} 个字符的字符串）"
+MSG_SEMANTIC_RELEASE_STATUS_INVALID = "发布状态「{status}」非法，可选值：{allowed}"
+
+# =============================================================================
 # 数据质量规则自动生成（dq-rule-auto-generation Task 4）
 # =============================================================================
 

@@ -218,6 +218,11 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     from app.services.kpi_match_cache import kpi_match_cache
     kpi_match_cache.onKpiChanged()
     await kpi_match_cache.warmUp(dbSession)
+    # feat-semantic-release P1b：Registry 是进程级缓存（DB 每次 TRUNCATE 重建），
+    # 不清会跨用例拿到上一个用例的快照。写路径上线后这里也是测试间的失效兜底。
+    from app.services.semantic_registry_service import semanticRegistry
+
+    semanticRegistry.invalidate()
     # 关掉 warmUp SELECT 留下的隐式事务：否则 dbSession 持有 AccessShareLock，
     # 阻塞后续 pgSession/engine B 的 TRUNCATE（feat-agent-tool-config-db 教训）
     await dbSession.commit()
@@ -233,6 +238,9 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     layerRuleRegistry.invalidate()
     from app.services.kpi_match_cache import kpi_match_cache
     kpi_match_cache.onKpiChanged()
+    from app.services.semantic_registry_service import semanticRegistry
+
+    semanticRegistry.invalidate()
 
 
 # ---------------------------------------------------------------------------

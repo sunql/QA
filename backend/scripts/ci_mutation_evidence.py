@@ -3,10 +3,10 @@
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
-⚠️ 本文件**只放跑者**（改坏 → 跑用例 → 判三态）；**121 组**变异的清单在
+⚠️ 本文件**只放跑者**（改坏 → 跑用例 → 判三态）；**245 组**变异的清单在
 `backend/scripts/ci_mutation_cases.py`（M37 起）+ `ci_mutation_cases_core.py`
-（M1–M36，纯数据）+ `ci_mutation_cases_r14.py`（M100–M121）——
-拆开是为了文件都不超 800 行上限。
+（M1–M36，纯数据）+ `ci_mutation_cases_r14/r16/r18/r20/r21/r23/r24/r26/
+r28/r30.py`（各轮收口/修复批，纯数据）——拆开是为了文件都不超 800 行上限。
 
 扩展说明：
 - 支持 **repo 根路径**（`.github/workflows/ci.yml`）—— 作用域 `repo`；
@@ -14,7 +14,7 @@
 
 用法（在仓库根或任意子目录执行均可，脚本按自身位置自动定位仓库根）：
 
-    python3 backend/scripts/ci_mutation_evidence.py            # 全部 99 组
+    python3 backend/scripts/ci_mutation_evidence.py            # 全部 245 组
     python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 
 环境要求：`TEST_DATABASE_URL` / `TEST_NEO4J_URI` / `TEST_NEO4J_PASSWORD`
@@ -75,6 +75,20 @@ def buildEnv() -> dict[str, str]:
 
 def resolve(scope: str, relPath: str) -> pathlib.Path:
     return (BACKEND if scope == "backend" else REPO) / relPath
+
+
+def anchorProblem(source: str, original: str, occurrence: int) -> str | None:
+    """锚点核验：`count == occurrence` **精确相等**，不精确时返回失败说明。
+
+    ⚠️ 旧判据 `total < occurrence` 是**假绿灯**——锚成为更深缩进同文本臂的
+    子串时 total 会变大（M169/M218 实证：count=2 vs occurrence=1 杀错臂
+    ⇒ 守卫仍绿）。锚点核验的契约是**精确相等**：多了说明锚不独占
+    （可能杀错臂），少了说明锚不存在，都判取证失败。
+    """
+    total = source.count(original)
+    if total != occurrence:
+        return f"锚点出现 {total} 次（要求恰好 {occurrence} 次）"
+    return None
 
 
 def replaceOccurrence(source: str, original: str, mutated: str, occurrence: int) -> str | None:
@@ -173,14 +187,11 @@ def main() -> int:
             continue
         path = resolve(scope, relPath)
         source = path.read_text()
-        total = source.count(original)
-        # 第二十七轮评审 M-27-2：旧判据 `total < occurrence` 是**假绿灯**——
-        # 锚成为更深缩进同文本臂的子串时 total 会变大（M169/M218 实证：count=2
-        # vs occurrence=1 杀错臂 ⇒ 守卫仍绿）。锚点核验的契约是
-        # `count == occurrence` **精确相等**：多了说明锚不独占（可能杀错臂），
-        # 少了说明锚不存在，都判取证失败。
-        if total != occurrence:
-            print(f"✗ {name}: 变异锚点在 {relPath} 里出现 {total} 次（要求恰好 {occurrence} 次）")
+        # 第二十七轮评审 M-27-2（第三十轮 M-29-11 提取成可单测的 helper）：
+        # `count == occurrence` 精确契约，不精确即取证失败。
+        problem = anchorProblem(source, original, occurrence)
+        if problem is not None:
+            print(f"✗ {name}: 变异锚点在 {relPath} 里{problem}")
             results.append((name, False, "锚点不精确"))
             continue
         changed = replaceOccurrence(source, original, mutated, occurrence)

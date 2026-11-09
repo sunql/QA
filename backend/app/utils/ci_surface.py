@@ -191,10 +191,10 @@ _CI_SURFACE_PATTERNS = (
     # 第二十四轮收口批 `ci_mutation_cases_r23.py`，纯数据；
     # 第二十五轮收口批 `ci_mutation_cases_r24.py`、第二十六轮收口批
     # `ci_mutation_cases_r26.py` 与第二十七轮修复批 `ci_mutation_cases_r28.py`，
-    # 纯数据）
+    # 纯数据；第三十轮修复批 `ci_mutation_cases_r30.py`，纯数据）
     # 与跑者（`ci_mutation_evidence.py`）
     # **同族**：改清单可以把某组变异改成「改一个没人守的地方」⇒ 照样恒绿。
-    r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28)?)\.py$",
+    r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30)?)\.py$",
     # ⚠️ **测试库断言的依赖模块**（第六轮复审 LOW-1）：`_pg_support.assertTestDatabase`
     # （每个 DB 夹具都走）import 它的 `databaseNameOf` ⇒ 改它 = 改「测试必须连哪个库」
     # 的守卫口径 ⇒ 与测试基建同族。

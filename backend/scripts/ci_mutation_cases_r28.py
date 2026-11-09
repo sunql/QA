@@ -33,9 +33,11 @@ _ROUND28_DENY = _CHAIN_GUARD + "::test_round28_deny_rules_are_enforced"
 
 R28_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
     # M235：H-27-1 sink 扫描面退回 args/keywords ⇒ func 子树里的 sink
-    #（`field_validator(Path('y').write_text)(lambda v: v)`）逃出 sink 臂
-    # ⇒ 该 fixture 只剩「内层被调」文本 ⇒ 文本归位判别（实参 sink 的
-    # regress fixture 不受影响——args 仍在扫描面 ⇒ 判别独占）。
+    #（`field_validator(Path('y').write_text)(lambda v: v)`）无人接住
+    #（第二十九轮 LOW-29-7 更正：变异后 hooks 变**空**，不是「只剩内层
+    # 被调文本」——内层 `Path('y').write_text` 是 Assign 的 value，不走
+    # 工厂调用臂）⇒ 文本归位断言转红（实参 sink 的 regress fixture
+    # 不受影响——args 仍在扫描面 ⇒ 判别独占）。
     (
         "M235",
         "backend",
@@ -94,7 +96,8 @@ R28_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
     ),
     # M239：H-27-2 递归退回平扫 ⇒ 分支体/类体内的嵌套 def 动态装饰器
     #（`def _o(): if True: @(_mk() …) def g()`）逃出 ⇒ hooks 变空判别
-    #（顶层形态仍被平扫接住 ⇒ 与 M227 判别互斥独占）。
+    #（顶层形态仍被平扫接住 ⇒ 反向 M227 死亡不影响本判别；正向 M227
+    # 杀臂时本判别连带转红——宽效应备案，同 M-27-1 M195/M228 先例）。
     (
         "M239",
         "backend",
@@ -111,10 +114,11 @@ R28_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M240",
         "backend",
         "app/utils/ci_surface.py",
+        # 第二次重锚（第三十轮）：新增 `_r30` 批后 pattern 行随之加宽。
         'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16'
-        '|_r18|_r20|_r21|_r23|_r24|_r26|_r28)?)\\.py$",',
+        '|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30)?)\\.py$",',
         'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16'
-        '|_r18|_r20|_r21|_r23|_r24|_r28)?)\\.py$",',
+        '|_r18|_r20|_r21|_r23|_r24|_r28|_r30)?\\.py$",',
         (_SURFACE_GUARD
          + "::test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_file"),
         1,

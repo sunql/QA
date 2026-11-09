@@ -56,6 +56,8 @@ R26_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
     # M227：H-26-2 被扫函数体内的嵌套 def/class 装饰器动态表达式臂死 ⇒
     # `def _o(): @(_mk() if True else None) def g()` 逃出（模块级预扫只管
     # 模块级 def ⇒ 该 fixture 完全放行）。
+    # ⚠️ 宽效应：杀的是整条臂 ⇒ M239 的分支体 fixture 也连带转红
+    #（M239 判别不独占于本变异，反向独占——见 r28 M239 注释备案）。
     # 第二十八轮 H-27-2 重锚：该臂从平扫 callee.body 顶层改成
     # _moduleScopeStatements 递归（分支体/类体补漏）⇒ 锚随新形态两行
     #（for 行保唯一——line 1500 的 `for s in _moduleScopeStatements` 变量名不同）。

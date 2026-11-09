@@ -218,3 +218,22 @@ def test_run_case_rejects_a_sibling_case_whose_name_only_extends_the_target(
     verdict, _ = ci_mutation_evidence.run_case(_CASE, {})
 
     assert verdict == "inconclusive", "同名兄弟用例失败被算成了这条守卫转红"
+def test_anchor_problem_accepts_an_exact_anchor() -> None:
+    """`count == occurrence` 精确相等 ⇒ 无问题。"""
+    assert ci_mutation_evidence.anchorProblem("a\nb\na", "a", 2) is None
+
+
+def test_anchor_problem_rejects_an_extra_occurrence() -> None:
+    """锚变成更深同文本臂的子串（count 变大）⇒ 必须报不精确（M169/M218 实证）。"""
+    problem = ci_mutation_evidence.anchorProblem("a\nb\na", "a", 1)
+
+    assert problem is not None
+    assert "2 次" in problem
+
+
+def test_anchor_problem_rejects_a_missing_anchor() -> None:
+    """锚不存在（重构后文本漂移）⇒ 必须报不精确，不能静默放过。"""
+    problem = ci_mutation_evidence.anchorProblem("b", "a", 1)
+
+    assert problem is not None
+    assert "0 次" in problem

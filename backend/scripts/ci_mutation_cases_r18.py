@@ -94,7 +94,9 @@ R18_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
                 #（调用方作用域别名）⇒ 本锚末行同步补 `, aliasesMap)`。
                 # 第二十八轮 H-27-3 重锚：scanCallee 加第四参（调用方本地类）
                 # ⇒ 13 个 scanExec 内调用点全部穿透 ⇒ 本锚末行同步补 `, classes)`。
-                "                                scanCallee(hook, depth + 1, aliasesMap, classes)",
+                # 第三十轮 H-29-2 重锚：模块级被调不再接收调用方作用域
+                # ⇒ localClasses 站点改为 `None, None` ⇒ 本锚末行同步改。
+                "                                scanCallee(hook, depth + 1, None, None)",
             ]
         ),
         # mut 只删钩子扫描循环、保留 instAmbiguity 声明——后续 `if instAmbiguity:`

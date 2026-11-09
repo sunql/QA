@@ -1454,7 +1454,39 @@ M69（第十三次）/M217（第三次）⇒ 变异 233 → 239 组。** `ci_mut
 **全量 239/239 转红、净漏 0**（`/tmp/n6_evidence_run_v17.log` 终态）。
 
 **行数**：`ci_conftest_chain.py` 2156 → **2184 行**；`test_ci_conftest_chain.py` 1765 → **1863 行**（190 条）；
-新文件 `ci_mutation_cases_r28.py` **148 行**（§5 行债更新，策略不变）。
+新文件 `ci_mutation_cases_r28.py` 写 **148 行**（⚠️ 第二十九轮复审 LOW-29-12 更正：当时实际 **122 行**——本轮 M240 重锚注释后 126 行；§5 行债更新，策略不变）。
+
+### 4.2.22 第二十九轮复审修复（3H/3M/6L，239 → 245 组，2026-11-09）
+
+第二十九轮复审判定 **BLOCK（3 HIGH / 3 MEDIUM / 6 LOW）**，全部带攻击构造（探针先行：
+19 用例 `/tmp/n6_r30_probe.py` 实测修复前 9 个新攻击全部逃逸、5 个回归基线仍拒、
+5 个 clean 仍过），逐条修复：
+
+| 编号 | 攻击构造 | 修复 | 判别 |
+|---|---|---|---|
+| H-29-1 | **外部执行器 + 本地可调用实参**：`list(map(_f, [0]))` / `functools.reduce(_f, [0])` / `list(map(lambda _: sys.path.insert(0,'x'), [0]))` / `cast(int, _f)()`——外部名不在 callTargets、被调解析只覆盖一层 ⇒ 实参里的本地可调用在 import 期被外部代码执行，整段逃逸 | 新 `_callableArgProblem(node, effAliases)`：Call 的实参（含 func 为 Call 时的内层实参）携带 `ast.Lambda` 或 `callTargets`/`ambiguousNames` 中的 Name ⇒ fail-closed「调用实参携带本地可调用/lambda…」；**白名单 `_INERT_CALLABLE_ARG_CHAINS`**（`fastapi.Depends` / `pydantic.BeforeValidator` / `pydantic.Field` / `pydantic.field_validator` / `sqlalchemy.orm.mapped_column`）由**真实闭包普查**钉死（`/tmp/n6_r30_calib_scan.py`：76 文件 63 处命中、恰 5 条链——mapped_column×41 / field_validator×11 / Field×5 / Depends×3 / BeforeValidator×3），命中白名单 ⇒ 放行、其余拒；两个落点（Name else 臂 gated `callee is None 且名不在 ambiguousNames`、Attribute 未知接收者 else 臂）保证与 scanCallee/ambiguous/sink 各臂判别独占；`cast(int, _f)()` 无需嵌套路径改动——内层 `cast(int, _f)` 节点被 Name 臂直接拒 | M243（Name 臂杀死）/ M246（Attribute 臂杀死）＋文本归位 4 形态＋放行性反向锚 5 条（五链注册惯例 0 hooks） |
+| H-29-2 | **模块级被调接收调用方作用域**：scanCallee 的调用点全部穿透 `aliasesMap`/`classes` ⇒ `def _o(): import json as s; _g()`（模块级 `_g` 引用 `sys as s`）被调用方 `json as s` 遮蔽 ⇒ 逃逸。同族：模块级类实例化 / 类别名实例化落点 | 模块级被调的 **11** 处调用点（callTargets / localClasses / classAliases / 类钩子 / `__call__` / `_resolveMember` 成员 / 嵌套 ClassDef 钩子）改 `scanCallee(x, depth + 1, None, None)`；**保留 threading 的 2 处**：Lambda IIFE（H-27-3 语义）与 fn-local classes 分支（H-26-3/M228 语义）；M141 第四次重锚 | scope_mask 三形态文本归位（M242 判 callTargets 落点 ⇒ hooks 变空） |
+| H-29-3 | **fn-local 类成员作装饰器**：`_decoratorMember` 只查模块级表 ⇒ fn 体内 `class _C: @staticmethod def deco…` + `@_C.deco` 成员解析失败 ⇒ deco 体不被扫 ⇒ 逃逸 | scanExec 装饰器臂传合并表 `{**localClasses, **(classes or {})}`；`isFnLocalBase`（dec 基名 ∈ fn-local classes）决定是否把别名/类 threading 进成员被调扫描；`_decoratorMember` 增 None 值歧义臂（clsName ∈ localClasses ⇒ 歧义 fail-closed）；M150 锚行原样保留 | `fn_local_class_decorator` 文本归位（M244=合并表回退成模块表 ⇒ hooks 变空） |
+| M-29-5 | **sink 别名洗白**：`_w = Path('y').write_text; field_validator('x')(_w)`——污染名经赋值绑进工厂实参，实参处只见 Name ⇒ 逃逸 | scanExec 登记 Assign/AnnAssign（value 为 `_DENIED_CALL_ATTRS` Attribute）目标名入 `sinkTainted`；`_callFactorySinkProblem` 增实参 Name 污点检查「嵌套调用工厂实参引用 sink 绑定名」；嵌套路径透传 `sinkTainted` | `sink_alias_launder` 文本归位（M245=污点登记条件杀死 ⇒ hooks 变空） |
+| M-29-4 | r28 数据文件漏出反向守卫清单与 pattern（M-27-3 的另一半：第二十八轮只补了 surface 侧，codeowners 侧与 CODEOWNERS 本身没查） | `test_ci_surface.py` 两清单 + pattern 元组、`test_ci_codeowners.py` 两清单各补 r28/r30；`.github/CODEOWNERS` 补 r28/r30 两行（**r28 也不在 CODEOWNERS**——同类漏改，本批一并补上）；pattern 加 `\|_r30`（M69 第十四次 + M217 第四次 + M240 第二次重锚；**M241**=删 `\|_r28`） | M241（pattern 反向守卫红） |
+| M-29-6 | scanCallee 注释「函数体内的装饰器由该 def 自己被 scanCallee 时管」对 fn 作用域**顶层命名函数**不成立（fn 作用域 def 不进 callTargets ⇒ 体/装饰器不被扫）——M-27-4 欠账的表述扩散 | 注释更正为指向 §5 既有欠账（M-27-4） | 注释（非 deny 线） |
+| LOW×6 | ①M235 注释称变异后「只剩内层被调文本」——实测 hooks 变**空**（内层 write_text 是 Assign 的 value，不走工厂调用臂）；②跑者 docstring 组数过期（「121 组」/「全部 99 组」）；③`_callFactorySinkProblem` docstring 漂移；④M227/M239 宽效应无备案；⑤跑者锚点检查内联在 main() 不可单测；⑥§4.2.21 行数写 148（实际 122） | ①③⑥注释/文档更正；②改 245 组 + 数据文件清单补全；④两注释各补宽效应/方向性备案（同 M-27-1 M195/M228 先例）；⑤提取 `anchorProblem(source, original, occurrence) -> str \| None`，main() 单点调用 + 3 条单测（精确/多出/缺失） | ⑤=3 单测；其余注释/文档 |
+
+**全量取证首跑抓出 M142 判别失独占**（净漏 1）：H-29-1 执行器臂把
+`__init_subclass__ = classmethod(lambda …)` 也接住了 ⇒ 杀类钩子臂后 fixture 仍被拒
+⇒ M142 转绿。处置：**包裹型内建 `classmethod`/`staticmethod` 入 `_INERT_CALLABLE_ARG_CHAINS`**
+（只包装、不执行实参 ⇒ 惰性；判别归位到类创建钩子臂/装饰器臂；普查 0 命中 ⇒ 校准零风险），
+变异后探针实证 0 hooks ⇒ 判别独占恢复。
+
+**新增 M241–M246（6 组，新文件 `ci_mutation_cases_r30.py`）+ 重锚 M141（第四次）/M69（第十四次）/
+M217（第四次）/M240（第二次）⇒ 变异 239 → 245 组。** `ci_mutation_cases.py` 文件头组数一并改 245。
+
+**证据链**：锚点 **245/245**（全量 `count == occurrence` 精确核对）→ 守卫套件 →
+校准（真实 76 文件闭包）**检出钩子 0、一层落点不在面/豁免 0**（H-29-1/2/3 + M-29-5
+新 deny 臂零误报）→ solo **6/6**（M241–M246，净漏 0、零崩溃红）→ 全量 245 组（终态见日志）。
+
+**行数**：`ci_conftest_chain.py` 2184 → **2372 行**；`test_ci_conftest_chain.py` 1863 → **2033 行**（204 条）；
+新文件 `ci_mutation_cases_r30.py` **111 行**（§5 行债更新，策略不变）。
 
 ### 4.3 真实 API 取证
 
@@ -1557,8 +1589,9 @@ M69（第十三次）/M217（第三次）⇒ 变异 233 → 239 组。** `ci_mut
   **第二十五轮更新**：`ci_conftest_chain.py` 1932 → **2066 行**（§4.2.19）；锚点数 **223 组**（M216–M224 新增 9 组、M169/M211/M213 重锚、M69 第十一次重锚），记债规则不变。
   **第二十六轮更新**：`ci_conftest_chain.py` 2066 → **2156 行**（§4.2.20）；锚点数 **233 组**（M225–M234 新增 10 组入新数据文件 `ci_mutation_cases_r26.py`、M103/M141/M195/M212/M216/M217 重锚、M69 第十二次重锚），记债规则不变。
   **第二十八轮更新**：`ci_conftest_chain.py` 2156 → **2184 行**（§4.2.21）；锚点数 **239 组**（M235–M240 新增 6 组入新数据文件 `ci_mutation_cases_r28.py`、M141/M227/M69/M217 重锚），记债规则不变。
+  **第三十轮更新**：`ci_conftest_chain.py` 2184 → **2372 行**（§4.2.22）；锚点数 **245 组**（M241–M246 新增 6 组入新数据文件 `ci_mutation_cases_r30.py`、M141 第四次/M69 第十四次/M217 第四次/M240 第二次重锚），记债规则不变——本轮若拆分则 245 组锚全部要重生成 + 全量取证重跑，维持「下次触碰顺手拆」。
   **第二十八轮新增欠账（M-27-4）**：fn 作用域 def/lambda 的调用目标从不进 `callTargets` ⇒ fn 作用域内 `def _h(): …; _h()` 的被调体不被 scanCallee——round-22 scanExec/callTargets 重构起即如此（非本轮回归）；顶层/类体/装饰器路径均覆盖，fn 作用域命名函数互调是剩余盲区。收口成本 = callTargets 作用域化 + 全量取证重跑，独立排期。
-  **同批欠账记账**：`test_ci_surface.py` 988 → **1021 行**（二十五轮 → **1033 行**；二十六轮 → **1039 行**）、`test_ci_conftest_chain.py` → **1407 行**（164 条用例；二十五轮 → **1588 行** / 175 条；二十六轮 → **1765 行** / 184 条；二十八轮 → **1863 行** / 190 条）——守卫测试文件的私有 fixture/常量同样被多层复用，拆分亦须逐条核对锚点，同规则记债。
+  **同批欠账记账**：`test_ci_surface.py` 988 → **1021 行**（二十五轮 → **1033 行**；二十六轮 → **1039 行**）、`test_ci_conftest_chain.py` → **1407 行**（164 条用例；二十五轮 → **1588 行** / 175 条；二十六轮 → **1765 行** / 184 条；二十八轮 → **1863 行** / 190 条；三十轮 → **2033 行** / 204 条）——守卫测试文件的私有 fixture/常量同样被多层复用，拆分亦须逐条核对锚点，同规则记债。
 - **没有**处理 N5（净丢失只能给 `NEEDS_REVIEW`）、N8（收紧 `enforce_admins` 的前置通道）。
 - 本批**不部署**（零 DDL、零生产写）。
 

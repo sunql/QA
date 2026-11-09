@@ -212,6 +212,8 @@ def test_detectCiSurfaceChanges_flags_the_mutation_evidence_script() -> None:
         "backend/scripts/ci_mutation_cases_r23.py",
         "backend/scripts/ci_mutation_cases_r24.py",
         "backend/scripts/ci_mutation_cases_r26.py",
+        "backend/scripts/ci_mutation_cases_r28.py",
+        "backend/scripts/ci_mutation_cases_r30.py",
     ):
         flagged = ci_surface.detectCiSurfaceChanges((relPath,))
 
@@ -803,6 +805,8 @@ def test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_
         "backend/scripts/ci_mutation_cases_r23.py",
         "backend/scripts/ci_mutation_cases_r24.py",
         "backend/scripts/ci_mutation_cases_r26.py",
+        "backend/scripts/ci_mutation_cases_r28.py",
+        "backend/scripts/ci_mutation_cases_r30.py",
     ):
         assert (scriptsDir / Path(relPath).name).exists(), (
             f"变异取证脚本不在预期位置（{relPath}）⇒ 清单可能已经过期"

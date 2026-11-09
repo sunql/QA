@@ -1861,3 +1861,173 @@ def test_round28_deny_rules_are_enforced(tmp_path: Path, case: str) -> None:
         f"{case} 的拒绝文本没有归位到「{expectedText}」：{hooks}"
         " ⇒ 精识 deny 臂失效（兜底线接住了）"
     )
+
+
+# ---------- 第三十轮评审修复批：R30 攻击构造（探针先行，修复前实测全部逃逸） ----------
+_EVIL_R30_SOURCES: dict[str, str] = {
+    # H-29-1：外部执行器 list(map(本地def)) —— import 期执行 _f
+    "executor_map_list_local_def": (
+        "import sys\n"
+        "def _f(_):\n"
+        "    sys.path.insert(0, 'x')\n"
+        "    return _\n"
+        "_r = list(map(_f, [0]))\n"
+    ),
+    # H-29-1：cast 返回可执行目标再调用（内层 cast 调用走 Name 臂拒绝）
+    "executor_cast_call": (
+        "import sys\n"
+        "from typing import cast\n"
+        "def _f(_):\n"
+        "    sys.path.insert(0, 'x')\n"
+        "    return _\n"
+        "_r = cast(int, _f)()\n"
+    ),
+    # H-29-1：lambda 实参
+    "executor_map_lambda": (
+        "import sys\n"
+        "_r = list(map(lambda _: sys.path.insert(0, 'x'), [0]))\n"
+    ),
+    # H-29-1：Attribute 执行器 functools.reduce（未知接收者臂）
+    "executor_functools_reduce": (
+        "import sys\n"
+        "import functools\n"
+        "def _f(a, b):\n"
+        "    sys.path.insert(0, 'x')\n"
+        "    return a\n"
+        "_r = functools.reduce(_f, [0])\n"
+    ),
+    # H-29-2：模块级 def 经 callTargets，调用方 fn 作用域别名遮蔽
+    "scope_mask_module_def": (
+        "import sys as s\n"
+        "def _g():\n"
+        "    s.path.insert(0, 'x')\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    _g()\n"
+        "_r = _o()\n"
+    ),
+    # H-29-2：模块级类实例化（localClasses 落点）被调用方遮蔽
+    "scope_mask_module_class": (
+        "import sys as s\n"
+        "class _Mc:\n"
+        "    def __init__(self):\n"
+        "        s.path.insert(0, 'x')\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    _Mc()\n"
+        "_r = _o()\n"
+    ),
+    # H-29-2：类别名实例化（classAliases 落点）被调用方遮蔽
+    "scope_mask_class_alias": (
+        "import sys as s\n"
+        "class _Mc:\n"
+        "    def __init__(self):\n"
+        "        s.path.insert(0, 'x')\n"
+        "_c = _Mc\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    _c()\n"
+        "_r = _o()\n"
+    ),
+    # H-29-3：fn-local 类成员作装饰器（_decoratorMember 只查模块表）
+    "fn_local_class_decorator": (
+        "import sys\n"
+        "def _o():\n"
+        "    class _C:\n"
+        "        @staticmethod\n"
+        "        def deco(fn):\n"
+        "            sys.path.insert(0, 'x')\n"
+        "            return fn\n"
+        "    @_C.deco\n"
+        "    def g():\n"
+        "        pass\n"
+        "    return g\n"
+        "_r = _o()\n"
+    ),
+    # M-29-5：sink 别名洗白（污染名经赋值绑进工厂实参）
+    "sink_alias_launder": (
+        "from pydantic import field_validator\n"
+        "from pathlib import Path\n"
+        "def _v(v):\n"
+        "    return v\n"
+        "_w = Path('y').write_text\n"
+        "_r = field_validator('x')(_w)\n"
+    ),
+}
+
+# 文本归位：executor 四形态必须由 H-29-1 的精识臂接住；scope-mask 三形态 +
+# fn-local 装饰器由被调扫描接住；sink 洗白必须由 M-29-5 的精识臂接住
+# （同调用的「内层被调」兜底文本不能当判别点——那是恒红的兜底线）。
+_EVIL_R30_EXPECTED_TEXT: dict[str, str] = {
+    "executor_map_list_local_def": "调用实参携带本地可调用",
+    "executor_cast_call": "调用实参携带本地可调用",
+    "executor_map_lambda": "调用实参携带本地可调用",
+    "executor_functools_reduce": "调用实参携带本地可调用",
+    "scope_mask_module_def": "顶层引用 sys.path.insert",
+    "scope_mask_module_class": "顶层引用 sys.path.insert",
+    "scope_mask_class_alias": "顶层引用 sys.path.insert",
+    "fn_local_class_decorator": "顶层引用 sys.path.insert",
+    "sink_alias_launder": "嵌套调用工厂实参引用 sink 绑定名",
+}
+
+# 放行性反向锚：真实闭包普查（2026-11-09，63 处/5 链）钉住的五条注册惯例，
+# 新 deny 臂引入后必须仍然 0 hooks（误报 = 校准即炸）。
+_CLEAN_R30_SOURCES: dict[str, str] = {
+    "clean_pydantic_registration": (
+        "from pydantic import field_validator\n"
+        "def _v(v):\n"
+        "    return v\n"
+        "_r = field_validator('x')(_v)\n"
+    ),
+    "clean_mapped_column": (
+        "from sqlalchemy.orm import mapped_column\n"
+        "from datetime import datetime\n"
+        "def _utcnow():\n"
+        "    return datetime.now()\n"
+        "class _M:\n"
+        "    created = mapped_column(_utcnow)\n"
+    ),
+    "clean_field_default_factory_lambda": (
+        "from pydantic import Field\n"
+        "class _M:\n"
+        "    x = Field(default_factory=lambda: 1)\n"
+    ),
+    "clean_depends": (
+        "from fastapi import Depends\n"
+        "def getCurrentUser():\n"
+        "    return 1\n"
+        "_d = Depends(getCurrentUser)\n"
+    ),
+    "clean_before_validator": (
+        "from pydantic import BeforeValidator\n"
+        "def _v(x):\n"
+        "    return x\n"
+        "_t = BeforeValidator(_v)\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_EVIL_R30_SOURCES))
+def test_round30_deny_rules_are_enforced(tmp_path: Path, case: str) -> None:
+    """第三十轮评审修复的 deny 线逐形态钉住（全部探针实测逃逸后收口）。"""
+    path = tmp_path / "m.py"
+    path.write_text(_EVIL_R30_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    expectedText = _EVIL_R30_EXPECTED_TEXT[case]
+    assert any(expectedText in hook for hook in hooks), (
+        f"{case} 的拒绝文本没有归位到「{expectedText}」：{hooks}"
+        " ⇒ 精识 deny 臂失效（兜底线接住了）"
+    )
+
+
+@pytest.mark.parametrize("case", sorted(_CLEAN_R30_SOURCES))
+def test_round30_inert_callable_registration_forms_pass(tmp_path: Path, case: str) -> None:
+    """H-29-1 白名单的五条注册惯例必须仍然放行（新 deny 臂零误报）。"""
+    path = tmp_path / "m.py"
+    path.write_text(_CLEAN_R30_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    assert hooks == (), f"{case} 被误报：{hooks}"

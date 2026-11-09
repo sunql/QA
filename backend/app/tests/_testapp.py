@@ -254,6 +254,21 @@ def buildTestApp(testFactory: Any) -> FastAPI:
             tags=["agent-runs"],
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
         )
+    # 语义发布只读 API（P1b / D9）：与 main.py 同一开关、同一 admin 门禁。
+    if settings.enableSemanticRelease:
+        from app.api.v1 import semantic_releases
+        from app.dependencies import requireAdmin
+
+        testApp.include_router(
+            semantic_releases.router,
+            prefix="/api/v1/semantic/releases",
+            tags=["semantic-release"],
+            dependencies=[
+                Depends(mustChangePasswordGuard),
+                Depends(rateLimitDep),
+                Depends(requireAdmin),
+            ],
+        )
     testApp.include_router(users.router, tags=["users"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(roles.router, tags=["roles"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(organizations.router, tags=["organizations"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])

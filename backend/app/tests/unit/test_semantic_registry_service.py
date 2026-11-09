@@ -318,6 +318,15 @@ async def test_get_by_id_rejects_non_positive_id() -> None:
     session.get.assert_not_awaited()
 
 
+async def test_get_by_id_rejects_ids_beyond_bigint() -> None:
+    """超出 bigint 的值交给 asyncpg 会抛整型越界（500），必须在这里变成 422。"""
+    session = AsyncMock()
+
+    with pytest.raises(ValidationError):
+        await SemanticRegistry().getById(session, semantic_registry_service.MAX_RELEASE_ID + 1)
+    session.get.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # listReleases 输入守卫
 # ---------------------------------------------------------------------------
@@ -339,6 +348,60 @@ async def test_list_releases_rejects_unknown_status() -> None:
     """状态是枚举，非法值不该变成一条永远返回空集的 SQL。"""
     with pytest.raises(ValidationError):
         await SemanticRegistry().listReleases(_listSession([]), status="DELETED")
+
+
+async def test_count_releases_uses_the_same_filters_as_the_list() -> None:
+    """分页 total 必须与 rows 用同一套筛选条件，否则「第 1 页 2 条、总数 5」会串味。"""
+    registry = SemanticRegistry()
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=MagicMock(scalar_one=MagicMock(return_value=3)))
+
+    total = await registry.countReleases(session, status="ACTIVE", domainCode="PROCUREMENT")
+
+    assert total == 3
+    statement = str(session.execute.await_args.args[0])
+    assert "count" in statement.lower()
+    assert "status" in statement
+    assert "domain_code" in statement
+
+
+async def test_count_releases_rejects_unknown_status() -> None:
+    with pytest.raises(ValidationError):
+        await SemanticRegistry().countReleases(_listSession([]), status="DELETED")
+
+
+@pytest.mark.parametrize("domainCode", ["", "X" * 21])
+async def test_list_releases_rejects_malformed_domain_code(domainCode: str) -> None:
+    """列表与 `/active` 必须同一套域编码契约（曾漏校验：空串静默返回空集）。"""
+    with pytest.raises(ValidationError):
+        await SemanticRegistry().listReleases(_listSession([]), domainCode=domainCode)
+
+
+async def test_count_releases_rejects_malformed_domain_code() -> None:
+    with pytest.raises(ValidationError):
+        await SemanticRegistry().countReleases(_listSession([]), domainCode="")
+
+
+def test_snapshot_size_cap_is_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """异常大快照不得被下发：读路径有字节上限（纵深防御的 API 层）。"""
+    monkeypatch.setattr(semantic_registry_service, "MAX_MANIFEST_BYTES", 16)
+    body = {"schemaVersion": "v1", "padding": "x" * 100}
+
+    with pytest.raises(SemanticReleaseIntegrityError):
+        semantic_registry_service._toSnapshot(_snapshotRow(manifest=body))
+
+
+def test_non_canonicalizable_snapshot_is_reported_as_integrity_error() -> None:
+    """孤立代理项：`json.loads` 读得进，但规范化后无法 UTF-8 编码。"""
+    body = {"schemaVersion": "v1", "bad": "\ud800"}
+    # 真哈希算不出来（同样会炸）；这里只验「规范化失败被转成完整性错误」，
+    # 所以直接给一个占位哈希 —— 规范化先于哈希比对发生。
+    row = _snapshotRow(manifest=body, manifestHash="b" * 64)
+
+    with pytest.raises(SemanticReleaseIntegrityError) as caught:
+        semantic_registry_service._toSnapshot(row)
+
+    assert "规范化" in str(caught.value)
 
 
 def test_summary_columns_exclude_the_manifest() -> None:

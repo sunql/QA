@@ -163,6 +163,11 @@ class Settings(BaseSettings):
     # ===== 多步持久化（Task 5）=====
     multiStepPersistEnabled: bool = Field(default=True, alias="MULTI_STEP_PERSIST_ENABLED")
 
+    # ===== 语义发布（P1b）=====
+    # 只读发布 API 的总开关；关闭时 /api/v1/semantic/releases 整组不注册（404）。
+    # Registry 服务本身不受开关影响：运行期消费快照不依赖 HTTP 层。
+    enableSemanticRelease: bool = Field(default=False, alias="ENABLE_SEMANTIC_RELEASE")
+
     # ===== 通用 Agent 编排 =====
     enableAgentOrchestration: bool = Field(default=False, alias="ENABLE_AGENT_ORCHESTRATION")
     agentOrchestrationPollSeconds: float = Field(default=2.0, alias="AGENT_ORCHESTRATION_POLL_SECONDS")
@@ -320,6 +325,29 @@ def productionAuthMisconfiguration(settings: Settings) -> str | None:
             "或接入 JWT/IdP 替换 getCurrentUser。"
         )
     return None
+
+
+def semanticReleaseAuthMisconfiguration(settings: Settings) -> str | None:
+    """启用语义发布只读 API 时鉴权必须是「真鉴权」；否则返回原因（纯函数）。
+
+    该 API 下发完整语义快照（本体类/属性/JOIN、指标口径、KPI 定义），属于治理 IP。
+    在 stub 鉴权下 `requireAdmin` 可被任意客户端的 `X-User-Roles: admin` 伪造，
+    等于匿名可读 —— 这与 `productionAuthMisconfiguration` 是同一类风险，只是
+    一个端点的敏感级别把后果放大到了「治理数据外泄」。
+
+    不阻塞启动：本地开发与测试套件依赖 stub 鉴权。但必须大声告警，
+    由部署方决定是否真的在非真鉴权环境启用该开关。
+    """
+    if not settings.enableSemanticRelease:
+        return None
+    if settings.authMode == "real" and not settings.authStubEnabled:
+        return None
+    return (
+        "ENABLE_SEMANTIC_RELEASE=true 但鉴权仍为 stub"
+        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
+        "任意客户端可伪造 X-User-Roles=admin 读取完整语义快照。"
+        "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
+    )
 
 
 @lru_cache

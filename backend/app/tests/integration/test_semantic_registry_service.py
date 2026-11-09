@@ -284,6 +284,20 @@ async def test_list_releases_domain_filter_three_states(
     assert [item.id for item in procurementOnly] == [procurementRow.id]
 
 
+async def test_count_releases_matches_the_list_filters(
+    dbSession: AsyncSession,
+) -> None:
+    await _insertRelease(dbSession, version="2026.11.10-1", status="DRAFT")
+    await _insertRelease(dbSession, version="2026.11.10-2", status="DRAFT")
+    await _insertRelease(dbSession, version="2026.11.10-3", status="ACTIVE", domainCode="PROCUREMENT")
+
+    assert await semanticRegistry.countReleases(dbSession) == 3
+    assert await semanticRegistry.countReleases(dbSession, status="DRAFT") == 2
+    assert await semanticRegistry.countReleases(dbSession, domainCode="PROCUREMENT") == 1
+    # 前两条没传 domainCode ⇒ 全局快照（`None` 是筛选值不是「不筛选」）。
+    assert await semanticRegistry.countReleases(dbSession, domainCode=None) == 2
+
+
 async def test_list_releases_paginates(dbSession: AsyncSession) -> None:
     for index in range(3):
         await _insertRelease(dbSession, version=f"2026.11.10-{index}")

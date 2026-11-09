@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import SemanticReleaseStatus
@@ -44,13 +44,18 @@ from app.services.messages_zh import (
     MSG_SEMANTIC_RELEASE_STATUS_INVALID,
 )
 
-_DEFAULT_LIST_LIMIT = 50
-_MAX_LIST_LIMIT = 200
+DEFAULT_LIST_LIMIT = 50
+MAX_LIST_LIMIT = 200
 _MAX_OFFSET = 1_000_000
+# bigint 上界：超出这个范围的值交给 asyncpg 会抛整型越界（变成 500），先按参数错拒绝。
+MAX_RELEASE_ID = 2**63 - 1
+# 读路径的快照字节上限（纵深防御的 API 层那一层，见 semantic_manifest_schema.py:56）。
+# 正常快照约 1MB；超限说明库里有异常数据，拒绝下发而不是把内存/带宽交给它。
+MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 # 缓存兜底生存期：跨进程 / 手工改库最晚 60 秒收敛。正常路径靠写时失效，不等 TTL。
 _CACHE_TTL_SECONDS = 60.0
-# 缓存键只有域编码；真实域数量是个位数。上限是防「调用方拿用户输入拼域编码」
-# 把缓存撑爆的安全阀（D9 仍须在 API 边界按域词表校验）。
+# 缓存键只有域编码；真实域数量是个位数。长度校验 + 条目上限是防「拿用户输入拼域编码」
+# 撑爆缓存的安全阀。这里刻意不查 data_domain 词表：那会把只读路径重新绑回治理表。
 _MAX_CACHE_ENTRIES = 16
 _MAX_DOMAIN_CODE_LENGTH = 20  # 与 semantic_release.domain_code 列宽一致
 
@@ -163,8 +168,10 @@ class SemanticRegistry:
 
     async def getById(self, session: AsyncSession, releaseId: int) -> SemanticReleaseSnapshot:
         """按主键取快照（详情页 / 回滚目标预览）。不存在 ⇒ 404 语义的领域异常。"""
-        if releaseId < 1:
-            raise ValidationError(MSG_SEMANTIC_RELEASE_ID_INVALID.format(releaseId=releaseId))
+        if releaseId < 1 or releaseId > MAX_RELEASE_ID:
+            raise ValidationError(
+                MSG_SEMANTIC_RELEASE_ID_INVALID.format(releaseId=releaseId, max=MAX_RELEASE_ID)
+            )
         row = await session.get(SemanticRelease, releaseId)
         if row is None:
             raise NotFoundError(MSG_SEMANTIC_RELEASE_NOT_FOUND.format(releaseId=releaseId))
@@ -176,7 +183,7 @@ class SemanticRegistry:
         *,
         status: str | None = None,
         domainCode: Any = _UNSET,
-        limit: int = _DEFAULT_LIST_LIMIT,
+        limit: int = DEFAULT_LIST_LIMIT,
         offset: int = 0,
     ) -> list[SemanticReleaseSummary]:
         """发布列表（新→旧）。
@@ -184,20 +191,34 @@ class SemanticRegistry:
         `domainCode` 三态：不传 = 不筛域；`None` = 只筛全局快照；字符串 = 该域。
         """
         _validateListQuery(status=status, limit=limit, offset=offset)
+        _validateListDomainCode(domainCode)
 
-        statement = select(*_SUMMARY_COLUMNS)
-        if status is not None:
-            statement = statement.where(SemanticRelease.status == status)
-        if domainCode is not _UNSET:
-            statement = statement.where(
-                SemanticRelease.domain_code.is_(None)
-                if domainCode is None
-                else SemanticRelease.domain_code == domainCode
-            )
+        statement = _applyListFilters(select(*_SUMMARY_COLUMNS), status=status, domainCode=domainCode)
         statement = statement.order_by(SemanticRelease.id.desc()).limit(limit).offset(offset)
 
         rows = (await session.execute(statement)).all()
         return [_toSummary(row) for row in rows]
+
+    async def countReleases(
+        self,
+        session: AsyncSession,
+        *,
+        status: str | None = None,
+        domainCode: Any = _UNSET,
+    ) -> int:
+        """与 `listReleases` 同筛选条件的总数（分页头）。
+
+        筛选条件走同一个构造函数：两处各写一份，迟早出现「rows 2 条、total 5」。
+        """
+        _validateStatus(status)
+        _validateListDomainCode(domainCode)
+
+        statement = _applyListFilters(
+            select(func.count()).select_from(SemanticRelease),
+            status=status,
+            domainCode=domainCode,
+        )
+        return (await session.execute(statement)).scalar_one()
 
     def invalidate(self) -> None:
         """写时失效：发布 / 激活 / 归档 / 回滚提交后必须调用。"""
@@ -226,17 +247,42 @@ def _validateDomainCode(domainCode: str | None) -> None:
         )
 
 
-def _validateListQuery(*, status: str | None, limit: int, offset: int) -> None:
+def _validateListDomainCode(domainCode: Any) -> None:
+    """列表的域筛选与 `/active` 同一套校验：`_UNSET` = 不筛域，`None` = 只筛全局。
+
+    列表曾经漏了这条，导致 `?domainCode=`（空串）静默返回空集、超长值进 SQL 绑定，
+    而同一个值打到 `/active` 却 422 —— 同一个参数在两条路径上契约必须一致。
+    """
+    if domainCode is not _UNSET:
+        _validateDomainCode(domainCode)
+
+
+def _validateStatus(status: str | None) -> None:
     if status is not None and status not in _STATUS_VALUES:
         raise ValidationError(
             MSG_SEMANTIC_RELEASE_STATUS_INVALID.format(
                 status=status, allowed=", ".join(sorted(_STATUS_VALUES))
             )
         )
-    if limit < 1 or limit > _MAX_LIST_LIMIT:
-        raise ValidationError(
-            MSG_SEMANTIC_RELEASE_LIMIT_RANGE.format(min=1, max=_MAX_LIST_LIMIT, value=limit)
+
+
+def _applyListFilters(statement: Any, *, status: str | None, domainCode: Any) -> Any:
+    """`listReleases` / `countReleases` 共用的筛选构造（三态域语义）。"""
+    if status is not None:
+        statement = statement.where(SemanticRelease.status == status)
+    if domainCode is not _UNSET:
+        statement = statement.where(
+            SemanticRelease.domain_code.is_(None)
+            if domainCode is None
+            else SemanticRelease.domain_code == domainCode
         )
+    return statement
+
+
+def _validateListQuery(*, status: str | None, limit: int, offset: int) -> None:
+    _validateStatus(status)
+    if limit < 1 or limit > MAX_LIST_LIMIT:
+        raise ValidationError(MSG_SEMANTIC_RELEASE_LIMIT_RANGE.format(min=1, max=MAX_LIST_LIMIT, value=limit))
     if offset < 0 or offset > _MAX_OFFSET:
         raise ValidationError(MSG_SEMANTIC_RELEASE_OFFSET_RANGE.format(min=0, max=_MAX_OFFSET, value=offset))
 
@@ -247,8 +293,21 @@ def _toSnapshot(row: SemanticRelease) -> SemanticReleaseSnapshot:
     JSONB 不保留键序，所以从库读出的快照必须先按发布时的同一规则规范化，
     才能与 `manifest_hash` 比对；这个字符串同时作为缓存的正文，供每次访问解析副本。
     """
-    canonical = canonicalManifestJson(row.manifest_json)
-    actualHash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    try:
+        canonical = canonicalManifestJson(row.manifest_json)
+        canonicalBytes = canonical.encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        # 孤立代理项 / NaN 这类「json.loads 读得进、规范化写不出」的坏行：
+        # 与哈希不一致同属完整性失败，统一抛领域异常而不是漏成未分类 500。
+        raise SemanticReleaseIntegrityError(
+            f"语义发布 {row.id}（version={row.version}）的快照无法规范化序列化：{exc}"
+        ) from exc
+    if len(canonicalBytes) > MAX_MANIFEST_BYTES:
+        raise SemanticReleaseIntegrityError(
+            f"语义发布 {row.id}（version={row.version}）的快照体量 {len(canonicalBytes)} 字节"
+            f"超过上限 {MAX_MANIFEST_BYTES}"
+        )
+    actualHash = hashlib.sha256(canonicalBytes).hexdigest()
     if actualHash != row.manifest_hash:
         raise SemanticReleaseIntegrityError(
             f"语义发布 {row.id}（version={row.version}）的快照内容与 manifest_hash 不一致"

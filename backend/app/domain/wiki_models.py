@@ -171,7 +171,11 @@ class WikiPage(Base, TimestampMixin):
     # v3.1 §4.13 治理：组织归属（11 部门枚举，NULL = 待治理流程推动）。
     # 与 authority_level 双轴并存：后者表数据精度，本字段表组织归属。
     # 该列不进学习回路，仅供治理流程追溯与冲突仲裁。
-    authority_department: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    authority_department: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+        comment="权威归属部门，11 部门枚举之一或 NULL（v3.1 §4.13 软约束；INDUSTRIES/OPS/INDUSTRY_STANDARD/CROSS_DOMAIN 覆盖跨域与外部权威场景）",
+    )
     version: Mapped[str] = mapped_column(
         String(30), nullable=False, default="v1.0", server_default="v1.0"
     )
@@ -309,11 +313,19 @@ class KnowledgeClaim(Base):
     authority_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # v3.1 §4.13 治理：组织归属（独立于 page 的 authority_department，claim 级记录
     # 便于按部门筛选冲突）。学习回路完全不引用本字段。
-    authority_department: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    authority_department: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+        comment="权威归属部门（同 wiki_page 字段；claim 级独立记录便于按部门筛冲突）",
+    )
     status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # 源版本（v3.1 §4.14 运维约束 2「编译产物可追溯」）：claim 抽取时的
     # 源 Page 版本号；0099 只加列，存量行为 NULL 不回填。
-    source_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_version: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+        comment="源 Page 版本号（编译产物可追溯，v3.1 §4.14）",
+    )
     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     triple_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="FALSE")

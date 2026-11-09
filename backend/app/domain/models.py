@@ -469,7 +469,7 @@ class KpiCatalog(Base, TimestampMixin):
     __tablename__ = "kpi_catalog"
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
-    kpi_code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    kpi_code: Mapped[str] = mapped_column(String(50), nullable=False)
     kpi_name: Mapped[str] = mapped_column(String(200), nullable=False)
     business_definition: Mapped[str | None] = mapped_column(Text, nullable=True)
     formula: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -525,6 +525,9 @@ class KpiCatalog(Base, TimestampMixin):
     )
 
     __table_args__ = (
+        # DB 侧是命名唯一索引 uq_kpi_catalog_code（0023 create_index(unique=True)），
+        # ORM 原用列级 unique=True（生成无名 UniqueConstraint）⇒ alembic 提议重建。
+        Index("uq_kpi_catalog_code", "kpi_code", unique=True),
         Index("ix_kpi_catalog_owner", "owner"),
         Index("ix_kpi_catalog_status", "status"),
         # 0050 迁移：ARRAY 列的 GIN 索引（默认 array_ops）。
@@ -690,7 +693,7 @@ class FeatureDefinition(Base, TimestampMixin):
     __tablename__ = "feature_definition"
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
-    feature_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    feature_name: Mapped[str] = mapped_column(String(100), nullable=False)
     feature_alias: Mapped[str | None] = mapped_column(String(200), nullable=True)
     feature_definition: Mapped[str | None] = mapped_column(Text, nullable=True)
     entity_type: Mapped[str] = mapped_column(
@@ -726,6 +729,9 @@ class FeatureDefinition(Base, TimestampMixin):
     )
 
     __table_args__ = (
+        # DB 侧是命名唯一索引 uq_feature_definition_name（0027 create_index(unique=True)），
+        # ORM 原用列级 unique=True（生成无名 UniqueConstraint）⇒ alembic 提议重建。
+        Index("uq_feature_definition_name", "feature_name", unique=True),
         Index("ix_feature_definition_datasource", "datasource_id"),
         Index("ix_feature_definition_owner", "owner"),
         Index("ix_feature_definition_status", "status"),
@@ -771,11 +777,13 @@ class FeatureValue(Base):
     feature: Mapped[FeatureDefinition] = relationship(back_populates="values")
 
     __table_args__ = (
-        UniqueConstraint(
+        # DB 侧是唯一索引（0027 op.create_index(unique=True)），非约束 ⇒ 同形声明。
+        Index(
+            "uq_feature_value_dedup",
             "feature_id",
             "entity_key",
             "valid_at",
-            name="uq_feature_value_dedup",
+            unique=True,
         ),
         Index("ix_feature_value_feature_id", "feature_id"),
         CheckConstraint(
@@ -817,7 +825,14 @@ class FeatureDefinitionHistory(Base):
     )
 
     __table_args__ = (
-        Index("ix_feature_def_history_feature_changed", "feature_id", "changed_at"),
+        # DB 实际是 (feature_id, changed_at DESC)（0028）；普通列声明会被 alembic
+        # 判成 changed index ⇒ 提议 drop+create。表达式形式与仓库既有惯例一致
+        # （见 mcp_models.py）。
+        Index(
+            "ix_feature_def_history_feature_changed",
+            "feature_id",
+            sa_text("changed_at DESC"),
+        ),
     )
 
     def __repr__(self) -> str:
@@ -1176,7 +1191,11 @@ class SessionQueryState(Base, TimestampMixin):
     # P0-3 新增（NULL 兼容历史）
     datasource_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     schema_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        comment="P0-3 归属用户 ID；-1 = 墓碑（P0-3 前遗留 NULL 行），读取侧 WHERE user_id != -1 排除",
+    )
     datasource_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # M5：stub 行标记；userId is None 时写 True，读侧排除
     is_stub: Mapped[bool] = mapped_column(
@@ -1195,8 +1214,14 @@ class SessionQueryState(Base, TimestampMixin):
     recent_rounds: Mapped[list[dict[str, Any]] | None] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
     )
+    # 该列在 DB 上是 `json`（migration 0101 建列时用了 JSON），不是 JSONB；
+    # 同表的 last_result_columns / recent_rounds 才是 JSONB。ORM 原声明
+    # with_variant(JSONB) ⇒ alembic 报 type change。这里按 DB 实际声明
+    # `postgresql.JSON`，零 DDL。
     inheritance_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+        postgresql.JSON,
+        nullable=True,
+        comment="B5 字段继承快照：inherited_metric / inherited_time / inherited_filters / inheritance_confidence（v3.1 §15.3）",
     )
 
     __table_args__ = (
@@ -1305,7 +1330,9 @@ class DataQualityRule(Base, TimestampMixin):
     # feat-dq-rule-params v1：结构化规则参数；与 rule_expression 二选一（NULL=自定义模式）。
     # 写时由 data_quality_rule_params_service 编译填值；evaluator 不读此列。
     rule_params: Mapped[dict[str, Any] | None] = mapped_column(
-        postgresql.JSONB(astext_type=sa.Text()), nullable=True,
+        postgresql.JSONB(astext_type=sa.Text()),
+        nullable=True,
+        comment="结构化规则参数；NULL=自定义SQL模式(legacy)，非NULL=结构化模式",
     )
     threshold: Mapped[Decimal] = mapped_column(
         Numeric(5, 2), nullable=False, default=Decimal("95.00")
@@ -1453,7 +1480,9 @@ class DataLineage(Base, TimestampMixin):
         # 同上下游 + 字段组合唯一；表级血缘 source/target_field 同时为 NULL 时
         # 唯一约束在 PG 视为「(..., NULL) 与 (..., NULL) 不冲突」（SQL 标准语义）。
         # 因此 service 层在创建时主动查重；DB 约束作为兜底，防止 race condition。
-        UniqueConstraint(
+        # DB 侧是唯一索引（0020 op.create_index(unique=True)），非约束 ⇒ 同形声明。
+        Index(
+            "uq_data_lineage_edge",
             "source_layer",
             "source_system",
             "source_object",
@@ -1462,7 +1491,7 @@ class DataLineage(Base, TimestampMixin):
             "target_system",
             "target_object",
             "target_field",
-            name="uq_data_lineage_edge",
+            unique=True,
         ),
         Index("ix_data_lineage_source", "source_layer", "source_system", "source_object"),
         Index("ix_data_lineage_target", "target_layer", "target_system", "target_object"),
@@ -1540,11 +1569,13 @@ class EntityMapping(Base, TimestampMixin):
 
     __table_args__ = (
         # 同一实体 + 同一源系统只允许一条映射；三列均非空，DB 约束即完整兜底。
-        UniqueConstraint(
+        # DB 侧是唯一索引（0021 op.create_index(unique=True)），非约束 ⇒ 同形声明。
+        Index(
+            "uq_entity_mapping_entity_source",
             "entity_type",
             "enterprise_key",
             "source_system",
-            name="uq_entity_mapping_entity_source",
+            unique=True,
         ),
         Index("ix_entity_mapping_enterprise_key", "enterprise_key"),
         Index("ix_entity_mapping_source", "entity_type", "source_system", "source_key"),
@@ -1643,13 +1674,15 @@ class AuditLog(Base):
             "'auth.password_changed','user.password_reset')",
             name="ck_audit_log_action",
         ),
+        # DB 实际是 (entity_type, entity_id, created_at DESC) / (actor, created_at DESC)
+        # （0024 用 sa.text(...) 建）；普通列声明会被 alembic 判成 changed index。
         Index(
             "ix_audit_log_entity",
             "entity_type",
             "entity_id",
-            "created_at",
+            sa_text("created_at DESC"),
         ),
-        Index("ix_audit_log_actor", "actor", "created_at"),
+        Index("ix_audit_log_actor", "actor", sa_text("created_at DESC")),
         Index(
             "ix_audit_log_outbox",
             "outbox_id",
@@ -1696,7 +1729,13 @@ class KpiCatalogHistory(Base):
     )
 
     __table_args__ = (
-        Index("ix_kpi_history_kpi_revision", "kpi_id", "revision"),
+        # DB 实际是 (kpi_id, revision DESC)（0024）；普通列声明会被 alembic
+        # 判成 changed index ⇒ 提议 drop+create。
+        Index(
+            "ix_kpi_history_kpi_revision",
+            "kpi_id",
+            sa_text("revision DESC"),
+        ),
     )
 
     def __repr__(self) -> str:
@@ -1785,10 +1824,11 @@ class DocumentEntityRelation(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint(
-            "document_id", "entity_type", "entity_key", "relation_type",
-            name="uq_doc_entity_rel",
-        ),
+        # 注：DB 上**没有** uq_doc_entity_rel。0030 建表时创建过，但 0042
+        # `DROP COLUMN entity_key` 把它级联删除、重建列后未重建 ⇒ 全新库与
+        # 5433 实测都不存在。ORM 曾一直声明它，导致 alembic 提议 ADD。
+        # 这里按 DB 实际情况移除声明；若要真正恢复唯一性，必须先评估重复行并
+        # 写专用迁移（见 Harness/changes/fix-alembic-residual-36/summary.md）。
         Index("ix_doc_rel_entity", "entity_type", "entity_key"),
         Index("ix_doc_rel_document", "document_id"),
         CheckConstraint(
@@ -2326,8 +2366,10 @@ class DataQualityViolationSample(Base):
     target_column: Mapped[str | None] = mapped_column(String(100), nullable=True)
     total_violations: Mapped[int] = mapped_column(Integer, nullable=False)
     sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 0141：DB 列类型由 jsonb 改为 json ⇒ 默认值也必须写成 '[]'::json，
+    # 否则 PG 报 "default for column cannot be cast automatically to type json"。
     sample_pk_values: Mapped[list[Any]] = mapped_column(
-        JSON, nullable=False, server_default=sa_text("'[]'::jsonb")
+        JSON, nullable=False, server_default=sa_text("'[]'::json")
     )
     captured_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
@@ -2498,9 +2540,14 @@ class IdMapping(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint(
+        # DB 侧是**唯一索引**（0097 用 op.create_index(unique=True) 建），不是约束；
+        # ORM 侧必须同形声明为 Index(unique=True)。声明成 UniqueConstraint 会让
+        # alembic 提议 DROP INDEX + ADD CONSTRAINT，而 0097 的 downgrade 已有
+        # op.drop_index(<同名>) ⇒ 回滚会报 index does not exist（§11.4 陷阱 1）。
+        Index(
+            "uq_id_mapping_bo_ext",
             "business_object", "external_id",
-            name="uq_id_mapping_bo_ext",
+            unique=True,
         ),
         Index("ix_id_mapping_bo", "business_object"),
         Index("ix_id_mapping_pg_table", "pg_table"),
@@ -2559,7 +2606,12 @@ class L3Acl(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     resource_pattern: Mapped[str] = mapped_column(String(255))  # 模糊匹配
     granted_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    # DB 是 timestamptz NOT NULL（0122 建表）；Mapped[datetime] 默认推导为无时区
+    # DateTime ⇒ alembic 报 type change。显式声明 timezone=True 对齐 DB（零 DDL），
+    # NOT NULL 由 0141 迁移补上（表在生产同构库上 0 行）。
     granted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
         server_default=sa.func.now(),
     )
 

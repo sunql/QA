@@ -272,7 +272,12 @@ class WikiTokenUsage(Base):
 
     __tablename__ = "wiki_token_usage"
     __table_args__ = (
-        Index("ix_wiki_token_usage_mechanism_time", "mechanism", "request_time"),
+        # DB 实际是 (mechanism, request_time DESC)（0054）；表达式形式保住 DESC。
+        Index(
+            "ix_wiki_token_usage_mechanism_time",
+            "mechanism",
+            saText("request_time DESC"),
+        ),
         Index("ix_wiki_token_usage_task", "import_task_id"),
         Index("ix_wiki_token_usage_compile_task", "compile_task_id"),
     )
@@ -325,7 +330,8 @@ class LearningFeedback(Base):
     __tablename__ = "learning_feedback"
     __table_args__ = (
         Index("ix_learning_feedback_entity", "mechanism", "entity_type", "entity_id"),
-        Index("ix_learning_feedback_time", "feedback_at"),
+        # DB 实际是 (feedback_at DESC)（0055）；表达式形式保住 DESC。
+        Index("ix_learning_feedback_time", saText("feedback_at DESC")),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
@@ -386,7 +392,7 @@ class KnowledgeConflict(Base):
         Index(
             "ix_knowledge_conflict_open",
             "severity",
-            "auto_detected_at",
+            saText("auto_detected_at DESC"),
             postgresql_where=saText("resolved_at IS NULL"),
         ),
         Index(
@@ -450,8 +456,18 @@ class StructureSuggestion(Base):
             unique=True,
             postgresql_where=saText("status = 'PENDING'"),
         ),
-        Index("ix_structure_suggestion_page", "page_id", "suggested_at"),
-        Index("ix_structure_suggestion_pending", "status", "suggested_at"),
+        # DB 实际是 (page_id, suggested_at DESC) / (status, suggested_at DESC)（0057）；
+        # 表达式形式保住 DESC。
+        Index(
+            "ix_structure_suggestion_page",
+            "page_id",
+            saText("suggested_at DESC"),
+        ),
+        Index(
+            "ix_structure_suggestion_pending",
+            "status",
+            saText("suggested_at DESC"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)

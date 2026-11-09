@@ -74,6 +74,12 @@ def upgrade() -> None:
             name="fk_semantic_release_domain",
             ondelete="RESTRICT",
         ),
+        # `uq_semantic_release_one_active` 的谓词是字面量 status = 'ACTIVE'；
+        # 大小写/空格变体都会绕过它 ⇒ 用 CHECK 把状态字面量钉死在库侧。
+        sa.CheckConstraint(
+            "status IN ('DRAFT','VALIDATED','ACTIVE','ARCHIVED')",
+            name="ck_semantic_release_status",
+        ),
     )
 
     op.create_index(

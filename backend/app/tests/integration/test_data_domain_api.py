@@ -5,6 +5,9 @@ conftest autouse 已 seed 3 个内置域（PROCUREMENT/QUALITY/LOGISTICS，均 e
 """
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.domain.semantic_release_models import SemanticRelease
 
 pytestmark = pytest.mark.asyncio
 
@@ -88,6 +91,35 @@ async def test_delete_referenced_domain_returns_409(
     """PROCUREMENT 被 seed 业务对象 primary_domain_id 引用 → 删除 409。"""
     resp = await client.delete("/api/v1/data-domains/PROCUREMENT")
     assert resp.status_code == 409
+
+
+async def test_delete_domain_with_release_snapshot_returns_409(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """semantic_release.domain_code 的 FK 是 RESTRICT ⇒ 删除域必须给 409 而不是裸 500。
+
+    D9 之前没有发布 API，这里直接用 ORM 造一行快照（数据落在真实 PG 行上，
+    与 FK 约束一致）。服务层的引用预检必须覆盖这张新表，否则 `session.delete`
+    提交时抛 IntegrityError —— 全局没有接这个异常，前端看到的是 500。
+    """
+    resp = await client.post(
+        "/api/v1/data-domains", json={"code": "XDOMREL", "name": "快照引用域"}
+    )
+    assert resp.status_code == 201
+
+    dbSession.add(
+        SemanticRelease(
+            domain_code="XDOMREL",
+            version="2026.11.09-1",
+            manifest_json={"schemaVersion": "v1", "classes": [], "joins": []},
+            manifest_hash="0" * 64,
+        )
+    )
+    await dbSession.commit()
+
+    resp = await client.delete("/api/v1/data-domains/XDOMREL")
+    assert resp.status_code == 409
+    assert "semantic_release" in resp.text
 
 
 async def test_create_with_unknown_org_returns_404(client: AsyncClient) -> None:

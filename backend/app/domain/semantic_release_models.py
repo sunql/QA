@@ -18,6 +18,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -50,7 +51,9 @@ class SemanticRelease(Base, TimestampMixin):
         ),
         nullable=True,
     )
-    # 发布版本号（如 2026.11.09-1）；同一作用域内唯一，由下方部分唯一索引保证。
+    # 发布版本号（如 2026.11.09-1）。首期只有全局作用域，版本号唯一性由下方
+    # `uq_semantic_release_global_version`（WHERE domain_code IS NULL）保证；
+    # 按域发布上线时须补同域版唯一索引（届时再随迁移一起做，不提前建）。
     version: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(
         String(20),
@@ -89,6 +92,13 @@ class SemanticRelease(Base, TimestampMixin):
             postgresql_where=sa_text("status = 'ACTIVE'"),
         ),
         Index("ix_semantic_release_status", "status"),
+        # 状态字面量必须受库侧约束：`uq_semantic_release_one_active` 的谓词是
+        # `status = 'ACTIVE'`，若写入路径存进 'active'/'ACTIVE '，索引会当成不同值，
+        # 「同域最多一条 ACTIVE」的兜底静默失效。服务层状态机（D10）与 CHECK 是双保险。
+        CheckConstraint(
+            "status IN ('DRAFT','VALIDATED','ACTIVE','ARCHIVED')",
+            name="ck_semantic_release_status",
+        ),
     )
 
     def __repr__(self) -> str:

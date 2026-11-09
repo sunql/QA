@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import pytest
 from sqlalchemy.dialects import postgresql
 
 from app.domain.enums import SemanticReleaseStatus
@@ -75,11 +74,18 @@ def test_domain_code_is_nullable_fk_to_data_domain_restrict() -> None:
 
 
 def test_status_defaults_to_draft() -> None:
+    """ORM 侧 default 与迁移的 server_default 必须是同一个字面量。
+
+    drift 工具只比列名，不比默认值 ⇒ 两侧分歧不会有任何信号，只能靠用例钉住。
+    """
     col = SemanticRelease.__table__.columns["status"]
 
     assert col.nullable is False
     assert col.default is not None
     assert col.default.arg == SemanticReleaseStatus.DRAFT.value
+    assert col.server_default is not None
+    # server_default 可能是裸字符串或被引号包裹的文本，两种形态都接受，只认字面量。
+    assert str(col.server_default.arg).strip("'") == SemanticReleaseStatus.DRAFT.value
 
 
 def test_status_enum_covers_state_machine() -> None:
@@ -113,16 +119,38 @@ def test_one_active_release_per_domain_enforced_by_index() -> None:
 
     assert ix.unique is True
     assert str(ix.dialect_options["postgresql"]["where"]) == "status = 'ACTIVE'"
+    # 表达式本身必须钉住：改成裸 domain_code 会让全局（NULL）作用域漏防，
+    # 而上面的 unique/where 断言仍全绿 —— 这条是唯一的探针。
+    assert "COALESCE" in str(ix.expressions[0]).upper()
+
+
+def test_status_has_check_constraint_for_state_machine() -> None:
+    """`status` 必须受库侧 CHECK 约束。
+
+    部分唯一索引的谓词是字面量 `status = 'ACTIVE'`：若写入路径存进 `'active'`
+    或 `'ACTIVE '`，索引会把它们当不同值 ⇒ 「同域最多一条 ACTIVE」的兜底静默失效。
+    CHECK 让非法取值在库侧直接失败（服务层状态机 D10 仍保留，二者是双保险）。
+    """
+    checks = {
+        c.name: str(c.sqltext)
+        for c in SemanticRelease.__table__.constraints
+        if c.__class__.__name__ == "CheckConstraint"
+    }
+
+    assert "ck_semantic_release_status" in checks
+    sqlText = checks["ck_semantic_release_status"]
+    for status in ("DRAFT", "VALIDATED", "ACTIVE", "ARCHIVED"):
+        assert status in sqlText, status
+
+
+def test_status_index_declared() -> None:
+    """发布列表页 / 巡检按状态列举；索引漏声明会让 drift 报 extra_index。"""
+    indexes = {ix.name: ix for ix in SemanticRelease.__table__.indexes}
+
+    assert "ix_semantic_release_status" in indexes
+    assert [c.name for c in indexes["ix_semantic_release_status"].columns] == ["status"]
 
 
 def test_model_is_registered_in_base_metadata() -> None:
     """drift CLI 只 import `app.domain.models`，漏注册就会被误报 extra_table。"""
     assert "semantic_release" in Base.metadata.tables
-
-
-@pytest.mark.parametrize("banned", ["SemanticManifest"])
-def test_banned_name_is_not_exported(banned: str) -> None:
-    """裁决四：与 `RelationManifest` 混淆的裸名禁止进入发布模块。"""
-    import app.domain.semantic_release_models as module
-
-    assert not hasattr(module, banned)

@@ -357,8 +357,10 @@ R21_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M203",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "or (classAliases is not None and dec.value.id in classAliases)",
-        "or False",
+        # 第三十二轮重锚：F4C 重构后类别名回退改写为 if/elif 链（旧行消失）；
+        # 锚 elif 分支（全文件唯一），死别名回退 ⇒ class_alias_decorator 红。
+        "elif classAliases is not None and baseName in classAliases:",
+        "elif False:",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[class_alias_decorator]"),
         1,
     ),

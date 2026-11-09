@@ -1468,7 +1468,7 @@ M69（第十三次）/M217（第三次）⇒ 变异 233 → 239 组。** `ci_mut
 | H-29-2 | **模块级被调接收调用方作用域**：scanCallee 的调用点全部穿透 `aliasesMap`/`classes` ⇒ `def _o(): import json as s; _g()`（模块级 `_g` 引用 `sys as s`）被调用方 `json as s` 遮蔽 ⇒ 逃逸。同族：模块级类实例化 / 类别名实例化落点 | 模块级被调的 **11** 处调用点（callTargets / localClasses / classAliases / 类钩子 / `__call__` / `_resolveMember` 成员 / 嵌套 ClassDef 钩子）改 `scanCallee(x, depth + 1, None, None)`；**保留 threading 的 2 处**：Lambda IIFE（H-27-3 语义）与 fn-local classes 分支（H-26-3/M228 语义）；M141 第四次重锚 | scope_mask 三形态文本归位（M242 判 callTargets 落点 ⇒ hooks 变空） |
 | H-29-3 | **fn-local 类成员作装饰器**：`_decoratorMember` 只查模块级表 ⇒ fn 体内 `class _C: @staticmethod def deco…` + `@_C.deco` 成员解析失败 ⇒ deco 体不被扫 ⇒ 逃逸 | scanExec 装饰器臂传合并表 `{**localClasses, **(classes or {})}`；`isFnLocalBase`（dec 基名 ∈ fn-local classes）决定是否把别名/类 threading 进成员被调扫描；`_decoratorMember` 增 None 值歧义臂（clsName ∈ localClasses ⇒ 歧义 fail-closed）；M150 锚行原样保留 | `fn_local_class_decorator` 文本归位（M244=合并表回退成模块表 ⇒ hooks 变空） |
 | M-29-5 | **sink 别名洗白**：`_w = Path('y').write_text; field_validator('x')(_w)`——污染名经赋值绑进工厂实参，实参处只见 Name ⇒ 逃逸 | scanExec 登记 Assign/AnnAssign（value 为 `_DENIED_CALL_ATTRS` Attribute）目标名入 `sinkTainted`；`_callFactorySinkProblem` 增实参 Name 污点检查「嵌套调用工厂实参引用 sink 绑定名」；嵌套路径透传 `sinkTainted` | `sink_alias_launder` 文本归位（M245=污点登记条件杀死 ⇒ hooks 变空） |
-| M-29-4 | r28 数据文件漏出反向守卫清单与 pattern（M-27-3 的另一半：第二十八轮只补了 surface 侧，codeowners 侧与 CODEOWNERS 本身没查） | `test_ci_surface.py` 两清单 + pattern 元组、`test_ci_codeowners.py` 两清单各补 r28/r30；`.github/CODEOWNERS` 补 r28/r30 两行（**r28 也不在 CODEOWNERS**——同类漏改，本批一并补上）；pattern 加 `\|_r30`（M69 第十四次 + M217 第四次 + M240 第二次重锚；**M241**=删 `\|_r28`） | M241（pattern 反向守卫红） |
+| M-29-4 | r28 数据文件漏出反向守卫清单与 pattern（M-27-3 的另一半：第二十八轮只补了 surface 侧，codeowners 侧与 CODEOWNERS 本身没查） | `test_ci_surface.py` 两清单 + pattern 元组、`test_ci_codeowners.py` 两清单各补 r28/r30；`.github/CODEOWNERS` 补 r30 一行（r28 原本已在——第三十一轮评审 F8-1 更正此前「r28 也不在」的错误表述）；pattern 加 `\|_r30`（M69 第十四次 + M217 第四次 + M240 第二次重锚；**M241**=删 `\|_r28`） | M241（pattern 反向守卫红） |
 | M-29-6 | scanCallee 注释「函数体内的装饰器由该 def 自己被 scanCallee 时管」对 fn 作用域**顶层命名函数**不成立（fn 作用域 def 不进 callTargets ⇒ 体/装饰器不被扫）——M-27-4 欠账的表述扩散 | 注释更正为指向 §5 既有欠账（M-27-4） | 注释（非 deny 线） |
 | LOW×6 | ①M235 注释称变异后「只剩内层被调文本」——实测 hooks 变**空**（内层 write_text 是 Assign 的 value，不走工厂调用臂）；②跑者 docstring 组数过期（「121 组」/「全部 99 组」）；③`_callFactorySinkProblem` docstring 漂移；④M227/M239 宽效应无备案；⑤跑者锚点检查内联在 main() 不可单测；⑥§4.2.21 行数写 148（实际 122） | ①③⑥注释/文档更正；②改 245 组 + 数据文件清单补全；④两注释各补宽效应/方向性备案（同 M-27-1 M195/M228 先例）；⑤提取 `anchorProblem(source, original, occurrence) -> str \| None`，main() 单点调用 + 3 条单测（精确/多出/缺失） | ⑤=3 单测；其余注释/文档 |
 
@@ -1487,6 +1487,50 @@ M217（第四次）/M240（第二次）⇒ 变异 239 → 245 组。** `ci_mutat
 
 **行数**：`ci_conftest_chain.py` 2184 → **2372 行**；`test_ci_conftest_chain.py` 1863 → **2033 行**（204 条）；
 新文件 `ci_mutation_cases_r30.py` **111 行**（§5 行债更新，策略不变）。
+
+### 4.2.23 第三十二轮复审修复（6H/1M/1L 全收口，245 → 278 组，2026-11-09）
+
+第三十一轮复审（报告 `/tmp/n6_r31_review_report.md`）用**形态变换攻击**实证：第三十轮的
+H-29-1/2/3 + M-29-5 修复只覆盖了各自的精确回归 fixture，同一语义换形态即 0 hooks 逃逸
+（20 个绕过形态全部逃出、4 个回归基线仍被拒）。本轮按报告 §5 处置顺序全量修复：
+
+| 编号 | 攻击构造（形态变换逃逸） | 修复 | 判别 |
+|---|---|---|---|
+| F1 | **执行器实参子树/通道失明**：`map(_C._f, [0])`（本地类成员）、fn 内 `def _g(): sys.path.insert…` + `list(map(_g, [0]))`（fn-local def）、`class _C` + `list(map(_C, [0]))`（fn-local 类）、`@dec` 后 `list(map(_f2, [0]))`（后续调用）、`list(map(_f, *[[0]]))`（星号展开）——实参扫描只认直接 Lambda/顶层 callTargets Name ⇒ 逃逸 | `_callableArgProblem` 实参扫描改 **`ast.walk` 全子树**：Name 成员资格链扩到 `localClasses`/`fnDefs`/`fnClasses`（本地类成员 `map(_C._f, [0])` 由 ast.walk 必访根 Name 接住——成员引用臂检测等价已删）；param 通道：被调是模块级 def 时对形参做保守绑定，实参引用本地可调用 ⇒ fail-closed | M247（ast.walk→[a]）/ M248（deny 条件杀）/ M249–M251（三个成员资格臂）/ M252（param 通道杀）|
+| F2 | **map 写文本形态**：`list(map(sys.path.__setattr__, [0], ['X']))`——`__setattr__` 不在 `_DENIED_CALL_ATTRS` | `_DENIED_CALL_ATTRS` 补 `__setattr__` | M248 同组（deny 条件杀死 ⇒ 文本归位） |
+| F3 | **with/star 污点传播缺口**：`with nullcontext(Path(P).unlink) as _w` / `for _w in [Path(P).unlink]` 后 `_w()`——sink 污点只登记 Assign 目标 | With/AsyncWith（`node.items` 的 context expr）、For（`node.iter`+target 对）登记 `spreadPairs` 进 `sinkTainted`；`with Path(P).unlink as _w:` 形态由 With spread 接住 | M264（sinkTainted 登记杀）/ M265（For spread 杀）/ M266（With items 杀） |
+| F4 | **装饰器解析三缺口**：`@_C._D.deco` 嵌套类属性链（dec.value 是 Attribute ⇒ None ⇒ 整段逃出）；fn-local 类遮蔽模块类别名（合并表优先级反了）；`sm_decorator_local_class` 形态 | `_decoratorMember`：F4A fnClassBindings 先解析根名；F4B Attribute 基沿链逐层 `_classMember`（任一层失败 ⇒ ambiguity fail-closed）；F4C 解析优先级 = fn-local/合并表优先、`classAliases` 仅兜底（旧实现无条件 `classAliases.get` ⇒ 模块别名遮蔽 fn-local 类） | M256–M258（三站点）+ 既有 M150/M203 重锚（见下） |
+| F5 | **fn 作用域 def/类别名实例化失明**：fn 内 `def _g(): …` 后 `_g()`、fn 内 `class _C` 后 `_C()`（别名/直呼）——fn 绑定表不登记 | scanExec 增 fn 作用域登记：fnModuleDefs/fnModuleClassAliases/fnClassAliases/fbDefs/fbClassAliases/fbInstances 六表 + fbDeferred/fbClassAliases 装饰器登记 | M253–M255 / M275–M276 / M278 |
+| F6 | **staticmethod 链与白名单语境**：`staticmethod(_f)()` 结果后调用、fn 内 `pd = _E(); pd.Field(_f)`（白名单惰性注册被重绑定洗白）、`pydantic = _E()` 模块级重绑定 | 白名单 gate 去 `fnBindings is None` 作用域分档（rootIsShadowed 单点校验 = fnShadowed + reboundImports 覆盖两种作用域）；deferredCallables 静态方法登记 + 调用臂 | M259–M263（五站点；M262/M263=遮蔽校验独占判别） |
+| F7 | **H-29-2 站点级判别缺口**：11 处模块级被调站点中 9 个无独占变异（scope_mask 形态换站点即逃） | 站点级 fixtures（`scope_mask_*`/`sm_*` 9 条）+ 站点级变异 M268–M278（threading `None,None`→`aliasesMap,classes` ⇒ hooks 变空）；模块预扫 2 站点与 scanExec 装饰器臂防御纵深冗余，不设变异（备案） | M268–M278（13 站点模拟探针实证独占） |
+| F8 | 文档/格式 4 子项：summary「r28 也不在 CODEOWNERS」表述错误（base 已有 r28，round-30 只补 r30）；r30 docstring「11 站点由既有锚覆盖」过大；E305 空行；test_ci_surface docstring 与实现矛盾 | ①summary 更正；②r30 docstring 更正为「9 站点 r32 补齐 + prescan 2 站点冗余备案」；③补空行；④docstring 改为「同时钉接受面与存在性反查」 | 非判别线 |
+
+**重锚（第三十二轮 pattern 加宽 `|_r32` 连带）**：M69（第十五次）/M217（第五次）/M240（第三次，顺手修
+旧变异后文本丢结尾 `?` 的笔误）/M241（第二次）——判别不变；**M150（第三十二轮）/M203（第三十二轮）**
+为 F4 重构连带（解析 return 双站点同文 / if-elif 链改写 ⇒ 旧锚消失，改锚唯一多行上下文 /
+elif 分支，模拟探针实证转红 + 基线 deny 正常）。
+
+**聚合接线**：`ci_surface.py` pattern 加 `|_r32`；`.github/CODEOWNERS` 补 r32 行；
+`test_ci_surface.py`/`test_ci_codeowners.py` 反查清单各 2 处补 r32；`ci_mutation_cases.py`
+拼接 R32_MUTATIONS、文件头组数 245 → **278**。
+
+**证据链**：锚点 **278/278**（全量 `count == occurrence`，从仓库根审计；M172 退役缺口已知）→
+33 组新变异先经 13 站点模拟探针 + 全量模拟（`/tmp/n6_r32_probe_{c,d,e}.py`）全部转红再入册 →
+守卫套件 258 条（R32 fixtures 36 → 47）→ 校准（真实 76 文件闭包）**0 hooks** →
+全量 278 组（终态见 `/tmp/n6_evidence_run_v22.log`）。
+
+**全量取证首跑抓出净漏 6（M131/M144/M160/M166/M171/M190 判别失独占）**：F1 的
+`_callableArgProblem` 实参臂（含 `instanceVars`/`localClasses` 成员资格链）给 6 个老
+fixture 都加上了第二条 deny 路——杀原臂后 F1 仍拒 ⇒ 变异转不红。逐个诊断：M131
+（`setattr(B,…)` 本地类实参）/ M171（`meta_path.insert(0, F())` 本地实例实参）/
+M144/M160/M190（type 三参 dict 引用 callTargets 名或 lambda）→ **fixture 收独占**（实参改
+惰性/内建：`int`、`object()`、惰性 dict，原语义由 F1 自己的 fixtures 覆盖）；M166
+（`list(X())` 实例实参被 callTargets 实例绑定罩住）→ 实测唯一独占窗口 = **白名单包裹型
+内建 + 本地实例实参**（`staticmethod(_x)`：F1 白名单放行、实例臂仍拒），fixture 改此形态。
+6 组双向模拟（基线拒 + 杀臂后 0 hooks）→ solo 6/6 转红 → 复跑全量净漏 0。
+
+**行数**：`ci_conftest_chain.py` 2372 → **2801 行**；`test_ci_conftest_chain.py` 2033 → **2641 行**（258 条）；
+新文件 `ci_mutation_cases_r32.py` **461 行**（§5 行债更新，策略不变）。
 
 ### 4.3 真实 API 取证
 
@@ -1590,8 +1634,9 @@ M217（第四次）/M240（第二次）⇒ 变异 239 → 245 组。** `ci_mutat
   **第二十六轮更新**：`ci_conftest_chain.py` 2066 → **2156 行**（§4.2.20）；锚点数 **233 组**（M225–M234 新增 10 组入新数据文件 `ci_mutation_cases_r26.py`、M103/M141/M195/M212/M216/M217 重锚、M69 第十二次重锚），记债规则不变。
   **第二十八轮更新**：`ci_conftest_chain.py` 2156 → **2184 行**（§4.2.21）；锚点数 **239 组**（M235–M240 新增 6 组入新数据文件 `ci_mutation_cases_r28.py`、M141/M227/M69/M217 重锚），记债规则不变。
   **第三十轮更新**：`ci_conftest_chain.py` 2184 → **2372 行**（§4.2.22）；锚点数 **245 组**（M241–M246 新增 6 组入新数据文件 `ci_mutation_cases_r30.py`、M141 第四次/M69 第十四次/M217 第四次/M240 第二次重锚），记债规则不变——本轮若拆分则 245 组锚全部要重生成 + 全量取证重跑，维持「下次触碰顺手拆」。
-  **第二十八轮新增欠账（M-27-4）**：fn 作用域 def/lambda 的调用目标从不进 `callTargets` ⇒ fn 作用域内 `def _h(): …; _h()` 的被调体不被 scanCallee——round-22 scanExec/callTargets 重构起即如此（非本轮回归）；顶层/类体/装饰器路径均覆盖，fn 作用域命名函数互调是剩余盲区。收口成本 = callTargets 作用域化 + 全量取证重跑，独立排期。
-  **同批欠账记账**：`test_ci_surface.py` 988 → **1021 行**（二十五轮 → **1033 行**；二十六轮 → **1039 行**）、`test_ci_conftest_chain.py` → **1407 行**（164 条用例；二十五轮 → **1588 行** / 175 条；二十六轮 → **1765 行** / 184 条；二十八轮 → **1863 行** / 190 条；三十轮 → **2033 行** / 204 条）——守卫测试文件的私有 fixture/常量同样被多层复用，拆分亦须逐条核对锚点，同规则记债。
+  **第三十二轮更新**：`ci_conftest_chain.py` 2372 → **2801 行**（§4.2.23）；锚点数 **278 组**（M247–M279 新增 33 组入新数据文件 `ci_mutation_cases_r32.py`、M69 第十五次/M150/M203/M217 第五次/M240 第三次/M241 重锚），记债规则不变；本轮净简化两处（白名单 gate 去 `fnBindings is None` 作用域分档、`_callableArgProblem` 冗余成员引用臂删除），行数仍净增主因是 F4/F5/F6/F7 的站点与登记面扩张。
+  **第二十八轮新增欠账（M-27-4）——✅ 第三十二轮 F5 收口**：fn 作用域 def/lambda/类的调用目标经 fn 绑定表（fbDefs/fbClassAliases/fbInstances/deferredCallables）登记 + scanCallee threading ⇒ fn 作用域内 `def _h(): …; _h()`、fn-local 类实例化/别名实例化的被调体已被扫（M253–M255/M275–M276/M259–M260 独占判别）。
+  **同批欠账记账**：`test_ci_surface.py` 988 → **1021 行**（二十五轮 → **1033 行**；二十六轮 → **1039 行**）、`test_ci_conftest_chain.py` → **1407 行**（164 条用例；二十五轮 → **1588 行** / 175 条；二十六轮 → **1765 行** / 184 条；二十八轮 → **1863 行** / 190 条；三十轮 → **2033 行** / 204 条；三十二轮 → **2641 行** / 258 条）——守卫测试文件的私有 fixture/常量同样被多层复用，拆分亦须逐条核对锚点，同规则记债。
 - **没有**处理 N5（净丢失只能给 `NEEDS_REVIEW`）、N8（收紧 `enforce_admins` 的前置通道）。
 - 本批**不部署**（零 DDL、零生产写）。
 

@@ -5,8 +5,10 @@
 - H-29-1 外部执行器 + 本地可调用实参 fail-closed（M243=Name 臂、
   M246=Attribute 未知接收者臂；`_INERT_CALLABLE_ARG_CHAINS` 白名单由
   真实闭包普查钉死：63 处/5 链，放行性反向锚 = 五条注册惯例 0 hooks）
-- H-29-2 模块级被调不再接收调用方作用域（M242=callTargets 落点；
-  其余 11 站点的判别由既有 M141/M228 等锚覆盖）
+- H-29-2 模块级被调不再接收调用方作用域（M242=callTargets 落点；本轮
+  只钉了这一处独占判别——其余站点的站点级变异是第三十二轮 F7 才补齐的：
+  9 个站点见 `ci_mutation_cases_r32.py` M268–M278，模块预扫 2 站点与
+  scanExec 装饰器臂防御纵深冗余、不设变异）
 - H-29-3 fn-local 类成员装饰器（M244=合并类表回退成模块表）
 - M-29-5 sink 别名洗白（M245=污点登记条件杀死 ⇒ `_w` 洗白逃逸）
 - M-27-3 同款反向守卫（M241=删 pattern 里的 `|_r28`；M69 第十四次、
@@ -38,8 +40,9 @@ R30_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M241",
         "backend",
         "app/utils/ci_surface.py",
-        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30)?)\\.py$",',
-        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r30)?)\\.py$",',
+        # 第十二轮重锚（第三十二轮）：新增 `_r32` 批后 pattern 行随之加宽。
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r32)?)\\.py$",',
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r30|_r32)?)\\.py$",',
         (_SURFACE_GUARD
          + "::test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_file"),
         1,
@@ -65,12 +68,13 @@ R30_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         1,
     ),
     # M243：H-29-1 Name 臂实参检查杀死 ⇒ `list(map(_f, [0]))` 放行
-    # ⇒ hooks 变空判别。
+    # ⇒ hooks 变空判别。（第三十二轮评审 F1 重锚：签名加 fnBindings 形参，
+    # fn 作用域 def/类实参同走本臂，判别不变。）
     (
         "M243",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "                            nameExecutorProblem = _callableArgProblem(node, effAliases)",
+        "                            nameExecutorProblem = _callableArgProblem(node, effAliases, fnBindings)",
         "                            nameExecutorProblem = None",
         (_ROUND30_DENY + "[executor_map_list_local_def]"),
         1,
@@ -87,23 +91,25 @@ R30_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         1,
     ),
     # M245：M-29-5 污点登记条件杀死 ⇒ `_w = Path('y').write_text` 不再登记
-    # ⇒ `_w` 经工厂实参洗白逃逸 ⇒ hooks 变空判别。
+    # ⇒ `_w` 经工厂实参洗白逃逸 ⇒ hooks 变空判别。（第三十二轮评审 F3
+    # 第二次重锚：登记条件改为 `_sinkTaintSpread` 子树传播，判别不变。）
     (
         "M245",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "                    and assignValue.attr in _DENIED_CALL_ATTRS",
-        "                    and False",
+        "                    if spreadValue is not None and _sinkTaintSpread(spreadValue, sinkTainted):",
+        "                    if False and _sinkTaintSpread(spreadValue, sinkTainted):",
         (_ROUND30_DENY + "[sink_alias_launder]"),
         1,
     ),
     # M246：H-29-1 Attribute 未知接收者臂实参检查杀死 ⇒
-    # `functools.reduce(_f, [0])` 放行 ⇒ hooks 变空判别。
+    # `functools.reduce(_f, [0])` 放行 ⇒ hooks 变空判别。（第三十二轮评审
+    # F1 重锚：签名加 fnBindings 形参，判别不变。）
     (
         "M246",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "                            executorProblem = _callableArgProblem(node, effAliases)",
+        "                            executorProblem = _callableArgProblem(node, effAliases, fnBindings)",
         "                            executorProblem = None",
         (_ROUND30_DENY + "[executor_functools_reduce]"),
         1,

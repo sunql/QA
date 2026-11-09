@@ -190,15 +190,19 @@ R18_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         1,
     ),
     # H-2：装饰器经类成员执行方法体（`@D.deco` 装饰在 import 期运行）；
-    # 成员解析被关 ⇒ decorator_class_member fixture 红。（第二十二轮重锚：
-    # _decoratorMember 改带 classAliases/ambiguity 参数后旧行消失；锚 helper
-    # 的解析 return（dec.attr 实参全文件唯一），死一处=死两处。）
+    # 成员解析被关 ⇒ decorator_class_member fixture 红。（第三十二轮重锚：
+    # F4 重构后解析 return 双站点同文 ⇒ 单行锚不再是唯一；改锚 F4C 路径
+    #（`@C.deco` base 为 Name 的解析落点）3 行上下文，count=1。）
     (
         "M150",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "            return _classMember(cls, dec.attr, callTargets, ambiguity)",
-        "            return None",
+        "    if cls is not None:\n"
+        "        return _classMember(cls, dec.attr, callTargets, ambiguity)\n"
+        "    return None",
+        "    if cls is not None:\n"
+        "        return None\n"
+        "    return None",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[decorator_class_member]"),
         1,
     ),

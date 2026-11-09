@@ -1,4 +1,4 @@
-"""CI 判据守卫的**变异清单**（纯数据，245 组 = 核心批 + N6 批 + 第四/五轮批 + 第六–九轮复审批 + 第十二轮收口批 + 第十三/十四轮收口批 + 第十五/十六轮收口批 + 第十八轮收口批 + 第二十轮收口批）。
+"""CI 判据守卫的**变异清单**（纯数据，278 组 = 核心批 + N6 批 + 第四/五轮批 + 第六–九轮复审批 + 第十二轮收口批 + 第十三/十四轮收口批 + 第十五/十六轮收口批 + 第十八轮收口批 + 第二十轮收口批 + 第三十轮修复批 + 第三十二轮修复批）。
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
@@ -17,7 +17,7 @@ M1–M36（继承批 + 模块拆分批 + workflow 批 + 净变更批）在 `ci_m
 
 用法（在仓库根或任意子目录执行均可，脚本按自身位置自动定位仓库根）：
 
-    python3 backend/scripts/ci_mutation_evidence.py            # 全部 245 组
+    python3 backend/scripts/ci_mutation_evidence.py            # 全部 278 组
     python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 """
 
@@ -34,12 +34,13 @@ from scripts.ci_mutation_cases_r24 import R24_MUTATIONS
 from scripts.ci_mutation_cases_r26 import R26_MUTATIONS
 from scripts.ci_mutation_cases_r28 import R28_MUTATIONS
 from scripts.ci_mutation_cases_r30 import R30_MUTATIONS
+from scripts.ci_mutation_cases_r32 import R32_MUTATIONS
 
 # (编号, 作用域, 文件, 原文, 变异后, 期望转红的用例, occurrence)
 MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = (
     MUTATIONS_CORE + R14_MUTATIONS + R16_MUTATIONS + R18_MUTATIONS + R20_MUTATIONS
     + R21_MUTATIONS + R23_MUTATIONS + R24_MUTATIONS + R26_MUTATIONS
-    + R28_MUTATIONS + R30_MUTATIONS + [
+    + R28_MUTATIONS + R30_MUTATIONS + R32_MUTATIONS + [
 
     # ---------- M37–M55：2026-11-07 N6「判定集合必须落在两次 run 实际跑的树上」批 ----------
     #
@@ -548,8 +549,8 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = (
         "M69",
         "backend",
         "app/utils/ci_surface.py",
-        # 第十四次重锚（第三十轮）：新增 `_r30` 批后 pattern 行随之加宽。
-        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30)?)\\.py$",',
+        # 第十五次重锚（第三十二轮）：新增 `_r32` 批后 pattern 行随之加宽。
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r32)?)\\.py$",',
         'r"^backend/scripts/ci_mutation_(?:evidence|cases)\\.py$",',
         (
             "app/tests/unit/test_ci_surface.py::"

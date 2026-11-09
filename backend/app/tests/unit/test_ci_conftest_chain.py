@@ -295,9 +295,11 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
     ),
     # H-3：调用式改类（第二十轮重锚：`type.__setattr__` 根条目被第十九轮的
     # `__setattr__` 禁段 supersede ⇒ 纯纵深防御无独占判别点，改钉 `setattr`
-    # 裸名根——不带 dunder 段、且顶层表达式规则不适用（赋值形态））
+    # 裸名根——不带 dunder 段、且顶层表达式规则不适用（赋值形态）。
+    # 第三十二轮收独占：实参原为本地类 B ⇒ F1 实参臂（localClasses 成员
+    # 资格链）与之双保护 ⇒ 改传内建 `int`，deny 只剩 setattr 根臂，M131 恢复独占）
     "builtin_setattr_call": (
-        "class B:\n    pass\n\n_r = setattr(B, '__init_subclass__', None)\n"
+        "_r = setattr(int, '__init_subclass__', None)\n"
     ),
     # H-4：被跳过的函数体经模块级调用执行
     "called_def": "import sys\ndef m():\n    sys.path.insert(0, 'x')\n\n_x = m()\n",
@@ -370,8 +372,10 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
     ),
     # HIGH-2：就地运算符作用于本地类实例（__iadd__ 隐式 dunder）
     "augassign_local_instance": "import sys\nclass X:\n    pass\n\n_x = X()\n_x += 1\n",
-    # HIGH-2：模块级三参 type() 动态建类（dict 里的可调用体追不完 ⇒ fail-closed）
-    "type_three_arg": "def hook(self):\n    pass\n\nX = type('X', (), {'__init__': hook})\n",
+    # HIGH-2：模块级三参 type() 动态建类（import 期动态建类 ⇒ fail-closed。
+    # 第三十二轮收独占：原 dict 值引用 callTargets 里的 hook ⇒ F1 实参臂
+    # 双保护 ⇒ 改惰性 dict，deny 只剩三参 type 臂，M144 恢复独占）
+    "type_three_arg": "X = type('X', (), {'a': 1})\n",
     # HIGH-2：类体描述符赋值触发 __set_name__（`attr = D()`；被类创建钩子 def
     # 形态检查抓住 —— setter 扫描分支纯纵深防御，无独占判别点，见 M147 注）
     "set_name_via_descriptor": (
@@ -452,13 +456,12 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
         "    model_rebuild = staticmethod(evil)\n"
         "Y.model_rebuild()\n"
     ),
-    # HIGH-4：type() 三参别名（_t = type 绕过真名判定）
+    # HIGH-4：type() 三参别名（_t = type 绕过真名判定。第三十二轮收独占：
+    # 原 dict 值引用 hook（callTargets）⇒ F1 实参臂双保护 ⇒ 改惰性 dict，
+    # deny 只剩 typeAliases 三参臂，M160 恢复独占）
     "type_alias_three_arg": (
-        "import sys\n"
-        "def hook(self):\n"
-        "    sys.path.insert(0, 'x')\n"
         "_t = type\n"
-        "X = _t('X', (), {'__init__': hook})\n"
+        "X = _t('X', (), {'a': 1})\n"
         "_x = X()\n"
     ),
     # HIGH-5：条件重定义 ⇒ 被调解析有歧义
@@ -520,14 +523,16 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
         "if _x:\n"
         "    pass\n"
     ),
-    # MEDIUM-3：实例作为调用实参 ⇒ __iter__/__len__ 等协议方法
+    # MEDIUM-3：实例作为调用实参 ⇒ __iter__/__len__ 等协议方法。
+    # 第三十二轮收独占：`list(X())` 形态被 F1 实参臂（callTargets 实例
+    # 绑定/localClasses）双保护 ⇒ 改包裹型内建 `staticmethod(_x)`——F1
+    # 白名单对包裹型内建放行（惰性包装不执行实参），实例臂成为唯一 deny
+    # ⇒ M166 恢复独占（双向模拟：基线拒、杀臂后 0 hooks）
     "instance_as_arg": (
-        "import sys\n"
         "class X:\n"
-        "    def __iter__(self):\n"
-        "        sys.path.insert(0, 'x')\n"
-        "        return iter(())\n"
-        "_r = list(X())\n"
+        "    pass\n"
+        "_x = X()\n"
+        "_r = staticmethod(_x)\n"
     ),
     # MEDIUM-4：PEP 562 __getattr__ 经元组解包绑定
     "pep562_tuple_unpack": "__getattr__, _x = (lambda name: [], 1)\n",
@@ -554,12 +559,12 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
         "def f9():\n    sys.path.insert(0, 'x')\n"
         "_x = f1()\n"
     ),
-    # MEDIUM-5：sys.meta_path 安装 import 钩子
+    # MEDIUM-5：sys.meta_path 安装 import 钩子（第三十二轮收独占：原实参
+    # `F()` 本地类实例化 ⇒ F1 实参臂双保护 ⇒ 改 `object()`，deny 只剩
+    # meta_path 禁段臂，M171 恢复独占）
     "meta_path_install": (
         "import sys\n"
-        "class F:\n"
-        "    pass\n"
-        "_r = sys.meta_path.insert(0, F())\n"
+        "_r = sys.meta_path.insert(0, object())\n"
     ),
     # MEDIUM-3：实例属性读 ⇒ @property getter
     "instance_property_read": (
@@ -734,12 +739,13 @@ _EVIL_POSITION_SOURCES: dict[str, str] = {
         "            sys.path.insert(0, 'x')\n"
         "_x = X()\n"
     ),
-    # H7：type 别名链（_u = _t，_t = type）
+    # H7：type 别名链（_u = _t，_t = type。第三十二轮收独占：原 dict 值是
+    # lambda ⇒ F1 实参臂双保护 ⇒ 改惰性 dict，deny 只剩别名链臂，M190 恢复独占）
     "type_alias_chain": (
         "import sys\n"
         "_t = type\n"
         "_u = _t\n"
-        "X = _u('X', (), {'m': lambda s: sys.path.insert(0, 'x')})\n"
+        "X = _u('X', (), {'m': 1})\n"
     ),
     # H8：类体 with 作用于本地类实例（__enter__/__exit__）
     "class_body_with_instance": (
@@ -2027,6 +2033,614 @@ def test_round30_inert_callable_registration_forms_pass(tmp_path: Path, case: st
     """H-29-1 白名单的五条注册惯例必须仍然放行（新 deny 臂零误报）。"""
     path = tmp_path / "m.py"
     path.write_text(_CLEAN_R30_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    assert hooks == (), f"{case} 被误报：{hooks}"
+
+
+# ---------- 第三十二轮评审修复批：R32 攻击构造（探针先行，修复前 30 形态全部逃逸） ----------
+# F1：外部执行器实参的来源变换（属性链/星号/字典展开/下标/条件表达式/嵌套类
+# 成员/本地类本身/fn 作用域 def/类）；F1C：本地被调的参数通道；F2：sink
+# Attribute 作实参；F3：sink 污点传播缺口（别名/条件/元组/海象/for/with）；
+# F4：fn-local 装饰器解析残留（类别名/嵌套链/模块别名遮蔽）；F5：fn 作用域
+# 绑定登记缺口（fn-local def/类、模块 def/类的 fn 别名、IIFE 别名）；F6：
+# 白名单洗白（staticmethod/classmethod 结果调用、fn 作用域遮蔽链根、模块级
+# import 名重绑定）。全部形态修复前探针实测 0 hooks（逃逸）。
+_EVIL_R32_SOURCES: dict[str, str] = {
+    # --- F1：实参来源变换（外部执行器 list(map(...))） ---
+    "f1_local_class_member_arg": (
+        "import sys\n"
+        "class _C:\n"
+        "    @staticmethod\n"
+        "    def _f(x):\n"
+        "        sys.path.insert(0, 'X')\n"
+        "_r = list(map(_C._f, [0]))\n"
+    ),
+    "f1_class_alias_member_arg": (
+        "import sys\n"
+        "class _C:\n"
+        "    @staticmethod\n"
+        "    def _f(x):\n"
+        "        sys.path.insert(0, 'X')\n"
+        "_c = _C\n"
+        "_r = list(map(_c._f, [0]))\n"
+    ),
+    "f1_local_class_obj_arg": (
+        "import sys\n"
+        "class _C:\n"
+        "    def __init__(self):\n"
+        "        sys.path.insert(0, 'X')\n"
+        "_r = list(map(_C, [0]))\n"
+    ),
+    "f1_class_alias_obj_arg": (
+        "import sys\n"
+        "class _C:\n"
+        "    def __init__(self):\n"
+        "        sys.path.insert(0, 'X')\n"
+        "_c = _C\n"
+        "_r = list(map(_c, [0]))\n"
+    ),
+    "f1_starred": (
+        "import sys\n"
+        "def _f(_):\n"
+        "    sys.path.insert(0, 'X')\n"
+        "    return _\n"
+        "_r = list(map(*[_f, [0]]))\n"
+    ),
+    "f1_kwargs_dict": (
+        "import sys\n"
+        "def _f(_):\n"
+        "    sys.path.insert(0, 'X')\n"
+        "    return _\n"
+        "_r = sorted([0], **{'key': _f})\n"
+    ),
+    "f1_subscript": (
+        "import sys\n"
+        "def _f(_):\n"
+        "    sys.path.insert(0, 'X')\n"
+        "    return _\n"
+        "_r = list(map([_f][0], [0]))\n"
+    ),
+    "f1_ifexp": (
+        "import sys\n"
+        "def _f(_):\n"
+        "    sys.path.insert(0, 'X')\n"
+        "    return _\n"
+        "_r = list(map((_f if True else None), [0]))\n"
+    ),
+    "f1_nested_class_member": (
+        "import sys\n"
+        "class _O:\n"
+        "    class _I:\n"
+        "        @staticmethod\n"
+        "        def _f(x):\n"
+        "            sys.path.insert(0, 'X')\n"
+        "_r = list(map(_O._I._f, [0]))\n"
+    ),
+    "f1_fn_local_def": (
+        "import sys\n"
+        "def _o():\n"
+        "    def _f(_):\n"
+        "        sys.path.insert(0, 'X')\n"
+        "        return _\n"
+        "    _r = list(map(_f, [0]))\n"
+        "    return _r\n"
+        "_r = _o()\n"
+    ),
+    "f1_fn_local_class": (
+        "import sys\n"
+        "def _o():\n"
+        "    class _C:\n"
+        "        def __init__(self):\n"
+        "            sys.path.insert(0, 'X')\n"
+        "    _r = list(map(_C, [0]))\n"
+        "    return _r\n"
+        "_r = _o()\n"
+    ),
+    # --- F1C：参数通道（fn-body 调用形态；模块级裸调用被顶层表达式规则拦，
+    # 不能当参数通道判别点——判别点独占） ---
+    "param_channel_module_def": (
+        "import sys\n"
+        "def _f(_):\n"
+        "    sys.path.insert(0, 'X')\n"
+        "    return _\n"
+        "def _run(cb):\n"
+        "    list(map(cb, [0]))\n"
+        "def _o():\n"
+        "    _run(_f)\n"
+        "_r = _o()\n"
+    ),
+    "param_channel_fn_local_def": (
+        "import sys\n"
+        "def _o():\n"
+        "    def _f(_):\n"
+        "        sys.path.insert(0, 'X')\n"
+        "        return _\n"
+        "    def _run(cb):\n"
+        "        list(map(cb, [0]))\n"
+        "    _run(_f)\n"
+        "_r = _o()\n"
+    ),
+    "param_channel_sink_fn_body": (
+        "from pathlib import Path\n"
+        "def _run(cb):\n"
+        "    cb()\n"
+        "def _o():\n"
+        "    _run(Path('/tmp/n6_r32_pc_sink').unlink)\n"
+        "_r = _o()\n"
+    ),
+    # --- F2：sink Attribute 作实参 ---
+    "f2_map_write_text": (
+        "from pathlib import Path\n"
+        "P = '/tmp/n6_r32_f2_map'\n"
+        "_r = list(map(Path(P).write_text, ['PAYLOAD']))\n"
+    ),
+    "f2_map_unlink": (
+        "from pathlib import Path\n"
+        "P = '/tmp/n6_r32_f2_unlink'\n"
+        "_r = list(map(Path(P).unlink, [P]))\n"
+    ),
+    "f2_sorted_key_sink": (
+        "from pathlib import Path\n"
+        "P = '/tmp/n6_r32_f2_sorted'\n"
+        "_r = sorted(['a'], key=Path(P).write_text)\n"
+    ),
+    # --- F3：sink 污点传播缺口 ---
+    "f3_one_hop_alias": (
+        "from typing import cast\n"
+        "from pathlib import Path\n"
+        "_w = Path('/tmp/n6_r32_f3_alias').unlink\n"
+        "_w2 = _w\n"
+        "_r = cast(int, _w2)()\n"
+    ),
+    "f3_ifexp_binding": (
+        "from typing import cast\n"
+        "from pathlib import Path\n"
+        "P = '/tmp/n6_r32_f3_ifexp'\n"
+        "_w = Path(P).unlink if True else None\n"
+        "_r = cast(int, _w)()\n"
+    ),
+    "f3_tuple_unpack": (
+        "from typing import cast\n"
+        "from pathlib import Path\n"
+        "P = '/tmp/n6_r32_f3_tuple'\n"
+        "_a, _w = 1, Path(P).unlink\n"
+        "_r = cast(int, _w)()\n"
+    ),
+    "f3_named_expr": (
+        "from typing import cast\n"
+        "from pathlib import Path\n"
+        "P = '/tmp/n6_r32_f3_named'\n"
+        "_w = (_x := Path(P).unlink)\n"
+        "_r = cast(int, _x)()\n"
+    ),
+    "f3_for_target": (
+        "from typing import cast\n"
+        "from pathlib import Path\n"
+        "P = '/tmp/n6_r32_f3_for'\n"
+        "for _w in [Path(P).unlink]:\n"
+        "    _r = cast(int, _w)()\n"
+    ),
+    "f3_with_target": (
+        "from typing import cast\n"
+        "from pathlib import Path\n"
+        "P = '/tmp/n6_r32_f3_with'\n"
+        "with Path(P).unlink as _w:\n"
+        "    _r = cast(int, _w)()\n"
+    ),
+    "f3_map_tainted": (
+        "from pathlib import Path\n"
+        "P = '/tmp/n6_r32_f3_map'\n"
+        "_w = Path(P).unlink\n"
+        "_w2 = _w\n"
+        "_r = list(map(_w2, [P]))\n"
+    ),
+    # --- F4：fn-local 装饰器解析残留 ---
+    "f4_class_alias_decorator": (
+        "import sys\n"
+        "def _o():\n"
+        "    class _C:\n"
+        "        @staticmethod\n"
+        "        def deco(fn):\n"
+        "            sys.path.insert(0, 'X')\n"
+        "            return fn\n"
+        "    _D = _C\n"
+        "    @_D.deco\n"
+        "    def g():\n"
+        "        pass\n"
+        "    return g\n"
+        "_r = _o()\n"
+    ),
+    "f4_nested_class_chain_decorator": (
+        "import sys\n"
+        "def _o():\n"
+        "    class _C:\n"
+        "        class _D:\n"
+        "            @staticmethod\n"
+        "            def deco(fn):\n"
+        "                sys.path.insert(0, 'X')\n"
+        "                return fn\n"
+        "    @_C._D.deco\n"
+        "    def g():\n"
+        "        pass\n"
+        "    return g\n"
+        "_r = _o()\n"
+    ),
+    "f4_module_alias_shadows_fn_local": (
+        "import sys\n"
+        "class _M:\n"
+        "    @staticmethod\n"
+        "    def deco(fn):\n"
+        "        return fn\n"
+        "_C = _M\n"
+        "def _o():\n"
+        "    class _C:\n"
+        "        @staticmethod\n"
+        "        def deco(fn):\n"
+        "            sys.path.insert(0, 'X')\n"
+        "            return fn\n"
+        "    @_C.deco\n"
+        "    def g():\n"
+        "        pass\n"
+        "    return g\n"
+        "_r = _o()\n"
+    ),
+    # --- F5：fn 作用域绑定登记缺口 ---
+    "f5_alias_to_module_def": (
+        "import sys as s\n"
+        "def _g():\n"
+        "    s.path.insert(0, 'X')\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    _h = _g\n"
+        "    _h()\n"
+        "_r = _o()\n"
+    ),
+    "f5_alias_to_module_class": (
+        "import sys as s\n"
+        "class _Mc:\n"
+        "    def __init__(self):\n"
+        "        s.path.insert(0, 'X')\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    _X = _Mc\n"
+        "    _X()\n"
+        "_r = _o()\n"
+    ),
+    "f5_iife_alias": (
+        "import sys as s\n"
+        "def _g():\n"
+        "    s.path.insert(0, 'X')\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    _h = _g\n"
+        "    _r = (lambda: _h())()\n"
+        "    return _r\n"
+        "_r = _o()\n"
+    ),
+    "f5_fn_local_def_call": (
+        "import sys\n"
+        "def _o():\n"
+        "    def _f():\n"
+        "        sys.path.insert(0, 'X')\n"
+        "    _f()\n"
+        "_r = _o()\n"
+    ),
+    # --- F6：白名单洗白 ---
+    "f6_staticmethod_result_call": (
+        "import sys\n"
+        "def _f():\n"
+        "    sys.path.insert(0, 'X')\n"
+        "_r = staticmethod(_f)\n"
+        "_res = _r()\n"
+    ),
+    "f6_staticmethod_dunder_func": (
+        "import sys\n"
+        "def _f():\n"
+        "    sys.path.insert(0, 'X')\n"
+        "_r = staticmethod(_f)\n"
+        "_res = _r.__func__()\n"
+    ),
+    "f6_classmethod_dunder_func": (
+        "import sys\n"
+        "def _f(_):\n"
+        "    sys.path.insert(0, 'X')\n"
+        "class _K:\n"
+        "    pass\n"
+        "_r = classmethod(_f)\n"
+        "_res = _r.__func__(_K)\n"
+    ),
+    "f6_fn_local_shadow_chain_root": (
+        "import sys\n"
+        "import pydantic as pd\n"
+        "class _E:\n"
+        "    def Field(self, x):\n"
+        "        x()\n"
+        "def _o():\n"
+        "    pd = _E()\n"
+        "    def _f():\n"
+        "        sys.path.insert(0, 'X')\n"
+        "    _res = pd.Field(_f)\n"
+        "_r = _o()\n"
+    ),
+    "f6_module_rebind_chain_root": (
+        "import sys\n"
+        "class _E:\n"
+        "    def Field(self, x):\n"
+        "        x()\n"
+        "pydantic = _E()\n"
+        "def _f():\n"
+        "    sys.path.insert(0, 'X')\n"
+        "_res = pydantic.Field(_f)\n"
+    ),
+    # F6 独占判别：链根重绑定为**常量**（不进 instanceVars/opaque，只有
+    # reboundImports 拦）⇒ M263 杀 reboundImports 校验 ⇒ 白名单放行 ⇒
+    # 逃逸。（f6_module_rebind_chain_root 的 `pydantic = _E()` 同时进
+    # instanceVars + reboundImports，双重防线，不设独占变异——防御纵深。）
+    "f6_module_rebind_constant": (
+        "import sys\n"
+        "import pydantic as pd\n"
+        "pd = 'x'\n"
+        "def _f():\n"
+        "    sys.path.insert(0, 'X')\n"
+        "_res = pd.Field(_f)\n"
+    ),
+    # F7（第三十一轮复审 MEDIUM）：scanCallee 各落点站点的判别 fixture——
+    # 每个 fixture 的 deny 只出自**独占站点**（模拟变异实证：站点回退成
+    # threading ⇒ 调用方 `import json as s` 遮蔽 `import sys as s` ⇒ 逃逸
+    # ⇒ 判红；见 /tmp 探针与 r32 变异文件注释）。scope_mask_module_def /
+    # scope_mask_module_class / scope_mask_class_alias（M242/M269/M270 的
+    # 判别）在 R30 块；这里补齐其余非冗余站点。
+    "sm_instance_call": (
+        "import sys as s\n"
+        "class _M:\n"
+        "    def __call__(self):\n"
+        "        s.path.insert(0, 'X')\n"
+        "_x = _M()\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    _x()\n"
+        "_r = _o()\n"
+    ),
+    "sm_nested_class_hook": (
+        "import sys as s\n"
+        "class _O:\n"
+        "    class _I:\n"
+        "        def __init__(self):\n"
+        "            s.path.insert(0, 'X')\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    _O._I()\n"
+        "_r = _o()\n"
+    ),
+    "sm_decorator_instance": (
+        "import sys as s\n"
+        "class _M:\n"
+        "    def __call__(self, fn):\n"
+        "        s.path.insert(0, 'X')\n"
+        "        return fn\n"
+        "_x = _M()\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    @_x\n"
+        "    def g():\n"
+        "        pass\n"
+        "_r = _o()\n"
+    ),
+    "sm_decorator_class_alias": (
+        "import sys as s\n"
+        "class _M:\n"
+        "    def __init__(self):\n"
+        "        s.path.insert(0, 'X')\n"
+        "_ca = _M\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    @_ca\n"
+        "    def g():\n"
+        "        pass\n"
+        "_r = _o()\n"
+    ),
+    "sm_decorator_local_class": (
+        "import sys as s\n"
+        "class _Mc:\n"
+        "    def __init__(self):\n"
+        "        s.path.insert(0, 'X')\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    @_Mc\n"
+        "    def g():\n"
+        "        pass\n"
+        "_r = _o()\n"
+    ),
+    "sm_fn_class_alias_instantiation": (
+        "import sys\n"
+        "def _o():\n"
+        "    class _Mc:\n"
+        "        def __init__(self):\n"
+        "            sys.path.insert(0, 'x')\n"
+        "    _X = _Mc\n"
+        "    _X()\n"
+        "_r = _o()\n"
+    ),
+    "sm_fn_instance_call": (
+        "import sys\n"
+        "def _o():\n"
+        "    class _Mc:\n"
+        "        def __call__(self):\n"
+        "            sys.path.insert(0, 'x')\n"
+        "    _i = _Mc()\n"
+        "    _i()\n"
+        "_r = _o()\n"
+    ),
+    "scope_mask_fn_module_class_alias": (
+        "import sys as s\n"
+        "class _Mc:\n"
+        "    def __init__(self):\n"
+        "        s.path.insert(0, 'x')\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    _X = _Mc\n"
+        "    _X()\n"
+        "_r = _o()\n"
+    ),
+    "scope_mask_fn_module_def_alias": (
+        "import sys as s\n"
+        "def _g():\n"
+        "    s.path.insert(0, 'x')\n"
+        "def _o():\n"
+        "    import json as s\n"
+        "    _h = _g\n"
+        "    _h()\n"
+        "_r = _o()\n"
+    ),
+    # F1C：成员解析落点的参数通道（`_c.method(_f)` 的 _f 经形参转交；
+    # 变异 M267 杀 memberParamProblem ⇒ 唯一 deny 线消失 ⇒ 逃逸）。
+    "param_channel_member_resolved": (
+        "import sys\n"
+        "class _C:\n"
+        "    def method(self, cb):\n"
+        "        list(map(cb, [0]))\n"
+        "_c = _C()\n"
+        "def _f(_):\n"
+        "    sys.path.insert(0, 'X')\n"
+        "    return _\n"
+        "_res = _c.method(_f)\n"
+    ),
+}
+
+# 文本归位：F1/F1C 实参形态必须由「调用实参携带本地可调用/lambda」精识臂
+# 接住；F2/F3 必须由「调用实参携带 sink 成员/污染绑定名」精识臂接住；
+# F4/F5 的被调扫描形态必须由「顶层引用 sys.path.insert」接住（钩子体被扫）；
+# F6 必须由「白名单工厂结果（延迟可调用）」精识臂接住。兜底线文本不能当
+# 判别点（同 r30 规矩）。
+_EVIL_R32_EXPECTED_TEXT: dict[str, str] = {
+    "f1_local_class_member_arg": "调用实参携带本地可调用",
+    "f1_class_alias_member_arg": "调用实参携带本地可调用",
+    "f1_local_class_obj_arg": "调用实参携带本地可调用",
+    "f1_class_alias_obj_arg": "调用实参携带本地可调用",
+    "f1_starred": "调用实参携带本地可调用",
+    "f1_kwargs_dict": "调用实参携带本地可调用",
+    "f1_subscript": "调用实参携带本地可调用",
+    "f1_ifexp": "调用实参携带本地可调用",
+    "f1_nested_class_member": "调用实参携带本地可调用",
+    "f1_fn_local_def": "调用实参携带本地可调用",
+    "f1_fn_local_class": "调用实参携带本地可调用",
+    "param_channel_module_def": "调用实参携带本地可调用",
+    "param_channel_fn_local_def": "调用实参携带本地可调用",
+    "param_channel_sink_fn_body": "调用实参携带 sink 成员",
+    "f2_map_write_text": "调用实参携带 sink 成员",
+    "f2_map_unlink": "调用实参携带 sink 成员",
+    "f2_sorted_key_sink": "调用实参携带 sink 成员",
+    "f3_one_hop_alias": "调用实参携带 sink 成员/污染绑定名",
+    "f3_ifexp_binding": "调用实参携带 sink 成员/污染绑定名",
+    "f3_tuple_unpack": "调用实参携带 sink 成员/污染绑定名",
+    "f3_named_expr": "调用实参携带 sink 成员/污染绑定名",
+    "f3_for_target": "调用实参携带 sink 成员/污染绑定名",
+    "f3_with_target": "调用实参携带 sink 成员/污染绑定名",
+    "f3_map_tainted": "调用实参携带 sink 成员/污染绑定名",
+    "f4_class_alias_decorator": "顶层引用 sys.path.insert",
+    "f4_nested_class_chain_decorator": "顶层引用 sys.path.insert",
+    "f4_module_alias_shadows_fn_local": "顶层引用 sys.path.insert",
+    "f5_alias_to_module_def": "顶层引用 sys.path.insert",
+    "f5_alias_to_module_class": "顶层引用 sys.path.insert",
+    "f5_iife_alias": "顶层引用 sys.path.insert",
+    "f5_fn_local_def_call": "顶层引用 sys.path.insert",
+    "f6_staticmethod_result_call": "白名单工厂结果（延迟可调用）被直接调用",
+    "f6_staticmethod_dunder_func": "白名单工厂结果（延迟可调用）被成员调用",
+    "f6_classmethod_dunder_func": "白名单工厂结果（延迟可调用）被成员调用",
+    "f6_fn_local_shadow_chain_root": "调用实参携带本地可调用",
+    "f6_module_rebind_chain_root": "调用实参携带本地可调用",
+    "f6_module_rebind_constant": "调用实参携带本地可调用",
+    # F7 站点 fixtures：deny = 钩子体被目标站点扫描（「顶层引用」）；
+    # param_channel_member_resolved = F1C 成员参数通道精识文本。
+    "sm_instance_call": "顶层引用 sys.path.insert",
+    "sm_nested_class_hook": "顶层引用 sys.path.insert",
+    "sm_decorator_instance": "顶层引用 sys.path.insert",
+    "sm_decorator_class_alias": "顶层引用 sys.path.insert",
+    "sm_decorator_local_class": "顶层引用 sys.path.insert",
+    "sm_fn_class_alias_instantiation": "顶层引用 sys.path.insert",
+    "sm_fn_instance_call": "顶层引用 sys.path.insert",
+    "scope_mask_fn_module_class_alias": "顶层引用 sys.path.insert",
+    "scope_mask_fn_module_def_alias": "顶层引用 sys.path.insert",
+    "param_channel_member_resolved": "调用实参携带本地可调用",
+}
+
+# 放行性反向锚：新 deny 臂引入后的惰性/注册/普通调用形态必须仍然 0 hooks
+#（误报 = 校准即炸；真实 76 文件闭包实测 0 hooks 是同方向的机器证据）。
+_CLEAN_R32_SOURCES: dict[str, str] = {
+    # fn 作用域 def/lambda 调用（无危险体）——F5 登记关闭后不得误伤
+    "clean_fn_local_helpers": (
+        "import sys\n"
+        "def _o():\n"
+        "    def _h(v):\n"
+        "        return v + 1\n"
+        "    return _h(1)\n"
+        "_r = _o()\n"
+    ),
+    # 延迟绑定但不调用（注册本身惰性）
+    "clean_deferred_uncalled": (
+        "import sys\n"
+        "def _f():\n"
+        "    return 1\n"
+        "_r = staticmethod(_f)\n"
+    ),
+    # 白名单注册 + 本地类成员（惰性注册，import 期不执行成员）
+    "clean_registration_with_local_member": (
+        "from pydantic import field_validator\n"
+        "class _C:\n"
+        "    @staticmethod\n"
+        "    def _f(v):\n"
+        "        return v\n"
+        "_r = field_validator('x')(_C._f)\n"
+    ),
+    # 模块级类别名实例化（干净钩子）
+    "clean_module_class_alias_instantiation": (
+        "class _Mc:\n"
+        "    def __init__(self):\n"
+        "        self.v = 1\n"
+        "_X = _Mc\n"
+        "_r = _X()\n"
+    ),
+    # import 别名做白名单链根（from-import as 形态）
+    "clean_import_alias_whitelist_root": (
+        "from sqlalchemy.orm import mapped_column as mc\n"
+        "from datetime import datetime\n"
+        "def _utcnow():\n"
+        "    return datetime.now()\n"
+        "class _M:\n"
+        "    created = mc(_utcnow)\n"
+    ),
+    # 外部纯函数经 fn 作用域（无本地可调用实参）
+    "clean_fn_map_no_local": (
+        "def _o():\n"
+        "    _r = list(map(str, [0]))\n"
+        "    return _r\n"
+        "_r = _o()\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_EVIL_R32_SOURCES))
+def test_round32_deny_rules_are_enforced(tmp_path: Path, case: str) -> None:
+    """第三十二轮评审修复的 deny 线逐形态钉住（全部探针实测逃逸后收口）。"""
+    path = tmp_path / "m.py"
+    path.write_text(_EVIL_R32_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    expectedText = _EVIL_R32_EXPECTED_TEXT[case]
+    assert any(expectedText in hook for hook in hooks), (
+        f"{case} 的拒绝文本没有归位到「{expectedText}」：{hooks}"
+        " ⇒ 精识 deny 臂失效（兜底线接住了）"
+    )
+
+
+@pytest.mark.parametrize("case", sorted(_CLEAN_R32_SOURCES))
+def test_round32_inert_forms_pass(tmp_path: Path, case: str) -> None:
+    """第三十二轮新 deny 臂的惰性/注册/普通调用形态必须仍然放行（零误报）。"""
+    path = tmp_path / "m.py"
+    path.write_text(_CLEAN_R32_SOURCES[case], encoding="utf-8")
 
     hooks = findImportTimeHooks(path)
 

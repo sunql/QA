@@ -218,6 +218,8 @@ def test_run_case_rejects_a_sibling_case_whose_name_only_extends_the_target(
     verdict, _ = ci_mutation_evidence.run_case(_CASE, {})
 
     assert verdict == "inconclusive", "同名兄弟用例失败被算成了这条守卫转红"
+
+
 def test_anchor_problem_accepts_an_exact_anchor() -> None:
     """`count == occurrence` 精确相等 ⇒ 无问题。"""
     assert ci_mutation_evidence.anchorProblem("a\nb\na", "a", 2) is None

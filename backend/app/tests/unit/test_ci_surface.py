@@ -214,6 +214,7 @@ def test_detectCiSurfaceChanges_flags_the_mutation_evidence_script() -> None:
         "backend/scripts/ci_mutation_cases_r26.py",
         "backend/scripts/ci_mutation_cases_r28.py",
         "backend/scripts/ci_mutation_cases_r30.py",
+        "backend/scripts/ci_mutation_cases_r32.py",
     ):
         flagged = ci_surface.detectCiSurfaceChanges((relPath,))
 
@@ -785,9 +786,9 @@ def test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_
     """**反向守卫**：真实存在的变异取证脚本必须被清单覆盖。
 
     与 `test_every_ci_tool_module_is_in_the_surface_list` 同款纪律 ——
-    逐个真实路径断言「必须被算进 CI 相关面」（⚠️ 本用例**不做**文件系统存在性
-    反查——那是 `test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_file`
-    的职责；这里钉的是清单 pattern 的接受面）。
+    逐个真实路径断言「必须被算进 CI 相关面」。本用例**同时**钉两件事：
+    ① pattern 的接受面（清单元组与真实文件逐一对上）；② 文件系统存在性
+    反查（清单里每个脚本在 `scripts/` 下真实存在 ⇒ 元组漏项/死项都会红）。
     （2026-11-08 第五轮安全评审 LOW-6：`cases_core` 拆出后这里曾漏 ——
     从 enum 里去掉 `|cases_core` 会让本用例红 ⇒ M69。）
     """
@@ -807,6 +808,7 @@ def test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_
         "backend/scripts/ci_mutation_cases_r26.py",
         "backend/scripts/ci_mutation_cases_r28.py",
         "backend/scripts/ci_mutation_cases_r30.py",
+        "backend/scripts/ci_mutation_cases_r32.py",
     ):
         assert (scriptsDir / Path(relPath).name).exists(), (
             f"变异取证脚本不在预期位置（{relPath}）⇒ 清单可能已经过期"

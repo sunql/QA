@@ -15,6 +15,12 @@
 - `ix_semantic_release_status`：按状态列举（发布列表页 / 巡检）。
 
 纯加法 DDL：只建新表，不触碰任何既有表。downgrade 仅删本表。
+
+**修订策略**：本迁移随 PR 一起落地、尚未在任何持久环境执行（生产仍在 0140），
+因此评审补的两条 CHECK 是**原地加在本 revision 里**的，不是新开迁移。
+一旦某个库已经 stamp 到 0142，`alembic upgrade head` 不再重放 ⇒ 那个库必须先
+DROP / 重建（测试库 `qa_metadata_test_semantic` 每次按此重建）。本 PR 合并后
+0142 冻结，再改约束必须新开迁移。
 """
 
 from __future__ import annotations
@@ -80,6 +86,16 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "status IN ('DRAFT','VALIDATED','ACTIVE','ARCHIVED')",
             name="ck_semantic_release_status",
+        ),
+        # 快照的形状/哈希格式在库侧钉死：绕过 ORM 的脚本写进 'null' / '[1,2]' /
+        # 任意 64 字符，会让"看起来已发布、回放时才炸"的坏快照落库。
+        sa.CheckConstraint(
+            "jsonb_typeof(manifest_json) = 'object'",
+            name="ck_semantic_release_manifest_is_object",
+        ),
+        sa.CheckConstraint(
+            "manifest_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_semantic_release_manifest_hash_sha256",
         ),
     )
 

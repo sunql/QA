@@ -99,6 +99,16 @@ class SemanticRelease(Base, TimestampMixin):
             "status IN ('DRAFT','VALIDATED','ACTIVE','ARCHIVED')",
             name="ck_semantic_release_status",
         ),
+        # 快照必须是 JSON 对象；哈希必须是 64 位小写十六进制。绕过 ORM 的写入
+        # 只能落进"看起来已发布、回放时才炸"的坏快照，库侧直接拒绝。
+        CheckConstraint(
+            "jsonb_typeof(manifest_json) = 'object'",
+            name="ck_semantic_release_manifest_is_object",
+        ),
+        CheckConstraint(
+            "manifest_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_semantic_release_manifest_hash_sha256",
+        ),
     )
 
     def __repr__(self) -> str:

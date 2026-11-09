@@ -143,6 +143,22 @@ def test_status_has_check_constraint_for_state_machine() -> None:
         assert status in sqlText, status
 
 
+def test_manifest_shape_check_constraints_declared() -> None:
+    """快照形状与哈希格式在 ORM 侧也必须声明（迁移 0142 与模型是两处）。
+
+    集成用例（真实 PG）证明的是**库侧行为**；这里钉住 ORM 侧声明，
+    否则 `alembic autogenerate` 会把这两条约束当成「DB 多余」提议删除。
+    """
+    checks = {
+        c.name: str(c.sqltext)
+        for c in SemanticRelease.__table__.constraints
+        if c.__class__.__name__ == "CheckConstraint"
+    }
+
+    assert "jsonb_typeof" in checks["ck_semantic_release_manifest_is_object"]
+    assert "0-9a-f" in checks["ck_semantic_release_manifest_hash_sha256"]
+
+
 def test_status_index_declared() -> None:
     """发布列表页 / 巡检按状态列举；索引漏声明会让 drift 报 extra_index。"""
     indexes = {ix.name: ix for ix in SemanticRelease.__table__.indexes}

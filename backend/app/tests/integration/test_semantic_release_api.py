@@ -292,3 +292,120 @@ async def test_tampered_snapshot_fails_closed(client: AsyncClient, dbSession: As
 
     with pytest.raises(SemanticReleaseIntegrityError):
         await client.get(f"{SEMANTIC_RELEASES_PATH}/active", headers=_ADMIN_HEADERS)
+
+
+# ---------------------------------------------------------------------------
+# 写路径（D10）：HTTP 层的状态码 / 响应包 / 错误映射 / 门禁
+# ---------------------------------------------------------------------------
+
+
+async def test_create_returns_201_operation_envelope(client: AsyncClient) -> None:
+    response = await client.post(
+        SEMANTIC_RELEASES_PATH,
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.10-http-1", "note": "评审预览"},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert set(body) == {"release", "blockers", "warnings"}
+    assert body["release"]["status"] == "DRAFT"
+    assert body["release"]["version"] == "2026.11.10-http-1"
+    assert body["release"]["note"] == "评审预览"
+    # 响应是 CamelModel：JSON 必须是 camelCase 且带哈希契约
+    assert len(body["release"]["manifestHash"]) == 64
+    assert response.headers["cache-control"] == "no-store"
+
+
+async def test_write_lifecycle_over_http(client: AsyncClient) -> None:
+    """四个 POST 端点走完整生命周期；激活后读路径立刻可见。"""
+    created = await client.post(
+        SEMANTIC_RELEASES_PATH, headers=_ADMIN_HEADERS, json={"version": "2026.11.10-http-life"}
+    )
+    assert created.status_code == 201
+    releaseId = created.json()["release"]["id"]
+
+    validated = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{releaseId}/validate", headers=_ADMIN_HEADERS
+    )
+    assert validated.status_code == 200
+    assert validated.json()["release"]["status"] == "VALIDATED"
+    assert validated.json()["blockers"] == []
+
+    activated = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{releaseId}/activate", headers=_ADMIN_HEADERS
+    )
+    assert activated.status_code == 200
+    assert activated.json()["release"]["status"] == "ACTIVE"
+
+    active = await client.get(f"{SEMANTIC_RELEASES_PATH}/active", headers=_ADMIN_HEADERS)
+    assert active.status_code == 200
+    assert active.json()["id"] == releaseId
+
+    archived = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{releaseId}/archive", headers=_ADMIN_HEADERS
+    )
+    assert archived.status_code == 200
+    assert archived.json()["release"]["status"] == "ARCHIVED"
+
+    noActive = await client.get(f"{SEMANTIC_RELEASES_PATH}/active", headers=_ADMIN_HEADERS)
+    assert noActive.status_code == 200
+    assert noActive.json() is None
+
+
+async def test_write_errors_map_to_domain_status_codes(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """409 / 404 / 422 必须是领域错误包（`error`），不是 FastAPI 的 `detail`。"""
+    await _insertRelease(dbSession, version="2026.11.10-http-dup")
+
+    duplicate = await client.post(
+        SEMANTIC_RELEASES_PATH, headers=_ADMIN_HEADERS, json={"version": "2026.11.10-http-dup"}
+    )
+    assert duplicate.status_code == 409
+    assert "error" in duplicate.json()
+
+    missing = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/999999/validate", headers=_ADMIN_HEADERS
+    )
+    assert missing.status_code == 404
+    assert "error" in missing.json()
+
+    badDomain = await client.post(
+        SEMANTIC_RELEASES_PATH,
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.10-http-dom", "domainCode": "NO_SUCH_DOMAIN"},
+    )
+    assert badDomain.status_code == 422
+    assert "error" in badDomain.json()
+
+    invalidId = await client.post(f"{SEMANTIC_RELEASES_PATH}/0/validate", headers=_ADMIN_HEADERS)
+    assert invalidId.status_code == 422
+
+
+async def test_http_illegal_transition_is_409(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    row = await _insertRelease(dbSession, version="2026.11.10-http-act", status="ACTIVE")
+
+    response = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/validate", headers=_ADMIN_HEADERS
+    )
+
+    assert response.status_code == 409
+    assert "error" in response.json()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        SEMANTIC_RELEASES_PATH,
+        f"{SEMANTIC_RELEASES_PATH}/1/validate",
+        f"{SEMANTIC_RELEASES_PATH}/1/activate",
+        f"{SEMANTIC_RELEASES_PATH}/1/archive",
+    ],
+)
+async def test_write_routes_are_forbidden_for_non_admin(client: AsyncClient, path: str) -> None:
+    response = await client.post(path, headers=_USER_HEADERS, json={"version": "x"})
+
+    assert response.status_code == 403

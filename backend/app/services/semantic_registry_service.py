@@ -141,7 +141,7 @@ class SemanticRegistry:
         self, session: AsyncSession, *, domainCode: str | None = None
     ) -> SemanticReleaseSnapshot | None:
         """取当前激活快照；没有则返回 `None`（未发布是正常状态，不是错误）。"""
-        _validateDomainCode(domainCode)
+        validateDomainCode(domainCode)
 
         now = _monotonic()
         cached = self._activeCache.get(domainCode)
@@ -238,7 +238,8 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
-def _validateDomainCode(domainCode: str | None) -> None:
+def validateDomainCode(domainCode: str | None) -> None:
+    """写路径（D10）与读路径共用的域编码契约。"""
     if domainCode is None:
         return
     if not isinstance(domainCode, str) or not (1 <= len(domainCode) <= _MAX_DOMAIN_CODE_LENGTH):
@@ -254,7 +255,7 @@ def _validateListDomainCode(domainCode: Any) -> None:
     而同一个值打到 `/active` 却 422 —— 同一个参数在两条路径上契约必须一致。
     """
     if domainCode is not _UNSET:
-        _validateDomainCode(domainCode)
+        validateDomainCode(domainCode)
 
 
 def _validateStatus(status: str | None) -> None:
@@ -322,6 +323,14 @@ def _toSnapshot(row: SemanticRelease) -> SemanticReleaseSnapshot:
         activated_time=row.activated_time,
         _manifestJson=canonical,
     )
+
+
+def verifySnapshotIntegrity(row: SemanticRelease) -> SemanticReleaseSnapshot:
+    """写路径（D10）共用：状态迁移前重新校验哈希与体量。
+
+    与读路径同一个实现 —— 两套校验迟早出现「读拒绝、写放行」。
+    """
+    return _toSnapshot(row)
 
 
 def _toSummary(row: Any) -> SemanticReleaseSummary:

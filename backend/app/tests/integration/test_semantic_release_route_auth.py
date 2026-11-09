@@ -1,4 +1,4 @@
-"""语义发布只读 API 的装配 + 门禁回归网（feature-scoped route-auth guard）。
+"""语义发布 API（读 + 写）的装配 + 门禁回归网（feature-scoped route-auth guard）。
 
 背景：本特性的路由由 `main.py` 与 `tests/_testapp.py` **两处手工装配**，而 API
 集成测试全部走 `_testapp.py`。若哪天从 `main.py` 删掉 `Depends(requireAdmin)`
@@ -6,10 +6,11 @@
 
 本文件直接构建**生产 app**（`app.main.createApp()`），钉三件事：
 
-1. 开关开启时路由集合恰好 3 条（集合相等：漏/多/改名都会红，空集必然不等）；
+1. 开关开启时路由集合恰好 7 条（3 条读 + 4 条写；集合相等：漏/多/改名都会红，
+   空集必然不等）；
 2. 每条路由的依赖链里同时声明了 `requireAdmin` 与 `getCurrentUser`
    （后者由前者间接引入，但两条都断言：删掉任一层都要红）；
-3. 开关关闭时这 3 条路由一条都不注册（404 的前提）。
+3. 开关关闭时这 7 条路由一条都不注册（404 的前提）。
 
 反向断言（探测器不恒真）：公开路由 `/api/v1/health` 必须被判为「无 admin 门禁」。
 路由树展开与依赖链探测复用 `test_agent_orchestration_route_auth.py` 的实现
@@ -33,6 +34,10 @@ _EXPECTED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", _PREFIX),
         ("GET", f"{_PREFIX}/active"),
         ("GET", f"{_PREFIX}/{{releaseId}}"),
+        ("POST", _PREFIX),
+        ("POST", f"{_PREFIX}/{{releaseId}}/validate"),
+        ("POST", f"{_PREFIX}/{{releaseId}}/activate"),
+        ("POST", f"{_PREFIX}/{{releaseId}}/archive"),
     }
 )
 
@@ -67,7 +72,7 @@ def _buildApp(monkeypatch: pytest.MonkeyPatch, *, enabled: bool) -> FastAPI:
         getSettings.cache_clear()
 
 
-def test_routes_are_exactly_the_expected_three(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_routes_are_exactly_the_expected_seven(monkeypatch: pytest.MonkeyPatch) -> None:
     routes = _semanticRoutes(_buildApp(monkeypatch, enabled=True))
 
     assert routes, "路由枚举为空——路由树结构变化会让本守卫空集通过"

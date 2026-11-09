@@ -90,7 +90,9 @@ R18_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
                 "                            for hook in _instantiationHooks(",
                 "                                localClasses[node.func.id], callTargets, instAmbiguity",
                 "                            ):",
-                "                                scanCallee(hook, depth + 1)",
+                # 第二十六轮评审 H-26-3 重锚：scanCallee 加了第三参
+                #（调用方作用域别名）⇒ 本锚末行同步补 `, aliasesMap)`。
+                "                                scanCallee(hook, depth + 1, aliasesMap)",
             ]
         ),
         # mut 只删钩子扫描循环、保留 instAmbiguity 声明——后续 `if instAmbiguity:`

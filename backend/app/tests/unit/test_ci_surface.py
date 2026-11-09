@@ -123,6 +123,12 @@ def test_round23_smuggling_path_classes_are_ci_surface() -> None:
         # 只被 `.so|pyd` pattern 命中 ⇒ M216 判别独占。
         "backend/app/utils/ci_conftest_chain.cpython-311-darwin.so",
         "backend/app/utils/ci_judge.pyd",
+        # 第二十六轮评审 H-26-5：pattern 泛化到 backend 全域——
+        # `backend/app/tests/_pg_support*.so` 在 conftest 收集前就被 import
+        #（conftest.py:102）⇒ payload 先于守卫执行；`backend/scripts/` 同理；
+        # `.abi3.so` 变体由同一 pattern 收口。
+        "backend/app/tests/_pg_support.cpython-311-darwin.so",
+        "backend/scripts/kpi_metric_db_guard.abi3.so",
     )
 
     flagged = ci_surface.detectCiSurfaceChanges(smuggled)

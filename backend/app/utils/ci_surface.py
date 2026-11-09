@@ -170,12 +170,14 @@ _CI_SURFACE_PATTERNS = (
     # `python -m app.utils.ci_shard` 先 import `app` / `app.utils` 并执行其
     # `__init__.py` ⇒ 在 shard 选择之前就能改写测试文件。
     r"^backend/app/utils/__init__\.py$",
-    # ⚠️ **原生扩展遮蔽**（第二十四轮评审 H-24-2，实测）：CPython import 顺序里
-    # EXT_SUFFIX（`.cpython-3xx-darwin.so` / `.pyd`）优先于同名 `.py` ⇒
-    # `backend/app/utils/ci_conftest_chain.so` 会遮蔽 `ci_conftest_chain.py`
-    # 被真正执行，而 `.py` 内容指纹完全失效。仓库当前无 `.so`，pattern 保持空集；
-    # 一旦出现即入面。
-    r"^backend/app/utils/[^/]+\.(?:so|pyd)$",
+    # ⚠️ **原生扩展遮蔽**（第二十四轮评审 H-24-2，实测；第二十六轮评审
+    # H-26-5 泛化到 backend 全域）：CPython import 顺序里 EXT_SUFFIX
+    #（`.cpython-3xx-darwin.so` / `.abi3.so` / `.pyd`）优先于同名 `.py` ⇒
+    # 任何目录里的 `ci_xxx.so` 都会遮蔽同名 `.py` 被真正执行，而 `.py`
+    # 内容指纹完全失效。第二十六轮泛化原因：`backend/app/tests/_pg_support*.so`
+    # 在 conftest 收集前就被 import（conftest.py:102）⇒ payload 先于守卫执行；
+    # `backend/scripts/` 同理。仓库当前无 `.so`，pattern 保持空集；一旦出现即入面。
+    r"^backend/.*\.(?:so|pyd)$",
     # ⚠️ **变异取证脚本**（2026-11-07 安全评审 MEDIUM-3）：
     # 它决定「哪些变异能转红」⇒ 改它就能让守卫**恒绿**（把「转红」判据改成
     # 「退出码非 0」即可 ⇒ 收集失败也算「转红」⇒ 取证全绿）
@@ -186,10 +188,12 @@ _CI_SURFACE_PATTERNS = (
     # 第十八轮收口批 `ci_mutation_cases_r18.py`，纯数据；
     # 第二十轮收口批 `ci_mutation_cases_r20.py`，纯数据；
     # 第二十二轮收口批 `ci_mutation_cases_r21.py`，纯数据；
-    # 第二十四轮收口批 `ci_mutation_cases_r23.py`，纯数据）
+    # 第二十四轮收口批 `ci_mutation_cases_r23.py`，纯数据；
+    # 第二十五轮收口批 `ci_mutation_cases_r24.py` 与第二十六轮收口批
+    # `ci_mutation_cases_r26.py`，纯数据）
     # 与跑者（`ci_mutation_evidence.py`）
     # **同族**：改清单可以把某组变异改成「改一个没人守的地方」⇒ 照样恒绿。
-    r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24)?)\.py$",
+    r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26)?)\.py$",
     # ⚠️ **测试库断言的依赖模块**（第六轮复审 LOW-1）：`_pg_support.assertTestDatabase`
     # （每个 DB 夹具都走）import 它的 `databaseNameOf` ⇒ 改它 = 改「测试必须连哪个库」
     # 的守卫口径 ⇒ 与测试基建同族。

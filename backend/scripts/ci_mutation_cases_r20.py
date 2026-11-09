@@ -212,8 +212,14 @@ R20_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M169",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        # 第二十五轮 C-24-1：预扫白名单收窄为 Name/Attribute/Call，锚随行更新
+        # 第二十五轮 C-24-1：预扫白名单收窄为 Name/Attribute/Call，锚随行更新。
+        # 第二十六轮重锚：scanCallee 里新增同判据臂（H-26-2，缩进更深）⇒ 单行
+        # 锚成其子串（count=2）⇒ occurrence=1 会杀错臂；带前导 for 行
+        #（12 空格缩进）唯一钉住模块级预扫臂。
+        "            for dec in stmt.decorator_list:\n"
         "                if not isinstance(dec, (ast.Name, ast.Attribute, ast.Call)):",
+        # mut 保留 for 头（锚跨两行 ⇒ mut 也要两行，否则 for 体悬空 IndentationError）
+        "            for dec in stmt.decorator_list:\n"
         "                if False:",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[lambda_decorator]"),
         1,

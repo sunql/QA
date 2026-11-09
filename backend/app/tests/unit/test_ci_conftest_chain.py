@@ -1416,9 +1416,40 @@ def test_analyzer_primitives_not_swapped_in_fresh_interpreter() -> None:
     `__module__`）⇒ 信任锚必须在**全新解释器**里重验——payload 没跑过、
     `__module__` 欺骗无意义。sitecustomize / conftest 级别的持久换假仍会
     在子进程里现形（那正是要抓的）。
+
+    第二十六轮评审 M-26-4 加固：子进程此前只验原始三件套，**没有 import
+    分析器、没有重跑守卫判定** ⇒ in-process 换假（同名函数提前进 `sys.modules`
+    / 改 `path.read_text` 返回干净源码）两道都过。现在子进程里真实 import
+    分析器并对合成 evil 源码跑 `findImportTimeHooks`，断言拒绝文本归位。
     """
     import subprocess
     import sys
+
+    backendRoot = str(Path(__file__).resolve().parents[3])
+    probe = (
+        "import pathlib, sys, tempfile\n"
+        f"sys.path.insert(0, {backendRoot!r})\n"
+        "from app.utils.ci_conftest_chain import findImportTimeHooks\n"
+        "src = (\n"
+        "    'import sys\\n'\n"
+        "    \"sys.path.insert(0, 'evil')\\n\"\n"
+        ")\n"
+        "tmp = pathlib.Path(tempfile.mkdtemp())\n"
+        "evil = tmp / 'evil_mod.py'\n"
+        "evil.write_text(src, encoding='utf-8')\n"
+        "hooks = findImportTimeHooks(evil)\n"
+        "assert hooks, 'fresh-interpreter analyzer flagged nothing ⇒ 换假生效'\n"
+        "assert any('sys.path' in h for h in hooks), hooks\n"
+        "print('BELT_OK')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, f"子进程失败：{proc.stderr}"
+    assert "BELT_OK" in proc.stdout, proc.stdout
 
     proc = subprocess.run(
         [
@@ -1534,11 +1565,16 @@ _CLEAN_R25_SOURCES: dict[str, str] = {
     "constant_replace": (
         "_r = 'a'.replace('a', 'b')\n"
     ),
-    # H-24-1 的反向锚：内层被调解析到**外部 import**（functools.partial）
-    # ⇒ 注册式豁免放行（真实闭包的同形态）。
+    # H-24-1 的反向锚：内层被调解析到**外部 import**（pydantic 注册式
+    # 惯用法，真实闭包 11 处互异行）⇒ 注册式豁免放行。
+    # ⚠️ 第二十六轮评审 H-26-1 后 `functools.partial(int)('2')` **不再是**
+    # 合法形态——通用可调用工厂能把任意 sink 绑进返回值 ⇒ 拒（evil fixture
+    # `nested_call_partial_factory` 钉住），反向锚换成 pydantic 注册式。
     "nested_call_external": (
-        "import functools\n"
-        "_r = functools.partial(int)('2')\n"
+        "from pydantic import field_validator\n"
+        "def _v(v):\n"
+        "    return v\n"
+        "_r = field_validator('x')(_v)\n"
     ),
     # C-24-1 的反向锚：外部模块属性工厂装饰器（functools.lru_cache）
     # ⇒ 解析到外部根 ⇒ 放行。
@@ -1586,3 +1622,144 @@ def test_round25_clean_forms_pass(tmp_path: Path, case: str) -> None:
     hooks = findImportTimeHooks(path)
 
     assert hooks == (), f"{case} 被误报：{hooks}"
+
+
+# ============================================================================
+# 第二十六轮评审修复（H-26-1..H-26-5 + M-26-1/M-26-2）的判别 fixtures。
+# 全部经探针实测：修复前 hooks == ()（逃逸实证），修复后拒绝文本归位。
+# ============================================================================
+
+_EVIL_R26_SOURCES: dict[str, str] = {
+    # H-26-1：通用可调用工厂——内层被调解析到 functools（外部 import）但
+    # 返回的是把任意可调用绑好的目标。变异 = 工厂条件死 ⇒ 放行（实参无
+    # sink ⇒ sink 臂接不住）⇒ hooks 变空。
+    "nested_call_partial_factory": (
+        "import functools\n"
+        "_r = functools.partial(int)('2')\n"
+    ),
+    # H-26-1：注册式豁免的实参里绑好 sink 成员引用（外层 Call 的实参子树，
+    # 探针实证逃逸）。变异 = sink 臂死 ⇒ 落「内层被调」兜底（文本不同）。
+    "nested_call_sink_arg": (
+        "from pydantic import field_validator\n"
+        "from pathlib import Path\n"
+        "_r = field_validator('x')(Path('y').unlink)\n"
+    ),
+    # H-26-2：被扫函数体内的嵌套 def 装饰器为动态表达式（IfExp）——模块级
+    # 预扫只管模块级 ⇒ 此前整段逃逸。变异 = 函数体臂死 ⇒ 完全放行
+    #（_decoratorMember 对 IfExp 不报歧义，探针实证）。
+    "fn_scope_dynamic_decorator": (
+        "import sys\n"
+        "def _mk():\n"
+        "    def _d(f):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return f\n"
+        "    return _d\n"
+        "def _o():\n"
+        "    @(_mk() if True else None)\n"
+        "    def g():\n"
+        "        pass\n"
+        "_r = _o()\n"
+    ),
+    # H-26-3：调用方作用域别名不进被调 fn-local 类方法的作用域映射 ⇒
+    # `flakes.hook = None`（fn 作用域 import 的项目接口换假）逃逸。变异 =
+    # 作用域映射退回旧形态（不带 enclosingAliases）⇒ hooks 变空。
+    "two_level_fn_scope_import": (
+        "def _o():\n"
+        "    from app.utils import flakes\n"
+        "    class _C:\n"
+        "        def __init__(self):\n"
+        "            flakes.hook = None\n"
+        "    _C()\n"
+        "_r = _o()\n"
+    ),
+    # H-26-4：fn 作用域的项目 import 遮蔽模块级外部同名别名——裸名装饰器
+    # 按模块级 aliases 解析 ⇒ 解析到 functools 放行（装饰期真实执行的是
+    # 项目 hook）。变异 = 解析退回 aliases ⇒ hooks 变空。
+    "fn_scope_project_decorator_shadow": (
+        "from functools import lru_cache as dec\n"
+        "def _o():\n"
+        "    from app.utils.flakes import hook as dec\n"
+        "    @dec\n"
+        "    def g():\n"
+        "        pass\n"
+        "    return g\n"
+        "_r = _o()\n"
+    ),
+    # M-26-1：相对导入只可能指向本仓库 ⇒ 按项目代码拒绝（此前 _aliasMap
+    # 静默跳过 ⇒ 根当外部放行）。变异 = __relative__ 出项目根元组 ⇒ 放行。
+    "relative_import_project_decorator": (
+        "from . import models\n"
+        "@models.deco\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    # M-26-2：四个此前无 fixture/无变异的装饰器 deny 臂。文本归位是唯一
+    # 判别（call_result/subscript_factory 有兜底线同拦，见变异注释）。
+    "decorator_call_result": (
+        "import sys\n"
+        "def _mk():\n"
+        "    def _d(f):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return f\n"
+        "    return _d\n"
+        "@(_mk())(None)\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    "decorator_subscript_factory": (
+        "import sys\n"
+        "def _d(f):\n"
+        "    sys.path.insert(0, 'x')\n"
+        "    return f\n"
+        "_arr = [_d]\n"
+        "@_arr[0](None)\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    "decorator_attr_base": (
+        "import sys\n"
+        "def _mk():\n"
+        "    def _d(f):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return f\n"
+        "    return _d\n"
+        "@_mk().hook\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    "decorator_unknown_bare_factory": (
+        "@unknown_factory(None)\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+}
+
+# 文本归位断言（与 round-25 同规矩：精识 deny 臂死后兜底线会用不同文本
+# 接住 ⇒ 只断言非空假绿）。
+_EVIL_R26_EXPECTED_TEXT: dict[str, str] = {
+    "nested_call_partial_factory": "嵌套调用工厂的内层被调",
+    "nested_call_sink_arg": "嵌套调用工厂实参携带 sink 成员",
+    "fn_scope_dynamic_decorator": "装饰器为动态表达式",
+    "two_level_fn_scope_import": "模块根属性再绑定",
+    "fn_scope_project_decorator_shadow": "解析到项目/禁止代码",
+    "relative_import_project_decorator": "解析到项目/禁止代码",
+    "decorator_call_result": "装饰器工厂本身是调用结果",
+    "decorator_subscript_factory": "装饰器工厂形态静态不可判",
+    "decorator_attr_base": "装饰器基底静态不可判",
+    "decorator_unknown_bare_factory": "装饰器工厂裸名静态不可判",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_EVIL_R26_SOURCES))
+def test_round26_deny_rules_are_enforced(tmp_path: Path, case: str) -> None:
+    """第二十六轮评审修复的 deny 线逐形态钉住（全部探针实测逃逸后收口）。"""
+    path = tmp_path / "m.py"
+    path.write_text(_EVIL_R26_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    expectedText = _EVIL_R26_EXPECTED_TEXT[case]
+    assert any(expectedText in hook for hook in hooks), (
+        f"{case} 的拒绝文本没有归位到「{expectedText}」：{hooks}"
+        " ⇒ 精识 deny 臂失效（兜底线接住了）"
+    )

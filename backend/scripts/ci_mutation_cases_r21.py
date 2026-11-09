@@ -254,13 +254,17 @@ R21_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[fn_local_class_redef]"),
         1,
     ),
-    # M195：M2 函数体别名作用域
+    # M195：M2 函数体别名作用域。第二十六轮评审 H-26-3 重锚：scopeAliases
+    # 变成带 enclosingAliases 的 dict 字面量（M228 锚整个 dict 换判别
+    # two_level_fn_scope_import）；本锚只杀 fn-local 别名映射那一行
+    #（⇒ fn_local_import_alias 的 fn 作用域 import 失效，判别不变，
+    # 与 M228 的锚/判别互不重叠）。
     (
         "M195",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "scopeAliases = {**aliases, **_aliasMap(list(callee.body))}",
-        "scopeAliases = aliases",
+        "**_aliasMap(list(callee.body)),",
+        "**{},",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[fn_local_import_alias]"),
         1,
     ),

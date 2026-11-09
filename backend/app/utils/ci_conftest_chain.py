@@ -272,7 +272,39 @@ _DECORATOR_BUILTIN_ALLOW = frozenset(
     }
 )
 
-_PROJECT_DECORATOR_ROOTS = ("app", "scripts")
+_PROJECT_DECORATOR_ROOTS = ("app", "scripts", "__relative__")
+
+# 第二十六轮评审 M-26-1：相对导入只可能指向**本仓库**（包内）⇒ 一律映射到
+# 相对哨兵根（归入项目根拒绝），不再静默跳过（`from . import models` 后
+# `@models.deco` 探针实证逃逸）。
+_RELATIVE_IMPORT_ROOT = "__relative__"
+
+# 第二十六轮评审 H-26-1：嵌套调用工厂豁免（注册式惯用法）可被**通用可调用
+# 工厂**洗白——`functools.partial(Path('x').unlink)()` 的内层被调解析到
+# functools（外部 import）⇒ 豁免臂放行，但返回的是把任意 sink 成员绑好的
+# 可执行目标（探针实证逃逸）。这批组合子不经过任何项目代码就能包装任意
+# 可调用 ⇒ 豁免臂不放行（真实闭包 0 处，校准实证）。
+_CALLABLE_FACTORY_DENIED = (
+    "functools.partial",
+    "operator.methodcaller",
+    "operator.attrgetter",
+)
+
+
+def _callFactorySinkProblem(callNode: ast.Call) -> str | None:
+    """嵌套调用工厂的实参子树里出现 sink 成员引用 ⇒ 返回拒绝消息，否则 None。
+
+    第二十六轮评审 H-26-1：豁免臂此前只判内层被调的根，
+    `field_validator('x')(Path('y').unlink)` 实参里绑好的 sink 方法引用
+    整段不看（探针实证逃逸）。"""
+    for arg in (*callNode.args, *(kw.value for kw in callNode.keywords)):
+        for sub in ast.walk(arg):
+            if isinstance(sub, ast.Attribute) and sub.attr in _DENIED_CALL_ATTRS:
+                return (
+                    f"嵌套调用工厂实参携带 sink 成员 .{sub.attr}"
+                    " ⇒ 可执行目标不可证 ⇒ fail-closed"
+                )
+    return None
 
 
 def _decoratorRootProblem(chain: str, effAliases: dict[str, str]) -> str | None:
@@ -461,8 +493,10 @@ def _aliasMap(body: list[ast.stmt]) -> dict[str, str]:
 
     `import sys as s` ⇒ s→sys；`from os import environ as e` ⇒ e→os.environ；
     **无别名的 from-import 也映射**（`from sys import path` 后裸写
-    `path.insert(...)` 同样要能追到 sys.path）。只看模块级；函数内重绑定、
-    相对导入的别名不追（文档化局限，见模块 docstring）。
+    `path.insert(...)` 同样要能追到 sys.path）。只看模块级；函数内重绑定
+    不追（文档化局限，见模块 docstring）。相对导入一律映射到
+    `_RELATIVE_IMPORT_ROOT` 哨兵（第二十六轮评审 M-26-1：相对导入只可能
+    指向本仓库 ⇒ 按项目代码拒绝，此前静默跳过是逃逸通道）。
     """
     aliases: dict[str, str] = {}
     for stmt in _moduleScopeStatements(body):
@@ -473,10 +507,21 @@ def _aliasMap(body: list[ast.stmt]) -> dict[str, str]:
                 else:
                     root = alias.name.split(".")[0]
                     aliases[root] = root
-        elif isinstance(stmt, ast.ImportFrom) and stmt.level == 0 and stmt.module:
-            for alias in stmt.names:
-                if alias.name != "*":  # 星号导入的名字静态未知（源头由星号拒绝管）
-                    aliases[alias.asname or alias.name] = f"{stmt.module}.{alias.name}"
+        elif isinstance(stmt, ast.ImportFrom):
+            if stmt.level == 0 and stmt.module:
+                moduleName: str | None = stmt.module
+            elif stmt.level > 0:
+                # 第二十六轮评审 M-26-1：相对导入只可能指向本仓库 ⇒ 映射到
+                # 相对哨兵根（_PROJECT_DECORATOR_ROOTS 含它 ⇒ 按项目代码拒）。
+                moduleName = _RELATIVE_IMPORT_ROOT
+            else:
+                moduleName = None
+            if moduleName is not None:
+                for alias in stmt.names:
+                    if alias.name != "*":  # 星号导入的名字静态未知（源头由星号拒绝管）
+                        aliases[alias.asname or alias.name] = (
+                            f"{moduleName}.{alias.name}"
+                        )
         elif (
             isinstance(stmt, ast.Assign)
             and len(stmt.targets) == 1
@@ -1422,7 +1467,11 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
     # 记下 id 让「实例属性读取」通则跳过（generator 是先序 ⇒ Call 先于其子节点）。
     resolvedAttrIds: set[int] = set()
 
-    def scanCallee(callee: ast.AST, depth: int) -> None:
+    def scanCallee(
+        callee: ast.AST,
+        depth: int,
+        enclosingAliases: dict[str, str] | None = None,
+    ) -> None:
         if depth > _MAX_CALLEE_DEPTH:
             # 第十九轮 MEDIUM-2：此前静默截断 ⇒ 深链整段逃出；改 fail-closed
             add(getattr(callee, "lineno", 0), f"被调链深超过 {_MAX_CALLEE_DEPTH} ⇒ fail-closed")
@@ -1464,9 +1513,29 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
         # 第二十二轮 M2：函数体内 import 别名重绑定此前不追（文档化局限）
         # ——`def _e(): from os import environ as e; e[...] = ...` 整段逃出
         # ⇒ 函数体别名并入作用域映射，scanExec 的拒绝判定按作用域查。
-        scopeAliases = {**aliases, **_aliasMap(list(callee.body))}
+        # 第二十六轮评审 H-26-3：被调的作用域映射必须带上**调用方的作用域
+        # 别名**（fn-local 类 __init__ 经 scanExec(…, scopeAliases) 的实例化
+        # 钩子进来）——此前只并模块级映射 ⇒ `def _o(): from … import flakes;
+        # class _C: __init__ 里 flakes.hook = None` 整段逃出（探针实证）。
+        # 顺序：内层自身 import > 调用方作用域 > 模块级。
+        scopeAliases = {
+            **aliases,
+            **(enclosingAliases or {}),
+            **_aliasMap(list(callee.body)),
+        }
         for stmt in callee.body:
             fnProblem = _instanceExecProblem(stmt, effectiveClasses, effInstances)
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                # 第二十六轮评审 H-26-2：被扫函数体内的嵌套 def/class 装饰器
+                # 此前只有模块级预扫管 ⇒ `def _o(): @(_mk() if True else None)
+                # def g(): …` 经 callTargets 进来整段逃出（IfExp/下标两形态
+                # 探针实证）。判据与模块级预扫一致（动态表达式 ⇒ 装饰期执行）。
+                for dec in stmt.decorator_list:
+                    if not isinstance(dec, (ast.Name, ast.Attribute, ast.Call)):
+                        add(
+                            stmt.lineno,
+                            "装饰器为动态表达式 ⇒ 装饰期执行 ⇒ fail-closed",
+                        )
             if fnProblem:
                 add(stmt.lineno, fnProblem)
             if isinstance(stmt, (ast.If, ast.While, ast.Match)):
@@ -1615,7 +1684,7 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 for dec in getattr(node, "decorator_list", []):
                     if isinstance(dec, ast.Name) and dec.id in callTargets:
-                        scanCallee(callTargets[dec.id], depth + 1)
+                        scanCallee(callTargets[dec.id], depth + 1, aliasesMap)
                     else:
                         # `@D.deco` / `@factory(...)`：装饰器在 def/class 语句
                         # 执行期被调用。第二十三轮评审 H-2 + 第二十五轮评审
@@ -1707,7 +1776,7 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                                 "装饰器成员绑定静态不可判（条件臂/未识别形态）⇒ fail-closed",
                             )
                         if member is not None and not isinstance(member, ast.ClassDef):
-                            scanCallee(member, depth + 1)
+                            scanCallee(member, depth + 1, aliasesMap)
                     if isinstance(dec, ast.Name) and dec.id not in callTargets:
                         # 第二十二轮 H1/H2：实例/本地类（含别名）/不透明名作装饰器
                         if dec.id in instanceVars:
@@ -1715,15 +1784,15 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                                 instanceVars[dec.id], "__call__", callTargets
                             )
                             if callMember is not None and not isinstance(callMember, ast.ClassDef):
-                                scanCallee(callMember, depth + 1)
+                                scanCallee(callMember, depth + 1, aliasesMap)
                         elif dec.id in classAliases:
                             for hook in _instantiationHooks(
                                 localClasses[classAliases[dec.id]], callTargets
                             ):
-                                scanCallee(hook, depth + 1)
+                                scanCallee(hook, depth + 1, aliasesMap)
                         elif dec.id in localClasses:
                             for hook in _instantiationHooks(localClasses[dec.id], callTargets):
-                                scanCallee(hook, depth + 1)
+                                scanCallee(hook, depth + 1, aliasesMap)
                         elif dec.id in opaqueNames:
                             add(dec.lineno, "不透明绑定的名字作装饰器 ⇒ 装饰期执行 ⇒ fail-closed")
                         else:
@@ -1732,7 +1801,13 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                             # 绑定里：要么经别名解析（from-import）要么完全
                             # 无静态绑定。解析到项目根/拒绝链 ⇒ 拒；完全无
                             # 绑定且非内置白名单 ⇒ 静态不可判 ⇒ 拒。
-                            decResolvedName = aliases.get(dec.id)
+                            # 第二十六轮评审 H-26-4：按**作用域**映射解析——
+                            # 此前用模块级 aliases ⇒ fn 作用域的项目 import
+                            # 遮蔽模块级外部同名别名时
+                            #（`from functools import lru_cache as dec` +
+                            # `def _o(): from app.utils.flakes import hook
+                            # as dec; @dec`）解析到外部根放行（探针实证）。
+                            decResolvedName = effAliases.get(dec.id)
                             if decResolvedName is None:
                                 if dec.id not in _DECORATOR_BUILTIN_ALLOW:
                                     add(
@@ -1762,7 +1837,7 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                         "下标取可调用再调用 ⇒ 可执行目标静态不可判 ⇒ fail-closed",
                     )
                 elif isinstance(node.func, ast.Lambda):
-                    scanCallee(node.func, depth + 1)  # IIFE：lambda 体在 import 期执行
+                    scanCallee(node.func, depth + 1, aliasesMap)  # IIFE：lambda 体在 import 期执行
                 elif isinstance(node.func, ast.Name):
                     if classes is not None and node.func.id in classes:
                         # 第二十二轮 H9：函数体内局部类实例化——遮蔽/重定义
@@ -1779,7 +1854,7 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                             for hook in _instantiationHooks(
                                 fnCls, callTargets, fnInstAmbiguity
                             ):
-                                scanCallee(hook, depth + 1)
+                                scanCallee(hook, depth + 1, aliasesMap)
                             if fnInstAmbiguity:
                                 add(
                                     node.lineno,
@@ -1798,7 +1873,7 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                             for hook in _instantiationHooks(
                                 localClasses[node.func.id], callTargets, instAmbiguity
                             ):
-                                scanCallee(hook, depth + 1)
+                                scanCallee(hook, depth + 1, aliasesMap)
                             if instAmbiguity:
                                 # 第二十二轮 H6：钩子绑定静态不可判 ⇒ 实例化语义不可判
                                 add(
@@ -1811,7 +1886,7 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                         for hook in _instantiationHooks(
                             localClasses[classAliases[node.func.id]], callTargets
                         ):
-                            scanCallee(hook, depth + 1)
+                            scanCallee(hook, depth + 1, aliasesMap)
                     elif node.func.id in opaqueNames:
                         # 第二十二轮：不透明绑定的名字被调用 ⇒ 可执行目标静态
                         # 不可判（`_p = _d['f']; _p()` 洗白通道）⇒ fail-closed。
@@ -1826,7 +1901,7 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                             instanceVars[node.func.id], "__call__", callTargets
                         )
                         if callMember is not None and not isinstance(callMember, ast.ClassDef):
-                            scanCallee(callMember, depth + 1)
+                            scanCallee(callMember, depth + 1, aliasesMap)
                     else:
                         if node.func.id in ambiguousNames:
                             # 第十九轮 HIGH-5：def/lambda 多重绑定 ⇒ 目标静态不可判
@@ -1836,7 +1911,7 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                             )
                         callee = callTargets.get(node.func.id)
                         if callee is not None:
-                            scanCallee(callee, depth + 1)
+                            scanCallee(callee, depth + 1, aliasesMap)
                         # 第十九轮 HIGH-6：实例作为调用参数 ⇒ __str__/__iter__ 等协议
                         argNodes = (*node.args, *(kw.value for kw in node.keywords))
                         if any(
@@ -1866,7 +1941,7 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                         # 嵌套类实例化（Outer.Inner()）
                         nestedAmbiguity: set[str] = set()
                         for hook in _instantiationHooks(member, callTargets, nestedAmbiguity):
-                            scanCallee(hook, depth + 1)
+                            scanCallee(hook, depth + 1, aliasesMap)
                         if nestedAmbiguity:
                             # 第二十二轮 H6：钩子绑定静态不可判 ⇒ 实例化语义不可判
                             add(
@@ -1875,7 +1950,7 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                             )
                     elif member is not None:
                         resolvedAttrIds.add(id(node.func))
-                        scanCallee(member, depth + 1)
+                        scanCallee(member, depth + 1, aliasesMap)
                     elif status == "local":
                         # 本地类/实例上未定义的成员 ⇒ 继承/property 途径。
                         # 例外：`model_rebuild` 机制调用（本地 pydantic 类继承
@@ -1936,13 +2011,28 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                         if innerChain is not None:
                             innerRoot = innerChain.split(".")[0]
                             innerResolved = effAliases.get(innerRoot, innerRoot)
+                            # 第二十六轮评审 H-26-1：通用可调用工厂（partial/
+                            # methodcaller/attrgetter）与实参 sink 成员引用
+                            # 都让「返回的可执行目标」不可证——组合子能把
+                            # 任意 sink 绑进返回值（探针实证逃逸）。
+                            resolvedInnerChain = (
+                                innerResolved + innerChain[len(innerRoot):]
+                            )
                             if (
                                 innerRoot in effAliases
                                 and innerResolved.split(".")[0]
                                 not in _PROJECT_DECORATOR_ROOTS
                                 and not _isForbidden(innerChain)
+                                and resolvedInnerChain not in _CALLABLE_FACTORY_DENIED
                             ):
-                                isProvenRegistration = True
+                                # sink 实参扫描只在工厂条件通过后做——两个
+                                # 消息归位互不抢（partial 形态两条件同时
+                                # 命中时由工厂兜底消息接住）。
+                                sinkProblem = _callFactorySinkProblem(node)
+                                if sinkProblem is not None:
+                                    add(node.lineno, sinkProblem)
+                                else:
+                                    isProvenRegistration = True
                         if not isProvenRegistration:
                             add(
                                 node.lineno,

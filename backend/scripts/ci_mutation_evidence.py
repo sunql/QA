@@ -50,6 +50,19 @@ CASE_TIMEOUT_SECONDS = 300
 # ⚠️ 只有 **1** 才是「守卫断言失败（转红）」⇒ 其余非 0 都是「没跑起来」。
 _PYTEST_EXIT_ASSERTION_FAILED = 1
 
+# 第二十六轮评审 M-26-3：**崩溃红**不是转红——变异若把分析器改成会抛异常的
+# 形态（如杀掉 isinstance 分派臂 ⇒ 下一行 AttributeError），退出码 1 与
+# `FAILED <nodeid>` 都满足，但证明的是「变异让分析器崩了」，不是「守卫抓到
+# 了逃逸」⇒ 输出里出现**分析器栈帧**即判取证失败。标记取分析器内部函数名
+# 的栈帧行（`  File "...", in findImportTimeHooks`）；正常断言失败的栈帧只
+# 会有测试文件与分析器入口，不会出现这些内部帧。
+_ANALYZER_FRAME_MARKERS = (
+    "in findImportTimeHooks",
+    "in _findImportTimeHooksImpl",
+    "in scanExec",
+    "in scanCallee",
+)
+
 
 def buildEnv() -> dict[str, str]:
     """继承当前 shell 环境（凭据不入库）；缺必需变量就 fail-fast。"""
@@ -139,6 +152,13 @@ def run_case(case: str, env: dict[str, str]) -> tuple[str, str]:
             "inconclusive",
             f"pytest 退出码 1，但输出里没有 {case!r} 自己的失败标记"
             f" ⇒ 不是它失败\n{output}",
+        )
+    # 第二十六轮评审 M-26-3：崩溃红取证失败（见 _ANALYZER_FRAME_MARKERS 注释）。
+    if any(marker in combined for marker in _ANALYZER_FRAME_MARKERS):
+        return (
+            "inconclusive",
+            "输出含分析器内部栈帧 ⇒ 崩溃红（变异让分析器异常）"
+            " ⇒ 不能证明检测能力\n" + output,
         )
     return "red", output
 

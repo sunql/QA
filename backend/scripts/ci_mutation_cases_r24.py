@@ -27,26 +27,28 @@ _ROUND25_DENY = _CHAIN_GUARD + "::test_round25_deny_rules_are_enforced"
 _ROUND25_CLEAN = _CHAIN_GUARD + "::test_round25_clean_forms_pass"
 
 R24_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
-    # M216：H-24-2 原生扩展遮蔽 pattern（CPython EXT_SUFFIX 优先于同名 .py）
+    # M216：H-24-2 原生扩展遮蔽 pattern（CPython EXT_SUFFIX 优先于同名 .py；
+    # 第二十六轮 H-26-5 泛化到 backend 全域 ⇒ 第 2 次重锚）
     (
         "M216",
         "backend",
         "app/utils/ci_surface.py",
-        'r"^backend/app/utils/[^/]+\\.(?:so|pyd)$",',
-        'r"^backend/app/utils/[^/]+\\.(?:soNEVER|pyd)$",',
+        'r"^backend/.*\\.(?:so|pyd)$",',
+        'r"^backend/.*\\.(?:soNEVER|pyd)$",',
         (_SURFACE_GUARD + "::test_round23_smuggling_path_classes_are_ci_surface"),
         1,
     ),
     # M217：M-24-2 反向守卫清单——变异脚本 pattern 只删 `|_r23` ⇒ 清单里的
-    # r23 条目转红（r24 等其余分支不受影响 ⇒ 判别独占）。
+    # r23 条目转红（r24/r26 等其余分支不受影响 ⇒ 判别独占）。
+    # 第二十六轮第 2 次重锚：pattern 行新增 `|_r26`。
     (
         "M217",
         "backend",
         "app/utils/ci_surface.py",
         'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16'
-        '|_r18|_r20|_r21|_r23|_r24)?)\\.py$",',
+        '|_r18|_r20|_r21|_r23|_r24|_r26)?)\\.py$",',
         'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16'
-        '|_r18|_r20|_r21|_r24)?)\\.py$",',
+        '|_r18|_r20|_r21|_r24|_r26)?)\\.py$",',
         (_SURFACE_GUARD
          + "::test_detectCiSurfaceChanges_flags_the_mutation_evidence_script"),
         1,
@@ -57,9 +59,14 @@ R24_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M218",
         "backend",
         "app/utils/ci_conftest_chain.py",
+        # 第二十六轮重锚（同 M169）：scanCallee 新增同判据臂（H-26-2）⇒ 单行锚
+        # 成其子串 ⇒ 带前导 for 行（12 空格缩进）唯一钉住模块级预扫臂。
+        "            for dec in stmt.decorator_list:\n"
         "                if not isinstance(dec, (ast.Name, ast.Attribute, ast.Call)):",
         # ⚠️ 回退目标是 round-24 之前的**正向**白名单（无 not）——写成
         # `not isinstance(...)` 语义反而更宽（拒掉一切非这三形态的表达式）。
+        # mut 保留 for 头（锚跨两行 ⇒ mut 也要两行，否则 for 体悬空 IndentationError）。
+        "            for dec in stmt.decorator_list:\n"
         "                if isinstance(dec, (ast.Lambda, ast.Subscript, ast.Starred)):",
         (_ROUND25_DENY + "[decorator_ifexp]"),
         1,

@@ -68,12 +68,15 @@ R14_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[import_alias]"),
         1,
     ),
+    # 第二十六轮评审 M-26-1 重锚：_aliasMap 的 ImportFrom 分支拆成了
+    # 内层 `if stmt.level == 0 and stmt.module:`（相对导入占 elif 臂）；
+    # 杀绝对 from-import 的模块名赋值 ⇒ from_alias fixture 放行（判别不变）。
     (
         "M103",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "        elif isinstance(stmt, ast.ImportFrom) and stmt.level == 0 and stmt.module:",
-        "        elif False:",
+        "                moduleName: str | None = stmt.module",
+        "                moduleName = None",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[from_alias]"),
         1,
     ),

@@ -1385,6 +1385,46 @@ solo 12/12 + 5/5 → **全量 214/214 转红、净漏 0**（exit 0）。
 **行数**：`ci_conftest_chain.py` 1932 → **2066 行**；`test_ci_conftest_chain.py` 1407 → **1588 行**（175 条）；
 `test_ci_surface.py` 1021 → **1033 行**（§5 行债更新，策略不变）。
 
+### 4.2.20 第二十六轮复审修复（5H/4M，223 → 233 组，2026-11-09）
+
+第二十六轮复审判定 **BLOCK（5 HIGH / 4 MEDIUM）**，全部带攻击构造（探针先行：15 个用例
+`/tmp/n6_r26_probe.py` 实测修复前全部逃逸 / 修复后归位），逐条修复：
+
+| 编号 | 攻击构造 | 修复 | 判别 |
+|---|---|---|---|
+| H-26-1 | ①通用可调用工厂：`functools.partial(int)('2')` / `operator.methodcaller` / `attrgetter`——内层解析到外部 import 的**工厂**，返回把任意可调用绑好的目标 ⇒ 例外臂放行；②注册式豁免的**实参子树**里绑好 sink 成员引用：`field_validator('x')(Path('y').unlink)`（sink 在外层 Call 的实参，非内层 func） | ①工厂条件加 `_CALLABLE_FACTORY_DENIED`（`functools.partial` / `operator.methodcaller` / `operator.attrgetter`，内层链经 `effAliases` 解析成全链再比对，M225）；②`_callFactorySinkProblem(node)` 对**整个 Call 节点**（func+args+keywords 子树 `ast.walk`）扫 `_DENIED_CALL_ATTRS` sink 成员，命中 ⇒ 专属消息（M226）。**顺序归位**：工厂条件先判、sink 扫描嵌在其内 ⇒ 两条消息互不抢（partial fixture 拿工厂消息、sink fixture 两消息都在） | 文本归位（`nested_call_partial_factory` / `nested_call_sink_arg`）；clean 反向锚 `nested_call_external` 从 `functools.partial(int)('2')`（本轮起为拒）**改真实形态**：pydantic `field_validator('x')(_v)` 注册惯用法 |
+| H-26-2 | 被扫函数体内的嵌套 def/class **装饰器**为动态表达式：`def _o(): @(_mk() if True else None) def g()`——模块级预扫只管模块级 ⇒ 整段逃逸 | scanCallee 的 stmt 循环对 FunctionDef/AsyncFunctionDef/ClassDef 的 `decorator_list` 补形态检查（非 Name/Attribute/Call ⇒ 拒，M227） | `fn_scope_dynamic_decorator`（放行性：`_decoratorMember` 对 IfExp 不报歧义） |
+| H-26-3 | scanCallee 的 `scopeAliases` 只并模块级映射 ⇒ 调用方作用域别名不进被调 fn-local 类 `__init__` 的作用域：`def _o(): from app.utils import flakes; class _C: __init__ 里 flakes.hook = None` ⇒ 逃逸 | scanCallee 加第三参 `enclosingAliases`，`scopeAliases = {**aliases, **enclosingAliases, **_aliasMap(body)}`（内层 > 调用方 > 模块级）；scanExec 内 12 处调用点全部穿透 threading（模块级 3 处 depth 0 不传） | `two_level_fn_scope_import`（M228=退回不带 enclosingAliases 的旧形态）；M195 同步重锚到 `_aliasMap` 单行（判别 fn_local_import_alias 不变，与 M228 锚/判别不重叠） |
+| H-26-4 | 裸名装饰器按模块级 `aliases` 解析 ⇒ fn 作用域的项目 import 遮蔽模块级外部同名别名时解析到外部根放行（装饰期真实执行的是项目 hook） | H2 块内 `decResolvedName = effAliases.get(dec.id)`（M229=退回 aliases） | `fn_scope_project_decorator_shadow`（放行性） |
+| M-26-1 | `from . import models; @models.deco`——相对导入在 `_aliasMap` 被静默跳过 ⇒ 根当外部放行；但相对导入只可能指向本仓库 | ImportFrom 分支 `stmt.level > 0` ⇒ 映射到哨兵根 `__relative__`，并入 `_PROJECT_DECORATOR_ROOTS` ⇒ 按项目代码拒（M234=哨兵出元组） | `relative_import_project_decorator`（放行性）；fixture 在 tmp_path 无包上下文也可判 |
+| M-26-2 | 四个装饰器 deny 臂无 fixture/无变异（call_result / subscript_factory / attr_base / unknown_bare_factory） | 四个探针实测的 fixture（M230–M233）；call_result/subscript_factory 有兜底线同拦 ⇒ **文本归位**，其余放行性 | 见 `_EVIL_R26_EXPECTED_TEXT` |
+| M-26-3 | M212 原变异（`if not isinstance(node.func, ast.Call):` → `if False:`）让 else 臂 AttributeError ⇒ **崩溃红**（退出码 1 + FAILED 行都满足但不证明检测能力） | ①M212 重设计为把该臂的 add 块换 `pass`（臂死 ⇒ IfExp 放行 ⇒ 干净转红）；②跑者 `ci_mutation_evidence.py` 加 `_ANALYZER_FRAME_MARKERS`（findImportTimeHooks/_findImportTimeHooksImpl/scanExec/scanCallee 栈帧）⇒ 输出含分析器内部帧判 `inconclusive`（取证失败，非转红） | M212 转红且无分析器帧；跑者自检由 M 判定本身覆盖 |
+| H-26-5 | `.so`/`.pyd` pattern 只盖 `app/utils/[^/]+` 一层：`app/tests/_pg_support*.so`（conftest.py:102 收集前 import）与 `scripts/kpi_metric_db_guard*.so` 都在面外 | pattern 收宽 `^backend/.*\.(?:so\|pyd)$` + CODEOWNERS 四行 `backend/**/*.so\|.pyd` + `backend/*.so\|.pyd`（`**` 匹配零或多层目录，test:168–200 实证）；杠杆路径加两处实测（M216 第二次重锚） | 杠杆用例（`_pg_support.cpython-311-darwin.so` / `kpi_metric_db_guard.abi3.so`） |
+| M-26-4 | 变异清单 `*_r26` 漏出 CI 面 pattern 与反向守卫清单 | pattern 加 `\|_r26`（M69 第十二次重锚 + M217 第二次重锚）；`test_ci_codeowners.py` 两清单加 r26 | M217 转红 |
+
+**新增 M225–M234（10 组，新文件 `ci_mutation_cases_r26.py`）+ 重锚 M103/M141/M195/M212/M216/M217/M169/M218 + M69
+第十二次重锚 ⇒ 变异 223 → 233 组。** 重锚分两类：
+
+- **重构连带**：M103/M141/M195 的旧锚（ImportFrom 单行条件 / `scanCallee(hook, depth + 1)` /
+  scopeAliases 单行 dict）被本轮 H-26-3/M-26-1 重构直接改掉 ⇒ 全量锚点核对抓出 ⇒ 按当前文本重锚、判别不变。
+  M141 注释保留「删声明 ⇒ NameError 崩穿」的教训。
+- **子串碰撞（全量终跑净漏 2 抓出）**：M169/M218 的单行锚（16 空格 `if not isinstance(dec, …)`) 成为
+  本轮新增 scanCallee H-26-2 臂（20 空格）的**子串**（count=2）⇒ occurrence=1 杀错臂（scanCallee 臂
+  对模块级 fixture 无关）⇒ 首轮全量 M169/M218 仍然绿。修法：锚带前导 for 行（12 空格缩进）唯一钉住
+  模块级预扫臂；**锚跨两行 ⇒ mut 也必须两行**（只换 if 行会留下悬空 for 体 ⇒ IndentationError ⇒
+  取证失败 exit 4，solo 即抓出）。教训入 M169/M218 注释：**新 deny 臂与旧臂同判据时，新臂缩进不能让
+  旧锚成子串；全量锚点核对要查 `count == occurrence` 而不只是 `≥`**。
+
+**证据链**：锚点 233/233（chain 文件内 `count == occurrence` 精确核对）→ 守卫套件 **250 passed**
+（5 文件；链文件 175 → **184 条**，round25+26 用例 20 条全绿）→ 校准（真实 76 文件闭包）**检出钩子 0**
+（H3 穿透/相对导入/工厂+sink 新 deny 臂零误报）→ solo 16/16（M103/M141/M195/M212/M169/M218 +
+M225–M234，净漏 0、零崩溃红）→ 全量首轮净漏 2（M169/M218 子串碰撞，见上）→ 重锚后
+**全量终跑 233/233 转红、净漏 0**（`/tmp/n6_r26_full_rerun2.log` 终态）。
+
+**行数**：`ci_conftest_chain.py` 2066 → **2156 行**；`test_ci_conftest_chain.py` 1588 → **1765 行**（184 条）；
+`test_ci_surface.py` 1033 → **1039 行**；`ci_surface.py` **690 行**；新文件 `ci_mutation_cases_r26.py` **166 行**
+（§5 行债更新，策略不变）。
+
 ### 4.3 真实 API 取证
 
 - Trees API 接受 **commit sha**（不必先查 tree sha）：`GET /repos/{o}/{r}/git/trees/{sha}?recursive=1`。
@@ -1484,7 +1524,8 @@ solo 12/12 + 5/5 → **全量 214/214 转红、净漏 0**（exit 0）。
   重生成 + 全量取证重跑，成本已高于任何评审压力，维持「下次触碰顺手拆」。
   **第二十四轮更新**：`ci_conftest_chain.py` 1755 → **1932 行**（§2.10.20/§4.2.17）；锚点数 **214 组**（M204–M215 新增 12 组、M69 第十次重锚、M172 已退休），记债规则不变。
   **第二十五轮更新**：`ci_conftest_chain.py` 1932 → **2066 行**（§4.2.19）；锚点数 **223 组**（M216–M224 新增 9 组、M169/M211/M213 重锚、M69 第十一次重锚），记债规则不变。
-  **同批欠账记账**：`test_ci_surface.py` 988 → **1021 行**（二十五轮 → **1033 行**）、`test_ci_conftest_chain.py` → **1407 行**（164 条用例；二十五轮 → **1588 行** / 175 条）——守卫测试文件的私有 fixture/常量同样被多层复用，拆分亦须逐条核对锚点，同规则记债。
+  **第二十六轮更新**：`ci_conftest_chain.py` 2066 → **2156 行**（§4.2.20）；锚点数 **233 组**（M225–M234 新增 10 组入新数据文件 `ci_mutation_cases_r26.py`、M103/M141/M195/M212/M216/M217 重锚、M69 第十二次重锚），记债规则不变。
+  **同批欠账记账**：`test_ci_surface.py` 988 → **1021 行**（二十五轮 → **1033 行**；二十六轮 → **1039 行**）、`test_ci_conftest_chain.py` → **1407 行**（164 条用例；二十五轮 → **1588 行** / 175 条；二十六轮 → **1765 行** / 184 条）——守卫测试文件的私有 fixture/常量同样被多层复用，拆分亦须逐条核对锚点，同规则记债。
 - **没有**处理 N5（净丢失只能给 `NEEDS_REVIEW`）、N8（收紧 `enforce_admins` 的前置通道）。
 - 本批**不部署**（零 DDL、零生产写）。
 

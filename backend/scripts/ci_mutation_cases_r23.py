@@ -109,13 +109,22 @@ R23_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         (_ROUND25_DENY + "[store_fn_scope_import]"),
         1,
     ),
-    # M212：H-1 被调形态 fail-closed（嵌套 Call 例外臂的判别开关）
+    # M212：H-1 被调形态 fail-closed（嵌套 Call 例外臂的判别开关）。
+    # 第二十六轮评审 M-26-3 重设计：原变异 `if not isinstance(...)` →
+    # `if False:` 会让 `else:` 臂直接吃掉 IfExp 形态 ⇒ node.func.func 在
+    # 下一行 AttributeError ⇒ **崩溃红**（退出码 1 + FAILED 行都满足，但
+    # 证明的是「变异让分析器崩了」，不是「守卫抓到逃逸」）。改为把该臂的
+    # add 换成 pass：臂死 ⇒ IfExp 放行 ⇒ hooks 变空 ⇒ 干净转红。
     (
         "M212",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "if not isinstance(node.func, ast.Call):",
-        "if False:",
+        """add(
+                            node.lineno,
+                            "被调形态静态不可判"
+                            "（非裸名/成员/lambda/下标/嵌套调用）⇒ fail-closed",
+                        )""",
+        "pass",
         (_ROUND24_DENY + "[fn_callee_ifexp]"),
         1,
     ),

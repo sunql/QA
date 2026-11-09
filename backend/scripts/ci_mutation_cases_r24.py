@@ -39,16 +39,17 @@ R24_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         1,
     ),
     # M217：M-24-2 反向守卫清单——变异脚本 pattern 只删 `|_r23` ⇒ 清单里的
-    # r23 条目转红（r24/r26 等其余分支不受影响 ⇒ 判别独占）。
+    # r23 条目转红（r24/r26/r28 等其余分支不受影响 ⇒ 判别独占）。
     # 第二十六轮第 2 次重锚：pattern 行新增 `|_r26`。
+    # 第二十八轮第 3 次重锚：pattern 行新增 `|_r28`。
     (
         "M217",
         "backend",
         "app/utils/ci_surface.py",
         'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16'
-        '|_r18|_r20|_r21|_r23|_r24|_r26)?)\\.py$",',
+        '|_r18|_r20|_r21|_r23|_r24|_r26|_r28)?)\\.py$",',
         'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16'
-        '|_r18|_r20|_r21|_r24|_r26)?)\\.py$",',
+        '|_r18|_r20|_r21|_r24|_r26|_r28)?)\\.py$",',
         (_SURFACE_GUARD
          + "::test_detectCiSurfaceChanges_flags_the_mutation_evidence_script"),
         1,

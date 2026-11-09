@@ -54,8 +54,9 @@ _PYTEST_EXIT_ASSERTION_FAILED = 1
 # 形态（如杀掉 isinstance 分派臂 ⇒ 下一行 AttributeError），退出码 1 与
 # `FAILED <nodeid>` 都满足，但证明的是「变异让分析器崩了」，不是「守卫抓到
 # 了逃逸」⇒ 输出里出现**分析器栈帧**即判取证失败。标记取分析器内部函数名
-# 的栈帧行（`  File "...", in findImportTimeHooks`）；正常断言失败的栈帧只
-# 会有测试文件与分析器入口，不会出现这些内部帧。
+# 的栈帧行（`  File "...", in findImportTimeHooks`）；正常断言失败发生在
+# 分析器调用**返回之后**（守卫已拿到结果再 assert）⇒ 栈帧只有测试帧，
+# 不会出现这些内部帧。
 _ANALYZER_FRAME_MARKERS = (
     "in findImportTimeHooks",
     "in _findImportTimeHooksImpl",
@@ -173,9 +174,14 @@ def main() -> int:
         path = resolve(scope, relPath)
         source = path.read_text()
         total = source.count(original)
-        if total < occurrence:
-            print(f"✗ {name}: 变异锚点在 {relPath} 里只出现 {total} 次（第 {occurrence} 次不存在）")
-            results.append((name, False, "锚点不存在"))
+        # 第二十七轮评审 M-27-2：旧判据 `total < occurrence` 是**假绿灯**——
+        # 锚成为更深缩进同文本臂的子串时 total 会变大（M169/M218 实证：count=2
+        # vs occurrence=1 杀错臂 ⇒ 守卫仍绿）。锚点核验的契约是
+        # `count == occurrence` **精确相等**：多了说明锚不独占（可能杀错臂），
+        # 少了说明锚不存在，都判取证失败。
+        if total != occurrence:
+            print(f"✗ {name}: 变异锚点在 {relPath} 里出现 {total} 次（要求恰好 {occurrence} 次）")
+            results.append((name, False, "锚点不精确"))
             continue
         changed = replaceOccurrence(source, original, mutated, occurrence)
         assert changed is not None

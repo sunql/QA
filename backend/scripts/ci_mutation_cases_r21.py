@@ -259,6 +259,13 @@ R21_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
     # two_level_fn_scope_import）；本锚只杀 fn-local 别名映射那一行
     #（⇒ fn_local_import_alias 的 fn 作用域 import 失效，判别不变，
     # 与 M228 的锚/判别互不重叠）。
+    # 第二十七轮 M-27-1 跨效应备案：两个变异同杀 scopeAliases 的一部分，
+    # 对方判别 fixture **都会**被顺带转红——M195 宽效应（杀 fn-local 行 ⇒
+    # two_level_fn_scope_import 的两级链同样断 ⇒ M228 判别也红）；M228 窄效应
+    #（只删 enclosingAliases ⇒ fn_local_import_alias 的 fn 作用域 import
+    # 仍在 ⇒ M195 判别不红）。判别归档取窄效应方（M228 → two_level、
+    # M195 → fn_local_import_alias），全量跑时按「期望用例红 + 其余分析」
+    # 解读，不按单用例红做唯一判据。
     (
         "M195",
         "backend",

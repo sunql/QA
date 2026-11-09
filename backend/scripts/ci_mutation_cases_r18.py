@@ -92,7 +92,9 @@ R18_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
                 "                            ):",
                 # 第二十六轮评审 H-26-3 重锚：scanCallee 加了第三参
                 #（调用方作用域别名）⇒ 本锚末行同步补 `, aliasesMap)`。
-                "                                scanCallee(hook, depth + 1, aliasesMap)",
+                # 第二十八轮 H-27-3 重锚：scanCallee 加第四参（调用方本地类）
+                # ⇒ 13 个 scanExec 内调用点全部穿透 ⇒ 本锚末行同步补 `, classes)`。
+                "                                scanCallee(hook, depth + 1, aliasesMap, classes)",
             ]
         ),
         # mut 只删钩子扫描循环、保留 instAmbiguity 声明——后续 `if instAmbiguity:`

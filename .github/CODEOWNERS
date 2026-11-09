@@ -149,6 +149,7 @@ backend/scripts/ci_mutation_cases_r21.py   @sunql
 backend/scripts/ci_mutation_cases_r23.py   @sunql
 backend/scripts/ci_mutation_cases_r24.py   @sunql
 backend/scripts/ci_mutation_cases_r26.py   @sunql
+backend/scripts/ci_mutation_cases_r28.py   @sunql
 # 第二十六轮评审 H-26-5：原生扩展遮蔽（EXT_SUFFIX 优先于同名 .py）全域收口
 # ——backend 下任何深度的 .so/.pyd 都入授权面（`**` 匹配零或多层目录）。
 backend/**/*.so        @sunql

@@ -1392,15 +1392,15 @@ solo 12/12 + 5/5 → **全量 214/214 转红、净漏 0**（exit 0）。
 
 | 编号 | 攻击构造 | 修复 | 判别 |
 |---|---|---|---|
-| H-26-1 | ①通用可调用工厂：`functools.partial(int)('2')` / `operator.methodcaller` / `attrgetter`——内层解析到外部 import 的**工厂**，返回把任意可调用绑好的目标 ⇒ 例外臂放行；②注册式豁免的**实参子树**里绑好 sink 成员引用：`field_validator('x')(Path('y').unlink)`（sink 在外层 Call 的实参，非内层 func） | ①工厂条件加 `_CALLABLE_FACTORY_DENIED`（`functools.partial` / `operator.methodcaller` / `operator.attrgetter`，内层链经 `effAliases` 解析成全链再比对，M225）；②`_callFactorySinkProblem(node)` 对**整个 Call 节点**（func+args+keywords 子树 `ast.walk`）扫 `_DENIED_CALL_ATTRS` sink 成员，命中 ⇒ 专属消息（M226）。**顺序归位**：工厂条件先判、sink 扫描嵌在其内 ⇒ 两条消息互不抢（partial fixture 拿工厂消息、sink fixture 两消息都在） | 文本归位（`nested_call_partial_factory` / `nested_call_sink_arg`）；clean 反向锚 `nested_call_external` 从 `functools.partial(int)('2')`（本轮起为拒）**改真实形态**：pydantic `field_validator('x')(_v)` 注册惯用法 |
+| H-26-1 | ①通用可调用工厂：`functools.partial(int)('2')` / `operator.methodcaller` / `attrgetter`——内层解析到外部 import 的**工厂**，返回把任意可调用绑好的目标 ⇒ 例外臂放行；②注册式豁免的**实参子树**里绑好 sink 成员引用：`field_validator('x')(Path('y').unlink)`（sink 在外层 Call 的实参，非内层 func） | ①工厂条件加 `_CALLABLE_FACTORY_DENIED`（`functools.partial` / `operator.methodcaller` / `operator.attrgetter`，内层链经 `effAliases` 解析成全链再比对，M225）；②`_callFactorySinkProblem(node)` 扫 `_DENIED_CALL_ATTRS` sink 成员，命中 ⇒ 专属消息（M226）。（⚠️ 本行原写「对**整个 Call 节点**扫描」——**第二十七轮复审证伪**：当时实现只走 args/keywords，func 子树不看（H-27-1），第二十八轮才真正收宽到整个 Call 节点，见 §4.2.21。）**顺序归位**：工厂条件先判、sink 扫描嵌在其内 ⇒ 两条消息互不抢（partial fixture 拿工厂消息、sink fixture 两消息都在） | 文本归位（`nested_call_partial_factory` / `nested_call_sink_arg`）；clean 反向锚 `nested_call_external` 从 `functools.partial(int)('2')`（本轮起为拒）**改真实形态**：pydantic `field_validator('x')(_v)` 注册惯用法 |
 | H-26-2 | 被扫函数体内的嵌套 def/class **装饰器**为动态表达式：`def _o(): @(_mk() if True else None) def g()`——模块级预扫只管模块级 ⇒ 整段逃逸 | scanCallee 的 stmt 循环对 FunctionDef/AsyncFunctionDef/ClassDef 的 `decorator_list` 补形态检查（非 Name/Attribute/Call ⇒ 拒，M227） | `fn_scope_dynamic_decorator`（放行性：`_decoratorMember` 对 IfExp 不报歧义） |
-| H-26-3 | scanCallee 的 `scopeAliases` 只并模块级映射 ⇒ 调用方作用域别名不进被调 fn-local 类 `__init__` 的作用域：`def _o(): from app.utils import flakes; class _C: __init__ 里 flakes.hook = None` ⇒ 逃逸 | scanCallee 加第三参 `enclosingAliases`，`scopeAliases = {**aliases, **enclosingAliases, **_aliasMap(body)}`（内层 > 调用方 > 模块级）；scanExec 内 12 处调用点全部穿透 threading（模块级 3 处 depth 0 不传） | `two_level_fn_scope_import`（M228=退回不带 enclosingAliases 的旧形态）；M195 同步重锚到 `_aliasMap` 单行（判别 fn_local_import_alias 不变，与 M228 锚/判别不重叠） |
+| H-26-3 | scanCallee 的 `scopeAliases` 只并模块级映射 ⇒ 调用方作用域别名不进被调 fn-local 类 `__init__` 的作用域：`def _o(): from app.utils import flakes; class _C: __init__ 里 flakes.hook = None` ⇒ 逃逸 | scanCallee 加第三参 `enclosingAliases`，`scopeAliases = {**aliases, **enclosingAliases, **_aliasMap(body)}`（内层 > 调用方 > 模块级）；scanExec 内 **13** 处调用点全部穿透 threading（原写 12 处为计数错漏，第二十七轮复审纠正；模块级 3 处 depth 0 不传） | `two_level_fn_scope_import`（M228=退回不带 enclosingAliases 的旧形态）；M195 同步重锚到 `_aliasMap` 单行（判别 fn_local_import_alias 不变，与 M228 锚/判别不重叠） |
 | H-26-4 | 裸名装饰器按模块级 `aliases` 解析 ⇒ fn 作用域的项目 import 遮蔽模块级外部同名别名时解析到外部根放行（装饰期真实执行的是项目 hook） | H2 块内 `decResolvedName = effAliases.get(dec.id)`（M229=退回 aliases） | `fn_scope_project_decorator_shadow`（放行性） |
 | M-26-1 | `from . import models; @models.deco`——相对导入在 `_aliasMap` 被静默跳过 ⇒ 根当外部放行；但相对导入只可能指向本仓库 | ImportFrom 分支 `stmt.level > 0` ⇒ 映射到哨兵根 `__relative__`，并入 `_PROJECT_DECORATOR_ROOTS` ⇒ 按项目代码拒（M234=哨兵出元组） | `relative_import_project_decorator`（放行性）；fixture 在 tmp_path 无包上下文也可判 |
 | M-26-2 | 四个装饰器 deny 臂无 fixture/无变异（call_result / subscript_factory / attr_base / unknown_bare_factory） | 四个探针实测的 fixture（M230–M233）；call_result/subscript_factory 有兜底线同拦 ⇒ **文本归位**，其余放行性 | 见 `_EVIL_R26_EXPECTED_TEXT` |
 | M-26-3 | M212 原变异（`if not isinstance(node.func, ast.Call):` → `if False:`）让 else 臂 AttributeError ⇒ **崩溃红**（退出码 1 + FAILED 行都满足但不证明检测能力） | ①M212 重设计为把该臂的 add 块换 `pass`（臂死 ⇒ IfExp 放行 ⇒ 干净转红）；②跑者 `ci_mutation_evidence.py` 加 `_ANALYZER_FRAME_MARKERS`（findImportTimeHooks/_findImportTimeHooksImpl/scanExec/scanCallee 栈帧）⇒ 输出含分析器内部帧判 `inconclusive`（取证失败，非转红） | M212 转红且无分析器帧；跑者自检由 M 判定本身覆盖 |
 | H-26-5 | `.so`/`.pyd` pattern 只盖 `app/utils/[^/]+` 一层：`app/tests/_pg_support*.so`（conftest.py:102 收集前 import）与 `scripts/kpi_metric_db_guard*.so` 都在面外 | pattern 收宽 `^backend/.*\.(?:so\|pyd)$` + CODEOWNERS 四行 `backend/**/*.so\|.pyd` + `backend/*.so\|.pyd`（`**` 匹配零或多层目录，test:168–200 实证）；杠杆路径加两处实测（M216 第二次重锚） | 杠杆用例（`_pg_support.cpython-311-darwin.so` / `kpi_metric_db_guard.abi3.so`） |
-| M-26-4 | 变异清单 `*_r26` 漏出 CI 面 pattern 与反向守卫清单 | pattern 加 `\|_r26`（M69 第十二次重锚 + M217 第二次重锚）；`test_ci_codeowners.py` 两清单加 r26 | M217 转红 |
+| M-26-4 | 变异清单 `*_r26` 漏出 CI 面 pattern 与反向守卫清单 | pattern 加 `\|_r26`（M69 第十二次重锚 + M217 第二次重锚）；`test_ci_codeowners.py` 两清单加 r26。（⚠️ 本行原写「两清单加 r26」已含漏改——`test_ci_surface.py` 的**两个反向清单**当时没加 r26，第二十七轮 M-27-3 抓出、第二十八轮补上，见 §4.2.21） | M217 转红 |
 
 **新增 M225–M234（10 组，新文件 `ci_mutation_cases_r26.py`）+ 重锚 M103/M141/M195/M212/M216/M217/M169/M218 + M69
 第十二次重锚 ⇒ 变异 223 → 233 组。** 重锚分两类：
@@ -1424,6 +1424,37 @@ M225–M234，净漏 0、零崩溃红）→ 全量首轮净漏 2（M169/M218 子
 **行数**：`ci_conftest_chain.py` 2066 → **2156 行**；`test_ci_conftest_chain.py` 1588 → **1765 行**（184 条）；
 `test_ci_surface.py` 1033 → **1039 行**；`ci_surface.py` **690 行**；新文件 `ci_mutation_cases_r26.py` **166 行**
 （§5 行债更新，策略不变）。
+
+### 4.2.21 第二十七轮复审修复（3H/5M/1L，233 → 239 组，2026-11-09）
+
+第二十七轮复审判定 **BLOCK（3 HIGH / 5 MEDIUM / 1 LOW）**，全部带攻击构造（探针先行：
+11 个用例 `/tmp/n6_r28_probe.py` 实测修复前 6 个新攻击全部逃逸、4 个回归基线仍拒、clean 仍过），
+逐条修复：
+
+| 编号 | 攻击构造 | 修复 | 判别 |
+|---|---|---|---|
+| H-27-1 | sink 藏在**外层工厂被调的 func 子树**：`field_validator(Path('y').write_text)(lambda v: v)`——write_text 在 `callNode.func` 的实参里，H-26-1 的扫描面只走 args/keywords ⇒ 整段逃逸（同时证伪 §4.2.20 的「整个 Call 节点」表述） | `_callFactorySinkProblem` 扫描面改为整个 Call 节点（`for subNode in (callNode.func, *args, *kw.values)` 后逐个 `ast.walk`）（M235=func 出扫描面 ⇒ 文本归位） | `nested_call_sink_in_factory_args`（文本归位；实参 sink 的回归 fixture 不受影响 ⇒ 判别独占） |
+| H-27-2 | H-26-2 臂只**平扫 callee.body 顶层**：`def _o(): if True: @(_mk() …) def g()`（分支体）与类体内的嵌套 def 动态装饰器整段逃逸 | scanCallee 末尾改 `_moduleScopeStatements(list(callee.body))` 递归（与模块级预扫同一展开语义：If/Try/With/For/While/Match + ClassDef 体；函数体内的装饰器由该 def 自己被 scanCallee 时管）（M227 重锚到新形态两行；M239=递归退回平扫 ⇒ 分支体 fixture 逃、顶层 fixture 仍被平扫接住 ⇒ 与 M227 判别互斥独占） | `fn_scope_dynamic_decorator_nested_block` / `fn_scope_dynamic_decorator_class_body`（M239 判前者；M227 判顶层 `fn_scope_dynamic_decorator`） |
+| H-27-3 | IIFE lambda 裸调 `scanExec(_iterExecNodes(callee.body), depth)` ⇒ **丢调用方作用域别名与本地类**：①`def _o(): import sys as s; (lambda: s.path.insert(0,'x'))()`；②`(lambda: _C())()`（_C 为 fn-local 类、`__init__` 携 sink）——双双整段逃逸 | scanCallee 加第四参 `enclosingClasses`；Lambda 臂改 `scanExec(…, classes=enclosingClasses, aliasesMap={**aliases, **(enclosingAliases or {})})`（lambda 体无语句 ⇒ 不可能有内层 import，别名两层并够用）；scanExec 内 **13** 处 scanCallee 调用点全部补第四参 threading（模块级 3 处 depth 0 不传；`effectiveClasses` 覆盖层**不加宽**——第四参只在 Lambda 臂消费 ⇒ 校准零风险）（M237=aliasesMap=None、M238=classes=None ⇒ hooks 变空；M141 第三次重锚补 `, classes)`） | `iife_fn_scope_import` / `iife_local_class`（放行性） |
+| M-27-5 | `operator.itemgetter` 不在 `_CALLABLE_FACTORY_DENIED`：`operator.itemgetter(0)(_c)`（`__getitem__` 携 sink）在 import 期执行 ⇒ 逃逸 | 元组加 `operator.itemgetter`（M236=出元组 ⇒ hooks 变空） | `nested_call_itemgetter_factory`（放行性） |
+| M-27-2 | 跑者锚点检查 `total < occurrence` 是**假绿灯**：锚成为更深缩进同文本臂的子串时 total 变大（M169/M218 实证 count=2 vs occurrence=1 杀错臂）⇒ 跑者层不设防 | 改 `total != occurrence` fail-closed（多了=锚不独占可能杀错臂、少了=锚不存在，都判取证失败）（判别在跑者契约本身 + M169/M218 教训注释；`test_ci_mutation_evidence.py` 无钉旧判据的用例） | 跑者契约（round-29 复审可查）；全量 239 组跑过即为回归证明 |
+| M-27-3 | M-26-4 漏改的另一半：`test_ci_surface.py` 两个反向守卫清单（~204 / ~787）只到 r24 ⇒ r26 数据文件在「真实文件反查」与「接受面」两处都不设防 | 两清单各加 `ci_mutation_cases_r26.py`；`ci_surface.py` pattern 加 `\|_r28`（M69 第十三次重锚 + M217 第三次重锚 + **M240**=删 `\|_r26`） | M240（真实文件反查用例红：r26 存在但不再判进面） |
+| M-27-1 | M195/M228 同杀 scopeAliases 的一部分 ⇒ 对方判别 fixture 会被顺带转红，无跨效应备案 | 备案入 M195 注释：**M195 宽效应**（杀 fn-local 行 ⇒ two_level 两级链同样断 ⇒ M228 判别也红）；**M228 窄效应**（只删 enclosingAliases ⇒ fn_local_import_alias 判别不红）；判别归档取窄效应方，全量跑按「期望用例红 + 其余分析」解读 | 注释备案（非 deny 线） |
+| M-27-4 | fn 作用域 def/lambda 的调用目标从不进 `callTargets` ⇒ fn 作用域内 `def _h(): …; _h()` 的被调体不被 scanCallee | **既有欠账入 §5**（round-22 重构起即如此，非本轮回归；顶层/类体/装饰器路径均覆盖，fn 作用域命名函数互调是剩余盲区） | §5 欠账（非本轮修复线） |
+| LOW×3 | ①r26 文件头写「M225–M233」漏 M234；②`_ROUND26_CLEAN` 未使用；③跑者崩溃红注释说「正常断言栈帧会有分析器入口帧」——错，正常断言发生在分析器调用**返回之后**，栈帧只有测试帧 | ①改 M234 + M-26-4 编号冲突对齐（腰带子进程归 M-26-3 取证基建）；②删未用常量；③注释改「返回之后 ⇒ 只有测试帧」；同款 M-26-4 编号冲突在 `test_ci_conftest_chain.py` 腰带用例 docstring 一并纠正（M-26-4→M-26-3） | 文档/注释（非 deny 线） |
+
+**新增 M235–M240（6 组，新文件 `ci_mutation_cases_r28.py`）+ 重锚 M141（第三次）/M227（第二次）/
+M69（第十三次）/M217（第三次）⇒ 变异 233 → 239 组。** `ci_mutation_cases.py` 文件头的组数
+（「174 组」自 r14 拆分起未随轮更新）一并改 **239**。
+
+**证据链**：锚点 **239/239**（全量 `count == occurrence` 精确核对）→ 守卫套件 **305 passed**
+（5 文件：chain 184 → **190 条**、surface、mutation_evidence、gh、merge_gate_workflow）→
+校准（真实 76 文件闭包）**检出钩子 0、一层落点不在面/豁免 0**（H-27-1/2/3 + itemgetter
+新 deny 臂零误报）→ solo **8/8**（M141/M227/M235–M240，净漏 0、零崩溃红）→
+**全量 239/239 转红、净漏 0**（`/tmp/n6_evidence_run_v17.log` 终态）。
+
+**行数**：`ci_conftest_chain.py` 2156 → **2184 行**；`test_ci_conftest_chain.py` 1765 → **1863 行**（190 条）；
+新文件 `ci_mutation_cases_r28.py` **148 行**（§5 行债更新，策略不变）。
 
 ### 4.3 真实 API 取证
 
@@ -1525,7 +1556,9 @@ M225–M234，净漏 0、零崩溃红）→ 全量首轮净漏 2（M169/M218 子
   **第二十四轮更新**：`ci_conftest_chain.py` 1755 → **1932 行**（§2.10.20/§4.2.17）；锚点数 **214 组**（M204–M215 新增 12 组、M69 第十次重锚、M172 已退休），记债规则不变。
   **第二十五轮更新**：`ci_conftest_chain.py` 1932 → **2066 行**（§4.2.19）；锚点数 **223 组**（M216–M224 新增 9 组、M169/M211/M213 重锚、M69 第十一次重锚），记债规则不变。
   **第二十六轮更新**：`ci_conftest_chain.py` 2066 → **2156 行**（§4.2.20）；锚点数 **233 组**（M225–M234 新增 10 组入新数据文件 `ci_mutation_cases_r26.py`、M103/M141/M195/M212/M216/M217 重锚、M69 第十二次重锚），记债规则不变。
-  **同批欠账记账**：`test_ci_surface.py` 988 → **1021 行**（二十五轮 → **1033 行**；二十六轮 → **1039 行**）、`test_ci_conftest_chain.py` → **1407 行**（164 条用例；二十五轮 → **1588 行** / 175 条；二十六轮 → **1765 行** / 184 条）——守卫测试文件的私有 fixture/常量同样被多层复用，拆分亦须逐条核对锚点，同规则记债。
+  **第二十八轮更新**：`ci_conftest_chain.py` 2156 → **2184 行**（§4.2.21）；锚点数 **239 组**（M235–M240 新增 6 组入新数据文件 `ci_mutation_cases_r28.py`、M141/M227/M69/M217 重锚），记债规则不变。
+  **第二十八轮新增欠账（M-27-4）**：fn 作用域 def/lambda 的调用目标从不进 `callTargets` ⇒ fn 作用域内 `def _h(): …; _h()` 的被调体不被 scanCallee——round-22 scanExec/callTargets 重构起即如此（非本轮回归）；顶层/类体/装饰器路径均覆盖，fn 作用域命名函数互调是剩余盲区。收口成本 = callTargets 作用域化 + 全量取证重跑，独立排期。
+  **同批欠账记账**：`test_ci_surface.py` 988 → **1021 行**（二十五轮 → **1033 行**；二十六轮 → **1039 行**）、`test_ci_conftest_chain.py` → **1407 行**（164 条用例；二十五轮 → **1588 行** / 175 条；二十六轮 → **1765 行** / 184 条；二十八轮 → **1863 行** / 190 条）——守卫测试文件的私有 fixture/常量同样被多层复用，拆分亦须逐条核对锚点，同规则记债。
 - **没有**处理 N5（净丢失只能给 `NEEDS_REVIEW`）、N8（收紧 `enforce_admins` 的前置通道）。
 - 本批**不部署**（零 DDL、零生产写）。
 

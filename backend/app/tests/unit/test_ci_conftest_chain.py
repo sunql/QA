@@ -1417,7 +1417,7 @@ def test_analyzer_primitives_not_swapped_in_fresh_interpreter() -> None:
     `__module__` 欺骗无意义。sitecustomize / conftest 级别的持久换假仍会
     在子进程里现形（那正是要抓的）。
 
-    第二十六轮评审 M-26-4 加固：子进程此前只验原始三件套，**没有 import
+    第二十六轮评审 M-26-3 加固：子进程此前只验原始三件套，**没有 import
     分析器、没有重跑守卫判定** ⇒ in-process 换假（同名函数提前进 `sys.modules`
     / 改 `path.read_text` 返回干净源码）两道都过。现在子进程里真实 import
     分析器并对合成 evil 源码跑 `findImportTimeHooks`，断言拒绝文本归位。
@@ -1759,6 +1759,104 @@ def test_round26_deny_rules_are_enforced(tmp_path: Path, case: str) -> None:
     hooks = findImportTimeHooks(path)
 
     expectedText = _EVIL_R26_EXPECTED_TEXT[case]
+    assert any(expectedText in hook for hook in hooks), (
+        f"{case} 的拒绝文本没有归位到「{expectedText}」：{hooks}"
+        " ⇒ 精识 deny 臂失效（兜底线接住了）"
+    )
+
+
+# ---------- 第二十七轮评审修复批：R28 攻击构造（探针先行，修复前实测全部逃逸） ----------
+_EVIL_R28_SOURCES: dict[str, str] = {
+    # H-27-1：sink 在外层工厂被调的 func 子树（`field_validator(Path('y')
+    # .write_text)(…)` 的 write_text 在 callNode.func 的实参里）
+    "nested_call_sink_in_factory_args": (
+        "from pydantic import field_validator\n"
+        "from pathlib import Path\n"
+        "_r = field_validator(Path('y').write_text)(lambda v: v)\n"
+    ),
+    # H-27-2：分支体内的嵌套 def 动态装饰器（平扫顶层看不见）
+    "fn_scope_dynamic_decorator_nested_block": (
+        "import sys\n"
+        "def _mk():\n"
+        "    def _d(f):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return f\n"
+        "    return _d\n"
+        "def _o():\n"
+        "    if True:\n"
+        "        @(_mk() if True else None)\n"
+        "        def g():\n"
+        "            pass\n"
+        "_r = _o()\n"
+    ),
+    # H-27-2：类体内的嵌套 def 动态装饰器
+    "fn_scope_dynamic_decorator_class_body": (
+        "import sys\n"
+        "def _mk():\n"
+        "    def _d(f):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return f\n"
+        "    return _d\n"
+        "def _o():\n"
+        "    class _C:\n"
+        "        @(_mk() if True else None)\n"
+        "        def m(self):\n"
+        "            pass\n"
+        "    return _C\n"
+        "_r = _o()\n"
+    ),
+    # H-27-3：IIFE lambda 丢调用方作用域别名（fn 作用域 import 再绑定）
+    "iife_fn_scope_import": (
+        "def _o():\n"
+        "    import sys as s\n"
+        "    _r = (lambda: s.path.insert(0, 'x'))()\n"
+        "    return _r\n"
+        "_r = _o()\n"
+    ),
+    # H-27-3：IIFE lambda 丢调用方本地类（fn-local 类 __init__ 携 sink）
+    "iife_local_class": (
+        "import sys\n"
+        "def _o():\n"
+        "    class _C:\n"
+        "        def __init__(self):\n"
+        "            sys.path.insert(0, 'x')\n"
+        "    _r = (lambda: _C())()\n"
+        "    return _r\n"
+        "_r = _o()\n"
+    ),
+    # M-27-5：itemgetter 工厂（import 期执行 _c.__getitem__，可携 sink）
+    "nested_call_itemgetter_factory": (
+        "import operator, sys\n"
+        "class _C:\n"
+        "    def __getitem__(self, k):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return k\n"
+        "_c = _C()\n"
+        "_r = operator.itemgetter(0)(_c)\n"
+    ),
+}
+
+# 文本归位：每条攻击必须由**本轮新开的精识 deny 臂**接住（兜底线接住 =
+# 臂失效），断言具体消息子串。
+_EVIL_R28_EXPECTED_TEXT: dict[str, str] = {
+    "nested_call_sink_in_factory_args": "嵌套调用工厂实参携带 sink 成员",
+    "fn_scope_dynamic_decorator_nested_block": "装饰器为动态表达式",
+    "fn_scope_dynamic_decorator_class_body": "装饰器为动态表达式",
+    "iife_fn_scope_import": "顶层引用 sys.path.insert",
+    "iife_local_class": "顶层引用 sys.path.insert",
+    "nested_call_itemgetter_factory": "嵌套调用工厂的内层被调",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_EVIL_R28_SOURCES))
+def test_round28_deny_rules_are_enforced(tmp_path: Path, case: str) -> None:
+    """第二十七轮评审修复的 deny 线逐形态钉住（全部探针实测逃逸后收口）。"""
+    path = tmp_path / "m.py"
+    path.write_text(_EVIL_R28_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    expectedText = _EVIL_R28_EXPECTED_TEXT[case]
     assert any(expectedText in hook for hook in hooks), (
         f"{case} 的拒绝文本没有归位到「{expectedText}」：{hooks}"
         " ⇒ 精识 deny 臂失效（兜底线接住了）"

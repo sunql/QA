@@ -1,4 +1,4 @@
-"""CI 判据守卫的**变异清单**（纯数据）—— 第二十六轮评审修复批（M225–M233）。
+"""CI 判据守卫的**变异清单**（纯数据）—— 第二十六轮评审修复批（M225–M234）。
 
 第二十六轮复审 5 HIGH + 4 MEDIUM 的修复判别：
 
@@ -7,9 +7,10 @@
 - H-26-3 scanCallee 作用域映射带调用方作用域（M228）
 - H-26-4 裸名装饰器按作用域映射解析（M229）
 - M-26-2 四个此前无 fixture/无变异的装饰器 deny 臂（M230–M233）
-  （M-26-1 相对导入 / M-26-3 M212 重设计 + 跑者崩溃红检测 /
-  M-26-4 腰带子进程真实跑分析器不落变异——前两者判别在 M229 与
-  跑者本身，后者是取证基建不是 deny 线）
+  （M-26-1 相对导入——判别在 M229；M-26-3 M212 重设计 + 跑者崩溃红检测 +
+  腰带子进程真实跑分析器——判别在跑者本身，取证基建不是 deny 线；
+  M-26-4 `*_r26` 入 CI 面 pattern 与两反向守卫清单——清单漏改由
+  第二十七轮 M-27-3 在 test_ci_surface.py 补上，判别在两反向清单 + M240）
 
 判别点一律取**独占落点**；精识 deny 臂（死后有兜底线接住）的判别 fixture
 用**文本归位**断言（`test_round26_deny_rules_are_enforced` 的
@@ -28,7 +29,6 @@ from __future__ import annotations
 
 _CHAIN_GUARD = "app/tests/unit/test_ci_conftest_chain.py"
 _ROUND26_DENY = _CHAIN_GUARD + "::test_round26_deny_rules_are_enforced"
-_ROUND26_CLEAN = _CHAIN_GUARD + "::test_round26_clean_forms_pass"
 
 R26_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
     # M225：H-26-1 通用可调用工厂拒——条件死 ⇒ `functools.partial(int)('2')`
@@ -55,16 +55,18 @@ R26_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
     ),
     # M227：H-26-2 被扫函数体内的嵌套 def/class 装饰器动态表达式臂死 ⇒
     # `def _o(): @(_mk() if True else None) def g()` 逃出（模块级预扫只管
-    # 模块级 def ⇒ 该 fixture 完全放行）。锚带 for 行保唯一（模块级同判据
-    # 缩进不同）。
+    # 模块级 def ⇒ 该 fixture 完全放行）。
+    # 第二十八轮 H-27-2 重锚：该臂从平扫 callee.body 顶层改成
+    # _moduleScopeStatements 递归（分支体/类体补漏）⇒ 锚随新形态两行
+    #（for 行保唯一——line 1500 的 `for s in _moduleScopeStatements` 变量名不同）。
     (
         "M227",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        """                for dec in stmt.decorator_list:
-                    if not isinstance(dec, (ast.Name, ast.Attribute, ast.Call)):""",
-        """                for dec in stmt.decorator_list:
-                    if False:""",
+        """        for fnStmt in _moduleScopeStatements(list(callee.body)):
+            if isinstance(fnStmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):""",
+        """        for fnStmt in _moduleScopeStatements(list(callee.body)):
+            if False:""",
         (_ROUND26_DENY + "[fn_scope_dynamic_decorator]"),
         1,
     ),

@@ -24,8 +24,8 @@ from sqlalchemy import (
     Index,
     String,
     Text,
-    text as sa_text,
 )
+from sqlalchemy import text as sa_text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column
 

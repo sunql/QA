@@ -16,6 +16,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.exceptions import ConflictError, NotFoundError
 from app.domain.models import (
     AgentDefinition,
     BusinessObject,
@@ -29,7 +30,6 @@ from app.domain.schemas import (
     DataDomainUpdate,
 )
 from app.domain.semantic_release_models import SemanticRelease
-from app.domain.exceptions import ConflictError, NotFoundError
 from app.services.data_domain_registry import dataDomainRegistry
 from app.services.messages_zh import (
     MSG_DATA_DOMAIN_CODE_EXISTS,

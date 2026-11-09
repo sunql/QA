@@ -103,6 +103,41 @@ def test_flake_whitelist_data_file_has_a_codeowner() -> None:
     assert _FLAKE_WHITELIST in owned
 
 
+def test_the_mutation_evidence_script_has_a_codeowner() -> None:
+    """**变异取证脚本**必须有 CODEOWNER —— 它决定「哪些变异算转红」。
+
+    攻击路径（2026-11-07 安全评审 MEDIUM-3）：改这个脚本，把「转红」判据从
+    「pytest 退出码 1」放宽成「退出码非 0」⇒ 收集失败（退出码 2）也算转红
+    ⇒ 取证全绿 ⇒ **守卫恒绿**且没人复核。
+
+    ⇒ 它与工具模块、守卫用例**同族** ⇒ 必须进授权面。
+
+    ⚠️ 清单（`ci_mutation_cases.py`，纯数据）与跑者**同族**：
+    改清单可以把某组变异指向一个没人守的地方 ⇒ 照样恒绿 ⇒ 两者都要有 CODEOWNER。
+    """
+    owned = _ownedPaths()
+
+    for relPath in (
+        "backend/scripts/ci_mutation_evidence.py",
+        "backend/scripts/ci_mutation_cases.py",
+        "backend/scripts/ci_mutation_cases_core.py",
+        "backend/scripts/ci_mutation_cases_r14.py",
+        "backend/scripts/ci_mutation_cases_r16.py",
+        "backend/scripts/ci_mutation_cases_r18.py",
+        "backend/scripts/ci_mutation_cases_r20.py",
+        "backend/scripts/ci_mutation_cases_r21.py",
+        "backend/scripts/ci_mutation_cases_r23.py",
+        "backend/scripts/ci_mutation_cases_r24.py",
+        "backend/scripts/ci_mutation_cases_r26.py",
+        "backend/scripts/ci_mutation_cases_r28.py",
+        "backend/scripts/ci_mutation_cases_r30.py",
+        "backend/scripts/ci_mutation_cases_r32.py",
+        "backend/scripts/ci_mutation_cases_r34.py",
+    ):
+        assert (_REPO_ROOT / relPath).is_file(), f"找不到变异取证脚本：{relPath}"
+        assert relPath in owned, f"{relPath} 没有 CODEOWNER（改它就能让守卫恒绿）"
+
+
 # ---------------------------------------------------------------------------
 # 2026-11-06 代码评审 M-5：CODEOWNERS 是「**最后匹配者生效**」
 # ---------------------------------------------------------------------------
@@ -191,7 +226,87 @@ def test_the_effective_owner_of_every_controlled_path_is_the_expected_one() -> N
         for path in (_REPO_ROOT / "backend" / "app" / "tests").rglob("_ci_*_support.py")
     }
     controlledPaths |= {_FLAKE_WHITELIST}
+    controlledPaths |= {"backend/scripts/ci_mutation_evidence.py"}
+    controlledPaths |= {"backend/scripts/ci_mutation_cases.py"}
+    controlledPaths |= {"backend/scripts/ci_mutation_cases_core.py"}
+    controlledPaths |= {
+        "backend/scripts/ci_mutation_cases_r14.py",
+        "backend/scripts/ci_mutation_cases_r16.py",
+        "backend/scripts/ci_mutation_cases_r18.py",
+        "backend/scripts/ci_mutation_cases_r20.py",
+        "backend/scripts/ci_mutation_cases_r21.py",
+        "backend/scripts/ci_mutation_cases_r23.py",
+        "backend/scripts/ci_mutation_cases_r24.py",
+        "backend/scripts/ci_mutation_cases_r26.py",
+        "backend/scripts/ci_mutation_cases_r28.py",
+        "backend/scripts/ci_mutation_cases_r30.py",
+        "backend/scripts/ci_mutation_cases_r32.py",
+        "backend/scripts/ci_mutation_cases_r34.py",
+    }
+    # 第二十六轮评审 H-26-5：原生扩展遮蔽全域收口——backend 下任何深度的
+    # .so/.pyd 都入授权面（lever 路径与 ci_surface lever test 同源）。
+    controlledPaths |= {
+        "backend/app/utils/ci_conftest_chain.cpython-311-darwin.so",
+        "backend/app/utils/ci_judge.pyd",
+        "backend/app/tests/_pg_support.cpython-311-darwin.so",
+        "backend/scripts/kpi_metric_db_guard.abi3.so",
+    }
     controlledPaths |= {".github/CODEOWNERS"}
+    # 第五轮安全评审（HIGH-1 / MEDIUM-2 / MEDIUM-3 / LOW-5）：CI 真正执行或加载的
+    # 环境定义杠杆 —— env.py、.env、解释器选择、测试基建与 seed 脚本。
+    controlledPaths |= {"backend/alembic/env.py"}
+    controlledPaths |= {"backend/.env", "backend/.env.example"}
+    controlledPaths |= {"backend/.python-version", "backend/uv.toml"}
+    controlledPaths |= {
+        "backend/app/tests/_pg_support.py",
+        "backend/app/tests/_neo4j_support.py",
+        "backend/app/tests/_testapp.py",
+        "backend/app/tests/milvus_isolation.py",
+    }
+    controlledPaths |= {
+        str(path.relative_to(_REPO_ROOT))
+        for path in (_REPO_ROOT / "backend" / "scripts").glob("seed_*.py")
+    }
+    # 第六轮复审（HIGH-1 / MEDIUM-1 / MEDIUM-2 / LOW-1）：迁移脚本本体、仓库根 uv.toml、
+    # backend/ 根的 seed 同族、测试库断言的依赖模块。
+    controlledPaths |= {
+        str(path.relative_to(_REPO_ROOT))
+        for path in (_REPO_ROOT / "backend" / "alembic" / "versions").glob("*.py")
+    }
+    controlledPaths |= {"uv.toml"}
+    controlledPaths |= {
+        str(path.relative_to(_REPO_ROOT))
+        for path in (_REPO_ROOT / "backend").glob("seed_*.py")
+    }
+    controlledPaths |= {"backend/scripts/kpi_metric_db_guard.py"}
+    # 第七轮复审（HIGH-1 / MEDIUM）：scripts 包 init（conftest/_pg_support 的
+    # `from scripts.… import …` 都先执行它）与 pytest prepend 导入链上的测试包 init。
+    controlledPaths |= {"backend/scripts/__init__.py"}
+    controlledPaths |= {
+        str(path.relative_to(_REPO_ROOT))
+        for path in (_REPO_ROOT / "backend" / "app" / "tests").rglob("__init__.py")
+    }
+    # 第八轮复审（HIGH-1）：backend 包 init —— 现在不存在，但新增它就把 pytest
+    # prepend 的 pkg_root 顶到仓库根 ⇒ 任何收集前执行（形态钉，管未来文件）。
+    controlledPaths |= {"backend/__init__.py"}
+    # 第九轮复审（HIGH-1 + MEDIUM-1）：app 包 init（prepend 链上现存且每次执行的一层）
+    # 与 conftest 收集前 import 的 harness 配置文件（settings / engine / crypto）。
+    controlledPaths |= {"backend/app/__init__.py"}
+    controlledPaths |= {
+        "backend/app/config.py",
+        "backend/app/infrastructure/__init__.py",
+        "backend/app/infrastructure/database.py",
+        "backend/app/infrastructure/security/__init__.py",
+        "backend/app/infrastructure/security/crypto.py",
+    }
+    # 第十二轮复审（HIGH-1）：conftest 收集前 import 链的**祖先包 init**
+    # （`ci_conftest_chain` 派生 + `test_ci_conftest_chain.py` 钉住）。
+    controlledPaths |= {
+        "backend/app/domain/__init__.py",
+        "backend/app/models/__init__.py",
+        "backend/app/services/__init__.py",
+        "backend/app/infrastructure/llm/__init__.py",
+    }
     assert controlledPaths, "受控路径集合为空（路径写错了？）"
 
     wrong = {
@@ -212,3 +327,29 @@ def test_a_trailing_catch_all_would_take_the_ownership_away() -> None:
     """
     assert _patternMatches("*", "backend/app/utils/ci_flakes.py")
     assert _patternMatches("*", ".github/CODEOWNERS")
+
+
+def test_every_ci_surface_file_in_the_pre_collection_closure_has_a_codeowner() -> None:
+    """派生守卫（第十二轮 LOW-5）：CI 相关面清单里「收集前闭包」内的文件必须有 owner。
+
+    CI 相关面与 CODEOWNERS 是两份人工维护的清单 ⇒ 会漂移：某文件进了
+    `_CI_SURFACE_PATTERNS`（改它 = 退出码 6）却没有 owner ⇒ 仲裁通道无人被请求复核。
+    这里用 `ci_conftest_chain.transitivePreCollectionPaths` **派生**收集前会执行的
+    文件集，对其中被 CI 相关面钉住的每一个断言 `_effectiveOwner` 非空 —— 新增
+    pattern 而忘加 CODEOWNERS 会在派生集扩到该文件时自动红。
+    """
+    from app.utils.ci_conftest_chain import transitivePreCollectionPaths
+    from app.utils.ci_surface import detectCiSurfaceChanges
+
+    backendRoot = _REPO_ROOT / "backend"
+    closure = transitivePreCollectionPaths(backendRoot)
+    assert len(closure) >= 60, f"闭包塌缩（派生器被掏空？）：{len(closure)}"
+
+    ownerless = [
+        path
+        for path in closure
+        if detectCiSurfaceChanges((path,)) and _effectiveOwner(path) is None
+    ]
+    assert not ownerless, (
+        f"这些 CI 相关面文件（收集前闭包内）在 CODEOWNERS 里没有 owner：{ownerless}"
+    )

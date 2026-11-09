@@ -66,7 +66,12 @@ def resolveHeadFreshness(repo: str, runId: str, runSha: str) -> HeadFreshness:
             reason=f"拉取 run {runId} 的 head 信息失败 ⇒ 无法确认 run 是否最新：{sanitizeForReport(str(error))}",
             note=None,
         )
-    if headInfo.headRepo != repo:
+    # ⚠️ **大小写不敏感**比较（2026-11-07 安全评审 MEDIUM-1）：
+    # GitHub 的仓库名大小写不敏感，API 侧会原样返回 `Sunql/QA` 这类形态
+    # ⇒ 严格相等会把**同一个仓库**当成 fork ⇒ 直接跳过新鲜度核对
+    # ⇒ 「run 已过期」这条守卫**静默失效**（fail-open）。
+    # 与 `ci_surface._baseTrustError` 的比较方式保持一致。
+    if headInfo.headRepo.lower() != repo.lower():
         return HeadFreshness(
             isFresh=True,
             reason=None,

@@ -29,10 +29,25 @@ def test_validateRepo_rejects_path_injection_forms(repo: str) -> None:
     assert ci_gh.validateRepo(repo) is not None
 
 
+def test_validateRepo_rejects_a_trailing_newline() -> None:
+    """结尾锚点必须是 `\\Z` 而不是 `$`。
+
+    Python 的 `$` **允许结尾换行** ⇒ `"sunql/QA\\n"` 能通过
+    `^[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*$`
+    ⇒ 校验形同虚设（实测）。
+    """
+    assert ci_gh.validateRepo("sunql/QA\n") is not None
+    assert ci_gh.validateRepo("sunql/QA\n") != ci_gh.validateRepo("sunql/QA")
+
+
 def test_validateRunId_rejects_non_numeric() -> None:
     assert ci_gh.validateRunId("111") is None
     assert ci_gh.validateRunId("11a") is not None
     assert ci_gh.validateRunId("../../x") is not None
+
+
+def test_validateRunId_rejects_a_trailing_newline() -> None:
+    assert ci_gh.validateRunId("111\n") is not None
 
 
 def test_fetchJobPayloads_rejects_malformed_repo() -> None:
@@ -81,6 +96,23 @@ def test_fetchRunHeadSha_rejects_malformed_sha() -> None:
         ci_gh.subprocess.run = original
 
 
+def test_fetchRunHeadSha_rejects_a_sha_with_a_trailing_newline() -> None:
+    """sha 的结尾锚点必须是 `\\Z`（`$` 允许结尾换行 ⇒ `"a"*40 + "\\n"` 能过校验）。"""
+
+    class FakeResult:
+        returncode = 0
+        stdout = json.dumps({"head_sha": "a" * 40 + "\n"})
+        stderr = ""
+
+    original = ci_gh.subprocess.run
+    ci_gh.subprocess.run = lambda *args, **kwargs: FakeResult()
+    try:
+        with pytest.raises(ValueError):
+            ci_gh.fetchRunHeadSha("sunql/QA", "111")
+    finally:
+        ci_gh.subprocess.run = original
+
+
 def test_fetchChangedFiles_rejects_malformed_sha() -> None:
     with pytest.raises(ValueError):
         ci_gh.fetchChangedFiles("sunql/QA", "not-a-sha", "b" * 40)
@@ -117,101 +149,144 @@ def test_parseJobs_accepts_plain_object_shape() -> None:
     assert [item["id"] for item in rawItems] == [7]
 
 
-def test_parseChangedFiles_merges_paginated_pages() -> None:
+# --------------------------------------------------------------------------
+# merge-base（三点语义的分叉点）
+# --------------------------------------------------------------------------
+
+
+def test_parseMergeBaseSha_reads_the_merge_base_commit() -> None:
+    payload = json.dumps({"merge_base_commit": {"sha": "c" * 40}, "files": []})
+
+    assert ci_gh._parseMergeBaseSha(payload) == "c" * 40
+
+
+def test_parseMergeBaseSha_accepts_the_slurped_page_array() -> None:
+    """`--paginate --slurp` 返回页数组 ⇒ 合并后仍要能找到 merge-base。"""
     payload = json.dumps(
         [
-            {"files": [{"filename": "a.py"}]},
-            {"files": [{"filename": "b.py"}]},
+            {"status": "ahead", "total_commits": 0},
+            {"merge_base_commit": {"sha": "c" * 40}},
         ]
     )
 
-    assert ci_gh._parseChangedFiles(payload) == ("a.py", "b.py")
+    assert ci_gh._parseMergeBaseSha(payload) == "c" * 40
 
 
-def test_parseChangedFiles_rejects_truncated_file_list() -> None:
-    """compare API 最多返回 **300** 个文件 ⇒ 静默截断会让 CI 相关面改动隐身。
-
-    GitHub 的 `repos/{repo}/compare/{base}...{head}` 响应里 `files` 数组
-    **最多 300 项**（`--paginate` 只对 commits 分页，**不会**补齐 files）
-    ⇒ 一个改了 300+ 文件的大 PR 里若混着一个 `.github/workflows/ci.yml`
-    或 `conftest.py`，我们只会看到前 300 个 ⇒ 守卫放行 ⇒ 假「净新增 0」。
-
-    ⇒ 命中上限必须**报错**（⇒ 调用方走「判定不出来 ⇒ 保守拦下」），
-    不能当成「就这些文件」。
-    """
-    payload = json.dumps({"files": [{"filename": f"f{i}.py"} for i in range(300)]})
+def test_parseMergeBaseSha_rejects_a_response_without_merge_base() -> None:
+    """拿不到分叉点 ⇒ 无法确定三点语义 ⇒ 必须**报错**（不能当成「无改动」）。"""
+    payload = json.dumps({"status": "identical", "files": []})
 
     with pytest.raises(ValueError):
-        ci_gh._parseChangedFiles(payload)
+        ci_gh._parseMergeBaseSha(payload)
 
 
-def test_parseChangedFiles_accepts_file_list_below_the_cap() -> None:
-    """反向守卫：299 个文件是正常情况，不得误拦。"""
-    payload = json.dumps({"files": [{"filename": f"f{i}.py"} for i in range(299)]})
+def test_parseMergeBaseSha_rejects_a_malformed_merge_base_sha() -> None:
+    payload = json.dumps({"merge_base_commit": {"sha": "not-a-sha"}})
 
-    assert len(ci_gh._parseChangedFiles(payload)) == 299
+    with pytest.raises(ValueError):
+        ci_gh._parseMergeBaseSha(payload)
 
 
-def test_parseChangedFiles_keeps_the_previous_path_of_a_rename() -> None:
-    """**改名**时旧路径必须一起进清单（`previous_filename`）。
+def test_fetchMergeBaseSha_calls_the_three_dot_compare_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """compare 必须走**三点**语法 `base...head`（两点 `base..head` 实测 404）。"""
+    captured: dict[str, object] = {}
 
-    ⚠️ GitHub compare 对一次改名只给**一个**条目：新路径在 `filename`，
-    旧路径在 `previous_filename` ⇒ 只取 `filename` 的话**旧路径从清单里消失**。
+    def fakeRunGh(args: list[str]) -> str:
+        captured["args"] = args
+        return json.dumps({"merge_base_commit": {"sha": "c" * 40}})
 
+    monkeypatch.setattr(ci_gh, "_runGh", fakeRunGh)
+
+    assert ci_gh.fetchMergeBaseSha("sunql/QA", "a" * 40, "b" * 40) == "c" * 40
+    assert captured["args"] == [
+        "api",
+        "repos/sunql/QA/compare/" + "a" * 40 + "..." + "b" * 40,
+        "--paginate",
+        "--slurp",
+    ]
+
+
+def test_fetchMergeBaseSha_rejects_malformed_shas() -> None:
+    with pytest.raises(ValueError):
+        ci_gh.fetchMergeBaseSha("sunql/QA", "not-a-sha", "b" * 40)
+    with pytest.raises(ValueError):
+        ci_gh.fetchMergeBaseSha("sunql/QA", "a" * 40, "not-a-sha")
+
+
+# --------------------------------------------------------------------------
+# 「PR 相对分叉点改了什么」（三点语义，树对树实现 ⇒ 无 300 项上限）
+# --------------------------------------------------------------------------
+
+
+def test_fetchChangedFiles_computes_the_three_point_diff_from_the_merge_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """三点语义 = `diff(merge_base, head)` ⇒ 分叉点从 compare 拿，差异树对树算。"""
+    trees = {
+        "c" * 40: {"a.py": "1" * 40, "old.py": "2" * 40},
+        "b" * 40: {"a.py": "1" * 40, "new.py": "3" * 40},
+    }
+    monkeypatch.setattr(ci_gh, "fetchMergeBaseSha", lambda repo, base, head: "c" * 40)
+    monkeypatch.setattr(ci_gh, "fetchTreePathShas", lambda repo, sha: trees[sha])
+
+    assert ci_gh.fetchChangedFiles("sunql/QA", "a" * 40, "b" * 40) == ("new.py", "old.py")
+
+
+def test_fetchChangedFiles_has_no_file_count_cap() -> None:
+    """⚠️ **没有 300 项上限**（2026-11-07 代码评审 MEDIUM-2）。
+
+    compare API 的 `files` 数组**最多 300 项** ⇒ 大 PR 会被静默截断
+    ⇒ 归因集不完整 ⇒ 与净变更取交集时会把 PR 真改的 CI 文件**排除**掉
+    ⇒ 守卫静默失效（fail-open）。
+
+    ⇒ 本实现改走 Trees API 树对树 ⇒ 条目数只受 GitHub 的 `truncated` 限制
+    ⇒ 400 个改动文件必须**全部**出现在清单里。
+    """
+    trees = {
+        "c" * 40: {f"f{i}.py": "1" * 40 for i in range(400)},
+        "b" * 40: {f"f{i}.py": "2" * 40 for i in range(400)},
+    }
+
+    original = ci_gh.fetchMergeBaseSha
+    originalTree = ci_gh.fetchTreePathShas
+    ci_gh.fetchMergeBaseSha = lambda repo, base, head: "c" * 40
+    ci_gh.fetchTreePathShas = lambda repo, sha: trees[sha]
+    try:
+        changed = ci_gh.fetchChangedFiles("sunql/QA", "a" * 40, "b" * 40)
+    finally:
+        ci_gh.fetchMergeBaseSha = original
+        ci_gh.fetchTreePathShas = originalTree
+
+    assert len(changed) == 400
+
+
+def test_fetchChangedFiles_reports_a_rename_as_delete_plus_add() -> None:
+    """**改名**在树对树下 = 旧路径删除 + 新路径新增 ⇒ **两个路径都在清单里**。
+
+    ⚠️ GitHub compare 对一次改名只给**一个**条目（新路径 `filename`、
+    旧路径 `previous_filename`）⇒ 只取 `filename` 的话**旧路径从清单里消失**
     ⇒ 攻击路径（2026-11-06 安全审查 H-1 实测）：把
-    `.github/ci-known-flaky-tests.json` **改名**成 `docs/notes.json`
-    ⇒ 白名单数据文件不再出现在改动清单里 ⇒ 「CI 相关面」守卫看不到它
-    ⇒ **静默绕过**退出码 6 的人工仲裁 ⇒ 而改名本身在 GitHub UI 上很不起眼。
+    `.github/ci-known-flaky-tests.json` 改名成 `docs/notes.json`
+    ⇒ 白名单数据文件不再出现在改动清单里 ⇒ **静默绕过**退出码 6 的人工仲裁。
     """
-    payload = json.dumps(
-        {
-            "files": [
-                {
-                    "filename": "docs/notes.json",
-                    "previous_filename": ".github/ci-known-flaky-tests.json",
-                }
-            ]
-        }
-    )
+    trees = {
+        "c" * 40: {".github/ci-known-flaky-tests.json": "1" * 40},
+        "b" * 40: {"docs/notes.json": "2" * 40},
+    }
 
-    assert ci_gh._parseChangedFiles(payload) == (
-        "docs/notes.json",
-        ".github/ci-known-flaky-tests.json",
-    )
+    original = ci_gh.fetchMergeBaseSha
+    originalTree = ci_gh.fetchTreePathShas
+    ci_gh.fetchMergeBaseSha = lambda repo, base, head: "c" * 40
+    ci_gh.fetchTreePathShas = lambda repo, sha: trees[sha]
+    try:
+        changed = ci_gh.fetchChangedFiles("sunql/QA", "a" * 40, "b" * 40)
+    finally:
+        ci_gh.fetchMergeBaseSha = original
+        ci_gh.fetchTreePathShas = originalTree
 
-
-def test_parseChangedFiles_counts_items_not_names_for_the_cap() -> None:
-    """上限按 **条目数**计，不是按「名字个数」计。
-
-    改名会让**一个**条目产出**两个**名字 ⇒ 若按名字数计，150 个改名条目
-    = 300 个名字 ⇒ 早就撞上 compare API 的 300 项上限（清单早被服务端截断）
-    却仍然放行 ⇒ 「改动文件清单不完整」这件事被静默吞掉。
-    """
-    payload = json.dumps(
-        {
-            "files": [
-                {"filename": f"new{i}.py", "previous_filename": f"old{i}.py"}
-                for i in range(300)
-            ]
-        }
-    )
-
-    with pytest.raises(ValueError):
-        ci_gh._parseChangedFiles(payload)
-
-
-def test_parseChangedFiles_accepts_renamed_files_below_the_cap() -> None:
-    """反向守卫：299 个**改名**条目（598 个名字）仍应放行（按条目数计）。"""
-    payload = json.dumps(
-        {
-            "files": [
-                {"filename": f"new{i}.py", "previous_filename": f"old{i}.py"}
-                for i in range(299)
-            ]
-        }
-    )
-
-    assert len(ci_gh._parseChangedFiles(payload)) == 598
+    assert changed == (".github/ci-known-flaky-tests.json", "docs/notes.json")
 
 
 # --------------------------------------------------------------------------
@@ -267,3 +342,291 @@ def test_runGh_never_uses_a_shell(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert captured["args"] == ["gh", "api", "repos/a b/c"]
     assert "shell" not in captured["kwargs"] or captured["kwargs"]["shell"] is False
+
+
+def test_fetchRunHeadInfo_exposes_the_trigger_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run 的**触发事件**必须取得到 ⇒ 工具侧才能判断「基线是不是 push run」。
+
+    GitHub 的 `runs?branch=<name>` **不区分事件** ⇒ 基线可能是 `pull_request` run
+    ⇒ 工具侧必须独立复核（不能只靠 workflow 的查询串）。
+    """
+    payload = json.dumps(
+        {
+            "head_sha": "a" * 40,
+            "head_branch": "main",
+            "event": "push",
+            "head_repository": {"full_name": "sunql/QA"},
+        }
+    )
+    monkeypatch.setattr(ci_gh, "_runGh", lambda args: payload)
+
+    headInfo = ci_gh.fetchRunHeadInfo("sunql/QA", "111")
+
+    assert headInfo.event == "push"
+    assert headInfo.headBranch == "main"
+    assert headInfo.headRepo == "sunql/QA"
+
+
+# --------------------------------------------------------------------------
+# 树对树净变更（净 diff）
+# --------------------------------------------------------------------------
+
+
+def _treePayload(entries: list[dict], truncated: bool = False) -> str:
+    return json.dumps({"truncated": truncated, "tree": entries})
+
+
+def test_parseTreePathShas_keeps_only_file_like_entries() -> None:
+    """递归树里混着三种条目：blob（文件）、tree（目录）、commit（子模块）。
+
+    - 目录（`type=tree`）必须**排除** ⇒ 否则「一边多一个空目录」会被当成
+      「改了一个文件」⇒ 改动清单里出现根本不是文件的路径；
+    - 子模块（`type=commit`）要**保留** ⇒ 它是一个路径级的指针变化；
+    - 值里带 `mode` ⇒ 只改权限位（chmod）的改动**也能看见**（blob sha 不变）。
+    """
+    payload = _treePayload(
+        [
+            {"path": "a.py", "type": "blob", "sha": "1" * 40, "mode": "100644"},
+            {"path": "dir", "type": "tree", "sha": "2" * 40, "mode": "040000"},
+            {"path": "dir/child.py", "type": "blob", "sha": "5" * 40, "mode": "100644"},
+            {"path": "sub", "type": "commit", "sha": "3" * 40, "mode": "160000"},
+        ]
+    )
+
+    assert ci_gh._parseTreePathShas(payload) == {
+        "a.py": f"100644:{'1' * 40}",
+        "dir/child.py": f"100644:{'5' * 40}",
+        "sub": f"160000:{'3' * 40}",
+    }
+
+
+def test_parseTreePathShas_rejects_truncated_tree() -> None:
+    """递归树被服务端截断 ⇒ 清单不可信 ⇒ 必须**报错**（fail-closed）。
+
+    Trees API 的递归树有上限（条目数 / 字节数）⇒ 命中上限时 GitHub 会
+    把 `truncated` 置真并**少给**一部分条目 ⇒ 少给的那部分里的 CI 相关面
+    文件就**看不见** ⇒ 守卫放行 ⇒ 假「净新增 0」。
+    """
+    payload = _treePayload(
+        [{"path": "a.py", "type": "blob", "sha": "1" * 40, "mode": "100644"}],
+        truncated=True,
+    )
+
+    with pytest.raises(ValueError):
+        ci_gh._parseTreePathShas(payload)
+
+
+def test_parseTreePathShas_rejects_a_missing_truncated_flag() -> None:
+    """`truncated` 键**缺失** ⇒ 按「不完整」处理，不能当「未截断」。
+
+    它是**唯一**能证明清单完整的字段 ⇒ 缺失时必须报错（fail-closed）。
+
+    ⚠️ 载荷里**必须带嵌套路径**（`dir/` + `dir/a.py`）⇒ 否则「递归没生效」
+    那条不变式会先报错 ⇒ 本用例就测不到 `truncated` 这一条了
+    （变异取证：去掉 `truncated` 检查后本用例必须转红）。
+    """
+    payload = json.dumps(
+        {
+            "tree": [
+                {"path": "dir", "type": "tree", "sha": "2" * 40, "mode": "040000"},
+                {"path": "dir/a.py", "type": "blob", "sha": "1" * 40, "mode": "100644"},
+            ]
+        }
+    )
+
+    with pytest.raises(ValueError):
+        ci_gh._parseTreePathShas(payload)
+
+
+def test_parseTreePathShas_rejects_unexpected_payload() -> None:
+    """gh 返回的结构不是预期形状 ⇒ 报错（不能当成「空树」）。"""
+    with pytest.raises(ValueError):
+        ci_gh._parseTreePathShas(json.dumps(["not", "an", "object"]))
+
+
+def test_parseTreePathShas_rejects_a_malformed_entry() -> None:
+    """条目缺字段 ⇒ **报错**，不静默跳过。
+
+    跳过 = 该路径从清单里消失 = 少一个 CI 相关面文件 = 守卫静默失效。
+    """
+    payload = _treePayload(
+        [{"path": "a.py", "type": "blob", "sha": "1" * 40, "mode": "100644"}]
+    )
+    payload = payload.replace('"mode": "100644"', '"mode": 100644')
+
+    with pytest.raises(ValueError):
+        ci_gh._parseTreePathShas(payload)
+
+
+def test_parseTreePathShas_rejects_an_unknown_entry_type() -> None:
+    """不认识的条目类型 ⇒ 报错（不能当成普通文件收下）。
+
+    ⚠️ 载荷里**必须带嵌套路径**（`dir/` + `dir/a.py`）⇒ 否则「递归没生效」
+    那条不变式会**先**报错 ⇒ 本用例就测不到「未知类型」这一条
+    （变异取证：把类型检查改成放行后本用例必须转红）。
+    """
+    payload = _treePayload(
+        [
+            {"path": "dir", "type": "tree", "sha": "2" * 40, "mode": "040000"},
+            {"path": "dir/a.py", "type": "weird", "sha": "1" * 40, "mode": "100644"},
+        ]
+    )
+
+    with pytest.raises(ValueError):
+        ci_gh._parseTreePathShas(payload)
+
+
+def test_parseTreePathShas_rejects_a_non_recursive_tree() -> None:
+    """**递归没生效** ⇒ 必须报错。
+
+    不带 `recursive=1` 时 GitHub 只返回**根级**条目（文件 + 各子目录的 tree 条目）
+    ⇒ 所有 CI 相关面文件（都在子目录里）**一个都看不见** ⇒ 守卫静默失效
+    ⇒ 而 `truncated` 仍是 false ⇒ 不看目录不变式就会当成「完整清单」放行。
+
+    ⇒ 不变式：**每个目录条目都必须有子条目**（git 不存空目录 ⇒ 恒成立）。
+    """
+    payload = _treePayload(
+        [
+            {"path": "README.md", "type": "blob", "sha": "1" * 40, "mode": "100644"},
+            {"path": ".github", "type": "tree", "sha": "2" * 40, "mode": "040000"},
+        ]
+    )
+
+    with pytest.raises(ValueError):
+        ci_gh._parseTreePathShas(payload)
+
+
+def test_diffTreePathShas_reports_added_removed_and_modified() -> None:
+    """净变更 = 两棵树按「路径 → 对象 sha」求差：新增 / 删除 / 内容变化都要报。"""
+    base = {"same.py": "1" * 40, "gone.py": "2" * 40, "mod.py": "3" * 40}
+    head = {"same.py": "1" * 40, "new.py": "4" * 40, "mod.py": "5" * 40}
+
+    assert ci_gh._diffTreePathShas(base, head) == ("gone.py", "mod.py", "new.py")
+
+
+def test_fetchTreePathShas_rejects_malformed_sha() -> None:
+    """sha 会被拼进 API 路径 ⇒ 自己校验（不能只在 CLI 校验）。"""
+    with pytest.raises(ValueError):
+        ci_gh.fetchTreePathShas("sunql/QA", "../../etc/passwd")
+
+
+def test_fetchTreePathShas_rejects_malformed_repo() -> None:
+    with pytest.raises(ValueError):
+        ci_gh.fetchTreePathShas("../../other-owner/other-repo", "a" * 40)
+
+
+def test_fetchTreePathShas_calls_the_recursive_trees_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """必须走 `git/trees/{sha}?recursive=1` ⇒ 一次拿到整棵树。"""
+    captured: dict[str, object] = {}
+
+    def fakeRunGh(args: list[str]) -> str:
+        captured["args"] = args
+        return json.dumps(
+            {
+                "truncated": False,
+                "tree": [
+                    {"path": "dir", "type": "tree", "sha": "2" * 40, "mode": "040000"},
+                    {"path": "dir/a.py", "type": "blob", "sha": "1" * 40, "mode": "100644"},
+                ],
+            }
+        )
+
+    monkeypatch.setattr(ci_gh, "_runGh", fakeRunGh)
+
+    ci_gh.fetchTreePathShas("sunql/QA", "a" * 40)
+
+    assert captured["args"] == ["api", "repos/sunql/QA/git/trees/" + "a" * 40 + "?recursive=1"]
+
+
+def test_fetchNetChangedFiles_compares_the_two_trees(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """净变更 = 两棵树之差。
+
+    ⚠️ **不能**用 compare API 的三点 diff 代替：三点从 merge-base 起算 ⇒
+    分支若含「重建 main 的 tree 的合成提交」⇒ main 的**自己的** CI 文件
+    会被算成「PR 改的」（2026-11-05 实证：三点 158 个文件 vs 净变更 11 个
+    ⇒ 假 `CI_SURFACE_CHANGED`）。
+    """
+    trees = {
+        "a" * 40: {"same.py": "1" * 40, "mod.py": "2" * 40},
+        "b" * 40: {"same.py": "1" * 40, "mod.py": "3" * 40},
+    }
+    monkeypatch.setattr(ci_gh, "fetchTreePathShas", lambda repo, sha: trees[sha])
+
+    assert ci_gh.fetchNetChangedFiles("sunql/QA", "a" * 40, "b" * 40) == ("mod.py",)
+
+
+def test_parseTreePathShas_rejects_a_response_missing_ancestor_entries() -> None:
+    """响应缺少**祖先目录条目** ⇒ 不是完整递归树 ⇒ 报错（fail-closed）。
+
+    实测本仓的递归列举必然带上每一级目录条目（git 的树里目录本身就是条目）
+    ⇒ 缺祖先 = 响应被裁剪过 ⇒ 清单可能缺文件 ⇒ CI 相关面文件会隐身。
+    """
+    payload = _treePayload(
+        [{"path": "dir/sub/a.py", "type": "blob", "sha": "1" * 40, "mode": "100644"}]
+    )
+
+    with pytest.raises(ValueError):
+        ci_gh._parseTreePathShas(payload)
+
+
+def test_parseTreePathShas_rejects_a_fully_flat_response() -> None:
+    """响应里**一个带目录前缀的条目都没有** ⇒ 递归没生效 ⇒ 报错。
+
+    ⚠️ 这条是「前两条不变式会真空通过」时的兜底：响应只剩根级条目 ⇒
+    所有 CI 相关面文件（都在子目录里）一个都看不见 ⇒ 守卫**静默失效**
+    而 `truncated=false` 不报错。
+    """
+    payload = _treePayload(
+        [{"path": "README.md", "type": "blob", "sha": "1" * 40, "mode": "100644"}]
+    )
+
+    with pytest.raises(ValueError):
+        ci_gh._parseTreePathShas(payload)
+
+
+def test_parseTreePathShas_rejects_a_zero_truncated_flag() -> None:
+    """`truncated` 是数字 `0` ⇒ **不能**当「未截断」放行。
+
+    ⚠️ 真值判断（`if parsed["truncated"]:`）会把 `0` 当成「没截断」⇒ **fail-open**
+    ⇒ 清单可能已被服务端截断却看不出来 ⇒ 守卫静默失效。
+    ⇒ 判据必须是 `is not False`（唯一放行的形态是**布尔假**）。
+    """
+    payload = json.dumps(
+        {
+            "truncated": 0,
+            "tree": [
+                {"path": "dir", "type": "tree", "sha": "2" * 40, "mode": "040000"},
+                {"path": "dir/a.py", "type": "blob", "sha": "1" * 40, "mode": "100644"},
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError):
+        ci_gh._parseTreePathShas(payload)
+
+
+
+
+def test_parseTreePathShas_rejects_a_string_false_truncated_flag() -> None:
+    """`truncated` 是字符串 `"false"` ⇒ **不能**当「未截断」放行。
+
+    判据必须是 `is not False`（唯一放行的形态是**布尔假**）⇒
+    真值判断会把 `"false"` 当成「已截断」（白拦），反过来若服务端改成别的
+    形态又可能当成「未截断」（fail-open）⇒ 两种都不接受。
+    """
+    payload = json.dumps(
+        {
+            "truncated": "false",
+            "tree": [
+                {"path": "dir", "type": "tree", "sha": "2" * 40, "mode": "040000"},
+                {"path": "dir/a.py", "type": "blob", "sha": "1" * 40, "mode": "100644"},
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError):
+        ci_gh._parseTreePathShas(payload)

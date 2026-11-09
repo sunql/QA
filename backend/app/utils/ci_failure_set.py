@@ -57,6 +57,9 @@
 14. **PR 改了「CI 相关面」⇒ 失败集合不再可比。** 见 `app.utils.ci_surface`：
     PR 可以通过 conftest / workflow / 分片清单让失败用例**根本不产生 FAILED 行**
     ⇒ 假「净新增 0」⇒ 而 CI 还全绿 ⇒ 没有二次防线。
+    ⚠️ 判定比的是「**两次 run 实际跑的那两份代码**」——
+    PR 的 CI run 检出的是 `refs/pull/N/merge`（**合并 commit**，不是 PR 头）
+    ⇒ 拿 PR 头去比 ⇒ main 改了 CI 文件时既**假拦**又**判不出来**。
 15. **PR run 必须跑的就是 PR 当前那版代码。** PR 又推了新 commit 而操作者
     拿的是上一次 push 的 run ⇒ 对差的是**旧代码** ⇒ 「净新增 0」是假的
     （而 GitHub 上最新那次 CI 可能已经红了，没人看）。见 `app.utils.ci_head`。
@@ -101,10 +104,10 @@
 1     净新增失败非空 ⇒ 不可合并
 2     存在不可用 job ⇒ 必须复跑后再对差
 3     运行错误（gh 调用失败、参数非法、两侧 run 相同、某侧无 job、
-      **PR run 已过期**等）
+      **PR run 已过期**、**基线 run 不可信**等）
 4     两次 run 的 job 集合不等价 ⇒ 对差不成立 ⇒ 人工确认
 5     净丢失失败用例非空 ⇒ 须人工确认不是「把失败藏起来了」
-6     PR 改了 CI 相关面 ⇒ 失败集合不可比 ⇒ 须人工确认
+6     两次 run 跑的 CI 相关面不同 ⇒ 失败集合不可比 ⇒ 须人工确认
 ===== ==========================
 """
 
@@ -117,6 +120,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from app.utils.ci_flakes import (
+    ExemptionOutcome,
     FlakeEntry,
     FlakeExemption,
     applyFlakeExemptions,
@@ -156,6 +160,8 @@ _FETCH_ERRORS = (
     OSError,
     ValueError,
     KeyError,
+    IndexError,
+    TypeError,
     AttributeError,
     subprocess.SubprocessError,
 )
@@ -208,7 +214,17 @@ def _applyCiSurfaceGuard(
     surface: CiSurfaceInfo,
     allowCiChanges: bool,
 ) -> Verdict:
-    """CI 相关面守卫：PR 改了 CI 相关文件 ⇒ 失败集合不可比 ⇒ 不可判「可合并」。
+    """CI 相关面守卫：两次 run 的 **CI 相关面代码不同** ⇒ 失败集合不可比 ⇒ 不可判「可合并」。
+
+    ⚠️ 判定的集合是「**两次 run 实际跑的那两份代码**的差异」
+    （= `A ∪ P`：`A` = main 从基线到 PR run **事件派发**那一刻的内容推进、
+    `P` = PR 自己改的文件），**不是**「PR 相对分叉点改了什么」：
+    - 只用「PR 改了哪些」⇒ 会**漏掉**「main 改了 CI 文件、PR 分支没跟上」
+      这一类 ⇒ 那两次 run 跑的 CI 定义本来就不同 ⇒ 失败集合不可比 ⇒ 却判「可合并」；
+    - 判定侧那棵「PR run 实际执行的树」**不直接取**（`refs/pull/N/merge` 的
+      当前值会漂移、PR 合并后还会 404）⇒ 改用 `A ∪ P` 两段重算 ⇒ 结论等价；
+    - 判定集不区分谁改的 ⇒ 报错时会分不清是 PR 的问题还是 main 的问题
+      ⇒ 所以**归因集**（PR 自己改的文件）仍保留，只用来**措辞**。
 
     只在**本该判「可合并」**时才起作用（其他结论已经拦住了）。
     判定不出来（`surface.error` 非空）时**保守拦下** —— 「不知道」不等于「没有」。
@@ -224,18 +240,85 @@ def _applyCiSurfaceGuard(
             ),
             reasonCode=_REASON_CI_SURFACE,
         )
-    ciChanges = detectCiSurfaceChanges(surface.changedFiles)
+    ciChanges = detectCiSurfaceChanges(surface.netChangedFiles)
     if not ciChanges:
         return verdict
     return Verdict(
         canMerge=False,
         blockingReason=(
-            "PR 改动了 CI 相关面 ⇒ 两次 run 的失败集合不可比 ⇒ 对差不成立："
-            f"{list(ciChanges)}"
-            "（PR 可以通过 conftest / workflow / 分片清单让失败用例不产生 FAILED 行）"
+            _ciSurfaceReason(surface, ciChanges)
+            + "（PR 可以通过 conftest / workflow / 分片清单让失败用例不产生 FAILED 行）"
             "⇒ 须人工确认；确知无影响时用 --allow-ci-changes 显式豁免"
         ),
         reasonCode=_REASON_CI_SURFACE,
+    )
+
+
+def _mainTipMismatchNote(surface: CiSurfaceInfo) -> str | None:
+    """基线 run 跑的 commit 与「PR run 的 main 侧底座」不是同一个时给出提示。
+
+    ⚠️ 为什么这件事要让人看见：PR 的 CI run 跑的是
+    **merge(main@事件派发时刻, PR 头)** ⇒ 它的 main 侧底座 = `M_T`。
+    基线 run 若是**别的** main commit ⇒ main 在基线之后推进过
+    ⇒ 两次 run 的 CI 定义可能不同 ⇒ 失败集合原则上不可比。
+
+    ⚠️⚠️ **本函数只讲事实，不讲处置**（2026-11-07 代码评审 HIGH-1）：
+    处置在 `_mainTipRemedyNote` 里，**分成两行**。
+    理由：报告的每个字段都会被 `sanitizeForReport` 截到 **200 字符**
+    ⇒ 事实 + 处置塞进同一个字符串 ⇒ 处置被截掉 ⇒ 操作者只看到「拦」
+    ⇒ 看不到该做什么 ⇒ 白跑一轮。
+
+    ⚠️⚠️ **调用方必须条件化**（`_isCiSurfaceChange`，第三轮评审 M-1）：
+    只在**判出 CI 相关面变更**时出现 —— `M_base ≠ M_T` 是常态 ⇒ 无条件出现就是噪音。
+    """
+    if surface.baseSha is None or surface.mainTipSha is None:
+        return None
+    if surface.baseSha == surface.mainTipSha:
+        return None
+    return (
+        f"基线 run 跑的 commit（{surface.baseSha[:12]}…）"
+        f"不是 PR run 的 main 侧底座（{surface.mainTipSha[:12]}…）"
+        "⇒ main 在基线之后推进过 ⇒ 两次 run 的 CI 定义可能不同"
+    )
+
+
+def _mainTipRemedyNote() -> str:
+    """处置办法：**推一个新 commit** ⇒ 产生一次**新的 CI 事件派发**。
+
+    ⚠️⚠️ **不能叫操作者「重新运行 PR 的 CI」**（2026-11-07 代码评审 HIGH-1）：
+    `pull_request` 事件的**合并 commit 在事件派发那一刻就被冻结**了
+    ⇒ 复跑（re-run）**不会**重新计算它 ⇒ 复跑检出的仍是**同一个**合并 commit
+    ⇒ 判定依旧不成立 ⇒ 照着这句话做会**白跑一轮**还拿不到新结论。
+    实测（PR #105 run `41908498247`，attempt=2）：复跑仍执行
+    `57a267a93f…`（= attempt-1 的那个合并 commit），其第一父仍是派发那一刻的 main。
+    ⇒ 正确的处置 = **推一个新 commit**（产生新的事件派发 ⇒ 新的合并 commit
+    ⇒ 新的 main 侧底座）。
+    """
+    return (
+        "处置：若判「CI 相关面变更」，请**推一个新 commit 到 PR 分支**"
+        "（或 rebase 到最新 main / 重开 PR）以产生一次**新的 CI 事件派发**"
+        "；⚠️ **单纯复跑 run 无效**（合并 commit 在派发那一刻已冻结）"
+    )
+
+
+def _ciSurfaceReason(surface: CiSurfaceInfo, ciChanges: tuple[str, ...]) -> str:
+    """CI 相关面命中时的措辞：**归因得到 PR 就说 PR，改归因不到就如实说**。
+
+    ⚠️ **不把「main 侧底座不同」拼进这条 reason**（2026-11-07）：
+    reason 本身会被截到 200 字符 ⇒ 拼进去必然把「⇒ 对差不成立」截掉
+    ⇒ 反而更难读。⇒ 事实与处置各自单独成行（`_reportNotes`）。
+    """
+    attributed = detectCiSurfaceChanges(surface.changedFiles)
+    if attributed:
+        return (
+            "PR 改动了 CI 相关面 ⇒ 两次 run 的失败集合不可比 ⇒ 对差不成立："
+            f"{list(attributed)}"
+        )
+    return (
+        "两次 run 跑的 CI 相关面不同、但归因不到本 PR"
+        f"（{list(ciChanges)}）"
+        "⇒ 通常是 main 改了 CI 文件、PR 分支没跟上"
+        "⇒ 这两次 run 跑的 CI 定义本身不同 ⇒ 失败集合不可比 ⇒ 对差不成立"
     )
 
 
@@ -325,6 +408,16 @@ def _applyFreshnessGuard(verdict: Verdict, freshness: HeadFreshness) -> Verdict:
     )
 
 
+def _isCiSurfaceChange(surface: CiSurfaceInfo) -> bool:
+    """**判出了 CI 相关面变更**吗（判定集合 `A ∪ P` ∩ 清单非空）。
+
+    ⚠️ 第三轮评审 M-1：`M_base ≠ M_T` 是**常态**（main 一直在推进）
+    ⇒ 底座不一致的提示**只在判出 CI 相关面变更时**才有意义；
+    无条件出现就是噪音 ⇒ 提示被无视 ⇒ 处置办法也跟着失效。
+    """
+    return bool(detectCiSurfaceChanges(surface.netChangedFiles))
+
+
 def _reportNotes(surface: CiSurfaceInfo, freshness: HeadFreshness, allowCiChanges: bool) -> list[str]:
     """报告里要显式留痕的提示（「不拦但必须让人看见」的那几件事）。"""
     notes: list[str] = []
@@ -335,6 +428,17 @@ def _reportNotes(surface: CiSurfaceInfo, freshness: HeadFreshness, allowCiChange
             "已用 --allow-ci-changes 豁免「CI 相关面被改动」的守卫"
             "（PR 改了 workflow / conftest / pytest 配置 ⇒ 失败集合原则上不可比）"
         )
+    if surface.unattributedCiFiles:
+        notes.append(
+            "两次 run 跑的 CI 相关面不同、但归因不到本 PR："
+            f"{list(surface.unattributedCiFiles)}"
+            "（通常是 main 改了 CI 文件、PR 分支没跟上 ⇒ 这两次 run 跑的 CI 定义不同）"
+        )
+    if _isCiSurfaceChange(surface):
+        mismatchNote = _mainTipMismatchNote(surface)
+        if mismatchNote is not None:
+            notes.append(mismatchNote)
+            notes.append(_mainTipRemedyNote())
     if surface.error is not None:
         notes.append(f"CI 相关面判定失败：{surface.error}")
     return notes
@@ -388,6 +492,7 @@ def _printReport(
             exemptions,
             rawBaseCount,
             rawPrCount,
+            surface.mainTipSha,
         )
     except Exception as error:  # noqa: BLE001 —— 报告渲染失败不能当成「可合并」
         # 渲染异常 ⇒ 结论不可见 ⇒ 绝不能落到 `return 0`（假绿）。
@@ -536,33 +641,35 @@ def _writeGateTitle(path: Path, title: str) -> None:
     path.write_text(title, encoding="utf-8")
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI 入口。
+@dataclass(frozen=True)
+class _Decision:
+    """对差过程的产物（豁免后的集合、差集、结论、提示）。"""
 
-    退出码：0 可合并 / 1 净新增失败 / 2 存在不可用 job / 3 运行错误（含 run 已过期、
-    白名单读不到）/ 4 覆盖不等价 / 5 净丢失失败待人工确认 / 6 CI 相关面被改动（集合不可比）。
-    """
-    args = _parseArgs(argv)
+    counted: RunComparison
+    outcome: ExemptionOutcome
+    diff: FailureDiff
+    verdict: Verdict
+    freshness: HeadFreshness
+    notes: tuple[str, ...]
 
-    invalidReason = _invalidArgumentReason(args.repo, args.base_run, args.pr_run)
-    if invalidReason is not None:
-        print(f"错误：{invalidReason}", file=sys.stderr)
-        return 3
 
-    entries = _loadFlakeEntries(args.flake_whitelist)
-    if entries is None:
-        return 3
-
-    comparison = _loadComparison(args.repo, args.base_run, args.pr_run)
-    if comparison is None:
-        return 3
-
+def _decide(
+    comparison: RunComparison,
+    surface: CiSurfaceInfo,
+    entries: list[FlakeEntry],
+    repo: str,
+    prRunId: str,
+    allowCiChanges: bool,
+) -> _Decision:
+    """豁免 → 差集 → 结论 → 提示（纯逻辑，不碰 IO）。"""
     # ⚠️ 「CI 相关面」必须**先**判定：豁免要条件化在「该用例所在文件本次未被改动」
-    # ⇒ 需要改动文件清单（`surface.changedFiles`）。
+    # ⇒ 需要改动文件清单。
+    # ⚠️ 用的是**判定集合**（`A ∪ P` = 两次 run 跑的那两份代码哪里不同），不是
+    # 「PR 相对分叉点改了什么」：后者漏掉 main 侧改动 ⇒ 会把「内容其实变了」的
+    # 白名单用例当成噪声豁免掉（对称豁免 ⇒ 两侧都剔除 ⇒ 真回归被吃掉）。
     # 判定不出来（`surface.error` 非空）⇒ 清单未知 ⇒ 照常豁免
     # ⇒ 由「CI 相关面」守卫以退出码 6 兜住（语义仍是「须人工确认」，不是「净新增失败」）。
-    surface = resolveCiSurface(args.repo, args.base_run, args.pr_run)
-    changedFiles = None if surface.error is not None else surface.changedFiles
+    changedFiles = None if surface.error is not None else surface.netChangedFiles
 
     # 豁免只影响「对差」：先剔除已知抖动用例，再算差集 ⇒ 判据里不再有噪声。
     # 不可用 job 判定 / 覆盖等价 / CI 相关面 / 新鲜度判定都**不看**白名单
@@ -575,40 +682,119 @@ def main(argv: list[str] | None = None) -> int:
     )
     counted = replace(comparison, baseFailures=outcome.baseFailures, prFailures=outcome.prFailures)
 
-    freshness = _resolveFreshness(args.repo, args.pr_run, surface.prSha)
+    freshness = _resolveFreshness(repo, prRunId, surface.prSha)
     diff = diffFailureSets(outcome.baseFailures, outcome.prFailures)
     verdict = verdictFor(diff, comparison.baseAssessments, comparison.prAssessments)
     verdict = _applyFreshnessGuard(verdict, freshness)
-    verdict = _applyCiSurfaceGuard(verdict, surface, args.allow_ci_changes)
-    notes = _reportNotes(surface, freshness, args.allow_ci_changes)
+    verdict = _applyCiSurfaceGuard(verdict, surface, allowCiChanges)
+    notes = list(_reportNotes(surface, freshness, allowCiChanges))
     unmatchedNote = _unmatchedWhitelistNote(entries, outcome.exemptions, outcome.skipped)
     if unmatchedNote is not None:
         notes.append(unmatchedNote)
     notes.extend(_skippedExemptionNotes(outcome.skipped))
+    return _Decision(
+        counted=counted,
+        outcome=outcome,
+        diff=diff,
+        verdict=verdict,
+        freshness=freshness,
+        notes=tuple(notes),
+    )
 
-    code = _exitCodeFor(verdict, comparison)
-    title = _gateTitle(code, outcome.exemptions)
+
+def _writeGateTitleIfNeeded(pathText: str | None, title: str | None) -> int:
+    """写 gate 标题文件；失败 ⇒ 返回 3（结论不可见即不可合并）。"""
+    if pathText is None or title is None:
+        return 0
+    try:
+        _writeGateTitle(Path(pathText), title)
+    except OSError as error:
+        # 标题是「豁免可见性」的**唯一**载体 ⇒ 写不出来就保守拦下
+        # （与「报告渲染失败 ⇒ 3」同一纪律：结论不可见即不可合并）。
+        print(f"错误：写 gate 标题文件失败：{sanitizeForReport(str(error))}", file=sys.stderr)
+        return 3
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI 入口。
+
+    退出码：0 可合并 / 1 净新增失败 / 2 存在不可用 job / 3 运行错误（含 run 已过期、
+    白名单读不到、**基线 run 不可信**）/ 4 覆盖不等价 / 5 净丢失失败待人工确认 /
+    6 CI 相关面被改动（集合不可比）。
+    """
+    try:
+        return _runMain(argv)
+    except Exception as error:  # noqa: BLE001 —— 工具自身崩了 ⇒ 「运行错误」
+        # ⚠️ **必须兜住**：未捕获的异常 ⇒ Python 退出码 **1** ⇒ 而 1 的语义是
+        # 「净新增失败」⇒ 闸门会把「工具崩了」误报成「有回归」⇒ 处置方向完全错。
+        # ⇒ 工具自身崩了 ⇒ 退出码 **3**（运行错误 / 须复跑）。
+        print(f"错误：工具自身异常：{sanitizeForReport(str(error))}", file=sys.stderr)
+        return 3
+
+
+def _reportAndFinish(
+    decision: _Decision,
+    comparison: RunComparison,
+    surface: CiSurfaceInfo,
+    gateTitleFile: str | None,
+) -> int:
+    """渲染报告 + 落闸门标题 ⇒ 返回退出码（3 = 报告/落盘失败）。"""
+    code = _exitCodeFor(decision.verdict, comparison)
+    title = _gateTitle(code, decision.outcome.exemptions)
     if not _printReport(
-        counted,
-        diff,
-        verdict,
+        decision.counted,
+        decision.diff,
+        decision.verdict,
         surface,
-        notes,
-        outcome.exemptions,
-        outcome.rawBaseCount,
-        outcome.rawPrCount,
+        list(decision.notes),
+        decision.outcome.exemptions,
+        decision.outcome.rawBaseCount,
+        decision.outcome.rawPrCount,
         title,
     ):
         return 3
-    if args.gate_title_file is not None and title is not None:
-        try:
-            _writeGateTitle(Path(args.gate_title_file), title)
-        except OSError as error:
-            # 标题是「豁免可见性」的**唯一**载体 ⇒ 写不出来就保守拦下
-            # （与「报告渲染失败 ⇒ 3」同一纪律：结论不可见即不可合并）。
-            print(f"错误：写 gate 标题文件失败：{sanitizeForReport(str(error))}", file=sys.stderr)
-            return 3
+    writeCode = _writeGateTitleIfNeeded(gateTitleFile, title)
+    if writeCode != 0:
+        return writeCode
     return code
+
+
+def _runMain(argv: list[str] | None = None) -> int:
+    """`main` 的实际流程（异常兜底在 `main` 里）。"""
+    args = _parseArgs(argv)
+
+    invalidReason = _invalidArgumentReason(args.repo, args.base_run, args.pr_run)
+    if invalidReason is not None:
+        print(f"错误：{invalidReason}", file=sys.stderr)
+        return 3
+
+    entries = _loadFlakeEntries(args.flake_whitelist)
+    if entries is None:
+        return 3
+
+    # ⚠️ **基线可信性先验**（2026-11-07 安全评审 HIGH-1）：
+    # 基线必须是「本仓库 main 分支上的 push run」⇒ 否则失败集合对差的前提
+    # 根本不成立（基线可能来自 fork 上一个同名分支 ⇒ 基线 = 攻击者自己的代码）
+    # ⇒ 直接退出码 3，不再往下对差。
+    surface = resolveCiSurface(args.repo, args.base_run, args.pr_run)
+    if surface.baseTrustError is not None:
+        print(f"错误：基线 run 不可信：{surface.baseTrustError}", file=sys.stderr)
+        return 3
+
+    comparison = _loadComparison(args.repo, args.base_run, args.pr_run)
+    if comparison is None:
+        return 3
+
+    decision = _decide(
+        comparison,
+        surface,
+        entries,
+        args.repo,
+        args.pr_run,
+        args.allow_ci_changes,
+    )
+    return _reportAndFinish(decision, comparison, surface, args.gate_title_file)
 
 
 if __name__ == "__main__":

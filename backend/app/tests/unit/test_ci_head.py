@@ -21,8 +21,16 @@ def _headInfo(
     headSha: str = "a" * 40,
     headBranch: str = "feat/ci-integration-sharding",
     headRepo: str = "sunql/QA",
+    event: str = "push",
 ) -> RunHeadInfo:
-    return RunHeadInfo(headSha=headSha, headBranch=headBranch, headRepo=headRepo)
+    return RunHeadInfo(
+        headSha=headSha,
+        headBranch=headBranch,
+        headRepo=headRepo,
+        event=event,
+        createdAt="2026-11-06T19:38:13Z",
+        runStartedAt="2026-11-06T19:38:13Z",
+    )
 
 
 def test_resolveHeadFreshness_rejects_stale_run(monkeypatch) -> None:

@@ -27,9 +27,139 @@ backend/app/utils/ci_surface.py       @sunql
 backend/app/utils/ci_head.py          @sunql
 backend/app/utils/ci_pytest_log.py    @sunql
 backend/app/utils/ci_flakes.py        @sunql
+# ⚠️ conftest 收集前 import 链的派生器（第九轮复审 MEDIUM-1）：它决定守卫看到哪些
+# 落点 ⇒ 改它就能让守卫漏报 ⇒ 与其他 ci_* 模块同族。
+backend/app/utils/ci_conftest_chain.py  @sunql
 
 # ---- 已知抖动白名单**数据文件**（它直接决定「哪些失败用例不作判据」⇒ 改它 = 改判据）----
 .github/ci-known-flaky-tests.json    @sunql
+
+# ---- **前端 CI 定义**（2026-11-07 安全评审 CRITICAL-1）----
+# `ci.yml` 的 `Frontend / typecheck + coverage` 是**非分片** job
+# ⇒ 它失败时只产出**不透明**的失败 ID（`job:<job 名>`）⇒ 前端的失败**照样进**对差
+# ⇒ 而前端测试的「定义」文件（vitest 的 exclude / setupFiles / coverage 阈值、
+#    npm scripts、锁文件、tsconfig）改一改就能让失败用例**根本不失败**
+# ⇒ 失败集合与基线完全相同 ⇒ 假「净新增 0」⇒ 而 CI 还全绿。
+# ⇒ 这些文件与后端闸门工具**同族**：改它 = 解除「CI 相关面」这道闸。
+frontend/package.json                     @sunql
+frontend/package-lock.json                @sunql
+frontend/npm-shrinkwrap.json             @sunql
+frontend/pnpm-lock.yaml                   @sunql
+frontend/pnpm-workspace.yaml              @sunql
+frontend/vite.config.ts                   @sunql
+# ⚠️ `vite.config.js` 是**被提交进仓库的编译产物**（`vite.config.ts` 的 tsc 输出）
+# ⇒ 但 vite 的配置解析顺序里 `.js` **优先于** `.ts`
+# ⇒ 它随时可能被真正加载 ⇒ 改它 = 改前端的构建口径 ⇒ 必须在 CI 相关面里。
+frontend/vite.config.js                   @sunql
+frontend/vitest.config.ts                 @sunql
+frontend/playwright.config.ts             @sunql
+# ⚠️ vitest 2.x **自动发现**的 workspace/projects 配置（第三轮安全评审 C-1）：
+# 存在时取代根 `vitest.config.ts` 的项目解析 ⇒ project 的 `test.exclude`
+# 能把失败用例整个排除掉 ⇒ 假「净新增 0」。仓库里现在没有这类文件
+# ⇒ 这两条通配管的是**未来文件**（有人新增 ⇒ 反查守卫会红）。
+frontend/vitest.workspace.*               @sunql
+frontend/vitest.projects.*                @sunql
+# ⚠️ `tsc -b` 的增量编译产物（composite ⇒ tsbuildinfo 决定哪些文件要重新类型检查）
+frontend/tsconfig.node.tsbuildinfo        @sunql
+# ⚠️ npm 的安装行为（registry / script-shell）⇒ 装出来的依赖环境变了 ⇒ 失败集合不可比
+frontend/.npmrc                           @sunql
+# ⚠️ vitest 以 mode `test` 解析 Vite 配置 ⇒ 会加载 `.env` / `.env.test`
+# （第五轮安全评审 LOW-4；现在影响潜伏，提前入授权面）。
+frontend/.env                             @sunql
+frontend/.env.*                           @sunql
+frontend/tsconfig.json                    @sunql
+frontend/tsconfig.node.json               @sunql
+frontend/src/tests/setup.ts               @sunql
+
+# ---- 复合 action（workflow 的 `uses:` 目标 ⇒ 改它 = 改 CI 的执行内容）----
+/.github/actions/                     @sunql
+
+# ---- alembic 配置（integration 分片跑 `alembic upgrade head` ⇒ 改它 = 改环境）----
+backend/alembic.ini                   @sunql
+# ⚠️ `env.py` 是真正建 engine、跑迁移的脚本 —— CI workspace 里的任意 Python
+# （第五轮安全评审 HIGH-1：可在 run_migrations 后追加 DDL ⇒ 塑形测试库）。
+backend/alembic/env.py                @sunql
+# ⚠️ 迁移脚本本体：`alembic upgrade head` 执行每个 revision 的 `upgrade()`
+# —— pytest 收集前的任意 Python（第六轮复审 HIGH-1）。通配条目管未来文件。
+backend/alembic/versions/*.py         @sunql
+
+# ---- 测试基建（autouse 夹具 / `alembic upgrade` 由它们塑形测试库与 registry）----
+# 第五轮安全评审 LOW-5：`_neo4j_support` / `_testapp` / seed 脚本与已入清单的
+# `_pg_support` / `milvus_isolation` 同族 —— 换成假的 = PR 引入的失败不出现。
+backend/app/tests/_pg_support.py        @sunql
+backend/app/tests/_neo4j_support.py     @sunql
+backend/app/tests/_testapp.py           @sunql
+backend/app/tests/milvus_isolation.py   @sunql
+backend/scripts/seed_*.py               @sunql
+# ⚠️ `backend/` 根的 seed 同族（conftest **模块级** import seed_ontology ⇒ 收集前执行；
+# 第六轮复审 MEDIUM-2）。
+backend/seed_*.py                       @sunql
+# ⚠️ 测试库断言的依赖模块（`_pg_support.assertTestDatabase` import 它的 `databaseNameOf`）。
+backend/scripts/kpi_metric_db_guard.py  @sunql
+# ⚠️ scripts 包 init（第七轮复审 HIGH-1）：任何 `from scripts.… import …`（conftest、
+# `_pg_support`、单测）都先执行它 ⇒ 收集前的任意 Python（里面已有模块级 import）。
+backend/scripts/__init__.py             @sunql
+# ⚠️ 测试包 init（第七轮复审 MEDIUM）：pytest prepend 导入链上的包 init，收集前执行；
+# 现在是空文件 ⇒ 未来子目录由 `**` 通配管。
+backend/app/tests/__init__.py           @sunql
+backend/app/tests/**/__init__.py        @sunql
+# ⚠️ backend 包 init（第八轮复审 HIGH-1）：现在不存在，但新增它就把 pytest prepend
+# 的 pkg_root 顶到仓库根 ⇒ conftest 以 `backend.…` 导入 ⇒ 本文件在任何收集前执行。
+backend/__init__.py                     @sunql
+# ⚠️ app 包 init（第九轮复审 HIGH-1）：conftest 以 `app.…` 导入 ⇒ 这是 prepend 链上
+# **现存且每次都执行**的最高一层包 init（收集前任意 Python）。
+backend/app/__init__.py                 @sunql
+# ⚠️ conftest 收集前 import 的 harness 配置文件（第九轮复审 MEDIUM-1）：
+# settings（与 .env 同一交互面）/ engine（测试库连接）/ crypto（SECRET 派生）
+# 都是 import 即执行的杠杆；落点由 ci_conftest_chain 派生并由其守卫钉住。
+backend/app/config.py                   @sunql
+backend/app/infrastructure/__init__.py  @sunql
+backend/app/infrastructure/database.py  @sunql
+backend/app/infrastructure/security/__init__.py  @sunql
+backend/app/infrastructure/security/crypto.py    @sunql
+# ⚠️ 祖先包 init 链（第十二轮复审 HIGH-1）：conftest `from app.domain.models import …`
+# 会**先执行** `app/domain/__init__.py` 等中间包 init（收集前任意 Python）；
+# 落点由 ci_conftest_chain._resolveModuleFiles 派生（含整条祖先链）并由其守卫钉住。
+backend/app/domain/__init__.py          @sunql
+backend/app/models/__init__.py          @sunql
+backend/app/services/__init__.py        @sunql
+backend/app/infrastructure/llm/__init__.py  @sunql
+
+# ---- 环境定义文件（第五轮安全评审 MEDIUM-2 / MEDIUM-3）----
+# `backend/.env` 被 conftest `load_dotenv(override=True)` 读 ⇒ 覆盖 CI 注入的全部变量
+# （`.gitignore` 拦不住 `git add -f`）。`.python-version` / `uv.toml` 被 uv 拿去选
+# 解释器 ⇒ 盖过 setup-python 的 3.13 ⇒ 两个 pytest job 的解释器与依赖树整个换掉。
+backend/.env                          @sunql
+backend/.env.*                        @sunql
+backend/.python-version               @sunql
+backend/uv.toml                       @sunql
+# ⚠️ uv 沿工作目录父链发现配置 ⇒ CI 在 backend/ 跑 uv 时**仓库根**的 uv.toml 也被读
+# （第六轮复审 MEDIUM-1；父级 .python-version 实测不被认）。
+/uv.toml                              @sunql
+
+# ---- 变异取证脚本（它决定「哪些变异能转红」⇒ 改它就能让守卫恒绿）----
+# 清单（纯数据）与跑者同族：改清单可以把某组变异指向没人守的地方 ⇒ 照样恒绿。
+backend/scripts/ci_mutation_cases.py       @sunql
+backend/scripts/ci_mutation_cases_core.py  @sunql
+backend/scripts/ci_mutation_cases_r14.py   @sunql
+backend/scripts/ci_mutation_cases_r16.py   @sunql
+backend/scripts/ci_mutation_cases_r18.py   @sunql
+backend/scripts/ci_mutation_cases_r20.py   @sunql
+backend/scripts/ci_mutation_cases_r21.py   @sunql
+backend/scripts/ci_mutation_cases_r23.py   @sunql
+backend/scripts/ci_mutation_cases_r24.py   @sunql
+backend/scripts/ci_mutation_cases_r26.py   @sunql
+backend/scripts/ci_mutation_cases_r28.py   @sunql
+backend/scripts/ci_mutation_cases_r30.py  @sunql
+backend/scripts/ci_mutation_cases_r32.py  @sunql
+backend/scripts/ci_mutation_cases_r34.py  @sunql
+# 第二十六轮评审 H-26-5：原生扩展遮蔽（EXT_SUFFIX 优先于同名 .py）全域收口
+# ——backend 下任何深度的 .so/.pyd 都入授权面（`**` 匹配零或多层目录）。
+backend/**/*.so        @sunql
+backend/**/*.pyd       @sunql
+backend/*.so           @sunql
+backend/*.pyd          @sunql
+backend/scripts/ci_mutation_evidence.py    @sunql
 
 # ---- CODEOWNERS **自己**（改授权面 = 换授权人 ⇒ 必须人工复核）----
 # 个人仓库的 CODEOWNERS 没有强制力（装不了 users bypass）⇒ 这是链上仅剩的人工检查点。
@@ -38,16 +168,23 @@ backend/app/utils/ci_flakes.py        @sunql
 # ---- 守卫用例（改守卫 = 解除守卫）----
 backend/app/tests/unit/test_ci_failure_set.py     @sunql
 backend/app/tests/unit/test_ci_failure_set_flakes.py @sunql
+backend/app/tests/unit/test_ci_failure_set_surface.py @sunql
 backend/app/tests/unit/test_ci_text.py            @sunql
 backend/app/tests/unit/test_ci_gh.py              @sunql
 backend/app/tests/unit/test_ci_surface.py         @sunql
+backend/app/tests/unit/test_ci_surface_reverse.py @sunql
+backend/app/tests/unit/test_ci_surface_frontend_reverse.py @sunql
 backend/app/tests/unit/test_ci_shard.py           @sunql
 backend/app/tests/unit/test_ci_head.py            @sunql
 backend/app/tests/unit/test_ci_report.py          @sunql
 backend/app/tests/unit/test_ci_flakes.py          @sunql
 backend/app/tests/unit/test_ci_codeowners.py      @sunql
 backend/app/tests/unit/test_ci_merge_gate_workflow.py @sunql
+backend/app/tests/unit/test_ci_main_tip_note.py @sunql
+backend/app/tests/unit/test_ci_main_tip.py  @sunql
+backend/app/tests/unit/test_ci_mutation_evidence.py @sunql
 backend/app/tests/unit/test_ci_integration_step.py @sunql
+backend/app/tests/unit/test_ci_conftest_chain.py   @sunql
 
 # ---- 守卫用例的**共享替身**（改替身 = 改守卫的观测对象 ⇒ 同属「解除守卫」面）----
 backend/app/tests/unit/_ci_gate_support.py        @sunql

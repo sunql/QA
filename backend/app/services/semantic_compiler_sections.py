@@ -86,6 +86,10 @@ def groupMetricSources(
     }
 
 
+# `MeasureSpecSchema` 的 snake_case 键在 Manifest 里统一成 camelCase。
+_MEASURE_KEY_RENAMES = {"class_alias": "classAlias"}
+
+
 def compileMetric(
     row: OntologyMetric,
     allClassById: dict[int, OntologyClass],
@@ -104,9 +108,14 @@ def compileMetric(
         "dimensionDefaults": row.dimension_defaults,
         "grainKeys": asList(row.grain_keys),
         "aggregationOrder": row.aggregation_order,
-        # 结构化轨道（P1 指标技术形态）：分子/分母度量整份入档，不做二次解释。
-        "numeratorMeasure": row.numerator_measure,
-        "denominatorMeasure": row.denominator_measure,
+        # 结构化轨道（P1 指标技术形态）：分子/分母度量整份入档，只把内嵌的
+        # 自增 class_id 换成 className（见 resolveMeasure）。
+        "numeratorMeasure": resolveMeasure(
+            row.numerator_measure, allClassById, "numerator_measure"
+        ),
+        "denominatorMeasure": resolveMeasure(
+            row.denominator_measure, allClassById, "denominator_measure"
+        ),
         "filterExpression": row.filter_expression,
         "status": row.status,
         "owner": row.owner,
@@ -114,6 +123,44 @@ def compileMetric(
         "sources": list(sources),
         "kpiCodes": list(kpiCodes),
     }
+
+
+def resolveMeasure(
+    measure: dict[str, Any] | None,
+    allClassById: dict[int, OntologyClass],
+    fieldName: str,
+) -> dict[str, Any] | None:
+    """度量定义整份保留，但把内嵌 `class_id` 归一成 `className`。
+
+    `MeasureSpecSchema` 存的是自增主键（JSON 内嵌引用，DB 加不了外键）。Manifest
+    是自包含快照：带上实例相关 id 会破坏「同样治理内容 ⇒ 同样字节」，回放时还会
+    在新环境里解析到另一张表。归一规则与 `refClassName` 一致 —— 墓碑类 → null，
+    完全不存在的 id → 抛错。
+
+    返回**新字典**：绝不原地改 ORM 行上的 JSON（那会污染会话身份映射）。
+    """
+    if measure is None:
+        return None
+    if not isinstance(measure, dict):
+        raise ValueError(
+            f"本体数据异常：{fieldName} 必须是对象，实际是 {type(measure).__name__}"
+        )
+    normalized = dict(measure)
+    rawClassId = normalized.pop("class_id", None)
+    for snakeKey, camelKey in _MEASURE_KEY_RENAMES.items():
+        if snakeKey not in normalized:
+            continue
+        if camelKey in normalized:
+            raise ValueError(
+                f"本体数据异常：{fieldName} 同时存在 {snakeKey!r} 与 {camelKey!r}"
+            )
+        normalized[camelKey] = normalized.pop(snakeKey)
+    if "className" in normalized:
+        raise ValueError(f"本体数据异常：{fieldName} 不应自带 className")
+    normalized["className"] = resolveActiveName(
+        rawClassId, allClassById, f"{fieldName}.class_id"
+    )
+    return normalized
 
 
 def compileKpis(

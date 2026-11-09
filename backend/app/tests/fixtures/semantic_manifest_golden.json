@@ -102,7 +102,7 @@
       "className": "Supplier",
       "description": null,
       "objectOwner": "采购部",
-      "objectType": "ENTITY",
+      "objectType": "Master",
       "parentClassName": null,
       "properties": [
         {
@@ -305,16 +305,18 @@
     },
     {
       "aggFunction": "SUM",
-      "aggregationOrder": "DIVIDE_AFTER_AGGREGATE",
+      "aggregationOrder": "WEIGHTED_RATIO",
       "denominatorMeasure": {
         "agg": "SUM",
-        "class": "PurchaseOrder",
-        "column": "QTY"
+        "classAlias": "采购订单",
+        "className": "PurchaseOrder",
+        "expr": "QTY",
+        "filter": null
       },
       "dimensionDefaults": {
         "time": "LAST_12_MONTHS"
       },
-      "executionSource": "ORACLE",
+      "executionSource": "ESCAPE_HATCH",
       "filterExpression": "STATUS <> 'CANCELLED'",
       "formula": "SUM(ON_TIME_QTY) / SUM(QTY)",
       "grainKeys": [
@@ -328,8 +330,10 @@
       "metricType": "RATIO",
       "numeratorMeasure": {
         "agg": "SUM",
-        "class": "PurchaseOrder",
-        "column": "ON_TIME_QTY"
+        "classAlias": "采购订单",
+        "className": "PurchaseOrder",
+        "expr": "ON_TIME_QTY",
+        "filter": null
       },
       "owner": "采购部",
       "sources": [

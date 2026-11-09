@@ -542,6 +542,9 @@ job 结论 = `cancelled`（不是 `failure`）。
       且必须处理 §11.4 的两个陷阱。
    ⚠️ ①不是纯收益：把 DESC 索引改成 `sa_text("… DESC")` 后，drift 工具与
    `test_orm_schema_ssot.py` 会**跳过**这些表达式索引 ⇒ 失去列序守卫。
+   ✅ **已兑现（2026-11-09）**：[fix-alembic-residual-36](../fix-alembic-residual-36/summary.md)
+   —— fresh 库 36 → **0**，`schema_drift --strict` exit 0；新增
+   `test_orm_expression_indexes.py` 补回表达式索引守卫（含变异取证）。
 2. **`app/domain/models.py` 已 2786 行**（超 800 行上限 3.5 倍）⇒ 拆分另案。
 3. **表达式索引的列序没有自动化覆盖**（`ix_wiki_import_task_created` 的列序在 drift 与
    `test_orm_schema_ssot.py` 里双双被跳过）⇒ 补一条针对该索引的专门断言。

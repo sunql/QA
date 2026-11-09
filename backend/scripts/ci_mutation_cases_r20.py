@@ -212,7 +212,8 @@ R20_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M169",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        "                if isinstance(dec, (ast.Lambda, ast.Subscript, ast.Starred)):",
+        # 第二十五轮 C-24-1：预扫白名单收窄为 Name/Attribute/Call，锚随行更新
+        "                if not isinstance(dec, (ast.Name, ast.Attribute, ast.Call)):",
         "                if False:",
         (_CHAIN_GUARD + "::test_hook_positions_are_denied[lambda_decorator]"),
         1,

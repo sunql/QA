@@ -117,6 +117,12 @@ def test_round23_smuggling_path_classes_are_ci_surface() -> None:
         "backend/app/utils/ci_shard/__init__.py",   # C-2：同名包遮蔽
         "backend/app/utils/ci_shard/_impl.py",      # C-2：包目录任意文件
         "backend/app/utils/__init__.py",            # C-3：父包 init
+        # 第二十四轮评审 H-24-2：原生扩展遮蔽（M216 判别）——
+        # CPython import 顺序 EXT_SUFFIX 优先于同名 `.py` ⇒ 入面。
+        # ⚠️ 文件名带 `.so` 但不含 `pyc`、不在 `__pycache__`、不带 `/`，
+        # 只被 `.so|pyd` pattern 命中 ⇒ M216 判别独占。
+        "backend/app/utils/ci_conftest_chain.cpython-311-darwin.so",
+        "backend/app/utils/ci_judge.pyd",
     )
 
     flagged = ci_surface.detectCiSurfaceChanges(smuggled)
@@ -197,6 +203,8 @@ def test_detectCiSurfaceChanges_flags_the_mutation_evidence_script() -> None:
         "backend/scripts/ci_mutation_cases_r18.py",
         "backend/scripts/ci_mutation_cases_r20.py",
         "backend/scripts/ci_mutation_cases_r21.py",
+        "backend/scripts/ci_mutation_cases_r23.py",
+        "backend/scripts/ci_mutation_cases_r24.py",
     ):
         flagged = ci_surface.detectCiSurfaceChanges((relPath,))
 
@@ -768,7 +776,9 @@ def test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_
     """**反向守卫**：真实存在的变异取证脚本必须被清单覆盖。
 
     与 `test_every_ci_tool_module_is_in_the_surface_list` 同款纪律 ——
-    清单漏了谁，从文件系统反查时直接转红。
+    逐个真实路径断言「必须被算进 CI 相关面」（⚠️ 本用例**不做**文件系统存在性
+    反查——那是 `test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_file`
+    的职责；这里钉的是清单 pattern 的接受面）。
     （2026-11-08 第五轮安全评审 LOW-6：`cases_core` 拆出后这里曾漏 ——
     从 enum 里去掉 `|cases_core` 会让本用例红 ⇒ M69。）
     """
@@ -783,6 +793,8 @@ def test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_
         "backend/scripts/ci_mutation_cases_r14.py",
         "backend/scripts/ci_mutation_cases_r16.py",
         "backend/scripts/ci_mutation_cases_r18.py",
+        "backend/scripts/ci_mutation_cases_r23.py",
+        "backend/scripts/ci_mutation_cases_r24.py",
     ):
         assert (scriptsDir / Path(relPath).name).exists(), (
             f"变异取证脚本不在预期位置（{relPath}）⇒ 清单可能已经过期"

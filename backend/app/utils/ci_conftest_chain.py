@@ -274,6 +274,22 @@ _DECORATOR_BUILTIN_ALLOW = frozenset(
 
 _PROJECT_DECORATOR_ROOTS = ("app", "scripts")
 
+
+def _decoratorRootProblem(chain: str, effAliases: dict[str, str]) -> str | None:
+    """装饰器工厂链解析到项目/禁止代码 ⇒ 返回拒绝消息，否则 None。
+
+    第二十五轮 C-24-1 收敛成单点：Call 装饰器（Name/Attribute 工厂）与
+    Attribute 装饰器共用同一解析——双份同文锚会让变异取证拿不到独占判别
+    （跑者只替换第 N 次出现，第二十二轮实证）。"""
+    rootName = chain.split(".")[0]
+    resolved = effAliases.get(rootName, rootName)
+    if resolved.split(".")[0] in _PROJECT_DECORATOR_ROOTS or _isForbidden(chain):
+        return (
+            f"装饰器 {chain} 解析到项目/禁止代码（{resolved}）"
+            " ⇒ 装饰期执行 ⇒ fail-closed"
+        )
+    return None
+
 # 顶层裸表达式（Expr-Call）只允许这些方法名，且**接收者必须是裸 Name**
 # （`get_module().model_rebuild()` 这类动态接收者是结构问题——第十三轮 LOW-2；
 # 点分接收者 `app.evil.model_rebuild()` 同样不放行）。
@@ -1371,6 +1387,13 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                         # 属性链根不是 import 名（`object.__new__(X)`）
                         for t in _assignTargetNames(targets):
                             opaqueNames.add(t.id)
+                else:
+                    # 第二十五轮评审 H-24-1：func 为 lambda/嵌套调用/下标等
+                    # 的调用结果绑定（`_f = (lambda a: a.remove)(os)`）⇒ 返回
+                    # 对象静态不可判 ⇒ 不透明（作可调用基底时由「不透明名被
+                    # 调用」拒）。
+                    for t in _assignTargetNames(targets):
+                        opaqueNames.add(t.id)
             elif isinstance(value, ast.Tuple):
                 if (
                     len(targets) == 1
@@ -1466,8 +1489,13 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
         classes: dict[str, ast.ClassDef | None] | None = None,
         aliasesMap: dict[str, str] | None = None,
     ) -> None:
+        # 第二十五轮 C-24-2：作用域别名映射单点——模块级扫描退化为模块映射，
+        # 被调函数体扫描（scanCallee）传入 scopeAliases。此前 Store 根判定/
+        # 装饰器解析直接用模块级 `aliases`，函数体内 import 的别名
+        # （`def _m(): import pathlib; pathlib.Path.read_text = ...`）逃出。
+        effAliases = aliases if aliasesMap is None else aliasesMap
         for node in nodes:
-            detail = _denyMessage(node, aliases if aliasesMap is None else aliasesMap)
+            detail = _denyMessage(node, effAliases)
             if detail:
                 add(getattr(node, "lineno", 0), f"顶层引用 {detail}")
             if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
@@ -1479,17 +1507,28 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                     # `pytest.TerminalReporter.summary_failures = ...` /
                     # `Path.read_text = ...`（根是 import 别名）把 stdlib/
                     # 工具模块的接口换成假实现 ⇒ 证据通道与分析器双双致盲。
-                    # 根是 import 别名 ⇒ 拒（与成员名无关，fail-closed）；
-                    # `self.x = 1` / `_p.attr = 1`（根非 import 名）不受影响
-                    # （真实 76 文件闭包模块级 Attribute Store 0 处，校准实证）。
+                    # 根是 import 别名（含函数作用域 import，effAliases）⇒ 拒
+                    # （与成员名无关，fail-closed）；`self.x = 1` / `_p.attr = 1`
+                    # （根非 import 名）不受影响（真实 76 文件闭包模块级
+                    # Attribute Store 0 处，校准实证）。
                     chain = _dottedChain(node)
-                    if chain:
+                    isStaticChain = chain is not None
+                    if isStaticChain:
                         root = chain.partition(".")[0]
-                        if root in aliases or _isForbidden(root):
+                        if root in effAliases or _isForbidden(root):
                             add(
                                 getattr(node, "lineno", 0),
                                 f"模块根属性再绑定 {chain} ⇒ 接口可被换假 ⇒ fail-closed",
                             )
+                    if not isStaticChain:
+                        # 第二十五轮评审 C-24-2：Store 基底不是静态名字/属性链
+                        #（`[_d][0].foo = ...` / `f().x = ...`）⇒ 目标对象静态
+                        # 不可判 ⇒ 接口可被换假 ⇒ fail-closed。
+                        add(
+                            getattr(node, "lineno", 0),
+                            "属性赋值基底静态不可判（非名字/属性链）"
+                            " ⇒ 接口可被换假 ⇒ fail-closed",
+                        )
             if (
                 isinstance(
                     node,
@@ -1578,30 +1617,85 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                     if isinstance(dec, ast.Name) and dec.id in callTargets:
                         scanCallee(callTargets[dec.id], depth + 1)
                     else:
-                        # `@D.deco`：装饰器在 def/class 语句执行期被调用
-                        # 第二十三轮评审 H-2：Call/Attribute 装饰器解析根，
-                        # 落到项目代码或拒绝链 ⇒ 装饰期执行项目代码 ⇒ 拒。
-                        # 裸名（Name）装饰器**不**在这里判——由下方第二段
-                        # if 链（实例/类别名/本地类/不透明/裸名 fail-closed）
-                        # 独占判定，保证每条 deny 臂的变异判别点独占。
-                        decTarget = (
-                            dec.func
-                            if isinstance(dec, ast.Call)
-                            else (None if isinstance(dec, ast.Name) else dec)
-                        )
-                        decChain = _dottedChain(decTarget) if decTarget is not None else None
-                        if decChain is not None:
-                            decRootName = decChain.split(".")[0]
-                            decResolved = aliases.get(decRootName, decRootName)
-                            if (
-                                decResolved.split(".")[0] in _PROJECT_DECORATOR_ROOTS
-                                or _isForbidden(decChain)
-                            ):
+                        # `@D.deco` / `@factory(...)`：装饰器在 def/class 语句
+                        # 执行期被调用。第二十三轮评审 H-2 + 第二十五轮评审
+                        # C-24-1：装饰器按**整体求值**建模——Call 装饰器先判
+                        # 工厂形态（lambda/嵌套调用 ⇒ 返回的装饰器闭包体静态
+                        # 不可判），再解析工厂链根（项目/禁止 ⇒ 拒，外部 ⇒ 放
+                        # 行，本地 def 工厂 ⇒ 拒）。裸名（Name）装饰器**不**
+                        # 在这里判——由下方第二段 if 链（实例/类别名/本地类/
+                        # 不透明/裸名 fail-closed）独占判定，保证每条 deny 臂
+                        # 的变异判别点独占。
+                        if isinstance(dec, ast.Call):
+                            callee = dec.func
+                            if isinstance(callee, ast.Lambda):
+                                # `@(lambda f: f)(hook)` —— 返回的装饰器闭包体不可静态判定
                                 add(
                                     dec.lineno,
-                                    f"装饰器 {decChain} 解析到项目/禁止代码（{decResolved}）"
+                                    "装饰器工厂为 lambda ⇒ 返回的装饰器静态不可判"
                                     " ⇒ 装饰期执行 ⇒ fail-closed",
                                 )
+                            elif isinstance(callee, ast.Call):
+                                # `@(f())(x)` —— 工厂本身是调用结果 ⇒ 不可判
+                                add(
+                                    dec.lineno,
+                                    "装饰器工厂本身是调用结果 ⇒ 返回的装饰器静态不可判"
+                                    " ⇒ 装饰期执行 ⇒ fail-closed",
+                                )
+                            else:
+                                decChain = _dottedChain(callee)
+                                if decChain is None:
+                                    add(
+                                        dec.lineno,
+                                        "装饰器工厂形态静态不可判（非名字/属性链）"
+                                        " ⇒ 装饰期执行 ⇒ fail-closed",
+                                    )
+                                else:
+                                    rootProblem = _decoratorRootProblem(
+                                        decChain, effAliases
+                                    )
+                                    if rootProblem is not None:
+                                        add(dec.lineno, rootProblem)
+                                    elif (
+                                        isinstance(callee, ast.Name)
+                                        and (
+                                            callee.id in callTargets
+                                            or callee.id in ambiguousNames
+                                        )
+                                    ):
+                                        # 第二十五轮 C-24-1：本地工厂装饰器
+                                        #（`@g()`，g 是本地 def）—— g 的体可扫，
+                                        # 但返回的嵌套闭包体（注册式装饰器）在
+                                        # 装饰期真实执行且不可静态判定（实测
+                                        # `@factory()` 内层 deco 写文件逃逸）。
+                                        add(
+                                            dec.lineno,
+                                            "装饰器工厂是本地函数 ⇒ 返回的装饰器闭包体"
+                                            "不可静态判定 ⇒ 装饰期执行 ⇒ fail-closed",
+                                        )
+                                    elif (
+                                        isinstance(callee, ast.Name)
+                                        and callee.id not in effAliases
+                                        and callee.id not in _DECORATOR_BUILTIN_ALLOW
+                                    ):
+                                        # 未 import 且非内置白名单的裸名工厂
+                                        add(
+                                            dec.lineno,
+                                            "装饰器工厂裸名静态不可判（未 import 且非内置白名单）"
+                                            " ⇒ 装饰期执行 ⇒ fail-closed",
+                                        )
+                        elif isinstance(dec, ast.Attribute):
+                            decChain = _dottedChain(dec)
+                            if decChain is None:
+                                add(
+                                    dec.lineno,
+                                    "装饰器基底静态不可判（非名字/属性链）"
+                                    " ⇒ 装饰期执行 ⇒ fail-closed",
+                                )
+                            else:
+                                rootProblem = _decoratorRootProblem(decChain, effAliases)
+                                if rootProblem is not None:
+                                    add(dec.lineno, rootProblem)
                         decAmbiguity: set[str] = set()
                         member = _decoratorMember(
                             dec, localClasses, callTargets, classAliases, decAmbiguity
@@ -1798,27 +1892,63 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                         # _p.unlink()` 赋值式逃逸），其余放行（真实闭包的
                         # dict.get 等形态，校准约束）。
                         if node.func.attr in _DENIED_CALL_ATTRS:
-                            add(
-                                node.lineno,
-                                f"成员调用 .{node.func.attr} 是文件系统/进程 sink ⇒ fail-closed",
-                            )
+                            # 第二十五轮评审 M-24-1：字面量接收者是良性形态
+                            #（`'a'.replace('a','b')`）⇒ 豁免；变量绑定的
+                            # 字符串仍 fail-closed（需要常量传播才可证，
+                            # 文档化局限）。其余接收者（Path(...) 构造、
+                            # 未知变量）fail-closed。
+                            if isinstance(node.func.value, ast.Constant):
+                                pass
+                            else:
+                                add(
+                                    node.lineno,
+                                    f"成员调用 .{node.func.attr} 是文件系统/进程 sink ⇒ fail-closed",
+                                )
                 else:
                     # 第二十三轮评审 H-1：Call 分派此前只认 Name/Attribute/
                     # Lambda/Subscript 四形态，其余（IfExp/NamedExpr/Call/
                     # BinOp/…作被调）**静默跳过** ⇒ `(m if True else None)()`
                     # 在被扫函数体里逃逸（顶层裸调用被结构规则拦，赋值/
                     # 被调体内可达）。fail-closed：不认识的被调形态一律拒。
-                    # **例外**：func 本身是 Call（`f()(...)` 注册式）——内层
-                    # Call 是子节点，经同一分派递归判定，最深处静态不可判
-                    # 的形态才会落回这里 ⇒ 外层不重复拒（第二十四轮校准实
-                    # 证：真实闭包仅 schemas.py 的 field_validator 链一形
-                    # 态，4 处）。
+                    # **例外（第二十五轮 H-24-1 收紧）**：func 本身是 Call
+                    # （`f()(...)` 注册式）——仅当**内层被调**解析到外部
+                    # import（别名根非项目/非禁止）才放行：真实闭包的
+                    # pydantic `field_validator(...)（_v)` 注册惯用法（第二十
+                    # 四轮复审实测 11 处互异行）。内层是本地 def / lambda /
+                    # 更深嵌套 / 不可判形态 ⇒ 返回的可执行目标不可证
+                    # ⇒ fail-closed（`pick(os)('/tmp/x')` 返回 os.remove 的
+                    # 逃逸通道实证——「内层经同一分派递归判定」只对内层
+                    # 调用本身成立，对「返回可调用再调用」不成立）。
                     if not isinstance(node.func, ast.Call):
                         add(
                             node.lineno,
                             "被调形态静态不可判"
                             "（非裸名/成员/lambda/下标/嵌套调用）⇒ fail-closed",
                         )
+                    else:
+                        innerCallee = node.func.func
+                        innerChain = (
+                            _dottedChain(innerCallee)
+                            if isinstance(innerCallee, (ast.Name, ast.Attribute))
+                            else None
+                        )
+                        isProvenRegistration = False
+                        if innerChain is not None:
+                            innerRoot = innerChain.split(".")[0]
+                            innerResolved = effAliases.get(innerRoot, innerRoot)
+                            if (
+                                innerRoot in effAliases
+                                and innerResolved.split(".")[0]
+                                not in _PROJECT_DECORATOR_ROOTS
+                                and not _isForbidden(innerChain)
+                            ):
+                                isProvenRegistration = True
+                        if not isProvenRegistration:
+                            add(
+                                node.lineno,
+                                "嵌套调用工厂的内层被调静态不可判/本地/禁止"
+                                " ⇒ 返回的可执行目标不可证 ⇒ fail-closed",
+                            )
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
@@ -1848,9 +1978,13 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
             # applyBinding 之后再解析会把 `@m def m` 的 @m 解到新 m ⇒ 漏旧绑定
             # ⇒ 装饰器解析必须在 applyBinding 之前做。
             for dec in stmt.decorator_list:
-                if isinstance(dec, (ast.Lambda, ast.Subscript, ast.Starred)):
-                    # 第十九轮 MEDIUM-1：装饰器为动态表达式 ⇒ 装饰期任意代码执行
-                    add(dec.lineno, "装饰器为动态表达式（lambda/下标）⇒ 装饰期执行 ⇒ fail-closed")
+                if not isinstance(dec, (ast.Name, ast.Attribute, ast.Call)):
+                    # 第十九轮 MEDIUM-1 + 第二十五轮评审 C-24-1：装饰器为动态
+                    # 表达式（lambda/下标/IfExp/BoolOp/NamedExpr/Starred/…）
+                    # ⇒ 装饰期任意代码执行 ⇒ fail-closed。白名单 = 静态可
+                    # 解析三形态（Name 走第二段 if 链，Call/Attribute 走
+                    # scanExec 装饰器臂）。
+                    add(dec.lineno, "装饰器为动态表达式 ⇒ 装饰期执行 ⇒ fail-closed")
             for dec in stmt.decorator_list:
                 if isinstance(dec, ast.Name) and dec.id in callTargets:
                     scanCallee(callTargets[dec.id], 0)

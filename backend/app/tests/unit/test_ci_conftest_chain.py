@@ -1327,13 +1327,13 @@ _EVIL_R24_SOURCES: dict[str, str] = {
 }
 
 _CLEAN_R24_SOURCES: dict[str, str] = {
-    # 第二十四轮校准实证的真实形态：嵌套 Call 作被调（pydantic 注册式）——
-    # 内层 Call 经同一分派递归判定 ⇒ 外层不重复拒（H-1 例外臂的锚）。
+    # 第二十四轮校准实证的真实形态：嵌套 Call 作被调（pydantic 注册式）。
+    # ⚠️ 第二十五轮评审 H-24-1 后收紧：内层被调是**本地 def** ⇒ 返回的可执行
+    # 目标不可证 ⇒ 拒（evil fixture `nested_call_local_factory` 钉住）；clean
+    # 形态必须是「内层被调解析到**外部 import**」（真实闭包的 field_validator
+    # 就来自 pydantic）⇒ 放行。静态分析 fixture，不真 import pydantic。
     "nested_call_callee": (
-        "def field_validator(key):\n"
-        "    def deco(fn):\n"
-        "        return fn\n"
-        "    return deco\n"
+        "from pydantic import field_validator\n"
         "def _v(v):\n"
         "    return v\n"
         "class M:\n"
@@ -1374,7 +1374,11 @@ def test_round24_deny_rules_are_enforced(tmp_path: Path, case: str) -> None:
     hooks = findImportTimeHooks(path)
 
     # 只断言非空：各 deny 线报文格式不一（拒绝根线是「顶层引用 X」、
-    # fail-closed 臂另有措辞）；防 vacuous 由 M204–M215 变异取证承担。
+    # fail-closed 臂另有措辞）。⚠️ 本批 fixture **不**逐条承担变异判别：
+    # 断言比 round-25 批弱（round-25 的精识臂用文本归位断言，见
+    # test_round25_deny_rules_are_enforced）；os_remove_assign /
+    # sys_stdout_rebind 与拒绝根线是双重覆盖。防 vacuous 仍由
+    # M204–M215 变异取证承担（判别点落在各自精识臂的锚上）。
     assert hooks, f"{case} 没被认出 ⇒ 对应 deny 线失效"
 
 
@@ -1405,3 +1409,180 @@ def test_analyzer_primitives_not_swapped_in_process() -> None:
     assert ast.parse.__module__ == "ast"
     assert Path.read_text.__module__ == "pathlib"
     assert ast.walk.__module__ == "ast"
+
+
+def test_analyzer_primitives_not_swapped_in_fresh_interpreter() -> None:
+    """第二十五轮评审 C-24-2：in-process 腰带可被伪造（换假实现 + 改
+    `__module__`）⇒ 信任锚必须在**全新解释器**里重验——payload 没跑过、
+    `__module__` 欺骗无意义。sitecustomize / conftest 级别的持久换假仍会
+    在子进程里现形（那正是要抓的）。
+    """
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import ast, pathlib, sys; "
+            "print(ast.parse.__module__, pathlib.Path.read_text.__module__, "
+            "ast.walk.__module__)",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, f"子进程失败：{proc.stderr}"
+    assert proc.stdout.split() == ["ast", "pathlib", "ast"], proc.stdout
+
+
+# ============================================================================
+# 第二十五轮评审修复（C-24-1/C-24-2/H-24-1/M-24-1）的判别 fixtures。
+# 与 round-24 批的区别：evil 用例断言**拒绝文本归位**（只断言非空时，
+# 兜底 fail-closed 线会用不同文本接住 ⇒ 精识 deny 臂的变异拿不到判别）。
+# ============================================================================
+
+_EVIL_R25_SOURCES: dict[str, str] = {
+    # C-24-1：装饰器为动态表达式（IfExp）——预扫白名单收窄（Name/Attribute/
+    # Call 之外全拒）的判别形态。变异 = 预扫回退到旧元组（Lambda/Subscript/
+    # Starred）⇒ IfExp 逃出预扫、scanExec 装饰器臂也不认（非 Call/Attribute/
+    # Name）⇒ 完全放行。
+    "decorator_ifexp": (
+        "import sys\n"
+        "def _d(f):\n"
+        "    sys.path.insert(0, 'x')\n"
+        "    return f\n"
+        "@(_d if True else None)\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    # C-24-1：本地 def 工厂装饰器（`@_factory()`）——返回的嵌套闭包体在装饰
+    # 期真实执行且不可静态判定。变异 = 本地工厂臂死 ⇒ 落到「裸名静态不可判」
+    # 兜底（仍拒但**文本不同**）⇒ 文本归位断言才拿得到判别。
+    "decorator_local_factory": (
+        "import sys\n"
+        "def _factory():\n"
+        "    def _deco(f):\n"
+        "        sys.path.insert(0, 'x')\n"
+        "        return f\n"
+        "    return _deco\n"
+        "@_factory()\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    # C-24-1：lambda 工厂装饰器。变异 = lambda 臂死 ⇒ 落「形态静态不可判」
+    # 兜底 ⇒ 文本归位。
+    "decorator_lambda_factory": (
+        "@(lambda f: f)(None)\n"
+        "def g():\n"
+        "    pass\n"
+    ),
+    # H-24-1：嵌套调用工厂的内层被调是本地 def（`pick(sys)('/tmp')`，pick
+    # 返回接收者）⇒ 返回的可执行目标不可证。变异 = isProvenRegistration 臂
+    # 死 ⇒ 无任何 deny（pick 体干净、返回值绑定不透明但未被使用）⇒ 放行。
+    # ⚠️ 故意不写 `_f = pick(sys); _f('/tmp/x')` 的后续调用——那会撞上
+    # 「不透明名被调用」既有线，判别不独占。
+    "nested_call_local_factory": (
+        "import sys\n"
+        "def pick(x):\n"
+        "    return x\n"
+        "_r = pick(sys)('/tmp')\n"
+    ),
+    # C-24-2：Store 基底非静态链（Subscript 基底）⇒ fail-closed。
+    # ⚠️ 用 `.foo`（不在 _REBIND_DENIED_ATTRS）⇒ 非名字/属性链 deny 臂是
+    # 唯一判别线。
+    "store_subscript_base": (
+        "import sys\n"
+        "[sys][0].foo = None\n"
+    ),
+    # C-24-2：函数作用域 import 的模块根再绑定——effAliases 单点（模块级
+    # aliases 看不到 fn 内 import）的判别形态。变异 = 该行 effAliases 退回
+    # aliases ⇒ fn 作用域 import 逃出 ⇒ 完全放行。
+    "store_fn_scope_import": (
+        "def _m():\n"
+        "    import logging\n"
+        "    logging.getLogger = lambda name: None\n"
+        "_r = _m()\n"
+    ),
+    # H-24-1：func 为 lambda 的调用结果绑定 ⇒ 不透明 ⇒ 被调用时拒。变异 =
+    # applyBinding 的 else 臂死 ⇒ _f 不记不透明 ⇒ unknown 放行语义放行
+    # （unknown 名被调不拒）⇒ 完全放行。
+    "opaque_lambda_result": (
+        "class C:\n"
+        "    def remove(self):\n"
+        "        pass\n"
+        "_f = (lambda a: a.remove)(C)\n"
+        "_r = _f('/tmp/x')\n"
+    ),
+}
+
+# 文本归位断言（None = 只断言 hooks 非空——判别点是**放行性**变异，
+# 基线文本无关紧要，变异后 hooks 变空即红）。
+_EVIL_R25_EXPECTED_TEXT: dict[str, str | None] = {
+    "decorator_ifexp": "装饰器为动态表达式",
+    "decorator_local_factory": "装饰器工厂是本地函数",
+    "decorator_lambda_factory": "装饰器工厂为 lambda",
+    "nested_call_local_factory": "嵌套调用工厂",
+    "store_subscript_base": "属性赋值基底静态不可判",
+    "store_fn_scope_import": "模块根属性再绑定",
+    "opaque_lambda_result": None,
+}
+
+_CLEAN_R25_SOURCES: dict[str, str] = {
+    # M-24-1：字面量接收者上的 sink 成员名是良性形态（`'a'.replace(...)`）
+    # ⇒ 豁免。变异 = 豁免条件死 ⇒ 本 fixture 被拒 ⇒ clean 用例红。
+    "constant_replace": (
+        "_r = 'a'.replace('a', 'b')\n"
+    ),
+    # H-24-1 的反向锚：内层被调解析到**外部 import**（functools.partial）
+    # ⇒ 注册式豁免放行（真实闭包的同形态）。
+    "nested_call_external": (
+        "import functools\n"
+        "_r = functools.partial(int)('2')\n"
+    ),
+    # C-24-1 的反向锚：外部模块属性工厂装饰器（functools.lru_cache）
+    # ⇒ 解析到外部根 ⇒ 放行。
+    "call_decorator_external": (
+        "import functools\n"
+        "@functools.lru_cache(maxsize=1)\n"
+        "def g():\n"
+        "    return 1\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_EVIL_R25_SOURCES))
+def test_round25_deny_rules_are_enforced(tmp_path: Path, case: str) -> None:
+    """第二十五轮新 deny 线逐形态钉住（C-24-1/C-24-2/H-24-1）。
+
+    精识 deny 臂的变异判别点靠**文本归位**：臂死后兜底 fail-closed 线
+    （措辞不同）接住 ⇒ 只断言非空会假绿。文本归位在 _EVIL_R25_EXPECTED_TEXT；
+    放行性变异（基线文本无关、变异后 hooks 变空）的条目为 None。
+    """
+    path = tmp_path / "m.py"
+    path.write_text(_EVIL_R25_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    expectedText = _EVIL_R25_EXPECTED_TEXT[case]
+    if expectedText is None:
+        assert hooks, f"{case} 没被认出 ⇒ 对应 deny 线失效"
+    else:
+        assert any(expectedText in hook for hook in hooks), (
+            f"{case} 的拒绝文本没有归位到「{expectedText}」：{hooks}"
+            " ⇒ 精识 deny 臂失效（兜底线接住了）"
+        )
+
+
+@pytest.mark.parametrize("case", sorted(_CLEAN_R25_SOURCES))
+def test_round25_clean_forms_pass(tmp_path: Path, case: str) -> None:
+    """第二十五轮 deny 加宽的反向锚：真实闭包里的合法形态必须放行。
+
+    deny 臂加宽到误伤这些形态 ⇒ 校准/本用例红（防 vacuous 反向）。
+    """
+    path = tmp_path / "m.py"
+    path.write_text(_CLEAN_R25_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    assert hooks == (), f"{case} 被误报：{hooks}"

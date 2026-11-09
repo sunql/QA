@@ -20,6 +20,7 @@ from __future__ import annotations
 _SURFACE_GUARD = "app/tests/unit/test_ci_surface.py"
 _CHAIN_GUARD = "app/tests/unit/test_ci_conftest_chain.py"
 _ROUND24_DENY = _CHAIN_GUARD + "::test_round24_deny_rules_are_enforced"
+_ROUND25_DENY = _CHAIN_GUARD + "::test_round25_deny_rules_are_enforced"
 
 R23_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
     # M204：C-1 字节码 pattern（.pyc 后缀；re.match 语义 ⇒ `.*` 前缀）
@@ -72,7 +73,8 @@ R23_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         (_ROUND24_DENY + "[os_chdir_assign]"),
         1,
     ),
-    # M209：C-4 动态根危险段（Path(...).write_text 的段拒绝）
+    # M209：C-4 动态根 sink 成员（第二十五轮 L-24-3 更正注释：段集扩展
+    # 已回退，本锚 = _DENIED_CALL_ATTRS 的 "write_text" 条目，非禁段扫描）。
     (
         "M209",
         "backend",
@@ -93,14 +95,18 @@ R23_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         (_ROUND24_DENY + "[unknown_recv_sink]"),
         1,
     ),
-    # M211：C-5/C-6 模块根属性再绑定 deny 块
+    # M211：C-5/C-6 模块根属性再绑定 deny 块（第二十五轮 C-24-2 重设计：
+    # 锚与变异都落在 effAliases 单点行——变异回退成模块级 aliases 只放走
+    # **函数作用域 import** 的再绑定（store_fn_scope_import 判别），模块级
+    # 形态不受影响 ⇒ 判别独占。原 `if False:` 形态对 module_root_attr_rebind
+    # 判别已被本形态 superset 覆盖）。
     (
         "M211",
         "backend",
         "app/utils/ci_conftest_chain.py",
+        "if root in effAliases or _isForbidden(root):",
         "if root in aliases or _isForbidden(root):",
-        "if False:",
-        (_ROUND24_DENY + "[module_root_attr_rebind]"),
+        (_ROUND25_DENY + "[store_fn_scope_import]"),
         1,
     ),
     # M212：H-1 被调形态 fail-closed（嵌套 Call 例外臂的判别开关）
@@ -119,8 +125,8 @@ R23_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M213",
         "backend",
         "app/utils/ci_conftest_chain.py",
-        'decResolved.split(".")[0] in _PROJECT_DECORATOR_ROOTS',
-        'decResolved.split(".")[0] in ("__never__",)',
+        'if resolved.split(".")[0] in _PROJECT_DECORATOR_ROOTS or _isForbidden(chain):',
+        'if False:',
         (_ROUND24_DENY + "[project_attr_decorator]"),
         1,
     ),

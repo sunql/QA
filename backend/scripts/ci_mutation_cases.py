@@ -30,11 +30,12 @@ from scripts.ci_mutation_cases_r18 import R18_MUTATIONS
 from scripts.ci_mutation_cases_r20 import R20_MUTATIONS
 from scripts.ci_mutation_cases_r21 import R21_MUTATIONS
 from scripts.ci_mutation_cases_r23 import R23_MUTATIONS
+from scripts.ci_mutation_cases_r24 import R24_MUTATIONS
 
 # (编号, 作用域, 文件, 原文, 变异后, 期望转红的用例, occurrence)
 MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = (
     MUTATIONS_CORE + R14_MUTATIONS + R16_MUTATIONS + R18_MUTATIONS + R20_MUTATIONS
-    + R21_MUTATIONS + R23_MUTATIONS + [
+    + R21_MUTATIONS + R23_MUTATIONS + R24_MUTATIONS + [
 
     # ---------- M37–M55：2026-11-07 N6「判定集合必须落在两次 run 实际跑的树上」批 ----------
     #
@@ -543,8 +544,8 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = (
         "M69",
         "backend",
         "app/utils/ci_surface.py",
-        # 第十次重锚（第二十四轮）：新增 `_r23` 批后 pattern 行随之加宽。
-        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23)?)\\.py$",',
+        # 第十一次重锚（第二十五轮）：新增 `_r24` 批后 pattern 行随之加宽。
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24)?)\\.py$",',
         'r"^backend/scripts/ci_mutation_(?:evidence|cases)\\.py$",',
         (
             "app/tests/unit/test_ci_surface.py::"

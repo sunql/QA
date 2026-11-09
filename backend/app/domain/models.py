@@ -2836,3 +2836,4 @@ from app.domain import mcp_models as _mcp_models  # noqa: E402,F401
 from app.domain import multi_step_models as _multi_step_models  # noqa: E402,F401
 from app.domain import research_models as _research_models  # noqa: E402,F401
 from app.domain import wiki_graph_insight as _wiki_graph_insight  # noqa: E402,F401
+from app.domain import semantic_release_models as _semantic_release_models  # noqa: E402,F401

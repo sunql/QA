@@ -587,3 +587,19 @@ class MetricSourceRole(str, Enum):
     DENOMINATOR = "DENOMINATOR"
     FILTER = "FILTER"
     BASE = "BASE"
+
+
+class SemanticReleaseStatus(str, Enum):
+    """语义发布状态机（P1b / D10 守卫按此判定合法转换）。
+
+    DRAFT → VALIDATED → ACTIVE → ARCHIVED
+    - DRAFT：编译产物已落库，可反复修改；
+    - VALIDATED：Schema 与哈希校验通过，可被激活；
+    - ACTIVE：当前生效快照（同域最多一条，由唯一索引兜底）；
+    - ARCHIVED：被新发布取代或人工下线，只读。
+    """
+
+    DRAFT = "DRAFT"
+    VALIDATED = "VALIDATED"
+    ACTIVE = "ACTIVE"
+    ARCHIVED = "ARCHIVED"

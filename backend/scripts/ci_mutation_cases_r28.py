@@ -114,12 +114,12 @@ R28_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M240",
         "backend",
         "app/utils/ci_surface.py",
-        # 第三次重锚（第三十二轮）：新增 `_r32` 批后 pattern 行随之加宽；
-        # 顺手修旧变异后文本丢结尾 `?` 的笔误（语义不变：仍删 `_r26`）。
+        # 第三次重锚（第三十二轮）；第四次重锚（第三十四轮）：pattern 行再增
+        # `_r34`。**变异后文本必须保留结尾 `?`**（旧笔误的教训）。
         'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16'
-        '|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r32)?)\\.py$",',
+        '|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r32|_r34)?)\\.py$",',
         'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16'
-        '|_r18|_r20|_r21|_r23|_r24|_r28|_r30|_r32)?)\\.py$",',
+        '|_r18|_r20|_r21|_r23|_r24|_r28|_r30|_r32|_r34)?)\\.py$",',
         (_SURFACE_GUARD
          + "::test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_file"),
         1,

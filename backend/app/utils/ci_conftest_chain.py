@@ -332,6 +332,7 @@ _WRAPPER_BUILTIN_NAMES = frozenset({"classmethod", "staticmethod"})
 def _callFactorySinkProblem(
     callNode: ast.Call,
     taintedNames: set[str] | None = None,
+    sinkMembers: set[str] | None = None,
 ) -> str | None:
     """嵌套调用工厂的**整个 Call 节点**里出现 sink ⇒ 返回拒绝消息，否则 None。
 
@@ -368,6 +369,13 @@ def _callFactorySinkProblem(
                     "嵌套调用工厂实参引用 sink 绑定名 ⇒ 可执行目标不可证"
                     " ⇒ fail-closed"
                 )
+            if isinstance(sub, (ast.Attribute, ast.Subscript)):
+                factoryMemberKey = _memberChainKey(sub)
+                if factoryMemberKey is not None and sinkMembers is not None and factoryMemberKey in sinkMembers:
+                    return (
+                        "嵌套调用工厂实参引用 sink 成员绑定 ⇒ 可执行目标不可证"
+                        " ⇒ fail-closed"
+                    )
     return None
 
 
@@ -377,7 +385,11 @@ def _sinkTaintSpread(value: ast.expr, tainted: set[str]) -> bool:
     三种来源都算：直接 sink 成员（`Path('y').unlink`）、**已污染名的
     引用**（`_w2 = _w` 一跳别名——`applyBinding` 对 Name 值不做传播，
     污点链只能靠这里接）、以及 **walrus 目标**（`_w = (_x := Path('y')
-    .unlink)`——NamedExpr 目标本身也绑定了 sink，必须递归登记）。"""
+    .unlink)`——NamedExpr 目标本身也绑定了 sink，必须递归登记）。
+
+    第三十四轮评审 H-33-3 只扩**目标**侧（属性/下标 Store 目标登记，
+    见 scanExec）；值子树引用成员绑定由 `applyBinding` 的 Attribute 值
+    ⇒ `opaqueNames` 通道接住（不做第二套同文锚，避免失独占）。"""
     found = False
     for sub in ast.walk(value):
         if isinstance(sub, ast.Attribute) and sub.attr in _DENIED_CALL_ATTRS:
@@ -1234,6 +1246,13 @@ def _decoratorMember(
         if fnClassBindings is not None and rootName in fnClassBindings:
             rootName = fnClassBindings[rootName]
         cls: ast.ClassDef | None = localClasses.get(rootName)
+        if cls is None and classAliases is not None:
+            # 第三十四轮评审 H-33-4：嵌套链根可以是**模块类别名**
+            # （`_ca = _M; @_ca.Inner.deco`）。旧实现只查 localClasses ⇒
+            # 根解析不了、整段放行（探针实证）。别名兜底与 F4C 同向。
+            aliasRoot = classAliases.get(rootName)
+            if aliasRoot is not None:
+                cls = localClasses.get(aliasRoot)
         if cls is None:
             return None
         for attr in reversed(chainAttrs):
@@ -1270,15 +1289,66 @@ def _decoratorMember(
     return None
 
 
+def _targetNamesIn(target: ast.expr):
+    """单个绑定目标里的裸名——**任意嵌套深度**的 Tuple/List/Starred 递归展开。
+
+    第三十四轮评审 H-33-3：旧实现只认「一层 Tuple 的 Name 元素」，
+    `for _a, (_b, _w) in [...]` 的嵌套目标被整段截断 ⇒ `_w` 的 sink 污点
+    登记永不触发（复审探针实测运行期删文件）。"""
+    if isinstance(target, ast.Name):
+        yield target
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            yield from _targetNamesIn(element)
+    elif isinstance(target, ast.Starred):
+        yield from _targetNamesIn(target.value)
+
+
 def _assignTargetNames(targets: list[ast.expr]):
-    """赋值目标里的裸名（含元组解包一层；第十九轮 HIGH-3 实例变量记账用）。"""
+    """赋值目标里的裸名（含嵌套解包；第十九轮 HIGH-3 实例变量记账用）。"""
     for t in targets:
-        if isinstance(t, ast.Name):
-            yield t
-        elif isinstance(t, ast.Tuple):
-            for e in t.elts:
-                if isinstance(e, ast.Name):
-                    yield e
+        yield from _targetNamesIn(t)
+
+
+def _staticChainOf(node: ast.expr) -> str | None:
+    """Name / Name-根属性链的稳定文本；其余形态 None（动态表达式）。"""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _dottedChain(node)
+    return None
+
+
+def _memberChainKey(node: ast.expr) -> str | None:
+    """属性/下标子表达式的稳定键（sink 成员/延迟可调用的成员登记与匹配）。
+
+    `_o.x` ⇒ `_o.x`；`_d[k]` ⇒ `_d[]`（下标键静态不可判 ⇒ 按整个容器基
+    保守匹配，fail-closed 方向）。第三十四轮评审 H-33-3/H-33-6。
+    """
+    if isinstance(node, ast.Attribute):
+        return _dottedChain(node)
+    if isinstance(node, ast.Subscript):
+        base = _staticChainOf(node.value)
+        return f"{base}[]" if base is not None else None
+    return None
+
+
+def _assignTargetChainKey(target: ast.expr) -> str | None:
+    """属性/下标 **Store 目标**的稳定键（供 `_memberChainKey` 匹配）。"""
+    return _memberChainKey(target)
+
+
+def _statementBindingTargets(stmt: ast.stmt) -> list[ast.expr]:
+    """语句级绑定目标（for/with/赋值/注解）——H-33-6 重绑定登记用。"""
+    if isinstance(stmt, ast.Assign):
+        return list(stmt.targets)
+    if isinstance(stmt, ast.AnnAssign):
+        return [stmt.target]
+    if isinstance(stmt, (ast.For, ast.AsyncFor)):
+        return [stmt.target]
+    if isinstance(stmt, (ast.With, ast.AsyncWith)):
+        return [item.optional_vars for item in stmt.items if item.optional_vars is not None]
+    return []
 
 
 def _usesLocalInstance(expr: ast.expr, localClasses: dict[str, ast.ClassDef], instanceVars: dict[str, ast.ClassDef]) -> bool:
@@ -1475,6 +1545,16 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
     def applyBinding(stmt: ast.stmt) -> None:
         if id(stmt) in classBodyIds:
             return  # 类体绑定不是模块全局名（方法/类属性）
+        if isinstance(stmt, (ast.For, ast.AsyncFor, ast.With, ast.AsyncWith)):
+            # 第三十四轮评审 H-33-6：for/with 目标也会重绑定 import 名
+            #（`for pd in [...]: pd.Field(_f)`、`with … as pd:`）——旧实现只
+            # 在 Assign/AnnAssign 里登记 ⇒ 白名单根真实性校验看不见 ⇒
+            # `_mk()` 的恶意 Field 被当作 pydantic.Field 放行（探针实证）。
+            for loopTarget in _statementBindingTargets(stmt):
+                for loopName in _assignTargetNames([loopTarget]):
+                    if loopName.id in aliases:
+                        reboundImports.add(loopName.id)
+            return
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if stmt.name in callTargets and callTargets[stmt.name] is not stmt:
                 ambiguousNames.add(stmt.name)
@@ -1490,6 +1570,10 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
         for rebindingTarget in _assignTargetNames(targets):
             if rebindingTarget.id in aliases:
                 reboundImports.add(rebindingTarget.id)
+        # 第三十四轮评审 H-33-1：容器里装本地可调用 ⇒ 目标名登记。
+        if isinstance(value, (ast.Dict, ast.List, ast.Set, ast.Tuple)) and _containsLocalCallable(value):
+            for containerTarget in _assignTargetNames(targets):
+                callableContainers.add(containerTarget.id)
         if isinstance(value, ast.Lambda):
             for t in targets:
                 if isinstance(t, ast.Name):
@@ -1564,6 +1648,12 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                 ):
                     for t in _assignTargetNames(targets):
                         deferredCallables.add(t.id)
+                    # 第三十四轮评审 H-33-6：成员目标（`_o.x = staticmethod(_f)`）
+                    # 同样登记，后续 `_o.x()` 由 Attribute 臂拒。
+                    for deferredTarget in targets:
+                        memberKey = _assignTargetChainKey(deferredTarget)
+                        if memberKey is not None:
+                            deferredMembers.add(memberKey)
         # 第二十二轮 C2/H3/M1：静态不可判定的绑定值 ⇒ 目标名记入不透明集合。
         # 已识别形态（不记）：常量 / lambda / Name（上面分支处理）/ 本地类
         # 实例化（含元组逐位）/ import 进来的构造器或模块方法调用
@@ -1632,6 +1722,40 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
     # 通道）。跨作用域累积（fn 内污染名也计入）：过宽方向 fail-closed，
     # 且模块级 prescan 本就无作用域出栈语义。
     sinkTainted: set[str] = set()
+    # 第三十四轮评审 H-33-3：**属性/下标 Store 目标**绑定的 sink 成员键
+    # （`_o.x = Path(…).unlink` ⇒ `_o.x`；`_d[k] = …` ⇒ `_d[]`）。旧实现
+    # 只登记裸名 ⇒ 成员写入后取用整段逃逸（探针实证运行期执行）。
+    sinkMembers: set[str] = set()
+    # 第三十四轮评审 H-33-6：白名单工厂结果写到**成员目标**时同样延迟可调
+    # （`_o.x = staticmethod(_f); _o.x()` 运行期执行被包体，探针实证）。
+    deferredMembers: set[str] = set()
+    # 第三十四轮评审 H-33-1：**装本地可调用元素的容器字面量**绑定名
+    #（`_box = [_f]`）。容器字面量本身不作为接收者记不透明（真实闭包
+    # 常态），但元素是可调用 ⇒ 取出/展开再作实参通道必须 fail-closed。
+    callableContainers: set[str] = set()
+
+    def _containsLocalCallable(expr: ast.expr) -> bool:
+        """容器字面量子树里是否含本地可调用/sink 成员（H-33-1 登记判据）。"""
+        for sub in ast.walk(expr):
+            if isinstance(sub, ast.Lambda):
+                return True
+            if isinstance(sub, ast.Name) and (
+                sub.id in callTargets
+                or sub.id in ambiguousNames
+                or sub.id in localClasses
+                or sub.id in classAliases
+                or sub.id in instanceVars
+                or sub.id in deferredCallables
+                or sub.id in sinkTainted
+                or sub.id in opaqueNames
+            ):
+                return True
+            if isinstance(sub, ast.Attribute) and sub.attr in _DENIED_CALL_ATTRS:
+                return True
+            containerMemberKey = _memberChainKey(sub)
+            if containerMemberKey is not None and containerMemberKey in sinkMembers:
+                return True
+        return False
 
     def _callableArgProblem(
         node: ast.Call,
@@ -1671,6 +1795,12 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
         fnClassAliases = fnBindings["classAliases"] if fnBindings else ()
         fnInstances = fnBindings["instances"] if fnBindings else ()
         fnShadowed = fnBindings["shadowed"] if fnBindings else ()
+        # 第三十四轮评审 H-33-1/H-33-5：fn 作用域里指向模块 def/模块类别名/
+        # 延迟可调用/静态不可判值的绑定名，作实参同样是可执行目标。
+        fnModuleDefs = fnBindings.get("moduleDefs", ()) if fnBindings else ()
+        fnModuleClassAliases = fnBindings.get("moduleClassAliases", ()) if fnBindings else ()
+        fnDeferred = fnBindings.get("deferred", ()) if fnBindings else ()
+        fnUnresolved = fnBindings.get("unresolved", ()) if fnBindings else ()
         callableNames: list[str] = []
         sinkNames: list[str] = []
         scanCalls: list[ast.Call] = [node]
@@ -1693,6 +1823,12 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                         or sub.id in fnClasses
                         or sub.id in fnClassAliases
                         or sub.id in fnInstances
+                        or sub.id in fnModuleDefs
+                        or sub.id in fnModuleClassAliases
+                        or sub.id in fnDeferred
+                        or sub.id in fnUnresolved
+                        or sub.id in opaqueNames
+                        or sub.id in reboundImports
                     ):
                         if sub.id in sinkTainted:
                             sinkNames.append(sub.id)
@@ -1705,6 +1841,25 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                         # 不在 Attribute 分支单独判定——ast.walk 必访根 Name，
                         # 根名进上面 Name 成员资格链即接住（检测等价，冗余
                         # 臂已删；第三十二轮评审后按判别点独占原则收敛）。
+                        memberKey = _memberChainKey(sub)
+                        if memberKey is not None and memberKey in sinkMembers:
+                            sinkNames.append(memberKey)
+                    elif isinstance(sub, ast.Subscript):
+                        # 第三十四轮评审 H-33-3：`_d[k] = sink` 后 `map(_d['k'], …)`
+                        subscriptMemberKey = _memberChainKey(sub)
+                        if subscriptMemberKey is not None and subscriptMemberKey in sinkMembers:
+                            sinkNames.append(subscriptMemberKey)
+                        # 第三十四轮评审 H-33-1：从**装载本地可调用的容器**里
+                        # 取元素再作实参（`map(_box[0], [0])` / `map(_d['fn'],…)`）。
+                        # 只认元素抽取形态——容器名本身/`.keys()` 这类方法调用
+                        # 是良性（真实闭包 `frozenset(HANDLERS.keys())` 校准）。
+                        containerBase = _staticChainOf(sub.value)
+                        if containerBase is not None and containerBase in callableContainers:
+                            callableNames.append(containerBase)
+                    elif isinstance(sub, ast.Starred):
+                        # H-33-1：星号展开容器（`map(*_box)`）把元素逐个转成实参。
+                        if isinstance(sub.value, ast.Name) and sub.value.id in callableContainers:
+                            callableNames.append(sub.value.id)
         if not callableNames and not sinkNames:
             return None
         chainNode = node.func.func if isinstance(node.func, ast.Call) else node.func
@@ -1834,6 +1989,47 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
         fnDeferred: set[str] = set()
         fnAmbiguous: set[str] = set()
         fnShadowed: set[str] = set()
+        # 第三十四轮评审 H-33-5：fn 作用域里**绑定值静态不可判**的目标名
+        #（`_h = _g if True else None` / `_h = [_g][0]` / 含本地可调用的
+        # 容器字面量）。旧实现这些目标不进任何表 ⇒ 调用落 external 臂放行
+        #（探针实证执行）。
+        fnUnresolved: set[str] = set()
+
+        def _fnAllArgs(fnArgs: ast.arguments):
+            yield from fnArgs.posonlyargs
+            yield from fnArgs.args
+            yield from fnArgs.kwonlyargs
+            if fnArgs.vararg is not None:
+                yield fnArgs.vararg
+            if fnArgs.kwarg is not None:
+                yield fnArgs.kwarg
+
+        def _fnContainsLocalCallable(fnValue: ast.expr) -> bool:
+            for fnSub in ast.walk(fnValue):
+                if isinstance(fnSub, ast.Lambda):
+                    return True
+                if isinstance(fnSub, ast.Name) and (
+                    fnSub.id in fnDefs
+                    or fnSub.id in fnModuleDefs
+                    or fnSub.id in fnClasses
+                    or fnSub.id in fnClassAliases
+                    or fnSub.id in fnModuleClassAliases
+                    or fnSub.id in fnDeferred
+                    or fnSub.id in callTargets
+                    or fnSub.id in localClasses
+                    or fnSub.id in sinkTainted
+                ):
+                    return True
+            return False
+
+        # 第三十四轮评审 H-33-6：**函数形参**也是 fn 作用域绑定——旧实现
+        # `fnShadowed` 只收 def/class/赋值目标 ⇒ `def _o(Field): Field(_f)`
+        # 的白名单根遮蔽校验看不见形参 ⇒ 放行（探针实证）。
+        # 非函数节点（如 M146 变异后 `scanCallee(ClassDef)` 兜底路径）没有
+        # `.args` ⇒ 取值防御，避免分析器抛异常（异常红不能证明检测能力）。
+        fnArgsNode = getattr(callee, "args", None)
+        if fnArgsNode is not None:
+            fnShadowed.update(fnArg.arg for fnArg in _fnAllArgs(fnArgsNode))
 
         def _fnScopeStmts(fnStmts):
             for fnNode in fnStmts:
@@ -1851,12 +2047,39 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
         for fnScopeStmt in _fnScopeStmts(list(callee.body)):
             if isinstance(fnScopeStmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 fnShadowed.add(fnScopeStmt.name)
+                # 第三十四轮评审 H-33-5：**语句序冲突**——先 `_h = _evil`
+                #（模块 def 别名）后 `def _h()`，旧实现 fnDefs 直接覆盖
+                # ⇒ 调用落到良性 def、恶意绑定整段被掩（探针实证）。
+                if (
+                    fnScopeStmt.name in fnModuleDefs
+                    or fnScopeStmt.name in fnModuleClassAliases
+                    or fnScopeStmt.name in fnClassAliases
+                    or fnScopeStmt.name in fnDeferred
+                    or fnScopeStmt.name in fnInstances
+                    or fnScopeStmt.name in fnUnresolved
+                ):
+                    fnAmbiguous.add(fnScopeStmt.name)
                 if fnScopeStmt.name in fnDefs:
                     fnAmbiguous.add(fnScopeStmt.name)
                 else:
                     fnDefs[fnScopeStmt.name] = fnScopeStmt
             elif isinstance(fnScopeStmt, ast.ClassDef):
                 fnShadowed.add(fnScopeStmt.name)
+            elif isinstance(fnScopeStmt, (ast.For, ast.AsyncFor)):
+                # 第三十四轮评审 H-33-6：for 目标同样是 fn 作用域绑定。
+                fnShadowed.update(
+                    t.id for t in _assignTargetNames([fnScopeStmt.target])
+                )
+            elif isinstance(fnScopeStmt, (ast.With, ast.AsyncWith)):
+                for fnItem in fnScopeStmt.items:
+                    if fnItem.optional_vars is not None:
+                        fnShadowed.update(
+                            t.id for t in _assignTargetNames([fnItem.optional_vars])
+                        )
+            elif isinstance(fnScopeStmt, (ast.Try, getattr(ast, "TryStar", ()))):
+                for fnHandler in fnScopeStmt.handlers:
+                    if fnHandler.name:
+                        fnShadowed.add(fnHandler.name)
             elif isinstance(fnScopeStmt, (ast.Assign, ast.AnnAssign)):
                 fnValue = fnScopeStmt.value
                 if fnValue is None:
@@ -1868,6 +2091,12 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                 )
                 fnTargetNames = [t.id for t in _assignTargetNames(fnTargets)]
                 fnShadowed.update(fnTargetNames)
+                # 第三十四轮评审 H-33-5：静态不可判的 fn 绑定值 ⇒ 目标名
+                # 记 unresolved（调用/作实参一律 fail-closed）。
+                if isinstance(fnValue, (ast.IfExp, ast.BoolOp, ast.Subscript)):
+                    fnUnresolved.update(fnTargetNames)
+                elif isinstance(fnValue, (ast.Dict, ast.List, ast.Set, ast.Tuple)) and _fnContainsLocalCallable(fnValue):
+                    fnUnresolved.update(fnTargetNames)
                 if isinstance(fnValue, ast.Name):
                     srcId = fnValue.id
                     if srcId in fnDefs and srcId not in fnAmbiguous:
@@ -1887,6 +2116,10 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                     elif srcId in fnModuleClassAliases:
                         for tid in fnTargetNames:
                             fnModuleClassAliases[tid] = fnModuleClassAliases[srcId]
+                    elif srcId in fnUnresolved:
+                        # H-33-5：不可判值的一跳别名传播。
+                        for tid in fnTargetNames:
+                            fnUnresolved.add(tid)
                     elif srcId in callTargets and srcId not in fnAmbiguous:
                         # 第三十二轮评审 F5：模块级 def 的 fn 作用域别名
                         #（`_h = _g`）——调用语义仍是模块级 ⇒ 记源名，
@@ -1940,6 +2173,7 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
             "ambiguous": fnAmbiguous,
             "shadowed": fnShadowed,
             "instances": fnInstances,
+            "unresolved": fnUnresolved,
         }
         for stmt in callee.body:
             fnProblem = _instanceExecProblem(stmt, effectiveClasses, effInstances)
@@ -2134,6 +2368,18 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                     if spreadValue is not None and _sinkTaintSpread(spreadValue, sinkTainted):
                         for t in _assignTargetNames(spreadTargets):
                             sinkTainted.add(t.id)
+                        # 第三十四轮评审 H-33-3：**属性/下标 Store 目标**也登记
+                        #（`_o.x = …` / `_d[k] = …`），后续成员取用作实参/直呼
+                        # 才接得住（旧实现只登记裸名，探针实证运行期执行）。
+                        for spreadTarget in spreadTargets:
+                            spreadKey = _assignTargetChainKey(spreadTarget)
+                            if spreadKey is not None:
+                                sinkMembers.add(spreadKey)
+            if isinstance(node, (ast.If, ast.While)):
+                # 第三十四轮评审 H-33-3：`if (_w := Path(…).unlink):` 的
+                # NamedExpr 目标在**判定表达式**里 ⇒ 旧实现只扫赋值/for/with
+                # ⇒ `_w` 永不污染，后续 `cast(int, _w)()` 执行（探针实证）。
+                _sinkTaintSpread(node.test, sinkTainted)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 for dec in getattr(node, "decorator_list", []):
                     if isinstance(dec, ast.Name) and dec.id in callTargets:
@@ -2154,6 +2400,16 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                         # 在这里判——由下方第二段 if 链（实例/类别名/本地类/
                         # 不透明/裸名 fail-closed）独占判定，保证每条 deny 臂
                         # 的变异判别点独占。
+                        # 第三十四轮评审 H-33-4：fn 作用域类别名分两张表——
+                        # fn-local 类（classAliases）与模块类别名
+                        #（moduleClassAliases）——成员解析时合并，否则
+                        # `_ca = _M; @_ca.deco` 的根不解析、装饰期执行整段
+                        # 逃出（探针实证）。
+                        decFnClassBindings = (
+                            {**fnBindings["classAliases"], **fnBindings["moduleClassAliases"]}
+                            if fnBindings
+                            else None
+                        )
                         if isinstance(dec, ast.Call):
                             callee = dec.func
                             if isinstance(callee, ast.Lambda):
@@ -2212,6 +2468,48 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                                             "装饰器工厂裸名静态不可判（未 import 且非内置白名单）"
                                             " ⇒ 装饰期执行 ⇒ fail-closed",
                                         )
+                                    elif isinstance(callee, ast.Attribute):
+                                        # 第三十四轮评审 H-33-4：**工厂调用**的
+                                        # 成员解析——`@_C.deco()` 的 callee 是
+                                        # `_C.deco`（Attribute），旧链只判裸名
+                                        # 工厂 ⇒ 本地类静态方法 deco 的体整段
+                                        # 不扫（探针实证返回装饰器闭包执行）。
+                                        callMemberAmbiguity: set[str] = set()
+                                        callMember = _decoratorMember(
+                                            callee,
+                                            {**localClasses, **(classes or {})},
+                                            callTargets,
+                                            classAliases,
+                                            callMemberAmbiguity,
+                                            fnClassBindings=decFnClassBindings,
+                                        )
+                                        if callMemberAmbiguity:
+                                            add(
+                                                dec.lineno,
+                                                "装饰器工厂成员绑定静态不可判"
+                                                " ⇒ 装饰期执行 ⇒ fail-closed",
+                                            )
+                                        if callMember is not None and not isinstance(
+                                            callMember, ast.ClassDef
+                                        ):
+                                            # 类作用域与 `@_C.deco` 同判据：根是
+                                            # fn-local 类才叠调用方作用域。
+                                            callBaseName = (
+                                                callee.value.id
+                                                if isinstance(callee.value, ast.Name)
+                                                else None
+                                            )
+                                            isCallFnLocalBase = (
+                                                callBaseName is not None
+                                                and classes is not None
+                                                and callBaseName in classes
+                                            )
+                                            scanCallee(
+                                                callMember,
+                                                depth + 1,
+                                                aliasesMap if isCallFnLocalBase else None,
+                                                classes if isCallFnLocalBase else None,
+                                            )
                         elif isinstance(dec, ast.Attribute):
                             decChain = _dottedChain(dec)
                             if decChain is None:
@@ -2250,9 +2548,7 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                             decAmbiguity,
                             # 第三十二轮评审 F4：fn 作用域类别名（`_D = _C`
                             # 后 `@_D.deco`）经别名映射解析到类根名。
-                            fnClassBindings=(
-                                fnBindings["classAliases"] if fnBindings else None
-                            ),
+                            fnClassBindings=decFnClassBindings,
                         )
                         if decAmbiguity:
                             # 第二十二轮 H6：装饰器成员绑定静态不可判 ⇒ fail-closed
@@ -2349,6 +2645,9 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                     fbDeferred = fnBindings["deferred"] if fnBindings else ()
                     fbAmbiguous = fnBindings["ambiguous"] if fnBindings else ()
                     fbInstances = fnBindings["instances"] if fnBindings else ()
+                    # 第三十四轮评审 H-33-5：静态不可判的 fn 绑定（条件表达式/
+                    # 下标/含本地可调用的容器）被调用 ⇒ fail-closed。
+                    fbUnresolved = fnBindings["unresolved"] if fnBindings else ()
                     # 第三十二轮评审 F1C：本地被调的**参数通道**——形参在
                     # 体内可能被调用/转交 ⇒ 实参携带本地可调用/lambda/sink
                     # 一样 fail-closed（`_run(_f)` 的 _f 经形参在 import 期
@@ -2363,6 +2662,8 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                         or node.func.id in fbClasses
                         or node.func.id in fbClassAliases
                         or node.func.id in fbInstances
+                        or node.func.id in fbModuleDefs
+                        or node.func.id in fbModuleClassAliases
                     )
                     if isLocalCallee:
                         paramProblem = _callableArgProblem(node, effAliases, fnBindings)
@@ -2418,6 +2719,14 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                             fbClasses[fbClassAliases[node.func.id]], callTargets
                         ):
                             scanCallee(hook, depth + 1, aliasesMap, classes, fnBindings)
+                    elif fnBindings is not None and node.func.id in fbUnresolved:
+                        # 第三十四轮评审 H-33-5：绑定值静态不可判却被调用
+                        # ⇒ 可执行目标不可证 ⇒ fail-closed（旧实现落
+                        # external 臂静默放行，探针实证执行）。
+                        add(
+                            node.lineno,
+                            f"调用目标 {node.func.id} 的绑定值静态不可判 ⇒ fail-closed",
+                        )
                     elif fnBindings is not None and node.func.id in fbInstances:
                         # fn 作用域实例变量调用 ⇒ __call__ 体（与模块级
                         # instanceVars 臂同语义，作用域 threading）。
@@ -2543,6 +2852,20 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                         add(
                             node.lineno,
                             "白名单工厂结果（延迟可调用）被成员调用 ⇒ 被包体 import 期执行 ⇒ fail-closed",
+                        )
+                    # 第三十四轮评审 H-33-3/H-33-6：**成员目标**绑定登记
+                    #（`_o.x = Path(…).unlink` / `_o.x = staticmethod(_f)`）被
+                    # 直接调用 ⇒ 旧实现只认裸名 ⇒ 运行期真实执行（探针实证）。
+                    memberCallKey = _dottedChain(node.func)
+                    if memberCallKey is not None and memberCallKey in sinkMembers:
+                        add(
+                            node.lineno,
+                            "sink 成员（属性/下标 Store 绑定）被调用 ⇒ import 期执行 ⇒ fail-closed",
+                        )
+                    if memberCallKey is not None and memberCallKey in deferredMembers:
+                        add(
+                            node.lineno,
+                            "白名单工厂结果（延迟可调用）的成员目标被调用 ⇒ 被包体 import 期执行 ⇒ fail-closed",
                         )
                     memberAmbiguity: set[str] = set()
                     member, status = _resolveMember(
@@ -2673,7 +2996,9 @@ def _findImportTimeHooksImpl(path: Path) -> tuple[str, ...]:
                                 # M-29-5：sink 可经赋值绑定洗白
                                 #（`_w = Path('y').write_text;
                                 # field_validator('x')(_w)`）⇒ 传入污染集。
-                                sinkProblem = _callFactorySinkProblem(node, sinkTainted)
+                                sinkProblem = _callFactorySinkProblem(
+                                    node, sinkTainted, sinkMembers
+                                )
                                 if sinkProblem is not None:
                                     add(node.lineno, sinkProblem)
                                 else:

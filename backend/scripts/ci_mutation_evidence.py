@@ -3,10 +3,10 @@
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
-⚠️ 本文件**只放跑者**（改坏 → 跑用例 → 判三态）；**245 组**变异的清单在
+⚠️ 本文件**只放跑者**（改坏 → 跑用例 → 判三态）；**307 组**变异的清单在
 `backend/scripts/ci_mutation_cases.py`（M37 起）+ `ci_mutation_cases_core.py`
 （M1–M36，纯数据）+ `ci_mutation_cases_r14/r16/r18/r20/r21/r23/r24/r26/
-r28/r30.py`（各轮收口/修复批，纯数据）——拆开是为了文件都不超 800 行上限。
+r28/r30/r32/r34.py`（各轮收口/修复批，纯数据）——拆开是为了文件都不超 800 行上限。
 
 扩展说明：
 - 支持 **repo 根路径**（`.github/workflows/ci.yml`）—— 作用域 `repo`；
@@ -14,7 +14,7 @@ r28/r30.py`（各轮收口/修复批，纯数据）——拆开是为了文件�
 
 用法（在仓库根或任意子目录执行均可，脚本按自身位置自动定位仓库根）：
 
-    python3 backend/scripts/ci_mutation_evidence.py            # 全部 245 组
+    python3 backend/scripts/ci_mutation_evidence.py            # 全部 307 组
     python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 
 环境要求：`TEST_DATABASE_URL` / `TEST_NEO4J_URI` / `TEST_NEO4J_PASSWORD`

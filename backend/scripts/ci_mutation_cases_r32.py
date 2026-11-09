@@ -448,12 +448,13 @@ R32_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
     ),
     # M279：pattern 行删 `|_r32` ⇒ r32 批脱出 CI 相关面 ⇒ pattern 反向
     # 守卫（其清单元组含 r32，本轮已补）转红。（M241 同款。）
+    # 第三十四轮重锚：pattern 行新增 `_r34`；变异只删 `_r32`、保留 `_r34`。
     (
         "M279",
         "backend",
         "app/utils/ci_surface.py",
-        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r32)?)\\.py$",',
-        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30)?)\\.py$",',
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r32|_r34)?)\\.py$",',
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r34)?)\\.py$",',
         (_SURFACE_GUARD
          + "::test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_file"),
         1,

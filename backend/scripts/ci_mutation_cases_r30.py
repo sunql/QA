@@ -40,9 +40,10 @@ R30_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M241",
         "backend",
         "app/utils/ci_surface.py",
-        # 第十二轮重锚（第三十二轮）：新增 `_r32` 批后 pattern 行随之加宽。
-        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r32)?)\\.py$",',
-        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r30|_r32)?)\\.py$",',
+        # 第十二轮重锚（第三十二轮）；第十三次重锚（第三十四轮）：pattern 行
+        # 再增 `_r34`（仍删 `_r28`，判别不变）。
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r32|_r34)?)\\.py$",',
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r30|_r32|_r34)?)\\.py$",',
         (_SURFACE_GUARD
          + "::test_detectCiSurfaceChanges_reads_the_mutation_script_pattern_from_the_real_file"),
         1,
@@ -85,7 +86,11 @@ R30_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M244",
         "backend",
         "app/utils/ci_conftest_chain.py",
+        # 第三十四轮重锚：H-33-4 新增「工厂调用成员解析」臂后同一合并表达式
+        # 出现两次 ⇒ 带前导 `dec,`（新臂是 `callee,`）恢复独占。
+        "                            dec,\n"
         "                            {**localClasses, **(classes or {})},",
+        "                            dec,\n"
         "                            localClasses,",
         (_ROUND30_DENY + "[fn_local_class_decorator]"),
         1,

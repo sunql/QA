@@ -132,6 +132,7 @@ def test_the_mutation_evidence_script_has_a_codeowner() -> None:
         "backend/scripts/ci_mutation_cases_r28.py",
         "backend/scripts/ci_mutation_cases_r30.py",
         "backend/scripts/ci_mutation_cases_r32.py",
+        "backend/scripts/ci_mutation_cases_r34.py",
     ):
         assert (_REPO_ROOT / relPath).is_file(), f"找不到变异取证脚本：{relPath}"
         assert relPath in owned, f"{relPath} 没有 CODEOWNER（改它就能让守卫恒绿）"
@@ -240,6 +241,7 @@ def test_the_effective_owner_of_every_controlled_path_is_the_expected_one() -> N
         "backend/scripts/ci_mutation_cases_r28.py",
         "backend/scripts/ci_mutation_cases_r30.py",
         "backend/scripts/ci_mutation_cases_r32.py",
+        "backend/scripts/ci_mutation_cases_r34.py",
     }
     # 第二十六轮评审 H-26-5：原生扩展遮蔽全域收口——backend 下任何深度的
     # .so/.pyd 都入授权面（lever 路径与 ci_surface lever test 同源）。

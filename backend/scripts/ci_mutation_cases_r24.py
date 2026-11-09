@@ -46,11 +46,12 @@ R24_MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = [
         "M217",
         "backend",
         "app/utils/ci_surface.py",
-        # 第五次重锚（第三十二轮）：新增 `_r32` 批后 pattern 行随之加宽。
+        # 第五次重锚（第三十二轮）；第六次重锚（第三十四轮）：pattern 行再增
+        # `_r34`。
         'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16'
-        '|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r32)?)\\.py$",',
+        '|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r32|_r34)?)\\.py$",',
         'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16'
-        '|_r18|_r20|_r21|_r24|_r26|_r28|_r30|_r32)?)\\.py$",',
+        '|_r18|_r20|_r21|_r24|_r26|_r28|_r30|_r32|_r34)?)\\.py$",',
         (_SURFACE_GUARD
          + "::test_detectCiSurfaceChanges_flags_the_mutation_evidence_script"),
         1,

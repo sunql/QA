@@ -33,6 +33,7 @@ app.domain.models import X` 会先执行 `app/domain/__init__.py`），断言每
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -2641,6 +2642,460 @@ def test_round32_inert_forms_pass(tmp_path: Path, case: str) -> None:
     """第三十二轮新 deny 臂的惰性/注册/普通调用形态必须仍然放行（零误报）。"""
     path = tmp_path / "m.py"
     path.write_text(_CLEAN_R32_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    assert hooks == (), f"{case} 被误报：{hooks}"
+
+
+# ---------------------------------------------------------------------------
+# 第三十四轮（终轮）评审 H-33-1..H-33-6 收口
+#
+# 判别点独占原则同 r32：每条新 deny 臂都要有**唯一** fixture——杀死该臂后
+# 这条 fixture 必须变空（0 hooks），不能被另一条旧臂兜住（否则变异取证
+# 拿到的是假绿）。兜底线文本（「顶层引用 …」/「静态不可判」）只在确有
+# fail-closed 语义的形态上作期望文本。
+# ---------------------------------------------------------------------------
+
+
+def _r34(source: str) -> str:
+    return textwrap.dedent(source).lstrip("\n")
+
+
+_EVIL_R34_SOURCES: dict[str, str] = {
+    # H-33-1：调用实参通道的可执行目标漏登记（容器元素/不透明结果/
+    # fn 作用域模块 def·模块类别名·延迟绑定·不可判值/重绑定 import）。
+    "f1_list_container_arg": _r34(
+        """
+        import sys
+        def _f(_):
+            sys.path.insert(0, 'X')
+        _box = [_f]
+        _r = list(map(_box[0], [0]))
+        """
+    ),
+    "f1_dict_container_arg": _r34(
+        """
+        import sys
+        def _f(_):
+            sys.path.insert(0, 'X')
+        _d = {'fn': _f}
+        _r = list(map(_d['fn'], [0]))
+        """
+    ),
+    "f1_star_container_arg": _r34(
+        """
+        import sys
+        def _f(_):
+            sys.path.insert(0, 'X')
+        _box = [_f, [0]]
+        _r = list(map(*_box))
+        """
+    ),
+    "f1_opaque_result_arg": _r34(
+        """
+        import sys
+        def _f(_):
+            sys.path.insert(0, 'X')
+        def _mk():
+            return _f
+        _r = _mk()
+        _r2 = list(map(_r, [0]))
+        """
+    ),
+    "f1_fn_module_def_alias_arg": _r34(
+        """
+        import sys
+        def _g(_):
+            sys.path.insert(0, 'X')
+        def _o():
+            _h = _g
+            _r = list(map(_h, [0]))
+        _r2 = _o()
+        """
+    ),
+    "f1_fn_module_class_alias_arg": _r34(
+        """
+        import sys
+        class _Mc:
+            def __init__(self, _):
+                sys.path.insert(0, 'X')
+        def _o():
+            _X = _Mc
+            _r = list(map(_X, [0]))
+        _r2 = _o()
+        """
+    ),
+    "f1_fn_deferred_arg": _r34(
+        """
+        import sys
+        def _f(_):
+            sys.path.insert(0, 'X')
+        def _o():
+            _r = staticmethod(_f)
+            _r2 = list(map(_r, [0]))
+        _r3 = _o()
+        """
+    ),
+    "f1_fn_unresolved_arg": _r34(
+        """
+        import sys
+        def _g(_):
+            sys.path.insert(0, 'X')
+        def _o():
+            _h = _g if True else None
+            _r = list(map(_h, [0]))
+        _r2 = _o()
+        """
+    ),
+    "f1_rebound_import_arg": _r34(
+        """
+        import pydantic as pd
+        pd = 'x'
+        _r = list(map(pd, [0]))
+        """
+    ),
+    "f1_fn_container_arg": _r34(
+        """
+        import sys
+        def _g(_):
+            sys.path.insert(0, 'X')
+        def _o():
+            _box = [_g]
+            _r = list(map(_box[0], [0]))
+        _r2 = _o()
+        """
+    ),
+    # H-33-2：本地被调的 fn 作用域别名（模块 def/模块类）不在参数通道
+    # 判据里 ⇒ `_h(_f)` 把本地可调用转交进模块函数体执行。
+    "h332_module_def_callee": _r34(
+        """
+        import sys
+        def _f():
+            sys.path.insert(0, 'X')
+        def _g(cb):
+            cb()
+        def _o():
+            _h = _g
+            _h(_f)
+        _r = _o()
+        """
+    ),
+    "h332_module_class_alias_callee": _r34(
+        """
+        import sys
+        class _Mc:
+            def __init__(self, cb):
+                cb()
+        def _f():
+            sys.path.insert(0, 'X')
+        def _o():
+            _X = _Mc
+            _X(_f)
+        _r = _o()
+        """
+    ),
+    # H-33-3：sink 写进**属性/下标目标**/海象判定/嵌套解包后取用。
+    "f3_attr_store_sink": _r34(
+        """
+        import types
+        from typing import cast
+        from pathlib import Path
+        _o = types.SimpleNamespace()
+        _o.x = Path('/tmp/n6_r34_target').unlink
+        _r = cast(int, _o.x)()
+        """
+    ),
+    "f3_subscript_store_sink": _r34(
+        """
+        from typing import cast
+        from pathlib import Path
+        _d = {}
+        _d['k'] = Path('/tmp/n6_r34_target').unlink
+        _r = cast(int, _d['k'])()
+        """
+    ),
+    "f3_walrus_if_sink": _r34(
+        """
+        from typing import cast
+        from pathlib import Path
+        if (_w := Path('/tmp/n6_r34_target').unlink):
+            _r = cast(int, _w)()
+        """
+    ),
+    "f3_nested_tuple_for_sink": _r34(
+        """
+        from typing import cast
+        from pathlib import Path
+        for _a, (_b, _w) in [(1, (2, Path('/tmp/n6_r34_target').unlink))]:
+            _r = cast(int, _w)()
+        """
+    ),
+    "f3_factory_member_arg": _r34(
+        """
+        import types
+        from pydantic import field_validator
+        from pathlib import Path
+        _o = types.SimpleNamespace()
+        _o.x = Path('/tmp/n6_r34_target').unlink
+        _v = field_validator('x')(_o.x)
+        """
+    ),
+    # 属性/下标成员作**普通外部调用**实参（无嵌套工厂兜底 ⇒ 判别点独占）。
+    "f3_attr_store_arg": _r34(
+        """
+        import types
+        from pathlib import Path
+        _o = types.SimpleNamespace()
+        _o.x = Path('/tmp/n6_r34_target').unlink
+        _r = list(map(_o.x, [0]))
+        """
+    ),
+    "f3_subscript_store_arg": _r34(
+        """
+        from pathlib import Path
+        _d = {}
+        _d['k'] = Path('/tmp/n6_r34_target').unlink
+        _r = list(map(_d['k'], [0]))
+        """
+    ),
+    "f3_fn_direct_member_call": _r34(
+        """
+        import types
+        from pathlib import Path
+        def _o2():
+            _n = types.SimpleNamespace()
+            _n.x = Path('/tmp/n6_r34_target').unlink
+            _r = _n.x()
+        _r2 = _o2()
+        """
+    ),
+    # H-33-4：装饰器成员解析的模块类别名根 / fn 作用域模块类别名 /
+    # 工厂调用形态（`@_C.deco()`）。
+    "f4_module_class_alias_root": _r34(
+        """
+        import sys
+        class _Inner:
+            @staticmethod
+            def deco(fn):
+                sys.path.insert(0, 'X')
+                return fn
+        class _M:
+            Inner = _Inner
+        _ca = _M
+        @_ca.Inner.deco
+        def _g():
+            pass
+        """
+    ),
+    "f4_fn_alias_to_module_class": _r34(
+        """
+        import sys
+        class _M:
+            @staticmethod
+            def deco(fn):
+                sys.path.insert(0, 'X')
+                return fn
+        def _o():
+            _ca = _M
+            @_ca.deco
+            def g():
+                pass
+        _r = _o()
+        """
+    ),
+    "f4_fn_local_class_factory_call": _r34(
+        """
+        import sys
+        def _o():
+            class _C:
+                @staticmethod
+                def deco():
+                    sys.path.insert(0, 'X')
+                    return lambda fn: fn
+            @_C.deco()
+            def g():
+                pass
+        _r = _o()
+        """
+    ),
+    # H-33-5：fn 作用域不可判绑定被调用 / 语句序冲突掩蔽。
+    "f5_fn_ifexp_binding": _r34(
+        """
+        import sys
+        def _g():
+            sys.path.insert(0, 'X')
+        def _o():
+            _h = _g if True else None
+            _h()
+        _r = _o()
+        """
+    ),
+    "f5_fn_order_masking": _r34(
+        """
+        import sys
+        def _evil():
+            sys.path.insert(0, 'X')
+        def _o():
+            _h = _evil
+            _h()
+            def _h():
+                pass
+        _r = _o()
+        """
+    ),
+    # H-33-6：白名单链根遮蔽未覆盖形参 / for 目标 / 成员目标延迟调用。
+    "f6_param_shadow_whitelist": _r34(
+        """
+        import sys
+        from pydantic import Field
+        def _f(x):
+            sys.path.insert(0, 'X')
+        def _o(Field):
+            Field(_f)('x')
+            return 0
+        _r = _o(staticmethod)
+        """
+    ),
+    "f6_for_target_shadow_whitelist": _r34(
+        """
+        import sys
+        import pydantic as pd
+        def _f(x):
+            sys.path.insert(0, 'X')
+        def _mk():
+            class _E:
+                @staticmethod
+                def Field(x):
+                    x('y')
+            return _E()
+        for pd in [_mk()]:
+            _r = pd.Field(_f)
+        """
+    ),
+    "f6_attr_target_deferred": _r34(
+        """
+        import sys
+        import types
+        def _f():
+            sys.path.insert(0, 'X')
+        _o = types.SimpleNamespace()
+        _o.x = staticmethod(_f)
+        _r = _o.x()
+        """
+    ),
+}
+
+_EVIL_R34_EXPECTED_TEXT: dict[str, str] = {
+    "f1_list_container_arg": "调用实参携带本地可调用",
+    "f1_dict_container_arg": "调用实参携带本地可调用",
+    "f1_star_container_arg": "调用实参携带本地可调用",
+    "f1_opaque_result_arg": "调用实参携带本地可调用",
+    "f1_fn_module_def_alias_arg": "调用实参携带本地可调用",
+    "f1_fn_module_class_alias_arg": "调用实参携带本地可调用",
+    "f1_fn_deferred_arg": "调用实参携带本地可调用",
+    "f1_fn_unresolved_arg": "调用实参携带本地可调用",
+    "f1_rebound_import_arg": "调用实参携带本地可调用",
+    "f1_fn_container_arg": "调用实参携带本地可调用",
+    "h332_module_def_callee": "调用实参携带本地可调用",
+    "h332_module_class_alias_callee": "调用实参携带本地可调用",
+    "f3_attr_store_sink": "调用实参携带 sink 成员/污染绑定名",
+    "f3_subscript_store_sink": "调用实参携带 sink 成员/污染绑定名",
+    "f3_walrus_if_sink": "调用实参携带 sink 成员/污染绑定名",
+    "f3_nested_tuple_for_sink": "调用实参携带 sink 成员/污染绑定名",
+    "f3_factory_member_arg": "嵌套调用工厂实参引用 sink 成员绑定",
+    "f3_attr_store_arg": "调用实参携带 sink 成员/污染绑定名",
+    "f3_subscript_store_arg": "调用实参携带 sink 成员/污染绑定名",
+    "f3_fn_direct_member_call": "sink 成员（属性/下标 Store 绑定）被调用",
+    "f4_module_class_alias_root": "装饰器成员绑定静态不可判",
+    "f4_fn_alias_to_module_class": "顶层引用 sys.path.insert",
+    "f4_fn_local_class_factory_call": "顶层引用 sys.path.insert",
+    "f5_fn_ifexp_binding": "绑定值静态不可判",
+    "f5_fn_order_masking": "多重绑定",
+    "f6_param_shadow_whitelist": "调用实参携带本地可调用",
+    "f6_for_target_shadow_whitelist": "调用实参携带本地可调用",
+    "f6_attr_target_deferred": "白名单工厂结果（延迟可调用）的成员目标被调用",
+}
+
+# 放行性反向锚：H-33 收窄（容器只认元素抽取形态）后仍须 0 hooks 的
+# 惰性/普通形态（其中 `frozenset(HANDLERS.keys())` 就是校准炸点）。
+_CLEAN_R34_SOURCES: dict[str, str] = {
+    "clean_container_benign": _r34(
+        """
+        _box = [1, 2]
+        _r = list(map(str, _box))
+        """
+    ),
+    "clean_fn_param_arg": _r34(
+        """
+        def _o(items):
+            return list(map(str, items))
+        """
+    ),
+    "clean_fn_ifexp_unused": _r34(
+        """
+        def _o():
+            _h = (lambda: 1) if True else None
+            return 0
+        """
+    ),
+    "clean_deferred_attr_uncalled": _r34(
+        """
+        import types
+        def _f():
+            return 1
+        _o = types.SimpleNamespace()
+        _o.x = staticmethod(_f)
+        """
+    ),
+    "clean_rebound_import_unused_as_arg": _r34(
+        """
+        import pydantic as pd
+        pd = 'x'
+        _r = pd.upper()
+        """
+    ),
+    "clean_callable_container_method_arg": _r34(
+        """
+        def _f():
+            return 1
+        def _g():
+            return 2
+        _H = {'a': _f, 'b': _g}
+        _V = frozenset(_H.keys())
+        """
+    ),
+    "clean_container_bare_arg": _r34(
+        """
+        def _f():
+            return 1
+        _box = [1, _f]
+        _r = len(_box)
+        """
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_EVIL_R34_SOURCES))
+def test_round34_deny_rules_are_enforced(tmp_path: Path, case: str) -> None:
+    """第三十四轮 H-33-1..6 的 deny 线逐形态钉住（探针实测逃逸后收口）。"""
+    path = tmp_path / "m.py"
+    path.write_text(_EVIL_R34_SOURCES[case], encoding="utf-8")
+
+    hooks = findImportTimeHooks(path)
+
+    expectedText = _EVIL_R34_EXPECTED_TEXT[case]
+    assert any(expectedText in hook for hook in hooks), (
+        f"{case} 的拒绝文本没有归位到「{expectedText}」：{hooks}"
+        " ⇒ 精识 deny 臂失效（兜底线接住了）"
+    )
+
+
+@pytest.mark.parametrize("case", sorted(_CLEAN_R34_SOURCES))
+def test_round34_inert_forms_pass(tmp_path: Path, case: str) -> None:
+    """第三十四轮新 deny 臂的惰性/普通形态必须仍然放行（零误报）。"""
+    path = tmp_path / "m.py"
+    path.write_text(_CLEAN_R34_SOURCES[case], encoding="utf-8")
 
     hooks = findImportTimeHooks(path)
 

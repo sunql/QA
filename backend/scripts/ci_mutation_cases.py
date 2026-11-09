@@ -1,4 +1,4 @@
-"""CI 判据守卫的**变异清单**（纯数据，278 组 = 核心批 + N6 批 + 第四/五轮批 + 第六–九轮复审批 + 第十二轮收口批 + 第十三/十四轮收口批 + 第十五/十六轮收口批 + 第十八轮收口批 + 第二十轮收口批 + 第三十轮修复批 + 第三十二轮修复批）。
+"""CI 判据守卫的**变异清单**（纯数据，307 组 = 核心批 + N6 批 + 第四/五轮批 + 第六–九轮复审批 + 第十二轮收口批 + 第十三/十四轮收口批 + 第十五/十六轮收口批 + 第十八轮收口批 + 第二十轮收口批 + 第三十轮修复批 + 第三十二轮修复批 + 第三十四轮修复批）。
 
 规矩（见 `Harness/rules/测试规范.md`）：守卫不是恒绿 ⇒ 必须拿变异取证。
 
@@ -10,14 +10,15 @@ M1–M36（继承批 + 模块拆分批 + workflow 批 + 净变更批）在 `ci_m
 `ci_mutation_cases_r16.py`，M137–M151（第十八轮收口批）在
 `ci_mutation_cases_r18.py`，M152–M174（第二十轮收口批）在
 `ci_mutation_cases_r20.py`，M175 起（第二十二轮收口批）在
-`ci_mutation_cases_r21.py` —— 文件超 800 行上限才拆。
+`ci_mutation_cases_r21.py`，M280–M308（第三十四轮修复批）在
+`ci_mutation_cases_r34.py` —— 文件超 800 行上限才拆。
 
 ⚠️ **本文件与跑者同属「CI 相关面」**（改了它就能让守卫恒绿）
 ⇒ 必须同时进 `.github/CODEOWNERS` 与 `ci_surface.py` 的 `_CI_SURFACE_PATTERNS`。
 
 用法（在仓库根或任意子目录执行均可，脚本按自身位置自动定位仓库根）：
 
-    python3 backend/scripts/ci_mutation_evidence.py            # 全部 278 组
+    python3 backend/scripts/ci_mutation_evidence.py            # 全部 307 组
     python3 backend/scripts/ci_mutation_evidence.py M5 M6      # 只跑指定组
 """
 
@@ -35,12 +36,13 @@ from scripts.ci_mutation_cases_r26 import R26_MUTATIONS
 from scripts.ci_mutation_cases_r28 import R28_MUTATIONS
 from scripts.ci_mutation_cases_r30 import R30_MUTATIONS
 from scripts.ci_mutation_cases_r32 import R32_MUTATIONS
+from scripts.ci_mutation_cases_r34 import R34_MUTATIONS
 
 # (编号, 作用域, 文件, 原文, 变异后, 期望转红的用例, occurrence)
 MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = (
     MUTATIONS_CORE + R14_MUTATIONS + R16_MUTATIONS + R18_MUTATIONS + R20_MUTATIONS
     + R21_MUTATIONS + R23_MUTATIONS + R24_MUTATIONS + R26_MUTATIONS
-    + R28_MUTATIONS + R30_MUTATIONS + R32_MUTATIONS + [
+    + R28_MUTATIONS + R30_MUTATIONS + R32_MUTATIONS + R34_MUTATIONS + [
 
     # ---------- M37–M55：2026-11-07 N6「判定集合必须落在两次 run 实际跑的树上」批 ----------
     #
@@ -549,8 +551,9 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, int]] = (
         "M69",
         "backend",
         "app/utils/ci_surface.py",
-        # 第十五次重锚（第三十二轮）：新增 `_r32` 批后 pattern 行随之加宽。
-        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r32)?)\\.py$",',
+        # 第十五次重锚（第三十二轮）；第十六次重锚（第三十四轮）：pattern
+        # 行再增 `_r34`。
+        'r"^backend/scripts/ci_mutation_(?:evidence|cases(?:_core|_r14|_r16|_r18|_r20|_r21|_r23|_r24|_r26|_r28|_r30|_r32|_r34)?)\\.py$",',
         'r"^backend/scripts/ci_mutation_(?:evidence|cases)\\.py$",',
         (
             "app/tests/unit/test_ci_surface.py::"

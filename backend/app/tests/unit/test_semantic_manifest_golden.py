@@ -110,7 +110,6 @@ _KPI_KEYS = {
     "status",
     "semanticKeywords",
     "metricName",
-    "datasourceId",
     "datasourceName",
 }
 _BUSINESS_OBJECT_KEYS = {
@@ -150,6 +149,8 @@ def buildGoldenRows() -> dict[str, Any]:
             dataType="STRING",
             isPrimaryKey=True,
             sourceColumn="SUPPLIER_CODE",
+            # 三态 True：明确非空。
+            isNotNull=True,
         ),
         makeProperty(
             1,
@@ -165,6 +166,11 @@ def buildGoldenRows() -> dict[str, Any]:
             dataType="DECIMAL",
             unit="元",
             allowedValues=["0", "1000000"],
+            # 三态 False：明确允许为空（必须与「未约束」的 None 区分开）。
+            isNotNull=False,
+            minValue="0",
+            maxValue="1000000",
+            regexPattern=r"^\d+(\.\d{1,2})?$",
         ),
         makeProperty(
             3,
@@ -349,6 +355,20 @@ def test_every_section_and_key_is_pinned() -> None:
     assert {k for kpi in manifest["kpis"] for k in kpi} == _KPI_KEYS
     assert {k for b in manifest["businessObjects"] for k in b} == _BUSINESS_OBJECT_KEYS
     assert {k for d in manifest["domains"] for k in d} == _DOMAIN_KEYS
+
+
+def test_property_nullability_is_three_state() -> None:
+    """`isNotNull` 必须保留三态：None（未约束）/ True / False。
+
+    用 `bool()` 压平会把「未约束」写成「允许为空」，语义悄悄收紧且无任何用例变红。
+    """
+    manifest = compileGolden()
+    supplier = next(c for c in manifest["classes"] if c["className"] == "Supplier")
+    byName = {prop["propertyName"]: prop for prop in supplier["properties"]}
+
+    assert byName["supplierCode"]["isNotNull"] is True
+    assert byName["creditLimit"]["isNotNull"] is False
+    assert byName["supplierName"]["isNotNull"] is None
 
 
 def test_golden_filters_tombstones_and_resolves_references() -> None:

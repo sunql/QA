@@ -5,7 +5,7 @@
 1. **结构闸**（`MANIFEST_SCHEMA`，JSON Schema draft 2020-12）：分区齐全、字段齐全、
    类型正确、枚举合法、**不允许未知字段**（`additionalProperties: false` —— 拼错的
    键会被静默忽略，那是发布评审最不该有的失败模式）。
-2. **引用闸**（`_validateReferences`）：Schema 表达不了的跨分区约束 —— 类名 / 指标名 /
+2. **引用闸**（`_referenceErrors`）：Schema 表达不了的跨分区约束 —— 类名 / 指标名 /
    域名必须存在、同名不得重复、`metrics[].kpiCodes` 与 `kpis[].metricName` 必须互相对上。
    编译器在**输入侧**已经校验过一次；这里在**产物侧**再验一次，因为回放历史快照时
    不会再经过编译器。
@@ -20,18 +20,55 @@ from __future__ import annotations
 
 import hashlib
 import json
+from itertools import islice
 from typing import Any
 
 from jsonschema import Draft202012Validator
+
+# 度量聚合白名单的单一事实源在写入侧（Pydantic 的 `MeasureSpecSchema`）。
+# 校验器是回放历史/人工编辑快照的最后一道闸，必须用同一份白名单。
+from app.domain.schemas import _MEASURE_AGG_ALLOWED
 
 SCHEMA_VERSION = "v1"
 """Manifest Schema 版本。编译器从这里取，避免两处各写各的。"""
 
 _MAX_REPORTED_ERRORS = 10
+_MAX_NAME_LENGTH = 200
+_MAX_TEXT_LENGTH = 4000
 
-_NULLABLE_STRING: dict[str, Any] = {"type": ["string", "null"]}
-_STRING_LIST: dict[str, Any] = {"type": "array", "items": {"type": "string"}}
-_NULLABLE_OBJECT: dict[str, Any] = {"type": ["object", "null"]}
+
+_NULLABLE_STRING: dict[str, Any] = {
+    "type": ["string", "null"],
+    "maxLength": _MAX_TEXT_LENGTH,
+}
+_NAME: dict[str, Any] = {"type": "string", "minLength": 1, "maxLength": _MAX_NAME_LENGTH}
+# 公式/表达式可比名字长得多（真实库最长 formula 上千字符）。
+_TEXT: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": _MAX_TEXT_LENGTH,
+}
+_NULLABLE_NAME: dict[str, Any] = {
+    "type": ["string", "null"],
+    "minLength": 1,
+    "maxLength": _MAX_NAME_LENGTH,
+}
+# 体量上限是纵深防御：D9 的 API 层还必须有字节级上限，两层缺一不可。
+_STRING_LIST: dict[str, Any] = {
+    "type": "array",
+    "items": {"type": "string", "maxLength": _MAX_NAME_LENGTH},
+    "maxItems": 1000,
+}
+# 唯一允许的自由对象：扁平字符串映射（否则是任意深/大的体量杠杆）。
+_NULLABLE_OBJECT: dict[str, Any] = {
+    "type": ["object", "null"],
+    "additionalProperties": {"type": "string", "maxLength": _MAX_NAME_LENGTH},
+    "maxProperties": 50,
+}
+
+
+def _array(items: dict[str, Any], *, maxItems: int) -> dict[str, Any]:
+    return {"type": "array", "items": items, "maxItems": maxItems}
 
 
 def _enum(*values: str, nullable: bool = False) -> dict[str, Any]:
@@ -52,14 +89,14 @@ def _object(properties: dict[str, Any], *, required: list[str] | None = None) ->
 
 _PROPERTY_SCHEMA = _object(
     {
-        "propertyName": {"type": "string", "minLength": 1},
+        "propertyName": _NAME,
         "propertyAlias": _NULLABLE_STRING,
         "businessAliases": _STRING_LIST,
         "description": _NULLABLE_STRING,
-        "dataType": {"type": "string", "minLength": 1},
+        "dataType": _NAME,
         "isPrimaryKey": {"type": "boolean"},
         "isForeignKey": {"type": "boolean"},
-        "refClassName": _NULLABLE_STRING,
+        "refClassName": _NULLABLE_NAME,
         "sourceColumn": _NULLABLE_STRING,
         "unit": _NULLABLE_STRING,
         "allowedValues": _STRING_LIST,
@@ -73,41 +110,41 @@ _PROPERTY_SCHEMA = _object(
 
 _CLASS_SCHEMA = _object(
     {
-        "className": {"type": "string", "minLength": 1},
+        "className": _NAME,
         "classAlias": _NULLABLE_STRING,
         "description": _NULLABLE_STRING,
         "sourceTable": _NULLABLE_STRING,
         # 取值来自 `app.domain.enums.ObjectType`（Master/Transaction/Reference/Event）。
         "objectType": _enum("Master", "Transaction", "Reference", "Event", nullable=True),
         "objectOwner": _NULLABLE_STRING,
-        "parentClassName": _NULLABLE_STRING,
-        "properties": {"type": "array", "items": _PROPERTY_SCHEMA},
+        "parentClassName": _NULLABLE_NAME,
+        "properties": _array(_PROPERTY_SCHEMA, maxItems=500),
     }
 )
 
 _JOIN_SCHEMA = _object(
     {
-        "joinKey": {"type": "string", "minLength": 1},
-        "sourceClassName": {"type": "string", "minLength": 1},
+        "joinKey": _NAME,
+        "sourceClassName": _NAME,
         "sourceColumns": _STRING_LIST,
-        "targetClassName": {"type": "string", "minLength": 1},
+        "targetClassName": _NAME,
         "targetColumns": _STRING_LIST,
         # join_type / relation_type 在库侧是自由字符串（实测 INNER / foreign_key），
         # 没有 Python 枚举作 SSOT ⇒ 这里不做枚举约束，否则会凭空冻结未定义的口径。
-        "joinType": {"type": "string"},
-        "relationType": {"type": "string"},
+        "joinType": {"type": "string", "maxLength": _MAX_NAME_LENGTH},
+        "relationType": {"type": "string", "maxLength": _MAX_NAME_LENGTH},
         "description": _NULLABLE_STRING,
     }
 )
 
 _MEASURE_SCHEMA = _object(
     {
-        # 取值来自 `schemas._MEASURE_AGG_ALLOWED`（SUM/COUNT/AVG/COUNT_DISTINCT）。
-        "agg": {"type": "string", "minLength": 1},
+        # 与写入侧 `MeasureSpecSchema` 共用白名单（SUM/COUNT/AVG/COUNT_DISTINCT）。
+        "agg": _enum(*sorted(_MEASURE_AGG_ALLOWED)),
         "expr": _NULLABLE_STRING,
         "filter": _NULLABLE_STRING,
         # 编译器把内嵌 class_id 归一成 className（墓碑类 ⇒ null）。
-        "className": _NULLABLE_STRING,
+        "className": _NULLABLE_NAME,
         "classAlias": _NULLABLE_STRING,
     },
     required=["agg", "className"],
@@ -115,19 +152,19 @@ _MEASURE_SCHEMA = _object(
 
 _METRIC_SOURCE_SCHEMA = _object(
     {
-        "className": {"type": "string", "minLength": 1},
+        "className": _NAME,
         "role": _enum("NUMERATOR", "DENOMINATOR", "FILTER", "BASE"),
     }
 )
 
 _METRIC_SCHEMA = _object(
     {
-        "metricName": {"type": "string", "minLength": 1},
+        "metricName": _NAME,
         "metricAlias": _NULLABLE_STRING,
-        "formula": {"type": "string", "minLength": 1},
-        "aggFunction": {"type": "string", "minLength": 1},
+        "formula": _TEXT,
+        "aggFunction": _NAME,
         "metricType": _enum("MEASURE", "RATIO", "DIFFERENCE", "DERIVED"),
-        "targetClassName": _NULLABLE_STRING,
+        "targetClassName": _NULLABLE_NAME,
         "dimensionDefaults": _NULLABLE_OBJECT,
         "grainKeys": _STRING_LIST,
         "aggregationOrder": _enum(
@@ -139,15 +176,15 @@ _METRIC_SCHEMA = _object(
         "status": _enum("DRAFT", "PUBLISHED"),
         "owner": _NULLABLE_STRING,
         "executionSource": _enum("COMPILED", "ESCAPE_HATCH", "NONE", nullable=True),
-        "sources": {"type": "array", "items": _METRIC_SOURCE_SCHEMA},
-        "kpiCodes": _STRING_LIST,
+        "sources": _array(_METRIC_SOURCE_SCHEMA, maxItems=50),
+        "kpiCodes": _array(_NAME, maxItems=100),
     }
 )
 
 _KPI_SCHEMA = _object(
     {
-        "kpiCode": {"type": "string", "minLength": 1},
-        "kpiName": {"type": "string", "minLength": 1},
+        "kpiCode": _NAME,
+        "kpiName": _NAME,
         "businessDefinition": _NULLABLE_STRING,
         "formula": _NULLABLE_STRING,
         "numerator": _NULLABLE_STRING,
@@ -161,21 +198,20 @@ _KPI_SCHEMA = _object(
         "version": {"type": "string"},
         "status": _enum("DRAFT", "PUBLISHED", "DEPRECATED"),
         "semanticKeywords": _STRING_LIST,
-        "metricName": _NULLABLE_STRING,
-        # 弱引用：KPI 可先于技术实现存在。id 是实例相关的，仅供追溯，
-        # 运行期解析一律用 datasourceName。
-        "datasourceId": {"type": ["integer", "null"]},
+        "metricName": _NULLABLE_NAME,
+        # 弱引用：KPI 可先于技术实现存在。数据源只记名字 —— id 是自增主键，
+        # 入档会让同一治理内容在不同环境编译出不同字节（与 measure.class_id 同类）。
         "datasourceName": _NULLABLE_STRING,
     }
 )
 
 _BUSINESS_OBJECT_SCHEMA = _object(
     {
-        "code": {"type": "string", "minLength": 1},
-        "name": {"type": "string", "minLength": 1},
-        "headerClassName": {"type": "string", "minLength": 1},
-        "primaryDomainCode": {"type": "string", "minLength": 1},
-        "attachedDomainCodes": _STRING_LIST,
+        "code": _NAME,
+        "name": _NAME,
+        "headerClassName": _NAME,
+        "primaryDomainCode": _NAME,
+        "attachedDomainCodes": _array(_NAME, maxItems=200),
         "graphLabel": _NULLABLE_STRING,
         "description": _NULLABLE_STRING,
     }
@@ -183,8 +219,8 @@ _BUSINESS_OBJECT_SCHEMA = _object(
 
 _DOMAIN_SCHEMA = _object(
     {
-        "code": {"type": "string", "minLength": 1},
-        "name": {"type": "string", "minLength": 1},
+        "code": _NAME,
+        "name": _NAME,
         "description": _NULLABLE_STRING,
         "enabled": {"type": "boolean"},
     }
@@ -197,12 +233,12 @@ MANIFEST_SCHEMA: dict[str, Any] = {
     **_object(
         {
             "schemaVersion": {"const": SCHEMA_VERSION},
-            "domains": {"type": "array", "items": _DOMAIN_SCHEMA},
-            "classes": {"type": "array", "items": _CLASS_SCHEMA},
-            "joins": {"type": "array", "items": _JOIN_SCHEMA},
-            "metrics": {"type": "array", "items": _METRIC_SCHEMA},
-            "kpis": {"type": "array", "items": _KPI_SCHEMA},
-            "businessObjects": {"type": "array", "items": _BUSINESS_OBJECT_SCHEMA},
+            "domains": _array(_DOMAIN_SCHEMA, maxItems=1000),
+            "classes": _array(_CLASS_SCHEMA, maxItems=5000),
+            "joins": _array(_JOIN_SCHEMA, maxItems=20000),
+            "metrics": _array(_METRIC_SCHEMA, maxItems=2000),
+            "kpis": _array(_KPI_SCHEMA, maxItems=2000),
+            "businessObjects": _array(_BUSINESS_OBJECT_SCHEMA, maxItems=1000),
         }
     ),
 }
@@ -214,11 +250,25 @@ class ManifestSchemaError(ValueError):
 
 def validateManifest(manifest: Any) -> None:
     """校验并返回 None；不合法则抛 `ManifestSchemaError`（一次报多处）。"""
-    errors = _schemaErrors(manifest)
-    if not errors:
-        errors = _referenceErrors(manifest)
+    errors = _schemaErrors(manifest) or _referenceErrors(manifest)
     if errors:
         raise ManifestSchemaError(_formatErrors(errors))
+    _ensureCanonicalizable(manifest)
+
+
+def _ensureCanonicalizable(manifest: Any) -> None:
+    """第三道闸的前置：能被规范化序列化，才谈得上哈希。
+
+    孤立代理项（`"\\ud800"`）能通过 `json.loads` 与 Schema 的类型检查，却会在
+    UTF-8 编码时抛 `UnicodeEncodeError`。不在这里转成契约错误，调用方按
+    `ManifestSchemaError` 捕获就会漏掉，变成 500。
+    """
+    try:
+        # 走完整哈希路径：UTF-8 编码失败（孤立代理项）只在 `.encode()` 处暴露，
+        # 单看 `canonicalManifestJson` 不会报错。
+        manifestHash(manifest)
+    except (ValueError, TypeError) as exc:
+        raise ManifestSchemaError(f"Manifest 无法规范化序列化：{exc}") from exc
 
 
 def canonicalManifestJson(manifest: dict[str, Any]) -> str:
@@ -241,8 +291,13 @@ def manifestHash(manifest: dict[str, Any]) -> str:
 
 
 def _schemaErrors(manifest: Any) -> list[str]:
+    """取前 N 条结构错误。
+
+    用 `islice` 而不是「先物化全部再截断」：10 万条非法元素时，后者会先生成
+    10 万个错误对象/字符串（内存随请求体线性增长），只为打印 10 行。
+    """
     validator = Draft202012Validator(MANIFEST_SCHEMA)
-    found = sorted(validator.iter_errors(manifest), key=lambda err: list(err.absolute_path))
+    found = islice(validator.iter_errors(manifest), _MAX_REPORTED_ERRORS)
     return [f"{_formatPath(err.absolute_path)}：{err.message}" for err in found]
 
 
@@ -253,8 +308,24 @@ def _referenceErrors(manifest: Any) -> list[str]:
     metricNames = _collectUnique(manifest["metrics"], "metricName", "metrics", errors)
     kpiCodes = _collectUnique(manifest["kpis"], "kpiCode", "kpis", errors)
     domainCodes = _collectUnique(manifest["domains"], "code", "domains", errors)
+    _collectUnique(manifest["joins"], "joinKey", "joins", errors)
+    _collectUnique(manifest["businessObjects"], "code", "businessObjects", errors)
 
-    for cls in manifest["classes"]:
+    _classSectionErrors(manifest["classes"], classNames, errors)
+    _joinSectionErrors(manifest["joins"], classNames, errors)
+    _metricSectionErrors(manifest["metrics"], classNames, kpiCodes, errors)
+    _kpiSectionErrors(manifest["kpis"], metricNames, errors)
+    _businessObjectSectionErrors(
+        manifest["businessObjects"], classNames, domainCodes, errors
+    )
+    _reverseIndexErrors(manifest["metrics"], manifest["kpis"], errors)
+    return errors
+
+
+def _classSectionErrors(
+    classes: list[dict[str, Any]], classNames: set[str], errors: list[str]
+) -> None:
+    for cls in classes:
         where = f"classes[{cls['className']}]"
         _checkRef(cls["parentClassName"], classNames, f"{where}.parentClassName", errors)
         _collectUnique(cls["properties"], "propertyName", where, errors)
@@ -266,38 +337,61 @@ def _referenceErrors(manifest: Any) -> list[str]:
                 errors,
             )
 
-    for join in manifest["joins"]:
+
+def _joinSectionErrors(
+    joins: list[dict[str, Any]], classNames: set[str], errors: list[str]
+) -> None:
+    for join in joins:
         where = f"joins[{join['joinKey']}]"
         _checkRef(join["sourceClassName"], classNames, f"{where}.sourceClassName", errors)
         _checkRef(join["targetClassName"], classNames, f"{where}.targetClassName", errors)
 
-    for metric in manifest["metrics"]:
+
+def _metricSectionErrors(
+    metrics: list[dict[str, Any]],
+    classNames: set[str],
+    kpiCodes: set[str],
+    errors: list[str],
+) -> None:
+    for metric in metrics:
         where = f"metrics[{metric['metricName']}]"
         _checkRef(metric["targetClassName"], classNames, f"{where}.targetClassName", errors)
         for field in ("numeratorMeasure", "denominatorMeasure"):
             measure = metric[field]
             if measure is not None:
-                _checkRef(measure["className"], classNames, f"{where}.{field}.className", errors)
+                _checkRef(
+                    measure["className"], classNames, f"{where}.{field}.className", errors
+                )
         for source in metric["sources"]:
             _checkRef(source["className"], classNames, f"{where}.sources", errors)
+        _checkUniqueList(metric["kpiCodes"], f"{where}.kpiCodes", errors)
         for code in metric["kpiCodes"]:
             if code not in kpiCodes:
-                errors.append(f"{where}.kpiCodes：KPI {code!r} 不存在于 kpis")
+                _append(errors, f"{where}.kpiCodes：KPI {code!r} 不存在于 kpis")
 
-    for kpi in manifest["kpis"]:
+
+def _kpiSectionErrors(
+    kpis: list[dict[str, Any]], metricNames: set[str], errors: list[str]
+) -> None:
+    for kpi in kpis:
         metricName = kpi["metricName"]
         if metricName is not None and metricName not in metricNames:
-            errors.append(
-                f"kpis[{kpi['kpiCode']}].metricName：指标 {metricName!r} 不存在于 metrics"
+            _append(
+                errors,
+                f"kpis[{kpi['kpiCode']}].metricName：指标 {metricName!r} 不存在于 metrics",
             )
 
-    for businessObject in manifest["businessObjects"]:
+
+def _businessObjectSectionErrors(
+    businessObjects: list[dict[str, Any]],
+    classNames: set[str],
+    domainCodes: set[str],
+    errors: list[str],
+) -> None:
+    for businessObject in businessObjects:
         where = f"businessObjects[{businessObject['code']}]"
         _checkRef(
-            businessObject["headerClassName"],
-            classNames,
-            f"{where}.headerClassName",
-            errors,
+            businessObject["headerClassName"], classNames, f"{where}.headerClassName", errors
         )
         _checkRef(
             businessObject["primaryDomainCode"],
@@ -305,10 +399,42 @@ def _referenceErrors(manifest: Any) -> list[str]:
             f"{where}.primaryDomainCode",
             errors,
         )
+        _checkUniqueList(
+            businessObject["attachedDomainCodes"], f"{where}.attachedDomainCodes", errors
+        )
         for code in businessObject["attachedDomainCodes"]:
             _checkRef(code, domainCodes, f"{where}.attachedDomainCodes", errors)
 
-    return errors
+
+def _reverseIndexErrors(
+    metrics: list[dict[str, Any]], kpis: list[dict[str, Any]], errors: list[str]
+) -> None:
+    """`metrics[].kpiCodes` 与 `kpis[].metricName` 必须**双向闭合**。
+
+    只校验「名字存在」会放行错配：两侧都指向真实存在的对象，但指的是不同的指标。
+    """
+    metricByName = {metric["metricName"]: metric for metric in metrics}
+    kpiByCode = {kpi["kpiCode"]: kpi for kpi in kpis}
+    for metric in metrics:
+        for code in metric["kpiCodes"]:
+            kpi = kpiByCode.get(code)
+            if kpi is not None and kpi["metricName"] != metric["metricName"]:
+                _append(
+                    errors,
+                    f"metrics[{metric['metricName']}].kpiCodes：KPI {code!r} 指向指标 "
+                    f"{kpi['metricName']!r}，不一致",
+                )
+    for kpi in kpis:
+        metricName = kpi["metricName"]
+        if metricName is None:
+            continue
+        metric = metricByName.get(metricName)
+        if metric is not None and kpi["kpiCode"] not in metric["kpiCodes"]:
+            _append(
+                errors,
+                f"kpis[{kpi['kpiCode']}].metricName：指标 {metricName!r} 的 kpiCodes "
+                f"未包含 {kpi['kpiCode']!r}，不一致",
+            )
 
 
 def _collectUnique(
@@ -321,14 +447,28 @@ def _collectUnique(
     for row in rows:
         name = row[key]
         if name in seen:
-            errors.append(f"{where}.{key} 重复：{name!r}")
+            _append(errors, f"{where}.{key} 重复：{name!r}")
         seen.add(name)
     return seen
 
 
+def _checkUniqueList(values: list[str], where: str, errors: list[str]) -> None:
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            _append(errors, f"{where} 重复：{value!r}")
+        seen.add(value)
+
+
 def _checkRef(value: Any, allowed: set[str], where: str, errors: list[str]) -> None:
     if value is not None and value not in allowed:
-        errors.append(f"{where}：{value!r} 不存在")
+        _append(errors, f"{where}：{value!r} 不存在")
+
+
+def _append(errors: list[str], message: str) -> None:
+    """错误收集上限：与展示上限一致，避免为打印 10 行而缓存整份输入的错误。"""
+    if len(errors) < _MAX_REPORTED_ERRORS:
+        errors.append(message)
 
 
 def _formatPath(path: Any) -> str:
@@ -342,10 +482,4 @@ def _formatPath(path: Any) -> str:
 
 
 def _formatErrors(errors: list[str]) -> str:
-    shown = errors[:_MAX_REPORTED_ERRORS]
-    suffix = (
-        f"\n…共 {len(errors)} 处，只显示前 {_MAX_REPORTED_ERRORS} 处"
-        if len(errors) > _MAX_REPORTED_ERRORS
-        else ""
-    )
-    return "Manifest 不满足 v1 契约：\n" + "\n".join(shown) + suffix
+    return "Manifest 不满足 v1 契约：\n" + "\n".join(errors)

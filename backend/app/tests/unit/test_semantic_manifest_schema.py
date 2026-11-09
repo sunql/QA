@@ -236,12 +236,126 @@ def test_hash_matches_test_helper_canonical_json() -> None:
     assert canonicalJson(manifest) == canonicalManifestJson(manifest)
 
 
+# ---------------------------------------------------------------------------
+# 4. 评审补强（D7b）：评审实证的放行缺口
+# ---------------------------------------------------------------------------
+
+
+def test_rejects_duplicate_join_and_business_object_keys() -> None:
+    """joinKey / BO code 也必须唯一：回放时按它解析，重复会任选其一或重复扇出。"""
+    broken = golden()
+    broken["joins"].append(copy.deepcopy(broken["joins"][0]))
+
+    with pytest.raises(ManifestSchemaError, match="joinKey"):
+        validateManifest(broken)
+
+    broken = golden()
+    broken["businessObjects"].append(copy.deepcopy(broken["businessObjects"][0]))
+
+    with pytest.raises(ManifestSchemaError, match="businessObjects"):
+        validateManifest(broken)
+
+
+def test_rejects_duplicate_entries_inside_list_fields() -> None:
+    """`kpiCodes` / `attachedDomainCodes` 内部重复同样是治理数据损坏。"""
+    broken = golden()
+    _metricByName(broken, "supplierOnTimeRate")["kpiCodes"].append("KPI-001")
+
+    with pytest.raises(ManifestSchemaError, match="kpiCodes"):
+        validateManifest(broken)
+
+    broken = golden()
+    _businessObjectByCode(broken, "SUPPLIER")["attachedDomainCodes"].append("QUALITY")
+
+    with pytest.raises(ManifestSchemaError, match="attachedDomainCodes"):
+        validateManifest(broken)
+
+
+def test_rejects_kpi_metric_link_mismatch() -> None:
+    """反向索引必须双向闭合，不只是「名字存在」。
+
+    KPI-001 原本挂 supplierOnTimeRate；改成另一个**真实存在**的指标后，
+    单向存在性检查放行，但两个指标各自的 `kpiCodes` 与之对不上。
+    """
+    broken = golden()
+    _kpiByCode(broken, "KPI-001")["metricName"] = "purchaseAmount"
+
+    with pytest.raises(ManifestSchemaError, match="KPI-001"):
+        validateManifest(broken)
+
+    # 反方向：指标的 kpiCodes 里点了名，但 KPI 指向别的指标。
+    broken = golden()
+    _metricByName(broken, "supplierOnTimeRate")["kpiCodes"].append("KPI-002")
+
+    with pytest.raises(ManifestSchemaError, match="KPI-002"):
+        validateManifest(broken)
+
+
+def test_rejects_measure_agg_outside_whitelist() -> None:
+    """`agg` 必须取自 `MeasureSpecSchema._MEASURE_AGG_ALLOWED`。
+
+    写入侧由 Pydantic 挡住，但校验器是回放历史/人工编辑快照的最后一道闸。
+    """
+    broken = golden()
+    _metricByName(broken, "supplierOnTimeRate")["numeratorMeasure"]["agg"] = "BOGUS"
+
+    with pytest.raises(ManifestSchemaError, match="agg"):
+        validateManifest(broken)
+
+
+def test_rejects_non_flat_dimension_defaults() -> None:
+    """`dimensionDefaults` 只能是扁平字符串映射（唯一不设键集的自由格，必须收窄）。"""
+    broken = golden()
+    _metricByName(broken, "supplierOnTimeRate")["dimensionDefaults"] = {
+        "time": {"nested": 1}
+    }
+
+    with pytest.raises(ManifestSchemaError, match="dimensionDefaults"):
+        validateManifest(broken)
+
+
+def test_rejects_payload_that_cannot_be_canonicalized() -> None:
+    """孤立代理项能通过 `json.loads` 与 Schema，但 UTF-8 编码失败 ⇒ 必须转成契约错误。
+
+    否则 D9 按 `ManifestSchemaError` 捕获会漏掉，变成 500。
+    """
+    broken = golden()
+    broken["domains"][0]["name"] = "\ud800"
+
+    with pytest.raises(ManifestSchemaError, match="规范化"):
+        validateManifest(broken)
+
+
+def test_manifest_carries_no_instance_ids() -> None:
+    """反向守卫：快照里不得出现自增 id 型键（跨环境字节一致性的硬约束）。"""
+    _assertNoInstanceIds(golden())
+
+
+def _assertNoInstanceIds(value: Any, path: str = "") -> None:
+    forbidden = {"class_id", "classId", "datasourceId", "targetClassId"}
+    if isinstance(value, dict):
+        for key, child in value.items():
+            assert key not in forbidden, f"{path}.{key} 是实例相关 id，不得进入 Manifest"
+            _assertNoInstanceIds(child, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _assertNoInstanceIds(child, f"{path}[{index}]")
+
+
 def _classByName(manifest: dict[str, Any], name: str) -> dict[str, Any]:
     return next(c for c in manifest["classes"] if c["className"] == name)
 
 
 def _metricByName(manifest: dict[str, Any], name: str) -> dict[str, Any]:
     return next(m for m in manifest["metrics"] if m["metricName"] == name)
+
+
+def _kpiByCode(manifest: dict[str, Any], code: str) -> dict[str, Any]:
+    return next(k for k in manifest["kpis"] if k["kpiCode"] == code)
+
+
+def _businessObjectByCode(manifest: dict[str, Any], code: str) -> dict[str, Any]:
+    return next(b for b in manifest["businessObjects"] if b["code"] == code)
 
 
 def _reverseKeyOrder(value: Any) -> Any:
@@ -253,4 +367,4 @@ def _reverseKeyOrder(value: Any) -> Any:
     return value
 
 
-_GOLDEN_HASH = "fb07ad0334be527db30edf7ae6b432e12ca3ffc187dd6c9171fccdc9c71aa38b"
+_GOLDEN_HASH = "29ecf144f910f4e7d9b3c2a204a6bb8c48d1e0666a22b4d318d8dd3368cfe867"

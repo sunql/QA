@@ -29,7 +29,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,37 +80,28 @@ def compileFromRows(
     参数默认 `()` 只是为了让只关心本体的用例免于重复传参；**真实发布必须走
     `compileManifest`** —— 它显式传全 10 张表，漏传会让快照悄悄缺一整个分区。
     """
-    allClasses = list(classes)
-    allClassById = {row.id: row for row in allClasses}
-    activeClasses = sortBy(
-        (row for row in allClasses if row.valid_to is None),
-        key=lambda row: row.class_name,
-    )
-    _rejectDuplicateNames(activeClasses)
-    activeNameById = {row.id: row.class_name for row in activeClasses}
-    propsByClassId = _groupActiveProperties(properties, allClassById)
-
-    allMetrics = list(metrics)
-    allKpis = list(kpis)
-    metricNameById = {row.id: row.metric_name for row in allMetrics}
-    datasourceNameById = {row.id: row.name for row in datasources}
+    indexes = _buildIndexes(classes, properties, metrics, kpis, datasources)
+    allClassById = indexes.allClassById
+    activeNameById = indexes.activeNameById
 
     return {
         "schemaVersion": SCHEMA_VERSION,
         "domains": compileDomains(domains),
         "classes": [
-            _compileClass(row, allClassById, propsByClassId.get(row.id, ()))
-            for row in activeClasses
+            _compileClass(row, allClassById, indexes.propsByClassId.get(row.id, ()))
+            for row in indexes.activeClasses
         ],
         "joins": _compileJoins(joins, allClassById, activeNameById),
         "metrics": compileMetrics(
-            allMetrics,
+            indexes.allMetrics,
             metricSources,
             allClassById,
             activeNameById,
-            groupKpiCodesByMetricId(allKpis),
+            groupKpiCodesByMetricId(indexes.allKpis),
         ),
-        "kpis": compileKpis(allKpis, metricNameById, datasourceNameById),
+        "kpis": compileKpis(
+            indexes.allKpis, indexes.metricNameById, indexes.datasourceNameById
+        ),
         "businessObjects": compileBusinessObjects(
             businessObjects,
             businessObjectDomains,
@@ -119,6 +110,46 @@ def compileFromRows(
             {row.code for row in domains},
         ),
     }
+
+
+class _Indexes(NamedTuple):
+    """一次编译里反复用到的行索引（避免 `compileFromRows` 主体过长）。"""
+
+    allClassById: dict[int, OntologyClass]
+    activeClasses: list[OntologyClass]
+    activeNameById: dict[int, str]
+    propsByClassId: dict[int, list[dict[str, Any]]]
+    allMetrics: list[OntologyMetric]
+    allKpis: list[KpiCatalog]
+    metricNameById: dict[int, str]
+    datasourceNameById: dict[int, str]
+
+
+def _buildIndexes(
+    classes: Iterable[OntologyClass],
+    properties: Iterable[OntologyProperty],
+    metrics: Iterable[OntologyMetric],
+    kpis: Iterable[KpiCatalog],
+    datasources: Iterable[DataSource],
+) -> _Indexes:
+    allClasses = list(classes)
+    allClassById = {row.id: row for row in allClasses}
+    activeClasses = sortBy(
+        (row for row in allClasses if row.valid_to is None),
+        key=lambda row: row.class_name,
+    )
+    _rejectDuplicateNames(activeClasses)
+    allMetrics = list(metrics)
+    return _Indexes(
+        allClassById=allClassById,
+        activeClasses=activeClasses,
+        activeNameById={row.id: row.class_name for row in activeClasses},
+        propsByClassId=_groupActiveProperties(properties, allClassById),
+        allMetrics=allMetrics,
+        allKpis=list(kpis),
+        metricNameById={row.id: row.metric_name for row in allMetrics},
+        datasourceNameById={row.id: row.name for row in datasources},
+    )
 
 
 async def compileManifest(session: AsyncSession) -> dict[str, Any]:

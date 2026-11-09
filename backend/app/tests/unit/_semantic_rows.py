@@ -62,6 +62,10 @@ def makeProperty(
     sourceColumn: str | None = None,
     unit: str | None = None,
     allowedValues: list[str] | None = None,
+    isNotNull: bool | None = None,
+    minValue: str | None = None,
+    maxValue: str | None = None,
+    regexPattern: str | None = None,
 ) -> OntologyProperty:
     return OntologyProperty(
         class_id=class_id,
@@ -75,6 +79,11 @@ def makeProperty(
         source_column=sourceColumn,
         unit=unit,
         allowed_values=allowedValues,
+        # 三态：None = 未约束，False = 明确允许为空（不可用 bool() 压平）。
+        is_not_null=isNotNull,
+        min_value=minValue,
+        max_value=maxValue,
+        regex_pattern=regexPattern,
     )
 
 

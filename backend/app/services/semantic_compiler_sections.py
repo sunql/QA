@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -105,7 +106,9 @@ def compileMetric(
         "targetClassName": resolveActiveName(
             row.target_class_id, allClassById, "target_class_id"
         ),
-        "dimensionDefaults": row.dimension_defaults,
+        # 必须复制：与 measure 同理，直接把 ORM 行上的 JSON 放进快照会让下游
+        # 任何规范化写污染会话里的实体（不可变约束）。
+        "dimensionDefaults": copy.deepcopy(row.dimension_defaults),
         "grainKeys": asList(row.grain_keys),
         "aggregationOrder": row.aggregation_order,
         # 结构化轨道（P1 指标技术形态）：分子/分母度量整份入档，只把内嵌的
@@ -214,7 +217,7 @@ def compileKpi(
         "status": row.status,
         "semanticKeywords": asList(row.semantic_keywords),
         "metricName": metricName,
-        "datasourceId": row.datasource_id,
+        # 只记名字：`datasource_id` 是自增主键，入档会让跨环境字节不一致。
         "datasourceName": datasourceName,
     }
 

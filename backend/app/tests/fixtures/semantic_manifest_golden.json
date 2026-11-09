@@ -114,14 +114,14 @@
           "dataType": "DECIMAL",
           "description": null,
           "isForeignKey": false,
-          "isNotNull": null,
+          "isNotNull": false,
           "isPrimaryKey": false,
-          "maxValue": null,
-          "minValue": null,
+          "maxValue": "1000000",
+          "minValue": "0",
           "propertyAlias": null,
           "propertyName": "creditLimit",
           "refClassName": null,
-          "regexPattern": null,
+          "regexPattern": "^\\d+(\\.\\d{1,2})?$",
           "sourceColumn": null,
           "unit": "元"
         },
@@ -134,7 +134,7 @@
           "dataType": "STRING",
           "description": null,
           "isForeignKey": false,
-          "isNotNull": null,
+          "isNotNull": true,
           "isPrimaryKey": true,
           "maxValue": null,
           "minValue": null,
@@ -207,7 +207,6 @@
   "kpis": [
     {
       "businessDefinition": "统计周期内准时交付数量占收货数量比例",
-      "datasourceId": 3,
       "datasourceName": "THBI",
       "denominator": "SUM(QTY)",
       "denominatorColumns": [
@@ -237,7 +236,6 @@
     },
     {
       "businessDefinition": null,
-      "datasourceId": null,
       "datasourceName": null,
       "denominator": null,
       "denominatorColumns": [],
@@ -257,7 +255,6 @@
     },
     {
       "businessDefinition": null,
-      "datasourceId": null,
       "datasourceName": null,
       "denominator": null,
       "denominatorColumns": [],

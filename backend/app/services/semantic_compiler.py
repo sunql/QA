@@ -19,6 +19,11 @@
    （目标已不在模型中）；指向**完全不存在**的 class_id 说明数据被写坏 ⇒ 抛 `ValueError`。
 5. **不静默降级**：同名多版本活跃类（`uq_ontology_class_name_version` 只约束 name+version，
    Phase 6 后同名多行属异常）直接抛错，而不是挑一行发布。
+
+模块划分（D6 拆分，保持每个文件一屏可读）：
+- 本文件：入口（`compileFromRows` / `compileManifest`）+ 本体核心（类 / 属性 / JOIN）；
+- `semantic_compiler_sections.py`：指标两层（`metrics` + `kpis`）与业务对象 / 数据域；
+- `semantic_manifest_common.py`：类引用解析与稳定排序等共享原语。
 """
 
 from __future__ import annotations
@@ -29,7 +34,31 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
+from app.domain.models import (
+    BusinessObject,
+    BusinessObjectDomain,
+    DataDomain,
+    DataSource,
+    KpiCatalog,
+    OntologyClass,
+    OntologyJoin,
+    OntologyMetric,
+    OntologyMetricSource,
+    OntologyProperty,
+)
+from app.services.semantic_compiler_sections import (
+    compileBusinessObjects,
+    compileDomains,
+    compileKpis,
+    compileMetrics,
+    groupKpiCodesByMetricId,
+)
+from app.services.semantic_manifest_common import (
+    asList,
+    requireClass,
+    resolveActiveName,
+    sortBy,
+)
 
 SCHEMA_VERSION = "v1"
 """Manifest 自身 Schema 版本。与发布 version 解耦：Schema 演进后旧快照仍可回放。"""
@@ -40,11 +69,22 @@ def compileFromRows(
     classes: Iterable[OntologyClass],
     properties: Iterable[OntologyProperty],
     joins: Iterable[OntologyJoin],
+    metrics: Iterable[OntologyMetric] = (),
+    metricSources: Iterable[OntologyMetricSource] = (),
+    kpis: Iterable[KpiCatalog] = (),
+    businessObjects: Iterable[BusinessObject] = (),
+    businessObjectDomains: Iterable[BusinessObjectDomain] = (),
+    domains: Iterable[DataDomain] = (),
+    datasources: Iterable[DataSource] = (),
 ) -> dict[str, Any]:
-    """把治理表行编译成 Manifest 字典（纯函数，无 IO）。"""
+    """把治理表行编译成 Manifest 字典（纯函数，无 IO）。
+
+    参数默认 `()` 只是为了让只关心本体的用例免于重复传参；**真实发布必须走
+    `compileManifest`** —— 它显式传全 10 张表，漏传会让快照悄悄缺一整个分区。
+    """
     allClasses = list(classes)
     allClassById = {row.id: row for row in allClasses}
-    activeClasses = _sortBy(
+    activeClasses = sortBy(
         (row for row in allClasses if row.valid_to is None),
         key=lambda row: row.class_name,
     )
@@ -52,13 +92,34 @@ def compileFromRows(
     activeNameById = {row.id: row.class_name for row in activeClasses}
     propsByClassId = _groupActiveProperties(properties, allClassById)
 
+    allMetrics = list(metrics)
+    allKpis = list(kpis)
+    metricNameById = {row.id: row.metric_name for row in allMetrics}
+    datasourceNameById = {row.id: row.name for row in datasources}
+
     return {
         "schemaVersion": SCHEMA_VERSION,
+        "domains": compileDomains(domains),
         "classes": [
             _compileClass(row, allClassById, propsByClassId.get(row.id, ()))
             for row in activeClasses
         ],
         "joins": _compileJoins(joins, allClassById, activeNameById),
+        "metrics": compileMetrics(
+            allMetrics,
+            metricSources,
+            allClassById,
+            activeNameById,
+            groupKpiCodesByMetricId(allKpis),
+        ),
+        "kpis": compileKpis(allKpis, metricNameById, datasourceNameById),
+        "businessObjects": compileBusinessObjects(
+            businessObjects,
+            businessObjectDomains,
+            allClassById,
+            activeNameById,
+            {row.code for row in domains},
+        ),
     }
 
 
@@ -67,16 +128,34 @@ async def compileManifest(session: AsyncSession) -> dict[str, Any]:
     classes = (await session.execute(select(OntologyClass))).scalars().all()
     properties = (await session.execute(select(OntologyProperty))).scalars().all()
     joins = (await session.execute(select(OntologyJoin))).scalars().all()
-    return compileFromRows(classes=classes, properties=properties, joins=joins)
+    metrics = (await session.execute(select(OntologyMetric))).scalars().all()
+    metricSources = (
+        await session.execute(select(OntologyMetricSource))
+    ).scalars().all()
+    kpis = (await session.execute(select(KpiCatalog))).scalars().all()
+    businessObjects = (await session.execute(select(BusinessObject))).scalars().all()
+    businessObjectDomains = (
+        await session.execute(select(BusinessObjectDomain))
+    ).scalars().all()
+    domains = (await session.execute(select(DataDomain))).scalars().all()
+    datasources = (await session.execute(select(DataSource))).scalars().all()
+    return compileFromRows(
+        classes=classes,
+        properties=properties,
+        joins=joins,
+        metrics=metrics,
+        metricSources=metricSources,
+        kpis=kpis,
+        businessObjects=businessObjects,
+        businessObjectDomains=businessObjectDomains,
+        domains=domains,
+        datasources=datasources,
+    )
 
 
 # ---------------------------------------------------------------------------
 # 内部实现
 # ---------------------------------------------------------------------------
-
-
-def _sortBy(rows: Iterable[Any], *, key: Any) -> list[Any]:
-    return sorted(rows, key=key)
 
 
 def _rejectDuplicateNames(activeClasses: Sequence[OntologyClass]) -> None:
@@ -106,7 +185,7 @@ def _groupActiveProperties(
         grouped.setdefault(row.class_id, []).append(_compileProperty(row, allClassById))
 
     return {
-        classId: _sortBy(items, key=lambda item: item["propertyName"])
+        classId: sortBy(items, key=lambda item: item["propertyName"])
         for classId, items in grouped.items()
     }
 
@@ -117,15 +196,15 @@ def _compileProperty(
     return {
         "propertyName": row.property_name,
         "propertyAlias": row.property_alias,
-        "businessAliases": _asList(row.business_aliases),
+        "businessAliases": asList(row.business_aliases),
         "description": row.description,
         "dataType": row.data_type,
         "isPrimaryKey": bool(row.is_primary_key),
         "isForeignKey": bool(row.is_foreign_key),
-        "refClassName": _resolveActiveName(row.ref_class_id, allClassById, "ref_class_id"),
+        "refClassName": resolveActiveName(row.ref_class_id, allClassById, "ref_class_id"),
         "sourceColumn": row.source_column,
         "unit": row.unit,
-        "allowedValues": _asList(row.allowed_values),
+        "allowedValues": asList(row.allowed_values),
         # 三态：None = 未约束；False = 明确允许为空。不可用 bool() 压平。
         "isNotNull": None if row.is_not_null is None else bool(row.is_not_null),
         "minValue": row.min_value,
@@ -146,7 +225,7 @@ def _compileClass(
         "sourceTable": row.source_table,
         "objectType": row.object_type,
         "objectOwner": row.object_owner,
-        "parentClassName": _resolveActiveName(
+        "parentClassName": resolveActiveName(
             row.parent_class_id, allClassById, "parent_class_id"
         ),
         "properties": list(properties),
@@ -160,52 +239,20 @@ def _compileJoins(
 ) -> list[dict[str, Any]]:
     compiled: list[dict[str, Any]] = []
     for row in joins:
-        source = _requireClass(row.source_class_id, allClassById, "source_class_id")
-        target = _requireClass(row.target_class_id, allClassById, "target_class_id")
+        source = requireClass(row.source_class_id, allClassById, "source_class_id")
+        target = requireClass(row.target_class_id, allClassById, "target_class_id")
         if source.valid_to is not None or target.valid_to is not None:
             continue
         compiled.append(
             {
                 "joinKey": row.join_key,
                 "sourceClassName": activeNameById[source.id],
-                "sourceColumns": _asList(row.source_columns),
+                "sourceColumns": asList(row.source_columns),
                 "targetClassName": activeNameById[target.id],
-                "targetColumns": _asList(row.target_columns),
+                "targetColumns": asList(row.target_columns),
                 "joinType": row.join_type,
                 "relationType": row.relation_type,
                 "description": row.description,
             }
         )
-    return _sortBy(compiled, key=lambda item: item["joinKey"])
-
-
-def _requireClass(
-    classId: int | None,
-    allClassById: dict[int, OntologyClass],
-    fieldName: str,
-) -> OntologyClass:
-    row = allClassById.get(classId) if classId is not None else None
-    if row is None:
-        raise ValueError(
-            f"本体数据异常：ontology_join {fieldName}={classId} 不存在于 ontology_class"
-        )
-    return row
-
-
-def _resolveActiveName(
-    classId: int | None,
-    allClassById: dict[int, OntologyClass],
-    fieldName: str,
-) -> str | None:
-    """引用活跃类 → 类名；引用墓碑类 → None（目标已不在模型中）。"""
-    if classId is None:
-        return None
-    row = allClassById.get(classId)
-    if row is None:
-        raise ValueError(f"本体数据异常：{fieldName}={classId} 不存在于 ontology_class")
-    return None if row.valid_to is not None else row.class_name
-
-
-def _asList(value: list[str] | None) -> list[str]:
-    """None → []，其余复制一份（不把 DB 对象的列表引用直接暴露给调用方）。"""
-    return list(value) if value else []
+    return sortBy(compiled, key=lambda item: item["joinKey"])

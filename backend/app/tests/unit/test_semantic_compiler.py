@@ -1,4 +1,4 @@
-"""语义编译器核心（P1a / D5）：治理表行 → 规范化 Manifest。
+"""语义编译器（P1a / D5–D6）：治理表行 → 规范化 Manifest。
 
 完成定义（日级排程 D5）：
 - 同输入两次输出**字节一致**（规范化 JSON 完全相同）；
@@ -23,95 +23,24 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
-from typing import Any
 
 import pytest
 
-from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
+from app.domain.models import BusinessObjectDomain, OntologyProperty
 from app.services.semantic_compiler import compileFromRows
-
-
-def canonicalJson(payload: Any) -> str:
-    """与 `_schemaVersion` 同款规范化序列化：键序稳定、无空白、保留中文。"""
-    return json.dumps(
-        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
-    )
-
-
-def makeClass(
-    class_id: int,
-    name: str,
-    *,
-    alias: str | None = None,
-    sourceTable: str | None = None,
-    objectType: str | None = None,
-    objectOwner: str | None = None,
-    parentClassId: int | None = None,
-    validTo: datetime | None = None,
-) -> OntologyClass:
-    return OntologyClass(
-        id=class_id,
-        class_name=name,
-        class_alias=alias,
-        source_table=sourceTable,
-        object_type=objectType,
-        object_owner=objectOwner,
-        parent_class_id=parentClassId,
-        valid_to=validTo,
-    )
-
-
-def makeProperty(
-    class_id: int,
-    name: str,
-    *,
-    alias: str | None = None,
-    businessAliases: list[str] | None = None,
-    dataType: str = "STRING",
-    isPrimaryKey: bool = False,
-    isForeignKey: bool = False,
-    refClassId: int | None = None,
-    sourceColumn: str | None = None,
-    unit: str | None = None,
-    allowedValues: list[str] | None = None,
-) -> OntologyProperty:
-    return OntologyProperty(
-        class_id=class_id,
-        property_name=name,
-        property_alias=alias,
-        business_aliases=businessAliases,
-        data_type=dataType,
-        is_primary_key=isPrimaryKey,
-        is_foreign_key=isForeignKey,
-        ref_class_id=refClassId,
-        source_column=sourceColumn,
-        unit=unit,
-        allowed_values=allowedValues,
-    )
-
-
-def makeJoin(
-    joinKey: str,
-    sourceClassId: int,
-    sourceColumns: list[str],
-    targetClassId: int,
-    targetColumns: list[str],
-    *,
-    joinType: str = "INNER",
-    relationType: str = "business",
-) -> OntologyJoin:
-    return OntologyJoin(
-        join_key=joinKey,
-        source_class_id=sourceClassId,
-        source_columns=sourceColumns,
-        target_class_id=targetClassId,
-        target_columns=targetColumns,
-        join_type=joinType,
-        relation_type=relationType,
-    )
-
+from app.tests.unit._semantic_rows import (
+    canonicalJson,
+    makeBusinessObject,
+    makeClass,
+    makeDataSource,
+    makeDomain,
+    makeJoin,
+    makeKpi,
+    makeMetric,
+    makeMetricSource,
+    makeProperty,
+)
 
 # ---------------------------------------------------------------------------
 # 1. 空输入
@@ -121,10 +50,16 @@ def makeJoin(
 def test_empty_input_produces_minimal_manifest() -> None:
     manifest = compileFromRows(classes=[], properties=[], joins=[])
 
+    # 空输入时每类集合都显式出现（空数组），不能省略键 —— 否则下游 `manifest["metrics"]`
+    # 在旧快照上 KeyError，Schema 校验也要靠「键必须存在」。
     assert manifest == {
         "schemaVersion": "v1",
+        "domains": [],
         "classes": [],
         "joins": [],
+        "metrics": [],
+        "kpis": [],
+        "businessObjects": [],
     }
 
 
@@ -395,3 +330,369 @@ def test_join_compiles_endpoint_names_and_column_pairs() -> None:
             "description": None,
         }
     ]
+
+
+# ---------------------------------------------------------------------------
+# 7. 指标（D6）：技术口径 + 多源角色 + KPI 反向引用
+# ---------------------------------------------------------------------------
+
+
+def test_metric_compiles_technical_form_and_sources() -> None:
+    classes = [makeClass(1, "PurchaseOrder"), makeClass(2, "Supplier")]
+    metric = makeMetric(
+        10,
+        "supplierOnTimeRate",
+        formula="numerator / denominator",
+        aggFunction="AVG",
+        metricType="RATIO",
+        numeratorMeasure={"class": "PurchaseOrder", "column": "ON_TIME_QTY", "agg": "SUM"},
+        denominatorMeasure={"class": "PurchaseOrder", "column": "QTY", "agg": "SUM"},
+        aggregationOrder="DIVIDE_AFTER_AGGREGATE",
+        grainKeys=["supplierCode"],
+        filterExpression="STATUS <> 'CANCELLED'",
+        dimensionDefaults={"time": "LAST_12_MONTHS"},
+        status="DRAFT",
+        owner="采购部",
+        executionSource="ORACLE",
+        alias="供应商准时率",
+    )
+    sources = [
+        makeMetricSource(10, 2, "FILTER"),
+        makeMetricSource(10, 1, "NUMERATOR"),
+        makeMetricSource(10, 2, "BASE"),
+    ]
+    kpis = [makeKpi("KPI-002", "准时交付率", metricId=10), makeKpi("KPI-001", "采购金额", metricId=10)]
+
+    manifest = compileFromRows(
+        classes=classes,
+        properties=[],
+        joins=[],
+        metrics=[metric],
+        metricSources=sources,
+        kpis=kpis,
+    )
+
+    [compiled] = manifest["metrics"]
+    assert compiled == {
+        "metricName": "supplierOnTimeRate",
+        "metricAlias": "供应商准时率",
+        "formula": "numerator / denominator",
+        "aggFunction": "AVG",
+        "metricType": "RATIO",
+        "targetClassName": None,
+        "dimensionDefaults": {"time": "LAST_12_MONTHS"},
+        "grainKeys": ["supplierCode"],
+        "aggregationOrder": "DIVIDE_AFTER_AGGREGATE",
+        "numeratorMeasure": {"class": "PurchaseOrder", "column": "ON_TIME_QTY", "agg": "SUM"},
+        "denominatorMeasure": {"class": "PurchaseOrder", "column": "QTY", "agg": "SUM"},
+        "filterExpression": "STATUS <> 'CANCELLED'",
+        "status": "DRAFT",
+        "owner": "采购部",
+        "executionSource": "ORACLE",
+        # 多源按 (role, className) 排序 ⇒ BASE 在 FILTER/NUMERATOR 之前
+        "sources": [
+            {"className": "Supplier", "role": "BASE"},
+            {"className": "Supplier", "role": "FILTER"},
+            {"className": "PurchaseOrder", "role": "NUMERATOR"},
+        ],
+        # 反向引用：kpi_catalog.metric_id → metric，按 kpiCode 排序
+        "kpiCodes": ["KPI-001", "KPI-002"],
+    }
+
+
+def test_metric_target_class_resolves_and_tombstone_becomes_null() -> None:
+    live = makeClass(1, "PurchaseOrder")
+    tombstone = makeClass(2, "Legacy", validTo=datetime(2026, 1, 1, tzinfo=UTC))
+    metrics = [
+        makeMetric(10, "liveMetric", targetClassId=1),
+        makeMetric(11, "tombstoneMetric", targetClassId=2),
+    ]
+
+    manifest = compileFromRows(
+        classes=[live, tombstone], properties=[], joins=[], metrics=metrics
+    )
+
+    byName = {m["metricName"]: m for m in manifest["metrics"]}
+    assert byName["liveMetric"]["targetClassName"] == "PurchaseOrder"
+    assert byName["tombstoneMetric"]["targetClassName"] is None
+
+
+def test_metric_target_class_nonexistent_raises() -> None:
+    with pytest.raises(ValueError, match="target_class_id=99"):
+        compileFromRows(
+            classes=[makeClass(1, "Supplier")],
+            properties=[],
+            joins=[],
+            metrics=[makeMetric(10, "bad", targetClassId=99)],
+        )
+
+
+def test_metric_source_to_tombstoned_class_is_excluded() -> None:
+    live = makeClass(1, "PurchaseOrder")
+    tombstone = makeClass(2, "Legacy", validTo=datetime(2026, 1, 1, tzinfo=UTC))
+    sources = [
+        makeMetricSource(10, 1, "BASE"),
+        makeMetricSource(10, 2, "NUMERATOR"),
+    ]
+
+    manifest = compileFromRows(
+        classes=[live, tombstone],
+        properties=[],
+        joins=[],
+        metrics=[makeMetric(10, "m")],
+        metricSources=sources,
+    )
+
+    assert manifest["metrics"][0]["sources"] == [
+        {"className": "PurchaseOrder", "role": "BASE"}
+    ]
+
+
+def test_metric_source_with_unknown_metric_or_class_raises() -> None:
+    classes = [makeClass(1, "Supplier")]
+    with pytest.raises(ValueError, match="metric_id=99"):
+        compileFromRows(
+            classes=classes,
+            properties=[],
+            joins=[],
+            metrics=[makeMetric(10, "m")],
+            metricSources=[makeMetricSource(99, 1, "BASE")],
+        )
+    with pytest.raises(ValueError, match="class_id=88"):
+        compileFromRows(
+            classes=classes,
+            properties=[],
+            joins=[],
+            metrics=[makeMetric(10, "m")],
+            metricSources=[makeMetricSource(10, 88, "BASE")],
+        )
+
+
+# ---------------------------------------------------------------------------
+# 8. KPI 业务层（D6）：与指标两层并存，弱引用可空
+# ---------------------------------------------------------------------------
+
+
+def test_kpi_compiles_business_layer_with_metric_and_datasource_names() -> None:
+    kpi = makeKpi(
+        "KPI-001",
+        "采购金额",
+        metricId=10,
+        datasourceId=3,
+        businessDefinition="统计周期内下单金额合计",
+        formula="SUM(AMOUNT)",
+        numerator="SUM(AMOUNT)",
+        denominator=None,
+        grain="月/供应商",
+        unit="元",
+        grainKeys=["month", "supplierCode"],
+        numeratorColumns=["AMOUNT"],
+        denominatorColumns=None,
+        owner="采购部",
+        version="v1.2",
+        status="PUBLISHED",
+        semanticKeywords=["采购金额", "采购额"],
+    )
+
+    manifest = compileFromRows(
+        classes=[],
+        properties=[],
+        joins=[],
+        metrics=[makeMetric(10, "purchaseAmount")],
+        kpis=[kpi],
+        datasources=[makeDataSource(3, "THBI")],
+    )
+
+    [compiled] = manifest["kpis"]
+    assert compiled == {
+        "kpiCode": "KPI-001",
+        "kpiName": "采购金额",
+        "businessDefinition": "统计周期内下单金额合计",
+        "formula": "SUM(AMOUNT)",
+        "numerator": "SUM(AMOUNT)",
+        "denominator": None,
+        "grain": "月/供应商",
+        "unit": "元",
+        "grainKeys": ["month", "supplierCode"],
+        "numeratorColumns": ["AMOUNT"],
+        "denominatorColumns": [],
+        "owner": "采购部",
+        "version": "v1.2",
+        "status": "PUBLISHED",
+        "semanticKeywords": ["采购金额", "采购额"],
+        "metricName": "purchaseAmount",
+        "datasourceId": 3,
+        "datasourceName": "THBI",
+    }
+
+
+def test_kpi_without_metric_is_allowed_and_without_datasource_is_null() -> None:
+    """KPI 可先于技术指标存在（业务定义先行，技术实现后置）。"""
+    kpi = makeKpi("KPI-009", "待实现指标")
+
+    manifest = compileFromRows(classes=[], properties=[], joins=[], kpis=[kpi])
+
+    [compiled] = manifest["kpis"]
+    assert compiled["metricName"] is None
+    assert compiled["datasourceId"] is None
+    assert compiled["datasourceName"] is None
+
+
+def test_kpi_with_dangling_metric_or_datasource_raises() -> None:
+    with pytest.raises(ValueError, match="metric_id=77"):
+        compileFromRows(
+            classes=[], properties=[], joins=[], kpis=[makeKpi("K1", "x", metricId=77)]
+        )
+    with pytest.raises(ValueError, match="datasource_id=66"):
+        compileFromRows(
+            classes=[],
+            properties=[],
+            joins=[],
+            kpis=[makeKpi("K1", "x", datasourceId=66)],
+        )
+
+
+def test_kpi_has_no_decimal_or_float_noise() -> None:
+    """`kpi_catalog.match_threshold` 是 Numeric/Decimal —— 不进 Manifest。
+
+    Decimal 无法被 stdlib json 序列化（历史事故：Decimal 直接炸 INSERT），
+    而且它属于检索调参，不是语义定义。
+    """
+    manifest = compileFromRows(
+        classes=[], properties=[], joins=[], kpis=[makeKpi("K1", "x")]
+    )
+
+    kpi = manifest["kpis"][0]
+    assert "matchThreshold" not in kpi
+    assert "match_threshold" not in kpi
+    canonicalJson(manifest)  # 不抛 TypeError 即通过
+
+
+# ---------------------------------------------------------------------------
+# 9. 业务对象 / 数据域（D6）
+# ---------------------------------------------------------------------------
+
+
+def test_business_object_compiles_header_primary_and_attached_domains() -> None:
+    classes = [makeClass(1, "Supplier")]
+    bo = makeBusinessObject("SUPPLIER", "供应商", 1, "PROCUREMENT", graphLabel="Supplier")
+    attached = [
+        BusinessObjectDomain(bo_code="SUPPLIER", domain_id="QUALITY"),
+        BusinessObjectDomain(bo_code="SUPPLIER", domain_id="LOGISTICS"),
+    ]
+    domains = [makeDomain("PROCUREMENT", "采购域"), makeDomain("LOGISTICS", "物流域"),
+               makeDomain("QUALITY", "质量域")]
+
+    manifest = compileFromRows(
+        classes=classes,
+        properties=[],
+        joins=[],
+        businessObjects=[bo],
+        businessObjectDomains=attached,
+        domains=domains,
+    )
+
+    assert [d["code"] for d in manifest["domains"]] == ["LOGISTICS", "PROCUREMENT", "QUALITY"]
+    [compiled] = manifest["businessObjects"]
+    assert compiled == {
+        "code": "SUPPLIER",
+        "name": "供应商",
+        "headerClassName": "Supplier",
+        "primaryDomainCode": "PROCUREMENT",
+        "attachedDomainCodes": ["LOGISTICS", "QUALITY"],
+        "graphLabel": "Supplier",
+        "description": None,
+    }
+
+
+def test_domain_keeps_enabled_flag_in_snapshot() -> None:
+    manifest = compileFromRows(
+        classes=[],
+        properties=[],
+        joins=[],
+        domains=[makeDomain("A", "甲", enabled=False), makeDomain("B", "乙", description="说明")],
+    )
+
+    assert manifest["domains"] == [
+        {"code": "A", "name": "甲", "description": None, "enabled": False},
+        {"code": "B", "name": "乙", "description": "说明", "enabled": True},
+    ]
+
+
+def test_business_object_with_tombstoned_header_raises() -> None:
+    """BO 的身份就是 header 类 —— header 已删时不能编译成 null，只能报错。"""
+    tombstone = makeClass(2, "Legacy", validTo=datetime(2026, 1, 1, tzinfo=UTC))
+
+    with pytest.raises(ValueError, match="header_class_id=2"):
+        compileFromRows(
+            classes=[tombstone],
+            properties=[],
+            joins=[],
+            businessObjects=[makeBusinessObject("LEGACY", "旧对象", 2, "PROCUREMENT")],
+            domains=[makeDomain("PROCUREMENT", "采购域")],
+        )
+
+
+def test_business_object_with_unknown_header_or_domain_raises() -> None:
+    with pytest.raises(ValueError, match="header_class_id=9"):
+        compileFromRows(
+            classes=[makeClass(1, "Supplier")],
+            properties=[],
+            joins=[],
+            businessObjects=[makeBusinessObject("X", "x", 9, "PROCUREMENT")],
+            domains=[makeDomain("PROCUREMENT", "采购域")],
+        )
+    with pytest.raises(ValueError, match="primary_domain_id=NOPE"):
+        compileFromRows(
+            classes=[makeClass(1, "Supplier")],
+            properties=[],
+            joins=[],
+            businessObjects=[makeBusinessObject("X", "x", 1, "NOPE")],
+            domains=[makeDomain("PROCUREMENT", "采购域")],
+        )
+    with pytest.raises(ValueError, match="NOPE"):
+        compileFromRows(
+            classes=[makeClass(1, "Supplier")],
+            properties=[],
+            joins=[],
+            businessObjects=[makeBusinessObject("X", "x", 1, "PROCUREMENT")],
+            businessObjectDomains=[BusinessObjectDomain(bo_code="X", domain_id="NOPE")],
+            domains=[makeDomain("PROCUREMENT", "采购域")],
+        )
+
+
+# ---------------------------------------------------------------------------
+# 10. 新分区同样与输入顺序无关
+# ---------------------------------------------------------------------------
+
+
+def test_d6_sections_are_byte_identical_regardless_of_input_order() -> None:
+    classes = [makeClass(1, "Supplier")]
+    metricA = makeMetric(10, "zetaMetric")
+    metricB = makeMetric(11, "alphaMetric")
+    kpiA = makeKpi("K2", "乙", metricId=11)
+    kpiB = makeKpi("K1", "甲", metricId=10)
+    domainA = makeDomain("Z", "z")
+    domainB = makeDomain("A", "a")
+
+    forward = compileFromRows(
+        classes=classes,
+        properties=[],
+        joins=[],
+        metrics=[metricA, metricB],
+        kpis=[kpiA, kpiB],
+        domains=[domainA, domainB],
+    )
+    backward = compileFromRows(
+        classes=classes,
+        properties=[],
+        joins=[],
+        metrics=[metricB, metricA],
+        kpis=[kpiB, kpiA],
+        domains=[domainB, domainA],
+    )
+
+    assert canonicalJson(forward) == canonicalJson(backward)
+    assert [m["metricName"] for m in forward["metrics"]] == ["alphaMetric", "zetaMetric"]
+    assert [k["kpiCode"] for k in forward["kpis"]] == ["K1", "K2"]
+    assert [d["code"] for d in forward["domains"]] == ["A", "Z"]

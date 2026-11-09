@@ -1,0 +1,355 @@
+{
+  "businessObjects": [
+    {
+      "attachedDomainCodes": [
+        "QUALITY"
+      ],
+      "code": "PURCHASE_ORDER",
+      "description": null,
+      "graphLabel": null,
+      "headerClassName": "PurchaseOrder",
+      "name": "采购订单",
+      "primaryDomainCode": "PROCUREMENT"
+    },
+    {
+      "attachedDomainCodes": [
+        "LOGISTICS",
+        "QUALITY"
+      ],
+      "code": "SUPPLIER",
+      "description": null,
+      "graphLabel": "Supplier",
+      "headerClassName": "Supplier",
+      "name": "供应商",
+      "primaryDomainCode": "PROCUREMENT"
+    }
+  ],
+  "classes": [
+    {
+      "classAlias": null,
+      "className": "Document",
+      "description": null,
+      "objectOwner": null,
+      "objectType": null,
+      "parentClassName": null,
+      "properties": [],
+      "sourceTable": null
+    },
+    {
+      "classAlias": "采购订单",
+      "className": "PurchaseOrder",
+      "description": null,
+      "objectOwner": null,
+      "objectType": null,
+      "parentClassName": "Document",
+      "properties": [
+        {
+          "allowedValues": [],
+          "businessAliases": [],
+          "dataType": "DECIMAL",
+          "description": null,
+          "isForeignKey": false,
+          "isNotNull": null,
+          "isPrimaryKey": false,
+          "maxValue": null,
+          "minValue": null,
+          "propertyAlias": null,
+          "propertyName": "onTimeQty",
+          "refClassName": null,
+          "regexPattern": null,
+          "sourceColumn": "ON_TIME_QTY",
+          "unit": "件"
+        },
+        {
+          "allowedValues": [],
+          "businessAliases": [],
+          "dataType": "DECIMAL",
+          "description": null,
+          "isForeignKey": false,
+          "isNotNull": null,
+          "isPrimaryKey": false,
+          "maxValue": null,
+          "minValue": null,
+          "propertyAlias": null,
+          "propertyName": "qty",
+          "refClassName": null,
+          "regexPattern": null,
+          "sourceColumn": "QTY",
+          "unit": "件"
+        },
+        {
+          "allowedValues": [],
+          "businessAliases": [],
+          "dataType": "STRING",
+          "description": null,
+          "isForeignKey": true,
+          "isNotNull": null,
+          "isPrimaryKey": false,
+          "maxValue": null,
+          "minValue": null,
+          "propertyAlias": null,
+          "propertyName": "supplierCode",
+          "refClassName": "Supplier",
+          "regexPattern": null,
+          "sourceColumn": "SUPPLIER_CODE",
+          "unit": null
+        }
+      ],
+      "sourceTable": "PORDER"
+    },
+    {
+      "classAlias": "供应商",
+      "className": "Supplier",
+      "description": null,
+      "objectOwner": "采购部",
+      "objectType": "Master",
+      "parentClassName": null,
+      "properties": [
+        {
+          "allowedValues": [
+            "0",
+            "1000000"
+          ],
+          "businessAliases": [],
+          "dataType": "DECIMAL",
+          "description": null,
+          "isForeignKey": false,
+          "isNotNull": false,
+          "isPrimaryKey": false,
+          "maxValue": "1000000",
+          "minValue": "0",
+          "propertyAlias": null,
+          "propertyName": "creditLimit",
+          "refClassName": null,
+          "regexPattern": "^\\d+(\\.\\d{1,2})?$",
+          "sourceColumn": null,
+          "unit": "元"
+        },
+        {
+          "allowedValues": [],
+          "businessAliases": [
+            "供应商代码",
+            "供应商编号"
+          ],
+          "dataType": "STRING",
+          "description": null,
+          "isForeignKey": false,
+          "isNotNull": true,
+          "isPrimaryKey": true,
+          "maxValue": null,
+          "minValue": null,
+          "propertyAlias": "供应商编码",
+          "propertyName": "supplierCode",
+          "refClassName": null,
+          "regexPattern": null,
+          "sourceColumn": "SUPPLIER_CODE",
+          "unit": null
+        },
+        {
+          "allowedValues": [],
+          "businessAliases": [
+            "供应商名"
+          ],
+          "dataType": "STRING",
+          "description": null,
+          "isForeignKey": false,
+          "isNotNull": null,
+          "isPrimaryKey": false,
+          "maxValue": null,
+          "minValue": null,
+          "propertyAlias": "供应商名称",
+          "propertyName": "supplierName",
+          "refClassName": null,
+          "regexPattern": null,
+          "sourceColumn": "SUPPLIER_NAME",
+          "unit": null
+        }
+      ],
+      "sourceTable": "SUPPLIER"
+    }
+  ],
+  "domains": [
+    {
+      "code": "LOGISTICS",
+      "description": null,
+      "enabled": true,
+      "name": "物流域"
+    },
+    {
+      "code": "PROCUREMENT",
+      "description": "采购主流程",
+      "enabled": true,
+      "name": "采购域"
+    },
+    {
+      "code": "QUALITY",
+      "description": null,
+      "enabled": false,
+      "name": "质量域"
+    }
+  ],
+  "joins": [
+    {
+      "description": null,
+      "joinKey": "PURCHASE_ORDER_SUPPLIER",
+      "joinType": "LEFT",
+      "relationType": "foreign_key",
+      "sourceClassName": "PurchaseOrder",
+      "sourceColumns": [
+        "SUPPLIER_CODE"
+      ],
+      "targetClassName": "Supplier",
+      "targetColumns": [
+        "SUPPLIER_CODE"
+      ]
+    }
+  ],
+  "kpis": [
+    {
+      "businessDefinition": "统计周期内准时交付数量占收货数量比例",
+      "datasourceName": "THBI",
+      "denominator": "SUM(QTY)",
+      "denominatorColumns": [
+        "QTY"
+      ],
+      "formula": "SUM(ON_TIME_QTY) / SUM(QTY)",
+      "grain": "月/供应商",
+      "grainKeys": [
+        "month",
+        "supplierCode"
+      ],
+      "kpiCode": "KPI-001",
+      "kpiName": "供应商准时率",
+      "metricName": "supplierOnTimeRate",
+      "numerator": "SUM(ON_TIME_QTY)",
+      "numeratorColumns": [
+        "ON_TIME_QTY"
+      ],
+      "owner": "采购部",
+      "semanticKeywords": [
+        "供应商准时率",
+        "准时交付率"
+      ],
+      "status": "PUBLISHED",
+      "unit": "%",
+      "version": "v1.2"
+    },
+    {
+      "businessDefinition": null,
+      "datasourceName": null,
+      "denominator": null,
+      "denominatorColumns": [],
+      "formula": null,
+      "grain": "月",
+      "grainKeys": [],
+      "kpiCode": "KPI-002",
+      "kpiName": "采购金额",
+      "metricName": "purchaseAmount",
+      "numerator": null,
+      "numeratorColumns": [],
+      "owner": null,
+      "semanticKeywords": [],
+      "status": "DRAFT",
+      "unit": "元",
+      "version": "v1.0"
+    },
+    {
+      "businessDefinition": null,
+      "datasourceName": null,
+      "denominator": null,
+      "denominatorColumns": [],
+      "formula": null,
+      "grain": null,
+      "grainKeys": [],
+      "kpiCode": "KPI-003",
+      "kpiName": "待实现指标",
+      "metricName": null,
+      "numerator": null,
+      "numeratorColumns": [],
+      "owner": null,
+      "semanticKeywords": [],
+      "status": "PUBLISHED",
+      "unit": null,
+      "version": "v1.0"
+    }
+  ],
+  "metrics": [
+    {
+      "aggFunction": "SUM",
+      "aggregationOrder": null,
+      "denominatorMeasure": null,
+      "dimensionDefaults": null,
+      "executionSource": null,
+      "filterExpression": null,
+      "formula": "SUM(PO_AMOUNT)",
+      "grainKeys": [],
+      "kpiCodes": [
+        "KPI-002"
+      ],
+      "metricAlias": "采购金额",
+      "metricName": "purchaseAmount",
+      "metricType": "MEASURE",
+      "numeratorMeasure": null,
+      "owner": "采购部",
+      "sources": [
+        {
+          "className": "PurchaseOrder",
+          "role": "FILTER"
+        }
+      ],
+      "status": "DRAFT",
+      "targetClassName": null
+    },
+    {
+      "aggFunction": "SUM",
+      "aggregationOrder": "WEIGHTED_RATIO",
+      "denominatorMeasure": {
+        "agg": "SUM",
+        "classAlias": "采购订单",
+        "className": "PurchaseOrder",
+        "expr": "QTY",
+        "filter": null
+      },
+      "dimensionDefaults": {
+        "time": "LAST_12_MONTHS"
+      },
+      "executionSource": "ESCAPE_HATCH",
+      "filterExpression": "STATUS <> 'CANCELLED'",
+      "formula": "SUM(ON_TIME_QTY) / SUM(QTY)",
+      "grainKeys": [
+        "supplierCode"
+      ],
+      "kpiCodes": [
+        "KPI-001"
+      ],
+      "metricAlias": "供应商准时率",
+      "metricName": "supplierOnTimeRate",
+      "metricType": "RATIO",
+      "numeratorMeasure": {
+        "agg": "SUM",
+        "classAlias": "采购订单",
+        "className": "PurchaseOrder",
+        "expr": "ON_TIME_QTY",
+        "filter": null
+      },
+      "owner": "采购部",
+      "sources": [
+        {
+          "className": "PurchaseOrder",
+          "role": "BASE"
+        },
+        {
+          "className": "PurchaseOrder",
+          "role": "DENOMINATOR"
+        },
+        {
+          "className": "PurchaseOrder",
+          "role": "NUMERATOR"
+        }
+      ],
+      "status": "PUBLISHED",
+      "targetClassName": "PurchaseOrder"
+    }
+  ],
+  "schemaVersion": "v1"
+}

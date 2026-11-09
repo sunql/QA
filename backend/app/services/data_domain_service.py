@@ -6,8 +6,9 @@ agent_vocabulary.AGENT_DATA_DOMAINS 常量，常量降级为 registry 未 warmUp
 守卫：
   - create: code 唯一（409）；primary_org_id 存在（若提供）
   - update: org 存在（若变更）
-  - delete: 三处引用检查（business_object.primary_domain_id /
-    business_object_domain / agent_definition.data_domains JSONB）→ 409
+  - delete: 四处引用检查（business_object.primary_domain_id /
+    business_object_domain / agent_definition.data_domains JSONB /
+    semantic_release.domain_code）→ 409
 写后调 dataDomainRegistry.reloadOne（registry 同款写时失效）。
 """
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.exceptions import ConflictError, NotFoundError
 from app.domain.models import (
     AgentDefinition,
     BusinessObject,
@@ -27,7 +29,7 @@ from app.domain.schemas import (
     DataDomainRead,
     DataDomainUpdate,
 )
-from app.domain.exceptions import ConflictError, NotFoundError
+from app.domain.semantic_release_models import SemanticRelease
 from app.services.data_domain_registry import dataDomainRegistry
 from app.services.messages_zh import (
     MSG_DATA_DOMAIN_CODE_EXISTS,
@@ -180,6 +182,18 @@ class DataDomainService:
         ).scalar()
         if agentUses:
             refs.append(f"agent_definition.data_domains({agentUses})")
+
+        # 语义发布快照（0142）：FK 是 ON DELETE RESTRICT。不预检的话删除会走
+        # IntegrityError → 500（全局没有接这个异常），用户只看到「服务器错误」。
+        releaseRefs = (
+            await session.execute(
+                select(func.count()).select_from(SemanticRelease).where(
+                    SemanticRelease.domain_code == code
+                )
+            )
+        ).scalar()
+        if releaseRefs:
+            refs.append(f"semantic_release.domain_code({releaseRefs})")
 
         if refs:
             raise ConflictError(

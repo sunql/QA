@@ -46,6 +46,7 @@ from app.domain.models import (
     OntologyMetricSource,
     OntologyProperty,
 )
+from app.domain.semantic_manifest_schema import SCHEMA_VERSION
 from app.services.semantic_compiler_sections import (
     compileBusinessObjects,
     compileDomains,
@@ -59,9 +60,6 @@ from app.services.semantic_manifest_common import (
     resolveActiveName,
     sortBy,
 )
-
-SCHEMA_VERSION = "v1"
-"""Manifest 自身 Schema 版本。与发布 version 解耦：Schema 演进后旧快照仍可回放。"""
 
 
 def compileFromRows(

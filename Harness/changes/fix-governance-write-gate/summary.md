@@ -23,7 +23,8 @@
 3. 词条两个映射字段为空 ⇒ 201（自由文本词条不受影响）；
 4. 既有词条/指标/本体套件**净新增失败 0**；
 5. 前端非 admin 看不到写入口，admin 功能不变；刷新后 admin 身份可恢复；
-6. chat 的 `/metric` `/define` `/map` 与 REST 写入口同口径：非 admin 不产生任何治理数据写入；
+6. chat 的 `/metric` `/define` `/map` 与**已收口的** REST 写入口（词条 / 指标）同口径：
+   非 admin 不产生任何治理数据写入（类/属性的 REST 写入口仍是历史开放面，见 §8.12）；
 7. `merge-gate / failure-set-diff` 净新增 0；不部署。
 
 ---
@@ -47,8 +48,10 @@
 ### 2.2 本体指标
 
 - `POST/PUT/DELETE /ontology/metrics` 均无角色门禁，任何人可创建/修改（**含 `status` 发布状态**）/删除；
-- `ontology_class` 走 owner ACL（`AclService.assertCanModify`），但 `ontology_metric` **没有
-  `object_owner` 列**，无法套用同一套 ACL ⇒ 本批用 admin 门禁（要按部门授权需先加列，DDL 另立项）。
+- `ontology_class` 的 update/delete/restore 走 owner ACL（`AclService.assertCanModify`），
+  但 `createClass` / `createProperty` / `updateProperty` 没有任何 ACL（见 §8.12）；
+  `ontology_metric` **没有 `object_owner` 列**，无法套用同一套 ACL ⇒ 本批用 admin 门禁
+  （要按部门授权需先加列，DDL 另立项）。
 
 ### 2.3 顺带发现
 
@@ -73,7 +76,9 @@
 | `faacee86` | 评审整改（MEDIUM-3）：读路由补 `getCurrentUser` 正断言 |
 | `3863d725` | 评审整改（H2）：NL2SQL schema 类头/别名/父类名同标准净化 + 3 条用例 |
 | `b0fef836` | 评审整改（MEDIUM-1/HIGH-2）：`useRestoreUser` 刷新补回身份；两个前端测试文件补 admin 种子 |
-| 本文件 | 文档 + `Harness/rules/权限与安全规范.md` 增「治理写入口」清单 |
+| `35b095fe` | 第二轮评审（H2 未闭合）：关键口径摘要、间接 JOIN 提示、table= 头、FK 目标、JOIN 列、属性名/物理列名全部同标准净化 + 5 条出口级用例 |
+| `b0c5a8bb` | 第二轮评审：chat 门禁补自然语言 + `/chat/stream` 两条用例；actor 契约三条用例显式 `roles=("admin",)`；两条摘要用例改回真实执行路径；权限提示文案错字 |
+| 本文件 | 文档 + `Harness/rules/权限与安全规范.md` 增「治理写入口」清单与已知缺口 |
 
 **文件**：
 
@@ -101,13 +106,14 @@
 |---|---|
 | 词条定向（write_gate 15 + api + supply_qty + governance 路由守卫） | **39 passed** |
 | 指标门禁 `test_ontology_metric_write_gate.py` | **5 passed** |
-| chat 写门禁 `test_chat_domain_write_gate.py` | **5 passed** |
+| chat 写门禁 `test_chat_domain_write_gate.py` | **7 passed**（含自然语言 + 流式两条） |
 | 路由守卫三件套（governance + semantic release + agent orchestration） | **19 passed** |
-| 目标回归（词条 4 + 本体 2 + 路由守卫 3 + chat 集成 1 + chat unit 3） | **302 passed, 12 failed**（失败集合见 §6，与基线完全一致） |
+| 目标回归（词条 4 + 本体 2 + 路由守卫 3 + chat 集成 1 + chat unit 3） | **305 passed, 12 failed**（失败集合见 §6，与基线逐条一致） |
 | 前端 3 个写入口测试文件 | **23 passed** |
 | 前端 OntologyPage + MessageItem | **89 passed** |
 | 前端 App + useRestoreUser | **11 passed**；`npx tsc -b` exit 0 |
-| schema 相关单测（nl2sql_schema + nl2sql_service） | **203 passed** |
+| schema 相关单测（nl2sql_schema + nl2sql_service） | **208 passed**（新增 5 条渲染出口用例） |
+| chat 三套单测 | **7 failed, 191 passed**（失败条目与 HEAD 基线逐条一致） |
 
 ---
 
@@ -121,9 +127,16 @@
 | P1：`_resolveLiveClassIds` 去掉 `valid_to IS NULL` | `test_property_on_tombstoned_row_is_rejected` | **1 红** |
 | P2：`_assertPropertyOnClass` 去掉 `class_id.in_(liveIds)` | `test_same_named_property_on_other_class_is_rejected` | **1 红** |
 | P3：存在同名的下线行就整类判死（过度拦截） | `test_mapping_ignores_tombstoned_sibling_rows` | **1 红** |
+| M4：chat 门禁条件短路为 `if False` | 5 条非 admin 拒绝用例（含新增自然语言/流式） | **5 红 / 读路径 + admin 2 绿** |
 
 P1–P3 均为「改一行 → 指定用例红 → 立即还原并复跑全绿」的受控变异，用来证明三条谓词
-用例各自钉住一个分支，而不是同一分支的重复断言。
+用例各自钉住一个分支，而不是同一分支的重复断言。**注**：三条用例是**单独**运行时各 1 红；
+跑全量时 P1/P2 会连带让依赖同一谓词的用例一起红，结论不变。
+M4 证明新增的两条入口用例真正钉在门禁上，而不是恰好被其它分支拦下。
+
+H2 第二轮（`35b095fe`）的 5 条出口用例按 TDD 先写后修：改前 **5 红**、改后 **5 绿**，
+每条对应一个独立渲染出口（摘要限定名 / 间接 JOIN 提示 / table= 头 + FK 目标 /
+JOIN 列 / 属性名 + 物理列名）。
 
 ---
 
@@ -188,6 +201,17 @@ code-reviewer 与 security-reviewer 各自独立评审后**收敛到同一条 HI
 | 9 | H2（安全，相邻） | `buildSchemaText` 类头/别名/父类名裸拼，`<` 与换行可逃逸/注入指令行 | 已修（`3863d725`）：同标准净化 + 3 条用例 |
 | 10 | H3 / M4 / M5 / M6 / LOW | stub 鉴权默认放行、词典总量预算与分页、类下线后的存量悬空词条与 TOCTOU、术语空白归一 | **延后**，见 §8 |
 
+### 第二轮（scoped 复审）
+
+| # | 级别 | 发现 | 处置 |
+|---|---|---|---|
+| 11 | HIGH | H2 未闭合：同一个 `class_name` / `property_name` / `source_table` 仍裸拼在关键口径摘要、间接 JOIN 提示、`table=` 头、FK 目标、JOIN 列、列行 | 已修（`35b095fe`）：6 个出口统一 `_sanitizeSchemaField`，5 条出口级用例（先红后绿） |
+| 12 | MEDIUM | actor 契约 3 条写用例只靠 `DEFAULT_STUB_ROLES` 默认携带 admin 才走到写路径，收口默认角色后会误红 | 已修（`b0c5a8bb`）：显式 `roles=("admin",)`，不依赖默认值 |
+| 13 | MEDIUM | 两条 `/metric` 单测没传用户，实际断言的是**拒绝分支**，成功路径失去覆盖 | 已修（`b0c5a8bb`）：传 `_ADMIN_USER`，恢复领域命令真实执行 |
+| 14 | LOW | 权限提示「请联系统管理员」缺字 | 已修（`b0c5a8bb`）：「请联系系统管理员」 |
+| 15 | LOW | §5 的 P1/P2 标「1 红」只在单条运行时成立 | 已在 §5 加注说明（结论不变） |
+| 16 | HIGH（安全，范围外） | 类/属性/导入的 REST 写路由仍只要求登录：`POST /ontology/classes`、`POST /ontology/properties`、`PUT/DELETE /ontology/properties/{id}`、`POST /datasources/{id}/import`；且 `createClass` / `createProperty` / `updateProperty` 连 owner ACL 都没有 | **延后**（见 §8.12）：本批批准范围只有词条 + 指标；收口到 admin 会改变 owner-ACL 语义，属产品决策，规则文档已显式标注「已知缺口」，不再宣称 REST 全量同口径 |
+
 ---
 
 ## 8. 明确不做的事 / 遗留
@@ -209,3 +233,11 @@ code-reviewer 与 security-reviewer 各自独立评审后**收敛到同一条 HI
 10. **术语空白归一（M6）**：`term` 未做 `strip`/大小写归一，`"占比 "` 与 `"占比"` 可并存。
     属数据规范问题，需先确认是否已有外部写入依赖原样字符串。
 11. **不部署**：生产当前停在 alembic `0140`，本批零迁移，随下次常规发版生效即可。
+12. **类/属性/导入的 REST 写入口未收口（待立项）**：`POST /ontology/classes`、
+    `POST /ontology/properties`、`PUT/DELETE /ontology/properties/{id}`、
+    `POST /datasources/{id}/import` 仍只要求登录；`createClass` / `createProperty` /
+    `updateProperty` 也没有 owner ACL（只有 class 的 update/delete/restore 有）。
+    这些入口写的是同一批共享治理数据。修法有两条互斥路线：
+    ① 全体 `requireAdmin`（与指标一致，但会剥夺非 admin owner 的既有编辑能力）；
+    ② 给 `ontology_class` 之外的写面补齐 owner ACL（需定义属性的 owner 归属）。
+    属产品决策，需单独确认后再动；在那之前**不要**把「chat 已收口」表述成写面全收口。

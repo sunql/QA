@@ -37,6 +37,7 @@ from app.services.stream_events import (
 )
 from app.services.value_sampler import clearValueSampleCache
 from app.tests.unit.test_chat_service import (
+    _ADMIN_USER,
     _config,
     _datasource,
     _dto,
@@ -192,11 +193,15 @@ def _buildStreamService(
 
 
 async def _collect(
-    service: ChatService, dto, *, session: _FakeSession | None = None,
+    service: ChatService,
+    dto,
+    *,
+    session: _FakeSession | None = None,
+    user=None,
 ) -> list[tuple[str, dict]]:
     events: list[tuple[str, dict]] = []
     session = session or _FakeSession()
-    async for event in service.processMessageStream(dto, session):
+    async for event in service.processMessageStream(dto, session, user=user):
         events.append((event.event, event.data))
     await asyncio.sleep(0)  # 让后台查询向量任务有机会完成，保证测试确定性
     return events
@@ -360,7 +365,9 @@ class TestStreamingPipeline:
     async def test_domain_command_streams_token_and_done(self) -> None:
         """DEFINE 领域命令流式：meta(define) → token(结果) → done（零 LLM 消耗）。"""
         service, llm, tokenUsage, embedding = _buildStreamService()
-        events = await _collect(service, _dto("定义指标 销售额 = SUM(order.amount)"))
+        events = await _collect(
+            service, _dto("定义指标 销售额 = SUM(order.amount)"), user=_ADMIN_USER
+        )
         types = [e for e, _ in events]
         assert types[0] == EVENT_META
         assert events[0][1]["intent"] == "define"
@@ -376,7 +383,9 @@ class TestStreamingPipeline:
     async def test_slash_define_streams_token_and_done(self) -> None:
         """斜杠 /define 创建类流式：meta(define) → token(结果) → done（零 LLM 消耗）。"""
         service, llm, tokenUsage, embedding = _buildStreamService()
-        events = await _collect(service, _dto("/define 产品 alias=Product desc=销售商品"))
+        events = await _collect(
+            service, _dto("/define 产品 alias=Product desc=销售商品"), user=_ADMIN_USER
+        )
         types = [e for e, _ in events]
         assert types[0] == EVENT_META
         assert events[0][1]["intent"] == "define"
@@ -393,7 +402,9 @@ class TestStreamingPipeline:
     async def test_slash_metric_streams_token_and_done(self) -> None:
         """斜杠 /metric 创建指标流式：meta(metric) → token(结果) → done（零 LLM 消耗）。"""
         service, llm, tokenUsage, embedding = _buildStreamService()
-        events = await _collect(service, _dto("/metric 销售额 = SUM(order.amount)"))
+        events = await _collect(
+            service, _dto("/metric 销售额 = SUM(order.amount)"), user=_ADMIN_USER
+        )
         types = [e for e, _ in events]
         assert types[0] == EVENT_META
         assert events[0][1]["intent"] == "metric"
@@ -421,7 +432,9 @@ class TestStreamingPipeline:
             llmFactory=lambda config: _StreamPipelineLlm(),
             adapterProvider=lambda datasourceId, ds: _FakeAdapter(_ROWS),
         )
-        events = await _collect(service, _dto("/map customer_name -> Order"))
+        events = await _collect(
+            service, _dto("/map customer_name -> Order"), user=_ADMIN_USER
+        )
         types = [e for e, _ in events]
         assert types[0] == EVENT_META
         assert events[0][1]["intent"] == "map"

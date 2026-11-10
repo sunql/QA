@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
+from app.dependencies import CurrentUser
 from app.domain.enums import ChartType, DataSourceType, IntentType
 from app.domain.exceptions import LlmClientError, Nl2SqlError, NotFoundError, ValidationError
 from app.domain.models import (
@@ -432,6 +433,11 @@ def _datasource() -> DataSource:
 
 def _dto(question: str, datasourceId: int = 1) -> ChatRequest:
     return ChatRequest(sessionId="s1", question=question, datasourceId=datasourceId)
+
+
+# 领域写命令（/metric、/define、/map）在 ChatService 层需 admin —— 与生产链路
+# 一致：`POST /chat` 必然带登录用户，这里必须显式给出，不能靠 None 默认放行。
+_ADMIN_USER = CurrentUser(userId="unit-admin", roles=("admin",))
 
 
 def _buildService(
@@ -1429,7 +1435,9 @@ class TestDomainCommands:
 
     async def test_define_metric_creates_and_replies(self) -> None:
         service, ontology, tokenUsage = await self._build()
-        response = await service.processMessage(_dto("定义指标 销售额 = SUM(order.amount)"), _FakeSession())
+        response = await service.processMessage(
+            _dto("定义指标 销售额 = SUM(order.amount)"), _FakeSession(), user=_ADMIN_USER
+        )
         assert response.intent == IntentType.DEFINE.value
         assert "销售额" in response.answer
         assert response.sql is None
@@ -1441,7 +1449,9 @@ class TestDomainCommands:
 
     async def test_define_without_formula_returns_usage_guide(self) -> None:
         service, ontology, _ = await self._build()
-        response = await service.processMessage(_dto("定义指标"), _FakeSession())
+        response = await service.processMessage(
+            _dto("定义指标"), _FakeSession(), user=_ADMIN_USER
+        )
         assert response.intent == IntentType.DEFINE.value
         assert "格式" in response.answer
         assert ontology.createdMetrics == []
@@ -1468,7 +1478,9 @@ class TestDomainCommands:
         customer = OntologyClass(id=1, class_name="Customer", properties=[prop])
         order = OntologyClass(id=2, class_name="Order")
         service, ontology, _ = await self._build(classes=[customer, order])
-        response = await service.processMessage(_dto("把 customer_name 映射到 Order"), _FakeSession())
+        response = await service.processMessage(
+            _dto("把 customer_name 映射到 Order"), _FakeSession(), user=_ADMIN_USER
+        )
         assert response.intent == IntentType.MAP.value
         assert "customer_name" in response.answer
         assert len(ontology.updatedProperties) == 1
@@ -1486,7 +1498,9 @@ class TestDomainCommands:
         customer = OntologyClass(id=1, class_name="Customer", properties=[prop])
         order = OntologyClass(id=2, class_name="Order")
         service, ontology, _ = await self._build(classes=[customer, order])
-        response = await service.processMessage(_dto("把 客户名称 映射到 Order"), _FakeSession())
+        response = await service.processMessage(
+            _dto("把 客户名称 映射到 Order"), _FakeSession(), user=_ADMIN_USER
+        )
         assert response.intent == IntentType.MAP.value
         assert len(ontology.updatedProperties) == 1
         propId, updateDto = ontology.updatedProperties[0]
@@ -1495,7 +1509,9 @@ class TestDomainCommands:
 
     async def test_map_unknown_entity_replies_guidance(self) -> None:
         service, ontology, _ = await self._build()
-        response = await service.processMessage(_dto("把 GHOST 映射到 Order"), _FakeSession())
+        response = await service.processMessage(
+            _dto("把 GHOST 映射到 Order"), _FakeSession(), user=_ADMIN_USER
+        )
         assert response.intent == IntentType.MAP.value
         assert "未找到" in response.answer
         assert ontology.updatedProperties == []
@@ -1509,7 +1525,9 @@ class TestDomainCommands:
 
     async def test_slash_define_creates_class_and_replies(self) -> None:
         service, ontology, tokenUsage = await self._build()
-        response = await service.processMessage(_dto("/define 产品"), _FakeSession())
+        response = await service.processMessage(
+            _dto("/define 产品"), _FakeSession(), user=_ADMIN_USER
+        )
         assert response.intent == IntentType.DEFINE.value
         assert "产品" in response.answer
         assert response.sql is None
@@ -1521,7 +1539,7 @@ class TestDomainCommands:
     async def test_slash_define_with_alias_and_desc(self) -> None:
         service, ontology, _ = await self._build()
         response = await service.processMessage(
-            _dto("/define 产品 alias=Product desc=销售商品"), _FakeSession()
+            _dto("/define 产品 alias=Product desc=销售商品"), _FakeSession(), user=_ADMIN_USER
         )
         assert response.intent == IntentType.DEFINE.value
         assert len(ontology.createdClasses) == 1
@@ -1532,7 +1550,7 @@ class TestDomainCommands:
     async def test_slash_metric_creates_metric(self) -> None:
         service, ontology, _ = await self._build()
         response = await service.processMessage(
-            _dto("/metric 销售额 = SUM(order.amount)"), _FakeSession()
+            _dto("/metric 销售额 = SUM(order.amount)"), _FakeSession(), user=_ADMIN_USER
         )
         assert response.intent == IntentType.METRIC.value
         assert "销售额" in response.answer
@@ -1545,7 +1563,7 @@ class TestDomainCommands:
         order = OntologyClass(id=2, class_name="Order")
         service, ontology, _ = await self._build(classes=[customer, order])
         response = await service.processMessage(
-            _dto("/map customer_name -> Order"), _FakeSession()
+            _dto("/map customer_name -> Order"), _FakeSession(), user=_ADMIN_USER
         )
         assert response.intent == IntentType.MAP.value
         assert "customer_name" in response.answer

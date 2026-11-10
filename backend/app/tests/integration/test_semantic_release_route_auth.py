@@ -8,8 +8,12 @@
 
 1. 开关开启时路由集合恰好 7 条（3 条读 + 4 条写；集合相等：漏/多/改名都会红，
    空集必然不等）；
-2. 每条路由的依赖链里同时声明了 `requireAdmin` 与 `getCurrentUser`
-   （后者由前者间接引入，但两条都断言：删掉任一层都要红）；
+2. 每条路由的依赖链里同时声明了 `requireAdmin` 与 `getCurrentUser`：
+   前者在 include 层、后者由 `requireAdmin`（参数依赖）与 `mustChangePasswordGuard`
+   共同引入，且 4 条写路由还在端点上直接声明。两条分别断言；
+   ⚠️ 二者**不是**「删任一层两条都红」的严格双保险 —— `getCurrentUser` 有旁路
+   （`mustChangePasswordGuard` 也依赖它），删掉 include 层的 `requireAdmin` 时
+   `[requireAdmin]` 会红、`[getCurrentUser]` 可能仍绿；
 3. 开关关闭时这 7 条路由一条都不注册（404 的前提）。
 
 反向断言（探测器不恒真）：公开路由 `/api/v1/health` 必须被判为「无 admin 门禁」；
@@ -33,6 +37,7 @@ import pytest
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.params import Depends as DependsParam
 from fastapi.routing import APIRoute
+from starlette.routing import Route as StarletteRoute
 
 from app.config import getSettings
 from app.dependencies import getCurrentUser, requireAdmin
@@ -83,6 +88,12 @@ def _iterRoutesWithDeps(
                 getattr(route, "prefix", "") or getattr(route, "path", "") or ""
             )
             yield from _iterRoutesWithDeps(nested, nestedPrefix, inherited)
+            continue
+        # 普通 Starlette 路由（`/docs`、`/openapi.json` 等）没有依赖树，显式跳过；
+        # 其余既不是 APIRoute 也展不开的包装层 ⇒ fail-closed（未知形态不许静默忽略，
+        # 否则 FastAPI 再换一次包装类型时枚举器会悄悄少枚举路由）。
+        if not isinstance(route, StarletteRoute):
+            raise AssertionError(f"未知的路由包装类型：{type(route)!r}")
 
 
 def _semanticRoutes(app: FastAPI) -> list[tuple[str, APIRoute, tuple[Any, ...]]]:
@@ -99,6 +110,10 @@ def _declaredDependencies(call: Any) -> Iterator[Any]:
     `include_context.dependencies` 里只有 `Depends(requireAdmin)` 这一层；
     `getCurrentUser` 是 `requireAdmin` 签名里的参数依赖。静态检查必须沿
     `inspect.signature` 往下走，否则「间接引入」的那一半门禁在 0.141 下不可见。
+
+    ⚠️ 只识别**默认参数**写法（`p: X = Depends(d)`）；`Annotated[X, Depends(d)]`
+    写法不在覆盖范围内（当前 `app/` 全仓无此写法）。若将来引入，本函数会漏掉
+    间接依赖 ⇒ 依赖「路由集合非空 / 条数相等」断言的 fail-closed 兜底，并需扩展此处。
     """
     seen: set[int] = set()
     stack = [call]
@@ -114,7 +129,8 @@ def _declaredDependencies(call: Any) -> Iterator[Any]:
             continue
         for parameter in signature.parameters.values():
             nested = parameter.default
-            # `fastapi.Depends` 是工厂函数（0.141）；类型判断必须用 `fastapi.params.Depends`。
+            # `fastapi.Depends` 是工厂函数而不是类（各版本均如此）；类型判断必须用
+            # `fastapi.params.Depends`，否则 `isinstance(x, Depends)` 会 TypeError。
             if isinstance(nested, DependsParam):
                 stack.append(nested.dependency)
 
@@ -157,6 +173,9 @@ def test_routes_are_exactly_the_expected_seven(monkeypatch: pytest.MonkeyPatch) 
     routes = _semanticRoutes(_buildApp(monkeypatch, enabled=True))
 
     assert routes, "路由枚举为空——路由树结构变化会让本守卫空集通过"
+    # 集合相等看不见重复注册（同一 router include 两次）或枚举器把某包装层列了两遍
+    # ⇒ 另外钉条数。
+    assert len(routes) == len(_EXPECTED_ROUTES), f"路由条数 {len(routes)} ≠ {len(_EXPECTED_ROUTES)}"
     enumerated = {(method, path) for path, route, _ in routes for method in route.methods}
     assert enumerated == _EXPECTED_ROUTES, (
         "路由集合与预期不一致（新增/删除/改名都必须同步本守卫）：\n  "

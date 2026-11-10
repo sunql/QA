@@ -12,20 +12,30 @@
    （后者由前者间接引入，但两条都断言：删掉任一层都要红）；
 3. 开关关闭时这 7 条路由一条都不注册（404 的前提）。
 
-反向断言（探测器不恒真）：公开路由 `/api/v1/health` 必须被判为「无 admin 门禁」。
-路由树展开与依赖链探测复用 `test_agent_orchestration_route_auth.py` 的实现
-（同一套 `_IncludedRouter` 兼容逻辑）。
+反向断言（探测器不恒真）：公开路由 `/api/v1/health` 必须被判为「无 admin 门禁」；
+另有正向对照（`test_detector_sees_include_context_dependencies`）证明
+`include_router(dependencies=[...])` 能被看见——否则探测器恒 False 时反向断言照样通过。
+
+⚠️ **版本敏感**：本特性的门禁声明在 `include_router(dependencies=[...])` 上，而
+FastAPI ≥0.141 把它放进 `_IncludedRouter.include_context`、不并入 `route.dependant`
+（0.136.x 会并入）。2026-11-10 的 PR #115 CI 用的正是 `uv.lock` 里的 **0.141.1**，
+只沿 dependant 探测会把 7 条路由全判成「没有门禁」⇒ 本文件的路由树展开必须
+同时回收 include 上下文里的依赖。
 """
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Iterator
+from typing import Any
+
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, Depends, FastAPI
+from fastapi.params import Depends as DependsParam
 from fastapi.routing import APIRoute
 
 from app.config import getSettings
 from app.dependencies import getCurrentUser, requireAdmin
-from app.tests.integration.test_agent_orchestration_route_auth import _iterRoutes
 
 _PREFIX = "/api/v1/semantic/releases"
 
@@ -42,12 +52,83 @@ _EXPECTED_ROUTES: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _semanticRoutes(app: FastAPI) -> list[tuple[str, APIRoute]]:
-    return [(path, route) for path, route in _iterRoutes(list(app.routes)) if path.startswith(_PREFIX)]
+def _iterRoutesWithDeps(
+    routes: list[Any], prefix: str = "", inherited: tuple[Any, ...] = ()
+) -> Iterator[tuple[str, APIRoute, tuple[Any, ...]]]:
+    """递归展开路由树，产出 (完整路径, APIRoute, include 时声明的依赖)。
+
+    FastAPI **≥0.141** 用 `_IncludedRouter` 包装 `include_router()` 的结果，并且
+    把 include 时声明的 `dependencies=[...]` 放进 `include_context.dependencies`，
+    **不并入** `route.dependant`（0.136.x 会并入）。本守卫的门禁正是声明在
+    `include_router(dependencies=[Depends(requireAdmin)])` 上的 ⇒ 只沿
+    `route.dependant` 探测，在 CI 用的 0.141.1 下会把 7 条路由全判成「没有门禁」。
+    """
+    for route in routes:
+        if isinstance(route, APIRoute):
+            yield prefix + route.path, route, inherited
+            continue
+        original = getattr(route, "original_router", None)
+        if original is not None:
+            includeContext = getattr(route, "include_context", None)
+            nestedPrefix = prefix + (getattr(includeContext, "prefix", "") or "")
+            nestedDeps = inherited + tuple(
+                getattr(dependency, "dependency", None)
+                for dependency in (getattr(includeContext, "dependencies", ()) or ())
+            )
+            yield from _iterRoutesWithDeps(list(original.routes), nestedPrefix, nestedDeps)
+            continue
+        nested = getattr(route, "routes", None)
+        if isinstance(nested, list):
+            nestedPrefix = prefix + (
+                getattr(route, "prefix", "") or getattr(route, "path", "") or ""
+            )
+            yield from _iterRoutesWithDeps(nested, nestedPrefix, inherited)
 
 
-def _declaresDependency(route: APIRoute, dependency: object) -> bool:
-    """路由依赖链（含 router 级 dependencies）是否声明了指定依赖。"""
+def _semanticRoutes(app: FastAPI) -> list[tuple[str, APIRoute, tuple[Any, ...]]]:
+    return [
+        (path, route, inherited)
+        for path, route, inherited in _iterRoutesWithDeps(list(app.routes))
+        if path.startswith(_PREFIX)
+    ]
+
+
+def _declaredDependencies(call: Any) -> Iterator[Any]:
+    """展开一个依赖 callable 自身签名里声明的 `Depends(...)`（递归）。
+
+    `include_context.dependencies` 里只有 `Depends(requireAdmin)` 这一层；
+    `getCurrentUser` 是 `requireAdmin` 签名里的参数依赖。静态检查必须沿
+    `inspect.signature` 往下走，否则「间接引入」的那一半门禁在 0.141 下不可见。
+    """
+    seen: set[int] = set()
+    stack = [call]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        try:
+            signature = inspect.signature(current)
+        except (TypeError, ValueError):
+            continue
+        for parameter in signature.parameters.values():
+            nested = parameter.default
+            # `fastapi.Depends` 是工厂函数（0.141）；类型判断必须用 `fastapi.params.Depends`。
+            if isinstance(nested, DependsParam):
+                stack.append(nested.dependency)
+
+
+def _declaresDependency(
+    route: APIRoute, dependency: object, inherited: tuple[Any, ...] = ()
+) -> bool:
+    """路由依赖链（含 include 时 / router 级 / 间接 dependencies）是否声明了指定依赖。"""
+    if any(
+        call is dependency
+        for root in inherited
+        for call in _declaredDependencies(root)
+    ):
+        return True
     seen: set[int] = set()
     stack = [route.dependant]
     while stack:
@@ -76,7 +157,7 @@ def test_routes_are_exactly_the_expected_seven(monkeypatch: pytest.MonkeyPatch) 
     routes = _semanticRoutes(_buildApp(monkeypatch, enabled=True))
 
     assert routes, "路由枚举为空——路由树结构变化会让本守卫空集通过"
-    enumerated = {(method, path) for path, route in routes for method in route.methods}
+    enumerated = {(method, path) for path, route, _ in routes for method in route.methods}
     assert enumerated == _EXPECTED_ROUTES, (
         "路由集合与预期不一致（新增/删除/改名都必须同步本守卫）：\n  "
         f"缺失: {sorted(_EXPECTED_ROUTES - enumerated)}\n"
@@ -92,9 +173,9 @@ def test_every_route_declares_the_admin_guard(monkeypatch: pytest.MonkeyPatch, d
     offenders = sorted(
         {
             (method, path)
-            for path, route in routes
+            for path, route, inherited in routes
             for method in route.methods
-            if not _declaresDependency(route, dependency)
+            if not _declaresDependency(route, dependency, inherited)
         }
     )
     assert offenders == [], (
@@ -113,8 +194,46 @@ def test_routes_are_absent_when_flag_is_off(monkeypatch: pytest.MonkeyPatch) -> 
 def test_guard_detector_is_not_vacuous(monkeypatch: pytest.MonkeyPatch) -> None:
     """反向断言：公开路由必须被判为「无 admin 门禁」，否则上一条可能恒真。"""
     app = _buildApp(monkeypatch, enabled=True)
-    public = [route for path, route in _iterRoutes(list(app.routes)) if path == "/api/v1/health"]
+    public = [
+        (route, inherited)
+        for path, route, inherited in _iterRoutesWithDeps(list(app.routes))
+        if path == "/api/v1/health"
+    ]
 
     assert public, "未枚举到 /api/v1/health——路由树展开失效"
-    assert not _declaresDependency(public[0], requireAdmin)
-    assert not _declaresDependency(public[0], getCurrentUser)
+    route, inherited = public[0]
+    assert not _declaresDependency(route, requireAdmin, inherited)
+    assert not _declaresDependency(route, getCurrentUser, inherited)
+
+
+def test_detector_sees_include_context_dependencies() -> None:
+    """正向对照：`include_router(dependencies=[...])` 必须被看见。
+
+    这是本守卫在 FastAPI **≥0.141** 下的关键分支（见 `_iterRoutesWithDeps`
+    的 docstring），而 0.136.x 会把它并入 `route.dependant`。两条路径都不许漏：
+    探测器若恒返回 False，上一条「公开路由无门禁」的反向断言照样通过 ⇒ 假绿。
+    """
+    def marker() -> None: ...
+
+    def outer(inner: Any = Depends(marker)) -> None: ...  # noqa: B008 - 探针需真实依赖声明
+
+    guarded = APIRouter(prefix="/guarded")
+
+    @guarded.get("/probe")
+    async def probeRoute() -> None: ...
+
+    app = FastAPI()
+    app.include_router(guarded, prefix="/api", dependencies=[Depends(outer)])
+
+    routes = [
+        (path, route, inherited)
+        for path, route, inherited in _iterRoutesWithDeps(list(app.routes))
+        if path.startswith("/api/guarded")
+    ]
+
+    assert len(routes) == 1, "探针路由未枚举到——展开逻辑失效"
+    _, route, inherited = routes[0]
+    assert _declaresDependency(route, outer, inherited)
+    # 间接依赖（outer 的参数里声明 marker）同样必须可见。
+    assert _declaresDependency(route, marker, inherited)
+    assert not _declaresDependency(route, requireAdmin, inherited)

@@ -1796,10 +1796,12 @@ class OntologyDriftReport(CamelModel):
 
 class TermDictionaryCreate(CamelModel):
     term: str = Field(..., min_length=1, max_length=100)
-    definition: str = Field(..., min_length=1)
+    # 词条全文会注入每个用户每次 NL2SQL 计划的 prompt（无分页、无截断），
+    # 限长防止存储型 DoS / prompt 膨胀。
+    definition: str = Field(..., min_length=1, max_length=2000)
     mapped_class_name: str | None = Field(default=None, max_length=100)
     mapped_property_name: str | None = Field(default=None, max_length=100)
-    formula_hint: str | None = None
+    formula_hint: str | None = Field(default=None, max_length=2000)
 
 
 class TermDictionaryRead(CamelModel):

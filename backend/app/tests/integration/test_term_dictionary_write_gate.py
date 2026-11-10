@@ -11,9 +11,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,7 +32,7 @@ async def _seedClass(
     cls = OntologyClass(
         class_name=className,
         source_table=f"T_{className}",
-        valid_to=datetime(2020, 1, 1, tzinfo=timezone.utc) if expired else None,
+        valid_to=datetime(2020, 1, 1, tzinfo=UTC) if expired else None,
         properties=[
             OntologyProperty(property_name=name, data_type="STRING")
             for name in propertyNames
@@ -69,6 +68,16 @@ async def test_non_admin_cannot_delete_term(client: AsyncClient) -> None:
     )
 
     assert resp.status_code == 403
+
+
+async def test_non_admin_can_still_read_terms(client: AsyncClient) -> None:
+    """读路径不受写门禁影响：普通用户查看词典应保持 200。
+
+    stub 身份默认角色含 admin，不带角色的请求测不出这个契约 —— 必须显式 `user`。
+    """
+    resp = await client.get("/api/v1/term-dictionary", headers=USER_HEADERS)
+
+    assert resp.status_code == 200
 
 
 async def test_admin_can_create_and_delete_without_mapping(client: AsyncClient) -> None:
@@ -175,6 +184,28 @@ async def test_property_not_on_class_is_rejected(
 
     assert resp.status_code == 422
     assert "不属于" in resp.json()["error"]
+
+
+async def test_oversized_definition_is_rejected(client: AsyncClient) -> None:
+    """词条全文会注入每个用户每次计划的 prompt ⇒ 写入口必须限长（存储型 DoS）。"""
+    resp = await client.post(
+        "/api/v1/term-dictionary",
+        json=_payload(definition="巨" * 2001),
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 422
+
+
+async def test_oversized_formula_hint_is_rejected(client: AsyncClient) -> None:
+    """formulaHint 与 definition 同样进 prompt，必须独立限长（不能只测一个字段）。"""
+    resp = await client.post(
+        "/api/v1/term-dictionary",
+        json=_payload(formulaHint="公" * 2001),
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 422
 
 
 async def test_property_without_class_is_rejected(client: AsyncClient) -> None:

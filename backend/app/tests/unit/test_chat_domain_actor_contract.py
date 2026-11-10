@@ -124,9 +124,15 @@ class TestDomainCommandActor:
         return service, ontology
 
     async def test_define_passes_authenticated_user_as_actor(self) -> None:
-        """认证用户：createClass 的 actor 必须是该用户 id（不是泛化的 "chat"）。"""
+        """管理员用户：createClass 的 actor 必须是该用户 id（不是泛化的 "chat"）。
+
+        写治理数据需 admin（chat 门禁）；这里**显式**给 roles，不依赖
+        `DEFAULT_STUB_ROLES` 默认携带的 admin —— 那个默认是待收口的治理问题。
+        """
         service, ontology = await self._build()
-        user = CurrentUser(userId="alice", departments=("采购部", "财务部"))
+        user = CurrentUser(
+            userId="alice", roles=("admin",), departments=("采购部", "财务部")
+        )
         await service.processMessage(
             _dto("/define 产品"), _FakeSession(), user=user
         )
@@ -145,14 +151,14 @@ class TestDomainCommandActor:
         assert "管理员" in response.answer
 
     async def test_map_passes_authenticated_user_as_actor(self) -> None:
-        """认证用户：updateProperty 的 actor 必须是该用户 id。"""
+        """管理员用户：updateProperty 的 actor 必须是该用户 id。"""
         prop = OntologyProperty(
             id=10, class_id=1, property_name="customer_name", data_type="STRING"
         )
         customer = OntologyClass(id=1, class_name="Customer", properties=[prop])
         order = OntologyClass(id=2, class_name="Order")
         service, ontology = await self._build(classes=[customer, order])
-        user = CurrentUser(userId="bob", departments=("销售部",))
+        user = CurrentUser(userId="bob", roles=("admin",), departments=("销售部",))
         await service.processMessage(
             _dto("把 customer_name 映射到 Order"), _FakeSession(), user=user
         )
@@ -160,9 +166,9 @@ class TestDomainCommandActor:
         assert ontology.updatedPropertyActors == ["bob"]
 
     async def test_metric_passes_authenticated_user_as_actor(self) -> None:
-        """认证用户：createMetric 的 actor 必须是该用户 id。"""
+        """管理员用户：createMetric 的 actor 必须是该用户 id。"""
         service, ontology = await self._build()
-        user = CurrentUser(userId="carol", departments=("采购部",))
+        user = CurrentUser(userId="carol", roles=("admin",), departments=("采购部",))
         await service.processMessage(
             _dto("定义指标 销售额 = SUM(order.amount)"), _FakeSession(), user=user
         )

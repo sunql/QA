@@ -1649,7 +1649,11 @@ class TestAffinityStatus:
             adapterProvider=lambda datasourceId, ds: _FakeAdapter([]),
             affinityTurns=3,
         )
-        response = await service.processMessage(_dto("/metric 销售额 = SUM(x)"), _FakeSession())
+        # 写命令走 admin 门禁；必须显式带用户，否则会短路在拒绝分支，
+        # 断言就成了「拒绝响应也没有 affinityStatus」的假绿。
+        response = await service.processMessage(
+            _dto("/metric 销售额 = SUM(x)"), _FakeSession(), user=_ADMIN_USER
+        )
         assert response.affinityStatus is None
 
     async def test_clarify_returns_affinity_status_when_locked(self) -> None:

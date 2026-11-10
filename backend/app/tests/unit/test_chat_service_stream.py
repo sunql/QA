@@ -676,7 +676,10 @@ class TestAffinityStream:
         """领域命令零 LLM：done 不携带 affinityStatus。"""
         service, llm, tokenUsage, _ = _buildStreamService()
         service._affinityTurns = 3  # type: ignore[attr-defined]
-        events = await _collect(service, _dto("/metric 销售额 = SUM(x)"))
+        # 写命令走 admin 门禁；显式带用户才会真的执行领域命令（否则断言的是拒绝分支）。
+        events = await _collect(
+            service, _dto("/metric 销售额 = SUM(x)"), user=_ADMIN_USER
+        )
         done = events[-1][1]
         assert "affinityStatus" not in done or done.get("affinityStatus") is None
 

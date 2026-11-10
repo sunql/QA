@@ -153,6 +153,42 @@ async def test_non_admin_metric_name_only_still_lists_metrics(
     assert await _metricNamed(dbSession, "只有名字") is None
 
 
+async def test_non_admin_natural_language_metric_does_not_create_metric(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """自然语言「定义指标 …」与 `/metric` 同一分发点，同样必须被拦。"""
+    await _seedDatasource(dbSession)
+
+    resp = await client.post(
+        "/api/v1/chat",
+        json=_chatPayload("定义指标 自然语言越权指标 = SUM(x)"),
+        headers=USER_HEADERS,
+    )
+
+    assert resp.status_code == 200
+    assert "管理员" in resp.json()["answer"]
+    assert await _metricNamed(dbSession, "自然语言越权指标") is None
+
+
+async def test_non_admin_stream_slash_metric_does_not_create_metric(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """流式入口走的是同一个 `_handleDomainCommand`，门禁不能只覆盖非流式。"""
+    await _seedDatasource(dbSession)
+
+    resp = await client.post(
+        "/api/v1/chat/stream",
+        json=_chatPayload("/metric 流式越权指标 = SUM(x)"),
+        headers=USER_HEADERS,
+    )
+
+    assert resp.status_code == 200
+    assert "管理员" in resp.text
+    assert await _metricNamed(dbSession, "流式越权指标") is None, (
+        "非 admin 经 /chat/stream 仍写入了 ontology_metric"
+    )
+
+
 async def test_admin_slash_metric_still_creates_metric(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:

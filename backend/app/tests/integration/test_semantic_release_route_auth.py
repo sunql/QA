@@ -38,8 +38,9 @@ from fastapi.routing import APIRoute
 from app.config import getSettings
 from app.dependencies import getCurrentUser, requireAdmin
 from app.tests._route_auth_support import (
-    declaredDependencies as _declaredDependencies,
     declaresDependency as _declaresDependency,
+)
+from app.tests._route_auth_support import (
     iterRoutesWithDeps as _iterRoutesWithDeps,
 )
 

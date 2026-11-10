@@ -23,8 +23,6 @@ router**做特征范围内的独立断言——
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
@@ -33,6 +31,8 @@ from app.config import getSettings
 from app.dependencies import getCurrentUser
 from app.tests._route_auth_support import (
     declaresDependency as _declaresDependency,
+)
+from app.tests._route_auth_support import (
     iterRoutesWithDeps as _iterRoutes,
 )
 

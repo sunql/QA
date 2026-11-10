@@ -19,6 +19,23 @@ from unittest.mock import patch
 import pytest
 
 
+@pytest.fixture(scope="module", autouse=True)
+def ensureMilvusTestDatabase() -> None:
+    """确保隔离库存在：`qa_ci` 是**惰性创建**的，不能靠同分片文件先跑。
+
+    CI 分片按「排序后文件下标 mod 4」切分（见 `.github/workflows/ci.yml`），
+    而 Milvus 隔离库只在首次用到 `milvusCleanClient` 等夹具时才创建。本文件
+    不依赖那些夹具 ⇒ 一旦新增测试文件改变了分片归属，本文件可能落到一个
+    「还没有任何文件建库」的分片，upload/search 直接撞
+    `database not found[qa_ci]`（PR #116 attempt 1/2 实证）。
+    这里显式幂等建库，使本文件不依赖执行顺序。
+    """
+    from app.infrastructure.milvus_client import getDbName
+    from app.tests.milvus_isolation import ensureIsolatedDatabase
+
+    ensureIsolatedDatabase(getDbName())
+
+
 class TestRagApiUpload:
     """POST /api/v1/documents/upload 端到端。"""
 

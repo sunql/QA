@@ -37,13 +37,34 @@ async def _truncate_id_mapping(session: AsyncSession) -> None:
     await session.commit()
 
 
+@pytest.fixture
+async def seedAlignedClasses(neo4jCleanDriver):
+    """种入与 PG 完全对齐的 3 个 Class 节点，**种之前先清空**。
+
+    `neo4jSeedClasses` 只在 teardown 清仓（见 `integration/conftest.py` 注释），
+    分片里更早文件留下的节点会进入首个用例。本用例断言 `diff_count == 0`，
+    对残留零容忍 ⇒ 自己先清再种，不依赖分片顺序（PR #116 attempt 1/2 实证：
+    新增测试文件改变分片归属后，本用例收到 2 个残留节点而误红）。
+    """
+    with neo4jCleanDriver.session() as session:
+        session.run(
+            "MATCH (n) WHERE n:Class OR n:Property OR n:Metric DETACH DELETE n"
+        )
+        session.run(
+            "CREATE (c:Class {unified_id: 'obj:supplier:S001', name: '供应商'})"
+        )
+        session.run("CREATE (c:Class {id: 100, name: '物料'})")
+        session.run("CREATE (c:Class {id: 101, name: '客户'})")
+    yield neo4jCleanDriver
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 
 async def test_reconcile_reports_clean_when_both_sides_align(
-    neo4jSeedClasses, dbSession: AsyncSession
+    seedAlignedClasses, dbSession: AsyncSession
 ):
     """两侧均一致 → reconcile exit 0，diff_count=0。"""
     from scripts.reconcile_neo4j_id_mapping import reconcile
@@ -51,7 +72,7 @@ async def test_reconcile_reports_clean_when_both_sides_align(
     await _truncate_id_mapping(dbSession)
     await _seed_pg_id_mapping(dbSession, "obj:supplier:S001", "supplier")
 
-    report = await reconcile(dbSession, neo4jSeedClasses)
+    report = await reconcile(dbSession, seedAlignedClasses)
 
     assert report.diff_count == 0, f"expected 0 diff, got {report.diff_count}"
     assert report.exit_code == 0

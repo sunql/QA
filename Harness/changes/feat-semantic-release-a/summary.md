@@ -53,12 +53,13 @@
 
 ## CI 失败集合对差
 
-**权威判据 = 闸门自己创建的 `merge-gate / failure-set-diff` check-run 输出**（`129551469962`）。
+**权威判据 = 闸门自己创建的 `merge-gate / failure-set-diff` check-run 输出**（最终 head 的 check `129575551686`）。
 
 | 项 | 值 |
 |---|---|
 | 基线 run | `42661565259`（main@`849de29e` push，PR 事件派发前最新完成） |
-| PR run | `42725327459`（head `81090a44`，attempt 1） |
+| PR run | `42732848144`（最终 head `621cb1d9`，attempt 1） |
+| 前一提交的 run | `42725327459`（head `81090a44`）：失败 **142 = 142**、净新增 0、同样退出码 6 ⇒ 两次结论一致 |
 | PR run 的 main 侧底座 | `849de29e`（= 基线 head，同一棵树） |
 | 失败总数 | 基线 **142** / PR **142** |
 | 净新增 | **0** |

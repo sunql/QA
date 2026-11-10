@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app import __version__
 from app.config import getSettings
-from app.dependencies import mustChangePasswordGuard
+from app.dependencies import mustChangePasswordGuard, requireAdmin
 from app.domain.error_messages import MSG_API_DESCRIPTION
 from app.domain.exceptions import DomainError, statusForError
 from app.domain.schemas import ErrorResponse, HealthResponse
@@ -177,6 +177,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _authReason = productionAuthMisconfiguration(settings)
     if _authReason:
         logger.error("🚨 安全告警：%s", _authReason)
+    # 语义发布只读 API 下发的完整语义快照属治理 IP；stub 鉴权下 admin 可被伪造。
+    # 与上面同一处理方式：只告警，不阻塞（本地/测试依赖 stub）。
+    from app.config import semanticReleaseAuthMisconfiguration
+
+    _semanticAuthReason = semanticReleaseAuthMisconfiguration(settings)
+    if _semanticAuthReason:
+        logger.error("🚨 安全告警：%s", _semanticAuthReason)
     # config 重复字段批：jwtSecret 曾有两份声明（旧块 default="" 被占位符覆盖），
     # 漏配时静默用公开已知的开发密钥；旧注释承诺的「启动期校验」当时从未实现，此处补上。
     from app.config import jwtSecretInsecurityReason
@@ -573,6 +580,22 @@ def createApp() -> FastAPI:
             prefix="/api/v1/agent-runs",
             tags=["agent-runs"],
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
+    # 语义发布只读 API（P1b / D9）：开关关闭时整组不注册（404），
+    # import 也留在条件内；整组挂 requireAdmin —— 草稿/归档版本与 created_by/note
+    # 属于治理元数据，不对普通用户开放。
+    if settings.enableSemanticRelease:
+        from app.api.v1 import semantic_releases
+
+        app.include_router(
+            semantic_releases.router,
+            prefix="/api/v1/semantic/releases",
+            tags=["semantic-release"],
+            dependencies=[
+                Depends(mustChangePasswordGuard),
+                Depends(rateLimitDep),
+                Depends(requireAdmin),
+            ],
         )
     app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])

@@ -627,6 +627,39 @@ MSG_BUSINESS_OBJECT_DOMAIN_CONFLICT = (
 )
 
 # =============================================================================
+# feat-semantic-release P1b：语义发布 Registry
+# =============================================================================
+
+MSG_SEMANTIC_RELEASE_NOT_FOUND = "语义发布 {releaseId} 不存在"
+MSG_SEMANTIC_RELEASE_ID_INVALID = "语义发布 id 必须为 1~{max} 的整数（收到 {releaseId}）"
+MSG_SEMANTIC_RELEASE_LIMIT_RANGE = "分页参数 limit 必须在 {min}~{max} 之间（收到 {value}）"
+MSG_SEMANTIC_RELEASE_OFFSET_RANGE = "分页参数 offset 必须在 {min}~{max} 之间（收到 {value}）"
+MSG_SEMANTIC_RELEASE_DOMAIN_INVALID = "数据域编码「{code}」非法（须为 1~{max} 个字符的字符串）"
+MSG_SEMANTIC_RELEASE_STATUS_INVALID = "发布状态「{status}」非法，可选值：{allowed}"
+MSG_SEMANTIC_RELEASE_SCOPE_CONFLICT = "globalOnly=true 与 domainCode 不能同时指定"
+
+# feat-semantic-release P1b / D10：写路径（状态机 + 发布闸门）
+MSG_SEMANTIC_RELEASE_VERSION_INVALID = (
+    "发布版本号必须为 1~{max} 个字符的非空字符串（收到 {version!r}）"
+)
+MSG_SEMANTIC_RELEASE_VERSION_CONFLICT = "发布版本号「{version}」已存在（全局快照版本号唯一）"
+MSG_SEMANTIC_RELEASE_DOMAIN_NOT_FOUND = "数据域「{code}」不存在，不能按该域发布"
+MSG_SEMANTIC_RELEASE_MANIFEST_TOO_LARGE = (
+    "语义快照体量 {size} 字节超过上限 {max} 字节，拒绝落库"
+)
+MSG_SEMANTIC_RELEASE_TRANSITION_INVALID = (
+    "语义发布 {releaseId} 当前状态为 {current}，不允许转换为 {target}"
+)
+MSG_SEMANTIC_RELEASE_GATE_BLOCKED = "语义发布 {releaseId} 未通过发布闸门（{count} 项阻断）：{detail}"
+MSG_SEMANTIC_RELEASE_ACTIVE_CONFLICT = (
+    "同一作用域已存在激活发布（并发激活冲突），请重试（releaseId={releaseId}）"
+)
+MSG_SEMANTIC_RELEASE_GATE_NO_SOURCE = "指标 {metric} 没有任何源类引用（sources 为空）"
+MSG_SEMANTIC_RELEASE_GATE_NO_LANDING = "指标 {metric} 的{part}度量没有落点类（className 为空）"
+MSG_SEMANTIC_RELEASE_ACTOR_INVALID = "操作人标识必须为 1~{max} 个字符的非空字符串"
+MSG_SEMANTIC_RELEASE_DEPARTMENTS_TOO_LONG = "操作人部门信息超过 {max} 个字符，拒绝写入审计"
+
+# =============================================================================
 # 数据质量规则自动生成（dq-rule-auto-generation Task 4）
 # =============================================================================
 

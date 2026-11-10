@@ -31,13 +31,21 @@ def _sanitizeContext(context: str) -> str:
     return context.replace("<", "&lt;").replace(">", "&gt;")
 
 
+# 行分隔符全集：LLM/日志/前端对「换行」的识别并不只认 \r\n，U+2028/U+2029
+# （JS 行终止符）、U+0085（NEL）以及 \v/\f 都能把一行拆成两行。
+_LINE_SEPARATORS = ("\r", "\n", "\u2028", "\u2029", "\u0085", "\v", "\f")
+
+
 def _sanitizeSchemaField(value: str) -> str:
-    """本体配置字段（别名/描述）渲染前的净化：转义尖括号 + 折叠换行。
+    """本体配置字段（别名/描述）渲染前的净化：转义尖括号 + 折叠全部行分隔符。
 
     换行不折叠会向 schema 文本注入裸行，形成"忽略规则"式指令行；本体配置虽是
     管理员写入，但属外部输入，按同一防御标准处理。
     """
-    return _sanitizeContext(value).replace("\r", " ").replace("\n", " ")
+    sanitized = _sanitizeContext(value)
+    for sep in _LINE_SEPARATORS:
+        sanitized = sanitized.replace(sep, " ")
+    return sanitized
 
 
 # schema 前缀（数据源用户名）仅允许合法标识符，防止提示注入

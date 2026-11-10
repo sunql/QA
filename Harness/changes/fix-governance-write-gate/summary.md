@@ -78,6 +78,8 @@
 | `b0fef836` | 评审整改（MEDIUM-1/HIGH-2）：`useRestoreUser` 刷新补回身份；两个前端测试文件补 admin 种子 |
 | `35b095fe` | 第二轮评审（H2 未闭合）：关键口径摘要、间接 JOIN 提示、table= 头、FK 目标、JOIN 列、属性名/物理列名全部同标准净化 + 5 条出口级用例 |
 | `b0c5a8bb` | 第二轮评审：chat 门禁补自然语言 + `/chat/stream` 两条用例；actor 契约三条用例显式 `roles=("admin",)`；两条摘要用例改回真实执行路径；权限提示文案错字 |
+| `472f4ad0` | 第三轮评审：`data_type` 同标准净化；JOIN 行表名半边补测；摘要用例断言收敛到摘要节 |
+| `84c5cb48` | 第三轮回归：`data_type` 缺值（None）兜底，避免净化原语崩掉整段 prompt 构造 |
 | 本文件 | 文档 + `Harness/rules/权限与安全规范.md` 增「治理写入口」清单与已知缺口 |
 
 **文件**：
@@ -112,7 +114,7 @@
 | 前端 3 个写入口测试文件 | **23 passed** |
 | 前端 OntologyPage + MessageItem | **89 passed** |
 | 前端 App + useRestoreUser | **11 passed**；`npx tsc -b` exit 0 |
-| schema 相关单测（nl2sql_schema + nl2sql_service） | **208 passed**（新增 5 条渲染出口用例） |
+| schema 相关单测（nl2sql_schema + nl2sql_service） | **211 passed**（新增 8 条渲染出口/缺值用例） |
 | chat 三套单测 | **7 failed, 191 passed**（失败条目与 HEAD 基线逐条一致） |
 
 ---
@@ -128,15 +130,19 @@
 | P2：`_assertPropertyOnClass` 去掉 `class_id.in_(liveIds)` | `test_same_named_property_on_other_class_is_rejected` | **1 红** |
 | P3：存在同名的下线行就整类判死（过度拦截） | `test_mapping_ignores_tombstoned_sibling_rows` | **1 红** |
 | M4：chat 门禁条件短路为 `if False` | 5 条非 admin 拒绝用例（含新增自然语言/流式） | **5 红 / 读路径 + admin 2 绿** |
+| M5：`_renderJoinColumns` 表名半边改回裸拼 | `test_join_table_names_are_sanitized` | **1 红** |
+| M6：`data_type` 改回裸拼 | `test_data_type_is_sanitized` | **1 红** |
 
 P1–P3 均为「改一行 → 指定用例红 → 立即还原并复跑全绿」的受控变异，用来证明三条谓词
 用例各自钉住一个分支，而不是同一分支的重复断言。**注**：三条用例是**单独**运行时各 1 红；
 跑全量时 P1/P2 会连带让依赖同一谓词的用例一起红，结论不变。
 M4 证明新增的两条入口用例真正钉在门禁上，而不是恰好被其它分支拦下。
 
-H2 第二轮（`35b095fe`）的 5 条出口用例按 TDD 先写后修：改前 **5 红**、改后 **5 绿**，
-每条对应一个独立渲染出口（摘要限定名 / 间接 JOIN 提示 / table= 头 + FK 目标 /
-JOIN 列 / 属性名 + 物理列名）。
+H2 第二、三轮（`35b095fe` / `472f4ad0` / `84c5cb48`）的 8 条出口用例按 TDD 先写后修：
+改前逐条红、改后全绿，覆盖摘要限定名 / 间接 JOIN 提示 / `table=` 头 + FK 目标 /
+JOIN 列表名 / JOIN 行表名 / 属性名 + 物理列名 / `data_type`。M5、M6 进一步证明
+JOIN 表名半边与 `data_type` 各自有独立用例钉住（此前表名半边会被漏测）。
+`data_type` 缺值（None）另有 1 条兜底用例：该回归曾在第三轮引入并由 11 条既有用例当场打红。
 
 ---
 
@@ -211,6 +217,16 @@ code-reviewer 与 security-reviewer 各自独立评审后**收敛到同一条 HI
 | 14 | LOW | 权限提示「请联系统管理员」缺字 | 已修（`b0c5a8bb`）：「请联系系统管理员」 |
 | 15 | LOW | §5 的 P1/P2 标「1 红」只在单条运行时成立 | 已在 §5 加注说明（结论不变） |
 | 16 | HIGH（安全，范围外） | 类/属性/导入的 REST 写路由仍只要求登录：`POST /ontology/classes`、`POST /ontology/properties`、`PUT/DELETE /ontology/properties/{id}`、`POST /datasources/{id}/import`；且 `createClass` / `createProperty` / `updateProperty` 连 owner ACL 都没有 | **延后**（见 §8.12）：本批批准范围只有词条 + 指标；收口到 admin 会改变 owner-ACL 语义，属产品决策，规则文档已显式标注「已知缺口」，不再宣称 REST 全量同口径 |
+
+### 第三轮（scoped 复审）
+
+| # | 级别 | 发现 | 处置 |
+|---|---|---|---|
+| 17 | MEDIUM | 同一 H2 通道仍有 `prop.data_type` 裸拼（无校验字段） | 已修（`472f4ad0`）：同标准净化 + 用例 |
+| 18 | MEDIUM | JOIN 行「表名半边」无用例，去掉净化无人发现 | 已修（`472f4ad0`）：新增 join 表名带换行的用例 + 变异 M5 |
+| 19 | LOW | 摘要用例的负断言跨段，不是逐出口隔离 | 已修（`472f4ad0`）：断言收敛到摘要节 |
+| 20 | LOW/INFO | `cls.class_name or ""` 实际不可达（None 会在排序/类头先崩） | 保留作防御；不构成掩盖缺陷（ORM 列为 NOT NULL） |
+| 21 | 回归 | `data_type` 净化对 None 崩溃（11 条既有用例当场打红） | 已修（`84c5cb48`）：`or ""` 兜底 + 1 条用例 |
 
 ---
 

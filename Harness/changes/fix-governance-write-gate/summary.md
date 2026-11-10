@@ -80,6 +80,7 @@
 | `b0c5a8bb` | 第二轮评审：chat 门禁补自然语言 + `/chat/stream` 两条用例；actor 契约三条用例显式 `roles=("admin",)`；两条摘要用例改回真实执行路径；权限提示文案错字 |
 | `472f4ad0` | 第三轮评审：`data_type` 同标准净化；JOIN 行表名半边补测；摘要用例断言收敛到摘要节 |
 | `84c5cb48` | 第三轮回归：`data_type` 缺值（None）兜底，避免净化原语崩掉整段 prompt 构造 |
+| `c21ede75` | 第三轮评审（LOW）：`_sanitizeSchemaField` 折叠**全部** Unicode 行分隔符（U+2028/U+2029/U+0085/`\v`/`\f`，此前只折叠 `\r\n`）+ 1 条用例 |
 | 本文件 | 文档 + `Harness/rules/权限与安全规范.md` 增「治理写入口」清单与已知缺口 |
 
 **文件**：
@@ -114,7 +115,7 @@
 | 前端 3 个写入口测试文件 | **23 passed** |
 | 前端 OntologyPage + MessageItem | **89 passed** |
 | 前端 App + useRestoreUser | **11 passed**；`npx tsc -b` exit 0 |
-| schema 相关单测（nl2sql_schema + nl2sql_service） | **211 passed**（新增 8 条渲染出口/缺值用例） |
+| schema 相关单测（nl2sql_schema + nl2sql_service） | **212 passed**（24 + 188；新增 9 条渲染出口/缺值/Unicode 分隔符用例） |
 | chat 三套单测 | **7 failed, 191 passed**（失败条目与 HEAD 基线逐条一致） |
 
 ---
@@ -132,6 +133,7 @@
 | M4：chat 门禁条件短路为 `if False` | 5 条非 admin 拒绝用例（含新增自然语言/流式） | **5 红 / 读路径 + admin 2 绿** |
 | M5：`_renderJoinColumns` 表名半边改回裸拼 | `test_join_table_names_are_sanitized` | **1 红** |
 | M6：`data_type` 改回裸拼 | `test_data_type_is_sanitized` | **1 红** |
+| M7：`_LINE_SEPARATORS` 退回只含 `\r`/`\n` | `test_unicode_line_separators_are_folded` | **1 红 / 其余 23 绿** |
 
 P1–P3 均为「改一行 → 指定用例红 → 立即还原并复跑全绿」的受控变异，用来证明三条谓词
 用例各自钉住一个分支，而不是同一分支的重复断言。**注**：三条用例是**单独**运行时各 1 红；
@@ -143,6 +145,8 @@ H2 第二、三轮（`35b095fe` / `472f4ad0` / `84c5cb48`）的 8 条出口用�
 JOIN 列表名 / JOIN 行表名 / 属性名 + 物理列名 / `data_type`。M5、M6 进一步证明
 JOIN 表名半边与 `data_type` 各自有独立用例钉住（此前表名半边会被漏测）。
 `data_type` 缺值（None）另有 1 条兜底用例：该回归曾在第三轮引入并由 11 条既有用例当场打红。
+Unicode 分隔符（`c21ede75`）同样先写用例见红（`1 failed, 23 passed`）再改绿，M7 证明该用例
+真的钉在 `_LINE_SEPARATORS` 全集上。
 
 ---
 
@@ -227,6 +231,8 @@ code-reviewer 与 security-reviewer 各自独立评审后**收敛到同一条 HI
 | 19 | LOW | 摘要用例的负断言跨段，不是逐出口隔离 | 已修（`472f4ad0`）：断言收敛到摘要节 |
 | 20 | LOW/INFO | `cls.class_name or ""` 实际不可达（None 会在排序/类头先崩） | 保留作防御；不构成掩盖缺陷（ORM 列为 NOT NULL） |
 | 21 | 回归 | `data_type` 净化对 None 崩溃（11 条既有用例当场打红） | 已修（`84c5cb48`）：`or ""` 兜底 + 1 条用例 |
+| 22 | LOW | 换行折叠不完整：只折叠 `\r`/`\n`，U+2028/U+2029/U+0085/`\v`/`\f` 仍可开出裸指令行 | 已修（`c21ede75`）：`_LINE_SEPARATORS` 全集逐一折叠 + 用例 + 变异 M7 |
+| 23 | LOW（相邻，延后） | `_formatSampleValue` 对 DB 采样值同样只整理引号/尖括号，未折叠行分隔符 | **延后**（见 §8.13）：采样值来自真实库数据而非治理配置，走的是另一条输入通道，需单独评估 |
 
 ---
 
@@ -257,3 +263,7 @@ code-reviewer 与 security-reviewer 各自独立评审后**收敛到同一条 HI
     ① 全体 `requireAdmin`（与指标一致，但会剥夺非 admin owner 的既有编辑能力）；
     ② 给 `ontology_class` 之外的写面补齐 owner ACL（需定义属性的 owner 归属）。
     属产品决策，需单独确认后再动；在那之前**不要**把「chat 已收口」表述成写面全收口。
+13. **`_formatSampleValue` 未折叠行分隔符（评审 LOW）**：值域采样值来自**真实库数据**，
+    当前只做截断 + 单引号加倍 + 尖括号转义，U+2028 等分隔符仍可把 schema 行拆开。与本批
+    `_sanitizeSchemaField`（治理配置）是不同输入通道、不同威胁模型（库数据由业务方写），
+    未纳入本次收口；如要统一标准，建议单独改并补用例，避免顺手改动影响 SQL 字面量语义。

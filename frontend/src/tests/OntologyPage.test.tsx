@@ -5,6 +5,8 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import OntologyPage from "../pages/OntologyPage";
+import { useAuthStore } from "../stores/authStore";
+import type { AuthMeRead } from "../types/auth";
 import type {
   OntologyClass,
   OntologyProperty,
@@ -117,9 +119,24 @@ function renderPage() {
 // Tests
 // =============================================================================
 
+/** 指标写入口限 admin（2026-11-10）：默认按管理员渲染，保证写入口行为可测。 */
+const ADMIN_USER: AuthMeRead = {
+  id: 1,
+  username: "admin",
+  displayName: "管理员",
+  email: null,
+  enabled: true,
+  mustChangePassword: false,
+  roles: ["admin"],
+  organizations: [],
+  tenantId: "default",
+  lastLoginAt: null,
+};
+
 describe("OntologyPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useAuthStore.setState({ user: ADMIN_USER });
     api.listClasses.mockResolvedValue([mockClass]);
     api.listMetrics.mockResolvedValue([mockMetric]);
     api.listAllProperties.mockResolvedValue([mockProperty]);

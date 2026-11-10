@@ -22,10 +22,31 @@ vi.mock("../hooks/useLlmModels", () => ({
 }));
 
 import MessageItem from "../components/chat/MessageItem";
+import { useAuthStore } from "../stores/authStore";
 import { useChatStore } from "../stores/chatStore";
 import { useThemeStore } from "../stores/themeStore";
 import { DARK_TOKEN, LIGHT_TOKEN } from "../theme/tokens";
+import type { AuthMeRead } from "../types/auth";
 import type { ChatMessage } from "../types/chat";
+
+// 错误消息上的「添加到术语词典」入口限 admin（2026-11-10）。模块级设默认，
+// 理由同上面的 useLlmModelsMock：任何一个 describe 先跑都不该拿到 null 用户。
+const ADMIN_USER: AuthMeRead = {
+  id: 1,
+  username: "admin",
+  displayName: "管理员",
+  email: null,
+  enabled: true,
+  mustChangePassword: false,
+  roles: ["admin"],
+  organizations: [],
+  tenantId: "default",
+  lastLoginAt: null,
+};
+
+beforeEach(() => {
+  useAuthStore.setState({ user: ADMIN_USER });
+});
 
 // ChartRenderer 用替身：本文件测的是「何时渲染图表/骨架」的门控与时序，
 // 不是 ChartRenderer 内部（那在 ChartRenderer.test.tsx）。替身让骨架与图表

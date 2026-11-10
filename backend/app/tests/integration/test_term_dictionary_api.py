@@ -4,9 +4,17 @@
 - GET    /api/v1/term-dictionary
 - POST   /api/v1/term-dictionary
 - DELETE /api/v1/term-dictionary/{id}
+
+写入口自 fix-governance-write-gate 起限 admin；映射类/属性必须在本体库中存世。
 """
 
 from __future__ import annotations
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.domain.models import OntologyClass, OntologyProperty
+
+ADMIN_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
 
 
 class TestTermDictionaryApi:
@@ -15,7 +23,16 @@ class TestTermDictionaryApi:
         assert resp.status_code == 200
         assert resp.json() == []
 
-    async def test_create_and_list_term(self, client) -> None:
+    async def test_create_and_list_term(
+        self, client, dbSession: AsyncSession
+    ) -> None:
+        cls = OntologyClass(class_name="PRECEIPTD", source_table="ZJTH.PRECEIPTD")
+        cls.properties = [
+            OntologyProperty(property_name="收货数量", data_type="DECIMAL")
+        ]
+        dbSession.add(cls)
+        await dbSession.commit()
+
         payload = {
             "term": "占比",
             "definition": "某值占总量的比例",
@@ -23,7 +40,9 @@ class TestTermDictionaryApi:
             "mappedPropertyName": "收货数量",
             "formulaHint": "占比 = SUM(收货数量) / SUM(SUM(收货数量)) OVER ()",
         }
-        resp = await client.post("/api/v1/term-dictionary", json=payload)
+        resp = await client.post(
+            "/api/v1/term-dictionary", json=payload, headers=ADMIN_HEADERS
+        )
         assert resp.status_code == 201
         body = resp.json()
         assert body["term"] == "占比"
@@ -31,7 +50,7 @@ class TestTermDictionaryApi:
         assert body["mappedClassName"] == "PRECEIPTD"
         assert body["mappedPropertyName"] == "收货数量"
         assert body["formulaHint"] == "占比 = SUM(收货数量) / SUM(SUM(收货数量)) OVER ()"
-        assert body["createdBy"] == "anonymous"
+        assert body["createdBy"] == "test-admin"
         assert body["id"] is not None
 
         listing = await client.get("/api/v1/term-dictionary")
@@ -41,20 +60,30 @@ class TestTermDictionaryApi:
 
     async def test_create_duplicate_term_conflict(self, client) -> None:
         payload = {"term": "占比", "definition": "某值占总量的比例"}
-        first = await client.post("/api/v1/term-dictionary", json=payload)
+        first = await client.post(
+            "/api/v1/term-dictionary", json=payload, headers=ADMIN_HEADERS
+        )
         assert first.status_code == 201
-        dup = await client.post("/api/v1/term-dictionary", json=payload)
+        dup = await client.post(
+            "/api/v1/term-dictionary", json=payload, headers=ADMIN_HEADERS
+        )
         assert dup.status_code == 422
 
     async def test_delete_term(self, client) -> None:
         payload = {"term": "实际到货", "definition": "真正入库的数量"}
-        created = await client.post("/api/v1/term-dictionary", json=payload)
+        created = await client.post(
+            "/api/v1/term-dictionary", json=payload, headers=ADMIN_HEADERS
+        )
         term_id = created.json()["id"]
-        resp = await client.delete(f"/api/v1/term-dictionary/{term_id}")
+        resp = await client.delete(
+            f"/api/v1/term-dictionary/{term_id}", headers=ADMIN_HEADERS
+        )
         assert resp.status_code == 204
         listing = await client.get("/api/v1/term-dictionary")
         assert listing.json() == []
 
     async def test_delete_nonexistent_term_not_found(self, client) -> None:
-        resp = await client.delete("/api/v1/term-dictionary/999999")
+        resp = await client.delete(
+            "/api/v1/term-dictionary/999999", headers=ADMIN_HEADERS
+        )
         assert resp.status_code == 404

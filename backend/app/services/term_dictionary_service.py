@@ -7,13 +7,20 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import NotFoundError, ValidationError
-from app.domain.models import TermDictionary
+from app.domain.models import OntologyClass, OntologyProperty, TermDictionary
 from app.domain.schemas import TermDictionaryCreate
-from app.services.messages_zh import MSG_TERM_DICT_NOT_FOUND, MSG_TERM_DICT_TERM_EXISTS
+from app.services.messages_zh import (
+    MSG_TERM_DICT_CLASS_EXPIRED,
+    MSG_TERM_DICT_CLASS_NOT_FOUND,
+    MSG_TERM_DICT_NOT_FOUND,
+    MSG_TERM_DICT_PROPERTY_NOT_FOUND,
+    MSG_TERM_DICT_PROPERTY_REQUIRES_CLASS,
+    MSG_TERM_DICT_TERM_EXISTS,
+)
 from app.services.nl2sql_service import _sanitizeSchemaField
 
 
@@ -48,9 +55,72 @@ class TermDictionaryService:
         result = await session.execute(select(TermDictionary).order_by(TermDictionary.id))
         return list(result.scalars().all())
 
+    async def _validateMappings(
+        self, session: AsyncSession, dto: TermDictionaryCreate
+    ) -> None:
+        """写入前校验映射指向的类/属性存活。
+
+        类名/属性名是裸字符串（无 FK），本体 tombstone 不会带着词条走 ⇒ 只能在写入时
+        把关。规则：
+        - 两个映射都为空：放行（自由文本词条，只解释业务习惯用语）；
+        - 只给属性不给类：拒绝（属性挂在类上，脱离类无法校验）；
+        - 类必须存在且 `valid_to IS NULL`（已下线的类与拼错类名给不同文案）；
+        - 给了属性则必须在**该类的存活行**之间有同名属性（属性名或物理列名任一命中）。
+        """
+        className = dto.mapped_class_name
+        propertyName = dto.mapped_property_name
+        if not className:
+            if propertyName:
+                raise ValidationError(MSG_TERM_DICT_PROPERTY_REQUIRES_CLASS)
+            return
+        liveIds = list(
+            (
+                await session.execute(
+                    select(OntologyClass.id).where(
+                        OntologyClass.class_name == className,
+                        OntologyClass.valid_to.is_(None),
+                    )
+                )
+            ).scalars()
+        )
+        if not liveIds:
+            anyRow = (
+                await session.execute(
+                    select(OntologyClass.id).where(OntologyClass.class_name == className)
+                )
+            ).first()
+            raise ValidationError(
+                (MSG_TERM_DICT_CLASS_EXPIRED if anyRow else MSG_TERM_DICT_CLASS_NOT_FOUND).format(
+                    className=className
+                )
+            )
+        if not propertyName:
+            return
+        # 属性名或物理列名任一命中即可：词条的消费方（report_semantic_context）按
+        # 物理列匹配列名，计划 prompt 里 LLM 也写物理列，所以既有数据普遍写 source_column
+        # （如「供货量」→ DWD_GOODS_RECEIPT_DTL / RCV_QTY_PUU）；也允许写中文属性名。
+        matched = (
+            await session.execute(
+                select(OntologyProperty.id).where(
+                    OntologyProperty.class_id.in_(liveIds),
+                    or_(
+                        OntologyProperty.property_name == propertyName,
+                        OntologyProperty.source_column == propertyName,
+                    ),
+                )
+            )
+        ).first()
+        if matched is None:
+            raise ValidationError(
+                MSG_TERM_DICT_PROPERTY_NOT_FOUND.format(
+                    propertyName=propertyName, className=className
+                )
+            )
+
     async def createTerm(
         self, session: AsyncSession, dto: TermDictionaryCreate, *, createdBy: str | None = None
     ) -> TermDictionary:
+        await self._validateMappings(session, dto)
         existing = await session.execute(
             select(TermDictionary).where(TermDictionary.term == dto.term)
         )

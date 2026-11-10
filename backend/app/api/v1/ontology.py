@@ -23,7 +23,7 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import CurrentUser, getCurrentUser, getDb
+from app.dependencies import CurrentUser, getCurrentUser, getDb, requireAdmin
 from app.domain.error_messages import (
     MSG_PARAM_EMBEDDING_VECTOR,
     MSG_PARAM_INCLUDE_EXPIRED_ONTOLOGY,
@@ -317,7 +317,7 @@ async def listMetrics(
 @router.post("/metrics", response_model=OntologyMetricRead, status_code=status.HTTP_201_CREATED)
 async def createMetric(
     dto: OntologyMetricCreate,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(requireAdmin),
     db: AsyncSession = Depends(getDb),
 ) -> OntologyMetricRead:
     """创建本体指标。"""
@@ -343,7 +343,7 @@ async def getMetric(
 async def updateMetric(
     id: int,
     dto: OntologyMetricUpdate,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(requireAdmin),
     db: AsyncSession = Depends(getDb),
 ) -> OntologyMetricRead:
     """更新本体指标。"""
@@ -358,7 +358,7 @@ async def updateMetric(
 @router.delete("/metrics/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteMetric(
     id: int,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(requireAdmin),
     db: AsyncSession = Depends(getDb),
 ) -> None:
     """删除本体指标。"""

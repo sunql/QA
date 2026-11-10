@@ -42,6 +42,9 @@ from app.infrastructure.security.crypto import encryptApiKey
 
 pytestmark = pytest.mark.asyncio
 
+# 写入口自 fix-governance-write-gate 起限 admin。
+ADMIN_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
+
 
 # 与 dev 环境实际写入的 3 条术语一致；id 由 DB 自增，测试断言按 term 内容
 SUPPLY_QTY_TERMS: list[dict] = [
@@ -216,8 +219,21 @@ def _imaterialProperties() -> list[OntologyProperty]:
     ]
 
 
+def _supplierProperties() -> list[OntologyProperty]:
+    """DIM_SUPPLIER 子集：BPSNUM_0(供应商代码)。
+
+    TERMS 里有「外协供应商」→ DIM_SUPPLIER / BPSNUM_0 的映射；写入口校验
+    映射引用完整性后，类与物理列必须在库中存世，否则种词条即 422。
+    """
+    return [
+        OntologyProperty(
+            property_name="供应商代码", data_type="STRING", source_column="BPSNUM_0"
+        ),
+    ]
+
+
 async def _seed(session) -> tuple[LlmConfig, DataSource]:
-    """写入模型配置、数据源、DWD_GOODS_RECEIPT_DTL + DIM_IMATERIAL 本体类。"""
+    """写入模型配置、数据源、DWD_GOODS_RECEIPT_DTL + DIM_IMATERIAL + DIM_SUPPLIER 本体类。"""
     config = LlmConfig(
         model_name="test-model",
         provider="openai",
@@ -247,7 +263,13 @@ async def _seed(session) -> tuple[LlmConfig, DataSource]:
         source_table="ZJTH.DIM_IMATERIAL",
         properties=_imaterialProperties(),
     )
-    session.add_all([config, ds, receipt, imaterial])
+    supplier = OntologyClass(
+        class_name="DIM_SUPPLIER",
+        class_alias="供应商主数据",
+        source_table="ZJTH.DIM_SUPPLIER",
+        properties=_supplierProperties(),
+    )
+    session.add_all([config, ds, receipt, imaterial, supplier])
     await session.commit()
     await session.refresh(config)
     await session.refresh(ds)
@@ -295,7 +317,9 @@ def _installFakes(monkeypatch, config: LlmConfig, *, planJson: str | None = None
 async def _seedTerms(client, terms: list[dict]) -> None:
     """经真实 API 写入术语词典条目。"""
     for t in terms:
-        resp = await client.post("/api/v1/term-dictionary", json=t)
+        resp = await client.post(
+            "/api/v1/term-dictionary", json=t, headers=ADMIN_HEADERS
+        )
         assert resp.status_code == 201, resp.text
 
 
@@ -304,7 +328,9 @@ async def _clearTerms(client) -> None:
     resp = await client.get("/api/v1/term-dictionary")
     assert resp.status_code == 200
     for term in resp.json():
-        delResp = await client.delete(f"/api/v1/term-dictionary/{term['id']}")
+        delResp = await client.delete(
+            f"/api/v1/term-dictionary/{term['id']}", headers=ADMIN_HEADERS
+        )
         assert delResp.status_code == 204, delResp.text
 
 

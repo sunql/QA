@@ -98,6 +98,12 @@ MSG_CHITCHAT_GREETING = (
 # 领域命令：DEFINE / MAP / METRIC
 # =============================================================================
 
+# 领域命令写入口的权限提示（/metric、/define、/map 会写本体/指标等治理数据）
+MSG_DOMAIN_WRITE_ADMIN_REQUIRED = (
+    "该操作会修改本体类/属性/指标等治理数据，仅管理员可执行。"
+    "如需调整请联系系统管理员，或改用查询方式提问。"
+)
+
 # 引导用户正确使用「定义指标」自然语言命令
 MSG_DEFINE_METRIC_GUIDE_PREFIX = "请使用格式：定义指标 指标名 = 公式。例如："
 MSG_DEFINE_METRIC_GUIDE_EXAMPLE = "定义指标 销售额 = SUM(order.amount)"
@@ -388,6 +394,13 @@ MSG_NL2SQL_DENOMINATOR_CONTRACT_WARNING = (
 
 MSG_TERM_DICT_TERM_EXISTS = "术语「{term}」已存在"
 MSG_TERM_DICT_NOT_FOUND = "术语 id={id} 不存在"
+# 写入口引用完整性（fix-governance-write-gate）：类/属性必须是存活本体。
+MSG_TERM_DICT_CLASS_NOT_FOUND = "术语映射的本体类不存在：{className}"
+MSG_TERM_DICT_CLASS_EXPIRED = "术语映射的本体类已下线：{className}（请改用当前存活的类名）"
+MSG_TERM_DICT_PROPERTY_NOT_FOUND = (
+    "术语映射的属性「{propertyName}」不属于本体类 {className}（按属性名或物理列名匹配）"
+)
+MSG_TERM_DICT_PROPERTY_REQUIRES_CLASS = "映射属性时必须同时指定映射类（mappedClassName）"
 
 # ---- Wiki 知识管理（feat-wiki-knowledge）----
 MSG_WIKI_PAGE_NOT_FOUND = "知识条目「{pageId}」不存在"

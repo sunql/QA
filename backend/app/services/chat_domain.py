@@ -61,6 +61,7 @@ from app.services.messages_zh import (
     MSG_DEFINE_CLASS_GUIDE_PREFIX,
     MSG_DEFINE_METRIC_GUIDE_EXAMPLE,
     MSG_DEFINE_METRIC_GUIDE_PREFIX,
+    MSG_DOMAIN_WRITE_ADMIN_REQUIRED,
     MSG_GRAPH_TRAVERSAL_UNAVAILABLE,
     MSG_MAP_PROPERTY_GUIDE,
     MSG_MAP_PROPERTY_NOT_FOUND,
@@ -84,6 +85,11 @@ from app.services.prompts_zh import PROMPT_CLARIFY_SYSTEM as _CLARIFY_SYSTEM_PRO
 
 # 匿名链路（无 CurrentUser）写本体时的 actor 归属：与 /metric 路径同口径。
 _ANONYMOUS_ACTOR = "chat"
+
+
+def _isAdmin(user: CurrentUser | None) -> bool:
+    """与 `app.dependencies.requireAdmin` 同口径的角色判断（chat 层无 HTTP 依赖）。"""
+    return user is not None and "admin" in (user.roles or ())
 
 
 class DomainCommandMixin:
@@ -150,6 +156,18 @@ class DomainCommandMixin:
         user：B5 起透传调用方（/metric 自动建 DRAFT KPI 户头的 created_by / 审计
         actor 归属），与 _handleAgentRun 的 actor 透传同约定；匿名链路传 None。
         """
+        # 治理写入口：三条命令最终调用 OntologyService 的 create/update，必须与
+        # 路由层 requireAdmin 同口径 —— 否则任何登录用户都能经 POST /api/v1/chat
+        # （只要求 getCurrentUser）绕过 /ontology/metrics 的 admin 门禁。
+        # METRIC 无公式时走列举（读），不拦。
+        writesGovernanceData = result.intent in (IntentType.DEFINE, IntentType.MAP) or (
+            result.intent == IntentType.METRIC
+            and bool(result.metric and result.formula)
+        )
+        if writesGovernanceData and not _isAdmin(user):
+            return ChatResponse(
+                answer=MSG_DOMAIN_WRITE_ADMIN_REQUIRED, intent=result.intent.value
+            )
         if result.intent == IntentType.DEFINE:
             if result.target and not result.metric:
                 return await self._handleDefineClass(session, dto, result, user=user)

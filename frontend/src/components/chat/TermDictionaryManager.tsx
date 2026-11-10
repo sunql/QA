@@ -3,12 +3,15 @@ import { Button, Drawer, Popconfirm, Table, Typography, message } from "antd";
 import { deleteTerm, listTerms } from "../../api/termDictionary";
 import type { TermDictionary } from "../../types/termDictionary";
 import { useTranslation } from "../../i18n";
+import { useAuthStore } from "../../stores/authStore";
 
 const { Text } = Typography;
 
 /** 术语词典管理抽屉：列出全部术语 + 删除。挂到 ChatPage 工具栏。 */
 export default function TermDictionaryManager() {
   const { t } = useTranslation();
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = (user?.roles ?? []).includes("admin");
   const [open, setOpen] = useState(false);
   const [terms, setTerms] = useState<TermDictionary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -77,21 +80,26 @@ export default function TermDictionaryManager() {
               render: (v: string | null) =>
                 v ? <Text code>{v}</Text> : <Text type="secondary">{t("common.emDash")}</Text>,
             },
-            {
-              title: t("common.delete"),
-              key: "actions",
-              width: 80,
-              render: (_: unknown, row: TermDictionary) => (
-                <Popconfirm
-                  title={t("termDictionary.deleteConfirm")}
-                  onConfirm={() => handleDelete(row.id)}
-                >
-                  <Button danger size="small">
-                    {t("common.delete")}
-                  </Button>
-                </Popconfirm>
-              ),
-            },
+            // 删除限 admin（后端 403 兜底）：非管理员只看只读列表。
+            ...(isAdmin
+              ? [
+                  {
+                    title: t("common.delete"),
+                    key: "actions",
+                    width: 80,
+                    render: (_: unknown, row: TermDictionary) => (
+                      <Popconfirm
+                        title={t("termDictionary.deleteConfirm")}
+                        onConfirm={() => handleDelete(row.id)}
+                      >
+                        <Button danger size="small">
+                          {t("common.delete")}
+                        </Button>
+                      </Popconfirm>
+                    ),
+                  },
+                ]
+              : []),
           ]}
         />
       </Drawer>

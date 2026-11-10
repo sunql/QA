@@ -63,6 +63,7 @@ import DataDomainPage from "./pages/DataDomainPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
 import { setMessageApi } from "./api/client";
+import { useRestoreUser } from "./hooks/useRestoreUser";
 
 export default function App() {
   // 把 antd ``App`` 提供的 message 实例注入到 httpClient 拦截器。
@@ -73,6 +74,10 @@ export default function App() {
   useEffect(() => {
     setMessageApi(message);
   }, [message]);
+
+  // 刷新恢复：persist 只存 token，不存 user（partialize）⇒ 直接刷新后
+  // `user === null`，所有按角色收敛的写入口（词条/指标等）都会消失。
+  useRestoreUser();
   return (
     <Routes>
       {/* 公开路由：登录页不进 AppLayout */}

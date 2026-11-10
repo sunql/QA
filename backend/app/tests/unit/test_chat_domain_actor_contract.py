@@ -15,8 +15,10 @@
    的签名——真实实现里**必填**的参数，替身必须存在**且同样必填**（既不许
    更宽松，也不许更严格）；同时钉住"被比较的方法集合非空"（防空集合恒真）。
 2. **行为守卫**（`TestDomainCommandActor`）：三条领域命令必须把 actor 传下去；
-   认证用户传 `userId`，匿名传 `"chat"`。配**反向守卫**：证明真实实现缺 actor
-   立即 TypeError（否则"行为守卫"也可能因为别的原因而绿）。
+   认证用户传 `userId`。匿名调用被治理写门禁拦下（2026-11-10 起，见
+   `test_chat_domain_write_gate.py`），代码里 `"chat"` 兜底串仅作防御。
+   配**反向守卫**：证明真实实现缺 actor 立即 TypeError（否则"行为守卫"也可能
+   因为别的原因而绿）。
 
 护栏：守卫断言的都是"**是谁**拒的 / **传了什么**"，不是"结果等于空/非空"
 这类恒真口径。
@@ -49,8 +51,6 @@ from app.tests.unit.test_chat_service import (
 
 # 替身必须保真覆盖的真实方法（领域命令写路径）
 _FIDELITY_METHODS: tuple[str, ...] = ("createClass", "createMetric", "updateProperty")
-
-_ANONYMOUS_ACTOR = "chat"
 
 
 def _requiredParams(sig: inspect.Signature) -> dict[str, inspect.Parameter]:
@@ -124,31 +124,41 @@ class TestDomainCommandActor:
         return service, ontology
 
     async def test_define_passes_authenticated_user_as_actor(self) -> None:
-        """认证用户：createClass 的 actor 必须是该用户 id（不是泛化的 "chat"）。"""
+        """管理员用户：createClass 的 actor 必须是该用户 id（不是泛化的 "chat"）。
+
+        写治理数据需 admin（chat 门禁）；这里**显式**给 roles，不依赖
+        `DEFAULT_STUB_ROLES` 默认携带的 admin —— 那个默认是待收口的治理问题。
+        """
         service, ontology = await self._build()
-        user = CurrentUser(userId="alice", departments=("采购部", "财务部"))
+        user = CurrentUser(
+            userId="alice", roles=("admin",), departments=("采购部", "财务部")
+        )
         await service.processMessage(
             _dto("/define 产品"), _FakeSession(), user=user
         )
         assert ontology.createdClasses, "createClass 未被调用（断言对象为空 ⇒ 无效断言）"
         assert ontology.createdClassActors == ["alice"]
 
-    async def test_define_anonymous_falls_back_to_chat_actor(self) -> None:
-        """匿名链路（无 CurrentUser）：actor 退化为固定串，不能是 None（审计必填）。"""
+    async def test_define_anonymous_is_denied_before_writing(self) -> None:
+        """匿名链路（无 CurrentUser）：治理写命令被门禁拦下，createClass 一次都不调。
+
+        匿名 actor 兜底串（"chat"）在代码里仍保留作防御，但正常情况下永远走不到 ——
+        `POST /chat` 必然带登录用户，无用户只可能来自内部直调。
+        """
         service, ontology = await self._build()
-        await service.processMessage(_dto("/define 产品"), _FakeSession())
-        assert ontology.createdClasses
-        assert ontology.createdClassActors == [_ANONYMOUS_ACTOR]
+        response = await service.processMessage(_dto("/define 产品"), _FakeSession())
+        assert ontology.createdClasses == [], "匿名的 /define 仍写入了本体类"
+        assert "管理员" in response.answer
 
     async def test_map_passes_authenticated_user_as_actor(self) -> None:
-        """认证用户：updateProperty 的 actor 必须是该用户 id。"""
+        """管理员用户：updateProperty 的 actor 必须是该用户 id。"""
         prop = OntologyProperty(
             id=10, class_id=1, property_name="customer_name", data_type="STRING"
         )
         customer = OntologyClass(id=1, class_name="Customer", properties=[prop])
         order = OntologyClass(id=2, class_name="Order")
         service, ontology = await self._build(classes=[customer, order])
-        user = CurrentUser(userId="bob", departments=("销售部",))
+        user = CurrentUser(userId="bob", roles=("admin",), departments=("销售部",))
         await service.processMessage(
             _dto("把 customer_name 映射到 Order"), _FakeSession(), user=user
         )
@@ -156,9 +166,9 @@ class TestDomainCommandActor:
         assert ontology.updatedPropertyActors == ["bob"]
 
     async def test_metric_passes_authenticated_user_as_actor(self) -> None:
-        """认证用户：createMetric 的 actor 必须是该用户 id。"""
+        """管理员用户：createMetric 的 actor 必须是该用户 id。"""
         service, ontology = await self._build()
-        user = CurrentUser(userId="carol", departments=("采购部",))
+        user = CurrentUser(userId="carol", roles=("admin",), departments=("采购部",))
         await service.processMessage(
             _dto("定义指标 销售额 = SUM(order.amount)"), _FakeSession(), user=user
         )
@@ -168,6 +178,9 @@ class TestDomainCommandActor:
     async def test_define_intent_is_still_class_define(self) -> None:
         """反向守卫：上面的 actor 断言必须建立在**真的走了 /define 路径**上。"""
         service, ontology = await self._build()
-        response = await service.processMessage(_dto("/define 产品"), _FakeSession())
+        user = CurrentUser(userId="dave", roles=("admin",))
+        response = await service.processMessage(
+            _dto("/define 产品"), _FakeSession(), user=user
+        )
         assert response.intent == IntentType.DEFINE.value
         assert ontology.createdMetrics == [], "/define 不应顺带建指标"

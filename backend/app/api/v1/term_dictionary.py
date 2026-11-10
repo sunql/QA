@@ -11,7 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import CurrentUser, getCurrentUser, getDb
+from app.dependencies import CurrentUser, getCurrentUser, getDb, requireAdmin
 from app.domain.schemas import TermDictionaryCreate, TermDictionaryRead
 from app.services.term_dictionary_service import TermDictionaryService
 
@@ -29,10 +29,13 @@ async def listTerms(db: AsyncSession = Depends(getDb)) -> list[TermDictionaryRea
 @router.post("", response_model=TermDictionaryRead, status_code=status.HTTP_201_CREATED)
 async def createTerm(
     dto: TermDictionaryCreate,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(requireAdmin),
     db: AsyncSession = Depends(getDb),
 ) -> TermDictionaryRead:
-    """新增一条术语字典条目（created_by 取自当前用户，不信任客户端）。"""
+    """新增一条术语字典条目（created_by 取自当前用户，不信任客户端）。
+
+    写入口限 admin：词条会原样进入 NL2SQL 计划 prompt，属治理数据。
+    """
     entity = await _termDictionaryService.createTerm(db, dto, createdBy=user.userId)
     return TermDictionaryRead.model_validate(entity)
 
@@ -40,7 +43,8 @@ async def createTerm(
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteTerm(
     id: int,
+    _user: CurrentUser = Depends(requireAdmin),
     db: AsyncSession = Depends(getDb),
 ) -> None:
-    """按 id 删除术语条目。"""
+    """按 id 删除术语条目（限 admin）。"""
     await _termDictionaryService.deleteTerm(db, id)

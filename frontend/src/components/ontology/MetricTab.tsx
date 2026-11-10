@@ -34,6 +34,7 @@ import type {
 } from "../../types/ontology";
 import { AGG_FUNCTION_OPTIONS } from "../../types/ontology";
 import { useTranslation } from "../../i18n";
+import { useAuthStore } from "../../stores/authStore";
 import FilterBar from "./FilterBar";
 import type { FilterField } from "./FilterBar";
 import { filterMetrics } from "../../utils/ontologyFilter";
@@ -155,6 +156,9 @@ export interface MetricTabProps {
 
 export default function MetricTab({ classes }: MetricTabProps) {
   const { t, locale } = useTranslation();
+  // 指标写入口限 admin（后端 requireAdmin 兜底）；非管理员只看列表。
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = (user?.roles ?? []).includes("admin");
   const [metrics, setMetrics] = useState<OntologyMetric[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -346,25 +350,30 @@ export default function MetricTab({ classes }: MetricTabProps) {
         );
       },
     },
-    {
-      title: t("forms.ontology.metricColumns.actions"),
-      width: 120,
-      render: (_: unknown, record: OntologyMetric) => (
-        <Space>
-          <Button size="small" onClick={() => openEdit(record)}>
-            {t("common.edit")}
-          </Button>
-          <Popconfirm
-            title={t("forms.ontology.deleteConfirm")}
-            onConfirm={() => void handleDelete(record.id)}
-          >
-            <Button size="small" danger>
-              {t("common.delete")}
-            </Button>
-          </Popconfirm>
-        </Space>
-      ),
-    },
+    // 编辑/删除限 admin（后端 requireAdmin 兜底）：非管理员不渲染操作列。
+    ...(isAdmin
+      ? [
+          {
+            title: t("forms.ontology.metricColumns.actions"),
+            width: 120,
+            render: (_: unknown, record: OntologyMetric) => (
+              <Space>
+                <Button size="small" onClick={() => openEdit(record)}>
+                  {t("common.edit")}
+                </Button>
+                <Popconfirm
+                  title={t("forms.ontology.deleteConfirm")}
+                  onConfirm={() => void handleDelete(record.id)}
+                >
+                  <Button size="small" danger>
+                    {t("common.delete")}
+                  </Button>
+                </Popconfirm>
+              </Space>
+            ),
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -375,9 +384,11 @@ export default function MetricTab({ classes }: MetricTabProps) {
           <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             {t("common.refresh")}
           </Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-            {t("forms.ontology.addMetricButton")}
-          </Button>
+          {isAdmin && (
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+              {t("forms.ontology.addMetricButton")}
+            </Button>
+          )}
         </Space>
       </div>
       <FilterBar

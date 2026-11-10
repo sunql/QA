@@ -31,13 +31,21 @@ def _sanitizeContext(context: str) -> str:
     return context.replace("<", "&lt;").replace(">", "&gt;")
 
 
+# 行分隔符全集：LLM/日志/前端对「换行」的识别并不只认 \r\n，U+2028/U+2029
+# （JS 行终止符）、U+0085（NEL）以及 \v/\f 都能把一行拆成两行。
+_LINE_SEPARATORS = ("\r", "\n", "\u2028", "\u2029", "\u0085", "\v", "\f")
+
+
 def _sanitizeSchemaField(value: str) -> str:
-    """本体配置字段（别名/描述）渲染前的净化：转义尖括号 + 折叠换行。
+    """本体配置字段（别名/描述）渲染前的净化：转义尖括号 + 折叠全部行分隔符。
 
     换行不折叠会向 schema 文本注入裸行，形成"忽略规则"式指令行；本体配置虽是
     管理员写入，但属外部输入，按同一防御标准处理。
     """
-    return _sanitizeContext(value).replace("\r", " ").replace("\n", " ")
+    sanitized = _sanitizeContext(value)
+    for sep in _LINE_SEPARATORS:
+        sanitized = sanitized.replace(sep, " ")
+    return sanitized
 
 
 # schema 前缀（数据源用户名）仅允许合法标识符，防止提示注入
@@ -67,8 +75,13 @@ def _bakeTableName(name: str, safePrefix: str | None) -> str:
 
 
 def _renderJoinColumns(bakedTable: str, columns: list[str]) -> str:
-    """渲染 join 单侧列：单列 `表.列`，多列 `表.列1 + 表.列2`（全部完整限定，避免歧义）。"""
-    return " + ".join(f"{bakedTable}.{c}" for c in columns)
+    """渲染 join 单侧列：单列 `表.列`，多列 `表.列1 + 表.列2`（全部完整限定，避免歧义）。
+
+    表名与列名都来自本体配置（外部输入），渲染前与属性行同标准净化，
+    否则换行可在 schema 文本里开出裸指令行。
+    """
+    safeTable = _sanitizeSchemaField(bakedTable)
+    return " + ".join(f"{safeTable}.{_sanitizeSchemaField(c)}" for c in columns)
 
 
 # =========================================================================
@@ -291,13 +304,15 @@ def buildSchemaText(
         if not cls.source_table:
             continue
         bakedTable = _bakeTableName(cls.source_table, safePrefix)
-        header = f"### {cls.class_name}"
+        # 类名/别名/父类名与属性一样来自本体配置（外部输入），必须同标准净化：
+        # 裸拼会让 `<`/换行逃出 schema 文本或开出裸指令行（安全评审 H2）。
+        header = f"### {_sanitizeSchemaField(cls.class_name)}"
         if cls.class_alias:
-            header += f" ({cls.class_alias})"
+            header += f" ({_sanitizeSchemaField(cls.class_alias)})"
         parent = _resolveParent(cls, classesById)
         if parent is not None:
-            header += f" (继承 {parent.class_name})"
-        header += f": table={bakedTable}"
+            header += f" (继承 {_sanitizeSchemaField(parent.class_name)})"
+        header += f": table={_sanitizeSchemaField(bakedTable)}"
         if cls.source_table in islandTables:
             header += f"  [{_ISLAND_MARKER}]"
         blocks.append(header)
@@ -309,13 +324,17 @@ def buildSchemaText(
                 markers.append("PK")
             refTable = _resolveRefTable(prop, classesById)
             if prop.is_foreign_key:
-                markers.append(f"FK → {refTable}" if refTable else "FK")
+                markers.append(
+                    f"FK → {_sanitizeSchemaField(refTable)}" if refTable else "FK"
+                )
             markerText = "".join(f" [{m}]" for m in markers)
             # 2-2：别名/业务别名/描述渲染进列行，缩写列名（AMT_0）与业务词（营业额）对得上。
             # 三者均来自本体配置（外部输入），经 _sanitizeSchemaField 转义尖括号并折叠换行，
             # 防止标签逃逸或注入"忽略规则"式指令行。
             # 单个别名放名称位（与类头 `### NAME (alias)` 同构），多别名/描述放行尾。
-            nameToken = prop.property_name
+            # property_name 理论上非空（DB NOT NULL），但构造实体可能缺名：
+            # 空值渲染成空 token，不要让净化原语吃 None，也不要渲染字面 "None"。
+            nameToken = _sanitizeSchemaField(prop.property_name or "")
             if prop.property_alias:
                 nameToken += f" ({_sanitizeSchemaField(prop.property_alias)})"
             # 2-5（feat-token-prune，2026-09-28）：column 标注只在左侧 token 读不出物理列时
@@ -324,8 +343,15 @@ def buildSchemaText(
             # 占 schema 文本 39%，且计划阶段与 SQL 阶段各投一遍。这是等价重编码（非子集
             # 裁剪），不丢信息；`column=未映射` 读不出来故天然保留（prompt 三处规则引用它）。
             columnEchoed = column == prop.property_name or column == prop.property_alias
-            columnText = "" if columnEchoed else f" (column={column})"
-            line = f"    {nameToken}: {prop.data_type}{columnText}{markerText}"
+            columnText = (
+                "" if columnEchoed else f" (column={_sanitizeSchemaField(column)})"
+            )
+            # data_type 同样是外部配置；构造实体可能缺值，与 property_name 同口径
+            # 以空串兜底，避免净化原语吃 None 崩掉整段 prompt 构造。
+            line = (
+                f"    {nameToken}: {_sanitizeSchemaField(prop.data_type or '')}"
+                f"{columnText}{markerText}"
+            )
             if prop.business_aliases:
                 line += (
                     " 业务别名: ["
@@ -399,7 +425,7 @@ def _buildIndirectJoinHints(
     if not graph:
         return ""
     tableToClass = {
-        cls.source_table: cls.class_name
+        cls.source_table: cls.class_name or ""
         for cls in classes
         if cls.source_table
     }
@@ -420,7 +446,11 @@ def _buildIndirectJoinHints(
     if not pathSet:
         return ""
     lines = sorted(
-        f"  {tableToClass.get(lo, lo)} -> {tableToClass.get(b, b)} -> {tableToClass.get(hi, hi)}"
+        "  "
+        + " -> ".join(
+            _sanitizeSchemaField(tableToClass.get(node, node))
+            for node in (lo, b, hi)
+        )
         for lo, b, hi in pathSet
     )
     if len(lines) > 20:
@@ -495,9 +525,13 @@ def _buildCriticalColumnsDigest(
             )
             if not any(kw in haystack for kw in keywords):
                 continue
+            # 类名/属性名同样来自本体配置，与描述同一净化标准：不净化就能借换行
+            # 在摘要节开出裸指令行（与类头 H2 同一条通道）。
             items.append(
                 (
-                    f"{cls.class_name}.{prop.property_name}",
+                    _sanitizeSchemaField(
+                        f"{cls.class_name}.{prop.property_name}"
+                    ),
                     _sanitizeSchemaField(prop.description),
                 )
             )

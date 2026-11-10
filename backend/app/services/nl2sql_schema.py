@@ -291,12 +291,14 @@ def buildSchemaText(
         if not cls.source_table:
             continue
         bakedTable = _bakeTableName(cls.source_table, safePrefix)
-        header = f"### {cls.class_name}"
+        # 类名/别名/父类名与属性一样来自本体配置（外部输入），必须同标准净化：
+        # 裸拼会让 `<`/换行逃出 schema 文本或开出裸指令行（安全评审 H2）。
+        header = f"### {_sanitizeSchemaField(cls.class_name)}"
         if cls.class_alias:
-            header += f" ({cls.class_alias})"
+            header += f" ({_sanitizeSchemaField(cls.class_alias)})"
         parent = _resolveParent(cls, classesById)
         if parent is not None:
-            header += f" (继承 {parent.class_name})"
+            header += f" (继承 {_sanitizeSchemaField(parent.class_name)})"
         header += f": table={bakedTable}"
         if cls.source_table in islandTables:
             header += f"  [{_ISLAND_MARKER}]"

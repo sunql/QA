@@ -338,7 +338,10 @@ def buildSchemaText(
             columnText = (
                 "" if columnEchoed else f" (column={_sanitizeSchemaField(column)})"
             )
-            line = f"    {nameToken}: {prop.data_type}{columnText}{markerText}"
+            line = (
+                f"    {nameToken}: {_sanitizeSchemaField(prop.data_type)}"
+                f"{columnText}{markerText}"
+            )
             if prop.business_aliases:
                 line += (
                     " 业务别名: ["

@@ -5,6 +5,26 @@ import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import MetricTab from "../components/ontology/MetricTab";
 import type { OntologyClass, OntologyMetric } from "../types/ontology";
+import { useAuthStore } from "../stores/authStore";
+import type { AuthMeRead } from "../types/auth";
+
+/** 指标写入口限 admin：默认按管理员渲染写入口。 */
+const ADMIN_USER: AuthMeRead = {
+  id: 1,
+  username: "admin",
+  displayName: "管理员",
+  email: null,
+  enabled: true,
+  mustChangePassword: false,
+  roles: ["admin"],
+  organizations: [],
+  tenantId: "default",
+  lastLoginAt: null,
+};
+
+beforeEach(() => {
+  useAuthStore.setState({ user: ADMIN_USER });
+});
 
 const mockClass: OntologyClass = {
   id: 1,
@@ -409,5 +429,38 @@ describe("MetricTab — 结构化技术形态", () => {
       class_alias: null,
     });
     expect(payload.status).toBe("DRAFT");
+  });
+});
+describe("MetricTab — 写入口 admin 门禁", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listMetrics.mockResolvedValue([mockMetric]);
+  });
+
+  it("非管理员看不到新增按钮与编辑/删除操作", async () => {
+    useAuthStore.setState({
+      ...useAuthStore.getState(),
+      user: { ...ADMIN_USER, roles: ["user"] },
+    });
+    renderTab();
+
+    await screen.findByText("订单金额");
+    expect(
+      screen.queryByRole("button", { name: /新\s?增/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /编\s?辑/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /删\s?除/ })).not.toBeInTheDocument();
+    // 读能力保留
+    expect(screen.getByRole("button", { name: /刷\s?新/ })).toBeInTheDocument();
+  });
+
+  it("管理员仍能看到写入口", async () => {
+    renderTab();
+
+    await screen.findByText("订单金额");
+    expect(
+      screen.getByRole("button", { name: /新\s?增/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /编\s?辑/ })).toBeInTheDocument();
   });
 });

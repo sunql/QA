@@ -4,6 +4,22 @@ import userEvent from "@testing-library/user-event";
 import { ConfigProvider, message } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import TermDictionaryButton from "../components/chat/TermDictionaryButton";
+import { useAuthStore } from "../stores/authStore";
+import type { AuthMeRead } from "../types/auth";
+
+/** 词条写入口限 admin：默认按管理员渲染入口。 */
+const ADMIN_USER: AuthMeRead = {
+  id: 1,
+  username: "admin",
+  displayName: "管理员",
+  email: null,
+  enabled: true,
+  mustChangePassword: false,
+  roles: ["admin"],
+  organizations: [],
+  tenantId: "default",
+  lastLoginAt: null,
+};
 
 const api = vi.hoisted(() => ({
   createTerm: vi.fn(),
@@ -21,6 +37,7 @@ function renderButton(props: { initialTerm?: string } = {}) {
 describe("TermDictionaryButton", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useAuthStore.setState({ user: ADMIN_USER });
     api.createTerm.mockResolvedValue({
       id: 1,
       term: "OTD",
@@ -90,5 +107,29 @@ describe("TermDictionaryButton", () => {
     await waitFor(() => {
       expect(api.createTerm).toHaveBeenCalled();
     });
+  });
+});
+
+describe("TermDictionaryButton — 写入口 admin 门禁", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useAuthStore.setState({ user: ADMIN_USER });
+  });
+
+  it("非管理员不渲染添加入口", () => {
+    useAuthStore.setState({ user: { ...ADMIN_USER, roles: ["user"] } });
+    renderButton();
+
+    expect(
+      screen.queryByRole("button", { name: /添加到术语词典/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("管理员渲染添加入口", () => {
+    renderButton();
+
+    expect(
+      screen.getByRole("button", { name: /添加到术语词典/ }),
+    ).toBeInTheDocument();
   });
 });

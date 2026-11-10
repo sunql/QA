@@ -137,6 +137,102 @@ async def test_mapping_to_live_class_is_accepted(
     assert resp.status_code == 201
 
 
+async def test_mapping_ignores_tombstoned_sibling_rows(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """同名类有存活行 + 下线行时，存活行的属性必须照常放行。
+
+    `ontology_class` 是版本化表（同名多行）。校验必须按「这一行的 valid_to」判断，
+    不能因为同名下存在下线行就把整类判死。
+    """
+    dead = OntologyClass(
+        class_name="VERSIONED_CLASS",
+        source_table="T_VERSIONED_CLASS_OLD",
+        version=1,
+        valid_to=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    live = OntologyClass(
+        class_name="VERSIONED_CLASS",
+        source_table="T_VERSIONED_CLASS",
+        version=2,
+        properties=[OntologyProperty(property_name="存活属性", data_type="STRING")],
+    )
+    dbSession.add_all([dead, live])
+    await dbSession.commit()
+
+    resp = await client.post(
+        "/api/v1/term-dictionary",
+        json=_payload(
+            term="存活词",
+            mappedClassName="VERSIONED_CLASS",
+            mappedPropertyName="存活属性",
+        ),
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 201
+
+
+async def test_property_on_tombstoned_row_is_rejected(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """属性只挂在下线行上 ⇒ 拒绝（存活行没有它）。
+
+    若把 `valid_to IS NULL` 过滤去掉，类 id 集合会包含下线行 ⇒ 这里会误放行。
+    """
+    dead = OntologyClass(
+        class_name="VERSIONED_DEAD",
+        source_table="T_VERSIONED_DEAD_OLD",
+        version=1,
+        valid_to=datetime(2020, 1, 1, tzinfo=UTC),
+        properties=[OntologyProperty(property_name="下线属性", data_type="STRING")],
+    )
+    live = OntologyClass(
+        class_name="VERSIONED_DEAD",
+        source_table="T_VERSIONED_DEAD",
+        version=2,
+    )
+    dbSession.add_all([dead, live])
+    await dbSession.commit()
+
+    resp = await client.post(
+        "/api/v1/term-dictionary",
+        json=_payload(
+            term="下线词",
+            mappedClassName="VERSIONED_DEAD",
+            mappedPropertyName="下线属性",
+        ),
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 422
+    assert "不属于" in resp.json()["error"]
+
+
+async def test_same_named_property_on_other_class_is_rejected(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """属性名在**另一个类**上存在也不算数：必须属于所映射的类。
+
+    若去掉 `class_id.in_(liveIds)` 过滤，全局同名属性会让这里误放行。
+    """
+    await _seedClass(dbSession, "CLASS_WITH_SHARED", propertyNames=("共享属性",))
+    await _seedClass(dbSession, "CLASS_WITHOUT_SHARED", propertyNames=("其他属性",))
+
+    resp = await client.post(
+        "/api/v1/term-dictionary",
+        json=_payload(
+            term="串类词",
+            mappedClassName="CLASS_WITHOUT_SHARED",
+            mappedPropertyName="共享属性",
+        ),
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 422
+    assert "不属于" in resp.json()["error"]
+
+
 async def test_mapping_by_source_column_is_accepted(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:

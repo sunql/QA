@@ -201,6 +201,19 @@ attempt 2 另判 **COVERAGE_MISMATCH**：复跑同一 sha 时，上一轮闸门�
 `merge-gate / failure-set-diff` check 被计入 job 列表 ⇒ 两次 run 的 job 集合不等价。
 按既有流程改用**新 sha** 起新一轮（不单 job 复跑）。
 
+**attempt 3（head `c7420cfc`，run `42870354532`）：判 MERGEABLE**。
+
+```
+基线 run 42745960445（head 4777bfba）：失败 142 条
+PR    run 42870354532（head c7420cfc）：失败 142 条
+净新增 0 条 / 净丢失 0 条
+后端 8 个分片全 failure（基线亦全 failure，失败集合逐条相同）；
+Frontend / typecheck + coverage success
+```
+
+即：净新增 0 满足合并判据；后端分片红是 main 既有基线（142 条），
+不是本批引入。
+
 **这 5 条为什么早就红**：`tests/integration/conftest.py:186` 的 `dbSession` 夹具会种
 `HEADER_CLASS_NAMES`（`scripts/seed_business_objects.py:24`，含 **`Supplier`**）：
 

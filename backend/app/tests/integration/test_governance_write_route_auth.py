@@ -111,11 +111,14 @@ def test_read_route_does_not_require_admin(
     method: str,
     path: str,
 ) -> None:
-    """读路由不得带 admin 门禁：普通用户必须能查看词条与指标。"""
+    """读路由不得带 admin 门禁，但仍须要求登录：普通用户必须能查看词条与指标。"""
     route, inherited = routeIndex[(method, path)]
 
     assert not declaresDependency(route, requireAdmin, inherited), (
         f"{method} {path} 意外要求 admin（普通用户读请求会 403）"
+    )
+    assert declaresDependency(route, getCurrentUser, inherited), (
+        f"{method} {path} 缺少 getCurrentUser（读入口对匿名开放）"
     )
 
 

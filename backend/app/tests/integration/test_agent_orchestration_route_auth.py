@@ -23,7 +23,6 @@ router**做特征范围内的独立断言——
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -32,6 +31,10 @@ from fastapi.routing import APIRoute
 
 from app.config import getSettings
 from app.dependencies import getCurrentUser
+from app.tests._route_auth_support import (
+    declaresDependency as _declaresDependency,
+    iterRoutesWithDeps as _iterRoutes,
+)
 
 # 本特性新增的两组路由前缀（与 main.py 的 include_router 前缀一致）。
 _NEW_PREFIXES: tuple[str, ...] = (
@@ -59,51 +62,11 @@ _EXPECTED_ROUTES: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _iterRoutes(routes: list[Any], prefix: str = "") -> Iterator[tuple[str, APIRoute]]:
-    """递归展开路由树，产出 (完整路径, APIRoute)。
-
-    FastAPI 0.141.1 用 `_IncludedRouter` 包装 `include_router()` 的结果，且包装
-    层**不暴露** `.routes`；只能通过 `original_router` + `include_context.prefix`
-    下钻。旧的 flat 列表形态（0.136.x）、嵌套 APIRouter 与 Mount 同样兼容。
-    """
-    for route in routes:
-        if isinstance(route, APIRoute):
-            yield prefix + route.path, route
-            continue
-        original = getattr(route, "original_router", None)
-        if original is not None:
-            includeContext = getattr(route, "include_context", None)
-            nestedPrefix = prefix + (getattr(includeContext, "prefix", "") or "")
-            yield from _iterRoutes(list(original.routes), nestedPrefix)
-            continue
-        nested = getattr(route, "routes", None)
-        if isinstance(nested, list):
-            nestedPrefix = prefix + (
-                getattr(route, "prefix", "") or getattr(route, "path", "") or ""
-            )
-            yield from _iterRoutes(nested, nestedPrefix)
-
-
-def _declaresCurrentUser(route: APIRoute) -> bool:
-    """路由依赖链（含 router 级 dependencies）是否声明了 getCurrentUser。"""
-    seen: set[int] = set()
-    stack = [route.dependant]
-    while stack:
-        dependant = stack.pop()
-        if id(dependant) in seen:
-            continue
-        seen.add(id(dependant))
-        if dependant.call is getCurrentUser:
-            return True
-        stack.extend(dependant.dependencies)
-    return False
-
-
 def _newOrchestrationRoutes(app: FastAPI) -> list[tuple[str, APIRoute]]:
     """只取两个新 router 下的路由（按前缀过滤）。"""
     return [
         (path, route)
-        for path, route in _iterRoutes(list(app.routes))
+        for path, route, _inherited in _iterRoutes(list(app.routes))
         if path.startswith(_NEW_PREFIXES)
     ]
 
@@ -153,7 +116,7 @@ def test_everyNewOrchestrationRouteDeclaresGetCurrentUser(
             (method, path)
             for path, route in routes
             for method in route.methods
-            if not _declaresCurrentUser(route)
+            if not _declaresDependency(route, getCurrentUser)
         }
     )
     assert offenders == [], (
@@ -170,10 +133,10 @@ def test_currentUserDetectorIsNotVacuous(orchestrationApp: FastAPI) -> None:
     """
     public = [
         route
-        for path, route in _iterRoutes(list(orchestrationApp.routes))
+        for path, route, _inherited in _iterRoutes(list(orchestrationApp.routes))
         if path == "/api/v1/health"
     ]
     assert public, "未枚举到 /api/v1/health——路由树展开失效"
-    assert not _declaresCurrentUser(public[0]), (
+    assert not _declaresDependency(public[0], getCurrentUser), (
         "/api/v1/health 被判为带鉴权——探测器逻辑可疑，请复核"
     )

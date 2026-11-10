@@ -29,18 +29,19 @@ FastAPI ≥0.141 把它放进 `_IncludedRouter.include_context`、不并入 `rou
 
 from __future__ import annotations
 
-import inspect
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from fastapi import APIRouter, Depends, FastAPI
-from fastapi.params import Depends as DependsParam
 from fastapi.routing import APIRoute
-from starlette.routing import Route as StarletteRoute
 
 from app.config import getSettings
 from app.dependencies import getCurrentUser, requireAdmin
+from app.tests._route_auth_support import (
+    declaredDependencies as _declaredDependencies,
+    declaresDependency as _declaresDependency,
+    iterRoutesWithDeps as _iterRoutesWithDeps,
+)
 
 _PREFIX = "/api/v1/semantic/releases"
 
@@ -57,105 +58,12 @@ _EXPECTED_ROUTES: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _iterRoutesWithDeps(
-    routes: list[Any], prefix: str = "", inherited: tuple[Any, ...] = ()
-) -> Iterator[tuple[str, APIRoute, tuple[Any, ...]]]:
-    """递归展开路由树，产出 (完整路径, APIRoute, include 时声明的依赖)。
-
-    FastAPI **≥0.141** 用 `_IncludedRouter` 包装 `include_router()` 的结果，并且
-    把 include 时声明的 `dependencies=[...]` 放进 `include_context.dependencies`，
-    **不并入** `route.dependant`（0.136.x 会并入）。本守卫的门禁正是声明在
-    `include_router(dependencies=[Depends(requireAdmin)])` 上的 ⇒ 只沿
-    `route.dependant` 探测，在 CI 用的 0.141.1 下会把 7 条路由全判成「没有门禁」。
-    """
-    for route in routes:
-        if isinstance(route, APIRoute):
-            yield prefix + route.path, route, inherited
-            continue
-        original = getattr(route, "original_router", None)
-        if original is not None:
-            includeContext = getattr(route, "include_context", None)
-            nestedPrefix = prefix + (getattr(includeContext, "prefix", "") or "")
-            nestedDeps = inherited + tuple(
-                getattr(dependency, "dependency", None)
-                for dependency in (getattr(includeContext, "dependencies", ()) or ())
-            )
-            yield from _iterRoutesWithDeps(list(original.routes), nestedPrefix, nestedDeps)
-            continue
-        nested = getattr(route, "routes", None)
-        if isinstance(nested, list):
-            nestedPrefix = prefix + (
-                getattr(route, "prefix", "") or getattr(route, "path", "") or ""
-            )
-            yield from _iterRoutesWithDeps(nested, nestedPrefix, inherited)
-            continue
-        # 普通 Starlette 路由（`/docs`、`/openapi.json` 等）没有依赖树，显式跳过；
-        # 其余既不是 APIRoute 也展不开的包装层 ⇒ fail-closed（未知形态不许静默忽略，
-        # 否则 FastAPI 再换一次包装类型时枚举器会悄悄少枚举路由）。
-        if not isinstance(route, StarletteRoute):
-            raise AssertionError(f"未知的路由包装类型：{type(route)!r}")
-
-
 def _semanticRoutes(app: FastAPI) -> list[tuple[str, APIRoute, tuple[Any, ...]]]:
     return [
         (path, route, inherited)
         for path, route, inherited in _iterRoutesWithDeps(list(app.routes))
         if path.startswith(_PREFIX)
     ]
-
-
-def _declaredDependencies(call: Any) -> Iterator[Any]:
-    """展开一个依赖 callable 自身签名里声明的 `Depends(...)`（递归）。
-
-    `include_context.dependencies` 里只有 `Depends(requireAdmin)` 这一层；
-    `getCurrentUser` 是 `requireAdmin` 签名里的参数依赖。静态检查必须沿
-    `inspect.signature` 往下走，否则「间接引入」的那一半门禁在 0.141 下不可见。
-
-    ⚠️ 只识别**默认参数**写法（`p: X = Depends(d)`）；`Annotated[X, Depends(d)]`
-    写法不在覆盖范围内（当前 `app/` 全仓无此写法）。若将来引入，本函数会漏掉
-    间接依赖 ⇒ 依赖「路由集合非空 / 条数相等」断言的 fail-closed 兜底，并需扩展此处。
-    """
-    seen: set[int] = set()
-    stack = [call]
-    while stack:
-        current = stack.pop()
-        if current is None or id(current) in seen:
-            continue
-        seen.add(id(current))
-        yield current
-        try:
-            signature = inspect.signature(current)
-        except (TypeError, ValueError):
-            continue
-        for parameter in signature.parameters.values():
-            nested = parameter.default
-            # `fastapi.Depends` 是工厂函数而不是类（各版本均如此）；类型判断必须用
-            # `fastapi.params.Depends`，否则 `isinstance(x, Depends)` 会 TypeError。
-            if isinstance(nested, DependsParam):
-                stack.append(nested.dependency)
-
-
-def _declaresDependency(
-    route: APIRoute, dependency: object, inherited: tuple[Any, ...] = ()
-) -> bool:
-    """路由依赖链（含 include 时 / router 级 / 间接 dependencies）是否声明了指定依赖。"""
-    if any(
-        call is dependency
-        for root in inherited
-        for call in _declaredDependencies(root)
-    ):
-        return True
-    seen: set[int] = set()
-    stack = [route.dependant]
-    while stack:
-        dependant = stack.pop()
-        if id(dependant) in seen:
-            continue
-        seen.add(id(dependant))
-        if dependant.call is dependency:
-            return True
-        stack.extend(dependant.dependencies)
-    return False
 
 
 def _buildApp(monkeypatch: pytest.MonkeyPatch, *, enabled: bool) -> FastAPI:

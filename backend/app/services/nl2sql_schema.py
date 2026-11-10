@@ -338,8 +338,10 @@ def buildSchemaText(
             columnText = (
                 "" if columnEchoed else f" (column={_sanitizeSchemaField(column)})"
             )
+            # data_type 同样是外部配置；构造实体可能缺值，与 property_name 同口径
+            # 以空串兜底，避免净化原语吃 None 崩掉整段 prompt 构造。
             line = (
-                f"    {nameToken}: {_sanitizeSchemaField(prop.data_type)}"
+                f"    {nameToken}: {_sanitizeSchemaField(prop.data_type or '')}"
                 f"{columnText}{markerText}"
             )
             if prop.business_aliases:

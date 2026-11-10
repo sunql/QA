@@ -81,6 +81,7 @@
 | `472f4ad0` | 第三轮评审：`data_type` 同标准净化；JOIN 行表名半边补测；摘要用例断言收敛到摘要节 |
 | `84c5cb48` | 第三轮回归：`data_type` 缺值（None）兜底，避免净化原语崩掉整段 prompt 构造 |
 | `c21ede75` | 第三轮评审（LOW）：`_sanitizeSchemaField` 折叠**全部** Unicode 行分隔符（U+2028/U+2029/U+0085/`\v`/`\f`，此前只折叠 `\r\n`）+ 1 条用例 |
+| `ddaf31ca` | CI 分片顺序副作用（非代码回归）：`test_rag_api.py` 自建 Milvus 隔离库；`test_reconcile_neo4j_id_mapping.py` 改用先清后种的 `seedAlignedClasses` 夹具 |
 | 本文件 | 文档 + `Harness/rules/权限与安全规范.md` 增「治理写入口」清单与已知缺口 |
 
 **文件**：
@@ -117,6 +118,7 @@
 | 前端 App + useRestoreUser | **11 passed**；`npx tsc -b` exit 0 |
 | schema 相关单测（nl2sql_schema + nl2sql_service） | **212 passed**（24 + 188；新增 9 条渲染出口/缺值/Unicode 分隔符用例） |
 | chat 三套单测 | **7 failed, 191 passed**（失败条目与 HEAD 基线逐条一致） |
+| CI 分片顺序修复定向验证 | `test_reconcile_neo4j_id_mapping.py` **7 passed**（先种 2 个残留节点：旧夹具 1 红 → 新夹具绿、整文件全绿）；`test_rag_api.py` 本地不跑（19530 是生产 Milvus），由 CI 验证 |
 
 ---
 
@@ -180,6 +182,24 @@ test_chat_service_stream.py::TestStreamingPipeline::test_stream_chunk_timeout_em
 
 ⇒ 两处**净新增失败 0**。后 7 条为既有基线（4 条 `TestBuildAnswerPrompt` 与摘要/提示文案变更
 相关、2 条流式超时用例、1 条裁剪日志用例），与本批改动无关，见 §8 遗留。
+
+### 6.1 CI 闸门（PR #116）与分片顺序副作用
+
+CI attempt 1/2 的 `merge-gate / failure-set-diff` 均判 **NEW_FAILURES 5 条**，全部是
+**分片顺序副作用**，不是本批代码回归：
+
+| 用例 | 症状 | 根因 |
+|---|---|---|
+| `test_rag_api.py` 4 条 | `database not found[database=qa_ci]` | Milvus 隔离库**惰性创建**（首次用到 `milvusCleanClient` 等夹具）；本文件不依赖那些夹具。本批新增 4 个集成测试文件 ⇒ CI 的「排序后文件下标 mod 4」重排 ⇒ 本文件落到尚无文件建库的分片 |
+| `test_reconcile_neo4j_id_mapping.py::test_reconcile_reports_clean_when_both_sides_align` | `expected 0 diff, got 2` | `neo4jSeedClasses` 只在 **teardown** 清仓（`integration/conftest.py` 注释已记该风险）；分片重排后更早文件留下 2 个 Class 节点 |
+
+处置：两条用例改为**不依赖执行顺序** —— `test_rag_api.py` 加 module 级夹具幂等建库；
+reconcile 用本地 `seedAlignedClasses` 夹具**先清后种**。本地用 2 个残留节点复现：
+旧夹具 1 红（与 CI 的 `got 2` 同形），新夹具 1 绿、整文件 **7 passed**。
+
+attempt 2 另判 **COVERAGE_MISMATCH**：复跑同一 sha 时，上一轮闸门自己落库的
+`merge-gate / failure-set-diff` check 被计入 job 列表 ⇒ 两次 run 的 job 集合不等价。
+按既有流程改用**新 sha** 起新一轮（不单 job 复跑）。
 
 **这 5 条为什么早就红**：`tests/integration/conftest.py:186` 的 `dbSession` 夹具会种
 `HEADER_CLASS_NAMES`（`scripts/seed_business_objects.py:24`，含 **`Supplier`**）：

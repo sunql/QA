@@ -1,0 +1,70 @@
+D1 Task 1.2 变异取证：planKpiExecution 路由分支
+日期：2026-11-11
+被测文件：backend/app/tests/unit/test_kpi_execution_plan.py
+被测实现：backend/app/services/kpi_execution_service.py
+
+=== 变异 1：SOURCE_COMPILED 分支 TIER_B -> TIER_A ===
+@@
+     if source == SOURCE_COMPILED:
+-        return KpiExecutionPlan(TIER_B, REASON_COMPILED_NOT_SUPPORTED)
++        return KpiExecutionPlan(TIER_A, REASON_COMPILED_NOT_SUPPORTED)
+
+命令：
+cd /private/tmp/qa-kpi-p2/backend
+TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@127.0.0.1:5434/qa_metadata_test' \
+TEST_NEO4J_URI='bolt://127.0.0.1:7688' TEST_NEO4J_PASSWORD='qa_neo4j_dev_2026' \
+.venv/bin/python -m pytest app/tests/unit/test_kpi_execution_plan.py -q
+exit=1
+
+输出（RED，符合预期）：
+........F.......                                                         [100%]
+=================================== FAILURES ===================================
+____________ test_plan_matrix[overrides8-B-compiled_not_supported] _____________
+
+overrides = {'execution_source': 'COMPILED'}, tier = 'B'
+reason = 'compiled_not_supported'
+
+    def test_plan_matrix(overrides, tier, reason) -> None:
+        plan = _plan(**overrides)
+>       assert plan.tier == tier
+E       AssertionError: assert 'A' == 'B'
+
+app/tests/unit/test_kpi_execution_plan.py:46: AssertionError
+=========================== short test summary info ============================
+FAILED app/tests/unit/test_kpi_execution_plan.py::test_plan_matrix[overrides8-B-compiled_not_supported]
+1 failed, 15 passed in 5.70s
+
+还原（精确反向编辑 TIER_A -> TIER_B）后：
+16 passed in 5.74s
+
+=== 变异 2：删除 `if not has_datasource` 守卫分支 ===
+@@
+-    if not has_datasource:
+-        return KpiExecutionPlan(TIER_C, REASON_DATASOURCE_MISSING)
+     if has_explicit_time_scope:
+
+命令：同上
+exit=1
+
+输出（RED，符合预期）：
+..........F.....                                                         [100%]
+=================================== FAILURES ===================================
+______________ test_plan_matrix[overrides10-C-datasource_missing] ______________
+
+overrides = {'has_datasource': False}, tier = 'C', reason = 'datasource_missing'
+
+    def test_plan_matrix(overrides, tier, reason) -> None:
+        plan = _plan(**overrides)
+>       assert plan.tier == tier
+E       AssertionError: assert 'A' == 'C'
+
+app/tests/unit/test_kpi_execution_plan.py:46: AssertionError
+=========================== short test summary info ============================
+FAILED app/tests/unit/test_kpi_execution_plan.py::test_plan_matrix[overrides10-C-datasource_missing]
+1 failed, 15 passed in 6.00s
+
+还原（精确反向编辑补回两行）后：
+16 passed in 5.59s
+
+=== 结论 ===
+两条关键路由分支均被决策表测试真实捕获；两次还原后均全绿，最终代码无变异残留（git diff 仅含预期改动）。

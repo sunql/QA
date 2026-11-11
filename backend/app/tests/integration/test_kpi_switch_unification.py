@@ -50,14 +50,17 @@ pytestmark = pytest.mark.asyncio
 # ---------------------------------------------------------------------------
 
 
-async def _setSwitch(session: AsyncSession, value: str | None) -> None:
+async def _setSwitch(
+    session: AsyncSession,
+    value: str | None,
+    *,
+    key: str = SWITCH_CONTRACT_INJECTION,
+) -> None:
     """写 / 删 system_config 开关行（value=None ⇒ 删行，模拟「行缺失」）。"""
-    await session.execute(
-        delete(SystemConfig).where(SystemConfig.key == SWITCH_CONTRACT_INJECTION)
-    )
+    await session.execute(delete(SystemConfig).where(SystemConfig.key == key))
     await session.commit()
     if value is not None:
-        session.add(SystemConfig(key=SWITCH_CONTRACT_INJECTION, value=value))
+        session.add(SystemConfig(key=key, value=value))
         await session.commit()
 
 
@@ -75,6 +78,17 @@ def _envKillOff(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class _FakeSettings:
         kpiContractInjectionEnabled = False
+        kpiMatchContainmentEnabled = True
+
+    monkeypatch.setattr(switches_module, "getSettings", lambda: _FakeSettings())
+
+
+def _envContainmentOff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把匹配器 v2 的 env 杀闸置为 false；契约注入闸保持不杀。"""
+
+    class _FakeSettings:
+        kpiContractInjectionEnabled = True
+        kpiMatchContainmentEnabled = False
 
     monkeypatch.setattr(switches_module, "getSettings", lambda: _FakeSettings())
 
@@ -86,11 +100,12 @@ def _pinEnvKillSwitchOn(monkeypatch: pytest.MonkeyPatch) -> None:
     为什么必须钉：``getSettings()`` 读进程环境 / ``backend/.env``。若运行者
     本地或 CI 导出 ``KPI_CONTRACT_INJECTION_ENABLED=false``（这正是本特性的
     用途），本文件「开」侧的 6 条用例会莫名失败，而报错完全不指向真实原因。
-    杀闸用例（``_envKillOff``）各自 override 为 False。
+    杀闸用例（``_envKillOff`` / ``_envContainmentOff``）各自 override 为 False。
     """
 
     class _FakeSettings:
         kpiContractInjectionEnabled = True
+        kpiMatchContainmentEnabled = True
 
     monkeypatch.setattr(switches_module, "getSettings", lambda: _FakeSettings())
 
@@ -419,3 +434,79 @@ async def test_both_surfaces_follow_the_same_row(
     await builder_module.buildKpiContractBlock(dbSession, "问题B")
     assert reconcileCalls == [], "行值 false 时 B3 面必须被拦下"
     assert builderCalls == [], "行值 false 时 Tier B 面必须被拦下"
+
+
+# ---------------------------------------------------------------------------
+# 匹配器 v2 灰度开关（KPI_MATCH_CONTAINMENT_ENABLED）
+#
+# 与契约注入总闸**不复用**同一个键：两者语义不同（一个管「注入不注入」，一个管
+# 「哪套匹配算法」），复用会让「关注入」连带改变匹配结果，排障时无法区分。
+# ---------------------------------------------------------------------------
+
+
+async def test_match_containment_switch_off_when_row_missing(
+    dbSession: AsyncSession,
+) -> None:
+    """灰度旋钮 fail-closed：没有 system_config 行 ⇒ False（合入后行为不变）。"""
+    from app.services.kpi_metric_switches import (
+        SWITCH_MATCH_CONTAINMENT,
+        isKpiMatchContainmentEnabled,
+    )
+
+    await _setSwitch(dbSession, None, key=SWITCH_MATCH_CONTAINMENT)
+    assert await isKpiMatchContainmentEnabled(dbSession) is False
+
+
+async def test_match_containment_switch_on_when_row_true(
+    dbSession: AsyncSession,
+) -> None:
+    from app.services.kpi_metric_switches import (
+        SWITCH_MATCH_CONTAINMENT,
+        isKpiMatchContainmentEnabled,
+    )
+
+    await _setSwitch(dbSession, "true", key=SWITCH_MATCH_CONTAINMENT)
+    assert await isKpiMatchContainmentEnabled(dbSession) is True
+
+
+async def test_match_containment_switch_off_when_row_invalid(
+    dbSession: AsyncSession,
+) -> None:
+    """行值非法 ⇒ 关（配置面故障不得让 v2「自动打开」）。"""
+    from app.services.kpi_metric_switches import (
+        SWITCH_MATCH_CONTAINMENT,
+        isKpiMatchContainmentEnabled,
+    )
+
+    await _setSwitch(dbSession, "maybe", key=SWITCH_MATCH_CONTAINMENT)
+    assert await isKpiMatchContainmentEnabled(dbSession) is False
+
+
+async def test_match_containment_env_kill_switch_wins(
+    dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """env 杀闸优先：行=true 也压不过 env=false（一键止血不依赖 DB 操作）。"""
+    from app.services.kpi_metric_switches import (
+        SWITCH_MATCH_CONTAINMENT,
+        isKpiMatchContainmentEnabled,
+    )
+
+    await _setSwitch(dbSession, "true", key=SWITCH_MATCH_CONTAINMENT)
+    _envContainmentOff(monkeypatch)
+    assert await isKpiMatchContainmentEnabled(dbSession) is False
+
+
+async def test_match_containment_env_true_does_not_open_missing_row(
+    dbSession: AsyncSession,
+) -> None:
+    """反向守卫：env 为 true（不杀闸）**不会**打开灰度。
+
+    没有这条，一个只看 env 的实现会在「行缺失 ⇒ 关」断言上假绿。
+    """
+    from app.services.kpi_metric_switches import (
+        SWITCH_MATCH_CONTAINMENT,
+        isKpiMatchContainmentEnabled,
+    )
+
+    await _setSwitch(dbSession, None, key=SWITCH_MATCH_CONTAINMENT)
+    assert await isKpiMatchContainmentEnabled(dbSession) is False

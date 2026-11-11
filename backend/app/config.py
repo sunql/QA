@@ -237,6 +237,10 @@ class Settings(BaseSettings):
     kpiContractInjectionEnabled: bool = Field(
         default=True, alias="KPI_CONTRACT_INJECTION_ENABLED"
     )
+    # P1 匹配器 v2 灰度开关：包含式匹配 + 歧义澄清（关闭 = 行为与 P0 完全一致）
+    kpiMatchContainmentEnabled: bool = Field(
+        default=True, alias="KPI_MATCH_CONTAINMENT_ENABLED"
+    )
 
     # ===== 证据分页（feat-evidence-extension）=====
     evidence_page_default: int = Field(default=50, alias="EVIDENCE_PAGE_DEFAULT")

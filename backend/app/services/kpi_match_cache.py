@@ -1,8 +1,9 @@
 """Phase 1 Task 1.3: KpiMatchCache — 启动预热 + 写时失效。
 
-两个索引（均只包含 status=PUBLISHED 的 KPI）：
+三个索引（均只包含 status=PUBLISHED 的 KPI）：
 - _by_code：code → KpiCatalog（精确查找）
 - _by_keyword：keyword → list[KpiCatalog]（semantic_keywords 子串匹配）
+- _metricAliasByCode：code → 挂靠 metric 的别名（v2 包含式匹配的第三短语源）
 
 启动时 warmUp() 全量加载；写时通过 SQLAlchemy event listener 触发
 onKpiChanged() 失效。
@@ -54,9 +55,10 @@ def _hasPendingKpiChanges(session: AsyncSession) -> bool:
 class KpiMatchCache:
     """L1 语义匹配缓存。
 
-    两个只读索引（由 refresh() 全量重建）：
+    三个只读索引（由 warmUp() 全量重建）：
     - _by_code：kpi_code → KpiCatalog
     - _by_keyword：keyword 子串 → list[KpiCatalog]
+    - _metricAliasByCode：kpi_code → 挂靠 metric 的别名
 
     写入时 onKpiChanged(kpi_code, kpiId=…) 失效对应条目，下次查询时触发 lazy rebuild。
 
@@ -81,6 +83,8 @@ class KpiMatchCache:
     def __init__(self) -> None:
         self._by_code: dict[str, "KpiCatalog"] = {}
         self._by_keyword: dict[str, list["KpiCatalog"]] = {}
+        # code → 挂靠 metric 的别名（v2 第三短语源）；与 _by_code 同生命周期重建。
+        self._metricAliasByCode: dict[str, str] = {}
         self._loaded: bool = False
         # 脏标记：任何失效后置 True，读路径 ensureFresh 见到就重建。
         self._dirty: bool = False
@@ -109,6 +113,12 @@ class KpiMatchCache:
     def is_warmUp(self) -> bool:
         """缓存是否已 warmUp。"""
         return self._loaded
+
+    def metricAliasOf(self, code: str) -> str | None:
+        """KPI 挂靠 metric 的别名；冷缓存或无别名返 None（不隐式加载）。"""
+        if not self._loaded:
+            return None
+        return self._metricAliasByCode.get(code)
 
     def findByAnyKeyword(self, keywords: list[str]) -> list["KpiCatalog"]:
         """返回 semantic_keywords 包含任意一个**非空** keyword 的 KPI 列表。
@@ -141,7 +151,7 @@ class KpiMatchCache:
         return result
 
     async def warmUp(self, session: AsyncSession) -> None:
-        """全量加载 status=PUBLISHED 的 KPI，重建两个索引。
+        """全量加载 status=PUBLISHED 的 KPI，重建三个索引。
 
         `populate_existing=True`：**强制用 DB 当前值刷新**已在 identity map 里的
         同 id 行。默认行为下 SELECT 会直接返回 identity map 里的旧实例（属性不
@@ -154,20 +164,29 @@ class KpiMatchCache:
         把旧值写回 DB = 数据丢失）。因此这里**条件化**：检测到待落库改动时退回
         普通 SELECT（读到略旧的值，但绝不毁数据；缓存是加速器，TTL 到期自愈）。
         """
-        from app.domain.models import KpiCatalog
+        from app.domain.models import KpiCatalog, OntologyMetric
 
-        stmt = select(KpiCatalog).where(KpiCatalog.status == KpiStatus.PUBLISHED.value)
+        # 别名在 ontology_metric 上（KpiCatalog 没有 metric_alias 列）⇒ 必须外连接。
+        # **必须是 outer**：种子/引导 KPI 的 metric_id 为 NULL，内连接会把它们整批
+        # 漏出缓存，语义匹配直接瘫痪。
+        stmt = (
+            select(KpiCatalog, OntologyMetric.metric_alias)
+            .outerjoin(OntologyMetric, OntologyMetric.id == KpiCatalog.metric_id)
+            .where(KpiCatalog.status == KpiStatus.PUBLISHED.value)
+        )
         if not _hasPendingKpiChanges(session):
             stmt = stmt.execution_options(populate_existing=True)
         rows = await session.execute(stmt)
-        kpis = list(rows.scalars().all())
 
         by_code: dict[str, "KpiCatalog"] = {}
         by_keyword: dict[str, list["KpiCatalog"]] = {}
+        alias_by_code: dict[str, str] = {}
 
-        for kpi in kpis:
+        for kpi, metric_alias in rows.all():
             if kpi.kpi_code:
                 by_code[kpi.kpi_code] = kpi
+                if metric_alias:
+                    alias_by_code[kpi.kpi_code] = metric_alias
 
             kws = kpi.semantic_keywords
             if kws:
@@ -178,6 +197,7 @@ class KpiMatchCache:
 
         self._by_code = by_code
         self._by_keyword = by_keyword
+        self._metricAliasByCode = alias_by_code
         self._loaded = True
         self._dirty = False
         self._loadedAt = time.monotonic()
@@ -195,6 +215,7 @@ class KpiMatchCache:
             # 全量清空（新建容器替换，不原地 clear —— 保持不可变语义）
             self._by_code = {}
             self._by_keyword = {}
+            self._metricAliasByCode = {}
             self._loaded = False
             self._dirty = True
             logger.debug("KpiMatchCache 全量失效")
@@ -212,8 +233,10 @@ class KpiMatchCache:
         空关键词桶整体丢弃（不留空 list）。
         """
         byCode: dict[str, KpiCatalog] = {}
+        removedCodes: set[str] = set()
         for code, kpi in self._by_code.items():
             if code == kpi_code or (kpiId is not None and kpi.id == kpiId):
+                removedCodes.add(code)
                 continue
             byCode[code] = kpi
         byKeyword: dict[str, list[KpiCatalog]] = {}
@@ -228,6 +251,11 @@ class KpiMatchCache:
                 byKeyword[kw] = kept
         self._by_code = byCode
         self._by_keyword = byKeyword
+        self._metricAliasByCode = {
+            code: alias
+            for code, alias in self._metricAliasByCode.items()
+            if code not in removedCodes
+        }
 
     async def refreshOne(
         self, session: AsyncSession, kpi_code: str, *, kpiId: int | None = None
@@ -245,19 +273,22 @@ class KpiMatchCache:
             )
             await self.warmUp(session)
             return
-        from app.domain.models import KpiCatalog
+        from app.domain.models import KpiCatalog, OntologyMetric
 
-        # 先清理该 KPI 在两个索引中的旧条目（按 id + 按 code 双保险）
+        # 先清理该 KPI 在三个索引中的旧条目（按 id + 按 code 双保险）
         self.onKpiChanged(kpi_code, kpiId=kpiId)
 
+        # 与 warmUp 同口径外连接别名（inner join 会把 metric_id 为 NULL 的 KPI 漏掉）。
         row = await session.execute(
-            select(KpiCatalog).where(KpiCatalog.kpi_code == kpi_code)
+            select(KpiCatalog, OntologyMetric.metric_alias)
+            .outerjoin(OntologyMetric, OntologyMetric.id == KpiCatalog.metric_id)
+            .where(KpiCatalog.kpi_code == kpi_code)
         )
-        kpi = row.scalar_one_or_none()
-
-        if kpi is None:
+        found = row.first()
+        if found is None:
             # 该 KPI 已被删除或不存在
             return
+        kpi, metric_alias = found
 
         # 与 warmUp 同口径：仅 status=PUBLISHED 入索引。曾误引 kpi.is_enabled
         # （85907cb）——kpi_catalog 无此列，读即 AttributeError。
@@ -268,8 +299,16 @@ class KpiMatchCache:
             }
             for kw in (kpi.semantic_keywords or []):
                 byKeyword[kw] = [*byKeyword.get(kw, []), kpi]
+            aliasByCode = {
+                code: alias
+                for code, alias in self._metricAliasByCode.items()
+                if code != kpi_code
+            }
+            if metric_alias:
+                aliasByCode[kpi_code] = metric_alias
             self._by_code = byCode
             self._by_keyword = byKeyword
+            self._metricAliasByCode = aliasByCode
         self._dirty = False
 
     async def ensureFresh(

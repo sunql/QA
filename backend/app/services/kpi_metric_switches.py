@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 SWITCH_CONTRACT_INJECTION = "KPI_CONTRACT_INJECTION_ENABLED"
 SWITCH_GATE = "KPI_METRIC_GATE_ENABLED"
 SWITCH_TIER_A = "KPI_METRIC_TIER_A_ENABLED"
+SWITCH_MATCH_CONTAINMENT = "KPI_MATCH_CONTAINMENT_ENABLED"
 
 _FALSY: frozenset[str] = frozenset({"0", "false", "off", "no"})
 _TRUTHY: frozenset[str] = frozenset({"1", "true", "on", "yes"})
@@ -87,3 +88,22 @@ async def isKpiContractInjectionEnabled(session: AsyncSession) -> bool:
         logger.debug("KPI 契约注入 env 紧急杀闸关闭：两条注入面一律不注入")
         return False
     return await readKpiMetricSwitch(session, SWITCH_CONTRACT_INJECTION, False)
+
+
+async def isKpiMatchContainmentEnabled(session: AsyncSession) -> bool:
+    """KPI 匹配器 v2 灰度开关（env 杀闸 + system_config 灰度，fail-closed）。
+
+    与 ``isKpiContractInjectionEnabled`` 完全同构，但**不复用它的键**：两者语义
+    不同（一个管「注不注入」，一个管「哪套匹配算法」），复用会让「关注入」连带
+    改变匹配结果，排障时无法区分。
+
+    1. env ``KPI_MATCH_CONTAINMENT_ENABLED=false`` ⇒ 一律走 v1 关键字路径
+       （进程级、需重启；默认 true，只作「一键止血」）；
+    2. system_config 行值为真才启用 v2；**行缺失 / 非法 / 读取异常 ⇒ 关**。
+
+    ⇒ 本批合入后生产行为不变：开 v2 是一次显式的数据操作（设计 §12）。
+    """
+    if not getSettings().kpiMatchContainmentEnabled:
+        logger.debug("KPI 包含式匹配 env 紧急杀闸关闭，回落 v1 关键字路径")
+        return False
+    return await readKpiMetricSwitch(session, SWITCH_MATCH_CONTAINMENT, False)

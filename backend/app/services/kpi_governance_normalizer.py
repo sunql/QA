@@ -17,8 +17,9 @@ mismatch ⇒ 契约注入把 KPI 整条丢掉。本模块把治理侧**对齐到
 
 from __future__ import annotations
 
+import copy
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,12 +33,19 @@ from app.services.kpi_metric_reconcile import (
 from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
 from app.services.nl2sql_semantic_guard import extractSqlIdentifiers
 
-_ALIAS_PREFIX = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\.")
-_TRUNC_CALL = re.compile(r"\bTRUNC\s*\(\s*([^()]*?)\s*\)", re.IGNORECASE)
-_OUTER_AGG = re.compile(
-    r"^\s*SELECT\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*FROM\b",
-    re.IGNORECASE | re.DOTALL,
+_STRING_LITERAL = r"'(?:[^']|'')*'"
+# 别名前缀与字符串字面量二选一：字面量整体保留（`'N.A'` 不是别名）。
+_ALIAS_OR_LITERAL = re.compile(rf"{_STRING_LITERAL}|\b[A-Za-z_][A-Za-z0-9_]*\.")
+# 只拆单参 TRUNC：`TRUNC(x, 'MM')` 保留原样（拆开会得到非法表达式）。
+_TRUNC_CALL = re.compile(
+    rf"{_STRING_LITERAL}|\bTRUNC\s*\(\s*([^()',]*?)\s*\)", re.IGNORECASE
 )
+_STRING_LITERAL_RE = re.compile(_STRING_LITERAL)
+_FUNCTION_CALL_NAME = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\s*\(")
+_SELECT_PREFIX = re.compile(r"SELECT\b", re.IGNORECASE)
+_FUNCTION_HEAD = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+# 空值守卫包装：`NULLIF(SUM(x), 0)` 的度量是里面的 SUM，不是 NULLIF 本身。
+_WRAPPER_FUNCTIONS = frozenset({"NULLIF", "COALESCE", "NVL", "IFNULL"})
 
 BASIS_MEASURE_JSON = "measure_json"
 BASIS_FORMULA_MEASURE = "formula_split_measure"
@@ -107,26 +115,65 @@ def _measureColumns(measure: MeasureSpec | None) -> tuple[str, ...]:
 
 
 def stripAliases(expr: str) -> str:
-    """去掉 ``R.COL`` / ``THBI.TABLE`` 这类前缀。"""
-    return _ALIAS_PREFIX.sub("", expr)
+    """去掉 ``R.COL`` / ``THBI.TABLE`` 这类前缀；字符串字面量原样保留。"""
+
+    def _replace(match: re.Match[str]) -> str:
+        text = match.group(0)
+        return text if text.startswith("'") else ""
+
+    return _ALIAS_OR_LITERAL.sub(_replace, expr)
 
 
 def unwrapTrunc(expr: str) -> str:
-    """``TRUNC(X)`` → ``(X)``：列集合不变，但让派生表达式可读。"""
-    return _TRUNC_CALL.sub(r"(\1)", expr)
+    """``TRUNC(X)`` → ``(X)``：列集合不变，但让派生表达式可读。
+
+    只拆**单参**形式：``TRUNC(x, 'MM')`` 拆开就是非法表达式，必须原样保留。
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        text = match.group(0)
+        if text.startswith("'"):
+            return text
+        return f"({match.group(1)})"
+
+    return _TRUNC_CALL.sub(_replace, expr)
+
+
+def _scanOutsideQuotes(text: str) -> Iterator[tuple[int, str, int]]:
+    """产出字面量之外的 ``(index, char, depth)``；depth 是该字符**之前**的括号深度。
+
+    SQL 转义写法 ``''``：连续两个引号仍在字面量内，必须一起跳过。
+    """
+    depth = 0
+    inQuote = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "'":
+            if inQuote and index + 1 < len(text) and text[index + 1] == "'":
+                index += 2
+                continue
+            inQuote = not inQuote
+            index += 1
+            continue
+        if not inQuote:
+            yield index, char, depth
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+        index += 1
 
 
 def splitTopLevelDivision(expr: str) -> tuple[str, str] | None:
-    """只在括号深度 0 且**恰好一个** ``/`` 时拆分；否则返回 None。"""
+    """只在括号深度 0 且**恰好一个** ``/`` 时拆分；否则返回 None。
+
+    字符串字面量里的 ``/``（如 ``'A/B'``）不是除法，扫描时跳过。
+    """
     parts: list[str] = []
-    depth = 0
     start = 0
-    for index, char in enumerate(expr):
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-        elif char == "/" and depth == 0:
+    for index, char, depth in _scanOutsideQuotes(expr):
+        if char == "/" and depth == 0:
             parts.append(expr[start:index])
             start = index + 1
     if len(parts) != 1:
@@ -135,15 +182,84 @@ def splitTopLevelDivision(expr: str) -> tuple[str, str] | None:
     return parts[0].strip(), parts[1].strip()
 
 
+def _selectItem(formula: str) -> str | None:
+    """取 SELECT 与**顶层** FROM 之间的表达式；括号/字面量里的 FROM 不算。"""
+    text = (formula or "").strip()
+    match = _SELECT_PREFIX.match(text)
+    if match is None:
+        return None
+    for index, _char, depth in _scanOutsideQuotes(text):
+        if depth != 0 or index < match.end():
+            continue
+        if text[index:index + 4].upper() != "FROM":
+            continue
+        before = text[index - 1] if index > 0 else " "
+        after = text[index + 4] if index + 4 < len(text) else " "
+        if before.isalnum() or before == "_" or after.isalnum() or after == "_":
+            continue
+        item = text[match.end():index].strip()
+        return item or None
+    return None
+
+
+def _parseAggCall(text: str) -> tuple[str, str] | None:
+    """``AGG(...)`` → (AGG, 参数体)；只认「整段就是一次调用」的形式。"""
+    match = _FUNCTION_HEAD.match(text)
+    if match is None:
+        return None
+    openIndex = match.end() - 1
+    for index, char, depth in _scanOutsideQuotes(text):
+        if index < openIndex or char != ")" or depth != 1:
+            continue
+        if text[index + 1:].strip():
+            return None
+        return match.group(1).upper(), text[openIndex + 1:index]
+    return None
+
+
+def _firstArgument(inner: str) -> str | None:
+    """取第一个顶层逗号之前的参数（``NULLIF(SUM(x), 0)`` → ``SUM(x)``）。"""
+    for index, char, depth in _scanOutsideQuotes(inner):
+        if char == "," and depth == 0:
+            return inner[:index].strip() or None
+    return inner.strip() or None
+
+
+def _parseAggSide(side: str) -> tuple[str, str] | None:
+    """一侧的聚合：``SUM(x)`` 直接取；``NULLIF(SUM(x), 0)`` 取里面的聚合。"""
+    parsed = _parseAggCall(side.strip())
+    if parsed is None:
+        return None
+    name, inner = parsed
+    if name not in _WRAPPER_FUNCTIONS:
+        return parsed
+    first = _firstArgument(inner)
+    if first is None:
+        return None
+    return _parseAggCall(first)
+
+
 def _normalizeExpr(expr: str) -> str:
     return unwrapTrunc(stripAliases(expr)).strip()
+
+
+def _columnTokens(expression: str) -> set[str]:
+    """列名候选：先屏蔽字符串字面量，再剔除函数调用名（``NVL``/``TRUNC``…）。
+
+    ``extractSqlIdentifiers`` 刻意宽松（文档写明「只判声明 ⊆ 实际方向」），
+    直接反向求差会把 ``'FAIL'``、``NVL`` 当成缺列 ⇒ 误拒。这里先做最小净化，
+    仍是**严格子集**校验（不猜列名）。
+    """
+    masked = _STRING_LITERAL_RE.sub("''", expression)
+    withoutCalls = _FUNCTION_CALL_NAME.sub(" ", masked)
+    return extractSqlIdentifiers(withoutCalls)
 
 
 def _assertPhysical(
     expression: str, allowedColumns: frozenset[str], kpiCode: str
 ) -> None:
     """派生表达式的列必须能在源类物理列里找到，否则拒绝（不猜）。"""
-    tokens = extractSqlIdentifiers(expression)
+    tokens = _columnTokens(expression)
     missing = sorted(token for token in tokens if token not in allowedColumns)
     if missing:
         raise NormalizationError(
@@ -158,10 +274,60 @@ def _existingPlan(measure: MeasureSpec | None) -> MeasurePlan | None:
     return MeasurePlan(agg=measure.agg, expr=measure.expr)
 
 
+def _deriveRatioPlans(
+    kpiCode: str,
+    item: str,
+    numerator: MeasureSpec | None,
+    denominator: MeasureSpec | None,
+) -> tuple[MeasurePlan | None, MeasurePlan | None]:
+    """RATIO 缺 measure 的两侧派生。
+
+    两种合法形态（**只写缺的那一侧**：已有 measure 可能带 filter/class_id，
+    重写会丢语义）：
+
+    1. 两侧聚合相除：``SUM(num) / NULLIF(SUM(den), 0)``；
+    2. 单个外层聚合包住除法：``AVG((num - den) / NULLIF(den, 0))``。
+    """
+    split = splitTopLevelDivision(item)
+    if split is not None:
+        leftSide = _parseAggSide(split[0])
+        rightSide = _parseAggSide(split[1])
+        if numerator is None and leftSide is None:
+            raise NormalizationError(
+                f"{kpiCode}: RATIO formula 的分子侧不是可识别聚合：{split[0]!r}"
+            )
+        if denominator is None and rightSide is None:
+            raise NormalizationError(
+                f"{kpiCode}: RATIO formula 的分母侧不是可识别聚合：{split[1]!r}"
+            )
+        numPlan = _existingPlan(numerator)
+        denPlan = _existingPlan(denominator)
+        if numPlan is None and leftSide is not None:
+            numPlan = MeasurePlan(agg=leftSide[0], expr=_normalizeExpr(leftSide[1]))
+        if denPlan is None and rightSide is not None:
+            denPlan = MeasurePlan(agg=rightSide[0], expr=_normalizeExpr(rightSide[1]))
+        return numPlan, denPlan
+
+    outer = _parseAggCall(item)
+    if outer is None:
+        raise NormalizationError(
+            f"{kpiCode}: RATIO 缺 measure，且 formula 不是可识别的聚合表达式：{item!r}"
+        )
+    agg, body = outer[0], _normalizeExpr(outer[1])
+    inner = splitTopLevelDivision(body)
+    if inner is None:
+        raise NormalizationError(
+            f"{kpiCode}: RATIO 缺 measure，且 formula 参数体没有唯一的顶层 '/'"
+        )
+    left, right = inner
+    numPlan = _existingPlan(numerator) or MeasurePlan(agg=agg, expr=left)
+    denPlan = _existingPlan(denominator) or MeasurePlan(agg=agg, expr=right)
+    return numPlan, denPlan
+
+
 def _deriveMeasures(
     kpiCode: str,
     metric: OntologyMetric,
-    allowedColumns: frozenset[str],
 ) -> tuple[MeasurePlan | None, MeasurePlan | None, bool, bool, str]:
     """返回 (分子度量, 分母度量, 是否写分子, 是否写分母, basis)。
 
@@ -188,16 +354,19 @@ def _deriveMeasures(
             BASIS_MEASURE_JSON,
         )
 
-    outer = _OUTER_AGG.match(metric.formula or "")
-    if outer is None:
+    item = _selectItem(metric.formula or "")
+    if item is None:
         raise NormalizationError(
-            f"{kpiCode}: metric {metric.id} 缺 measure 且 formula 无法解析外层聚合"
+            f"{kpiCode}: metric {metric.id} 缺 measure 且 formula 无法解析 SELECT 项"
         )
-    agg = outer.group(1).upper()
-    body = _normalizeExpr(outer.group(2))
 
     if metric.metric_type == "MEASURE":
-        _assertPhysical(body, allowedColumns, kpiCode)
+        parsed = _parseAggCall(item)
+        if parsed is None:
+            raise NormalizationError(
+                f"{kpiCode}: MEASURE formula 不是单个外层聚合：{item!r}"
+            )
+        agg, body = parsed[0], _normalizeExpr(parsed[1])
         return (
             MeasurePlan(agg=agg, expr=body),
             _existingPlan(denominator),
@@ -207,19 +376,12 @@ def _deriveMeasures(
         )
 
     if metric.metric_type == "RATIO" and (numerator is None or denominator is None):
-        split = splitTopLevelDivision(body)
-        if split is None:
-            raise NormalizationError(
-                f"{kpiCode}: RATIO 缺 measure，且 formula 参数体没有唯一的顶层 '/'"
-            )
-        left, right = split
-        _assertPhysical(left, allowedColumns, kpiCode)
-        _assertPhysical(right, allowedColumns, kpiCode)
+        numPlan, denPlan = _deriveRatioPlans(kpiCode, item, numerator, denominator)
         return (
-            MeasurePlan(agg=agg, expr=left),
-            MeasurePlan(agg=agg, expr=right),
-            True,
-            True,
+            numPlan,
+            denPlan,
+            numerator is None,
+            denominator is None,
             BASIS_FORMULA_RATIO,
         )
 
@@ -230,9 +392,11 @@ def _deriveMeasures(
 
 
 def _tierOf(result: Any) -> str:
-    """Tier A = 层 2 pass 且层 1/3 无降级；其余为 C。"""
+    """Tier A = 层 2 pass 且层 1/3 无降级；pass 但降级 = B；其余 = C。"""
     if result.isTierAEligible:
         return TIER_A
+    if result.isPass:
+        return TIER_B
     return TIER_C
 
 
@@ -293,11 +457,16 @@ def _withAfter(
 
 
 def _isNoop(kpi: KpiCatalog, plan: NormalizationPlan) -> bool:
-    """目标值 == 现值且无需补 measure ⇒ 重跑不产生任何写入。"""
+    """目标值 == 现值且无需补 measure ⇒ 重跑不产生任何写入。
+
+    列集合按**无序**比较：治理侧列序不参与任何判定，仅顺序不同时重写
+    属于无意义变更（apply 应保持幂等）。
+    """
     return (
-        _tokens(kpi.numerator_columns) == plan.numerator_columns
-        and _tokens(kpi.denominator_columns) == plan.denominator_columns
-        and _tokens(kpi.grain_keys) == plan.grain_keys
+        sorted(_tokens(kpi.numerator_columns)) == sorted(plan.numerator_columns)
+        and sorted(_tokens(kpi.denominator_columns))
+        == sorted(plan.denominator_columns)
+        and sorted(_tokens(kpi.grain_keys)) == sorted(plan.grain_keys)
         and plan.numerator_measure is None
         and plan.denominator_measure is None
     )
@@ -310,15 +479,17 @@ def deriveNormalization(
 ) -> NormalizationPlan:
     """单条 KPI 的规范化计划（纯函数，无 IO）。"""
     kpiCode = str(kpi.kpi_code)
-    before = {
-        "numerator_columns": kpi.numerator_columns,
-        "denominator_columns": kpi.denominator_columns,
-        "grain_keys": kpi.grain_keys,
-        "numerator_measure": metric.numerator_measure if metric else None,
-        "denominator_measure": metric.denominator_measure if metric else None,
-    }
     if metric is None:
         raise NormalizationError(f"{kpiCode}: 未挂靠 ontology_metric，拒绝推断治理字段")
+    # before 必须是**值快照**：直接存 ORM 上的 list/dict 会随 apply 一起被改写，
+    # 报告里的 before/after 就变成同一个数（假取证）。
+    before = {
+        "numerator_columns": copy.deepcopy(list(kpi.numerator_columns or ())),
+        "denominator_columns": copy.deepcopy(list(kpi.denominator_columns or ())),
+        "grain_keys": copy.deepcopy(list(kpi.grain_keys or ())),
+        "numerator_measure": copy.deepcopy(metric.numerator_measure),
+        "denominator_measure": copy.deepcopy(metric.denominator_measure),
+    }
 
     beforeResult = reconcileMetric(governanceSpecOf(kpi), techniqueOf(metric))
 
@@ -344,9 +515,12 @@ def deriveNormalization(
         return _withAfter(target, afterResult, is_noop=_isNoop(kpi, target))
 
     allowed = frozenset(col.lower() for col in class_columns)
-    numPlan, denPlan, writeNum, writeDen, basis = _deriveMeasures(
-        kpiCode, metric, allowed
-    )
+    numPlan, denPlan, writeNum, writeDen, basis = _deriveMeasures(kpiCode, metric)
+    # 统一物理校验：已有 measure JSON 与派生表达式同一条线，任何一侧引用了
+    # 源类里不存在的列都拒绝落库（不猜、不静默通过）。
+    for side in (numPlan, denPlan):
+        if side is not None and side.expr:
+            _assertPhysical(side.expr, allowed, kpiCode)
     numeratorSpec = MeasureSpec.fromRaw(numPlan.toRaw()) if numPlan else None
     denominatorSpec = MeasureSpec.fromRaw(denPlan.toRaw()) if denPlan else None
     numeratorColumns = _measureColumns(numeratorSpec)

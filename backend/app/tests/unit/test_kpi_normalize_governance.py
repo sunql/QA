@@ -20,11 +20,15 @@ from app.services.kpi_metric_reconcile import (
     reconcileMetric,
 )
 from app.services.kpi_metric_spec import techniqueOf
+from app.services.kpi_governance_normalizer import _assertPhysical
 from scripts.kpi_normalize_governance import (
     NormalizationError,
     deriveNormalization,
     planNormalizations,
     renderReport,
+    splitTopLevelDivision,
+    stripAliases,
+    unwrapTrunc,
 )
 
 _OTD_FORMULA = (
@@ -325,3 +329,119 @@ def test_plan_normalizations_keeps_input_order_and_report_counts() -> None:
     assert "summary: pass=1 unknown=1 mismatch=0" in report
     assert "KPI_SUPPLIER_OTD" in report
     assert "KPI_SUPPLIER_DEFECT_RATE" in report
+
+
+# ---------------------------------------------------------------------------
+# 复审修复：SQL 文本处理必须认识字符串字面量 / 函数调用
+# ---------------------------------------------------------------------------
+
+
+def test_alias_stripping_preserves_string_literals() -> None:
+    """`'N.A'` 是字面量，不能被当成 `R.` 这类别名前缀去掉。"""
+    expr = "CASE WHEN R.STATUS = 'N.A' THEN R.QTY END"
+
+    assert stripAliases(expr) == "CASE WHEN STATUS = 'N.A' THEN QTY END"
+
+
+def test_trunc_with_format_argument_is_not_unwrapped() -> None:
+    """`TRUNC(x, 'MM')` 两参形式不能拆成 `(x, 'MM')`（非法表达式）。"""
+    expr = "TRUNC(R.ORDER_DATE, 'MM')"
+
+    assert unwrapTrunc(expr) == expr
+
+
+def test_split_top_level_division_ignores_literal_slash() -> None:
+    """字面量里的 `/` 不是除法。"""
+    assert splitTopLevelDivision("CASE WHEN S = 'A/B' THEN X END") is None
+
+
+def test_physical_check_ignores_literals_and_function_names() -> None:
+    """`'FAIL'` 与 `NVL` 不是列；列名命中即通过（不误拒）。"""
+    expr = "NVL(CASE WHEN STATUS = 'FAIL' THEN QTY END, 0)"
+
+    # 不抛异常即通过
+    _assertPhysical(expr, frozenset({"status", "qty"}), "KPI_OK")
+
+
+def test_physical_check_still_rejects_missing_column() -> None:
+    """反向守卫：真正缺列仍然拒绝（证明上面的放行不是恒真）。"""
+    with pytest.raises(NormalizationError, match="MYSTERY_COL"):
+        _assertPhysical("NVL(MYSTERY_COL, 0)", frozenset({"qty"}), "KPI_BAD")
+
+
+def test_partial_ratio_preserves_existing_measure_json() -> None:
+    """RATIO 只有一侧 measure：只写缺的一侧，已有侧原样保留（含 filter）。"""
+    plan = deriveNormalization(
+        _kpi(
+            "KPI_PARTIAL_RATIO",
+            num=["RECEIPT_DATE"],
+            den=["PROMISED_RECEIPT_DATE"],
+            grain=["SUPPLIER_CODE"],
+        ),
+        _metric(
+            metric_type="RATIO",
+            source="ESCAPE_HATCH",
+            order="WEIGHTED_RATIO",
+            formula=_OTD_FORMULA,
+            num={
+                "agg": "COUNT",
+                "expr": "RECEIPT_DATE",
+                "filter": "RECEIPT_DATE > SYSDATE",
+                "class_id": 7,
+            },
+            grain=["SUPPLIER_CODE"],
+        ),
+        frozenset({"RECEIPT_DATE", "PROMISED_RECEIPT_DATE", "SUPPLIER_CODE"}),
+    )
+
+    assert plan.numerator_measure is None  # 已有侧不重写，保留 filter/class_id
+    assert plan.denominator_measure == {
+        "agg": "COUNT",
+        "expr": "PROMISED_RECEIPT_DATE",
+    }
+    assert plan.verdict_after == "pass"
+
+
+def test_pass_but_degraded_reports_tier_b() -> None:
+    """层 2 pass 但层 1 降级 ⇒ Tier B（不是 C，也不是 A）。"""
+    plan = deriveNormalization(
+        _kpi(
+            "KPI_DEGRADED",
+            num=["B"],
+            grain=["SUPPLIER_CODE"],
+        ),
+        _metric(
+            metric_type="MEASURE",
+            source="ESCAPE_HATCH",
+            formula="SELECT SUM(A) FROM THBI.T",
+            num={"agg": "SUM", "expr": "B"},
+            grain=["SUPPLIER_CODE"],
+        ),
+        frozenset({"A", "B", "SUPPLIER_CODE"}),
+    )
+
+    assert plan.verdict_after == "pass"
+    assert plan.findings_after  # 有降级 finding
+    assert plan.tier_after == "B"
+
+
+def test_noop_compares_unordered_columns() -> None:
+    """已有列集合相同但顺序不同 ⇒ 仍算 noop（不产生无意义重写）。"""
+    plan = deriveNormalization(
+        _kpi(
+            "KPI_UNORDERED",
+            num=["RECEIPT_DATE", "CREATION_DATE"],
+            grain=["SUPPLIER_CODE"],
+        ),
+        _metric(
+            metric_type="MEASURE",
+            source="ESCAPE_HATCH",
+            formula="SELECT AVG(R.RECEIPT_DATE - L.CREATION_DATE) FROM THBI.T",
+            num={"agg": "AVG", "expr": "(RECEIPT_DATE) - (CREATION_DATE)"},
+            grain=["SUPPLIER_CODE"],
+        ),
+        frozenset({"RECEIPT_DATE", "CREATION_DATE", "SUPPLIER_CODE"}),
+    )
+
+    assert plan.numerator_columns == ("CREATION_DATE", "RECEIPT_DATE")
+    assert plan.is_noop is True

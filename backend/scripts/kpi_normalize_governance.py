@@ -19,8 +19,14 @@ import argparse
 import asyncio
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
-from sqlalchemy import select, text
+# 直接 `python3 scripts/xxx.py` 运行时 sys.path[0] 是 scripts/ ⇒ `app` / `scripts`
+# 都不可导入。必须先把 backend 根插进 sys.path：否则要么 ModuleNotFoundError，
+# 要么被 editable 安装的 .pth 引到**主仓**的旧副本（本项目已知的遮蔽陷阱）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from sqlalchemy import select, text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.domain.models import (
@@ -39,7 +45,7 @@ from app.services.kpi_governance_normalizer import (
     stripAliases,
     unwrapTrunc,
 )
-from scripts.kpi_metric_db_guard import assertSafeTarget
+from scripts.kpi_metric_db_guard import assertSafeTarget, maskDsn
 
 _EXIT_TARGET_MISMATCH = 1
 _EXIT_DERIVATION_ERROR = 2
@@ -138,7 +144,7 @@ async def _main(argv: Sequence[str] | None = None) -> int:
     args = _parseArgs(argv)
     # dev 与 prod 同名（都叫 qa_metadata）：dry-run 只读，允许以它为目标；
     # --apply 必须显式 --allow-prod-write（且调用方先做当日备份）。
-    assertSafeTarget(
+    targetDb = assertSafeTarget(
         args.database_url,
         allowProdWrite=args.allow_prod_write or not args.apply,
     )
@@ -149,7 +155,15 @@ async def _main(argv: Sequence[str] | None = None) -> int:
         async with sessionFactory() as session:
             dbNameRow = (await session.execute(text("SELECT current_database()"))).first()
             dbName = "" if dbNameRow is None else str(dbNameRow[0])
-            print(f"target: {args.database_url.split('@')[-1]} database={dbName}")
+            # DSN 里的库名是「声称」，current_database() 是「事实」：两者不一致
+            # 说明连到了别的库（连接池/pgbouncer/环境变量串了），一律拒绝继续。
+            if dbName != targetDb:
+                print(
+                    f"[refused] 实际连接库 {dbName!r} 与 DSN 目标 {targetDb!r} 不一致",
+                    file=sys.stderr,
+                )
+                return _EXIT_TARGET_MISMATCH
+            print(f"target: {maskDsn(args.database_url)} database={dbName}")
             kpis, metrics, classColumns = await loadSnapshot(session)
             try:
                 plans = planNormalizations(kpis, metrics, classColumns)
@@ -166,7 +180,11 @@ async def _main(argv: Sequence[str] | None = None) -> int:
             if not args.apply:
                 print("dry-run：未写库（加 --apply 落库）")
                 return 0
-            await applyPlans(session, plans)
+            try:
+                await applyPlans(session, plans)
+            except NormalizationError as exc:
+                print(f"[refused] 落库前复核失败：{exc}", file=sys.stderr)
+                return _EXIT_DERIVATION_ERROR
             print("applied：已写入 kpi_catalog / ontology_metric")
             return 0
     finally:

@@ -1,0 +1,122 @@
+# Tier A 真实数据验收（D6 / 设计 §13-M2）
+
+日期：2026-11-11
+环境：dev 元数据库 `qa_metadata` @ 127.0.0.1:5433（12 条真实 KPI：8 条
+ESCAPE_HATCH / 4 条 NONE，全部 `datasource_id=1` → THBI Oracle 19c
+192.168.205.70:1521/X3V71ORA）。
+
+结论：**环境可达，M2 数值验收未降级**。THBI Oracle 连接成功，8 条 ESCAPE_HATCH
+全部真实执行；其中 6 条返回数值且与手工只读执行逐条一致（diff=0），2 条两端均为
+NULL（无匹配行，`empty_result` 按设计降级 Tier B）。
+
+> 探针不读 Tier A 开关行（`switch=forced_on`，输出已标注）；不经过 chat / LLM。
+> 元数据库口令用 `$QA_METADATA_URL` 占位，未写入本文件；数据源口令由部署环境
+> `SECRET_KEY` 在内存中解密后使用，未落盘。
+
+## 步骤 1-2：路由计划（dry-run，只读元数据库）
+
+命令（在 `backend/` 下；`$QA_METADATA_URL` 指向 `...@127.0.0.1:5433/qa_metadata`）：
+
+```bash
+python -m scripts.kpi_tier_a_probe --database-url "$QA_METADATA_URL"
+```
+
+输出原样：
+
+```text
+switch=forced_on (未读取 Tier A 开关行)
+kpi_code=KPI_COST_SAVING tier=A reason=- source=ESCAPE_HATCH eligible=True datasource_id=1
+kpi_code=KPI_INVOICE_MATCH_RATE tier=A reason=- source=ESCAPE_HATCH eligible=True datasource_id=1
+kpi_code=KPI_PAYMENT_ON_TIME tier=A reason=- source=ESCAPE_HATCH eligible=True datasource_id=1
+kpi_code=KPI_PURCHASE_CYCLE_TIME tier=A reason=- source=ESCAPE_HATCH eligible=True datasource_id=1
+kpi_code=KPI_PURCHASE_PRICE_VARIANCE tier=A reason=- source=ESCAPE_HATCH eligible=True datasource_id=1
+kpi_code=KPI_SUPPLIER_DEFECT_RATE tier=C reason=execution_source_none source=NONE eligible=False datasource_id=1
+kpi_code=KPI_SUPPLIER_DELAY_DAYS tier=A reason=- source=ESCAPE_HATCH eligible=True datasource_id=1
+kpi_code=KPI_SUPPLIER_FPY tier=C reason=execution_source_none source=NONE eligible=False datasource_id=1
+kpi_code=KPI_SUPPLIER_MAINTENANCE_RATIO tier=C reason=execution_source_none source=NONE eligible=False datasource_id=1
+kpi_code=KPI_SUPPLIER_NCR_RATE tier=C reason=execution_source_none source=NONE eligible=False datasource_id=1
+kpi_code=KPI_SUPPLIER_OTD tier=A reason=- source=ESCAPE_HATCH eligible=True datasource_id=1
+kpi_code=KPI_SUPPLIER_OVERDUE_RATIO tier=A reason=- source=ESCAPE_HATCH eligible=True datasource_id=1
+total=12 tierA=8
+```
+
+- 步骤 1：8 条 ESCAPE_HATCH 全部 `tier=A`，PASS。
+- 步骤 2：4 条 NONE 全部 `tier=C / execution_source_none`，PASS。
+
+## 步骤 3：8 条 ESCAPE_HATCH 真实执行
+
+命令（逐条替换 `$KPI_CODE`；`--datasource-id 1` 必须等于 KPI 绑定值）：
+
+```bash
+python -m scripts.kpi_tier_a_probe --database-url "$QA_METADATA_URL" \
+    --execute --kpi-code "$KPI_CODE" --datasource-id 1
+```
+
+输出原样（每条的 `ok/value/rowCount/elapsedMs/truncated/reason` 均保留）：
+
+```text
+=== KPI_SUPPLIER_OTD ===
+{"kpiCode": "KPI_SUPPLIER_OTD", "ok": true, "value": 0.1674391472412354, "rowCount": 1, "elapsedMs": 2362, "truncated": false, "reason": null}
+=== KPI_SUPPLIER_OVERDUE_RATIO ===
+{"kpiCode": "KPI_SUPPLIER_OVERDUE_RATIO", "ok": true, "value": 0.8325608527587646, "rowCount": 1, "elapsedMs": 1989, "truncated": false, "reason": null}
+=== KPI_PURCHASE_CYCLE_TIME ===
+{"kpiCode": "KPI_PURCHASE_CYCLE_TIME", "ok": true, "value": 128.73548388653205, "rowCount": 1, "elapsedMs": 1847, "truncated": false, "reason": null}
+=== KPI_SUPPLIER_DELAY_DAYS ===
+{"kpiCode": "KPI_SUPPLIER_DELAY_DAYS", "ok": true, "value": 47.285447884598305, "rowCount": 1, "elapsedMs": 2930, "truncated": false, "reason": null}
+=== KPI_PURCHASE_PRICE_VARIANCE ===
+{"kpiCode": "KPI_PURCHASE_PRICE_VARIANCE", "ok": false, "value": null, "rowCount": 1, "elapsedMs": 537, "truncated": false, "reason": "empty_result"}
+=== KPI_COST_SAVING ===
+{"kpiCode": "KPI_COST_SAVING", "ok": false, "value": null, "rowCount": 1, "elapsedMs": 493, "truncated": false, "reason": "empty_result"}
+=== KPI_INVOICE_MATCH_RATE ===
+{"kpiCode": "KPI_INVOICE_MATCH_RATE", "ok": true, "value": 0.003440846725584261, "rowCount": 1, "elapsedMs": 2183, "truncated": false, "reason": null}
+=== KPI_PAYMENT_ON_TIME ===
+{"kpiCode": "KPI_PAYMENT_ON_TIME", "ok": true, "value": 1, "rowCount": 1, "elapsedMs": 427, "truncated": false, "reason": null}
+```
+
+说明：`KPI_PURCHASE_PRICE_VARIANCE` / `KPI_COST_SAVING` 的 SQL 返回 1 行但值为
+NULL（当前数据下价格清单 join 无匹配），执行器按 `firstPresentValue` 口径判
+`empty_result` 并降级 Tier B —— 这是设计预期，不是执行故障。
+
+控制台另有 `evidence 落库失败 ... 5432` 噪声：探针进程未设置 `DATABASE_URL`，
+adapter 的既有 SQL_QUERY 证据 best-effort 写向默认 5432 失败；与 Tier A 结果无关，
+未写入任何库。
+
+## 步骤 4：同一 formula 在只读客户端手工执行
+
+只读客户端：`oracledb` 异步连接（等价 sqlplus），每条公式前执行
+`SET TRANSACTION READ ONLY`，结束后 rollback；连接参数取该 KPI 绑定的
+`data_source` 行（口令仅在内存解密，未写入本文件）。
+
+```text
+KPI_COST_SAVING    None
+KPI_INVOICE_MATCH_RATE    0.003440846725584261
+KPI_PAYMENT_ON_TIME    1
+KPI_PURCHASE_CYCLE_TIME    128.73548388653205
+KPI_PURCHASE_PRICE_VARIANCE    None
+KPI_SUPPLIER_DELAY_DAYS    47.285447884598305
+KPI_SUPPLIER_OTD    0.1674391472412354
+KPI_SUPPLIER_OVERDUE_RATIO    0.8325608527587646
+```
+
+## 步骤 5：结果表（差值 ≤ 0.01 记 PASS）
+
+| kpi_code | tier_a_value | manual_value | diff | pass |
+|---|---|---|---|---|
+| KPI_SUPPLIER_OTD | 0.1674391472412354 | 0.1674391472412354 | 0.0 | PASS |
+| KPI_SUPPLIER_OVERDUE_RATIO | 0.8325608527587646 | 0.8325608527587646 | 0.0 | PASS |
+| KPI_PURCHASE_CYCLE_TIME | 128.73548388653205 | 128.73548388653205 | 0.0 | PASS |
+| KPI_SUPPLIER_DELAY_DAYS | 47.285447884598305 | 47.285447884598305 | 0.0 | PASS |
+| KPI_PURCHASE_PRICE_VARIANCE | null | null | N/A | PASS（两端 NULL 一致） |
+| KPI_COST_SAVING | null | null | N/A | PASS（两端 NULL 一致） |
+| KPI_INVOICE_MATCH_RATE | 0.003440846725584261 | 0.003440846725584261 | 0.0 | PASS |
+| KPI_PAYMENT_ON_TIME | 1 | 1 | 0.0 | PASS |
+
+数值对比：6/6 有值 KPI diff=0.0；2/2 NULL KPI 两端一致。M2 数值验收通过。
+
+## 探索过程中的环境噪声（如实记录，不影响结论）
+
+- 首次 `--execute` 未导出部署 `SECRET_KEY`，解密数据源口令失败 ⇒ 执行器按设计
+  降级为 `execution_error`（未抛到探针外）。导出部署 `SECRET_KEY` 后重跑成功；
+  该密钥值未写入任何 evidence 文件。
+- Oracle 连通性预检：TCP 192.168.205.70:1521 可达；真实执行 8 条均成功返回
+  （含 2 条 NULL），无 DNS / 网络 / 认证失败。

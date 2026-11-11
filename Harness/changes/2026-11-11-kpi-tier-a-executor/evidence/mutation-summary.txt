@@ -1,0 +1,232 @@
+# Tier A 变异取证汇总（D6 Task 6.2）
+
+日期：2026-11-11
+分支：`feat/kpi-tier-a-executor`（HEAD `88885b9a`）
+方式：逐个「改 → 跑定向 → 必须 RED → `git checkout -- <文件>` 还原 → 复跑证 GREEN」。
+变异取证期间未并发运行其他 pytest。
+
+通用测试环境（下文化命令中省略，均同此）：
+
+```bash
+cd /private/tmp/qa-kpi-p2/backend
+export TEST_DATABASE_URL='postgresql+asyncpg://qa_user:<PW>@127.0.0.1:5434/qa_metadata_test'
+export TEST_NEO4J_URI='bolt://127.0.0.1:7688'
+export TEST_NEO4J_PASSWORD='<PW>'
+```
+
+> 还原后均核对 `git status --short <文件>` 为空；最终 `git diff` 仅含本日预期改动
+> （探针脚本、覆盖用例、docstring 修正），无变异残留。
+
+---
+
+## 变异 1：`readKpiMetricSwitch` 行缺失返回 `True`
+
+- 文件：`backend/app/services/kpi_metric_switches.py:43-44`
+- 改前：
+
+```python
+    if cfg is None:
+        return default
+```
+
+- 改后：
+
+```python
+    if cfg is None:
+        return True  # MUTATION 1: row missing treated as enabled
+```
+
+- 命令：
+
+```bash
+python -m pytest app/tests/unit/test_kpi_metric_tier_a_switch.py::test_row_missing_is_false -q
+```
+
+- RED（符合预期）：
+
+```text
+FAILED app/tests/unit/test_kpi_metric_tier_a_switch.py::test_row_missing_is_false
+E       assert True is False
+app/tests/unit/test_kpi_metric_tier_a_switch.py:57: AssertionError
+1 failed in 1.16s
+```
+
+- 还原后：`git checkout -- app/services/kpi_metric_switches.py` ⇒ `1 passed in 1.07s`。
+
+---
+
+## 变异 2：`planKpiExecution` 把 COMPILED 判成 A
+
+- 文件：`backend/app/services/kpi_execution_service.py:78-79`
+- 改前：
+
+```python
+    if source == SOURCE_COMPILED:
+        return KpiExecutionPlan(TIER_B, REASON_COMPILED_NOT_SUPPORTED)
+```
+
+- 改后：
+
+```python
+    if source == SOURCE_COMPILED:
+        return KpiExecutionPlan(TIER_A, REASON_COMPILED_NOT_SUPPORTED)  # MUTATION 2
+```
+
+- 命令：
+
+```bash
+python -m pytest app/tests/unit/test_kpi_execution_plan.py -q
+```
+
+- RED（符合预期）：
+
+```text
+FAILED app/tests/unit/test_kpi_execution_plan.py::test_plan_matrix[overrides8-B-compiled_not_supported]
+E       AssertionError: assert 'A' == 'B'
+1 failed, 15 passed in 5.34s
+```
+
+- 与计划表的差异（如实记录）：brief 写的用例名是 `test_plan_matrix[COMPILED]`，
+  实际 pytest 对三元参数（dict/tier/reason）自动生成 id 为
+  `test_plan_matrix[overrides8-B-compiled_not_supported]`。红掉的正是 COMPILED 这一行
+  （`execution_source="COMPILED"`），语义一致，不是漏测。
+- 还原后：`16 passed in 5.16s`。
+
+---
+
+## 变异 3：执行器删掉 `_assert_read_only`
+
+- 文件：`backend/app/services/kpi_execution_service.py:185`
+- 改前：
+
+```python
+            _assert_read_only(formula)  # 执行器侧第一道；adapter 内部还会再验
+```
+
+- 改后：
+
+```python
+            pass  # MUTATION 3: _assert_read_only removed
+```
+
+- 命令：
+
+```bash
+python -m pytest app/tests/unit/test_kpi_execution_service.py::test_non_readonly_formula_is_rejected_before_adapter -q
+```
+
+- RED（符合预期）：
+
+```text
+FAILED app/tests/unit/test_kpi_execution_service.py::test_non_readonly_formula_is_rejected_before_adapter
+E       AssertionError: assert (True is False)
+E        +  where True = KpiExecutionResult(ok=True, rows=({'x': 1},), value=1, rowCount=1, truncated=False, elapsedMs=0, reason=None).ok
+app/tests/unit/test_kpi_execution_service.py:107: AssertionError
+1 failed in 1.10s
+```
+
+- 还原后：`1 passed in 1.09s`。
+
+---
+
+## 变异 4：Tier B 分支返回 `None`（落 L4）
+
+- 文件：`backend/app/services/chat_stream_output.py:537-541`
+- 改前：
+
+```python
+                if plan.tier == TIER_B:
+                    # L4 不注入契约块：Tier B 必须交给主 NL2SQL 流水线。
+                    return self._tierBPreamble(
+                        match, kpi, plan.reason, dto.datasourceId
+                    )
+```
+
+- 改后：
+
+```python
+                if plan.tier == TIER_B:
+                    # MUTATION 4: return None instead of Tier B sentinel
+                    return None
+```
+
+- 命令：
+
+```bash
+python -m pytest app/tests/unit/test_chat_tier_a_preamble.py::test_tier_b_returns_sentinel_and_skips_l4 -q
+```
+
+- RED（符合预期）：
+
+```text
+FAILED app/tests/unit/test_chat_tier_a_preamble.py::test_tier_b_returns_sentinel_and_skips_l4
+E       assert None is not None
+app/tests/unit/test_chat_tier_a_preamble.py:112: AssertionError
+1 failed in 1.12s
+```
+
+- 与计划表的差异（如实记录）：
+  1. brief 括号里写「落 L4」。当前代码把 Tier B 哨兵放在 `if plan.tier == TIER_A /
+     elif TIER_C / else(LEGACY)` **之前**；把该 `return` 删空（`pass`）会让 Tier B
+     落进 `else`（LEGACY），实际红在 `assert preamble.routing_layer == "L1B"`，
+     得到 `'L1' == 'L1B'`。这不是「落 L4」。
+  2. 因此按字面语义「Tier B 分支返回 `None`」取 `return None`：函数提前结束，
+     调用方拿不到哨兵、继续主 NL2SQL 路径，用例红在 `assert preamble is not None`。
+     两种写法都把 Tier B 哨兵打掉，本记录采用与变异描述一致的后一种。
+- 还原后：`1 passed in 1.10s`。
+
+---
+
+## 变异 5：`_attachKpiHint` 不挂字段
+
+- 文件：`backend/app/services/chat_service.py:562-566`
+- 改前：
+
+```python
+        """Tier B 提示挂到主链路响应（不可变：model_copy 派生）。"""
+        if hint is None or response is None:
+            return response
+```
+
+- 改后：
+
+```python
+        """Tier B 提示挂到主链路响应（不可变：model_copy 派生）。"""
+        return response  # MUTATION 5: do not attach Tier B fields
+        if hint is None or response is None:
+            return response
+```
+
+- 命令：
+
+```bash
+python -m pytest 'app/tests/integration/test_kpi_tier_a_chat_api.py::test_clarify_intent_keeps_tier_b_fields_on_either_entry' -q
+```
+
+- RED（符合预期，红在非流式半段）：
+
+```text
+FAILED app/tests/integration/test_kpi_tier_a_chat_api.py::test_clarify_intent_keeps_tier_b_fields_on_either_entry
+app/tests/integration/test_kpi_tier_a_chat_api.py:744: in test_clarify_intent_keeps_tier_b_fields_on_either_entry
+    assert body["executionTier"] == "B"
+E   AssertionError: assert None == 'B'
+1 failed in 1.68s
+```
+
+- 说明：同用例的流式半段（meta 帧走 `tierHintFields`，不经 `_attachKpiHint`）仍然
+  通过；红掉的正是非流式 `_attachKpiHint` 路径，与计划表一致。第 9 例满足取证要求。
+- 还原后：`1 passed in 1.65s`。
+
+---
+
+## 结论
+
+| # | 变异 | 必须变红 | 实际 RED | 还原后 |
+|---|---|---|---|---|
+| 1 | 开关行缺失返回 True | `test_row_missing_is_false` | 同名用例 | GREEN |
+| 2 | COMPILED 判成 A | `test_plan_matrix[COMPILED]` | `test_plan_matrix[overrides8-B-compiled_not_supported]`（同一行） | GREEN |
+| 3 | 删 `_assert_read_only` | `test_non_readonly_formula_is_rejected_before_adapter` | 同名用例 | GREEN |
+| 4 | Tier B 分支返回 None | `test_tier_b_returns_sentinel_and_skips_l4` | 同名用例；红点 `preamble is not None` | GREEN |
+| 5 | `_attachKpiHint` 不挂字段 | 第 9 例非流式 Tier B 断言 | 同用例第 744 行非流式半段 | GREEN |
+
+5/5 变异均被现有用例真实捕获；两处命名/控制流差异已在上文如实说明，无凑数。

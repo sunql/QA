@@ -10,8 +10,16 @@ from app.services import kpi_metric_switches as switches
 
 
 class _FakeSettings:
-    def __init__(self, enabled: bool) -> None:
+    def __init__(
+        self,
+        enabled: bool = True,
+        *,
+        contractInjection: bool = True,
+        containment: bool = True,
+    ) -> None:
         self.kpiMetricTierAEnabled = enabled
+        self.kpiContractInjectionEnabled = contractInjection
+        self.kpiMatchContainmentEnabled = containment
 
 
 class _FakeSavepoint:
@@ -35,13 +43,16 @@ class _FakeResult:
 class _FakeSession:
     """只实现 readKpiMetricSwitch 需要的 begin_nested / execute。"""
 
-    def __init__(self, value: str | None) -> None:
+    def __init__(self, value: str | None, *, raises: bool = False) -> None:
         self._value = value
+        self._raises = raises
 
     def begin_nested(self) -> _FakeSavepoint:
         return _FakeSavepoint()
 
     async def execute(self, _stmt: object) -> _FakeResult:
+        if self._raises:
+            raise RuntimeError("db down")
         return _FakeResult(self._value)
 
 
@@ -67,3 +78,83 @@ async def test_row_true_is_true(monkeypatch) -> None:
 async def test_none_session_is_false(monkeypatch) -> None:
     monkeypatch.setattr(switches, "getSettings", lambda: _FakeSettings(True))
     assert await switches.isKpiMetricTierAEnabled(None) is False
+
+
+# =============================================================================
+# readKpiMetricSwitch 取值语义（Tier A 之外的两个同构开关复用同一读取器）
+# =============================================================================
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "off", "NO", "  False  "])
+async def test_falsy_values_are_false(raw: str) -> None:
+    assert await switches.readKpiMetricSwitch(_FakeSession(raw), "K", True) is False
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "on", "YES", "  True  "])
+async def test_truthy_values_are_true(raw: str) -> None:
+    assert await switches.readKpiMetricSwitch(_FakeSession(raw), "K", False) is True
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("3", True), ("0", False)])
+async def test_numeric_values_parse(raw: str, expected: bool) -> None:
+    assert await switches.readKpiMetricSwitch(_FakeSession(raw), "K", not expected) is expected
+
+
+async def test_empty_value_falls_back_to_default() -> None:
+    assert await switches.readKpiMetricSwitch(_FakeSession("   "), "K", True) is True
+
+
+async def test_invalid_value_falls_back_to_default() -> None:
+    assert await switches.readKpiMetricSwitch(_FakeSession("maybe"), "K", True) is True
+
+
+async def test_read_exception_falls_back_to_default(monkeypatch) -> None:
+    monkeypatch.setattr(switches, "getSettings", lambda: _FakeSettings(True))
+    assert await switches.isKpiMetricTierAEnabled(
+        _FakeSession(None, raises=True)
+    ) is False
+
+
+# =============================================================================
+# 两个同构灰度开关：env 杀闸与 system_config 行
+# =============================================================================
+
+
+@pytest.mark.asyncio()
+async def test_contract_injection_env_kill_switch(monkeypatch) -> None:
+    monkeypatch.setattr(
+        switches, "getSettings", lambda: _FakeSettings(contractInjection=False)
+    )
+    assert await switches.isKpiContractInjectionEnabled(_FakeSession("true")) is False
+
+
+@pytest.mark.asyncio()
+async def test_contract_injection_row_true(monkeypatch) -> None:
+    monkeypatch.setattr(switches, "getSettings", lambda: _FakeSettings())
+    assert await switches.isKpiContractInjectionEnabled(_FakeSession("true")) is True
+
+
+@pytest.mark.asyncio()
+async def test_contract_injection_row_missing_is_false(monkeypatch) -> None:
+    monkeypatch.setattr(switches, "getSettings", lambda: _FakeSettings())
+    assert await switches.isKpiContractInjectionEnabled(_FakeSession(None)) is False
+
+
+@pytest.mark.asyncio()
+async def test_match_containment_env_kill_switch(monkeypatch) -> None:
+    monkeypatch.setattr(
+        switches, "getSettings", lambda: _FakeSettings(containment=False)
+    )
+    assert await switches.isKpiMatchContainmentEnabled(_FakeSession("true")) is False
+
+
+@pytest.mark.asyncio()
+async def test_match_containment_row_true(monkeypatch) -> None:
+    monkeypatch.setattr(switches, "getSettings", lambda: _FakeSettings())
+    assert await switches.isKpiMatchContainmentEnabled(_FakeSession("true")) is True
+
+
+@pytest.mark.asyncio()
+async def test_match_containment_row_missing_is_false(monkeypatch) -> None:
+    monkeypatch.setattr(switches, "getSettings", lambda: _FakeSettings())
+    assert await switches.isKpiMatchContainmentEnabled(_FakeSession(None)) is False

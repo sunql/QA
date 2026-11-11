@@ -621,7 +621,7 @@ async def test_metric_intent_gets_no_tier_b_fields_on_either_entry(
     本帧解析出的 intent 门控；非流式入口的 ``_attachKpiHint`` 本就在早退分支之后。
     两者都应表现为 ``executionTier is None`` / ``degradedReason is None``。
 
-    真空通过风险由第 6 例 ``test_formula_execution_error_degrades_to_tier_b`` 排除：
+    真空通过风险由第 5 例 ``test_formula_execution_error_degrades_to_tier_b`` 排除：
     该用例使用**同一夹具**（``KPI_TIER_A_ERR`` + 同一坏公式）与同一 KPI 名的
     QUERY 问句「TierA报错指标统计」，断言流式首帧 ``executionTier == "B"``，
     证明本夹具的 Tier B hint 确实存在 —— 故本用例的「无字段」是意图门控所致，

@@ -1,38 +1,27 @@
 #!/usr/bin/env python3
 """Tier A 真实数据验收探针（手动、不进 CI；零生产写操作）。
 
-用途（对应 P2 计划 D6 / 设计 §13-M2）：
+- ``--dry-run``（默认）：只读元数据库，打印 KPI 的 ``tier/reason``；
+- ``--execute --kpi-code KPI_XXX --datasource-id N``：直接调用
+  ``KpiExecutionService.execute``（不经过 chat/LLM，不读 Tier A 开关行）。
 
-1. ``--dry-run``（默认）：逐条打印 KPI 路由计划 ``tier/reason``，**只读元数据库**，
-   不发任何业务库查询；
-2. ``--execute --kpi-code KPI_XXX --datasource-id N``：直接调用
-   ``KpiExecutionService.execute``（不经过 chat、不经过 LLM、**不读 Tier A 开关行**），
-   打印 ``ok/value/rowCount/elapsedMs/truncated/reason``。
+Tier 判定与运行时同源：KpiCatalog → OntologyMetric → ``governanceSpecOf`` +
+``techniqueOf`` → ``reconcileMetric`` → ``isTierAEligible`` → ``planKpiExecution``；
+``switch_on`` 固定 True，输出标注 ``switch=forced_on``。
 
-Tier 判定与运行时同源：``KpiCatalog`` → ``OntologyMetric`` →
-``governanceSpecOf`` + ``techniqueOf`` → ``reconcileMetric`` → ``isTierAEligible``
-→ ``planKpiExecution``。``switch_on`` 固定为 True，输出标注 ``switch=forced_on``
-（避免读者误以为探针读取了生产灰度开关）。
+目标库白名单：``qa_metadata_test*``（任意 host），或**仅回环 host** 的
+``qa_metadata``；其他拒绝（退出 2，只打印库名/host，绝不打印密码）。
+库名与 host 只从 authority/path 读取；**任何非空 query 一律拒绝**（``?host=`` /
+``?database=`` 会被 ``create_async_engine`` 合并进连接参数），只打印 key 列表。
 
-目标库白名单（比 ``_pg_support.assertTestDatabase`` 更严）：
-- ``qa_metadata_test*``：允许（任意 host，测试库）；
-- ``qa_metadata``：**仅回环 host**（127.0.0.1 / localhost / ::1）允许 ——
-  同名库在远端即视为生产，拒绝；
-- 其他库名：拒绝。拒绝时退出码 2，只打印解析出的库名与 host，绝不打印密码。
+退出码：``--execute`` 成功 0，失败 1（含设计内降级的 ``empty_result``）；调用方
+应按输出 ``status``（ok / expected_degradation(...) / failed(...)）判定。
 
 示例（在 backend/ 下执行；URL 用占位符，勿把口令写进 shell 历史/证据文件）::
 
-    # 步骤 1-2：8 条 ESCAPE_HATCH 应为 tier=A；4 条 NONE 应为 tier=C
-    python -m scripts.kpi_tier_a_probe \\
-        --database-url 'postgresql+asyncpg://USER:PASS@127.0.0.1:5433/qa_metadata'
-
-    # 步骤 3：逐条执行（datasource-id 必须等于该 KPI 绑定的 data_source.id）
-    python -m scripts.kpi_tier_a_probe \\
-        --database-url 'postgresql+asyncpg://USER:PASS@127.0.0.1:5433/qa_metadata' \\
+    python -m scripts.kpi_tier_a_probe --database-url "$QA_METADATA_URL"
+    python -m scripts.kpi_tier_a_probe --database-url "$QA_METADATA_URL" \\
         --execute --kpi-code KPI_SUPPLIER_OTD --datasource-id 1
-
-    # 步骤 4：用同一 formula 在只读客户端（psql/sqlplus）手工执行后逐条对比；
-    # 差值 <= 0.01 记为 PASS（步骤 5 的结果表见 evidence/tier-a-realdata.txt）。
 """
 
 from __future__ import annotations
@@ -44,15 +33,22 @@ import re
 import sys
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
+
+# 允许 `python scripts/kpi_tier_a_probe.py` 直接运行：backend/ 进 sys.path，
+# 必须在任何 `import app.*` 之前执行。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import app.infrastructure.business_db_pool as _businessDbPool
 from app.domain.models import DataSource, KpiCatalog, OntologyMetric
 from app.services.kpi_execution_service import (
     TIER_A,
+    KpiExecutionPlan,
     KpiExecutionService,
     planKpiExecution,
 )
@@ -64,18 +60,24 @@ _PROD_DB_NAME = "qa_metadata"
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
-# =============================================================================
-# 目标库护栏
-# =============================================================================
-
-
 def assertAllowedTarget(databaseUrl: str) -> tuple[str, str]:
-    """校验目标库；返回 (库名, host)。拒绝时退出码 2（不泄漏口令/完整 DSN）。"""
+    """校验目标库；返回 (库名, host)。拒绝退出 2，不泄漏口令/完整 DSN。
+
+    库名与 host 只从 authority/path 读取；任何非空 query 一律拒绝（可绕过
+    库/主机护栏），且只打印 key 列表，不打印值（值可能是口令类）。
+    """
     try:
         parsed = make_url(databaseUrl)
     except Exception:
         print("拒绝执行：--database-url 无法解析", file=sys.stderr)
         raise SystemExit(2) from None
+    if parsed.query:
+        print(
+            "拒绝执行：连接参数中不允许 query 参数（可绕过库/主机护栏）："
+            f"keys={sorted(parsed.query.keys())}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     name = (parsed.database or "").strip()
     host = (parsed.host or "").strip().strip("[]").lower()
     if _TEST_DB_PATTERN.match(name):
@@ -92,28 +94,26 @@ def assertAllowedTarget(databaseUrl: str) -> tuple[str, str]:
 
 def _requireAsyncUrl(databaseUrl: str) -> None:
     if not databaseUrl.startswith("postgresql+asyncpg://"):
-        print(
-            "拒绝执行：--database-url 必须是 postgresql+asyncpg:// 异步 DSN。",
-            file=sys.stderr,
-        )
+        print("拒绝执行：--database-url 必须是 postgresql+asyncpg:// 异步 DSN。", file=sys.stderr)
         raise SystemExit(2)
 
 
-# =============================================================================
-# 路由计划（与运行时同源）
-# =============================================================================
+def planFor(kpi: KpiCatalog, metric: OntologyMetric | None) -> KpiExecutionPlan:
+    """运行时口径：reconcileMetric → isTierAEligible → planKpiExecution。
 
-
-def planFor(kpi: KpiCatalog, metric: OntologyMetric | None):
-    """运行时口径：reconcileMetric → isTierAEligible → planKpiExecution。"""
-    reconcile = reconcileMetric(governanceSpecOf(kpi), techniqueOf(metric))
+    与 ``chat_stream_output._planKpiTier`` 同形：metric 缺失时不做对账，eligible 置 False。
+    """
+    reconcile = (
+        reconcileMetric(governanceSpecOf(kpi), techniqueOf(metric))
+        if metric is not None else None
+    )
     return planKpiExecution(
         # 探针明确不读灰度开关行：强制 on，输出里标注 switch=forced_on。
         switch_on=True,
         kpi_found=True,
         metric_present=metric is not None,
         execution_source=(metric.execution_source if metric is not None else None),
-        tier_a_eligible=reconcile.isTierAEligible,
+        tier_a_eligible=bool(reconcile is not None and reconcile.isTierAEligible),
         has_datasource=kpi.datasource_id is not None,
         formula_present=bool(metric is not None and (metric.formula or "").strip()),
         # 探针没有问句；显式时间限定由 chat 侧 hasExplicitTimeScope 判定。
@@ -139,11 +139,6 @@ def _sourceOf(metric: OntologyMetric | None) -> str:
     return (metric.execution_source if metric is not None else None) or "-"
 
 
-# =============================================================================
-# 两种模式
-# =============================================================================
-
-
 async def runDryRun(session: AsyncSession, kpiCode: str | None) -> int:
     kpis = await _loadKpis(session, kpiCode)
     if kpiCode and not kpis:
@@ -164,9 +159,8 @@ async def runDryRun(session: AsyncSession, kpiCode: str | None) -> int:
     return 0
 
 
-async def runExecute(
-    session: AsyncSession, kpiCode: str, datasourceId: int
-) -> int:
+async def runExecute(session: AsyncSession, kpiCode: str, datasourceId: int) -> int:
+    """执行单条 Tier A KPI。成功 0；失败 1（含 empty_result，按 status 判定）。"""
     kpis = await _loadKpis(session, kpiCode)
     if not kpis:
         print(f"未找到 KPI: {kpiCode}", file=sys.stderr)
@@ -195,32 +189,48 @@ async def runExecute(
         print(f"未找到 data_source id={datasourceId}", file=sys.stderr)
         return 1
 
-    # 手动验收不落 METRIC_RESULT 证据：避免探针按 env 里的 DATABASE_URL
-    # 写到一个非目标库；执行器本身的行为不变。
-    service = KpiExecutionService(evidenceScheduler=lambda **_kwargs: None)
-    result = await service.execute(
-        formula=metric.formula,
-        datasourceId=kpi.datasource_id,
-        datasource=datasource,
-        metricCode=kpi.kpi_code,
-        metricName=kpi.kpi_name,
-        confidence=1.0,
-    )
+    # 零写库：抑制两类 evidence。METRIC_RESULT 由 service 注入 noop；SQL_QUERY 由
+    # adapter 在查询成功后调用模块属性 scheduleSqlQueryEvidence（调用时解析），
+    # 故临时替换为计数 noop，finally 还原。
+    suppressedEvidence = 0
+
+    def _suppressSqlQueryEvidence(**_kwargs: Any) -> None:
+        nonlocal suppressedEvidence
+        suppressedEvidence += 1
+
+    originalSchedule = _businessDbPool.scheduleSqlQueryEvidence
+    _businessDbPool.scheduleSqlQueryEvidence = _suppressSqlQueryEvidence
+    try:
+        service = KpiExecutionService(evidenceScheduler=lambda **_kwargs: None)
+        result = await service.execute(
+            formula=metric.formula,
+            datasourceId=kpi.datasource_id,
+            datasource=datasource,
+            metricCode=kpi.kpi_code,
+            metricName=kpi.kpi_name,
+            confidence=1.0,
+        )
+    finally:
+        _businessDbPool.scheduleSqlQueryEvidence = originalSchedule
+
+    if result.ok:
+        status = "ok"
+    elif result.reason == "empty_result":
+        status = f"expected_degradation({result.reason})"
+    else:
+        status = f"failed({result.reason})"
     print(json.dumps({
         "kpiCode": kpi.kpi_code,
         "ok": result.ok,
+        "status": status,
         "value": _jsonSafe(result.value),
         "rowCount": result.rowCount,
         "elapsedMs": result.elapsedMs,
         "truncated": result.truncated,
         "reason": result.reason,
     }, ensure_ascii=False))
+    print(f"evidence: suppressed={suppressedEvidence}")
     return 0 if result.ok else 1
-
-
-# =============================================================================
-# 输出 / 入口
-# =============================================================================
 
 
 def _jsonSafe(value: Any) -> Any:
@@ -242,15 +252,12 @@ def _parseArgs(argv: list[str] | None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--database-url",
-        required=True,
-        help="元数据库 DSN（必填，无默认值）。只允许 qa_metadata_test* 或回环 host 上的 qa_metadata。",
+        "--database-url", required=True,
+        help="元数据库 DSN（必填）。只允许 qa_metadata_test* 或回环 host 上的 qa_metadata。",
     )
     parser.add_argument("--kpi-code", default=None, help="KPI code；dry-run 可选，execute 必填。")
     parser.add_argument(
-        "--datasource-id",
-        type=int,
-        default=None,
+        "--datasource-id", type=int, default=None,
         help="业务数据源 id；execute 必填，且必须等于 KPI 绑定的 data_source.id。",
     )
     mode = parser.add_mutually_exclusive_group()

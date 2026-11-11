@@ -79,7 +79,7 @@ NULL（当前数据下价格清单 join 无匹配），执行器按 `firstPresen
 
 控制台另有 `evidence 落库失败 ... 5432` 噪声：探针进程未设置 `DATABASE_URL`，
 adapter 的既有 SQL_QUERY 证据 best-effort 写向默认 5432 失败；与 Tier A 结果无关，
-未写入任何库。
+未写入任何库。**修复轮 1 起该隐式写入已被探针显式抑制**（见文末「证据抑制验证」）。
 
 ## 步骤 4：同一 formula 在只读客户端手工执行
 
@@ -120,3 +120,39 @@ KPI_SUPPLIER_OVERDUE_RATIO    0.8325608527587646
   该密钥值未写入任何 evidence 文件。
 - Oracle 连通性预检：TCP 192.168.205.70:1521 可达；真实执行 8 条均成功返回
   （含 2 条 NULL），无 DNS / 网络 / 认证失败。
+
+## 证据抑制验证（修复轮 1）
+
+目的：`--execute` 路径必须**零写库**。除 `KpiExecutionService` 的
+METRIC_RESULT 调度（已注入 noop `evidenceScheduler`）外，adapter 在查询成功后
+还会调用 `business_db_pool.scheduleSqlQueryEvidence` 落 SQL_QUERY 证据。探针在
+`runExecute` 内临时把该模块属性替换为计数 noop，`finally` 还原，结束时打印
+`evidence: suppressed=N`。
+
+取证方法（确保反对照有效，而不是「本来就没写」）：
+
+- 证据落库目标由进程环境 `DATABASE_URL` 决定。把它显式指向**测试库**
+  `...@127.0.0.1:5434/qa_metadata_test`（若未抑制，行会写到这里）；
+- 元数据库仍为 dev `...@127.0.0.1:5433/qa_metadata`，业务查询走 Oracle 只读；
+- 统计测试库 `evidence` 表行数：执行前 → 执行 → 执行后。
+
+```text
+before: select count(*) from evidence;                    => 0
+run:    python scripts/kpi_tier_a_probe.py \
+          --database-url "$QA_METADATA_URL" \
+          --execute --kpi-code KPI_SUPPLIER_OTD --datasource-id 1
+        （控制台）
+        switch=forced_on (未读取 Tier A 开关行) kpi_code=KPI_SUPPLIER_OTD tier=A ...
+        {"kpiCode": "KPI_SUPPLIER_OTD", "ok": true, "status": "ok", ...}
+        evidence: suppressed=1
+        （退出码 0）
+after:  select count(*) from evidence;                    => 0
+```
+
+结论：before = after = 0，且 `suppressed=1` 证明确实有 1 次 SQL_QUERY 证据调度
+被拦下（不是零调度）。
+
+反对照（证明该写入路径本来会写、`0 → 0` 不是空跑）：在同一 `DATABASE_URL`
+（测试库 5434）下直接调用一次 `scheduleSqlQueryEvidence`（`datasourceId=1`），
+`evidence` 表出现 1 行控制记录；随后按 `payload->>'sql'` 精确删除该行，表回到
+0 行。控制记录只落在测试库，未触碰 dev / 生产。

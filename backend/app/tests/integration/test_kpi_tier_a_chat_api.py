@@ -603,3 +603,70 @@ async def test_time_scoped_question_non_stream_returns_200_and_tier_b(
     body = resp.json()
     assert body["executionTier"] == "B"
     assert body["degradedReason"] == "explicit_time_scope"
+
+
+# ---------------------------------------------------------------------------
+# 8. 两入口观测一致性：METRIC 意图不得暴露 Tier B 字段
+# ---------------------------------------------------------------------------
+
+
+async def test_metric_intent_gets_no_tier_b_fields_on_either_entry(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """两入口观测一致性守卫：METRIC 意图在流式/非流式都**不得**带 Tier B 字段。
+
+    问句「TierA报错指标是多少」的意图分类由 ``IntentService.classifyResult``
+    实测得出为 ``METRIC``（不是猜测）——该意图在两个入口都会早退到领域命令，
+    不会落到通用查询主链路。流式入口的 META 帧在意图分支之前产出，故必须按
+    本帧解析出的 intent 门控；非流式入口的 ``_attachKpiHint`` 本就在早退分支之后。
+    两者都应表现为 ``executionTier is None`` / ``degradedReason is None``。
+    """
+    from app.services.intent_service import IntentService
+
+    question = "TierA报错指标是多少"
+    result = IntentService().classifyResult(question)
+    assert result.intent.value == "metric", (
+        f"问句意图实测为 {result.intent.value!r}，本守卫依赖 METRIC 早退路径"
+    )
+
+    ds = await _seedSelfDatasource(dbSession)
+    await _seedSwitches(dbSession)
+    await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_TIER_A_ERR",
+        kpiName="TierA报错指标",
+        keywords=["TierA报错指标"],
+        formula=_BROKEN_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    # 流式：首个 META 帧 intent=metric，且不含 Tier B 观测键。
+    stream_resp = await client.post(
+        _CHAT_STREAM_URL,
+        json=_payload(question, ds.id),
+        headers=_HEADERS,
+    )
+    assert stream_resp.status_code == 200, stream_resp.text
+    metas = _metaFrames(stream_resp.text)
+    assert metas, f"未收到 meta 帧，SSE={stream_resp.text[:400]}"
+    first = metas[0]
+    assert first["intent"] == "metric"
+    assert "executionTier" not in first, (
+        f"METRIC 意图不得暴露 executionTier，实际 meta={first!r}"
+    )
+    assert "degradedReason" not in first, (
+        f"METRIC 意图不得暴露 degradedReason，实际 meta={first!r}"
+    )
+
+    # 非流式：领域命令早退，Tier 字段保持 None（与流式一致）。
+    chat_resp = await client.post(
+        _CHAT_URL,
+        json=_payload(question, ds.id),
+        headers=_HEADERS,
+    )
+    assert chat_resp.status_code == 200, chat_resp.text
+    body = chat_resp.json()
+    assert body["intent"] == "metric"
+    assert body["executionTier"] is None
+    assert body["degradedReason"] is None

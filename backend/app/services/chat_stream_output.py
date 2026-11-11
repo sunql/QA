@@ -28,7 +28,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
-from app.domain.enums import ChartType
+from app.domain.enums import ChartType, IntentType
 from app.domain.error_messages import (
     MSG_INTERNAL_ERROR_GENERIC,
     MSG_KPI_DATASOURCE_MISMATCH,
@@ -275,6 +275,30 @@ def kpiHintFields(hint: PreambleResult | None) -> dict[str, Any]:
         fields["warning"] = hint.mismatch_warning
         fields["code"] = "KPI_DATASOURCE_MISMATCH"
     return fields
+
+
+# 与 `chat_service.processMessage` 的早退分支保持一致：这些意图不会落到通用查询
+# 主链路，因此不得携带 Tier B 观测字段（否则流式与非流式对同一问句给出相反观测）。
+_TIER_HINT_INTENTS: frozenset[IntentType] = frozenset({
+    IntentType.QUERY,
+    IntentType.NEW_QUERY,
+    IntentType.REFINE,
+    IntentType.FOLLOW_UP,
+})
+
+
+def tierHintFields(hint: PreambleResult | None, intent: IntentType) -> dict[str, Any]:
+    """仅对最终会落到通用查询主链路的意图发 Tier B 字段。
+
+    门控与 ``chat_service.processMessage`` 的早退分支一一对应：CHITCHAT / DEFINE /
+    MAP / METRIC / SUPPLIER_* / AGENT_RUN / CLARIFY 在挂载 hint 之前就返回，流式
+    入口必须在产出 META 帧时用**本帧解析出的意图**复刻同一门控，否则会出现
+    「流式宣称 executionTier=B、非流式却是 null」的观测性谎言。
+    重分类可能改变意图，故调用方逐帧传入各自的 ``intent``，不得复用首帧结果。
+    """
+    if intent not in _TIER_HINT_INTENTS:
+        return {}
+    return kpiHintFields(hint)
 
 
 class L1L4PreambleMixin:
@@ -585,6 +609,7 @@ __all__ = [
     "L1L4PreambleMixin",
     "PreambleResult",
     "kpiHintFields",
+    "tierHintFields",
     "splitTierBPreamble",
     "_STREAM_CHUNK_TIMEOUT_SECONDS",
     "_ANSWER_SYSTEM_PROMPT",

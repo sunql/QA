@@ -1,12 +1,34 @@
 """Tier B 哨兵拆包 + SSE meta 字段形状（纯函数，无 IO）。"""
 
+import pytest
+
+from app.domain.enums import IntentType
 from app.services.chat_stream_output import (
     L1L4PreambleMixin,
     PreambleResult,
     kpiHintFields,
     splitTierBPreamble,
+    tierHintFields,
 )
 from app.services.kpi_semantic_match_service import KpiMatchResult
+
+# 与 chat_service.processMessage 的早退分支保持一致：只有会落到通用查询主链路的
+# 意图才允许带 Tier B 观测字段。
+_REJECTED_INTENTS = (
+    IntentType.METRIC,
+    IntentType.DEFINE,
+    IntentType.MAP,
+    IntentType.CHITCHAT,
+    IntentType.SUPPLIER_360,
+    IntentType.AGENT_RUN,
+    IntentType.CLARIFY,
+)
+_ALLOWED_INTENTS = (
+    IntentType.QUERY,
+    IntentType.NEW_QUERY,
+    IntentType.REFINE,
+    IntentType.FOLLOW_UP,
+)
 
 
 def _tierB() -> PreambleResult:
@@ -87,3 +109,32 @@ def test_tier_b_preamble_carries_datasource_mismatch() -> None:
     assert sentinel.datasource_mismatch is True
     assert sentinel.mismatch_warning is not None
     assert "1" in sentinel.mismatch_warning and "2" in sentinel.mismatch_warning
+
+
+@pytest.mark.parametrize("intent", _REJECTED_INTENTS)
+def test_tier_hint_fields_rejects_non_generic_intents(intent) -> None:
+    """非通用查询意图不得带 Tier B 观测字段（与 processMessage 早退分支同口径）。
+
+    使用**非 None** 的 Tier B hint：被挡掉必须是意图门控的结果，而不是 hint 为空。
+    """
+    hint = _tierB()
+    assert hint is not None
+    assert tierHintFields(hint, intent) == {}
+
+
+@pytest.mark.parametrize("intent", _ALLOWED_INTENTS)
+def test_tier_hint_fields_allows_generic_query_intents(intent) -> None:
+    fields = tierHintFields(_tierB(), intent)
+    assert fields["kpiCode"] == "KPI_X"
+    assert fields["executionTier"] == "B"
+    assert fields["degradedReason"] == "explicit_time_scope"
+
+
+def test_tier_hint_fields_none_hint_allowed_intent_is_empty() -> None:
+    """交叉守卫：允许意图 + 无 hint ⇒ 空（门控不凭空造字段）。"""
+    assert tierHintFields(None, IntentType.QUERY) == {}
+
+
+def test_tier_hint_fields_rejected_intent_none_hint_is_empty() -> None:
+    """交叉守卫：被拒意图 + 无 hint ⇒ 空。"""
+    assert tierHintFields(None, IntentType.METRIC) == {}

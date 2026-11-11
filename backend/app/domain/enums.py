@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Literal
 
 
@@ -603,3 +603,24 @@ class SemanticReleaseStatus(str, Enum):
     VALIDATED = "VALIDATED"
     ACTIVE = "ACTIVE"
     ARCHIVED = "ARCHIVED"
+
+
+class TimeGrain(StrEnum):
+    """KPI 时间粒度（P3 D1 / 0143）。
+
+    治理侧显式声明口径的时间粒度，并解析到源类的日期列（`time_column`）。
+    值小写，与 SQL / JSON 契约一致。
+
+    ⚠️ DB 列 `kpi_catalog.time_grain` / `ontology_metric.time_grain` 是
+    VARCHAR(20) 而非 PG ENUM —— 值域由本枚举与 `TIME_GRAIN_VALUES` 守卫；
+    新增值须同步迁移列宽与前端契约。
+    """
+
+    DAY = "day"
+    WEEK = "week"
+    MONTH = "month"
+    QUARTER = "quarter"
+    YEAR = "year"
+
+
+TIME_GRAIN_VALUES: frozenset[str] = frozenset(grain.value for grain in TimeGrain)

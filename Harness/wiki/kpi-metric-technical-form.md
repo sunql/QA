@@ -356,7 +356,7 @@ KPI: DRAFT → PUBLISHED  ⟸ 必须同时满足：
 |---|---|
 | 规范化落库 | `applied：12 条变更`，重跑 dry-run **12/12 noop**、第二次 `--apply` **0 条** |
 | 对账 verdict | **8 `pass` + 4 `unknown` + 0 `mismatch`**（unknown = `execution_source=NONE` 的 4 条：DEFECT_RATE / FPY / MAINTENANCE_RATIO / NCR_RATE） |
-| S3 oracle（realdata） | 9 步全 PASS；`S3.3 mismatch 集合 = ∅`；`S3.4` 列级 finding 集合 = ∅ |
+| S3 oracle（realdata） | 9 步全 PASS；`S3.3 mismatch 集合 = ∅`；`S3.4` 列级 finding 集合 = ∅（测度修复后重跑） |
 | 契约块 | 仍有 NONE 源 ⇒ 注入按块机制照旧；发布闸门仍拦 unknown |
 
 **取证**：[before.json / after.json / dry-run 报告 / second-apply](../changes/2026-11-11-kpi-definition-consumption/)。
@@ -371,5 +371,13 @@ KPI: DRAFT → PUBLISHED  ⟸ 必须同时满足：
    声明的业务列时，PLAN 的 `deviations` 才继续生效；规范化之后必须失效，否则 S3 永远 mismatch。
 3. **落库回填脚本 `kpi_metric_backfill_apply._governanceValues` 写的是业务名**，在已规范化的库上
    重跑会覆盖回业务名、重新制造 mismatch —— 只当历史初始化工具用。
+4. **派生 `*_measure.expr` 必须保真（保留别名限定与 `TRUNC`）**。首轮实现把
+   `O.UNIT_PRICE - P.UNIT_PRICE` 压成 `UNIT_PRICE - UNIT_PRICE`（恒 0），并去掉 `TRUNC`。
+   列集合比较才剥别名/函数名（`nl2sql_semantic_guard.measureColumnIdentifiers`）；
+   落库表达式由 `kpi_governance_normalizer._normalizeExpr` 只做 trim。已修的 dev 库值见
+   变更记录 §4。
+5. **`scripts/kpi_metric_realdata.py` 的 S1.1 是精确版本闸门**（`== "0137"`）：库升到 `0142`
+   后 S1.1 FAIL、S2–S8 全 SKIP（退出码 2）。取 S3 证据请直接调 `step3_reconcile`，
+   或先与脚本归属方确认放宽闸门。
 
 **未做（P1/P2/P3 边界）**：匹配升级、Tier A 执行、结构化→SQL 编译器、生产部署。

@@ -43,6 +43,8 @@ KPI 口径对 NL2SQL 完全不可用。
 | `0e1923da` | 规范化前快照（before.json + dry-run 报告） |
 | `6c3fafb7` | realdata S3：期望改为按 **execution_source** 判定（tier B 规范化后为 pass） |
 | `05a7f442` | 安全复审修复：`_assertOwnership` 校验治理列/度量快照未过期；更正「生产永远拒绝」失实说明 |
+| `86d0e12f` | 安全复审修复：CLI 帮助文本/计划文档如实说明「守卫只看库名」 |
+| `e3aa96ca` | **度量表达式保真**：派生 measure 保留别名限定与 `TRUNC`；列集合提取改由 `measureColumnIdentifiers` 负责；未挂靠 metric 的草稿 KPI 跳过而非中断整批 |
 | 本文件所在 commit | 回填脚本警示注释 + wiki §16 + 本变更记录 |
 
 **新增文件**
@@ -75,6 +77,21 @@ KPI 口径对 NL2SQL 完全不可用。
 4 条 `NONE` 源（DEFECT_RATE / FPY / MAINTENANCE_RATIO / NCR_RATE）没有可对账的技术形态
 ⇒ 清空结构化字段、verdict 记 `unknown`，业务待补事项写入 CLI 报告的 `business_todo`。
 
+**派生度量的落库值（复审后修正）**：首轮 `--apply` 写入的派生 measure 被去掉了表别名与
+`TRUNC`，退化成不可执行/恒零的表达式（如 `(UNIT_PRICE - UNIT_PRICE) * ORDER_QTY`）。
+代码复审发现后改为**表达式原样保留限定名与函数**，列集合提取下沉到
+`measureColumnIdentifiers`（只在比较列集合时剥别名/函数名）。dev 库上受影响的 4 条
+（metric 6/7/8/9）先置空 `*_measure` 再重跑 `--apply` 修复，现库内值为：
+
+| metric | numerator_measure | denominator_measure |
+|---|---|---|
+| 6 `KPI_PURCHASE_CYCLE_TIME` | `AVG TRUNC(R.RECEIPT_DATE) - TRUNC(L.CREATION_DATE)` | — |
+| 7 `KPI_SUPPLIER_DELAY_DAYS` | `AVG TRUNC(R.RECEIPT_DATE) - TRUNC(O.PROMISED_RECEIPT_DATE)` | — |
+| 8 `KPI_COST_SAVING` | `SUM (P.UNIT_PRICE - O.UNIT_PRICE) * O.ORDER_QTY` | — |
+| 9 `KPI_PURCHASE_PRICE_VARIANCE` | `AVG (O.UNIT_PRICE - P.UNIT_PRICE)` | `AVG NULLIF(P.UNIT_PRICE, 0)` |
+
+修复后重跑 dry-run：**12/12 noop**、`summary: pass=8 unknown=4 mismatch=0`。
+
 ## 5. 验收证据
 
 | # | 验收项 | 结果 |
@@ -83,7 +100,7 @@ KPI 口径对 NL2SQL 完全不可用。
 | 2 | `--apply` 后目标状态 | ✅ `applied：12 条变更`；`summary: pass=8 unknown=4 mismatch=0`；8 条 Tier A |
 | 3 | 幂等 | ✅ 重跑 dry-run **12/12 noop**；第二次 `--apply` **0 条**（`second-apply-noop.txt`） |
 | 4 | 诊断接口 | ✅ admin 200 / 非 admin 403；返回命中方式、verdict/reasons、注入块是否为空、Tier A 可执行性（`test_kpi_diagnose_api.py`） |
-| 5 | 对账复验（realdata S3） | ✅ 对 dev 库跑 S3：**9 步全 PASS**，`S3.3 mismatch 集合 = ∅`，`S3.4 列级 finding = ∅`，分布 `{'pass': 8, 'unknown': 4}` |
+| 5 | 对账复验（realdata S3） | ✅ 测度修复**后**重跑 S3：**9 步全 PASS**（`RESULT: PASS steps=9 passed=9 failed=0 skipped=0`），`S3.3 mismatch 集合 = ∅`，`S3.4 列级 finding = ∅`，分布 `{'pass': 8, 'unknown': 4}`。⚠️ 直接跑 `scripts/kpi_metric_realdata.py` 会 `FAIL S1.1` 并跳过 S2–S8 —— 该脚本把 alembic 版本**精确钉在 `0137`**，dev 库已到 `0142`；本轮用只跑 `step3_reconcile` 的 runner 取证（S3 的判据不依赖版本闸门） |
 | 6 | 定向回归 | ✅ 主 7 套件 **118 passed**；另 4 套件 75 passed / 1 failed，失败项 `test_kpi_catalog_search_api.py::test_search_requires_auth` 在 `origin/main` 基线**同样失败**（`getSettings` 的 `lru_cache` 让测试内 `monkeypatch.setenv` 不生效）⇒ **净新增 0** |
 | 7 | 生产 | ✅ **未写、未部署**；生产仍 `0140` |
 
@@ -115,6 +132,16 @@ KPI 口径对 NL2SQL 完全不可用。
 4. **`session.rollback()` 会 expire 主键属性**：测试里要在调用 `applyPlans` 前先取出 id。
 5. **失效对象必须 `populate_existing=True`**：`expire_all()` 后直接访问属性会触发
    `MissingGreenlet`。
+6. **派生 measure 必须保真**：落库的 `*_measure.expr` 要**原样保留**表别名限定（`O.UNIT_PRICE`）
+   与函数包裹（`TRUNC(...)`）。把 `O.UNIT_PRICE - P.UNIT_PRICE` 压成
+   `UNIT_PRICE - UNIT_PRICE` 会得到恒 0 的表达式，`TRUNC` 去掉则改变取整语义；
+   而**列集合比较**（层 2 治理 ⇄ 技术）才需要剥别名与函数名。两条职责现分别落在
+   `kpi_governance_normalizer._normalizeExpr`（只 trim）与
+   `nl2sql_semantic_guard.measureColumnIdentifiers`（剥别名/函数名）。首轮实现把两者合并，
+   导致 4 条度量化简后落库 —— 复审已修，dev 库已重写。
+7. **`kpi_metric_realdata.py` 的 S1.1 是精确版本闸门**（`version == "0137"`）：库一升级到
+   `0142`，S1.1 直接 FAIL 且 S2–S8 全部 SKIP（「全跳」退出码 2，不会被读成通过）。取 S3 证据时
+   要么跑库内 `step3_reconcile`（判据与版本无关），要么先放宽该闸门（本批未改，留给脚本归属方）。
 
 ## 8. 未做的事（明确边界）
 

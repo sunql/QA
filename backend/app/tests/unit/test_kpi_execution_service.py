@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from app.services.kpi_execution_service import (
@@ -171,3 +173,93 @@ async def test_non_readonly_matrix(formula: str, reason: str) -> None:
     )
     assert result.ok is False and result.reason == reason
     assert adapter.calls == []
+
+
+# =============================================================================
+# 执行器 → 证据 接线
+# =============================================================================
+
+
+async def test_success_schedules_metric_result_evidence() -> None:
+    """成功时把执行结果按上游匹配参数原样交给证据调度器（不重新匹配、不改写）。"""
+    calls: list[dict] = []
+    svc = KpiExecutionService(
+        adapterProvider=lambda _i, _d: _StubAdapter(rows=[{"rate": 0.93}]),
+        evidenceScheduler=lambda **kwargs: calls.append(kwargs),
+    )
+    result = await svc.execute(
+        formula="SELECT 0.93 AS rate", datasourceId=7, datasource=object(),
+        metricCode="KPI_X", metricName="x", confidence=0.9,
+    )
+    assert result.ok is True
+    assert len(calls) == 1
+    assert calls[0] == {
+        "metricCode": "KPI_X",
+        "metricName": "x",
+        "confidence": 0.9,
+        "rows": ({"rate": 0.93},),
+        "datasourceId": 7,
+    }
+
+
+async def test_failure_does_not_schedule_evidence() -> None:
+    """空结果或执行异常都不产生 METRIC_RESULT 证据（只对成功执行留痕）。"""
+    calls: list[dict] = []
+
+    def record(**kwargs) -> None:
+        calls.append(kwargs)
+
+    empty = KpiExecutionService(
+        adapterProvider=lambda _i, _d: _StubAdapter(rows=[]),
+        evidenceScheduler=record,
+    )
+    emptyResult = await empty.execute(
+        formula="SELECT 1", datasourceId=1, datasource=object(),
+        metricCode="KPI_X", metricName="x", confidence=1.0,
+    )
+    assert emptyResult.ok is False
+
+    failed = KpiExecutionService(
+        adapterProvider=lambda _i, _d: _StubAdapter(exc=RuntimeError("boom")),
+        evidenceScheduler=record,
+    )
+    failedResult = await failed.execute(
+        formula="SELECT 1", datasourceId=1, datasource=object(),
+        metricCode="KPI_X", metricName="x", confidence=1.0,
+    )
+    assert failedResult.ok is False
+    assert calls == []
+
+
+async def test_log_line_contains_kpi_and_datasource(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # 成功行走 logger.info；不抬高捕获阈值 caplog 看不到。
+    caplog.set_level(logging.INFO, logger="app.services.kpi_execution_service")
+
+    success = KpiExecutionService(
+        adapterProvider=lambda _i, _d: _StubAdapter(rows=[{"v": 1}]),
+        evidenceScheduler=lambda **_kwargs: None,
+    )
+    await success.execute(
+        formula="SELECT 1 AS v", datasourceId=9, datasource=object(),
+        metricCode="KPI_LOG", metricName="log", confidence=1.0,
+    )
+    successLines = [r.getMessage() for r in caplog.records if "TierA 执行成功" in r.getMessage()]
+    assert len(successLines) == 1
+    for fragment in ("kpi=KPI_LOG", "datasource_id=9", "rows=", "elapsed_ms="):
+        assert fragment in successLines[0]
+
+    caplog.clear()
+    failure = KpiExecutionService(
+        adapterProvider=lambda _i, _d: _StubAdapter(exc=RuntimeError("boom")),
+        evidenceScheduler=lambda **_kwargs: None,
+    )
+    await failure.execute(
+        formula="SELECT 1", datasourceId=9, datasource=object(),
+        metricCode="KPI_LOG", metricName="log", confidence=1.0,
+    )
+    failureLines = [r.getMessage() for r in caplog.records if "TierA 执行失败" in r.getMessage()]
+    assert len(failureLines) == 1
+    assert "kpi=KPI_LOG" in failureLines[0]
+    assert "datasource_id=9" in failureLines[0]

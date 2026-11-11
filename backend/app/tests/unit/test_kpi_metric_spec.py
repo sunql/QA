@@ -134,6 +134,18 @@ def test_governance_spec_leaves_time_grain_null_without_time_word() -> None:
     assert spec.time_grain is None
 
 
+def test_governance_spec_prefers_explicit_time_grain_column() -> None:
+    """P3 D4：显式列（admin 写入口）优先于 grain 自由文本推导；大小写归一。"""
+    spec = governanceSpecOf(_kpi(grain="供应商+月", time_grain="QUARTER"))
+    assert spec.time_grain == "quarter"
+
+
+def test_governance_spec_falls_back_to_grain_text_when_explicit_invalid() -> None:
+    """列值非法（历史脏数据）⇒ 回退 grain 文本推导，不把脏值带进对账。"""
+    spec = governanceSpecOf(_kpi(grain="供应商+月", time_grain="BOGUS"))
+    assert spec.time_grain == "month"
+
+
 def test_technique_of_maps_time_grain_and_time_column() -> None:
     technique = techniqueOf(_metric(time_grain="MONTH", time_column="RECEIPT_DATE"))
     assert technique.time_grain == "MONTH"

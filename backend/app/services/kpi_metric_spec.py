@@ -18,7 +18,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import MetricType
+from app.domain.enums import TIME_GRAIN_VALUES, MetricType
 from app.domain.models import KpiCatalog, OntologyMetric
 from app.services.kpi_alignment_resolver import (
     ResolutionOutcome,
@@ -37,13 +37,22 @@ logger = logging.getLogger(__name__)
 
 
 def governanceSpecOf(kpi: KpiCatalog) -> GovernanceSpec:
-    """KPI 治理侧快照：结构化列 + 粒度键 + 时间粒度（R6 由 grain 文本推导）。"""
-    timeGrain = deriveTimeGrain(kpi.grain)
+    """KPI 治理侧快照：结构化列 + 粒度键 + 时间粒度。
+
+    时间粒度**显式列优先**（P3 D4 admin 写入口），缺省/非法值回退 `grain` 自由文本
+    推导（R6，兼容 0143 回填前的存量行与回填脚本）。值统一小写（TimeGrain 值域）。
+    """
+    explicitGrain = (kpi.time_grain or "").strip().lower()
+    if explicitGrain in TIME_GRAIN_VALUES:
+        timeGrainValue: str | None = explicitGrain
+    else:
+        derived = deriveTimeGrain(kpi.grain)
+        timeGrainValue = derived.value if derived is not None else None
     return GovernanceSpec(
         numerator_columns=tuple(kpi.numerator_columns or ()),
         denominator_columns=tuple(kpi.denominator_columns or ()),
         grain_keys=tuple(kpi.grain_keys or ()),
-        time_grain=timeGrain.value if timeGrain is not None else None,
+        time_grain=timeGrainValue,
     )
 
 

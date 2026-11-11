@@ -21,6 +21,7 @@ from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import DataSource, KpiCatalog
 from app.domain.schemas import KpiCatalogCreate, KpiCatalogUpdate
 from app.services.acl_service import AclService
+from app.services.kpi_alignment_resolver import deriveTimeGrain
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_publish_gate import enforceKpiPublishGate
 from app.services.kpi_metric_reconcile import GovernanceSpec
@@ -36,12 +37,22 @@ from app.services.outbox_service import OutboxService
 logger = logging.getLogger(__name__)
 
 # 治理侧结构化列（改动它们 ⇒ 闸门必须按**新值**判对账，而不是旧口径）
-_GOVERNANCE_KEYS = ("numerator_columns", "denominator_columns", "grain_keys")
+# `time_grain`：显式声明的口径粒度；显式值优先，缺省时回退 `grain` 文本推导（R6）。
+_GOVERNANCE_KEYS = ("numerator_columns", "denominator_columns", "grain_keys", "time_grain")
 
 # match_threshold 的默认值：与 DB server_default 一致（models.KpiCatalog 处为
 # Numeric(3, 2), nullable=False, default=Decimal("0.75")）。create / update 两条路径
 # 共用，避免「一边归一、一边写穿 NOT NULL」的不对称。
 _DEFAULT_MATCH_THRESHOLD = Decimal("0.75")
+
+
+def _effectiveTimeGrain(entity: KpiCatalog, updates: dict) -> str | None:
+    """本次请求合并后的治理时间粒度（显式列优先，缺省回退 `grain` 文本推导）。"""
+    explicit = updates.get("time_grain", entity.time_grain)
+    if explicit:
+        return explicit
+    derived = deriveTimeGrain(updates.get("grain", entity.grain))
+    return derived.value if derived is not None else None
 
 
 def _governanceOverride(
@@ -58,6 +69,7 @@ def _governanceOverride(
             updates.get("denominator_columns", entity.denominator_columns) or ()
         ),
         grain_keys=tuple(updates.get("grain_keys", entity.grain_keys) or ()),
+        time_grain=_effectiveTimeGrain(entity, updates),
     )
 
 
@@ -129,6 +141,7 @@ class KpiCatalogService:
             numerator=dto.numerator,
             denominator=dto.denominator,
             grain=dto.grain,
+            time_grain=dto.time_grain,
             unit=dto.unit,
             data_source=dto.data_source,
             owner=dto.owner,

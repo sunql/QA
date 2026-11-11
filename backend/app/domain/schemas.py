@@ -23,6 +23,7 @@ from app.domain.agent_vocabulary import (
     normalizeAgentDomain,
 )
 from app.domain.enums import (
+    TIME_GRAIN_VALUES,
     AgentPermission,
     AgentToolHandlerKind,
     AgentResponseLatency,
@@ -699,6 +700,20 @@ class OntologyMetricCreate(CamelModel):
     status: MetricStatus = MetricStatus.DRAFT
     owner: str | None = Field(default=None, max_length=100)
     execution_source: MetricExecutionSource | None = None
+    # ── P3 时间粒度（0143）─────────────────────────────────────────
+    time_grain: str | None = Field(
+        default=None,
+        max_length=20,
+        description="技术侧时间粒度：day|week|month|quarter|year（落库小写）",
+    )
+    time_column: str | None = Field(
+        default=None, max_length=100, description="技术侧时间列（源类物理列名）"
+    )
+
+    @field_validator("time_grain")
+    @classmethod
+    def _validateTimeGrain(cls, value: str | None) -> str | None:
+        return _checkTimeGrain(value)
 
 
 class OntologyMetricUpdate(CamelModel):
@@ -718,6 +733,20 @@ class OntologyMetricUpdate(CamelModel):
     status: MetricStatus | None = None
     owner: str | None = Field(default=None, max_length=100)
     execution_source: MetricExecutionSource | None = None
+    # ── P3 时间粒度（0143）─────────────────────────────────────────
+    time_grain: str | None = Field(
+        default=None,
+        max_length=20,
+        description="技术侧时间粒度：day|week|month|quarter|year（显式 null = 清空）",
+    )
+    time_column: str | None = Field(
+        default=None, max_length=100, description="技术侧时间列（显式 null = 清空）"
+    )
+
+    @field_validator("time_grain")
+    @classmethod
+    def _validateTimeGrain(cls, value: str | None) -> str | None:
+        return _checkTimeGrain(value)
 
 
 class OntologyClassRead(CamelModel):
@@ -785,6 +814,9 @@ class OntologyMetricRead(CamelModel):
     status: MetricStatus = MetricStatus.DRAFT
     owner: str | None = None
     execution_source: MetricExecutionSource | None = None
+    # ── P3 时间粒度（0143）─────────────────────────────────────────
+    time_grain: str | None = None
+    time_column: str | None = None
 
 
 # L1 语义匹配关键词的边界：条数 + 单项长度。
@@ -793,6 +825,24 @@ class OntologyMetricRead(CamelModel):
 # KPI 建档不做 ACL（任何登录用户都能建），所以这条必须在系统边界上校验。
 KPI_SEMANTIC_KEYWORDS_MAX_ITEMS = 50
 KPI_SEMANTIC_KEYWORD_MAX_CHARS = 100
+
+
+def _checkTimeGrain(value: str | None) -> str | None:
+    """`time_grain` 写入边界守卫：大小写/空白不敏感，落库统一小写。
+
+    DB 列是 VARCHAR(20) 而非 PG ENUM，值域由 `TimeGrain` / `TIME_GRAIN_VALUES`
+    兜底（P3 D1）。非法值在该边界 fail-fast（⇒ 422），不写穿到列里。
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text not in TIME_GRAIN_VALUES:
+        raise ValueError(
+            f"time_grain 非法：{value!r}；应为 {sorted(TIME_GRAIN_VALUES)}"
+        )
+    return text
 
 
 def _checkSemanticKeywords(value: list[str] | None) -> list[str] | None:
@@ -826,6 +876,11 @@ class KpiCatalogCreate(CamelModel):
     numerator: str | None = Field(default=None, max_length=1000)
     denominator: str | None = Field(default=None, max_length=1000)
     grain: str | None = Field(default=None, max_length=100)
+    time_grain: str | None = Field(
+        default=None,
+        max_length=20,
+        description="P3 时间粒度：day|week|month|quarter|year（大小写不敏感，落库小写）",
+    )
     unit: str | None = Field(default=None, max_length=50)
     data_source: str | None = Field(default=None, max_length=200)
     owner: str | None = Field(default=None, max_length=100)
@@ -859,6 +914,11 @@ class KpiCatalogCreate(CamelModel):
     def _validateSemanticKeywords(cls, value: list[str] | None) -> list[str] | None:
         return _checkSemanticKeywords(value)
 
+    @field_validator("time_grain")
+    @classmethod
+    def _validateTimeGrain(cls, value: str | None) -> str | None:
+        return _checkTimeGrain(value)
+
 
 class KpiCatalogUpdate(CamelModel):
     """KPI 业务目录更新请求。
@@ -874,6 +934,11 @@ class KpiCatalogUpdate(CamelModel):
     numerator: str | None = Field(default=None, max_length=1000)
     denominator: str | None = Field(default=None, max_length=1000)
     grain: str | None = Field(default=None, max_length=100)
+    time_grain: str | None = Field(
+        default=None,
+        max_length=20,
+        description="P3 时间粒度：day|week|month|quarter|year（显式 null = 清空）",
+    )
     unit: str | None = Field(default=None, max_length=50)
     data_source: str | None = Field(default=None, max_length=200)
     owner: str | None = Field(default=None, max_length=100)
@@ -896,6 +961,11 @@ class KpiCatalogUpdate(CamelModel):
     numerator_columns: list[str] | None = None
     denominator_columns: list[str] | None = None
 
+    @field_validator("time_grain")
+    @classmethod
+    def _validateTimeGrain(cls, value: str | None) -> str | None:
+        return _checkTimeGrain(value)
+
 
 class KpiCatalogRead(CamelModel):
     id: int
@@ -906,6 +976,7 @@ class KpiCatalogRead(CamelModel):
     numerator: str | None = None
     denominator: str | None = None
     grain: str | None = None
+    time_grain: str | None = None
     unit: str | None = None
     data_source: str | None = None
     datasource_id: int | None = None

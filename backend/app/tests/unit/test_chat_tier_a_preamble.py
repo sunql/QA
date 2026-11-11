@@ -6,7 +6,8 @@ import pytest
 
 from app.domain.models import KpiCatalog, OntologyMetric
 from app.domain.schemas import ChatRequest
-from app.services.chat_stream_output import L1L4PreambleMixin
+from app.services.chat_constants import ROUTING_LAYER_KPI_TIER_B
+from app.services.chat_stream_output import L1L4PreambleMixin, PreambleResult
 from app.services.kpi_semantic_match_service import KpiMatchResult, KpiMatchRoute
 
 
@@ -79,6 +80,13 @@ def _dto() -> ChatRequest:
     return ChatRequest(question="供应商准时交付率", sessionId="s", datasourceId=1)
 
 
+def test_tier_b_sentinel_literal_matches_constant() -> None:
+    """`PreambleResult.routing_layer` 的 "L1B" 字面量与常量必须一致。"""
+    assert ROUTING_LAYER_KPI_TIER_B == "L1B"
+    result = PreambleResult(routing_layer=ROUTING_LAYER_KPI_TIER_B, answer="")
+    assert result.routing_layer == "L1B"
+
+
 @pytest.mark.asyncio()
 async def test_tier_a_builds_l1_response_and_skips_l4() -> None:
     response = type("R", (), {
@@ -116,7 +124,10 @@ async def test_tier_c_returns_l1_without_execution() -> None:
     preamble = await mixin._runL1AndL4Preamble(_dto(), None, None)
     assert preamble is not None and preamble.routing_layer == "L1"
     assert preamble.execution_tier == "C"
+    # Tier C 的定义性行为：0 LLM —— 绝不能回落到 legacy / L4 路径。
     assert mixin.tierACalled is False and mixin.l4Called is False
+    assert mixin.legacyCalled is False
+    assert "暂不可确定性计算" in preamble.full_response.answer
 
 
 @pytest.mark.asyncio()
@@ -141,6 +152,45 @@ async def test_tier_a_execution_failure_degrades_to_b() -> None:
     assert preamble is not None and preamble.routing_layer == "L1B"
     assert preamble.degraded_reason == "execution_error"
     assert mixin.l4Called is False
+
+
+class _CatalogErrorPreamble(_Preamble):
+    async def _resolveKpiCatalog(self, code, session):  # noqa: ANN001
+        raise RuntimeError("catalog boom")
+
+
+@pytest.mark.asyncio()
+async def test_catalog_failure_falls_through_to_l4_without_raising() -> None:
+    """目录/开关/对账故障不得冒泡到请求路径：回落原有 L4 块。"""
+    mixin = _CatalogErrorPreamble(
+        tierPlan=type("P", (), {"tier": "A", "reason": None})()
+    )
+    preamble = await mixin._runL1AndL4Preamble(_dto(), None, None)
+    assert preamble is None
+    assert mixin.l4Called is True
+
+
+class _ExecuteErrorPreamble(_Preamble):
+    async def _executeTierA(self, match, kpi, session):  # noqa: ANN001
+        raise RuntimeError("execute boom")
+
+
+@pytest.mark.asyncio()
+async def test_tier_a_execute_raising_degrades_to_b_without_raising() -> None:
+    mixin = _ExecuteErrorPreamble(
+        tierPlan=type("P", (), {"tier": "A", "reason": None})()
+    )
+    preamble = await mixin._runL1AndL4Preamble(_dto(), None, None)
+    assert preamble is not None and preamble.routing_layer == "L1B"
+    assert preamble.degraded_reason == "execution_error"
+    assert mixin.l4Called is False
+
+
+@pytest.mark.asyncio()
+async def test_default_execute_tier_a_degrades_without_raising() -> None:
+    """mixin 默认实现：误开开关也只会降级，绝不 500。"""
+    result = await L1L4PreambleMixin()._executeTierA(None, None, None)
+    assert result == (None, "execution_error")
 
 
 # ===========================================================================

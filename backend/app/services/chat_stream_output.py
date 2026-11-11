@@ -338,6 +338,16 @@ class L1L4PreambleMixin:
             has_explicit_time_scope=hasExplicitTime,
         )
 
+    async def _executeTierA(
+        self, match: KpiMatchResult, kpi: Any | None, session: AsyncSession | None
+    ) -> tuple[Any | None, str | None]:
+        """Tier A 执行钩子默认值（真实实现在 ChatService，下一个任务落地）。
+
+        D4 先以「失败降级」占位：即使 Tier A 开关被误开且路由走到了 Tier A，
+        这里也只返回 ``(None, REASON_EXECUTION_ERROR)`` ⇒ Tier B 哨兵，绝不 500。
+        """
+        return None, REASON_EXECUTION_ERROR
+
     @staticmethod
     def _tierBPreamble(
         match: KpiMatchResult, kpi: Any | None, reason: str | None
@@ -419,55 +429,72 @@ class L1L4PreambleMixin:
 
         match = route.matches[0] if route is not None and route.kind == "hit" else None
         if match is not None:
-            # 先取 KPI 行：四条分支都要用它（Tier 判定 / 文案 / datasource 比较）。
-            kpi = await self._resolveKpiCatalog(match.code, session)
-            plan = await self._planKpiTier(dto.question, kpi, session)
+            try:
+                # 先取 KPI 行：四条分支都要用它（Tier 判定 / 文案 / datasource 比较）。
+                kpi = await self._resolveKpiCatalog(match.code, session)
+                plan = await self._planKpiTier(dto.question, kpi, session)
+            except Exception:  # noqa: BLE001 — 降级到原 L4 流水线，绝不上抛请求路径
+                # 与原 _buildL1Response 的容错语义一致：目录/开关/对账任何故障都只记
+                # warning 并落到下面的 L4 块（非流式不 500、流式不中断）。
+                logger.warning(
+                    "KPI tier routing failed kpi=%s, falling back to L4",
+                    match.code, exc_info=True,
+                )
+            else:
+                if plan.tier == TIER_B:
+                    # L4 不注入契约块：Tier B 必须交给主 NL2SQL 流水线。
+                    return self._tierBPreamble(match, kpi, plan.reason)
 
-            if plan.tier == TIER_B:
-                # L4 不注入契约块：Tier B 必须交给主 NL2SQL 流水线。
-                return self._tierBPreamble(match, kpi, plan.reason)
+                if plan.tier == TIER_A:
+                    try:
+                        l1, degradedReason = await self._executeTierA(
+                            match, kpi, session
+                        )
+                    except Exception:  # noqa: BLE001 — Tier A 失败降级到 Tier B
+                        logger.warning(
+                            "Tier A execution failed kpi=%s, degrading to Tier B",
+                            match.code, exc_info=True,
+                        )
+                        l1, degradedReason = None, REASON_EXECUTION_ERROR
+                    if l1 is None:
+                        return self._tierBPreamble(
+                            match, kpi, degradedReason or REASON_EXECUTION_ERROR
+                        )
+                elif plan.tier == TIER_C:
+                    l1 = self._buildTierCResponse(match, kpi, plan.reason)
+                else:  # TIER_LEGACY：开关关 / 目录缺失 ⇒ 现有 FD 执行路径
+                    l1 = await self._buildL1Response(match, session)
 
-            if plan.tier == TIER_A:
-                l1, degradedReason = await self._executeTierA(match, kpi, session)
-                if l1 is None:
-                    return self._tierBPreamble(
-                        match, kpi, degradedReason or REASON_EXECUTION_ERROR
+                if l1 is not None:
+                    # P0 合并项 6：仅在 KPI 实际绑定了数据源时比较（沿用原判断）。
+                    mismatch = (
+                        kpi is not None
+                        and kpi.datasource_id is not None
+                        and kpi.datasource_id != dto.datasourceId
                     )
-            elif plan.tier == TIER_C:
-                l1 = self._buildTierCResponse(match, kpi, plan.reason)
-            else:  # TIER_LEGACY：开关关 / 目录缺失 ⇒ 现有 FD 执行路径
-                l1 = await self._buildL1Response(match, session)
-
-            if l1 is not None:
-                # P0 合并项 6：仅在 KPI 实际绑定了数据源时比较（沿用原判断）。
-                mismatch = (
-                    kpi is not None
-                    and kpi.datasource_id is not None
-                    and kpi.datasource_id != dto.datasourceId
-                )
-                warning = (
-                    MSG_KPI_DATASOURCE_MISMATCH.format(
-                        datasource_id=kpi.datasource_id,
-                        user_datasource_id=dto.datasourceId,
+                    warning = (
+                        MSG_KPI_DATASOURCE_MISMATCH.format(
+                            datasource_id=kpi.datasource_id,
+                            user_datasource_id=dto.datasourceId,
+                        )
+                        if mismatch else None
                     )
-                    if mismatch else None
-                )
-                return PreambleResult(
-                    routing_layer=ROUTING_LAYER_L1,
-                    answer=l1.answer,
-                    chart_type=l1.chartType,
-                    chart_option=l1.chartOption,
-                    visual_rationale=l1.visual_rationale,
-                    kpi_code=match.code,
-                    kpi_name=l1.kpi_name,
-                    confidence=match.confidence,
-                    kpi_match_method=match.method,
-                    execution_tier=plan.tier,
-                    degraded_reason=plan.reason,
-                    datasource_mismatch=mismatch,
-                    mismatch_warning=warning,
-                    full_response=l1,
-                )
+                    return PreambleResult(
+                        routing_layer=ROUTING_LAYER_L1,
+                        answer=l1.answer,
+                        chart_type=l1.chartType,
+                        chart_option=l1.chartOption,
+                        visual_rationale=l1.visual_rationale,
+                        kpi_code=match.code,
+                        kpi_name=l1.kpi_name,
+                        confidence=match.confidence,
+                        kpi_match_method=match.method,
+                        execution_tier=plan.tier,
+                        degraded_reason=plan.reason,
+                        datasource_mismatch=mismatch,
+                        mismatch_warning=warning,
+                        full_response=l1,
+                    )
 
         # 2. L4 Agent Loop
         l4 = await self._handleNl2SqlAgent(session, dto, user=user)

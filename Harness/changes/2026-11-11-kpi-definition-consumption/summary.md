@@ -45,7 +45,8 @@ KPI 口径对 NL2SQL 完全不可用。
 | `05a7f442` | 安全复审修复：`_assertOwnership` 校验治理列/度量快照未过期；更正「生产永远拒绝」失实说明 |
 | `86d0e12f` | 安全复审修复：CLI 帮助文本/计划文档如实说明「守卫只看库名」 |
 | `e3aa96ca` | **度量表达式保真**：派生 measure 保留别名限定与 `TRUNC`；列集合提取改由 `measureColumnIdentifiers` 负责；未挂靠 metric 的草稿 KPI 跳过而非中断整批 |
-| 本文件所在 commit | 回填脚本警示注释 + wiki §16 + 本变更记录 |
+| `0c0b451d` | 回填脚本警示注释 + wiki §16 + 本变更记录 |
+| 本文件所在 commit | 合并闸门净新增修复：两处 `_matchKpiCodes` 替身补 `strict` 形参；seed 用例显式 eager-load（§7 踩坑 8） |
 
 **新增文件**
 
@@ -139,7 +140,15 @@ KPI 口径对 NL2SQL 完全不可用。
    `kpi_governance_normalizer._normalizeExpr`（只 trim）与
    `nl2sql_semantic_guard.measureColumnIdentifiers`（剥别名/函数名）。首轮实现把两者合并，
    导致 4 条度量化简后落库 —— 复审已修，dev 库已重写。
-7. **`kpi_metric_realdata.py` 的 S1.1 是精确版本闸门**（`version == "0137"`）：库一升级到
+7. **测试用例别依赖弱引用 identity map 里的对象存活**：`test_seed_feature_rules.py::
+   test_seed_risk_score_has_3_tiers` 原先假设「同一 session 里刚 seed 过的 FeatureRule
+   实例还在 identity map 里、`thresholds` 已加载」。SQLAlchemy `Session` 的 identity map
+   是**弱引用**，clean 实例随时可能被 GC；一旦被回收，再次 SELECT 得到的是
+   `thresholds` 未加载的新实例，async 下的同步懒加载就抛 `MissingGreenlet`。
+   本分支只是新增了一个路由导入（`kpi_diagnose`）改变了分配/回收时机，就把这条用例
+   从「碰巧绿」翻成「稳定红」——**不是产品回归**。修法是用例显式
+   `selectinload(FeatureRule.thresholds)`（生产路径 `getRule`/`listRules` 本来就这么加载）。
+8. **`kpi_metric_realdata.py` 的 S1.1 是精确版本闸门**（`version == "0137"`）：库一升级到
    `0142`，S1.1 直接 FAIL 且 S2–S8 全部 SKIP（「全跳」退出码 2，不会被读成通过）。取 S3 证据时
    要么跑库内 `step3_reconcile`（判据与版本无关），要么先放宽该闸门（本批未改，留给脚本归属方）。
 

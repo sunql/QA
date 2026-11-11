@@ -26,7 +26,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import KpiCatalog, OntologyMetric
 from app.services.audit_service import AuditService
-from app.services.kpi_metric_switches import isKpiContractInjectionEnabled
+from app.services.kpi_metric_switches import (
+    isKpiContractInjectionEnabled,
+    isKpiMatchContainmentEnabled,
+)
 from app.services.nl2sql_semantic_guard import (
     denominatorContractWarning,
     extractSqlIdentifiers,
@@ -184,8 +187,10 @@ async def buildKpiContractBlock(
 ) -> str | None:
     """按问句装配 KPI 治理契约块（B3 注入点 B：plan 之前注入，影响选类与聚合）。
 
-    链路：KpiSemanticMatchService.matchAll（KpiMatchCache，只索引 PUBLISHED，
-    冷缓存安全降级空列表）→ confidence 降序 Top-3 → 逐个过 B2 门禁 → 渲染条目。
+    链路：v2（``KPI_MATCH_CONTAINMENT_ENABLED`` 开启）走
+    ``KpiSemanticMatchService.matchRoute``（唯一命中 / 歧义候选 / 无命中）；
+    否则回退 v1 ``matchAll`` Top-3（KpiMatchCache，只索引 PUBLISHED，冷缓存
+    安全降级空列表）。歧义与无命中一样**不注入**：chat 侧会先反问用户。
 
     门禁口径：
     - **未挂靠可用 metric ⇒ Tier C ⇒ 不注入**（2026-10-30 补齐；此前本面把
@@ -208,9 +213,17 @@ async def buildKpiContractBlock(
     from app.services.kpi_match_cache import get_kpi_match_cache
     from app.services.kpi_semantic_match_service import getKpiSemanticMatchService
 
-    matches = await getKpiSemanticMatchService().matchAll(
-        question.strip(), limit=_KPI_CONTRACT_MAX_KPIS
-    )
+    matcher = getKpiSemanticMatchService()
+    if await isKpiMatchContainmentEnabled(session):
+        route = await matcher.matchRoute(question.strip())
+        if route.kind != "hit":
+            # none 与 ambiguous 都不注入：歧义时 chat 会先反问用户，不会执行 SQL。
+            return None
+        matches = list(route.matches)
+    else:
+        matches = await matcher.matchAll(
+            question.strip(), limit=_KPI_CONTRACT_MAX_KPIS
+        )
     if not matches:
         return None
 

@@ -44,7 +44,10 @@ from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_audit import recordReconcileResult
 from app.services.kpi_metric_reconcile import VERDICT_MISMATCH, reconcileMetric
 from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
-from app.services.kpi_metric_switches import isKpiContractInjectionEnabled
+from app.services.kpi_metric_switches import (
+    isKpiContractInjectionEnabled,
+    isKpiMatchContainmentEnabled,
+)
 from app.services.kpi_semantic_match_service import getKpiSemanticMatchService
 
 logger = logging.getLogger(__name__)
@@ -283,34 +286,39 @@ async def _loadSourceClasses(
 async def _matchKpiCodes(
     session: AsyncSession, question: str, limit: int, *, strict: bool = False
 ) -> list[str]:
-    """动态匹配 KPI（读配置里的 semantic_keywords，不是硬编码清单）。
+    """动态匹配 KPI（v1 Jaccard / v2 包含式，由灰度开关选择）。
 
     先 ensureFresh：缓存冷/脏/过期时重建（否则语义匹配静默失效 ⇒ 契约永远注不进）。
     兜底失败**降级而非抛**：缓存是加速器，不是正确性依赖。
     ``strict=True``：不降级，故障原样抛出。当前唯一诊断入口总是自带 ``codes``，
     不会走到这里；该分支是给「需要诊断匹配本身」的调用方保留的。
+
+    歧义（v2 等长并列）⇒ 返回空列表：契约块会写进 plan prompt，把两个互相
+    矛盾的口径同时注入等于让模型替用户选指标 —— 设计 §5.2 明令禁止。
     """
     if not question or not question.strip():
         return []
+
+    async def _match() -> list[str]:
+        await get_kpi_match_cache().ensureFresh(session)
+        matcher = getKpiSemanticMatchService()
+        if await isKpiMatchContainmentEnabled(session):
+            route = await matcher.matchRoute(question)
+            return [m.code for m in route.matches] if route.kind == "hit" else []
+        results = await matcher.matchAll(question, limit=limit)
+        return [r.code for r in results]
+
     if strict:
         async with session.begin_nested():
-            await get_kpi_match_cache().ensureFresh(session)
-            results = await getKpiSemanticMatchService().matchAll(
-                question, limit=limit
-            )
-        return [r.code for r in results]
+            return await _match()
     try:
         # savepoint：ensureFresh 可能写库；DB 级失败若不回滚到保存点，
         # 会把调用方 session 的事务打成 failed 态（后续语句全 PendingRollbackError）。
         async with session.begin_nested():
-            await get_kpi_match_cache().ensureFresh(session)
-            results = await getKpiSemanticMatchService().matchAll(
-                question, limit=limit
-            )
+            return await _match()
     except Exception:
         logger.warning("KPI 语义匹配失败，跳过契约注入", exc_info=True)
         return []
-    return [r.code for r in results]
 
 
 async def buildKpiContractBlock(

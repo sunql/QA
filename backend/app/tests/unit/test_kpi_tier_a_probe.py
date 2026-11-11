@@ -92,3 +92,139 @@ def test_direct_script_help_works() -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert "--database-url" in completed.stdout
+    assert "--confirm-target" in completed.stdout
+
+
+# ===========================================================================
+# --execute 业务库目标确认（安全终审 M4/M5）
+# ===========================================================================
+
+_FAKE_DATABASE_URL = "postgresql+asyncpg://qa_user:secret@127.0.0.1:5433/qa_metadata"
+
+
+def _fakeKpi():
+    from app.domain.models import KpiCatalog
+
+    return KpiCatalog(
+        kpi_code="KPI_PROBE",
+        kpi_name="探针指标",
+        metric_id=1,
+        datasource_id=1,
+        numerator_columns=["qty"],
+        grain_keys=["supplier_id"],
+        status="PUBLISHED",
+    )
+
+
+def _fakeMetric():
+    from app.domain.models import OntologyMetric
+
+    return OntologyMetric(
+        metric_name="KPI_PROBE-metric",
+        formula="SELECT SUM(qty) FROM delivery GROUP BY supplier_id",
+        metric_type="MEASURE",
+        numerator_measure={"agg": "SUM", "expr": "qty"},
+        grain_keys=["supplier_id"],
+        execution_source="ESCAPE_HATCH",
+    )
+
+
+def _fakeDatasource():
+    from app.domain.enums import DataSourceType
+    from app.domain.models import DataSource
+
+    return DataSource(
+        id=1,
+        name="thbi",
+        type=DataSourceType.ORACLE,
+        host="10.0.0.5",
+        port=1521,
+        database_name="SVC",
+        username="secret-user",
+        password_encrypted="secret-cipher",
+    )
+
+
+class _Scalars:
+    def __init__(self, items) -> None:
+        self._items = items
+
+    def all(self):
+        return list(self._items)
+
+
+class _Result:
+    def __init__(self, items) -> None:
+        self._items = items
+
+    def scalars(self) -> _Scalars:
+        return _Scalars(self._items)
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self._kpi = _fakeKpi()
+        self._metric = _fakeMetric()
+        self._datasource = _fakeDatasource()
+
+    async def execute(self, _stmt):
+        return _Result([self._kpi])
+
+    async def get(self, model, _pk):
+        from app.domain.models import OntologyMetric
+
+        return self._metric if model is OntologyMetric else self._datasource
+
+
+def test_parse_args_confirm_target_defaults_false() -> None:
+    args = probe._parseArgs(
+        ["--database-url", _FAKE_DATABASE_URL, "--execute",
+         "--kpi-code", "KPI_PROBE", "--datasource-id", "1"]
+    )
+    assert args.confirm_target is False
+
+
+def test_parse_args_accepts_confirm_target() -> None:
+    args = probe._parseArgs(
+        ["--database-url", _FAKE_DATABASE_URL, "--execute",
+         "--kpi-code", "KPI_PROBE", "--datasource-id", "1", "--confirm-target"]
+    )
+    assert args.confirm_target is True
+
+
+@pytest.mark.asyncio()
+async def test_execute_without_confirm_prints_target_and_skips_query(
+    capsys, monkeypatch
+) -> None:
+    """缺 --confirm-target：只打印目标（不含用户名/口令），绝不执行查询，退出 3。"""
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("未确认目标时不得构造执行服务")
+
+    monkeypatch.setattr(probe, "KpiExecutionService", _forbidden)
+    code = await probe.runExecute(_FakeSession(), "KPI_PROBE", 1, confirmTarget=False)
+    captured = capsys.readouterr()
+
+    assert code == 3
+    assert "type=ORACLE" in captured.out
+    assert "host=10.0.0.5" in captured.out
+    assert "port=1521" in captured.out
+    assert "database=SVC" in captured.out
+    assert "secret-user" not in captured.out + captured.err
+    assert "secret-cipher" not in captured.out + captured.err
+    assert "--confirm-target" in captured.err
+
+
+def test_main_masks_exception_detail(monkeypatch, capsys) -> None:
+    """安全终审 M5：异常兜底只打印类名 + 详情已省略（原文可能含 host/user）。"""
+    async def _boom(_args):
+        raise RuntimeError("host=10.0.0.5 user=secret-user")
+
+    monkeypatch.setattr(probe, "_run", _boom)
+    code = probe.main(["--database-url", _FAKE_DATABASE_URL])
+    stderr = capsys.readouterr().err
+
+    assert code == 1
+    assert "RuntimeError" in stderr
+    assert "详情已省略" in stderr
+    assert "10.0.0.5" not in stderr
+    assert "secret-user" not in stderr

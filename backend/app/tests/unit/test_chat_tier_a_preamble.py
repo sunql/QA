@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from app.domain.models import KpiCatalog, OntologyMetric
@@ -297,3 +299,20 @@ async def test_real_plan_reconciled_escape_hatch_is_tier_a() -> None:
     )
     assert plan.tier == "A"
     assert plan.reason is None
+
+
+@pytest.mark.asyncio()
+async def test_real_plan_unknown_source_logs_warning(caplog) -> None:
+    """DoD #3：未知 execution_source ⇒ Tier C + warning（含 kpi code）。"""
+    caplog.set_level(logging.WARNING)
+    probe = _PlanProbe(enabled=True)
+    plan = await probe._planKpiTier(
+        "供应商准时交付率是多少", _kpi(), _MetricSession(_metric("WEIRD"))
+    )
+    assert plan.tier == "C"
+    assert plan.reason == "execution_source_unknown"
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "未知 execution_source" in message and "KPI_SUPPLIER_OTD" in message
+        for message in messages
+    ), messages

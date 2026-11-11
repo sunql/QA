@@ -112,6 +112,12 @@ _EXPLICIT_TIME_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?<![A-Za-z])Q[1-4](?![0-9])", re.IGNORECASE),
     re.compile(r"(本|上|下|这)?财年"),
     re.compile(r"(年|月|季度|半年)(初|底|末)"),
+    # 终审补：同/环比、半年度（H1/H2）、财年缩写（FY25 / FY2025）、滚动 12 个月
+    # CJK 下 \b 不可用（中文字符算 \w），沿用字母/数字 lookaround 写法。
+    re.compile(r"(同|环)比"),
+    re.compile(r"(?<![A-Za-z0-9])H[12](?![0-9])"),
+    re.compile(r"(?<![A-Za-z])FY\s*\d{0,4}(?![0-9])", re.IGNORECASE),
+    re.compile(r"(?<![A-Za-z])(TTM|LTM)(?![A-Za-z])", re.IGNORECASE),
 )
 
 

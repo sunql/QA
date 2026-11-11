@@ -29,6 +29,16 @@ from app.services.kpi_execution_service import hasExplicitTimeScope
         "2025Q2交付率",
         "本财年交付率",
         "年初交付率",
+        # 终审补：同/环比、半年度、财年缩写、滚动 12 个月
+        "同比",
+        "环比",
+        "季度环比",
+        "H1",
+        "H2",
+        "FY25",
+        "FY2025",
+        "TTM",
+        "LTM",
     ],
 )
 def test_detects_explicit_time(question: str) -> None:
@@ -42,6 +52,9 @@ def test_detects_explicit_time(question: str) -> None:
         "KPI_SUPPLIER_OTD 这个指标",
         "逾期率为什么下降",
         "交付率",
+        # 集成用例里的普通问句：补时间模式后仍不得被判成显式时间
+        "TierA测试指标是多少",
+        "TierA报错指标统计",
     ],
 )
 def test_plain_question_has_no_time_scope(question: str) -> None:

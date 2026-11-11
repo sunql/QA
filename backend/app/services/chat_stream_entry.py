@@ -33,7 +33,11 @@ from app.services.chat_constants import (
     metaIntentOf,
 )
 from app.services.chat_helpers import attachStreamPersistState
-from app.services.chat_stream_output import splitTierBPreamble, tierHintFields
+from app.services.chat_stream_output import (
+    splitTierBPreamble,
+    tierHintClearedFields,
+    tierHintFields,
+)
 from app.services.error_classification import classifyError, sanitizeErrorMessage
 from app.services.evidence_record_service import (
     resetChatSessionId,
@@ -263,11 +267,17 @@ class StreamEntryMixin:
             state = classified.state
             if state is not None:
                 result = classified.intentResult
+                # 第二帧显式清空：重分类后意图若落早退集合，非流式入口
+                # executionTier 为 null，流式也必须发一组 None 覆盖首帧旧值
+                # （前端逐帧合并，省略键清不掉）。
+                tierFields = tierHintFields(kpiHint, result.intent)
+                if kpiHint is not None and tierFields == {}:
+                    tierFields = tierHintClearedFields()
                 yield StreamEvent(
                     EVENT_META,
                     {
-                        "intent": classified.intentResult.intent.value,
-                        **tierHintFields(kpiHint, classified.intentResult.intent),
+                        "intent": result.intent.value,
+                        **tierFields,
                     },
                 )
                 if result.intent == IntentType.CHITCHAT:

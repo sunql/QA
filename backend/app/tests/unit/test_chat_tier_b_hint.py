@@ -8,6 +8,7 @@ from app.services.chat_stream_output import (
     PreambleResult,
     kpiHintFields,
     splitTierBPreamble,
+    tierHintClearedFields,
     tierHintFields,
 )
 from app.services.kpi_semantic_match_service import KpiMatchResult
@@ -76,6 +77,13 @@ def test_hint_fields_wire_shape() -> None:
 
 def test_hint_fields_none_is_empty() -> None:
     assert kpiHintFields(None) == {}
+
+
+def test_tier_hint_cleared_fields_cover_all_hint_keys() -> None:
+    """第二帧清空字段必须覆盖首帧 Tier B 字段的**全部键**（防将来漏清）。"""
+    cleared = tierHintClearedFields()
+    assert set(cleared) == set(kpiHintFields(_tierB()))
+    assert set(cleared.values()) == {None}
 
 
 def test_hint_fields_datasource_mismatch_adds_warning_fields() -> None:

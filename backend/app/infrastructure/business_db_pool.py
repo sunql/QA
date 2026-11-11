@@ -27,6 +27,7 @@ from app.domain.error_messages import (
     MSG_DATASOURCE_CONNECT_OK,
     MSG_ORACLE_NOT_SQLALCHEMY_URL,
     MSG_SQL_EMPTY,
+    MSG_SQL_EXECUTABLE_COMMENT,
     MSG_SQL_FORBIDDEN_OPERATION,
     MSG_SQL_MULTI_STATEMENT,
     MSG_SQL_NOT_READONLY,
@@ -132,6 +133,8 @@ _FORBIDDEN_CALLS = {
     "PG_CANCEL_BACKEND",
     "PG_RELOAD_CONF",
     "PG_ROTATE_LOGFILE",
+    # 会话级配置改写（可改 search_path / role 等，属跨库/越权面）
+    "SET_CONFIG",
 }
 
 # 包 / 类型（M1）：以「**包名形态**」（名字后紧跟 ``.``）命中，如 UTL_HTTP.REQUEST、
@@ -151,6 +154,10 @@ _FORBIDDEN_PACKAGES = {
     "DBMS_LDAP",
     "DBMS_SCHEDULER",
     "DBMS_NETWORK_ACL_ADMIN",
+    # 安全终审 M2：可执行任意 SQL / DDL / Java 的包
+    "DBMS_SQL",
+    "DBMS_UTILITY",
+    "DBMS_JAVA",
 }
 
 _adapters: dict[int, BusinessDbAdapter] = {}
@@ -173,9 +180,17 @@ def _assert_read_only(sql: str) -> None:
     仅看首 token 不足以防注入：`WITH x AS (DELETE ...) SELECT ...`、
     `SELECT ... INTO ...`、`SELECT ... FOR UPDATE` 等首 token 都合法，
     故在首 token 白名单通过后再做深度扫描（见 _assertNoHiddenWrites）。
+
+    MySQL 可执行注释 ``/*! ... */`` 会在服务端展开执行（sqlparse 当普通注释跳过），
+    必须在语句拆分前按原始文本拒绝，否则 ``SELECT 1 /*!50000 , SLEEP(60) */``
+    能整体绕过解析层。
     """
     if not sql or not sql.strip():
         raise SqlSafetyError(MSG_SQL_EMPTY, sql=sql)
+
+    # 原始文本检测（不能等 sqlparse：它把 /*! ... */ 归为 Comment 直接跳过）
+    if "/*!" in sql:
+        raise SqlSafetyError(MSG_SQL_EXECUTABLE_COMMENT, sql=sql)
 
     statements = sqlparse.parse(sql)
     nonEmptyStmts: list[sqlparse.sql.Statement] = []

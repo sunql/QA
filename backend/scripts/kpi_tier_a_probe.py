@@ -2,8 +2,10 @@
 """Tier A 真实数据验收探针（手动、不进 CI；零生产写操作）。
 
 - ``--dry-run``（默认）：只读元数据库，打印 KPI 的 ``tier/reason``；
-- ``--execute --kpi-code KPI_XXX --datasource-id N``：直接调用
+- ``--execute --kpi-code KPI_XXX --datasource-id N --confirm-target``：直接调用
   ``KpiExecutionService.execute``（不经过 chat/LLM，不读 Tier A 开关行）。
+  缺 ``--confirm-target`` 时只打印业务库目标（type/host/port/database，不含
+  用户名/口令）并以退出码 3 结束，**不会执行查询**。
 
 Tier 判定与运行时同源：KpiCatalog → OntologyMetric → ``governanceSpecOf`` +
 ``techniqueOf`` → ``reconcileMetric`` → ``isTierAEligible`` → ``planKpiExecution``；
@@ -14,14 +16,15 @@ Tier 判定与运行时同源：KpiCatalog → OntologyMetric → ``governanceSp
 库名与 host 只从 authority/path 读取；**任何非空 query 一律拒绝**（``?host=`` /
 ``?database=`` 会被 ``create_async_engine`` 合并进连接参数），只打印 key 列表。
 
-退出码：``--execute`` 成功 0，失败 1（含设计内降级的 ``empty_result``）；调用方
-应按输出 ``status``（ok / expected_degradation(...) / failed(...)）判定。
+退出码：``--execute`` 成功 0，失败 1（含设计内降级的 ``empty_result``）；缺
+``--confirm-target`` 时 3（未执行查询）；调用方应按输出 ``status``
+（ok / expected_degradation(...) / failed(...)）判定。
 
 示例（在 backend/ 下执行；URL 用占位符，勿把口令写进 shell 历史/证据文件）::
 
     python -m scripts.kpi_tier_a_probe --database-url "$QA_METADATA_URL"
     python -m scripts.kpi_tier_a_probe --database-url "$QA_METADATA_URL" \\
-        --execute --kpi-code KPI_SUPPLIER_OTD --datasource-id 1
+        --execute --kpi-code KPI_SUPPLIER_OTD --datasource-id 1 --confirm-target
 """
 
 from __future__ import annotations
@@ -159,8 +162,23 @@ async def runDryRun(session: AsyncSession, kpiCode: str | None) -> int:
     return 0
 
 
-async def runExecute(session: AsyncSession, kpiCode: str, datasourceId: int) -> int:
-    """执行单条 Tier A KPI。成功 0；失败 1（含 empty_result，按 status 判定）。"""
+def _printBusinessTarget(datasource: DataSource) -> None:
+    """打印业务库目标（type/host/port/database）。绝不打印用户名/口令。"""
+    rawType = getattr(datasource.type, "value", datasource.type)
+    print(
+        f"业务库目标：type={str(rawType).upper()} host={datasource.host} "
+        f"port={datasource.port} database={datasource.database_name}"
+    )
+
+
+async def runExecute(
+    session: AsyncSession,
+    kpiCode: str,
+    datasourceId: int,
+    *,
+    confirmTarget: bool = False,
+) -> int:
+    """执行单条 Tier A KPI。成功 0；失败 1；缺目标确认 3（不执行查询）。"""
     kpis = await _loadKpis(session, kpiCode)
     if not kpis:
         print(f"未找到 KPI: {kpiCode}", file=sys.stderr)
@@ -188,6 +206,17 @@ async def runExecute(session: AsyncSession, kpiCode: str, datasourceId: int) -> 
     if datasource is None:
         print(f"未找到 data_source id={datasourceId}", file=sys.stderr)
         return 1
+
+    # 安全终审 M4：--execute 必须显式确认业务库目标，避免按错 datasource-id
+    # 把查询打到别的库。确认前不改 evidence 钩子、不构造执行服务。
+    if not confirmTarget:
+        _printBusinessTarget(datasource)
+        print(
+            "拒绝执行：未确认业务库目标；请核对上方 type/host/port/database 后"
+            "加 --confirm-target 才会真正执行。",
+            file=sys.stderr,
+        )
+        return 3
 
     # 零写库：抑制两类 evidence。METRIC_RESULT 由 service 注入 noop；SQL_QUERY 由
     # adapter 在查询成功后调用模块属性 scheduleSqlQueryEvidence（调用时解析），
@@ -263,6 +292,14 @@ def _parseArgs(argv: list[str] | None) -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="只打印路由计划（默认）。")
     mode.add_argument("--execute", action="store_true", help="真实执行指定 KPI。")
+    parser.add_argument(
+        "--confirm-target",
+        action="store_true",
+        help=(
+            "确认业务库目标后才真正执行（--execute 用）。缺省时只打印 "
+            "type/host/port/database 并退出 3，不执行查询。"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.execute and not args.kpi_code:
         parser.error("--execute 必须同时提供 --kpi-code（不允许全量执行）")
@@ -279,7 +316,12 @@ async def _run(args: argparse.Namespace) -> int:
     try:
         async with factory() as session:
             if args.execute:
-                return await runExecute(session, args.kpi_code, args.datasource_id)
+                return await runExecute(
+                    session,
+                    args.kpi_code,
+                    args.datasource_id,
+                    confirmTarget=args.confirm_target,
+                )
             return await runDryRun(session, args.kpi_code)
     finally:
         await engine.dispose()
@@ -291,7 +333,8 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 - 手动探针：显式报错并给出类型
-        print(f"探针失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        # 安全终审 M5：异常原文可能含内部地址/用户名等，只打印类名。
+        print(f"探针失败：{type(exc).__name__}（详情已省略）", file=sys.stderr)
         return 1
 
 

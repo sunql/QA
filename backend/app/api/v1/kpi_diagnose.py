@@ -49,6 +49,7 @@ router = APIRouter(prefix="/api/v1/admin/kpi", tags=["admin-kpi"])
 
 VERDICT_NO_METRIC = "no_metric"
 EXECUTION_SOURCE_NONE = "NONE"
+EXECUTION_SOURCE_COMPILED = "COMPILED"
 
 TIER_A = "A"
 TIER_B = "B"
@@ -101,12 +102,28 @@ def _isNoneSource(metric: OntologyMetric | None) -> bool:
     return (metric.execution_source or "").strip().upper() == EXECUTION_SOURCE_NONE
 
 
+def _isCompiledSource(metric: OntologyMetric | None) -> bool:
+    if metric is None:
+        return False
+    return (
+        (metric.execution_source or "").strip().upper()
+        == EXECUTION_SOURCE_COMPILED
+    )
+
+
 def _tierOf(
     result: ReconcileResult | None, metric: OntologyMetric | None
 ) -> str:
-    """无 metric 或 NONE 源 ⇒ C（NONE 明确不允许 Tier A 直通）；A = pass 无降级；其余 B。"""
+    """Tier 判定（与运行时 ``planKpiExecution`` 同源）。
+
+    无 metric 或 NONE 源 ⇒ C（NONE 明确不允许 Tier A 直通）；
+    COMPILED ⇒ B（运行时一律降级到 Tier B，``compiled_not_supported``）；
+    A = pass 无降级；其余 B。
+    """
     if metric is None or _isNoneSource(metric):
         return TIER_C
+    if _isCompiledSource(metric):
+        return TIER_B
     if result is not None and result.isTierAEligible:
         return TIER_A
     return TIER_B

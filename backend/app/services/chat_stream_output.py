@@ -47,6 +47,7 @@ from app.services.chat_constants import (
 )
 from app.services.kpi_execution_service import (
     REASON_EXECUTION_ERROR,
+    REASON_EXECUTION_SOURCE_UNKNOWN,
     TIER_A,
     TIER_B,
     TIER_C,
@@ -291,6 +292,27 @@ _TIER_HINT_INTENTS: frozenset[IntentType] = frozenset({
 })
 
 
+def tierHintClearedFields() -> dict[str, Any]:
+    """Tier B 字段的显式清空帧（第二帧 META 用）。
+
+    重分类后意图若落到早退集合（CHITCHAT / DEFINE / MAP / METRIC ...），非流式
+    入口不会挂 hint，``executionTier`` 为 ``null``；流式入口首帧也可能已经发过
+    Tier B 字段，而前端逐帧合并 —— 只省略键不会清掉旧值。故第二帧显式发送一组
+    ``None``，让两入口的最终观测一致（``executionTier: null``）。
+
+    键集合必须与 :func:`kpiHintFields` 完全一致（有测试守护），否则会残留
+    ``kpiCode`` 等半套字段。
+    """
+    return {
+        "kpiCode": None,
+        "kpiName": None,
+        "confidence": None,
+        "matchMethod": None,
+        "executionTier": None,
+        "degradedReason": None,
+    }
+
+
 def tierHintFields(hint: PreambleResult | None, intent: IntentType) -> dict[str, Any]:
     """仅对最终会落到通用查询主链路的意图发 Tier B 字段。
 
@@ -397,7 +419,7 @@ class L1L4PreambleMixin:
             reconcileMetric(governanceSpecOf(kpi), techniqueOf(metric))
             if metric is not None else None
         )
-        return planKpiExecution(
+        plan = planKpiExecution(
             switch_on=True,
             kpi_found=True,
             metric_present=metric is not None,
@@ -407,6 +429,16 @@ class L1L4PreambleMixin:
             formula_present=bool(metric is not None and (metric.formula or "").strip()),
             has_explicit_time_scope=hasExplicitTime,
         )
+        if plan.reason == REASON_EXECUTION_SOURCE_UNKNOWN:
+            # 运营/治理面可见：未知执行源意味着该 KPI 永远走不进 Tier A，
+            # 需要人修 execution_source。%r 转义，防控制字符伪造日志行。
+            logger.warning(
+                "未知 execution_source kpi=%s source=%r datasource_id=%s",
+                kpi.kpi_code,
+                metric.execution_source if metric is not None else None,
+                kpi.datasource_id,
+            )
+        return plan
 
     async def _executeTierA(
         self, match: KpiMatchResult, kpi: Any | None, session: AsyncSession | None
@@ -615,6 +647,7 @@ __all__ = [
     "L1L4PreambleMixin",
     "PreambleResult",
     "kpiHintFields",
+    "tierHintClearedFields",
     "tierHintFields",
     "splitTierBPreamble",
     "_STREAM_CHUNK_TIMEOUT_SECONDS",

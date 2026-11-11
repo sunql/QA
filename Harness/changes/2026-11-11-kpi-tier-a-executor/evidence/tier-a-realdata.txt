@@ -3,7 +3,7 @@
 日期：2026-11-11
 环境：dev 元数据库 `qa_metadata` @ 127.0.0.1:5433（12 条真实 KPI：8 条
 ESCAPE_HATCH / 4 条 NONE，全部 `datasource_id=1` → THBI Oracle 19c
-192.168.205.70:1521/X3V71ORA）。
+<THBI_ORACLE_HOST:PORT/SERVICE>）。
 
 结论：**环境可达，M2 数值验收未降级**。THBI Oracle 连接成功，8 条 ESCAPE_HATCH
 全部真实执行；其中 6 条返回数值且与手工只读执行逐条一致（diff=0），2 条两端均为
@@ -118,7 +118,7 @@ KPI_SUPPLIER_OVERDUE_RATIO    0.8325608527587646
 - 首次 `--execute` 未导出部署 `SECRET_KEY`，解密数据源口令失败 ⇒ 执行器按设计
   降级为 `execution_error`（未抛到探针外）。导出部署 `SECRET_KEY` 后重跑成功；
   该密钥值未写入任何 evidence 文件。
-- Oracle 连通性预检：TCP 192.168.205.70:1521 可达；真实执行 8 条均成功返回
+- Oracle 连通性预检：TCP <THBI_ORACLE_HOST:PORT> 可达；真实执行 8 条均成功返回
   （含 2 条 NULL），无 DNS / 网络 / 认证失败。
 
 ## 证据抑制验证（修复轮 1）

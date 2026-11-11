@@ -37,11 +37,14 @@ class KpiMatchResult:
         confidence: 匹配置信度，精确 alias 为 1.0，关键词 Jaccard 为 (0,1)。
         layer: 固定 "l1_match"，供路由指标记录。
         kpi_name: KPI 名称（matchAll 时从缓存填充；match 返回 None）。
+        method: 命中路径，``exact_code``（精确 code）或 ``keyword``（Jaccard）；
+            诊断接口据此解释「为什么命中」，不参与打分。
     """
     code: str
     confidence: float
     layer: str = "l1_match"
     kpi_name: str | None = None
+    method: str = "keyword"
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +177,7 @@ class KpiSemanticMatchService:
                     confidence=alias_result.confidence,
                     layer=alias_result.layer,
                     kpi_name=alias_kpi.kpi_name if alias_kpi else None,
+                    method=alias_result.method,
                 )
                 results.append(alias_result)
                 seen_codes.add(alias_result.code)
@@ -216,7 +220,7 @@ class KpiSemanticMatchService:
             return None
         code = m.group(1)
         if self._cache.hasCode(code):
-            return KpiMatchResult(code=code, confidence=1.0)
+            return KpiMatchResult(code=code, confidence=1.0, method="exact_code")
         return None
 
     # ------------------------------------------------------------------

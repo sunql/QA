@@ -39,6 +39,7 @@ from app.api.v1 import (
     graph,
     graph_traversal,
     kpi_catalog,
+    kpi_diagnose,
     local_import,
     menu_config,
     messages,
@@ -292,6 +293,11 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         system_config.router,
         prefix="/api/v1/admin/system-config",
         tags=["system-config"],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+    )
+    # KPI 诊断（P0 D2）：router 自带 /api/v1/admin/kpi 前缀。
+    testApp.include_router(
+        kpi_diagnose.router,
         dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
     testApp.include_router(

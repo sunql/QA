@@ -1,0 +1,82 @@
+# Step 4 — stock-12 layer-2 verdicts through the NEW wired path (read-only dev 5433)
+
+- Date: 2026-11-12
+- Worktree: `/private/tmp/qa-kpi-p3` (branch `feat/kpi-p3-alias-resolver`, HEAD `42a985c7`)
+- DB: `postgresql+asyncpg://qa_user:***@127.0.0.1:5433/qa_metadata` (SELECT only; `transaction_read_only=on`)
+- Command: `cd /private/tmp/qa-kpi-p3/backend && uv run python ../.superpowers/sdd/plan/stock-verdict-probe.py`
+- Probe: `.superpowers/sdd/plan/stock-verdict-probe.py` (git-ignored scratch, never staged)
+
+## Conclusion: PASS
+
+Filtered verdicts (time-grain-absent findings excluded) match recon §5 exactly:
+**8 pass / 4 unknown / 0 mismatch**. Per-KPI verdict category matches; the 4
+unknown rows retain the exact baseline reason shape
+(`governance_columns_absent×2 + governance_grain_absent`) and degraded=True.
+
+Raw verdicts (as computed, before filtering): 12/12 unknown, all carrying
+`time_grain_absent_technical` (KPI_SUPPLIER_MAINTENANCE_RATIO additionally
+`time_grain_absent_governance` because its `grain` free text has no time word).
+This is the controller-adjudicated pre-backfill window, not a defect.
+
+## Deviation from the probe premise (schema state, not verdict)
+
+- The dev DB is at `alembic_version = 0142`; **0143 is NOT applied**. The columns
+  `kpi_catalog.time_grain`, `ontology_metric.time_grain` and
+  `ontology_metric.time_column` are **ABSENT** (not NULL).
+- The branch ORM already declares the 0143 columns, so ORM SELECTs of
+  `ontology_metric` fail on this DB (including via `OntologyProperty` →
+  `OntologyClass` → `metrics` selectin cascade inside `sourcePropertiesForMetric`).
+- The probe therefore reads only existing columns with raw SELECT and substitutes
+  a SELECT-only raw-SQL equivalent of `sourcePropertiesForMetric` (same tables,
+  columns and filtering semantics). `governanceSpecOf` / `techniqueOf` /
+  `resolutionForMetric` / `reconcileMetric` still run unchanged — this is the
+  Task 3 wired path.
+- Semantically this equals the pre-backfill NULL state: missing technical
+  `time_grain` yields `time_grain_absent_technical` on every row.
+- Recommended follow-up for controller: apply 0143 to dev 5433 (and then Task 5
+  backfill) before measuring the post-migration pre-backfill window; this probe
+  measured the stronger "columns absent" state.
+
+## Full script stdout
+
+```
+=== Connection (read-only guard) ===
+DSN                 : postgresql+asyncpg://qa_user:qa_pg_dev_2026@127.0.0.1:5433/qa_metadata
+current_database()  : qa_metadata
+inet_server_addr/port: 172.18.0.2/32:5432
+transaction_read_only: on
+server port note    : inet_server_port=5432 (container-internal; host DSN port=5433)
+
+=== Schema state (dev DB) ===
+alembic_version            : 0142
+kpi_catalog.time_grain     : ABSENT (0143 not applied)
+ontology_metric.time_grain : ABSENT (0143 not applied)
+ontology_metric.time_column: ABSENT (0143 not applied)
+
+loader note: dev DB lacks 0143 columns ⇒ using raw-SQL equiv of sourcePropertiesForMetric (SELECT-only)
+
+kpi_catalog rows: 12
+
+kpi_code                       | baseline | raw      | filtered | reasons
+-------------------------------------------------------------------------
+KPI_COST_SAVING                | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
+KPI_INVOICE_MATCH_RATE         | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
+KPI_PAYMENT_ON_TIME            | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
+KPI_PURCHASE_CYCLE_TIME        | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
+KPI_PURCHASE_PRICE_VARIANCE    | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
+KPI_SUPPLIER_DEFECT_RATE       | unknown  | unknown  | unknown  | raw(governance_columns_absentx2, governance_grain_absentx1, time_grain_absent_technicalx1) filtered(governance_columns_absentx2, governance_grain_absentx1)
+KPI_SUPPLIER_DELAY_DAYS        | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
+KPI_SUPPLIER_FPY               | unknown  | unknown  | unknown  | raw(governance_columns_absentx2, governance_grain_absentx1, time_grain_absent_technicalx1) filtered(governance_columns_absentx2, governance_grain_absentx1)
+KPI_SUPPLIER_MAINTENANCE_RATIO | unknown  | unknown  | unknown  | raw(governance_columns_absentx2, governance_grain_absentx1, time_grain_absent_governancex1, time_grain_absent_technicalx1) filtered(governance_columns_absentx2, governance_grain_absentx1)
+KPI_SUPPLIER_NCR_RATE          | unknown  | unknown  | unknown  | raw(governance_columns_absentx2, governance_grain_absentx1, time_grain_absent_technicalx1) filtered(governance_columns_absentx2, governance_grain_absentx1)
+KPI_SUPPLIER_OTD               | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
+KPI_SUPPLIER_OVERDUE_RATIO     | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
+
+ontology_metric.time_grain: column ABSENT on dev DB (0143 not applied) ⇒ treated as NULL for all rows
+
+baseline summary: 8 pass / 4 unknown / 0 mismatch (total 0 mismatch)
+
+PASS: filtered verdicts (time_grain_absent excluded) match recon §5 for all 12 stock KPIs.
+```
+
+Exit code: 0.

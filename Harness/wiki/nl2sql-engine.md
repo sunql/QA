@@ -790,3 +790,20 @@ reason=… total=… kept=… odsFiltered=… truncated=…`。此前降级是 `
 **回归**：`backend/app/tests/prompts/test_nl2sql_dialects.py`（Oracle 自然月 1 条 + Oracle/PG/MySQL 天级 3 条）。
 ⚠️ 天级 3 条断言的是**整段子句**（`_normalized()` 压空白后 `find(...)`），不是零散片段 ——
 片段断言会被说明文字与示例行喂饱，模板回退成 off-by-one 也照样绿（假绿）。已做变异取证。
+
+## KPI 时间粒度字段与 degraded 语义（P3，2026-11-12）
+
+P3（分支 `feat/kpi-p3-alias-resolver`，迁移 0143，未部署）对本引擎的影响：
+
+1. **KPI 契约块新增治理字段**：`kpi_catalog.time_grain` / `ontology_metric.time_grain`/
+   `time_column` 进契约注入面（`kpi_contract_builder`）与诊断面（`kpi_diagnose`）。
+   `time_grain` 同时进发布闸门 `_GOVERNANCE_KEYS`。
+2. **degraded 语义扩展**：层 2 对账 `verdict==unknown` 现在置 `degraded=True`（此前只由
+   层 1/3 mismatch 置真）。**Tier A 资格判定不变**（`isTierAEligible = isPass and not degraded`，
+   unknown 本来就非 pass ⇒ 不会因此新增降 Tier B）；可见变化是诊断/契约块对 4 条 NONE KPI
+   多出 degraded 标注。
+3. **对账解析层**：治理⇄技术比较经 `kpi_alignment_resolver`（token→物理列 + 纯时间词→TimeGrain），
+   `resolution=None` 时与 P2 逐字相同（恒等回退）。存量 12 条 verdict 不变
+   （8 pass / 4 unknown，回归测试钉死）。
+4. **对 P4 的接口**：time_grain（枚举）已可确定；time_column 允许为 null（多候选/零候选不写，
+   治理侧人工指定）——P4 参数化/编译器可先吃 time_grain，time_column 后补不阻塞。

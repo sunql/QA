@@ -1,0 +1,24 @@
+kpi_catalog|1|KPI_SUPPLIER_OTD|供应商+工厂+月
+kpi_catalog|2|KPI_SUPPLIER_OVERDUE_RATIO|供应商+工厂+月
+kpi_catalog|3|KPI_PURCHASE_CYCLE_TIME|供应商+工厂+月
+kpi_catalog|4|KPI_SUPPLIER_DELAY_DAYS|供应商+工厂+月
+kpi_catalog|5|KPI_SUPPLIER_DEFECT_RATE|供应商+物料+工厂+月
+kpi_catalog|6|KPI_SUPPLIER_FPY|供应商+物料+工厂+月
+kpi_catalog|7|KPI_SUPPLIER_NCR_RATE|供应商+物料+工厂+月
+kpi_catalog|8|KPI_PURCHASE_PRICE_VARIANCE|物料+工厂+月
+kpi_catalog|9|KPI_COST_SAVING|供应商+物料+月
+kpi_catalog|10|KPI_INVOICE_MATCH_RATE|供应商+月
+kpi_catalog|11|KPI_PAYMENT_ON_TIME|供应商+月
+kpi_catalog|12|KPI_SUPPLIER_MAINTENANCE_RATIO|供应商（快照）
+ontology_metric|2|KPI_SUPPLIER_OTD 供应商准时交付率
+ontology_metric|3|KPI_SUPPLIER_OVERDUE_RATIO 供应商逾期率
+ontology_metric|4|KPI_PAYMENT_ON_TIME 付款及时率
+ontology_metric|5|KPI_INVOICE_MATCH_RATE 发票三单匹配率
+ontology_metric|6|KPI_PURCHASE_CYCLE_TIME 采购周期
+ontology_metric|7|KPI_SUPPLIER_DELAY_DAYS 供应商平均延误天数
+ontology_metric|8|KPI_COST_SAVING 采购成本节约
+ontology_metric|9|KPI_PURCHASE_PRICE_VARIANCE 采购价格偏差率
+ontology_metric|10|KPI_SUPPLIER_MAINTENANCE_RATIO 供应商资质合规率
+ontology_metric|11|KPI_SUPPLIER_DEFECT_RATE 供应商来料不良率
+ontology_metric|12|KPI_SUPPLIER_FPY 供应商一次合格率
+ontology_metric|13|KPI_SUPPLIER_NCR_RATE 供应商 NCR 率

@@ -2068,6 +2068,10 @@ class ChatResponse(CamelModel):
         default=None,
         description="L1 匹配置信度（精确 alias=1.0，关键词 Jaccard∈(0,1]）",
     )
+    match_method: str | None = Field(
+        default=None,
+        description="L1 命中路径：exact_code | keyword | containment（诊断可解释性）",
+    )
     # v3.1 B6（M7 Hypothesis Hook）：「可能原因」假设（仅触发词表 + 本轮有数据时
     # 填充；流式路径不随 SSE 下发，前端经 GET /chat/sessions/{id}/hypotheses 读取）
     hypotheses: list[HypothesisRead] | None = Field(

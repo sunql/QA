@@ -11,14 +11,16 @@ constants in this codebase).
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from app.services.chat_constants import (
+    META_INTENT_CLARIFY,
     META_INTENT_L1,
     META_INTENT_L4,
+    ROUTING_LAYER_KPI_CLARIFY,
     ROUTING_LAYER_L1,
     ROUTING_LAYER_L4,
+    metaIntentOf,
 )
 
 # ----------------------------------------------------------------------
@@ -96,95 +98,45 @@ def _read_chat_stream_source() -> str:
     return _CHAT_STREAM_ENTRY_PATH.read_text(encoding="utf-8")
 
 
-def test_chat_stream_uses_meta_intent_constants_for_l1() -> None:
-    """chat_stream meta frame L1 path uses META_INTENT_L1 (not raw "KPI")."""
+def test_meta_intent_of_maps_every_routing_layer() -> None:
+    """功能守卫：三个路由层的 wire 映射逐条锁定（比正则抓三元表达式更硬）。"""
+    assert metaIntentOf(ROUTING_LAYER_L1) == "KPI"
+    assert metaIntentOf(ROUTING_LAYER_KPI_CLARIFY) == "clarify"
+    assert metaIntentOf(ROUTING_LAYER_L4) == "AGENT_RUN"
+    # 未登记的路由层兜底到 AGENT_RUN（fail-safe，不是静默丢帧）
+    assert metaIntentOf("L9") == "AGENT_RUN"
+
+
+def test_meta_intent_of_delegates_to_constants() -> None:
+    """映射函数本身不得写死字面量：改常量必须连带改行为。"""
+    import app.services.chat_constants as constants
+
+    assert constants.metaIntentOf(constants.ROUTING_LAYER_L1) == constants.META_INTENT_L1
+    assert (
+        constants.metaIntentOf(constants.ROUTING_LAYER_KPI_CLARIFY)
+        == constants.META_INTENT_CLARIFY
+    )
+    assert constants.metaIntentOf(constants.ROUTING_LAYER_L4) == constants.META_INTENT_L4
+
+
+def test_meta_intent_clarify_is_a_real_intent_type_value() -> None:
+    """澄清是**真实意图**（与 KPI/AGENT_RUN 这种纯 wire 值不同），前端已认识。"""
+    from app.domain.enums import IntentType
+
+    assert META_INTENT_CLARIFY == IntentType.CLARIFY.value == "clarify"
+
+
+def test_chat_stream_entry_calls_meta_intent_helper() -> None:
+    """入口必须走 helper，不得再手写三元表达式。"""
     source = _read_chat_stream_source()
-    # Find the line that constructs the meta frame's intent field.
-    # Per plan: pre-refactor used raw "KPI" / "AGENT_RUN". Post-refactor uses constants.
-    intent_line_match = re.search(
-        r'^\s*"intent":\s*([^,\n]+),',
-        source,
-        re.MULTILINE,
-    )
-    assert intent_line_match is not None, (
-        "Could not find meta frame 'intent' line in chat_stream.py"
-    )
-    intent_expr = intent_line_match.group(1)
-    # The expression should reference the constant IDENTIFIER (e.g. META_INTENT_L1),
-    # not the bare string value ("KPI"). We assert the identifier is present.
-    assert "META_INTENT_L1" in intent_expr, (
-        f"meta frame 'intent' line should reference META_INTENT_L1 identifier. "
-        f"Got: {intent_expr!r}"
-    )
-    assert "META_INTENT_L4" in intent_expr, (
-        f"meta frame 'intent' line should reference META_INTENT_L4 identifier. "
-        f"Got: {intent_expr!r}"
-    )
+    assert "metaIntentOf(preamble.routing_layer)" in source
+    assert "META_INTENT_L1 if" not in source
 
 
-def test_chat_stream_uses_meta_intent_l1_constant_in_ternary() -> None:
-    """L1 branch of meta frame ternary references META_INTENT_L1 identifier.
-
-    Split out from the combined test for clearer failure isolation: if a future
-    refactor replaces META_INTENT_L1 with raw "KPI" in the L1 branch only, this
-    test fails with a precise message rather than co-failing with the L4 branch.
-    """
+def test_chat_stream_done_frame_zero_cost_covers_clarify() -> None:
+    """done 帧 tokenCostUsd 必须对 L1C 同样记 0（澄清也是 0 LLM 消耗）。"""
     source = _read_chat_stream_source()
-    intent_line_match = re.search(
-        r'^\s*"intent":\s*([^,\n]+),',
-        source,
-        re.MULTILINE,
-    )
-    assert intent_line_match is not None, (
-        "Could not find meta frame 'intent' line in chat_stream.py"
-    )
-    intent_expr = intent_line_match.group(1)
-    assert "META_INTENT_L1" in intent_expr, (
-        f"L1 branch of meta frame ternary should use META_INTENT_L1 identifier. "
-        f"Got: {intent_expr!r}"
-    )
-
-
-def test_chat_stream_uses_meta_intent_l4_constant_in_ternary() -> None:
-    """L4 (else) branch of meta frame ternary references META_INTENT_L4 identifier.
-
-    Split out from the combined test for clearer failure isolation.
-    """
-    source = _read_chat_stream_source()
-    intent_line_match = re.search(
-        r'^\s*"intent":\s*([^,\n]+),',
-        source,
-        re.MULTILINE,
-    )
-    assert intent_line_match is not None, (
-        "Could not find meta frame 'intent' line in chat_stream.py"
-    )
-    intent_expr = intent_line_match.group(1)
-    assert "META_INTENT_L4" in intent_expr, (
-        f"L4 (else) branch of meta frame ternary should use META_INTENT_L4 identifier. "
-        f"Got: {intent_expr!r}"
-    )
-
-
-def test_chat_stream_uses_routing_layer_constant_for_l1_comparison() -> None:
-    """chat_stream preamble checks routing_layer against ROUTING_LAYER_L1 (not "L1")."""
-    source = _read_chat_stream_source()
-    # Look for the preamble meta frame section: preamble.routing_layer == <expr>
-    # After refactor, <expr> should be ROUTING_LAYER_L1, not "L1".
-    preamble_section = re.search(
-        r'preamble\.routing_layer\s*==\s*([^\n]+)',
-        source,
-    )
-    assert preamble_section is not None, (
-        "Could not find 'preamble.routing_layer == ...' comparison in chat_stream.py"
-    )
-    comparison_expr = preamble_section.group(1).strip()
-    # The expression should reference the constant IDENTIFIER (e.g. ROUTING_LAYER_L1),
-    # not the bare string value ("L1"). Assert the identifier is present.
-    assert "ROUTING_LAYER_L1" in comparison_expr, (
-        f"preamble.routing_layer comparison should use ROUTING_LAYER_L1 identifier. "
-        f"Got: {comparison_expr!r}"
-    )
+    assert "ROUTING_LAYER_KPI_CLARIFY" in source
 
 
 def test_chat_stream_no_raw_uppercase_kpi_string_outside_documentation() -> None:

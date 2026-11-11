@@ -237,6 +237,46 @@ def requireFullResponse(preamble: PreambleResult, routing_layer: str) -> Any:
     raise RuntimeError(MSG_INTERNAL_ERROR_GENERIC)
 
 
+def splitTierBPreamble(
+    preamble: PreambleResult | None,
+) -> tuple[PreambleResult | None, PreambleResult | None]:
+    """Tier B 哨兵拆包：返回 (终结型 preamble, Tier B 提示)。
+
+    Tier B 的 preamble 只是「这次别走 L4」的提示，**不终结**请求：入口拿到
+    ``(None, hint)`` 后继续主 NL2SQL 流水线（与 ``routing_layer == "L1B"`` 对应）。
+    其余层原样返回 ``(preamble, None)``。
+    """
+    if (
+        preamble is not None
+        and preamble.routing_layer == ROUTING_LAYER_KPI_TIER_B
+    ):
+        return None, preamble
+    return preamble, None
+
+
+def kpiHintFields(hint: PreambleResult | None) -> dict[str, Any]:
+    """Tier B 提示 → SSE meta 帧字段（前端 camelCase wire 契约）。
+
+    datasource mismatch 与终结型 L1 meta 帧保持同一组键（``datasourceMismatch``
+    / ``warning`` / ``code``），否则重分类后的第二帧会把警告冲掉。
+    """
+    if hint is None:
+        return {}
+    fields: dict[str, Any] = {
+        "kpiCode": hint.kpi_code,
+        "kpiName": hint.kpi_name,
+        "confidence": hint.confidence,
+        "matchMethod": hint.kpi_match_method,
+        "executionTier": hint.execution_tier,
+        "degradedReason": hint.degraded_reason,
+    }
+    if hint.datasource_mismatch:
+        fields["datasourceMismatch"] = True
+        fields["warning"] = hint.mismatch_warning
+        fields["code"] = "KPI_DATASOURCE_MISMATCH"
+    return fields
+
+
 class L1L4PreambleMixin:
     """抽 KPI/L4 预检为共享 mixin，让普通 + 流式入口共用同一条路径。"""
 
@@ -350,9 +390,29 @@ class L1L4PreambleMixin:
 
     @staticmethod
     def _tierBPreamble(
-        match: KpiMatchResult, kpi: Any | None, reason: str | None
+        match: KpiMatchResult,
+        kpi: Any | None,
+        reason: str | None,
+        userDatasourceId: int | None = None,
     ) -> PreambleResult:
-        """Tier B 哨兵：preamble 不终结，入口拆包后继续主 NL2SQL 流水线。"""
+        """Tier B 哨兵：preamble 不终结，入口拆包后继续主 NL2SQL 流水线。
+
+        datasource mismatch 必须随哨兵一路带到 SSE meta（与终结型 L1 同口径），
+        否则 Tier B 走主链路时那条「KPI 绑定数据源 ≠ 用户所选数据源」的警告
+        会被静默吞掉（D4 评审 Important）。
+        """
+        mismatch = (
+            kpi is not None
+            and kpi.datasource_id is not None
+            and kpi.datasource_id != userDatasourceId
+        )
+        warning = (
+            MSG_KPI_DATASOURCE_MISMATCH.format(
+                datasource_id=kpi.datasource_id,
+                user_datasource_id=userDatasourceId,
+            )
+            if mismatch else None
+        )
         return PreambleResult(
             routing_layer=ROUTING_LAYER_KPI_TIER_B,
             answer="",
@@ -362,6 +422,8 @@ class L1L4PreambleMixin:
             kpi_match_method=match.method,
             execution_tier=TIER_B,
             degraded_reason=reason,
+            datasource_mismatch=mismatch,
+            mismatch_warning=warning,
         )
 
     def _buildTierCResponse(
@@ -373,8 +435,7 @@ class L1L4PreambleMixin:
         datasource_missing / execution_source_unknown），不再硬编码单一常量。
 
         ChatResponse 在函数内延迟导入（同 ``_buildKpiClarifyPreamble`` 的既有模式，
-        避免本模块与 schemas 的循环依赖）。D4 不设 executionTier/degradedReason
-        （字段归 D5），tier/reason 由 PreambleResult 携带。
+        避免本模块与 schemas 的循环依赖）。
         """
         from app.domain.schemas import ChatResponse
 
@@ -399,6 +460,8 @@ class L1L4PreambleMixin:
             match_method=match.method,
             tokensUsed=0,
             cost=0.0,
+            execution_tier=TIER_C,
+            degraded_reason=reason,
         )
 
     async def _runL1AndL4Preamble(
@@ -443,7 +506,9 @@ class L1L4PreambleMixin:
             else:
                 if plan.tier == TIER_B:
                     # L4 不注入契约块：Tier B 必须交给主 NL2SQL 流水线。
-                    return self._tierBPreamble(match, kpi, plan.reason)
+                    return self._tierBPreamble(
+                        match, kpi, plan.reason, dto.datasourceId
+                    )
 
                 if plan.tier == TIER_A:
                     try:
@@ -458,7 +523,8 @@ class L1L4PreambleMixin:
                         l1, degradedReason = None, REASON_EXECUTION_ERROR
                     if l1 is None:
                         return self._tierBPreamble(
-                            match, kpi, degradedReason or REASON_EXECUTION_ERROR
+                            match, kpi, degradedReason or REASON_EXECUTION_ERROR,
+                            dto.datasourceId,
                         )
                 elif plan.tier == TIER_C:
                     l1 = self._buildTierCResponse(match, kpi, plan.reason)
@@ -518,6 +584,8 @@ __all__ = [
     "ChatStreamOutputMixin",
     "L1L4PreambleMixin",
     "PreambleResult",
+    "kpiHintFields",
+    "splitTierBPreamble",
     "_STREAM_CHUNK_TIMEOUT_SECONDS",
     "_ANSWER_SYSTEM_PROMPT",
 ]

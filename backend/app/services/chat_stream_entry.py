@@ -33,6 +33,7 @@ from app.services.chat_constants import (
     metaIntentOf,
 )
 from app.services.chat_helpers import attachStreamPersistState
+from app.services.chat_stream_output import kpiHintFields, splitTierBPreamble
 from app.services.error_classification import classifyError, sanitizeErrorMessage
 from app.services.evidence_record_service import (
     resetChatSessionId,
@@ -180,7 +181,10 @@ class StreamEntryMixin:
 
         # P0-1：流式入口共享 L1/L4 pre-amble（普通入口已接）
         # KPI 命中最优先短路（0 LLM cost）；L4 命中也短路；未命中继续分类流程。
-        preamble = await self._runL1AndL4Preamble(dto, session, user)
+        # Tier B 哨兵不终结：拆包后 preamble 为 None，主分类/查询流水线继续；
+        # hint 字段随后注入两个 META 帧。
+        rawPreamble = await self._runL1AndL4Preamble(dto, session, user)
+        preamble, kpiHint = splitTierBPreamble(rawPreamble)
         if preamble is not None:
             # F2c: merge into single meta frame (was 2-3 separate frames; each
             #不带 intent 的帧会抹掉前端刚设好的 intent）。
@@ -190,6 +194,12 @@ class StreamEntryMixin:
                 "routingLayer": preamble.routing_layer,
                 "datasourceMismatch": preamble.datasource_mismatch,
             }
+            # Tier A/C/LEGACY 的观测字段（Tier B 走下面的 kpiHint 分支）。
+            # LEGACY 与 Tier C 都有值；Tier A 的 degradedReason 为 None，仍需发键。
+            if preamble.execution_tier is not None:
+                meta_frame["executionTier"] = preamble.execution_tier
+                meta_frame["degradedReason"] = preamble.degraded_reason
+                meta_frame["matchMethod"] = preamble.kpi_match_method
             if preamble.mismatch_warning is not None:
                 meta_frame["warning"] = preamble.mismatch_warning
                 meta_frame["code"] = "KPI_DATASOURCE_MISMATCH"
@@ -220,12 +230,15 @@ class StreamEntryMixin:
             })
             return
 
+        # Tier B 走主链路：两个 META 帧（首次分类 + 重分类）都必须带同一份字段。
+        # 前端逐帧合并，漏掉任一处会在重分类后被冲掉。
+        hintFields = kpiHintFields(kpiHint)
         # A7 通道 1 收口：分类+重分类统一走 classifyAndRecall 单入口。
         # 首帧 META 必须携带无状态分类结果（SSE 事件序列不变），故第一遍以
         # sessionId=None 纯分类；第二遍带 sessionId 完成「加载状态→重分类」。
         firstPass = await self.classifyAndRecall(session, dto.question, needRecall=False)
         result = firstPass.intentResult
-        yield StreamEvent(EVENT_META, {"intent": result.intent.value})
+        yield StreamEvent(EVENT_META, {"intent": result.intent.value, **hintFields})
 
         if result.intent == IntentType.CHITCHAT:
             async for event in self._streamChitchat(dto, session):
@@ -245,7 +258,9 @@ class StreamEntryMixin:
             state = classified.state
             if state is not None:
                 result = classified.intentResult
-                yield StreamEvent(EVENT_META, {"intent": result.intent.value})
+                yield StreamEvent(
+                    EVENT_META, {"intent": result.intent.value, **hintFields}
+                )
                 if result.intent == IntentType.CHITCHAT:
                     # 重分类后仍可能收敛为闲聊（如问候中含指代词）：同样短路
                     async for event in self._streamChitchat(dto, session):

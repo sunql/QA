@@ -53,7 +53,14 @@ from app.domain.exceptions import (
     PermissionDeniedError,
     ValidationError,
 )
-from app.domain.models import DataSource, LlmConfig, OntologyClass, SessionMessage, SessionQueryState
+from app.domain.models import (
+    DataSource,
+    LlmConfig,
+    OntologyClass,
+    OntologyMetric,
+    SessionMessage,
+    SessionQueryState,
+)
 from app.domain.multi_step_plan import (
     GlobalFilters,
     MultiStepPlan,
@@ -82,7 +89,18 @@ from app.infrastructure.llm.factory import createClient
 from app.services.audit_service import AuditService
 from app.services.chart_renderer import toNumber, renderChartOption
 from app.services.chart_service import ChartService
-from app.services.chat_stream_output import _ANSWER_SYSTEM_PROMPT, ChatStreamOutputMixin
+from app.services.chat_stream_output import (
+    _ANSWER_SYSTEM_PROMPT,
+    ChatStreamOutputMixin,
+    PreambleResult,
+    splitTierBPreamble,
+)
+from app.services.kpi_execution_service import (
+    REASON_DATASOURCE_MISSING,
+    REASON_METRIC_MISSING,
+    TIER_A,
+    KpiExecutionService,
+)
 from app.services.data_summary import summarize_data
 from app.services.datasource_service import DataSourceService
 from app.services.kpi_contract_builder import buildKpiContractBlock
@@ -361,6 +379,7 @@ class ChatService(
         agentRuntimeService: AgentRuntimeService | None = None,  # Phase 6.4：Agent 运行时
         supplierNameResolver: SupplierNameResolver | None = None,  # Phase 6.5：名字预解析
         kpiMatcher: KpiSemanticMatchService | None = None,  # Phase 1.4：L1 KPI 语义匹配
+        kpiExecutionService: Any | None = None,  # P2 Tier A 执行器（测试可注入桩）
     ) -> None:
         self._intent = intentService or IntentService()
         self._nl2sql = nl2sqlService or Nl2SqlService()
@@ -383,6 +402,10 @@ class ChatService(
         if self._kpiMatcher is None:
             from app.services.kpi_match_cache import get_kpi_match_cache
             self._kpiMatcher = KpiSemanticMatchService(get_kpi_match_cache())
+        # P2 Tier A：复用同一个 adapterProvider（生产 = get_adapter；测试可注入假 adapter）。
+        self._kpiExecutionService = kpiExecutionService or KpiExecutionService(
+            adapterProvider=self._adapterProvider
+        )
         # Phase 4.4：注入 Feature 查询 service（默认懒加载避免循环 import）
         self._featureQueryService: Any | None = None
         # Phase 6.3：图推理 service（无循环依赖，直接实例化）
@@ -447,7 +470,10 @@ class ChatService(
             return ChatResponse(answer=exc.message, intent=preResult.intent.value)
 
         # Phase 1.4 + Phase 4.4：L1 KPI + L4 Agent Loop 共享 pre-amble（流式入口同样调）
-        preamble = await self._runL1AndL4Preamble(dto, session, user)
+        # Tier B 哨兵不终结：拆包后 preamble 为 None，主 NL2SQL 流水线继续；hint
+        # 挂到主链路响应（见下方 _handleGenericQuery 后）。
+        rawPreamble = await self._runL1AndL4Preamble(dto, session, user)
+        preamble, kpiHint = splitTierBPreamble(rawPreamble)
         if preamble is not None:
             if preamble.routing_layer in (ROUTING_LAYER_L1, ROUTING_LAYER_KPI_CLARIFY):
                 if preamble.routing_layer == ROUTING_LAYER_L1:
@@ -470,7 +496,18 @@ class ChatService(
                     visual_rationale=preamble.visual_rationale,
                 )
                 # Return full ChatResponse via preamble (preserves data/confidence/chartType etc.)
-                return requireFullResponse(preamble, preamble.routing_layer)
+                response = requireFullResponse(preamble, preamble.routing_layer)
+                # P2 Tier A：非流式 L1 路径也要暴露观测字段。Tier A/C 的响应
+                # 构造点已自带；LEGACY（开关关）在 preamble 无响应字段，这里补齐。
+                if (
+                    preamble.execution_tier is not None
+                    and getattr(response, "execution_tier", None) is None
+                ):
+                    response = response.model_copy(update={
+                        "execution_tier": preamble.execution_tier,
+                        "degraded_reason": preamble.degraded_reason,
+                    })
+                return response
             # L4: preamble already ran _handleNl2SqlAgent and built the ChatResponse
             return requireFullResponse(preamble, "L4")
 
@@ -501,7 +538,12 @@ class ChatService(
         if result.intent == IntentType.AGENT_RUN:
             return await self._handleAgentRun(session, dto, result, user=user)
 
+        # 说明：上面的 CHITCHAT / DEFINE / MAP / METRIC / SUPPLIER_* / AGENT_RUN
+        # 早退分支**刻意不挂** Tier B hint —— 它们不是 Tier B 的目标路径（KPI 命中
+        # 却需降级的那条问句应落到通用查询流水线）。hint 只在下面主链路挂载。
         response = await self._handleGenericQuery(session, dto, result, state, user=user)
+        if response is not None:
+            response = self._attachKpiHint(response, kpiHint)
         # Phase 7 G4：中置信语义路由命中的建议卡片附到响应。仅 QUERY/NEW_QUERY/
         # FOLLOW_UP 在 classifyResult 中携带 result.suggested_agent；其余意图该
         # 字段为 None 不附加。model_copy 保持不可变风格（不改原响应对象）。
@@ -510,6 +552,23 @@ class ChatService(
                 update={"suggested_agent": result.suggested_agent}
             )
         return response
+
+    @staticmethod
+    def _attachKpiHint(
+        response: ChatResponse | None,
+        hint: PreambleResult | None,
+    ) -> ChatResponse | None:
+        """Tier B 提示挂到主链路响应（不可变：model_copy 派生）。"""
+        if hint is None or response is None:
+            return response
+        return response.model_copy(update={
+            "kpi_code": hint.kpi_code,
+            "kpi_name": hint.kpi_name,
+            "confidence": hint.confidence,
+            "match_method": hint.kpi_match_method,
+            "execution_tier": hint.execution_tier,
+            "degraded_reason": hint.degraded_reason,
+        })
 
     async def _handleGenericQuery(
         self,
@@ -1527,6 +1586,57 @@ class ChatService(
     # Phase 1.4：L1 KPI 语义匹配
     # =========================================================================
 
+    async def _executeTierA(
+        self,
+        match: KpiMatchResult,
+        kpi: Any | None,
+        session: AsyncSession | None,
+    ) -> tuple[ChatResponse | None, str | None]:
+        """Tier A：执行 metric.formula；失败返回 (None, reason) 交 preamble 降级。
+
+        覆写 ``L1L4PreambleMixin`` 的失败占位实现。异常不在这里吞：调用方
+        （``_runL1AndL4Preamble``）已把整段调用纳入降级边界，抛出 ⇒ Tier B。
+        """
+        if kpi is None or kpi.metric_id is None or session is None:
+            return None, REASON_METRIC_MISSING
+        metric = await session.get(OntologyMetric, kpi.metric_id)
+        if metric is None:
+            return None, REASON_METRIC_MISSING
+        datasource = (
+            await session.get(DataSource, kpi.datasource_id)
+            if kpi.datasource_id is not None else None
+        )
+        if datasource is None:
+            return None, REASON_DATASOURCE_MISSING
+
+        result = await self._kpiExecutionService.execute(
+            # formula 类型为 str；空串只可能出现在「计划被绕过」的防御性路径。
+            formula=metric.formula or "",
+            datasourceId=kpi.datasource_id,
+            datasource=datasource,
+            metricCode=match.code,
+            metricName=kpi.kpi_name,
+            confidence=match.confidence,
+        )
+        if not result.ok:
+            logger.warning(
+                "Tier A 降级 kpi=%s reason=%s", match.code, result.reason
+            )
+            return None, result.reason
+
+        data = [dict(r) for r in result.rows]
+        answerText = self._buildAnswerText(kpi, data, kpi.kpi_name or match.code)
+        response = self._wrapChatResponse(
+            match, kpi.kpi_name or match.code, data, answerText, unit=kpi.unit,
+            executionTier=TIER_A,
+        )
+        if result.truncated:
+            logger.warning(
+                "Tier A 结果截断 kpi=%s row_count=%d",
+                match.code, result.rowCount,
+            )
+        return response, None
+
     async def _buildL1Response(
         self,
         match: KpiMatchResult,
@@ -1749,6 +1859,9 @@ class ChatService(
         data: list[dict] | None,
         answer: str,
         unit: str | None = None,
+        *,
+        executionTier: str | None = None,
+        degradedReason: str | None = None,
     ) -> ChatResponse:
         """构造 intent=l1_match 的 ChatResponse（零 LLM 消耗）。"""
         chartType, chartOption = self._buildKpiChart(kpi_name, unit, data)
@@ -1776,6 +1889,8 @@ class ChatService(
             tokensUsed=0,
             cost=0.0,
             modelName=None,
+            execution_tier=executionTier,
+            degraded_reason=degradedReason,
         )
 
     # =========================================================================

@@ -396,10 +396,14 @@ async def test_apply_degrades_when_column_missing(
 
 
 async def test_layer2_reconcile_reports_mismatch_not_pass(dbSession: AsyncSession) -> None:
-    """T15-L：脚本产物**必须**让层 2 报 mismatch（闸门据此拦住 PUBLISHED）。
+    """T15-L：**回填脚本**的产物必须让层 2 报 mismatch（闸门据此拦住 PUBLISHED）。
 
     若这里判 pass，说明脚本把治理列改写成了物理列 —— 那是「自己给自己签字」，
     正是控制器要求避免的那个缺陷。
+
+    注意区分工具：``kpi_normalize_governance --apply`` 是**另一次显式审批**的
+    P0 规范化（治理列对齐技术形态），它会把 mismatch 变为 pass/unknown；
+    本用例钉的是回填脚本**单独运行时**不得自签，与规范化无关。
     """
     kpi, _, _ = await _seedOtd(dbSession)
     await applyPlans(dbSession, [_plan("KPI_SUPPLIER_OTD")])

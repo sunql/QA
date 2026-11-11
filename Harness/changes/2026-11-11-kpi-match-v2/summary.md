@@ -67,6 +67,8 @@ v2 的做法：**精确 code → 归一化包含 → 最长短语胜出 → 等�
 | `61b4b7f5` | **D5**：50 条真实问句回归集（admin 诊断接口真实 HTTP 链路） |
 | `58080a2a` | **D6**：变更记录 + Wiki 三处更新 |
 | `d048980e` | **D6**：评审修复（MEDIUM-1/2/3 + L-1/L-2/L-3，见 §8） |
+| `75d79407` | **D6**：评审发现与处置写入变更记录 |
+| `5a84b99d` | **D6**：Milvus 隔离库改为文件自建，解耦 CI 分片归属（见 §6.5） |
 
 ## 5. 文件清单
 
@@ -170,6 +172,34 @@ inner join 会让它们整体消失。
 
 第 3 条需要真实挂靠的 metric（seed 的 12 条 `metric_id` 均为 NULL，块必空），用例里单独构造了一条
 `RATIO / WEIGHTED_RATIO / ESCAPE_HATCH` 的 pass 型 KPI，断言 `matchMethod=="exact_code"` 且块非空。
+
+### 6.5 闸门首轮：12 条「净新增」是分片重排假回归（已修用例隔离）
+
+PR #119 首轮 `merge-gate / failure-set-diff` 判 **退出码 1 / 净新增 12**，全部落在
+Milvus / RAG 集成用例（`test_milvus_document_fields.py` 4 条、`test_rag_clearance.py` 8 条），
+与本批改动的 KPI 匹配零交集。
+
+**取证（不是推测）**：
+
+- CI 集成分片按「`find | sort` 后**下标 mod 4**」切分（`.github/workflows/ci.yml`）。
+- 本批新增 `test_kpi_match_corpus.py` ⇒ 排序位置 188 之后的文件**整体后移 1 位**。
+- 实测两个红文件的归属：`test_milvus_document_fields.py` 211→212、`test_rag_clearance.py`
+  243→244 ⇒ 均从 **shard 2 挪到 shard 3**。
+- 错误原文：`MilvusException: (code=800, message=database not found[database=qa_ci])`。
+  Milvus 隔离库 `qa_ci` 是**惰性创建**的（只有用到本体清理夹具时才建），shard 3 恰好
+  没有任何建库文件 ⇒ 这两个文件直接撞库不存在。PR #116 是同一类问题，当时只给
+  `test_rag_api.py` 补了自建库夹具，其余文件仍是碰运气。
+
+**修复**（`5a84b99d`，纯测试侧）：
+
+- `app/tests/milvus_isolation.py` 新增 `ensureIsolatedDatabaseForTest()`（按当前
+  `MILVUS_DB_NAME` 幂等建库）；
+- `test_milvus_document_fields.py` / `test_rag_clearance.py` 补 module 级 autouse 夹具；
+  `test_rag_api.py` 改为复用该函数（三处同一实现）；
+- 单测 `test_milvus_db_isolation.py::TestEnsureIsolatedDatabaseForTest` 2 条
+  （缺库则建、有库 no-op），RED（`AttributeError`）→ GREEN 取证。
+
+修复后这两个文件**不再依赖分片归属**；判据仍以新一轮 CI 的失败集合对差为准。
 
 ## 7. 明确未做的事
 

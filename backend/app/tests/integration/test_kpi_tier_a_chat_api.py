@@ -1,0 +1,605 @@
+"""P2 Tier A 全链路集成测试（真实 PostgreSQL + 完整 HTTP 链路）。
+
+覆盖设计 §6 的四条执行分层路径 —— 测试只从 HTTP 入口发起，生产代码零改动：
+
+1. Tier A：普通问句直通 ``metric.formula``，真实 asyncpg 连测试库自身，0 LLM。
+2. Tier C：``execution_source=NONE`` ⇒ 只给口径说明，不执行、不调 LLM。
+3. LEGACY：Tier A 开关行缺失 ⇒ 回落旧 FD 路径（不执行、不报错）。
+4. Tier B：显式时间限定 / 执行异常 / 非只读公式 ⇒ 哨兵拆包后走主 NL2SQL 流水线。
+5. 非流式 Tier B 必须 200：钉住「哨兵拆包在 ``if preamble is not None`` 之前」，
+   否则 ``requireFullResponse`` 会抛 ``RuntimeError`` → 500。
+
+约定：
+- 业务库 = 测试元数据库自身（同 ``test_kpi_tier_a_execution_pg.py``），不建任何表。
+- 每个用例前后 ``business_db_pool.reset_pool()``：``_adapters`` 按 datasourceId
+  缓存，TRUNCATE 清不掉进程内缓存。
+- KPI 匹配缓存是全局单例，不随 TRUNCATE 清空；每个用例显式失效 + 预热。
+- Tier B 用例给主链路注入最小 fake（路由 / LLM / adapter / embedding），
+  避免无 key 的 LLM 与真实业务库；Tier A 用例**不**替换 adapter —— 要测真连接。
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from decimal import Decimal
+
+import pytest
+from httpx import AsyncClient
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.domain.models import (
+    DataSource,
+    KpiCatalog,
+    LlmConfig,
+    OntologyClass,
+    OntologyMetric,
+    OntologyProperty,
+)
+from app.infrastructure import business_db_pool
+from app.infrastructure.llm.base_client import StreamChunk
+from app.infrastructure.security.crypto import encryptApiKey
+from app.models.system_config import SystemConfig
+from app.services.kpi_match_cache import get_kpi_match_cache
+from app.services.kpi_metric_reconcile import reconcileMetric
+from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
+from app.services.kpi_metric_switches import SWITCH_MATCH_CONTAINMENT, SWITCH_TIER_A
+from app.tests._pg_support import resolveTestDatabaseUrl
+
+pytestmark = pytest.mark.asyncio
+
+_CHAT_URL = "/api/v1/chat"
+_CHAT_STREAM_URL = "/api/v1/chat/stream"
+_HEADERS = {"X-User-Id": "test-user-001"}
+
+# 单值 COUNT 公式：结构化列 {"cnt"} ⊆ formula 标识符 {"cnt", "kpi_catalog"}。
+_TIER_A_FORMULA = "SELECT COUNT(*) AS cnt FROM kpi_catalog"
+# cnt 是真实表里不存在的列 ⇒ 对账 pass（标识符集合含 cnt），执行时才报错。
+_BROKEN_FORMULA = "SELECT cnt FROM kpi_catalog"
+# 非只读公式：对账同样 pass，执行前被 _assert_read_only 拦下。
+_WRITE_FORMULA = "DELETE FROM kpi_catalog WHERE cnt > 0"
+
+
+# ---------------------------------------------------------------------------
+# 进程内缓存隔离（模块级 autouse）
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+async def _resetBusinessDbPools():
+    """每用例前后释放 adapter 缓存：TRUNCATE 不会清进程内 ``_adapters``。"""
+    await business_db_pool.reset_pool()
+    yield
+    await business_db_pool.reset_pool()
+
+
+# ---------------------------------------------------------------------------
+# Arrange helpers
+# ---------------------------------------------------------------------------
+
+
+async def _seedSelfDatasource(dbSession: AsyncSession) -> DataSource:
+    """把测试元数据库自身当作业务库：真实 asyncpg + 真实只读事务。"""
+    url = make_url(resolveTestDatabaseUrl())
+    ds = DataSource(
+        name="tier-a-chat-self-pg",
+        type="postgresql",
+        host=url.host,
+        port=url.port or 5432,
+        database_name=url.database,
+        username=url.username,
+        password_encrypted=encryptApiKey(url.password or ""),
+        is_active=True,
+    )
+    dbSession.add(ds)
+    await dbSession.commit()
+    await dbSession.refresh(ds)
+    return ds
+
+
+async def _seedSwitches(
+    dbSession: AsyncSession,
+    *,
+    containment: bool = True,
+    tierA: bool = True,
+) -> None:
+    """v2 包含式匹配 + Tier A 执行器均为 system_config 灰度行（默认关）。"""
+    rows: list[SystemConfig] = []
+    if containment:
+        rows.append(SystemConfig(key=SWITCH_MATCH_CONTAINMENT, value="true"))
+    if tierA:
+        rows.append(SystemConfig(key=SWITCH_TIER_A, value="true"))
+    if rows:
+        dbSession.add_all(rows)
+        await dbSession.commit()
+
+
+async def _seedKpiWithMetric(
+    dbSession: AsyncSession,
+    *,
+    datasourceId: int,
+    kpiCode: str,
+    kpiName: str,
+    keywords: list[str],
+    formula: str,
+    executionSource: str = "ESCAPE_HATCH",
+    businessDefinition: str = "按测试元数据表计数",
+) -> tuple[OntologyMetric, KpiCatalog]:
+    """对账 pass 的最小形状：MEASURE + 分子 {cnt} + 粒度 {kpi_code}。"""
+    metric = OntologyMetric(
+        metric_name=f"{kpiCode}-metric",
+        formula=formula,
+        metric_type="MEASURE",
+        numerator_measure={"agg": "COUNT", "expr": "cnt"},
+        grain_keys=["kpi_code"],
+        execution_source=executionSource,
+        created_by="tier-a-chat-test",
+    )
+    dbSession.add(metric)
+    await dbSession.flush()
+
+    kpi = KpiCatalog(
+        kpi_code=kpiCode,
+        kpi_name=kpiName,
+        business_definition=businessDefinition,
+        unit="个",
+        status="PUBLISHED",
+        metric_id=metric.id,
+        datasource_id=datasourceId,
+        semantic_keywords=keywords,
+        match_threshold=Decimal("0.75"),
+        numerator_columns=["cnt"],
+        grain_keys=["kpi_code"],
+    )
+    dbSession.add(kpi)
+    await dbSession.commit()
+    await dbSession.refresh(kpi)
+    return metric, kpi
+
+
+async def _warmKpiCache(dbSession: AsyncSession) -> None:
+    """全局缓存不随 TRUNCATE 清空，每个用例必须显式失效 + 预热。"""
+    cache = get_kpi_match_cache()
+    cache.onKpiChanged()
+    await cache.warmUp(dbSession)
+
+
+# ---------------------------------------------------------------------------
+# Tier B 主链路最小 fake（仅这些用例注入；Tier A 用真实 adapter）
+# ---------------------------------------------------------------------------
+
+_ROWS = [{"NAME": "A", "QTY": Decimal(10)}, {"NAME": "B", "QTY": Decimal(20)}]
+
+
+class _StubLlm:
+    """按 prompt 内容路由：计划 / SQL / 图表 JSON / 回答；流式回答两段增量。"""
+
+    async def complete(self, messages: list, **kwargs) -> object:
+        system = messages[0].content
+        user = messages[1].content
+
+        class _Resp:
+            content = ""
+            modelName = "test-model"
+            promptTokens = 10
+            completionTokens = 5
+
+        if "图表类型" in user:
+            _Resp.content = '{"title":{"text":"t"},"series":[{"type":"bar","data":[1,2]}]}'
+        elif "解析为查询计划" in system:
+            _Resp.content = (
+                '{"target":"各供应商的收货数量汇总","selectedClasses":["PRECEIPT"],'
+                '"selectedProperties":["NAME","QTY"],"groupBy":["NAME"]}'
+            )
+        elif "生成 SQL 时必须" in system:
+            _Resp.content = (
+                "```sql\nSELECT NAME, SUM(QTY) AS TOTAL_QTY FROM ZJTH.PRECEIPT "
+                "GROUP BY NAME FETCH FIRST 10 ROWS ONLY\n```"
+            )
+        else:
+            _Resp.content = "查询完成，共 2 条记录。"
+        return _Resp()
+
+    async def completeStream(self, messages: list, **kwargs):
+        for piece in ("查询完成，", "共 2 条记录。"):
+            yield StreamChunk(
+                content=piece,
+                isDone=False,
+                promptTokens=0,
+                completionTokens=0,
+                modelName="test-model",
+            )
+        yield StreamChunk(
+            content="",
+            isDone=True,
+            promptTokens=10,
+            completionTokens=5,
+            modelName="test-model",
+        )
+
+
+class _RouterFor:
+    def __init__(self, config: LlmConfig) -> None:
+        self._config = config
+
+    def selectModel(self, configs, prompt, ctx) -> LlmConfig:
+        return self._config
+
+    def selectFallbackModel(self, configs, excludeId) -> LlmConfig | None:
+        return None
+
+
+class _FakeAdapter:
+    """Tier B 主链路：不触达真实业务库。"""
+
+    async def execute_read_only(self, sql: str) -> list[dict]:
+        return _ROWS
+
+
+class _StubEmbedding:
+    async def storeQueryEmbedding(self, **kwargs) -> None:
+        return None
+
+
+async def _seedTierBPipelineSupport(
+    dbSession: AsyncSession,
+) -> LlmConfig:
+    """主链路所需的最小元数据：LlmConfig + 一个可被计划引用的本体类。"""
+    config = LlmConfig(
+        model_name="test-model",
+        provider="openai",
+        cost_per_1k_input=Decimal("0.001"),
+        cost_per_1k_output=Decimal("0.002"),
+    )
+    cls = OntologyClass(
+        class_name="PRECEIPT",
+        class_alias="收货单",
+        source_table="ZJTH.PRECEIPT",
+        properties=[
+            OntologyProperty(
+                property_name="NAME", data_type="STRING", source_column="NAME"
+            ),
+            OntologyProperty(
+                property_name="QTY", data_type="DECIMAL", source_column="QTY"
+            ),
+        ],
+    )
+    dbSession.add_all([config, cls])
+    await dbSession.commit()
+    await dbSession.refresh(config)
+    return config
+
+
+def _installTierBFakes(monkeypatch, config: LlmConfig) -> None:
+    """替换 ChatService 单例的路由 / LLM / adapter / embedding。
+
+    ``_kpiExecutionService`` 在构造时已捕获 ``get_adapter``，不受本替换影响 ——
+    执行失败的用例仍走真实 adapter，这正是要验证的路径。
+    """
+    import app.api.v1.chat as chat_module
+
+    monkeypatch.setattr(chat_module._service, "_modelRouter", _RouterFor(config))
+    monkeypatch.setattr(
+        chat_module._service, "_llmFactory", lambda _config: _StubLlm()
+    )
+    monkeypatch.setattr(
+        chat_module._service,
+        "_adapterProvider",
+        lambda _dsId, _ds: _FakeAdapter(),
+    )
+    monkeypatch.setattr(chat_module._service, "_embedding", _StubEmbedding())
+
+
+# ---------------------------------------------------------------------------
+# HTTP / SSE helpers
+# ---------------------------------------------------------------------------
+
+
+def _payload(question: str, datasourceId: int) -> dict:
+    return {
+        "sessionId": f"s-{uuid.uuid4().hex[:12]}",
+        "question": question,
+        "datasourceId": datasourceId,
+    }
+
+
+def _metaFrames(text: str) -> list[dict]:
+    """按空行切 SSE 帧，只保留 ``event: meta``，返回解析后的 data。"""
+    frames: list[dict] = []
+    for block in text.split("\n\n"):
+        if not block.strip():
+            continue
+        event: str | None = None
+        data: dict | None = None
+        for line in block.split("\n"):
+            if line.startswith("event: "):
+                event = line[len("event: "):]
+            elif line.startswith("data: "):
+                data = json.loads(line[len("data: "):])
+        if event == "meta" and data is not None:
+            frames.append(data)
+    return frames
+
+
+async def _countKpiCatalog(dbSession: AsyncSession) -> int:
+    result = await dbSession.execute(text("SELECT COUNT(*) FROM kpi_catalog"))
+    return int(result.scalar_one())
+
+
+# ---------------------------------------------------------------------------
+# 1. Tier A：零 LLM 确定性执行
+# ---------------------------------------------------------------------------
+
+
+async def test_plain_question_executes_tier_a_zero_llm(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    ds = await _seedSelfDatasource(dbSession)
+    await _seedSwitches(dbSession)
+    _, kpi = await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_TIER_A_OK",
+        kpiName="TierA测试指标",
+        keywords=["TierA测试指标"],
+        formula=_TIER_A_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    # 同一连接先取基线：Tier A 的 COUNT(*) 必须与它一致。
+    baseline = await _countKpiCatalog(dbSession)
+    assert baseline >= 1  # 至少包含刚播种的 KPI 行
+
+    resp = await client.post(
+        _CHAT_URL,
+        json=_payload("TierA测试指标是多少", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["intent"] == "l1_match"
+    assert body["tokensUsed"] == 0
+    assert body["cost"] == 0.0
+    assert body["executionTier"] == "A"
+    assert body["degradedReason"] is None
+
+    data = body["data"]
+    assert data and len(data) == 1
+    value = next(v for v in data[0].values() if v is not None)
+    assert abs(float(value) - float(baseline)) <= 0.01, (
+        f"Tier A 结果 {value!r} 与基线 COUNT(*)={baseline} 不一致"
+    )
+    assert body["kpiCode"] == kpi.kpi_code
+
+
+# ---------------------------------------------------------------------------
+# 2. Tier C：execution_source=NONE ⇒ 只给口径说明
+# ---------------------------------------------------------------------------
+
+
+async def test_none_source_returns_tier_c_text(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    ds = await _seedSelfDatasource(dbSession)
+    await _seedSwitches(dbSession)
+    await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_TIER_C_NONE",
+        kpiName="TierC测试指标",
+        keywords=["TierC测试指标"],
+        formula=_TIER_A_FORMULA,
+        executionSource="NONE",
+        businessDefinition="该指标暂无技术形态",
+    )
+    await _warmKpiCache(dbSession)
+
+    resp = await client.post(
+        _CHAT_URL,
+        json=_payload("TierC测试指标是多少", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["executionTier"] == "C"
+    assert "execution_source_none" in (body["degradedReason"] or "")
+    assert "暂不可确定性计算" in body["answer"]
+    assert body["tokensUsed"] == 0
+    assert body["data"] is None
+
+
+# ---------------------------------------------------------------------------
+# 3. LEGACY：Tier A 开关行缺失 ⇒ 旧 FD 路径
+# ---------------------------------------------------------------------------
+
+
+async def test_switch_row_missing_keeps_legacy_behavior(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    ds = await _seedSelfDatasource(dbSession)
+    # 只开 v2 匹配（保证能命中），**不**播种 KPI_METRIC_TIER_A_ENABLED。
+    await _seedSwitches(dbSession, tierA=False)
+    await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_LEGACY_OK",
+        kpiName="TierLegacy测试指标",
+        keywords=["TierLegacy测试指标"],
+        formula=_TIER_A_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    resp = await client.post(
+        _CHAT_URL,
+        json=_payload("TierLegacy测试指标是多少", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["executionTier"] == "LEGACY"
+    assert body["degradedReason"] == "tier_a_disabled"
+    # 旧 FD 路径找不到锚点 ⇒ 不执行、不报错。
+    assert body["data"] is None
+
+
+# ---------------------------------------------------------------------------
+# 4. Tier B（流式）：显式时间限定
+# ---------------------------------------------------------------------------
+
+
+async def test_time_scoped_question_degrades_to_tier_b(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    ds = await _seedSelfDatasource(dbSession)
+    config = await _seedTierBPipelineSupport(dbSession)
+    _installTierBFakes(monkeypatch, config)
+    await _seedSwitches(dbSession)
+    await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_TIER_A_OK",
+        kpiName="TierA测试指标",
+        keywords=["TierA测试指标"],
+        formula=_TIER_A_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    resp = await client.post(
+        _CHAT_STREAM_URL,
+        json=_payload("近6个月TierA测试指标", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    metas = _metaFrames(resp.text)
+    assert metas, f"未收到 meta 帧，SSE={resp.text[:400]}"
+
+    first = metas[0]
+    assert first["executionTier"] == "B"
+    assert first["degradedReason"] == "explicit_time_scope"
+    # 哨兵已拆包：preamble 未终结，因此首个 meta 不带 routingLayer。
+    assert "routingLayer" not in first
+
+
+# ---------------------------------------------------------------------------
+# 5. Tier B（流式）：执行异常降级
+# ---------------------------------------------------------------------------
+
+
+async def test_formula_execution_error_degrades_to_tier_b(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    ds = await _seedSelfDatasource(dbSession)
+    config = await _seedTierBPipelineSupport(dbSession)
+    _installTierBFakes(monkeypatch, config)
+    await _seedSwitches(dbSession)
+    metric, kpi = await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_TIER_A_ERR",
+        kpiName="TierA报错指标",
+        keywords=["TierA报错指标"],
+        formula=_BROKEN_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    # 先钉住对账结论：该 formula 确实能过对账，才会走到执行并在此报错。
+    reconciled = reconcileMetric(governanceSpecOf(kpi), techniqueOf(metric))
+    assert reconciled.isTierAEligible is True
+
+    resp = await client.post(
+        _CHAT_STREAM_URL,
+        json=_payload("TierA报错指标统计", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    metas = _metaFrames(resp.text)
+    assert metas, f"未收到 meta 帧，SSE={resp.text[:400]}"
+    assert metas[0]["executionTier"] == "B"
+    assert metas[0]["degradedReason"] == "execution_error"
+
+
+# ---------------------------------------------------------------------------
+# 6. Tier B（非流式）：非只读公式绝不触达 adapter
+# ---------------------------------------------------------------------------
+
+
+async def test_non_readonly_formula_never_reaches_adapter(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    ds = await _seedSelfDatasource(dbSession)
+    config = await _seedTierBPipelineSupport(dbSession)
+    _installTierBFakes(monkeypatch, config)
+    await _seedSwitches(dbSession)
+    metric, kpi = await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_TIER_A_WRITE",
+        kpiName="TierA写指标",
+        keywords=["TierA写指标"],
+        formula=_WRITE_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    reconciled = reconcileMetric(governanceSpecOf(kpi), techniqueOf(metric))
+    assert reconciled.isTierAEligible is True
+
+    before = await _countKpiCatalog(dbSession)
+
+    resp = await client.post(
+        _CHAT_URL,
+        json=_payload("TierA写指标统计", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["executionTier"] == "B"
+    assert body["degradedReason"] == "formula_not_read_only"
+
+    # 种子 KPI 行仍在且行数未变 ⇒ 写语句从未执行。
+    assert await _countKpiCatalog(dbSession) == before
+    remaining = await dbSession.execute(
+        text("SELECT COUNT(*) FROM kpi_catalog WHERE kpi_code = :code"),
+        {"code": kpi.kpi_code},
+    )
+    assert int(remaining.scalar_one()) == 1
+
+
+# ---------------------------------------------------------------------------
+# 7. Tier B（非流式）必须 200：哨兵拆包位置守卫
+# ---------------------------------------------------------------------------
+
+
+async def test_time_scoped_question_non_stream_returns_200_and_tier_b(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """若 Tier B 拆包被移到 ``if preamble is not None`` 之下，
+    ``requireFullResponse`` 会对哨兵抛 ``RuntimeError`` → 500；本用例钉住 200。"""
+    ds = await _seedSelfDatasource(dbSession)
+    config = await _seedTierBPipelineSupport(dbSession)
+    _installTierBFakes(monkeypatch, config)
+    await _seedSwitches(dbSession)
+    await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_TIER_A_OK",
+        kpiName="TierA测试指标",
+        keywords=["TierA测试指标"],
+        formula=_TIER_A_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    resp = await client.post(
+        _CHAT_URL,
+        json=_payload("近6个月TierA测试指标", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executionTier"] == "B"
+    assert body["degradedReason"] == "explicit_time_scope"

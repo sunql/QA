@@ -42,6 +42,7 @@ KPI 口径对 NL2SQL 完全不可用。
 | `1e04248d` | realdata S3：PLAN 偏差只在治理列未规范化时生效（`planDeviationActive`） |
 | `0e1923da` | 规范化前快照（before.json + dry-run 报告） |
 | `6c3fafb7` | realdata S3：期望改为按 **execution_source** 判定（tier B 规范化后为 pass） |
+| `05a7f442` | 安全复审修复：`_assertOwnership` 校验治理列/度量快照未过期；更正「生产永远拒绝」失实说明 |
 | 本文件所在 commit | 回填脚本警示注释 + wiki §16 + 本变更记录 |
 
 **新增文件**

@@ -1,6 +1,6 @@
 # KPI 写入口收口到 admin（评审 HIGH-1 的产品决策落地）
 
-> 分支：`feat/kpi-write-acl`（base = `origin/main` `33d292f8`）
+> 分支：`feat/kpi-write-acl`（base = `origin/main` `08788a67`，含 PR #119 的匹配器 v2）
 > 来源：`feat/kpi-match-v2`（PR #119）评审 HIGH-1
 > 状态：**已完成，未部署**。零 DDL、零生产写、无 Alembic 迁移。
 

@@ -212,14 +212,15 @@ Milvus / RAG 集成用例（`test_milvus_document_fields.py` 4 条、`test_rag_c
 | B4 分母示警 `buildKpiDenominatorWarning` | 仍 v1（计划只改 B3） |
 | Jaccard | **不删**。`matchAll` 继续供上述面使用 |
 | 表结构 / 迁移 | 零 DDL，无新迁移 |
-| KPI 写 ACL | **未改**（仍是登录即可建 KPI）。这是 §8.1 HIGH-1 的根因，需产品决策；在决策落地前灰度开关必须保持关闭 |
+| KPI 写 ACL | **已另行修复**：`feat/kpi-write-acl`（PR #120）把 create/update/delete 收口到 admin，产品决策见 §8.1。灰度开关仍保持关闭，直到该 PR 部署 |
 
 ## 8. 评审发现与处置
 
 `code-reviewer` + `security-reviewer` 对本批全量 diff 各跑一轮，逐条处置如下。
-**唯一未修的是 HIGH-1**（需要产品决策，超出本批边界），其余全部在本批内修掉。
+**HIGH-1 需要产品决策，超出本批边界**（决策已于 2026-11-11 落地，由后续 PR #120 修复，见 §8.1）；
+其余全部在本批内修掉。
 
-### 8.1 HIGH-1（未修，需产品决策）— 匹配器不再看 `match_threshold`，KPI 写入口仍只要求登录
+### 8.1 HIGH-1（已由 PR #120 修复）— 匹配器不再看 `match_threshold`，KPI 写入口曾只要求登录
 
 **现象**：v1 的 `matchAll` 按 `kpi_catalog.match_threshold` 过滤候选；v2 的 `matchRoute` 用固定的
 `CONTAINMENT_CONFIDENCE = 0.9` 判定包含式命中，**完全不读 `match_threshold`**。同时
@@ -245,6 +246,18 @@ Milvus / RAG 集成用例（`test_milvus_document_fields.py` 4 条、`test_rag_c
    - 环境变量 `KPI_MATCH_CONTAINMENT_ENABLED` 保持默认即可（默认 True 只在灰度行存在时才生效——
      两个开关是**且**关系：env 是紧急熔断，`system_config` 行是灰度闸门，缺行仍然 False）。
 3. 合并前请用户确认：**本批合入但不开启灰度**（§7 已列）。
+
+**后续处置（2026-11-11 已完成，见本 PR）**：产品决策为「写入口一律 admin」，与词条字典 /
+本体指标同口径（PR #116）。已由 `feat/kpi-write-acl`（PR #120）落地：
+
+- `createKpi` / `updateKpi` / `deleteKpi` 的依赖改为 `getAdminOnlyActor`，前端按角色隐藏写入口，
+  非 admin 直接调 API 得 403；
+- service 层 owner ACL 保留（admin 恒通过），仅作审计语义，不再作权限闸门；
+- 详细证据与遗留项（403 文案、生产鉴权硬闸门既有漏检形态）见
+  `Harness/changes/2026-11-11-kpi-write-acl/summary.md`。
+
+**灰度行仍不得开启**：PR #120 合入并**部署**之后才谈 `KPI_MATCH_CONTAINMENT_ENABLED`，
+且开启是独立的一次数据操作（需单独批准）。
 
 ### 8.2 MEDIUM-1（已修）— B3 在冷缓存下静默丢失契约块
 

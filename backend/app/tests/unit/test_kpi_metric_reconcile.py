@@ -521,6 +521,36 @@ def test_resolution_ambiguous_token_is_unknown() -> None:
     assert r.reasons() == (REASON_GOVERNANCE_TOKEN_AMBIGUOUS,)
 
 
+def test_resolution_ambiguous_token_candidate_reference_stays_unknown() -> None:
+    """I2：一角色一 token 可解析、一 token 歧义，技术引用了歧义候选列。
+
+    ``_resolvedColumnsFor`` 会丢掉歧义 token；若仍做差集，会把技术侧的候选列
+    判成 ``technical_column_not_in_governance`` / ``grain_mismatch``（mismatch）。
+    按「不猜 ⇒ unknown 不阻断」，此处只能是 unknown，不能升 mismatch。
+    """
+    governance = GovernanceSpec(
+        numerator_columns=("QTY", "金额"),
+        grain_keys=("SUPPLIER_CODE", "工厂"),
+        time_grain="month",
+    )
+    technique = MetricTechnique(
+        numerator=_measure("AMT_CANDIDATE + QTY"),
+        grain_keys=("FACILITY_CANDIDATE",),
+        time_grain="month",
+    )
+    resolution = ResolutionOutcome(
+        resolved=(("QTY", "QTY"), ("SUPPLIER_CODE", "SUPPLIER_CODE")),
+        unknownTokens=("金额", "工厂"),
+        timeGrain=TimeGrain.MONTH,
+    )
+    r = reconcileMetric(governance, technique, resolution=resolution)
+    assert r.verdict == VERDICT_UNKNOWN
+    assert r.reasons() == (REASON_GOVERNANCE_TOKEN_AMBIGUOUS,)
+    assert REASON_TECHNICAL_COLUMN_NOT_IN_GOVERNANCE not in r.reasons()
+    assert REASON_GRAIN_MISMATCH not in r.reasons()
+    assert r.degraded is True
+
+
 def test_resolution_technical_column_not_in_resolved_governance_is_mismatch() -> None:
     """resolved 列集合替代 token 集合后，技术侧仍多出未声明列 ⇒ mismatch。"""
     governance = GovernanceSpec(

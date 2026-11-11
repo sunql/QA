@@ -80,9 +80,6 @@ async def resolutionForMetric(
         return None
     try:
         properties = await sourcePropertiesForMetric(session, metricId)
-        return resolveGovernanceTokens(
-            governanceTokensOf(governance), properties
-        )
     except Exception:
         logger.warning(
             "KPI 治理 token 别名解析失败，回退恒等对账 metric_id=%s",
@@ -90,6 +87,15 @@ async def resolutionForMetric(
             exc_info=True,
         )
         return None
+
+    tokens = governanceTokensOf(governance)
+    # R2：无 ontology_metric_source 行 ⇒ 无源类可解析。治理 token 既不能证明
+    # 可解析（pass），也没有证据判 missing（mismatch）；按设计记 unknown（不猜、
+    # 不阻断注入）。不能回退 resolution=None（那会把无源类误判成 pass）。
+    if not properties and tokens:
+        return ResolutionOutcome(unknownTokens=tokens)
+    # 纯函数放在 try 外：resolver 自身缺陷必须暴露，不能被吞成恒等回退。
+    return resolveGovernanceTokens(tokens, properties)
 
 
 __all__ = ["governanceSpecOf", "resolutionForMetric", "techniqueOf"]

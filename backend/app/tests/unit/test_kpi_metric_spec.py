@@ -10,7 +10,13 @@ import pytest
 
 from app.domain.enums import MetricExecutionSource, MetricType
 from app.domain.models import KpiCatalog, OntologyMetric
-from app.services.kpi_metric_reconcile import GovernanceSpec, MetricTechnique
+from app.services.kpi_metric_reconcile import (
+    VERDICT_UNKNOWN,
+    GovernanceSpec,
+    MeasureSpec,
+    MetricTechnique,
+    reconcileMetric,
+)
 from app.services.kpi_metric_spec import (
     governanceSpecOf,
     resolutionForMetric,
@@ -164,3 +170,35 @@ async def test_resolution_for_metric_skips_loader_when_metric_absent() -> None:
         object(), None, GovernanceSpec()  # type: ignore[arg-type]
     )
     assert resolution is None
+
+
+async def test_resolution_for_metric_without_source_rows_is_unknown_not_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """I1 / R2：无 ``ontology_metric_source`` 行 ⇒ 无源类 ⇒ unknown，不是 mismatch。"""
+    async def noProperties(session: object, metricId: int) -> tuple[()]:
+        return ()
+
+    monkeypatch.setattr(
+        "app.services.kpi_metric_spec.sourcePropertiesForMetric", noProperties
+    )
+    governance = GovernanceSpec(
+        numerator_columns=("QTY",),
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    resolution = await resolutionForMetric(object(), 7, governance)  # type: ignore[arg-type]
+    assert resolution is not None
+    assert resolution.missingTokens == ()
+    assert set(resolution.unknownTokens) == {"QTY", "SUPPLIER_CODE"}
+
+    result = reconcileMetric(
+        governance,
+        MetricTechnique(
+            numerator=MeasureSpec(agg="SUM", expr="QTY"),
+            grain_keys=("SUPPLIER_CODE",),
+            time_grain="month",
+        ),
+        resolution=resolution,
+    )
+    assert result.verdict == VERDICT_UNKNOWN

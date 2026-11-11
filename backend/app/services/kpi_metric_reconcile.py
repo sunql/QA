@@ -320,6 +320,20 @@ def _resolvedColumnsFor(
     return tuple(sorted(columns))
 
 
+def _hasAmbiguousTokens(
+    tokens: tuple[str, ...], resolution: ResolutionOutcome
+) -> bool:
+    """本组 token 是否含 resolver 无法判定的 token（多候选 / 无源类）。
+
+    含歧义时列集合是不完整的，任何基于差集的 mismatch 都可能是误判；
+    按设计「不猜 ⇒ unknown 不阻断」，此时该组比较不再产出差集 mismatch，
+    由 ``governance_token_ambiguous`` 的 unknown finding 表达。
+    """
+    declared = _tokens(tokens)
+    ambiguous = {token.strip().lower() for token in resolution.unknownTokens}
+    return bool(declared & ambiguous)
+
+
 def _checkTimeGrain(
     governance: GovernanceSpec, technique: MetricTechnique
 ) -> tuple[ReconcileFinding, ...]:
@@ -383,7 +397,11 @@ def _checkGrainWithResolution(
             VERDICT_MISMATCH,
         ))
         return tuple(findings)
-    if resolvedDimensions != technicalDimensions:
+    # 含歧义 token 时维度集合不完整，差集结果不可信 ⇒ 不判 mismatch（I2）。
+    if (
+        not _hasAmbiguousTokens(governance.grain_keys, resolution)
+        and resolvedDimensions != technicalDimensions
+    ):
         findings.append(_finding(
             LAYER_GOVERNANCE,
             REASON_GRAIN_MISMATCH,
@@ -481,12 +499,17 @@ def _reconcileGovernanceWithResolution(
             f"治理 token 命中多个候选，无法判定：{', '.join(resolution.unknownTokens)}",
             VERDICT_UNKNOWN,
         ))
-    findings.extend(_checkRole(
-        _resolvedColumnsFor(governance.numerator_columns, resolution),
-        technique.numerator,
-        "分子",
-    ))
-    if _needsDenominator(governance, technique):
+    # 角色 token 含歧义 ⇒ 解析后的列集合不完整，差集 mismatch 不可信（I2）：
+    # 保留 ``governance_token_ambiguous`` 的 unknown，不再追加列差集判定。
+    if not _hasAmbiguousTokens(governance.numerator_columns, resolution):
+        findings.extend(_checkRole(
+            _resolvedColumnsFor(governance.numerator_columns, resolution),
+            technique.numerator,
+            "分子",
+        ))
+    if _needsDenominator(governance, technique) and not _hasAmbiguousTokens(
+        governance.denominator_columns, resolution
+    ):
         findings.extend(_checkRole(
             _resolvedColumnsFor(governance.denominator_columns, resolution),
             technique.denominator,

@@ -92,8 +92,39 @@ FAILED test_resolution_grain_dimension_aliases_and_time_word_removal
 73 passed, 21 warnings in 20.05s
 ```
 
+## Fix round 1 补充变异
+
+### 变异 ④：关闭「含歧义 token 不做差集」保护（I2）
+
+改动：`_hasAmbiguousTokens` 恒返回 False（角色/维度差集照常执行）。
+
+红（1 failed）：
+
+```
+FAILED test_resolution_ambiguous_token_candidate_reference_stays_unknown
+  AssertionError: assert 'mismatch' == 'unknown'
+```
+
+还原后复绿（单测）：`1 passed`；完整定向 75 passed。
+
+### 变异 ⑤：删除「无源类 ⇒ unknown」分支（I1）
+
+改动：`resolutionForMetric` 的 `if not properties and tokens:` 改为恒 False
+（无源类退回 resolver 的 missingTokens 语义）。
+
+红（1 failed）：
+
+```
+FAILED test_resolution_for_metric_without_source_rows_is_unknown_not_mismatch
+  AssertionError: assert ('QTY', 'SUPPLIER_CODE') == ()
+（missingTokens 非空 ⇒ 层 2 会判 governance_token_unresolvable mismatch）
+```
+
+还原后复绿（单测）：`1 passed`；完整定向 75 passed。
+
 ## 结论
 
-三次变异分别钉住三条新增语义：**恒等回退（存量兼容）**、**层 2 unknown ⇒
-degraded（R4）**、**time_grain 枚举 + 别名归一后的维度集合比较（R6）**。
+五次变异分别钉住：**恒等回退（存量兼容）**、**层 2 unknown ⇒ degraded（R4）**、
+**time_grain 枚举 + 别名归一后的维度集合比较（R6）**、**歧义 token 不升 mismatch
+（I2）**、**无源类 ⇒ unknown 而非 mismatch（I1/R2）**。
 每条均满足「改 ⇒ 红 ⇒ 还原 ⇒ 复绿」，且存量断言零改动。

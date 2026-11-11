@@ -118,7 +118,8 @@ class KpiCatalogService:
         """创建 KPI。重复 kpi_code 抛 ConflictError（DB unique 兜底）。
 
         Phase 4.5：写入 audit_log（CREATE）+ kpi_catalog_history（revision=0）。
-        CREATE 不做 ACL 检查（无既有 entity，无 owner 比较意义；任何部门都能创建新 KPI）。
+        权限：写入口在路由层要求 admin（feat-kpi-write-acl，2026-11-11）——
+        KPI 名称决定 L1 匹配方向，service 层不再重复校验，直接信任 actor。
         """
         entity = KpiCatalog(
             kpi_code=dto.kpi_code,

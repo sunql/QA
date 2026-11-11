@@ -5,6 +5,8 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { ConfigProvider, message } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import KpiCatalogPage from "../pages/KpiCatalogPage";
+import { useAuthStore } from "../stores/authStore";
+import type { AuthMeRead } from "../types/auth";
 import type { KpiCatalog, KpiDatasourceSuggestion } from "../types/kpiCatalog";
 import type { OntologyMetric } from "../types/ontology";
 import {
@@ -101,6 +103,26 @@ function renderPage() {
     </ConfigProvider>
   );
 }
+
+/** KPI 写入口限 admin：既有用例默认以管理员身份渲染。 */
+const ADMIN_USER: AuthMeRead = {
+  id: 1,
+  username: "admin",
+  displayName: "管理员",
+  email: null,
+  enabled: true,
+  mustChangePassword: false,
+  roles: ["admin"],
+  organizations: [],
+  tenantId: "default",
+  lastLoginAt: null,
+};
+
+const NORMAL_USER: AuthMeRead = { ...ADMIN_USER, username: "alice", roles: ["user"] };
+
+beforeEach(() => {
+  useAuthStore.setState({ user: ADMIN_USER });
+});
 
 describe("KpiCatalogPage", () => {
   beforeEach(() => {
@@ -596,6 +618,45 @@ describe("KpiCatalogPage — 结构化口径与技术形态挂靠", () => {
  * 也已不是 record 的实例 ⇒ UI 用例无法判别。
  * 真正承重的是下面的工厂函数测试：直接对入参实例做身份断言。
  */
+describe("KpiCatalogPage — 写入口限 admin", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listKpis.mockResolvedValue([mockKpi]);
+    datasourceApi.listDataSources.mockResolvedValue([
+      { id: 7, name: "DWS_TEST", isActive: true },
+    ]);
+    api.getDatasourceSuggestions.mockResolvedValue([]);
+    ontologyApi.listMetrics.mockResolvedValue([]);
+  });
+
+  it("非 admin 不渲染新建 / 编辑 / 删除入口", async () => {
+    useAuthStore.setState({ user: NORMAL_USER });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument(),
+    );
+
+    expect(
+      screen.queryByRole("button", { name: /plus.*新.*建.*KPI/ }),
+    ).toBeNull();
+    expect(screen.queryByText(/编\s?辑/)).toBeNull();
+    expect(screen.queryByText(/删\s?除/)).toBeNull();
+  });
+
+  it("admin 渲染新建 / 编辑 / 删除入口（反向守卫）", async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument(),
+    );
+
+    expect(
+      screen.getByRole("button", { name: /plus.*新.*建.*KPI/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/编\s?辑/)).toBeInTheDocument();
+    expect(screen.getByText(/删\s?除/)).toBeInTheDocument();
+  });
+});
+
 describe("kpiCatalogPayload — 数组字段不与入参共享实例", () => {
   it("buildKpiUpdatePayload / buildKpiCreatePayload 各自拷贝四个数组", () => {
     const values = {

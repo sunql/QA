@@ -121,6 +121,34 @@ L4: Pure Python async while loop Agent (5 NL2SQL tools, iterative)
   根因与修复方案见 [kpi-metric-technical-form](kpi-metric-technical-form.md) §9 T2。
 - **Code**: `app/services/kpi_semantic_match_service.py`
 
+##### 匹配器 v2（包含式 + 歧义澄清，灰度）
+
+2026-11-11 起，执行面（chat L1 preamble / B3 契约注入 / admin 诊断）在灰度开关打开时改走
+`matchRoute`；Jaccard 的 `matchAll` / `match` **保留**给 `/search`、研究线与 B4 分母示警。
+
+- **短语源**：`kpi_name` + `semantic_keywords[]` + `ontology_metric.metric_alias`
+  （缓存用 **outer** join 取 alias —— inner join 会把 `metric_id IS NULL` 的 KPI 整条丢掉）。
+- **归一化**：NFKC → lower → 非字母数字转空格 → 折叠空白 → strip。
+- **命中规则**：CJK 短语子串即命中；纯 ASCII 短语必须过词边界 `(?<![a-z0-9])phrase(?![a-z0-9])`
+  （否则 `OTD` 会命中 `notdone`）；短语门槛 CJK ≥ 2 字或 ASCII ≥ 3 字符。
+- **判定**：精确 code → 1.0 单命中；每 KPI 取自己命中的**最长**短语，全局最长者胜出；
+  **最长长度并列且分属不同 KPI ⇒ `ambiguous`**（不取 top1，候选按 code 升序）；否则 `none`。
+- **歧义面**：不建契约块（把两个矛盾口径同时注入 = 让模型替用户选指标）；chat 直接返回
+  `intent=clarify` 的澄清候选（路由层 `L1C`，0 LLM、0 token），见下表。
+- **开关**（与 `KPI_CONTRACT_INJECTION_ENABLED` 同构）：env `KPI_MATCH_CONTAINMENT_ENABLED`
+  默认 `true` 是紧急杀闸；`system_config` 同名行**缺失即 false**（fail-closed）。
+  生产当前没有该行 ⇒ 仍走 v1。
+- **Code**: `kpi_semantic_match_service.matchRoute` / `kpi_match_cache` / `kpi_metric_switches`
+
+| `matchRoute` 结果 | meta `intent` | 契约注入 | chat |
+|---|---|---|---|
+| `hit` | `kpi`（路由层 `L1`） | 按命中 KPI 注入 | 正常 L1 / L4 流程 |
+| `ambiguous` | `clarify`（路由层 `L1C`） | **不注入** | 澄清候选，0 LLM |
+| `none` | `agent_l4` / `agent_run` | 不注入 | 回落 LLM 流水线 |
+
+> `meta.intent` 一律由 `chat_constants.metaIntentOf(routing_layer)` 派生，新增路由层必须登记
+> （`test_meta_intent_of_maps_every_routing_layer` 锁三态）。
+
 #### L2 — LLM Single SQL (existing ReAct two-phase)
 
 - Phase 1: `generateValidatedPlan` → `QueryPlan` JSON (target/selectedClasses/selectedProperties/conditions/aggregations/groupBy/joins/sortBy/rowLimit).

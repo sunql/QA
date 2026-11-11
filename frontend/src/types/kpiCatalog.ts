@@ -1,5 +1,7 @@
 /** KPI Catalog 类型定义 — 对应后端 Pydantic Schema（Phase 4.1） */
 
+import type { TimeGrain } from "./ontology";
+
 export type KpiStatus = "DRAFT" | "PUBLISHED" | "DEPRECATED";
 
 export const KPI_STATUS_OPTIONS: { value: KpiStatus; labelKey: KpiStatus }[] = [
@@ -17,6 +19,8 @@ export interface KpiCatalog {
   numerator: string | null;
   denominator: string | null;
   grain: string | null;
+  /** P3 时间粒度（0143）；null = 未设置。 */
+  timeGrain: TimeGrain | null;
   unit: string | null;
   dataSource: string | null;
   datasourceId: number | null;
@@ -63,6 +67,7 @@ export interface KpiCatalogCreate {
   numerator?: string;
   denominator?: string;
   grain?: string;
+  timeGrain?: TimeGrain | null;
   unit?: string;
   dataSource?: string;
   owner?: string;
@@ -86,6 +91,8 @@ export interface KpiCatalogUpdate {
   numerator?: string | null;
   denominator?: string | null;
   grain?: string | null;
+  /** 显式 null = 清空（undefined 会被 axios 丢弃 ⇒ 后端保留旧值）。 */
+  timeGrain?: TimeGrain | null;
   unit?: string | null;
   dataSource?: string | null;
   owner?: string | null;

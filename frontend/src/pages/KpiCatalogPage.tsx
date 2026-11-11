@@ -23,6 +23,7 @@ import {
   getDatasourceSuggestions,
 } from "../api/kpiCatalog";
 import { listMetrics } from "../api/ontology";
+import { TIME_GRAIN_OPTIONS } from "../types/ontology";
 import type { MetricStatus, OntologyMetric } from "../types/ontology";
 import type {
   KpiCatalog,
@@ -156,6 +157,7 @@ export default function KpiCatalogPage() {
       numerator: record.numerator ?? "",
       denominator: record.denominator ?? "",
       grain: record.grain ?? "",
+      timeGrain: record.timeGrain ?? "",
       unit: record.unit ?? "",
       dataSource: record.dataSource ?? "",
       datasourceId: record.datasourceId ?? undefined,
@@ -416,6 +418,23 @@ export default function KpiCatalogPage() {
               <Input placeholder={t("kpiCatalog.placeholders.owner")} />
             </Form.Item>
           </Space.Compact>
+          <Form.Item
+            name="timeGrain"
+            label={t("kpiCatalog.labels.timeGrain")}
+          >
+            <Select
+              allowClear
+              placeholder={t("kpiCatalog.placeholders.timeGrain")}
+              options={[
+                ...TIME_GRAIN_OPTIONS.map((o) => ({
+                  value: o.value,
+                  label: t(`enums.timeGrain.${o.labelKey}`),
+                })),
+                // 显式留空选项：与 allowClear 同效，但让「不设置」可被看到 / 选中
+                { value: "", label: t("common.none") },
+              ]}
+            />
+          </Form.Item>
           <Form.Item
             name="datasourceId"
             label={t("kpiCatalog.labels.datasourceId")}

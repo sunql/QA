@@ -31,6 +31,7 @@ import type {
   MetricExecutionSource,
   MetricStatus,
   MeasureSpec,
+  TimeGrain,
 } from "../../types/ontology";
 import { AGG_FUNCTION_OPTIONS } from "../../types/ontology";
 import { useTranslation } from "../../i18n";
@@ -65,6 +66,9 @@ interface MetricFormValues {
   filterExpression: string;
   owner: string;
   status: MetricStatus;
+  // ── P3 时间粒度（下拉留空 ⇒ 空串，提交时转 null）──
+  timeGrain: TimeGrain | "";
+  timeColumn: string;
 }
 
 const EMPTY_METRIC_FORM: MetricFormValues = {
@@ -87,6 +91,8 @@ const EMPTY_METRIC_FORM: MetricFormValues = {
   filterExpression: "",
   owner: "",
   status: "DRAFT",
+  timeGrain: "",
+  timeColumn: "",
 };
 
 /** 编辑时库里的原 measure —— 用于把派生字段 `class_id` / `class_alias` 原样带回。 */
@@ -147,6 +153,9 @@ function buildMetricPayload(
     // `class_id` / `class_alias`（必须保留）刻意不同。
     owner: values.owner || null,
     executionSource: values.executionSource ?? null,
+    // 留空 ⇒ 显式 null（创建/更新都清空；undefined 会被 axios 丢弃）
+    timeGrain: values.timeGrain || null,
+    timeColumn: values.timeColumn || null,
   };
 }
 
@@ -247,6 +256,8 @@ export default function MetricTab({ classes }: MetricTabProps) {
       filterExpression: record.filterExpression ?? "",
       owner: record.owner ?? "",
       status: record.status,
+      timeGrain: record.timeGrain ?? "",
+      timeColumn: record.timeColumn ?? "",
     });
     setModalOpen(true);
   };

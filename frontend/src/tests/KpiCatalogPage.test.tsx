@@ -25,6 +25,8 @@ const { mockKpi } = vi.hoisted(() => ({
     numerator: "按时签收订单数",
     denominator: "总订单数",
     grain: "供应商+月",
+    // 刻意取非默认值：断言编辑回填路径真的生效（漏回填会变成空值）
+    timeGrain: "month",
     unit: "%",
     dataSource: "DWS_SUPPLIER_MONTHLY",
     datasourceId: 7,
@@ -530,6 +532,67 @@ describe("KpiCatalogPage — 结构化口径与技术形态挂靠", () => {
     expect(payload.metricId).toBe(42);
     // 0.6 ≠ DEFAULT_MATCH_THRESHOLD(0.75) ⇒ 证明回填路径真的生效，而非默认值兜底
     expect(payload.matchThreshold).toBe(0.6);
+    // "month" ≠ 空白 ⇒ 证明 timeGrain 回填路径生效并原样进入 payload
+    expect(payload.timeGrain).toBe("month");
+  });
+
+  it("编辑表单提供时间粒度下拉（五枚举 + 留空），可改选后进入 payload", async () => {
+    const user = userEvent.setup();
+    api.updateKpi.mockResolvedValue({ ...mockKpi });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    const timeGrainItem = (await screen.findByText("时间粒度")).closest(
+      ".ant-form-item",
+    );
+    expect(timeGrainItem).not.toBeNull();
+    // 回填 month ⇒ 选中项显示「月」
+    expect(timeGrainItem).toHaveTextContent("月");
+
+    // 展开下拉：五个枚举 + 显式留空选项都在
+    await user.click(timeGrainItem!.querySelector(".ant-select-selector")!);
+    const optionTexts = Array.from(
+      document.querySelectorAll(".ant-select-item-option"),
+    ).map((el) => el.textContent);
+    expect(optionTexts).toEqual(
+      expect.arrayContaining(["日", "周", "月", "季度", "年", "（无）"]),
+    );
+
+    // 改选「季度」后提交 ⇒ payload.timeGrain = "quarter"
+    await user.click(await screen.findByTitle("季度"));
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateKpi).toHaveBeenCalled());
+    const payload = api.updateKpi.mock.calls[0][1];
+    expect(payload.timeGrain).toBe("quarter");
+  });
+
+  it("清空「时间粒度」后提交显式 null（允许留空）", async () => {
+    const user = userEvent.setup();
+    api.updateKpi.mockResolvedValue({ ...mockKpi });
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText("KPI_SUPPLIER_OTD")).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("button", { name: /编\s?辑/ }));
+    const timeGrainItem = (await screen.findByText("时间粒度")).closest(
+      ".ant-form-item",
+    );
+    expect(timeGrainItem).not.toBeNull();
+    const clearIcon = timeGrainItem!.querySelector(".ant-select-clear");
+    expect(clearIcon).not.toBeNull();
+    fireEvent.mouseDown(clearIcon!);
+
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateKpi).toHaveBeenCalled());
+    const payload = api.updateKpi.mock.calls[0][1];
+    // 显式 null = 清空（后端 exclude_unset 契约：undefined 会被静默丢弃）
+    expect(payload.timeGrain).toBeNull();
   });
 
   it("语义关键词 tags Select 可输入新标签并进入 payload", async () => {
@@ -654,6 +717,18 @@ describe("KpiCatalogPage — 写入口限 admin", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/编\s?辑/)).toBeInTheDocument();
     expect(screen.getByText(/删\s?除/)).toBeInTheDocument();
+  });
+});
+
+describe("kpiCatalogPayload — timeGrain 映射", () => {
+  it("有值时 create/update 均携带；空值时 update 显式 null、create 省略", () => {
+    const filled = { ...emptyKpiForm(), timeGrain: "month" as const };
+    expect(buildKpiUpdatePayload(filled).timeGrain).toBe("month");
+    expect(buildKpiCreatePayload(filled).timeGrain).toBe("month");
+
+    const blank = emptyKpiForm();
+    expect(buildKpiUpdatePayload(blank).timeGrain).toBeNull();
+    expect(buildKpiCreatePayload(blank).timeGrain).toBeUndefined();
   });
 });
 

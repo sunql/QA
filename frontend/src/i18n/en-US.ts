@@ -1863,6 +1863,8 @@ export const enUS = {
         denominatorFilter: "Denominator filter",
         grainKeys: "Grain keys",
         filterExpression: "Global filter",
+        timeGrain: "Time grain",
+        timeColumn: "Time column",
         owner: "Technical caliber owner",
         status: "Metric status",
       },
@@ -1878,6 +1880,8 @@ export const enUS = {
         denominatorFilter: "e.g. STATUS = 'OK'",
         grainKeys: "Press Enter to add, e.g. plant_code",
         filterExpression: "Global filter predicate",
+        timeGrain: "Select time grain (optional)",
+        timeColumn: "e.g. ORDER_DATE",
         owner: "Technical caliber owner",
       },
       metricHints: {
@@ -2051,6 +2055,7 @@ export const enUS = {
       numerator: "Numerator",
       denominator: "Denominator",
       grain: "Grain",
+      timeGrain: "Time grain",
       unit: "Unit",
       dataSource: "Data Source",
       datasourceId: "Bound Data Source",
@@ -2071,6 +2076,7 @@ export const enUS = {
       numerator: "Numerator description",
       denominator: "Denominator description",
       grain: "e.g. Supplier+Month",
+      timeGrain: "Select time grain (optional)",
       unit: "e.g. %, days, CNY",
       dataSource: "e.g. DWS_SUPPLIER_MONTHLY",
       datasourceId: "Select the data source this KPI is computed from",
@@ -2256,6 +2262,13 @@ export const enUS = {
     metricStatus: {
       DRAFT: "Draft",
       PUBLISHED: "Published",
+    },
+    timeGrain: {
+      day: "Day",
+      week: "Week",
+      month: "Month",
+      quarter: "Quarter",
+      year: "Year",
     },
     kpiStatus: {
       DRAFT: "Draft",

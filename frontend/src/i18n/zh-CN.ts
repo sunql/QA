@@ -1888,6 +1888,8 @@ export const zhCN = {
         denominatorFilter: "分母过滤",
         grainKeys: "粒度键",
         filterExpression: "全局过滤",
+        timeGrain: "时间粒度",
+        timeColumn: "时间列",
         owner: "技术口径负责人",
         status: "指标状态",
       },
@@ -1903,6 +1905,8 @@ export const zhCN = {
         denominatorFilter: "如：STATUS = 'OK'",
         grainKeys: "回车新增，如：plant_code",
         filterExpression: "全局过滤谓词",
+        timeGrain: "选择时间粒度（可留空）",
+        timeColumn: "如：ORDER_DATE",
         owner: "技术口径负责人",
       },
       metricHints: {
@@ -2075,6 +2079,7 @@ export const zhCN = {
       numerator: "分子",
       denominator: "分母",
       grain: "粒度",
+      timeGrain: "时间粒度",
       unit: "单位",
       dataSource: "数据来源",
       datasourceId: "绑定数据源",
@@ -2095,6 +2100,7 @@ export const zhCN = {
       numerator: "分子描述",
       denominator: "分母描述",
       grain: "如：供应商+月",
+      timeGrain: "选择时间粒度（可留空）",
       unit: "如：%、天、元",
       dataSource: "如：DWS_SUPPLIER_MONTHLY",
       datasourceId: "选择该 KPI 计算所依据的数据源",
@@ -2276,6 +2282,13 @@ export const zhCN = {
     metricStatus: {
       DRAFT: "草稿",
       PUBLISHED: "已发布",
+    },
+    timeGrain: {
+      day: "日",
+      week: "周",
+      month: "月",
+      quarter: "季度",
+      year: "年",
     },
     kpiStatus: {
       DRAFT: "草稿",

@@ -74,6 +74,8 @@ function metric(over: Partial<OntologyMetric>): OntologyMetric {
     status: "DRAFT",
     owner: null,
     executionSource: null,
+    timeGrain: null,
+    timeColumn: null,
     ...over,
   };
 }

@@ -82,8 +82,8 @@ import asyncio
 import logging
 import os
 import sys
-from functools import partial
 from collections import Counter
+from functools import partial
 from pathlib import Path
 
 # 允许从 scripts/ 直接运行：把 backend/ 放进 sys.path
@@ -100,9 +100,9 @@ from scripts.kpi_metric_realdata_lib import (  # noqa: E402
     guardTarget,
     info,
     lastSkipReason,
-    planDeviationActive,
     maskDsn,
     passStep,
+    planDeviationActive,
     printSummary,
     resolveDatabaseUrl,
     skipStep,
@@ -169,6 +169,10 @@ from scripts.kpi_metric_backfill import (  # noqa: E402
     verifyPlan,
 )
 from scripts.kpi_metric_backfill_plan import KpiBackfillPlan  # noqa: E402
+from scripts.kpi_metric_db_guard import (  # noqa: E402
+    PROD_DB_NAME,
+    databaseNameOf,
+)
 from scripts.kpi_metric_realdata_db import (  # noqa: E402
     countLinkedKpis,
     countMetrics,
@@ -196,11 +200,6 @@ from scripts.kpi_metric_realdata_s3 import (  # noqa: E402
     formulaCoverage,
 )
 from scripts.kpi_metric_realdata_s4 import step4_publishGate  # noqa: E402
-
-from scripts.kpi_metric_db_guard import (  # noqa: E402
-    PROD_DB_NAME,
-    databaseNameOf,
-)
 
 # F8：目标库是否为正式库（由入口从 DSN 判定后传入 S4/S9，不在步骤内重写常量）
 _IS_PROD = databaseNameOf(DATABASE_URL) == PROD_DB_NAME

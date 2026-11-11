@@ -31,17 +31,11 @@ from app.services.kpi_metric_reconcile import (
     reconcileMetric,
 )
 from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
-from app.services.nl2sql_semantic_guard import extractSqlIdentifiers
+from app.services.nl2sql_semantic_guard import measureColumnIdentifiers
 
 _STRING_LITERAL = r"'(?:[^']|'')*'"
 # 别名前缀与字符串字面量二选一：字面量整体保留（`'N.A'` 不是别名）。
 _ALIAS_OR_LITERAL = re.compile(rf"{_STRING_LITERAL}|\b[A-Za-z_][A-Za-z0-9_]*\.")
-# 只拆单参 TRUNC：`TRUNC(x, 'MM')` 保留原样（拆开会得到非法表达式）。
-_TRUNC_CALL = re.compile(
-    rf"{_STRING_LITERAL}|\bTRUNC\s*\(\s*([^()',]*?)\s*\)", re.IGNORECASE
-)
-_STRING_LITERAL_RE = re.compile(_STRING_LITERAL)
-_FUNCTION_CALL_NAME = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\s*\(")
 _SELECT_PREFIX = re.compile(r"SELECT\b", re.IGNORECASE)
 _FUNCTION_HEAD = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 # 空值守卫包装：`NULLIF(SUM(x), 0)` 的度量是里面的 SUM，不是 NULLIF 本身。
@@ -122,21 +116,6 @@ def stripAliases(expr: str) -> str:
         return text if text.startswith("'") else ""
 
     return _ALIAS_OR_LITERAL.sub(_replace, expr)
-
-
-def unwrapTrunc(expr: str) -> str:
-    """``TRUNC(X)`` → ``(X)``：列集合不变，但让派生表达式可读。
-
-    只拆**单参**形式：``TRUNC(x, 'MM')`` 拆开就是非法表达式，必须原样保留。
-    """
-
-    def _replace(match: re.Match[str]) -> str:
-        text = match.group(0)
-        if text.startswith("'"):
-            return text
-        return f"({match.group(1)})"
-
-    return _TRUNC_CALL.sub(_replace, expr)
 
 
 def _scanOutsideQuotes(text: str) -> Iterator[tuple[int, str, int]]:
@@ -240,19 +219,20 @@ def _parseAggSide(side: str) -> tuple[str, str] | None:
 
 
 def _normalizeExpr(expr: str) -> str:
-    return unwrapTrunc(stripAliases(expr)).strip()
+    """派生表达式只去首尾空白：**保留**别名限定与 ``TRUNC`` 等语义。
+
+    2026-11-11 复审实测：去掉 ``O.``/``P.`` 会把 ``O.UNIT_PRICE - P.UNIT_PRICE``
+    压成 ``UNIT_PRICE - UNIT_PRICE``（恒 0）；去掉 TRUNC 会改变取整语义。
+    列集合由 :func:`_columnTokens` 单独净化，不靠改写表达式。
+    """
+    return expr.strip()
 
 
 def _columnTokens(expression: str) -> set[str]:
-    """列名候选：先屏蔽字符串字面量，再剔除函数调用名（``NVL``/``TRUNC``…）。
-
-    ``extractSqlIdentifiers`` 刻意宽松（文档写明「只判声明 ⊆ 实际方向」），
-    直接反向求差会把 ``'FAIL'``、``NVL`` 当成缺列 ⇒ 误拒。这里先做最小净化，
-    仍是**严格子集**校验（不猜列名）。
+    """物理列候选：去别名前缀、屏蔽字面量、剔除函数名（见
+    :func:`measureColumnIdentifiers`）。只做**严格子集**校验（不猜列名）。
     """
-    masked = _STRING_LITERAL_RE.sub("''", expression)
-    withoutCalls = _FUNCTION_CALL_NAME.sub(" ", masked)
-    return extractSqlIdentifiers(withoutCalls)
+    return measureColumnIdentifiers(expression)
 
 
 def _assertPhysical(
@@ -553,16 +533,29 @@ def planNormalizations(
     kpis: Sequence[KpiCatalog],
     metrics_by_id: Mapping[int, OntologyMetric],
     class_columns_by_metric: Mapping[int, frozenset[str]],
-) -> list[NormalizationPlan]:
-    """批量计划：保持输入顺序（报告可对照），单条失败即整体失败。"""
-    return [
-        deriveNormalization(
-            kpi,
-            metrics_by_id.get(kpi.metric_id) if kpi.metric_id is not None else None,
-            class_columns_by_metric.get(kpi.metric_id, frozenset()),
+) -> tuple[list[NormalizationPlan], list[str]]:
+    """批量计划：保持输入顺序（报告可对照），单条失败即整体失败。
+
+    返回 ``(plans, skipped_codes)``。``metric_id`` 为空的 KPI 是**合法的草稿**
+    （``KpiCatalogCreate.metric_id`` 可空、``status`` 默认 DRAFT），跳过并返回，
+    由调用方显式打印 —— 一条草稿不该让整个运维工具（含 dry-run）不可用。
+    ``metric_id`` 非空但库里找不到对应 metric 属数据损坏，仍走
+    :func:`deriveNormalization` 抛错（不静默跳过）。
+    """
+    plans: list[NormalizationPlan] = []
+    skipped: list[str] = []
+    for kpi in kpis:
+        if kpi.metric_id is None:
+            skipped.append(str(kpi.kpi_code))
+            continue
+        plans.append(
+            deriveNormalization(
+                kpi,
+                metrics_by_id.get(kpi.metric_id),
+                class_columns_by_metric.get(kpi.metric_id, frozenset()),
+            )
         )
-        for kpi in kpis
-    ]
+    return plans, skipped
 
 
 __all__ = [
@@ -577,5 +570,4 @@ __all__ = [
     "planNormalizations",
     "splitTopLevelDivision",
     "stripAliases",
-    "unwrapTrunc",
 ]

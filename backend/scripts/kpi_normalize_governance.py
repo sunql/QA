@@ -44,7 +44,6 @@ from app.services.kpi_governance_normalizer import (
     planNormalizations,
     splitTopLevelDivision,
     stripAliases,
-    unwrapTrunc,
 )
 from app.services.kpi_metric_reconcile import VERDICT_MISMATCH, reconcileMetric
 from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
@@ -174,11 +173,15 @@ async def _main(argv: Sequence[str] | None = None) -> int:
             print(f"target: {maskDsn(args.database_url)} database={dbName}")
             kpis, metrics, classColumns = await loadSnapshot(session)
             try:
-                plans = planNormalizations(kpis, metrics, classColumns)
+                plans, skipped = planNormalizations(kpis, metrics, classColumns)
             except NormalizationError as exc:
                 print(f"[refused] {exc}", file=sys.stderr)
                 return _EXIT_DERIVATION_ERROR
+            for code in skipped:
+                print(f"[skip] {code}: 未挂靠 ontology_metric（草稿），不参与规范化")
             print(renderReport(plans))
+            if skipped:
+                print(f"skipped: {len(skipped)} 条未挂靠 metric 的 KPI（见上方 [skip] 行）")
             if any(plan.verdict_after == "mismatch" for plan in plans):
                 print(
                     "[refused] 目标状态仍有 mismatch，拒绝继续（见上方 findings）",
@@ -430,7 +433,6 @@ __all__ = [
     "renderReport",
     "splitTopLevelDivision",
     "stripAliases",
-    "unwrapTrunc",
 ]
 
 

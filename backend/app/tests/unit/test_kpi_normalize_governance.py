@@ -15,12 +15,12 @@ from __future__ import annotations
 import pytest
 
 from app.domain.models import KpiCatalog, OntologyMetric
+from app.services.kpi_governance_normalizer import _assertPhysical
 from app.services.kpi_metric_reconcile import (
     GovernanceSpec,
     reconcileMetric,
 )
 from app.services.kpi_metric_spec import techniqueOf
-from app.services.kpi_governance_normalizer import _assertPhysical
 from scripts.kpi_normalize_governance import (
     NormalizationError,
     deriveNormalization,
@@ -28,7 +28,6 @@ from scripts.kpi_normalize_governance import (
     renderReport,
     splitTopLevelDivision,
     stripAliases,
-    unwrapTrunc,
 )
 
 _OTD_FORMULA = (
@@ -55,7 +54,7 @@ def _kpi(
     num: list[str] | None = None,
     den: list[str] | None = None,
     grain: list[str] | None = None,
-    metric_id: int = 1,
+    metric_id: int | None = 1,
 ) -> KpiCatalog:
     return KpiCatalog(
         kpi_code=code,
@@ -124,7 +123,7 @@ def test_measure_json_drives_governance_columns() -> None:
 
 
 def test_measure_metric_derives_numerator_measure_from_formula() -> None:
-    """MEASURE 缺 measure：外层聚合 + 去别名/拆 TRUNC ⇒ 可对账的结构化度量。"""
+    """MEASURE 缺 measure：外层聚合 ⇒ 可对账的结构化度量（表达式原样保留语义）。"""
     plan = deriveNormalization(
         _kpi(
             "KPI_PURCHASE_CYCLE_TIME",
@@ -141,9 +140,11 @@ def test_measure_metric_derives_numerator_measure_from_formula() -> None:
     )
 
     assert plan.basis == "formula_split_measure"
+    # 别名与 TRUNC 必须原样保留：去掉别名会把 `R.RECEIPT_DATE` / `L.CREATION_DATE`
+    # 压成同一个列名，去掉 TRUNC 会改变取整语义 —— 落库的表达式必须可执行。
     assert plan.numerator_measure == {
         "agg": "AVG",
-        "expr": "(RECEIPT_DATE) - (CREATION_DATE)",
+        "expr": "TRUNC(R.RECEIPT_DATE) - TRUNC(L.CREATION_DATE)",
     }
     assert plan.numerator_columns == ("CREATION_DATE", "RECEIPT_DATE")
     assert plan.denominator_columns == ()
@@ -170,8 +171,13 @@ def test_ratio_without_measures_splits_top_level_division() -> None:
     )
 
     assert plan.basis == "formula_split_ratio"
-    assert plan.numerator_measure == {"agg": "AVG", "expr": "(UNIT_PRICE - UNIT_PRICE)"}
-    assert plan.denominator_measure == {"agg": "AVG", "expr": "NULLIF(UNIT_PRICE, 0)"}
+    # 反假绿：`O.UNIT_PRICE - P.UNIT_PRICE` 去掉别名会退化成 `UNIT_PRICE - UNIT_PRICE`
+    # （恒等于 0）。表达式必须保留限定名，列集合仍只含物理列。
+    assert plan.numerator_measure == {
+        "agg": "AVG",
+        "expr": "(O.UNIT_PRICE - P.UNIT_PRICE)",
+    }
+    assert plan.denominator_measure == {"agg": "AVG", "expr": "NULLIF(P.UNIT_PRICE, 0)"}
     assert plan.numerator_columns == ("UNIT_PRICE",)
     assert plan.denominator_columns == ("UNIT_PRICE",)
     assert plan.verdict_after == "pass"
@@ -322,13 +328,40 @@ def test_plan_normalizations_keeps_input_order_and_report_counts() -> None:
     otd.metric_id = 1
     defect.metric_id = 2
 
-    plans = planNormalizations([otd, defect], metrics, class_cols)
+    plans, skipped = planNormalizations([otd, defect], metrics, class_cols)
     assert [p.kpi_code for p in plans] == ["KPI_SUPPLIER_OTD", "KPI_SUPPLIER_DEFECT_RATE"]
+    assert skipped == []
 
     report = renderReport(plans)
     assert "summary: pass=1 unknown=1 mismatch=0" in report
     assert "KPI_SUPPLIER_OTD" in report
     assert "KPI_SUPPLIER_DEFECT_RATE" in report
+
+
+def test_plan_normalizations_skips_unlinked_draft_kpi() -> None:
+    """未挂靠 metric 的草稿 KPI 跳过并报告，**不得**让整批（含 dry-run）失败。
+
+    ``KpiCatalogCreate.metric_id`` 可空、``status`` 默认 DRAFT ⇒ 生产库必然
+    存在这类行；它们是合法的「待挂靠」状态，不是工具缺陷。
+    """
+    linked = _kpi("KPI_LINKED", num=["QTY"], metric_id=1)
+    draft = _kpi("KPI_DRAFT", num=[], metric_id=None)
+    metrics = {
+        1: _metric(
+            metric_type="MEASURE",
+            source="ESCAPE_HATCH",
+            formula="SELECT SUM(QTY) FROM T",
+            num={"agg": "SUM", "expr": "QTY"},
+            grain=["SUPPLIER_CODE"],
+        )
+    }
+
+    plans, skipped = planNormalizations(
+        [linked, draft], metrics, {1: frozenset({"QTY"})}
+    )
+
+    assert [p.kpi_code for p in plans] == ["KPI_LINKED"]
+    assert skipped == ["KPI_DRAFT"]
 
 
 # ---------------------------------------------------------------------------
@@ -341,13 +374,6 @@ def test_alias_stripping_preserves_string_literals() -> None:
     expr = "CASE WHEN R.STATUS = 'N.A' THEN R.QTY END"
 
     assert stripAliases(expr) == "CASE WHEN STATUS = 'N.A' THEN QTY END"
-
-
-def test_trunc_with_format_argument_is_not_unwrapped() -> None:
-    """`TRUNC(x, 'MM')` 两参形式不能拆成 `(x, 'MM')`（非法表达式）。"""
-    expr = "TRUNC(R.ORDER_DATE, 'MM')"
-
-    assert unwrapTrunc(expr) == expr
 
 
 def test_split_top_level_division_ignores_literal_slash() -> None:
@@ -395,9 +421,10 @@ def test_partial_ratio_preserves_existing_measure_json() -> None:
     )
 
     assert plan.numerator_measure is None  # 已有侧不重写，保留 filter/class_id
+    # 派生侧保留公式里的限定名（`O.`），不压成裸列名。
     assert plan.denominator_measure == {
         "agg": "COUNT",
-        "expr": "PROMISED_RECEIPT_DATE",
+        "expr": "O.PROMISED_RECEIPT_DATE",
     }
     assert plan.verdict_after == "pass"
 

@@ -287,7 +287,8 @@ async def _matchKpiCodes(
 
     先 ensureFresh：缓存冷/脏/过期时重建（否则语义匹配静默失效 ⇒ 契约永远注不进）。
     兜底失败**降级而非抛**：缓存是加速器，不是正确性依赖。
-    ``strict=True``（诊断接口）：不降级，故障原样抛出。
+    ``strict=True``：不降级，故障原样抛出。当前唯一诊断入口总是自带 ``codes``，
+    不会走到这里；该分支是给「需要诊断匹配本身」的调用方保留的。
     """
     if not question or not question.strip():
         return []

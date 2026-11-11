@@ -1,0 +1,58 @@
+=== MUTATION 1: executor-side _assert_read_only(formula) removed ===
+formula = '', reason = 'formula_not_read_only'
+
+    @pytest.mark.parametrize(
+        ("formula", "reason"),
+        [
+            ("DELETE FROM t", "formula_not_read_only"),
+            ("INSERT INTO t VALUES (1)", "formula_not_read_only"),
+            ("", "formula_not_read_only"),
+        ],
+    )
+    async def test_non_readonly_matrix(formula: str, reason: str) -> None:
+        adapter = _StubAdapter(rows=[{"x": 1}])
+        svc = KpiExecutionService(adapterProvider=lambda _i, _d: adapter)
+        result = await svc.execute(
+            formula=formula, datasourceId=1, datasource=object(),
+            metricCode="KPI_X", metricName="x", confidence=1.0,
+        )
+>       assert result.ok is False and result.reason == reason
+E       AssertionError: assert (True is False)
+E        +  where True = KpiExecutionResult(ok=True, rows=({'x': 1},), value=1, rowCount=1, truncated=False, elapsedMs=0, reason=None).ok
+
+app/tests/unit/test_kpi_execution_service.py:158: AssertionError
+---------------------------- Captured log teardown -----------------------------
+WARNING  app.services.evidence_record_service:evidence_record_service.py:179 evidence 落库失败 session_id=None sql=: Multiple exceptions: [Errno 61] Connect call failed ('::1', 5432, 0, 0), [Errno 61] Connect call failed ('127.0.0.1', 5432)
+=========================== short test summary info ============================
+FAILED app/tests/unit/test_kpi_execution_service.py::test_non_readonly_formula_is_rejected_before_adapter
+FAILED app/tests/unit/test_kpi_execution_service.py::test_non_readonly_matrix[DELETE FROM t-formula_not_read_only]
+FAILED app/tests/unit/test_kpi_execution_service.py::test_non_readonly_matrix[INSERT INTO t VALUES (1)-formula_not_read_only]
+FAILED app/tests/unit/test_kpi_execution_service.py::test_non_readonly_matrix[-formula_not_read_only]
+4 failed, 9 passed in 4.48s
+
+=== MUTATION 2: except TimeoutError folded into except Exception ===
+            formula="SELECT 1", datasourceId=1, datasource=object(),
+            metricCode="KPI_X", metricName="x", confidence=1.0,
+        )
+>       assert result.ok is False and result.reason == "execution_timeout"
+E       AssertionError: assert (False is False and 'execution_error' == 'execution_timeout'
+E        +  where False = KpiExecutionResult(ok=False, rows=(), value=None, rowCount=0, truncated=False, elapsedMs=1, reason='execution_error').ok
+E         
+E         - execution_timeout
+E         ?           ---  ^^
+E         + execution_error
+E         ?            ++ ^)
+
+app/tests/unit/test_kpi_execution_service.py:70: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.kpi_execution_service:kpi_execution_service.py:165 TierA 执行失败 kpi=KPI_X datasource_id=1 elapsed_ms=0
+Traceback (most recent call last):
+  File "/private/tmp/qa-kpi-p2/backend/app/services/kpi_execution_service.py", line 163, in execute
+    raw = await adapter.execute_read_only(formula, maxRows=rowLimit + 1)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/qa-kpi-p2/backend/app/tests/unit/test_kpi_execution_service.py", line 22, in execute_read_only
+    raise self.exc
+TimeoutError: t
+=========================== short test summary info ============================
+FAILED app/tests/unit/test_kpi_execution_service.py::test_adapter_timeout_degrades
+1 failed, 12 passed in 4.50s

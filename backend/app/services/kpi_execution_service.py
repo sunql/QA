@@ -6,7 +6,22 @@
 
 from __future__ import annotations
 
+import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
+
+from app.domain.exceptions import SqlSafetyError
+from app.domain.models import DataSource
+from app.infrastructure.business_db_pool import (
+    BusinessDbAdapter,
+    _assert_read_only,
+    get_adapter,
+)
+from app.services.evidence_record_service import scheduleMetricResultEvidence
+
+logger = logging.getLogger(__name__)
 
 TIER_A = "A"
 TIER_B = "B"
@@ -72,3 +87,133 @@ def planKpiExecution(
     if not tier_a_eligible:
         return KpiExecutionPlan(TIER_B, REASON_RECONCILE_NOT_ELIGIBLE)
     return KpiExecutionPlan(TIER_A)
+
+
+# =============================================================================
+# Tier A 确定性执行器
+# =============================================================================
+
+KPI_RESULT_ROW_LIMIT = 1000
+
+REASON_FORMULA_NOT_READ_ONLY = "formula_not_read_only"
+REASON_EXECUTION_TIMEOUT = "execution_timeout"
+REASON_EXECUTION_ERROR = "execution_error"
+REASON_EMPTY_RESULT = "empty_result"
+
+AdapterProvider = Callable[[int, Any], BusinessDbAdapter]
+
+
+@dataclass(frozen=True)
+class KpiExecutionResult:
+    ok: bool
+    rows: tuple[dict[str, Any], ...] = ()
+    value: Any | None = None
+    rowCount: int = 0
+    truncated: bool = False
+    elapsedMs: int = 0
+    reason: str | None = None
+
+
+def firstPresentValue(rows: tuple[dict[str, Any], ...] | list[dict[str, Any]]) -> Any | None:
+    """首行第一个非 None 值（KPI 结果读值的唯一口径）。"""
+    if not rows:
+        return None
+    return next((v for v in rows[0].values() if v is not None), None)
+
+
+class KpiExecutionService:
+    """执行 metric.formula：只读校验 → adapter（超时/行数由 adapter 兜底）→ 归一化。"""
+
+    def __init__(
+        self,
+        *,
+        adapterProvider: AdapterProvider | None = None,
+        evidenceScheduler: Callable[..., Any] = scheduleMetricResultEvidence,
+    ) -> None:
+        self._adapterProvider = adapterProvider or get_adapter
+        self._evidenceScheduler = evidenceScheduler
+
+    async def execute(
+        self,
+        *,
+        formula: str,
+        datasourceId: int,
+        datasource: DataSource,
+        metricCode: str,
+        metricName: str,
+        confidence: float,
+        rowLimit: int = KPI_RESULT_ROW_LIMIT,
+    ) -> KpiExecutionResult:
+        try:
+            _assert_read_only(formula)  # 执行器侧第一道；adapter 内部还会再验
+        except SqlSafetyError:
+            logger.warning(
+                "TierA formula 未通过只读校验 kpi=%s datasource_id=%s",
+                metricCode, datasourceId, exc_info=True,
+            )
+            return KpiExecutionResult(ok=False, reason=REASON_FORMULA_NOT_READ_ONLY)
+
+        started = time.monotonic()
+        adapter = self._adapterProvider(datasourceId, datasource)
+        try:
+            # 多取 1 行用于**精确**判断截断（len==rowLimit 不代表被截断）。
+            # QUERY_ROW_LIMIT 默认 0（不限行），故 rowLimit + 1 的取数是精确的；
+            # 若运维把 QUERY_ROW_LIMIT 配到 rowLimit 或更小，adapter 会先按配置
+            # 截断，此时截断可能被少报（under-reported）。
+            raw = await adapter.execute_read_only(formula, maxRows=rowLimit + 1)
+        except TimeoutError:
+            logger.warning(
+                "TierA 执行超时 kpi=%s datasource_id=%s elapsed_ms=%d",
+                metricCode, datasourceId, _elapsedMs(started), exc_info=True,
+            )
+            return KpiExecutionResult(
+                ok=False, elapsedMs=_elapsedMs(started), reason=REASON_EXECUTION_TIMEOUT
+            )
+        except Exception:
+            logger.warning(
+                "TierA 执行失败 kpi=%s datasource_id=%s elapsed_ms=%d",
+                metricCode, datasourceId, _elapsedMs(started), exc_info=True,
+            )
+            return KpiExecutionResult(
+                ok=False, elapsedMs=_elapsedMs(started), reason=REASON_EXECUTION_ERROR
+            )
+
+        fetched = tuple(dict(r) for r in (raw or []))
+        truncated = len(fetched) > rowLimit
+        rows = fetched[:rowLimit] if truncated else fetched
+        elapsed = _elapsedMs(started)
+        value = firstPresentValue(rows)
+        if not rows or value is None:
+            logger.warning(
+                "TierA 空结果 kpi=%s datasource_id=%s rows=%d elapsed_ms=%d",
+                metricCode, datasourceId, len(rows), elapsed,
+            )
+            return KpiExecutionResult(
+                ok=False, rows=rows, rowCount=len(rows), elapsedMs=elapsed,
+                reason=REASON_EMPTY_RESULT,
+            )
+
+        result = KpiExecutionResult(
+            ok=True, rows=rows, value=value, rowCount=len(rows), truncated=truncated,
+            elapsedMs=elapsed,
+        )
+        logger.info(
+            "TierA 执行成功 kpi=%s datasource_id=%s rows=%d elapsed_ms=%d truncated=%s",
+            metricCode, datasourceId, len(rows), elapsed, truncated,
+        )
+        self._scheduleEvidence(
+            metricCode=metricCode, metricName=metricName, confidence=confidence,
+            rows=rows, datasourceId=datasourceId,
+        )
+        return result
+
+    def _scheduleEvidence(self, **kwargs: Any) -> None:
+        """METRIC_RESULT best-effort：调度失败只 warning，不影响主链路。"""
+        try:
+            self._evidenceScheduler(**kwargs)
+        except Exception:
+            logger.warning("TierA METRIC_RESULT 证据调度失败（忽略）", exc_info=True)
+
+
+def _elapsedMs(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)

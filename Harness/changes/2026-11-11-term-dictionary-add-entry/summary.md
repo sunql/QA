@@ -45,7 +45,22 @@
 - 本地重建 frontend 镜像后经 nginx 冒烟（admin）：`POST /api/v1/term-dictionary` **201** →
   列表可见 → `DELETE` **204**；构建产物包含 `新增` 文案
 
-## 4. 明确未做的事
+## 4. CI 闸门取证（退出码 5：净丢失 1 条，判为基线侧 flake）
+
+- 基线 run `42888578074`（head `851d6049`）：失败 **143** 条；
+  PR run `42930057960`（head `b180ccf5`）：失败 **142** 条 ⇒ 净新增 **0** / 净丢失 **1**。
+- 净丢失用例：`app/tests/integration/test_seed_feature_rules.py::test_seed_risk_score_has_3_tiers`
+  （前后端代码在本 PR 中零改动）。三件套证伪：
+
+| 证据 | 结果 |
+|---|---|
+| ① PR 侧真跑且通过 | 同一 job（`Backend / integration shard 0`）汇总：基线 `34 failed, 694 passed` → PR `33 failed, 695 passed`，不多不少正好这一条由失败转通过 |
+| ② 同代码不同结论 | 基线 head `851d6049` 正是本 PR 的 main 底座；`git diff origin/main...HEAD` 只含 4 个前端组件/i18n 文件 + 测试 + 本文档，无任何后端改动 |
+| ③ 本批碰不到它 | 基线失败原因是 `MissingGreenlet`（lazy load `rule.thresholds` 在异步会话外触发），属会话态相关的非确定性失败；diff 与该文件、`seedFeatureRules`、lazy-load 机制均无关 |
+
+⇒ 判「基线侧 flake」，非把失败藏起来。
+
+## 5. 明确未做的事
 
 - 未动后端（写路由已是 `requireAdmin`，见 `fix-governance-write-gate`）。
 - 未把「新增」入口放到抽屉的工具栏外（如表格上方），未改权限模型。

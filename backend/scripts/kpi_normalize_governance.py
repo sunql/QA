@@ -26,7 +26,7 @@ from pathlib import Path
 # 要么被 editable 安装的 .pth 引到**主仓**的旧副本（本项目已知的遮蔽陷阱）。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import select, text  # noqa: E402
+from sqlalchemy import select, text, update  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.domain.models import (
@@ -45,6 +45,8 @@ from app.services.kpi_governance_normalizer import (
     stripAliases,
     unwrapTrunc,
 )
+from app.services.kpi_metric_reconcile import VERDICT_MISMATCH, reconcileMetric
+from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
 from scripts.kpi_metric_db_guard import assertSafeTarget, maskDsn
 
 _EXIT_TARGET_MISMATCH = 1
@@ -181,21 +183,126 @@ async def _main(argv: Sequence[str] | None = None) -> int:
                 print("dry-run：未写库（加 --apply 落库）")
                 return 0
             try:
-                await applyPlans(session, plans)
+                changed = await applyPlans(session, plans)
             except NormalizationError as exc:
-                print(f"[refused] 落库前复核失败：{exc}", file=sys.stderr)
+                print(f"[refused] 落库复核失败（已回滚）：{exc}", file=sys.stderr)
                 return _EXIT_DERIVATION_ERROR
-            print("applied：已写入 kpi_catalog / ontology_metric")
+            print(f"applied：{changed} 条变更已写入 kpi_catalog / ontology_metric")
             return 0
     finally:
         await engine.dispose()
 
 
-async def applyPlans(
+def _sortedColumns(values: Sequence[str] | None) -> tuple[str, ...]:
+    return tuple(sorted(str(v).strip().upper() for v in (values or ()) if str(v).strip()))
+
+
+async def _verifyApplied(
     session: AsyncSession, plans: Sequence[NormalizationPlan]
 ) -> None:
-    """按计划落库（D3 实现）；调用方须先确认目标无 mismatch。"""
-    raise NotImplementedError("D3 实现")
+    """落库后**读回复核**：值必须等于目标，且重跑对账不得出现 mismatch。
+
+    只信「写成功」不够：JSONB 反序列化、触发器、类型转换都可能改写值。
+    """
+    session.expire_all()
+    codes = [plan.kpi_code for plan in plans]
+    rows = (
+        await session.execute(
+            select(KpiCatalog)
+            .where(KpiCatalog.kpi_code.in_(codes))
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    byCode = {row.kpi_code: row for row in rows}
+    for plan in plans:
+        kpi = byCode.get(plan.kpi_code)
+        if kpi is None:
+            raise NormalizationError(f"{plan.kpi_code}: 落库后读不到 KPI 行")
+        if _sortedColumns(kpi.numerator_columns) != plan.numerator_columns:
+            raise NormalizationError(f"{plan.kpi_code}: 分子列落库值与目标不一致")
+        if _sortedColumns(kpi.denominator_columns) != plan.denominator_columns:
+            raise NormalizationError(f"{plan.kpi_code}: 分母列落库值与目标不一致")
+        if _sortedColumns(kpi.grain_keys) != plan.grain_keys:
+            raise NormalizationError(f"{plan.kpi_code}: 粒度键落库值与目标不一致")
+        metric = (
+            await session.get(
+                OntologyMetric, plan.metric_id, populate_existing=True
+            )
+            if plan.metric_id is not None
+            else None
+        )
+        if metric is None:
+            raise NormalizationError(f"{plan.kpi_code}: 落库后读不到 ontology_metric")
+        for field, expected in (
+            ("numerator_measure", plan.numerator_measure),
+            ("denominator_measure", plan.denominator_measure),
+        ):
+            if expected is not None and getattr(metric, field) != expected:
+                raise NormalizationError(f"{plan.kpi_code}: {field} 落库值与目标不一致")
+        result = reconcileMetric(governanceSpecOf(kpi), techniqueOf(metric))
+        if result.verdict == VERDICT_MISMATCH:
+            raise NormalizationError(
+                f"{plan.kpi_code}: 落库后对账仍 mismatch：{list(result.reasons())}"
+            )
+
+
+async def applyPlans(
+    session: AsyncSession, plans: Sequence[NormalizationPlan]
+) -> int:
+    """按计划落库并复核；返回实际变更的 KPI 条数。
+
+    单事务：任一条失败（更新行数 ≠ 1 / 复核不一致 / 仍 mismatch）⇒ 全部回滚。
+    ``is_noop`` 的条目跳过，所以重跑不会产生无意义写入。
+    """
+    mismatched = [plan.kpi_code for plan in plans if plan.verdict_after == "mismatch"]
+    if mismatched:
+        raise NormalizationError(
+            f"目标状态仍有 mismatch，拒绝写库：{', '.join(mismatched)}"
+        )
+    pending = [plan for plan in plans if not plan.is_noop]
+    if not pending:
+        return 0
+    try:
+        for plan in pending:
+            result = await session.execute(
+                update(KpiCatalog)
+                .where(KpiCatalog.kpi_code == plan.kpi_code)
+                .values(
+                    numerator_columns=list(plan.numerator_columns),
+                    denominator_columns=list(plan.denominator_columns),
+                    grain_keys=list(plan.grain_keys),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount != 1:
+                raise NormalizationError(
+                    f"{plan.kpi_code}: 更新行数 {result.rowcount} ≠ 1，拒绝继续"
+                )
+            if plan.numerator_measure is None and plan.denominator_measure is None:
+                continue
+            measureValues: dict[str, object] = {}
+            if plan.numerator_measure is not None:
+                measureValues["numerator_measure"] = plan.numerator_measure
+            if plan.denominator_measure is not None:
+                measureValues["denominator_measure"] = plan.denominator_measure
+            if plan.metric_id is None:
+                raise NormalizationError(f"{plan.kpi_code}: 缺 metric_id，无法写度量")
+            result = await session.execute(
+                update(OntologyMetric)
+                .where(OntologyMetric.id == plan.metric_id)
+                .values(**measureValues)
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount != 1:
+                raise NormalizationError(
+                    f"{plan.kpi_code}: metric 更新行数 {result.rowcount} ≠ 1，拒绝继续"
+                )
+        await _verifyApplied(session, pending)
+    except NormalizationError:
+        await session.rollback()
+        raise
+    await session.commit()
+    return len(pending)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

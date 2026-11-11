@@ -3194,9 +3194,10 @@ export const zhCN = {
 
   routingMetrics: {
     title: "路由分层指标",
-    subtitle: "L1/L2/L4 各层命中率、延迟与 Token 成本（L3 已废弃，多步记 L2）",
+    subtitle: "L1/L1C/L2/L4 各层命中率、延迟与 Token 成本（L3 已废弃，多步记 L2；L1C = KPI 歧义澄清）",
     layer: {
       L1: "L1 语义匹配",
+      L1C: "L1C KPI 歧义澄清",
       L2: "L2 LLM NL2SQL（含多步拆解）",
       L4: "L4 Agent Loop",
     },

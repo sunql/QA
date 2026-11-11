@@ -34,7 +34,10 @@ from app.services import kpi_contract_builder as builder_module
 from app.services.chat_service import ChatService
 from app.services.kpi_contract_builder import buildKpiContractBlock
 from app.services.kpi_match_cache import kpi_match_cache
-from app.services.kpi_metric_switches import SWITCH_CONTRACT_INJECTION
+from app.services.kpi_metric_switches import (
+    SWITCH_CONTRACT_INJECTION,
+    SWITCH_MATCH_CONTAINMENT,
+)
 from app.services.nl2sql_dialects import resolveDialect
 from app.services.nl2sql_prompts import _buildPlanSystemPrompt
 from app.services.nl2sql_service import Nl2SqlService
@@ -146,6 +149,7 @@ async def _seedKpi(
     numeratorColumns: list[str] | None = None,
     grainKeys: list[str] | None = None,
     keywords: list[str] | None = None,
+    matchThreshold: Decimal | None = None,
 ) -> KpiCatalog:
     """落一条 KPI（治理侧结构化列可选 —— 留空即对账 unknown，仍可注入）。"""
     kpi = KpiCatalog(
@@ -166,7 +170,9 @@ async def _seedKpi(
         numerator_columns=numeratorColumns,
         grain_keys=grainKeys,
         semantic_keywords=keywords or [name],
-        match_threshold=Decimal("0.10"),
+        match_threshold=(
+            matchThreshold if matchThreshold is not None else Decimal("0.10")
+        ),
     )
     dbSession.add(kpi)
     await dbSession.commit()
@@ -458,6 +464,90 @@ async def test_build_contract_block_omits_ratio_guidance_for_measure_type(
     assert "AVG(分子/分母)" not in block
     # 残留值本身仍如实呈现（不隐藏事实，只是不据此发指引）
     assert "聚合阶：WEIGHTED_RATIO" in block
+
+
+# ---------------------------------------------------------------------------
+# 6. 匹配器 v2（包含式）在 B3 注入面的分支
+# ---------------------------------------------------------------------------
+
+
+async def _seedAmbiguousPair(dbSession: AsyncSession) -> None:
+    """两个等长短语并列的 KPI，各自挂指标 ⇒ 若被注入，块必非空。
+
+    ``matchThreshold=0`` 是**判别点**：v1 Jaccard 也会命中这两个 KPI
+    （0.045 ≥ 0），所以「块为空」只可能来自 v2 的歧义短路，而不是「本来就没命中」。
+    """
+    for suffix, name, keyword in (
+        ("A", "供应商交付率", "交付率"),
+        ("B", "供应商逾期率", "逾期率"),
+    ):
+        metric = await _seedRatioMetric(dbSession, name=f"v2-指标{suffix}")
+        await _seedKpi(
+            dbSession,
+            code=f"KPI_V2_AMB_{suffix}",
+            name=name,
+            metricId=metric.id,
+            keywords=[keyword],
+            matchThreshold=Decimal("0"),
+        )
+
+
+async def _warmV2Cache(dbSession: AsyncSession) -> None:
+    dbSession.add(SystemConfig(key=SWITCH_MATCH_CONTAINMENT, value="true"))
+    await dbSession.commit()
+    kpi_match_cache.onKpiChanged()
+    await kpi_match_cache.warmUp(dbSession)
+
+
+async def test_match_kpi_codes_v2_ambiguous_returns_empty(
+    dbSession: AsyncSession,
+) -> None:
+    """v2 等长并列 ⇒ 不返回任何 code（不替用户选指标）。"""
+    await _seedAmbiguousPair(dbSession)
+    await _warmV2Cache(dbSession)
+    try:
+        codes = await builder_module._matchKpiCodes(
+            dbSession, "交付率和逾期率分别是多少", 3
+        )
+    finally:
+        kpi_match_cache.onKpiChanged(None)
+
+    assert codes == []
+
+
+async def test_build_contract_block_v2_ambiguity_injects_nothing(
+    dbSession: AsyncSession,
+) -> None:
+    """v2 歧义 ⇒ 契约块为空，两条口径都不进 prompt。"""
+    await _seedAmbiguousPair(dbSession)
+    await _warmV2Cache(dbSession)
+    try:
+        block = await buildKpiContractBlock(dbSession, "交付率和逾期率分别是多少")
+    finally:
+        kpi_match_cache.onKpiChanged(None)
+
+    assert block == ""
+
+
+async def test_build_contract_block_v2_containment_hit_injects(
+    dbSession: AsyncSession,
+) -> None:
+    """v2 唯一包含式命中 ⇒ 照常注入（开关开启不是「一律不注入」）。"""
+    metric = await _seedRatioMetric(dbSession, name="供应商准时交付率")
+    await _seedKpi(
+        dbSession,
+        code="KPI_V2_HIT",
+        name="供应商准时交付率",
+        metricId=metric.id,
+        keywords=["准时交付"],
+    )
+    await _warmV2Cache(dbSession)
+    try:
+        block = await buildKpiContractBlock(dbSession, "供应商准时交付率是多少")
+    finally:
+        kpi_match_cache.onKpiChanged(None)
+
+    assert "KPI_V2_HIT" in block
 
 
 # ── F1：DB 级失败必须被 savepoint 隔离（不得把 chat session 打成 failed 态） ──

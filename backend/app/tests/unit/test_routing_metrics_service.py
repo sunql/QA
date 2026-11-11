@@ -63,7 +63,7 @@ async def test_layer_distribution_aggregates_correctly(seeded_messages):
     )
 
     assert snapshot.total_queries == 8  # 4 layers * 2 messages
-    assert len(snapshot.layer_distribution) == 4
+    assert len(snapshot.layer_distribution) == 5
     by_layer = {m.layer: m for m in snapshot.layer_distribution}
     assert by_layer["L1"].hit_count == 2
     assert by_layer["L2"].hit_count == 2
@@ -82,11 +82,39 @@ async def test_snapshot_respects_time_range(seeded_messages):
 
 
 async def test_layer_distribution_sorted_by_layer_name(seeded_messages):
-    """layer_distribution returns layers in L1/L2/L3/L4 order."""
+    """layer_distribution returns layers in L1/L1C/L2/L3/L4 order."""
     service = RoutingMetricsService(seeded_messages)
     snapshot = await service.get_snapshot(since=datetime_now_utc() - timedelta(days=1))
     layers = [m.layer for m in snapshot.layer_distribution]
-    assert layers == ["L1", "L2", "L3", "L4"]
+    assert layers == ["L1", "L1C", "L2", "L3", "L4"]
+
+
+async def test_clarify_layer_is_counted(dbSession):
+    """L1C（KPI 歧义澄清）必须进分布与总数。
+
+    新增路由层若不在 `_ROUTING_LAYERS` 白名单里，该层消息会被静默丢弃 ⇒
+    灰度期「澄清了多少次」不可见，`total_queries` 也与真实请求数对不上。
+    """
+    dbSession.add(SessionMessage(
+        session_id="sess-l1c",
+        role="assistant",
+        content="请确认是哪个指标",
+        question="供应商交付率和逾期率分别是多少",
+        routing_layer="L1C",
+        latency_ms=3,
+        token_cost_usd=0.0,
+        created_time=datetime_now_utc() - timedelta(minutes=5),
+    ))
+    await dbSession.commit()
+
+    snapshot = await RoutingMetricsService(dbSession).get_snapshot(
+        since=datetime_now_utc() - timedelta(days=1)
+    )
+
+    by_layer = {m.layer: m for m in snapshot.layer_distribution}
+    assert "L1C" in by_layer
+    assert by_layer["L1C"].hit_count == 1
+    assert snapshot.total_queries == 1
 
 
 async def test_snapshot_handles_empty_data(dbSession):
@@ -127,10 +155,10 @@ async def test_layer_metric_dataclasses_are_frozen(dbSession):
         snapshot.layer_distribution[0].hit_count = 999
 
 
-async def test_snapshot_includes_all_four_layers_even_when_no_data(dbSession):
-    """Empty data still returns exactly 4 LayerMetric entries (L1-L4)."""
+async def test_snapshot_includes_all_layers_even_when_no_data(dbSession):
+    """Empty data still returns every known layer (L1/L1C/L2/L3/L4)."""
     service = RoutingMetricsService(dbSession)
     snapshot = await service.get_snapshot(since=datetime_now_utc() - timedelta(days=1))
-    assert len(snapshot.layer_distribution) == 4
+    assert len(snapshot.layer_distribution) == 5
     layers = [m.layer for m in snapshot.layer_distribution]
-    assert layers == ["L1", "L2", "L3", "L4"]
+    assert layers == ["L1", "L1C", "L2", "L3", "L4"]

@@ -136,14 +136,23 @@ dev 库 12 条 KPI 实为 5 种形状（加总 / 平均 / 带过滤平均 / 条�
 
 ```
 问句
- ├─ KPI 语义匹配命中？（读配置里的 semantic_keywords）
- │   ├─ 否 ─────────────────────────────────▶ Tier C：NL2SQL 无契约（现状）
- │   └─ 是 → kpi.metric_id → ontology_metric(+sources)
+ ├─ KPI 匹配（灰度开 ⇒ v2 `matchRoute`；灰度关 ⇒ v1 Jaccard `matchAll`）
+ │   ├─ ambiguous（等长跨 KPI 并列）───────────▶ 不注入；chat 反问（L1C，0 LLM、0 token）
+ │   ├─ none（无命中）─────────────────────────▶ Tier C：NL2SQL 无契约（现状）
+ │   └─ hit（唯一命中）→ kpi.metric_id → ontology_metric(+sources)
  │        ├─ metric.status=PUBLISHED ∧ execution_source≠NONE ∧ 对账=pass
  │        │  ∧ 问句无范围/分组/筛选约束        ⇒ **Tier A**（0 LLM 直通）
  │        ├─ metric 有结构化口径，对账 pass|unknown ⇒ **Tier B**（NL2SQL + 契约注入）
  │        └─ metric 缺失 / 对账 mismatch            ⇒ **Tier C**（+ audit 记 drift）
 ```
+
+**匹配器 v2 与开关**（2026-11-11）：短语源 = `kpi_name` + `semantic_keywords` + `metric_alias`；
+CJK 子串命中、纯 ASCII 过词边界；每 KPI 取最长短语、全局最长者胜出；**等长并列必 `ambiguous`，
+不得取 top1**。灰度 = `system_config.KPI_MATCH_CONTAINMENT_ENABLED`（**行缺失即 false**）+
+env 同名杀闸（默认 true）。诊断接口 / B3 注入 / chat 三处共用同一个 `matchRoute` 决策，
+**歧义时三条面都不建块**。生产当前无该行 ⇒ 仍 v1。详见
+[nl2sql-engine](nl2sql-engine.md) 的「匹配器 v2」小节与
+`Harness/changes/2026-11-11-kpi-match-v2/summary.md`。
 
 ### Tier A（确定性直通）
 

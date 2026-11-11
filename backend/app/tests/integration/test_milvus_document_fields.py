@@ -20,6 +20,20 @@ from app.infrastructure.milvus_client import (
 )
 
 
+@pytest.fixture(scope="module", autouse=True)
+def ensureMilvusTestDatabase() -> None:
+    """确保 Milvus 隔离库存在：`qa_ci` 惰性创建，不能靠同分片文件先跑。
+
+    分片归属会随新增 integration 文件而变（排序后下标 mod 4）；落到一个没有任何
+    文件建过库的分片时，`ensureDocumentCollection()` 会撞
+    `database not found[qa_ci]`（PR #119 实证）。理由与实现见
+    `app/tests/milvus_isolation.py` 的 `ensureIsolatedDatabaseForTest`。
+    """
+    from app.tests.milvus_isolation import ensureIsolatedDatabaseForTest
+
+    ensureIsolatedDatabaseForTest()
+
+
 class TestDocumentFields:
     def test_locator_fields_present(self) -> None:
         names = [f.name for f in _documentFields()]

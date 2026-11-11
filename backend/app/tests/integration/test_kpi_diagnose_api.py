@@ -334,6 +334,83 @@ async def test_diagnose_injected_follows_block_membership(
     assert match["injected"] is False
 
 
+async def test_diagnose_reports_ambiguous_and_builds_no_block(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """v2 开启 + 等长跨 KPI ⇒ ambiguous=true，不建契约块（不替用户选指标）。"""
+    from app.services.kpi_metric_switches import SWITCH_MATCH_CONTAINMENT
+
+    await _enableInjectionSwitch(dbSession)
+    dbSession.add(SystemConfig(key=SWITCH_MATCH_CONTAINMENT, value="true"))
+    await dbSession.commit()
+    await _seedKpi(dbSession, "KPI_P1_DIAG_A", metricId=None,
+                   numeratorColumns=[], denominatorColumns=[], grainKeys=[],
+                   keywords=["交付率"])
+    await _seedKpi(dbSession, "KPI_P1_DIAG_B", metricId=None,
+                   numeratorColumns=[], denominatorColumns=[], grainKeys=[],
+                   keywords=["逾期率"])
+    await _warmCache(dbSession)
+
+    resp = await client.get(
+        _DIAGNOSE_URL,
+        params={"question": "交付率和逾期率分别是多少"},
+        headers=_ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ambiguous"] is True
+    assert sorted(m["kpiCode"] for m in body["matches"]) == [
+        "KPI_P1_DIAG_A",
+        "KPI_P1_DIAG_B",
+    ]
+    assert body["injectionBlockEmpty"] is True
+
+
+async def test_diagnose_containment_hit_reports_method(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """唯一包含式命中 ⇒ matchMethod=containment，与 chat 同一路径。"""
+    from app.services.kpi_metric_switches import SWITCH_MATCH_CONTAINMENT
+
+    await _enableInjectionSwitch(dbSession)
+    dbSession.add(SystemConfig(key=SWITCH_MATCH_CONTAINMENT, value="true"))
+    await dbSession.commit()
+    await _seedKpi(dbSession, "KPI_P1_DIAG_C", metricId=None,
+                   numeratorColumns=[], denominatorColumns=[], grainKeys=[],
+                   keywords=["采购周期"])
+    await _warmCache(dbSession)
+
+    resp = await client.get(
+        _DIAGNOSE_URL, params={"question": "采购周期多长"}, headers=_ADMIN_HEADERS
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ambiguous"] is False
+    assert [m["kpiCode"] for m in body["matches"]] == ["KPI_P1_DIAG_C"]
+    assert body["matches"][0]["matchMethod"] == "containment"
+
+
+async def test_diagnose_legacy_when_switch_off(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """灰度关闭 ⇒ 永不澄清（生产当前行为可回退）。"""
+    await _seedKpi(dbSession, "KPI_P1_DIAG_D", metricId=None,
+                   numeratorColumns=[], denominatorColumns=[], grainKeys=[],
+                   keywords=["交付率"])
+    await _seedKpi(dbSession, "KPI_P1_DIAG_E", metricId=None,
+                   numeratorColumns=[], denominatorColumns=[], grainKeys=[],
+                   keywords=["逾期率"])
+    await _warmCache(dbSession)
+
+    resp = await client.get(
+        _DIAGNOSE_URL,
+        params={"question": "交付率和逾期率分别是多少"},
+        headers=_ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ambiguous"] is False
+
+
 async def test_diagnose_no_match_returns_empty_list(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:

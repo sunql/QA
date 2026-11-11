@@ -4,7 +4,8 @@
 
 把「问句 ⇄ KPI ⇄ 技术形态 ⇄ 注入门禁」整条链路摊开给管理员：
 
-- 匹配：``matchAll`` 的 code / confidence / 命中路径（exact_code / keyword）
+- 匹配：v2 的 ``matchRoute``（唯一命中 / 歧义候选 / 无命中）或 v1 的
+  ``matchAll`` 的 code / confidence / 命中路径（exact_code / keyword / containment）
 - 对账：``reconcileMetric`` 的 verdict / degraded / Tier / findings（原因码 + 明细）
 - 注入：总闸状态 + 每条是否注入 + 注入块是否为空
 
@@ -38,7 +39,10 @@ from app.services.kpi_metric_reconcile import (
     reconcileMetric,
 )
 from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
-from app.services.kpi_metric_switches import isKpiContractInjectionEnabled
+from app.services.kpi_metric_switches import (
+    isKpiContractInjectionEnabled,
+    isKpiMatchContainmentEnabled,
+)
 from app.services.kpi_semantic_match_service import getKpiSemanticMatchService
 
 router = APIRouter(prefix="/api/v1/admin/kpi", tags=["admin-kpi"])
@@ -86,6 +90,8 @@ class KpiDiagnoseRead(CamelModel):
     question: str
     injection_enabled: bool
     injection_block_empty: bool
+    # v2 等长跨 KPI 并列 ⇒ True：matches 是候选（不替用户选），块必为空。
+    ambiguous: bool = False
     matches: list[KpiDiagnoseMatch] = Field(default_factory=list)
 
 
@@ -185,16 +191,24 @@ async def diagnoseKpi(
     # 这里**不做 savepoint 兜底**：诊断接口要让缓存/DB 故障暴露（500），
     # 不能像 chat 主流程那样降级成「无命中」。
     await get_kpi_match_cache().ensureFresh(db)
-    matches = await getKpiSemanticMatchService().matchAll(
-        question, limit=KPI_CONTRACT_MAX_KPIS
-    )
+    matcher = getKpiSemanticMatchService()
+    ambiguous = False
+    if await isKpiMatchContainmentEnabled(db):
+        route = await matcher.matchRoute(question)
+        matches = list(route.matches)
+        ambiguous = route.kind == "ambiguous"
+        # 歧义时不建块：matches 仍全量返回（管理员要看候选），但不据此注入。
+        codes = [m.code for m in matches] if route.kind == "hit" else []
+    else:
+        matches = await matcher.matchAll(question, limit=KPI_CONTRACT_MAX_KPIS)
+        codes = [m.code for m in matches]
 
-    # 用同一份匹配结果建块：不重复 matchAll，也不在只读 GET 里写审计
+    # 用同一份匹配结果建块：不重复匹配，也不在只读 GET 里写审计
     # （getDb 不提交 ⇒ 审计只会被回滚并留下误导性 INFO 日志）。
     block, includedCodes = await buildKpiContractBlockWithCodes(
         db,
         question,
-        codes=[match.code for match in matches],
+        codes=codes,
         strict=True,
         recordAudit=False,
     )
@@ -221,5 +235,6 @@ async def diagnoseKpi(
         question=question,
         injection_enabled=injectionEnabled,
         injection_block_empty=not block.strip(),
+        ambiguous=ambiguous,
         matches=diagnosticMatches,
     )

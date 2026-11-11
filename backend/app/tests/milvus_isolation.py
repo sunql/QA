@@ -72,6 +72,21 @@ def ensureIsolatedDatabase(dbName: str) -> None:
         client.close()
 
 
+def ensureIsolatedDatabaseForTest() -> None:
+    """测试用：确保**当前配置**的 Milvus 隔离库存在（幂等）。
+
+    隔离库是惰性创建的（只在首次用到本体清理夹具时建）。CI 分片按「排序后文件
+    下标 mod N」切分 ⇒ 新增一个 integration 文件就会把一部分文件挪到别的分片；
+    落到一个「还没有任何文件建过库」的分片时，直接撞
+    `database not found[qa_ci]`（PR #116、PR #119 实证），在闸门上表现为**净新增
+    失败**（假回归，与本批改动无关）。
+
+    需要 Milvus 的测试文件应挂一个 module 级 autouse 夹具调用本函数，
+    这样文件就与分片归属 / 执行顺序无关。
+    """
+    ensureIsolatedDatabase(getDbName())
+
+
 def dropOntologyCollectionsForTest() -> None:
     """删除并重建 3 个本体集合（idempotent；集合不存在 no-op）。
 

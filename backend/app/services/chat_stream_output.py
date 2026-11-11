@@ -34,8 +34,17 @@ from app.domain.schemas import ChatRequest
 from app.infrastructure.llm.base_client import BaseLlmClient, LlmMessage, StreamChunk
 from app.services.chart_thresholds import loadFullDataThreshold
 from app.services.chat_constants import (
+    ROUTING_LAYER_KPI_CLARIFY,
+    ROUTING_LAYER_L1,
     USAGE_PURPOSE_ANSWER_STREAM_FAILED,
     USAGE_PURPOSE_FALLBACK_ANSWER,
+)
+from app.services.kpi_match_cache import get_kpi_match_cache
+from app.services.kpi_metric_switches import isKpiMatchContainmentEnabled
+from app.services.kpi_semantic_match_service import (
+    KpiMatchResult,
+    KpiMatchRoute,
+    buildKpiClarifyAnswer,
 )
 from app.domain.error_messages import (
     MSG_INTERNAL_ERROR_GENERIC,
@@ -150,7 +159,9 @@ class ChatStreamOutputMixin:
 class PreambleResult(BaseModel):
     """L1/L4 命中后的封装；含生成 SSE 帧所需全部字段。"""
 
-    routing_layer: Literal["L1", "L4"]
+    # "L1C" = KPI 多命中歧义澄清（见 ROUTING_LAYER_KPI_CLARIFY）。Literal 不能用常量，
+    # 故写字面量；str 值由 chat_constants 单点定义，测试锁定两者一致。
+    routing_layer: Literal["L1", "L4", "L1C"]
     answer: str
     chart_type: Any = None  # ChartType | None — avoid import cycle
     chart_option: dict | None = None
@@ -209,6 +220,56 @@ class L1L4PreambleMixin:
     # Subclasses must provide _kpiMatcher (KpiSemanticMatchService)
     _kpiMatcher: Any
 
+    async def _containmentEnabled(self, session: AsyncSession) -> bool:
+        """v2 灰度开关判定（单点，测试可覆写以避免 DB 依赖）。"""
+        return await isKpiMatchContainmentEnabled(session)
+
+    async def _ensureKpiCacheFresh(self, session: AsyncSession) -> None:
+        """v2 匹配前确保缓存新鲜（单点，测试可覆写以避免 DB 依赖）。
+
+        savepoint：``ensureFresh`` 可能写库（TTL 重建），失败不能把 chat 主流程的
+        事务打成 failed 态（后续语句全 PendingRollbackError）。
+        """
+        async with session.begin_nested():
+            await get_kpi_match_cache().ensureFresh(session)
+
+    async def _routeKpi(
+        self, question: str, session: AsyncSession
+    ) -> KpiMatchRoute:
+        """KPI 匹配路由：v2 走 matchRoute（先 ensureFresh），v1 走旧 match()。"""
+        if not await self._containmentEnabled(session):
+            match = await self._kpiMatcher.match(question)
+            if match is None:
+                return KpiMatchRoute(kind="none")
+            return KpiMatchRoute(kind="hit", matches=(match,))
+        await self._ensureKpiCacheFresh(session)
+        return await self._kpiMatcher.matchRoute(question)
+
+    def _buildKpiClarifyPreamble(
+        self, question: str, matches: tuple[KpiMatchResult, ...]
+    ) -> PreambleResult:
+        """多命中 ⇒ 澄清候选（0 LLM、无图表；前端按 intent=clarify 渲染正文）。
+
+        ChatResponse 在这里**延迟导入**：本模块在 ChatResponse 之前被导入，
+        模块级 import 会形成循环依赖（与 full_response 的 Any 注解同源问题）。
+        """
+        from app.domain.enums import IntentType
+        from app.domain.schemas import ChatResponse
+
+        answer = buildKpiClarifyAnswer(question, matches)
+        response = ChatResponse(
+            answer=answer,
+            intent=IntentType.CLARIFY.value,
+            data=[{"code": m.code, "name": m.kpi_name or m.code} for m in matches],
+            tokensUsed=0,
+            cost=0.0,
+        )
+        return PreambleResult(
+            routing_layer=ROUTING_LAYER_KPI_CLARIFY,
+            answer=answer,
+            full_response=response,
+        )
+
     async def _runL1AndL4Preamble(
         self,
         dto: ChatRequest,
@@ -222,13 +283,20 @@ class L1L4PreambleMixin:
           不匹配给 mismatch_warning（不静默）
         - L4 不改行为
         """
-        # 1. KPI 匹配（与 chat_service.py:409-432 同款 try/except 降级）
+        # 1. KPI 路由：v2（包含式）开启走 matchRoute；否则回落 v1 关键字匹配。
+        #    任何故障（含缓存预热失败）都降级到「无匹配」，不阻断 LLM 流水线。
+        route: KpiMatchRoute | None = None
         try:
-            match = await self._kpiMatcher.match(dto.question)
+            route = await self._routeKpi(dto.question, session)
         except Exception:  # noqa: BLE001 — 降级到原 LLM 流水线
             logger.warning("L1 KPI match failed, falling back to LLM", exc_info=True)
-            match = None
+            route = None
 
+        if route is not None and route.kind == "ambiguous":
+            # 等长跨 KPI 并列：不猜、不执行 SQL，直接返回澄清候选（0 LLM）。
+            return self._buildKpiClarifyPreamble(dto.question, route.matches)
+
+        match = route.matches[0] if route is not None and route.kind == "hit" else None
         if match is not None:
             l1 = await self._buildL1Response(match, session)
             if l1 is not None:
@@ -243,7 +311,7 @@ class L1L4PreambleMixin:
                         user_datasource_id=dto.datasourceId,
                     )
                 return PreambleResult(
-                    routing_layer="L1",
+                    routing_layer=ROUTING_LAYER_L1,
                     answer=l1.answer,
                     chart_type=l1.chartType,
                     chart_option=l1.chartOption,

@@ -28,9 +28,9 @@ from app.domain.exceptions import (
 )
 from app.domain.schemas import ChatRequest
 from app.services.chat_constants import (
-    META_INTENT_L1,
-    META_INTENT_L4,
+    ROUTING_LAYER_KPI_CLARIFY,
     ROUTING_LAYER_L1,
+    metaIntentOf,
 )
 from app.services.chat_helpers import attachStreamPersistState
 from app.services.error_classification import classifyError, sanitizeErrorMessage
@@ -185,7 +185,8 @@ class StreamEntryMixin:
             # F2c: merge into single meta frame (was 2-3 separate frames; each
             #不带 intent 的帧会抹掉前端刚设好的 intent）。
             meta_frame = {
-                "intent": META_INTENT_L1 if preamble.routing_layer == ROUTING_LAYER_L1 else META_INTENT_L4,
+                # 路由层→wire intent 的唯一映射（L1→KPI / L1C→clarify / 其余→AGENT_RUN）
+                "intent": metaIntentOf(preamble.routing_layer),
                 "routingLayer": preamble.routing_layer,
                 "datasourceMismatch": preamble.datasource_mismatch,
             }
@@ -210,7 +211,12 @@ class StreamEntryMixin:
             yield StreamEvent(EVENT_TOKEN, {"content": preamble.answer})
             yield StreamEvent(EVENT_DONE, {
                 "routingLayer": preamble.routing_layer,
-                "tokenCostUsd": 0.0 if preamble.routing_layer == ROUTING_LAYER_L1 else None,
+                # L1 与 L1C 都是 0 LLM 消耗；L4 才由用量审计回填
+                "tokenCostUsd": (
+                    0.0
+                    if preamble.routing_layer in (ROUTING_LAYER_L1, ROUTING_LAYER_KPI_CLARIFY)
+                    else None
+                ),
             })
             return
 

@@ -110,6 +110,13 @@ if score >= threshold and score >= float(kpi.match_threshold):
   不受 `match_threshold` 约束；Jaccard 是慢车道（`:226` `_matchByKeywords`）
 - ⚠️ dev 库 `semantic_keywords` **12/12 全空** ⇒ Jaccard 恒不命中，实际只有 exact-alias 生效
 
+> **v2 包含式匹配（2026-11-11，灰度）**：`system_config.KPI_MATCH_CONTAINMENT_ENABLED`
+> 显式 `true` 时，执行面（chat L1 / B3 契约注入 / admin 诊断）改走 `matchRoute` ——
+> 短语源扩到 `kpi_name` + `semantic_keywords` + `metric_alias`，CJK 子串命中、纯 ASCII 过词边界，
+> 最长短语胜出，**等长跨 KPI 并列 ⇒ `ambiguous`（反问，不猜）**。
+> 该 `system_config` 行**缺失即 false** ⇒ 生产当前仍是上面描述的 v1 路径。
+> 本节其余内容（tokenize / Jaccard / threshold）描述的是保留给 `/search`、研究线、B4 的 v1 面。
+
 ### Admin Review API
 
 > 路由前缀 `/api/v1/kpi-catalog`（`backend/app/main.py:525`），**不是**原文写的 `/admin/kpi-catalog`。

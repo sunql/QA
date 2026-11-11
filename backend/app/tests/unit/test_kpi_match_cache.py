@@ -385,3 +385,169 @@ class TestNotWarmedUp:
         cache = KpiMatchCache()
         with pytest.raises(RuntimeError, match="未 warmUp"):
             cache.getAll()
+
+
+# ---------------------------------------------------------------------------
+# metric_alias（P1 匹配器 v2 的第三个短语源）
+# ---------------------------------------------------------------------------
+
+
+class TestMetricAlias:
+    """`metricAliasOf` —— KPI 挂靠 metric 的别名必须能从缓存读到。
+
+    `KpiCatalog` 没有 metric_alias 列（别名在 `OntologyMetric`），所以 `warmUp`
+    必须外连接 ontology_metric 才能拿到。这里是 50 条回归语料之前唯一能验证
+    「别名真的进了缓存」的地方。
+    """
+
+    async def test_metricAliasOf_returns_alias_of_linked_metric(
+        self, dbSession: AsyncSession
+    ) -> None:
+        from app.domain.models import OntologyMetric
+
+        metric = OntologyMetric(
+            metric_name="cache-alias-metric",
+            metric_alias="准时交货",
+            formula="1",
+            created_by="p1-test",
+        )
+        dbSession.add(metric)
+        await dbSession.commit()
+
+        dbSession.add(
+            KpiCatalog(
+                kpi_code="KPI_P1_ALIAS",
+                kpi_name="别名测试指标",
+                status=KpiStatus.PUBLISHED.value,
+                metric_id=metric.id,
+                semantic_keywords=[],
+            )
+        )
+        await dbSession.commit()
+
+        cache = KpiMatchCache()
+        await cache.warmUp(dbSession)
+        assert cache.metricAliasOf("KPI_P1_ALIAS") == "准时交货"
+
+    async def test_metricAliasOf_is_none_for_unlinked_kpi(
+        self, dbSession: AsyncSession
+    ) -> None:
+        """metric_id 为 NULL 的引导 KPI 仍必须进缓存（外层连接，不是内连接）。
+
+        反向守卫：写成 inner join 时，12 条种子 KPI（metric_id 全为 NULL）会整批
+        从缓存里消失 —— 语义匹配直接瘫痪，而「别名能读到」的用例照样能绿。
+        """
+        dbSession.add(
+            KpiCatalog(
+                kpi_code="KPI_P1_NO_METRIC",
+                kpi_name="无 metric 指标",
+                status=KpiStatus.PUBLISHED.value,
+                metric_id=None,
+                semantic_keywords=["无指标"],
+            )
+        )
+        await dbSession.commit()
+
+        cache = KpiMatchCache()
+        await cache.warmUp(dbSession)
+        assert cache.metricAliasOf("KPI_P1_NO_METRIC") is None
+        assert "KPI_P1_NO_METRIC" in {kpi.kpi_code for kpi in cache.getAll()}
+
+    async def test_metricAliasOf_is_none_when_cold(self) -> None:
+        """冷缓存不做隐式加载，返 None（调用方由 ensureFresh 负责预热）。"""
+        assert KpiMatchCache().metricAliasOf("ANY") is None
+
+    async def test_refreshOne_updates_alias(self, dbSession: AsyncSession) -> None:
+        """改挂 metric 后定向刷新要跟上（否则缓存长期停在旧别名）。"""
+        from app.domain.models import OntologyMetric
+
+        metricA = OntologyMetric(
+            metric_name="alias-a", metric_alias="旧别名", formula="1", created_by="p1-test"
+        )
+        metricB = OntologyMetric(
+            metric_name="alias-b", metric_alias="新别名", formula="1", created_by="p1-test"
+        )
+        dbSession.add_all([metricA, metricB])
+        await dbSession.commit()
+
+        kpi = KpiCatalog(
+            kpi_code="KPI_P1_REFRESH",
+            kpi_name="刷新指标",
+            status=KpiStatus.PUBLISHED.value,
+            metric_id=metricA.id,
+            semantic_keywords=[],
+        )
+        dbSession.add(kpi)
+        await dbSession.commit()
+
+        cache = KpiMatchCache()
+        await cache.warmUp(dbSession)
+        assert cache.metricAliasOf("KPI_P1_REFRESH") == "旧别名"
+
+        kpi.metric_id = metricB.id
+        await dbSession.commit()
+        await cache.refreshOne(dbSession, "KPI_P1_REFRESH", kpiId=kpi.id)
+        assert cache.metricAliasOf("KPI_P1_REFRESH") == "新别名"
+
+    async def test_onKpiChanged_full_invalidation_drops_aliases(
+        self, dbSession: AsyncSession
+    ) -> None:
+        from app.domain.models import OntologyMetric
+
+        metric = OntologyMetric(
+            metric_name="alias-c", metric_alias="会被清掉", formula="1", created_by="p1-test"
+        )
+        dbSession.add(metric)
+        await dbSession.commit()
+        dbSession.add(
+            KpiCatalog(
+                kpi_code="KPI_P1_DROP",
+                kpi_name="失效指标",
+                status=KpiStatus.PUBLISHED.value,
+                metric_id=metric.id,
+                semantic_keywords=[],
+            )
+        )
+        await dbSession.commit()
+
+        cache = KpiMatchCache()
+        await cache.warmUp(dbSession)
+        assert cache.metricAliasOf("KPI_P1_DROP") == "会被清掉"
+
+        cache.onKpiChanged()
+        # 必须断言内部表：`metricAliasOf` 在冷缓存下恒返回 None（`_loaded=False`），
+        # 只看它的话，全量失效**漏清**别名表这条用例照样绿 —— 测不到它要测的东西。
+        assert cache._metricAliasByCode == {}
+
+    async def test_onKpiChanged_single_code_drops_alias(
+        self, dbSession: AsyncSession
+    ) -> None:
+        """单条失效（删除 / 改名路径）也必须摘掉别名条目。
+
+        `_removeEntries` 只裁主索引、漏裁别名时，删除的 KPI 会在别名表里留一条
+        永不过期的残影（当前读路径按 `getAll()` 取 KPI，不会命中它，但内存与
+        语义都不该保留已删除对象的属性）。
+        """
+        from app.domain.models import OntologyMetric
+
+        metric = OntologyMetric(
+            metric_name="alias-d", metric_alias="单条失效", formula="1", created_by="p1-test"
+        )
+        dbSession.add(metric)
+        await dbSession.commit()
+        kpi = KpiCatalog(
+            kpi_code="KPI_P1_EVICT",
+            kpi_name="单条失效指标",
+            status=KpiStatus.PUBLISHED.value,
+            metric_id=metric.id,
+            semantic_keywords=[],
+        )
+        dbSession.add(kpi)
+        await dbSession.commit()
+
+        cache = KpiMatchCache()
+        await cache.warmUp(dbSession)
+        assert cache.metricAliasOf("KPI_P1_EVICT") == "单条失效"
+
+        cache.onKpiChanged("KPI_P1_EVICT", kpiId=kpi.id)
+        assert cache.metricAliasOf("KPI_P1_EVICT") is None

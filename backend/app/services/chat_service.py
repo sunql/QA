@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
 from app.services.chat_constants import (
+    ROUTING_LAYER_KPI_CLARIFY,
     ROUTING_LAYER_L1,
     ROUTING_LAYER_L2,
     USAGE_PURPOSE_NL2SQL,
@@ -448,24 +449,28 @@ class ChatService(
         # Phase 1.4 + Phase 4.4：L1 KPI + L4 Agent Loop 共享 pre-amble（流式入口同样调）
         preamble = await self._runL1AndL4Preamble(dto, session, user)
         if preamble is not None:
-            if preamble.routing_layer == "L1":
-                # Log L1 KPI hit (mirrors original inline code's logger.info call)
-                logger.info(
-                    "L1 KPI hit: code=%s confidence=%s",
-                    preamble.kpi_code, preamble.confidence,
-                )
-                # L1: 0 LLM cost, capture wall-clock latency
+            if preamble.routing_layer in (ROUTING_LAYER_L1, ROUTING_LAYER_KPI_CLARIFY):
+                if preamble.routing_layer == ROUTING_LAYER_L1:
+                    # Log L1 KPI hit (mirrors original inline code's logger.info call)
+                    logger.info(
+                        "L1 KPI hit: code=%s confidence=%s",
+                        preamble.kpi_code, preamble.confidence,
+                    )
+                else:
+                    logger.info("KPI 匹配歧义：返回澄清候选，未执行 SQL")
+                # L1 / L1C: 0 LLM cost, capture wall-clock latency
                 _t0 = time.monotonic()
                 await self._storeSessionMessages(
                     session, dto.sessionId, dto.question, preamble.answer, None,
-                    routing_layer=ROUTING_LAYER_L1, latency_ms=int((time.monotonic() - _t0) * 1000),
+                    routing_layer=preamble.routing_layer,
+                    latency_ms=int((time.monotonic() - _t0) * 1000),
                     token_cost_usd=0.0,
                     chart_type=preamble.chart_type,
                     chart_option=preamble.chart_option,
                     visual_rationale=preamble.visual_rationale,
                 )
                 # Return full ChatResponse via preamble (preserves data/confidence/chartType etc.)
-                return requireFullResponse(preamble, "L1")
+                return requireFullResponse(preamble, preamble.routing_layer)
             # L4: preamble already ran _handleNl2SqlAgent and built the ChatResponse
             return requireFullResponse(preamble, "L4")
 
@@ -1767,6 +1772,7 @@ class ChatService(
             kpi_code=match.code,
             kpi_name=kpi_name,
             confidence=match.confidence,
+            match_method=match.method,
             tokensUsed=0,
             cost=0.0,
             modelName=None,

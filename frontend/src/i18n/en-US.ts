@@ -3183,9 +3183,10 @@ export const enUS = {
 
   routingMetrics: {
     title: "Routing Layer Metrics",
-    subtitle: "Hit count, latency and token cost per L1/L2/L3/L4 layer",
+    subtitle: "Hit count, latency and token cost per L1/L1C/L2/L3/L4 layer",
     layer: {
       L1: "L1 Semantic Match",
+      L1C: "L1C KPI Clarification",
       L2: "L2 LLM Intent Classification",
       L3: "L3 Multi-step Chain",
       L4: "L4 LangGraph Agent Loop",

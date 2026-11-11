@@ -37,8 +37,9 @@ const TIME_WINDOW_OPTIONS = [
   { value: "30d", label: "routingMetrics.timeWindow.30d" },
 ] as const;
 
-const LAYER_COLORS: Record<"L1" | "L2" | "L4", string> = {
+const LAYER_COLORS: Record<"L1" | "L1C" | "L2" | "L4", string> = {
   L1: "#52c41a",
+  L1C: "#faad14",
   L2: "#1890ff",
   L4: "#f5222d",
 };

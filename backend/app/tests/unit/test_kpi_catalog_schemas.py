@@ -113,3 +113,45 @@ class TestKpiCatalogSchemas:
         assert "kpiName" in dumped
         assert dumped["datasourceId"] == 1
         assert dumped["status"] == "DRAFT"
+
+
+class TestSemanticKeywordBounds:
+    """`semantic_keywords` 是自由文本且会被 v2 包含式匹配逐条归一化 ⇒ 必须有上限。
+
+    无上限时任意登录用户（KPI 建档不做 ACL）建一条超长关键词，就能让**所有用户**
+    的每一次匹配多做几次 NFKC/小写/切分（进程级缓存共享）⇒ 单行 CPU DoS。
+    同时这也是一道系统边界校验：输入在进入匹配器之前就该被拒。
+    """
+
+    def _create(self, **kwargs: object) -> KpiCatalogCreate:
+        return KpiCatalogCreate(
+            kpiCode="K1", kpiName="N", datasourceId=1, **kwargs
+        )
+
+    def test_create_rejects_oversized_keyword(self) -> None:
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            self._create(semanticKeywords=["x" * 101])
+
+    def test_create_rejects_too_many_keywords(self) -> None:
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            self._create(semanticKeywords=[f"k{i}" for i in range(51)])
+
+    def test_create_accepts_boundary_values(self) -> None:
+        dto = self._create(semanticKeywords=["x" * 100] * 50)
+        assert len(dto.semantic_keywords or []) == 50
+
+    def test_update_rejects_oversized_keyword(self) -> None:
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            KpiCatalogUpdate(semanticKeywords=["x" * 101])
+
+    def test_update_accepts_none(self) -> None:
+        assert KpiCatalogUpdate(semanticKeywords=None).semantic_keywords is None

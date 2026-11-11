@@ -1,6 +1,6 @@
 """Chat 模块的字面常量 SSOT（避免散落字面量与跨文件重复）。
 
-本模块不承载运行时行为；仅为下列字符串标识符提供唯一真相：
+本模块只承载常量与一个无副作用的纯映射函数（``metaIntentOf``）；不触库、不调 LLM。
 
 - ``ROUTING_LAYER_*``：路由层标签（落 routing_metrics SQL 维度，前端展示）
 - ``USAGE_PURPOSE_*``：token usage 用途标识（落 token_usage.purpose，SQL 聚合维度）
@@ -23,6 +23,8 @@ ROUTING_LAYER_L1 = "L1"  # 单轮 SQL 直答（简单查询，无追问、无拆
 ROUTING_LAYER_L2 = "L2"  # 多轮对话 / 上下文召回 / 拆步计划（绝大多数生产流量）
 ROUTING_LAYER_L3 = "L3"  # 多步持久化执行（chat_multistep 路径，独立 run 表）
 ROUTING_LAYER_L4 = "L4"  # L4 Agent Loop（研究类问题，触发 _L4_EXPLORATORY_KEYWORDS）
+# KPI 多命中歧义：不执行，返回澄清候选（设计 §5.2）。长度 3，safe for VARCHAR(10)。
+ROUTING_LAYER_KPI_CLARIFY = "L1C"
 
 
 # =============================================================================
@@ -35,6 +37,21 @@ ROUTING_LAYER_L4 = "L4"  # L4 Agent Loop（研究类问题，触发 _L4_EXPLORAT
 # (the latter's reverse guards assert single["intent"] == "KPI").
 META_INTENT_L1 = "KPI"  # L1 短路命中：KPI 目录直答，0 LLM cost
 META_INTENT_L4 = "AGENT_RUN"  # L4 短路命中：Agent Loop 触发
+META_INTENT_CLARIFY = "clarify"  # L1C 歧义澄清：复用 IntentType.CLARIFY 的值（前端已知意图）
+
+
+def metaIntentOf(routingLayer: str) -> str:
+    """路由层 → meta 帧 ``intent`` 的唯一映射（SSE wire 契约）。
+
+    新增路由层**必须**在这里显式登记：未登记的值会落到 ``META_INTENT_L4``，
+    前端会把它当 Agent 运行来渲染（图表卡/轨迹位全空）。这条兜底是刻意的
+    fail-safe，不是「默认值随便挑」。
+    """
+    if routingLayer == ROUTING_LAYER_KPI_CLARIFY:
+        return META_INTENT_CLARIFY
+    if routingLayer == ROUTING_LAYER_L1:
+        return META_INTENT_L1
+    return META_INTENT_L4
 
 
 # =============================================================================

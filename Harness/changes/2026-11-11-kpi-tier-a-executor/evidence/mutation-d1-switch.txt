@@ -1,0 +1,43 @@
+D1 Task 1.1 变异取证：readKpiMetricSwitch 行缺失分支 default -> True
+日期：2026-11-11
+被测文件：backend/app/tests/unit/test_kpi_metric_tier_a_switch.py
+变异点：backend/app/services/kpi_metric_switches.py `readKpiMetricSwitch`
+        `if cfg is None: return default` -> `return True`
+
+=== 变异（临时）===
+@@ if cfg is None:
+-        return default
++        return True
+
+=== 命令 ===
+cd /private/tmp/qa-kpi-p2/backend
+TEST_DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@127.0.0.1:5434/qa_metadata_test' \
+TEST_NEO4J_URI='bolt://127.0.0.1:7688' TEST_NEO4J_PASSWORD='qa_neo4j_dev_2026' \
+.venv/bin/python -m pytest app/tests/unit/test_kpi_metric_tier_a_switch.py -q
+exit=1
+
+=== 变异后输出（RED，符合预期）===
+.F..                                                                     [100%]
+=================================== FAILURES ===================================
+__________________________ test_row_missing_is_false ___________________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10bcb9850>
+
+    @pytest.mark.asyncio()
+    async def test_row_missing_is_false(monkeypatch) -> None:
+        monkeypatch.setattr(switches, "getSettings", lambda: _FakeSettings(True))
+>       assert await switches.isKpiMetricTierAEnabled(_FakeSession(None)) is False
+E       assert True is False
+
+app/tests/unit/test_kpi_metric_tier_a_switch.py:57: AssertionError
+=========================== short test summary info ============================
+FAILED app/tests/unit/test_kpi_metric_tier_a_switch.py::test_row_missing_is_false
+1 failed, 3 passed in 2.26s
+
+=== 还原（精确反向编辑 `return True` -> `return default`）后 ===
+exit=0
+....                                                                     [100%]
+4 passed in 2.11s
+
+=== 结论 ===
+fail-closed 语义被测试真实捕获；还原后全绿。

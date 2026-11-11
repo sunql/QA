@@ -107,3 +107,20 @@ async def isKpiMatchContainmentEnabled(session: AsyncSession) -> bool:
         logger.debug("KPI 包含式匹配 env 紧急杀闸关闭，回落 v1 关键字路径")
         return False
     return await readKpiMetricSwitch(session, SWITCH_MATCH_CONTAINMENT, False)
+
+
+async def isKpiMetricTierAEnabled(session: AsyncSession | None) -> bool:
+    """Tier A 执行器双闸（fail-closed）。
+
+    1. env ``KPI_METRIC_TIER_A_ENABLED=false`` ⇒ 一律回旧行为（进程级）；
+    2. system_config 行 ``KPI_METRIC_TIER_A_ENABLED`` 为真才执行；
+       **行缺失 / 非法 / 读取异常 ⇒ 关**。
+
+    ⇒ 本批合入后行为不变：开 Tier A 是一次显式的数据操作（设计 §12）。
+    """
+    if session is None:
+        return False
+    if not getSettings().kpiMetricTierAEnabled:
+        logger.debug("Tier A env 紧急杀闸关闭，回落旧 L1 行为")
+        return False
+    return await readKpiMetricSwitch(session, SWITCH_TIER_A, False)

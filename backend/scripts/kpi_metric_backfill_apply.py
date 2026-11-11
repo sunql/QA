@@ -461,7 +461,14 @@ async def _writeSources(
 def _governanceValues(
     plan: KpiBackfillPlan, metricId: int, kpi: KpiCatalog, *, overwrite: bool
 ) -> dict[str, Any]:
-    """KPI 治理列的目标值；默认模式只保留 KPI 上为空的字段（FIX-I1）。"""
+    """KPI 治理列的目标值；默认模式只保留 KPI 上为空的字段（FIX-I1）。
+
+    ⚠️ P0（``kpi_normalize_governance --apply``）起治理结构化列**必须以物理列
+    为准**；本函数写的是 PLAN 声明的**业务名**（``governanceNumerator`` 等），
+    与物理列刻意不同（T15-L）。重跑回填会把这些列覆盖回业务名，从而再次产出
+    ``mismatch`` —— 只把它当作历史初始化工具，**不要**在已规范化的库上
+    ``--overwrite``（``test_kpi_metric_backfill_apply.py`` 仍钉着这一事实）。
+    """
     desired: dict[str, Any] = {
         "metric_id": metricId,
         "grain_keys": list(plan.governanceGrain),

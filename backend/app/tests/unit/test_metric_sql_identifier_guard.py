@@ -50,5 +50,27 @@ def test_measure_columns_ignores_filter() -> None:
     assert measureColumnIdentifiers("QTY") == {"qty"}
 
 
+def test_measure_columns_strips_table_aliases() -> None:
+    """`O.UNIT_PRICE` 的限定名不是列：measure 列集合只含物理列。
+
+    与 ``extractSqlIdentifiers``（刻意宽松、保留别名）不同 —— measure 走
+    governance ⇄ technique 的**集合相等**比较，别名残留会让对账恒 mismatch。
+    """
+    assert measureColumnIdentifiers("O.UNIT_PRICE - P.UNIT_PRICE") == {"unit_price"}
+
+
+def test_measure_columns_drops_function_names() -> None:
+    """`TRUNC`/`NVL` 不是列（`trunc`/`nvl` 不在 SQL 停用词表里，必须单独剔除）。"""
+    assert measureColumnIdentifiers("TRUNC(R.RECEIPT_DATE) - NVL(QTY, 0)") == {
+        "receipt_date",
+        "qty",
+    }
+
+
+def test_extract_stays_loose_for_sql_text() -> None:
+    """反向守卫：`extractSqlIdentifiers` 行为不变（SQL 侧只做「声明 ⊆ 实际」）。"""
+    assert extractSqlIdentifiers("O.UNIT_PRICE") == {"o", "unit_price"}
+
+
 def test_measure_columns_on_none_returns_empty() -> None:
     assert measureColumnIdentifiers(None) == set()

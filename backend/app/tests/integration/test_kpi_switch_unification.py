@@ -323,7 +323,9 @@ def _recordMatchCalls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """
     calls: list[str] = []
 
-    async def _fakeMatch(_session, question: str, _limit: int) -> list[str]:
+    async def _fakeMatch(
+        _session, question: str, _limit: int, *, strict: bool = False
+    ) -> list[str]:
         calls.append(question)
         return []
 
@@ -393,7 +395,9 @@ async def test_both_surfaces_follow_the_same_row(
         reconcileCalls.append(question)
         return []
 
-    async def _fakeBuilderMatch(_session, question: str, _limit: int) -> list[str]:
+    async def _fakeBuilderMatch(
+        _session, question: str, _limit: int, *, strict: bool = False
+    ) -> list[str]:
         builderCalls.append(question)
         return []
 

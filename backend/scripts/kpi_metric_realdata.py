@@ -21,14 +21,16 @@
    ``class_id`` 索引；``kpi_catalog`` 新增 3 列。
 2. **回填预览与物理列校验**：PLAN 与**库内** ``kpi_catalog`` 行一一对应；
    tier A 的结构化列**必须**在真实 ``schema_cache`` 里存在。
-3. **三层对账逐档**：**实测 12/12 全部 ``mismatch``** —— 这是 PLAN 刻意保留
-   「治理列 = 业务口径、技术列 = 物理列」偏差的**预期结果**（T15-L），不是脚本缺陷。
-   回填后治理列与物理列必然不同（``governanceGrain`` 是中文业务词、``grainKeys``
-   是列名），故原先「tier A ⇒ pass / tier B/C ⇒ unknown、无一条 mismatch」的预测
-   **不成立**。判据因此改为：**verdict 必须与 PLAN 已登记偏差集合一致**（S3.1/S3.3），
-   且**列级 finding 集合必须与治理/技术列的实际差异一致**（S3.4，防 ``_checkRole``
+3. **三层对账逐档**：PLAN 登记了「治理列 = 业务口径、技术列 = 物理列」的偏差
+   （T15-L），偏差**仍生效**时 12/12 全部 ``mismatch`` 是预期结果，不是脚本缺陷。
+   判据：**verdict 必须与仍生效的 PLAN 偏差集合一致**（S3.1/S3.3），且
+   **列级 finding 集合必须与治理/技术列的实际差异一致**（S3.4，防 ``_checkRole``
    的列比对被删掉）。tier A 的 formula 仍须**覆盖全部结构化列**
    （否则「未降级」是恒真的，T16-17）。
+   P0 规范化（``kpi_normalize_governance --apply``）把治理列改写成物理列后，
+   偏差不再生效 ⇒ 期望改按 **execution_source** 判：``NONE`` ⇒ ``unknown``，
+   其余 ⇒ ``pass``（2026-11-11 起 dev 库即为此状态，实测 8 pass + 4 unknown）。
+   **不能按 PLAN tier 判**：tier B 在规范化后同样 pass，会把正确结果判成失败。
 4. **发布闸门**：开关 ON ⇒ 服务层抛 ``ConflictError`` 且带**缺项明细**
    （断言「是谁拒的 + 缺哪一项」，不是只断言状态码）；开关 OFF ⇒ 不拦。
    本轮临时写的开关**退出前还原**，并打印前后对照。
@@ -80,8 +82,8 @@ import asyncio
 import logging
 import os
 import sys
-from functools import partial
 from collections import Counter
+from functools import partial
 from pathlib import Path
 
 # 允许从 scripts/ 直接运行：把 backend/ 放进 sys.path
@@ -100,6 +102,7 @@ from scripts.kpi_metric_realdata_lib import (  # noqa: E402
     lastSkipReason,
     maskDsn,
     passStep,
+    planDeviationActive,
     printSummary,
     resolveDatabaseUrl,
     skipStep,
@@ -166,6 +169,10 @@ from scripts.kpi_metric_backfill import (  # noqa: E402
     verifyPlan,
 )
 from scripts.kpi_metric_backfill_plan import KpiBackfillPlan  # noqa: E402
+from scripts.kpi_metric_db_guard import (  # noqa: E402
+    PROD_DB_NAME,
+    databaseNameOf,
+)
 from scripts.kpi_metric_realdata_db import (  # noqa: E402
     countLinkedKpis,
     countMetrics,
@@ -193,11 +200,6 @@ from scripts.kpi_metric_realdata_s3 import (  # noqa: E402
     formulaCoverage,
 )
 from scripts.kpi_metric_realdata_s4 import step4_publishGate  # noqa: E402
-
-from scripts.kpi_metric_db_guard import (  # noqa: E402
-    PROD_DB_NAME,
-    databaseNameOf,
-)
 
 # F8：目标库是否为正式库（由入口从 DSN 判定后传入 S4/S9，不在步骤内重写常量）
 _IS_PROD = databaseNameOf(DATABASE_URL) == PROD_DB_NAME
@@ -416,25 +418,29 @@ async def _collectReconcile(
         technique = techniqueOf(metric)
         governance = governanceSpecOf(kpi)
         result = reconcileMetric(governance, technique)
+        plan = plans.get(kpi.kpi_code)
+        tier = _tierOfCode(plans, kpi.kpi_code)
+        # ⚠️ PLAN 登记了「治理列 = 业务口径、技术列 = 物理列」的偏差（T15-L）：
+        # 偏差**仍生效**时对账必须判 mismatch，否则等于「脚本自己给自己签字」。
+        # P0 规范化（``kpi_normalize_governance --apply``）会把治理列改写成物理列，
+        # 此后 PLAN 的 deviations 不再适用，期望改按档位判 pass / unknown。
+        deviationActive = plan is not None and planDeviationActive(kpi, plan)
+        deviations = plan.deviations if deviationActive else ()
         outcomes.append(
             ReconcileOutcome(
                 code=kpi.kpi_code,
                 verdict=result.verdict,
                 reasons=tuple(result.reasons()),
                 columnDiffers=anyColumnDiffers(governance, technique),
+                deviationActive=deviationActive,
             )
         )
-        plan = plans.get(kpi.kpi_code)
-        tier = _tierOfCode(plans, kpi.kpi_code)
-        # ⚠️ PLAN **刻意**保留业务治理列（``governance*``）与技术物理列不同
-        # （T15-L）：有已登记偏差 ⇒ 对账**必须**判 mismatch，否则等于「脚本自己
-        # 给自己签字」。没有偏差时才按档位判 pass / unknown（这两条分支由
-        # ``expectedVerdictFor`` 的单测覆盖 —— 真实 12 条全部有偏差）。
-        expected = expectedVerdictFor(
-            tier, plan.deviations if plan is not None else ()
+        expected = expectedVerdictFor(metric.execution_source, deviations)
+        basis = (
+            "PLAN 已登记治理↔物理偏差仍生效"
+            if deviations
+            else f"execution_source={metric.execution_source} 治理列已规范化"
         )
-        hasDeviation = bool(plan is not None and plan.deviations)
-        basis = "PLAN 已登记治理↔物理偏差" if hasDeviation else f"tier {tier} 无已登记偏差"
         check(
             f"S3.1 {kpi.kpi_code} 对账 verdict = {expected}（{basis}）",
             result.verdict == expected,
@@ -452,27 +458,24 @@ async def _collectReconcile(
     return outcomes
 
 
-def _judgeReconcile(
-    plans: dict[str, KpiBackfillPlan], outcomes: list[ReconcileOutcome]
-) -> None:
+def _judgeReconcile(outcomes: list[ReconcileOutcome]) -> None:
     """跨条目判定：mismatch 集合（S3.3）与列级 finding 集合（S3.4）。"""
     verdicts = {outcome.code: outcome.verdict for outcome in outcomes}
     mismatches = {
         code for code, verdict in verdicts.items() if verdict == VERDICT_MISMATCH
     }
-    deviationCodes = {
-        plan.kpiCode for plan in plans.values() if plan.deviations
-    } & set(verdicts)
+    deviationCodes = {outcome.code for outcome in outcomes if outcome.deviationActive}
     check(
-        "S3.3 mismatch 集合 = PLAN 已登记偏差集合（不多不少）",
+        "S3.3 mismatch 集合 = 仍生效的 PLAN 偏差集合（不多不少）",
         mismatches == deviationCodes,
         f"多判 {sorted(mismatches - deviationCodes)}；漏判 "
         f"{sorted(deviationCodes - mismatches)}",
     )
-    # ⚠️ S3.3 单独不够：12 条 PLAN 的治理粒度（中文业务词）与技术粒度（列名）
-    # **永远**不等 ⇒ 每条 findings 都含 ``grain_mismatch`` ⇒ 即便把
-    # ``_checkRole`` 的列比对整体删掉，S3.3 依旧全绿。S3.4 按 **finding code**
-    # 独立断言：列级 finding 的有无必须与「治理列 vs 技术列」的实际差异一致。
+    # ⚠️ S3.3 单独不够：偏差仍生效时 12 条 PLAN 的治理粒度（中文业务词）与
+    # 技术粒度（列名）**永远**不等 ⇒ 每条 findings 都含 ``grain_mismatch`` ⇒
+    # 即便把 ``_checkRole`` 的列比对整体删掉，S3.3 依旧全绿。S3.4 按
+    # **finding code** 独立断言：列级 finding 的有无必须与「治理列 vs 技术列」
+    # 的实际差异一致（规范化后两者一致 ⇒ finding 与差异都应清空）。
     expected = expectedColumnCodes(outcomes)
     actual = actualColumnCodes(outcomes)
     check(
@@ -499,7 +502,7 @@ async def step3_reconcile(session: AsyncSession) -> None:
             "scripts/kpi_metric_backfill.py（并经业务方审核）",
         )
         return
-    _judgeReconcile(plans, outcomes)
+    _judgeReconcile(outcomes)
 
 
 # ── S4 发布闸门（实现见 kpi_metric_realdata_s4） ──────────────────────

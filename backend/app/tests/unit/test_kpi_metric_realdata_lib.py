@@ -29,6 +29,7 @@ from scripts.kpi_metric_realdata_lib import (
     expectedVerdictFor,
     guardTarget,
     lastSkipReason,
+    planDeviationActive,
     printSummary,
     resolveDatabaseUrl,
 )
@@ -289,33 +290,104 @@ def test_last_skip_reason_returns_most_recent_prefix_match() -> None:
 
 # ── S3 期望 verdict（FIX-2：无偏差分支必须被真实执行过） ──────────────
 #
-# 真实 12 条 PLAN **全部**有 deviations ⇒ S3 里「无偏差」的两条分支实跑
-# 永不执行。这里构造 ``deviations=()`` 的 plan 输入直接跑这两条路径。
+# PLAN 的 12 条都登记了 deviations，但 **P0 规范化**会把治理列改写成物理列
+# （``kpi_normalize_governance --apply``）⇒ 偏差不再生效，S3 的两条
+# 「无偏差」分支在规范化后的库上**会**真实执行。这里直接跑这两条路径。
 
 
-def test_expected_verdict_without_deviation_tier_a_is_pass() -> None:
-    plan = SimpleNamespace(tier="A", deviations=())
-    assert expectedVerdictFor(plan.tier, plan.deviations) == VERDICT_PASS
+def test_plan_deviation_active_while_governance_is_business_columns() -> None:
+    """治理列仍是 PLAN 声明的业务列 ⇒ 偏差生效（期望 mismatch）。"""
+    kpi = SimpleNamespace(
+        numerator_columns=["ACTUAL_RECEIPT_DATE"],
+        denominator_columns=["PROMISED_DATE"],
+        grain_keys=["供应商", "工厂", "月"],
+    )
+    plan = SimpleNamespace(
+        governanceNumerator=("ACTUAL_RECEIPT_DATE",),
+        governanceDenominator=("PROMISED_DATE",),
+        governanceGrain=("供应商", "工厂", "月"),
+    )
+
+    assert planDeviationActive(kpi, plan) is True
 
 
-def test_expected_verdict_without_deviation_tier_b_is_unknown() -> None:
-    plan = SimpleNamespace(tier="B", deviations=())
-    assert expectedVerdictFor(plan.tier, plan.deviations) == VERDICT_UNKNOWN
+def test_plan_deviation_inactive_after_normalization() -> None:
+    """治理列已规范化为物理列 ⇒ 偏差失效（期望 pass/unknown，而不是 mismatch）。"""
+    kpi = SimpleNamespace(
+        numerator_columns=["RECEIPT_DATE"],
+        denominator_columns=["PROMISED_RECEIPT_DATE"],
+        grain_keys=["SUPPLIER_CODE", "FACILITY_CODE"],
+    )
+    plan = SimpleNamespace(
+        governanceNumerator=("ACTUAL_RECEIPT_DATE",),
+        governanceDenominator=("PROMISED_DATE",),
+        governanceGrain=("供应商", "工厂", "月"),
+    )
+
+    assert planDeviationActive(kpi, plan) is False
 
 
-def test_expected_verdict_without_deviation_tier_c_is_unknown() -> None:
-    plan = SimpleNamespace(tier="C", deviations=())
-    assert expectedVerdictFor(plan.tier, plan.deviations) == VERDICT_UNKNOWN
+def test_plan_deviation_inactive_when_columns_partially_match() -> None:
+    """只对上分子不算生效：三组治理列必须**全部**等于 PLAN 声明。"""
+    kpi = SimpleNamespace(
+        numerator_columns=["ACTUAL_RECEIPT_DATE"],
+        denominator_columns=["PROMISED_RECEIPT_DATE"],
+        grain_keys=["SUPPLIER_CODE"],
+    )
+    plan = SimpleNamespace(
+        governanceNumerator=("ACTUAL_RECEIPT_DATE",),
+        governanceDenominator=("PROMISED_DATE",),
+        governanceGrain=("供应商", "工厂", "月"),
+    )
+
+    assert planDeviationActive(kpi, plan) is False
 
 
-def test_expected_verdict_with_deviation_is_mismatch_even_tier_a() -> None:
-    plan = SimpleNamespace(tier="A", deviations=("governance↔物理列偏差",))
-    assert expectedVerdictFor(plan.tier, plan.deviations) == VERDICT_MISMATCH
+def test_plan_deviation_inactive_for_empty_plan_governance() -> None:
+    """PLAN 没有声明治理列（空）时不把偏差当成生效（避免空对空恒真）。"""
+    kpi = SimpleNamespace(
+        numerator_columns=[], denominator_columns=[], grain_keys=[]
+    )
+    plan = SimpleNamespace(
+        governanceNumerator=(), governanceDenominator=(), governanceGrain=()
+    )
+
+    assert planDeviationActive(kpi, plan) is False
 
 
-def test_expected_verdict_unknown_tier_without_deviation_is_unknown() -> None:
-    """PLAN 里查不到该 code（tier=None）⇒ 不得当成 pass。"""
+def test_expected_verdict_measurable_source_without_deviation_is_pass() -> None:
+    """规范化后非 NONE 源必然带结构化度量 ⇒ 层 2 必须 pass。
+
+    这里**不能**沿用 PLAN 的 tier：PLAN tier B 覆盖「一侧度量 + 算术式」等
+    情形，规范化落库后它们同样 reconcile 到 pass（实测 4 条 tier B 全 pass）；
+    拿 PLAN tier 当 oracle 会把 4 条正确结果判成失败。
+    """
+    plan = SimpleNamespace(executionSource="ESCAPE_HATCH", deviations=())
+    assert (
+        expectedVerdictFor(plan.executionSource, plan.deviations) == VERDICT_PASS
+    )
+
+
+def test_expected_verdict_none_source_without_deviation_is_unknown() -> None:
+    plan = SimpleNamespace(executionSource="NONE", deviations=())
+    assert (
+        expectedVerdictFor(plan.executionSource, plan.deviations) == VERDICT_UNKNOWN
+    )
+
+
+def test_expected_verdict_missing_source_is_unknown() -> None:
+    """取不到 execution_source ⇒ 不得当成 pass（无法确认技术形态）。"""
     assert expectedVerdictFor(None, ()) == VERDICT_UNKNOWN
+    assert expectedVerdictFor("", ()) == VERDICT_UNKNOWN
+
+
+def test_expected_verdict_with_deviation_is_mismatch_even_measurable() -> None:
+    plan = SimpleNamespace(
+        executionSource="ESCAPE_HATCH", deviations=("governance↔物理列偏差",)
+    )
+    assert (
+        expectedVerdictFor(plan.executionSource, plan.deviations) == VERDICT_MISMATCH
+    )
 
 
 def test_verdict_literals_match_reconcile_module() -> None:

@@ -89,19 +89,54 @@ VERDICT_MISMATCH = "mismatch"
 VERDICT_UNKNOWN = "unknown"
 
 
-def expectedVerdictFor(tier: str | None, deviations: object) -> str:
-    """PLAN 档位 + 已登记偏差 ⇒ 期望的层 2 verdict。
+def expectedVerdictFor(executionSource: str | None, deviations: object) -> str:
+    """PLAN 偏差状态 + metric 的执行源 ⇒ 期望的层 2 verdict。
 
     ``deviations`` 传 PLAN 的 ``deviations``（空序列 / ``None`` = 无偏差）。
+    偏差是否仍生效由 :func:`planDeviationActive` 判定 —— P0 规范化
+    （``kpi_normalize_governance --apply``）会把治理列改写成物理列，此后
+    PLAN 登记的「治理↔物理」偏差不再存在。
 
-    为什么抽成纯函数：真实 12 条 PLAN **全部**有 deviations ⇒ 「无偏差」的
-    两条分支（tier A ⇒ pass / tier B/C ⇒ unknown）在实跑里**永不执行**。
-    留作未测代码，等哪天 PLAN 清空 deviations 时会静默生效 —— 由单测直接
-    覆盖这两条路径（FIX-2）。
+    偏差失效后的期望**按 execution_source 判**，不按 PLAN 的 tier：
+
+    - ``NONE``：没有可对账的技术形态 ⇒ ``unknown``；
+    - 其它：规范化必然派生/保留结构化度量，治理列由技术形态推出
+      ⇒ 层 2 必须 ``pass``；
+    - 取不到执行源（``None``/空）：无法确认技术形态 ⇒ ``unknown``（不得当 pass）。
+
+    ⚠️ 为什么不用 PLAN tier：tier B 覆盖「一侧度量 + 算术式 / 物理源部分缺失」，
+    规范化落库后它们同样 reconcile 到 pass（实测 4 条 tier B 全 pass）。
+    拿 tier 当 oracle 会把正确结果判成失败 —— 2026-11-11 落库后实测发现。
+
+    为什么抽成纯函数：12 条 PLAN 都**登记**了 deviations，规范化之前
+    「无偏差」的分支在实跑里永不执行；规范化之后它才是常态。两条路径都由
+    单测直接覆盖（FIX-2）。
     """
     if deviations:
         return VERDICT_MISMATCH
-    return VERDICT_PASS if tier == "A" else VERDICT_UNKNOWN
+    source = str(executionSource or "").strip().upper()
+    return VERDICT_UNKNOWN if source in ("", "NONE") else VERDICT_PASS
+
+
+def planDeviationActive(kpi: object, plan: object) -> bool:
+    """PLAN 登记的「治理↔物理」偏差在当前库上是否仍然生效。
+
+    判据 = 库里的治理列**三组全部**仍是 PLAN 声明的那组业务列。
+    任一不同（典型：P0 规范化已把治理列改写为物理列）⇒ 偏差失效。
+
+    PLAN 没有声明治理列（三组皆空）时返回 ``False``：空对空恒真会把
+    「未登记治理列」误判成「偏差仍生效」。
+    """
+    numerator = tuple(plan.governanceNumerator)
+    denominator = tuple(plan.governanceDenominator)
+    grain = tuple(plan.governanceGrain)
+    if not (numerator or denominator or grain):
+        return False
+    return (
+        tuple(getattr(kpi, "numerator_columns", None) or ()) == numerator
+        and tuple(getattr(kpi, "denominator_columns", None) or ()) == denominator
+        and tuple(getattr(kpi, "grain_keys", None) or ()) == grain
+    )
 
 
 def resolveDatabaseUrl(explicit: str | None = None) -> tuple[str, str]:
@@ -258,6 +293,7 @@ __all__ = [
     "lastSkipReason",
     "maskDsn",
     "passStep",
+    "planDeviationActive",
     "printSummary",
     "resolveDatabaseUrl",
     "skipStep",

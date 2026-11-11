@@ -182,6 +182,13 @@ class TestMatchExactAlias:
         assert result.layer == "l1_match"
 
     @pytest.mark.asyncio()
+    async def test_match_exact_alias_reports_method(self, svc: KpiSemanticMatchService) -> None:
+        """可解释性：精确 code 命中 ⇒ method="exact_code"（诊断接口展示用）。"""
+        result = await svc.match("请帮我查一下 KPI_SUPPLIER_OTD 的完成情况")
+        assert result is not None
+        assert result.method == "exact_code"
+
+    @pytest.mark.asyncio()
     async def test_match_exact_alias_miss_case(self, svc: KpiSemanticMatchService) -> None:
         """问题含大写下划线 token 但不在 catalog → 返回 None。"""
         result = await svc.match("请查一下 KPI_UNKNOWN_CODE")
@@ -231,6 +238,7 @@ class TestMatchByKeywords:
         assert result is not None
         assert result.code == "KPI_SUPPLIER_OTD"
         assert result.confidence >= Decimal("0.75")
+        assert result.method == "keyword"
 
     @pytest.mark.asyncio()
     async def test_match_keyword_overlap_below_threshold(

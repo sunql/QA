@@ -95,6 +95,8 @@ class ReconcileOutcome:
     verdict: str
     reasons: tuple[str, ...]
     columnDiffers: bool
+    # PLAN 登记的「治理↔物理」偏差是否仍生效（P0 规范化后为 False）。
+    deviationActive: bool = False
 
 
 def expectedColumnCodes(outcomes: Sequence[ReconcileOutcome]) -> set[str]:

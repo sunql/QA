@@ -326,14 +326,35 @@ def extractSqlIdentifiers(text: str | None) -> set[str]:
     return {t.lower() for t in _SQL_IDENTIFIER_RE.findall(text)} - _SQL_STOPWORDS
 
 
+_MEASURE_STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
+# `O.UNIT_PRICE` 的 `O.` 是表别名，不是列；连写/带空白都要去掉。
+_MEASURE_ALIAS_PREFIX = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\s*\.")
+_MEASURE_FUNCTION_NAME = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\s*\(")
+
+
 def measureColumnIdentifiers(expr: str | None) -> set[str]:
-    """从结构化度量的 expr 抽取列集合。
+    """从结构化度量的 expr 抽取**物理列**集合。
 
     **只取 expr，不取 filter** —— measure.filter 是过滤谓词，可能引用别的类的列
     （例如 "IQCRESULT = 'FAIL'" 里的 IQCRESULT 属于源类）。把它算进列集合会让
     「治理未声明该列」被误判成 mismatch（假阳性）。
+
+    与 :func:`extractSqlIdentifiers`（对 SQL 文本刻意宽松，保留别名/表名）不同，
+    这里是**列集合相等**比较的一端（层 2 治理⇄技术），必须只留列：
+
+    - 去掉 ``alias.`` 限定前缀（``O.UNIT_PRICE`` → ``UNIT_PRICE``）；
+    - 去掉函数名（``trunc``/``nvl`` 不在 SQL 停用词表里）；
+    - 字符串字面量整体屏蔽（``'FAIL'`` 不是列）。
+
+    注意：别名只在**取列集合**时丢弃；measure.expr 里必须原样保留限定名
+    （``O.UNIT_PRICE - P.UNIT_PRICE`` 去掉别名会退化成恒 0 的表达式）。
     """
-    return extractSqlIdentifiers(expr)
+    if not expr:
+        return set()
+    withoutLiterals = _MEASURE_STRING_LITERAL.sub("''", expr)
+    withoutAliases = _MEASURE_ALIAS_PREFIX.sub("", withoutLiterals)
+    withoutCalls = _MEASURE_FUNCTION_NAME.sub(" ", withoutAliases)
+    return extractSqlIdentifiers(withoutCalls)
 
 
 def _divisionDenominatorTexts(text: str) -> Iterator[str]:

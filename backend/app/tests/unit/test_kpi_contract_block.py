@@ -13,6 +13,7 @@ from app.services.kpi_contract_builder import (
     SourceClassRef,
     ratioSqlGuidance,
     renderContractBlock,
+    renderContractBlockWithCodes,
     renderContractEntry,
 )
 
@@ -203,6 +204,28 @@ def test_render_block_drops_entries_over_limit_and_notes_count(
     assert "[…更多 KPI 契约因长度上限未注入，共 2 条]" in block
     # 复审 Minor #1：尾注本身也计入预算 ⇒ 含尾注的整块不超上限
     assert len(block) <= 500
+
+
+def test_render_block_with_codes_reports_only_entries_actually_in_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`injected` 必须按**块成员关系**判：被字符上限丢掉的条目不算注入。"""
+    entries = tuple(
+        ContractEntry(
+            kpi_code=f"KPI_{index}",
+            kpi_name="长条目",
+            verdict="pass",
+            business_definition="乙" * 200,
+        )
+        for index in range(3)
+    )
+    monkeypatch.setattr(builderModule, "KPI_CONTRACT_MAX_BLOCK_CHARS", 500)
+
+    block, codes = renderContractBlockWithCodes(entries)
+
+    assert codes == ("KPI_0",)
+    assert "KPI_0" in block
+    assert "KPI_1" not in block
 
 
 def test_render_block_stays_within_cap_when_tailnote_appended(

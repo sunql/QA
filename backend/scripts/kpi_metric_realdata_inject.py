@@ -1,8 +1,9 @@
 """S5：契约块注入端到端（含「审核模拟」）。
 
-**为什么单列一个模块**：S5 的判据不是「块非空」这么简单 —— 真实目录里
-12/12 的 KPI 在回填后都是 ``mismatch``（PLAN 刻意保留业务治理列、技术侧写
-物理列，见 ``KpiBackfillPlan.deviations`` 与 T15-L）。因此：
+**为什么单列一个模块**：S5 的判据不是「块非空」这么简单 —— 回填后若 PLAN 的
+「治理↔物理」偏差仍生效（见 ``KpiBackfillPlan.deviations`` 与 T15-L），真实目录里
+12/12 的 KPI 都是 ``mismatch``；P0 规范化（``kpi_normalize_governance --apply``）
+之后则变为 8 pass + 4 unknown。因此：
 
 - 全部 ``mismatch`` ⇒ 契约块**必须为空**（对账拦截生效）；
 - 只要有一条非 ``mismatch`` ⇒ 契约块**必须非空**（否则注入链路坏了）。

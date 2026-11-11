@@ -1,0 +1,72 @@
+target: postgresql+asyncpg://qa_user:***@127.0.0.1:5433/qa_metadata database=qa_metadata
+[1/12] KPI_COST_SAVING (metric=8) before=mismatch after=pass tier=A basis=formula_split_measure
+    num  ['STANDARD_PRICE', 'ACTUAL_PRICE'] -> ['ORDER_QTY', 'UNIT_PRICE']
+    den  [] -> []
+    grain ['供应商', '物料', '月'] -> ['SUPPLIER_CODE', 'MATERIAL_CODE']
+    measure.num -> {'agg': 'SUM', 'expr': '(UNIT_PRICE - UNIT_PRICE) * ORDER_QTY'}
+[2/12] KPI_INVOICE_MATCH_RATE (metric=5) before=mismatch after=pass tier=A basis=measure_json
+    num  ['PO', 'QTY', 'PRICE'] -> ['LINE_AMOUNT_EXCL_TAX']
+    den  [] -> ['AMOUNT_EXCL_TAX']
+    grain ['供应商', '月'] -> ['SUPPLIER_CODE', 'INVOICE_DATE']
+[3/12] KPI_PAYMENT_ON_TIME (metric=4) before=mismatch after=pass tier=A basis=measure_json
+    num  ['PAYMENT_DATE'] -> ['VALUE_DATE']
+    den  ['DUE_DATE'] -> ['DUE_DATE']
+    grain ['供应商', '月'] -> ['SUPPLIER_CODE']
+[4/12] KPI_PURCHASE_CYCLE_TIME (metric=6) before=mismatch after=pass tier=A basis=formula_split_measure
+    num  ['GOODS_RECEIPT_DATE', 'PR_CREATED_DATE'] -> ['CREATION_DATE', 'RECEIPT_DATE']
+    den  [] -> []
+    grain ['供应商', '工厂', '月'] -> ['SUPPLIER_CODE', 'FACILITY_CODE']
+    measure.num -> {'agg': 'AVG', 'expr': '(RECEIPT_DATE) - (CREATION_DATE)'}
+[5/12] KPI_PURCHASE_PRICE_VARIANCE (metric=9) before=mismatch after=pass tier=A basis=formula_split_ratio
+    num  ['ACTUAL_PRICE', 'STANDARD_PRICE'] -> ['UNIT_PRICE']
+    den  ['STANDARD_PRICE'] -> ['UNIT_PRICE']
+    grain ['物料', '工厂', '月'] -> ['MATERIAL_CODE', 'FACILITY_CODE']
+    measure.num -> {'agg': 'AVG', 'expr': '(UNIT_PRICE - UNIT_PRICE)'}
+    measure.den -> {'agg': 'AVG', 'expr': 'NULLIF(UNIT_PRICE, 0)'}
+[6/12] KPI_SUPPLIER_DEFECT_RATE (metric=11) before=mismatch after=unknown tier=C basis=none_tier_c
+    num  ['IQCRESULT'] -> []
+    den  [] -> []
+    grain ['供应商', '物料', '工厂', '月'] -> []
+    business_todo: 口径声明：检验结果为 FAIL 的检验数量 / 检验总数量。技术形态待业务补：物理源 DWD_INCOMING_INSPECTION 在 schema_cache 里不存在 ⇒ execution_source = NONE。
+    finding governance/governance_columns_absent
+    finding governance/governance_columns_absent
+    finding governance/governance_grain_absent
+[7/12] KPI_SUPPLIER_DELAY_DAYS (metric=7) before=mismatch after=pass tier=A basis=formula_split_measure
+    num  ['ACTUAL_RECEIPT_DATE', 'PROMISED_DATE'] -> ['PROMISED_RECEIPT_DATE', 'RECEIPT_DATE']
+    den  [] -> []
+    grain ['供应商', '工厂', '月'] -> ['SUPPLIER_CODE', 'FACILITY_CODE']
+    measure.num -> {'agg': 'AVG', 'expr': '(RECEIPT_DATE) - (PROMISED_RECEIPT_DATE)'}
+[8/12] KPI_SUPPLIER_FPY (metric=12) before=mismatch after=unknown tier=C basis=none_tier_c
+    num  ['INSPECTION_RETRY_COUNT', 'IQCRESULT'] -> []
+    den  [] -> []
+    grain ['供应商', '物料', '工厂', '月'] -> []
+    business_todo: 口径声明：首次检验即通过且无复检的批数 / 检验总批数。技术形态待业务补：物理源 DWD_INCOMING_INSPECTION 不存在 ⇒ execution_source = NONE。
+    finding governance/governance_columns_absent
+    finding governance/governance_columns_absent
+    finding governance/governance_grain_absent
+[9/12] KPI_SUPPLIER_MAINTENANCE_RATIO (metric=10) before=mismatch after=unknown tier=C basis=none_tier_c
+    num  [] -> []
+    den  [] -> []
+    grain ['供应商（快照）'] -> []
+    business_todo: 口径声明：有效期内资质证书齐全的供应商数 / 活跃供应商总数。技术形态待业务补：资质表 supply_quality_certificate 在 srm 数据源，与 THBI 跨库，无法写成单条可执行 SQL ⇒ execution_source = NONE。
+    finding governance/governance_columns_absent
+    finding governance/governance_columns_absent
+    finding governance/governance_grain_absent
+[10/12] KPI_SUPPLIER_NCR_RATE (metric=13) before=mismatch after=unknown tier=C basis=none_tier_c
+    num  [] -> []
+    den  [] -> []
+    grain ['供应商', '物料', '工厂', '月'] -> []
+    business_todo: 口径声明：触发 NCR 的检验批数 / 检验总批数。技术形态待业务补：物理源 DWD_INCOMING_INSPECTION 与 DWD_NCR 都不存在 ⇒ execution_source = NONE。
+    finding governance/governance_columns_absent
+    finding governance/governance_columns_absent
+    finding governance/governance_grain_absent
+[11/12] KPI_SUPPLIER_OTD (metric=2) before=mismatch after=pass tier=A basis=measure_json
+    num  ['ACTUAL_RECEIPT_DATE'] -> ['RECEIPT_DATE']
+    den  ['PROMISED_DATE'] -> ['PROMISED_RECEIPT_DATE']
+    grain ['供应商', '工厂', '月'] -> ['SUPPLIER_CODE', 'FACILITY_CODE']
+[12/12] KPI_SUPPLIER_OVERDUE_RATIO (metric=3) before=mismatch after=pass tier=A basis=measure_json
+    num  ['ACTUAL_RECEIPT_DATE'] -> ['RECEIPT_DATE']
+    den  ['PROMISED_DATE'] -> ['PROMISED_RECEIPT_DATE']
+    grain ['供应商', '工厂', '月'] -> ['SUPPLIER_CODE', 'FACILITY_CODE']
+summary: pass=8 unknown=4 mismatch=0 (target mismatch=0)
+dry-run：未写库（加 --apply 落库）

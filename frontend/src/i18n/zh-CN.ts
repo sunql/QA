@@ -1023,6 +1023,7 @@ export const zhCN = {
 
   termDictionary: {
     addButton: "添加到术语词典",
+    add: "新增",
     openManager: "术语词典",
     managerTitle: "术语词典",
     createTitle: "添加术语",

@@ -12,22 +12,25 @@ from app.services.chat_stream_output import (
 )
 from app.services.kpi_semantic_match_service import KpiMatchResult
 
-# 与 chat_service.processMessage 的早退分支保持一致：只有会落到通用查询主链路的
-# 意图才允许带 Tier B 观测字段。
+# 与 chat_service.processMessage 的分支保持一致：允许集合 = 会落到
+# `_handleGenericQuery`（随后 `_attachKpiHint`）的意图；其余意图早退，不得带 Tier B
+# 观测字段。两集合必须穷尽 IntentType（见下方覆盖断言）。
 _REJECTED_INTENTS = (
     IntentType.METRIC,
     IntentType.DEFINE,
     IntentType.MAP,
     IntentType.CHITCHAT,
     IntentType.SUPPLIER_360,
+    IntentType.SUPPLIER_RISK,
+    IntentType.GRAPH_REASONING,
     IntentType.AGENT_RUN,
-    IntentType.CLARIFY,
 )
 _ALLOWED_INTENTS = (
     IntentType.QUERY,
     IntentType.NEW_QUERY,
     IntentType.REFINE,
     IntentType.FOLLOW_UP,
+    IntentType.CLARIFY,
 )
 
 
@@ -109,6 +112,17 @@ def test_tier_b_preamble_carries_datasource_mismatch() -> None:
     assert sentinel.datasource_mismatch is True
     assert sentinel.mismatch_warning is not None
     assert "1" in sentinel.mismatch_warning and "2" in sentinel.mismatch_warning
+
+
+def test_tier_hint_intent_sets_cover_all_intent_types() -> None:
+    """允许 + 拒绝必须互斥且穷尽 ``IntentType``。
+
+    将来新增意图若没归类，本断言立即失败，避免静默漏配成「流式有、非流式无」。
+    """
+    allowed = set(_ALLOWED_INTENTS)
+    rejected = set(_REJECTED_INTENTS)
+    assert allowed.isdisjoint(rejected)
+    assert allowed | rejected == set(IntentType)
 
 
 @pytest.mark.parametrize("intent", _REJECTED_INTENTS)

@@ -620,6 +620,12 @@ async def test_metric_intent_gets_no_tier_b_fields_on_either_entry(
     不会落到通用查询主链路。流式入口的 META 帧在意图分支之前产出，故必须按
     本帧解析出的 intent 门控；非流式入口的 ``_attachKpiHint`` 本就在早退分支之后。
     两者都应表现为 ``executionTier is None`` / ``degradedReason is None``。
+
+    真空通过风险由第 6 例 ``test_formula_execution_error_degrades_to_tier_b`` 排除：
+    该用例使用**同一夹具**（``KPI_TIER_A_ERR`` + 同一坏公式）与同一 KPI 名的
+    QUERY 问句「TierA报错指标统计」，断言流式首帧 ``executionTier == "B"``，
+    证明本夹具的 Tier B hint 确实存在 —— 故本用例的「无字段」是意图门控所致，
+    而非 hint 为空。此处不再重复发请求。
     """
     from app.services.intent_service import IntentService
 
@@ -670,3 +676,70 @@ async def test_metric_intent_gets_no_tier_b_fields_on_either_entry(
     assert body["intent"] == "metric"
     assert body["executionTier"] is None
     assert body["degradedReason"] is None
+
+
+# ---------------------------------------------------------------------------
+# 9. 两入口观测一致性（正向）：CLARIFY 意图必须带 Tier B 字段
+# ---------------------------------------------------------------------------
+
+
+async def test_clarify_intent_keeps_tier_b_fields_on_either_entry(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """两入口观测一致性正向守卫：CLARIFY 落到通用查询主链路，必须带 Tier B 字段。
+
+    问句「近6个月TierA报错指标是什么」的意图由 ``IntentService.classifyResult``
+    实测得出为 ``CLARIFY``（不是猜测）。该意图**不在** ``processMessage`` 的早退
+    分支里：``_handleGenericQuery`` → ``_handleClarify`` 返回后仍会经过
+    ``_attachKpiHint``，因此非流式会带 ``executionTier=B`` /
+    ``degradedReason=explicit_time_scope``；流式首帧 META 在分支之前产出，门控
+    集合必须包含 CLARIFY 才能与之一致。本用例是字段**存在**且取值相同的正向守卫
+    （与第 8 例 METRIC 的「无字段」互为对偶）。
+    """
+    from app.services.intent_service import IntentService
+
+    question = "近6个月TierA报错指标是什么"
+    result = IntentService().classifyResult(question)
+    assert result.intent.value == "clarify", (
+        f"问句意图实测为 {result.intent.value!r}，本守卫依赖 CLARIFY 走通用查询链路"
+    )
+
+    ds = await _seedSelfDatasource(dbSession)
+    config = await _seedTierBPipelineSupport(dbSession)
+    _installTierBFakes(monkeypatch, config)
+    await _seedSwitches(dbSession)
+    await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_TIER_A_ERR",
+        kpiName="TierA报错指标",
+        keywords=["TierA报错指标"],
+        formula=_BROKEN_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    # 流式：首帧 intent=clarify，且带 Tier B 观测键。
+    stream_resp = await client.post(
+        _CHAT_STREAM_URL,
+        json=_payload(question, ds.id),
+        headers=_HEADERS,
+    )
+    assert stream_resp.status_code == 200, stream_resp.text
+    metas = _metaFrames(stream_resp.text)
+    assert metas, f"未收到 meta 帧，SSE={stream_resp.text[:400]}"
+    first = metas[0]
+    assert first["intent"] == "clarify", first
+    assert first["executionTier"] == "B", first
+    assert first["degradedReason"] == "explicit_time_scope", first
+
+    # 非流式：CLARIFY 走 _handleClarify，返回后 _attachKpiHint 挂上同一组字段。
+    chat_resp = await client.post(
+        _CHAT_URL,
+        json=_payload(question, ds.id),
+        headers=_HEADERS,
+    )
+    assert chat_resp.status_code == 200, chat_resp.text
+    body = chat_resp.json()
+    assert body["intent"] == "clarify"
+    assert body["executionTier"] == "B"
+    assert body["degradedReason"] == "explicit_time_scope"

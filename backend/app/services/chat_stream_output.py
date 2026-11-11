@@ -277,23 +277,29 @@ def kpiHintFields(hint: PreambleResult | None) -> dict[str, Any]:
     return fields
 
 
-# 与 `chat_service.processMessage` 的早退分支保持一致：这些意图不会落到通用查询
-# 主链路，因此不得携带 Tier B 观测字段（否则流式与非流式对同一问句给出相反观测）。
+# = 会落到 `chat_service._handleGenericQuery` 的意图集合：这些意图在
+# `processMessage` 中会经过 `_attachKpiHint`，因此两入口都必须携带 Tier B 观测字段。
+# 早退集合是 CHITCHAT / DEFINE / MAP / METRIC / SUPPLIER_360 / SUPPLIER_RISK /
+# GRAPH_REASONING / AGENT_RUN —— 新增意图时必须先确认它归哪一边，否则会复现
+# 「流式有、非流式无」或反向的观测不一致。
 _TIER_HINT_INTENTS: frozenset[IntentType] = frozenset({
     IntentType.QUERY,
     IntentType.NEW_QUERY,
     IntentType.REFINE,
     IntentType.FOLLOW_UP,
+    IntentType.CLARIFY,
 })
 
 
 def tierHintFields(hint: PreambleResult | None, intent: IntentType) -> dict[str, Any]:
     """仅对最终会落到通用查询主链路的意图发 Tier B 字段。
 
-    门控与 ``chat_service.processMessage`` 的早退分支一一对应：CHITCHAT / DEFINE /
-    MAP / METRIC / SUPPLIER_* / AGENT_RUN / CLARIFY 在挂载 hint 之前就返回，流式
-    入口必须在产出 META 帧时用**本帧解析出的意图**复刻同一门控，否则会出现
-    「流式宣称 executionTier=B、非流式却是 null」的观测性谎言。
+    ``_TIER_HINT_INTENTS`` = 会落到 ``chat_service._handleGenericQuery`` 的意图集合
+    （QUERY / NEW_QUERY / REFINE / FOLLOW_UP / CLARIFY）。早退集合是 CHITCHAT /
+    DEFINE / MAP / METRIC / SUPPLIER_360 / SUPPLIER_RISK / GRAPH_REASONING /
+    AGENT_RUN —— 新增意图时必须先确认它归哪一边。流式入口的 META 帧在意图分支
+    之前产出，必须用**本帧解析出的意图**复刻同一门控，否则会出现「流式宣称
+    executionTier=B、非流式却是 null」（或反向）的观测性谎言。
     重分类可能改变意图，故调用方逐帧传入各自的 ``intent``，不得复用首帧结果。
     """
     if intent not in _TIER_HINT_INTENTS:

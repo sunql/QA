@@ -178,7 +178,7 @@ async def test_apply_refuses_mismatch_target_and_writes_nothing(
 async def test_apply_rolls_back_when_verification_fails(
     dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """复核失败（模拟 JSONB 被改写）⇒ 已执行的 UPDATE 全部回滚。"""
+    """复核抛错 ⇒ 已执行的 UPDATE 全部回滚。"""
 
     async def _boom(session: AsyncSession, plans) -> None:
         raise NormalizationError("模拟复核不一致")
@@ -195,6 +195,158 @@ async def test_apply_rolls_back_when_verification_fails(
     reloaded, _metric = await _reload(dbSession, kpiId, metricId)
     assert reloaded.numerator_columns == ["按期到货行数"]
     assert reloaded.denominator_columns == ["总到货行数"]
+
+
+async def test_apply_rolls_back_every_plan_when_verify_reports_mismatch(
+    dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**真实的**复核 mismatch 分支：第二条失败 ⇒ 第一条的写入也回滚。"""
+
+    class _Mismatch:
+        verdict = "mismatch"
+
+        def reasons(self):
+            return ("模拟落库后对账 mismatch",)
+
+    monkeypatch.setattr(
+        normalizeScript, "reconcileMetric", lambda governance, technique: _Mismatch()
+    )
+    metricA, kpiA = await _seedRatioKpi(dbSession, "KPI_D3_VERIFY_A")
+    metricB, kpiB = await _seedRatioKpi(dbSession, "KPI_D3_VERIFY_B")
+    kpiAId, metricAId = kpiA.id, metricA.id
+    kpiBId, metricBId = kpiB.id, metricB.id
+    plans = [
+        deriveNormalization(kpiA, metricA, _CLASS_COLUMNS),
+        deriveNormalization(kpiB, metricB, _CLASS_COLUMNS),
+    ]
+
+    with pytest.raises(NormalizationError, match="落库后对账仍 mismatch"):
+        await normalizeScript.applyPlans(dbSession, plans)
+
+    for kpiId, metricId in ((kpiAId, metricAId), (kpiBId, metricBId)):
+        reloaded, _metric = await _reload(dbSession, kpiId, metricId)
+        assert reloaded.numerator_columns == ["按期到货行数"], kpiId
+        assert reloaded.denominator_columns == ["总到货行数"], kpiId
+
+
+async def test_apply_rejects_verdict_downgrade(
+    dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """计划写后是 pass，复核却回落 unknown ⇒ 视为失败（不是「不是 mismatch 就行」）。"""
+
+    class _Downgraded:
+        verdict = "unknown"
+
+        def reasons(self):
+            return ()
+
+    monkeypatch.setattr(
+        normalizeScript, "reconcileMetric", lambda governance, technique: _Downgraded()
+    )
+    metric, kpi = await _seedRatioKpi(dbSession, "KPI_D3_DOWNGRADE")
+    kpiId, metricId = kpi.id, metric.id
+    plan = deriveNormalization(kpi, metric, _CLASS_COLUMNS)
+    assert plan.verdict_after == "pass"
+
+    with pytest.raises(NormalizationError, match="verdict"):
+        await normalizeScript.applyPlans(dbSession, [plan])
+
+    reloaded, _metric = await _reload(dbSession, kpiId, metricId)
+    assert reloaded.numerator_columns == ["按期到货行数"]
+
+
+async def test_apply_handles_multi_key_grain_in_author_order(
+    dbSession: AsyncSession,
+) -> None:
+    """grain 多键且**非字母序**：落库与复核都不得因为「排序」而误报失败。"""
+    metric = OntologyMetric(
+        metric_name="KPI_D3_GRAIN_ORDER-metric",
+        formula=_FORMULA,
+        agg_function="SUM",
+        metric_type="RATIO",
+        aggregation_order="WEIGHTED_RATIO",
+        execution_source="ESCAPE_HATCH",
+        numerator_measure={"agg": "COUNT", "expr": "RECEIPT_DATE"},
+        denominator_measure={"agg": "COUNT", "expr": "PROMISED_RECEIPT_DATE"},
+        grain_keys=["SUPPLIER_CODE", "PROVINCE"],
+        created_by="d3-test",
+    )
+    dbSession.add(metric)
+    await dbSession.commit()
+    kpi = KpiCatalog(
+        kpi_code="KPI_D3_GRAIN_ORDER",
+        kpi_name="粒度顺序",
+        status="PUBLISHED",
+        metric_id=metric.id,
+        numerator_columns=["按期到货行数"],
+        denominator_columns=["总到货行数"],
+        grain_keys=["供应商", "省"],
+    )
+    dbSession.add(kpi)
+    await dbSession.commit()
+    kpiId, metricId = kpi.id, metric.id
+    plan = deriveNormalization(kpi, metric, _CLASS_COLUMNS)
+    assert plan.grain_keys == ("SUPPLIER_CODE", "PROVINCE")
+
+    assert await normalizeScript.applyPlans(dbSession, [plan]) == 1
+
+    reloaded, _metric = await _reload(dbSession, kpiId, metricId)
+    assert reloaded.grain_keys == ["SUPPLIER_CODE", "PROVINCE"]
+
+
+async def test_apply_refuses_when_metric_mapping_changed(
+    dbSession: AsyncSession,
+) -> None:
+    """计划里的 metric_id 与库里当前挂靠不一致 ⇒ 拒绝写库（防并发改挂靠）。"""
+    metric, kpi = await _seedRatioKpi(dbSession, "KPI_D3_REMAP")
+    other = OntologyMetric(
+        metric_name="KPI_D3_REMAP-other",
+        formula=_FORMULA,
+        agg_function="SUM",
+        metric_type="RATIO",
+        aggregation_order="WEIGHTED_RATIO",
+        execution_source="ESCAPE_HATCH",
+        numerator_measure={"agg": "COUNT", "expr": "RECEIPT_DATE"},
+        denominator_measure={"agg": "COUNT", "expr": "PROMISED_RECEIPT_DATE"},
+        grain_keys=["SUPPLIER_CODE"],
+        created_by="d3-test",
+    )
+    dbSession.add(other)
+    await dbSession.commit()
+    kpiId, metricId, otherId = kpi.id, metric.id, other.id
+    plan = deriveNormalization(kpi, metric, _CLASS_COLUMNS)
+    # 模拟快照之后有人把 KPI 改挂到另一个 metric。
+    kpi.metric_id = otherId
+    await dbSession.commit()
+
+    with pytest.raises(NormalizationError, match="metric_id"):
+        await normalizeScript.applyPlans(dbSession, [plan])
+
+    reloaded, _metric = await _reload(dbSession, kpiId, metricId)
+    assert reloaded.numerator_columns == ["按期到货行数"]
+
+
+async def test_apply_rejects_duplicate_metric_in_plan(dbSession: AsyncSession) -> None:
+    """同一 metric 被两条计划写 ⇒ 拒绝（后写覆盖先写，等于静默丢一条意图）。"""
+    metric, kpiA = await _seedRatioKpi(dbSession, "KPI_D3_DUP_A")
+    kpiB = KpiCatalog(
+        kpi_code="KPI_D3_DUP_B",
+        kpi_name="重复挂靠",
+        status="PUBLISHED",
+        metric_id=metric.id,
+        numerator_columns=["按期到货行数"],
+        denominator_columns=["总到货行数"],
+        grain_keys=["供应商"],
+    )
+    dbSession.add(kpiB)
+    await dbSession.commit()
+    plans = [
+        deriveNormalization(kpiA, metric, _CLASS_COLUMNS),
+        deriveNormalization(kpiB, metric, _CLASS_COLUMNS),
+    ]
+
+    with pytest.raises(NormalizationError, match="metric_id"):
+        await normalizeScript.applyPlans(dbSession, plans)
 
 
 async def test_main_refuses_non_whitelist_target() -> None:

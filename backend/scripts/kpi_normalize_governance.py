@@ -10,7 +10,8 @@
     python3 scripts/kpi_normalize_governance.py \
         --database-url '...' --apply                                    # 落库
 
-退出码：0 正常；1 目标状态仍有 mismatch（拒绝继续）；2 派生失败（拒绝写库）。
+退出码：0 正常；1 目标状态仍有 mismatch / 连错库（拒绝继续）；
+2 派生失败或落库复核失败（已回滚，拒绝提交）。
 """
 
 from __future__ import annotations
@@ -187,6 +188,9 @@ async def _main(argv: Sequence[str] | None = None) -> int:
             except NormalizationError as exc:
                 print(f"[refused] 落库复核失败（已回滚）：{exc}", file=sys.stderr)
                 return _EXIT_DERIVATION_ERROR
+            except Exception as exc:  # noqa: BLE001 — DB 级异常不能混进退出码 1
+                print(f"[failed] 落库异常（已回滚）：{exc!r}", file=sys.stderr)
+                return _EXIT_DERIVATION_ERROR
             print(f"applied：{changed} 条变更已写入 kpi_catalog / ontology_metric")
             return 0
     finally:
@@ -218,12 +222,21 @@ async def _verifyApplied(
         kpi = byCode.get(plan.kpi_code)
         if kpi is None:
             raise NormalizationError(f"{plan.kpi_code}: 落库后读不到 KPI 行")
-        if _sortedColumns(kpi.numerator_columns) != plan.numerator_columns:
+        # 三组列都按**无序**比较：治理列序不参与任何判定，plan 的 grain 保持
+        # 作者原序（``_tokens`` 不排序），拿排序结果去比未排序目标会误报。
+        if _sortedColumns(kpi.numerator_columns) != _sortedColumns(plan.numerator_columns):
             raise NormalizationError(f"{plan.kpi_code}: 分子列落库值与目标不一致")
-        if _sortedColumns(kpi.denominator_columns) != plan.denominator_columns:
+        if _sortedColumns(kpi.denominator_columns) != _sortedColumns(
+            plan.denominator_columns
+        ):
             raise NormalizationError(f"{plan.kpi_code}: 分母列落库值与目标不一致")
-        if _sortedColumns(kpi.grain_keys) != plan.grain_keys:
+        if _sortedColumns(kpi.grain_keys) != _sortedColumns(plan.grain_keys):
             raise NormalizationError(f"{plan.kpi_code}: 粒度键落库值与目标不一致")
+        if plan.metric_id is not None and kpi.metric_id != plan.metric_id:
+            raise NormalizationError(
+                f"{plan.kpi_code}: metric_id 已变化（库 {kpi.metric_id} ≠ 计划 "
+                f"{plan.metric_id}），落库后复核不通过"
+            )
         metric = (
             await session.get(
                 OntologyMetric, plan.metric_id, populate_existing=True
@@ -244,6 +257,58 @@ async def _verifyApplied(
             raise NormalizationError(
                 f"{plan.kpi_code}: 落库后对账仍 mismatch：{list(result.reasons())}"
             )
+        # 不止「不是 mismatch」：pass 计划回落成 unknown 同样是失败（Tier 降级）。
+        if plan.verdict_after and result.verdict != plan.verdict_after:
+            raise NormalizationError(
+                f"{plan.kpi_code}: 落库后 verdict={result.verdict}，"
+                f"与计划 {plan.verdict_after} 不一致"
+            )
+
+
+def _assertUniqueTargets(plans: Sequence[NormalizationPlan]) -> None:
+    """同一 kpi_code / metric_id 只能出现一次：后写会静默覆盖先写。"""
+    codes: dict[str, int] = {}
+    metricIds: dict[int, str] = {}
+    for plan in plans:
+        if plan.kpi_code in codes:
+            raise NormalizationError(f"{plan.kpi_code}: 计划里出现重复 kpi_code")
+        codes[plan.kpi_code] = 1
+        if plan.metric_id is None:
+            continue
+        if plan.metric_id in metricIds:
+            raise NormalizationError(
+                f"metric_id {plan.metric_id} 被多个 KPI 计划共享"
+                f"（{metricIds[plan.metric_id]} / {plan.kpi_code}）"
+            )
+        metricIds[plan.metric_id] = plan.kpi_code
+
+
+async def _assertOwnership(
+    session: AsyncSession, plans: Sequence[NormalizationPlan]
+) -> None:
+    """落库前**重读**挂靠关系：计划快照里的 metric_id 必须仍是库里当前值。
+
+    只按 ``kpi_code`` 改治理列、按 ``plan.metric_id`` 改度量，若不核对挂靠，
+    并发改挂靠后会把度量写到别的指标上，且复核用自己的 metric 永远自洽。
+    """
+    codes = [plan.kpi_code for plan in plans]
+    rows = (
+        await session.execute(
+            select(KpiCatalog)
+            .where(KpiCatalog.kpi_code.in_(codes))
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    byCode = {row.kpi_code: row for row in rows}
+    for plan in plans:
+        kpi = byCode.get(plan.kpi_code)
+        if kpi is None:
+            raise NormalizationError(f"{plan.kpi_code}: 库里找不到该 KPI，拒绝写库")
+        if plan.metric_id is not None and kpi.metric_id != plan.metric_id:
+            raise NormalizationError(
+                f"{plan.kpi_code}: metric_id 已变化（库 {kpi.metric_id} ≠ 计划 "
+                f"{plan.metric_id}），拒绝写库"
+            )
 
 
 async def applyPlans(
@@ -259,10 +324,12 @@ async def applyPlans(
         raise NormalizationError(
             f"目标状态仍有 mismatch，拒绝写库：{', '.join(mismatched)}"
         )
+    _assertUniqueTargets(plans)
     pending = [plan for plan in plans if not plan.is_noop]
     if not pending:
         return 0
     try:
+        await _assertOwnership(session, pending)
         for plan in pending:
             result = await session.execute(
                 update(KpiCatalog)
@@ -298,10 +365,12 @@ async def applyPlans(
                     f"{plan.kpi_code}: metric 更新行数 {result.rowcount} ≠ 1，拒绝继续"
                 )
         await _verifyApplied(session, pending)
-    except NormalizationError:
+        await session.commit()
+    except Exception:
+        # 不止 NormalizationError：DB 级异常同样必须回滚，否则调用方（本函数
+        # 对外导出、测试直接调用）在同一 session 上后续 commit 会带出半截写入。
         await session.rollback()
         raise
-    await session.commit()
     return len(pending)
 
 

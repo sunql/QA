@@ -33,3 +33,13 @@ app/tests/unit/test_kpi_time_scope_detection.py:26: AssertionError
 =========================== short test summary info ============================
 FAILED app/tests/unit/test_kpi_time_scope_detection.py::test_detects_explicit_time[2025\u5e74\u51c6\u65f6\u4ea4\u4ed8\u7387]
 1 failed, 13 passed in 4.78s
+
+---- post-restore GREEN run ----
+Command: TEST_DATABASE_URL=... .venv/bin/python -m pytest app/tests/unit/test_kpi_time_scope_detection.py -q
+......................                                                   [100%]
+22 passed in 7.09s
+
+---- Fix round 1 (review Important #1) verification ----
+Command: pytest app/tests/unit/test_kpi_time_scope_detection.py app/tests/unit/test_kpi_execution_service.py -q
+.......................................                                  [100%]
+39 passed in 12.58s

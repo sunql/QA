@@ -99,15 +99,19 @@ def planKpiExecution(
 # 正则覆盖；复用会把「检测口径」与「注入口径」耦合，P4 改解析器时会连带改变路由。
 _EXPLICIT_TIME_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(近|最近|过去|前)\s*[0-9一二三四五六七八九十两]+\s*(天|日|周|星期|个月|月|年|季度)"),
-    re.compile(r"(近|最近|过去)\s*半\s*年"),
+    re.compile(r"(近|最近|过去|这)\s*半\s*年"),
     re.compile(r"[0-9]{4}\s*年"),
     re.compile(r"[0-9]{4}\s*[-/]\s*[0-9]{1,2}"),
     re.compile(r"[0-9]{1,2}\s*月份?"),
-    re.compile(r"(本|上|下|这|当前)(周|星期|个月|月|季度|年|年度)"),
+    re.compile(r"[一二三四五六七八九十]{1,2}\s*月份?"),
+    re.compile(r"(本|上|下|这|当前)(个)?(周|星期|个月|月|季度|年|年度)"),
     re.compile(r"(今年|去年|明年|前年|本年|上年)"),
     re.compile(r"第?\s*[一二三四1-4]\s*季度"),
     re.compile(r"(上|下)半年"),
-    re.compile(r"\bQ[1-4]\b", re.IGNORECASE),
+    # CJK 字符在 Python 里算 \w，\bQ[1-4]\b 对「Q2交」不成立；用字母/数字边界代替。
+    re.compile(r"(?<![A-Za-z])Q[1-4](?![0-9])", re.IGNORECASE),
+    re.compile(r"(本|上|下|这)?财年"),
+    re.compile(r"(年|月|季度|半年)(初|底|末)"),
 )
 
 
@@ -116,7 +120,8 @@ def hasExplicitTimeScope(question: str) -> bool:
 
     宁可多判（误判 ⇒ Tier B，多一次 LLM）不可漏判（漏判 ⇒ 时段错的数字看起来合理）。
     匹配到任一形态即视为显式；无数字的「近半年/这半年」也计入（滚动窗口语义有分歧，
-    交给 LLM 按用户原话处理）。
+    交给 LLM 按用户原话处理）。季度支持 Q2/2025Q2，月份支持阿拉伯数字与中文数字，
+    另覆盖「上个季度」「本财年」「年初/月底」等相对与期间边缘形态。
     """
     return any(p.search(question) for p in _EXPLICIT_TIME_PATTERNS)
 

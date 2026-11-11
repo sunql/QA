@@ -20,6 +20,15 @@ from app.services.kpi_execution_service import hasExplicitTimeScope
         "Q2 交付率",
         "上半年交付率",
         "2025年上半年逾期率",
+        # 评审 Fix round 1 补的常见显式时间形态
+        "这半年交付率",
+        "Q2交付率",
+        "上个季度逾期率",
+        "四月交付率",
+        "十二月份交付率",
+        "2025Q2交付率",
+        "本财年交付率",
+        "年初交付率",
     ],
 )
 def test_detects_explicit_time(question: str) -> None:

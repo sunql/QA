@@ -289,7 +289,7 @@ KPI: DRAFT → PUBLISHED  ⟸ 必须同时满足：
 |---|---|
 | 迁移 | `0136_metric_structured` + `0137_metric_source_unique` 已落地（分支 head = 0137）；**prod 仍为 0135** |
 | 回填（隔离测试库 5434） | 12 条：第 1 次 `created=12`，第 2 次 `created=0 updated=12`（幂等）；`ontology_metric` `0 → 12 → 12` |
-| 对账 verdict | **12/12 `mismatch`** —— PLAN 刻意保留治理列（业务口径）≠ 物理列的偏差（T15-L），属设计上的多签互锁 |
+| 对账 verdict | **12/12 `mismatch`** —— PLAN 刻意保留治理列（业务口径）≠ 物理列的偏差（T15-L），属设计上的多签互锁。**⚠️ 已被 §16 的 P0 规范化取代（2026-11-11 起 dev 库 8 pass + 4 unknown）** |
 | 契约块（现状） | **空**（全 mismatch ⇒ 对账拦截）；模拟治理列对齐后 575 字符、prompt 4361 字符 |
 | exact-alias | 命中，`confidence = 1.0`；Jaccard 自然语言路径最高分 **0.0** ⇒ 不可达（遗留项 L1） |
 | 裸表名 join | 22 引用 / 命中 13（59.1%） |
@@ -341,3 +341,35 @@ KPI: DRAFT → PUBLISHED  ⟸ 必须同时满足：
 
 **测试 fixture 纪律**：要测「分母**可编辑**时的回传」（含 `class_id`/`class_alias` 对称断言）fixture 必须是
 `RATIO`；测「表单没暴露分母 ⇒ 不得清空」才用 `MEASURE` + 非空分母。两条用例别混。
+
+## 16. P0 止血：治理结构化列 = 物理列（2026-11-11）
+
+**约定（本批确立，后续编辑以此为准）**：`kpi_catalog.numerator_columns` /
+`denominator_columns` / `grain_keys` **以物理列名为准**，由 `ontology_metric` 的
+`*_measure`（或外层聚合 formula 派生出的 measure）确定性推导；不再写业务中文名。
+工具：`backend/scripts/kpi_normalize_governance.py`（默认 dry-run；`--apply` 写库；
+目标库 `qa_metadata` 需 `--allow-prod-write`；单事务 + 落库后读回复核）。
+
+**dev 库实测（2026-11-11，5433 `qa_metadata`）**：
+
+| 项 | 结果 |
+|---|---|
+| 规范化落库 | `applied：12 条变更`，重跑 dry-run **12/12 noop**、第二次 `--apply` **0 条** |
+| 对账 verdict | **8 `pass` + 4 `unknown` + 0 `mismatch`**（unknown = `execution_source=NONE` 的 4 条：DEFECT_RATE / FPY / MAINTENANCE_RATIO / NCR_RATE） |
+| S3 oracle（realdata） | 9 步全 PASS；`S3.3 mismatch 集合 = ∅`；`S3.4` 列级 finding 集合 = ∅ |
+| 契约块 | 仍有 NONE 源 ⇒ 注入按块机制照旧；发布闸门仍拦 unknown |
+
+**取证**：[before.json / after.json / dry-run 报告 / second-apply](../changes/2026-11-11-kpi-definition-consumption/)。
+
+**踩过的坑（别再踩）**：
+
+1. **realdata S3 的期望不能按 PLAN tier 判**。PLAN tier B 覆盖「一侧度量 + 算术式 /
+   物理源部分缺失」，其中 `MAINTENANCE_RATIO` 的 **PLAN tier = B 但 DB `execution_source = NONE`**。
+   规范化后正确期望是：**`NONE` ⇒ `unknown`，其余 ⇒ `pass`**（`expectedVerdictFor(executionSource, deviations)`）。
+   按 tier 判会把 4 条正确结果判成失败（2026-11-11 实跑发现）。
+2. **偏差是否生效**用 `planDeviationActive(kpi, plan)` 判：只有在三组治理列**全部**仍等于 PLAN
+   声明的业务列时，PLAN 的 `deviations` 才继续生效；规范化之后必须失效，否则 S3 永远 mismatch。
+3. **落库回填脚本 `kpi_metric_backfill_apply._governanceValues` 写的是业务名**，在已规范化的库上
+   重跑会覆盖回业务名、重新制造 mismatch —— 只当历史初始化工具用。
+
+**未做（P1/P2/P3 边界）**：匹配升级、Tier A 执行、结构化→SQL 编译器、生产部署。

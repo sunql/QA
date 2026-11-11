@@ -70,6 +70,20 @@ async def test_adapter_timeout_degrades() -> None:
     assert result.ok is False and result.reason == "execution_timeout"
 
 
+async def test_adapter_provider_failure_degrades_without_raising() -> None:
+    """adapter 构造失败（如 SECRET_KEY 轮换后解密异常）也必须降级，不得上抛。"""
+
+    def boom(_datasourceId, _datasource):
+        raise RuntimeError("decrypt failed")
+
+    svc = KpiExecutionService(adapterProvider=boom)
+    result = await svc.execute(
+        formula="SELECT 1", datasourceId=1, datasource=object(),
+        metricCode="KPI_X", metricName="x", confidence=1.0,
+    )
+    assert result.ok is False and result.reason == "execution_error"
+
+
 async def test_adapter_error_degrades_without_raising() -> None:
     svc = KpiExecutionService(
         adapterProvider=lambda _i, _d: _StubAdapter(exc=RuntimeError("boom"))

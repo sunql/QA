@@ -154,8 +154,10 @@ class KpiExecutionService:
             return KpiExecutionResult(ok=False, reason=REASON_FORMULA_NOT_READ_ONLY)
 
         started = time.monotonic()
-        adapter = self._adapterProvider(datasourceId, datasource)
         try:
+            # adapter 构造也可能失败（如 SECRET_KEY 轮换后 decryptApiKey 抛
+            # InvalidToken）；与执行同属可降级路径，绝不能让 Tier A 降级变成请求失败。
+            adapter = self._adapterProvider(datasourceId, datasource)
             # 多取 1 行用于**精确**判断截断（len==rowLimit 不代表被截断）。
             # QUERY_ROW_LIMIT 默认 0（不限行），故 rowLimit + 1 的取数是精确的；
             # 若运维把 QUERY_ROW_LIMIT 配到 rowLimit 或更小，adapter 会先按配置

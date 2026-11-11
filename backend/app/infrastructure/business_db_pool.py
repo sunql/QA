@@ -407,7 +407,12 @@ def _recordEvidenceAfterSuccess(func):
         self, sql: str, *, maxRows: int | None = None
     ) -> list[dict[str, Any]]:
         startedAt = time.monotonic()
-        rows = await func(self, sql, maxRows=maxRows)
+        # 仅在调用方显式传 maxRows 时才转发关键字：装饰器须保持对「不接受
+        # maxRows 的被装饰方法」的向后兼容（既有测试替身即为这种形态）。
+        if maxRows is None:
+            rows = await func(self, sql)
+        else:
+            rows = await func(self, sql, maxRows=maxRows)
         scheduleSqlQueryEvidence(
             sql=sql,
             rows=rows,

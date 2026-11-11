@@ -3,8 +3,12 @@
 与 data_quality / entity_mapping 同模式：扁平路径，挂在 /api/v1/kpi-catalog。
 KPI 不进 Neo4j / Milvus（治理层）。
 
-Phase 4.5：PUT / DELETE 走 AclService（owner-based）；PermissionDenied → 403。
-ACL 已在 service 层抛 PermissionDeniedError；不再路由层重复检查。
+写入口（POST / PUT / DELETE）一律 admin：KPI 名称与 semantic_keywords 决定 L1
+匹配与 B3 契约注入方向，任何登录用户可写就等于可劫持这些决策（feat-kpi-match-v2
+评审 HIGH-1）。与词条字典 / 本体指标同口径。
+
+Phase 4.5 的 owner-based AclService 仍在 service 层保留（admin 恒通过），
+用于审计语义；不再依赖它做权限闸门。
 """
 
 from __future__ import annotations
@@ -101,12 +105,12 @@ async def searchKpiCatalog(
 @router.post("", response_model=KpiCatalogRead, status_code=status.HTTP_201_CREATED)
 async def createKpi(
     dto: KpiCatalogCreate,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(getAdminOnlyActor),
     db: AsyncSession = Depends(getDb),
 ) -> KpiCatalogRead:
-    """创建 KPI。重复 kpi_code 返回 409。
+    """创建 KPI（仅 admin）。重复 kpi_code 返回 409。
 
-    CREATE 不做 ACL（任何部门都能创建新 KPI）；审计 + 历史快照由 service 层写入。
+    审计 + 历史快照由 service 层写入。
     """
     return KpiCatalogRead.model_validate(await _service.createKpi(db, dto, user))
 
@@ -143,20 +147,20 @@ async def getKpi(
 async def updateKpi(
     id: int,
     dto: KpiCatalogUpdate,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(getAdminOnlyActor),
     db: AsyncSession = Depends(getDb),
 ) -> KpiCatalogRead:
-    """更新 KPI。owner 不匹配 → 403；revision_count 始终 +1。"""
+    """更新 KPI（仅 admin）。revision_count 始终 +1。"""
     return KpiCatalogRead.model_validate(await _service.updateKpi(db, id, dto, user))
 
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteKpi(
     id: int,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(getAdminOnlyActor),
     db: AsyncSession = Depends(getDb),
 ) -> None:
-    """删除 KPI。owner 不匹配 → 403；审计 before 写入。"""
+    """删除 KPI（仅 admin）。审计 before 写入。"""
     await _service.deleteKpi(db, id, user)
 
 

@@ -38,6 +38,7 @@ import {
 } from "../utils/kpiCatalogPayload";
 import type { KpiFormValues } from "../utils/kpiCatalogPayload";
 import { useTranslation } from "../i18n";
+import { useAuthStore } from "../stores/authStore";
 import { useDatasourceOptions, datasourceName } from "../hooks/useDatasourceOptions";
 import { useTablePagination } from "../utils/useTablePagination";
 import FilterBar from "../components/ontology/FilterBar";
@@ -60,6 +61,10 @@ const METRIC_STATUS_TAG_COLOR: Record<MetricStatus, string> = {
 
 export default function KpiCatalogPage() {
   const { t } = useTranslation();
+  // 写入口（新建/编辑/删除）一律 admin：KPI 名称与 semantic_keywords 决定
+  // L1 匹配与 B3 契约注入方向（feat-kpi-match-v2 评审 HIGH-1）。后端同样强制。
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = (user?.roles ?? []).includes("admin");
   const { pagination } = useTablePagination();
   const sources = useDatasourceOptions();
   const [kpis, setKpis] = useState<KpiCatalog[]>([]);
@@ -280,25 +285,30 @@ export default function KpiCatalogPage() {
         <Tag color={KPI_STATUS_TAG_COLOR[v]}>{t(`enums.kpiStatus.${v}`)}</Tag>
       ),
     },
-    {
-      title: t("kpiCatalog.columns.actions"),
-      width: 160,
-      render: (_: unknown, record: KpiCatalog) => (
-        <Space>
-          <Button size="small" onClick={() => openEdit(record)}>
-            {t("common.edit")}
-          </Button>
-          <Popconfirm
-            title={t("kpiCatalog.deleteConfirm")}
-            onConfirm={() => void handleDelete(record.id)}
-          >
-            <Button size="small" danger>
-              {t("common.delete")}
-            </Button>
-          </Popconfirm>
-        </Space>
-      ),
-    },
+    // 非 admin 不渲染写操作列（后端同样 403）
+    ...(isAdmin
+      ? [
+          {
+            title: t("kpiCatalog.columns.actions"),
+            width: 160,
+            render: (_: unknown, record: KpiCatalog) => (
+              <Space>
+                <Button size="small" onClick={() => openEdit(record)}>
+                  {t("common.edit")}
+                </Button>
+                <Popconfirm
+                  title={t("kpiCatalog.deleteConfirm")}
+                  onConfirm={() => void handleDelete(record.id)}
+                >
+                  <Button size="small" danger>
+                    {t("common.delete")}
+                  </Button>
+                </Popconfirm>
+              </Space>
+            ),
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -309,9 +319,11 @@ export default function KpiCatalogPage() {
           <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             {t("common.refresh")}
           </Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-            {t("kpiCatalog.newButton")}
-          </Button>
+          {isAdmin ? (
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+              {t("kpiCatalog.newButton")}
+            </Button>
+          ) : null}
         </Space>
       </div>
       <FilterBar

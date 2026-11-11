@@ -2,7 +2,7 @@
 
 强制规则（Harness/rules/测试规范.md）：真实 PostgreSQL + 完整 API 链路。
 覆盖：
-1. ACL：admin 通过 / owner 部门通过 / 其他部门拒绝 / 空 owner 拒绝非 admin
+1. ACL：写入口一律 admin；非 admin（含 owner 部门成员）一律 403
 2. 审计：CREATE/UPDATE/DELETE 都写入 audit_log，含 actor + before/after
 3. 历史：每次变更完整快照写入 kpi_catalog_history；删 KPI 后 kpi_id=NULL 但 snapshot 仍可查
 4. 事务绑定：审计/历史与业务同事务（rollback 一致性）
@@ -54,9 +54,16 @@ class _Helper:
 
 
 class TestKpiAcl:
-    """PUT/DELETE 走 AclService：admin 通过；owner 部门通过；其他部门 403。"""
+    """写入口一律 admin：create / update / delete；部门归属不再授予写权限。
+
+    2026-11-11（feat-kpi-match-v2 评审 HIGH-1）：KPI 名称与 semantic_keywords 决定
+    L1 匹配与 B3 契约注入方向，若部门 owner 可写，就能「先建自己的 KPI 再改名劫持」。
+    因此写权限与词条字典 / 本体指标同口径收口到 admin；service 层的 owner ACL
+    保留（admin 恒通过），仅用于审计语义。
+    """
 
     async def _create(self, client, seed_data_source, code: str, owner: str) -> dict:
+        """用 admin 身份建 KPI（写入口 admin-only）；owner 由业务指定，与请求方无关。"""
         resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
@@ -65,14 +72,14 @@ class TestKpiAcl:
                 "kpiName": f"测试-{code}",
                 "owner": owner,
             },
+            headers={"X-User-Id": "root", "X-User-Roles": "admin"},
         )
         assert resp.status_code == 201, resp.text
         return resp.json()
 
-    async def test_create_does_not_require_acl(self, client, dbSession, seed_data_source) -> None:
-        """CREATE 不走 ACL；任何部门都能创建新 KPI。"""
+    async def test_create_requires_admin(self, client, dbSession, seed_data_source) -> None:
+        """非 admin 不能创建 KPI（部门归属不授予写权限）。"""
         await _Helper.clean(dbSession)
-        # 任何部门（甚至无部门）都能 POST
         resp = await client.post(
             "/api/v1/kpi-catalog",
             json={
@@ -81,24 +88,76 @@ class TestKpiAcl:
                 "kpiName": "A",
                 "owner": PROCUREMENT,
             },
-            headers={"X-User-Id": "alice", "X-User-Departments": FINANCE},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "user",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
-        assert resp.status_code == 201
+        assert resp.status_code == 403
+        # 拒绝原因必须落在 admin 语义上，而不是碰巧的 422/409
+        assert "admin" in resp.json().get("detail", "")
 
-    async def test_update_owner_dept_passes(self, client, dbSession, seed_data_source) -> None:
-        """owner=procurement + user=procurement → 200。"""
+    async def test_create_published_requires_admin(
+        self, client, dbSession, seed_data_source
+    ) -> None:
+        """发布态是唯一进入匹配索引的状态，非 admin 不得直接创建。"""
         await _Helper.clean(dbSession)
-        kpi = await self._create(client, seed_data_source, "KPI_GOV_B", PROCUREMENT)
-        resp = await client.put(
-            f"/api/v1/kpi-catalog/{kpi['id']}",
-            json={"kpiName": "改后"},
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+        resp = await client.post(
+            "/api/v1/kpi-catalog",
+            json={
+                "datasourceId": seed_data_source.id,
+                "kpiCode": "KPI_GOV_PUB",
+                "kpiName": "发布态",
+                "owner": PROCUREMENT,
+                "status": "PUBLISHED",
+            },
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "user",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
-        assert resp.status_code == 200
-        assert resp.json()["kpiName"] == "改后"
+        assert resp.status_code == 403
 
-    async def test_update_other_dept_returns_403(self, client, dbSession, seed_data_source) -> None:
-        """owner=procurement + user=finance → 403。"""
+    async def test_admin_can_create_published(self, client, dbSession, seed_data_source) -> None:
+        """对照片：同一发布态 payload 换 admin 头 ⇒ 201（证明上面的 403 不是 payload 问题）。"""
+        await _Helper.clean(dbSession)
+        resp = await client.post(
+            "/api/v1/kpi-catalog",
+            json={
+                "datasourceId": seed_data_source.id,
+                "kpiCode": "KPI_GOV_ADMIN_PUB",
+                "kpiName": "管理员发布",
+                "owner": PROCUREMENT,
+                "status": "PUBLISHED",
+            },
+            headers={"X-User-Id": "root", "X-User-Roles": "admin"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["status"] == "PUBLISHED"
+
+    async def test_non_admin_can_still_read(self, client, dbSession, seed_data_source) -> None:
+        """反向守卫：写入口收口不得误伤读路径。"""
+        await _Helper.clean(dbSession)
+        kpi = await self._create(client, seed_data_source, "KPI_GOV_READ", PROCUREMENT)
+        userHeaders = {
+            "X-User-Id": "alice",
+            "X-User-Roles": "user",
+            "X-User-Departments": PROCUREMENT,
+        }
+
+        listed = await client.get("/api/v1/kpi-catalog", headers=userHeaders)
+        assert listed.status_code == 200, listed.text
+        assert "KPI_GOV_READ" in {k["kpiCode"] for k in listed.json()}
+
+        fetched = await client.get(f"/api/v1/kpi-catalog/{kpi['id']}", headers=userHeaders)
+        assert fetched.status_code == 200, fetched.text
+
+    async def test_update_own_department_returns_403(
+        self, client, dbSession, seed_data_source
+    ) -> None:
+        """owner=procurement + user 也在 procurement → 仍 403（唯 admin 可写）。"""
         await _Helper.clean(dbSession)
         kpi = await self._create(client, seed_data_source, "KPI_GOV_C", PROCUREMENT)
         resp = await client.put(
@@ -107,12 +166,11 @@ class TestKpiAcl:
             headers={
                 "X-User-Id": "bob",
                 "X-User-Roles": "user",
-                "X-User-Departments": FINANCE,
+                "X-User-Departments": PROCUREMENT,
             },
         )
         assert resp.status_code == 403
-        body = resp.json()
-        assert "无权修改" in body.get("error", "")
+        assert "admin" in resp.json().get("detail", "")
 
     async def test_update_admin_any_owner_passes(self, client, dbSession, seed_data_source) -> None:
         """admin 角色可改任意 owner。"""
@@ -125,8 +183,8 @@ class TestKpiAcl:
         )
         assert resp.status_code == 200
 
-    async def test_delete_other_dept_returns_403(self, client, dbSession, seed_data_source) -> None:
-        """DELETE 其他部门 → 403。"""
+    async def test_delete_non_admin_returns_403(self, client, dbSession, seed_data_source) -> None:
+        """DELETE 非 admin → 403（部门不授予写权限）。"""
         await _Helper.clean(dbSession)
         kpi = await self._create(client, seed_data_source, "KPI_GOV_E", PROCUREMENT)
         resp = await client.delete(
@@ -138,6 +196,7 @@ class TestKpiAcl:
             },
         )
         assert resp.status_code == 403
+        assert "admin" in resp.json().get("detail", "")
 
     async def test_empty_owner_only_admin_can_modify(self, client, dbSession, seed_data_source) -> None:
         """owner 为空 + 非 admin → 403；admin → 200。"""
@@ -162,8 +221,10 @@ class TestKpiAcl:
         )
         assert resp2.status_code == 200
 
-    async def test_multi_department_user_can_match_any(self, client, dbSession, seed_data_source) -> None:
-        """多部门成员：任一匹配即通过。"""
+    async def test_multi_department_non_admin_returns_403(
+        self, client, dbSession, seed_data_source
+    ) -> None:
+        """多部门成员也 403：部门集合再匹配也不是写权限。"""
         await _Helper.clean(dbSession)
         kpi = await self._create(client, seed_data_source, "KPI_GOV_G", FINANCE)
         resp = await client.put(
@@ -171,10 +232,11 @@ class TestKpiAcl:
             json={"kpiName": "双岗改"},
             headers={
                 "X-User-Id": "carol",
+                "X-User-Roles": "user",
                 "X-User-Departments": f"{PROCUREMENT},{FINANCE}",
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 403
 
 
 class TestKpiAudit:
@@ -190,7 +252,11 @@ class TestKpiAudit:
                 "kpiName": "H",
                 "owner": PROCUREMENT,
             },
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "admin",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         kpiId = resp.json()["id"]
         await _Helper.drainOutbox(dbSession)
@@ -223,13 +289,21 @@ class TestKpiAudit:
                 "kpiName": "原名",
                 "owner": PROCUREMENT,
             },
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "admin",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         kpiId = resp.json()["id"]
         await client.put(
             f"/api/v1/kpi-catalog/{kpiId}",
             json={"kpiName": "新名"},
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "admin",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         await _Helper.drainOutbox(dbSession)
 
@@ -256,12 +330,20 @@ class TestKpiAudit:
                 "kpiName": "J",
                 "owner": PROCUREMENT,
             },
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "admin",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         kpiId = resp.json()["id"]
         await client.delete(
             f"/api/v1/kpi-catalog/{kpiId}",
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "admin",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         await _Helper.drainOutbox(dbSession)
 
@@ -292,6 +374,7 @@ class TestKpiAudit:
             },
             headers={
                 "X-User-Id": "carol",
+                "X-User-Roles": "admin",
                 "X-User-Departments": f"{PROCUREMENT},{FINANCE}",
             },
         )
@@ -323,7 +406,11 @@ class TestKpiHistory:
                 "owner": PROCUREMENT,
                 "formula": "F0",
             },
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "admin",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         kpiId = resp.json()["id"]
         await _Helper.drainOutbox(dbSession)
@@ -348,14 +435,22 @@ class TestKpiHistory:
                 "kpiName": "M",
                 "owner": PROCUREMENT,
             },
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "admin",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         kpiId = resp.json()["id"]
         for newName in ["M1", "M2", "M3"]:
             await client.put(
                 f"/api/v1/kpi-catalog/{kpiId}",
                 json={"kpiName": newName},
-                headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+                headers={
+                    "X-User-Id": "alice",
+                    "X-User-Roles": "admin",
+                    "X-User-Departments": PROCUREMENT,
+                },
             )
         await _Helper.drainOutbox(dbSession)
 
@@ -383,13 +478,21 @@ class TestKpiHistory:
                 "formula": "OLD",
                 "owner": PROCUREMENT,
             },
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "admin",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         kpiId = resp.json()["id"]
         await client.put(
             f"/api/v1/kpi-catalog/{kpiId}",
             json={"kpiName": "N-新", "formula": "NEW"},
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "admin",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
 
         await _Helper.drainOutbox(dbSession)
@@ -431,14 +534,22 @@ class TestKpiHistory:
                 "kpiName": "O",
                 "owner": PROCUREMENT,
             },
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "admin",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         kpiId = resp.json()["id"]
         # create 事件先消费（worker 及时处理），保证 history 已落地
         await _Helper.drainOutbox(dbSession)
         await client.delete(
             f"/api/v1/kpi-catalog/{kpiId}",
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "admin",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         # delete 事件再消费
         await _Helper.drainOutbox(dbSession)
@@ -456,12 +567,17 @@ class TestKpiHistory:
 
 
 class TestKpiAclRollbackOnFailure:
-    """事务绑定：审计/历史 与 业务 共享事务（任一失败 → 全部回滚）。"""
+    """写拒绝不产生审计/历史副作用（事务绑定）。"""
 
-    async def test_acl_denied_does_not_write_audit_or_history(
+    async def test_route_acl_denied_does_not_write_audit_or_history(
         self, client, dbSession, seed_data_source
     ) -> None:
-        """ACL 拒绝 → 不应产生 audit_log 与 history 行（service 早于 audit 抛错）。"""
+        """路由层 ACL 拒绝 ⇒ 不应产生 UPDATE audit_log 与 revision=1 history。
+
+        2026-11-11 起写入口在路由依赖 `getAdminOnlyActor` 就 403，不再进入
+        `KpiCatalogService`（service 层 owner ACL 仅保留审计语义）。
+        因此本条覆盖的是「拒绝路径无写副作用」，不是 service 内部的事务顺序。
+        """
         await _Helper.clean(dbSession)
         resp = await client.post(
             "/api/v1/kpi-catalog",
@@ -471,7 +587,11 @@ class TestKpiAclRollbackOnFailure:
                 "kpiName": "P",
                 "owner": PROCUREMENT,
             },
-            headers={"X-User-Id": "alice", "X-User-Departments": PROCUREMENT},
+            headers={
+                "X-User-Id": "alice",
+                "X-User-Roles": "admin",
+                "X-User-Departments": PROCUREMENT,
+            },
         )
         kpiId = resp.json()["id"]
 

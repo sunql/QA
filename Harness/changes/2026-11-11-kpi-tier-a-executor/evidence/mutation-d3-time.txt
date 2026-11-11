@@ -1,0 +1,35 @@
+Task 3.1 mutation evidence (2026-11-11)
+Mutation: removed pattern re.compile(r"[0-9]{4}\s*年") from _EXPLICIT_TIME_PATTERNS
+Command: TEST_DATABASE_URL=... .venv/bin/python -m pytest app/tests/unit/test_kpi_time_scope_detection.py -q
+Expected: only '2025年准时交付率' fails (other forms caught by sibling patterns => not dead code).
+---- pytest output ----
+...F..........                                                           [100%]
+=================================== FAILURES ===================================
+_____ test_detects_explicit_time[2025\u5e74\u51c6\u65f6\u4ea4\u4ed8\u7387] _____
+
+question = '2025年准时交付率'
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "近6个月供应商准时交付率",
+            "最近 30 天的逾期率",
+            "过去三个月的交付率",
+            "2025年准时交付率",
+            "2025-03 的交付率",
+            "本季度交付率",
+            "第二季度交付率",
+            "Q2 交付率",
+            "上半年交付率",
+            "2025年上半年逾期率",
+        ],
+    )
+    def test_detects_explicit_time(question: str) -> None:
+>       assert hasExplicitTimeScope(question) is True
+E       AssertionError: assert False is True
+E        +  where False = hasExplicitTimeScope('2025年准时交付率')
+
+app/tests/unit/test_kpi_time_scope_detection.py:26: AssertionError
+=========================== short test summary info ============================
+FAILED app/tests/unit/test_kpi_time_scope_detection.py::test_detects_explicit_time[2025\u5e74\u51c6\u65f6\u4ea4\u4ed8\u7387]
+1 failed, 13 passed in 4.78s

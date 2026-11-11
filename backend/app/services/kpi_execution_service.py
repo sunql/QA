@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -87,6 +88,37 @@ def planKpiExecution(
     if not tier_a_eligible:
         return KpiExecutionPlan(TIER_B, REASON_RECONCILE_NOT_ELIGIBLE)
     return KpiExecutionPlan(TIER_A)
+
+
+# =============================================================================
+# 显式时间限定检测
+# =============================================================================
+
+# 一期只做“有/无”判定，不做区间解析（P4 参数化才解析）。
+# 不调用 time_scope_resolver.parseTimeScope：它只认季度/半年，且这些形态已被下面的
+# 正则覆盖；复用会把「检测口径」与「注入口径」耦合，P4 改解析器时会连带改变路由。
+_EXPLICIT_TIME_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(近|最近|过去|前)\s*[0-9一二三四五六七八九十两]+\s*(天|日|周|星期|个月|月|年|季度)"),
+    re.compile(r"(近|最近|过去)\s*半\s*年"),
+    re.compile(r"[0-9]{4}\s*年"),
+    re.compile(r"[0-9]{4}\s*[-/]\s*[0-9]{1,2}"),
+    re.compile(r"[0-9]{1,2}\s*月份?"),
+    re.compile(r"(本|上|下|这|当前)(周|星期|个月|月|季度|年|年度)"),
+    re.compile(r"(今年|去年|明年|前年|本年|上年)"),
+    re.compile(r"第?\s*[一二三四1-4]\s*季度"),
+    re.compile(r"(上|下)半年"),
+    re.compile(r"\bQ[1-4]\b", re.IGNORECASE),
+)
+
+
+def hasExplicitTimeScope(question: str) -> bool:
+    """问句是否含显式时间限定（设计 §6.4：有 ⇒ 不路由 Tier A）。
+
+    宁可多判（误判 ⇒ Tier B，多一次 LLM）不可漏判（漏判 ⇒ 时段错的数字看起来合理）。
+    匹配到任一形态即视为显式；无数字的「近半年/这半年」也计入（滚动窗口语义有分歧，
+    交给 LLM 按用户原话处理）。
+    """
+    return any(p.search(question) for p in _EXPLICIT_TIME_PATTERNS)
 
 
 # =============================================================================

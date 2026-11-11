@@ -526,7 +526,7 @@ class ContextMixin:
         """持久化一轮对话：user + assistant 双写（仅创建新记录，不可变）。
 
         routing_layer / latency_ms / token_cost_usd：Phase 5 监控埋点，对应 routing_layer
-        枚举值 L1~L4（由调用方从流水线入口传播进来）。
+        枚举值 L1 / L1C / L2 / L4（由调用方从流水线入口传播进来；L1C = KPI 歧义澄清）。
 
         interrupted（H4）：该 assistant 行是否由断连兜底写入（内容可能是半截回答）。
         默认 False ⇒ 既有调用点（27 处）语义不变。

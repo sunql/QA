@@ -10,7 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import SessionMessage
 
-_ROUTING_LAYERS = ("L1", "L2", "L3", "L4")
+# L1C = KPI 歧义澄清（2026-11-11 匹配器 v2 新增的路由层，0 LLM）。不列在这里的层
+# 会在聚合时被静默丢弃 ⇒ 澄清量与 total_queries 都对不上。
+_ROUTING_LAYERS = ("L1", "L1C", "L2", "L3", "L4")
 
 
 @dataclass(frozen=True)

@@ -201,7 +201,9 @@ async def buildKpiContractBlock(
       场景——诚实口径，不把 unknown 当「不通过」）。
 
     零回归契约：无匹配 / 空问句 / 开关关闭 → None（调用方 prompt 侧零改动）；
-    装配器内部异常由调用方（nl2sql_service）兜底降级，不阻断 plan。
+    冷/脏缓存会**先自行预热**（与 chat Tier B、诊断接口同源），预热失败按 None
+    降级并写 warning —— 静默消失比降级更糟。装配器内部异常由调用方
+    （nl2sql_service）兜底降级，不阻断 plan。
     """
     if not question or not question.strip():
         return None
@@ -212,6 +214,16 @@ async def buildKpiContractBlock(
 
     from app.services.kpi_match_cache import get_kpi_match_cache
     from app.services.kpi_semantic_match_service import getKpiSemanticMatchService
+
+    try:
+        # 匹配前必须确保缓存新鲜：冷/脏缓存下 matchRoute 返回 none、matchAll 返回
+        # 空列表 ⇒ 契约块**静默消失且无任何日志**。chat 侧预热只覆盖 chat 这条链，
+        # 研究线等非 chat 调用方直接进 B3，必须自己在 savepoint 里预热。
+        async with session.begin_nested():
+            await get_kpi_match_cache().ensureFresh(session)
+    except Exception:
+        logger.warning("KPI 匹配缓存刷新失败，B3 跳过契约注入", exc_info=True)
+        return None
 
     matcher = getKpiSemanticMatchService()
     if await isKpiMatchContainmentEnabled(session):
@@ -307,10 +319,12 @@ async def buildKpiDenominatorWarning(
 ) -> str | None:
     """按问句装配 B4 分母契约示警（L2 出口：答案渲染层前置，不硬拒）。
 
-    链路：matchAll（Top-3，同 B3 匹配口径）→ 第一个 denominator 非空的命中 KPI →
+    链路：matchAll（Top-3）→ 第一个 denominator 非空的命中 KPI →
     `denominatorContractWarning(sql, denominator)` 弱校验。与 B3 注入的差异：
     不走灰度开关（示警面不是 prompt 注入面）、不做 B2 门禁（治理声明与 metric
-    的对账结论不影响「SQL 是否符合声明」这一独立问题）。
+    的对账结论不影响「SQL 是否符合声明」这一独立问题），也**不跟 v2 包含式
+    匹配**（`KPI_MATCH_CONTAINMENT_ENABLED` 开启时 B3 可能命中一条 B4 看不见的
+    KPI ⇒ 该问句没有分母示警。这是刻意保留的 v1 面，见变更记录 D-5）。
 
     零回归契约：无匹配 / denominator 空 / 判不了 / 本函数任何异常 → None
     （示警面永不阻断答案——try/except 收口在此处，调用方直连）。

@@ -14,7 +14,8 @@
 
 /** Per-layer metric atom. */
 export interface LayerMetric {
-  layer: "L1" | "L2" | "L4";
+  /** L1C = KPI 歧义澄清（匹配器 v2，2026-11-11 新增；0 LLM、0 token）。 */
+  layer: "L1" | "L1C" | "L2" | "L4";
   hitCount: number;
   avgDurationMs: number;
   avgTokenCost: number;

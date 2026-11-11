@@ -787,6 +787,31 @@ class OntologyMetricRead(CamelModel):
     execution_source: MetricExecutionSource | None = None
 
 
+# L1 语义匹配关键词的边界：条数 + 单项长度。
+# 这些文本会被匹配器逐条归一化（NFKC → 小写 → 切分），而缓存是**进程级共享**的 ⇒
+# 不设上限时任意一条超长关键词就会拖慢所有用户的每一次匹配（单行 CPU DoS）。
+# KPI 建档不做 ACL（任何登录用户都能建），所以这条必须在系统边界上校验。
+KPI_SEMANTIC_KEYWORDS_MAX_ITEMS = 50
+KPI_SEMANTIC_KEYWORD_MAX_CHARS = 100
+
+
+def _checkSemanticKeywords(value: list[str] | None) -> list[str] | None:
+    """校验 KPI 语义关键词边界（Create/Update 共用，避免两处规则漂移）。"""
+    if value is None:
+        return None
+    if len(value) > KPI_SEMANTIC_KEYWORDS_MAX_ITEMS:
+        raise ValueError(
+            f"semantic_keywords 最多 {KPI_SEMANTIC_KEYWORDS_MAX_ITEMS} 条"
+        )
+    for keyword in value:
+        if len(keyword) > KPI_SEMANTIC_KEYWORD_MAX_CHARS:
+            raise ValueError(
+                "semantic_keywords 单项长度不得超过 "
+                f"{KPI_SEMANTIC_KEYWORD_MAX_CHARS} 字"
+            )
+    return value
+
+
 class KpiCatalogCreate(CamelModel):
     """KPI 业务目录创建请求（Phase 4.1）。
 
@@ -829,6 +854,11 @@ class KpiCatalogCreate(CamelModel):
         description="匹配阈值，默认 0.75",
     )
 
+    @field_validator("semantic_keywords")
+    @classmethod
+    def _validateSemanticKeywords(cls, value: list[str] | None) -> list[str] | None:
+        return _checkSemanticKeywords(value)
+
 
 class KpiCatalogUpdate(CamelModel):
     """KPI 业务目录更新请求。
@@ -858,6 +888,11 @@ class KpiCatalogUpdate(CamelModel):
         default=None, ge=0.0, le=1.0, description="匹配阈值，默认 0.75"
     )
     grain_keys: list[str] | None = None
+
+    @field_validator("semantic_keywords")
+    @classmethod
+    def _validateSemanticKeywords(cls, value: list[str] | None) -> list[str] | None:
+        return _checkSemanticKeywords(value)
     numerator_columns: list[str] | None = None
     denominator_columns: list[str] | None = None
 

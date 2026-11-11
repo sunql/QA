@@ -515,7 +515,9 @@ class TestMetricAlias:
         assert cache.metricAliasOf("KPI_P1_DROP") == "会被清掉"
 
         cache.onKpiChanged()
-        assert cache.metricAliasOf("KPI_P1_DROP") is None
+        # 必须断言内部表：`metricAliasOf` 在冷缓存下恒返回 None（`_loaded=False`），
+        # 只看它的话，全量失效**漏清**别名表这条用例照样绿 —— 测不到它要测的东西。
+        assert cache._metricAliasByCode == {}
 
     async def test_onKpiChanged_single_code_drops_alias(
         self, dbSession: AsyncSession

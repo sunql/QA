@@ -10,7 +10,8 @@
    需要一个可对账的本体指标，无 metric 即「未经对账的治理声明」）；
 4. 门禁通过 → 渲染治理字段 + 技术公式行。
 
-零回归契约：无匹配 / 冷缓存 / 开关关闭 / 空问句 → None。
+零回归契约：无匹配 / 开关关闭 / 空问句 → None；冷缓存会**先自行预热**
+（见 `test_cold_cache_is_warmed_by_b3_itself`）。
 
 匹配路径说明：单 KPI 用例走 exact-alias 快车道（问句含 KPI code 大写下划线词，
 confidence=1.0，不依赖 Jaccard 阈值——同 test_chat_l1_routing 的既有约定）；
@@ -132,6 +133,34 @@ async def test_block_contains_governance_fields_and_formula(
     assert "按月+供应商" in block
     assert "%" in block
     assert "SUM(received_qty)/SUM(order_qty)" in block
+
+
+async def test_cold_cache_is_warmed_by_b3_itself(dbSession: AsyncSession) -> None:
+    """冷缓存下 B3 必须自行预热，而不是静默返回 None。
+
+    三个面（诊断接口 / chat Tier B / B3）对同一问句必须给出同一个决策。
+    chat 侧预热只保证「chat 这条链」；研究线等非 chat 调用方直接进 B3，
+    冷缓存会让契约块凭空消失且**没有任何日志** —— 这正是「静默失效」。
+    """
+    metric = await _seedMetric(
+        dbSession, name="冷缓存-注入", formula="SUM(received_qty)/SUM(order_qty)"
+    )
+    await _seedKpi(
+        dbSession,
+        "KPI_B3_COLD",
+        name="冷缓存及时率",
+        numerator="received_qty",
+        denominator="order_qty",
+        grain="按月",
+        metricId=metric.id,
+    )
+    # 显式打冷：不 warmUp，模拟应用刚启动 / 全量失效后的第一次调用。
+    get_kpi_match_cache().onKpiChanged()
+
+    block = await buildKpiContractBlock(dbSession, "KPI_B3_COLD 这个指标是多少")
+
+    assert block is not None
+    assert "KPI_B3_COLD" in block
 
 
 async def test_mismatch_kpi_not_injected(dbSession: AsyncSession) -> None:

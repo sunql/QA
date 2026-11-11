@@ -1,0 +1,59 @@
+# Tier A 新模块覆盖率（D6 Task 6.3）
+
+日期：2026-11-11
+分支：`feat/kpi-tier-a-executor`
+
+## 命令
+
+```bash
+cd /private/tmp/qa-kpi-p2/backend
+export TEST_DATABASE_URL='postgresql+asyncpg://qa_user:<PW>@127.0.0.1:5434/qa_metadata_test'
+export TEST_NEO4J_URI='bolt://127.0.0.1:7688'
+export TEST_NEO4J_PASSWORD='<PW>'
+python -m pytest app/tests/unit/test_kpi_execution_plan.py \
+    app/tests/unit/test_kpi_execution_service.py \
+    app/tests/unit/test_kpi_time_scope_detection.py \
+    app/tests/unit/test_kpi_metric_tier_a_switch.py \
+    --cov=app.services.kpi_execution_service \
+    --cov=app.services.kpi_metric_switches \
+    --cov-report=term-missing
+```
+
+## 输出（原样）
+
+```text
+============================= test session starts ==============================
+platform darwin -- Python 3.14.7, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/qa-kpi-p2/backend
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.4.0, anyio-4.14.2, langsmith-0.12.4, respx-0.23.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 80 items
+
+app/tests/unit/test_kpi_execution_plan.py ................               [ 20%]
+app/tests/unit/test_kpi_execution_service.py .................          [ 41%]
+app/tests/unit/test_kpi_time_scope_detection.py ......................  [ 68%]
+app/tests/unit/test_kpi_metric_tier_a_switch.py ........................ [ 98%]
+.                                                                        [100%]
+
+================================ tests coverage ================================
+_______________ coverage: platform darwin, python 3.14.7-final-0 _______________
+
+Name                                    Stmts   Miss  Cover   Missing
+---------------------------------------------------------------------
+app/services/kpi_execution_service.py     120      0   100%
+app/services/kpi_metric_switches.py        52      0   100%
+---------------------------------------------------------------------
+TOTAL                                     172      0   100%
+Required test coverage of 80.0% reached. Total coverage: 100.00%
+============================= 80 passed in 23.68s ==============================
+```
+
+## 结果
+
+- `kpi_execution_service.py`：100%
+- `kpi_metric_switches.py`：100%（首轮只有 65%；缺口为异常回退、空值、
+  falsy/truthy、非法/数字取值，以及两个同构开关 `isKpiContractInjectionEnabled` /
+  `isKpiMatchContainmentEnabled` 的 env 杀闸与行缺失路径。已在
+  `test_kpi_metric_tier_a_switch.py` 补齐对应用例，未使用 `# pragma: no cover`。）
+- 两模块均 ≥ 80%，总覆盖率 100%。

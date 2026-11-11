@@ -25,6 +25,10 @@ MSG_SQL_MULTI_STATEMENT = "禁止多语句执行"
 MSG_SQL_PARSE_FAILED = "无法解析 SQL 语句"
 MSG_SQL_FORBIDDEN_OPERATION = "禁止的 SQL 操作: {verb}"
 MSG_SQL_NOT_READONLY = "仅允许只读查询（SELECT/WITH），收到: {verb}"
+MSG_SQL_EXECUTABLE_COMMENT = (
+    "禁止 MySQL/MariaDB 可执行注释（/*! ... */、/*M! ... */）："
+    "服务端会展开执行其中的 SQL，绕过只读校验"
+)
 
 # =============================================================================
 # API Key 加密（security/crypto）

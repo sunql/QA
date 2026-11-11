@@ -241,6 +241,10 @@ class Settings(BaseSettings):
     kpiMatchContainmentEnabled: bool = Field(
         default=True, alias="KPI_MATCH_CONTAINMENT_ENABLED"
     )
+    # P2 Tier A 确定性执行器灰度开关（env 只作一键止血；system_config 行才是旋钮）
+    kpiMetricTierAEnabled: bool = Field(
+        default=True, alias="KPI_METRIC_TIER_A_ENABLED"
+    )
 
     # ===== 证据分页（feat-evidence-extension）=====
     evidence_page_default: int = Field(default=50, alias="EVIDENCE_PAGE_DEFAULT")

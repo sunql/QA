@@ -2027,6 +2027,13 @@ class ChatResponse(CamelModel):
     modelName: str | None = Field(
         default=None, description=MSG_SCHEMA_CHAT_SERVED_MODEL
     )
+    # P2 Tier A：执行分层与降级原因（观测字段；不改变前端既有渲染分支）。
+    execution_tier: str | None = Field(
+        default=None, description="KPI 执行分层：A | B | C | LEGACY"
+    )
+    degraded_reason: str | None = Field(
+        default=None, description="未走 Tier A 的原因码（设计 §6）"
+    )
     extractedEntities: ExtractedEntities | None = Field(
         default=None, description=MSG_SCHEMA_CHAT_QUERY_ENTITIES
     )

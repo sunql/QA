@@ -149,6 +149,50 @@ L4: Pure Python async while loop Agent (5 NL2SQL tools, iterative)
 > `meta.intent` 一律由 `chat_constants.metaIntentOf(routing_layer)` 派生，新增路由层必须登记
 > （`test_meta_intent_of_maps_every_routing_layer` 锁三态）。
 
+##### L1 命中后的 Tier 分流（Tier A/B/C/LEGACY，2026-11-11）
+
+L1 命中（`hit`）只是「认出了问的是哪个 KPI」，**答什么**由 Tier 决定。决策是纯函数
+`kpi_execution_service.planKpiExecution`，只读 `ontology_metric.execution_source`，**不嗅探 formula 文本**。
+
+```
+L1 hit ──┬─ 开关关 ─────────────────────────────► LEGACY（旧 _buildL1Response，行为逐字不变）
+         ├─ metric 缺失 / 来源 NONE / 未知 / 无数据源 ──► C（明确文案，不执行、不编数）
+         ├─ 来源 COMPILED / 显式时间限定 /
+         │  formula 空 / 对账不通过 ─────────────► B（带降级原因，走 LLM 但**跳过 L4**）
+         └─ 其余（ESCAPE_HATCH + 可对账）────────► A（服务端确定性执行 metric.formula）
+```
+
+| Tier | 触发条件（按判定顺序） | `degradedReason` |
+|---|---|---|
+| `LEGACY` | 开关关；或问句未命中任何 KPI | `tier_a_disabled` / `kpi_not_found` |
+| `C` | `metric_present=False`；来源空 / `NONE` / 未知；`datasource_id` 缺失 | `metric_missing` / `execution_source_missing` / `execution_source_none` / `execution_source_unknown`（另打 warning）/ `datasource_missing` |
+| `B` | 来源 `COMPILED`；问句含显式时间限定；formula 为空；对账 `isTierAEligible=False` | `compiled_not_supported` / `explicit_time_scope` / `formula_empty` / `reconcile_not_eligible` |
+| `A` | 以上都不满足 | `null` |
+
+- **开关双闸（fail-closed）**：env `KPI_METRIC_TIER_A_ENABLED`（默认 `true`，紧急杀闸）+ `system_config`
+  同名行；**行缺失 / 非法 / 读异常 ⇒ 关**。生产当前**没有该行** ⇒ 生产仍走旧行为。
+- **Tier A 执行**：`_assert_read_only`（执行器侧第一道）→ 业务库 adapter（只读事务、超时、
+  `fetchmany(maxRows+1)`）→ 截断到 1000 行并标 `truncated` → 取首行第一个非 None 值。
+  `tokensUsed=0`、`cost=0.0`；成功时 best-effort 调度 `METRIC_RESULT` 证据（失败只 warning）。
+  任何异常/超时/空结果都**不静默**：warning 带 `kpi_code`/`datasource_id`/cause 链，落 Tier B。
+- **Tier B 必须跳过 L4**：L4 不注入 KPI 契约块，走 L4 会脱离定义口径。实现用路由层哨兵 `L1B`
+  返回 `PreambleResult`，两个入口（`chat_service.processMessage` / `chat_stream_entry`）都在
+  L1/L4 分支**之前**用 `splitTierBPreamble` 拆包。
+- **响应字段**：`ChatResponse.executionTier` / `degradedReason`（wire 为 camelCase），非流式 L1 与
+  Tier B 路径都带值；流式两处 meta 帧同名字段。**按意图门控**：只有会落到
+  `_handleGenericQuery` 的意图（QUERY / NEW_QUERY / REFINE / FOLLOW_UP / CLARIFY）才发；
+  重分类到 CHITCHAT / METRIC 等早退意图时，第二帧显式发 `null` 覆盖首帧，与非流式保持一致。
+- **诊断对齐**：`kpi_diagnose._tierOf` 与运行时同口径（`COMPILED ⇒ B`）；仍存两处已知分歧
+  （`datasource_missing`、来源空/未知时诊断判 B 运行时判 C），登记在
+  `test_kpi_tier_parity.py` 的已知分歧用例里，P5 治理收口时统一。
+- **一期时间策略**：显式时间限定一律降级 Tier B，**不做区间解析**（P4 参数化才解析）。检测器
+  `hasExplicitTimeScope` 按「宁可多判」写（误判只多一次 LLM，漏判会让时段错的数字看起来合理），
+  覆盖近 N 天/月/年、季度、半年、年度、`Q1–Q4`、`H1/H2`、`同比/环比`、`FY`、`TTM/LTM`、
+  月初/月底等形态。
+- **回滚**：关开关（env 或删/改行）即回旧行为；零迁移、零数据变更，代码可整体 revert。
+- **Code**: `app/services/kpi_execution_service.py` / `chat_stream_output.py` /
+  `chat_stream_entry.py` / `scripts/kpi_tier_a_probe.py`（手动验收探针，默认 dry-run）
+
 #### L2 — LLM Single SQL (existing ReAct two-phase)
 
 - Phase 1: `generateValidatedPlan` → `QueryPlan` JSON (target/selectedClasses/selectedProperties/conditions/aggregations/groupBy/joins/sortBy/rowLimit).

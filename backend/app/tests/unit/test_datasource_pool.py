@@ -100,6 +100,41 @@ class TestAssertReadOnly:
         with pytest.raises(SqlSafetyError):
             pool._assert_read_only("SELECT pg_read_file('/etc/passwd')")
 
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            # MySQL / MariaDB 版本注释：服务端会展开执行其中的 SQL，
+            # sqlparse 当普通注释跳过。
+            "SELECT 1 /*!50000 , SLEEP(60) */",
+            "SELECT 1 /*!50000 INTO OUTFILE '/tmp/x' */",
+            "SELECT 1 /*M!100100 , SLEEP(60) */",
+        ],
+    )
+    def test_rejects_mysql_executable_comment(self, sql: str) -> None:
+        """`/*! ... */` 与 `/*M! ... */` 可执行注释必须直接拒绝。"""
+        with pytest.raises(SqlSafetyError):
+            pool._assert_read_only(sql)
+
+    def test_accepts_optimizer_hint_comment(self) -> None:
+        """反向守卫：`/*+ ... */` 优化器 hint 不是可执行注释，不得误伤。"""
+        pool._assert_read_only("SELECT /*+ INDEX(t idx) */ 1")
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            # Oracle 执行任意 SQL / DDL 的包（安全终审 M2：纵深防御遗漏）
+            "SELECT DBMS_SQL.PARSE(c, 'SELECT 1', 1) FROM dual",
+            "SELECT DBMS_UTILITY.EXEC_DDL_STATEMENT('DROP TABLE t') FROM dual",
+            "SELECT DBMS_JAVA.RUNJAVA('x') FROM dual",
+            # PG 会话级配置改写（可改 search_path / role 等）
+            "SELECT set_config('search_path', 'evil', false)",
+        ],
+    )
+    def test_rejects_extra_dangerous_packages_and_calls(self, sql: str) -> None:
+        """DBMS_SQL / DBMS_UTILITY / DBMS_JAVA / set_config 补齐黑名单。"""
+        with pytest.raises(SqlSafetyError):
+            pool._assert_read_only(sql)
+
     def test_accepts_write_words_inside_string_literal(self) -> None:
         pool._assert_read_only("SELECT * FROM t WHERE x = 'DELETE FROM t'")
 

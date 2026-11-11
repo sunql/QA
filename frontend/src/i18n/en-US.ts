@@ -1016,6 +1016,7 @@ export const enUS = {
 
   termDictionary: {
     addButton: "Add to Term Dictionary",
+    add: "Add",
     openManager: "Term Dictionary",
     managerTitle: "Term Dictionary",
     createTitle: "Add Term",

@@ -4,6 +4,7 @@ import { deleteTerm, listTerms } from "../../api/termDictionary";
 import type { TermDictionary } from "../../types/termDictionary";
 import { useTranslation } from "../../i18n";
 import { useAuthStore } from "../../stores/authStore";
+import TermDictionaryFormModal from "./TermDictionaryFormModal";
 
 const { Text } = Typography;
 
@@ -13,6 +14,7 @@ export default function TermDictionaryManager() {
   const user = useAuthStore((s) => s.user);
   const isAdmin = (user?.roles ?? []).includes("admin");
   const [open, setOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
   const [terms, setTerms] = useState<TermDictionary[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -46,6 +48,14 @@ export default function TermDictionaryManager() {
         open={open}
         onClose={() => setOpen(false)}
         width={680}
+        // 新增限 admin（后端 403 兜底）：非管理员只看只读列表。
+        extra={
+          isAdmin ? (
+            <Button type="primary" onClick={() => setAddOpen(true)}>
+              {t("termDictionary.add")}
+            </Button>
+          ) : null
+        }
       >
         <Table<TermDictionary>
           rowKey="id"
@@ -103,6 +113,11 @@ export default function TermDictionaryManager() {
           ]}
         />
       </Drawer>
+      <TermDictionaryFormModal
+        open={addOpen}
+        onCancel={() => setAddOpen(false)}
+        onCreated={() => void load()}
+      />
     </>
   );
 }

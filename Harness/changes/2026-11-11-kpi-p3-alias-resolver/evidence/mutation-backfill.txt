@@ -68,3 +68,85 @@ output 见 evidence/backfill-report.txt：
 注意：本次 dry-run 暴露并修复了 sourcePropertiesForMetric 的 ORM 实体 select
 会触发 selectin 关系加载（OntologyClass.metrics → 整行 ontology_metric）问题；
 改为列表达式 select 后 dev（缺 0143 列）不再 UndefinedColumn 崩溃。
+
+# ── Fix round 1（controller review I1 / I2） ─────────────────────────
+
+## I1 RED（先加回归测试，修复前）
+
+$ uv run pytest app/tests/integration/test_kpi_time_grain_backfill_apply.py -q \
+      -k 'date_named_table or cte_name'
+FAILED test_date_named_table_is_not_a_time_column_candidate
+FAILED test_cte_name_and_date_named_table_are_not_candidates
+2 failed, 2 passed, 9 deselected
+（失败原因：_referencedColumns 把 formula 整段 SQL 的裸词喂给名称启发式，
+  FROM DWD_DATE_DIM / WITH recent_date / max_date 被当成日期候选 ⇒
+  candidates 多值 ⇒ basis=ambiguous ⇒ time_column 未回填）
+（同轮 -k 'existing_equal or existing_conflicting' 2 passed：I2 是覆盖缺口，
+  不是行为缺陷 —— 特征测试在修复前即锁定现有「填 null 不覆盖」语义）
+
+## I1 GREEN（修复后）
+
+$ uv run pytest app/tests/integration/test_kpi_time_grain_backfill_apply.py -q
+13 passed
+
+修复：_isDateIdentifier 增加 knownColumns（ontology_property.source_column 大写
+集合）门 —— 名称启发式（含 DATE / _TS 结尾）只作用于已知物理列；表名 / CTE 名 /
+关键字 / 别名一律不是候选。
+
+## MUTATION-3 — 还原 I1 修复（删除 known-column 门）
+
+改动：app/services/kpi_time_grain_backfill.py
+    if upper not in knownColumns:
+        return False
+→ （删除两行）
+
+$ uv run pytest ... -q -k 'date_named_table or cte_name'
+FAILED test_date_named_table_is_not_a_time_column_candidate
+FAILED test_cte_name_and_date_named_table_are_not_candidates
+2 failed, 11 deselected
+
+还原：重新加回两行 → 复跑
+2 passed, 11 deselected
+
+## I2 特征测试（修复前即绿：覆盖缺口，不是行为缺陷）
+
+$ uv run pytest ... -q -k 'existing_equal or existing_conflicting'
+2 passed
+（equal：显式值 == 推导值 ⇒ applied：0 条变更、无「保留人工值」note；
+  conflicting：kpi month / metric year / column BOOKED_DATE 全部保留，
+  三条冲突 note 出现在 stdout，推导值不覆盖）
+
+## MUTATION-4 — kpi_catalog.time_grain 冲突时写推导值
+
+改动：app/services/kpi_time_grain_backfill.py
+    if kpi.time_grain is None:
+→   if True:  # MUTATION-4
+
+$ uv run pytest ... -q -k 'existing_conflicting'
+FAILED test_existing_conflicting_values_are_never_overwritten
+E   AssertionError: assert 'applied：0 条变更' in '...summary: changes=1 ... applied：1 条变更...'
+
+还原：if kpi.time_grain is None: → 全文件复跑 13 passed
+
+## MUTATION-5 — ontology_metric.time_column 冲突时写推导值
+
+改动：app/services/kpi_time_grain_backfill.py
+    elif metric.time_column is not None:
+→   elif False:  # MUTATION-5
+
+$ uv run pytest ... -q -k 'existing_conflicting'
+FAILED test_existing_conflicting_values_are_never_overwritten
+E   AssertionError: assert 'applied：0 条变更' in '...summary: changes=1 ... applied：1 条变更...'
+
+还原：elif metric.time_column is not None: → 全文件复跑 13 passed
+
+## dev 5433 dry-run 复跑（只读，Fix round 1 后）
+
+$ uv run python scripts/kpi_backfill_time_grain.py \
+    --database-url 'postgresql+asyncpg://qa_user:***@127.0.0.1:5433/qa_metadata'
+exit=0，输出覆盖 evidence/backfill-report.txt
+- summary: changes=11 noop=1 total=12（与修复前一致：dev 12 条 KPI 的公式里
+  没有被误判的表名/CTE 名，I1 修复不改变 dev planned 结果）
+- KPI_INVOICE_MATCH_RATE：time_column=INVOICE_DATE（grain_keys）不变
+- 未写库（无 --apply；5433 全程只读）
+

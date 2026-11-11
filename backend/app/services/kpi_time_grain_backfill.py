@@ -160,14 +160,26 @@ def _columnCasing(properties: Sequence[SourceProperty]) -> dict[str, str]:
 
 
 def _isDateIdentifier(
-    identifier: str, dateCandidates: Mapping[str, str], dataTypes: Mapping[str, str]
+    identifier: str,
+    dateCandidates: Mapping[str, str],
+    dataTypes: Mapping[str, str],
+    knownColumns: Mapping[str, str],
 ) -> bool:
-    """与 resolver ``_isDateColumn`` 同判定：data_type 日期型 / 列名含 DATE / ``_TS``。"""
+    """与 resolver ``_isDateColumn`` 同判定，但**只信已知物理列**。
+
+    measure / formula 的标识符提取是「整段 SQL 的裸词」：表名、CTE 名、别名、
+    关键字都会进来（``FROM DWD_DATE_DIM`` / ``WITH recent_date AS``）。名称启发式
+    （含 DATE / 以 ``_TS`` 结尾）只允许作用于 ``ontology_property.source_column``
+    已知的物理列；否则 ``DWD_DATE_DIM`` 会被当成 ``time_column`` 写入，或与真实
+    日期列一起把候选判成 ambiguous，错误阻断合法回填。
+    """
     upper = identifier.strip().upper()
     if not upper:
         return False
     if upper in dateCandidates:
         return True
+    if upper not in knownColumns:
+        return False
     if dataTypes.get(upper) in _DATE_DATA_TYPES:
         return True
     return _DATE_COLUMN_MARKER in upper or upper.endswith(_TS_COLUMN_SUFFIX)
@@ -226,7 +238,7 @@ def deriveTimeColumn(
 
     measureCandidates: set[str] = set()
     for ref in _referencedColumns(metric):
-        if not _isDateIdentifier(ref, dateCandidates, dataTypes):
+        if not _isDateIdentifier(ref, dateCandidates, dataTypes, casing):
             continue
         upper = ref.upper()
         measureCandidates.add(dateCandidates.get(upper) or casing.get(upper) or upper)

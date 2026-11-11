@@ -13,7 +13,9 @@ RED 覆盖：
 4. R3 不猜：多候选 ⇒ 不写 time_column，报告列出候选；grain_keys 唯一日期 token
    优先于 measure/formula 引用；
 5. 守卫：``--apply`` 写 ``qa_metadata`` 缺 ``--allow-prod-write`` ⇒ 拒绝（不建连接）；
-6. 0143 未迁移：dry-run 打印 ``[schema-not-migrated]`` 且不崩；``--apply`` 拒绝。
+6. 0143 未迁移：dry-run 打印 ``[schema-not-migrated]`` 且不崩；``--apply`` 拒绝；
+7. 非列标识符（日期命名的表 / CTE 名 / 未建模列）不得进入 time_column 候选（Fix round 1 I1）；
+8. 已有显式值：与推导同值 ⇒ 0 变更；冲突 ⇒ 保留人工值、绝不覆盖（Fix round 1 I2）。
 """
 
 from __future__ import annotations
@@ -78,6 +80,8 @@ async def _seedMetric(
     denominatorMeasure: dict | None = None,
     grainKeys: list[str] | None = None,
     classId: int | None = None,
+    timeGrain: str | None = None,
+    timeColumn: str | None = None,
 ) -> OntologyMetric:
     metric = OntologyMetric(
         metric_name=name,
@@ -88,6 +92,8 @@ async def _seedMetric(
         numerator_measure=numeratorMeasure,
         denominator_measure=denominatorMeasure,
         grain_keys=grainKeys,
+        time_grain=timeGrain,
+        time_column=timeColumn,
         created_by="d5-test",
     )
     session.add(metric)
@@ -109,6 +115,7 @@ async def _seedKpi(
     *,
     grain: str | None,
     grainKeys: list[str] | None = None,
+    timeGrain: str | None = None,
 ) -> KpiCatalog:
     kpi = KpiCatalog(
         kpi_code=code,
@@ -117,6 +124,7 @@ async def _seedKpi(
         metric_id=None if metric is None else metric.id,
         grain=grain,
         grain_keys=grainKeys,
+        time_grain=timeGrain,
         numerator_columns=[],
         denominator_columns=[],
         created_by="d5-test",
@@ -372,6 +380,211 @@ async def test_time_column_prefers_unique_grain_key_date(
     )
     metricRow = await _reloadMetric(dbSession, metric.id)
     assert metricRow.time_column == "INVOICE_DATE"
+
+
+# ── ④b 非列标识符不得成为 time_column 候选（Fix round 1 / I1） ──────
+
+
+async def test_date_named_table_is_not_a_time_column_candidate(
+    dbSession: AsyncSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """formula 里的 ``FROM DWD_DATE_DIM`` 是表名，不是物理列：不得污染候选集。"""
+    classId = await _seedClass(
+        dbSession,
+        "DWD_PURCHASE_ORDER_LINE_D6",
+        [
+            ("BOOKED_DATE", "BOOKED_DATE", "DATE"),
+            ("ORDER_QTY", "ORDER_QTY", "DECIMAL"),
+        ],
+    )
+    metric = await _seedMetric(
+        dbSession,
+        "D6_DATE_TABLE-metric",
+        formula=(
+            "SELECT SUM(ORDER_QTY) FROM DWD_DATE_DIM d "
+            "JOIN DWD_PURCHASE_ORDER_LINE_D6 t ON t.DATE_KEY = d.DATE_KEY "
+            "WHERE t.BOOKED_DATE IS NOT NULL"
+        ),
+        numeratorMeasure={"agg": "SUM", "expr": "ORDER_QTY"},
+        grainKeys=["SUPPLIER_CODE"],
+        classId=classId,
+    )
+    kpi = await _seedKpi(
+        dbSession,
+        "KPI_D6_DATE_TABLE",
+        metric,
+        grain="月",
+        grainKeys=["SUPPLIER_CODE"],
+    )
+
+    assert (
+        await backfillScript._main(
+            ["--database-url", resolveTestDatabaseUrl(), "--apply"]
+        )
+        == 0
+    )
+    printed = capsys.readouterr().out
+    # 真实日期列唯一 ⇒ 正常回填；表名 / DATE_KEY 不得出现在候选集
+    assert "candidates=['BOOKED_DATE']" in printed
+    assert "DWD_DATE_DIM" not in printed
+    metricRow = await _reloadMetric(dbSession, metric.id)
+    assert metricRow.time_column == "BOOKED_DATE"
+    assert (await _reloadKpi(dbSession, kpi.kpi_code)).time_grain == "month"
+
+
+async def test_cte_name_and_date_named_table_are_not_candidates(
+    dbSession: AsyncSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """CTE 名 ``recent_date`` / 表名 / 未建模的 ``max_date`` 都不是物理列候选。"""
+    classId = await _seedClass(
+        dbSession,
+        "DWD_PURCHASE_ORDER_LINE_D6_CTE",
+        [
+            ("BOOKED_DATE", "BOOKED_DATE", "DATE"),
+            ("ORDER_QTY", "ORDER_QTY", "DECIMAL"),
+        ],
+    )
+    metric = await _seedMetric(
+        dbSession,
+        "D6_CTE-metric",
+        formula=(
+            "WITH recent_date AS ("
+            "SELECT MAX(ORDER_DATE) AS max_date FROM DWD_DATE_DIM"
+            ") SELECT SUM(ORDER_QTY) FROM DWD_PURCHASE_ORDER_LINE_D6_CTE "
+            "WHERE BOOKED_DATE >= max_date"
+        ),
+        numeratorMeasure={"agg": "SUM", "expr": "ORDER_QTY"},
+        grainKeys=["SUPPLIER_CODE"],
+        classId=classId,
+    )
+    kpi = await _seedKpi(
+        dbSession,
+        "KPI_D6_CTE",
+        metric,
+        grain="月",
+        grainKeys=["SUPPLIER_CODE"],
+    )
+
+    assert (
+        await backfillScript._main(
+            ["--database-url", resolveTestDatabaseUrl(), "--apply"]
+        )
+        == 0
+    )
+    printed = capsys.readouterr().out
+    assert "candidates=['BOOKED_DATE']" in printed
+    assert "recent_date" not in printed
+    assert "max_date" not in printed
+    metricRow = await _reloadMetric(dbSession, metric.id)
+    assert metricRow.time_column == "BOOKED_DATE"
+    assert (await _reloadKpi(dbSession, kpi.kpi_code)).time_grain == "month"
+
+
+# ── ④c 显式值保留：同值不写、冲突绝不覆盖（Fix round 1 / I2） ────────
+
+
+async def _seedKpiWithExplicitTimeFields(
+    session: AsyncSession,
+    *,
+    kpiTimeGrain: str | None,
+    metricTimeGrain: str | None,
+    metricTimeColumn: str | None,
+) -> tuple[KpiCatalog, OntologyMetric]:
+    """grain=「季度」⇒ 推导 quarter；formula 唯一日期列 = RECEIPT_DATE。"""
+    classId = await _seedClass(
+        session,
+        "DWD_GOODS_RECEIPT_LINE_D6",
+        [
+            ("RECEIPT_DATE", "RECEIPT_DATE", "DATE"),
+            ("BOOKED_DATE", "BOOKED_DATE", "DATE"),
+            ("RECEIVED_QTY", "RECEIVED_QTY", "DECIMAL"),
+        ],
+    )
+    metric = await _seedMetric(
+        session,
+        "D6_EXPLICIT-metric",
+        formula=(
+            "SELECT SUM(RECEIVED_QTY) FROM DWD_GOODS_RECEIPT_LINE_D6 "
+            "WHERE RECEIPT_DATE IS NOT NULL"
+        ),
+        numeratorMeasure={"agg": "SUM", "expr": "RECEIVED_QTY"},
+        grainKeys=["SUPPLIER_CODE"],
+        classId=classId,
+        timeGrain=metricTimeGrain,
+        timeColumn=metricTimeColumn,
+    )
+    kpi = await _seedKpi(
+        session,
+        "KPI_D6_EXPLICIT",
+        metric,
+        grain="季度",
+        grainKeys=["SUPPLIER_CODE"],
+        timeGrain=kpiTimeGrain,
+    )
+    return kpi, metric
+
+
+async def test_existing_equal_values_are_preserved_without_writes(
+    dbSession: AsyncSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """字段已是推导/唯一候选值 ⇒ 保留、0 变更、无冲突 note。"""
+    kpi, metric = await _seedKpiWithExplicitTimeFields(
+        dbSession,
+        kpiTimeGrain="quarter",
+        metricTimeGrain="quarter",
+        metricTimeColumn="RECEIPT_DATE",
+    )
+
+    assert (
+        await backfillScript._main(
+            ["--database-url", resolveTestDatabaseUrl(), "--apply"]
+        )
+        == 0
+    )
+    printed = capsys.readouterr().out
+    assert "applied：0 条变更" in printed
+    assert "保留人工值" not in printed
+    assert (await _reloadKpi(dbSession, kpi.kpi_code)).time_grain == "quarter"
+    metricRow = await _reloadMetric(dbSession, metric.id)
+    assert metricRow.time_grain == "quarter"
+    assert metricRow.time_column == "RECEIPT_DATE"
+
+
+async def test_existing_conflicting_values_are_never_overwritten(
+    dbSession: AsyncSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """显式值与推导冲突 ⇒ 保留人工值，绝不写推导值；三条冲突 note 都出现。"""
+    kpi, metric = await _seedKpiWithExplicitTimeFields(
+        dbSession,
+        kpiTimeGrain="month",
+        metricTimeGrain="year",
+        metricTimeColumn="BOOKED_DATE",
+    )
+
+    assert (
+        await backfillScript._main(
+            ["--database-url", resolveTestDatabaseUrl(), "--apply"]
+        )
+        == 0
+    )
+    printed = capsys.readouterr().out
+    assert "applied：0 条变更" in printed
+    assert (
+        "kpi_catalog.time_grain 已有显式值 'month'，与 grain 推导 'quarter' 不同"
+        in printed
+    )
+    assert (
+        "ontology_metric.time_grain 已有显式值 'year'，与 grain 推导 'quarter' 不同"
+        in printed
+    )
+    assert (
+        "ontology_metric.time_column 已有显式值 'BOOKED_DATE'，"
+        "与推导 'RECEIPT_DATE' 不同" in printed
+    )
+    assert (await _reloadKpi(dbSession, kpi.kpi_code)).time_grain == "month"
+    metricRow = await _reloadMetric(dbSession, metric.id)
+    assert metricRow.time_grain == "year"
+    assert metricRow.time_column == "BOOKED_DATE"
 
 
 # ── ⑤ 守卫 ───────────────────────────────────────────────────────────

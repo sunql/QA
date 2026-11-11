@@ -138,7 +138,10 @@ def _parseArgs(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--allow-prod-write",
         action="store_true",
-        help="允许对 qa_metadata 写（仅 dev 5433；生产永远拒绝）",
+        help=(
+            "允许对 qa_metadata 写。⚠️ 守卫只看库名：dev 与 prod 同名，"
+            "本开关 + 生产 DSN 会真的写生产 —— 执行前必须自行核对连接串"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -147,6 +150,8 @@ async def _main(argv: Sequence[str] | None = None) -> int:
     args = _parseArgs(argv)
     # dev 与 prod 同名（都叫 qa_metadata）：dry-run 只读，允许以它为目标；
     # --apply 必须显式 --allow-prod-write（且调用方先做当日备份）。
+    # ⚠️ 守卫**只看库名**，不校验 host/port —— 该开关对生产 DSN 同样放行。
+    # 环境区分靠操作者核对下面打印的 host（maskDsn 保留 host:port）。
     targetDb = assertSafeTarget(
         args.database_url,
         allowProdWrite=args.allow_prod_write or not args.apply,
@@ -286,10 +291,17 @@ def _assertUniqueTargets(plans: Sequence[NormalizationPlan]) -> None:
 async def _assertOwnership(
     session: AsyncSession, plans: Sequence[NormalizationPlan]
 ) -> None:
-    """落库前**重读**挂靠关系：计划快照里的 metric_id 必须仍是库里当前值。
+    """落库前**重读**：计划依赖的字段必须仍是快照时的值。
 
-    只按 ``kpi_code`` 改治理列、按 ``plan.metric_id`` 改度量，若不核对挂靠，
-    并发改挂靠后会把度量写到别的指标上，且复核用自己的 metric 永远自洽。
+    三类并发改动都要拦：
+
+    1. ``metric_id`` 挂靠变了 —— 否则度量会写到别的指标上，且复核用自己的
+       metric 永远自洽；
+    2. 治理列被改了 —— 直接覆盖会静默丢掉别人的编辑；
+    3. 度量被改了 —— 计划里的治理列是从旧度量推导的，写下去就是过期值。
+
+    只查 ``metric_id`` 不够：2/3 两类的写入本身「成功」，错误要等到复核才暴露，
+    而那时代码已经改过库里的值（虽然会回滚，但拒绝写库才是正确语义）。
     """
     codes = [plan.kpi_code for plan in plans]
     rows = (
@@ -300,6 +312,17 @@ async def _assertOwnership(
         )
     ).scalars().all()
     byCode = {row.kpi_code: row for row in rows}
+    metricIds = [plan.metric_id for plan in plans if plan.metric_id is not None]
+    metrics: dict[int, OntologyMetric] = {}
+    if metricIds:
+        metricRows = (
+            await session.execute(
+                select(OntologyMetric)
+                .where(OntologyMetric.id.in_(metricIds))
+                .execution_options(populate_existing=True)
+            )
+        ).scalars().all()
+        metrics = {int(metric.id): metric for metric in metricRows}
     for plan in plans:
         kpi = byCode.get(plan.kpi_code)
         if kpi is None:
@@ -309,6 +332,23 @@ async def _assertOwnership(
                 f"{plan.kpi_code}: metric_id 已变化（库 {kpi.metric_id} ≠ 计划 "
                 f"{plan.metric_id}），拒绝写库"
             )
+        for field in ("numerator_columns", "denominator_columns", "grain_keys"):
+            if list(getattr(kpi, field) or ()) != list(plan.before.get(field) or ()):
+                raise NormalizationError(
+                    f"{plan.kpi_code}: {field} 在计划快照后已被改动，拒绝写库"
+                )
+        if plan.metric_id is None:
+            continue
+        metric = metrics.get(plan.metric_id)
+        if metric is None:
+            raise NormalizationError(
+                f"{plan.kpi_code}: 库里找不到 metric {plan.metric_id}，拒绝写库"
+            )
+        for field in ("numerator_measure", "denominator_measure"):
+            if getattr(metric, field) != plan.before.get(field):
+                raise NormalizationError(
+                    f"{plan.kpi_code}: {field} 在计划快照后已被改动，拒绝写库"
+                )
 
 
 async def applyPlans(

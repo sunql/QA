@@ -254,16 +254,20 @@ pytest app/tests/integration/test_kpi_normalize_governance_apply.py -q
 ```bash
 python3 scripts/kpi_normalize_governance.py \
   --database-url 'postgresql+asyncpg://qa_user:qa_pg_dev_2026@127.0.0.1:5433/qa_metadata' \
-  --apply --allow-prod-write --out /tmp/kpi_p0_before_after.json
+  --apply --allow-prod-write
 ```
-- 先跑一次 dry-run 留档；`--apply` 前把 before/after JSON 保存到 `/tmp` 并摘录进 `summary.md`。
+- 先跑一次 dry-run 留档（stdout 重定向到 `dry-run-before.txt`）；`--apply` 后再跑一次
+  dry-run（`dry-run-after.txt`）并把库内原值/新值导出为 `before.json` / `after.json`
+  —— CLI **没有** `--out` 参数，快照靠 stdout 重定向与 psql 导出。
 - 写后复验（只读）：
 ```bash
 python3 scripts/kpi_normalize_governance.py \
   --database-url 'postgresql+asyncpg://qa_user:qa_pg_dev_2026@127.0.0.1:5433/qa_metadata'
 # 预期：12 行全部 noop，summary: pass=8 unknown=4 mismatch=0
 ```
-- 生产库不写；`0533` 以外 host 一律拒绝。
+- ⚠️ **守卫只看库名**：`qa_metadata` 在 dev（5433）与 prod 同名，`assertSafeTarget`
+  **不校验 host/port**。`--allow-prod-write` + 生产 DSN 会真的写生产。本批只写 5433
+  靠的是操作者核对命令里的连接串（脚本会打印 `maskDsn` 的 host:port，不带口令）。
 
 ### D3-3 清理与既有断言的冲突
 
@@ -316,7 +320,7 @@ HTTPS_PROXY=http://127.0.0.1:12450 gh pr create --base main --title "feat: KPI �
 | 风险 | 评估 | 处置 |
 |---|---|---|
 | 规范化写坏 dev 数据 | 低 | 单事务 + 写前对账复验；before 快照落 `/tmp/kpi_p0_before_after.json`；dev 可重建 |
-| 误写生产（库名同名） | 中 | `--allow-prod-write` 仅在显式传入时生效；脚本打印 host/port/db；只用 5433 |
+| 误写生产（库名同名） | 中 | `--allow-prod-write` 仅在显式传入时生效；脚本打印 host/port/db。⚠️ 守卫**只按库名**判定，dev/prod 同名 ⇒ 该开关对生产 DSN 同样放行，防线是操作者核对打印出的 host |
 | 改了既有断言的语义（假绿） | 中 | D3-3 只改“期望”，保留取证；反向守卫（D1-1 #7）证明比较器仍会红 |
 | 诊断接口泄露 | 低 | admin-only + 只读 + 不回显 SQL 结果；错误不吞 |
 | 契约块因 Top-3 截断仍为空 | 低 | 诊断报告 `injectionBlockEmpty` 直接暴露；用例用单 code 问句 |

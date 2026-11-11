@@ -93,9 +93,12 @@ KPI 口径对 NL2SQL 完全不可用。
   （plan 的 `grain_keys` 保持作者原序），`metric_id` 必须未变，reconcile verdict 必须**等于**计划的
   `verdict_after`（pass 回落 unknown 同样算失败）。
 - **写前守卫**：`_assertUniqueTargets`（重复 kpi_code / 共享 metric_id 拒绝）、
-  `_assertOwnership`（重读 KPI，`metric_id` 与计划快照不一致 ⇒ 拒绝）。
+  `_assertOwnership`（重读 KPI + metric：`metric_id`、三组治理列、两侧度量任一与计划快照
+  不一致 ⇒ 拒绝；防止覆盖并发编辑或在过期派生值上写库）。
 - **库守卫**：`assertSafeTarget`；`qa_metadata`（dev/prod 同名）必须显式 `--allow-prod-write`；
   建连后再用 `current_database()` 复核「真的连到了以为的那个库」。
+  ⚠️ 守卫**只看库名、不校验 host/port**：dev 与 prod 都叫 `qa_metadata`，`--allow-prod-write`
+  对生产 DSN 同样放行。环境区分靠操作者核对脚本打印的 `host:port`（`maskDsn` 不带口令）。
 - **退出码**：0 正常；1 目标仍有 mismatch / 连错库；2 派生失败或落库复核失败（已回滚）。
 
 ## 7. 踩坑与更正（后续勿重犯）

@@ -349,6 +349,44 @@ async def test_apply_rejects_duplicate_metric_in_plan(dbSession: AsyncSession) -
         await normalizeScript.applyPlans(dbSession, plans)
 
 
+async def test_apply_refuses_when_governance_columns_changed_after_snapshot(
+    dbSession: AsyncSession,
+) -> None:
+    """计划快照后治理列被并发改动 ⇒ 拒绝写库（不得覆盖别人的改动）。"""
+    metric, kpi = await _seedRatioKpi(dbSession, "KPI_D3_STALE_COLUMNS")
+    kpiId, metricId = kpi.id, metric.id
+    plan = deriveNormalization(kpi, metric, _CLASS_COLUMNS)
+
+    kpi.numerator_columns = ["CONCURRENT_EDIT"]
+    await dbSession.commit()
+
+    with pytest.raises(NormalizationError, match="numerator_columns.*快照"):
+        await normalizeScript.applyPlans(dbSession, [plan])
+
+    storedKpi, _ = await _reload(dbSession, kpiId, metricId)
+    assert storedKpi.numerator_columns == ["CONCURRENT_EDIT"]
+
+
+async def test_apply_refuses_when_measure_changed_after_snapshot(
+    dbSession: AsyncSession,
+) -> None:
+    """计划快照后度量被并发改动 ⇒ 拒绝写库（派生列已过期，写下去就是错值）。"""
+    metric, kpi = await _seedRatioKpi(dbSession, "KPI_D3_STALE_MEASURE")
+    kpiId, metricId = kpi.id, metric.id
+    plan = deriveNormalization(kpi, metric, _CLASS_COLUMNS)
+
+    metric.numerator_measure = {"agg": "SUM", "expr": "SOME_OTHER_COLUMN"}
+    await dbSession.commit()
+
+    with pytest.raises(NormalizationError, match="numerator_measure.*快照"):
+        await normalizeScript.applyPlans(dbSession, [plan])
+
+    storedKpi, storedMetric = await _reload(dbSession, kpiId, metricId)
+    # 治理列与度量都保持并发改动后的状态（既没被覆盖，也没半截写入）。
+    assert storedKpi.numerator_columns == ["按期到货行数"]
+    assert storedMetric.numerator_measure == {"agg": "SUM", "expr": "SOME_OTHER_COLUMN"}
+
+
 async def test_main_refuses_non_whitelist_target() -> None:
     """库名不在白名单 ⇒ SystemExit（在建立连接之前就拒绝）。"""
     with pytest.raises(SystemExit, match="不在白名单"):

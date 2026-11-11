@@ -12,7 +12,10 @@
 ``buildKpiContractBlock``，对账读 ``reconcileMetric`` —— 与 chat 注入路径同源，
 诊断结果与真实注入行为不会漂移。
 
-异常不吞：DB/缓存故障直接 500。诊断接口把错误伪装成空结果，等于让它骗人。
+异常不吞：匹配 / 契约块构建故障直接 500（走 builder 的 strict 路径）。诊断接口
+把错误伪装成空结果，等于让它骗人。唯一例外是注入总闸读取：与 chat 同源
+（``isKpiContractInjectionEnabled``），读失败按 fail-closed 记为关闭 —— 那是
+既有设计，不在本接口改动。
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from app.domain.models import KpiCatalog, OntologyMetric
 from app.domain.schemas import CamelModel
 from app.services.kpi_contract_builder import (
     KPI_CONTRACT_MAX_KPIS,
-    buildKpiContractBlock,
+    buildKpiContractBlockWithCodes,
 )
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_reconcile import (
@@ -96,11 +99,11 @@ def _isNoneSource(metric: OntologyMetric | None) -> bool:
 def _tierOf(
     result: ReconcileResult | None, metric: OntologyMetric | None
 ) -> str:
-    """Tier A = pass 且层 1/3 无降级；无 metric 或 NONE ⇒ C；其余 B。"""
-    if result is not None and result.isTierAEligible:
-        return TIER_A
+    """无 metric 或 NONE 源 ⇒ C（NONE 明确不允许 Tier A 直通）；A = pass 无降级；其余 B。"""
     if metric is None or _isNoneSource(metric):
         return TIER_C
+    if result is not None and result.isTierAEligible:
+        return TIER_A
     return TIER_B
 
 
@@ -141,16 +144,16 @@ def _matchOf(
     kpiName: str | None,
     confidence: float,
     method: str,
-    injectionEnabled: bool,
+    injected: bool,
 ) -> KpiDiagnoseMatch:
-    """单条命中：对账 + 注入门禁（与 ``_buildEntry`` 同口径）。"""
+    """单条命中：对账结果 + 是否真的进了注入块（由调用方按块成员关系传入）。"""
     result: ReconcileResult | None = None
     if metric is not None and kpi is not None:
         result = reconcileMetric(governanceSpecOf(kpi), techniqueOf(metric))
     verdict = result.verdict if result is not None else VERDICT_NO_METRIC
-    injected = (
-        injectionEnabled and metric is not None and verdict != VERDICT_MISMATCH
-    )
+    tierAEligible = (
+        result.isTierAEligible if result is not None else False
+    ) and not _isNoneSource(metric)
     return KpiDiagnoseMatch(
         kpi_code=code,
         kpi_name=kpi.kpi_name if kpi is not None else kpiName,
@@ -162,7 +165,7 @@ def _matchOf(
         execution_source=metric.execution_source if metric is not None else None,
         verdict=verdict,
         degraded=result.degraded if result is not None else False,
-        tier_a_eligible=result.isTierAEligible if result is not None else False,
+        tier_a_eligible=tierAEligible,
         tier=_tierOf(result, metric),
         reasons=list(result.reasons()) if result is not None else [],
         findings=_findingsOf(result),
@@ -187,6 +190,17 @@ async def diagnoseKpi(
         question, limit=KPI_CONTRACT_MAX_KPIS
     )
 
+    # 用同一份匹配结果建块：不重复 matchAll，也不在只读 GET 里写审计
+    # （getDb 不提交 ⇒ 审计只会被回滚并留下误导性 INFO 日志）。
+    block, includedCodes = await buildKpiContractBlockWithCodes(
+        db,
+        question,
+        codes=[match.code for match in matches],
+        strict=True,
+        recordAudit=False,
+    )
+    injectedCodes = set(includedCodes)
+
     diagnosticMatches: list[KpiDiagnoseMatch] = []
     for match in matches:
         kpi = await _loadKpi(db, match.code)
@@ -199,11 +213,11 @@ async def diagnoseKpi(
                 kpiName=match.kpi_name,
                 confidence=match.confidence,
                 method=match.method,
-                injectionEnabled=injectionEnabled,
+                # 以**块成员关系**为准：通过逐条门禁但被字符上限丢掉的条目不算注入。
+                injected=match.code in injectedCodes,
             )
         )
 
-    block = await buildKpiContractBlock(db, question)
     return KpiDiagnoseRead(
         question=question,
         injection_enabled=injectionEnabled,

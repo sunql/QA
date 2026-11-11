@@ -21,6 +21,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.api.v1.kpi_diagnose as kpiDiagnoseModule
 from app.domain.models import KpiCatalog, OntologyMetric
 from app.models.system_config import SystemConfig
 from app.services.kpi_match_cache import get_kpi_match_cache
@@ -241,6 +242,96 @@ async def test_diagnose_reports_switch_off(
     assert len(body["matches"]) == 1
     assert body["matches"][0]["verdict"] == "pass"
     assert body["matches"][0]["injected"] is False
+
+
+async def test_diagnose_none_source_reports_tier_c(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """NONE 源即便层 2 pass 也只能是 Tier C（枚举契约：NONE 不允许 Tier A 直通）。"""
+    await _enableInjectionSwitch(dbSession)
+    metric = OntologyMetric(
+        metric_name="KPI_D2_NONE-metric",
+        formula="",
+        agg_function="SUM",
+        metric_type="MEASURE",
+        execution_source="NONE",
+        numerator_measure={"agg": "SUM", "expr": "RECEIPT_DATE"},
+        grain_keys=["SUPPLIER_CODE"],
+        created_by="d2-test",
+    )
+    dbSession.add(metric)
+    await dbSession.commit()
+    await _seedKpi(
+        dbSession,
+        "KPI_D2_NONE",
+        metricId=metric.id,
+        numeratorColumns=["RECEIPT_DATE"],
+        denominatorColumns=[],
+        grainKeys=["SUPPLIER_CODE"],
+        keywords=["NONE源诊断"],
+    )
+    await _warmCache(dbSession)
+
+    response = await client.get(
+        _DIAGNOSE_URL,
+        params={"question": "KPI_D2_NONE 是多少"},
+        headers=_ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 200, response.text
+    match = response.json()["matches"][0]
+    # 层 2 判 pass，但 NONE 没有可执行形态 ⇒ 不得报 A / 不得报可直通。
+    assert match["verdict"] == "pass"
+    assert match["tier"] == "C"
+    assert match["tierAEligible"] is False
+
+
+async def test_diagnose_match_failure_is_not_swallowed(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """匹配故障必须向上抛（500），不能伪装成「无命中」的 200。"""
+
+    class _BoomService:
+        async def matchAll(self, question: str, limit: int):
+            raise RuntimeError("cache/db down")
+
+    monkeypatch.setattr(
+        kpiDiagnoseModule, "getKpiSemanticMatchService", lambda: _BoomService()
+    )
+
+    with pytest.raises(RuntimeError, match="cache/db down"):
+        await client.get(
+            _DIAGNOSE_URL,
+            params={"question": "任意问句"},
+            headers=_ADMIN_HEADERS,
+        )
+
+
+async def test_diagnose_injected_follows_block_membership(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """pass 门禁 ≠ 一定注入：条目被块上限丢掉时 ``injected`` 必须为 false。"""
+    await _enableInjectionSwitch(dbSession)
+    await _seedPassingKpi(dbSession, "KPI_D2_NOT_IN_BLOCK")
+    await _warmCache(dbSession)
+
+    async def _emptyBlock(session, question, **kwargs):
+        return "【KPI 口径契约】占位", ()
+
+    monkeypatch.setattr(
+        kpiDiagnoseModule, "buildKpiContractBlockWithCodes", _emptyBlock
+    )
+
+    response = await client.get(
+        _DIAGNOSE_URL,
+        params={"question": "KPI_D2_NOT_IN_BLOCK 是多少"},
+        headers=_ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 200, response.text
+    match = response.json()["matches"][0]
+    assert match["verdict"] == "pass"
+    assert match["injected"] is False
 
 
 async def test_diagnose_no_match_returns_empty_list(

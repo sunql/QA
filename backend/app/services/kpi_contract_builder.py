@@ -27,6 +27,7 @@ AVG_OF_RATIOS        AVG(分子/分母)             SUM(分子)/SUM(分母)
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -187,8 +188,21 @@ def renderContractEntry(entry: ContractEntry) -> str:
 
 def renderContractBlock(entries: tuple[ContractEntry, ...]) -> str:
     """渲染整个契约块；无条目时返回空串。"""
+    return renderContractBlockWithCodes(entries)[0]
+
+
+def renderContractBlockWithCodes(
+    entries: tuple[ContractEntry, ...],
+) -> tuple[str, tuple[str, ...]]:
+    """渲染契约块，并返回**真正写进块里**的 KPI code。
+
+    字符上限会丢整条后续 entry ⇒ 「通过逐条门禁」≠「出现在块里」。
+    诊断接口的 ``injected`` 必须以后者为准，否则会报一个 chat 侧根本看不到的
+    ``injected=true``。
+    """
     if not entries:
-        return ""
+        return "", ()
+    includedCodes: list[str] = []
     header = (
         "【KPI 口径契约】以下口径由业务方签字，生成 SQL 时必须严格遵循："
         "不得自行改写聚合口径、粒度键或除法形态。"
@@ -209,10 +223,11 @@ def renderContractBlock(entries: tuple[ContractEntry, ...]) -> str:
             omitted = len(entries) - index
             break
         blocks.append(rendered)
+        includedCodes.append(entry.kpi_code)
         totalChars += len(rendered) + 1
     if omitted:
         blocks.append(f"[…更多 KPI 契约因长度上限未注入，共 {omitted} 条]")
-    return "\n".join(blocks)
+    return "\n".join(blocks), tuple(includedCodes)
 
 
 async def _loadKpi(session: AsyncSession, kpiCode: str) -> KpiCatalog | None:
@@ -266,15 +281,23 @@ async def _loadSourceClasses(
 
 
 async def _matchKpiCodes(
-    session: AsyncSession, question: str, limit: int
+    session: AsyncSession, question: str, limit: int, *, strict: bool = False
 ) -> list[str]:
     """动态匹配 KPI（读配置里的 semantic_keywords，不是硬编码清单）。
 
     先 ensureFresh：缓存冷/脏/过期时重建（否则语义匹配静默失效 ⇒ 契约永远注不进）。
     兜底失败**降级而非抛**：缓存是加速器，不是正确性依赖。
+    ``strict=True``（诊断接口）：不降级，故障原样抛出。
     """
     if not question or not question.strip():
         return []
+    if strict:
+        async with session.begin_nested():
+            await get_kpi_match_cache().ensureFresh(session)
+            results = await getKpiSemanticMatchService().matchAll(
+                question, limit=limit
+            )
+        return [r.code for r in results]
     try:
         # savepoint：ensureFresh 可能写库；DB 级失败若不回滚到保存点，
         # 会把调用方 session 的事务打成 failed 态（后续语句全 PendingRollbackError）。
@@ -292,40 +315,72 @@ async def _matchKpiCodes(
 async def buildKpiContractBlock(
     session: AsyncSession, question: str, *, limit: int = KPI_CONTRACT_MAX_KPIS
 ) -> str:
-    """构建 Tier B 的 KPI 契约块；无可注入内容时返回空串。
+    """构建 Tier B 的 KPI 契约块；无可注入内容时返回空串。"""
+    block, _codes = await buildKpiContractBlockWithCodes(
+        session, question, limit=limit
+    )
+    return block
+
+
+async def buildKpiContractBlockWithCodes(
+    session: AsyncSession,
+    question: str,
+    *,
+    limit: int = KPI_CONTRACT_MAX_KPIS,
+    codes: Sequence[str] | None = None,
+    strict: bool = False,
+    recordAudit: bool = True,
+) -> tuple[str, tuple[str, ...]]:
+    """构建契约块并返回**实际进入块内**的 KPI code（受字符上限影响）。
 
     注入总闸（2026-10-30 口径统一）：本面与 nl2sql 侧 B3 治理契约面共用同一个
     system_config 灰度开关 ``KPI_CONTRACT_INJECTION_ENABLED`` + env 紧急杀闸，
     fail-closed（行缺失 ⇒ 不注入）。env 杀闸关闭 ⇒ 完全不查库；system_config 行
     关闭 ⇒ 只多读一次开关行即返回空串（不发起语义匹配）。
     单个 KPI 构建失败只丢该条，不影响其余 KPI（spec §7.4 永不静默：写 warning）。
+
+    - ``codes``：调用方已匹配好的 code 列表（诊断接口用，避免重复匹配）；
+    - ``strict``：条目构建失败原样抛出（诊断接口：故障不能伪装成空块）；
+    - ``recordAudit``：是否写对账审计（诊断是只读 GET，session 不提交，
+      写审计只会被回滚并留下误导性 INFO 日志）。
     """
     enabled = await isKpiContractInjectionEnabled(session)
     if not enabled:
         # DEBUG 而非 INFO：每请求都会走到，INFO 会刷屏
         logger.debug("KPI 契约注入开关关闭，跳过")
-        return ""
-    codes = await _matchKpiCodes(session, question, limit)
-    if not codes:
-        return ""
+        return "", ()
+    matched = (
+        list(codes)
+        if codes is not None
+        else await _matchKpiCodes(session, question, limit, strict=strict)
+    )
+    if not matched:
+        return "", ()
     entries: list[ContractEntry] = []
-    for code in codes:
-        try:
-            # savepoint 必须紧贴整条构建路径（_loadKpi/_loadMetric/_loadSourceClasses）：
-            # 任一查询 DB 级失败时只回滚本条，不能让整个 chat session 进入 failed 态。
+    for code in matched:
+        if strict:
+            # savepoint 仍要保留：失败回滚到本条后，异常继续向上抛（不吞）。
             async with session.begin_nested():
-                entry = await _buildEntry(session, code)
-        except Exception:
-            logger.warning("KPI 契约条目构建失败，跳过 code=%s", code, exc_info=True)
-            continue
+                entry = await _buildEntry(session, code, recordAudit=recordAudit)
+        else:
+            try:
+                # savepoint 必须紧贴整条构建路径（_loadKpi/_loadMetric/_loadSourceClasses）：
+                # 任一查询 DB 级失败时只回滚本条，不能让整个 chat session 进入 failed 态。
+                async with session.begin_nested():
+                    entry = await _buildEntry(session, code, recordAudit=recordAudit)
+            except Exception:
+                logger.warning("KPI 契约条目构建失败，跳过 code=%s", code, exc_info=True)
+                continue
         if entry is not None:
             entries.append(entry)
     if not entries:
-        return ""
-    return renderContractBlock(tuple(entries))
+        return "", ()
+    return renderContractBlockWithCodes(tuple(entries))
 
 
-async def _buildEntry(session: AsyncSession, kpiCode: str) -> ContractEntry | None:
+async def _buildEntry(
+    session: AsyncSession, kpiCode: str, *, recordAudit: bool = True
+) -> ContractEntry | None:
     """构建一个 KPI 的契约条目；mismatch / metric 缺失时返回 None（不注入）。"""
     kpi = await _loadKpi(session, kpiCode)
     if kpi is None:
@@ -337,14 +392,15 @@ async def _buildEntry(session: AsyncSession, kpiCode: str) -> ContractEntry | No
         return None
     technique = techniqueOf(metric)
     result = reconcileMetric(governanceSpecOf(kpi), technique)
-    try:
-        # 审计写失败只影响审计：savepoint 保证不回滚外层 per-code 事务。
-        async with session.begin_nested():
-            await recordReconcileResult(
-                session, kpiId=kpi.id, kpiCode=kpi.kpi_code, result=result
-            )
-    except Exception:
-        logger.warning("KPI 对账审计写入失败 code=%s", kpi.kpi_code, exc_info=True)
+    if recordAudit:
+        try:
+            # 审计写失败只影响审计：savepoint 保证不回滚外层 per-code 事务。
+            async with session.begin_nested():
+                await recordReconcileResult(
+                    session, kpiId=kpi.id, kpiCode=kpi.kpi_code, result=result
+                )
+        except Exception:
+            logger.warning("KPI 对账审计写入失败 code=%s", kpi.kpi_code, exc_info=True)
     if result.verdict == VERDICT_MISMATCH:
         logger.warning(
             "KPI 口径对账 mismatch，拒绝注入 code=%s reasons=%s",

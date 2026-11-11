@@ -1,0 +1,99 @@
+# Task 3 变异取证 — 层 2 对账接入 alias resolver / degraded 扩展
+
+环境：worktree `/private/tmp/qa-kpi-p3`（branch `feat/kpi-p3-alias-resolver`），
+`TEST_DATABASE_URL=postgresql+asyncpg://qa_user:***@127.0.0.1:5434/qa_metadata_test`、
+`TEST_NEO4J_URI=bolt://127.0.0.1:7688`、`TEST_NEO4J_PASSWORD=***`。
+协议：改 → 红 → 还原 → 复绿。
+
+- 单元命令：`cd backend && uv run pytest app/tests/unit/test_kpi_metric_reconcile.py -q`
+  （基线 52 passed）
+- 定向命令：`cd backend && uv run pytest app/tests/unit/test_kpi_metric_reconcile.py \
+  app/tests/unit/test_kpi_tier_parity.py app/tests/unit/test_kpi_metric_spec.py \
+  app/tests/integration/test_kpi_stock_verdict_regression.py -q`
+  （基线 73 passed）
+
+## 基线（还原后）
+
+```
+73 passed, 21 warnings in 20.05s
+```
+
+## 变异 ①：删除 `resolution=None` 恒等回退（identity fallback）
+
+改动：`reconcileGovernanceVsTechnique` 去掉 `if resolution is None:
+return _reconcileGovernanceIdentity(...)` 分支，一律走
+`_reconcileGovernanceWithResolution`（即存量调用被强制喂 resolution 语义）。
+
+红（27 failed, 25 passed；reconcile 单文件）：
+
+```
+FAILED test_layer2_grain_absent_on_governance_is_unknown
+FAILED test_layer2_technical_grain_absent_is_mismatch
+FAILED test_layer2_grain_order_insensitive
+FAILED test_layer2_grain_mismatch_is_mismatch
+FAILED test_layer2_grain_aligned_columns_differ_is_mismatch_without_grain_code
+FAILED test_layer2_full_match_is_pass
+FAILED test_merge_unknown_when_only_governance_empty
+FAILED test_merge_pass_when_everything_aligned
+FAILED test_merge_collects_all_layer_findings
+FAILED test_merge_clean_is_not_degraded_and_tier_a_eligible
+...（共 27 条，均为 P2 存量断言，未改动一行）
+```
+
+这正是硬门槛 DoD#5 的证据：恒等回退一删，**存量断言**立即红；存量断言本身
+全程未修改。还原后：
+
+```
+52 passed
+```
+
+## 变异 ②：删除 degraded 扩展（层 2 unknown 不再标 degraded）
+
+改动：`reconcileMetric` 的 `degraded` 去掉 `layer2.verdict == VERDICT_UNKNOWN`
+子句，恢复为只由层 1/3 mismatch 触发。
+
+红（3 failed；单元 2 + 存量回归 1）：
+
+```
+FAILED test_resolution_time_column_not_in_source_is_degraded_unknown
+FAILED test_merge_degraded_true_when_layer2_unknown
+FAILED app/tests/integration/test_kpi_stock_verdict_regression.py::test_stock_12_kpi_layer2_verdict_matches_baseline
+  AssertionError: KPI_SUPPLIER_DEFECT_RATE: unknown 应标注 degraded
+               KPI_SUPPLIER_FPY: unknown 应标注 degraded
+               KPI_SUPPLIER_MAINTENANCE_RATIO: unknown 应标注 degraded
+               KPI_SUPPLIER_NCR_RATE: unknown 应标注 degraded
+```
+
+还原后（单元 + 回归）：
+
+```
+53 passed
+```
+
+## 变异 ③：粒度比较改回字符串直比（绕过 time_grain 枚举 / resolver 维度）
+
+改动：`_checkGrainWithResolution` 首行改为直接调用旧 `_checkGrain(
+governance.grain_keys, technique.grain_keys)` 并返回，不再比较
+`GovernanceSpec.time_grain` / `MetricTechnique.time_grain`，也不用
+`_resolvedColumnsFor` 归一化维度列。
+
+红（4 failed）：
+
+```
+FAILED test_resolution_time_grain_mismatch_is_mismatch
+FAILED test_resolution_time_grain_absent_on_governance_is_unknown
+FAILED test_resolution_time_grain_absent_on_technical_is_unknown
+FAILED test_resolution_grain_dimension_aliases_and_time_word_removal
+```
+
+还原后（完整定向）：
+
+```
+73 passed, 21 warnings in 20.05s
+```
+
+## 结论
+
+三次变异分别钉住三条新增语义：**恒等回退（存量兼容）**、**层 2 unknown ⇒
+degraded（R4）**、**time_grain 枚举 + 别名归一后的维度集合比较（R6）**。
+每条均满足「改 ⇒ 红 ⇒ 还原 ⇒ 复绿」，且存量断言零改动。

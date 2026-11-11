@@ -14,21 +14,36 @@
 
 from __future__ import annotations
 
+import logging
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.domain.enums import MetricType
 from app.domain.models import KpiCatalog, OntologyMetric
+from app.services.kpi_alignment_resolver import (
+    ResolutionOutcome,
+    deriveTimeGrain,
+    resolveGovernanceTokens,
+    sourcePropertiesForMetric,
+)
 from app.services.kpi_metric_reconcile import (
     GovernanceSpec,
     MeasureSpec,
     MetricTechnique,
+    governanceTokensOf,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def governanceSpecOf(kpi: KpiCatalog) -> GovernanceSpec:
-    """KPI 治理侧快照：结构化列 + 粒度键（列名按小写比较，集合语义）。"""
+    """KPI 治理侧快照：结构化列 + 粒度键 + 时间粒度（R6 由 grain 文本推导）。"""
+    timeGrain = deriveTimeGrain(kpi.grain)
     return GovernanceSpec(
         numerator_columns=tuple(kpi.numerator_columns or ()),
         denominator_columns=tuple(kpi.denominator_columns or ()),
         grain_keys=tuple(kpi.grain_keys or ()),
+        time_grain=timeGrain.value if timeGrain is not None else None,
     )
 
 
@@ -45,7 +60,36 @@ def techniqueOf(metric: OntologyMetric | None) -> MetricTechnique:
         filter_expression=metric.filter_expression,
         formula=metric.formula,
         execution_source=metric.execution_source,
+        time_grain=metric.time_grain,
+        time_column=metric.time_column,
     )
 
 
-__all__ = ["governanceSpecOf", "techniqueOf"]
+async def resolutionForMetric(
+    session: AsyncSession,
+    metricId: int | None,
+    governance: GovernanceSpec,
+) -> ResolutionOutcome | None:
+    """治理 token 别名解析（薄 loader + 纯函数）；失败 ⇒ ``None`` 恒等回退。
+
+    三处接线点（契约构建 / chat Tier 判定 / 诊断）共用本函数。**绝不让解析
+    失败变成请求失败**：DB/读异常只记 warning，返回 None 走 ``resolution=None``
+    的既有行为（设计 §7.1 的恒等回退，DoD#5）。
+    """
+    if metricId is None:
+        return None
+    try:
+        properties = await sourcePropertiesForMetric(session, metricId)
+        return resolveGovernanceTokens(
+            governanceTokensOf(governance), properties
+        )
+    except Exception:
+        logger.warning(
+            "KPI 治理 token 别名解析失败，回退恒等对账 metric_id=%s",
+            metricId,
+            exc_info=True,
+        )
+        return None
+
+
+__all__ = ["governanceSpecOf", "resolutionForMetric", "techniqueOf"]

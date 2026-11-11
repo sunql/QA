@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import CurrentUser, getDb, requireAdmin
 from app.domain.models import KpiCatalog, OntologyMetric
 from app.domain.schemas import CamelModel
+from app.services.kpi_alignment_resolver import ResolutionOutcome
 from app.services.kpi_contract_builder import (
     KPI_CONTRACT_MAX_KPIS,
     buildKpiContractBlockWithCodes,
@@ -38,7 +39,11 @@ from app.services.kpi_metric_reconcile import (
     ReconcileResult,
     reconcileMetric,
 )
-from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
+from app.services.kpi_metric_spec import (
+    governanceSpecOf,
+    resolutionForMetric,
+    techniqueOf,
+)
 from app.services.kpi_metric_switches import (
     isKpiContractInjectionEnabled,
     isKpiMatchContainmentEnabled,
@@ -177,11 +182,14 @@ def _matchOf(
     confidence: float,
     method: str,
     injected: bool,
+    resolution: ResolutionOutcome | None = None,
 ) -> KpiDiagnoseMatch:
     """单条命中：对账结果 + 是否真的进了注入块（由调用方按块成员关系传入）。"""
     result: ReconcileResult | None = None
     if metric is not None and kpi is not None:
-        result = reconcileMetric(governanceSpecOf(kpi), techniqueOf(metric))
+        result = reconcileMetric(
+            governanceSpecOf(kpi), techniqueOf(metric), resolution=resolution
+        )
     verdict = result.verdict if result is not None else VERDICT_NO_METRIC
     tierAEligible = (
         result.isTierAEligible if result is not None else False
@@ -245,6 +253,13 @@ async def diagnoseKpi(
     for match in matches:
         kpi = await _loadKpi(db, match.code)
         metric = await _loadMetric(db, kpi.metric_id if kpi is not None else None)
+        governance = governanceSpecOf(kpi) if kpi is not None else None
+        # 别名解析失败只降级为 resolution=None（恒等回退），不把诊断变成 500。
+        resolution = (
+            await resolutionForMetric(db, metric.id, governance)
+            if metric is not None and governance is not None
+            else None
+        )
         diagnosticMatches.append(
             _matchOf(
                 kpi=kpi,
@@ -255,6 +270,7 @@ async def diagnoseKpi(
                 method=match.method,
                 # 以**块成员关系**为准：通过逐条门禁但被字符上限丢掉的条目不算注入。
                 injected=match.code in injectedCodes,
+                resolution=resolution,
             )
         )
 

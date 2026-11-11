@@ -83,7 +83,7 @@ KPI 口径对 NL2SQL 完全不可用。
 | 3 | 幂等 | ✅ 重跑 dry-run **12/12 noop**；第二次 `--apply` **0 条**（`second-apply-noop.txt`） |
 | 4 | 诊断接口 | ✅ admin 200 / 非 admin 403；返回命中方式、verdict/reasons、注入块是否为空、Tier A 可执行性（`test_kpi_diagnose_api.py`） |
 | 5 | 对账复验（realdata S3） | ✅ 对 dev 库跑 S3：**9 步全 PASS**，`S3.3 mismatch 集合 = ∅`，`S3.4 列级 finding = ∅`，分布 `{'pass': 8, 'unknown': 4}` |
-| 6 | 定向回归 | ✅ 7 个套件 **118 passed**（normalizer 单元、apply 集成、backfill apply、realdata lib/s3、diagnose、contract block） |
+| 6 | 定向回归 | ✅ 主 7 套件 **118 passed**；另 4 套件 75 passed / 1 failed，失败项 `test_kpi_catalog_search_api.py::test_search_requires_auth` 在 `origin/main` 基线**同样失败**（`getSettings` 的 `lru_cache` 让测试内 `monkeypatch.setenv` 不生效）⇒ **净新增 0** |
 | 7 | 生产 | ✅ **未写、未部署**；生产仍 `0140` |
 
 ## 6. 关键实现约束（复审后定稿）

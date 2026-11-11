@@ -403,9 +403,11 @@ def _recordEvidenceAfterSuccess(func):
     （hash 计算失败也只 warning），查询延迟只增加一次 result_hash 计算。
     """
     @functools.wraps(func)
-    async def wrapper(self, sql: str) -> list[dict[str, Any]]:
+    async def wrapper(
+        self, sql: str, *, maxRows: int | None = None
+    ) -> list[dict[str, Any]]:
         startedAt = time.monotonic()
-        rows = await func(self, sql)
+        rows = await func(self, sql, maxRows=maxRows)
         scheduleSqlQueryEvidence(
             sql=sql,
             rows=rows,
@@ -415,6 +417,16 @@ def _recordEvidenceAfterSuccess(func):
         return rows
 
     return wrapper
+
+
+def _effectiveRowLimit(maxRows: int | None) -> int:
+    """显式 maxRows 与 QUERY_ROW_LIMIT 取更小正数；都为 0/None ⇒ 不限行。"""
+    configured = getSettings().queryRowLimit
+    if maxRows is not None and maxRows > 0:
+        if configured <= 0:
+            return maxRows
+        return min(maxRows, configured)
+    return configured
 
 
 # =============================================================================
@@ -438,8 +450,14 @@ class BusinessDbAdapter(Protocol):
         """
         ...
 
-    async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
-        """执行只读 SQL，返回字典行列表。已做只读校验、行数限制与超时。"""
+    async def execute_read_only(
+        self, sql: str, *, maxRows: int | None = None
+    ) -> list[dict[str, Any]]:
+        """执行只读 SQL，返回字典行列表。已做只读校验、行数限制与超时。
+
+        maxRows 为单次调用行数上限（与 QUERY_ROW_LIMIT 取更小正数）；
+        None/0 表示不额外限制。默认 None 保持既有调用方行为不变。
+        """
         ...
 
     async def dispose(self) -> None:
@@ -515,12 +533,14 @@ class _SqlaAdapter:
             return False, str(exc), None
 
     @_recordEvidenceAfterSuccess
-    async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
+    async def execute_read_only(
+        self, sql: str, *, maxRows: int | None = None
+    ) -> list[dict[str, Any]]:
         _assert_read_only(sql)
-        # queryRowLimit <= 0 视为取消行数上限。注意：不能依赖 fetchmany(None)=全部行——
+        # limit <= 0 视为取消行数上限。注意：不能依赖 fetchmany(None)=全部行——
         # 该假设仅对 asyncpg 成立，aiomysql 的 fetchmany(None) 按 cursor.arraysize（默认 1）
         # 只返回 1 行，导致 MySQL 数据源 introspection 每个查询只取到首行。无限行必须显式 all()。
-        limit = getSettings().queryRowLimit
+        limit = _effectiveRowLimit(maxRows)
         timeout = getSettings().queryTimeoutSeconds
         # 库侧只读兜底：解析层黑名单（M1/M2 批）之外，事务级只读是结构性防御——
         # 同一事务中所有写入都会被数据库引擎拒绝，与解析层无关。
@@ -589,7 +609,9 @@ class _OracleAdapter:
             return False, str(exc), None
 
     @_recordEvidenceAfterSuccess
-    async def execute_read_only(self, sql: str) -> list[dict[str, Any]]:
+    async def execute_read_only(
+        self, sql: str, *, maxRows: int | None = None
+    ) -> list[dict[str, Any]]:
         _assert_read_only(sql)
         # 执行前兜底：剥离语句尾部 `;`（Oracle 拒收 ⇒ ORA-00933）。对无尾分号的 SQL 是 no-op。
         sql = _strip_trailing_semicolon(sql)
@@ -599,10 +621,10 @@ class _OracleAdapter:
         # 执行前兜底：裸 ORDER BY ... DESC 补 NULLS LAST（Oracle DESC 默认 NULLS FIRST，
         # 跨年对比时仅部分年份有数据的行会排到最前）；对已显式写 NULLS 的 SQL 是 no-op。
         sql = _inject_nulls_last(sql)
-        # queryRowLimit <= 0 视为取消行数上限：
+        # limit <= 0 视为取消行数上限：
         # 注意 oracledb 的 cursor.fetchmany(None) 实际按 cursor.arraysize（默认 100）截行，
         # 不会返回全部剩余行；要真"无限制"必须显式循环 fetchmany 直到耗尽。
-        limit = getSettings().queryRowLimit
+        limit = _effectiveRowLimit(maxRows)
         timeout = getSettings().queryTimeoutSeconds
 
         async def _run() -> list[dict[str, Any]]:

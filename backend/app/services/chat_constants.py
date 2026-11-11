@@ -25,6 +25,9 @@ ROUTING_LAYER_L3 = "L3"  # 多步持久化执行（chat_multistep 路径，独�
 ROUTING_LAYER_L4 = "L4"  # L4 Agent Loop（研究类问题，触发 _L4_EXPLORATORY_KEYWORDS）
 # KPI 多命中歧义：不执行，返回澄清候选（设计 §5.2）。长度 3，safe for VARCHAR(10)。
 ROUTING_LAYER_KPI_CLARIFY = "L1C"
+# Tier B 降级哨兵：preamble 返回它 ≠ 终结，入口必须继续主 NL2SQL 流水线。
+# 仅进程内使用，不落 session_message.routing_layer（仍按 L2 落库）。
+ROUTING_LAYER_KPI_TIER_B = "L1B"
 
 
 # =============================================================================

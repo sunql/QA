@@ -1,0 +1,41 @@
+MUTATION (D4 Step 5): L1L4PreambleMixin._tierBPreamble body replaced with 'return None' (Tier B sentinel lost -> falls through / returns None, i.e. does not short-circuit L4)
+command: pytest app/tests/unit/test_chat_tier_a_preamble.py -q
+---
+.F..F......                                                              [100%]
+=================================== FAILURES ===================================
+__________________ test_tier_b_returns_sentinel_and_skips_l4 ___________________
+
+    @pytest.mark.asyncio()
+    async def test_tier_b_returns_sentinel_and_skips_l4() -> None:
+        mixin = _Preamble(
+            tierPlan=type("P", (), {"tier": "B", "reason": "explicit_time_scope"})()
+        )
+        preamble = await mixin._runL1AndL4Preamble(_dto(), None, None)
+>       assert preamble is not None
+E       assert None is not None
+
+app/tests/unit/test_chat_tier_a_preamble.py:104: AssertionError
+_________________ test_tier_a_execution_failure_degrades_to_b __________________
+
+    @pytest.mark.asyncio()
+    async def test_tier_a_execution_failure_degrades_to_b() -> None:
+        mixin = _Preamble(
+            tierPlan=type("P", (), {"tier": "A", "reason": None})(),
+            executeResult=None,
+            executeReason="execution_error",
+        )
+        preamble = await mixin._runL1AndL4Preamble(_dto(), None, None)
+>       assert preamble is not None and preamble.routing_layer == "L1B"
+E       assert (None is not None)
+
+app/tests/unit/test_chat_tier_a_preamble.py:141: AssertionError
+=========================== short test summary info ============================
+FAILED app/tests/unit/test_chat_tier_a_preamble.py::test_tier_b_returns_sentinel_and_skips_l4
+FAILED app/tests/unit/test_chat_tier_a_preamble.py::test_tier_a_execution_failure_degrades_to_b
+2 failed, 9 passed in 4.66s
+
+=== POST-REVERT (mutation reverted) ===
+command: pytest app/tests/unit/test_chat_tier_a_preamble.py -q
+---
+...........                                                              [100%]
+11 passed in 4.36s

@@ -1,0 +1,75 @@
+target: postgresql+asyncpg://qa_user:***@127.0.0.1:5433/qa_metadata database=qa_metadata
+[schema-not-migrated] 0143 列缺失：kpi_catalog.time_grain, ontology_metric.time_grain, ontology_metric.time_column（dry-run 继续：以下为 planned 值，不可写）
+[1/12] KPI_COST_SAVING (metric=8)
+    grain '供应商+物料+月' -> time_grain=month basis=deriveTimeGrain('供应商+物料+月')
+    kpi.time_grain: n/a(0143) -> month
+    metric.time_grain: n/a(0143) -> month
+    metric.time_column: n/a(0143) -> <不写> basis=ambiguous candidates=['ORDER_DATE', 'VALID_FROM', 'VALID_TO']
+    note: time_column 不写（ambiguous）：候选 ['ORDER_DATE', 'VALID_FROM', 'VALID_TO']（多候选/零候选不猜，由治理侧人工指定）
+[2/12] KPI_INVOICE_MATCH_RATE (metric=5)
+    grain '供应商+月' -> time_grain=month basis=deriveTimeGrain('供应商+月')
+    kpi.time_grain: n/a(0143) -> month
+    metric.time_grain: n/a(0143) -> month
+    metric.time_column: n/a(0143) -> INVOICE_DATE basis=grain_keys candidates=['INVOICE_DATE']
+[3/12] KPI_PAYMENT_ON_TIME (metric=4)
+    grain '供应商+月' -> time_grain=month basis=deriveTimeGrain('供应商+月')
+    kpi.time_grain: n/a(0143) -> month
+    metric.time_grain: n/a(0143) -> month
+    metric.time_column: n/a(0143) -> <不写> basis=ambiguous candidates=['DUE_DATE', 'VALUE_DATE']
+    note: time_column 不写（ambiguous）：候选 ['DUE_DATE', 'VALUE_DATE']（多候选/零候选不猜，由治理侧人工指定）
+[4/12] KPI_PURCHASE_CYCLE_TIME (metric=6)
+    grain '供应商+工厂+月' -> time_grain=month basis=deriveTimeGrain('供应商+工厂+月')
+    kpi.time_grain: n/a(0143) -> month
+    metric.time_grain: n/a(0143) -> month
+    metric.time_column: n/a(0143) -> <不写> basis=ambiguous candidates=['CREATION_DATE', 'RECEIPT_DATE']
+    note: time_column 不写（ambiguous）：候选 ['CREATION_DATE', 'RECEIPT_DATE']（多候选/零候选不猜，由治理侧人工指定）
+[5/12] KPI_PURCHASE_PRICE_VARIANCE (metric=9)
+    grain '物料+工厂+月' -> time_grain=month basis=deriveTimeGrain('物料+工厂+月')
+    kpi.time_grain: n/a(0143) -> month
+    metric.time_grain: n/a(0143) -> month
+    metric.time_column: n/a(0143) -> <不写> basis=ambiguous candidates=['ORDER_DATE', 'VALID_FROM', 'VALID_TO']
+    note: time_column 不写（ambiguous）：候选 ['ORDER_DATE', 'VALID_FROM', 'VALID_TO']（多候选/零候选不猜，由治理侧人工指定）
+[6/12] KPI_SUPPLIER_DEFECT_RATE (metric=11)
+    grain '供应商+物料+工厂+月' -> time_grain=month basis=deriveTimeGrain('供应商+物料+工厂+月')
+    kpi.time_grain: n/a(0143) -> month
+    metric.time_grain: n/a(0143) -> month
+    metric.time_column: n/a(0143) -> <不写> basis=no-candidates candidates=[]
+    note: time_column 不写（no-candidates）：候选 []（多候选/零候选不猜，由治理侧人工指定）
+[7/12] KPI_SUPPLIER_DELAY_DAYS (metric=7)
+    grain '供应商+工厂+月' -> time_grain=month basis=deriveTimeGrain('供应商+工厂+月')
+    kpi.time_grain: n/a(0143) -> month
+    metric.time_grain: n/a(0143) -> month
+    metric.time_column: n/a(0143) -> <不写> basis=ambiguous candidates=['PROMISED_RECEIPT_DATE', 'RECEIPT_DATE']
+    note: time_column 不写（ambiguous）：候选 ['PROMISED_RECEIPT_DATE', 'RECEIPT_DATE']（多候选/零候选不猜，由治理侧人工指定）
+[8/12] KPI_SUPPLIER_FPY (metric=12)
+    grain '供应商+物料+工厂+月' -> time_grain=month basis=deriveTimeGrain('供应商+物料+工厂+月')
+    kpi.time_grain: n/a(0143) -> month
+    metric.time_grain: n/a(0143) -> month
+    metric.time_column: n/a(0143) -> <不写> basis=no-candidates candidates=[]
+    note: time_column 不写（no-candidates）：候选 []（多候选/零候选不猜，由治理侧人工指定）
+[9/12] KPI_SUPPLIER_MAINTENANCE_RATIO (metric=10)
+    grain '供应商（快照）' -> time_grain=<不写> basis=deriveTimeGrain('供应商（快照）')
+    kpi.time_grain: n/a(0143) -> <不写>
+    metric.time_grain: n/a(0143) -> <不写>
+    metric.time_column: n/a(0143) -> <不写> basis=no-candidates candidates=[]
+    note: time_column 不写（no-candidates）：候选 []（多候选/零候选不猜，由治理侧人工指定）
+[10/12] KPI_SUPPLIER_NCR_RATE (metric=13)
+    grain '供应商+物料+工厂+月' -> time_grain=month basis=deriveTimeGrain('供应商+物料+工厂+月')
+    kpi.time_grain: n/a(0143) -> month
+    metric.time_grain: n/a(0143) -> month
+    metric.time_column: n/a(0143) -> <不写> basis=no-candidates candidates=[]
+    note: time_column 不写（no-candidates）：候选 []（多候选/零候选不猜，由治理侧人工指定）
+[11/12] KPI_SUPPLIER_OTD (metric=2)
+    grain '供应商+工厂+月' -> time_grain=month basis=deriveTimeGrain('供应商+工厂+月')
+    kpi.time_grain: n/a(0143) -> month
+    metric.time_grain: n/a(0143) -> month
+    metric.time_column: n/a(0143) -> <不写> basis=ambiguous candidates=['PROMISED_RECEIPT_DATE', 'RECEIPT_DATE']
+    note: time_column 不写（ambiguous）：候选 ['PROMISED_RECEIPT_DATE', 'RECEIPT_DATE']（多候选/零候选不猜，由治理侧人工指定）
+[12/12] KPI_SUPPLIER_OVERDUE_RATIO (metric=3)
+    grain '供应商+工厂+月' -> time_grain=month basis=deriveTimeGrain('供应商+工厂+月')
+    kpi.time_grain: n/a(0143) -> month
+    metric.time_grain: n/a(0143) -> month
+    metric.time_column: n/a(0143) -> <不写> basis=ambiguous candidates=['PROMISED_RECEIPT_DATE', 'RECEIPT_DATE']
+    note: time_column 不写（ambiguous）：候选 ['PROMISED_RECEIPT_DATE', 'RECEIPT_DATE']（多候选/零候选不猜，由治理侧人工指定）
+summary: changes=11 noop=1 total=12
+dry-run：未写库（加 --apply 落库）

@@ -233,19 +233,29 @@ async def sourcePropertiesForMetric(session: AsyncSession, metricId: int) -> tup
     if not classIds:
         return ()
 
+    # 只选需要的列（列表达式 select），不加载 ORM 实体：实体 select 会触发
+    # ``OntologyProperty.ontology_class → OntologyClass.metrics`` 的 selectin 关系
+    # 加载，进而 SELECT 整行 ontology_metric —— 0143 未迁移时该表缺 time_grain /
+    # time_column ⇒ 回填脚本的 dry-run 在 dev 库上直接 UndefinedColumn 崩溃。
     propertyRows = await session.execute(
-        select(OntologyProperty).where(OntologyProperty.class_id.in_(classIds))
+        select(
+            OntologyProperty.property_name,
+            OntologyProperty.source_column,
+            OntologyProperty.property_alias,
+            OntologyProperty.business_aliases,
+            OntologyProperty.data_type,
+        ).where(OntologyProperty.class_id.in_(classIds))
     )
-    properties = propertyRows.scalars().all()
+    properties = propertyRows.all()
     return tuple(
         SourceProperty(
-            property_name=prop.property_name,
-            source_column=prop.source_column,
-            property_alias=prop.property_alias,
-            business_aliases=tuple(prop.business_aliases or ()),
-            data_type=prop.data_type,
+            property_name=row.property_name,
+            source_column=row.source_column,
+            property_alias=row.property_alias,
+            business_aliases=tuple(row.business_aliases or ()),
+            data_type=row.data_type,
         )
-        for prop in properties
+        for row in properties
     )
 
 

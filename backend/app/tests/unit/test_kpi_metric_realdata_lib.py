@@ -355,29 +355,39 @@ def test_plan_deviation_inactive_for_empty_plan_governance() -> None:
     assert planDeviationActive(kpi, plan) is False
 
 
-def test_expected_verdict_without_deviation_tier_a_is_pass() -> None:
-    plan = SimpleNamespace(tier="A", deviations=())
-    assert expectedVerdictFor(plan.tier, plan.deviations) == VERDICT_PASS
+def test_expected_verdict_measurable_source_without_deviation_is_pass() -> None:
+    """规范化后非 NONE 源必然带结构化度量 ⇒ 层 2 必须 pass。
+
+    这里**不能**沿用 PLAN 的 tier：PLAN tier B 覆盖「一侧度量 + 算术式」等
+    情形，规范化落库后它们同样 reconcile 到 pass（实测 4 条 tier B 全 pass）；
+    拿 PLAN tier 当 oracle 会把 4 条正确结果判成失败。
+    """
+    plan = SimpleNamespace(executionSource="ESCAPE_HATCH", deviations=())
+    assert (
+        expectedVerdictFor(plan.executionSource, plan.deviations) == VERDICT_PASS
+    )
 
 
-def test_expected_verdict_without_deviation_tier_b_is_unknown() -> None:
-    plan = SimpleNamespace(tier="B", deviations=())
-    assert expectedVerdictFor(plan.tier, plan.deviations) == VERDICT_UNKNOWN
+def test_expected_verdict_none_source_without_deviation_is_unknown() -> None:
+    plan = SimpleNamespace(executionSource="NONE", deviations=())
+    assert (
+        expectedVerdictFor(plan.executionSource, plan.deviations) == VERDICT_UNKNOWN
+    )
 
 
-def test_expected_verdict_without_deviation_tier_c_is_unknown() -> None:
-    plan = SimpleNamespace(tier="C", deviations=())
-    assert expectedVerdictFor(plan.tier, plan.deviations) == VERDICT_UNKNOWN
-
-
-def test_expected_verdict_with_deviation_is_mismatch_even_tier_a() -> None:
-    plan = SimpleNamespace(tier="A", deviations=("governance↔物理列偏差",))
-    assert expectedVerdictFor(plan.tier, plan.deviations) == VERDICT_MISMATCH
-
-
-def test_expected_verdict_unknown_tier_without_deviation_is_unknown() -> None:
-    """PLAN 里查不到该 code（tier=None）⇒ 不得当成 pass。"""
+def test_expected_verdict_missing_source_is_unknown() -> None:
+    """取不到 execution_source ⇒ 不得当成 pass（无法确认技术形态）。"""
     assert expectedVerdictFor(None, ()) == VERDICT_UNKNOWN
+    assert expectedVerdictFor("", ()) == VERDICT_UNKNOWN
+
+
+def test_expected_verdict_with_deviation_is_mismatch_even_measurable() -> None:
+    plan = SimpleNamespace(
+        executionSource="ESCAPE_HATCH", deviations=("governance↔物理列偏差",)
+    )
+    assert (
+        expectedVerdictFor(plan.executionSource, plan.deviations) == VERDICT_MISMATCH
+    )
 
 
 def test_verdict_literals_match_reconcile_module() -> None:

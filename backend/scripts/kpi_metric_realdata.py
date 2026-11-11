@@ -28,8 +28,9 @@
    的列比对被删掉）。tier A 的 formula 仍须**覆盖全部结构化列**
    （否则「未降级」是恒真的，T16-17）。
    P0 规范化（``kpi_normalize_governance --apply``）把治理列改写成物理列后，
-   偏差不再生效 ⇒ 期望按档位回落为 tier A ``pass`` / 其余 ``unknown``
-   （2026-11-11 起 dev 库即为此状态）。
+   偏差不再生效 ⇒ 期望改按 **execution_source** 判：``NONE`` ⇒ ``unknown``，
+   其余 ⇒ ``pass``（2026-11-11 起 dev 库即为此状态，实测 8 pass + 4 unknown）。
+   **不能按 PLAN tier 判**：tier B 在规范化后同样 pass，会把正确结果判成失败。
 4. **发布闸门**：开关 ON ⇒ 服务层抛 ``ConflictError`` 且带**缺项明细**
    （断言「是谁拒的 + 缺哪一项」，不是只断言状态码）；开关 OFF ⇒ 不拦。
    本轮临时写的开关**退出前还原**，并打印前后对照。
@@ -435,11 +436,11 @@ async def _collectReconcile(
                 deviationActive=deviationActive,
             )
         )
-        expected = expectedVerdictFor(tier, deviations)
+        expected = expectedVerdictFor(metric.execution_source, deviations)
         basis = (
             "PLAN 已登记治理↔物理偏差仍生效"
             if deviations
-            else f"tier {tier} 治理列已与 PLAN 技术形态一致"
+            else f"execution_source={metric.execution_source} 治理列已规范化"
         )
         check(
             f"S3.1 {kpi.kpi_code} 对账 verdict = {expected}（{basis}）",

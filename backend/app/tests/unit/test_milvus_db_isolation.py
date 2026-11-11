@@ -146,3 +146,51 @@ class TestDbNameSwitchForcesReconnect:
         milvus_client._connect()
 
         assert events == []
+
+
+class TestEnsureIsolatedDatabaseForTest:
+    """`ensureIsolatedDatabaseForTest` 必须按**当前配置**的库名幂等建库。
+
+    回归（PR #116 / PR #119）：`qa_ci` 这类隔离库惰性创建，CI 分片按「排序后
+    下标 mod N」切分 ⇒ 新增一个 integration 文件就把部分文件挪进一个「还没人
+    建过库」的分片 ⇒ 直接撞 `database not found[qa_ci]`，在闸门上表现为净新增
+    失败（假回归）。测试文件自己挂 module 级 autouse 夹具调本函数即可解耦执行顺序。
+    """
+
+    def _fakeClient(self, monkeypatch, databases: list[str], calls: list[tuple]) -> None:
+        import pymilvus
+
+        class FakeClient:
+            def __init__(self, uri: str) -> None:
+                calls.append(("client", uri))
+
+            def list_databases(self) -> list[str]:
+                calls.append(("list",))
+                return databases
+
+            def create_database(self, name: str) -> None:
+                calls.append(("create", name))
+
+            def close(self) -> None:
+                calls.append(("close",))
+
+        monkeypatch.setattr(pymilvus, "MilvusClient", FakeClient)
+
+    def test_creates_database_when_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple] = []
+        self._fakeClient(monkeypatch, ["default"], calls)
+        _setDbName(monkeypatch, "qa_ci")
+
+        milvus_isolation.ensureIsolatedDatabaseForTest()
+
+        assert ("create", "qa_ci") in calls
+        assert calls[-1] == ("close",)
+
+    def test_noop_when_database_already_exists(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[tuple] = []
+        self._fakeClient(monkeypatch, ["default", "qa_ci"], calls)
+        _setDbName(monkeypatch, "qa_ci")
+
+        milvus_isolation.ensureIsolatedDatabaseForTest()
+
+        assert not [c for c in calls if c[0] == "create"]

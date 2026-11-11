@@ -1,0 +1,122 @@
+# KPI Tier A 执行器 — D7 / Task 7.1 定向回归取证
+
+日期: 2026-11-11
+分支: feat/kpi-tier-a-executor
+HEAD: 23e4f2814a2c1c558e1b31fb23f5ece763760821
+基线: origin/main = 00f3b13ebcd3f1a5b2b8998a0e225065cb6af4aa
+
+## 环境
+
+- 工作区: /private/tmp/qa-kpi-p2/backend (分支侧)
+- 基线 worktree: /tmp/qa-kpi-p2-base/backend (detached origin/main, 用后已 remove + prune)
+- PostgreSQL: 127.0.0.1:5434 / qa_metadata_test (qa_user, 密码不记录)
+- Neo4j: bolt://127.0.0.1:7688 / 测试库
+- 解释器: /private/tmp/qa-kpi-p2/backend/.venv/bin/python (Python 3.14.7)
+- 基线遮蔽校验: 使用同一 venv + `PYTHONPATH=/tmp/qa-kpi-p2-base/backend` + cwd 基线目录；
+  校验命令输出:
+  ```
+  cd /tmp/qa-kpi-p2-base/backend && PYTHONPATH=/tmp/qa-kpi-p2-base/backend \
+    /private/tmp/qa-kpi-p2/backend/.venv/bin/python -c "import app; print(app.__file__)"
+  → /private/tmp/qa-kpi-p2-base/backend/app/__init__.py
+  ```
+  指向基线 worktree，未指向 p2 目录，遮蔽已解除。
+- 未跑 Milvus 用例；未跑后端全量 unit；无 DDL；未部署。
+
+## 命令原文
+
+### 7.1a（分支侧）
+
+```bash
+cd /private/tmp/qa-kpi-p2/backend
+export TEST_DATABASE_URL='postgresql+asyncpg://qa_user:***@127.0.0.1:5434/qa_metadata_test'
+export TEST_NEO4J_URI='bolt://127.0.0.1:7688'
+export TEST_NEO4J_PASSWORD='***'
+.venv/bin/python -m pytest \
+  app/tests/unit/test_kpi_execution_plan.py \
+  app/tests/unit/test_kpi_execution_service.py \
+  app/tests/unit/test_kpi_time_scope_detection.py \
+  app/tests/unit/test_kpi_metric_tier_a_switch.py \
+  app/tests/unit/test_chat_tier_a_preamble.py \
+  app/tests/unit/test_chat_tier_b_hint.py \
+  app/tests/unit/test_chat_response_tier_fields.py \
+  app/tests/integration/test_kpi_tier_a_execution_pg.py \
+  app/tests/integration/test_kpi_tier_a_chat_api.py -q
+```
+
+### 7.1b（分支侧与基线侧同一命令）
+
+```bash
+cd <SIDE>/backend
+export TEST_DATABASE_URL='postgresql+asyncpg://qa_user:***@127.0.0.1:5434/qa_metadata_test'
+export TEST_NEO4J_URI='bolt://127.0.0.1:7688'
+export TEST_NEO4J_PASSWORD='***'
+# 基线侧额外: export PYTHONPATH=/tmp/qa-kpi-p2-base/backend
+<python> -m pytest \
+  app/tests/unit/test_chat_preamble_kpi_route.py \
+  app/tests/integration/test_chat_l1_routing.py \
+  app/tests/integration/test_chat_l1_calculation_resolution.py \
+  app/tests/integration/test_chat_stream_l1_l4.py \
+  app/tests/integration/test_kpi_switch_unification.py \
+  app/tests/integration/test_kpi_diagnose_api.py -q -rfE --tb=no
+```
+
+## 7.1a 结果（分支侧）
+
+整轮: **131 passed, 21 warnings in 41.07s** — 0 failed。
+
+| 文件 | passed | failed | 耗时 |
+|---|---|---|---|
+| app/tests/unit/test_kpi_execution_plan.py | 16 | 0 | 5.29s |
+| app/tests/unit/test_kpi_execution_service.py | 17 | 0 | 5.57s |
+| app/tests/unit/test_kpi_time_scope_detection.py | 22 | 0 | 7.13s |
+| app/tests/unit/test_kpi_metric_tier_a_switch.py | 26 | 0 | 7.98s |
+| app/tests/unit/test_chat_tier_a_preamble.py | 15 | 0 | 5.13s |
+| app/tests/unit/test_chat_tier_b_hint.py | 23 | 0 | 7.47s |
+| app/tests/unit/test_chat_response_tier_fields.py | 2 | 0 | 1.39s |
+| app/tests/integration/test_kpi_tier_a_execution_pg.py | 1 | 0 | 1.39s |
+| app/tests/integration/test_kpi_tier_a_chat_api.py | 9 | 0 | 6.34s |
+| **合计** | **131** | **0** | |
+
+## 7.1b 失败集合对差
+
+| 基线侧 (origin/main) | 分支侧 (feat/kpi-tier-a-executor) | 对差 |
+|---|---|---|
+| 3 failed, 50 passed, 2 errors (24.52s) | 3 failed, 50 passed, 2 errors (24.93s) | 相同 |
+
+### 失败/错误 nodeid 并排
+
+| # | nodeid | 基线 | 分支 |
+|---|---|---|---|
+| 1 | app/tests/integration/test_chat_l1_routing.py::TestL1KpiCard::test_l1_answer_carries_a_kpi_card | FAILED | FAILED |
+| 2 | app/tests/integration/test_chat_l1_routing.py::TestL1KpiCard::test_l1_answer_without_a_value_carries_no_card | FAILED | FAILED |
+| 3 | app/tests/integration/test_chat_l1_routing.py::TestL1KpiCard::test_l1_answer_carries_rationale_and_persists_it | FAILED | FAILED |
+| 4 | app/tests/integration/test_chat_stream_l1_l4.py::test_stream_kpi_match_returns_zero_llm_cost | ERROR | ERROR |
+| 5 | app/tests/integration/test_chat_stream_l1_l4.py::test_stream_kpi_datasource_mismatch_warns | ERROR | ERROR |
+
+### 同因证据（nodeid 一致 + 失败断言一致）
+
+5 条用例在两侧失败根因完全相同，均为种子数据写入撞
+`business_object.header_class_id` NOT NULL 约束（既有测试夹具/schema drift，非本分支引入）：
+
+```
+asyncpg.exceptions.NotNullViolationError: null value in column "header_class_id"
+of relation "business_object" violates not-null constraint
+SQL: INSERT INTO business_object (code, name, header_class_id, primary_domain_id, ...)
+```
+
+- 分支侧详细日志: /tmp/kpi-p2-branch-7.1b-detail.log
+- 基线侧详细日志: /tmp/kpi-p2-base-7.1b-detail.log
+- 两侧 `--tb=line` 输出均命中同一条 NotNullViolationError。
+
+### 净新增
+
+分支侧失败集合 ⊆ 基线侧失败集合，**净新增 = 0**。
+
+（备注：本次对差仅覆盖上述 6 个既有邻近文件；新增 9 个测试文件导致的 CI 分片轮转属已知假 net-new 面，不在本对差判定范围。）
+
+## 结论
+
+```
+7.1a: PASS
+7.1b: net-new 0
+```

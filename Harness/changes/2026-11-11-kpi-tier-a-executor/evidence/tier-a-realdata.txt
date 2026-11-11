@@ -49,7 +49,7 @@ total=12 tierA=8
 
 ```bash
 python -m scripts.kpi_tier_a_probe --database-url "$QA_METADATA_URL" \
-    --execute --kpi-code "$KPI_CODE" --datasource-id 1
+    --execute --kpi-code "$KPI_CODE" --datasource-id 1 --confirm-target
 ```
 
 输出原样（每条的 `ok/value/rowCount/elapsedMs/truncated/reason` 均保留）：
@@ -140,7 +140,7 @@ METRIC_RESULT 调度（已注入 noop `evidenceScheduler`）外，adapter 在查
 before: select count(*) from evidence;                    => 0
 run:    python scripts/kpi_tier_a_probe.py \
           --database-url "$QA_METADATA_URL" \
-          --execute --kpi-code KPI_SUPPLIER_OTD --datasource-id 1
+          --execute --kpi-code KPI_SUPPLIER_OTD --datasource-id 1 --confirm-target
         （控制台）
         switch=forced_on (未读取 Tier A 开关行) kpi_code=KPI_SUPPLIER_OTD tier=A ...
         {"kpiCode": "KPI_SUPPLIER_OTD", "ok": true, "status": "ok", ...}

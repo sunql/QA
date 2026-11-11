@@ -34,8 +34,8 @@ from app.services.chat_constants import (
 )
 from app.services.chat_helpers import attachStreamPersistState
 from app.services.chat_stream_output import (
+    secondFrameTierFields,
     splitTierBPreamble,
-    tierHintClearedFields,
     tierHintFields,
 )
 from app.services.error_classification import classifyError, sanitizeErrorMessage
@@ -270,14 +270,11 @@ class StreamEntryMixin:
                 # 第二帧显式清空：重分类后意图若落早退集合，非流式入口
                 # executionTier 为 null，流式也必须发一组 None 覆盖首帧旧值
                 # （前端逐帧合并，省略键清不掉）。
-                tierFields = tierHintFields(kpiHint, result.intent)
-                if kpiHint is not None and tierFields == {}:
-                    tierFields = tierHintClearedFields()
                 yield StreamEvent(
                     EVENT_META,
                     {
                         "intent": result.intent.value,
-                        **tierFields,
+                        **secondFrameTierFields(kpiHint, result.intent),
                     },
                 )
                 if result.intent == IntentType.CHITCHAT:

@@ -292,7 +292,7 @@ _TIER_HINT_INTENTS: frozenset[IntentType] = frozenset({
 })
 
 
-def tierHintClearedFields() -> dict[str, Any]:
+def tierHintClearedFields(hint: PreambleResult) -> dict[str, None]:
     """Tier B 字段的显式清空帧（第二帧 META 用）。
 
     重分类后意图若落到早退集合（CHITCHAT / DEFINE / MAP / METRIC ...），非流式
@@ -300,17 +300,10 @@ def tierHintClearedFields() -> dict[str, Any]:
     Tier B 字段，而前端逐帧合并 —— 只省略键不会清掉旧值。故第二帧显式发送一组
     ``None``，让两入口的最终观测一致（``executionTier: null``）。
 
-    键集合必须与 :func:`kpiHintFields` 完全一致（有测试守护），否则会残留
-    ``kpiCode`` 等半套字段。
+    键集合**由 :func:`kpiHintFields` 派生**：包含 datasource mismatch 时追加的
+    ``datasourceMismatch`` / ``warning`` / ``code``，将来新增字段也自动覆盖。
     """
-    return {
-        "kpiCode": None,
-        "kpiName": None,
-        "confidence": None,
-        "matchMethod": None,
-        "executionTier": None,
-        "degradedReason": None,
-    }
+    return {key: None for key in kpiHintFields(hint)}
 
 
 def tierHintFields(hint: PreambleResult | None, intent: IntentType) -> dict[str, Any]:
@@ -327,6 +320,21 @@ def tierHintFields(hint: PreambleResult | None, intent: IntentType) -> dict[str,
     if intent not in _TIER_HINT_INTENTS:
         return {}
     return kpiHintFields(hint)
+
+
+def secondFrameTierFields(
+    hint: PreambleResult | None, intent: IntentType
+) -> dict[str, Any]:
+    """第二帧 META 的 Tier 字段：门控不命中时显式清空首帧留下的字段。
+
+    首帧可能已发过 Tier B 观测字段；重分类后意图若落到早退集合，非流式入口
+    的对应字段为 ``null``。前端逐帧合并，省略键清不掉旧值，故 hint 非 None 时
+    发送全 ``None`` 的同键集合。``hint is None`` 时无字段可清，保持空字典。
+    """
+    fields = tierHintFields(hint, intent)
+    if hint is not None and fields == {}:
+        return tierHintClearedFields(hint)
+    return fields
 
 
 class L1L4PreambleMixin:
@@ -647,6 +655,7 @@ __all__ = [
     "L1L4PreambleMixin",
     "PreambleResult",
     "kpiHintFields",
+    "secondFrameTierFields",
     "tierHintClearedFields",
     "tierHintFields",
     "splitTierBPreamble",

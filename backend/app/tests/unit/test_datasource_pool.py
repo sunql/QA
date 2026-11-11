@@ -103,13 +103,15 @@ class TestAssertReadOnly:
     @pytest.mark.parametrize(
         "sql",
         [
-            # MySQL 版本注释：服务端会展开执行其中的 SQL，sqlparse 当普通注释跳过。
+            # MySQL / MariaDB 版本注释：服务端会展开执行其中的 SQL，
+            # sqlparse 当普通注释跳过。
             "SELECT 1 /*!50000 , SLEEP(60) */",
             "SELECT 1 /*!50000 INTO OUTFILE '/tmp/x' */",
+            "SELECT 1 /*M!100100 , SLEEP(60) */",
         ],
     )
     def test_rejects_mysql_executable_comment(self, sql: str) -> None:
-        """`/*! ... */` 可执行注释必须直接拒绝（不得当普通注释跳过）。"""
+        """`/*! ... */` 与 `/*M! ... */` 可执行注释必须直接拒绝。"""
         with pytest.raises(SqlSafetyError):
             pool._assert_read_only(sql)
 

@@ -35,6 +35,11 @@ from app.services.kpi_execution_service import hasExplicitTimeScope
         "季度环比",
         "H1",
         "H2",
+        # 终审复审：年份嵌入形态也必须识别（2025H1 / 1H25 等）
+        "2025H1",
+        "2025H2",
+        "24H1",
+        "1H25",
         "FY25",
         "FY2025",
         "TTM",
@@ -55,6 +60,9 @@ def test_detects_explicit_time(question: str) -> None:
         # 集成用例里的普通问句：补时间模式后仍不得被判成显式时间
         "TierA测试指标是多少",
         "TierA报错指标统计",
+        # 半年度反向守卫：不是合法 H1/H2 记号的字符串不得因该模式命中
+        "H10",
+        "H1X",
     ],
 )
 def test_plain_question_has_no_time_scope(question: str) -> None:

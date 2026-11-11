@@ -181,15 +181,15 @@ def _assert_read_only(sql: str) -> None:
     `SELECT ... INTO ...`、`SELECT ... FOR UPDATE` 等首 token 都合法，
     故在首 token 白名单通过后再做深度扫描（见 _assertNoHiddenWrites）。
 
-    MySQL 可执行注释 ``/*! ... */`` 会在服务端展开执行（sqlparse 当普通注释跳过），
-    必须在语句拆分前按原始文本拒绝，否则 ``SELECT 1 /*!50000 , SLEEP(60) */``
-    能整体绕过解析层。
+    MySQL/MariaDB 可执行注释 ``/*! ... */`` / ``/*M! ... */`` 会在服务端展开执行
+    （sqlparse 当普通注释跳过），必须在语句拆分前按原始文本拒绝，否则
+    ``SELECT 1 /*!50000 , SLEEP(60) */`` 能整体绕过解析层。
     """
     if not sql or not sql.strip():
         raise SqlSafetyError(MSG_SQL_EMPTY, sql=sql)
 
-    # 原始文本检测（不能等 sqlparse：它把 /*! ... */ 归为 Comment 直接跳过）
-    if "/*!" in sql:
+    # 原始文本检测（不能等 sqlparse：它把可执行注释归为 Comment 直接跳过）
+    if re.search(r"/\*(?:!|M!)", sql, re.IGNORECASE):
         raise SqlSafetyError(MSG_SQL_EXECUTABLE_COMMENT, sql=sql)
 
     statements = sqlparse.parse(sql)

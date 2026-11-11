@@ -50,6 +50,7 @@ router = APIRouter(prefix="/api/v1/admin/kpi", tags=["admin-kpi"])
 VERDICT_NO_METRIC = "no_metric"
 EXECUTION_SOURCE_NONE = "NONE"
 EXECUTION_SOURCE_COMPILED = "COMPILED"
+EXECUTION_SOURCE_ESCAPE_HATCH = "ESCAPE_HATCH"
 
 TIER_A = "A"
 TIER_B = "B"
@@ -111,18 +112,27 @@ def _isCompiledSource(metric: OntologyMetric | None) -> bool:
     )
 
 
+def _isEscapeHatchSource(metric: OntologyMetric | None) -> bool:
+    if metric is None:
+        return False
+    return (
+        (metric.execution_source or "").strip().upper()
+        == EXECUTION_SOURCE_ESCAPE_HATCH
+    )
+
+
 def _tierOf(
     result: ReconcileResult | None, metric: OntologyMetric | None
 ) -> str:
     """Tier 判定（与运行时 ``planKpiExecution`` 同源）。
 
     无 metric 或 NONE 源 ⇒ C（NONE 明确不允许 Tier A 直通）；
-    COMPILED ⇒ B（运行时一律降级到 Tier B，``compiled_not_supported``）；
-    A = pass 无降级；其余 B。
+    来源不是 ESCAPE_HATCH（COMPILED / 空 / 未知）⇒ B（运行时对空/未知判 C，
+    属已知分歧，P5 收口）；A = pass 无降级；其余 B。
     """
     if metric is None or _isNoneSource(metric):
         return TIER_C
-    if _isCompiledSource(metric):
+    if not _isEscapeHatchSource(metric):
         return TIER_B
     if result is not None and result.isTierAEligible:
         return TIER_A
@@ -175,7 +185,7 @@ def _matchOf(
     verdict = result.verdict if result is not None else VERDICT_NO_METRIC
     tierAEligible = (
         result.isTierAEligible if result is not None else False
-    ) and not _isNoneSource(metric)
+    ) and not _isNoneSource(metric) and not _isCompiledSource(metric)
     return KpiDiagnoseMatch(
         kpi_code=code,
         kpi_name=kpi.kpi_name if kpi is not None else kpiName,

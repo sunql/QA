@@ -7,6 +7,7 @@ from app.services.chat_stream_output import (
     L1L4PreambleMixin,
     PreambleResult,
     kpiHintFields,
+    secondFrameTierFields,
     splitTierBPreamble,
     tierHintClearedFields,
     tierHintFields,
@@ -48,6 +49,14 @@ def _tierB() -> PreambleResult:
     )
 
 
+def _mismatchTierB() -> PreambleResult:
+    """datasource mismatch 的 Tier B hint：kpiHintFields 会多带 3 个警告键。"""
+    return _tierB().model_copy(update={
+        "datasource_mismatch": True,
+        "mismatch_warning": "KPI 数据源 1 与所选数据源 2 不一致",
+    })
+
+
 def test_split_tier_b_sentinel_returns_hint() -> None:
     preamble, hint = splitTierBPreamble(_tierB())
     assert preamble is None
@@ -81,18 +90,44 @@ def test_hint_fields_none_is_empty() -> None:
 
 def test_tier_hint_cleared_fields_cover_all_hint_keys() -> None:
     """第二帧清空字段必须覆盖首帧 Tier B 字段的**全部键**（防将来漏清）。"""
-    cleared = tierHintClearedFields()
-    assert set(cleared) == set(kpiHintFields(_tierB()))
+    hint = _tierB()
+    cleared = tierHintClearedFields(hint)
+    assert cleared
+    assert set(cleared) == set(kpiHintFields(hint))
     assert set(cleared.values()) == {None}
+
+
+def test_tier_hint_cleared_fields_cover_mismatch_warning_keys() -> None:
+    """mismatch 追加的 datasourceMismatch/warning/code 也必须被清空。"""
+    hint = _mismatchTierB()
+    cleared = tierHintClearedFields(hint)
+    assert set(cleared) == set(kpiHintFields(hint))
+    assert {"datasourceMismatch", "warning", "code"} <= set(cleared)
+    assert set(cleared.values()) == {None}
+
+
+def test_second_frame_clears_every_first_frame_field_on_early_exit() -> None:
+    """帧级：首帧发 Tier B 字段，重分类到早退意图后第二帧逐键显式置 None。"""
+    hint = _mismatchTierB()
+
+    first = secondFrameTierFields(hint, IntentType.QUERY)
+    assert first
+    assert first["executionTier"] == "B"
+    assert first["datasourceMismatch"] is True
+
+    # 重分类到早退意图：门控不发明文，且 hint 非 None ⇒ 显式清空整组键。
+    second = secondFrameTierFields(hint, IntentType.METRIC)
+    assert set(second) == set(first)
+    assert set(second.values()) == {None}
+
+    # 前端逐帧合并后的最终观测：首帧每个键都被覆盖为 None（不残留旧警告）。
+    merged = {**first, **second}
+    assert all(merged[key] is None for key in first)
 
 
 def test_hint_fields_datasource_mismatch_adds_warning_fields() -> None:
     """D4 评审：Tier B 哨兵不得吞掉 datasource mismatch 警告。"""
-    hint = _tierB()
-    hint = hint.model_copy(update={
-        "datasource_mismatch": True,
-        "mismatch_warning": "KPI 数据源 1 与所选数据源 2 不一致",
-    })
+    hint = _mismatchTierB()
     assert kpiHintFields(hint) == {
         "kpiCode": "KPI_X",
         "kpiName": "指标X",

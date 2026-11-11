@@ -96,8 +96,8 @@ def test_known_divergences_are_documented() -> None:
     """显式钉住两处**已知且本批不改**的分歧（计划 §3 原文）。
 
     ① ``has_datasource=False``：运行时 C / 诊断 A（诊断没有 datasource 视图）；
-    ② ``execution_source`` 为空或未知值：运行时 C / 诊断 B（诊断无来源分支，
-       落到「不可 Tier A ⇒ B」；此处用 reconcile 不 eligible 的夹具钉住该形态）。
+    ② ``execution_source`` 为空或未知值：运行时 C / 诊断 B（诊断侧来源不是
+       ESCAPE_HATCH ⇒ 不可 Tier A）。eligible True/False 两态都钉住。
 
     P5 治理收口跟进；若有人改了任一侧行为，这条会红，请同步更新 summary.md。
     """
@@ -110,11 +110,12 @@ def test_known_divergences_are_documented() -> None:
     assert planNoDs.reason == "datasource_missing"
     assert kpi_diagnose._tierOf(resultEscape, metricEscape) == "A"
 
-    # ② 来源为空 / 未知
+    # ② 来源为空 / 未知：eligible True 与 False 都必须落在运行时 C / 诊断 B
     for source in ("", "WEIRD"):
-        metric = _ineligible_metric(source)
-        result = _result_of(metric, _kpi())
-        assert result.isTierAEligible is False
-        plan = _runtime_plan(metric)
-        assert plan.tier == "C"
-        assert kpi_diagnose._tierOf(result, metric) == "B"
+        for eligible in (True, False):
+            metric = _eligible_metric(source) if eligible else _ineligible_metric(source)
+            result = _result_of(metric, _kpi())
+            assert result.isTierAEligible is eligible
+            plan = _runtime_plan(metric)
+            assert plan.tier == "C"
+            assert kpi_diagnose._tierOf(result, metric) == "B"

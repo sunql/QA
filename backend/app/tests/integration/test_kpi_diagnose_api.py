@@ -48,7 +48,7 @@ async def _enableInjectionSwitch(session: AsyncSession) -> None:
 
 
 async def _seedMetric(
-    session: AsyncSession, *, name: str
+    session: AsyncSession, *, name: str, source: str = "ESCAPE_HATCH"
 ) -> OntologyMetric:
     """RATIO + 两侧 measure + formula 列覆盖 ⇒ 层 1/2/3 均可 pass。"""
     metric = OntologyMetric(
@@ -57,7 +57,7 @@ async def _seedMetric(
         agg_function="SUM",
         metric_type="RATIO",
         aggregation_order="WEIGHTED_RATIO",
-        execution_source="ESCAPE_HATCH",
+        execution_source=source,
         numerator_measure={"agg": "COUNT", "expr": "RECEIPT_DATE"},
         denominator_measure={"agg": "COUNT", "expr": "PROMISED_RECEIPT_DATE"},
         grain_keys=["SUPPLIER_CODE"],
@@ -283,6 +283,39 @@ async def test_diagnose_none_source_reports_tier_c(
     # 层 2 判 pass，但 NONE 没有可执行形态 ⇒ 不得报 A / 不得报可直通。
     assert match["verdict"] == "pass"
     assert match["tier"] == "C"
+    assert match["tierAEligible"] is False
+
+
+async def test_diagnose_compiled_source_reports_tier_b_not_eligible(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """COMPILED 源与运行时同口径：tier=B，且不得再宣称 tierAEligible=True。"""
+    await _enableInjectionSwitch(dbSession)
+    metric = await _seedMetric(
+        dbSession, name="KPI_D2_COMPILED-metric", source="COMPILED"
+    )
+    await _seedKpi(
+        dbSession,
+        "KPI_D2_COMPILED",
+        metricId=metric.id,
+        numeratorColumns=["RECEIPT_DATE"],
+        denominatorColumns=["PROMISED_RECEIPT_DATE"],
+        grainKeys=["SUPPLIER_CODE"],
+        keywords=["编译源诊断"],
+    )
+    await _warmCache(dbSession)
+
+    response = await client.get(
+        _DIAGNOSE_URL,
+        params={"question": "KPI_D2_COMPILED 是多少"},
+        headers=_ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 200, response.text
+    match = response.json()["matches"][0]
+    assert match["executionSource"] == "COMPILED"
+    assert match["verdict"] == "pass"
+    assert match["tier"] == "B"
     assert match["tierAEligible"] is False
 
 

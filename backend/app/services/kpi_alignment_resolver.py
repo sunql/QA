@@ -86,8 +86,16 @@ class ResolutionOutcome:
     timeCandidates: tuple[str, ...] = ()
 
 
-def _normalize(value: str | None) -> str:
-    return (value or "").strip().lower()
+def _normalize(value: object) -> str:
+    """归一化用于比较的文本；非 str 一律视为「无值」并跳过。
+
+    legacy JSONB 别名（``business_aliases`` / ``property_alias``）可能混入数字/对象，
+    请求路径上若直接 ``.strip()`` 会 AttributeError 崩掉整条 KPI 注入。跳过比
+    ``str(value)`` 更安全：``123`` 不应因字符串化而偶然命中 token ``"123"``。
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lower()
 
 
 def _timeGrainForToken(normalized: str) -> TimeGrain | None:

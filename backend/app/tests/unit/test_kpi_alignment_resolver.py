@@ -135,6 +135,33 @@ def testBusinessAliasesMultiCandidateIsUnknown() -> None:
     assert outcome.unknownTokens == ("金额",)
 
 
+def testNonStringAliasIsSkippedNotAttributeError() -> None:
+    """legacy JSONB 别名可能非 str；归一化必须跳过，不得 AttributeError。
+
+    请求路径上 resolver 崩溃会把整条 KPI 注入变成异常（P3 终审 Minor）。
+    """
+    props = (
+        SourceProperty(
+            property_name="金额属性",
+            source_column="AMOUNT",
+            property_alias=None,
+            business_aliases=(123, "金额"),
+            data_type="VARCHAR",
+        ),
+    )
+    outcome = resolveGovernanceTokens(("金额",), props)
+    assert outcome.resolved == (("金额", "AMOUNT"),)
+    assert outcome.unknownTokens == ()
+    assert outcome.missingTokens == ()
+
+    # 非 str 的 property_alias 本身也不得匹配/崩溃（跳过 ⇒ 无候选 ⇒ missing）
+    aliasProp = _prop("某属性", "QTY", property_alias=456)
+    aliasOutcome = resolveGovernanceTokens(("456",), (aliasProp,))
+    assert aliasOutcome.resolved == ()
+    assert aliasOutcome.unknownTokens == ()
+    assert aliasOutcome.missingTokens == ("456",)
+
+
 # ── 5. 多候选 unknown / 无候选 missing ─────────────────────────────────
 
 

@@ -57,7 +57,11 @@ from app.services.kpi_execution_service import (
 )
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_reconcile import reconcileMetric
-from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
+from app.services.kpi_metric_spec import (
+    governanceSpecOf,
+    resolutionForMetric,
+    techniqueOf,
+)
 from app.services.kpi_metric_switches import (
     isKpiMatchContainmentEnabled,
     isKpiMetricTierAEnabled,
@@ -422,9 +426,15 @@ class L1L4PreambleMixin:
             await session.get(OntologyMetric, kpi.metric_id)
             if kpi.metric_id is not None else None
         )
+        # 别名解析失败只降级为 resolution=None（恒等回退），绝不阻断 Tier 判定。
+        governance = governanceSpecOf(kpi)
+        resolution = (
+            await resolutionForMetric(session, metric.id, governance)
+            if metric is not None and session is not None else None
+        )
         # metric 缺失时不做对账（techniqueOf(None) 虽可构造，但此时对账结论无意义）。
         reconcile = (
-            reconcileMetric(governanceSpecOf(kpi), techniqueOf(metric))
+            reconcileMetric(governance, techniqueOf(metric), resolution=resolution)
             if metric is not None else None
         )
         plan = planKpiExecution(

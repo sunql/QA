@@ -43,7 +43,11 @@ from app.domain.models import (
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_audit import recordReconcileResult
 from app.services.kpi_metric_reconcile import VERDICT_MISMATCH, reconcileMetric
-from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
+from app.services.kpi_metric_spec import (
+    governanceSpecOf,
+    resolutionForMetric,
+    techniqueOf,
+)
 from app.services.kpi_metric_switches import (
     isKpiContractInjectionEnabled,
     isKpiMatchContainmentEnabled,
@@ -399,8 +403,11 @@ async def _buildEntry(
         # metric_id 为空或悬空 ⇒ Tier C（spec §7.4），不注入契约。
         logger.warning("KPI 未挂靠可用本体指标，降级 Tier C code=%s", kpi.kpi_code)
         return None
+    governance = governanceSpecOf(kpi)
     technique = techniqueOf(metric)
-    result = reconcileMetric(governanceSpecOf(kpi), technique)
+    # 别名解析失败只降级为 resolution=None（恒等回退），绝不阻断契约构建。
+    resolution = await resolutionForMetric(session, metric.id, governance)
+    result = reconcileMetric(governance, technique, resolution=resolution)
     if recordAudit:
         try:
             # 审计写失败只影响审计：savepoint 保证不回滚外层 per-code 事务。

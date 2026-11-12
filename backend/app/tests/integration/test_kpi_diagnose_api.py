@@ -22,7 +22,13 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.api.v1.kpi_diagnose as kpiDiagnoseModule
-from app.domain.models import KpiCatalog, OntologyMetric
+from app.domain.models import (
+    KpiCatalog,
+    OntologyClass,
+    OntologyMetric,
+    OntologyMetricSource,
+    OntologyProperty,
+)
 from app.models.system_config import SystemConfig
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_switches import SWITCH_CONTRACT_INJECTION
@@ -50,7 +56,11 @@ async def _enableInjectionSwitch(session: AsyncSession) -> None:
 async def _seedMetric(
     session: AsyncSession, *, name: str, source: str = "ESCAPE_HATCH"
 ) -> OntologyMetric:
-    """RATIO + 两侧 measure + formula 列覆盖 ⇒ 层 1/2/3 均可 pass。"""
+    """RATIO + 两侧 measure + formula 列覆盖 ⇒ 层 1/2/3 均可 pass。
+
+    P3 D3 起层 2 会解析治理 token 并比较时间粒度：``time_grain`` 按回填后
+    等价状态种入（与夹具 KPI 的 ``grain`` 文本推导一致）。
+    """
     metric = OntologyMetric(
         metric_name=name,
         formula=_FORMULA,
@@ -61,11 +71,56 @@ async def _seedMetric(
         numerator_measure={"agg": "COUNT", "expr": "RECEIPT_DATE"},
         denominator_measure={"agg": "COUNT", "expr": "PROMISED_RECEIPT_DATE"},
         grain_keys=["SUPPLIER_CODE"],
+        time_grain="MONTH",
         created_by="d2-test",
     )
     session.add(metric)
     await session.commit()
     return metric
+
+
+async def _seedSourceProperties(
+    session: AsyncSession,
+    metric: OntologyMetric,
+    mapping: dict[str, str],
+) -> None:
+    """种一个源类：``property_name`` → ``source_column``，并挂到 metric。
+
+    P3 D3 的层 2 用 ``ontology_metric_source`` 找源类属性做别名解析；无源类
+    会按 R2 判 unknown。夹具按回填后等价状态补齐，保留各用例原意图。
+    """
+    ontologyClass = OntologyClass(
+        class_name=f"{metric.metric_name}-source",
+        version=1,
+        created_by="d2-test",
+    )
+    session.add(ontologyClass)
+    await session.flush()
+    for propertyName, sourceColumn in mapping.items():
+        session.add(
+            OntologyProperty(
+                class_id=ontologyClass.id,
+                property_name=propertyName,
+                source_column=sourceColumn,
+                data_type="DATE" if sourceColumn.endswith("_DATE") else "VARCHAR",
+            )
+        )
+    session.add(
+        OntologyMetricSource(
+            metric_id=metric.id,
+            class_id=ontologyClass.id,
+            role="NUMERATOR",
+        )
+    )
+    await session.commit()
+
+
+# 标准 pass 夹具的治理 token 可直接按物理列解析。
+_PASS_SOURCE_MAPPING = {
+    "RECEIPT_DATE": "RECEIPT_DATE",
+    "PROMISED_RECEIPT_DATE": "PROMISED_RECEIPT_DATE",
+    "SUPPLIER_CODE": "SUPPLIER_CODE",
+}
 
 
 async def _seedKpi(
@@ -77,6 +132,7 @@ async def _seedKpi(
     denominatorColumns: list[str],
     grainKeys: list[str],
     keywords: list[str] | None = None,
+    grain: str = "供应商+月",
 ) -> KpiCatalog:
     kpi = KpiCatalog(
         kpi_code=code,
@@ -86,6 +142,7 @@ async def _seedKpi(
         numerator_columns=numeratorColumns,
         denominator_columns=denominatorColumns,
         grain_keys=grainKeys,
+        grain=grain,
         semantic_keywords=keywords or [],
         match_threshold=Decimal("0.75"),
     )
@@ -114,6 +171,7 @@ async def _seedPassingKpi(
         grainKeys=["SUPPLIER_CODE"],
         keywords=["诊断"],
     )
+    await _seedSourceProperties(session, metric, _PASS_SOURCE_MAPPING)
     return metric, kpi
 
 
@@ -167,6 +225,17 @@ async def test_diagnose_mismatch_reports_reason_and_no_injection(
         denominatorColumns=["总到货行数"],
         grainKeys=["SUPPLIER_CODE"],
         keywords=["诊断"],
+    )
+    # 源类把治理业务词解析到技术 measure 里不存在的物理列 ⇒ 保留原意图：
+    # 必须是 ``governance_column_not_in_technical`` 的 mismatch（不是无源类 unknown）。
+    await _seedSourceProperties(
+        dbSession,
+        metric,
+        {
+            "按期到货行数": "BIZ_RECEIPT_DATE",
+            "总到货行数": "BIZ_PROMISED_DATE",
+            "SUPPLIER_CODE": "SUPPLIER_CODE",
+        },
     )
     await _warmCache(dbSession)
 
@@ -257,6 +326,7 @@ async def test_diagnose_none_source_reports_tier_c(
         execution_source="NONE",
         numerator_measure={"agg": "SUM", "expr": "RECEIPT_DATE"},
         grain_keys=["SUPPLIER_CODE"],
+        time_grain="MONTH",
         created_by="d2-test",
     )
     dbSession.add(metric)
@@ -270,6 +340,7 @@ async def test_diagnose_none_source_reports_tier_c(
         grainKeys=["SUPPLIER_CODE"],
         keywords=["NONE源诊断"],
     )
+    await _seedSourceProperties(dbSession, metric, _PASS_SOURCE_MAPPING)
     await _warmCache(dbSession)
 
     response = await client.get(
@@ -303,6 +374,7 @@ async def test_diagnose_compiled_source_reports_tier_b_not_eligible(
         grainKeys=["SUPPLIER_CODE"],
         keywords=["编译源诊断"],
     )
+    await _seedSourceProperties(dbSession, metric, _PASS_SOURCE_MAPPING)
     await _warmCache(dbSession)
 
     response = await client.get(

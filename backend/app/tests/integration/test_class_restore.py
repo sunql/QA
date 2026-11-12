@@ -25,9 +25,12 @@ ADMIN_HEADERS = {
 
 # owner 派生：服务端从 departments[0] 取（createClass 的 object_owner 派生逻辑）
 OWNER_DEPT = "procurement"
+# P3 I1：类/属性写路由已收 admin（与 metric 写入口同模式）。这里仍保留部门头
+# 以派生 object_owner（restore 的 owner ACL 路径仍被用例覆盖），但写动作本身
+# 必须是 admin —— 否则 create/update 在路由层即 403。
 OWNER_HEADERS = {
     "X-User-Id": "test-owner",
-    "X-User-Roles": "user",
+    "X-User-Roles": "admin",
     "X-User-Departments": OWNER_DEPT,
 }
 NON_OWNER_HEADERS = {

@@ -6,6 +6,8 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from app.domain.enums import TimeGrain
+from app.services.kpi_alignment_resolver import ResolutionOutcome
 from app.services.kpi_metric_reconcile import (
     LAYER_EXECUTABLE,
     LAYER_GOVERNANCE,
@@ -16,12 +18,18 @@ from app.services.kpi_metric_reconcile import (
     REASON_GOVERNANCE_COLUMNS_ABSENT,
     REASON_GOVERNANCE_GRAIN_ABSENT,
     REASON_GOVERNANCE_MEASURE_ABSENT,
+    REASON_GOVERNANCE_TOKEN_AMBIGUOUS,
+    REASON_GOVERNANCE_TOKEN_UNRESOLVABLE,
     REASON_GRAIN_MISMATCH,
     REASON_RATIO_AGGREGATION_ORDER_INVALID,
     REASON_RATIO_AGGREGATION_ORDER_MISSING,
     REASON_TECHNICAL_COLUMN_NOT_IN_GOVERNANCE,
     REASON_TECHNICAL_GRAIN_ABSENT,
     REASON_TECHNICAL_MEASURE_UNJUDGEABLE,
+    REASON_TIME_COLUMN_NOT_IN_SOURCE,
+    REASON_TIME_GRAIN_ABSENT_GOVERNANCE,
+    REASON_TIME_GRAIN_ABSENT_TECHNICAL,
+    REASON_TIME_GRAIN_MISMATCH,
     VERDICT_MISMATCH,
     VERDICT_PASS,
     VERDICT_UNKNOWN,
@@ -418,3 +426,328 @@ def test_result_is_immutable() -> None:
     r = reconcileMetric(GovernanceSpec(), MetricTechnique())
     with pytest.raises(FrozenInstanceError):
         r.verdict = "pass"  # type: ignore[misc]
+
+
+# ── 层 2 with resolution（别名解析结果参与比对，P3 D3）──────────────
+
+
+def _resolvedAlignment() -> tuple[GovernanceSpec, MetricTechnique, ResolutionOutcome]:
+    """治理 token 经 resolver 解析成物理列后与技术侧完全对齐。
+
+    治理分子 token 是业务词「收货数量」；只有走 resolution 才会通过
+    （``resolution=None`` 的恒等回退会把它与 ``QTY`` 直接比较 ⇒ mismatch）。
+    """
+    governance = GovernanceSpec(
+        numerator_columns=("收货数量",),
+        denominator_columns=("AMOUNT",),
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    technique = MetricTechnique(
+        metric_type="RATIO",
+        numerator=_measure("QTY"),
+        denominator=_measure("AMOUNT"),
+        aggregation_order="WEIGHTED_RATIO",
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    resolution = ResolutionOutcome(
+        resolved=(
+            ("收货数量", "QTY"),
+            ("AMOUNT", "AMOUNT"),
+            ("SUPPLIER_CODE", "SUPPLIER_CODE"),
+        ),
+        timeGrain=TimeGrain.MONTH,
+        timeCandidates=("ORDER_DATE", "RECEIPT_DATE"),
+    )
+    return governance, technique, resolution
+
+
+def test_resolution_resolved_columns_feed_column_comparison() -> None:
+    governance, technique, resolution = _resolvedAlignment()
+    r = reconcileGovernanceVsTechnique(governance, technique, resolution=resolution)
+    assert r.verdict == VERDICT_PASS
+    assert r.findings == ()
+
+
+def test_resolution_replaces_raw_governance_tokens() -> None:
+    """同一份治理 token 在 resolution=None 时 mismatch，有 resolution 时 pass。"""
+    governance, technique, resolution = _resolvedAlignment()
+    identity = reconcileGovernanceVsTechnique(governance, technique)
+    assert identity.verdict == VERDICT_MISMATCH
+    resolved = reconcileGovernanceVsTechnique(
+        governance, technique, resolution=resolution
+    )
+    assert resolved.verdict == VERDICT_PASS
+
+
+def test_resolution_missing_token_is_mismatch() -> None:
+    governance = GovernanceSpec(
+        numerator_columns=("QTY", "BAD_TOKEN"),
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    technique = MetricTechnique(
+        numerator=_measure("QTY"),
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    resolution = ResolutionOutcome(
+        resolved=(("QTY", "QTY"), ("SUPPLIER_CODE", "SUPPLIER_CODE")),
+        missingTokens=("BAD_TOKEN",),
+    )
+    r = reconcileGovernanceVsTechnique(governance, technique, resolution=resolution)
+    assert r.verdict == VERDICT_MISMATCH
+    assert r.reasons() == (REASON_GOVERNANCE_TOKEN_UNRESOLVABLE,)
+
+
+def test_resolution_ambiguous_token_is_unknown() -> None:
+    governance = GovernanceSpec(
+        numerator_columns=("QTY", "AMBIG_TOKEN"),
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    technique = MetricTechnique(
+        numerator=_measure("QTY"),
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    resolution = ResolutionOutcome(
+        resolved=(("QTY", "QTY"), ("SUPPLIER_CODE", "SUPPLIER_CODE")),
+        unknownTokens=("AMBIG_TOKEN",),
+    )
+    r = reconcileGovernanceVsTechnique(governance, technique, resolution=resolution)
+    assert r.verdict == VERDICT_UNKNOWN
+    assert r.reasons() == (REASON_GOVERNANCE_TOKEN_AMBIGUOUS,)
+
+
+def test_resolution_ambiguous_token_candidate_reference_stays_unknown() -> None:
+    """I2：一角色一 token 可解析、一 token 歧义，技术引用了歧义候选列。
+
+    ``_resolvedColumnsFor`` 会丢掉歧义 token；若仍做差集，会把技术侧的候选列
+    判成 ``technical_column_not_in_governance`` / ``grain_mismatch``（mismatch）。
+    按「不猜 ⇒ unknown 不阻断」，此处只能是 unknown，不能升 mismatch。
+    """
+    governance = GovernanceSpec(
+        numerator_columns=("QTY", "金额"),
+        grain_keys=("SUPPLIER_CODE", "工厂"),
+        time_grain="month",
+    )
+    technique = MetricTechnique(
+        numerator=_measure("AMT_CANDIDATE + QTY"),
+        grain_keys=("FACILITY_CANDIDATE",),
+        time_grain="month",
+    )
+    resolution = ResolutionOutcome(
+        resolved=(("QTY", "QTY"), ("SUPPLIER_CODE", "SUPPLIER_CODE")),
+        unknownTokens=("金额", "工厂"),
+        timeGrain=TimeGrain.MONTH,
+    )
+    r = reconcileMetric(governance, technique, resolution=resolution)
+    assert r.verdict == VERDICT_UNKNOWN
+    assert r.reasons() == (REASON_GOVERNANCE_TOKEN_AMBIGUOUS,)
+    assert REASON_TECHNICAL_COLUMN_NOT_IN_GOVERNANCE not in r.reasons()
+    assert REASON_GRAIN_MISMATCH not in r.reasons()
+    assert r.degraded is True
+
+
+def test_resolution_technical_column_not_in_resolved_governance_is_mismatch() -> None:
+    """resolved 列集合替代 token 集合后，技术侧仍多出未声明列 ⇒ mismatch。"""
+    governance = GovernanceSpec(
+        numerator_columns=("收货数量",),
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    technique = MetricTechnique(
+        numerator=_measure("QTY - DISCOUNT"),
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    resolution = ResolutionOutcome(
+        resolved=(("收货数量", "QTY"), ("SUPPLIER_CODE", "SUPPLIER_CODE")),
+        timeGrain=TimeGrain.MONTH,
+    )
+    r = reconcileGovernanceVsTechnique(governance, technique, resolution=resolution)
+    assert r.verdict == VERDICT_MISMATCH
+    assert r.reasons() == (REASON_TECHNICAL_COLUMN_NOT_IN_GOVERNANCE,)
+
+
+def test_resolution_time_grain_mismatch_is_mismatch() -> None:
+    governance, technique, resolution = _resolvedAlignment()
+    mismatched = MetricTechnique(
+        metric_type=technique.metric_type,
+        numerator=technique.numerator,
+        denominator=technique.denominator,
+        aggregation_order=technique.aggregation_order,
+        grain_keys=technique.grain_keys,
+        time_grain="quarter",
+    )
+    r = reconcileGovernanceVsTechnique(
+        governance, mismatched, resolution=resolution
+    )
+    assert r.verdict == VERDICT_MISMATCH
+    assert r.reasons() == (REASON_TIME_GRAIN_MISMATCH,)
+
+
+def test_resolution_time_grain_absent_on_governance_is_unknown() -> None:
+    governance, technique, resolution = _resolvedAlignment()
+    governanceMissing = GovernanceSpec(
+        numerator_columns=governance.numerator_columns,
+        denominator_columns=governance.denominator_columns,
+        grain_keys=governance.grain_keys,
+        time_grain=None,
+    )
+    r = reconcileGovernanceVsTechnique(
+        governanceMissing, technique, resolution=resolution
+    )
+    assert r.verdict == VERDICT_UNKNOWN
+    assert r.reasons() == (REASON_TIME_GRAIN_ABSENT_GOVERNANCE,)
+
+
+def test_resolution_time_grain_absent_on_technical_is_unknown() -> None:
+    governance, technique, resolution = _resolvedAlignment()
+    techniqueMissing = MetricTechnique(
+        metric_type=technique.metric_type,
+        numerator=technique.numerator,
+        denominator=technique.denominator,
+        aggregation_order=technique.aggregation_order,
+        grain_keys=technique.grain_keys,
+        time_grain=None,
+    )
+    r = reconcileGovernanceVsTechnique(
+        governance, techniqueMissing, resolution=resolution
+    )
+    assert r.verdict == VERDICT_UNKNOWN
+    assert r.reasons() == (REASON_TIME_GRAIN_ABSENT_TECHNICAL,)
+
+
+def test_resolution_time_grain_absent_on_both_sides_skips_axis() -> None:
+    """C 裁决：双侧都未声明 time_grain ⇒ 跳过粒度轴，不产生任何 unknown。"""
+    governance, technique, resolution = _resolvedAlignment()
+    governanceMissing = GovernanceSpec(
+        numerator_columns=governance.numerator_columns,
+        denominator_columns=governance.denominator_columns,
+        grain_keys=governance.grain_keys,
+        time_grain=None,
+    )
+    techniqueMissing = MetricTechnique(
+        metric_type=technique.metric_type,
+        numerator=technique.numerator,
+        denominator=technique.denominator,
+        aggregation_order=technique.aggregation_order,
+        grain_keys=technique.grain_keys,
+        time_grain=None,
+    )
+    r = reconcileGovernanceVsTechnique(
+        governanceMissing, techniqueMissing, resolution=resolution
+    )
+    assert r.verdict == VERDICT_PASS
+    assert r.findings == ()
+
+
+def test_resolution_time_grain_both_present_equal_is_pass() -> None:
+    """双侧都声明且一致 ⇒ pass（skip 只针对双侧都未声明，不得扩大）。"""
+    governance, technique, resolution = _resolvedAlignment()
+    r = reconcileGovernanceVsTechnique(governance, technique, resolution=resolution)
+    assert r.verdict == VERDICT_PASS
+    assert r.reasons() == ()
+
+
+def test_resolution_grain_dimension_aliases_and_time_word_removal() -> None:
+    """grain_keys 里的时间词已由 resolver 剔除，业务词别名解析成物理列。"""
+    governance = GovernanceSpec(
+        numerator_columns=("QTY",),
+        grain_keys=("供应商编码", "月"),
+        time_grain="month",
+    )
+    technique = MetricTechnique(
+        numerator=_measure("QTY"),
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    resolution = ResolutionOutcome(
+        resolved=(("QTY", "QTY"), ("供应商编码", "SUPPLIER_CODE")),
+        timeGrain=TimeGrain.MONTH,
+    )
+    r = reconcileGovernanceVsTechnique(governance, technique, resolution=resolution)
+    assert r.verdict == VERDICT_PASS
+    assert r.findings == ()
+
+
+def test_resolution_grain_dimension_mismatch_is_mismatch() -> None:
+    governance = GovernanceSpec(
+        numerator_columns=("QTY",),
+        grain_keys=("供应商编码",),
+        time_grain="month",
+    )
+    technique = MetricTechnique(
+        numerator=_measure("QTY"),
+        grain_keys=("FACILITY_CODE",),
+        time_grain="month",
+    )
+    resolution = ResolutionOutcome(
+        resolved=(("QTY", "QTY"), ("供应商编码", "SUPPLIER_CODE")),
+        timeGrain=TimeGrain.MONTH,
+    )
+    r = reconcileGovernanceVsTechnique(governance, technique, resolution=resolution)
+    assert r.verdict == VERDICT_MISMATCH
+    assert r.reasons() == (REASON_GRAIN_MISMATCH,)
+
+
+def test_resolution_time_column_not_in_source_is_degraded_unknown() -> None:
+    governance, technique, resolution = _resolvedAlignment()
+    withColumn = MetricTechnique(
+        metric_type=technique.metric_type,
+        numerator=technique.numerator,
+        denominator=technique.denominator,
+        aggregation_order=technique.aggregation_order,
+        grain_keys=technique.grain_keys,
+        time_grain=technique.time_grain,
+        time_column="OTHER_TS",
+    )
+    result = reconcileMetric(governance, withColumn, resolution=resolution)
+    assert result.verdict == VERDICT_UNKNOWN
+    assert REASON_TIME_COLUMN_NOT_IN_SOURCE in result.reasons()
+    assert result.degraded is True
+    assert result.isTierAEligible is False
+
+
+def test_resolution_time_column_in_source_candidates_has_no_finding() -> None:
+    governance, technique, resolution = _resolvedAlignment()
+    withColumn = MetricTechnique(
+        metric_type=technique.metric_type,
+        numerator=technique.numerator,
+        denominator=technique.denominator,
+        aggregation_order=technique.aggregation_order,
+        grain_keys=technique.grain_keys,
+        time_grain=technique.time_grain,
+        time_column="ORDER_DATE",
+    )
+    r = reconcileGovernanceVsTechnique(governance, withColumn, resolution=resolution)
+    assert r.verdict == VERDICT_PASS
+    assert r.findings == ()
+
+
+def test_merge_degraded_true_when_layer2_unknown() -> None:
+    """R4：层 2 unknown 放行但必须标注 degraded。"""
+    r = reconcileMetric(GovernanceSpec(), MetricTechnique())
+    assert r.verdict == VERDICT_UNKNOWN
+    assert r.degraded is True
+    assert r.isTierAEligible is False
+
+
+def test_merge_identity_fallback_when_resolution_none() -> None:
+    """resolution=None ⇒ 恒等回退（业务词 token 与物理列直比 ⇒ mismatch）。"""
+    governance = GovernanceSpec(
+        numerator_columns=("收货数量",),
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    technique = MetricTechnique(
+        numerator=_measure("QTY"),
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    r = reconcileMetric(governance, technique, resolution=None)
+    assert r.verdict == VERDICT_MISMATCH
+    assert REASON_GOVERNANCE_COLUMN_NOT_IN_TECHNICAL in r.reasons()

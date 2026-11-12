@@ -26,7 +26,13 @@ from app.domain.enums import (
     MetricAggregationOrder,
     MetricType,
 )
-from app.domain.models import KpiCatalog, OntologyMetric
+from app.domain.models import (
+    KpiCatalog,
+    OntologyClass,
+    OntologyMetric,
+    OntologyMetricSource,
+    OntologyProperty,
+)
 from app.models.system_config import SystemConfig
 from app.security.prompt_sanitizer import UntrustedLabel
 from app.services import chat_service as chat_service_module
@@ -138,6 +144,35 @@ async def _seedRatioMetric(
     dbSession.add(metric)
     await dbSession.flush()
     return metric
+
+
+async def _seedSourceColumn(
+    dbSession: AsyncSession, metric: OntologyMetric, *, propertyName: str, sourceColumn: str
+) -> None:
+    """种一个可解析的源类属性（P3 D3：无源类会按 R2 判 unknown，不再 mismatch）。"""
+    ontologyClass = OntologyClass(
+        class_name=f"{metric.metric_name}-{propertyName}",
+        version=1,
+        created_by="contract-injection-test",
+    )
+    dbSession.add(ontologyClass)
+    await dbSession.flush()
+    dbSession.add(
+        OntologyProperty(
+            class_id=ontologyClass.id,
+            property_name=propertyName,
+            source_column=sourceColumn,
+            data_type="VARCHAR",
+        )
+    )
+    dbSession.add(
+        OntologyMetricSource(
+            metric_id=metric.id,
+            class_id=ontologyClass.id,
+            role="NUMERATOR",
+        )
+    )
+    await dbSession.commit()
 
 
 async def _seedKpi(
@@ -332,6 +367,13 @@ async def test_build_contract_block_skips_mismatch_kpi(
         numeratorColumns=["NOT_EXISTENT_COLUMN"],
         grainKeys=["supplier_code"],
     )
+    # 让治理 token 可解析到技术 measure 不存在的物理列 ⇒ 真 mismatch（不是无源类 unknown）。
+    await _seedSourceColumn(
+        dbSession,
+        metric,
+        propertyName="NOT_EXISTENT_COLUMN",
+        sourceColumn="BIZ_NOT_EXISTENT_COLUMN",
+    )
     _matchOnly(monkeypatch, ["KPI_MISMATCH_TEST"])
 
     block = await buildKpiContractBlock(dbSession, "问题")
@@ -354,6 +396,13 @@ async def test_build_contract_block_keeps_sibling_kpi_when_one_mismatches(
         name="坏指标",
         metricId=badMetric.id,
         numeratorColumns=["NOT_EXISTENT_COLUMN"],
+    )
+    # 同上：可解析但技术侧不存在 ⇒ mismatch，兄弟 KPI 仍应注入。
+    await _seedSourceColumn(
+        dbSession,
+        badMetric,
+        propertyName="NOT_EXISTENT_COLUMN",
+        sourceColumn="BIZ_NOT_EXISTENT_COLUMN",
     )
     _matchOnly(monkeypatch, ["KPI_SIBLING_BAD", "KPI_SIBLING_GOOD"])
 

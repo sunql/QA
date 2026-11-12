@@ -14,6 +14,7 @@ import type {
   KpiCatalogUpdate,
   KpiStatus,
 } from "../types/kpiCatalog";
+import type { TimeGrain } from "../types/ontology";
 
 /** 语义匹配阈值默认值（与后端 `KpiCatalogRead.match_threshold` 默认值一致）。 */
 export const DEFAULT_MATCH_THRESHOLD = 0.75;
@@ -27,6 +28,8 @@ export interface KpiFormValues {
   numerator: string;
   denominator: string;
   grain: string;
+  /** 下拉留空 ⇒ 空串（提交时 update 转 null / create 省略）。 */
+  timeGrain: TimeGrain | "";
   unit: string;
   dataSource: string;
   datasourceId?: number;
@@ -54,6 +57,7 @@ export const emptyKpiForm = (): KpiFormValues => ({
   numerator: "",
   denominator: "",
   grain: "",
+  timeGrain: "",
   unit: "",
   dataSource: "",
   datasourceId: undefined,
@@ -78,6 +82,7 @@ export function buildKpiUpdatePayload(values: KpiFormValues): KpiCatalogUpdate {
     numerator: values.numerator || null,
     denominator: values.denominator || null,
     grain: values.grain || null,
+    timeGrain: values.timeGrain || null,
     unit: values.unit || null,
     dataSource: values.dataSource || null,
     datasourceId: values.datasourceId ?? null,
@@ -105,6 +110,7 @@ export function buildKpiCreatePayload(values: KpiFormValues): KpiCatalogCreate {
     numerator: values.numerator || undefined,
     denominator: values.denominator || undefined,
     grain: values.grain || undefined,
+    timeGrain: values.timeGrain || undefined,
     unit: values.unit || undefined,
     dataSource: values.dataSource || undefined,
     datasourceId: values.datasourceId!,

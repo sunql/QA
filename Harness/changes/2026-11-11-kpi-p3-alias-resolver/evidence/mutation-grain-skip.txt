@@ -1,0 +1,74 @@
+# Mutation evidence — 双侧 time_grain 未声明 ⇒ 跳过粒度轴（C 裁决）
+
+- Date: 2026-11-12
+- Worktree: `/private/tmp/qa-kpi-p3`（branch `feat/kpi-p3-alias-resolver`，基线 HEAD `61a4b5a0`）
+- Target: `backend/app/services/kpi_metric_reconcile.py` `_checkTimeGrain`
+- Test env: `TEST_DATABASE_URL=postgresql+asyncpg://qa_user:***@127.0.0.1:5434/qa_metadata_test`、
+  `TEST_NEO4J_URI=bolt://127.0.0.1:7688`、`TEST_NEO4J_PASSWORD=***`
+
+## Mutation
+
+把「双侧未声明 ⇒ 跳过」的 `return ()` 换成 `pass`（继续走旧的 unknown 分支）：
+
+```diff
+-    if governanceGrain is None and technicalGrain is None:
+-        return ()
++    if governanceGrain is None and technicalGrain is None:
++        pass  # MUTATION: 跳过分支被禁用（双侧未声明按旧行为判 unknown）
+     findings: list[ReconcileFinding] = []
+```
+
+## RED（mutation 生效）
+
+Command:
+```
+pytest app/tests/unit/test_kpi_metric_reconcile.py::test_resolution_time_grain_absent_on_both_sides_skips_axis \
+       app/tests/integration/test_kpi_metric_publish_gate_api.py::test_publish_kpi_succeeds_when_both_time_grains_absent -q
+```
+
+```
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+__________ test_resolution_time_grain_absent_on_both_sides_skips_axis __________
+
+        r = reconcileGovernanceVsTechnique(
+            governanceMissing, techniqueMissing, resolution=resolution
+        )
+>       assert r.verdict == VERDICT_PASS
+E       AssertionError: assert 'unknown' == 'pass'
+E         - pass
+E         + unknown
+
+app/tests/unit/test_kpi_metric_reconcile.py:644: AssertionError
+____________ test_publish_kpi_succeeds_when_both_time_grains_absent ____________
+
+>       updated = await service.updateKpi(
+            dbSession, kpi.id, KpiCatalogUpdate(status=KpiStatus.PUBLISHED), ADMIN
+        )
+...
+E       app.domain.exceptions.ConflictError: 发布闸门未通过：口径对账未完成（unknown）：[治理层] 治理侧未声明时间粒度；[治理层] 技术侧未声明时间粒度
+
+app/services/kpi_metric_publish_gate.py:473: ConflictError
+=========================== short test summary info ============================
+FAILED app/tests/unit/test_kpi_metric_reconcile.py::test_resolution_time_grain_absent_on_both_sides_skips_axis
+FAILED app/tests/integration/test_kpi_metric_publish_gate_api.py::test_publish_kpi_succeeds_when_both_time_grains_absent
+2 failed, 21 warnings in 2.60s
+```
+
+结论：跳过语义被破坏时，两个目标测试都必须变红（单测层 + 闸门链路层各一），
+说明它们真实钉住了「双侧未声明 ⇒ 不产生 unknown」这一行为，而不是碰巧为绿。
+
+## Revert 后 GREEN
+
+恢复 `return ()`，同一命令：
+
+```
+..                                                                       [100%]
+2 passed, 21 warnings in 2.57s
+```
+
+## 说明
+
+- Mutation 仅改 `_checkTimeGrain` 一处，未触碰 identity 路径（P2 逐字不变）。
+- 该 mutation 不会影响「单侧缺失 ⇒ unknown」与「双侧不等 ⇒ mismatch」两条既有测试，
+  因此 RED 集合精确指向跳过语义本身。

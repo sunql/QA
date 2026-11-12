@@ -14,21 +14,45 @@
 
 from __future__ import annotations
 
-from app.domain.enums import MetricType
+import logging
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.domain.enums import TIME_GRAIN_VALUES, MetricType
 from app.domain.models import KpiCatalog, OntologyMetric
+from app.services.kpi_alignment_resolver import (
+    ResolutionOutcome,
+    deriveTimeGrain,
+    resolveGovernanceTokens,
+    sourcePropertiesForMetric,
+)
 from app.services.kpi_metric_reconcile import (
     GovernanceSpec,
     MeasureSpec,
     MetricTechnique,
+    governanceTokensOf,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def governanceSpecOf(kpi: KpiCatalog) -> GovernanceSpec:
-    """KPI 治理侧快照：结构化列 + 粒度键（列名按小写比较，集合语义）。"""
+    """KPI 治理侧快照：结构化列 + 粒度键 + 时间粒度。
+
+    时间粒度**显式列优先**（P3 D4 admin 写入口），缺省/非法值回退 `grain` 自由文本
+    推导（R6，兼容 0143 回填前的存量行与回填脚本）。值统一小写（TimeGrain 值域）。
+    """
+    explicitGrain = (kpi.time_grain or "").strip().lower()
+    if explicitGrain in TIME_GRAIN_VALUES:
+        timeGrainValue: str | None = explicitGrain
+    else:
+        derived = deriveTimeGrain(kpi.grain)
+        timeGrainValue = derived.value if derived is not None else None
     return GovernanceSpec(
         numerator_columns=tuple(kpi.numerator_columns or ()),
         denominator_columns=tuple(kpi.denominator_columns or ()),
         grain_keys=tuple(kpi.grain_keys or ()),
+        time_grain=timeGrainValue,
     )
 
 
@@ -45,7 +69,42 @@ def techniqueOf(metric: OntologyMetric | None) -> MetricTechnique:
         filter_expression=metric.filter_expression,
         formula=metric.formula,
         execution_source=metric.execution_source,
+        time_grain=metric.time_grain,
+        time_column=metric.time_column,
     )
 
 
-__all__ = ["governanceSpecOf", "techniqueOf"]
+async def resolutionForMetric(
+    session: AsyncSession,
+    metricId: int | None,
+    governance: GovernanceSpec,
+) -> ResolutionOutcome | None:
+    """治理 token 别名解析（薄 loader + 纯函数）；失败 ⇒ ``None`` 恒等回退。
+
+    三处接线点（契约构建 / chat Tier 判定 / 诊断）共用本函数。**绝不让解析
+    失败变成请求失败**：DB/读异常只记 warning，返回 None 走 ``resolution=None``
+    的既有行为（设计 §7.1 的恒等回退，DoD#5）。
+    """
+    if metricId is None:
+        return None
+    try:
+        properties = await sourcePropertiesForMetric(session, metricId)
+    except Exception:
+        logger.warning(
+            "KPI 治理 token 别名解析失败，回退恒等对账 metric_id=%s",
+            metricId,
+            exc_info=True,
+        )
+        return None
+
+    tokens = governanceTokensOf(governance)
+    # R2：无 ontology_metric_source 行 ⇒ 无源类可解析。治理 token 既不能证明
+    # 可解析（pass），也没有证据判 missing（mismatch）；按设计记 unknown（不猜、
+    # 不阻断注入）。不能回退 resolution=None（那会把无源类误判成 pass）。
+    if not properties and tokens:
+        return ResolutionOutcome(unknownTokens=tokens)
+    # 纯函数放在 try 外：resolver 自身缺陷必须暴露，不能被吞成恒等回退。
+    return resolveGovernanceTokens(tokens, properties)
+
+
+__all__ = ["governanceSpecOf", "resolutionForMetric", "techniqueOf"]

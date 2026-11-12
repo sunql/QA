@@ -192,6 +192,27 @@ export const METRIC_STATUS_OPTIONS: { value: MetricStatus; labelKey: MetricStatu
 ];
 
 /**
+ * 时间粒度（P3 D1 / 0143）。
+ *
+ * 值小写，与后端 `TimeGrain` 枚举 / SQL / JSON 契约一致；写入边界由后端
+ * `_checkTimeGrain` 守卫（非法值 422）。前端只允许从这里取值。
+ */
+export type TimeGrain = "day" | "week" | "month" | "quarter" | "year";
+
+/**
+ * 时间粒度下拉选项。
+ * labelKey 与 value 一致；组件渲染时通过 ``t(`enums.timeGrain.${labelKey}`)`` 解析。
+ * 保持 types 层无 hook 依赖（同 DATA_TYPE_OPTIONS / OBJECT_TYPE_OPTIONS）。
+ */
+export const TIME_GRAIN_OPTIONS: { value: TimeGrain; labelKey: TimeGrain }[] = [
+  { value: "day", labelKey: "day" },
+  { value: "week", labelKey: "week" },
+  { value: "month", labelKey: "month" },
+  { value: "quarter", labelKey: "quarter" },
+  { value: "year", labelKey: "year" },
+];
+
+/**
  * 结构化度量（ontology_metric.numerator_measure / denominator_measure 的 JSONB）。
  *
  * 键名：读端是裸 dict、落库是 `model_dump()`（未带 by_alias）⇒ 恒为 snake_case；
@@ -231,6 +252,11 @@ export interface OntologyMetric {
   status: MetricStatus;
   owner: string | null;
   executionSource: MetricExecutionSource | null;
+  // ── P3 时间粒度（0143）──
+  /** 时间粒度；null = 未设置。 */
+  timeGrain: TimeGrain | null;
+  /** 时间列（源类物理列名）；null = 未设置。 */
+  timeColumn: string | null;
 }
 
 export interface OntologyMetricCreate {
@@ -254,6 +280,9 @@ export interface OntologyMetricCreate {
   // 与 measure 内的 `class_id` / `class_alias`（派生字段，必须保留）刻意不同。
   owner?: string | null;
   executionSource?: MetricExecutionSource | null;
+  // 留空 = 显式 null（创建同样用 null，与其余可清空字段一致）。
+  timeGrain?: TimeGrain | null;
+  timeColumn?: string | null;
 }
 
 export interface OntologyMetricUpdate {
@@ -273,6 +302,9 @@ export interface OntologyMetricUpdate {
   status?: MetricStatus;
   owner?: string | null;
   executionSource?: MetricExecutionSource | null;
+  // 显式 null = 清空（undefined 会被 axios 丢弃 ⇒ 后端静默保留旧值）。
+  timeGrain?: TimeGrain | null;
+  timeColumn?: string | null;
 }
 
 // ===== Join（关联关系目录） =====

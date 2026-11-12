@@ -1,0 +1,78 @@
+# Task 2 变异取证 — kpi_alignment_resolver 纯函数
+
+环境：worktree `/private/tmp/qa-kpi-p3`（branch `feat/kpi-p3-alias-resolver`），
+`TEST_DATABASE_URL=postgresql+asyncpg://qa_user:***@127.0.0.1:5434/qa_metadata_test`。
+命令：`cd backend && uv run pytest app/tests/unit/test_kpi_alignment_resolver.py -q`
+协议：改 → 红 → 还原 → 复绿。基线 = 57 passed。
+
+## 基线（还原后）
+
+```
+57 passed in 15.26s
+```
+
+## 变异 ①：删除 property_alias 解析分支
+
+改动：`_resolveOneToken` 中整段 `aliasHits`（`property_alias` 归一化命中 ⇒ `source_column`）删除，
+token 直接落到 `business_aliases`/missing。
+
+红（3 failed, 54 passed）：
+
+```
+FAILED testResolvesPropertyAlias
+FAILED testAliasWithoutSourceColumnIsUnknown
+FAILED testMixedOutcomePreservesInputOrder
+```
+
+还原后复绿：
+
+```
+57 passed in 15.45s
+```
+
+## 变异 ②：删除纯时间词剔除
+
+改动：`_timeGrainForToken` 首行插入 `return None`（时间词不再识别，全部进入列解析）。
+
+红（18 failed, 39 passed），节选：
+
+```
+FAILED testPureTimeTokenMapsToTimeGrain[月-month]
+FAILED testPureTimeTokenMapsToTimeGrain[按月-month]
+FAILED testPureTimeTokenMapsToTimeGrain[...]
+FAILED testTimeWordExcludedFromColumnResolutionEvenWhenColumnExists
+FAILED testConflictingTimeWordsAreUnknown
+FAILED testSameGrainTimeWordsDoNotConflict
+FAILED testMixedOutcomePreservesInputOrder
+```
+
+还原后复绿：
+
+```
+57 passed in 15.26s
+```
+
+## 变异 ③：多候选改取 first（不猜 → 猜）
+
+改动：`_decide` 在 distinct 判定前插入「取第一个非空列即返回 resolved」。
+
+红（2 failed, 55 passed）：
+
+```
+FAILED testBusinessAliasesMultiCandidateIsUnknown
+FAILED testMultipleCandidateColumnsAreUnknown
+  AssertionError: assert (('数量', 'QTY_A'),) == ()
+```
+
+还原后复绿：
+
+```
+57 passed in 15.42s
+```
+
+## 还原后覆盖率（定向）
+
+```
+app/services/kpi_alignment_resolver.py  115 stmts  7 miss  94%
+missing: 229-240（sourcePropertiesForMetric loader，纯 IO，留给集成/回填用例）
+```

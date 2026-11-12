@@ -407,6 +407,14 @@ class OntologyMetric(Base, TimestampMixin):
     owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
     execution_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
+    # ── P3 时间粒度（0143）：口径粒度 + 源类日期列 ───────────────────
+    time_grain: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, comment="0143，P3 时间粒度"
+    )
+    time_column: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, comment="0143，P3 时间粒度"
+    )
+
     # Relationships
     target_class: Mapped[OntologyClass | None] = relationship(
         back_populates="metrics", lazy="selectin"
@@ -517,6 +525,11 @@ class KpiCatalog(Base, TimestampMixin):
     )
     denominator_columns: Mapped[list[str] | None] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=True
+    )
+
+    # ── P3 时间粒度（0143）：治理侧显式声明口径粒度 ──────────────────
+    time_grain: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, comment="0143，P3 时间粒度"
     )
 
     # Relationships

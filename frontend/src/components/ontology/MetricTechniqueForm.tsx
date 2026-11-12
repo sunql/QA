@@ -5,6 +5,7 @@ import {
   METRIC_EXECUTION_SOURCE_OPTIONS,
   METRIC_STATUS_OPTIONS,
   METRIC_TYPE_OPTIONS,
+  TIME_GRAIN_OPTIONS,
 } from "../../types/ontology";
 import { useTranslation } from "../../i18n";
 import { needsDenominatorMeasure } from "../../utils/metricTechnique";
@@ -19,6 +20,8 @@ const MEASURE_AGG_OPTIONS = ["SUM", "COUNT", "AVG", "COUNT_DISTINCT"].map((value
 const MEASURE_EXPR_MAX_LENGTH = 1000;
 const FILTER_EXPRESSION_MAX_LENGTH = 2000;
 const OWNER_MAX_LENGTH = 100;
+/** 后端 `time_column` 的字段长度上限（schemas.py max_length=100）。 */
+const TIME_COLUMN_MAX_LENGTH = 100;
 
 /** 指标类型 / 聚合阶 / 执行来源。 */
 function MetricTypeRow() {
@@ -127,6 +130,38 @@ function MetricMetaRow() {
             <Input
               maxLength={FILTER_EXPRESSION_MAX_LENGTH}
               placeholder={t("forms.ontology.metricPlaceholders.filterExpression")}
+            />
+          </Form.Item>
+        </Col>
+      </Row>
+      <Row gutter={12}>
+        <Col span={12}>
+          <Form.Item
+            name="timeGrain"
+            label={t("forms.ontology.metricLabels.timeGrain")}
+          >
+            <Select
+              allowClear
+              placeholder={t("forms.ontology.metricPlaceholders.timeGrain")}
+              options={[
+                ...TIME_GRAIN_OPTIONS.map((o) => ({
+                  value: o.value,
+                  label: t(`enums.timeGrain.${o.labelKey}`),
+                })),
+                // 显式留空选项：与 allowClear 同效，但让「不设置」可被看到 / 选中
+                { value: "", label: t("common.none") },
+              ]}
+            />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item
+            name="timeColumn"
+            label={t("forms.ontology.metricLabels.timeColumn")}
+          >
+            <Input
+              maxLength={TIME_COLUMN_MAX_LENGTH}
+              placeholder={t("forms.ontology.metricPlaceholders.timeColumn")}
             />
           </Form.Item>
         </Col>

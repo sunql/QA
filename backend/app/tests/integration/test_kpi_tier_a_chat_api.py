@@ -36,6 +36,7 @@ from app.domain.models import (
     LlmConfig,
     OntologyClass,
     OntologyMetric,
+    OntologyMetricSource,
     OntologyProperty,
 )
 from app.infrastructure import business_db_pool
@@ -127,7 +128,12 @@ async def _seedKpiWithMetric(
     executionSource: str = "ESCAPE_HATCH",
     businessDefinition: str = "按测试元数据表计数",
 ) -> tuple[OntologyMetric, KpiCatalog]:
-    """对账 pass 的最小形状：MEASURE + 分子 {cnt} + 粒度 {kpi_code}。"""
+    """对账 pass 的最小形状：MEASURE + 分子 {cnt} + 粒度 {kpi_code}。
+
+    P3 D3 起层 2 走别名解析：夹具按**回填后等价状态**种源类属性
+    （``cnt`` / ``kpi_code`` 可解析）与时间粒度（``MONTH``），否则无源类会
+    判 unknown、time_grain 缺失也会判 unknown，Tier A 判定被误伤。
+    """
     metric = OntologyMetric(
         metric_name=f"{kpiCode}-metric",
         formula=formula,
@@ -135,6 +141,7 @@ async def _seedKpiWithMetric(
         numerator_measure={"agg": "COUNT", "expr": "cnt"},
         grain_keys=["kpi_code"],
         execution_source=executionSource,
+        time_grain="MONTH",
         created_by="tier-a-chat-test",
     )
     dbSession.add(metric)
@@ -152,8 +159,33 @@ async def _seedKpiWithMetric(
         match_threshold=Decimal("0.75"),
         numerator_columns=["cnt"],
         grain_keys=["kpi_code"],
+        grain="按kpi_code+月",
     )
     dbSession.add(kpi)
+
+    ontologyClass = OntologyClass(
+        class_name=f"{kpiCode}-source",
+        version=1,
+        created_by="tier-a-chat-test",
+    )
+    dbSession.add(ontologyClass)
+    await dbSession.flush()
+    for column in ("cnt", "kpi_code"):
+        dbSession.add(
+            OntologyProperty(
+                class_id=ontologyClass.id,
+                property_name=column,
+                source_column=column,
+                data_type="VARCHAR",
+            )
+        )
+    dbSession.add(
+        OntologyMetricSource(
+            metric_id=metric.id,
+            class_id=ontologyClass.id,
+            role="NUMERATOR",
+        )
+    )
     await dbSession.commit()
     await dbSession.refresh(kpi)
     return metric, kpi

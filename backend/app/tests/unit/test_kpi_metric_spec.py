@@ -6,10 +6,22 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.domain.enums import MetricExecutionSource, MetricType
 from app.domain.models import KpiCatalog, OntologyMetric
-from app.services.kpi_metric_reconcile import MetricTechnique
-from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
+from app.services.kpi_metric_reconcile import (
+    VERDICT_UNKNOWN,
+    GovernanceSpec,
+    MeasureSpec,
+    MetricTechnique,
+    reconcileMetric,
+)
+from app.services.kpi_metric_spec import (
+    governanceSpecOf,
+    resolutionForMetric,
+    techniqueOf,
+)
 
 
 def _kpi(**overrides: object) -> KpiCatalog:
@@ -106,3 +118,99 @@ def test_technique_of_metric_treats_malformed_measure_as_none() -> None:
 def test_technique_of_metric_keeps_null_grain_as_empty_tuple() -> None:
     technique = techniqueOf(_metric(grain_keys=None))
     assert technique.grain_keys == ()
+
+
+# ── P3 time grain / time column（R6）────────────────────────────────
+
+
+def test_governance_spec_derives_time_grain_from_free_text() -> None:
+    """``kpi.grain`` 自由文本 → ``TimeGrain``（最长词优先）。"""
+    spec = governanceSpecOf(_kpi(grain="供应商+物料+月"))
+    assert spec.time_grain == "month"
+
+
+def test_governance_spec_leaves_time_grain_null_without_time_word() -> None:
+    spec = governanceSpecOf(_kpi(grain="供应商（快照）"))
+    assert spec.time_grain is None
+
+
+def test_governance_spec_prefers_explicit_time_grain_column() -> None:
+    """P3 D4：显式列（admin 写入口）优先于 grain 自由文本推导；大小写归一。"""
+    spec = governanceSpecOf(_kpi(grain="供应商+月", time_grain="QUARTER"))
+    assert spec.time_grain == "quarter"
+
+
+def test_governance_spec_falls_back_to_grain_text_when_explicit_invalid() -> None:
+    """列值非法（历史脏数据）⇒ 回退 grain 文本推导，不把脏值带进对账。"""
+    spec = governanceSpecOf(_kpi(grain="供应商+月", time_grain="BOGUS"))
+    assert spec.time_grain == "month"
+
+
+def test_technique_of_maps_time_grain_and_time_column() -> None:
+    technique = techniqueOf(_metric(time_grain="MONTH", time_column="RECEIPT_DATE"))
+    assert technique.time_grain == "MONTH"
+    assert technique.time_column == "RECEIPT_DATE"
+
+
+def test_technique_of_none_has_no_time_grain_or_column() -> None:
+    technique = techniqueOf(None)
+    assert technique.time_grain is None
+    assert technique.time_column is None
+
+
+# ── resolutionForMetric：loader 失败 ⇒ None（绝不把解析失败变成请求失败）──
+
+
+async def test_resolution_for_metric_returns_none_when_loader_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def boom(session: object, metricId: int) -> tuple[()]:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(
+        "app.services.kpi_metric_spec.sourcePropertiesForMetric", boom
+    )
+    resolution = await resolutionForMetric(
+        object(), 7, GovernanceSpec(numerator_columns=("QTY",))  # type: ignore[arg-type]
+    )
+    assert resolution is None
+    assert "回退恒等对账" in caplog.text
+
+
+async def test_resolution_for_metric_skips_loader_when_metric_absent() -> None:
+    resolution = await resolutionForMetric(
+        object(), None, GovernanceSpec()  # type: ignore[arg-type]
+    )
+    assert resolution is None
+
+
+async def test_resolution_for_metric_without_source_rows_is_unknown_not_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """I1 / R2：无 ``ontology_metric_source`` 行 ⇒ 无源类 ⇒ unknown，不是 mismatch。"""
+    async def noProperties(session: object, metricId: int) -> tuple[()]:
+        return ()
+
+    monkeypatch.setattr(
+        "app.services.kpi_metric_spec.sourcePropertiesForMetric", noProperties
+    )
+    governance = GovernanceSpec(
+        numerator_columns=("QTY",),
+        grain_keys=("SUPPLIER_CODE",),
+        time_grain="month",
+    )
+    resolution = await resolutionForMetric(object(), 7, governance)  # type: ignore[arg-type]
+    assert resolution is not None
+    assert resolution.missingTokens == ()
+    assert set(resolution.unknownTokens) == {"QTY", "SUPPLIER_CODE"}
+
+    result = reconcileMetric(
+        governance,
+        MetricTechnique(
+            numerator=MeasureSpec(agg="SUM", expr="QTY"),
+            grain_keys=("SUPPLIER_CODE",),
+            time_grain="month",
+        ),
+        resolution=resolution,
+    )
+    assert result.verdict == VERDICT_UNKNOWN

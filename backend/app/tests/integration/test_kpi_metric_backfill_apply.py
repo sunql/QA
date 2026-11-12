@@ -29,6 +29,7 @@ from app.domain.models import (
     OntologyClass,
     OntologyMetric,
     OntologyMetricSource,
+    OntologyProperty,
     SchemaCache,
 )
 from app.services.kpi_metric_publish_gate import checkKpiPublishGate
@@ -274,6 +275,38 @@ async def _seedOtd(session: AsyncSession) -> tuple[KpiCatalog, dict[str, int], i
     return kpi, classIds, dsId
 
 
+# 闸门消费 resolver 后，源类必须带 ``ontology_property`` 行才能解析治理 token：
+# - 回填产物保留业务原声明（T15-L：不自签）⇒ 解析到自身，仍与技术物理列不同；
+# - 维度业务词按本体别名解析到物理列；
+# - 覆盖快照传入的物理 token ⇒ 恒等解析，可与技术形态对齐。
+_GATE_PROPERTY_MAPPINGS: tuple[tuple[str, str], ...] = (
+    ("ACTUAL_RECEIPT_DATE", "ACTUAL_RECEIPT_DATE"),
+    ("PROMISED_DATE", "PROMISED_DATE"),
+    ("供应商", "SUPPLIER_CODE"),
+    ("工厂", "FACILITY_CODE"),
+    ("RECEIPT_DATE", "RECEIPT_DATE"),
+    ("PROMISED_RECEIPT_DATE", "PROMISED_RECEIPT_DATE"),
+    ("SUPPLIER_CODE", "SUPPLIER_CODE"),
+    ("FACILITY_CODE", "FACILITY_CODE"),
+)
+
+
+async def _seedGateProperties(
+    session: AsyncSession, classIds: dict[str, int]
+) -> None:
+    classId = classIds["DWD_GOODS_RECEIPT_LINE"]
+    for propertyName, sourceColumn in _GATE_PROPERTY_MAPPINGS:
+        session.add(
+            OntologyProperty(
+                class_id=classId,
+                property_name=propertyName,
+                source_column=sourceColumn,
+                data_type="VARCHAR",
+            )
+        )
+    await session.commit()
+
+
 async def test_apply_creates_metric_and_links_kpi(
     dbSession: AsyncSession, _neutralizeNeo4j: list[str], _spyEmbedding: list[str]
 ) -> None:
@@ -436,7 +469,8 @@ async def test_layer2_reconcile_reports_mismatch_not_pass(dbSession: AsyncSessio
 
 async def test_publish_gate_blocks_the_backfilled_kpi(dbSession: AsyncSession) -> None:
     """发布闸门的 reconcile 项必须**不通过**（原因 = 上面的层 2 mismatch）。"""
-    kpi, _, _ = await _seedOtd(dbSession)
+    kpi, classIds, _ = await _seedOtd(dbSession)
+    await _seedGateProperties(dbSession, classIds)
     await applyPlans(dbSession, [_plan("KPI_SUPPLIER_OTD")])
     await dbSession.refresh(kpi)
 
@@ -457,7 +491,8 @@ async def test_publish_gate_uses_passed_governance_over_stored_values(
     这里先断言「不传覆盖 ⇒ reconcile 不通过」，再断言「传按技术侧填的覆盖 ⇒
     reconcile 通过」，两条缺一不可（只写后者时，若实现恒 pass 也是绿的）。
     """
-    kpi, _, _ = await _seedOtd(dbSession)
+    kpi, classIds, _ = await _seedOtd(dbSession)
+    await _seedGateProperties(dbSession, classIds)
     await applyPlans(dbSession, [_plan("KPI_SUPPLIER_OTD")])
     await dbSession.refresh(kpi)
 

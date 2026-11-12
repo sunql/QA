@@ -200,6 +200,9 @@ def _mergedTechnique(entity: OntologyMetric, updates: dict) -> MetricTechnique:
         filter_expression=updates.get("filter_expression", entity.filter_expression),
         formula=updates.get("formula", entity.formula),
         execution_source=updates.get("execution_source", entity.execution_source),
+        # P3：技术侧时间粒度/时间列也要按本次请求的新值进闸门
+        time_grain=updates.get("time_grain", entity.time_grain),
+        time_column=updates.get("time_column", entity.time_column),
     )
 
 
@@ -943,6 +946,9 @@ class OntologyService:
             execution_source=(
                 dto.execution_source.value if dto.execution_source else None
             ),
+            # P3 时间粒度（0143）：显式列清单，漏写 ⇒ DB NULL ⇒ 对账/契约读到空值
+            time_grain=dto.time_grain,
+            time_column=dto.time_column,
         )
         # P1 发布闸门：创建即 PUBLISHED 也要过闸（不通过 ⇒ 409，且不入库）
         if dto.status == MetricStatus.PUBLISHED:

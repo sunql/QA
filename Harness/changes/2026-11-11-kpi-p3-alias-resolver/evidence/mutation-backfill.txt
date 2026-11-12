@@ -1,0 +1,152 @@
+# Task 5 变异取证 — kpi_backfill_time_grain
+
+日期：2026-11-12
+环境：TEST_DATABASE_URL=postgresql+asyncpg://qa_user:***@127.0.0.1:5434/qa_metadata_test
+（白名单测试库；5433 dev 库全程只读）
+
+## RED（实现前）
+
+$ uv run pytest app/tests/integration/test_kpi_time_grain_backfill_apply.py -q
+E   ModuleNotFoundError: No module named 'scripts.kpi_backfill_time_grain'
+1 error in 0.08s
+
+→ 测试先于实现落盘，RED 是真实收集失败（不是「实现写完才补测试」）。
+
+## GREEN（实现后）
+
+$ uv run pytest app/tests/integration/test_kpi_time_grain_backfill_apply.py -q
+9 passed
+
+# 回归（loader 改为列表达式 select 后）
+$ uv run pytest app/tests/unit/test_kpi_alignment_resolver.py \
+      app/tests/unit/test_kpi_metric_spec.py \
+      app/tests/unit/test_kpi_time_grain_model.py \
+      app/tests/integration/test_kpi_time_grain_backfill_apply.py -q
+87 passed
+
+## MUTATION-1 — 移除 prod 写守卫
+
+改动：scripts/kpi_backfill_time_grain.py
+    allowProdWrite=args.allow_prod_write or not args.apply,
+→   allowProdWrite=True,  # MUTATION-1
+
+$ uv run pytest ...::test_apply_prod_without_opt_in_is_refused -q
+FAILED ... asyncpg.exceptions.InvalidPasswordError: password authentication failed for user "qa_user"
+（不再是 SystemExit：守卫移除后脚本尝试连接 qa_metadata（测试 DSN 口令 x 连接失败；
+即使连上，dev 库 0143 缺列也会在 apply 前拒绝，全程无写）
+
+还原：cp 备份 → 复跑
+1 passed
+
+## MUTATION-2 — 移除幂等 noop 过滤
+
+改动：scripts/kpi_backfill_time_grain.py
+    pending = [plan for plan in plans if plan.has_changes]
+→   pending = list(plans)  # MUTATION-2
+
+$ uv run pytest ...::test_second_apply_is_noop -q
+FAILED app/tests/integration/test_kpi_time_grain_backfill_apply.py:280: AssertionError
+（二次 apply 返回非 0（期望 "applied：0 条变更"）；noop 条目被当成变更）
+
+还原：cp 备份 → 复跑
+1 passed
+
+## dev dry-run（只读 5433）
+
+$ uv run python scripts/kpi_backfill_time_grain.py \
+    --database-url 'postgresql+asyncpg://qa_user:***@127.0.0.1:5433/qa_metadata'
+exit=0
+output 见 evidence/backfill-report.txt：
+- [schema-not-migrated] 0143 三列缺失（dev 仍在 alembic 0142）
+- 12 条 KPI：11 条 planned time_grain=month，1 条（KPI_SUPPLIER_MAINTENANCE_RATIO）
+  grain 无时间词 ⇒ 不写
+- time_column：仅 KPI_INVOICE_MATCH_RATE（grain_keys 唯一日期 token INVOICE_DATE）
+  planned 写；其余多候选/零候选不写并列出候选
+- summary: changes=11 noop=1 total=12
+- dry-run：未写库
+
+注意：本次 dry-run 暴露并修复了 sourcePropertiesForMetric 的 ORM 实体 select
+会触发 selectin 关系加载（OntologyClass.metrics → 整行 ontology_metric）问题；
+改为列表达式 select 后 dev（缺 0143 列）不再 UndefinedColumn 崩溃。
+
+# ── Fix round 1（controller review I1 / I2） ─────────────────────────
+
+## I1 RED（先加回归测试，修复前）
+
+$ uv run pytest app/tests/integration/test_kpi_time_grain_backfill_apply.py -q \
+      -k 'date_named_table or cte_name'
+FAILED test_date_named_table_is_not_a_time_column_candidate
+FAILED test_cte_name_and_date_named_table_are_not_candidates
+2 failed, 2 passed, 9 deselected
+（失败原因：_referencedColumns 把 formula 整段 SQL 的裸词喂给名称启发式，
+  FROM DWD_DATE_DIM / WITH recent_date / max_date 被当成日期候选 ⇒
+  candidates 多值 ⇒ basis=ambiguous ⇒ time_column 未回填）
+（同轮 -k 'existing_equal or existing_conflicting' 2 passed：I2 是覆盖缺口，
+  不是行为缺陷 —— 特征测试在修复前即锁定现有「填 null 不覆盖」语义）
+
+## I1 GREEN（修复后）
+
+$ uv run pytest app/tests/integration/test_kpi_time_grain_backfill_apply.py -q
+13 passed
+
+修复：_isDateIdentifier 增加 knownColumns（ontology_property.source_column 大写
+集合）门 —— 名称启发式（含 DATE / _TS 结尾）只作用于已知物理列；表名 / CTE 名 /
+关键字 / 别名一律不是候选。
+
+## MUTATION-3 — 还原 I1 修复（删除 known-column 门）
+
+改动：app/services/kpi_time_grain_backfill.py
+    if upper not in knownColumns:
+        return False
+→ （删除两行）
+
+$ uv run pytest ... -q -k 'date_named_table or cte_name'
+FAILED test_date_named_table_is_not_a_time_column_candidate
+FAILED test_cte_name_and_date_named_table_are_not_candidates
+2 failed, 11 deselected
+
+还原：重新加回两行 → 复跑
+2 passed, 11 deselected
+
+## I2 特征测试（修复前即绿：覆盖缺口，不是行为缺陷）
+
+$ uv run pytest ... -q -k 'existing_equal or existing_conflicting'
+2 passed
+（equal：显式值 == 推导值 ⇒ applied：0 条变更、无「保留人工值」note；
+  conflicting：kpi month / metric year / column BOOKED_DATE 全部保留，
+  三条冲突 note 出现在 stdout，推导值不覆盖）
+
+## MUTATION-4 — kpi_catalog.time_grain 冲突时写推导值
+
+改动：app/services/kpi_time_grain_backfill.py
+    if kpi.time_grain is None:
+→   if True:  # MUTATION-4
+
+$ uv run pytest ... -q -k 'existing_conflicting'
+FAILED test_existing_conflicting_values_are_never_overwritten
+E   AssertionError: assert 'applied：0 条变更' in '...summary: changes=1 ... applied：1 条变更...'
+
+还原：if kpi.time_grain is None: → 全文件复跑 13 passed
+
+## MUTATION-5 — ontology_metric.time_column 冲突时写推导值
+
+改动：app/services/kpi_time_grain_backfill.py
+    elif metric.time_column is not None:
+→   elif False:  # MUTATION-5
+
+$ uv run pytest ... -q -k 'existing_conflicting'
+FAILED test_existing_conflicting_values_are_never_overwritten
+E   AssertionError: assert 'applied：0 条变更' in '...summary: changes=1 ... applied：1 条变更...'
+
+还原：elif metric.time_column is not None: → 全文件复跑 13 passed
+
+## dev 5433 dry-run 复跑（只读，Fix round 1 后）
+
+$ uv run python scripts/kpi_backfill_time_grain.py \
+    --database-url 'postgresql+asyncpg://qa_user:***@127.0.0.1:5433/qa_metadata'
+exit=0，输出覆盖 evidence/backfill-report.txt
+- summary: changes=11 noop=1 total=12（与修复前一致：dev 12 条 KPI 的公式里
+  没有被误判的表名/CTE 名，I1 修复不改变 dev planned 结果）
+- KPI_INVOICE_MATCH_RATE：time_column=INVOICE_DATE（grain_keys）不变
+- 未写库（无 --apply；5433 全程只读）
+

@@ -128,6 +128,10 @@ dev 库 12 条 KPI 实为 5 种形状（加总 / 平均 / 带过滤平均 / 条�
 
 **挂点**：**注入时实时对账** + **发布时对账** ⇒ **不依赖任何编译入口**（`compileObject` 零生产调用方 ⇒ 编译期对账在生产永不触发）。
 
+> **P3（2026-11-12）改造了层 2 的判定方式**（不改三档语义）：治理⇄技术比较从「中文字符串直比」
+> 改为经 `kpi_alignment_resolver` 解析成物理列 + `time_grain` 枚举比较；`unknown` 现在会置
+> `degraded=True`（仍放行注入）。详见 §17。
+
 **审计**：`audit_log`，`entity_type='kpi_metric_reconcile'`，**仅在有 finding 时落**（`pass` 不落，避免噪声）。
 
 ---
@@ -390,3 +394,45 @@ KPI: DRAFT → PUBLISHED  ⟸ 必须同时满足：
    或先与脚本归属方确认放宽闸门。
 
 **未做（P1/P2/P3 边界）**：匹配升级、Tier A 执行、结构化→SQL 编译器、生产部署。
+
+## 17. P3 别名解析层 + time_grain（2026-11-12）
+
+**交付**（分支 `feat/kpi-p3-alias-resolver`，迁移 0143，未部署）：
+
+1. **`TimeGrain` 枚举**（`day/week/month/quarter/year`）：`kpi_catalog.time_grain` +
+   `ontology_metric.time_grain/time_column` 三列（全 nullable）。独立于
+   `time_scope_resolver.granularity`（那是问句区间口径）。
+2. **`kpi_alignment_resolver`（纯函数）**：结构化治理 token → 物理列。唯一命中→列名；
+   多候选→unknown；无候选→missing；纯时间词（`月/月份/季度/年/周/日/天`）→`TimeGrain`
+   并从列比较剔除。源类 = `ontology_metric_source` class_id 并集（`target_class_id` 全 NULL 不用）；
+   **无 source 行 ⇒ unknown，不是 mismatch**。别名分支（`property_alias`/`business_aliases`）
+   按现数据（全 null）为未来准备。
+3. **层 2 对账改造**：`reconcileMetric`/`reconcileGovernanceVsTechnique` 新增可选 `resolution`
+   参数——有值时粒度比较 = `time_grain` 枚举相等 + 维度列集合相等；**双侧 `time_grain` 都未
+   声明 ⇒ 跳过粒度轴**（Round 2 C 裁决：不产生 unknown，快照类 KPI 不被时间轴拦）；仅单侧
+   缺失 ⇒ unknown；**`resolution=None` = 与 P2 逐字相同的恒等回退**（存量 12 条 verdict
+   不变：8 pass/4 unknown，回归测试钉死）。ambiguous token 不经集合差集升级 mismatch。
+4. **degraded 扩展**：`verdict==unknown ⇒ degraded=True`（无条件，不受恒等回退豁免）。
+   mismatch 仍阻断注入；Tier A 资格语义不变（unknown 本来就非 pass）。
+5. **治理写入口**：KPI 目录 + 本体指标两个 admin 入口读写 `timeGrain`/`timeColumn`；
+   `time_grain` 与 `grain`（自由文本，影响推导值）都进 `_GOVERNANCE_KEYS` 发布闸门；
+   发布闸门两个调用点（`checkKpiPublishGate` / `_linkedMismatchOf`）与运行时同口径消费
+   `resolutionForMetric`（Round 2 I2 收口）；前端两表单可编辑（i18n 中英齐全）。
+6. **回填脚本** `backend/scripts/kpi_backfill_time_grain.py`：默认 dry-run；`--allow-prod-write`
+   四道闸；只填 null（显式值保留 + conflict note）；`time_column` 候选**仅限已建模源列**
+   （`ontology_property.source_column`），多候选/零候选**不写**只报告（「不猜」原则）。
+
+**dev 库执行（2026-11-12，5433 `qa_metadata`，用户批准）**：`alembic upgrade head` 0142→0143；
+回填 **changes=11 noop=1**（11 条 month 双侧；metric=5 额外 `time_column=INVOICE_DATE`；
+4 条 time_column 多候选不写；MAINTENANCE_RATIO「供应商（快照）」全 noop）；幂等复跑 0 变更。
+取证：`../changes/2026-11-11-kpi-p3-alias-resolver/evidence/`。
+
+**发版前提（runbook 须登记）**：生产仍在 0140 + 旧代码；下次发版 `upgrade head`（→0143）后
+**立即回填**。回填前窗口内技术侧 `time_grain` 为 NULL 而治理侧多由 `grain` 推导为 month ⇒
+单侧缺失 ⇒ 原始 verdict 12/12 unknown（8 条基线 pass 降为 unknown/degraded，注入仍放行），
+回填后恢复 8 pass/4 unknown/0 mismatch。两侧都未声明的快照类 KPI 走跳过语义（无
+`time_grain_absent_*`），但因治理列全空仍为 unknown。不是恒等回退——闸门已与运行时同口径
+消费 resolution。
+
+**未做**：别名数据补录（独立数据工作项）；time_column 治理侧人工指定（metric=2/3/7/11 多候选
+PROMISED_RECEIPT_DATE vs RECEIPT_DATE）；P4 参数化/编译器另立项（可先吃 time_grain）。

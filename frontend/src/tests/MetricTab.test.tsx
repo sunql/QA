@@ -63,6 +63,9 @@ const mockMetric: OntologyMetric = {
   status: "DRAFT",
   owner: null,
   executionSource: null,
+  // 刻意取非默认值：断言编辑回填路径真的生效（漏回填会变成空值）
+  timeGrain: "month",
+  timeColumn: "ORDER_DATE",
 };
 
 /** 带非空 measure 的指标：用于守住「编辑回显 class_id / class_alias」的接线。
@@ -317,6 +320,38 @@ describe("MetricTab — 编辑流", () => {
     });
   });
 
+  it("编辑回填时间粒度 / 时间列；时间列清空后提交显式 null", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByText("订单金额");
+
+    const editBtn = screen.getAllByRole("button").find((b) =>
+      (b.textContent || "").replace(/\s+/g, "").includes("编辑"),
+    );
+    expect(editBtn).toBeDefined();
+    await user.click(editBtn!);
+
+    // 时间粒度回填 month ⇒ 选中项显示「月」
+    const timeGrainField = (await screen.findByLabelText("时间粒度")).closest(
+      ".ant-form-item",
+    );
+    expect(timeGrainField).toHaveTextContent("月");
+    // 时间列回填 ORDER_DATE
+    const timeColumnInput = (await screen.findByLabelText(
+      "时间列",
+    )) as HTMLInputElement;
+    expect(timeColumnInput.value).toBe("ORDER_DATE");
+
+    // 清空时间列 ⇒ 提交必须发显式 null（undefined 会被 axios 丢弃 ⇒ 后端保留旧值）
+    await user.clear(timeColumnInput);
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.updateMetric).toHaveBeenCalled());
+    const payload = api.updateMetric.mock.calls[0][1];
+    expect(payload.timeGrain).toBe("month");
+    expect(payload.timeColumn).toBeNull();
+  });
+
   it("把比率改成度量型时清空分母（改型就是「不要分母」的意图）", async () => {
     api.listMetrics.mockResolvedValue([mockMetricWithMeasure]);
     const user = userEvent.setup();
@@ -429,6 +464,38 @@ describe("MetricTab — 结构化技术形态", () => {
       class_alias: null,
     });
     expect(payload.status).toBe("DRAFT");
+    // 留空 = 两个时间字段显式 null（创建路径同样不发 undefined）
+    expect(payload.timeGrain).toBeNull();
+    expect(payload.timeColumn).toBeNull();
+  });
+
+  it("新建表单提供时间粒度下拉（五枚举 + 留空）与时间列输入，并进入 payload", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByRole("table");
+
+    await user.click(screen.getByRole("button", { name: /新\s?增/ }));
+    await user.type(await screen.findByLabelText("指标名"), "新指标");
+    await user.type(await screen.findByLabelText("公式"), "SELECT 1 FROM T");
+
+    // 五枚举 + 显式留空选项
+    await user.click(await screen.findByLabelText("时间粒度"));
+    const optionTexts = Array.from(
+      document.querySelectorAll(".ant-select-item-option"),
+    ).map((el) => el.textContent);
+    expect(optionTexts).toEqual(
+      expect.arrayContaining(["日", "周", "月", "季度", "年", "（无）"]),
+    );
+    await user.click(await screen.findByTitle("季度"));
+
+    await user.type(await screen.findByLabelText("时间列"), "ORDER_DATE");
+
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    await waitFor(() => expect(api.createMetric).toHaveBeenCalled());
+    const payload = api.createMetric.mock.calls[0][0];
+    expect(payload.timeGrain).toBe("quarter");
+    expect(payload.timeColumn).toBe("ORDER_DATE");
   });
 });
 describe("MetricTab — 写入口 admin 门禁", () => {

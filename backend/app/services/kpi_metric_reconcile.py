@@ -18,7 +18,9 @@ from app.domain.enums import (
     MetricAggregationOrder,
     MetricExecutionSource,
     MetricType,
+    TimeGrain,
 )
+from app.services.kpi_alignment_resolver import ResolutionOutcome
 from app.services.nl2sql_semantic_guard import (
     extractSqlIdentifiers,
     measureColumnIdentifiers,
@@ -44,6 +46,13 @@ REASON_GRAIN_MISMATCH = "grain_mismatch"
 REASON_RATIO_AGGREGATION_ORDER_MISSING = "ratio_aggregation_order_missing"
 REASON_RATIO_AGGREGATION_ORDER_INVALID = "ratio_aggregation_order_invalid"
 REASON_EXECUTABLE_COLUMN_MISSING = "executable_column_missing_in_measure"
+# P3 D3：治理 token 经别名解析层后的结果（resolution 非 None 时）。
+REASON_GOVERNANCE_TOKEN_UNRESOLVABLE = "governance_token_unresolvable"
+REASON_GOVERNANCE_TOKEN_AMBIGUOUS = "governance_token_ambiguous"
+REASON_TIME_GRAIN_ABSENT_GOVERNANCE = "time_grain_absent_governance"
+REASON_TIME_GRAIN_ABSENT_TECHNICAL = "time_grain_absent_technical"
+REASON_TIME_GRAIN_MISMATCH = "time_grain_mismatch"
+REASON_TIME_COLUMN_NOT_IN_SOURCE = "time_column_not_in_source"
 
 _TYPES_REQUIRING_DENOMINATOR = frozenset(
     {MetricType.RATIO.value, MetricType.DIFFERENCE.value}
@@ -111,6 +120,9 @@ class MetricTechnique:
     filter_expression: str | None = None
     formula: str | None = None
     execution_source: str | None = None
+    # P3 D3：技术侧时间粒度与源类日期列（0143 新列）。
+    time_grain: str | None = None
+    time_column: str | None = None
 
     def structuredColumns(self) -> set[str]:
         """结构化 measure 声明的全部列（分子 ∪ 分母）。"""
@@ -129,6 +141,17 @@ class GovernanceSpec:
     numerator_columns: tuple[str, ...] = ()
     denominator_columns: tuple[str, ...] = ()
     grain_keys: tuple[str, ...] = ()
+    # P3 D3：治理侧时间粒度（由 kpi.grain 自由文本推导，R6）。
+    time_grain: str | None = None
+
+
+def governanceTokensOf(governance: GovernanceSpec) -> tuple[str, ...]:
+    """治理侧全部结构化 token（分子 ∪ 分母 ∪ 粒度键），供 resolver 一次性解析。"""
+    return (
+        tuple(governance.numerator_columns)
+        + tuple(governance.denominator_columns)
+        + tuple(governance.grain_keys)
+    )
 
 
 @dataclass(frozen=True)
@@ -273,6 +296,146 @@ def _checkGrain(
     return ()
 
 
+def _parseTimeGrain(value: str | None) -> TimeGrain | None:
+    """``time_grain`` 文本 → 枚举（大小写/空白不敏感）；非法值按缺失处理。"""
+    text = (value or "").strip().lower()
+    if not text:
+        return None
+    try:
+        return TimeGrain(text)
+    except ValueError:
+        return None
+
+
+def _resolvedColumnsFor(
+    tokens: tuple[str, ...], resolution: ResolutionOutcome
+) -> tuple[str, ...]:
+    """从扁平解析结果里取出属于本角色 token 的物理列（集合语义，排序）。"""
+    declared = _tokens(tokens)
+    columns = {
+        column.strip().lower()
+        for token, column in resolution.resolved
+        if token.strip().lower() in declared
+    }
+    return tuple(sorted(columns))
+
+
+def _hasAmbiguousTokens(
+    tokens: tuple[str, ...], resolution: ResolutionOutcome
+) -> bool:
+    """本组 token 是否含 resolver 无法判定的 token（多候选 / 无源类）。
+
+    含歧义时列集合是不完整的，任何基于差集的 mismatch 都可能是误判；
+    按设计「不猜 ⇒ unknown 不阻断」，此时该组比较不再产出差集 mismatch，
+    由 ``governance_token_ambiguous`` 的 unknown finding 表达。
+    """
+    declared = _tokens(tokens)
+    ambiguous = {token.strip().lower() for token in resolution.unknownTokens}
+    return bool(declared & ambiguous)
+
+
+def _checkTimeGrain(
+    governance: GovernanceSpec, technique: MetricTechnique
+) -> tuple[ReconcileFinding, ...]:
+    """时间粒度枚举比较。
+
+    C 裁决（P3 I2）：**双侧都未声明** ⇒ 跳过粒度轴（不产生 unknown）；只有单侧
+    声明 ⇒ unknown（不 mismatch，设计 §7.3）；双侧都声明且不等 ⇒ mismatch。
+    """
+    governanceGrain = _parseTimeGrain(governance.time_grain)
+    technicalGrain = _parseTimeGrain(technique.time_grain)
+    if governanceGrain is None and technicalGrain is None:
+        return ()
+    findings: list[ReconcileFinding] = []
+    if governanceGrain is None:
+        findings.append(_finding(
+            LAYER_GOVERNANCE,
+            REASON_TIME_GRAIN_ABSENT_GOVERNANCE,
+            "治理侧未声明时间粒度",
+            VERDICT_UNKNOWN,
+        ))
+    if technicalGrain is None:
+        findings.append(_finding(
+            LAYER_GOVERNANCE,
+            REASON_TIME_GRAIN_ABSENT_TECHNICAL,
+            "技术侧未声明时间粒度",
+            VERDICT_UNKNOWN,
+        ))
+    if (
+        governanceGrain is not None
+        and technicalGrain is not None
+        and governanceGrain != technicalGrain
+    ):
+        findings.append(_finding(
+            LAYER_GOVERNANCE,
+            REASON_TIME_GRAIN_MISMATCH,
+            f"时间粒度不一致：治理={governanceGrain.value} 技术={technicalGrain.value}",
+            VERDICT_MISMATCH,
+        ))
+    return tuple(findings)
+
+
+def _checkGrainWithResolution(
+    governance: GovernanceSpec,
+    technique: MetricTechnique,
+    resolution: ResolutionOutcome,
+) -> tuple[ReconcileFinding, ...]:
+    """粒度比较 = time_grain 枚举相等 + 维度列集合（经 resolver）相等。"""
+    findings = list(_checkTimeGrain(governance, technique))
+    declaredRaw = _tokens(governance.grain_keys)
+    if not declaredRaw:
+        findings.append(_finding(
+            LAYER_GOVERNANCE,
+            REASON_GOVERNANCE_GRAIN_ABSENT,
+            "治理侧未声明结构化粒度键",
+            VERDICT_UNKNOWN,
+        ))
+        return tuple(findings)
+    resolvedDimensions = set(
+        _resolvedColumnsFor(governance.grain_keys, resolution)
+    )
+    technicalDimensions = _tokens(technique.grain_keys)
+    if not technicalDimensions:
+        findings.append(_finding(
+            LAYER_GOVERNANCE,
+            REASON_TECHNICAL_GRAIN_ABSENT,
+            "治理侧声明了粒度键，但技术侧为空",
+            VERDICT_MISMATCH,
+        ))
+        return tuple(findings)
+    # 含歧义 token 时维度集合不完整，差集结果不可信 ⇒ 不判 mismatch（I2）。
+    if (
+        not _hasAmbiguousTokens(governance.grain_keys, resolution)
+        and resolvedDimensions != technicalDimensions
+    ):
+        findings.append(_finding(
+            LAYER_GOVERNANCE,
+            REASON_GRAIN_MISMATCH,
+            "治理与技术粒度键不一致："
+            f"治理={sorted(resolvedDimensions)} 技术={sorted(technicalDimensions)}",
+            VERDICT_MISMATCH,
+        ))
+    return tuple(findings)
+
+
+def _checkTimeColumn(
+    technique: MetricTechnique, resolution: ResolutionOutcome
+) -> tuple[ReconcileFinding, ...]:
+    """技术声明的 ``time_column`` 必须落在源类日期候选内（否则 unknown 降级）。"""
+    column = (technique.time_column or "").strip()
+    if not column:
+        return ()
+    candidates = {candidate.strip().lower() for candidate in resolution.timeCandidates}
+    if column.lower() in candidates:
+        return ()
+    return (_finding(
+        LAYER_GOVERNANCE,
+        REASON_TIME_COLUMN_NOT_IN_SOURCE,
+        f"技术时间列 {column} 不在源类日期候选：{sorted(candidates)}",
+        VERDICT_UNKNOWN,
+    ),)
+
+
 def _checkRatio(technique: MetricTechnique) -> tuple[ReconcileFinding, ...]:
     """RATIO 型必须配合法聚合阶，防止两种比率语义被混用。"""
     if technique.metric_type != MetricType.RATIO.value:
@@ -295,25 +458,88 @@ def _checkRatio(technique: MetricTechnique) -> tuple[ReconcileFinding, ...]:
     return ()
 
 
-def reconcileGovernanceVsTechnique(
+def _needsDenominator(
+    governance: GovernanceSpec, technique: MetricTechnique
+) -> bool:
+    return (
+        technique.metric_type in _TYPES_REQUIRING_DENOMINATOR
+        or bool(_tokens(governance.denominator_columns))
+    )
+
+
+def _reconcileGovernanceIdentity(
     governance: GovernanceSpec, technique: MetricTechnique
 ) -> ReconcileResult:
-    """层 2：治理 ⇄ 技术；治理是签字基准。"""
+    """``resolution=None`` 的恒等回退：与 P2 行为逐字相同（硬门槛 DoD#5）。"""
     findings: list[ReconcileFinding] = []
     findings.extend(_checkRole(
         governance.numerator_columns, technique.numerator, "分子"
     ))
-    needsDenominator = (
-        technique.metric_type in _TYPES_REQUIRING_DENOMINATOR
-        or bool(_tokens(governance.denominator_columns))
-    )
-    if needsDenominator:
+    if _needsDenominator(governance, technique):
         findings.extend(_checkRole(
             governance.denominator_columns, technique.denominator, "分母"
         ))
     findings.extend(_checkGrain(governance.grain_keys, technique.grain_keys))
     findings.extend(_checkRatio(technique))
     return _result(tuple(findings))
+
+
+def _reconcileGovernanceWithResolution(
+    governance: GovernanceSpec,
+    technique: MetricTechnique,
+    resolution: ResolutionOutcome,
+) -> ReconcileResult:
+    """解析结果可用：治理列集合 = resolver 结果；粒度按枚举 + 维度列比较。"""
+    findings: list[ReconcileFinding] = []
+    if resolution.missingTokens:
+        findings.append(_finding(
+            LAYER_GOVERNANCE,
+            REASON_GOVERNANCE_TOKEN_UNRESOLVABLE,
+            f"治理 token 在源类无对应列：{', '.join(resolution.missingTokens)}",
+            VERDICT_MISMATCH,
+        ))
+    if resolution.unknownTokens:
+        findings.append(_finding(
+            LAYER_GOVERNANCE,
+            REASON_GOVERNANCE_TOKEN_AMBIGUOUS,
+            f"治理 token 命中多个候选，无法判定：{', '.join(resolution.unknownTokens)}",
+            VERDICT_UNKNOWN,
+        ))
+    # 角色 token 含歧义 ⇒ 解析后的列集合不完整，差集 mismatch 不可信（I2）：
+    # 保留 ``governance_token_ambiguous`` 的 unknown，不再追加列差集判定。
+    if not _hasAmbiguousTokens(governance.numerator_columns, resolution):
+        findings.extend(_checkRole(
+            _resolvedColumnsFor(governance.numerator_columns, resolution),
+            technique.numerator,
+            "分子",
+        ))
+    if _needsDenominator(governance, technique) and not _hasAmbiguousTokens(
+        governance.denominator_columns, resolution
+    ):
+        findings.extend(_checkRole(
+            _resolvedColumnsFor(governance.denominator_columns, resolution),
+            technique.denominator,
+            "分母",
+        ))
+    findings.extend(_checkGrainWithResolution(governance, technique, resolution))
+    findings.extend(_checkRatio(technique))
+    findings.extend(_checkTimeColumn(technique, resolution))
+    return _result(tuple(findings))
+
+
+def reconcileGovernanceVsTechnique(
+    governance: GovernanceSpec,
+    technique: MetricTechnique,
+    resolution: ResolutionOutcome | None = None,
+) -> ReconcileResult:
+    """层 2：治理 ⇄ 技术；治理是签字基准。
+
+    ``resolution`` 为 None ⇒ 恒等回退（存量行为不变）；非 None ⇒ 治理 token
+    先用别名解析层换成物理列，再与技术 measure 比较（P3 D3）。
+    """
+    if resolution is None:
+        return _reconcileGovernanceIdentity(governance, technique)
+    return _reconcileGovernanceWithResolution(governance, technique, resolution)
 
 
 def reconcileExecutableVsStructured(technique: MetricTechnique) -> ReconcileResult:
@@ -343,17 +569,22 @@ def reconcileExecutableVsStructured(technique: MetricTechnique) -> ReconcileResu
 
 
 def reconcileMetric(
-    governance: GovernanceSpec, technique: MetricTechnique
+    governance: GovernanceSpec,
+    technique: MetricTechnique,
+    resolution: ResolutionOutcome | None = None,
 ) -> ReconcileResult:
-    """合并三层 findings；注入门禁只采用层 2，层 1/3 仅降级。"""
+    """合并三层 findings；注入门禁只采用层 2，层 1/3/层 2 unknown 仅降级。"""
     layer1 = reconcileTechniqueInternal(technique)
-    layer2 = reconcileGovernanceVsTechnique(governance, technique)
+    layer2 = reconcileGovernanceVsTechnique(governance, technique, resolution)
     layer3 = reconcileExecutableVsStructured(technique)
     findings = tuple(
         f for layer in (layer1, layer2, layer3) for f in layer.findings
     )
+    # R4：unknown 放行注入，但必须标注 degraded（设计 §7.3）。
     degraded = (
-        layer1.verdict == VERDICT_MISMATCH or layer3.verdict == VERDICT_MISMATCH
+        layer1.verdict == VERDICT_MISMATCH
+        or layer3.verdict == VERDICT_MISMATCH
+        or layer2.verdict == VERDICT_UNKNOWN
     )
     return ReconcileResult(
         verdict=layer2.verdict, findings=findings, degraded=degraded

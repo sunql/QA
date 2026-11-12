@@ -109,7 +109,7 @@ async def listClasses(
 @router.post("/classes", response_model=OntologyClassRead, status_code=status.HTTP_201_CREATED)
 async def createClass(
     dto: OntologyClassCreate,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(requireAdmin),
     db: AsyncSession = Depends(getDb),
 ) -> OntologyClassRead:
     """创建本体类（起始 version=1）。
@@ -153,7 +153,7 @@ async def getClass(
 async def updateClass(
     id: int,
     dto: OntologyClassUpdate,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(requireAdmin),
     db: AsyncSession = Depends(getDb),
 ) -> OntologyClassRead:
     """更新本体类（Phase 6：创建新版本而非原地修改，返回新 id）。
@@ -170,7 +170,7 @@ async def updateClass(
 @router.delete("/classes/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteClass(
     id: int,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(requireAdmin),
     db: AsyncSession = Depends(getDb),
 ) -> None:
     """软删除本体类：valid_to = now()（墓碑），listClasses 默认不再返回。
@@ -240,7 +240,7 @@ async def listAllProperties(
 )
 async def createProperty(
     dto: OntologyPropertyCreate,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(requireAdmin),
     db: AsyncSession = Depends(getDb),
 ) -> OntologyPropertyRead:
     """创建本体属性。"""
@@ -274,7 +274,7 @@ async def getProperty(
 async def updateProperty(
     id: int,
     dto: OntologyPropertyUpdate,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(requireAdmin),
     db: AsyncSession = Depends(getDb),
 ) -> OntologyPropertyRead:
     """更新本体属性。"""
@@ -289,7 +289,7 @@ async def updateProperty(
 @router.delete("/properties/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def deleteProperty(
     id: int,
-    user: CurrentUser = Depends(getCurrentUser),
+    user: CurrentUser = Depends(requireAdmin),
     db: AsyncSession = Depends(getDb),
 ) -> None:
     """删除本体属性。"""

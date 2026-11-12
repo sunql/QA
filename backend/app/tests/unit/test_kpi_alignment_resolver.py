@@ -172,6 +172,7 @@ def testBlankTokenIsMissing() -> None:
         ("月", TimeGrain.MONTH),
         ("月份", TimeGrain.MONTH),
         ("按月", TimeGrain.MONTH),
+        ("按月份", TimeGrain.MONTH),
         ("季度", TimeGrain.QUARTER),
         ("按季度", TimeGrain.QUARTER),
         ("年", TimeGrain.YEAR),
@@ -189,6 +190,20 @@ def testPureTimeTokenMapsToTimeGrain(token: str, expected: TimeGrain) -> None:
     props = (_prop("数量", "QTY"),)
     outcome = resolveGovernanceTokens((token,), props)
     assert outcome.timeGrain is expected
+    assert outcome.resolved == ()
+    assert outcome.unknownTokens == ()
+    assert outcome.missingTokens == ()
+
+
+def testByPrefixMonthVariantIsPureTimeWordNotColumnToken() -> None:
+    """R8：`按X` 形态必须覆盖全部裸时间词（含 `按月份`）。
+
+    回归：`_BARE_TIME_WORDS` 漏 `月份` 时，`按月份` 落入列解析 ⇒ missing ⇒
+    `governance_token_unresolvable` mismatch，错误阻断注入。
+    """
+    props = (_prop("数量", "QTY"),)
+    outcome = resolveGovernanceTokens(("按月份",), props)
+    assert outcome.timeGrain is TimeGrain.MONTH
     assert outcome.resolved == ()
     assert outcome.unknownTokens == ()
     assert outcome.missingTokens == ()

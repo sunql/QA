@@ -42,9 +42,11 @@ _TIME_TOKEN_TO_GRAIN: dict[str, TimeGrain] = {
     "天": TimeGrain.DAY,
 }
 
-# `按X` 前缀形态只认这五个裸时间词（基本形态）。
+# `按X` 前缀形态认的全部裸时间词，必须与 `_TIME_TOKEN_TO_GRAIN` 的键对齐
+# （R8：月/月份/季度/年/周/日/天）。直接从映射派生，避免两处清单再次漂移
+# （此前漏 `月份` ⇒ `按月份` 被当列 token ⇒ missing ⇒ 误判 mismatch）。
 _BY_PREFIX = "按"
-_BARE_TIME_WORDS: frozenset[str] = frozenset({"月", "季度", "年", "周", "日", "天"})
+_BARE_TIME_WORDS: frozenset[str] = frozenset(_TIME_TOKEN_TO_GRAIN)
 
 # 自由文本 grain 推导：最长词优先（「季度」先于「月」；两者无重叠但保持显式）。
 _GRAIN_TEXT_MARKERS: tuple[tuple[str, TimeGrain], ...] = (

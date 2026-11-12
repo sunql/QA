@@ -623,4 +623,7 @@ class TimeGrain(StrEnum):
     YEAR = "year"
 
 
-TIME_GRAIN_VALUES: frozenset[str] = frozenset(grain.value for grain in TimeGrain)
+# 字面量而非 `frozenset(g.value for g in TimeGrain)`：本文件在收集前 import 链
+# （conftest 传递闭包）上，顶层带本地名的调用被 import 期钩子守卫 fail-closed
+# （test_ci_conftest_chain 实证）。枚举↔集合一致性由 test_kpi_time_grain_model 钉死。
+TIME_GRAIN_VALUES: frozenset[str] = frozenset({"day", "week", "month", "quarter", "year"})

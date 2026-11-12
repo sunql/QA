@@ -25,6 +25,8 @@ def test_time_grain_enum_has_five_values() -> None:
 def test_time_grain_values_frozenset() -> None:
     assert isinstance(TIME_GRAIN_VALUES, frozenset)
     assert frozenset({"day", "week", "month", "quarter", "year"}) == TIME_GRAIN_VALUES
+    # 枚举 ↔ 值集合一致（enums.py 里集合是字面量，防两处漂移）。
+    assert frozenset(member.value for member in TimeGrain) == TIME_GRAIN_VALUES
 
 
 def test_kpi_catalog_declares_time_grain() -> None:

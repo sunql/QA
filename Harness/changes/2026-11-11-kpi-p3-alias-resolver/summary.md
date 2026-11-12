@@ -95,9 +95,17 @@ NONE KPI 的 unknown verdict 不带 degraded 标注。P3 交付：
 2. **time_column 治理侧人工指定**：metric=2/3/7/11 多候选（PROMISED_RECEIPT_DATE vs RECEIPT_DATE）、
    其余零候选，须业务确认后经 admin API 指定（R3）。
 3. **P4 参数化/编译器**：按序启动；编译器可先吃 time_grain（time_column 允许为 null）。
-4. **部署**：生产仍在 alembic 0140 + 旧代码。0143 随下次发版进链；**发版 runbook 须新增前提步骤：
-   `alembic upgrade head`（→0143）后立即执行 `scripts/kpi_backfill_time_grain.py --apply --allow-prod-write`**
-   （否则层 2 全部落 resolution=None 恒等回退，功能不生效——这不是缺陷，是设计好的降级）。
+4. **部署**：生产仍在 alembic 0140 + 旧代码。发版 runbook 必须按序执行：
+   1. **迁移先于新代码**：`alembic upgrade head`（→0143）必须先于新代码上线 ——
+      ORM 已声明 `time_grain` / `time_column` 三列，旧库上跑新代码会 `UndefinedColumn`。
+   2. **迁移后立即回填（硬闸门）**：执行
+      `scripts/kpi_backfill_time_grain.py --apply --allow-prod-write`；预期
+      **`changes=11 noop=1`**，幂等复跑必须 **`changes=0 noop=12`** 才算回填成功。
+   3. **回填前窗口的真实影响**：resolver 已生效但技术侧 `time_grain` 仍为 NULL ⇒
+      `_checkTimeGrain` 判 `time_grain_absent_technical` ⇒ 原始 verdict **12/12 unknown**，
+      8 条基线 pass KPI 暂失 Tier A（degraded **注入**，不是故障、不阻断注入）；
+      回填后恢复 **8 pass / 4 unknown**（见 `evidence/stock-verdict-after.txt`）。
+      注意：不是「resolution=None 恒等回退」——恒等路径会忽略时间字段而保持 pass。
 5. **Minor 归集**：D1-D6 各任务评审的 Minor 记录于 SDD ledger（`.superpowers/sdd/plan/progress.md`），
    全部为非阻塞项（注释措辞、共享 helper、类型建模等），随下次触达重构。
 

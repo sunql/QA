@@ -337,9 +337,15 @@ def _hasAmbiguousTokens(
 def _checkTimeGrain(
     governance: GovernanceSpec, technique: MetricTechnique
 ) -> tuple[ReconcileFinding, ...]:
-    """时间粒度枚举比较；任一侧缺失只判 unknown（不 mismatch，设计 §7.3）。"""
+    """时间粒度枚举比较。
+
+    C 裁决（P3 I2）：**双侧都未声明** ⇒ 跳过粒度轴（不产生 unknown）；只有单侧
+    声明 ⇒ unknown（不 mismatch，设计 §7.3）；双侧都声明且不等 ⇒ mismatch。
+    """
     governanceGrain = _parseTimeGrain(governance.time_grain)
     technicalGrain = _parseTimeGrain(technique.time_grain)
+    if governanceGrain is None and technicalGrain is None:
+        return ()
     findings: list[ReconcileFinding] = []
     if governanceGrain is None:
         findings.append(_finding(

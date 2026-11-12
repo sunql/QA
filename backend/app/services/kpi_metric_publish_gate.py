@@ -41,7 +41,11 @@ from app.services.kpi_metric_reconcile import (
     reconcileGovernanceVsTechnique,
     reconcileTechniqueInternal,
 )
-from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
+from app.services.kpi_metric_spec import (
+    governanceSpecOf,
+    resolutionForMetric,
+    techniqueOf,
+)
 from app.services.kpi_metric_switches import SWITCH_GATE, readKpiMetricSwitch
 from app.services.messages_zh import (
     MSG_KPI_GATE_BLOCKED,
@@ -312,13 +316,23 @@ class _LinkedMismatch:
     reasonCodes: tuple[str, ...]
 
 
-def _linkedMismatchOf(
-    linked: tuple[KpiCatalog, ...], technique: MetricTechnique
+async def _linkedMismatchOf(
+    session: AsyncSession,
+    metricId: int | None,
+    linked: tuple[KpiCatalog, ...],
+    technique: MetricTechnique,
 ) -> tuple[_LinkedMismatch, ...]:
-    """关联 KPI 的层 2 对账：**只拦 mismatch**（unknown 放行，打破互锁）。"""
+    """关联 KPI 的层 2 对账：**只拦 mismatch**（unknown 放行，打破互锁）。
+
+    ``resolution`` 与运行时（契约构建 / chat Tier 判定）同口径构造：发布时
+    ``time_grain`` / ``time_column`` 也参与对账，不再只靠运行时降级兜底（P3 I2）。
+    loader 失败由 ``resolutionForMetric`` 内部回退 None（恒等路径），保持容错。
+    """
     mismatches: list[_LinkedMismatch] = []
     for kpi in linked:
-        layer2 = reconcileGovernanceVsTechnique(governanceSpecOf(kpi), technique)
+        governance = governanceSpecOf(kpi)
+        resolution = await resolutionForMetric(session, metricId, governance)
+        layer2 = reconcileGovernanceVsTechnique(governance, technique, resolution)
         # 只有 mismatch 计入（unknown 放行；反向实验把它改成 != VERDICT_PASS 时
         # ⇒ 用例 test_metric_publish_allowed_when_linked_kpi_governance_unknown 必须变红）
         if layer2.verdict == VERDICT_MISMATCH:
@@ -348,7 +362,9 @@ async def checkMetricPublishGate(
     degraded = (
         layer1.verdict == VERDICT_MISMATCH or layer3.verdict == VERDICT_MISMATCH
     )
-    linkedFindings = _linkedMismatchOf(await _loadLinkedKpis(session, metric.id), tech)
+    linkedFindings = await _linkedMismatchOf(
+        session, metric.id, await _loadLinkedKpis(session, metric.id), tech
+    )
     items = buildMetricGateItems(
         metricType=tech.metric_type,
         numeratorMeasure=tech.numerator,
@@ -399,7 +415,14 @@ async def checkKpiPublishGate(
     effectiveGovernance = (
         governance if governance is not None else governanceSpecOf(kpi)
     )
-    layer2 = reconcileGovernanceVsTechnique(effectiveGovernance, technique)
+    # 与运行时同口径：治理 token 先经别名解析层，再与技术形态对账（P3 I2）。
+    # loader/解析异常由 resolutionForMetric 回退 None（恒等路径），不阻断发布。
+    resolution = await resolutionForMetric(
+        session, effectiveMetricId, effectiveGovernance
+    )
+    layer2 = reconcileGovernanceVsTechnique(
+        effectiveGovernance, technique, resolution
+    )
     items = buildKpiGateItems(
         metricId=effectiveMetricId,
         metricStatus=metric.status if metric is not None else None,

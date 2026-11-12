@@ -38,7 +38,15 @@ logger = logging.getLogger(__name__)
 
 # 治理侧结构化列（改动它们 ⇒ 闸门必须按**新值**判对账，而不是旧口径）
 # `time_grain`：显式声明的口径粒度；显式值优先，缺省时回退 `grain` 文本推导（R6）。
-_GOVERNANCE_KEYS = ("numerator_columns", "denominator_columns", "grain_keys", "time_grain")
+# `grain` 也在内：同一次请求只改自由文本 grain 时，闸门必须按**新文本**推导的
+# time_grain 判定（否则用实体旧值 ⇒ 发布语义与本次请求不一致；I2 潜伏路径）。
+_GOVERNANCE_KEYS = (
+    "numerator_columns",
+    "denominator_columns",
+    "grain_keys",
+    "time_grain",
+    "grain",
+)
 
 # match_threshold 的默认值：与 DB server_default 一致（models.KpiCatalog 处为
 # Numeric(3, 2), nullable=False, default=Decimal("0.75")）。create / update 两条路径

@@ -621,6 +621,38 @@ def test_resolution_time_grain_absent_on_technical_is_unknown() -> None:
     assert r.reasons() == (REASON_TIME_GRAIN_ABSENT_TECHNICAL,)
 
 
+def test_resolution_time_grain_absent_on_both_sides_skips_axis() -> None:
+    """C 裁决：双侧都未声明 time_grain ⇒ 跳过粒度轴，不产生任何 unknown。"""
+    governance, technique, resolution = _resolvedAlignment()
+    governanceMissing = GovernanceSpec(
+        numerator_columns=governance.numerator_columns,
+        denominator_columns=governance.denominator_columns,
+        grain_keys=governance.grain_keys,
+        time_grain=None,
+    )
+    techniqueMissing = MetricTechnique(
+        metric_type=technique.metric_type,
+        numerator=technique.numerator,
+        denominator=technique.denominator,
+        aggregation_order=technique.aggregation_order,
+        grain_keys=technique.grain_keys,
+        time_grain=None,
+    )
+    r = reconcileGovernanceVsTechnique(
+        governanceMissing, techniqueMissing, resolution=resolution
+    )
+    assert r.verdict == VERDICT_PASS
+    assert r.findings == ()
+
+
+def test_resolution_time_grain_both_present_equal_is_pass() -> None:
+    """双侧都声明且一致 ⇒ pass（skip 只针对双侧都未声明，不得扩大）。"""
+    governance, technique, resolution = _resolvedAlignment()
+    r = reconcileGovernanceVsTechnique(governance, technique, resolution=resolution)
+    assert r.verdict == VERDICT_PASS
+    assert r.reasons() == ()
+
+
 def test_resolution_grain_dimension_aliases_and_time_word_removal() -> None:
     """grain_keys 里的时间词已由 resolver 剔除，业务词别名解析成物理列。"""
     governance = GovernanceSpec(

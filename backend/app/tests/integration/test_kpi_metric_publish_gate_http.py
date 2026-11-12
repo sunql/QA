@@ -14,7 +14,14 @@ from httpx import AsyncClient, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models import DataSource, KpiCatalog, OntologyMetric
+from app.domain.models import (
+    DataSource,
+    KpiCatalog,
+    OntologyClass,
+    OntologyMetric,
+    OntologyMetricSource,
+    OntologyProperty,
+)
 from app.models.system_config import SystemConfig
 from app.services.kpi_metric_switches import SWITCH_GATE
 
@@ -69,6 +76,40 @@ async def _createKpi(
     )
     assert resp.status_code == 201, resp.text
     return resp.json()
+
+
+async def _attachSources(
+    dbSession: AsyncSession,
+    metricId: int,
+    *,
+    tokens: tuple[str, ...] = ("plant_code",),
+) -> None:
+    """给 API 创建的指标补源类 + 源属性（P3 I2 后闸门消费 resolver）。
+
+    无源类的指标 ⇒ 治理 token 判 unknown（放行），测不到 mismatch 分支。
+    """
+    ontologyClass = OntologyClass(
+        class_name=f"HTTP_GATE_SRC_{metricId}",
+        version=1,
+        created_by="gate-test",
+    )
+    dbSession.add(ontologyClass)
+    await dbSession.flush()
+    for token in tokens:
+        dbSession.add(
+            OntologyProperty(
+                class_id=ontologyClass.id,
+                property_name=token,
+                source_column=token,
+                data_type="VARCHAR",
+            )
+        )
+    dbSession.add(
+        OntologyMetricSource(
+            metric_id=metricId, class_id=ontologyClass.id, role="BASE"
+        )
+    )
+    await dbSession.commit()
 
 
 async def _publishMetric(client: AsyncClient, metricId: int) -> Response:
@@ -136,6 +177,8 @@ async def test_metric_publish_blocked_when_linked_kpi_grain_mismatch(
     """关联 KPI 粒度键与技术侧不一致 ⇒ 层 2 = mismatch ⇒ 拦下 + 中文正文。"""
     await _enableGate(dbSession)
     metric = await _createMetric(client, "HTTP_MISMATCH_BLOCK")
+    # 有源类但无 other_plant ⇒ resolver 判 missing ⇒ 粒度差集 mismatch（非 unknown）。
+    await _attachSources(dbSession, metric["id"])
     await _createKpi(
         client,
         code="KPI_HTTP_MISMATCH",

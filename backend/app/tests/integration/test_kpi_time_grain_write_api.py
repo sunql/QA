@@ -7,10 +7,10 @@
    都必须携带新值（对照 `test_kpi_metric_backfill_apply.py` 的
    `test_publish_gate_uses_passed_governance_over_stored_values` 写法）。
 
-⚠️ 闸门对账当前走 `resolution=None` 的恒等回退（P3 D3 定下的行为，Task 3 DoD#5），
-该路径**不比较 `time_grain`**，所以本文件断言的是「闸门被调用时的输入快照」——
-只有新值确实传进闸门，后续接入解析结果时判定才可能正确；若断言 verdict，当前
-实现下任何值都会通过，等于假绿（详见 task-4 报告「发布闸门决策」）。
+⚠️ 闸门对账在 P3 I2 后与运行时同口径消费 `resolution`，`time_grain` 参与判定：
+双侧未声明 ⇒ 跳过粒度轴；单侧缺失 ⇒ unknown；双侧不等 ⇒ mismatch。本文件的
+spy 用例仍断言「闸门被调用时的输入快照」（新值必须传进闸门），并让指标侧也
+声明一致的 timeGrain + 源类，避免单侧缺失把发布拦在 unknown。
 
 写入语义：`timeGrain` 大小写不敏感，落库统一小写（`TimeGrain` 值域 / VARCHAR(20)）；
 非法值在 DTO 边界 422。
@@ -22,7 +22,14 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models import DataSource, KpiCatalog, OntologyMetric
+from app.domain.models import (
+    DataSource,
+    KpiCatalog,
+    OntologyClass,
+    OntologyMetric,
+    OntologyMetricSource,
+    OntologyProperty,
+)
 from app.models.system_config import SystemConfig
 from app.services.kpi_metric_switches import SWITCH_GATE
 
@@ -61,6 +68,37 @@ async def _createDataSource(dbSession: AsyncSession) -> DataSource:
     await dbSession.commit()
     await dbSession.refresh(ds)
     return ds
+
+
+async def _attachSources(
+    dbSession: AsyncSession,
+    metricId: int,
+    *,
+    tokens: tuple[str, ...] = ("QTY", "plant_code"),
+) -> None:
+    """给指标补源类 + 源属性：闸门与运行时同口径消费 resolver 的必需前置。"""
+    ontologyClass = OntologyClass(
+        class_name=f"TG_GATE_SRC_{metricId}",
+        version=1,
+        created_by="gate-test",
+    )
+    dbSession.add(ontologyClass)
+    await dbSession.flush()
+    for token in tokens:
+        dbSession.add(
+            OntologyProperty(
+                class_id=ontologyClass.id,
+                property_name=token,
+                source_column=token,
+                data_type="VARCHAR",
+            )
+        )
+    dbSession.add(
+        OntologyMetricSource(
+            metric_id=metricId, class_id=ontologyClass.id, role="BASE"
+        )
+    )
+    await dbSession.commit()
 
 
 async def _createMetric(client: AsyncClient, name: str, **overrides: object) -> dict:
@@ -248,7 +286,10 @@ async def test_kpi_publish_gate_receives_new_time_grain(
     import app.services.kpi_catalog_service as kpiCatalogModule
 
     await _enableGate(dbSession)
-    metric = await _createMetric(client, "TG_KPI_GATE", status="PUBLISHED")
+    metric = await _createMetric(
+        client, "TG_KPI_GATE", status="PUBLISHED", timeGrain="MONTH"
+    )
+    await _attachSources(dbSession, metric["id"])
     kpi = await _createKpi(
         client,
         code="KPI_TG_GATE",

@@ -16,7 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import CurrentUser
 from app.domain.enums import KpiStatus, MetricStatus
 from app.domain.exceptions import ConflictError
-from app.domain.models import DataSource, KpiCatalog, OntologyMetric
+from app.domain.models import (
+    DataSource,
+    KpiCatalog,
+    OntologyClass,
+    OntologyMetric,
+    OntologyMetricSource,
+    OntologyProperty,
+)
 from app.domain.schemas import (
     KpiCatalogCreate,
     KpiCatalogUpdate,
@@ -110,6 +117,43 @@ async def _seedKpi(dbSession: AsyncSession, **overrides) -> KpiCatalog:
     return kpi
 
 
+async def _attachSources(
+    dbSession: AsyncSession,
+    metric: OntologyMetric,
+    *,
+    tokens: tuple[str, ...] = ("QTY", "plant_code"),
+) -> None:
+    """模拟生产态：指标绑源类 + 源属性（治理 token 可被 resolver 解析）。
+
+    P3 起发布闸门与运行时同口径消费 ``resolution``：无源类的指标 ⇒
+    ``governance_token_ambiguous`` unknown ⇒ 闸门拦（既有闸门行为，不改）。
+    """
+    ontologyClass = OntologyClass(
+        class_name=f"GATE_SRC_{metric.id}",
+        version=1,
+        created_by="gate-test",
+    )
+    dbSession.add(ontologyClass)
+    await dbSession.flush()
+    for token in tokens:
+        dbSession.add(
+            OntologyProperty(
+                class_id=ontologyClass.id,
+                property_name=token,
+                source_column=token,
+                data_type="VARCHAR",
+            )
+        )
+    dbSession.add(
+        OntologyMetricSource(
+            metric_id=metric.id,
+            class_id=ontologyClass.id,
+            role="BASE",
+        )
+    )
+    await dbSession.commit()
+
+
 # ── updateKpi 路径 ───────────────────────────────────────────────────
 
 
@@ -155,6 +199,7 @@ async def test_publish_kpi_succeeds_when_all_conditions_met(
     await _enableGate(dbSession, True)
     ds = await _addSource(dbSession, "GATE_DS_OK")
     metric = await _seedMetric(dbSession)
+    await _attachSources(dbSession, metric)
     kpi = await _seedKpi(
         dbSession,
         kpi_code="KPI_GATE_OK",
@@ -233,6 +278,9 @@ async def test_publish_kpi_blocked_when_governance_not_reconciled(
     await _enableGate(dbSession, True)
     ds = await _addSource(dbSession, "GATE_DS_MISMATCH")
     metric = await _seedMetric(dbSession)
+    # 有源类才能解析治理 token：OTHER_COL 在源类无对应列 ⇒ 判 missing 并进 mismatch
+    # （无源类只会判 ambiguous/unknown，测不到本用例要的 mismatch 分支）。
+    await _attachSources(dbSession, metric)
     kpi = await _seedKpi(
         dbSession,
         kpi_code="KPI_GATE_MISMATCH",
@@ -257,6 +305,7 @@ async def test_publish_kpi_uses_new_governance_columns(
     await _enableGate(dbSession, True)
     ds = await _addSource(dbSession, "GATE_DS_NEWGOV")
     metric = await _seedMetric(dbSession)
+    await _attachSources(dbSession, metric)
     kpi = await _seedKpi(
         dbSession,
         kpi_code="KPI_GATE_NEWGOV",
@@ -341,6 +390,7 @@ async def test_create_kpi_published_succeeds_when_all_conditions_met(
     await _enableGate(dbSession, True)
     ds = await _addSource(dbSession, "GATE_DS_CREATE_OK")
     metric = await _seedMetric(dbSession, metric_name="创建闸门指标")
+    await _attachSources(dbSession, metric)
 
     service = KpiCatalogService()
     created = await service.createKpi(
@@ -357,6 +407,70 @@ async def test_create_kpi_published_succeeds_when_all_conditions_met(
         ADMIN,
     )
     assert created.status == KpiStatus.PUBLISHED.value
+
+
+# ── 发布闸门时间语义（P3 I2：闸门与运行时同口径消费 resolution）──────
+
+
+async def test_publish_kpi_succeeds_when_both_time_grains_absent(
+    dbSession: AsyncSession,
+) -> None:
+    """快照类 KPI：双侧都未声明 time_grain ⇒ 跳过粒度轴，正常发布。"""
+    await _enableGate(dbSession, True)
+    ds = await _addSource(dbSession, "GATE_DS_NO_GRAIN")
+    metric = await _seedMetric(dbSession)
+    await _attachSources(dbSession, metric)
+    kpi = await _seedKpi(
+        dbSession,
+        kpi_code="KPI_GATE_NO_GRAIN",
+        datasource_id=ds.id,
+        metric_id=metric.id,
+        numerator_columns=["QTY"],
+        grain_keys=["plant_code"],
+        grain="供应商（快照）",
+    )
+
+    service = KpiCatalogService()
+    updated = await service.updateKpi(
+        dbSession, kpi.id, KpiCatalogUpdate(status=KpiStatus.PUBLISHED), ADMIN
+    )
+    assert updated.status == KpiStatus.PUBLISHED.value
+
+
+async def test_publish_kpi_blocked_when_time_grain_mismatch(
+    dbSession: AsyncSession,
+) -> None:
+    """治理 time_grain=quarter vs 技术 time_grain=month ⇒ 发布被拦。"""
+    await _enableGate(dbSession, True)
+    ds = await _addSource(dbSession, "GATE_DS_GRAIN_MISMATCH")
+    metric = await _seedMetric(
+        dbSession, metric_name="闸门粒度失配指标", time_grain="MONTH"
+    )
+    await _attachSources(dbSession, metric)
+    kpi = await _seedKpi(
+        dbSession,
+        kpi_code="KPI_GATE_GRAIN_MISMATCH",
+        datasource_id=ds.id,
+        metric_id=metric.id,
+        numerator_columns=["QTY"],
+        grain_keys=["plant_code"],
+        time_grain="QUARTER",
+        grain="季度",
+    )
+
+    service = KpiCatalogService()
+    with pytest.raises(ConflictError) as exc:
+        await service.updateKpi(
+            dbSession, kpi.id, KpiCatalogUpdate(status=KpiStatus.PUBLISHED), ADMIN
+        )
+    message = str(exc.value)
+    assert "口径对账不通过" in message
+    assert "时间粒度不一致" in message
+
+    # 闸门失败 ⇒ 库里仍是 DRAFT
+    row = await dbSession.get(KpiCatalog, kpi.id)
+    await dbSession.refresh(row)
+    assert row.status == "DRAFT"
 
 
 # ── 本体指标方向 ─────────────────────────────────────────────────────
@@ -400,7 +514,9 @@ async def test_update_metric_published_blocked_when_linked_kpi_mismatch(
         metric_name="闸门关联失配指标",
         status="DRAFT",
     )
-    # 治理侧声明的分子列与指标结构化列不一致 ⇒ 层 2 mismatch
+    # 治理侧声明的分子列与指标结构化列不一致 ⇒ 层 2 mismatch。
+    # 先挂源类：无源类会让 token 判 unknown（unknown 放行，测不到 mismatch）。
+    await _attachSources(dbSession, metric)
     await _seedKpi(
         dbSession,
         kpi_code="KPI_GATE_LINKED_MISMATCH",

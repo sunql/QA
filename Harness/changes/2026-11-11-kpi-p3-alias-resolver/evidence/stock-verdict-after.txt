@@ -1,41 +1,26 @@
-# Step 4 — stock-12 layer-2 verdicts through the NEW wired path (read-only dev 5433)
+# Step 4 (regenerated Round 2) — stock-12 layer-2 verdicts through the NEW wired path (read-only dev 5433)
 
-- Date: 2026-11-12
-- Worktree: `/private/tmp/qa-kpi-p3` (branch `feat/kpi-p3-alias-resolver`, HEAD `42a985c7`)
+- Date: 2026-11-12 (Round 2 regeneration; original measurement was 2026-11-12 01:19)
+- Worktree: `/private/tmp/qa-kpi-p3` (branch `feat/kpi-p3-alias-resolver`, base HEAD `61a4b5a0` + Round-2 working tree)
 - DB: `postgresql+asyncpg://qa_user:***@127.0.0.1:5433/qa_metadata` (SELECT only; `transaction_read_only=on`)
-- Command: `cd /private/tmp/qa-kpi-p3/backend && uv run python ../.superpowers/sdd/plan/stock-verdict-probe.py`
+- DB schema state: `alembic_version = 0143` + D5 backfill applied（12 行中 11 行写入 time_grain，1 行快照类 noop）
+- Command: `cd /private/tmp/qa-kpi-p3/backend && .venv/bin/python ../.superpowers/sdd/plan/stock-verdict-probe.py`
 - Probe: `.superpowers/sdd/plan/stock-verdict-probe.py` (git-ignored scratch, never staged)
 
-## Conclusion: PASS
+## Conclusion: PASS（raw 直接命中基线）
 
-Filtered verdicts (time-grain-absent findings excluded) match recon §5 exactly:
-**8 pass / 4 unknown / 0 mismatch**. Per-KPI verdict category matches; the 4
-unknown rows retain the exact baseline reason shape
-(`governance_columns_absent×2 + governance_grain_absent`) and degraded=True.
+**Raw verdicts = 8 pass / 4 unknown / 0 mismatch**，逐条与 recon §5 基线一致。
+两侧 time_grain 都未声明的快照类 KPI（KPI_SUPPLIER_MAINTENANCE_RATIO）走新跳过
+语义（不产生 `time_grain_absent_*`），仍因治理列全空判 unknown；
+4 条 unknown 的 reason 形状保持 `governance_columns_absent×2 + governance_grain_absent`。
+本轮 raw 与 filtered 完全相同（没有任何 time-grain-absent finding 可排除）。
 
-Raw verdicts (as computed, before filtering): 12/12 unknown, all carrying
-`time_grain_absent_technical` (KPI_SUPPLIER_MAINTENANCE_RATIO additionally
-`time_grain_absent_governance` because its `grain` free text has no time word).
-This is the controller-adjudicated pre-backfill window, not a defect.
-
-## Deviation from the probe premise (schema state, not verdict)
-
-- The dev DB is at `alembic_version = 0142`; **0143 is NOT applied**. The columns
-  `kpi_catalog.time_grain`, `ontology_metric.time_grain` and
-  `ontology_metric.time_column` are **ABSENT** (not NULL).
-- The branch ORM already declares the 0143 columns, so ORM SELECTs of
-  `ontology_metric` fail on this DB (including via `OntologyProperty` →
-  `OntologyClass` → `metrics` selectin cascade inside `sourcePropertiesForMetric`).
-- The probe therefore reads only existing columns with raw SELECT and substitutes
-  a SELECT-only raw-SQL equivalent of `sourcePropertiesForMetric` (same tables,
-  columns and filtering semantics). `governanceSpecOf` / `techniqueOf` /
-  `resolutionForMetric` / `reconcileMetric` still run unchanged — this is the
-  Task 3 wired path.
-- Semantically this equals the pre-backfill NULL state: missing technical
-  `time_grain` yields `time_grain_absent_technical` on every row.
-- Recommended follow-up for controller: apply 0143 to dev 5433 (and then Task 5
-  backfill) before measuring the post-migration pre-backfill window; this probe
-  measured the stronger "columns absent" state.
+历史对照（同一探针，2026-11-12 01:19，本文件旧版内容）：当时 dev 库仍在 0142
+（0143 未迁移 ⇒ 技术侧 time_grain 列不存在，等价回填前 NULL），raw = 12/12 unknown
+（8 条原 pass 因 `time_grain_absent_technical` 单侧缺失降为 unknown），filtered = 8/4/0。
+该事实说明：**回填前窗口内 Tier A 仍会损失 8 条 pass**；选项 C 的跳过只覆盖
+「双侧都未声明」，不覆盖「治理侧有 month、技术侧 NULL」的单侧缺失。详见
+`.superpowers/sdd/plan/final-fix-report.md` Round 2「文档口径澄清」。
 
 ## Full script stdout
 
@@ -48,35 +33,32 @@ transaction_read_only: on
 server port note    : inet_server_port=5432 (container-internal; host DSN port=5433)
 
 === Schema state (dev DB) ===
-alembic_version            : 0142
-kpi_catalog.time_grain     : ABSENT (0143 not applied)
-ontology_metric.time_grain : ABSENT (0143 not applied)
-ontology_metric.time_column: ABSENT (0143 not applied)
+alembic_version            : 0143
+kpi_catalog.time_grain     : present
+ontology_metric.time_grain : present
+ontology_metric.time_column: present
 
-loader note: dev DB lacks 0143 columns ⇒ using raw-SQL equiv of sourcePropertiesForMetric (SELECT-only)
 
 kpi_catalog rows: 12
 
 kpi_code                       | baseline | raw      | filtered | reasons
 -------------------------------------------------------------------------
-KPI_COST_SAVING                | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
-KPI_INVOICE_MATCH_RATE         | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
-KPI_PAYMENT_ON_TIME            | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
-KPI_PURCHASE_CYCLE_TIME        | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
-KPI_PURCHASE_PRICE_VARIANCE    | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
-KPI_SUPPLIER_DEFECT_RATE       | unknown  | unknown  | unknown  | raw(governance_columns_absentx2, governance_grain_absentx1, time_grain_absent_technicalx1) filtered(governance_columns_absentx2, governance_grain_absentx1)
-KPI_SUPPLIER_DELAY_DAYS        | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
-KPI_SUPPLIER_FPY               | unknown  | unknown  | unknown  | raw(governance_columns_absentx2, governance_grain_absentx1, time_grain_absent_technicalx1) filtered(governance_columns_absentx2, governance_grain_absentx1)
-KPI_SUPPLIER_MAINTENANCE_RATIO | unknown  | unknown  | unknown  | raw(governance_columns_absentx2, governance_grain_absentx1, time_grain_absent_governancex1, time_grain_absent_technicalx1) filtered(governance_columns_absentx2, governance_grain_absentx1)
-KPI_SUPPLIER_NCR_RATE          | unknown  | unknown  | unknown  | raw(governance_columns_absentx2, governance_grain_absentx1, time_grain_absent_technicalx1) filtered(governance_columns_absentx2, governance_grain_absentx1)
-KPI_SUPPLIER_OTD               | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
-KPI_SUPPLIER_OVERDUE_RATIO     | pass     | unknown  | pass     | raw(time_grain_absent_technicalx1) filtered()
+KPI_COST_SAVING                | pass     | pass     | pass     | raw() filtered()
+KPI_INVOICE_MATCH_RATE         | pass     | pass     | pass     | raw() filtered()
+KPI_PAYMENT_ON_TIME            | pass     | pass     | pass     | raw() filtered()
+KPI_PURCHASE_CYCLE_TIME        | pass     | pass     | pass     | raw() filtered()
+KPI_PURCHASE_PRICE_VARIANCE    | pass     | pass     | pass     | raw() filtered()
+KPI_SUPPLIER_DEFECT_RATE       | unknown  | unknown  | unknown  | raw(governance_columns_absentx2, governance_grain_absentx1) filtered(governance_columns_absentx2, governance_grain_absentx1)
+KPI_SUPPLIER_DELAY_DAYS        | pass     | pass     | pass     | raw() filtered()
+KPI_SUPPLIER_FPY               | unknown  | unknown  | unknown  | raw(governance_columns_absentx2, governance_grain_absentx1) filtered(governance_columns_absentx2, governance_grain_absentx1)
+KPI_SUPPLIER_MAINTENANCE_RATIO | unknown  | unknown  | unknown  | raw(governance_columns_absentx2, governance_grain_absentx1) filtered(governance_columns_absentx2, governance_grain_absentx1)
+KPI_SUPPLIER_NCR_RATE          | unknown  | unknown  | unknown  | raw(governance_columns_absentx2, governance_grain_absentx1) filtered(governance_columns_absentx2, governance_grain_absentx1)
+KPI_SUPPLIER_OTD               | pass     | pass     | pass     | raw() filtered()
+KPI_SUPPLIER_OVERDUE_RATIO     | pass     | pass     | pass     | raw() filtered()
 
-ontology_metric.time_grain: column ABSENT on dev DB (0143 not applied) ⇒ treated as NULL for all rows
+ontology_metric.time_grain NULL count / total: 1 / 12
 
 baseline summary: 8 pass / 4 unknown / 0 mismatch (total 0 mismatch)
 
 PASS: filtered verdicts (time_grain_absent excluded) match recon §5 for all 12 stock KPIs.
 ```
-
-Exit code: 0.

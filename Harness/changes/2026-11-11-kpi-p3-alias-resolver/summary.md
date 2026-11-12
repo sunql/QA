@@ -101,11 +101,16 @@ NONE KPI 的 unknown verdict 不带 degraded 标注。P3 交付：
    2. **迁移后立即回填（硬闸门）**：执行
       `scripts/kpi_backfill_time_grain.py --apply --allow-prod-write`；预期
       **`changes=11 noop=1`**，幂等复跑必须 **`changes=0 noop=12`** 才算回填成功。
-   3. **回填前窗口的真实影响**：resolver 已生效但技术侧 `time_grain` 仍为 NULL ⇒
-      `_checkTimeGrain` 判 `time_grain_absent_technical` ⇒ 原始 verdict **12/12 unknown**，
-      8 条基线 pass KPI 暂失 Tier A（degraded **注入**，不是故障、不阻断注入）；
-      回填后恢复 **8 pass / 4 unknown**（见 `evidence/stock-verdict-after.txt`）。
-      注意：不是「resolution=None 恒等回退」——恒等路径会忽略时间字段而保持 pass。
+   3. **时间轴语义（Round 2，C 裁决）**：双侧 `time_grain` 都未声明 ⇒ 跳过粒度轴
+      （不产生 unknown；快照类 KPI 不被时间轴拦）。仅单侧缺失 ⇒ `time_grain_absent_*`
+      unknown；双侧都声明且不等 ⇒ mismatch。
+   4. **回填前窗口的真实影响**：治理侧多由 `grain` 文本推导为 month、技术侧仍为 NULL ⇒
+      **单侧缺失** ⇒ 原始 verdict **12/12 unknown**，8 条基线 pass KPI 暂失 Tier A
+      （degraded **注入**，不是故障、不阻断注入）；回填后 raw 恢复
+      **8 pass / 4 unknown / 0 mismatch**（见 `evidence/stock-verdict-after.txt`，已按
+      0143+回填后状态重新生成）。注意：不是「resolution=None 恒等回退」——恒等路径会
+      忽略时间字段而保持 pass；本分支已接线 resolution，「双侧未声明」的跳过不等于
+      「单侧缺失」的放行。
 5. **Minor 归集**：D1-D6 各任务评审的 Minor 记录于 SDD ledger（`.superpowers/sdd/plan/progress.md`），
    全部为非阻塞项（注释措辞、共享 helper、类型建模等），随下次触达重构。
 

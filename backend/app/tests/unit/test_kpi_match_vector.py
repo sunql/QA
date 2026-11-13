@@ -128,8 +128,10 @@ async def test_two_hits_ambiguous(warmCache, fakeVectorSearch):
     route = await svc.getKpiSemanticMatchService().matchRouteVector("完全不沾边的问句")
 
     assert route.kind == "ambiguous"
+    assert len(route.matches) == 2
     codes = [m.code for m in route.matches]
     assert codes == sorted(codes)
+    assert codes == ["KPI_A", "KPI_C"]
 
 
 async def test_milvus_failure_silent_fallback(warmCache, fakeVectorSearch):

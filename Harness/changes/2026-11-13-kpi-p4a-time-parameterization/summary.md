@@ -39,6 +39,8 @@ P3（别名解析层 + time_grain/time_column 治理字段）之后，显式时�
 | `d3d1025a` | Task 5 fix：错误消息断言 + 反向合法 + 显式清空 time_column 边界（11 passed） |
 | `10373f4b` | Task 6：`kpi_time_scope_rewrite.py` 纯函数建议层 + `scripts/kpi_rewrite_time_scope.py` 只读 dry-run CLI（无 --apply，DSN 打码，`--output` JSON 报告） |
 | `9d710a90` | Task 6 fix：存量 8 条 ESCAPE_HATCH 建议快照 + 幂等断言（7 passed） |
+| `37969855` | 终审 F1：近 N 月/季/年窗口 N 上界 120，荒谬输入 fail-closed 返回 None——修复共享 NL2SQL 路径上「近99999个月」ValueError/OverflowError 相对 main 的净新增回归（`_MAX_RECENT_N=120`，月/季/年统一上界，n>120 ⇒ None） |
+| `7f21fb7c` | 终审 F5：Tier A 渲染后直接取 `prepared.formula`，去掉占位符回退——`prepared.formula or formula` 死分支收严，契约违背时不再可能漏占位符进 DB |
 
 ## dev 库 dry-run 实测（2026-11-13，只读，dev 5433 `qa_metadata`）
 
@@ -89,6 +91,9 @@ P3（别名解析层 + time_grain/time_column 治理字段）之后，显式时�
   邻近 chat 套件抽查（tier_a_probe / metric_tier_a_switch / tier_parity）**47 passed in 17.18s**。
 - 快照测试 `_DEV_STOCK_ROWS` 为 dev-5433 存量 formula 镜像（characterization 语义）：
   存量演进导致失败时须先跑 live dry-run 对账再更新快照。
+- 终审（fable 全分支）结论 **ready-to-merge**；修复波（37969855 / 7f21fb7c）覆盖测试
+  **95 + 30 passed**。残留已知项（≥4301 位数字 N 经 `int()` 转换上限仍会 ValueError）
+  经核实**不可达**——`ChatRequest.question` max_length=2000，问句容纳不了该量级输入。
 
 ## 回滚
 

@@ -1985,7 +1985,7 @@ class OntologyService:
         syncedMetrics, metricFailures = await self._reconcileMetrics(
             session, id_mapping_svc, metrics, existingMetricUids
         )
-        kpiSummary = await reconcileKpiGraph(session)
+        kpiSummary = await reconcileKpiGraph(session, neo4jClient=neo4j)
         failures = [*failures, *metricFailures, *kpiSummary["failures"]]
 
         logger.info(

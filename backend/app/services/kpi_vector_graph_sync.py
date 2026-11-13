@@ -50,6 +50,11 @@ KPI_VECTOR_TYPE = "kpi"
 METRIC_BUSINESS_OBJECT = "METRIC"
 PUBLISHED_STATUS = "PUBLISHED"
 
+# 段级失败占位 entityId：**0 = 段级失败，不归属单行**。
+# GraphSyncFailure.entityId 是必填 int（backend/app/api/v1/ontology.py），不改它的
+# 契约（改了会外溢到前端类型）；PG serial 从 1 起 ⇒ 0 无歧义。
+SECTION_FAILURE_ENTITY_ID = 0
+
 # 后台同步任务的强引用（create_task 弱引用会被 GC，需持握防丢失）
 _PENDING_KPI_SYNC_TASKS: set[asyncio.Task] = set()
 
@@ -258,7 +263,10 @@ async def deleteKpiGraphNow(session: AsyncSession, kpiId: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def reconcileKpiGraph(session: AsyncSession) -> dict[str, Any]:
+async def reconcileKpiGraph(
+    session: AsyncSession,
+    neo4jClient: Any = None,
+) -> dict[str, Any]:
     """KPI 图对账兜底：解析/注册 uid → 补缺失节点 → MEASURED_BY 恒 MERGE（幂等）。
 
     与 syncMissingGraph 的类/属性段同语义：只补缺失、不删陈旧；单条失败不中断
@@ -268,12 +276,33 @@ async def reconcileKpiGraph(session: AsyncSession) -> dict[str, Any]:
     （与 syncMissingGraph 既有 missingClassCount 口径一致：missing 指「PG 有
     而图里缺」）。MEASURED_BY 边恒 MERGE 但**不计数**（幂等补边，不是缺口）。
 
+    **段级保护（D4 best-effort）**：图侧读取异常（Neo4j 故障）**不抛给调用方** ——
+    降级为一条段级失败明细（entityType="kpi"，entityId=`SECTION_FAILURE_ENTITY_ID`）。
+    否则一次图侧故障会让调用方整次对账抛异常、已完成的其它段工作全部丢弃。
+
+    **neo4jClient 注入**：默认 None 时回落本模块的全局 `neo4j`。调用方
+    （`ontology_service.syncMissingGraph`）应把自己那个**可 patch** 的 client
+    传进来 —— `app.services.kpi_vector_graph_sync.neo4j` 与
+    `app.services.ontology_service.neo4j` 是两个各自独立可 patch 的模块属性，
+    仓库既有约定只 patch 后者 ⇒ KPI 段若用模块全局，在 unit 上下文里会回落
+    `bolt://localhost:7687`（= 生产图谱），而 upsertKpiCatalogNode 是**写**操作。
+
     ⚠️ 本函数会**提交事务**：`_resolveKpiUid` 在 KPI 尚未注册时调
     `IdMappingService.register`，而 register **内部 commit**。
     """
+    client = neo4jClient if neo4jClient is not None else neo4j
+    try:
+        kpis = list((await session.execute(select(KpiCatalog))).scalars().all())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("KPI 图对账段级失败（库侧读取异常）: %s", exc)
+        return _kpiSectionFailure(exc, totalKpis=0)
+    try:
+        existingUids = client.getKpiCatalogIds()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("KPI 图对账段级失败（图侧读取异常）: %s", exc)
+        return _kpiSectionFailure(exc, totalKpis=len(kpis))
+
     idMappingSvc = IdMappingService()
-    kpis = list((await session.execute(select(KpiCatalog))).scalars().all())
-    existingUids = neo4j.getKpiCatalogIds()
     syncedKpis = 0
     failures: list[dict[str, Any]] = []
     for kpi in kpis:
@@ -284,7 +313,7 @@ async def reconcileKpiGraph(session: AsyncSession) -> dict[str, Any]:
         try:
             unifiedId = await _resolveKpiUid(session, idMappingSvc, kpi)
             if unifiedId not in existingUids:
-                neo4j.upsertKpiCatalogNode(
+                client.upsertKpiCatalogNode(
                     unified_id=unifiedId,
                     code=kpi.kpi_code,
                     name=kpi.kpi_name,
@@ -293,7 +322,7 @@ async def reconcileKpiGraph(session: AsyncSession) -> dict[str, Any]:
                     unit=kpi.unit,
                 )
                 syncedKpis += 1
-            await _linkKpiMeasuredBy(session, idMappingSvc, kpi, unifiedId)
+            await _linkKpiMeasuredBy(session, idMappingSvc, kpi, unifiedId, client)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "KPI 图对账失败 id=%d code=%s: %s", kpiId, kpiCode, exc
@@ -310,15 +339,41 @@ async def reconcileKpiGraph(session: AsyncSession) -> dict[str, Any]:
     }
 
 
+def _kpiSectionFailure(exc: Exception, *, totalKpis: int) -> dict[str, Any]:
+    """段级失败摘要（Neo4j/库侧整体故障 ⇒ 整段放弃，不抛给调用方）。
+
+    `entityId=SECTION_FAILURE_ENTITY_ID`（0）：段级失败**不归属任何单行**；
+    PG serial 从 1 起 ⇒ 0 无歧义（`GraphSyncFailure.entityId` 是必填 int，
+    不改它的契约 —— 改了会外溢到前端类型）。
+    """
+    return {
+        "totalKpis": totalKpis,
+        "missingKpiCount": 0,
+        "syncedKpiCount": 0,
+        "failedCount": 1,
+        "failures": [
+            {
+                "entityType": "kpi",
+                "entityId": SECTION_FAILURE_ENTITY_ID,
+                "error": str(exc),
+            }
+        ],
+    }
+
+
 async def _linkKpiMeasuredBy(
     session: AsyncSession,
     idMappingSvc: IdMappingService,
     kpi: KpiCatalog,
     unifiedId: str,
+    neo4jClient: Any,
 ) -> None:
     """KPI → 挂靠指标 的 MEASURED_BY 边（幂等补边，不计数）。
 
     指标未在 id_mapping 注册 ⇒ 不建边（边的另一端节点必须先存在）。
+
+    ⚠️ 必须用**注入进来的** client：写操作绝不能走模块全局（见 reconcileKpiGraph
+    的注入说明）。
     """
     if kpi.metric_id is None:
         return
@@ -326,7 +381,7 @@ async def _linkKpiMeasuredBy(
         session, METRIC_BUSINESS_OBJECT, str(kpi.metric_id)
     )
     if metricRow is not None:
-        neo4j.linkKpiMeasuredBy(unifiedId, metricRow.unified_id)
+        neo4jClient.linkKpiMeasuredBy(unifiedId, metricRow.unified_id)
 
 
 # ---------------------------------------------------------------------------

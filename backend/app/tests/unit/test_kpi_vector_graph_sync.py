@@ -588,6 +588,70 @@ class _FakeEmbedding:
         return [0.0] * 4
 
 
+class _MilvusProbe:
+    """Milvus 操作的**共享** in-flight 计数器（delete 与 insert 共用同一个）。
+
+    为什么 delete/insert 必须**共用**一个计数器：若两者各自为政，则
+    「只给 delete 加锁、insert 在锁外」这类变异不会被发现（各自峰值都是 1）
+    ⇒ 守卫形同虚设（R2 复评的变异测试正是这么溜过去的）。
+    断言的是「**任一时刻只有一个 Milvus 操作在飞**」，不依赖任何调用顺序假设。
+    """
+
+    def __init__(self, window: float = 0.2) -> None:
+        self._guard = threading.Lock()
+        self._window = window
+        self.active = 0
+        self.peak = 0
+        self.operations: list[str] = []
+
+    def _enter(self, name: str) -> None:
+        with self._guard:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            self.operations.append(name)
+        # 拓宽窗口：撑到「检测到重叠」为止，或超时
+        deadline = time.monotonic() + self._window
+        while time.monotonic() < deadline:
+            with self._guard:
+                if self.active >= 2:
+                    break
+            time.sleep(0.005)
+
+    def _exit(self) -> None:
+        with self._guard:
+            self.active -= 1
+
+    def deleteFake(self, ontology_id, vector_type) -> None:
+        self._enter(f"delete:{ontology_id}")
+        try:
+            time.sleep(0.01)
+        finally:
+            self._exit()
+
+    def insertFake(self, records) -> None:
+        first = records[0].get("external_id") if records else None
+        self._enter(f"insert:{first}")
+        try:
+            time.sleep(0.01)
+        finally:
+            self._exit()
+
+
+def _patchMilvus(monkeypatch: pytest.MonkeyPatch, probe: _MilvusProbe, *, insertHook=None) -> None:
+    """把两个 Milvus 写函数都接到**同一个** probe 上（共用 in-flight 计数器）。"""
+
+    def _fakeDelete(oid, typ):
+        probe.deleteFake(oid, typ)
+
+    def _fakeInsert(records):
+        if insertHook is not None:
+            insertHook()
+        probe.insertFake(records)
+
+    monkeypatch.setattr(sync, "deleteByOntologyIdDual", _fakeDelete)
+    monkeypatch.setattr(sync, "insertEmbeddingsDual", _fakeInsert)
+
+
 async def test_milvus_write_runs_off_event_loop_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -609,21 +673,34 @@ async def test_milvus_write_runs_off_event_loop_thread(
     assert calls[0][2] != loopThread, "阻塞式 Milvus 调用不得跑在事件循环线程上"
 
 
+async def test_direct_vector_sync_calls_are_serialized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**直接**调 syncKpiVectorNow（Task 6/7/8 的路径）也必须串行 ⇒ 锁在函数内部。
+
+    若锁只在 best-effort 包装层取，直接调用路径完全无保护 ⇒ 后台同步与
+    admin 回填可能对同一集合并发 flush。
+    """
+    probe = _MilvusProbe()
+    _patchMilvus(monkeypatch, probe)
+    monkeypatch.setattr(sync, "EmbeddingService", _FakeEmbedding)
+
+    await asyncio.gather(
+        sync.syncKpiVectorNow(_FakeDbSession(_kpi(id=1)), 1),
+        sync.syncKpiVectorNow(_FakeDbSession(_kpi(id=2)), 2),
+    )
+
+    assert probe.peak == 1, f"Milvus 操作必须整体串行，实际峰值 {probe.peak}"
+    assert len(probe.operations) == 4, probe.operations
+
+
 async def test_milvus_writes_are_serialized(monkeypatch: pytest.MonkeyPatch) -> None:
-    """并发 KPI 同步不得并发 flush 同一集合 ⇒ 一次 KPI 的删+插是一个临界区。"""
-    state = {"active": 0, "maxActive": 0}
-    guard = threading.Lock()
+    """并发 KPI 同步不得并发 flush 同一集合 ⇒ 一次 KPI 的删+插是一个临界区。
 
-    def _fakeDelete(oid, typ):
-        with guard:
-            state["active"] += 1
-            state["maxActive"] = max(state["maxActive"], state["active"])
-        time.sleep(0.05)
-        with guard:
-            state["active"] -= 1
-
-    monkeypatch.setattr(sync, "deleteByOntologyIdDual", _fakeDelete)
-    monkeypatch.setattr(sync, "insertEmbeddingsDual", lambda records: None)
+    守卫覆盖「按语句加锁」的变异（delete 在锁内、insert 在锁外 ⇒ 峰值会变成 2）。
+    """
+    probe = _MilvusProbe()
+    _patchMilvus(monkeypatch, probe)
     monkeypatch.setattr(sync, "EmbeddingService", _FakeEmbedding)
     monkeypatch.setattr(sync, "_ownSession", lambda: _FakeDbSession(_kpi()))
 
@@ -631,4 +708,38 @@ async def test_milvus_writes_are_serialized(monkeypatch: pytest.MonkeyPatch) -> 
         sync._runVectorOwnSession(1), sync._runVectorOwnSession(2)
     )
 
-    assert state["maxActive"] == 1, "Milvus 写入段必须串行（并发 flush 会拖垮 Milvus）"
+    assert probe.peak == 1, f"Milvus 写入段必须串行，实际峰值 {probe.peak}"
+    assert len(probe.operations) == 4, probe.operations
+
+
+async def test_embedding_generation_runs_outside_critical_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """embedding 的 LLM 往返**不得**在 Milvus 临界区内。
+
+    临界区存在的理由只是「避免并发 flush 同一集合」；把 embedding 放进去会
+    让 N 条并发 KPI 的 LLM 延迟**串行叠加**。
+    守卫：第一个 embedding 调用会等「另一次 insert 完成」——
+    只有 embedding 在锁外时，另一个 KPI 才可能走到 insert。
+    """
+    probe = _MilvusProbe(window=0.05)
+    insertDone = asyncio.Event()
+    embeddingCalls = {"n": 0}
+
+    class _GatedEmbedding:
+        async def generateEmbedding(self, text: str) -> list[float]:
+            embeddingCalls["n"] += 1
+            if embeddingCalls["n"] == 1:
+                await asyncio.wait_for(insertDone.wait(), timeout=2.0)
+            return [0.0] * 4
+
+    _patchMilvus(monkeypatch, probe, insertHook=insertDone.set)
+    monkeypatch.setattr(sync, "EmbeddingService", _GatedEmbedding)
+    monkeypatch.setattr(sync, "_ownSession", lambda: _FakeDbSession(_kpi()))
+
+    await asyncio.gather(
+        sync._runVectorOwnSession(1), sync._runVectorOwnSession(2)
+    )
+
+    assert embeddingCalls["n"] == 2
+    assert probe.peak == 1, f"Milvus 写入段必须串行，实际峰值 {probe.peak}"

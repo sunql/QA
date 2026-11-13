@@ -54,9 +54,13 @@ PUBLISHED_STATUS = "PUBLISHED"
 _PENDING_KPI_SYNC_TASKS: set[asyncio.Task] = set()
 
 # Milvus 写入串行化锁：pymilvus 的 insert/delete 之后必须 flush（单次 8-25s），
-# N 个后台任务并发 flush 同一集合会拖垮 Milvus（同
+# N 个并发写入并发 flush 同一集合会拖垮 Milvus（同
 # OntologyService.syncMissingClassEmbeddingsBestEffort 的教训）。
 # 一次 KPI 的「删 + 插」构成一个临界区。
+#
+# 锁**下沉到函数内部**（syncKpiVectorNow / deleteKpiVectorNow）⇒ 后台 best-effort
+# 与「直接调用」路径（reconcile / admin 端点 / 回填脚本）走的是同一把锁。
+# ⚠️ asyncio.Lock **不可重入** ⇒ 包装层与函数层只能取一次；调用方也不要自己取。
 #
 # asyncio.Lock 在 Python 3.10+ 不在构造时绑定 loop（3.12+ 本仓要求），但它**绑定
 # 首次使用它的那个 loop**；跨 loop 使用（如 pytest-asyncio 每测试一个新 loop）
@@ -172,21 +176,38 @@ async def syncKpiGraphNow(session: AsyncSession, kpiId: int) -> str:
 
 
 async def syncKpiVectorNow(session: AsyncSession, kpiId: int) -> None:
-    """单条向量重建：删旧 → PUBLISHED 才重插（D3：DRAFT/DEPRECATED 只删不插）。
+    """单条向量重建（D3：PUBLISHED 才有向量）。
 
-    Milvus 是**同步 SDK**（insert/delete 之后还要 flush，单次 8-25s）⇒ 两个调用
-    都经 `asyncio.to_thread` 移出事件循环，**不得**在 API worker 的事件循环线程上
-    直接调用（否则一次 KPI 写入会堵住该 worker 上的所有其它请求）。
+    执行顺序（**刻意**如此，勿调换）：
+    1) 加载 KPI + 指标别名；
+    2) 判状态：非 PUBLISHED ⇒ 进入 Milvus 临界区**只删旧向量**后返回；
+    3) PUBLISHED ⇒ **先**算 embedding（在临界区**外**）；
+    4) 再进入 Milvus 临界区：删旧 → 重插。
 
-    并发串行化由调用方负责：走 best-effort 入口时锁在 `_runVectorOwnSession`
-    持有（一次 KPI 的「删 + 插」= 一个临界区）；**直接**调本函数（admin 对账 /
-    回填脚本）不在锁内，调用方需自行保证不并发 flush 同一集合。
+    为什么 embedding 在临界区外：临界区存在的理由只是「避免并发 flush 同一集合」
+    （pymilvus 同步 SDK，insert/delete 之后要 flush，单次 8-25s）。若把 embedding
+    的 LLM 往返也放进临界区，N 条并发 KPI 会把 LLM 延迟**串行叠加**。
+
+    副作用（**刻意**为之）：embedding 生成失败时**旧向量保留**（不再先删后炸）——
+    比「删掉旧向量才发现 embedding 挂了、导致该 KPI 搜不到」更安全，
+    也更符合 D4（同步失败不影响既有可用状态）。
+    可观测语义不变：PUBLISHED ⇒ 最终恰好一条当前内容的向量；非 PUBLISHED ⇒ 无向量。
+
+    Milvus 是**同步 SDK** ⇒ 两个调用都经 `asyncio.to_thread` 移出事件循环，
+    **不得**在 API worker 的事件循环线程上直接调用（否则一次 KPI 写入会堵住
+    该 worker 上的所有其它请求）。
+
+    并发串行化：本函数**内部**持有 Milvus 写入锁 ⇒ **直接**调用（Task 6 reconcile /
+    Task 7 admin 端点 / Task 8 回填脚本）也自动与后台 best-effort 同步互斥，
+    调用方**不必**自己加锁。但也**不要**在已持有该锁时再调本函数
+    （`asyncio.Lock` 不可重入 ⇒ 死锁）。
     """
     kpi, metricAlias = await _loadKpiWithMetricAlias(session, kpiId)
     if kpi is None:
         raise ValueError(f"KPI 不存在: id={kpiId}")
-    await asyncio.to_thread(deleteByOntologyIdDual, kpi.id, KPI_VECTOR_TYPE)
     if kpi.status != PUBLISHED_STATUS:
+        async with _milvusWriteLock():
+            await asyncio.to_thread(deleteByOntologyIdDual, kpi.id, KPI_VECTOR_TYPE)
         logger.info(
             "KPI id=%d status=%s 非 PUBLISHED，向量保持删除", kpiId, kpi.status
         )
@@ -194,23 +215,27 @@ async def syncKpiVectorNow(session: AsyncSession, kpiId: int) -> None:
     vec = await EmbeddingService().generateEmbedding(
         kpiEmbeddingText(kpi, metricAlias)
     )
-    await asyncio.to_thread(insertEmbeddingsDual, [{
-        "ontology_id": kpi.id,
-        "type": KPI_VECTOR_TYPE,
-        "name": kpi.kpi_name,
-        "alias": metricAlias or "",
-        "description": kpi.business_definition or "",
-        "embedding": vec,
-        "external_id": kpi.kpi_code,
-    }])
+    async with _milvusWriteLock():
+        await asyncio.to_thread(deleteByOntologyIdDual, kpi.id, KPI_VECTOR_TYPE)
+        await asyncio.to_thread(insertEmbeddingsDual, [{
+            "ontology_id": kpi.id,
+            "type": KPI_VECTOR_TYPE,
+            "name": kpi.kpi_name,
+            "alias": metricAlias or "",
+            "description": kpi.business_definition or "",
+            "embedding": vec,
+            "external_id": kpi.kpi_code,
+        }])
 
 
 async def deleteKpiVectorNow(kpiId: int) -> None:
     """删该 KPI 的向量（Milvus type-routed 集合，按 ontology_id=kpiId 定位）。
 
-    同 syncKpiVectorNow：阻塞式 Milvus 调用走 `asyncio.to_thread`，不占事件循环。
+    同 syncKpiVectorNow：阻塞式 Milvus 调用走 `asyncio.to_thread`（不占事件循环）；
+    本函数**内部**持有 Milvus 写入锁 ⇒ 与其它 KPI 的向量写入互斥。
     """
-    await asyncio.to_thread(deleteByOntologyIdDual, kpiId, KPI_VECTOR_TYPE)
+    async with _milvusWriteLock():
+        await asyncio.to_thread(deleteByOntologyIdDual, kpiId, KPI_VECTOR_TYPE)
 
 
 async def deleteKpiGraphNow(session: AsyncSession, kpiId: int) -> None:
@@ -277,8 +302,9 @@ async def syncKpiGraphBestEffort(kpiId: int) -> None:
 
 
 async def _runVectorOwnSession(kpiId: int) -> None:
-    # Milvus 写入临界区：一次 KPI 的「删 + 插」不与别的 KPI 交错 flush。
-    async with _milvusWriteLock(), _ownSession() as session:
+    # ⚠️ **不要**在这里取 Milvus 锁：锁已在 syncKpiVectorNow 内部取，
+    # asyncio.Lock 不可重入 ⇒ 嵌套取锁会死锁。
+    async with _ownSession() as session:
         await syncKpiVectorNow(session, kpiId)
 
 
@@ -288,8 +314,8 @@ async def syncKpiVectorBestEffort(kpiId: int) -> None:
 
 
 async def _runDeleteVector(kpiId: int) -> None:
-    async with _milvusWriteLock():
-        await deleteKpiVectorNow(kpiId)
+    # ⚠️ 同 _runVectorOwnSession：锁在 deleteKpiVectorNow 内部取，此处不得再取。
+    await deleteKpiVectorNow(kpiId)
 
 
 async def deleteKpiVectorBestEffort(kpiId: int) -> None:

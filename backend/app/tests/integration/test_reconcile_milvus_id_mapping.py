@@ -153,14 +153,15 @@ async def test_reconcile_errors_when_unified_ids_mismatch(
 
 
 async def test_backfill_writes_external_id_for_rows_missing_it(
-    milvusSeedExternalId, dbSession: AsyncSession
+    milvusSeedEmptyExternalId, dbSession: AsyncSession
 ):
     """Milvus rows with external_id=\"\" → backfill should populate obj:{type}:{ontology_id}."""
     from scripts.backfill_milvus_external_id import backfill
 
     await _truncate_id_mapping(dbSession)
-    # milvusSeedExternalId seeds 3 rows (class/property/metric, ontology_id 5001-5003),
-    # but _insertIntoNewCollection writes external_id="", so backfill should fill them.
+    # milvusSeedEmptyExternalId seeds 3 rows (class/property/metric, ontology_id
+    # 5001-5003) with external_id="" —— 即生产上「本体写入后、backfill 之前」的
+    # 真实状态，backfill 应当把它们全部填上。
 
     written = await backfill(dbSession)
 
@@ -174,7 +175,7 @@ async def test_backfill_writes_external_id_for_rows_missing_it(
 
 
 async def test_backfill_is_idempotent(
-    milvusSeedExternalId, dbSession: AsyncSession
+    milvusSeedEmptyExternalId, dbSession: AsyncSession
 ):
     """Running backfill twice should not write duplicate rows."""
     from scripts.backfill_milvus_external_id import backfill
@@ -188,7 +189,7 @@ async def test_backfill_is_idempotent(
 
 
 async def test_backfill_then_reconcile_yields_zero_diff(
-    milvusSeedExternalId, dbSession: AsyncSession
+    milvusSeedEmptyExternalId, dbSession: AsyncSession
 ):
     """After backfill, reconcile must report diff_count=0 (PG placeholder rows synced)."""
     from scripts.backfill_milvus_external_id import backfill
@@ -202,7 +203,7 @@ async def test_backfill_then_reconcile_yields_zero_diff(
 
 
 async def test_backfill_leaves_no_row_with_empty_external_id(
-    milvusSeedExternalId, dbSession: AsyncSession
+    milvusSeedEmptyExternalId, dbSession: AsyncSession
 ):
     """回填后不得再有 external_id 为空的行，且同一 ontology_id 只剩一行。
 

@@ -329,6 +329,47 @@ def milvusSeedExternalId(milvusCleanClient):
     return {"seeded": 3, "external_ids": ["obj:class:5001", "obj:property:5002", "obj:metric:5003"]}
 
 
+@pytest.fixture
+def milvusSeedEmptyExternalId(milvusCleanClient):
+    """种入 3 条「backfill 之前」的本体行：external_id 为空串。
+
+    生产本体写入路径（`ontology_service` 同步 embedding）**不传** external_id
+    ⇒ 落库为空串，随后由 `scripts/backfill_milvus_external_id` 回填。本夹具
+    如实复刻该状态 ⇒ **不要**为了「方便对账」在这里预填 external_id。
+
+    回归来历（2026-11-13）：`_insertIntoNewCollection` 从「external_id 一律写空」
+    改为「透传记录上的 external_id」（KPI 行需要 kpi_code）后，旧夹具预填的值
+    真的落了库 ⇒ backfill 扫不到待回填行 ⇒ 3 条 backfill 用例在 CI 全红
+    （`expected 3 rows backfilled, got 0`）。夹具尾部的自检就是为了让这种
+    「前提不成立」在夹具处直接失败，而不是让用例以 `written == 0` 间接失败。
+    """
+    from app.infrastructure.milvus_client import (
+        insertEmbeddingsDual,
+        queryClassEmbeddings,
+    )
+
+    insertEmbeddingsDual([
+        {"ontology_id": 5001, "type": "class", "name": "ClassS001",
+         "alias": "", "description": "",
+         "embedding": [0.5] * _EMBEDDING_DIM},
+        {"ontology_id": 5002, "type": "property", "name": "PropP001",
+         "alias": "", "description": "",
+         "embedding": [0.6] * _EMBEDDING_DIM},
+        {"ontology_id": 5003, "type": "metric", "name": "MetricM001",
+         "alias": "", "description": "",
+         "embedding": [0.7] * _EMBEDDING_DIM},
+    ])
+
+    # 自检（fixture 前置条件，不是用例断言）：确实种出了 external_id 为空的行
+    seeded = [r for r in queryClassEmbeddings() if r.get("ontology_id") == 5001]
+    assert seeded, "5001 未种入 ontology_class_embeddings"
+    assert seeded[0].get("external_id") == "", (
+        "夹具应种出 external_id 为空的行（backfill 的前提），实得 "
+        f"{seeded[0].get('external_id')!r}"
+    )
+    return {"seeded": 3}
+
+
 # ---------------------------------------------------------------------------
 # KPI Catalog + DataSource fixtures (F2 §5.4)
 # ---------------------------------------------------------------------------

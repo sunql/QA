@@ -595,6 +595,11 @@ class _MilvusProbe:
     「只给 delete 加锁、insert 在锁外」这类变异不会被发现（各自峰值都是 1）
     ⇒ 守卫形同虚设（R2 复评的变异测试正是这么溜过去的）。
     断言的是「**任一时刻只有一个 Milvus 操作在飞**」，不依赖任何调用顺序假设。
+
+    operation 标识**统一用 KPI 主键**（`ontology_id`）：delete 记 `ontology_id`，
+    insert 记同一行的 `records[0]["ontology_id"]`（**不是** `external_id`=kpi_code）
+    ⇒ 探针能按 KPI 把 delete/insert **配对**，从而断言「一次 KPI 的删+插
+    构成一个临界区」（只断言 peak==1 抓不住「每条语句各自取锁」的变异）。
     """
 
     def __init__(self, window: float = 0.2) -> None:
@@ -629,12 +634,40 @@ class _MilvusProbe:
             self._exit()
 
     def insertFake(self, records) -> None:
-        first = records[0].get("external_id") if records else None
-        self._enter(f"insert:{first}")
+        # 用**同一把 key**（KPI 主键）标注 insert ⇒ 能与 delete 配对
+        kpiKey = records[0].get("ontology_id") if records else None
+        self._enter(f"insert:{kpiKey}")
         try:
             time.sleep(0.01)
         finally:
             self._exit()
+
+
+def _assertGroupedCriticalSections(operations: list[str]) -> None:
+    """断言 operation 序列 = 两个「delete+insert **相邻**」的临界区。
+
+    合法形态（谁先谁后都行）：
+        ['delete:1', 'insert:1', 'delete:2', 'insert:2']
+        ['delete:2', 'insert:2', 'delete:1', 'insert:1']
+    非法形态（一次 KPI 的删+插被别的 KPI 拆开 ⇒ 不是同一个临界区）：
+        ['delete:1', 'delete:2', 'insert:1', 'insert:2']
+    """
+    assert len(operations) == 4, f"Milvus 操作数应为 4，实际 {operations}"
+    positions: dict[str, list[int]] = {}
+    kinds: dict[str, list[str]] = {}
+    for index, operation in enumerate(operations):
+        kind, key = operation.split(":", 1)
+        positions.setdefault(key, []).append(index)
+        kinds.setdefault(key, []).append(kind)
+    assert len(positions) == 2, f"两条并发 KPI 必须可区分：{operations}"
+    for key, indexes in positions.items():
+        assert kinds[key] == ["delete", "insert"], (
+            f"KPI {key} 的操作形态不对（应为 delete 后 insert）：{operations}"
+        )
+        assert indexes[1] - indexes[0] == 1, (
+            f"KPI {key} 的 delete 与 insert 不相邻 ⇒ 一次 KPI 的删+插不是一个临界区："
+            f"{operations}"
+        )
 
 
 def _patchMilvus(monkeypatch: pytest.MonkeyPatch, probe: _MilvusProbe, *, insertHook=None) -> None:
@@ -650,6 +683,14 @@ def _patchMilvus(monkeypatch: pytest.MonkeyPatch, probe: _MilvusProbe, *, insert
 
     monkeypatch.setattr(sync, "deleteByOntologyIdDual", _fakeDelete)
     monkeypatch.setattr(sync, "insertEmbeddingsDual", _fakeInsert)
+
+
+def _twoDistinctKpis() -> list[KpiCatalog]:
+    """两条可区分的 KPI（不同主键、不同 kpi_code）⇒ 探针能按 KPI 配对操作。"""
+    return [
+        _kpi(id=1, kpi_code="KPI_ONE"),
+        _kpi(id=2, kpi_code="KPI_TWO"),
+    ]
 
 
 async def test_milvus_write_runs_off_event_loop_thread(
@@ -680,29 +721,41 @@ async def test_direct_vector_sync_calls_are_serialized(
 
     若锁只在 best-effort 包装层取，直接调用路径完全无保护 ⇒ 后台同步与
     admin 回填可能对同一集合并发 flush。
+
+    断言两件事：
+    1) 任一时刻只有一个 Milvus 操作在飞（peak == 1）；
+    2) **一次 KPI 的 delete+insert 相邻、构成一个临界区**（分组断言）——
+       只断言 1) 抓不住「每条语句各自取锁」的变异。
     """
     probe = _MilvusProbe()
     _patchMilvus(monkeypatch, probe)
     monkeypatch.setattr(sync, "EmbeddingService", _FakeEmbedding)
+    kpis = _twoDistinctKpis()
 
     await asyncio.gather(
-        sync.syncKpiVectorNow(_FakeDbSession(_kpi(id=1)), 1),
-        sync.syncKpiVectorNow(_FakeDbSession(_kpi(id=2)), 2),
+        sync.syncKpiVectorNow(_FakeDbSession(kpis[0]), kpis[0].id),
+        sync.syncKpiVectorNow(_FakeDbSession(kpis[1]), kpis[1].id),
     )
 
     assert probe.peak == 1, f"Milvus 操作必须整体串行，实际峰值 {probe.peak}"
     assert len(probe.operations) == 4, probe.operations
+    _assertGroupedCriticalSections(probe.operations)
 
 
 async def test_milvus_writes_are_serialized(monkeypatch: pytest.MonkeyPatch) -> None:
     """并发 KPI 同步不得并发 flush 同一集合 ⇒ 一次 KPI 的删+插是一个临界区。
 
-    守卫覆盖「按语句加锁」的变异（delete 在锁内、insert 在锁外 ⇒ 峰值会变成 2）。
+    守卫覆盖两类变异：
+    - 「insert 在锁外」⇒ 峰值变成 2；
+    - 「每条语句各自取锁」⇒ 峰值仍是 1，但 delete+insert 被别的 KPI 拆开
+      ⇒ 由**分组断言**（delete/insert 必须相邻且同 KPI）抓住。
     """
     probe = _MilvusProbe()
     _patchMilvus(monkeypatch, probe)
     monkeypatch.setattr(sync, "EmbeddingService", _FakeEmbedding)
-    monkeypatch.setattr(sync, "_ownSession", lambda: _FakeDbSession(_kpi()))
+    kpis = _twoDistinctKpis()
+    sessions = iter([_FakeDbSession(kpi) for kpi in kpis])
+    monkeypatch.setattr(sync, "_ownSession", lambda: next(sessions))
 
     await asyncio.gather(
         sync._runVectorOwnSession(1), sync._runVectorOwnSession(2)
@@ -710,6 +763,7 @@ async def test_milvus_writes_are_serialized(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert probe.peak == 1, f"Milvus 写入段必须串行，实际峰值 {probe.peak}"
     assert len(probe.operations) == 4, probe.operations
+    _assertGroupedCriticalSections(probe.operations)
 
 
 async def test_embedding_generation_runs_outside_critical_section(
@@ -735,7 +789,9 @@ async def test_embedding_generation_runs_outside_critical_section(
 
     _patchMilvus(monkeypatch, probe, insertHook=insertDone.set)
     monkeypatch.setattr(sync, "EmbeddingService", _GatedEmbedding)
-    monkeypatch.setattr(sync, "_ownSession", lambda: _FakeDbSession(_kpi()))
+    kpis = _twoDistinctKpis()
+    sessions = iter([_FakeDbSession(kpi) for kpi in kpis])
+    monkeypatch.setattr(sync, "_ownSession", lambda: next(sessions))
 
     await asyncio.gather(
         sync._runVectorOwnSession(1), sync._runVectorOwnSession(2)

@@ -109,6 +109,10 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> _AliasRegistry:
     reg = _AliasRegistry()
     monkeypatch.setattr(milvus_search, "_connect", reg.connect, raising=False)
     monkeypatch.setattr(milvus_search, "Collection", reg.buildCollection)
+    # KPI 是可选集合：扇出前会问存在性（离线替身，不连真实 Milvus）。
+    monkeypatch.setattr(
+        milvus_search, "hasEmbeddingCollection", lambda name: True, raising=False
+    )
     return reg
 
 

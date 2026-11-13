@@ -18,6 +18,7 @@ from app.infrastructure.milvus_client import (
     _MILVUS_QUERY_PAGE,
     _connAlias,
     _connect,
+    hasEmbeddingCollection,
 )
 
 
@@ -84,7 +85,14 @@ def queryMetricEmbeddings() -> list[dict[str, Any]]:
 
 
 def queryKpiEmbeddings() -> list[dict[str, Any]]:
-    """Read all rows from kpi_catalog_embeddings."""
+    """Read all rows from kpi_catalog_embeddings.
+
+    可选集合：KPI 尚未写入时该集合不存在（``Collection(name, ...)`` 会抛
+    ``SchemaNotReadyException("Collection not exist")``）⇒ 等价于「还没有 KPI
+    向量」，返回空列表。**既有三集合的读取语义不变**：缺失仍抛。
+    """
+    if not hasEmbeddingCollection(_KPI_COLLECTION_NAME):
+        return []
     return _queryAllRowsFromCollection(_KPI_COLLECTION_NAME)
 
 
@@ -102,6 +110,9 @@ def listEmbeddingsAcross3Collections() -> list[dict[str, Any]]:
 
     ⚠️ 函数名保留旧的「Across3Collections」：诊断 API（vectors.py 等）与 backfill
     脚本按此名导入，改名会打断它们；实际读取范围已含 KPI 目录集合。
+
+    KPI 段是**可选**的：集合不存在（第一次 KPI 写入之前）时该段跳过、不抛；
+    既有三集合缺失仍照旧抛（严格语义不变）。
 
     适用：诊断/统计 API（vectors.py 等）。
     """

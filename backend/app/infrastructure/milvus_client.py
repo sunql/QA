@@ -156,6 +156,27 @@ def _ensureCollection(name: str, fields: list[FieldSchema]) -> Collection:
     return collection
 
 
+def hasEmbeddingCollection(name: str) -> bool:
+    """探针：指定向量集合是否已存在（**只读** —— 不建集合、不删集合）。
+
+    为什么需要它：pymilvus 的 ``Collection(name, using=...)`` 在集合不存在时抛
+    ``SchemaNotReadyException("Collection not exist")``，而不是返回空句柄。
+    kpi_catalog_embeddings 在第一次 KPI 写入（``ensureKpiCollection``）之前根本
+    不存在，而全局读路径（``typeFilter=None`` 的检索扇出、
+    ``listEmbeddingsAcross3Collections``）会扫所有集合 ⇒ 集合缺失会让整条读路径
+    失败，而不是「暂时还没有 KPI 向量」。
+
+    「可选集合」在读路径上先用本探针判存在性；**既有三集合
+    （class/property/metric）的严格语义不变**：缺失仍照旧抛。
+
+    内部只做 ``_connect()`` + ``utility.has_collection``：已连接时 ``_connect()``
+    走快路径（一次 ``list_collections`` 健康检查，不重连），再叠加一次只读
+    ``has_collection`` RPC。
+    """
+    _connect()
+    return bool(utility.has_collection(name, using=_connAlias()))
+
+
 def _ontologyFields() -> list[FieldSchema]:
     return [
         FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),

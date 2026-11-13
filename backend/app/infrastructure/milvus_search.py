@@ -16,6 +16,7 @@ from app.infrastructure.milvus_client import (
     VALID_EMBEDDING_TYPES,
     _connAlias,
     _connect,
+    hasEmbeddingCollection,
 )
 
 
@@ -62,6 +63,11 @@ def searchEmbeddingsByTypeRouted(
         - typeFilter == "property" → 只查 ontology_property_embeddings
         - typeFilter == "metric" → 只查 ontology_metric_embeddings
         - typeFilter == "kpi" → 只查 kpi_catalog_embeddings
+
+    可选集合（kpi_catalog_embeddings）：集合不存在（第一次 KPI 写入之前）
+    等价于「还没有 KPI 向量」⇒ 显式查 kpi 返回空、None 扇出跳过该集合，
+    都不抛。**既有三集合的严格语义不变**：缺失仍由 ``Collection()`` 抛
+    ``SchemaNotReadyException``。
     """
     if typeFilter is not None and typeFilter not in VALID_EMBEDDING_TYPES:
         raise ValueError(f"unknown embedding type filter: {typeFilter!r}")
@@ -82,17 +88,24 @@ def searchEmbeddingsByTypeRouted(
     if typeFilter == "metric":
         return _searchCollection(_METRIC_COLLECTION_NAME, queryEmbedding, topK)
     if typeFilter == "kpi":
+        # 可选集合：KPI 尚未写入 ⇒ 集合不存在 ⇒ 「还没有 KPI 向量」，返回空而非抛
+        if not hasEmbeddingCollection(_KPI_COLLECTION_NAME):
+            return []
         return _searchCollection(_KPI_COLLECTION_NAME, queryEmbedding, topK)
 
-    # typeFilter is None: search all 4 collections, merge, sort by distance, take topK
+    # typeFilter is None: search all collections, merge, sort by distance, take topK
     perCollectionTopK = topK
     perHits: list[dict[str, Any]] = []
-    for collectionName in (
+    collectionNames = [
         _CLASS_COLLECTION_NAME,
         _PROPERTY_COLLECTION_NAME,
         _METRIC_COLLECTION_NAME,
-        _KPI_COLLECTION_NAME,
-    ):
+    ]
+    # KPI 是可选集合：不存在就跳过（其余三集合缺失仍照旧抛，语义不变）
+    if hasEmbeddingCollection(_KPI_COLLECTION_NAME):
+        collectionNames.append(_KPI_COLLECTION_NAME)
+
+    for collectionName in collectionNames:
         perHits.extend(_searchCollection(collectionName, queryEmbedding, perCollectionTopK))
 
     perHits.sort(key=lambda h: h["distance"])

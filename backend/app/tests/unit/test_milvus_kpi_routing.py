@@ -131,6 +131,7 @@ def test_search_kpi_branch(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(search, "_searchCollection", fakeSearch)
     monkeypatch.setattr(search, "_connect", lambda: None)
+    monkeypatch.setattr(search, "hasEmbeddingCollection", lambda name: True)
     search.searchEmbeddingsByTypeRouted([0.0], 5, "kpi")
     assert seen == ["kpi_catalog_embeddings"]
 
@@ -141,6 +142,7 @@ def test_search_none_sweep_covers_4_collections(monkeypatch: pytest.MonkeyPatch)
         search, "_searchCollection", lambda name, q, k: seen.append(name) or []
     )
     monkeypatch.setattr(search, "_connect", lambda: None)
+    monkeypatch.setattr(search, "hasEmbeddingCollection", lambda name: True)
     search.searchEmbeddingsByTypeRouted([0.0], 5, None)
     assert seen == [
         "ontology_class_embeddings",
@@ -155,6 +157,7 @@ def test_query_helpers_kpi_read(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         helpers, "_queryAllRowsFromCollection", lambda name: called.append(name) or []
     )
+    monkeypatch.setattr(helpers, "hasEmbeddingCollection", lambda name: True)
     assert helpers.queryKpiEmbeddings() == []
     assert called == ["kpi_catalog_embeddings"]
 
@@ -165,6 +168,7 @@ def test_query_helpers_sweep_covers_4(monkeypatch: pytest.MonkeyPatch) -> None:
         helpers, "_queryAllRowsFromCollection", lambda name: called.append(name) or []
     )
     monkeypatch.setattr(helpers, "_connect", lambda: None)
+    monkeypatch.setattr(helpers, "hasEmbeddingCollection", lambda name: True)
     helpers.listEmbeddingsAcross3Collections()
     assert "kpi_catalog_embeddings" in called
     assert len(called) == 4

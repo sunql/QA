@@ -44,7 +44,7 @@ _MILVUS_QUERY_PAGE = 16384
 
 # 合法 embedding 类型。ontology_id 在 Milvus 中非跨类型唯一（类/属性共用 id 序列），
 # 删除与检索均须按 type 作用域，非法值在拼接表达式前 fail-fast。
-VALID_EMBEDDING_TYPES = frozenset(("class", "property", "metric"))
+VALID_EMBEDDING_TYPES = frozenset(("class", "property", "metric", "kpi"))
 
 # ---------------------------------------------------------------------------
 # Common helpers
@@ -659,7 +659,8 @@ def refreshDocumentCollection() -> None:
 
 
 # ---------------------------------------------------------------------------
-# M0-P0.4: 3-collection schema with external_id field (class/property/metric)
+# M0-P0.4: 4-collection schema with external_id field
+# (class/property/metric/kpi)
 # NOTE: The actual implementations are imported from milvus_dual_write.py,
 # milvus_query_helpers.py, and milvus_search.py above.
 # This section only re-exports the constants used by callers.
@@ -668,6 +669,7 @@ def refreshDocumentCollection() -> None:
 _CLASS_COLLECTION_NAME = "ontology_class_embeddings"
 _PROPERTY_COLLECTION_NAME = "ontology_property_embeddings"
 _METRIC_COLLECTION_NAME = "ontology_metric_embeddings"
+_KPI_COLLECTION_NAME = "kpi_catalog_embeddings"
 
 
 def closeConnection() -> None:
@@ -757,9 +759,11 @@ from app.infrastructure.milvus_dual_write import (
     _classFields,
     _propertyFields,
     _metricFields,
+    _kpiFields,
     ensureClassCollection,
     ensurePropertyCollection,
     ensureMetricCollection,
+    ensureKpiCollection,
     insertEmbeddingsDual,
     deleteByOntologyIdDual,
     rebuildOntologyCollections,
@@ -768,6 +772,7 @@ from app.infrastructure.milvus_query_helpers import (
     queryClassEmbeddings,
     queryPropertyEmbeddings,
     queryMetricEmbeddings,
+    queryKpiEmbeddings,
     listEmbeddingsAcross3Collections,
 )
 from app.infrastructure.milvus_search import (

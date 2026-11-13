@@ -1,9 +1,10 @@
-"""Milvus query helpers for type-routed 3-collection reads.
+"""Milvus query helpers for type-routed 4-collection reads.
 
 M0-P0.4 Phase 2 (Task 15): Extracted from milvus_client.py.
 
 Provides:
 - queryClassEmbeddings / queryPropertyEmbeddings / queryMetricEmbeddings
+  / queryKpiEmbeddings
 - listEmbeddingsAcross3Collections / _queryAllRowsFromCollection
 """
 
@@ -26,6 +27,7 @@ from app.infrastructure.milvus_client import (
 _CLASS_COLLECTION_NAME = "ontology_class_embeddings"
 _PROPERTY_COLLECTION_NAME = "ontology_property_embeddings"
 _METRIC_COLLECTION_NAME = "ontology_metric_embeddings"
+_KPI_COLLECTION_NAME = "kpi_catalog_embeddings"
 
 
 # ---------------------------------------------------------------------------
@@ -81,17 +83,25 @@ def queryMetricEmbeddings() -> list[dict[str, Any]]:
     return _queryAllRowsFromCollection(_METRIC_COLLECTION_NAME)
 
 
+def queryKpiEmbeddings() -> list[dict[str, Any]]:
+    """Read all rows from kpi_catalog_embeddings."""
+    return _queryAllRowsFromCollection(_KPI_COLLECTION_NAME)
+
+
 # ---------------------------------------------------------------------------
 # Cross-collection read
 # ---------------------------------------------------------------------------
 
 def listEmbeddingsAcross3Collections() -> list[dict[str, Any]]:
-    """读取 3 个新 type-specific collection 全量，合并返回。
+    """读取全部 type-specific collection 全量，合并返回。
 
     与 listAllEmbeddings() 的差别：读 ontology_class_embeddings /
-    ontology_property_embeddings / ontology_metric_embeddings，而非旧
-    ontology_embeddings。M7 backfill 后 3 个新 collection 数据与旧一致；
-    M12+ 旧 collection 丢弃后，此函数成为唯一读取入口。
+    ontology_property_embeddings / ontology_metric_embeddings /
+    kpi_catalog_embeddings，而非旧 ontology_embeddings。M7 backfill 后新
+    collection 数据与旧一致；M12+ 旧 collection 丢弃后，此函数成为唯一读取入口。
+
+    ⚠️ 函数名保留旧的「Across3Collections」：诊断 API（vectors.py 等）与 backfill
+    脚本按此名导入，改名会打断它们；实际读取范围已含 KPI 目录集合。
 
     适用：诊断/统计 API（vectors.py 等）。
     """
@@ -101,6 +111,7 @@ def listEmbeddingsAcross3Collections() -> list[dict[str, Any]]:
         queryClassEmbeddings,
         queryPropertyEmbeddings,
         queryMetricEmbeddings,
+        queryKpiEmbeddings,
     ):
         rows.extend(query_fn())
     return rows

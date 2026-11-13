@@ -1,4 +1,4 @@
-"""Milvus search for type-routed 3-collection embeddings.
+"""Milvus search for type-routed 4-collection embeddings.
 
 M0-P0.4 Phase 2 (Task 15): Extracted from milvus_client.py.
 
@@ -25,6 +25,7 @@ from app.infrastructure.milvus_client import (
 _CLASS_COLLECTION_NAME = "ontology_class_embeddings"
 _PROPERTY_COLLECTION_NAME = "ontology_property_embeddings"
 _METRIC_COLLECTION_NAME = "ontology_metric_embeddings"
+_KPI_COLLECTION_NAME = "kpi_catalog_embeddings"
 
 # 去重超取倍数：Milvus 的 limit 按「实体」而非「不同 ontology_id」计数，集合里
 # 一旦残留同一 ontology_id 的多份向量（delete-then-insert 在批量负载下不可靠，
@@ -44,22 +45,23 @@ def searchEmbeddingsByTypeRouted(
     topK: int = 5,
     typeFilter: str | None = None,
 ) -> list[dict[str, Any]]:
-    """向量相似度搜索（type-routed；走 3 个 type-specific collection）。
+    """向量相似度搜索（type-routed；走 4 个 type-specific collection）。
 
     Args:
         queryEmbedding: 查询向量
         topK: 返回条数
-        typeFilter: 可选，限定类型（class/property/metric）
+        typeFilter: 可选，限定类型（class/property/metric/kpi）
 
     Returns:
         匹配的记录列表（含 ontology_id / type / name / alias / description / distance），
         按 distance 升序。
 
     Notes:
-        - typeFilter is None → 跨 3 collection 各取 topK，合并排序取 topK
+        - typeFilter is None → 跨 4 collection 各取 topK，合并排序取 topK
         - typeFilter == "class" → 只查 ontology_class_embeddings
         - typeFilter == "property" → 只查 ontology_property_embeddings
         - typeFilter == "metric" → 只查 ontology_metric_embeddings
+        - typeFilter == "kpi" → 只查 kpi_catalog_embeddings
     """
     if typeFilter is not None and typeFilter not in VALID_EMBEDDING_TYPES:
         raise ValueError(f"unknown embedding type filter: {typeFilter!r}")
@@ -68,7 +70,7 @@ def searchEmbeddingsByTypeRouted(
     # Milvus 的路径之一。把建连留给「别的调用方碰巧先跑过」的代价是：容器/进程
     # 重建后**首次**检索必失败（ConnectionNotExistException → chat 召回落
     # fallback →「数据表智能召回暂不可用」），后续又正常，间歇症状极易被放过。
-    # 每个调用只连一次（typeFilter=None 时下面要扫 3 个集合，逐集合建连等于 3 遍
+    # 每个调用只连一次（typeFilter=None 时下面要扫 4 个集合，逐集合建连等于 4 遍
     # 健康检查）。不写成 `if not has_connection(...)`：别名在而连接已死的场景
     # 仍须经 _connect() 的失效重连路径。
     _connect()
@@ -79,14 +81,17 @@ def searchEmbeddingsByTypeRouted(
         return _searchCollection(_PROPERTY_COLLECTION_NAME, queryEmbedding, topK)
     if typeFilter == "metric":
         return _searchCollection(_METRIC_COLLECTION_NAME, queryEmbedding, topK)
+    if typeFilter == "kpi":
+        return _searchCollection(_KPI_COLLECTION_NAME, queryEmbedding, topK)
 
-    # typeFilter is None: search all 3 collections, merge, sort by distance, take topK
+    # typeFilter is None: search all 4 collections, merge, sort by distance, take topK
     perCollectionTopK = topK
     perHits: list[dict[str, Any]] = []
     for collectionName in (
         _CLASS_COLLECTION_NAME,
         _PROPERTY_COLLECTION_NAME,
         _METRIC_COLLECTION_NAME,
+        _KPI_COLLECTION_NAME,
     ):
         perHits.extend(_searchCollection(collectionName, queryEmbedding, perCollectionTopK))
 

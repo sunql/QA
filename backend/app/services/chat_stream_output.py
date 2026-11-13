@@ -55,6 +55,7 @@ from app.services.kpi_execution_service import (
     hasExplicitTimeScope,
     planKpiExecution,
 )
+from app.services.time_scope_renderer import TIME_SCOPE_PLACEHOLDER
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_reconcile import reconcileMetric
 from app.services.kpi_metric_spec import (
@@ -414,12 +415,14 @@ class L1L4PreambleMixin:
                 switch_on=False, kpi_found=kpi is not None, metric_present=False,
                 execution_source=None, tier_a_eligible=False, has_datasource=False,
                 formula_present=False, has_explicit_time_scope=hasExplicitTime,
+                time_param_ready=False,
             )
         if kpi is None:
             return planKpiExecution(
                 switch_on=True, kpi_found=False, metric_present=False,
                 execution_source=None, tier_a_eligible=False, has_datasource=False,
                 formula_present=False, has_explicit_time_scope=hasExplicitTime,
+                time_param_ready=False,
             )
 
         metric = (
@@ -437,6 +440,13 @@ class L1L4PreambleMixin:
             reconcileMetric(governance, techniqueOf(metric), resolution=resolution)
             if metric is not None else None
         )
+        # P4a：占位符 + time_column 双就绪才允许显式时间问句走 Tier A；
+        # 二者任一缺失 ⇒ 维持 explicit_time_scope 降级（行为零变化）。
+        timeParamReady = bool(
+            metric is not None
+            and TIME_SCOPE_PLACEHOLDER in (metric.formula or "")
+            and (metric.time_column or "").strip()
+        )
         plan = planKpiExecution(
             switch_on=True,
             kpi_found=True,
@@ -446,6 +456,7 @@ class L1L4PreambleMixin:
             has_datasource=kpi.datasource_id is not None,
             formula_present=bool(metric is not None and (metric.formula or "").strip()),
             has_explicit_time_scope=hasExplicitTime,
+            time_param_ready=timeParamReady,
         )
         if plan.reason == REASON_EXECUTION_SOURCE_UNKNOWN:
             # 运营/治理面可见：未知执行源意味着该 KPI 永远走不进 Tier A，

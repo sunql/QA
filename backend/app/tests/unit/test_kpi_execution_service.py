@@ -9,6 +9,7 @@ import pytest
 from app.services.kpi_execution_service import (
     KpiExecutionService,
     firstPresentValue,
+    planKpiExecution,
 )
 
 
@@ -263,3 +264,47 @@ async def test_log_line_contains_kpi_and_datasource(
     assert len(failureLines) == 1
     assert "kpi=KPI_LOG" in failureLines[0]
     assert "datasource_id=9" in failureLines[0]
+
+
+# =============================================================================
+# P4a：time_param_ready —— 显式时间 + 占位符就绪 ⇒ 不再一票降级 Tier B
+# =============================================================================
+
+
+def test_explicit_time_without_placeholder_still_tier_b() -> None:
+    """占位符缺失 ⇒ 行为零变化（现状回归）。"""
+    plan = planKpiExecution(
+        switch_on=True, kpi_found=True, metric_present=True,
+        execution_source="ESCAPE_HATCH", tier_a_eligible=True, has_datasource=True,
+        formula_present=True, has_explicit_time_scope=True, time_param_ready=False,
+    )
+    assert (plan.tier, plan.reason) == ("B", "explicit_time_scope")
+
+
+def test_explicit_time_with_placeholder_reaches_tier_a() -> None:
+    plan = planKpiExecution(
+        switch_on=True, kpi_found=True, metric_present=True,
+        execution_source="ESCAPE_HATCH", tier_a_eligible=True, has_datasource=True,
+        formula_present=True, has_explicit_time_scope=True, time_param_ready=True,
+    )
+    assert (plan.tier, plan.reason) == ("A", None)
+
+
+def test_placeholder_ready_still_respects_later_short_circuits() -> None:
+    """占位符就绪不能跳过后续短路（对账不合格仍 Tier B）。"""
+    plan = planKpiExecution(
+        switch_on=True, kpi_found=True, metric_present=True,
+        execution_source="ESCAPE_HATCH", tier_a_eligible=False, has_datasource=True,
+        formula_present=True, has_explicit_time_scope=True, time_param_ready=True,
+    )
+    assert (plan.tier, plan.reason) == ("B", "reconcile_not_eligible")
+
+
+def test_time_param_ready_defaults_false() -> None:
+    """不传新参的旧调用行为不变（向后兼容）。"""
+    plan = planKpiExecution(
+        switch_on=True, kpi_found=True, metric_present=True,
+        execution_source="ESCAPE_HATCH", tier_a_eligible=True, has_datasource=True,
+        formula_present=True, has_explicit_time_scope=True,
+    )
+    assert plan.reason == "explicit_time_scope"

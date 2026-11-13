@@ -62,6 +62,7 @@ def planKpiExecution(
     has_datasource: bool,
     formula_present: bool,
     has_explicit_time_scope: bool,
+    time_param_ready: bool = False,
 ) -> KpiExecutionPlan:
     """按 §6.1/§6.2/§6.4 顺序短路（见 plan.md §3 决策表）。"""
     if not switch_on:
@@ -81,7 +82,9 @@ def planKpiExecution(
         return KpiExecutionPlan(TIER_C, REASON_EXECUTION_SOURCE_UNKNOWN)
     if not has_datasource:
         return KpiExecutionPlan(TIER_C, REASON_DATASOURCE_MISSING)
-    if has_explicit_time_scope:
+    # P4a：formula 声明 {time_scope} 且 time_column 就绪时，显式时间问句不再
+    # 一票降级 Tier B（渲染失败在执行层降级，见 time_scope_renderer）。
+    if has_explicit_time_scope and not time_param_ready:
         return KpiExecutionPlan(TIER_B, REASON_EXPLICIT_TIME_SCOPE)
     if not formula_present:
         return KpiExecutionPlan(TIER_B, REASON_FORMULA_EMPTY)

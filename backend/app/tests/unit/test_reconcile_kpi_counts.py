@@ -31,6 +31,9 @@ async def test_kpi_mismatch_reports_both_pairs() -> None:
     texts = _kpiTexts(result)
     assert any("kpi_published" in t and "milvus" in t for t in texts)
     assert any("kpi_total" in t and "neo4j" in t for t in texts)
+    # 值的方向也必须钉住：pg 侧在前、store 侧在后（写反 ⇒ 运维看到颠倒的数）
+    assert "对账不一致 kpi_published: pg=12, milvus=10" in texts
+    assert "对账不一致 kpi_total: pg=15, neo4j=14" in texts
 
 
 async def test_kpi_parity_is_silent() -> None:

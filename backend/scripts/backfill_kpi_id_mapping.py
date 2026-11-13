@@ -76,19 +76,31 @@ async def _registerKpi(
     return mapping.unified_id
 
 
+async def _snapshotKpiRefs(session: AsyncSession) -> list[tuple[int, str]]:
+    """一次性把 kpi_catalog 读成**普通值**列表 ``(id, kpi_code)``。
+
+    ⚠️ **循环体外取快照**（不是循环体内）：``IdMappingService.register`` 在
+    IntegrityError 时会 ``await session.rollback()`` ⇒ session identity map 里
+    所有持久化实例的属性**全部过期**。若在循环体内读 ``kpi.id``，那么上一轮
+    rollback 之后的那一行会触发 async 下的**同步懒加载** ⇒ ``MissingGreenlet``，
+    且该异常发生在下一轮循环开头（不在 try 保护范围内）⇒ 整批回填带 traceback
+    崩掉，而不是「计入 failed 后继续」。
+
+    故：这里把属性读成 int/str 快照，循环体只遍历普通值，不再触碰 ORM 实例。
+    """
+    rows = (await session.execute(select(KpiCatalog))).scalars().all()
+    return [(int(kpi.id), str(kpi.kpi_code)) for kpi in rows]
+
+
 async def backfillKpiIdMappings(session: AsyncSession, apply: bool) -> dict:
     """幂等回填：已注册跳过，未注册补 register。返回摘要 dict。"""
     idMappingSvc = IdMappingService()
-    rows = (await session.execute(select(KpiCatalog))).scalars().all()
+    kpiRefs = await _snapshotKpiRefs(session)
     registered = 0
     alreadyMapped = 0
     failed = 0
     failures: list[dict] = []
-    for kpi in rows:
-        # ⚠️ 先取快照值：register 内部 IntegrityError 时会 rollback ⇒ ORM 属性
-        # 过期；此后读 kpi.id 会触发 async 下的同步懒加载（MissingGreenlet）。
-        kpiId = kpi.id
-        kpiCode = kpi.kpi_code
+    for kpiId, kpiCode in kpiRefs:
         existing = await idMappingSvc.resolveByExternal(
             session, KPI_BUSINESS_OBJECT, str(kpiId)
         )
@@ -107,7 +119,7 @@ async def backfillKpiIdMappings(session: AsyncSession, apply: bool) -> dict:
             failures.append({"kpiId": kpiId, "error": str(exc)})
             print(f"  FAIL id={kpiId} code={kpiCode}: {exc}")
     summary = {
-        "totalKpis": len(rows),
+        "totalKpis": len(kpiRefs),
         "alreadyMapped": alreadyMapped,
         "registered": registered,
         "failed": failed,

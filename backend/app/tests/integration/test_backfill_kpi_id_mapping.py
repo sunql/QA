@@ -200,22 +200,91 @@ async def test_dry_run_does_not_write_any_row(seedKpis, dbSession):
         await _cleanup(dbSession)
 
 
-async def test_register_failure_is_reported_not_raised(seedKpis, dbSession, monkeypatch):
-    """单行注册失败 ⇒ 计入 failed/failures，不中断整批。"""
+async def test_conflicting_register_fails_one_row_and_continues(
+    seedKpis, dbSession, monkeypatch
+):
+    """**真撞唯一索引**（IntegrityError ⇒ register 内部 rollback）⇒ 失败行计入 failed，
+    **后续行仍被处理**。
+
+    这是 I-1 的回归防线：``register()`` 在 IntegrityError 时会
+    ``await session.rollback()`` ⇒ session 里所有持久化实例属性过期 ⇒ 回填循环
+    若在循环体内读 ORM 属性，下一轮就触发 async 下的同步懒加载（MissingGreenlet）
+    ⇒ 整批带 traceback 崩掉（而不是「计入 failed 后继续」）。
+
+    ⚠️ 冲突行只能来自**并发窗口**：`uq_id_mapping_bo_ext` 是
+    (business_object, external_id) 上的唯一索引，而 ``resolveByExternal`` 恰好按
+    同一对列查 ⇒ **预置一条冲突行是撞不上的**（会被查出来走 alreadyMapped 分支）。
+    故本用例用「另一个独立 session 先提交冲突行」+「只对 A 打桩
+    resolveByExternal 返回 None」如实模拟 SELECT 与 INSERT 之间的竞态，
+    ``register`` **保持真实实现** ⇒ 真 IntegrityError、真 rollback。
+    """
     from app.services import id_mapping_service as idMappingModule
 
-    async def _boom(self, session, dto, **kwargs):
-        raise RuntimeError("模拟注册失败")
+    kpiA, kpiB = seedKpis
+    # 先取普通值：脚本里的 rollback 会让 ORM 实例属性过期。
+    aId = int(kpiA.id)
+    bId = int(kpiB.id)
 
-    monkeypatch.setattr(idMappingModule.IdMappingService, "register", _boom)
+    # ① 另一个独立 engine 的 session 提交冲突行（模拟并发写者）。
+    otherFactory = buildSessionFactory(_requireRealTestDsn())
     try:
+        async with otherFactory() as otherSession:
+            otherSession.add(
+                IdMapping(
+                    unified_id=f"obj:KPI:{aId}",
+                    business_object="KPI",
+                    external_id=str(aId),
+                    pg_table="kpi_catalog",
+                    pg_id=str(aId),
+                )
+            )
+            await otherSession.commit()
+    finally:
+        await otherFactory.kw["bind"].dispose()
+
+    # ② 只对 A 打桩 resolveByExternal 返回 None（竞态窗口：查不到但插得进）；
+    #    B 仍走真实实现；register 保持真实实现。
+    originalResolve = idMappingModule.IdMappingService.resolveByExternal
+
+    async def _resolve(self, session, businessObject, externalId):
+        if businessObject == "KPI" and externalId == str(aId):
+            return None
+        return await originalResolve(self, session, businessObject, externalId)
+
+    monkeypatch.setattr(
+        idMappingModule.IdMappingService, "resolveByExternal", _resolve
+    )
+
+    try:
+        # ③ 正常返回（不抛 MissingGreenlet）—— 本用例的核心断言。
         summary = await backfillKpiIdMappings(dbSession, apply=True)
-        assert summary["failed"] >= 1
-        assert summary["registered"] == 0
-        assert summary["failures"]
-        first = summary["failures"][0]
-        assert set(first.keys()) == {"kpiId", "error"}
-        assert "模拟注册失败" in first["error"]
+        assert summary["totalKpis"] == 2
+        assert summary["alreadyMapped"] == 0
+        assert summary["failed"] == 1
+        assert summary["registered"] == 1
+        assert len(summary["failures"]) == 1
+        assert summary["failures"][0]["kpiId"] == aId
+        assert set(summary["failures"][0].keys()) == {"kpiId", "error"}
+
+        # ④ B 确实被注册（没有 I-1 修复时 B 会因 MissingGreenlet 崩掉 ⇒ 本例变红）。
+        bUnifiedIds = (
+            await dbSession.execute(
+                select(IdMapping.unified_id).where(
+                    IdMapping.external_id == str(bId)
+                )
+            )
+        ).scalars().all()
+        assert bUnifiedIds == [f"obj:KPI:{bId}"]
+
+        # ⑤ A 只剩并发写者那一条（我们的 INSERT 被唯一索引挡掉，没写进第二行）。
+        aCount = (
+            await dbSession.execute(
+                select(saFunc.count())
+                .select_from(IdMapping)
+                .where(IdMapping.external_id == str(aId))
+            )
+        ).scalar_one()
+        assert aCount == 1
     finally:
         await _cleanup(dbSession)
 

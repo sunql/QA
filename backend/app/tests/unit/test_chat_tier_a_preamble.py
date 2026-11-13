@@ -234,14 +234,28 @@ def _kpi(*, metric_id: int | None = 5, datasource_id: int | None = 1) -> KpiCata
     )
 
 
-def _metric(execution_source: str) -> OntologyMetric:
-    """治理/技术可对账通过的一对；execution_source 决定路由分支。"""
+def _metric(
+    execution_source: str,
+    *,
+    formula: str | None = None,
+    time_column: str | None = None,
+) -> OntologyMetric:
+    """治理/技术可对账通过的一对；execution_source 决定路由分支。
+
+    formula / time_column 可选覆写：P4a 反向守卫用它们单独控制
+    `{time_scope}` 占位符与 time_column 两个就绪事实。
+    """
     return OntologyMetric(
         metric_name="供应商准时交付率",
-        formula="SELECT SUM(qty) FROM delivery GROUP BY supplier_id",
+        formula=(
+            formula
+            if formula is not None
+            else "SELECT SUM(qty) FROM delivery GROUP BY supplier_id"
+        ),
         numerator_measure={"agg": "SUM", "expr": "qty"},
         grain_keys=["supplier_id"],
         execution_source=execution_source,
+        time_column=time_column,
     )
 
 
@@ -296,6 +310,60 @@ async def test_real_plan_reconciled_escape_hatch_is_tier_a() -> None:
     probe = _PlanProbe(enabled=True)
     plan = await probe._planKpiTier(
         "供应商准时交付率是多少", _kpi(), _MetricSession(_metric("ESCAPE_HATCH"))
+    )
+    assert plan.tier == "A"
+    assert plan.reason is None
+
+
+# --- P4a 反向守卫：占位符 + time_column 双就绪缺一不可（防单一事实实现） ---
+
+
+@pytest.mark.asyncio()
+async def test_real_plan_placeholder_without_time_column_stays_tier_b() -> None:
+    """反向守卫①：占位符就绪但 time_column 缺失 ⇒ 维持 explicit_time_scope 降级。"""
+    probe = _PlanProbe(enabled=True)
+    plan = await probe._planKpiTier(
+        "近6个月供应商准时交付率",
+        _kpi(),
+        _MetricSession(_metric(
+            "ESCAPE_HATCH",
+            formula="SELECT SUM(qty) FROM delivery WHERE {time_scope} GROUP BY supplier_id",
+            time_column=None,
+        )),
+    )
+    assert plan.tier == "B"
+    assert plan.reason == "explicit_time_scope"
+
+
+@pytest.mark.asyncio()
+async def test_real_plan_time_column_without_placeholder_stays_tier_b() -> None:
+    """反向守卫②：time_column 就绪但 formula 无占位符 ⇒ 维持降级（防只查 time_column）。"""
+    probe = _PlanProbe(enabled=True)
+    plan = await probe._planKpiTier(
+        "近6个月供应商准时交付率",
+        _kpi(),
+        _MetricSession(_metric(
+            "ESCAPE_HATCH",
+            formula="SELECT SUM(qty) FROM delivery GROUP BY supplier_id",
+            time_column="ORDER_DATE",
+        )),
+    )
+    assert plan.tier == "B"
+    assert plan.reason == "explicit_time_scope"
+
+
+@pytest.mark.asyncio()
+async def test_real_plan_placeholder_and_time_column_reach_tier_a() -> None:
+    """反向守卫③（正路径）：双就绪 + 显式时间问句 ⇒ 走真 wiring 进 Tier A。"""
+    probe = _PlanProbe(enabled=True)
+    plan = await probe._planKpiTier(
+        "近6个月供应商准时交付率",
+        _kpi(),
+        _MetricSession(_metric(
+            "ESCAPE_HATCH",
+            formula="SELECT SUM(qty) FROM delivery WHERE {time_scope} GROUP BY supplier_id",
+            time_column="ORDER_DATE",
+        )),
     )
     assert plan.tier == "A"
     assert plan.reason is None

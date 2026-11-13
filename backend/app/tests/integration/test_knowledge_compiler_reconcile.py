@@ -57,7 +57,13 @@ async def test_reconcile_real_pg_empty_diff_zero_writes_audit(
     svc = KnowledgeCompilerService()
     summary = await svc.reconcile(dbSession)
 
-    assert summary.pg_counts == {"class": 0, "property": 0, "metric": 0}
+    assert summary.pg_counts == {
+        "class": 0,
+        "property": 0,
+        "metric": 0,
+        "kpi_published": 0,
+        "kpi_total": 0,
+    }
     assert summary.isConsistent is True
     assert summary.warnings == ()
 

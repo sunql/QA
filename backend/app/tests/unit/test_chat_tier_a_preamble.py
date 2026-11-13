@@ -62,7 +62,7 @@ class _Preamble(L1L4PreambleMixin):
     async def _planKpiTier(self, question, kpi, session):  # noqa: ANN001
         return self.plan
 
-    async def _executeTierA(self, match, kpi, session):  # noqa: ANN001
+    async def _executeTierA(self, match, kpi, session, question=None):  # noqa: ANN001
         self.tierACalled = True
         return self.executeResult, self.executeReason
 
@@ -173,7 +173,7 @@ async def test_catalog_failure_falls_through_to_l4_without_raising() -> None:
 
 
 class _ExecuteErrorPreamble(_Preamble):
-    async def _executeTierA(self, match, kpi, session):  # noqa: ANN001
+    async def _executeTierA(self, match, kpi, session, question=None):  # noqa: ANN001
         raise RuntimeError("execute boom")
 
 

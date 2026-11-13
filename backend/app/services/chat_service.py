@@ -101,6 +101,11 @@ from app.services.kpi_execution_service import (
     TIER_A,
     KpiExecutionService,
 )
+from app.services.time_scope_renderer import (
+    REASON_TIME_SCOPE_PARSE_FAILED,
+    TIME_SCOPE_PLACEHOLDER,
+    prepareTimeParameterizedFormula,
+)
 from app.services.data_summary import summarize_data
 from app.services.datasource_service import DataSourceService
 from app.services.kpi_contract_builder import buildKpiContractBlock
@@ -1591,6 +1596,7 @@ class ChatService(
         match: KpiMatchResult,
         kpi: Any | None,
         session: AsyncSession | None,
+        question: str | None = None,
     ) -> tuple[ChatResponse | None, str | None]:
         """Tier A：执行 metric.formula；失败返回 (None, reason) 交 preamble 降级。
 
@@ -1609,9 +1615,30 @@ class ChatService(
         if datasource is None:
             return None, REASON_DATASOURCE_MISSING
 
+        # P4a：占位符渲染（确定性三步：解析 → 渲染 → 替换）。
+        # 渲染失败 ⇒ (None, reason) 走 Tier B 哨兵；绝不能把含占位符原文的
+        # formula 发给数据库（花括号必语法错，且语义不可控）。
+        formula = metric.formula or ""
+        timeColumn = (metric.time_column or "").strip()
+        if TIME_SCOPE_PLACEHOLDER in formula:
+            if not timeColumn or not (question or "").strip():
+                return None, REASON_TIME_SCOPE_PARSE_FAILED
+            prepared = prepareTimeParameterizedFormula(
+                formula=formula,
+                question=question,
+                timeColumn=timeColumn,
+                dialect=datasource.type.value if hasattr(datasource.type, "value") else str(datasource.type),
+            )
+            if not prepared.ok:
+                logger.warning(
+                    "TierA 时间参数化失败 kpi=%s reason=%s", match.code, prepared.reason
+                )
+                return None, prepared.reason
+            formula = prepared.formula or formula
+
         result = await self._kpiExecutionService.execute(
             # formula 类型为 str；空串只可能出现在「计划被绕过」的防御性路径。
-            formula=metric.formula or "",
+            formula=formula,
             datasourceId=kpi.datasource_id,
             datasource=datasource,
             metricCode=match.code,

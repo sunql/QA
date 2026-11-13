@@ -127,6 +127,7 @@ async def _seedKpiWithMetric(
     formula: str,
     executionSource: str = "ESCAPE_HATCH",
     businessDefinition: str = "按测试元数据表计数",
+    timeColumn: str | None = None,
 ) -> tuple[OntologyMetric, KpiCatalog]:
     """对账 pass 的最小形状：MEASURE + 分子 {cnt} + 粒度 {kpi_code}。
 
@@ -142,6 +143,7 @@ async def _seedKpiWithMetric(
         grain_keys=["kpi_code"],
         execution_source=executionSource,
         time_grain="MONTH",
+        time_column=timeColumn,
         created_by="tier-a-chat-test",
     )
     dbSession.add(metric)
@@ -177,6 +179,17 @@ async def _seedKpiWithMetric(
                 property_name=column,
                 source_column=column,
                 data_type="VARCHAR",
+            )
+        )
+    if timeColumn:
+        # P4a：time_column 必须能在源类日期候选中解析，否则层 2 对账 unknown
+        # ⇒ degraded ⇒ 路由根本进不了 Tier A（渲染分支无从被测）。
+        dbSession.add(
+            OntologyProperty(
+                class_id=ontologyClass.id,
+                property_name=timeColumn,
+                source_column=timeColumn,
+                data_type="DATE",
             )
         )
     dbSession.add(
@@ -775,3 +788,103 @@ async def test_clarify_intent_keeps_tier_b_fields_on_either_entry(
     assert body["intent"] == "clarify"
     assert body["executionTier"] == "B"
     assert body["degradedReason"] == "explicit_time_scope"
+
+
+# ---------------------------------------------------------------------------
+# 8. P4a：{time_scope} 占位符 —— 非 Oracle fail-closed / Oracle 渲染放行
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_FORMULA = "SELECT COUNT(*) AS cnt FROM kpi_catalog WHERE {time_scope}"
+
+
+async def test_placeholder_metric_pg_fails_closed_to_tier_b(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """占位符 + time_column 就绪 + postgresql ⇒ 执行层渲染 fail-closed。
+
+    路由判 Tier A（time_param_ready=True），渲染层抛 unsupported ⇒ degraded
+    reason=time_scope_render_unsupported_dialect；绝不让 LLM 猜时间、绝不 500。
+    """
+    ds = await _seedSelfDatasource(dbSession)  # type == "postgresql"
+    config = await _seedTierBPipelineSupport(dbSession)
+    _installTierBFakes(monkeypatch, config)
+    await _seedSwitches(dbSession)
+    await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_TScopePG",
+        kpiName="时间占位PG指标",
+        keywords=["时间占位PG指标"],
+        formula=_PLACEHOLDER_FORMULA,
+        timeColumn="created_time",
+    )
+    await _warmKpiCache(dbSession)
+
+    resp = await client.post(
+        _CHAT_URL,
+        json=_payload("近6个月时间占位PG指标", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executionTier"] == "B"
+    assert body["degradedReason"] == "time_scope_render_unsupported_dialect"
+
+
+async def test_placeholder_metric_oracle_renders_predicate_into_formula(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """占位符 + oracle ⇒ 渲染成功，发给 adapter 的 formula 含 DATE 字面量谓词。
+
+    本地无真实 Oracle：替换执行器 live adapter provider 捕获执行入参（渲染层
+    证据），fake adapter 返回合法行 ⇒ 全链路判 Tier A。
+    """
+    captured: dict[str, str] = {}
+
+    class _FakeAdapter:
+        async def execute_read_only(self, sql: str, maxRows: int):  # noqa: ANN001
+            captured["sql"] = sql
+            return [{"cnt": 7}]
+
+    def _fakeGetAdapter(datasourceId, datasource):  # noqa: ANN001
+        return _FakeAdapter()
+
+    # ``KpiExecutionService`` 在构造时已捕获 adapterProvider（ChatService 注入的
+    # ``get_adapter``），事后 patch 模块级名字无效；必须 patch 实例上的 live provider。
+    import app.api.v1.chat as chat_module
+
+    monkeypatch.setattr(
+        chat_module._service._kpiExecutionService,
+        "_adapterProvider",
+        _fakeGetAdapter,
+    )
+
+    ds = await _seedSelfDatasource(dbSession)
+    await _seedSwitches(dbSession)
+    metric, kpi = await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_TScopeOra",
+        kpiName="时间占位Oracle指标",
+        keywords=["时间占位Oracle指标"],
+        formula=_PLACEHOLDER_FORMULA,
+        timeColumn="created_time",
+    )
+    # 自连 datasource 是 postgresql ⇒ 改 type 后**提交**（本用例专测 oracle 渲染分支）。
+    # 仅 flush 不够：请求走另一个 session/连接，未提交的 UPDATE 对它不可见。
+    ds.type = "oracle"
+    await dbSession.commit()
+    await _warmKpiCache(dbSession)
+
+    resp = await client.post(
+        _CHAT_URL,
+        json=_payload("近6个月时间占位Oracle指标", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executionTier"] == "A", body
+    sql = captured["sql"]
+    assert "{time_scope}" not in sql
+    assert "created_time >= DATE '" in sql
+    assert "created_time < DATE '" in sql

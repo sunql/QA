@@ -470,7 +470,11 @@ class L1L4PreambleMixin:
         return plan
 
     async def _executeTierA(
-        self, match: KpiMatchResult, kpi: Any | None, session: AsyncSession | None
+        self,
+        match: KpiMatchResult,
+        kpi: Any | None,
+        session: AsyncSession | None,
+        question: str | None = None,
     ) -> tuple[Any | None, str | None]:
         """Tier A 执行钩子默认值（真实实现在 ChatService，下一个任务落地）。
 
@@ -604,7 +608,7 @@ class L1L4PreambleMixin:
                 if plan.tier == TIER_A:
                     try:
                         l1, degradedReason = await self._executeTierA(
-                            match, kpi, session
+                            match, kpi, session, question=dto.question
                         )
                     except Exception:  # noqa: BLE001 — Tier A 失败降级到 Tier B
                         logger.warning(

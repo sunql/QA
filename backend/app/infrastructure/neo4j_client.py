@@ -393,12 +393,46 @@ def linkKpiMeasuredBy(kpiUid: str, metricUid: str) -> None:
         session.run(cql, kpiUid=kpiUid, metricUid=metricUid)
 
 
+def _setKpiMeasuredByTx(
+    tx: Any, kpiUid: str, metricUid: str | None
+) -> tuple[bool, bool]:
+    """事务内：删旧 MEASURED_BY 边 → 按目标 metric 建边。
+
+    返回 ``(kpiExists, metricLinked)``：
+    - ``kpiExists``：KPI 节点在图里（不在 ⇒ 静默无操作，文档约定）；
+    - ``metricLinked``：目标 metric 命中并建了边（未命中 ⇒ 边未建成，需告警）。
+
+    三条语句（探测 KPI 存在性 / 删旧边 / 建新边）**必须**在同一个事务里：
+    分两次 auto-commit 时，中途失败会留下「边被删掉却没建回来」的半应用状态，
+    而本仓 D4 不允许 outbox / 重试队列 ⇒ 错状态会静默留存。
+    """
+    kpiRecord = tx.run(
+        "MATCH (k:KpiCatalog {unified_id: $kpiUid}) RETURN count(k) AS cnt",
+        kpiUid=kpiUid,
+    ).single()
+    kpiExists = bool(kpiRecord and kpiRecord["cnt"])
+    tx.run(
+        "MATCH (k:KpiCatalog {unified_id: $kpiUid})-[r:MEASURED_BY]->() DELETE r",
+        kpiUid=kpiUid,
+    )
+    if metricUid is None:
+        return kpiExists, False
+    linkRecord = tx.run(
+        "MATCH (k:KpiCatalog {unified_id: $kpiUid}), "
+        "(m:Metric {unified_id: $metricUid}) MERGE (k)-[:MEASURED_BY]->(m) "
+        "RETURN m.unified_id AS metricUid",
+        kpiUid=kpiUid,
+        metricUid=metricUid,
+    ).single()
+    return kpiExists, linkRecord is not None
+
+
 def setKpiMeasuredBy(kpiUid: str, metricUid: str | None) -> None:
     """把 KPI 节点的 MEASURED_BY 边集合置为恰好一条（或零条）。
 
     metricUid 为 None ⇒ 删除该 KPI 节点现有的全部 MEASURED_BY 边、不建新边；
     否则 ⇒ 先删旧边，再按 metricUid MERGE 一条新边。
-    节点不存在时静默无操作（MATCH 不命中 ⇒ 无语句效果）。
+    KPI 节点不存在时静默无操作（MATCH 不命中 ⇒ 无语句效果）。
 
     为什么不用 linkKpiMeasuredBy（只加不删）：KPI 的 metric_id 从 A 改到 B（或
     被清空）后，旧边仍在 ⇒ 图里出现「同一 KPI 被两个指标测量」的自相矛盾数据，
@@ -407,20 +441,24 @@ def setKpiMeasuredBy(kpiUid: str, metricUid: str | None) -> None:
 
     metric 端用 MATCH（而非 MERGE 建节点）⇒ 指标节点尚未入图时不凭空造点，
     与 linkKpiMeasuredBy / reconcile* 系列同款约束。
+
+    事务语义：删边与建边在**同一个显式事务**（``session.execute_write`` 托管
+    事务，自带瞬时错误重试；本操作幂等 ⇒ 重试安全）⇒ 要么都生效、要么都不生效。
+
+    可观测性：KPI 在图里但目标 metric 不在 ⇒ 记 warning（KPI uid + metric uid），
+    「metric 尚未入图 ⇒ 边未建立」不能无声消失（对账/reconcile 事后补边）。
     """
     driver = getDriver()
     with driver.session() as session:
-        session.run(
-            "MATCH (k:KpiCatalog {unified_id: $kpiUid})-[r:MEASURED_BY]->() DELETE r",
-            kpiUid=kpiUid,
+        kpiExists, metricLinked = session.execute_write(
+            _setKpiMeasuredByTx, kpiUid, metricUid
         )
-        if metricUid:
-            session.run(
-                "MATCH (k:KpiCatalog {unified_id: $kpiUid}), "
-                "(m:Metric {unified_id: $metricUid}) MERGE (k)-[:MEASURED_BY]->(m)",
-                kpiUid=kpiUid,
-                metricUid=metricUid,
-            )
+    if kpiExists and metricUid is not None and not metricLinked:
+        logger.warning(
+            "KPI 图节点存在但目标指标尚未入图，MEASURED_BY 边未建立 kpiUid=%s metricUid=%s",
+            kpiUid,
+            metricUid,
+        )
 
 
 def reconcilePropertyReferences(propertyUid: str, refClassUid: str | None) -> None:

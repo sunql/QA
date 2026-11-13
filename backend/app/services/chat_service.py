@@ -1634,7 +1634,9 @@ class ChatService(
                     "TierA 时间参数化失败 kpi=%s reason=%s", match.code, prepared.reason
                 )
                 return None, prepared.reason
-            formula = prepared.formula or formula
+            # 走到这里 prepared.ok 为真，渲染器契约保证 formula 非 None；
+            # 不再回退到含 {time_scope} 占位符的原文（否则契约破坏时会把占位符发进 DB）。
+            formula = prepared.formula
 
         result = await self._kpiExecutionService.execute(
             # formula 类型为 str；空串只可能出现在「计划被绕过」的防御性路径。

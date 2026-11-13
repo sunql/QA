@@ -22,6 +22,7 @@ import pytest
 import pytest_asyncio
 
 from app.services.time_scope_resolver import (
+    _cnNumberToInt,
     parseTimeScope,
     parseTimeScopes,
     renderTimeScopeFact,
@@ -152,7 +153,8 @@ def test_resolves_half_year(question: str, today: date, start: date, end: date, 
     [
         "各供应商的收货数量汇总",
         "最近 30 天",
-        "最近 3 个月",
+        # 「最近 3 个月」已改判：P4a D3（2026-11-13）将滚动窗口按自然月对齐解析，
+        # 见下方 TestRecentWindowScopes；不再归入不解析清单。
         "这半年有多少新增供应商",  # 滚动半年 vs 自然半年存在业务歧义，本模块不解析
         "近半年采购额",
         "3个月均价",
@@ -336,3 +338,123 @@ def test_time_scope_is_immutable() -> None:
     assert scope is not None
     with pytest.raises(FrozenInstanceError):
         scope.start = date(2020, 1, 1)  # type: ignore[misc]
+
+
+# =============================================================================
+# P4a：滚动窗口 + 自然月/年（设计 D3 裁决；此前滚动窗口不解析，2026-11-13 改判）
+# =============================================================================
+
+
+class TestRecentWindowScopes:
+    def test_recent_n_months_is_natural_month_aligned(self) -> None:
+        """近6个月 = 含本月共 6 个自然月，半开区间 [本月初-5月, 下月初)。"""
+        scope = parseTimeScope("近6个月供应商准时交付率", today=date(2026, 11, 13))
+        assert scope is not None
+        assert scope.start == date(2026, 6, 1)
+        assert scope.end == date(2026, 12, 1)
+        assert scope.granularity == "month"
+        assert "近6个月" in scope.matched
+
+    def test_recent_n_months_with_spaces_and_arabic_digits(self) -> None:
+        """「最近 3 个月」（空格 + 阿拉伯数字）与「最近三个月」同义，须解析。"""
+        scope = parseTimeScope("最近 3 个月销售额", today=date(2026, 11, 13))
+        assert scope is not None
+        assert scope.start == date(2026, 9, 1)
+        assert scope.end == date(2026, 12, 1)
+
+    def test_recent_one_month_starts_at_current_month(self) -> None:
+        scope = parseTimeScope("近1个月采购额", today=date(2026, 11, 13))
+        assert scope is not None
+        assert scope.start == date(2026, 11, 1)
+        assert scope.end == date(2026, 12, 1)
+
+    def test_recent_n_months_crosses_year(self) -> None:
+        scope = parseTimeScope("近6个月交付率", today=date(2026, 1, 5))
+        assert scope is not None
+        assert scope.start == date(2025, 8, 1)
+        assert scope.end == date(2026, 2, 1)
+
+    def test_recent_cn_numeral_months(self) -> None:
+        scope = parseTimeScope("最近三个月销售额", today=date(2026, 11, 13))
+        assert scope is not None
+        assert scope.start == date(2026, 9, 1)
+        assert scope.end == date(2026, 12, 1)
+
+    def test_recent_liang_means_two(self) -> None:
+        scope = parseTimeScope("近两个月退货率", today=date(2026, 11, 13))
+        assert scope is not None
+        assert scope.start == date(2026, 10, 1)
+
+    def test_recent_n_quarters(self) -> None:
+        scope = parseTimeScope("近2个季度库存周转", today=date(2026, 11, 13))
+        assert scope is not None
+        # 当前季度 Q4 起点 10-01，-(2-1) 季 ⇒ 7-01
+        assert scope.start == date(2026, 7, 1)
+        assert scope.end == date(2027, 1, 1)
+        assert scope.granularity == "quarter"
+
+    def test_recent_n_years(self) -> None:
+        scope = parseTimeScope("近3年营收", today=date(2026, 11, 13))
+        assert scope is not None
+        assert scope.start == date(2024, 1, 1)
+        assert scope.end == date(2027, 1, 1)
+        assert scope.granularity == "year"
+
+    def test_recent_zero_or_invalid_not_parsed(self) -> None:
+        assert parseTimeScope("近0个月销售额", today=date(2026, 11, 13)) is None
+
+
+class TestStandaloneNaturalScopes:
+    def test_ben_yue(self) -> None:
+        scope = parseTimeScope("本月供应商数量", today=date(2026, 11, 13))
+        assert scope is not None
+        assert scope.start == date(2026, 11, 1)
+        assert scope.end == date(2026, 12, 1)
+
+    def test_shang_ge_yue(self) -> None:
+        scope = parseTimeScope("上个月采购额", today=date(2026, 11, 13))
+        assert scope is not None
+        assert scope.start == date(2026, 10, 1)
+        assert scope.end == date(2026, 11, 1)
+
+    def test_jin_nian_bare(self) -> None:
+        scope = parseTimeScope("今年入库总量", today=date(2026, 11, 13))
+        assert scope is not None
+        assert scope.start == date(2026, 1, 1)
+        assert scope.end == date(2027, 1, 1)
+        assert scope.granularity == "year"
+
+    def test_qu_nian_bare(self) -> None:
+        scope = parseTimeScope("去年出货总额", today=date(2026, 11, 13))
+        assert scope is not None
+        assert scope.start == date(2025, 1, 1)
+        assert scope.end == date(2026, 1, 1)
+
+
+class TestResolverInteractionGuards:
+    def test_year_quarter_beats_bare_year(self) -> None:
+        """「今年一季度」须命中季度口径（长匹配优先），不落裸年全年口径。"""
+        scope = parseTimeScope("今年一季度采购额", today=date(2026, 11, 13))
+        assert scope is not None
+        assert scope.granularity == "quarter"
+        assert scope.start == date(2026, 1, 1)
+        assert scope.end == date(2026, 4, 1)
+
+    def test_concrete_date_range_still_not_parsed(self) -> None:
+        """D3 边界：具体日期区间仍不解析（后续批次）。"""
+        assert parseTimeScope("2026-01-01 到 2026-03-31 的销售额", today=date(2026, 11, 13)) is None
+
+
+class TestCnNumberToInt:
+    def test_simple_and_combinations(self) -> None:
+        assert _cnNumberToInt("3") == 3
+        assert _cnNumberToInt("三") == 3
+        assert _cnNumberToInt("两") == 2
+        assert _cnNumberToInt("十") == 10
+        assert _cnNumberToInt("十二") == 12
+        assert _cnNumberToInt("二十") == 20
+        assert _cnNumberToInt("二十一") == 21
+
+    def test_invalid_returns_none(self) -> None:
+        assert _cnNumberToInt("百") is None
+        assert _cnNumberToInt("") is None

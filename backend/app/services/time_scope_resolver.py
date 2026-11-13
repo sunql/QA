@@ -6,11 +6,12 @@
 表达解析为服务端算好的半开区间 [start, end)，作为**事实数据**注入 prompt。
 
 设计约束：
-- 只解析季度/半年这类无歧义口径；「这半年」「近半年」「最近 N 天」等滚动窗口
-  语义存在业务分歧（滚动 vs 自然边界），一律不解析（返回 None），交给上游决定。
+- 无歧义口径确定性解析；「这半年」等语义仍不解析（返回 None）。
+- P4a（2026-11-13，设计 D3 裁决）：滚动窗口「近 N 月/季/年」按**自然月/季/年
+  对齐**解析（含当前期共 N 期，[start, end) 半开）；「本月/上月/今年/去年」
+  解析为自然区间。具体日期区间（2026-01-01 到 …）仍不解析。
 - 半开区间含起不含止，跨年边界由计算得出，不允许调用方自行拼 `end`。
-- 命中多个区间时按「长匹配优先、再按出现位置」去重，避免「上一季度」中的
-  「一季度」被重复识别。
+- 命中多个区间时按「长匹配优先、再按出现位置」去重。
 """
 
 from __future__ import annotations
@@ -23,6 +24,36 @@ from datetime import date
 _QUARTER_START_MONTHS = (1, 4, 7, 10)
 
 _CN_QUARTERS = {"一": 1, "二": 2, "三": 3, "四": 4, "1": 1, "2": 2, "3": 3, "4": 4}
+
+# 滚动窗口 N 的中文数字（业务窗口 N 不会过百，「十/十二/二十一」已覆盖）。
+_CN_WINDOW_DIGITS: dict[str, int] = {
+    "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+}
+
+
+def _cnNumberToInt(token: str) -> int | None:
+    """中文/阿拉伯数字 → 正整数；不支持百以上，非法返回 None。"""
+    if not token:
+        return None
+    if token.isdigit():
+        return int(token)
+    if token == "十":
+        return 10
+    if "十" in token:
+        left, _, right = token.partition("十")
+        if (left and left not in _CN_WINDOW_DIGITS) or (right and right not in _CN_WINDOW_DIGITS):
+            return None
+        tens = _CN_WINDOW_DIGITS.get(left, 1)
+        ones = _CN_WINDOW_DIGITS.get(right, 0) if right else 0
+        return tens * 10 + ones
+    return _CN_WINDOW_DIGITS.get(token)
+
+
+def _addMonths(d: date, n: int) -> date:
+    """月份加减（纯标准库）；本模块只传月初 1 号，无月末 clamp 路径。"""
+    total = d.year * 12 + (d.month - 1) + n
+    return date(total // 12, total % 12 + 1, d.day)
 
 _RELATIVE_YEAR_OFFSETS = {
     "今年": 0,
@@ -92,6 +123,22 @@ _RE_HALF_YEAR = re.compile(
     r"\s*(?P<half>[上下])\s*半年"
 )
 
+# 近 N 月/季/年（P4a D3）：近6个月 / 最近三个月 / 过去 12 个月 / 前3个季度 / 近2年
+_RE_RECENT_N = re.compile(
+    r"(?P<dir>近|最近|过去|前)\s*(?P<n>[0-9]+|[一二三四五六七八九十两]+)\s*个?\s*(?P<unit>月|季度|年)"
+)
+# 独立自然月：本月 / 这个月 / 上个月 / 当前月（「上季度」由 _RE_RELATIVE_QUARTER 接管，不冲突）
+_RE_STANDALONE_MONTH = re.compile(r"(?P<dir>当前|上一|这个|上个|上|本|这)(?:个)?月")
+# 裸相对年（不接季度/数字后缀的场景）：今年销售额 / 去年出货。「今年一季度」
+# 由季度规则更长匹配胜出；「今年3月」「去年12月」「今年4-6月」等带数字后缀的
+# 形态是月份/日期区间语义，不能落整年口径，故后随数字一律排除。
+_RE_BARE_YEAR = re.compile(rf"(?P<rel>{_RELATIVE_YEAR})(?!\s*[0-9一二三四五六七八九十])")
+
+# 独立自然月的方向偏移（本月=0，上月=-1）。
+_STANDALONE_MONTH_OFFSETS: dict[str, int] = {
+    "本": 0, "这": 0, "当前": 0, "这个": 0, "上": -1, "上一": -1, "上个": -1,
+}
+
 
 @dataclass(frozen=True)
 class TimeScope:
@@ -101,7 +148,7 @@ class TimeScope:
     start: date
     end: date
     label: str
-    granularity: str  # "quarter" | "half_year"
+    granularity: str  # "quarter" | "half_year" | "month" | "year"
 
 
 def _quarterBounds(year: int, quarter: int) -> tuple[date, date]:
@@ -129,6 +176,53 @@ def _halfYearScope(year: int, half: int, matched: str) -> TimeScope:
     else:
         start, end, label = date(year, 7, 1), date(year + 1, 1, 1), f"{year}年下半年"
     return TimeScope(matched=matched, start=start, end=end, label=label, granularity="half_year")
+
+
+def _recentWindowScope(today: date, n: int, unit: str, matched: str) -> TimeScope | None:
+    """滚动近 N 月/季/年：含当前期共 N 期，自然边界对齐，[start, end)。"""
+    if n <= 0:
+        return None
+    if unit == "月":
+        monthStart = date(today.year, today.month, 1)
+        start = _addMonths(monthStart, -(n - 1))
+        end = _addMonths(monthStart, 1)
+        label = f"近{n}个月"
+        granularity = "month"
+    elif unit == "季度":
+        quarterStartMonth = ((today.month - 1) // 3) * 3 + 1
+        quarterStart = date(today.year, quarterStartMonth, 1)
+        start = _addMonths(quarterStart, -3 * (n - 1))
+        end = _addMonths(quarterStart, 3)
+        label = f"近{n}个季度"
+        granularity = "quarter"
+    else:
+        start = date(today.year - (n - 1), 1, 1)
+        end = date(today.year + 1, 1, 1)
+        label = f"近{n}年"
+        granularity = "year"
+    return TimeScope(matched=matched, start=start, end=end, label=label, granularity=granularity)
+
+
+def _standaloneMonthScope(today: date, offset: int, matched: str) -> TimeScope:
+    monthStart = _addMonths(date(today.year, today.month, 1), offset)
+    return TimeScope(
+        matched=matched,
+        start=monthStart,
+        end=_addMonths(monthStart, 1),
+        label="本月" if offset == 0 else "上月",
+        granularity="month",
+    )
+
+
+def _bareYearScope(today: date, offset: int, matched: str) -> TimeScope:
+    year = today.year + offset
+    return TimeScope(
+        matched=matched,
+        start=date(year, 1, 1),
+        end=date(year + 1, 1, 1),
+        label=f"{year}年",
+        granularity="year",
+    )
 
 
 def _shiftQuarter(year: int, quarter: int, offset: int) -> tuple[int, int]:
@@ -212,6 +306,25 @@ def _collectCandidates(question: str, today: date) -> list[tuple[int, int, TimeS
             else:
                 year = _carriedYear(question, m.start(), currentYear)
             add(m, _halfYearScope(year, 1 if m.group("half") == "上" else 2, m.group(0)))
+
+    # 7. 近 N 月/季/年（P4a D3；中文数字先转 int，非法 N 忽略）
+    # 「前 N 季度」不带「个」时是累计口径（前三季度 = Q1–Q3 累计，2026-10-31 裁决），
+    # 与滚动窗口歧义；须带「个」（如 前3个季度）才按滚动窗口解析。
+    for m in _RE_RECENT_N.finditer(question):
+        n = _cnNumberToInt(m.group("n"))
+        isCumulativeQuarter = m.group("dir") == "前" and m.group("unit") == "季度" and "个" not in m.group(0)
+        if n is not None and not isCumulativeQuarter:
+            scope = _recentWindowScope(today, n, m.group("unit"), m.group(0))
+            if scope is not None:
+                add(m, scope)
+
+    # 8. 独立自然月（本月/上月）
+    for m in _RE_STANDALONE_MONTH.finditer(question):
+        add(m, _standaloneMonthScope(today, _STANDALONE_MONTH_OFFSETS[m.group("dir")], m.group(0)))
+
+    # 9. 裸相对年（今年/去年/前年/明年——不带季度/数字后缀时才落到这里）
+    for m in _RE_BARE_YEAR.finditer(question):
+        add(m, _bareYearScope(today, _RELATIVE_YEAR_OFFSETS[m.group("rel")], m.group(0)))
 
     return candidates
 

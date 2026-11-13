@@ -140,6 +140,11 @@ async def test_non_admin_is_forbidden_and_service_not_called(
     assert response.status_code == 403, (
         f"{url} 非 admin 应 403，实得 {response.status_code}"
     )
+    # 只断言 403 会与 mustChangePasswordGuard（同样 403，但 code=MUST_CHANGE_PASSWORD）
+    # 混在一起：钉住 code 才能证明拦截来自 requireAdmin 而不是别的前置守卫。
+    assert response.json()["detail"]["code"] == "PERMISSION_DENIED", (
+        f"{url} 403 应来自 requireAdmin，实得 {response.json()}"
+    )
     assert serviceSpy == [], (
         f"{url} 非 admin 请求必须在校验层被拦下，不得先进入 service（实际调用：{serviceSpy}）"
     )

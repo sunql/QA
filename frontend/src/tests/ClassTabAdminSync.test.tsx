@@ -88,7 +88,7 @@ describe("ClassTab 同步入口仅 admin", () => {
     }
   });
 
-  it("非 admin 仍可使用刷新/新增（不是把整块工具条藏掉）", async () => {
+  it("非 admin 仍可见刷新/新增（不是把整块工具条藏掉）", async () => {
     useAuthStore.setState({ user: NORMAL_USER });
     renderTab();
 

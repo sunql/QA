@@ -380,6 +380,9 @@ def linkKpiMeasuredBy(kpiUid: str, metricUid: str) -> None:
     """KpiCatalog -[:MEASURED_BY]-> Metric（按 unified_id 匹配；MERGE 幂等）。
 
     两端节点须已存在（MATCH 而非 MERGE 建节点），与 linkMetricDerivedFrom 同款。
+
+    **只加不删**：KPI 的 metric_id 变更后旧边会残留 ⇒ 需要「边集合精确等于
+    当前 metric_id」的语义请用 setKpiMeasuredBy（对账/补边场景仍用本函数）。
     """
     driver = getDriver()
     cql = """
@@ -388,6 +391,36 @@ def linkKpiMeasuredBy(kpiUid: str, metricUid: str) -> None:
     """
     with driver.session() as session:
         session.run(cql, kpiUid=kpiUid, metricUid=metricUid)
+
+
+def setKpiMeasuredBy(kpiUid: str, metricUid: str | None) -> None:
+    """把 KPI 节点的 MEASURED_BY 边集合置为恰好一条（或零条）。
+
+    metricUid 为 None ⇒ 删除该 KPI 节点现有的全部 MEASURED_BY 边、不建新边；
+    否则 ⇒ 先删旧边，再按 metricUid MERGE 一条新边。
+    节点不存在时静默无操作（MATCH 不命中 ⇒ 无语句效果）。
+
+    为什么不用 linkKpiMeasuredBy（只加不删）：KPI 的 metric_id 从 A 改到 B（或
+    被清空）后，旧边仍在 ⇒ 图里出现「同一 KPI 被两个指标测量」的自相矛盾数据，
+    而图是喂给 LLM 的语义源，错的边会被当成事实讲出来。故写路径必须
+    「先删后建」，边集合与 PG 的 metric_id 精确一致。
+
+    metric 端用 MATCH（而非 MERGE 建节点）⇒ 指标节点尚未入图时不凭空造点，
+    与 linkKpiMeasuredBy / reconcile* 系列同款约束。
+    """
+    driver = getDriver()
+    with driver.session() as session:
+        session.run(
+            "MATCH (k:KpiCatalog {unified_id: $kpiUid})-[r:MEASURED_BY]->() DELETE r",
+            kpiUid=kpiUid,
+        )
+        if metricUid:
+            session.run(
+                "MATCH (k:KpiCatalog {unified_id: $kpiUid}), "
+                "(m:Metric {unified_id: $metricUid}) MERGE (k)-[:MEASURED_BY]->(m)",
+                kpiUid=kpiUid,
+                metricUid=metricUid,
+            )
 
 
 def reconcilePropertyReferences(propertyUid: str, refClassUid: str | None) -> None:

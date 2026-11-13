@@ -403,6 +403,27 @@ class TestRecentWindowScopes:
     def test_recent_zero_or_invalid_not_parsed(self) -> None:
         assert parseTimeScope("近0个月销售额", today=date(2026, 11, 13)) is None
 
+    def test_recent_absurd_n_years_out_of_range(self) -> None:
+        """N 大到越过 datetime 年份范围：必须 fail-closed 返回 None，不得抛 ValueError。
+
+        解析器在共享 NL2SQL 路径上被无条件调用，对荒谬输入抛异常会让普通会话 500。
+        """
+        assert parseTimeScope("近99999个月销售额", today=date(2026, 11, 13)) is None
+
+    def test_recent_overflow_n_returns_none(self) -> None:
+        """N 大到整数溢出：返回 None，不得抛 OverflowError。"""
+        assert parseTimeScope("近999999999999999个月销售额", today=date(2026, 11, 13)) is None
+
+    def test_recent_n_at_upper_boundary_still_parses(self) -> None:
+        """边界内保留：120 个月仍解析（2016-12-01 至 2026-12-01）。"""
+        scope = parseTimeScope("近120个月销售额", today=date(2026, 11, 13))
+        assert scope is not None
+        assert scope.start == date(2016, 12, 1)
+        assert scope.end == date(2026, 12, 1)
+
+    def test_recent_n_above_upper_boundary_not_parsed(self) -> None:
+        assert parseTimeScope("近121个月销售额", today=date(2026, 11, 13)) is None
+
 
 class TestStandaloneNaturalScopes:
     def test_ben_yue(self) -> None:

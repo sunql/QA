@@ -127,6 +127,12 @@ _RE_HALF_YEAR = re.compile(
 _RE_RECENT_N = re.compile(
     r"(?P<dir>近|最近|过去|前)\s*(?P<n>[0-9]+|[一二三四五六七八九十两]+)\s*个?\s*(?P<unit>月|季度|年)"
 )
+# 滚动窗口 N 的上界：本模块用 datetime.date 计算区间，年份范围只有 1..9999。
+# 解析器在共享 NL2SQL 路径上被无条件调用，荒谬输入（近99999个月）若在此抛
+# ValueError/OverflowError 会让普通会话 500；越界一律 fail-closed 返回 None
+# （与 P4a 之前的「不解析」行为一致）。120 个月（10 年）远超业务窗口。
+_MAX_RECENT_N = 120
+
 # 独立自然月：本月 / 这个月 / 上个月 / 当前月（「上季度」由 _RE_RELATIVE_QUARTER 接管，不冲突）
 _RE_STANDALONE_MONTH = re.compile(r"(?P<dir>当前|上一|这个|上个|上|本|这)(?:个)?月")
 # 裸相对年（不接季度/数字后缀的场景）：今年销售额 / 去年出货。「今年一季度」
@@ -180,7 +186,7 @@ def _halfYearScope(year: int, half: int, matched: str) -> TimeScope:
 
 def _recentWindowScope(today: date, n: int, unit: str, matched: str) -> TimeScope | None:
     """滚动近 N 月/季/年：含当前期共 N 期，自然边界对齐，[start, end)。"""
-    if n <= 0:
+    if n <= 0 or n > _MAX_RECENT_N:
         return None
     if unit == "月":
         monthStart = date(today.year, today.month, 1)

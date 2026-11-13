@@ -2582,8 +2582,6 @@ def _svcWithCounts(monkeypatch, pg, neo, mil):
 
 
 async def test_kpi_mismatch_produces_warning(monkeypatch):
-```python
-async def test_kpi_mismatch_produces_warning(monkeypatch):
     svc = _svcWithCounts(monkeypatch,
                          pg={"kpi_published": 12, "kpi_total": 15},
                          neo={"kpi": 15}, mil={"kpi": 10})

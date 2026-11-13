@@ -784,8 +784,11 @@ class EmbeddingSyncRequest(BaseModel):
 
 
 @router.post("/embeddings/sync", status_code=status.HTTP_204_NO_CONTENT)
-async def syncEmbedding(payload: EmbeddingSyncRequest) -> None:
-    """将单条 embedding 同步到 Milvus（新建或覆盖）。"""
+async def syncEmbedding(
+    payload: EmbeddingSyncRequest,
+    user: CurrentUser = Depends(requireAdmin),
+) -> None:
+    """将单条 embedding 同步到 Milvus（新建或覆盖）。仅 admin：会覆盖共享向量。"""
     _ontologyService.syncEmbedding(
         ontologyId=payload.ontologyId,
         type=payload.type,
@@ -877,8 +880,11 @@ class GraphSyncMissingResult(BaseModel):
     response_model=EmbeddingSyncMissingResult,
     status_code=status.HTTP_200_OK,
 )
-async def syncMissingEmbeddings(db: AsyncSession = Depends(getDb)) -> EmbeddingSyncMissingResult:
-    """向量对账：为 PG 有而 Milvus 缺失的未软删类与属性补生成向量（批量人工同步入口）。"""
+async def syncMissingEmbeddings(
+    db: AsyncSession = Depends(getDb),
+    user: CurrentUser = Depends(requireAdmin),
+) -> EmbeddingSyncMissingResult:
+    """向量对账：为 PG 有而 Milvus 缺失的未软删类与属性补生成向量（批量人工同步入口）。仅 admin。"""
     result = await _ontologyService.syncMissingClassEmbeddings(db)
     return EmbeddingSyncMissingResult(**result)
 
@@ -888,8 +894,11 @@ async def syncMissingEmbeddings(db: AsyncSession = Depends(getDb)) -> EmbeddingS
     response_model=GraphSyncMissingResult,
     status_code=status.HTTP_200_OK,
 )
-async def syncMissingGraph(db: AsyncSession = Depends(getDb)) -> GraphSyncMissingResult:
-    """图谱对账：以 PG 为真源补齐 Neo4j 缺失的 Class/Property/Metric/KpiCatalog 节点与 JOIN/语义关系边。"""
+async def syncMissingGraph(
+    db: AsyncSession = Depends(getDb),
+    user: CurrentUser = Depends(requireAdmin),
+) -> GraphSyncMissingResult:
+    """图谱对账：以 PG 为真源补齐 Neo4j 缺失的 Class/Property/Metric/KpiCatalog 节点与 JOIN/语义关系边。仅 admin。"""
     result = await _ontologyService.syncMissingGraph(db)
     return GraphSyncMissingResult(**result)
 
@@ -898,8 +907,9 @@ async def syncMissingGraph(db: AsyncSession = Depends(getDb)) -> GraphSyncMissin
 async def syncClassEmbedding(
     id: int,
     db: AsyncSession = Depends(getDb),
+    user: CurrentUser = Depends(requireAdmin),
 ) -> None:
-    """手动同步单个类向量：服务端按 PG 当前数据重新生成 embedding 并覆盖 Milvus。"""
+    """手动同步单个类向量：服务端按 PG 当前数据重新生成 embedding 并覆盖 Milvus。仅 admin。"""
     await _ontologyService.syncClassEmbedding(db, id)
 
 

@@ -37,6 +37,7 @@ import type {
 } from "../../types/ontology";
 import { OBJECT_TYPE_OPTIONS } from "../../types/ontology";
 import { useTranslation } from "../../i18n";
+import { useAuthStore } from "../../stores/authStore";
 import FilterBar from "./FilterBar";
 import type { FilterField } from "./FilterBar";
 import { filterClasses } from "../../utils/ontologyFilter";
@@ -86,6 +87,10 @@ export default function ClassTab({
   includeExpired = false,
 }: ClassTabProps) {
   const { t, locale } = useTranslation();
+  // 同步入口仅 admin：后端 4 个同步端点已 requireAdmin，UI 同步隐藏（仅影响可见性，
+  // 真正的权限校验在服务端）。
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = (user?.roles ?? []).includes("admin");
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<OntologyClass | null>(null);
@@ -447,14 +452,16 @@ export default function ClassTab({
           <Button size="small" onClick={() => void openVersions(record)}>
             {t("common.version")}
           </Button>
-          <Button
-            size="small"
-            icon={<SyncOutlined />}
-            loading={syncingIds.includes(record.id)}
-            onClick={() => void handleSyncEmbedding(record)}
-          >
-            {t("forms.ontology.syncEmbedding")}
-          </Button>
+          {isAdmin && (
+            <Button
+              size="small"
+              icon={<SyncOutlined />}
+              loading={syncingIds.includes(record.id)}
+              onClick={() => void handleSyncEmbedding(record)}
+            >
+              {t("forms.ontology.syncEmbedding")}
+            </Button>
+          )}
           {record.validTo != null ? (
             <Popconfirm
               title={t("forms.ontology.restoreConfirm")}
@@ -493,20 +500,24 @@ export default function ClassTab({
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
         <span />
         <Space>
-          <Button
-            icon={<SyncOutlined />}
-            loading={batchSyncing}
-            onClick={() => void handleSyncMissing()}
-          >
-            {t("forms.ontology.syncMissingEmbeddings")}
-          </Button>
-          <Button
-            icon={<ApiOutlined />}
-            loading={graphSyncing}
-            onClick={() => void handleSyncGraph()}
-          >
-            {t("forms.ontology.syncGraphButton")}
-          </Button>
+          {isAdmin && (
+            <Button
+              icon={<SyncOutlined />}
+              loading={batchSyncing}
+              onClick={() => void handleSyncMissing()}
+            >
+              {t("forms.ontology.syncMissingEmbeddings")}
+            </Button>
+          )}
+          {isAdmin && (
+            <Button
+              icon={<ApiOutlined />}
+              loading={graphSyncing}
+              onClick={() => void handleSyncGraph()}
+            >
+              {t("forms.ontology.syncGraphButton")}
+            </Button>
+          )}
           <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             {t("common.refresh")}
           </Button>

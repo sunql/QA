@@ -19,7 +19,7 @@ from app.domain.enums import ClassRelationType
 logger = logging.getLogger(__name__)
 
 # 仅允许删除这些已知 label（deleteNode 通过字符串拼接 label，必须白名单防注入）
-_ALLOWED_LABELS = frozenset({"Class", "Property", "Metric"})
+_ALLOWED_LABELS = frozenset({"Class", "Property", "Metric", "KpiCatalog"})
 
 # =============================================================================
 # 业务实体子图（Phase 6.2 feat-semantic-relations）
@@ -172,6 +172,30 @@ def getPropertyIds() -> set[str]:
         }
 
 
+def getMetricIds() -> set[str]:
+    """读全部 Metric 节点 unified_id（对账用）。兼容旧节点 id 属性。"""
+    driver = getDriver()
+    with driver.session() as session:
+        return {
+            str(record["uid"])
+            for record in session.run(
+                "MATCH (m:Metric) RETURN COALESCE(m.unified_id, toString(m.id)) AS uid"
+            )
+        }
+
+
+def getKpiCatalogIds() -> set[str]:
+    """读全部 KpiCatalog 节点 unified_id（对账用）。兼容旧节点 id 属性。"""
+    driver = getDriver()
+    with driver.session() as session:
+        return {
+            str(record["uid"])
+            for record in session.run(
+                "MATCH (k:KpiCatalog) RETURN COALESCE(k.unified_id, toString(k.id)) AS uid"
+            )
+        }
+
+
 def getJoinPairs() -> set[tuple[str, str]]:
     """读全部 JOIN 边 (sourceUid, targetUid)（对账用；COALESCE 兼容旧节点 id 属性）。"""
     driver = getDriver()
@@ -287,6 +311,33 @@ def upsertMetricNode(
         session.run(cql, unified_id=unified_id, name=name, alias=alias, formula=formula, aggFunction=aggFunction)
 
 
+def upsertKpiCatalogNode(
+    unified_id: str,
+    code: str,
+    name: str | None,
+    status: str,
+    owner: str | None,
+    unit: str | None,
+) -> None:
+    """按 unified_id 幂等创建/更新 KpiCatalog 节点属性。
+
+    D3 语义：KPI 向量只为 PUBLISHED 建，但**图节点全状态都保留** —— DRAFT /
+    DEPRECATED 同样建节点，status 属性原地更新，故用 MERGE 而非 CREATE。
+    """
+    driver = getDriver()
+    cql = """
+        MERGE (k:KpiCatalog {unified_id: $unified_id})
+        SET k.code = $code, k.name = $name, k.status = $status,
+            k.owner = $owner, k.unit = $unit
+        RETURN k
+    """
+    with driver.session() as session:
+        session.run(
+            cql, unified_id=unified_id, code=code, name=name,
+            status=status, owner=owner, unit=unit,
+        )
+
+
 # =============================================================================
 # Relationship operations
 # =============================================================================
@@ -323,6 +374,20 @@ def linkMetricDerivedFrom(metricUid: str, classUid: str) -> None:
     """
     with driver.session() as session:
         session.run(cql, metricUid=metricUid, classUid=classUid)
+
+
+def linkKpiMeasuredBy(kpiUid: str, metricUid: str) -> None:
+    """KpiCatalog -[:MEASURED_BY]-> Metric（按 unified_id 匹配；MERGE 幂等）。
+
+    两端节点须已存在（MATCH 而非 MERGE 建节点），与 linkMetricDerivedFrom 同款。
+    """
+    driver = getDriver()
+    cql = """
+        MATCH (k:KpiCatalog {unified_id: $kpiUid}), (m:Metric {unified_id: $metricUid})
+        MERGE (k)-[:MEASURED_BY]->(m)
+    """
+    with driver.session() as session:
+        session.run(cql, kpiUid=kpiUid, metricUid=metricUid)
 
 
 def reconcilePropertyReferences(propertyUid: str, refClassUid: str | None) -> None:
@@ -561,7 +626,7 @@ def getAllClassNodes() -> list[dict[str, Any]]:
 
 
 def listNodesByLabel(label: str) -> list[dict[str, Any]]:
-    """返回指定 label 的所有节点（Class | Property | Metric），按 name 排序。"""
+    """返回指定 label 的所有节点（Class | Property | Metric | KpiCatalog），按 name 排序。"""
     if label not in _ALLOWED_LABELS:
         raise ValueError(f"Invalid label: {label!r}")
     driver = getDriver()

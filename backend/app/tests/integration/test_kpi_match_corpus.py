@@ -234,3 +234,24 @@ async def test_kpi_code_question_yields_non_empty_contract_block(
     assert body["matches"][0]["kpiCode"] == "KPI_M1_OTD"
     assert body["matches"][0]["matchMethod"] == "exact_code"
     assert body["injectionBlockEmpty"] is False
+
+
+# ---------------------------------------------------------------------------
+# Task 7：诊断接口新增同步健康读（Milvus / Neo4j）⇒ 本文件**禁止**连真实例
+# （19530 / 7687）。autouse 夹具把两个读取点换成假替身。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def fakeKpiSyncHealthStores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把诊断接口的 Milvus / Neo4j 读取点换成假替身（禁连真实例）。"""
+    import app.api.v1.kpi_diagnose as kpiDiagnoseModule
+
+    monkeypatch.setattr(kpiDiagnoseModule, "queryKpiEmbeddings", lambda: [])
+
+    class _FakeNeo4j:
+        @staticmethod
+        def getKpiCatalogIds() -> set[str]:
+            return set()
+
+    monkeypatch.setattr(kpiDiagnoseModule, "neo4j", _FakeNeo4j)

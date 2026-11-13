@@ -36,7 +36,10 @@ from app.infrastructure import neo4j_client as neo4j
 # 尚未定义完的 milvus_dual_write ⇒ ImportError（见 milvus_client.py:775 注释）。
 from app.infrastructure.milvus_client import (
     deleteByOntologyIdDual,
+    ensureKpiCollection,
     insertEmbeddingsDual,
+    queryKpiEmbeddings,
+    refreshCollection,
 )
 from app.services.embedding_service import EmbeddingService
 from app.services.id_mapping_service import IdMappingService
@@ -295,6 +298,11 @@ async def reconcileKpiGraph(
         kpis = list((await session.execute(select(KpiCatalog))).scalars().all())
     except Exception as exc:  # noqa: BLE001
         logger.warning("KPI 图对账段级失败（库侧读取异常）: %s", exc)
+        # 库侧读取失败 ⇒ 事务可能已处于 aborted 态（PG：上一个语句报错后本事务
+        # 不可再执行 SQL）。调用方（Task 7 的 syncMissingKpi）之后还要继续用
+        # session、端点层还要 commit ⇒ 不回滚会抛 PendingRollbackError ⇒ 500。
+        # 回滚本身也可能失败 ⇒ 单独 try/except + warning（**不**静默吞）。
+        await _rollbackQuietly(session)
         return _kpiSectionFailure(exc, totalKpis=0)
     try:
         existingUids = client.getKpiCatalogIds()
@@ -337,6 +345,18 @@ async def reconcileKpiGraph(
         "failedCount": len(failures),
         "failures": failures,
     }
+
+
+async def _rollbackQuietly(session: AsyncSession) -> None:
+    """回滚 session（回滚本身失败也只告警，**不**静默吞异常）。
+
+    用于「库侧读取失败 ⇒ 事务已 aborted」的收尾：回滚后 session 才可继续使用
+    （否则调用方的下一次 execute/commit 会抛 PendingRollbackError）。
+    """
+    try:
+        await session.rollback()
+    except Exception as rollbackExc:  # noqa: BLE001
+        logger.warning("KPI 图对账段级失败后的回滚也失败: %s", rollbackExc)
 
 
 def _kpiSectionFailure(exc: Exception, *, totalKpis: int) -> dict[str, Any]:
@@ -382,6 +402,139 @@ async def _linkKpiMeasuredBy(
     )
     if metricRow is not None:
         neo4jClient.linkKpiMeasuredBy(unifiedId, metricRow.unified_id)
+
+
+# ---------------------------------------------------------------------------
+# 全量对账（admin 手动触发：补缺失 + 删孤儿 + 图对账）
+# ---------------------------------------------------------------------------
+
+
+async def _readMilvusPresentIds() -> tuple[set[str], list[dict[str, Any]]]:
+    """读 Milvus 里现有 KPI 向量的 ontology_id 集合。
+
+    `queryKpiEmbeddings` 是**同步**函数（pymilvus 同步 SDK）⇒ 走 to_thread，
+    不占 API worker 的事件循环线程。
+
+    读失败 ⇒ 返回空集 + 一条失败明细（调用方据此把失败暴露给管理员，
+    **不**静默降级成「没有缺失」）。
+    """
+    try:
+        rows = await asyncio.to_thread(queryKpiEmbeddings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("syncMissingKpi 读 Milvus 失败: %s", exc)
+        return set(), [
+            {"entityType": "milvus", "entityId": None, "error": str(exc)}
+        ]
+    presentIds: set[str] = set()
+    for row in rows:
+        value = row.get("ontology_id")
+        if value is not None:
+            presentIds.add(str(value))
+    return presentIds, []
+
+
+async def _syncMissingKpiVectors(
+    session: AsyncSession, missing: list[KpiCatalog]
+) -> tuple[int, list[dict[str, Any]]]:
+    """补缺失向量（逐条调 syncKpiVectorNow；单条失败不中断）。
+
+    ⚠️ **不要**把 Milvus 写入锁提到这个循环外面：`syncKpiVectorNow` 内部自己取锁，
+    而 asyncio.Lock **不可重入** ⇒ 已持锁再调会死锁。锁下沉到函数内部是既有设计。
+    """
+    synced = 0
+    failures: list[dict[str, Any]] = []
+    for kpi in missing:
+        try:
+            await syncKpiVectorNow(session, kpi.id)  # missing 已是 PUBLISHED-only ⇒ 必重插
+            synced += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("syncMissingKpi 补向量失败 id=%d: %s", kpi.id, exc)
+            failures.append(
+                {"entityType": "kpi", "entityId": kpi.id, "error": str(exc)}
+            )
+    return synced, failures
+
+
+async def _deleteOrphanKpiVectors(
+    orphanIds: set[str],
+) -> tuple[int, list[dict[str, Any]]]:
+    """删孤儿向量（Milvus 有、PG 非 PUBLISHED 或已不存在）。
+
+    纯 Milvus 删除（无 DB 写）⇒ 无需 session / commit。
+    """
+    deleted = 0
+    failures: list[dict[str, Any]] = []
+    for orphanId in sorted(orphanIds):
+        try:
+            await deleteKpiVectorNow(int(orphanId))
+            deleted += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("syncMissingKpi 删孤儿失败 id=%s: %s", orphanId, exc)
+            failures.append(
+                {"entityType": "kpi", "entityId": orphanId, "error": str(exc)}
+            )
+    return deleted, failures
+
+
+def _refreshKpiCollectionNow() -> None:
+    """release + load KPI 集合（同步 pymilvus 调用，调用方负责 to_thread）。"""
+    refreshCollection(ensureKpiCollection())
+
+
+async def _refreshKpiVisibility() -> list[dict[str, Any]]:
+    """刷新 KPI 集合可见性（孤儿 delete 走异步管道，需要 release+load 才立即可见）。
+
+    ⚠️ `refreshCollection` 的 release→load 之间该集合**未加载 2-3s**
+    （milvus_client.py:618 docstring：「必须维护窗口执行」「不用于在线业务路径」）
+    ⇒ 这里只影响 KPI 集合，且**失败只告警**（孤儿已删，只是可见性延迟，
+    不该让整个 admin 请求 500）。
+    """
+    try:
+        await asyncio.to_thread(_refreshKpiCollectionNow)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("syncMissingKpi 刷新 KPI 集合可见性失败: %s", exc)
+        return [{"entityType": "milvus", "entityId": None, "error": str(exc)}]
+    return []
+
+
+async def syncMissingKpi(session: AsyncSession) -> dict[str, Any]:
+    """全量对账：向量（PUBLISHED 期望集 vs Milvus 现有）+ 图（reconcileKpiGraph）。幂等。
+
+    口径：
+    - 向量段：期望集 = PG 里 status=PUBLISHED 的 KPI；现状集 = Milvus 现有向量；
+      缺失 ⇒ 逐条补；孤儿（Milvus 有、PG 非 PUBLISHED/不存在）⇒ 逐条删；
+    - 图段：直接复用 `reconcileKpiGraph`（只补缺失，不删陈旧）。
+
+    **幂等**：复跑时缺失集与孤儿集都为空 ⇒ 向量段 counts 全 0。
+
+    ⚠️ 本函数会**提交事务**（reconcileKpiGraph 内部的 id_mapping 注册带 commit）。
+    """
+    failures: list[dict[str, Any]] = []
+    kpis = list((await session.execute(select(KpiCatalog))).scalars().all())
+    published = [k for k in kpis if k.status == PUBLISHED_STATUS]
+    presentIds, milvusFailures = await _readMilvusPresentIds()
+    failures.extend(milvusFailures)
+    publishedIds = {str(k.id) for k in published}
+    missing = [k for k in published if str(k.id) not in presentIds]
+    orphanIds = presentIds - publishedIds
+    vectorSynced, syncFailures = await _syncMissingKpiVectors(session, missing)
+    failures.extend(syncFailures)
+    _, orphanFailures = await _deleteOrphanKpiVectors(orphanIds)
+    failures.extend(orphanFailures)
+    graph = await reconcileKpiGraph(session)
+    failures = [*failures, *graph["failures"]]
+    if orphanIds:
+        failures.extend(await _refreshKpiVisibility())
+    return {
+        "vectorPublishedTotal": len(published),
+        "vectorMissingCount": len(missing),
+        "vectorSyncedCount": vectorSynced,
+        "vectorOrphanCount": len(orphanIds),
+        "graphMissingCount": graph["missingKpiCount"],
+        "graphSyncedCount": graph["syncedKpiCount"],
+        "failedCount": len(failures),
+        "failures": failures,
+    }
 
 
 # ---------------------------------------------------------------------------

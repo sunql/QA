@@ -541,3 +541,112 @@ async def test_diagnose_no_match_returns_empty_list(
 
     assert response.status_code == 200, response.text
     assert response.json()["matches"] == []
+
+
+# ---------------------------------------------------------------------------
+# Task 7：同步健康快照（syncHealth）+ distance 字段
+#
+# ⚠️ 同步健康会读 Milvus / Neo4j ⇒ 本文件**禁止**连真实例（19530 / 7687）。
+# 下面的 autouse 夹具把两个读取点换成假替身；用例内可用 monkeypatch 覆盖。
+# ---------------------------------------------------------------------------
+
+
+class _FakeSyncHealthNeo4j:
+    """假 Neo4j（图节点计数）。"""
+
+    ids: set[str] = set()
+
+    @staticmethod
+    def getKpiCatalogIds() -> set[str]:
+        return set(_FakeSyncHealthNeo4j.ids)
+
+
+@pytest.fixture(autouse=True)
+def fakeKpiSyncHealthStores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把诊断接口的 Milvus / Neo4j 读取点换成假替身（禁连真实例）。"""
+    _FakeSyncHealthNeo4j.ids = set()
+    monkeypatch.setattr(kpiDiagnoseModule, "queryKpiEmbeddings", lambda: [])
+    monkeypatch.setattr(kpiDiagnoseModule, "neo4j", _FakeSyncHealthNeo4j)
+
+
+async def test_diagnose_reports_sync_health(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同步健康：三计数齐全 + errors 为空。"""
+    await _seedKpi(dbSession, "KPI_D2_HEALTH", metricId=None,
+                   numeratorColumns=[], denominatorColumns=[], grainKeys=[],
+                   keywords=["健康"])
+    await _warmCache(dbSession)
+
+    monkeypatch.setattr(
+        kpiDiagnoseModule,
+        "queryKpiEmbeddings",
+        lambda: [{"ontology_id": 1}, {"ontology_id": 2}, {"ontology_id": 3}],
+    )
+    _FakeSyncHealthNeo4j.ids = {"obj:KPI:1", "obj:KPI:2"}
+
+    resp = await client.get(
+        _DIAGNOSE_URL,
+        params={"question": "健康"},
+        headers=_ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    health = resp.json()["syncHealth"]
+    assert health is not None
+    assert health["kpiPublishedPgCount"] == 1
+    assert health["kpiVectorCount"] == 3
+    assert health["kpiGraphNodeCount"] == 2
+    assert health["errors"] == []
+
+
+async def test_diagnose_sync_health_records_store_errors(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Milvus / Neo4j 取数失败 ⇒ 仍 200，错误进 errors，计数置 None。"""
+
+    def _boomMilvus() -> list[dict]:
+        raise RuntimeError("milvus 挂了")
+
+    def _boomNeo4j() -> set[str]:
+        raise RuntimeError("neo4j 挂了")
+
+    monkeypatch.setattr(kpiDiagnoseModule, "queryKpiEmbeddings", _boomMilvus)
+    monkeypatch.setattr(kpiDiagnoseModule, "neo4j", type("_N", (), {
+        "getKpiCatalogIds": staticmethod(_boomNeo4j),
+    }))
+
+    resp = await client.get(
+        _DIAGNOSE_URL,
+        params={"question": "今天天气怎么样"},
+        headers=_ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    health = resp.json()["syncHealth"]
+    assert health is not None
+    assert health["kpiVectorCount"] is None
+    assert health["kpiGraphNodeCount"] is None
+    assert len(health["errors"]) == 2
+    assert any(e.startswith("milvus: ") for e in health["errors"])
+    assert any(e.startswith("neo4j: ") for e in health["errors"])
+    assert any("milvus 挂了" in e for e in health["errors"])
+    assert any("neo4j 挂了" in e for e in health["errors"])
+
+
+async def test_diagnose_match_exposes_distance_field(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """matches[].distance 字段存在（L1 不产距离 ⇒ None，不报错）。"""
+    await _seedKpi(dbSession, "KPI_D2_DIST", metricId=None,
+                   numeratorColumns=[], denominatorColumns=[], grainKeys=[],
+                   keywords=["距离"])
+    await _warmCache(dbSession)
+
+    resp = await client.get(
+        _DIAGNOSE_URL,
+        params={"question": "距离"},
+        headers=_ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["matches"]) == 1
+    assert body["matches"][0]["distance"] is None

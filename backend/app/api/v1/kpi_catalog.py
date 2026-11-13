@@ -1,7 +1,8 @@
 """KPI Catalog REST API（Phase 4.1 + Phase 4.5 governance hardening）。
 
+KPI 目录 API——向量（Milvus）与图（Neo4j）同步纳入本体治理（2026-11-13 起 KPI 与类/属性同权）。
+
 与 data_quality / entity_mapping 同模式：扁平路径，挂在 /api/v1/kpi-catalog。
-KPI 不进 Neo4j / Milvus（治理层）。
 
 写入口（POST / PUT / DELETE）一律 admin：KPI 名称与 semantic_keywords 决定 L1
 匹配与 B3 契约注入方向，任何登录用户可写就等于可劫持这些决策（feat-kpi-match-v2
@@ -16,7 +17,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import Field
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import (
@@ -25,6 +26,8 @@ from app.dependencies import (
     getCurrentUser,
     getDb,
 )
+from app.domain.enums import KpiStatus
+from app.domain.models import KpiCatalog
 from app.domain.schemas import (
     KpiCatalogCreate,
     KpiCatalogHistoryRead,
@@ -36,6 +39,7 @@ from app.domain.schemas import (
     KpiSearchHit,
     KpiSearchResponse,
 )
+from app.services import kpi_vector_graph_sync as kpi_sync
 from app.services.history_service import HistoryService
 from app.services.kpi_catalog_service import KpiCatalogService
 from app.services.kpi_datasource_binding_service import (
@@ -131,6 +135,72 @@ async def bulkBindKpiDatasource(
 ) -> KpiDatasourceBulkBindResult:
     """批量绑定（逐行 commit，部分成功；上限 1000 行，非 admin 403）。"""
     return await _binding_service.bulkBind(db, items, admin, force=force)
+
+
+class KpiSyncMissingResult(BaseModel):
+    """sync-missing 对账结果（扁平键，幂等复跑全 0）。
+
+    字段名保持 camelCase（与本仓其它 KPI 响应体一致；不走 CamelModel 的
+    snake_case→camelCase 别名机制）。
+    """
+
+    vectorPublishedTotal: int
+    vectorMissingCount: int
+    vectorSyncedCount: int
+    vectorOrphanCount: int
+    graphMissingCount: int
+    graphSyncedCount: int
+    failedCount: int
+    failures: list[dict]
+
+
+# NOTE: 两段静态/带参路径必须在 /{id} 之前注册（FastAPI 路由按顺序匹配）。
+# `/embeddings/sync-missing` 必须排在 `/{id}/embedding` 之前 —— 否则
+# "embeddings" 会被 `/{id}` 吃掉并因非整数 id 报 422。
+@router.post(
+    "/embeddings/sync-missing",
+    response_model=KpiSyncMissingResult,
+    status_code=status.HTTP_200_OK,
+    summary="KPI 向量+图全量对账（admin）",
+)
+async def syncMissingKpiEmbeddings(
+    user: CurrentUser = Depends(getAdminOnlyActor),
+    db: AsyncSession = Depends(getDb),
+) -> KpiSyncMissingResult:
+    """全量对账 KPI 向量+图（补缺失/删孤儿），幂等。
+
+    外部依赖故障**降级为失败明细**（不 500）：Milvus/Neo4j 不可用时
+    failedCount>0，failures 里给出 entityType/error。
+    """
+    result = await kpi_sync.syncMissingKpi(db)
+    await db.commit()
+    return KpiSyncMissingResult(**result)
+
+
+@router.post(
+    "/{id}/embedding",
+    status_code=status.HTTP_200_OK,
+    summary="单条 KPI 向量重建（admin）",
+)
+async def resyncKpiEmbedding(
+    id: int,
+    user: CurrentUser = Depends(getAdminOnlyActor),
+    db: AsyncSession = Depends(getDb),
+) -> dict:
+    """单条重建向量（delete-first + PUBLISHED 重插）。非 PUBLISHED ⇒ 409。"""
+    kpi = await db.get(KpiCatalog, id)
+    if kpi is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="KPI 不存在"
+        )
+    if kpi.status != KpiStatus.PUBLISHED.value:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"仅 PUBLISHED 状态的 KPI 建向量（当前 {kpi.status}）",
+        )
+    await kpi_sync.syncKpiVectorNow(db, id)
+    await db.commit()
+    return {"resynced": True}
 
 
 @router.get("/{id}", response_model=KpiCatalogRead, status_code=status.HTTP_200_OK)

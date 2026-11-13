@@ -89,15 +89,21 @@
 | `frontend/src/pages/KpiCatalogPage.tsx` | 页头全量对账 + 行级重新同步 |
 | `frontend/src/i18n/{zh-CN,en-US}.ts` | 同步入口文案（中英齐全） |
 
-**Tests（27）**
+**Docs（1）**
+
+| 文件 | 变化 |
+|---|---|
+| `docs/superpowers/plans/2026-11-13-kpi-vector-graph-sync.md` | 计划围栏修正（commit `9104500b`） |
+
+**Tests（24）**
 
 | 段 | 文件 |
 |---|---|
 | 新增单测（9） | `test_backfill_milvus_script.py`、`test_kpi_catalog_hooks.py`、`test_kpi_match_vector.py`、`test_kpi_sync_switches.py`、`test_kpi_vector_graph_sync.py`、`test_milvus_kpi_routing.py`、`test_milvus_optional_collection.py`、`test_neo4j_kpi_catalog.py`、`test_reconcile_kpi_counts.py` |
 | 新增集成（5） | `test_backfill_expected_from_pg.py`、`test_backfill_kpi_id_mapping.py`、`test_kpi_graph_sync_integration.py`、`test_kpi_reconcile_graph.py`、`test_kpi_sync_endpoints.py` |
 | 修改（7） | `test_knowledge_compiler_reconcile.py`、`test_kpi_diagnose_api.py`、`test_kpi_match_corpus.py`、`test_ontology_reconcile_sync.py`、`test_milvus_collection_rebuild.py`、`test_milvus_search_connection.py`、`conftest.py`（测试环境 `KPI_SYNC_ENABLED=false` 隔离） |
-| 新增前端（2） | `frontend/src/tests/KpiCatalogSync.test.tsx`、`frontend/src/tests/kpiCatalogI18n.test.ts`（扩展） |
-| 修改前端（1） | `frontend/src/tests/KpiCatalogPage.test.tsx` |
+| 新增前端（1） | `frontend/src/tests/KpiCatalogSync.test.tsx` |
+| 修改前端（2） | `frontend/src/tests/KpiCatalogPage.test.tsx`、`frontend/src/tests/kpiCatalogI18n.test.ts`（扩展） |
 
 > 说明：conftest 的 `KPI_SYNC_ENABLED=false` 只是**测试环境显式覆盖**，不改变代码默认值（默认 on）。
 > 原因：best-effort 钩子会自开 session 并用 app 侧配置连 Neo4j（默认 7687 = 生产），半隔离比不隔离更危险。
@@ -112,7 +118,7 @@
 |---|---|---|---|
 | 1 | 新建 KPI 自动建向量/图；diagnose 可见 | `unit/test_kpi_catalog_hooks.py::test_create_published_syncs_graph_and_vector`、`test_create_draft_syncs_graph_only`；`integration/test_kpi_diagnose_api.py::test_diagnose_reports_sync_health` | create 提交后同时调用 graphSynced + vectorSynced（DRAFT 只建图）；diagnose 返回 `syncHealth` 三计数（PG 1 / 向量 3 / 图 2）且 `errors=[]`——PASS |
 | 2 | 转 DRAFT 删向量、留图节点 | `unit/test_kpi_catalog_hooks.py::test_update_unpublish_deletes_vector_keeps_graph`；`integration/test_kpi_graph_sync_integration.py::test_vector_sync_published_then_draft`；`unit/test_milvus_kpi_routing.py::test_search_none_sweep_covers_4_collections` | PUBLISHED→DRAFT ⇒ `vectorDeleted=[id]`、`graphSynced=[id]`（节点保留、status 更新）；4 collection 扫描路径覆盖 kpi——PASS |
-| 3 | `sync-missing` 幂等 + 修复缺失 | `integration/test_kpi_sync_endpoints.py::test_sync_missing_endpoint_idempotent`、`test_sync_missing_endpoint_syncs_absent_vector`、`test_sync_missing_endpoint_deletes_orphan_vectors`、`test_sync_missing_second_round_after_sync_is_noop`；`integration/test_kpi_graph_sync_integration.py::test_graph_sync_registers_mapping_and_upserts` | 首轮补齐缺失/删孤儿后，复跑 `vectorSyncedCount/vectorOrphanCount/graphSyncedCount/failedCount` 全 0；图对账注册 id_mapping 并 upsert——PASS |
+| 3 | `sync-missing` 幂等 + 修复缺失 | `integration/test_kpi_sync_endpoints.py::test_sync_missing_endpoint_idempotent`、`test_sync_missing_endpoint_syncs_absent_vector`、`test_sync_missing_endpoint_deletes_orphan_vectors`、`test_sync_missing_second_round_after_sync_is_noop`；`integration/test_kpi_reconcile_graph.py::test_sync_missing_graph_covers_metric_and_kpi`；`integration/test_kpi_graph_sync_integration.py::test_graph_sync_registers_mapping_and_upserts` | kpi 向量：首轮补齐缺失/删孤儿后，复跑 `vectorSyncedCount/vectorOrphanCount/graphSyncedCount/failedCount` 全 0。Metric 图节点：`syncMissingGraph` 在库内仅 1 metric + 1 KPI 时返回 `totalMetrics=1 / syncedMetricCount=1 / missingMetricCount=1`，`metricUpsert` 收到 `obj:METRIC:{id}`（name/alias/formula/aggFunction 全字段），且 KPI 段随后建出 `MEASURED_BY` 边 ⇒ 指标图节点缺失可修复。KPI 图：`syncKpiGraphNow` 注册 id_mapping 并 upsert 节点——PASS |
 | 4 | 回填 `--cleanup` 后 4 collection 恢复 | `unit/test_backfill_milvus_script.py::test_cleanup_writes_back_all_four_types`、`test_cleanup_refills_missing_metric_and_kpi_rows`、`test_read_all_rows_covers_four_collections`、`test_write_back_records_preserve_external_id` | fake Milvus 下 cleanup 读/写回覆盖 class/property/metric/kpi 四类，metric+kpi 缺失行被补回，`external_id` 保留——PASS。**注意：仅 fake 夹具，未对真实 Milvus 执行 `--cleanup`。** |
 | 5 | 灰度：`match_method=vector` / 歧义澄清 / 关闸回退 | `unit/test_kpi_match_vector.py::test_single_vector_hit`、`test_metric_hit_reverse_binds_kpi`、`test_two_hits_ambiguous`、`test_containment_wins_vector_not_called`、`test_over_threshold_dropped`、`test_milvus_failure_silent_fallback`；`unit/test_kpi_sync_switches.py::test_settings_defaults`、`test_match_vector_default_off_when_row_missing`、`test_match_vector_env_kill_wins_over_true_row`、`test_sync_enabled_default_on_when_row_missing` | 单命中 `method="vector"` + distance 透传；metric 命中经 `metric_id` 反查绑定 KPI；2 候选 ⇒ ambiguous（code 升序，不猜 top1）；包含式命中优先且不发起向量检索；超阈值丢弃；Milvus 异常静默回落；双闸默认 off/on 与 env 杀闸均符合预期——PASS |
 | 6 | 净新增红为 0 | 见下方失败集合对差 | **14 个新建文件 146 passed / 0 failed**；6 个修改文件 39 用例中 11 failed，与 base `b6b384e5` 的失败集合**逐条同名**（base 同样 11 failed）；19 个邻近文件 284 passed / 0 failed ⇒ **净新增红 0** |

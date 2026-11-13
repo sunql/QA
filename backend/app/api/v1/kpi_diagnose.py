@@ -56,6 +56,7 @@ from app.services.kpi_metric_spec import (
 from app.services.kpi_metric_switches import (
     isKpiContractInjectionEnabled,
     isKpiMatchContainmentEnabled,
+    isKpiMatchVectorEnabled,
 )
 from app.services.kpi_semantic_match_service import (
     KpiMatchResult,
@@ -288,6 +289,8 @@ async def _resolveKpiMatches(
     matcher = getKpiSemanticMatchService()
     if await isKpiMatchContainmentEnabled(db):
         route = await matcher.matchRoute(question)
+        if route.kind == "none" and await isKpiMatchVectorEnabled(db):
+            route = await matcher.matchRouteVector(question)
         matches = list(route.matches)
         ambiguous = route.kind == "ambiguous"
         # 歧义时不建块：matches 仍全量返回（管理员要看候选），但不据此注入。
@@ -325,8 +328,8 @@ async def _buildDiagnosticMatches(
                 # 以**块成员关系**为准：通过逐条门禁但被字符上限丢掉的条目不算注入。
                 injected=match.code in injectedCodes,
                 resolution=resolution,
-                # L1 匹配目前不产出距离；字段留口，取 getattr 兼容未来扩展。
-                distance=getattr(match, "distance", None),
+                # 文本命中恒为 None；向量候选带原始 Milvus L2 距离。
+                distance=match.distance,
             )
         )
     return diagnosticMatches

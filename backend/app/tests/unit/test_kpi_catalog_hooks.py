@@ -20,10 +20,11 @@ from __future__ import annotations
 import os
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
-from app.domain.models import DataSource
+from app.domain.models import DataSource, KpiCatalog
 from app.domain.schemas import KpiCatalogCreate, KpiCatalogUpdate
 from app.services import kpi_catalog_service as svc_module
 from app.services.kpi_catalog_service import KpiCatalogService
@@ -234,3 +235,48 @@ async def test_test_env_disables_kpi_sync_hook_by_default() -> None:
     DATABASE_URL 5432 —— 失败后才轮不到 Neo4j。）
     """
     assert os.environ.get("KPI_SYNC_ENABLED") == "false"
+
+
+async def test_hook_failure_does_not_break_create(
+    dbSession: AsyncSession,
+    seedDataSource: DataSource,
+    recorder: _Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D4：钩子抛异常**不得**影响主流程。
+
+    - 钩子入口 ``syncKpiGraphBestEffort`` 抛异常；
+    - 断言 1：``createKpi`` **正常返回**（不抛）；
+    - 断言 2：**业务行确实落库**（真 PG 里查得到该 KPI）；
+    - 断言 3：钩子确实被调用过（调用计数 = 1）。
+
+    另断言「后续入口被短路」：钩子的 try/except 包住的是**整个钩子体** ⇒
+    第一个入口抛异常后，后面的向量同步**不会**再被调用（否则失败会继续传播）。
+    """
+    calls: list[int] = []
+
+    async def _boom(kpiId):
+        calls.append(kpiId)
+        raise RuntimeError("boom")
+
+    # 覆盖 recorder fixture 里那个「正常版」的图同步入口（monkeypatch 自动还原）
+    monkeypatch.setattr(svc_module.kpi_sync, "syncKpiGraphBestEffort", _boom)
+
+    dto = _createDto(seedDataSource.id, status="PUBLISHED")
+    kpi = await KpiCatalogService().createKpi(dbSession, dto, _actor())
+
+    # 断言 3：钩子确实被调用过
+    assert calls == [kpi.id]
+    # 钩子体整体被 try/except 包住 ⇒ 第一个入口抛异常后，后续入口短路
+    assert recorder.vectorSynced == []
+    assert recorder.vectorDeleted == []
+    assert recorder.graphDeleted == []
+    # 断言 2：业务行确实落库（真 PG）
+    row = (
+        await dbSession.execute(
+            select(KpiCatalog).where(KpiCatalog.id == kpi.id)
+        )
+    ).scalar_one_or_none()
+    assert row is not None
+    assert row.kpi_code == dto.kpi_code
+    assert row.status == "PUBLISHED"

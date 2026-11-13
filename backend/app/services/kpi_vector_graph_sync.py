@@ -409,11 +409,17 @@ async def _linkKpiMeasuredBy(
 # ---------------------------------------------------------------------------
 
 
-async def _readMilvusPresentIds() -> tuple[set[str], list[dict[str, Any]]]:
+async def _readMilvusPresentIds() -> tuple[set[str], list[dict[str, Any]], bool]:
     """读 Milvus 里现有 KPI 向量的 ontology_id 集合。
 
     `queryKpiEmbeddings` 是**同步**函数（pymilvus 同步 SDK）⇒ 走 to_thread，
     不占 API worker 的事件循环线程。
+
+    返回 (presentIds, failures, ok)：
+    - `ok=True`  ⇒ 读到了现状（**可能为空集**：真的没有向量）；
+    - `ok=False` ⇒ **读失败**（现状未知）。两者必须可区分 —— 把「读失败」
+      当成「现状为空集」会让全部 PUBLISHED KPI 被判成缺失 ⇒ 批量重算
+      embedding（打真 LLM、零收益，且是破坏性重写）。
 
     读失败 ⇒ 返回空集 + 一条失败明细（调用方据此把失败暴露给管理员，
     **不**静默降级成「没有缺失」）。
@@ -424,13 +430,13 @@ async def _readMilvusPresentIds() -> tuple[set[str], list[dict[str, Any]]]:
         logger.warning("syncMissingKpi 读 Milvus 失败: %s", exc)
         return set(), [
             {"entityType": "milvus", "entityId": None, "error": str(exc)}
-        ]
+        ], False
     presentIds: set[str] = set()
     for row in rows:
         value = row.get("ontology_id")
         if value is not None:
             presentIds.add(str(value))
-    return presentIds, []
+    return presentIds, [], True
 
 
 async def _syncMissingKpiVectors(
@@ -497,23 +503,27 @@ async def _refreshKpiVisibility() -> list[dict[str, Any]]:
     return []
 
 
-async def syncMissingKpi(session: AsyncSession) -> dict[str, Any]:
-    """全量对账：向量（PUBLISHED 期望集 vs Milvus 现有）+ 图（reconcileKpiGraph）。幂等。
+async def _reconcileVectorSection(
+    session: AsyncSession, published: list[KpiCatalog]
+) -> dict[str, Any]:
+    """向量段对账：补缺失 + 删孤儿。
 
-    口径：
-    - 向量段：期望集 = PG 里 status=PUBLISHED 的 KPI；现状集 = Milvus 现有向量；
-      缺失 ⇒ 逐条补；孤儿（Milvus 有、PG 非 PUBLISHED/不存在）⇒ 逐条删；
-    - 图段：直接复用 `reconcileKpiGraph`（只补缺失，不删陈旧）。
+    ⚠️ **Milvus 读失败 ⇒ 整段跳过**（既不补也不删）：读不到现状时若照
+    「现状=空集」处理，会把全部 PUBLISHED KPI 当成缺失 ⇒ 批量重算 embedding
+    （打真 LLM、零收益，且是对全部 PUBLISHED 的破坏性重写）。此时只保留
+    一条失败明细，让管理员知道「没能查出来」。
 
-    **幂等**：复跑时缺失集与孤儿集都为空 ⇒ 向量段 counts 全 0。
-
-    ⚠️ 本函数会**提交事务**（reconcileKpiGraph 内部的 id_mapping 注册带 commit）。
+    图段与向量段互相独立（Milvus 挂了不代表 Neo4j 挂了）⇒ 图段照常跑。
     """
-    failures: list[dict[str, Any]] = []
-    kpis = list((await session.execute(select(KpiCatalog))).scalars().all())
-    published = [k for k in kpis if k.status == PUBLISHED_STATUS]
-    presentIds, milvusFailures = await _readMilvusPresentIds()
-    failures.extend(milvusFailures)
+    presentIds, milvusFailures, milvusOk = await _readMilvusPresentIds()
+    failures: list[dict[str, Any]] = list(milvusFailures)
+    if not milvusOk:
+        return {
+            "vectorMissingCount": 0,
+            "vectorSyncedCount": 0,
+            "vectorOrphanCount": 0,
+            "failures": failures,
+        }
     publishedIds = {str(k.id) for k in published}
     missing = [k for k in published if str(k.id) not in presentIds]
     orphanIds = presentIds - publishedIds
@@ -521,15 +531,40 @@ async def syncMissingKpi(session: AsyncSession) -> dict[str, Any]:
     failures.extend(syncFailures)
     _, orphanFailures = await _deleteOrphanKpiVectors(orphanIds)
     failures.extend(orphanFailures)
-    graph = await reconcileKpiGraph(session)
-    failures = [*failures, *graph["failures"]]
     if orphanIds:
         failures.extend(await _refreshKpiVisibility())
     return {
-        "vectorPublishedTotal": len(published),
         "vectorMissingCount": len(missing),
         "vectorSyncedCount": vectorSynced,
         "vectorOrphanCount": len(orphanIds),
+        "failures": failures,
+    }
+
+
+async def syncMissingKpi(session: AsyncSession) -> dict[str, Any]:
+    """全量对账：向量（PUBLISHED 期望集 vs Milvus 现有）+ 图（reconcileKpiGraph）。幂等。
+
+    口径：
+    - 向量段：期望集 = PG 里 status=PUBLISHED 的 KPI；现状集 = Milvus 现有向量；
+      缺失 ⇒ 逐条补；孤儿（Milvus 有、PG 非 PUBLISHED/不存在）⇒ 逐条删；
+      **Milvus 读失败 ⇒ 整段跳过**（不补不删，见 `_reconcileVectorSection`）；
+    - 图段：直接复用 `reconcileKpiGraph`（只补缺失，不删陈旧）。
+
+    **幂等**：复跑时缺失集与孤儿集都为空 ⇒ 向量段 counts 全 0。
+
+    ⚠️ 本函数会**提交事务**（reconcileKpiGraph 内部的 id_mapping 注册带 commit）。
+    """
+    kpis = list((await session.execute(select(KpiCatalog))).scalars().all())
+    published = [k for k in kpis if k.status == PUBLISHED_STATUS]
+    vector = await _reconcileVectorSection(session, published)
+    failures: list[dict[str, Any]] = list(vector["failures"])
+    graph = await reconcileKpiGraph(session)
+    failures = [*failures, *graph["failures"]]
+    return {
+        "vectorPublishedTotal": len(published),
+        "vectorMissingCount": vector["vectorMissingCount"],
+        "vectorSyncedCount": vector["vectorSyncedCount"],
+        "vectorOrphanCount": vector["vectorOrphanCount"],
         "graphMissingCount": graph["missingKpiCount"],
         "graphSyncedCount": graph["syncedKpiCount"],
         "failedCount": len(failures),

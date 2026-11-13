@@ -46,10 +46,13 @@ class _FakeEmbedding:
 def fakeKpiStores(monkeypatch: pytest.MonkeyPatch) -> dict:
     """fake Milvus / Neo4j / Embedding（补丁点是**模块属性**）。"""
     stores: dict = {
-        "milvusPresent": set(),  # str(ontology_id)
+        "milvusPresent": set(),  # str(ontology_id)——fake Milvus 的**现状**
         "kpiIds": set(),  # 图上已有的 unified_id
         "vectorDeletes": set(),
         "vectorInserts": set(),
+        # 每次 insert 调用都记一条（**允许重复**）⇒ 能证明「第二轮没有再写」，
+        # 而 set 会把重复 id 折叠掉（那样断言恒真 ⇒ 假绿）。
+        "vectorInsertCalls": [],
         "refreshCalls": 0,
     }
 
@@ -68,10 +71,15 @@ def fakeKpiStores(monkeypatch: pytest.MonkeyPatch) -> dict:
 
     def _fakeDelete(ontologyId: int, type: str) -> None:
         stores["vectorDeletes"].add(str(ontologyId))
+        # 真 Milvus：delete 会让该向量从现状里消失 ⇒ fake 必须同步维护现状，
+        # 否则 fake 是「只进不出」的替身 ⇒ 「补过之后复跑不再补」证明不了。
+        stores["milvusPresent"].discard(str(ontologyId))
 
     def _fakeInsert(records: list[dict]) -> None:
         for record in records:
             stores["vectorInserts"].add(str(record.get("ontology_id")))
+            stores["vectorInsertCalls"].append(str(record.get("ontology_id")))
+            stores["milvusPresent"].add(str(record.get("ontology_id")))
 
     def _fakeQuery() -> list[dict]:
         return [{"ontology_id": int(i)} for i in stores["milvusPresent"]]
@@ -169,8 +177,7 @@ async def test_sync_missing_endpoint_syncs_absent_vector(
     assert body["vectorOrphanCount"] == 0
     assert body["failedCount"] == 0
     assert fakeKpiStores["vectorInserts"] == {str(seedPublishedKpi.id)}
-    # DRAFT 不进向量期望集 ⇒ 不该出现在插入集合里
-    assert str(seedPublishedKpi.id) in fakeKpiStores["vectorInserts"]
+    # DRAFT 不进向量期望集 ⇒ 见 test_sync_missing_skips_draft_kpi_vector（D3 专项）
 
 
 async def test_sync_missing_endpoint_deletes_orphan_vectors(
@@ -262,7 +269,12 @@ async def test_sync_missing_survives_neo4j_read_failure(
 async def test_sync_missing_survives_milvus_read_failure(
     client, seedPublishedKpi, fakeKpiStores, monkeypatch
 ):
-    """Milvus 读失败 ⇒ 端点 **200** + 一条 milvus 失败明细（不 500）。"""
+    """Milvus 读失败 ⇒ 端点 **200** + 一条 milvus 失败明细（不 500）。
+
+    且**整个向量段跳过**（既不补缺失也不删孤儿）：读不到现状时若照
+    「现状=空集」处理，会把全部 PUBLISHED KPI 当成缺失 ⇒ 批量重算 embedding
+    （打真 LLM、零收益）。⇒ 一个向量都不许写。
+    """
 
     def _boom() -> list[dict]:
         raise RuntimeError("milvus 读失败")
@@ -276,6 +288,66 @@ async def test_sync_missing_survives_milvus_read_failure(
     milvusFailures = [f for f in body["failures"] if f["entityType"] == "milvus"]
     assert milvusFailures, body["failures"]
     assert "milvus 读失败" in milvusFailures[0]["error"]
+    # 向量段整体跳过（读失败 ≠ 现状为空）
+    assert body["vectorMissingCount"] == 0
+    assert body["vectorOrphanCount"] == 0
+    assert body["vectorSyncedCount"] == 0
+    # 核心断言：一个向量都不许写（否则 Milvus 全挂时 LLM 费用照付、零收益）
+    assert fakeKpiStores["vectorInserts"] == set()
+    assert fakeKpiStores["vectorDeletes"] == set()
+    assert fakeKpiStores["vectorInsertCalls"] == []
+
+
+async def test_sync_missing_second_round_after_sync_is_noop(
+    client, seedPublishedKpi, fakeKpiStores
+):
+    """真正的幂等：第 1 轮补了向量 ⇒ 第 2 轮**不再补**。
+
+    与 ``test_sync_missing_endpoint_idempotent``（预置 milvusPresent ⇒ 一开始
+    就没缺）不同：本用例第 1 轮**真的写入了向量**（fake Milvus 有增删语义），
+    第 2 轮必须读到「刚写进去的那条」⇒ 缺失集为空 ⇒ 计数全 0。
+    """
+    # 注意：**不**预置 milvusPresent ⇒ 第 1 轮必然判缺失
+    resp = await client.post(_SYNC_MISSING_URL, headers=_ADMIN_HEADERS)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["vectorPublishedTotal"] == 1
+    assert body["vectorMissingCount"] == 1
+    assert body["vectorSyncedCount"] == 1
+    assert body["failedCount"] == 0
+    assert str(seedPublishedKpi.id) in fakeKpiStores["vectorInserts"]
+    insertCallsAfterFirst = list(fakeKpiStores["vectorInsertCalls"])
+    assert len(insertCallsAfterFirst) == 1
+
+    second = await client.post(_SYNC_MISSING_URL, headers=_ADMIN_HEADERS)
+    assert second.status_code == 200, second.text
+    body2 = second.json()
+    assert body2["vectorMissingCount"] == 0
+    assert body2["vectorSyncedCount"] == 0
+    assert body2["vectorOrphanCount"] == 0
+    assert body2["graphMissingCount"] == 0
+    assert body2["graphSyncedCount"] == 0
+    assert body2["failedCount"] == 0
+    # 第 2 轮一次 insert 都不许发生（insertCalls 保留重复 ⇒ 能真的抓到重复写）
+    assert fakeKpiStores["vectorInsertCalls"] == insertCallsAfterFirst
+
+
+async def test_sync_missing_skips_draft_kpi_vector(
+    client, seedDraftKpi, fakeKpiStores
+):
+    """D3：KPI 向量**只索引 PUBLISHED** ⇒ DRAFT 不建向量（但图节点保留）。
+
+    DRAFT 不在向量期望集里 ⇒ 也不在缺失集里 ⇒ 不该产生任何向量写入。
+    """
+    resp = await client.post(_SYNC_MISSING_URL, headers=_ADMIN_HEADERS)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["vectorPublishedTotal"] == 0
+    assert body["vectorMissingCount"] == 0
+    assert body["vectorSyncedCount"] == 0
+    assert str(seedDraftKpi.id) not in fakeKpiStores["vectorInserts"]
+    assert fakeKpiStores["vectorInsertCalls"] == []
+    assert fakeKpiStores["vectorDeletes"] == set()
 
 
 async def test_reconcile_kpi_graph_rolls_back_so_session_stays_usable(

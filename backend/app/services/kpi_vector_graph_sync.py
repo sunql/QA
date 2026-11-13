@@ -254,6 +254,82 @@ async def deleteKpiGraphNow(session: AsyncSession, kpiId: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 图对账（运维兜底；只补缺失，不删陈旧）
+# ---------------------------------------------------------------------------
+
+
+async def reconcileKpiGraph(session: AsyncSession) -> dict[str, Any]:
+    """KPI 图对账兜底：解析/注册 uid → 补缺失节点 → MEASURED_BY 恒 MERGE（幂等）。
+
+    与 syncMissingGraph 的类/属性段同语义：只补缺失、不删陈旧；单条失败不中断
+    （失败明细聚合进 failures，键：entityType/entityId/error）。
+
+    **计数口径**：`missingKpiCount` = `syncedKpiCount` = 本次补齐的节点数
+    （与 syncMissingGraph 既有 missingClassCount 口径一致：missing 指「PG 有
+    而图里缺」）。MEASURED_BY 边恒 MERGE 但**不计数**（幂等补边，不是缺口）。
+
+    ⚠️ 本函数会**提交事务**：`_resolveKpiUid` 在 KPI 尚未注册时调
+    `IdMappingService.register`，而 register **内部 commit**。
+    """
+    idMappingSvc = IdMappingService()
+    kpis = list((await session.execute(select(KpiCatalog))).scalars().all())
+    existingUids = neo4j.getKpiCatalogIds()
+    syncedKpis = 0
+    failures: list[dict[str, Any]] = []
+    for kpi in kpis:
+        # 先取快照：_resolveKpiUid 失败时 register 内部会 rollback ⇒ 实例被过期，
+        # 之后再读属性会触发异步懒加载（MissingGreenletError）掩盖真实错误。
+        kpiId = kpi.id
+        kpiCode = kpi.kpi_code
+        try:
+            unifiedId = await _resolveKpiUid(session, idMappingSvc, kpi)
+            if unifiedId not in existingUids:
+                neo4j.upsertKpiCatalogNode(
+                    unified_id=unifiedId,
+                    code=kpi.kpi_code,
+                    name=kpi.kpi_name,
+                    status=kpi.status,
+                    owner=kpi.owner,
+                    unit=kpi.unit,
+                )
+                syncedKpis += 1
+            await _linkKpiMeasuredBy(session, idMappingSvc, kpi, unifiedId)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "KPI 图对账失败 id=%d code=%s: %s", kpiId, kpiCode, exc
+            )
+            failures.append(
+                {"entityType": "kpi", "entityId": kpiId, "error": str(exc)}
+            )
+    return {
+        "totalKpis": len(kpis),
+        "missingKpiCount": syncedKpis,
+        "syncedKpiCount": syncedKpis,
+        "failedCount": len(failures),
+        "failures": failures,
+    }
+
+
+async def _linkKpiMeasuredBy(
+    session: AsyncSession,
+    idMappingSvc: IdMappingService,
+    kpi: KpiCatalog,
+    unifiedId: str,
+) -> None:
+    """KPI → 挂靠指标 的 MEASURED_BY 边（幂等补边，不计数）。
+
+    指标未在 id_mapping 注册 ⇒ 不建边（边的另一端节点必须先存在）。
+    """
+    if kpi.metric_id is None:
+        return
+    metricRow = await idMappingSvc.resolveByExternal(
+        session, METRIC_BUSINESS_OBJECT, str(kpi.metric_id)
+    )
+    if metricRow is not None:
+        neo4j.linkKpiMeasuredBy(unifiedId, metricRow.unified_id)
+
+
+# ---------------------------------------------------------------------------
 # best-effort 装配（钩子用；各自开 session，失败仅告警）
 # ---------------------------------------------------------------------------
 

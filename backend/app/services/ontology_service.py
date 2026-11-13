@@ -63,6 +63,7 @@ from app.services.id_mapping_service import IdMappingService
 from app.services.join_inference import SAGE_X3_REFERENCE_MAP
 from app.services.kpi_metric_publish_gate import enforceMetricPublishGate
 from app.services.kpi_metric_reconcile import MeasureSpec, MetricTechnique
+from app.services.kpi_vector_graph_sync import reconcileKpiGraph
 from app.services.messages_zh import (
     MSG_CLASS_ALREADY_EXPIRED,
     MSG_CLASS_INHERIT_CYCLE,
@@ -1848,11 +1849,13 @@ class OntologyService:
         )
         joins = await self.listJoins(session)
         relations = await self.listRelations(session)
+        metrics = await self.listMetrics(session)
 
         existingClassUids = neo4j.getClassIds()
         existingPropUids = neo4j.getPropertyIds()
         existingJoinPairs = neo4j.getJoinPairs()
         existingRelTriples = neo4j.getRelationTriples()
+        existingMetricUids = neo4j.getMetricIds()
 
         id_mapping_svc = IdMappingService()
         failures: list[dict[str, Any]] = []
@@ -1979,13 +1982,22 @@ class OntologyService:
         )
         failures = [*failures, *joinFailures, *relFailures]
 
+        syncedMetrics, metricFailures = await self._reconcileMetrics(
+            session, id_mapping_svc, metrics, existingMetricUids
+        )
+        kpiSummary = await reconcileKpiGraph(session)
+        failures = [*failures, *metricFailures, *kpiSummary["failures"]]
+
         logger.info(
             "图对账完成 类 missing=%d/%d JOIN missing=%d/%d"
-            " 属性 missing=%d/%d 关系 missing=%d/%d failed=%d",
+            " 属性 missing=%d/%d 关系 missing=%d/%d"
+            " 指标 missing=%d/%d KPI missing=%d/%d failed=%d",
             syncedClasses, len(classes),
             missingJoins, joinTotal,
             syncedProps, len(props),
             missingRelations, relTotal,
+            syncedMetrics, len(metrics),
+            kpiSummary["syncedKpiCount"], kpiSummary["totalKpis"],
             len(failures),
         )
         return {
@@ -2001,9 +2013,113 @@ class OntologyService:
             "totalRelations": relTotal,
             "missingRelationCount": missingRelations,
             "syncedRelationCount": syncedRelations,
+            "totalMetrics": len(metrics),
+            "missingMetricCount": syncedMetrics,
+            "syncedMetricCount": syncedMetrics,
+            "totalKpis": kpiSummary["totalKpis"],
+            "missingKpiCount": kpiSummary["missingKpiCount"],
+            "syncedKpiCount": kpiSummary["syncedKpiCount"],
             "failedCount": len(failures),
             "failures": failures,
         }
+
+    async def _reconcileMetrics(
+        self,
+        session: AsyncSession,
+        idMappingSvc: IdMappingService,
+        metrics: list[OntologyMetric],
+        existingMetricUids: set[str],
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """Metric 图节点对账：解析/注册 uid → 补缺失节点 → DERIVED_FROM 边。
+
+        D3：metric 维持现状（**DRAFT 也建节点**）⇒ 不按 status 过滤，口径是
+        `ontology_metric` 全表。
+
+        返回 (本次补齐数, 失败明细)；单条失败不中断其余指标。
+        """
+        synced = 0
+        failures: list[dict[str, Any]] = []
+        for metric in metrics:
+            # 先取快照：id_mapping 注册失败时 session 被 rollback ⇒ 实例过期，
+            # 之后再读属性会触发异步懒加载（MissingGreenletError）掩盖真实错误。
+            metricId = metric.id
+            metricName = metric.metric_name
+            try:
+                metricUid = await self._resolveOrRegisterMetricUid(
+                    session, idMappingSvc, metric
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.append({
+                    "entityType": "metric", "entityId": metricId,
+                    "error": f"id_mapping 注册失败: {exc}",
+                })
+                continue
+            if metricUid in existingMetricUids:
+                continue
+            try:
+                neo4j.upsertMetricNode(
+                    unified_id=metricUid,
+                    name=metricName,
+                    alias=metric.metric_alias,
+                    formula=metric.formula,
+                    aggFunction=metric.agg_function,
+                )
+                await self._linkMetricDerivedFrom(
+                    session, idMappingSvc, metric, metricUid
+                )
+                synced += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "图对账：指标入图失败 id=%d name=%s: %s",
+                    metricId, metricName, exc,
+                )
+                failures.append({
+                    "entityType": "metric", "entityId": metricId, "error": str(exc),
+                })
+        return synced, failures
+
+    async def _resolveOrRegisterMetricUid(
+        self,
+        session: AsyncSession,
+        idMappingSvc: IdMappingService,
+        metric: OntologyMetric,
+    ) -> str:
+        """指标 unified_id；未在 id_mapping 注册则补注册（落 ontology_metric）。
+
+        ⚠️ 注册走 `IdMappingService.register`，而 register **内部会 commit** ⇒
+        传入的事务 session 会提前提交（对账路径可接受，见 reconcileKpiGraph 同款）。
+        """
+        row = await idMappingSvc.resolveByExternal(
+            session, "METRIC", str(metric.id)
+        )
+        if row is not None:
+            return row.unified_id
+        mapping = await idMappingSvc.register(
+            session,
+            IdMappingCreate(
+                business_object="METRIC",
+                external_id=str(metric.id),
+            ),
+            pg_table="ontology_metric",
+            pg_id=str(metric.id),
+        )
+        return mapping.unified_id
+
+    async def _linkMetricDerivedFrom(
+        self,
+        session: AsyncSession,
+        idMappingSvc: IdMappingService,
+        metric: OntologyMetric,
+        metricUid: str,
+    ) -> None:
+        """Metric → Class 的 DERIVED_FROM 边（目标类未注册映射则跳过）。"""
+        if not metric.target_class_id:
+            return
+        classUid = await self._resolveClassUid(
+            session, idMappingSvc, metric.target_class_id
+        )
+        if classUid:
+            neo4j.linkMetricDerivedFrom(metricUid, classUid)
 
     async def _resolveClassUid(
         self,

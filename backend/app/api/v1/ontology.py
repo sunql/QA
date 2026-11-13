@@ -863,6 +863,13 @@ class GraphSyncMissingResult(BaseModel):
     syncedRelationCount: int
     failedCount: int
     failures: list[GraphSyncFailure]
+    # Metric / KPI 图节点对账（Task 6 新增）：默认 0 ⇒ 老响应形状仍合法
+    totalMetrics: int = 0
+    missingMetricCount: int = 0
+    syncedMetricCount: int = 0
+    totalKpis: int = 0
+    missingKpiCount: int = 0
+    syncedKpiCount: int = 0
 
 
 @router.post(
@@ -882,7 +889,7 @@ async def syncMissingEmbeddings(db: AsyncSession = Depends(getDb)) -> EmbeddingS
     status_code=status.HTTP_200_OK,
 )
 async def syncMissingGraph(db: AsyncSession = Depends(getDb)) -> GraphSyncMissingResult:
-    """图谱对账：以 PG 为真源补齐 Neo4j 缺失的 Class/Property 节点与 JOIN/语义关系边。"""
+    """图谱对账：以 PG 为真源补齐 Neo4j 缺失的 Class/Property/Metric/KpiCatalog 节点与 JOIN/语义关系边。"""
     result = await _ontologyService.syncMissingGraph(db)
     return GraphSyncMissingResult(**result)
 

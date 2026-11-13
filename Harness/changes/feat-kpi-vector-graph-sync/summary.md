@@ -22,7 +22,9 @@
 
 ## 变更清单
 
-### 逐 commit（`git log --oneline b6b384e5..HEAD`，23 个）
+### 逐 commit（评审范围 `b6b384e5..a3af2446`，共 23 个 = 代码/测试 22 个 + 计划文档 1 个 `9104500b`）
+
+> 另含 3 个变更记录 docs commit（首版 `bd3ba653`、校正轮 `9004b55d`、本节计数口径轮），不计入下述代码口径。
 
 | commit | 说明 |
 |---|---|
@@ -50,7 +52,9 @@
 | `b94b346c` | feat: KPI 目录页 admin 同步入口（页头全量对账 + 行级重新同步）+ i18n |
 | `a3af2446` | test: KPI 同步用例拆出独立文件 + 409/成功提示钉住渲染文案 |
 
-### 文件变更（`git diff --stat b6b384e5..HEAD`，48 文件 +6805/−316；零 DDL、零迁移）
+### 文件变更（代码面 `git diff --stat b6b384e5..a3af2446` 不含 docs：47 文件 +6805/−314；含计划文档修正则 48 文件 +6805/−316；零 DDL、零迁移）
+
+> 计数口径固定到评审范围 `b6b384e5..a3af2446`，不随之后的 docs commit 漂移。
 
 **Backend（16）**
 
@@ -215,3 +219,14 @@ npx vitest run src/tests/KpiCatalogPage.test.tsx \
 3. `POST /api/v1/kpi-catalog/embeddings/sync-missing` 幂等复跑 → counts 全 0。
 4. 开灰度（env + `system_config` 行双 true）→ 语义相近问句命中 `match_method=vector`；歧义走澄清。
 5. 回填脚本 `--cleanup` 后 4 个 collection 全部恢复（class/property/metric/kpi）。
+
+## 后续跟进（合并后，非本批阻塞）
+
+终审 triage 的 80 项 Minor：**无阻塞合并项**，以下为建议的合并后跟进（按主题归并）。
+
+- **测试覆盖缺口**：补 `isKpiMatchVectorEnabled` 非法/读取异常 ⇒ off 的两条方向测试；钉住 Settings env alias（`KPI_SYNC_ENABLED`/`KPI_MATCH_VECTOR_ENABLED`）绑定；补 vector 路径 min-distance 去重、非有限/None distance、metric 路径阈值；补 `sync-missing` 单类缺失 ⇒ 收敛非零的负向测试；`_verifyConvergence` 校验 `external_id`；覆盖 `syncAllDone`/`syncAllFailed` 两条前端分支；补 reconcile「pg=0 / store=5」假值真漂移用例与单侧 store 为 None 的混合用例；补每实体失败隔离（per-KPI / register / 入图）与重同步失败路径的 error-content 断言。
+- **语义加固**：`--cleanup` 收敛检查看不到 KPI embedding 文本中的 `semantic_keywords`/`unit` 漂移（元数据列只存 name/alias/description）；`resyncKpiEmbedding` 失败无处理 ⇒ 未降级为响应体错误；DB 读失败 `totalKpis=0` 与真实 0 不可区分（应加显式 section-failure 标志）；`sync-missing`（图）集成层未断言 D3「保留图节点」；`_linkKpiMeasuredBy` docstring 过度声明。
+- **代码整洁**：`neo4j_client.py`（1024 行）与 `backfill_milvus_embeddings.py`（799 行）需拆分；`syncMissingGraph` ~185 行；`assertSafeWriteTarget` 第三份拷贝去重；`backfillKpiIdMappings` 直接 print 改为返回 dataclass；`"PUBLISHED"` 字面量改 `KpiStatus.PUBLISHED.value`；diagnose GET 两次无界读改 bounded count；I-1 守卫加 `ORDER BY` 保证确定性；`milvus_isolation._ONTOLOGY_COLLECTIONS` 补 KPI collection。
+- **文档**：`domain/models.py:474` KpiCatalog docstring 过期；`_countPg` docstring 仍写「三类」（现 5 键）；`_readMilvusPresentIds` docstring 过期；backfill CLI docstring 过期；`task-12-report.md:159` 的 A16/M8 与仓库 A15/M9 不符（仅报告文字，本 summary 表正确）。
+
+**产品复核提醒**：`POST /ontology/graph/sync-missing` 的写面本批已扩大（注册 KPI id_mapping、写 KpiCatalog 节点与 `MEASURED_BY` 边），建议重新确认「仅登录、不要求 admin」这一决定仍成立。

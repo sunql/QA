@@ -21,6 +21,8 @@ SWITCH_CONTRACT_INJECTION = "KPI_CONTRACT_INJECTION_ENABLED"
 SWITCH_GATE = "KPI_METRIC_GATE_ENABLED"
 SWITCH_TIER_A = "KPI_METRIC_TIER_A_ENABLED"
 SWITCH_MATCH_CONTAINMENT = "KPI_MATCH_CONTAINMENT_ENABLED"
+SWITCH_KPI_SYNC = "KPI_SYNC_ENABLED"
+SWITCH_MATCH_VECTOR = "KPI_MATCH_VECTOR_ENABLED"
 
 _FALSY: frozenset[str] = frozenset({"0", "false", "off", "no"})
 _TRUTHY: frozenset[str] = frozenset({"1", "true", "on", "yes"})
@@ -124,3 +126,35 @@ async def isKpiMetricTierAEnabled(session: AsyncSession | None) -> bool:
         logger.debug("Tier A env 紧急杀闸关闭，回落旧 L1 行为")
         return False
     return await readKpiMetricSwitch(session, SWITCH_TIER_A, False)
+
+
+async def isKpiSyncEnabled(session: AsyncSession) -> bool:
+    """KPI 向量/图同步钩子开关（env 杀闸 + system_config 灰度）。
+
+    **方向与既有开关相反**：system_config 行**缺失 / 非法 / 读取异常 ⇒ on**。
+
+    理由：同步是**存储面**能力——旧行为是「完全没有同步」，缺行回落 on 才是
+    「无行为变化」；若缺行即 off，则新建的 KPI 会**静默失去**向量/图副本，
+    且没有任何痕迹。关同步是一次**显式的数据操作**（把行置 false）。
+
+    env ``KPI_SYNC_ENABLED=false`` 仍是一键止血（进程级、需重启；默认 true
+    ⇒ 平时不干预）。
+
+    与 ``isKpiMatchVectorEnabled``（fail-closed）方向相反，两者不可混用。
+    """
+    if not getSettings().kpiSyncEnabled:
+        logger.debug("KPI 同步 env 紧急杀闸关闭：跳过向量/图钩子")
+        return False
+    return await readKpiMetricSwitch(session, SWITCH_KPI_SYNC, True)
+
+
+async def isKpiMatchVectorEnabled(session: AsyncSession) -> bool:
+    """KPI 匹配器向量候选步灰度开关（env 杀闸 + system_config 灰度，fail-closed）。
+
+    与 ``isKpiMatchContainmentEnabled`` 同构（向量召回改变 chat 行为 ⇒ 行缺失 /
+    非法 / 读取异常 ⇒ off；开 = 显式灰度操作）。
+    """
+    if not getSettings().kpiMatchVectorEnabled:
+        logger.debug("KPI 向量匹配 env 紧急杀闸关闭，纯文本匹配")
+        return False
+    return await readKpiMetricSwitch(session, SWITCH_MATCH_VECTOR, False)

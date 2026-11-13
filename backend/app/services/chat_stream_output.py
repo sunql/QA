@@ -65,6 +65,7 @@ from app.services.kpi_metric_spec import (
 )
 from app.services.kpi_metric_switches import (
     isKpiMatchContainmentEnabled,
+    isKpiMatchVectorEnabled,
     isKpiMetricTierAEnabled,
 )
 from app.services.kpi_semantic_match_service import (
@@ -352,6 +353,14 @@ class L1L4PreambleMixin:
         """v2 灰度开关判定（单点，测试可覆写以避免 DB 依赖）。"""
         return await isKpiMatchContainmentEnabled(session)
 
+    async def _vectorMatchEnabled(self, session: AsyncSession) -> bool:
+        """向量候选步灰度开关判定（单点，测试可覆写以避免 DB 依赖）。
+
+        ⚠️ **双闸**：env `KPI_MATCH_VECTOR_ENABLED`（默认 off）**且** system_config 行 = true。
+        行单独为 true **不会**启用本步（见 app/services/kpi_metric_switches.py）。
+        """
+        return await isKpiMatchVectorEnabled(session)
+
     async def _ensureKpiCacheFresh(self, session: AsyncSession) -> None:
         """v2 匹配前确保缓存新鲜（单点，测试可覆写以避免 DB 依赖）。
 
@@ -371,7 +380,10 @@ class L1L4PreambleMixin:
                 return KpiMatchRoute(kind="none")
             return KpiMatchRoute(kind="hit", matches=(match,))
         await self._ensureKpiCacheFresh(session)
-        return await self._kpiMatcher.matchRoute(question)
+        route = await self._kpiMatcher.matchRoute(question)
+        if route.kind == "none" and await self._vectorMatchEnabled(session):
+            route = await self._kpiMatcher.matchRouteVector(question)
+        return route
 
     def _buildKpiClarifyPreamble(
         self, question: str, matches: tuple[KpiMatchResult, ...]

@@ -41,6 +41,7 @@ _COLLECTION_NAMES = (
     "ontology_class_embeddings",
     "ontology_property_embeddings",
     "ontology_metric_embeddings",
+    "kpi_catalog_embeddings",
 )
 
 
@@ -108,6 +109,10 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> _AliasRegistry:
     reg = _AliasRegistry()
     monkeypatch.setattr(milvus_search, "_connect", reg.connect, raising=False)
     monkeypatch.setattr(milvus_search, "Collection", reg.buildCollection)
+    # KPI 是可选集合：扇出前会问存在性（离线替身，不连真实 Milvus）。
+    monkeypatch.setattr(
+        milvus_search, "hasEmbeddingCollection", lambda name: True, raising=False
+    )
     return reg
 
 
@@ -130,8 +135,8 @@ def test_search_connects_when_alias_not_registered(registry) -> None:
     ]
 
 
-def test_search_connects_once_for_all_three_collections(registry) -> None:
-    """typeFilter=None 跨 3 个集合：只建连一次，不做 3 遍连接健康检查。"""
+def test_search_connects_once_for_all_four_collections(registry) -> None:
+    """typeFilter=None 跨 4 个集合：只建连一次，不做 4 遍连接健康检查。"""
     milvus_search.searchEmbeddingsByTypeRouted([0.0] * _DIM, topK=3)
 
     assert registry.connectCount == 1

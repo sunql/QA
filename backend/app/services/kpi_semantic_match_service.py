@@ -13,13 +13,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
+
+from app.infrastructure.milvus_client import searchEmbeddingsByTypeRouted
+from app.services.embedding_service import EmbeddingService
+from app.services.vector_similarity import distanceToSimilarity
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,8 @@ class KpiMatchResult:
         method: 命中路径，``exact_code``（精确 code）/ ``keyword``（Jaccard）/
             ``containment``（v2 包含式）；诊断接口据此解释「为什么命中」，不参与打分。
         matched_phrase: v2 包含式命中时实际命中的短语（诊断可解释性）；其他路径为 None。
+        distance: 向量候选的原始 Milvus **L2 距离**（越小越相似）；文本候选恒为
+            None。相似度换算见 ``confidence``（全库唯一口径 distanceToSimilarity）。
     """
     code: str
     confidence: float
@@ -49,6 +56,7 @@ class KpiMatchResult:
     kpi_name: str | None = None
     method: str = "keyword"
     matched_phrase: str | None = None
+    distance: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +87,11 @@ def jaccard(a: list[str], b: list[str]) -> float:
 # 包含式命中的置信度：规则确定，但与「用户直接点名 code」的身份级命中不同，
 # 故低于 1.0。误命中兜底靠最长匹配 + 等长澄清 + 50 条回归集。
 CONTAINMENT_CONFIDENCE = 0.9
+
+KPI_VECTOR_DISTANCE_MAX: Final[float] = 0.5
+"""向量候选距离上限（**Milvus L2 距离口径**，不是余弦相似度；见 milvus_search._searchCollection 的 metric_type="L2"）。超限的候选直接丢弃。"""
+
+KPI_VECTOR_TOP_K: Final[int] = 5
 
 _CJK_START = "一"
 _CJK_END = "鿿"
@@ -377,6 +390,79 @@ class KpiSemanticMatchService:
             return KpiMatchRoute(kind="hit", matches=top)
         # 等长跨 KPI 并列：不猜，交给澄清。hits 已按 code 升序。
         return KpiMatchRoute(kind="ambiguous", matches=top)
+
+    async def _vectorCandidates(self, question: str) -> list[KpiMatchResult]:
+        """问题 → Milvus kpi/metric 两路 topK 候选。
+
+        **失败抛出**（由 `matchRouteVector` 决定回落）；本函数不做降级。
+        metric 集合缺失 ⇒ `searchEmbeddingsByTypeRouted(typeFilter="metric")` 抛
+        （只有 kpi 集合是可选的）⇒ 向量召回整体降级为纯文本。
+        metric 命中按 ``KpiCatalog.metric_id`` 反查绑定 KPI；与 kpi 直检候选按
+        ``code`` 去重，保留 **min distance**。
+        """
+        queryVector = await EmbeddingService().generateEmbedding(question)
+        kpiHits = await asyncio.to_thread(
+            searchEmbeddingsByTypeRouted, queryVector, KPI_VECTOR_TOP_K, "kpi"
+        )
+        metricHits = await asyncio.to_thread(
+            searchEmbeddingsByTypeRouted, queryVector, KPI_VECTOR_TOP_K, "metric"
+        )
+        allKpis = self._cache.getAll()
+        idToKpi = {str(kpi.id): kpi for kpi in allKpis}
+        candidates: dict[str, KpiMatchResult] = {}
+        for source, hits in (("kpi", kpiHits), ("metric", metricHits)):
+            for hit in hits:
+                distance = float(hit.get("distance", 1.0))
+                if distance > KPI_VECTOR_DISTANCE_MAX:
+                    continue
+                # kpi 按 KPI id 直取；metric 按 metric_id 反查（两套 id 空间会撞号）。
+                kpi = idToKpi.get(str(hit.get("ontology_id"))) if source == "kpi" else None
+                if kpi is None and source == "metric":
+                    kpi = next(
+                        (
+                            k
+                            for k in allKpis
+                            if k.metric_id is not None
+                            and str(k.metric_id) == str(hit["ontology_id"])
+                        ),
+                        None,
+                    )
+                if kpi is None:
+                    continue
+                candidate = KpiMatchResult(
+                    code=kpi.kpi_code,
+                    confidence=distanceToSimilarity(distance),
+                    kpi_name=kpi.kpi_name,
+                    method="vector",
+                    distance=distance,
+                )
+                prev = candidates.get(kpi.kpi_code)
+                if prev is None or prev.distance is None or prev.distance > distance:
+                    candidates[kpi.kpi_code] = candidate
+        return sorted(candidates.values(), key=lambda r: r.code)
+
+    async def matchRouteVector(self, question: str) -> KpiMatchRoute:
+        """向量候选兜底路由：包含式赢、向量只补 none。
+
+        **开关不在本函数内判**（调用方 gate）——本函数可能被诊断接口直接调用。
+        缓存冷 ⇒ 直接返回 base，不碰向量。
+        异常（Milvus / embedding）⇒ 静默回落纯文本（spec §6）。
+        """
+        base = await self.matchRoute(question)
+        if base.kind != "none":
+            return base
+        if not self._cache.is_warmUp():
+            return base
+        try:
+            candidates = await self._vectorCandidates(question)
+        except Exception:  # noqa: BLE001 - spec §6：向量故障静默回落纯文本
+            logger.warning("向量候选失败，静默回落纯文本", exc_info=True)
+            return base
+        if not candidates:
+            return base
+        if len(candidates) == 1:
+            return KpiMatchRoute(kind="hit", matches=tuple(candidates))
+        return KpiMatchRoute(kind="ambiguous", matches=tuple(candidates))
 
     # ------------------------------------------------------------------
     # Exact alias match

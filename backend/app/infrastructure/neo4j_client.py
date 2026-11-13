@@ -19,7 +19,7 @@ from app.domain.enums import ClassRelationType
 logger = logging.getLogger(__name__)
 
 # 仅允许删除这些已知 label（deleteNode 通过字符串拼接 label，必须白名单防注入）
-_ALLOWED_LABELS = frozenset({"Class", "Property", "Metric"})
+_ALLOWED_LABELS = frozenset({"Class", "Property", "Metric", "KpiCatalog"})
 
 # =============================================================================
 # 业务实体子图（Phase 6.2 feat-semantic-relations）
@@ -172,6 +172,30 @@ def getPropertyIds() -> set[str]:
         }
 
 
+def getMetricIds() -> set[str]:
+    """读全部 Metric 节点 unified_id（对账用）。兼容旧节点 id 属性。"""
+    driver = getDriver()
+    with driver.session() as session:
+        return {
+            str(record["uid"])
+            for record in session.run(
+                "MATCH (m:Metric) RETURN COALESCE(m.unified_id, toString(m.id)) AS uid"
+            )
+        }
+
+
+def getKpiCatalogIds() -> set[str]:
+    """读全部 KpiCatalog 节点 unified_id（对账用）。兼容旧节点 id 属性。"""
+    driver = getDriver()
+    with driver.session() as session:
+        return {
+            str(record["uid"])
+            for record in session.run(
+                "MATCH (k:KpiCatalog) RETURN COALESCE(k.unified_id, toString(k.id)) AS uid"
+            )
+        }
+
+
 def getJoinPairs() -> set[tuple[str, str]]:
     """读全部 JOIN 边 (sourceUid, targetUid)（对账用；COALESCE 兼容旧节点 id 属性）。"""
     driver = getDriver()
@@ -287,6 +311,33 @@ def upsertMetricNode(
         session.run(cql, unified_id=unified_id, name=name, alias=alias, formula=formula, aggFunction=aggFunction)
 
 
+def upsertKpiCatalogNode(
+    unified_id: str,
+    code: str,
+    name: str | None,
+    status: str,
+    owner: str | None,
+    unit: str | None,
+) -> None:
+    """按 unified_id 幂等创建/更新 KpiCatalog 节点属性。
+
+    D3 语义：KPI 向量只为 PUBLISHED 建，但**图节点全状态都保留** —— DRAFT /
+    DEPRECATED 同样建节点，status 属性原地更新，故用 MERGE 而非 CREATE。
+    """
+    driver = getDriver()
+    cql = """
+        MERGE (k:KpiCatalog {unified_id: $unified_id})
+        SET k.code = $code, k.name = $name, k.status = $status,
+            k.owner = $owner, k.unit = $unit
+        RETURN k
+    """
+    with driver.session() as session:
+        session.run(
+            cql, unified_id=unified_id, code=code, name=name,
+            status=status, owner=owner, unit=unit,
+        )
+
+
 # =============================================================================
 # Relationship operations
 # =============================================================================
@@ -323,6 +374,91 @@ def linkMetricDerivedFrom(metricUid: str, classUid: str) -> None:
     """
     with driver.session() as session:
         session.run(cql, metricUid=metricUid, classUid=classUid)
+
+
+def linkKpiMeasuredBy(kpiUid: str, metricUid: str) -> None:
+    """KpiCatalog -[:MEASURED_BY]-> Metric（按 unified_id 匹配；MERGE 幂等）。
+
+    两端节点须已存在（MATCH 而非 MERGE 建节点），与 linkMetricDerivedFrom 同款。
+
+    **只加不删**：KPI 的 metric_id 变更后旧边会残留 ⇒ 需要「边集合精确等于
+    当前 metric_id」的语义请用 setKpiMeasuredBy（对账/补边场景仍用本函数）。
+    """
+    driver = getDriver()
+    cql = """
+        MATCH (k:KpiCatalog {unified_id: $kpiUid}), (m:Metric {unified_id: $metricUid})
+        MERGE (k)-[:MEASURED_BY]->(m)
+    """
+    with driver.session() as session:
+        session.run(cql, kpiUid=kpiUid, metricUid=metricUid)
+
+
+def _setKpiMeasuredByTx(
+    tx: Any, kpiUid: str, metricUid: str | None
+) -> tuple[bool, bool]:
+    """事务内：删旧 MEASURED_BY 边 → 按目标 metric 建边。
+
+    返回 ``(kpiExists, metricLinked)``：
+    - ``kpiExists``：KPI 节点在图里（不在 ⇒ 静默无操作，文档约定）；
+    - ``metricLinked``：目标 metric 命中并建了边（未命中 ⇒ 边未建成，需告警）。
+
+    三条语句（探测 KPI 存在性 / 删旧边 / 建新边）**必须**在同一个事务里：
+    分两次 auto-commit 时，中途失败会留下「边被删掉却没建回来」的半应用状态，
+    而本仓 D4 不允许 outbox / 重试队列 ⇒ 错状态会静默留存。
+    """
+    kpiRecord = tx.run(
+        "MATCH (k:KpiCatalog {unified_id: $kpiUid}) RETURN count(k) AS cnt",
+        kpiUid=kpiUid,
+    ).single()
+    kpiExists = bool(kpiRecord and kpiRecord["cnt"])
+    tx.run(
+        "MATCH (k:KpiCatalog {unified_id: $kpiUid})-[r:MEASURED_BY]->() DELETE r",
+        kpiUid=kpiUid,
+    )
+    if metricUid is None:
+        return kpiExists, False
+    linkRecord = tx.run(
+        "MATCH (k:KpiCatalog {unified_id: $kpiUid}), "
+        "(m:Metric {unified_id: $metricUid}) MERGE (k)-[:MEASURED_BY]->(m) "
+        "RETURN m.unified_id AS metricUid",
+        kpiUid=kpiUid,
+        metricUid=metricUid,
+    ).single()
+    return kpiExists, linkRecord is not None
+
+
+def setKpiMeasuredBy(kpiUid: str, metricUid: str | None) -> None:
+    """把 KPI 节点的 MEASURED_BY 边集合置为恰好一条（或零条）。
+
+    metricUid 为 None ⇒ 删除该 KPI 节点现有的全部 MEASURED_BY 边、不建新边；
+    否则 ⇒ 先删旧边，再按 metricUid MERGE 一条新边。
+    KPI 节点不存在时静默无操作（MATCH 不命中 ⇒ 无语句效果）。
+
+    为什么不用 linkKpiMeasuredBy（只加不删）：KPI 的 metric_id 从 A 改到 B（或
+    被清空）后，旧边仍在 ⇒ 图里出现「同一 KPI 被两个指标测量」的自相矛盾数据，
+    而图是喂给 LLM 的语义源，错的边会被当成事实讲出来。故写路径必须
+    「先删后建」，边集合与 PG 的 metric_id 精确一致。
+
+    metric 端用 MATCH（而非 MERGE 建节点）⇒ 指标节点尚未入图时不凭空造点，
+    与 linkKpiMeasuredBy / reconcile* 系列同款约束。
+
+    事务语义：删边与建边在**同一个显式事务**（``session.execute_write`` 托管
+    事务，自带瞬时错误重试；本操作幂等 ⇒ 重试安全）⇒ 要么都生效、要么都不生效。
+
+    可观测性：KPI 在图里但目标 metric 不在 ⇒ 记 warning（KPI uid + metric uid），
+    「metric 尚未入图 ⇒ 边未建立」不能无声消失（对账/reconcile 事后补边）。
+    """
+    driver = getDriver()
+    with driver.session() as session:
+        kpiExists, metricLinked = session.execute_write(
+            _setKpiMeasuredByTx, kpiUid, metricUid
+        )
+    if kpiExists and metricUid is not None and not metricLinked:
+        logger.warning(
+            "KPI 图节点存在但目标指标尚未入图，MEASURED_BY 边未建立 kpiUid=%s metricUid=%s",
+            kpiUid,
+            metricUid,
+        )
 
 
 def reconcilePropertyReferences(propertyUid: str, refClassUid: str | None) -> None:
@@ -561,7 +697,7 @@ def getAllClassNodes() -> list[dict[str, Any]]:
 
 
 def listNodesByLabel(label: str) -> list[dict[str, Any]]:
-    """返回指定 label 的所有节点（Class | Property | Metric），按 name 排序。"""
+    """返回指定 label 的所有节点（Class | Property | Metric | KpiCatalog），按 name 排序。"""
     if label not in _ALLOWED_LABELS:
         raise ValueError(f"Invalid label: {label!r}")
     driver = getDriver()

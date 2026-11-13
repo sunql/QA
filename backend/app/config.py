@@ -245,6 +245,13 @@ class Settings(BaseSettings):
     kpiMetricTierAEnabled: bool = Field(
         default=True, alias="KPI_METRIC_TIER_A_ENABLED"
     )
+    # KPI 向量/图同步开关（feat-kpi-vector-graph-sync）：env 只作一键止血；
+    # system_config 行缺失 ⇒ 默认 on（见 kpi_metric_switches.isKpiSyncEnabled docstring）
+    kpiSyncEnabled: bool = Field(default=True, alias="KPI_SYNC_ENABLED")
+    # KPI 匹配器向量候选步灰度开关（默认关：向量召回改变 chat 行为）
+    kpiMatchVectorEnabled: bool = Field(
+        default=False, alias="KPI_MATCH_VECTOR_ENABLED"
+    )
 
     # ===== 证据分页（feat-evidence-extension）=====
     evidence_page_default: int = Field(default=50, alias="EVIDENCE_PAGE_DEFAULT")

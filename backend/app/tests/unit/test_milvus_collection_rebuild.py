@@ -1,10 +1,13 @@
-"""rebuildOntologyCollections：drop + 重建 3 个本体向量集合。
+"""rebuildOntologyCollections：drop + 重建 4 个 type-routed 向量集合。
 
 背景（2026-09-30）：scripts/backfill_milvus_embeddings.py --cleanup 自称
 「删集重建 + 整批插入」，但它调的是 `milvus.dropCollection()` / `ensureCollection()`
 —— Task 14 丢弃旧 ontology_embeddings 后这两个已是 **no-op**，于是 cleanup 退化成
 纯 append：每跑一次就多一整套向量（实测 32 类 / 3642 属性被堆成 3 倍，
 正是检索 topK 窗口被吃光的根源）。本模块提供真正的 drop 重建原语。
+
+KPI 目录集合（kpi_catalog_embeddings）自「指标/KPI 纳入向量图管理」起同属
+type-routed 管线，rebuild 一并覆盖（drop 全部先于 ensure 全部的顺序不变）。
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ _EXPECTED_COLLECTIONS = [
     "ontology_class_embeddings",
     "ontology_property_embeddings",
     "ontology_metric_embeddings",
+    "kpi_catalog_embeddings",
 ]
 
 
@@ -36,6 +40,7 @@ def fakeMilvus(monkeypatch: pytest.MonkeyPatch):
         ("ensureClassCollection", _EXPECTED_COLLECTIONS[0]),
         ("ensurePropertyCollection", _EXPECTED_COLLECTIONS[1]),
         ("ensureMetricCollection", _EXPECTED_COLLECTIONS[2]),
+        ("ensureKpiCollection", _EXPECTED_COLLECTIONS[3]),
     ):
         monkeypatch.setattr(dual_write, attr, _ensure(attr, coll))
 
@@ -48,8 +53,8 @@ def _setHasCollection(monkeypatch, exists: bool) -> None:
     )
 
 
-def test_drops_then_recreates_all_three_collections(fakeMilvus) -> None:
-    """三个集合都存在 → 逐个 drop，再逐个 ensure（顺序：drop 全部先于 ensure 全部）。"""
+def test_drops_then_recreates_all_four_collections(fakeMilvus) -> None:
+    """四个集合都存在 → 逐个 drop，再逐个 ensure（顺序：drop 全部先于 ensure 全部）。"""
     calls, monkeypatch = fakeMilvus
     _setHasCollection(monkeypatch, True)
     monkeypatch.setattr(
@@ -64,9 +69,11 @@ def test_drops_then_recreates_all_three_collections(fakeMilvus) -> None:
         ("drop", "ontology_class_embeddings"),
         ("drop", "ontology_property_embeddings"),
         ("drop", "ontology_metric_embeddings"),
+        ("drop", "kpi_catalog_embeddings"),
         ("ensure", "ontology_class_embeddings"),
         ("ensure", "ontology_property_embeddings"),
         ("ensure", "ontology_metric_embeddings"),
+        ("ensure", "kpi_catalog_embeddings"),
     ]
 
 
@@ -86,4 +93,5 @@ def test_ensures_without_dropping_when_collection_absent(fakeMilvus) -> None:
         ("ensure", "ontology_class_embeddings"),
         ("ensure", "ontology_property_embeddings"),
         ("ensure", "ontology_metric_embeddings"),
+        ("ensure", "kpi_catalog_embeddings"),
     ]

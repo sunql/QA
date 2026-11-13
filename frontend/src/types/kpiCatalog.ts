@@ -105,3 +105,19 @@ export interface KpiCatalogUpdate {
   numeratorColumns?: string[] | null;
   denominatorColumns?: string[] | null;
 }
+
+/** sync-missing 对账结果（后端 `KpiSyncMissingResult`，BaseModel ⇒ camelCase 出参）。 */
+export interface KpiSyncMissingResult {
+  vectorPublishedTotal: number;
+  vectorMissingCount: number;
+  vectorSyncedCount: number;
+  vectorOrphanCount: number;
+  graphMissingCount: number;
+  graphSyncedCount: number;
+  failedCount: number;
+  failures: Array<{
+    entityType?: string;
+    entityId?: number | string;
+    error: string;
+  }>;
+}

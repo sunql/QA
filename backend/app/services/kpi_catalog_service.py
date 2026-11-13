@@ -3,6 +3,11 @@
 Legacy rows: kpi_catalog.datasource_id IS NULL（migration 0125 之前的历史行 +
 未填的运营行）— chat 路径 L1 mismatch 检查会跳过（per chat_stream_output.py:197
 "NULL ⇒ 不校验"分支），不警告。要让警告生效，必须先 PUT 一次以填补 datasource_id。
+
+向量/图同步（feat-kpi-vector-graph-sync）：CRUD **提交后**挂 best-effort 钩子
+（``_syncKpiVectorAndGraph`` / ``_deleteKpiVectorAndGraph``）——D3 口径：向量只
+索引 PUBLISHED，流转到 DRAFT/DEPRECATED 删向量但**图节点保留**；D4：同步失败
+只告警，不影响主流程。开关见 ``kpi_metric_switches.isKpiSyncEnabled``。
 """
 
 from __future__ import annotations
@@ -20,11 +25,13 @@ from app.domain.enums import KpiStatus
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import DataSource, KpiCatalog
 from app.domain.schemas import KpiCatalogCreate, KpiCatalogUpdate
+from app.services import kpi_vector_graph_sync as kpi_sync
 from app.services.acl_service import AclService
 from app.services.kpi_alignment_resolver import deriveTimeGrain
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_publish_gate import enforceKpiPublishGate
 from app.services.kpi_metric_reconcile import GovernanceSpec
+from app.services.kpi_metric_switches import isKpiSyncEnabled
 from app.services.messages_zh import (
     MSG_KPI_CATALOG_DUPLICATE_CODE,
     MSG_KPI_CATALOG_NOT_FOUND,
@@ -52,6 +59,54 @@ _GOVERNANCE_KEYS = (
 # Numeric(3, 2), nullable=False, default=Decimal("0.75")）。create / update 两条路径
 # 共用，避免「一边归一、一边写穿 NOT NULL」的不对称。
 _DEFAULT_MATCH_THRESHOLD = Decimal("0.75")
+
+# KPI 向量/图同步钩子的状态口径（D3）：向量只索引 PUBLISHED；
+# 流转到 DRAFT/DEPRECATED ⇒ 删向量、**图节点保留**（status 属性原地更新）。
+_PUBLISHED_STATUS = KpiStatus.PUBLISHED.value
+
+
+async def _syncKpiVectorAndGraph(
+    session: AsyncSession,
+    kpiId: int,
+    *,
+    status: str,
+    statusBefore: str | None = None,
+) -> None:
+    """KPI 写操作提交后的向量/图同步钩子（best-effort）。
+
+    D4：同步失败**只告警，不影响主流程** ⇒ 整个钩子包在 try/except 里。
+
+    - 图节点：全状态同步（MERGE on unified_id），保留历史节点；
+    - 向量：只索引 PUBLISHED；
+    - PUBLISHED → DRAFT/DEPRECATED：删向量（图节点保留，status 属性更新）。
+
+    ``statusBefore`` 是**改动前**的状态（update 路径必须在改实体之前捕获）。
+    """
+    try:
+        if not await isKpiSyncEnabled(session):
+            return
+        await kpi_sync.syncKpiGraphBestEffort(kpiId)
+        if status == _PUBLISHED_STATUS:
+            await kpi_sync.syncKpiVectorBestEffort(kpiId)
+        elif statusBefore == _PUBLISHED_STATUS:
+            await kpi_sync.deleteKpiVectorBestEffort(kpiId)
+    except Exception:
+        logger.warning(
+            "KPI 向量/图同步钩子失败 kpiId=%s（不影响主流程）", kpiId, exc_info=True
+        )
+
+
+async def _deleteKpiVectorAndGraph(session: AsyncSession, kpiId: int) -> None:
+    """KPI 删除后的向量/图清理钩子（best-effort，同 D4）。"""
+    try:
+        if not await isKpiSyncEnabled(session):
+            return
+        await kpi_sync.deleteKpiVectorBestEffort(kpiId)
+        await kpi_sync.deleteKpiGraphBestEffort(kpiId)
+    except Exception:
+        logger.warning(
+            "KPI 向量/图删除钩子失败 kpiId=%s（不影响主流程）", kpiId, exc_info=True
+        )
 
 
 def _effectiveTimeGrain(entity: KpiCatalog, updates: dict) -> str | None:
@@ -202,6 +257,7 @@ class KpiCatalogService:
         await get_kpi_match_cache().refreshOne(
             session, entity.kpi_code, kpiId=entity.id
         )
+        await _syncKpiVectorAndGraph(session, entity.id, status=entity.status)
         logger.info("创建 KPI Catalog id=%d code=%s", entity.id, entity.kpi_code)
         return entity
 
@@ -218,6 +274,8 @@ class KpiCatalogService:
         再 audit_log（UPDATE，before+after）+ kpi_catalog_history（revision=new）。
         """
         entity = await self.getKpi(session, id)
+        # 同步钩子需要「改动前」的状态（必须在改实体之前捕获）
+        statusBefore = entity.status
         # ACL：必须在改之前检查；通过后才允许修改
         self._acl.assertCanModify(
             actor,
@@ -279,6 +337,12 @@ class KpiCatalogService:
         await get_kpi_match_cache().refreshOne(
             session, entity.kpi_code, kpiId=entity.id
         )
+        await _syncKpiVectorAndGraph(
+            session,
+            entity.id,
+            status=entity.status,
+            statusBefore=statusBefore,
+        )
         logger.info(
             "更新 KPI Catalog id=%d revision=%d by %s",
             id,
@@ -315,6 +379,7 @@ class KpiCatalogService:
         await session.delete(entity)
         await session.commit()
         get_kpi_match_cache().onKpiChanged(entity.kpi_code, kpiId=entity.id)
+        await _deleteKpiVectorAndGraph(session, entity.id)
         logger.info("删除 KPI Catalog id=%d by %s", id, actor.userId)
 
     async def ensureDraftForMetric(

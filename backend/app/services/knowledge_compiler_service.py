@@ -39,6 +39,7 @@ from app.domain.schemas import IdMappingCreate
 from app.infrastructure import neo4j_client as neo4j
 from app.infrastructure.milvus_client import (
     _CLASS_COLLECTION_NAME,
+    _KPI_COLLECTION_NAME,
     _METRIC_COLLECTION_NAME,
     _PROPERTY_COLLECTION_NAME,
     _connAlias,
@@ -598,8 +599,15 @@ class KnowledgeCompilerService:
 
     @staticmethod
     def _compareCounts(*storeCounts: Mapping[str, int] | None) -> list[str]:
-        """逐类型三方比对：可用库之间 count 不一致即 warning。"""
+        """逐类型三方比对：可用库之间 count 不一致即 warning。
+
+        KPI 走**两两**比对（kpi_published↔milvus、kpi_total↔neo4j），
+        **刻意不进** `_TYPE_TO_BUSINESS_OBJECT` 的三方循环 —— 那张表同时被
+        统一 ID 解析（unified_id 形如 obj:{type}:{id}）复用，把 KPI 卷进去会
+        波及那边的守卫。口径说明见 _countPg 的注释。
+        """
         mismatches: list[str] = []
+        stores = dict(zip(("pg", "neo4j", "milvus"), storeCounts, strict=True))
         for objectType in _TYPE_TO_BUSINESS_OBJECT:
             values = {
                 name: counts[objectType]
@@ -610,6 +618,24 @@ class KnowledgeCompilerService:
                 rendered = ", ".join(f"{name}={count}" for name, count in values.items())
                 mismatches.append(
                     _MSG_RECONCILE_MISMATCH.format(object_type=objectType, counts=rendered)
+                )
+        pgCounts = stores.get("pg") or {}
+        for pgKey, storeName in (
+            ("kpi_published", "milvus"),
+            ("kpi_total", "neo4j"),
+        ):
+            storeMap = stores.get(storeName) or {}
+            pgValue = pgCounts.get(pgKey)
+            storeValue = storeMap.get("kpi")
+            if pgValue is None or storeValue is None:
+                # 该侧不可用或缺 kpi 键 ⇒ 跳过，不误报
+                continue
+            if pgValue != storeValue:
+                mismatches.append(
+                    _MSG_RECONCILE_MISMATCH.format(
+                        object_type=pgKey,
+                        counts=f"pg={pgValue}, {storeName}={storeValue}",
+                    )
                 )
         return mismatches
 
@@ -622,24 +648,44 @@ class KnowledgeCompilerService:
             if model is OntologyClass:
                 stmt = stmt.where(OntologyClass.valid_to.is_(None))
             counts[objectType] = (await session.execute(stmt)).scalar_one()
+        # D3：KPI 向量只索引 PUBLISHED（与 KPI 匹配缓存同口径）⇒ 向量侧对
+        # kpi_published；KPI 转 DRAFT/DEPRECATED 时删向量但**图节点保留**
+        # ⇒ 图侧对 kpi_total。
+        # status 用字面量而非 KpiStatus 枚举：避免本模块在 import 期与枚举耦合。
+        counts["kpi_published"] = int(
+            (
+                await session.execute(
+                    select(func.count(KpiCatalog.id)).where(
+                        KpiCatalog.status == "PUBLISHED"
+                    )
+                )
+            ).scalar_one()
+        )
+        counts["kpi_total"] = int(
+            (await session.execute(select(func.count(KpiCatalog.id)))).scalar_one()
+        )
         return counts
 
     @staticmethod
     def _countNeo4j() -> dict[str, int]:
-        """Neo4j 本体节点数（Class/Property/Metric label）。"""
+        """Neo4j 本体节点数（Class/Property/Metric/KpiCatalog label）。"""
         return {
             "class": len(neo4j.getClassIds()),
             "property": len(neo4j.getPropertyIds()),
             "metric": len(neo4j.listNodesByLabel("Metric")),
+            # D3：KPI 转 DRAFT/DEPRECATED 时图节点保留 ⇒ 对齐 PG 的 kpi_total
+            "kpi": len(neo4j.getKpiCatalogIds()),
         }
 
     @staticmethod
     def _countMilvus() -> dict[str, int]:
-        """Milvus 3-collection 行数（只读 num_entities；缺集合计 0）。"""
+        """Milvus 4-collection 行数（只读 num_entities；缺集合计 0）。"""
         _connect()
         counts: dict[str, int] = {}
         for objectType, collectionName in _TYPE_TO_COLLECTION.items():
             counts[objectType] = _milvusCollectionCount(collectionName)
+        # KPI 集合单独追加：不进 _TYPE_TO_COLLECTION（那张表只映射 class/property/metric）
+        counts["kpi"] = _milvusCollectionCount(_KPI_COLLECTION_NAME)
         return counts
 
     # ------------------------------------------------------------------

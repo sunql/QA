@@ -718,6 +718,7 @@ describe("KpiCatalogPage — 写入口限 admin", () => {
     expect(screen.getByText(/编\s?辑/)).toBeInTheDocument();
     expect(screen.getByText(/删\s?除/)).toBeInTheDocument();
   });
+
 });
 
 describe("kpiCatalogPayload — timeGrain 映射", () => {

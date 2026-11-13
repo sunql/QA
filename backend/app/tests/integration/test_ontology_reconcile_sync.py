@@ -29,6 +29,7 @@ from app.domain.schemas import (
     OntologyPropertyCreate,
     OntologyRelationCreate,
 )
+from app.services import kpi_vector_graph_sync
 from app.services.acl_service import ADMIN_ROLE
 from app.services.id_mapping_service import IdMappingService
 from app.services.ontology_service import OntologyService
@@ -109,11 +110,15 @@ class _FakeNeo4j:
         propertyIds: set[str] | None = None,
         joinPairs: set[tuple[str, str]] | None = None,
         relationTriples: set[tuple[str, str, str]] | None = None,
+        metricIds: set[str] | None = None,
+        kpiIds: set[str] | None = None,
     ) -> None:
         self.classIds = classIds or set()
         self.propertyIds = propertyIds or set()
         self.joinPairs = joinPairs or set()
         self.relationTriples = relationTriples or set()
+        self.metricIds = metricIds or set()
+        self.kpiIds = kpiIds or set()
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
 
     def getClassIds(self) -> set[str]:
@@ -121,6 +126,12 @@ class _FakeNeo4j:
 
     def getPropertyIds(self) -> set[str]:
         return set(self.propertyIds)
+
+    def getMetricIds(self) -> set[str]:
+        return set(self.metricIds)
+
+    def getKpiCatalogIds(self) -> set[str]:
+        return set(self.kpiIds)
 
     def getJoinPairs(self) -> set[tuple[str, str]]:
         return set(self.joinPairs)
@@ -178,6 +189,12 @@ class _FakeNeo4j:
     def reconcileMetricDerivedFrom(self, *args: Any, **kw: Any) -> None:
         self.calls.append(("reconcileMetricDerivedFrom", args))
 
+    def upsertKpiCatalogNode(self, *args: Any, **kw: Any) -> None:
+        self.calls.append(("upsertKpiCatalogNode", args))
+
+    def linkKpiMeasuredBy(self, *args: Any, **kw: Any) -> None:
+        self.calls.append(("linkKpiMeasuredBy", args))
+
 
 def _installFakes(
     monkeypatch: pytest.MonkeyPatch,
@@ -187,6 +204,9 @@ def _installFakes(
 ) -> None:
     monkeypatch.setattr(ontology_service_module, "milvus", milvus)
     monkeypatch.setattr(ontology_service_module, "neo4j", neo4j)
+    # KPI 图对账（Task 6）走 app.services.kpi_vector_graph_sync 自己的 neo4j
+    # 引用 ⇒ 必须一并 patch，否则会连**真** Neo4j（7687 = 生产图谱）。
+    monkeypatch.setattr(kpi_vector_graph_sync, "neo4j", neo4j)
     if embedding is not None:
         monkeypatch.setattr(
             ontology_service_module, "EmbeddingService", lambda: embedding

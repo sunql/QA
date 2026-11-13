@@ -40,6 +40,16 @@ os.environ["RATE_LIMIT_ENABLED"] = "false"
 # 删线上向量（2026-09-30 事故）。用 setdefault 之外还要覆盖：外部若不慎预设了
 # 空值/默认库，测试必须仍然隔离。故直接赋值，并保留显式覆盖测试库名的能力。
 os.environ["MILVUS_DB_NAME"] = os.environ.get("MILVUS_TEST_DB_NAME", "qa_test")
+# KPI 向量/图同步钩子（feat-kpi-vector-graph-sync）在测试环境**强制关闭**：
+# 该钩子的后台 best-effort 任务会用 **app 侧配置**自开 session + 连 Neo4j
+# （settings.neo4jUri 默认 = 生产 bolt://localhost:7687）+ 写 Milvus ⇒ 任何
+# 调 createKpi/updateKpi/deleteKpi 的既有用例都可能**污染生产图/向量库**
+# （半隔离比不隔离更危险：夹具连测试实例、被测代码连生产）。
+# 与 MILVUS_DB_NAME 同款隔离思路：测试环境统一用 env 杀闸关掉；
+# 要验钩子本身的用例自己 monkeypatch 掉（见 test_kpi_catalog_hooks.py）。
+# ⚠️ 这**不改**代码里的默认值（KPI_SYNC_ENABLED 默认 on，见
+# kpi_metric_switches.isKpiSyncEnabled）——只是测试环境的显式覆盖。
+os.environ["KPI_SYNC_ENABLED"] = "false"
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker  # noqa: E402
 

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from httpx import AsyncClient
 
+from app.services.messages_zh import MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN
+
 ADMIN_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
 USER_HEADERS = {"X-User-Id": "normal-user", "X-User-Roles": "user"}
 
@@ -106,6 +108,7 @@ async def test_create_metric_with_placeholder_without_time_column_rejected(clien
     }
     resp = await client.post("/api/v1/ontology/metrics", json=payload, headers=ADMIN_HEADERS)
     assert resp.status_code == 422, resp.text
+    assert resp.json()["error"] == MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN, resp.text
 
 
 async def test_create_metric_with_placeholder_and_time_column_ok(client: AsyncClient) -> None:
@@ -128,6 +131,7 @@ async def test_update_metric_to_placeholder_without_column_rejected(client: Asyn
         headers=ADMIN_HEADERS,
     )
     assert resp.status_code == 422, resp.text
+    assert resp.json()["error"] == MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN, resp.text
 
 
 async def test_update_metric_placeholder_with_existing_column_ok(client: AsyncClient) -> None:
@@ -146,3 +150,34 @@ async def test_update_metric_placeholder_with_existing_column_ok(client: AsyncCl
         headers=ADMIN_HEADERS,
     )
     assert resp.status_code == 200, resp.text
+
+
+async def test_create_metric_without_placeholder_with_time_column_ok(client: AsyncClient) -> None:
+    """反向不强制：formula 无占位符但配了 time_column ⇒ 正常（201）。"""
+    payload = {
+        **_METRIC_PAYLOAD,
+        "formula": "SUM(order_amount)",
+        "executionSource": "ESCAPE_HATCH",
+        "timeColumn": "INVOICE_DATE",
+    }
+    resp = await client.post("/api/v1/ontology/metrics", json=payload, headers=ADMIN_HEADERS)
+    assert resp.status_code == 201, resp.text
+
+
+async def test_update_metric_clear_time_column_with_placeholder_rejected(client: AsyncClient) -> None:
+    """占位符+列已建后，partial update 仅传 timeColumn=None 清空 ⇒ 合并后占位符无列 ⇒ 422。"""
+    payload = {
+        **_METRIC_PAYLOAD,
+        "formula": "SELECT COUNT(*) FROM ORDERS WHERE {time_scope}",
+        "executionSource": "ESCAPE_HATCH",
+        "timeColumn": "INVOICE_DATE",
+    }
+    resp = await client.post("/api/v1/ontology/metrics", json=payload, headers=ADMIN_HEADERS)
+    metric_id = resp.json()["id"]
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metric_id}",
+        json={"timeColumn": None},
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"] == MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN, resp.text

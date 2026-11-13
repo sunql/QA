@@ -1972,10 +1972,10 @@ async def syncMissingKpi(session: AsyncSession) -> dict[str, Any]:
 
     graph = await reconcileKpiGraph(session)
     failures = [*failures, *graph["failures"]]
-    # 孤儿删除走 release+load 才对后续检索可见（Milvus delete 可见性既有约定）
+    # 孤儿删除走 release+load 才对后续检索可见（Milvus delete 可见性既有约定：
+    # refreshCollection = release + load + wait_for_loading_complete，milvus_client.py:597）
     if orphanIds:
-        milvus.releaseCollectionsForTypes(["kpi"])
-        milvus.loadCollectionsForTypes(["kpi"])
+        refreshCollection(ensureKpiCollection())
     return {
         "vectorPublishedTotal": len(published),
         "vectorMissingCount": len(missing),
@@ -1988,7 +1988,7 @@ async def syncMissingKpi(session: AsyncSession) -> dict[str, Any]:
     }
 ```
 
-> `deleteKpiVectorNow(kpiId)` 为纯 Milvus 删除（Task 3 签名，无 DB 写）⇒ 孤儿删除无需 session commit；`reconcileKpiGraph` 内部的 id_mapping 注册自带 commit（Task 6 语义）。端点层的 `await session.commit()` 兜底未决变更。`releaseCollectionsForTypes / loadCollectionsForTypes` 若 milvus_client 无同名函数，用现有等价函数（grep `def release.*load` 确认实际名）并在实施时对齐调用。
+> `deleteKpiVectorNow(kpiId)` 为纯 Milvus 删除（Task 3 签名，无 DB 写）⇒ 孤儿删除无需 session commit；`reconcileKpiGraph` 内部的 id_mapping 注册自带 commit（Task 6 语义）。端点层的 `await session.commit()` 兜底未决变更。孤儿删除后的可见性用 `milvus_client.refreshCollection(collection)`（`milvus_client.py:597`）——它内部就是 release + load + `wait_for_loading_complete`；**不要**自造 `releaseCollectionsForTypes` 之类函数（milvus_client 无此 API）。`ensureKpiCollection` 为 Task 1 产出（`milvus_dual_write`，re-export 自 milvus_client）。
 
 `kpi_catalog.py`：模块 docstring 第一行改为「KPI 目录 API——向量（Milvus）与图（Neo4j）同步纳入本体治理（2026-11-13 起 KPI 与类/属性同权）」；追加响应模型与端点：
 ```python
@@ -2266,18 +2266,27 @@ git commit -m "fix: 回填脚本 cleanup/rebuild 覆盖 4 collection，补 metri
 
 **Files:**
 - Modify: `backend/app/services/kpi_semantic_match_service.py`
-- Modify: `backend/app/services/chat_stream_output.py:315-394`（`L1L4PreambleMixin._routeKpi`）
+- Modify: `backend/app/services/chat_stream_output.py:349-374`（`L1L4PreambleMixin._routeKpi`）
 - Modify: `backend/app/api/v1/kpi_diagnose.py`（诊断 fallback 分支）
 - Test: `backend/app/tests/unit/test_kpi_match_vector.py`（新建）
 
 **Interfaces:**
-- Consumes: `matchRoute(session, question)`（既有）；Task 4 `isKpiMatchVectorEnabled(session)`；`searchEmbeddingsByTypeRouted(queryEmbedding, topK, typeFilter)`（Task 1，位置参数版）；`EmbeddingService`（既有，问题向量化）；KPI 匹配缓存（`getAll()` / metric_alias 反查）。
+- Consumes（**真实 API，已核实**）：
+  - `KpiSemanticMatchService.matchRoute(self, question: str) -> KpiMatchRoute`（**实例方法，只收 question，无 session 参数**；`:321`）
+  - `getKpiSemanticMatchService() -> KpiSemanticMatchService`（`:458`）
+  - `KpiMatchRoute(kind: Literal["hit","ambiguous","none"], matches: tuple[KpiMatchResult, ...])`（**字段名是 `matches`，不是 `results`**；`:133-147`）
+  - `KpiMatchResult(code, confidence, layer="l1_match", kpi_name=None, method="keyword", matched_phrase=None)`（**字段名是 `code` / `confidence` / `method`**；`:33-51`）——本任务给它**新增** `distance: float | None = None`
+  - `get_kpi_match_cache() -> KpiMatchCache`（**snake_case 访问器**，`kpi_match_cache.py:388`）；缓存方法：`is_warmUp() -> bool`（**不是 `isFresh()`**）、`getAll() -> list[KpiCatalog]`（**ORM 对象列表，不是 dict**）、`metricAliasOf(code) -> str | None`、`findByAnyKeyword(kws)`
+  - `EmbeddingService.generateEmbedding(text) -> list[float]`（**不是 `embedText`**；`embedding_service.py:61`）
+  - `searchEmbeddingsByTypeRouted(queryEmbedding, topK, typeFilter)`（Task 1，**位置参数**）
+  - `milvus_client.refreshCollection(collection, waitForLoad=True)`（`milvus_client.py:597`）—— release+load 强制 delete 可见
 - Produces:
-  - `KpiMatchResult` 新增字段 `distance: float | None = None`（vector 候选携带，text 候选恒 None）。
-  - 常量 `KPI_VECTOR_DISTANCE_MAX: Final = 0.5`、`KPI_VECTOR_TOP_K: Final = 5`（模块级 UPPER_SNAKE_CASE）。
-  - `matchRouteVector(session, question) -> KpiMatchRoute`：先跑 `matchRoute`；`kind != "none"` 直接返回（包含式赢）；仅 `none` 时取向量候选补位。**开关不在本函数内判**（调用方 gate），但缓存冷时直接 `none`（守卫既有 `_ensureCacheFresh` 失败语义）。
-  - chat `L1L4PreambleMixin` 新增 `_vectorMatchEnabled(session) -> bool`（默认 `await isKpiMatchVectorEnabled(session)`）——override 点；`_routeKpi` 在 `route.kind == "none"` 且开关开时用 `matchRouteVector` 重路由；v1 路径不动。
-- 语义规则（spec §6，双向断言）：阈值超限丢弃；0 候选 ⇒ none；1 候选 ⇒ `hit` 且 `match_method="vector"`；>1 ⇒ `ambiguous`（按 code 排序，不猜）；Milvus/embedding 异常 ⇒ 静默回落纯文本（返回 `matchRoute` 原结果）；metric 命中经 `kpi.metric_id` 反查绑定的 KPI，与 kpi 直检候选按 code 去重（取 min distance）。
+  - `KpiMatchResult` 新增字段 `distance: float | None = None`（vector 候选携带；文本候选恒 None）。
+  - 常量 `KPI_VECTOR_DISTANCE_MAX: Final[float] = 0.5`、`KPI_VECTOR_TOP_K: Final[int] = 5`。
+  - `KpiSemanticMatchService.matchRouteVector(self, question: str) -> KpiMatchRoute`：先跑 `self.matchRoute(question)`；`kind != "none"` 直接返回（包含式赢）；仅 `none` 时取向量候选补位。**开关不在本函数内判**（调用方 gate）；缓存冷（`not is_warmUp()`）⇒ 直接返回 base，不碰向量。
+  - chat `L1L4PreambleMixin` 新增 `_vectorMatchEnabled(self, session) -> bool`（默认 `await isKpiMatchVectorEnabled(session)`）——测试可覆写；`_routeKpi` 在 `matchRoute` 返回 `kind == "none"` 且开关开时改走 `matchRouteVector`；v1 路径（`_containmentEnabled` 为 False）不动。
+- 语义规则（spec §6，双向断言）：阈值超限丢弃；0 候选 ⇒ none；1 候选 ⇒ `hit` 且 `method == "vector"`；>1 ⇒ `ambiguous`（按 `code` 升序，不猜）；Milvus/embedding 异常 ⇒ 静默回落纯文本（返回 base）；metric 命中经 `kpi.metric_id` 反查绑定 KPI，与 kpi 直检候选按 `code` 去重（取 min distance）。
+- **口径说明**：KPI 缓存只收 `status=PUBLISHED`（`kpi_match_cache.warmUp` 的 where）⇒ 向量候选天然只覆盖 PUBLISHED，与 D3 同口径。
 
 - [ ] **Step 1: RED — 单测（fake 缓存 + fake EmbeddingService/search，禁连真 Milvus）**
 
@@ -2286,42 +2295,45 @@ git commit -m "fix: 回填脚本 cleanup/rebuild 覆盖 4 collection，补 metri
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 import pytest
 
 from app.services import kpi_semantic_match_service as svc
-from app.services.kpi_match_cache import getKpiMatchCache
+from app.services.kpi_match_cache import get_kpi_match_cache
 
 pytestmark = pytest.mark.asyncio
 
 
-def _mkResult(**kw):
-    return svc.KpiMatchResult(
-        kpi_code=kw["code"], kpi_name=kw.get("name", kw["code"]),
-        score=Decimal("0.90"), match_method=kw.get("method", "containment"),
-        distance=kw.get("distance"),
-    )
+class _StubKpi:
+    """最小 KpiCatalog 替身（只需 id/code/name/metric_id）。"""
+
+    def __init__(self, id: int, kpi_code: str, kpi_name: str, metric_id: int | None = None):
+        self.id = id
+        self.kpi_code = kpi_code
+        self.kpi_name = kpi_name
+        self.metric_id = metric_id
 
 
 @pytest.fixture()
-def warmCache(monkeypatch, seededKpiRows):
-    """预灌缓存（kpi 行由 fixture 建：code/name/metric_id/PUBLISHED）。"""
-    cache = getKpiMatchCache()
-    monkeypatch.setattr(cache, "isFresh", lambda: True)
-    return cache
+def warmCache(monkeypatch):
+    """预灌缓存：3 条 PUBLISHED KPI（其中 1 条绑 metric）。"""
+    cache = get_kpi_match_cache()
+    kpis = [
+        _StubKpi(101, "KPI_A", "指标A", None),
+        _StubKpi(102, "KPI_B", "指标B", 55),
+        _StubKpi(103, "KPI_C", "指标C", None),
+    ]
+    monkeypatch.setattr(cache, "is_warmUp", lambda: True)
+    monkeypatch.setattr(cache, "getAll", lambda: list(kpis))
+    return cache, kpis
 
 
 @pytest.fixture()
 def fakeVectorSearch(monkeypatch):
-    """fake 向量检索：按 (embedding_type) 返回预设命中。"""
+    """fake 向量检索：按 typeFilter 返回预设命中。"""
     state = {"kpi": [], "metric": [], "raise": False}
     calls: list[str] = []
 
-    async def _fakeEmbed(question: str):
-        return [0.1, 0.2]
-
-    def _fakeSearch(query_vector, top_k, typeFilter):
+    def _fakeSearch(query_embedding, top_k, typeFilter):
         calls.append(typeFilter)
         if state["raise"]:
             raise RuntimeError("milvus down")
@@ -2329,87 +2341,93 @@ def fakeVectorSearch(monkeypatch):
 
     class _FakeEmbeddingSvc:
         @staticmethod
-        async def embedText(text: str):
-            return await _fakeEmbed(text)
+        async def generateEmbedding(text: str):
+            return [0.1, 0.2]
 
     monkeypatch.setattr(svc, "EmbeddingService", _FakeEmbeddingSvc, raising=False)
-    monkeypatch.setattr(
-        svc, "searchEmbeddingsByTypeRouted", _fakeSearch, raising=False
-    )
+    monkeypatch.setattr(svc, "searchEmbeddingsByTypeRouted", _fakeSearch, raising=False)
     return state, calls
 
 
 async def test_containment_wins_vector_not_called(warmCache, fakeVectorSearch):
-    """包含式命中 ⇒ 向量检索根本不发起。"""
+    """包含式命中 ⇒ 向量检索根本不发起（双向守卫）。"""
+    cache, kpis = warmCache
     state, calls = fakeVectorSearch
-    state["kpi"] = [{"ontology_id": "9", "distance": 0.1}]
-    route = await svc.matchRouteVector(None, "我的供货量是多少")
+    state["kpi"] = [{"ontology_id": "101", "distance": 0.1}]
+    # 让 matchRoute 命中：缓存 KPI_A 的关键词包含在问句里
+    cache.findByAnyKeyword = lambda kws: [kpis[0]]
+    svcInst = svc.getKpiSemanticMatchService()
+    route = await svcInst.matchRouteVector("我的指标A是多少")
     assert route.kind == "hit"
-    assert route.results[0].match_method == "containment"
-    assert calls == []  # 双向守卫：向量路径未触发
+    assert route.matches[0].method == "containment"
+    assert calls == []
 
 
-async def test_single_vector_hit(warmCache, fakeVectorSearch, seededKpiRows):
+async def test_single_vector_hit(warmCache, fakeVectorSearch):
     state, _ = fakeVectorSearch
-    kpiId, code = seededKpiRows[0]
-    state["kpi"] = [{"ontology_id": str(kpiId), "distance": 0.32}]
-    route = await svc.matchRouteVector(None, "完全不沾边的问句")
+    state["kpi"] = [{"ontology_id": "101", "distance": 0.32}]
+    svcInst = svc.getKpiSemanticMatchService()
+    route = await svcInst.matchRouteVector("完全不沾边的问句")
     assert route.kind == "hit"
-    assert route.results[0].kpi_code == code
-    assert route.results[0].match_method == "vector"
-    assert route.results[0].distance == 0.32
+    assert route.matches[0].code == "KPI_A"
+    assert route.matches[0].method == "vector"
+    assert route.matches[0].distance == 0.32
 
 
-async def test_metric_hit_reverse_binds_kpi(warmCache, fakeVectorSearch, seededKpiRows):
-    """metric 向量命中 → kpi.metric_id 反查 → 归到绑定 KPI。"""
+async def test_metric_hit_reverse_binds_kpi(warmCache, fakeVectorSearch):
+    """metric 向量命中 → kpi.metric_id 反查 → 归到绑定 KPI（KPI_B 绑 metric 55）。"""
     state, _ = fakeVectorSearch
-    metricId, kpiId, code = seededKpiRows[1]
-    state["metric"] = [{"ontology_id": str(metricId), "distance": 0.28}]
-    route = await svc.matchRouteVector(None, "完全不沾边的问句")
+    state["metric"] = [{"ontology_id": "55", "distance": 0.28}]
+    svcInst = svc.getKpiSemanticMatchService()
+    route = await svcInst.matchRouteVector("完全不沾边的问句")
     assert route.kind == "hit"
-    assert route.results[0].kpi_code == code
-    assert route.results[0].match_method == "vector"
+    assert route.matches[0].code == "KPI_B"
+    assert route.matches[0].method == "vector"
+    assert route.matches[0].distance == 0.28
 
 
 async def test_over_threshold_dropped(warmCache, fakeVectorSearch):
     """双向反例：distance > KPI_VECTOR_DISTANCE_MAX ⇒ 丢弃 ⇒ none。"""
     state, _ = fakeVectorSearch
-    state["kpi"] = [{"ontology_id": "1", "distance": svc.KPI_VECTOR_DISTANCE_MAX + 0.01}]
-    route = await svc.matchRouteVector(None, "完全不沾边的问句")
+    state["kpi"] = [{"ontology_id": "101", "distance": svc.KPI_VECTOR_DISTANCE_MAX + 0.01}]
+    svcInst = svc.getKpiSemanticMatchService()
+    route = await svcInst.matchRouteVector("完全不沾边的问句")
     assert route.kind == "none"
 
 
-async def test_two_hits_ambiguous(warmCache, fakeVectorSearch, seededKpiRows):
+async def test_two_hits_ambiguous(warmCache, fakeVectorSearch):
     state, _ = fakeVectorSearch
-    idA, codeA = seededKpiRows[0]
-    idB, codeB = seededKpiRows[2]
     state["kpi"] = [
-        {"ontology_id": str(idA), "distance": 0.30},
-        {"ontology_id": str(idB), "distance": 0.35},
+        {"ontology_id": "103", "distance": 0.30},
+        {"ontology_id": "101", "distance": 0.35},
     ]
-    route = await svc.matchRouteVector(None, "完全不沾边的问句")
+    svcInst = svc.getKpiSemanticMatchService()
+    route = await svcInst.matchRouteVector("完全不沾边的问句")
     assert route.kind == "ambiguous"
-    codes = [r.kpi_code for r in route.results]
-    assert codes == sorted(codes)
+    codes = [m.code for m in route.matches]
+    assert codes == sorted(codes)  # 确定性排序
 
 
 async def test_milvus_failure_silent_fallback(warmCache, fakeVectorSearch):
     state, _ = fakeVectorSearch
     state["raise"] = True
-    route = await svc.matchRouteVector(None, "完全不沾边的问句")
+    svcInst = svc.getKpiSemanticMatchService()
+    route = await svcInst.matchRouteVector("完全不沾边的问句")
     assert route.kind == "none"  # 静默回落，不抛
 
 
 async def test_cache_cold_returns_none(fakeVectorSearch, monkeypatch):
     """缓存冷 ⇒ none（不触发向量检索）。"""
-    cache = getKpiMatchCache()
-    monkeypatch.setattr(cache, "isFresh", lambda: False)
+    cache = get_kpi_match_cache()
+    monkeypatch.setattr(cache, "is_warmUp", lambda: False)
     state, calls = fakeVectorSearch
-    route = await svc.matchRouteVector(None, "完全不沾边的问句")
+    svcInst = svc.getKpiSemanticMatchService()
+    route = await svcInst.matchRouteVector("完全不沾边的问句")
     assert route.kind == "none"
     assert calls == []
 ```
-（`seededKpiRows` fixture：真 PG 建三条 PUBLISHED KPI + 一条 metric，返回 `[(kpiId, code), (metricId, kpiIdB, codeB), (kpiIdC, codeC)]`；`session=None` 时 matcher 内部用缓存路径，不触 PG——与既有 `test_kpi_match_route.py` 的 fake cache 手法一致，实施时对齐该文件的 fixture 实名。）
+
+> `getKpiSemanticMatchService()` 返回**绑定了全局 cache 单例**的 service（`:458-462`）⇒ 测试里 monkeypatch 单例方法即可生效。`matchRoute` 的包含式命中依赖 `findByAnyKeyword` + `_phrasesOf` 的真实逻辑；本测试用 `cache.findByAnyKeyword` 桩让 `matchRoute` 走到 hit 分支。**实施时若 `matchRoute` 走的是 `_by_code`/`_by_keyword` 内部字典而非 `findByAnyKeyword`，改桩点为该内部字典**（读 `kpi_semantic_match_service.py:321-379` 对齐），断言不变。
 
 - [ ] **Step 2: 跑 RED**
 ```bash
@@ -2418,90 +2436,99 @@ pytest app/tests/unit/test_kpi_match_vector.py -q
 预期：FAIL（`matchRouteVector` / `distance` 字段 / 常量不存在）。
 - [ ] **Step 3: GREEN — matcher 实现（`kpi_semantic_match_service.py`）**
 
+1. `KpiMatchResult` dataclass 追加字段（带默认值，不破坏既有构造）：
+```python
+    distance: float | None = None
+```
+2. 模块级常量：
 ```python
 KPI_VECTOR_DISTANCE_MAX: Final[float] = 0.5
 KPI_VECTOR_TOP_K: Final[int] = 5
-
-
-async def _vectorCandidates(session, question: str) -> list[KpiMatchResult]:
-    """问题 → Milvus kpi/metric 两路 topK 候选（失败抛出，由调用方决定回落）。"""
-    embeddingSvc = EmbeddingService()
-    queryVector = await embeddingSvc.embedText(question)
-    # 签名 = Task 1 落地的位置参数版：(queryEmbedding, topK, typeFilter)
-    kpiHits = await asyncio.to_thread(
-        searchEmbeddingsByTypeRouted, queryVector, KPI_VECTOR_TOP_K, "kpi"
-    )
-    metricHits = await asyncio.to_thread(
-        searchEmbeddingsByTypeRouted, queryVector, KPI_VECTOR_TOP_K, "metric"
-    )
-    cache = getKpiMatchCache()
-    idToRow = {str(row["id"]): row for row in cache.getAll()} \
-        if hasattr(cache, "getAll") else {}
-    candidates: dict[str, KpiMatchResult] = {}
-    for source, hits in (("kpi", kpiHits), ("metric", metricHits)):
-        for hit in hits:
-            distance = float(hit.get("distance", 1.0))
-            if distance > KPI_VECTOR_DISTANCE_MAX:
-                continue
-            kpiRow = idToRow.get(str(hit.get("ontology_id")))
-            if kpiRow is None and source == "metric":
-                # metric 命中 → 反查绑定 KPI（缓存行含 metric_id）
-                kpiRow = next(
-                    (r for r in cache.getAll()
-                     if r.get("metric_id") is not None
-                     and str(r["metric_id"]) == str(hit["ontology_id"])),
-                    None,
+```
+3. `KpiSemanticMatchService` 新增两个方法（放在 `matchRoute` 之后）：
+```python
+    async def _vectorCandidates(self, question: str) -> list[KpiMatchResult]:
+        """问题 → Milvus kpi/metric 两路 topK 候选（失败抛出，由调用方决定回落）。"""
+        queryVector = await EmbeddingService().generateEmbedding(question)
+        kpiHits = await asyncio.to_thread(
+            searchEmbeddingsByTypeRouted, queryVector, KPI_VECTOR_TOP_K, "kpi"
+        )
+        metricHits = await asyncio.to_thread(
+            searchEmbeddingsByTypeRouted, queryVector, KPI_VECTOR_TOP_K, "metric"
+        )
+        cache = get_kpi_match_cache()
+        allKpis = cache.getAll()
+        idToKpi = {str(kpi.id): kpi for kpi in allKpis}
+        candidates: dict[str, KpiMatchResult] = {}
+        for source, hits in (("kpi", kpiHits), ("metric", metricHits)):
+            for hit in hits:
+                distance = float(hit.get("distance", 1.0))
+                if distance > KPI_VECTOR_DISTANCE_MAX:
+                    continue
+                kpi = idToKpi.get(str(hit.get("ontology_id")))
+                if kpi is None and source == "metric":
+                    # metric 命中 → 反查绑定 KPI（KpiCatalog.metric_id）
+                    kpi = next(
+                        (k for k in allKpis
+                         if k.metric_id is not None
+                         and str(k.metric_id) == str(hit["ontology_id"])),
+                        None,
+                    )
+                if kpi is None:
+                    continue
+                result = KpiMatchResult(
+                    code=kpi.kpi_code,
+                    confidence=round(max(0.0, 1.0 - distance), 4),
+                    kpi_name=kpi.kpi_name,
+                    method="vector",
+                    distance=distance,
                 )
-            if kpiRow is None:
-                continue
-            code = kpiRow["kpi_code"]
-            result = KpiMatchResult(
-                kpi_code=code, kpi_name=kpiRow.get("kpi_name", code),
-                score=Decimal(str(round(max(0.0, 1.0 - distance), 4))),
-                match_method="vector", distance=distance,
-            )
-            prev = candidates.get(code)
-            if prev is None or (prev.distance or 1.0) > distance:
-                candidates[code] = result
-    return sorted(candidates.values(), key=lambda r: r.kpi_code)
-```
-> `searchEmbeddingsByTypeRouted` 签名与 Task 1 落地一致（位置参数 `(queryEmbedding, topK, typeFilter)`，返回行含 `ontology_id / distance / name / alias / external_id`）；`cache.getAll()` 的行结构以 `kpi_match_cache.py` 现状为准（实施时 grep 字段名，勿臆造 `metric_id` 键名——若缓存行只有 alias，则 metric 反查改走 `_metricAliasByCode` 的对偶查询）。`matchRouteVector` 主体：
-```python
-async def matchRouteVector(session, question: str) -> KpiMatchRoute:
-    """向量候选兜底路由：包含式赢、向量只补 none。开关由调用方 gate。"""
-    base = await matchRoute(session, question)
-    if base.kind != "none":
-        return base
-    cache = getKpiMatchCache()
-    if not cache.isFresh():
-        return base  # 缓存冷：守卫既有语义，不碰向量
-    try:
-        candidates = await _vectorCandidates(session, question)
-    except Exception:
-        logger.warning("向量候选失败，静默回落纯文本", exc_info=True)
-        return base
-    if not candidates:
-        return base
-    if len(candidates) == 1:
-        return KpiMatchRoute(kind="hit", results=candidates)
-    return KpiMatchRoute(kind="ambiguous", results=candidates)
-```
+                prev = candidates.get(kpi.kpi_code)
+                if prev is None or (prev.distance or 1.0) > distance:
+                    candidates[kpi.kpi_code] = result
+        return sorted(candidates.values(), key=lambda r: r.code)
 
-chat `chat_stream_output.py`：
+    async def matchRouteVector(self, question: str) -> KpiMatchRoute:
+        """向量候选兜底路由：包含式赢、向量只补 none。开关由调用方 gate。"""
+        base = await self.matchRoute(question)
+        if base.kind != "none":
+            return base
+        if not get_kpi_match_cache().is_warmUp():
+            return base  # 缓存冷：守卫既有语义，不碰向量
+        try:
+            candidates = await self._vectorCandidates(question)
+        except Exception:
+            logger.warning("向量候选失败，静默回落纯文本", exc_info=True)
+            return base
+        if not candidates:
+            return base
+        if len(candidates) == 1:
+            return KpiMatchRoute(kind="hit", matches=tuple(candidates))
+        return KpiMatchRoute(kind="ambiguous", matches=tuple(candidates))
+```
+4. 顶部 import 补 `asyncio`、`Final`、`EmbeddingService`、`searchEmbeddingsByTypeRouted`、`get_kpi_match_cache`（按文件既有 import 风格）。
+- [ ] **Step 4: GREEN — chat 与诊断接入**
+
+`chat_stream_output.py`：
 ```python
-    async def _vectorMatchEnabled(self, session) -> bool:
-        """override 点（测试替换）；生产 = 灰度开关。"""
+    async def _vectorMatchEnabled(self, session: AsyncSession) -> bool:
+        """override 点（测试可覆写）；生产 = 灰度开关。"""
         return await isKpiMatchVectorEnabled(session)
 ```
-`_routeKpi`（`:364-374`）在取到 `route.kind == "none"` 时：
+`_routeKpi`（`:364-374`）的 containment 分支改为：
 ```python
+        await self._ensureKpiCacheFresh(session)
+        route = await self._kpiMatcher.matchRoute(question)
         if route.kind == "none" and await self._vectorMatchEnabled(session):
-            route = await getKpiSemanticMatchService().matchRouteVector(session, question)
+            route = await self._kpiMatcher.matchRouteVector(question)
+        return route
 ```
-`kpi_diagnose.py`：containment 分支（`:231-236`）与 v1 分支（`:237-239`）之间插向量 fallback——`kind == "none"` 且 `isKpiMatchVectorEnabled` ⇒ `matchRouteVector` 结果，命中传 `distance`（诊断**不吞异常**：这里不 catch，故障 500，与模块承诺一致）。
+（v1 分支 `self._kpiMatcher.match(question)` 不动。）
 
-- [ ] **Step 4: 跑 GREEN**：Step 2 全 PASS；回归 `pytest app/tests/unit/test_kpi_match_route.py app/tests/unit/test_kpi_match_cache.py -q` 净新增 0。
-- [ ] **Step 5: Commit**
+`kpi_diagnose.py`：在 containment 分支（`:231-236`）与 v1 分支（`:237-239`）之间插向量 fallback——`route.kind == "none"` 且 `await isKpiMatchVectorEnabled(session)` ⇒ 改用 `matchRouteVector` 结果；命中项的 `distance` 传进 `KpiDiagnoseMatch.distance`（Task 7 已加该字段）。诊断**不吞异常**：这里不 catch，故障 500，与模块承诺一致。
+
+- [ ] **Step 5: 跑 GREEN**：Step 2 全 PASS；回归 `pytest app/tests/unit/test_kpi_match_route.py app/tests/unit/test_kpi_match_cache.py app/tests/unit/test_kpi_semantic_match_service.py -q` 净新增 0（第三个文件名为实测名，不存在则跳过）。
+- [ ] **Step 6: Commit**
 ```bash
 git add backend/app/services/kpi_semantic_match_service.py backend/app/services/chat_stream_output.py \
         backend/app/api/v1/kpi_diagnose.py backend/app/tests/unit/test_kpi_match_vector.py

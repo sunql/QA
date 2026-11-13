@@ -21,6 +21,8 @@ import {
   updateKpi,
   deleteKpi,
   getDatasourceSuggestions,
+  syncMissingKpi,
+  resyncKpiEmbedding,
 } from "../api/kpiCatalog";
 import { listMetrics } from "../api/ontology";
 import { TIME_GRAIN_OPTIONS } from "../types/ontology";
@@ -71,6 +73,10 @@ export default function KpiCatalogPage() {
   const [kpis, setKpis] = useState<KpiCatalog[]>([]);
   const [metrics, setMetrics] = useState<OntologyMetric[]>([]);
   const [loading, setLoading] = useState(false);
+  // 全量对账按钮加载态
+  const [syncingAll, setSyncingAll] = useState(false);
+  // 行级重建加载态（不可变更新：复制后增删）
+  const [syncingIds, setSyncingIds] = useState<Set<number>>(new Set<number>());
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<KpiCatalog | null>(null);
   const [suggestions, setSuggestions] = useState<KpiDatasourceSuggestion[]>([]);
@@ -292,7 +298,7 @@ export default function KpiCatalogPage() {
       ? [
           {
             title: t("kpiCatalog.columns.actions"),
-            width: 160,
+            width: 240,
             render: (_: unknown, record: KpiCatalog) => (
               <Space>
                 <Button size="small" onClick={() => openEdit(record)}>
@@ -306,6 +312,34 @@ export default function KpiCatalogPage() {
                     {t("common.delete")}
                   </Button>
                 </Popconfirm>
+                <Button
+                  size="small"
+                  loading={syncingIds.has(record.id)}
+                  onClick={async () => {
+                    setSyncingIds((prev) => new Set(prev).add(record.id));
+                    try {
+                      await resyncKpiEmbedding(record.id);
+                      void message.success(
+                        t("kpiCatalog.resyncDone", { code: record.kpiCode }),
+                      );
+                    } catch (e) {
+                      const err = e as Error & { status?: number };
+                      if (err.status === 409) {
+                        void message.error(t("kpiCatalog.resyncNotPublished"));
+                      } else {
+                        void message.error(t("kpiCatalog.resyncFailed"));
+                      }
+                    } finally {
+                      setSyncingIds((prev) => {
+                        const next = new Set(prev);
+                        next.delete(record.id);
+                        return next;
+                      });
+                    }
+                  }}
+                >
+                  {t("kpiCatalog.resyncButton")}
+                </Button>
               </Space>
             ),
           },
@@ -321,6 +355,43 @@ export default function KpiCatalogPage() {
           <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             {t("common.refresh")}
           </Button>
+          {isAdmin ? (
+            <Button
+              loading={syncingAll}
+              onClick={async () => {
+                setSyncingAll(true);
+                try {
+                  const r = await syncMissingKpi();
+                  // C11：有失败即不得宣称「无缺失」——失败优先，否则降级读会把
+                  // 「没能查出来」（计数全 0）报成绿色「已是最新」。
+                  const missing =
+                    r.vectorMissingCount +
+                    r.graphMissingCount +
+                    r.vectorOrphanCount;
+                  if (r.failedCount > 0) {
+                    void message.warning(
+                      t("kpiCatalog.syncAllPartial", { failed: r.failedCount }),
+                    );
+                  } else if (missing === 0) {
+                    void message.success(t("kpiCatalog.syncAllNone"));
+                  } else {
+                    void message.success(
+                      t("kpiCatalog.syncAllDone", {
+                        vector: r.vectorSyncedCount,
+                        graph: r.graphSyncedCount,
+                      }),
+                    );
+                  }
+                } catch {
+                  void message.error(t("kpiCatalog.syncAllFailed"));
+                } finally {
+                  setSyncingAll(false);
+                }
+              }}
+            >
+              {t("kpiCatalog.syncAllButton")}
+            </Button>
+          ) : null}
           {isAdmin ? (
             <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
               {t("kpiCatalog.newButton")}

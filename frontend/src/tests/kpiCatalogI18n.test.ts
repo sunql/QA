@@ -73,3 +73,33 @@ describe("KPI 数据源建议 — reason i18n", () => {
     expect(enUS.kpiCatalog.suggestions.reasons).toHaveProperty("legacy_table_exact");
   });
 });
+
+/** 本页新增的同步按钮 i18n 键（C2：t() 无 key 类型保护，缺键只渲染裸 key）。 */
+const SYNC_KEYS = [
+  "syncAllButton",
+  "resyncButton",
+  "syncAllNone",
+  "syncAllDone",
+  "syncAllPartial",
+  "syncAllFailed",
+  "resyncDone",
+  "resyncFailed",
+  "resyncNotPublished",
+] as const;
+
+describe("KPI 同步按钮 — i18n", () => {
+  it.each(DICTIONARIES)("%s 词典含全部同步按钮 key 且译文非空", (_locale, dict) => {
+    for (const key of SYNC_KEYS) {
+      expectNonEmpty(dict, ["kpiCatalog", key]);
+    }
+  });
+
+  it("zh-CN 与 en-US 的同步按钮 key 集合一致", () => {
+    const zh = lookup(zhCN as unknown as Dictionary, ["kpiCatalog"]) as Record<string, unknown>;
+    const en = lookup(enUS as unknown as Dictionary, ["kpiCatalog"]) as Record<string, unknown>;
+    for (const key of SYNC_KEYS) {
+      expect(Object.prototype.hasOwnProperty.call(en, key)).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(zh, key)).toBe(true);
+    }
+  });
+});

@@ -28,7 +28,9 @@ PR #123 后，ontology 的四个「同步」端点都会改共享基础设施：
   ⚠️ 生效前提：`AUTH_MODE=real` + `AUTH_STUB_ENABLED=0`。stub 模式下 `X-User-Roles`
   由客户端自述且缺省角色含 admin（`dependencies.py` `DEFAULT_STUB_ROLES`），
   本守卫只对真实认证有意义；生产启动门禁已强制 real auth。
-- `backend/app/tests/integration/test_ontology_sync_admin_only.py`（新增，8 用例）：
+- `backend/app/tests/integration/test_ontology_reconcile_sync.py`（末尾追加 8 用例，
+  刻意并入既有文件而非新建：新增 integration 文件会让 `find|sort` 下标 mod 4 的分片整体轮转，
+  实测曾把一条挂起用例挪进 shard 3 导致 90min timeout cancelled）：
   - 非 admin（`X-User-Roles: user`）⇒ 403 且 `detail.code == "PERMISSION_DENIED"`
     （钉住拦截来自 `requireAdmin`，排除 `mustChangePasswordGuard` 同码 403 的假绿），
     且 **service 未被调用**（防止「先干活再被拦」）；
@@ -45,7 +47,8 @@ PR #123 后，ontology 的四个「同步」端点都会改共享基础设施：
 
 ## 验收
 
-- 后端定向套件（`test_ontology_sync_admin_only.py`）：8 passed。
+- 后端定向套件（`test_ontology_reconcile_sync.py -k sync_endpoint_`）：8 passed；
+  同文件其余 8 条失败与 base `e85f1ff8` 独立 worktree 复现结果**逐一相同**（共享测试库残留）。
 - 前端 `ClassTabAdminSync.test.tsx` + `OntologyPage.test.tsx`：38 passed；`tsc --noEmit` exit 0。
 - 邻近后端套件回归：`test_ontology_api.py` / `test_ontology_reconcile_sync.py` /
   `test_kpi_reconcile_graph.py` 的失败与 base `e85f1ff8` **逐一相同**（共享测试库

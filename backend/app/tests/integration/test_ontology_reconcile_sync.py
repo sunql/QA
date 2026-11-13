@@ -691,3 +691,168 @@ class TestReconcileEndpoints:
         assert body["syncedClassCount"] == 2
         assert body["missingPropertyCount"] == 1
         assert body["failedCount"] == 0
+
+
+# =============================================================================
+# 「同步」写面仅 admin（feat-ontology-sync-admin-only）
+# =============================================================================
+
+# 背景：PR #123 把 graph/sync-missing 的写面扩到 KPI id_mapping 与 KpiCatalog
+# 节点/边；四个同步端点都会改共享基础设施（Milvus / Neo4j / id_mapping）⇒ 收成
+# admin-only。两条方向都断言（防止「先干活再被拦」或「只在 UI 藏按钮」）：
+# 1. 非 admin ⇒ 403（code=PERMISSION_DENIED）且 service 一次未被调用；
+# 2. admin ⇒ 正常返回且确实走到对应 service。
+# 刻意并入本文件而不是新建文件：新增 integration 文件会让 `find|sort` 下标
+# mod 4 的分片整体轮转（见 ci.yml 注释与 CI 分片顺序陷阱）。
+
+_ADMIN_HEADERS = {"X-User-Id": "admin", "X-User-Roles": "admin"}
+_USER_HEADERS = {"X-User-Id": "alice", "X-User-Roles": "user"}
+
+_EMBEDDING_SYNC_MISSING_STUB = {
+    "totalClasses": 0,
+    "missingCount": 0,
+    "syncedCount": 0,
+    "failedCount": 0,
+    "failures": [],
+    "totalProperties": 0,
+    "missingPropertyCount": 0,
+    "syncedPropertyCount": 0,
+    "failedPropertyCount": 0,
+    "propertyFailures": [],
+    "totalMetrics": 0,
+    "missingMetricCount": 0,
+    "syncedMetricCount": 0,
+    "failedMetricCount": 0,
+    "metricFailures": [],
+}
+
+_GRAPH_SYNC_MISSING_STUB = {
+    "totalClasses": 0,
+    "missingClassCount": 0,
+    "syncedClassCount": 0,
+    "totalProperties": 0,
+    "missingPropertyCount": 0,
+    "syncedPropertyCount": 0,
+    "totalJoins": 0,
+    "missingJoinCount": 0,
+    "syncedJoinCount": 0,
+    "totalRelations": 0,
+    "missingRelationCount": 0,
+    "syncedRelationCount": 0,
+    "failedCount": 0,
+    "failures": [],
+}
+
+_EMBEDDING_SYNC_PAYLOAD = {
+    "ontologyId": 990001,
+    "type": "class",
+    "name": "AdminGateProbe",
+    "embedding": [0.0] * 1024,
+}
+
+
+@pytest.fixture
+def serviceSpy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """替换 4 个 service 入口：不碰真实 Milvus/Neo4j，并可断言「是否真的被调用」。
+
+    刻意不 autouse：本文件其余用例继续走自己的 fake 边界。
+    """
+    calls: list[str] = []
+
+    async def _syncMissingClassEmbeddings(*_a: object, **_k: object) -> dict:
+        calls.append("syncMissingClassEmbeddings")
+        return dict(_EMBEDDING_SYNC_MISSING_STUB)
+
+    async def _syncMissingGraph(*_a: object, **_k: object) -> dict:
+        calls.append("syncMissingGraph")
+        return dict(_GRAPH_SYNC_MISSING_STUB)
+
+    async def _syncClassEmbedding(*_a: object, **_k: object) -> None:
+        calls.append("syncClassEmbedding")
+
+    def _syncEmbedding(*_a: object, **_k: object) -> None:
+        calls.append("syncEmbedding")
+
+    monkeypatch.setattr(
+        OntologyService, "syncMissingClassEmbeddings", _syncMissingClassEmbeddings
+    )
+    monkeypatch.setattr(OntologyService, "syncMissingGraph", _syncMissingGraph)
+    monkeypatch.setattr(OntologyService, "syncClassEmbedding", _syncClassEmbedding)
+    monkeypatch.setattr(OntologyService, "syncEmbedding", _syncEmbedding)
+    return calls
+
+
+_SYNC_ENDPOINTS = [
+    pytest.param(
+        "/api/v1/ontology/embeddings/sync-missing",
+        None,
+        200,
+        "syncMissingClassEmbeddings",
+        id="embeddings-sync-missing",
+    ),
+    pytest.param(
+        "/api/v1/ontology/graph/sync-missing",
+        None,
+        200,
+        "syncMissingGraph",
+        id="graph-sync-missing",
+    ),
+    pytest.param(
+        "/api/v1/ontology/classes/990001/embedding",
+        None,
+        204,
+        "syncClassEmbedding",
+        id="class-embedding",
+    ),
+    pytest.param(
+        "/api/v1/ontology/embeddings/sync",
+        _EMBEDDING_SYNC_PAYLOAD,
+        204,
+        "syncEmbedding",
+        id="embeddings-sync",
+    ),
+]
+
+
+@pytest.mark.parametrize("url,payload,expectedStatus,expectedCall", _SYNC_ENDPOINTS)
+async def test_sync_endpoint_non_admin_forbidden(
+    client,
+    serviceSpy: list[str],
+    url: str,
+    payload: dict | None,
+    expectedStatus: int,
+    expectedCall: str,
+) -> None:
+    """非 admin：403 + PERMISSION_DENIED，且服务层一次都没被调用。"""
+    response = await client.post(url, json=payload, headers=_USER_HEADERS)
+
+    assert response.status_code == 403, (
+        f"{url} 非 admin 应 403，实得 {response.status_code}"
+    )
+    # 只断言 403 会与 mustChangePasswordGuard（同 403 但 code 不同）混淆。
+    assert response.json()["detail"]["code"] == "PERMISSION_DENIED", (
+        f"{url} 403 应来自 requireAdmin，实得 {response.json()}"
+    )
+    assert serviceSpy == [], (
+        f"{url} 非 admin 请求必须在校验层被拦下，不得先进入 service（实际：{serviceSpy}）"
+    )
+
+
+@pytest.mark.parametrize("url,payload,expectedStatus,expectedCall", _SYNC_ENDPOINTS)
+async def test_sync_endpoint_admin_reaches_service(
+    client,
+    serviceSpy: list[str],
+    url: str,
+    payload: dict | None,
+    expectedStatus: int,
+    expectedCall: str,
+) -> None:
+    """admin：正常返回，且确实调用对应 service。"""
+    response = await client.post(url, json=payload, headers=_ADMIN_HEADERS)
+
+    assert response.status_code == expectedStatus, (
+        f"{url} admin 应 {expectedStatus}，实得 {response.status_code}: {response.text}"
+    )
+    assert serviceSpy == [expectedCall], (
+        f"{url} 应只调用 {expectedCall}，实际：{serviceSpy}"
+    )

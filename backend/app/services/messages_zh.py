@@ -799,3 +799,7 @@ MSG_FIELD_HINT_TITLE = "字段治理提示"
 MSG_FIELD_HINT_MISSING_LABEL = "以下字段缺少中文含义，请在「本体 → 属性管理」补充别名：{fields}"
 MSG_FIELD_HINT_MISSING_UNIT = "以下数值字段未定义单位，请在本体属性中补充「单位」：{fields}"
 MSG_FIELD_HINT_TRUNCATED = " 等 {count} 个"
+# --- P4a 时间参数化：治理校验（占位符 ⇔ time_column） ------------------------
+MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN = (
+    "指标 formula 声明了时间占位符（time_scope）时必须同时配置 time_column（时间列）"
+)

@@ -90,3 +90,59 @@ async def test_admin_can_write_metrics(client: AsyncClient) -> None:
     assert updated.status_code == 200
     assert updated.json()["metricAlias"] == "订单总量"
     assert deleted.status_code == 204
+
+
+# =============================================================================
+# P4a：formula 含 {time_scope} 占位符 ⇒ time_column 必填（反向不强制）
+# =============================================================================
+
+
+async def test_create_metric_with_placeholder_without_time_column_rejected(client: AsyncClient) -> None:
+    payload = {
+        **_METRIC_PAYLOAD,
+        "formula": "SELECT COUNT(*) FROM ORDERS WHERE {time_scope}",
+        "executionSource": "ESCAPE_HATCH",
+        # 无 timeColumn
+    }
+    resp = await client.post("/api/v1/ontology/metrics", json=payload, headers=ADMIN_HEADERS)
+    assert resp.status_code == 422, resp.text
+
+
+async def test_create_metric_with_placeholder_and_time_column_ok(client: AsyncClient) -> None:
+    payload = {
+        **_METRIC_PAYLOAD,
+        "formula": "SELECT COUNT(*) FROM ORDERS WHERE {time_scope}",
+        "executionSource": "ESCAPE_HATCH",
+        "timeColumn": "INVOICE_DATE",
+    }
+    resp = await client.post("/api/v1/ontology/metrics", json=payload, headers=ADMIN_HEADERS)
+    assert resp.status_code == 201, resp.text
+
+
+async def test_update_metric_to_placeholder_without_column_rejected(client: AsyncClient) -> None:
+    """partial update：formula 改为含占位符、time_column 未传且原值空 ⇒ 422。"""
+    metric_id = await _createMetric(client)  # 现有 helper，formula 无占位符
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metric_id}",
+        json={"formula": "SELECT COUNT(*) FROM ORDERS WHERE {time_scope}"},
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_update_metric_placeholder_with_existing_column_ok(client: AsyncClient) -> None:
+    """先建（占位符+列），再 update 别的合法字段 ⇒ 正常（列已满足约束）。"""
+    payload = {
+        **_METRIC_PAYLOAD,
+        "formula": "SELECT COUNT(*) FROM ORDERS WHERE {time_scope}",
+        "executionSource": "ESCAPE_HATCH",
+        "timeColumn": "INVOICE_DATE",
+    }
+    resp = await client.post("/api/v1/ontology/metrics", json=payload, headers=ADMIN_HEADERS)
+    metric_id = resp.json()["id"]
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metric_id}",
+        json={"metricAlias": "别名更新"},
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text

@@ -70,6 +70,7 @@ from app.services.messages_zh import (
     MSG_CLASS_NAME_EXISTS,
     MSG_CLASS_NOT_EXPIRED,
     MSG_INHERIT_CHECK_UNAVAILABLE,
+    MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN,
     MSG_ONTOLOGY_CLASS_EXPIRED,
     MSG_ONTOLOGY_CLASS_NOT_FOUND,
     MSG_ONTOLOGY_JOIN_COLUMN_COUNT_MISMATCH,
@@ -85,6 +86,7 @@ from app.services.messages_zh import (
     MSG_VECTOR_SEARCH_FAILED,
     MSG_VECTOR_SYNC_FAILED,
 )
+from app.services.time_scope_renderer import TIME_SCOPE_PLACEHOLDER
 from app.services.vector_similarity import distanceToSimilarity
 
 # 语义关系类型词表（与 ClassRelationType 对齐；用于 service 层校验，返回友好中文 422）
@@ -220,6 +222,14 @@ def makeJoinKey(
     src = ",".join(sourceColumns)
     tgt = ",".join(targetColumns)
     return f"{sourceClassId}|{src}->{targetClassId}|{tgt}"
+
+
+def _assertTimeScopePlaceholderConsistency(
+    *, formula: str | None, timeColumn: str | None
+) -> None:
+    """P4a 写入校验：formula 含时间占位符 ⇒ time_column 必填（反向不强制）。"""
+    if TIME_SCOPE_PLACEHOLDER in (formula or "") and not (timeColumn or "").strip():
+        raise ValidationError(MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN)
 
 
 # =============================================================================
@@ -917,6 +927,11 @@ class OntologyService:
         if dto.target_class_id:
             await self.getClass(session, dto.target_class_id)
 
+        # P4a：占位符 ⇔ time_column 一致性（写入校验，spec §5.4）。
+        _assertTimeScopePlaceholderConsistency(
+            formula=dto.formula, timeColumn=dto.time_column
+        )
+
         entity = OntologyMetric(
             metric_name=dto.metric_name,
             metric_alias=dto.metric_alias,
@@ -1038,6 +1053,11 @@ class OntologyService:
             value = updates.get(key)
             if value is not None and hasattr(value, "value"):
                 updates[key] = value.value
+        # P4a：合并后的 formula/time_column 一致性（partial update 用原值补位）。
+        _assertTimeScopePlaceholderConsistency(
+            formula=updates.get("formula", entity.formula),
+            timeColumn=updates.get("time_column", entity.time_column),
+        )
         # P1 发布闸门：**先过闸再落属性** —— 闸门失败时实体保持原样
         #（不留下「内存已改、库里没改」的脏状态），且按**新值**判定。
         if targetStatus == MetricStatus.PUBLISHED:

@@ -475,10 +475,12 @@ async def _governanceReconcile(
 ) -> KpiGovernanceReconcile:
     """近 7 天对账统计（audit_log，verdict 走 JSONB ->> 取值）。
 
-    ``pass_count`` 预期长期为 0 且**不代表通过率**：P1 起
-    ``recordReconcileResult`` 只在存在 finding 时写审计（避免噪声），而
-    verdict='pass' 只在 findings 为空时产生 ⇒ pass 行从不落库。本计数只是
-    「窗口内实际落库的 pass 行数」，在 pass 持久化决策前恒为 0。
+    ``pass_count`` **不代表通过率，且会严重低估真实 pass**：P1 起
+    ``recordReconcileResult`` 只在 findings 非空时写审计（避免噪声）⇒
+    **干净 pass 不落库**；但 ``reconcileMetric`` 的 verdict 只取层 2，
+    层 1/3 mismatch 会并入 findings 并置 ``degraded=True``，因此
+    **degraded pass 会以 verdict='pass', degraded=true 落库**。本计数只是
+    「窗口内实际落库的（多为 degraded）pass 行数」，干净 pass 不在其中。
     """
     windowStart = datetime.now(UTC) - timedelta(
         days=GOVERNANCE_RECONCILE_WINDOW_DAYS
@@ -563,8 +565,9 @@ async def governanceSummary(
       把 NULL / 空串统一归入 ``NONE``；
     - ``reconcile``：近 7 天 ``audit_log``（entity_type 见
       ``RECONCILE_ENTITY_TYPE``）按 ``after_json->>'verdict'`` 计数，查询失败
-      ⇒ 全 0 + ``reconcileError``，不 500。``passCount`` 预期恒为 0（P1 起
-      pass 不落审计，见 ``_governanceReconcile`` docstring），**不是通过率**；
+      ⇒ 全 0 + ``reconcileError``，不 500。``passCount`` 只是「实际落库的
+      （多为 degraded）pass 行数」：干净 pass 不落库，degraded pass 会落库，
+      见 ``_governanceReconcile`` docstring，**不是通过率**；
     - ``syncHealth``：复用 ``_kpiSyncHealth``（PG + Milvus + Neo4j），外部计数
       失败保持 null + ``syncHealthError``；
     - ``gates``：与运行时同源的三个开关（publish gate / Tier A / sync）。

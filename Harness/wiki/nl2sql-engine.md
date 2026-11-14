@@ -159,7 +159,7 @@ L1 hit ──┬─ 开关关 ────────────────�
          ├─ metric 缺失 / 来源 NONE / 未知 / 无数据源 ──► C（明确文案，不执行、不编数）
          ├─ 编译失败 / 显式时间限定 /
          │  formula 空（非 COMPILED）/ 对账不通过 ─► B（带降级原因，走 LLM 但**跳过 L4**）
-         └─ 其余（ESCAPE_HATCH + 可对账）────────► A（服务端确定性执行 metric.formula）
+         └─ 其余（ESCAPE_HATCH / COMPILED 且可对账）─► A（服务端确定性执行/编译）
 ```
 
 | Tier | 触发条件（按判定顺序） | `degradedReason` |

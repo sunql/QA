@@ -222,8 +222,9 @@ DELETE FROM system_config WHERE key = 'KPI_METRIC_GATE_ENABLED';
 
 ### 发布 / 废弃 / 恢复
 
-写入口一律 admin（`AUTH_MODE=real` 下由 `requireAdmin` 判定）。下面的
-`X-User-Roles: admin` 只是 stub 模式示例；生产必须 `AUTH_MODE=real` +
+写入口一律 admin（KPI 写入口走 `getAdminOnlyActor`，指标写入口走 `requireAdmin`；
+两者都是 admin-only，但 403 的错误形状不同）。下面的 `X-User-Roles: admin` 只是
+stub 模式示例；生产必须 `AUTH_MODE=real` +
 `AUTH_STUB_ENABLED=0`，否则任何客户端都能自填该头。
 
 ```bash
@@ -253,14 +254,14 @@ curl -sS -X PUT "$BASE/ontology/metrics/45" \
 
 | 实体 | 允许流转 | 说明 |
 |---|---|---|
-| KPI | `DRAFT→PUBLISHED`、`PUBLISHED→DEPRECATED`、`DEPRECATED→DRAFT`；同状态 = 无操作 | `DRAFT→PUBLISHED` 过发布闸门 |
+| KPI | `DRAFT→PUBLISHED`、`PUBLISHED→DEPRECATED`、`DEPRECATED→DRAFT`；同状态 = 流转校验放行（但 PUT 仍会 +1 revision 并写审计/历史） | `DRAFT→PUBLISHED` 过发布闸门 |
 | 指标 | `DRAFT↔PUBLISHED` | `PUBLISHED→DRAFT` 仅当**没有** `PUBLISHED` KPI 挂靠该指标 |
 
 其余流转（含 `PUBLISHED→DRAFT`、`DRAFT→DEPRECATED`、`DEPRECATED→PUBLISHED`）一律
 409，响应体形如：
 
 ```json
-{"error": "…", "detail": "INVALID_STATUS_TRANSITION",
+{"success": false, "error": "…", "detail": "INVALID_STATUS_TRANSITION",
  "details": {"from": "PUBLISHED", "to": "DRAFT", "allowed": ["DEPRECATED"]}}
 ```
 
@@ -293,10 +294,25 @@ curl -sS "$BASE/admin/kpi/diagnose?question=<KPI名称或关键词>" \
 curl -sS "$BASE/kpi-catalog?unbound=true" -H 'X-User-Roles: admin'
 ```
 
-`reconcile.passCount` **结构性恒为 0，不是通过率**：对账只在有 finding 时落
-`audit_log`，而 `verdict=pass` 只在 findings 为空时产生 ⇒ pass 行从不落库。因此判据是
-**mismatchCount = 0 且 unknownCount = 0**，并对每条待发布 KPI 用 diagnose 确认
-`verdict == "pass"`；「计数为 0」也可能只是从未对账过，不能单独当作通过证据。
+`reconcile.passCount` **不是通过率，且会严重低估真实 pass**：P1 起对账只在
+findings 非空时落 `audit_log`（避免噪声）⇒ **干净 pass 不落库**；但
+`reconcileMetric` 的 `verdict` 只取层 2，层 1/3 的 mismatch 会并入 findings 并置
+`degraded=true`，所以 **degraded pass 会以 `verdict="pass", degraded=true` 落库**。
+`passCount` 只是「窗口内实际落库的（多为 degraded）pass 行数」。
+
+因此闸门前判据不是单看 `mismatchCount=0` / `unknownCount=0`，还要排除 degraded pass：
+
+```sql
+-- 近 7 天 degraded=true 的对账行必须为 0（层 1/3 有 finding 的 pass）
+SELECT count(*) FROM audit_log
+WHERE entity_type = 'kpi_metric_reconcile'
+  AND created_at >= now() - interval '7 days'
+  AND after_json->>'degraded' = 'true';
+```
+
+并对每条待发布 KPI 用 diagnose 确认 `verdict == "pass"` **且 `degraded == false`**。
+注意闸门本身只要求层 2 对账 PASS，degraded pass 能过闸但口径不完整，所以人工口径
+必须更严。「计数为 0」也可能只是从未对账过，不能单独当作通过证据。
 
 发现数据没补齐：保持闸门关闭（或执行上面的 `DELETE` 回滚），先修数据。回滚闸门
 **只需删除 `system_config` 行**，无需回滚代码。
@@ -321,13 +337,15 @@ curl -sS -X POST "$BASE/kpi-catalog/123/embedding" -H 'X-User-Roles: admin'
 逐个排查；Milvus / Neo4j 不可用属于降级明细，不是接口故障。单条端点只重建向量，
 不补图节点。
 
-**admin 前提**：两个端点都是 `requireAdmin`（`getAdminOnlyActor`）。生产必须
+**admin 前提**：两个端点都是 admin-only（`getAdminOnlyActor`）。生产必须
 `AUTH_MODE=real` + `AUTH_STUB_ENABLED=0`（同「批量写入口的鉴权前提」）。
 
 ### 数据修复与审计查询
 
-合法流转沿用既有 outbox 管线，最终落到 `audit_log`（`entity_type='kpi_catalog'` /
-`'ONTOLOGY_METRIC'`）与 `kpi_catalog_history`；非法流转不落任何一侧。
+KPI 合法流转沿用既有 outbox 管线，最终落到 `audit_log`（`entity_type='kpi_catalog'`）
+与 `kpi_catalog_history`。指标合法流转由 `ontology_service.updateMetric` **直接**写
+`audit_log`（`entity_type='ONTOLOGY_METRIC'`），**不经过 outbox，也没有
+`kpi_catalog_history` 快照**。非法流转不落任何一侧；运维查指标变更只看 `audit_log`。
 
 ```sql
 -- KPI 修订快照（每次合法 PUT +1 revision）
@@ -337,7 +355,7 @@ WHERE kpi_id = 123
 ORDER BY revision DESC
 LIMIT 20;
 
--- 对账审计：只有 finding 才落库（pass 不落）
+-- 对账审计：仅 findings 非空才落库（干净 pass 不落；degraded pass 会落）
 SELECT created_at,
        entity_id,
        after_json->>'kpi_code' AS kpi_code,
@@ -358,8 +376,8 @@ GROUP BY 1, 2
 ORDER BY 3 DESC;
 ```
 
-`after_json->>'verdict'` 只会出现 `mismatch` / `unknown`（历史数据可能有其它值）；
-`pass` 行按设计不存在，看板与巡检不得把它当通过率。
+`after_json->>'verdict'` 可能是 `pass`（仅 degraded pass 会落库）、`mismatch` 或
+`unknown`；干净 pass 不落库。看板与巡检不得把 `passCount` 当通过率。
 
 状态与向量/图不一致时（例如 KPI 已 `PUBLISHED` 但向量缺失），先跑
 `embeddings/sync-missing` 对账；状态流转本身会自动删/建向量并更新图节点 `status`。
@@ -386,14 +404,17 @@ pass KPI 暂失 Tier A（degraded 注入，不阻断，但口径不完整）。
 
 1. **显式时间问句 + COMPILED 走不到编译器**：路由门先判
    `has_explicit_time_scope and not time_param_ready` ⇒ Tier B（`explicit_time_scope`）。
-   `time_param_ready` 要求 `metric.formula` 含 `{time_scope}` 占位符，而 COMPILED
-   指标 formula 为空 ⇒ 恒 False。编译器本身支持 timeScope（Oracle 方言），但当前路由
-   在到达编译器前就降级，属 fail-safe 的已知限制。
+   `time_param_ready` 要求 `metric.formula` 含 `{time_scope}` 占位符**且
+   `metric.time_column` 非空**；COMPILED 指标 formula 为空 ⇒ 恒 False。编译器本身
+   支持 timeScope（Oracle 方言），但当前路由在到达编译器前就降级，属 fail-safe 的
+   已知限制。
 2. **`COUNT(*)` 形态的 COMPILED 指标进不了 Tier A**：对账层 2 对「技术侧度量无表达式」
    返回 `technical_measure_unjudgeable` / `UNKNOWN` ⇒ `isTierAEligible=False` ⇒ 路由落到
    `reconcile_not_eligible`。要进 Tier A 必须写成 `COUNT(<列>)`（治理 / 产品决策项，
    本批不改对账语义）。
-3. **`reconcile.passCount` 结构性恒为 0**：见「发布闸门开启前检查」；它不是通过率。
+3. **`reconcile.passCount` 不代表通过率**：干净 pass 不落审计（P1 避免噪声），只有
+   degraded pass 落库 ⇒ 计数既漏掉干净 pass、又混入 degraded pass；闸门前须另查
+   `after_json->>'degraded'='true'` 行数为 0，并逐 KPI diagnose 确认 `degraded=false`。
 
 ## 日志
 

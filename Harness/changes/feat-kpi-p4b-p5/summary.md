@@ -109,9 +109,11 @@ NONE
   2. `COUNT(*)` 形态的 COMPILED 指标进不了 Tier A：对账层 2 返回
      `technical_measure_unjudgeable` / `UNKNOWN` ⇒ `isTierAEligible=False`；
      要进 Tier A 须写成 `COUNT(<列>)`（治理/产品决策项）。
-  3. `reconcile.passCount` 结构性恒为 0：`recordReconcileResult` 只在有 finding 时
-     落 `audit_log`，`verdict=pass` 从不落库 ⇒ 看板计数**不是通过率**；闸门前判据用
-     `mismatchCount` / `unknownCount` + 逐 KPI diagnose。
+  3. `reconcile.passCount` **不代表通过率**：P1 只为 findings 非空的对账落审计 ⇒
+     干净 pass 不落库；但层 1/3 mismatch + 层 2 pass 的 degraded pass 会以
+     `verdict="pass", degraded=true` 落库。`passCount` 既漏干净 pass 又混入 degraded
+     pass，严重低估真实 pass；闸门前须查 `after_json->>'degraded'='true'` 行数为 0，
+     并逐 KPI diagnose 确认 `degraded=false`（不能只看 `mismatchCount`/`unknownCount`）。
 - **延后 minor**：`KpiGovernancePage.tsx` 组件体积偏大，未拆分/未抽卡片公共组件；
   中英文 i18n 键一致性仍靠人工，未加 parity 测试。
 - **零 DDL**：本批无迁移；不部署生产。

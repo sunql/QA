@@ -728,9 +728,10 @@ async def test_governance_summary_shape(
             SystemConfig(key=SWITCH_GATE, value="true"),
         ]
     )
-    # 对账审计：pass 行真实运行不落库（P1 只为 finding 写审计、避免噪声），
-    # 这里直接种行只为验证 JSONB `after_json->>'verdict'` 的计数口径。
-    # ⇒ `passCount` 只是「实际落库的 pass 行数」，**不是通过率**，生产恒为 0。
+    # 对账审计只写 findings 非空的行：干净 pass 不落库，但 degraded pass
+    # （层 1/3 mismatch + 层 2 pass）会以 verdict=pass 落库。这里直接种行
+    # 只为验证 JSONB `after_json->>'verdict'` 的计数口径。
+    # ⇒ `passCount` 只是「实际落库的（多为 degraded）pass 行数」，**不是通过率**。
     now = datetime.now(UTC)
     dbSession.add_all(
         [

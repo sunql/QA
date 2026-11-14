@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Alert,
@@ -51,7 +51,7 @@ function displayCount(value: number | null, fallback: string): string | number {
   return value ?? fallback;
 }
 
-/** 仅做显示裁剪，不引入时区换算：后端给 ISO-8601 UTC 串。 */
+/** 仅做显示裁剪，不引入时区换算：后端给 ISO-8601 UTC 串，调用方在 label 里标注 UTC。 */
 function formatTimestamp(value: string): string {
   return value.replace("T", " ").replace("Z", "").slice(0, 19);
 }
@@ -64,23 +64,51 @@ export default function KpiGovernancePage() {
   const [data, setData] = useState<KpiGovernanceSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
+  // 请求序号：refresh/retry 可能重叠，只有最新一次请求允许提交状态
+  // （旧响应后到会清掉新失败、提前结束 spinner）。
+  const requestSeq = useRef(0);
+  // 卸载后禁止 setState；StrictMode 的 mount→unmount→mount 也靠它 + 序号兜底。
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
-      setData(await getKpiGovernanceSummary());
+      const next = await getKpiGovernanceSummary();
+      if (!mountedRef.current || seq !== requestSeq.current) return;
+      setData(next);
       setLoadFailed(false);
     } catch {
+      if (!mountedRef.current || seq !== requestSeq.current) return;
       // 错误已由 axios 拦截器 toast；页面保留内联 Alert（可读 + 可重试）。
       setLoadFailed(true);
     } finally {
-      setLoading(false);
+      if (mountedRef.current && seq === requestSeq.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     if (isAdmin) void load();
   }, [isAdmin, load]);
+
+  // 刷新后 user 尚未恢复（persist 不存 user，fetchMe 在途）：先当作 loading，
+  // 否则 admin 会先看到一闪而过的「仅管理员可见」。
+  if (!user) {
+    return (
+      <div data-testid="governance-loading">
+        <Spin />
+      </div>
+    );
+  }
 
   if (!isAdmin) {
     return (
@@ -123,16 +151,21 @@ export default function KpiGovernancePage() {
           style={{ marginBottom: 16 }}
           message={t("kpiGovernance.loadFailed")}
           action={
-            <Button size="small" onClick={() => void load()}>
+            <Button size="small" loading={loading} onClick={() => void load()}>
               {t("common.retry")}
             </Button>
           }
         />
       ) : null}
 
-      {!data ? (
-        <Spin />
-      ) : (
+      {/* 首载中才转圈；失败后不转（否则错误提示旁无限 spinner）。 */}
+      {loading && !data && !loadFailed ? (
+        <div data-testid="governance-loading">
+          <Spin />
+        </div>
+      ) : null}
+
+      {data ? (
         <>
           <Row gutter={[16, 16]}>
             <Col xs={24} lg={12}>
@@ -339,7 +372,7 @@ export default function KpiGovernancePage() {
             })}
           </div>
         </>
-      )}
+      ) : null}
     </div>
   );
 }

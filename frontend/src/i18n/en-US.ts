@@ -2138,20 +2138,21 @@ export const enUS = {
     passCount: "Pass Records",
     passCountHint:
       "Pass records are expected to stay 0: passes are not audited when there are no findings — this is not a pass rate.",
-    lastMismatchAt: "Last mismatch at",
+    lastMismatchAt: "Last mismatch at (UTC)",
     reconcileError: "Reconcile query failed: {error}",
     syncHealthTitle: "Three-Store Sync Health",
     publishedKpiCount: "PG published KPIs",
     milvusKpiCount: "Milvus vectors",
     neo4jKpiCount: "Neo4j graph nodes",
     syncKpiTotal: "Total KPIs",
+    syncHealthError: "Sync health query failed: {error}",
     gatesTitle: "Governance Gates",
     publishGate: "Publish gate",
     tierA: "Tier A compiler",
     syncGate: "Vector/graph sync",
     enabled: "On",
     disabled: "Off",
-    generatedAt: "Generated at: {time}",
+    generatedAt: "Generated at (UTC): {time}",
   },
 
   feature: {

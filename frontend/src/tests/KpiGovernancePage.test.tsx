@@ -60,6 +60,17 @@ const SUMMARY: KpiGovernanceSummary = {
   generatedAt: "2026-11-14T00:00:00Z",
 };
 
+/** 降级态：外部审计/同步健康查询失败，且 Milvus 计数为 null。 */
+const DEGRADED_SUMMARY: KpiGovernanceSummary = {
+  ...SUMMARY,
+  reconcile: { ...SUMMARY.reconcile, reconcileError: "audit down" },
+  syncHealth: {
+    ...SUMMARY.syncHealth,
+    milvusKpiCount: null,
+    syncHealthError: "milvus down",
+  },
+};
+
 describe("KpiGovernancePage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -84,17 +95,54 @@ describe("KpiGovernancePage", () => {
     expect(screen.getByTestId("stat-pass-count")).toHaveTextContent("40");
   });
 
-  it("加载失败给出可读提示，重试后恢复数据", async () => {
+  it("加载失败给出可读提示，重试后恢复数据并清除错误", async () => {
     vi.mocked(api.getKpiGovernanceSummary).mockRejectedValueOnce(new Error("boom"));
     render(<KpiGovernancePage />);
 
     expect(await screen.findByText(/加载失败/)).toBeInTheDocument();
+    // 失败态不得留一个无限转圈
+    expect(screen.queryByTestId("governance-loading")).not.toBeInTheDocument();
 
     // 重试按钮走同一个 loader：数据出现即证明恢复到正常渲染
     vi.mocked(api.getKpiGovernanceSummary).mockResolvedValue(SUMMARY);
     // antd Button 会在两个汉字之间插入空格（「重 试」），用正则匹配
     fireEvent.click(screen.getByRole("button", { name: /重\s*试/ }));
     expect(await screen.findByTestId("stat-kpi-total")).toHaveTextContent("12");
+    // 成功的重试必须清掉旧的错误提示
+    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+  });
+
+  it("降级错误串渲染为本地化文案，null 计数显示占位符而不是 0", async () => {
+    vi.mocked(api.getKpiGovernanceSummary).mockResolvedValue(DEGRADED_SUMMARY);
+    render(<KpiGovernancePage />);
+
+    // 键缺失时 t() 回退成 key 本身 —— 这两条断言会因此变红
+    expect(
+      await screen.findByText(/同步健康查询失败：milvus down/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/对账查询失败：audit down/)).toBeInTheDocument();
+
+    // best-effort 的 null 计数是「取不到」，不能伪装成 0
+    expect(screen.getByTestId("stat-milvus-count")).toHaveTextContent("—");
+    expect(screen.getByTestId("stat-milvus-count")).not.toHaveTextContent("0");
+  });
+
+  it("闸门卡片按开关值显示开启/关闭", async () => {
+    render(<KpiGovernancePage />);
+
+    expect(await screen.findByTestId("gate-publishGate")).toHaveTextContent("关闭");
+    expect(screen.getByTestId("gate-tierA")).toHaveTextContent("开启");
+    expect(screen.getByTestId("gate-syncGate")).toHaveTextContent("开启");
+    expect(screen.getByTestId("gate-publishGate")).not.toHaveTextContent("开启");
+  });
+
+  it("auth 用户尚未恢复时按 loading 处理，不误报仅管理员可见", () => {
+    useAuthStore.setState({ user: null });
+    render(<KpiGovernancePage />);
+
+    expect(screen.getByTestId("governance-loading")).toBeInTheDocument();
+    expect(screen.queryByText("仅管理员可见")).not.toBeInTheDocument();
+    expect(api.getKpiGovernanceSummary).not.toHaveBeenCalled();
   });
 
   it("非 admin 只显示提示且不请求接口", async () => {

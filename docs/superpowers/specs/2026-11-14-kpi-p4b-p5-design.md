@@ -73,7 +73,14 @@
 
 ### 1.5 失败原因码（全部 fail-closed）
 
-`compiled_metric_type_unsupported`、`compiled_measure_missing`、`compiled_measure_class_unresolved`、`compiled_table_missing`、`compiled_join_path_missing`、`compiled_agg_unsupported`、`compiled_expr_missing`、`compiled_dialect_unsupported`、`compiled_time_scope_unsupported`、`compiled_invalid_fragment`、`compiled_not_read_only`。
+`compiled_dialect_unsupported`、`compiled_metric_type_unsupported`、
+`compiled_aggregation_order_unsupported`、`compiled_measure_missing`、
+`compiled_agg_unsupported`、`compiled_expr_missing`、`compiled_invalid_fragment`、
+`compiled_measure_class_unresolved`、`compiled_class_table_missing`、
+`compiled_join_path_missing`、`compiled_join_direction_unsupported`、
+`compiled_expr_cross_table_unsupported`、`compiled_filter_source_unsupported`、
+`compiled_time_scope_unsupported`、`compiled_time_column_missing`、
+`compiled_not_read_only`。
 
 ### 1.6 文件
 

@@ -27,7 +27,7 @@ docs commit 追加）。
 
 | Commit | 内容 |
 |---|---|
-| `f59942a4` | 新增 `kpi_sql_compiler.py`：measure→SQL 编译器（fail-closed、单值只读 SELECT）+ 284 行单测 |
+| `f59942a4` | 新增 `kpi_sql_compiler.py`：measure→SQL 编译器（fail-closed、单值只读 SELECT）+ 编译器单测（终审修复波后 581 行） |
 | `350e6fc8` | 编译器修复：schema 限定表名、跨表值列限定、WHERE 谓词括号化 |
 | `959d3295` | COMPILED 指标路由到 Tier A；对账不合格仍降级 B；`kpi_diagnose._tierOf` 与运行时同口径 |
 | `472e585e` | chat Tier A 分支接入编译器；编译失败 fail-closed 降级 Tier B（跳过 L4） |
@@ -50,6 +50,20 @@ docs commit 追加）。
 |---|---|
 | `d81a526a` | P4b 编译器 + P5 治理收口设计与实施计划（904 行计划 + 198 行设计） |
 | `13976cea` | 实施计划按 recon 校正路由分歧、精确路径与错误形状 |
+| `feb15626` | KPI 治理 runbook + P4b/P5 变更记录 |
+| `7f95a4c7` | 订正对账 pass/degraded 口径（runbook/变更记录/注释） |
+| `51a8facd` | 看板 pass 提示与对账口径一致化 |
+| `893f9ca5` | 统一 passCount 口径（类型注释/runbook/en-US 措辞） |
+
+### 终审修复波（whole-branch review）
+
+| Commit | 内容 |
+|---|---|
+| `331e0e21` | 编译器角色感知 measure→class 解析；FILTER 源 / LEFT 反向遍历 / 多表复合表达式 fail-closed；编译 warning 落日志 |
+| `9d1df4d9` | 诊断 Tier 建模 `formula_empty` 静态门；COMPILED 空 formula 不看 formula；parity 参数化 + wiki 分歧如实登记 |
+| `e3ee358f` | 指标 PUT 显式 `status: null` ⇒ 422（`MSG_KPI_METRIC_STATUS_NULL`），不再落 NOT NULL 500 |
+
+本变更记录自身的 docs commit 紧随其后（不列自身 SHA）。
 
 ## 验收
 
@@ -115,6 +129,13 @@ NONE
      `verdict="pass", degraded=true` 落库。`passCount` 既漏干净 pass 又混入 degraded
      pass，严重低估真实 pass；闸门前须查 `after_json->>'degraded'='true'` 行数为 0，
      并逐 KPI diagnose 确认 `degraded=false`（不能只看 `mismatchCount`/`unknownCount`）。
+- **终审修复波新增的 fail-closed 能力边界**（编译器拒绝而非猜）：
+  1. `FILTER` 角色源类若与分子/分母类不同 ⇒ `compiled_filter_source_unsupported`
+     （1:N join 无法判定基数，join 会放大聚合）；
+  2. `LEFT` 边被从 target 往 source 反向遍历 ⇒ `compiled_join_direction_unsupported`
+     （翻转会静默保留错误的一侧；`INNER` 方向无关，不受影响）；
+  3. 多表查询中的复合值表达式（如 `A * B`）⇒ `compiled_expr_cross_table_unsupported`
+     （裸列可能被 DB 解析到错误的表；单表仍允许）。
 - **延后 minor**：`KpiGovernancePage.tsx` 组件体积偏大，未拆分/未抽卡片公共组件；
   中英文 i18n 键一致性仍靠人工，未加 parity 测试。
 - **零 DDL**：本批无迁移；不部署生产。

@@ -1,0 +1,35 @@
+# scripts/pg_subset_tables.txt
+# 「本体 + 指标 + KPI 目录」子集表清单（SSOT）
+#
+# 用途：生产侧导出、 本地侧恢复，两端共用同一份清单，避免两边漂移。
+# 顺序 = **删除顺序（子 → 父）**；pg_dump 自身按 FK 依赖排序，导出顺序不受此影响。
+#
+# 语义：整表替换 —— 先按本顺序 DELETE 本地行，再灌入生产行（单事务）。
+#
+# 不在本清单内、但与本清单有 FK 关系的表（重要）：
+#   - data_source：kpi_catalog.datasource_id → data_source(id) ON DELETE RESTRICT。
+#     **只校验 id 对齐，不恢复**（本地 5 条数据源是本地环境资产，恢复会打断本地业务库连接）。
+#   - entity_mapping（35 万行）/ feature_definition / document_entity_relation：
+#     → business_object(code) ON DELETE RESTRICT。恢复期间用
+#     `SET session_replication_role = replica` 关闭 FK 触发器，恢复后必须跑孤儿审计。
+#
+# 覆盖范围说明：
+#   本体图谱 = ontology_class / ontology_property / ontology_relation / ontology_join
+#   本体指标 = ontology_metric / ontology_metric_source（+ class_domain_mapping 域映射）
+#   业务对象 = business_object / business_object_domain（BO 层，指标与类都引用它）
+#   KPI 目录 = kpi_catalog / kpi_catalog_history
+#   配套    = coverage_cell（覆盖率矩阵，FK→ontology_class）、id_mapping（类/属性/指标/KPI 的统一 ID 映射）
+
+ontology_metric_source
+kpi_catalog_history
+ontology_join
+ontology_relation
+ontology_property
+class_domain_mapping
+coverage_cell
+business_object_domain
+kpi_catalog
+ontology_metric
+business_object
+ontology_class
+id_mapping

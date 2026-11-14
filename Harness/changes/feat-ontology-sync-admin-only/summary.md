@@ -1,7 +1,7 @@
 # ontology 同步写面收 admin-only
 
 - 分支：`feat/ontology-sync-admin`，base = main `e85f1ff8`（PR #123 合并点）
-- 状态：代码完成、待评审/合并；未部署生产（生产仍 0140 + 旧代码）
+- 状态：已合并 main `30c4097f`（PR #124），未部署生产（生产仍 0140 + 旧代码）
 - 关联：`feat-kpi-vector-graph-sync`（PR #123 把 `POST /ontology/graph/sync-missing` 的写面
   扩大到 KPI 的 `id_mapping` 与 `KpiCatalog` 节点/边，本批补权限收口）
 

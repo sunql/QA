@@ -157,8 +157,8 @@ L1 命中（`hit`）只是「认出了问的是哪个 KPI」，**答什么**由 
 ```
 L1 hit ──┬─ 开关关 ─────────────────────────────► LEGACY（旧 _buildL1Response，行为逐字不变）
          ├─ metric 缺失 / 来源 NONE / 未知 / 无数据源 ──► C（明确文案，不执行、不编数）
-         ├─ 来源 COMPILED / 显式时间限定 /
-         │  formula 空 / 对账不通过 ─────────────► B（带降级原因，走 LLM 但**跳过 L4**）
+         ├─ 编译失败 / 显式时间限定 /
+         │  formula 空（非 COMPILED）/ 对账不通过 ─► B（带降级原因，走 LLM 但**跳过 L4**）
          └─ 其余（ESCAPE_HATCH + 可对账）────────► A（服务端确定性执行 metric.formula）
 ```
 
@@ -166,8 +166,8 @@ L1 hit ──┬─ 开关关 ────────────────�
 |---|---|---|
 | `LEGACY` | 开关关；或问句未命中任何 KPI | `tier_a_disabled` / `kpi_not_found` |
 | `C` | `metric_present=False`；来源空 / `NONE` / 未知；`datasource_id` 缺失 | `metric_missing` / `execution_source_missing` / `execution_source_none` / `execution_source_unknown`（另打 warning）/ `datasource_missing` |
-| `B` | 来源 `COMPILED`；问句含显式时间限定；formula 为空；对账 `isTierAEligible=False` | `compiled_not_supported` / `explicit_time_scope` / `formula_empty` / `reconcile_not_eligible` |
-| `A` | 以上都不满足 | `null` |
+| `B` | 显式时间限定；formula 为空（非 COMPILED 指标）；对账 `isTierAEligible=False`；COMPILED 编译失败 | `explicit_time_scope` / `formula_empty` / `reconcile_not_eligible` / `compiled_*`（任一编译失败原因码） |
+| `A` | 以上都不满足（`ESCAPE_HATCH` 直接执行 formula；`COMPILED` 由结构化列编译出单值只读 SELECT，与前者同走 Tier A） | `null` |
 
 - **开关双闸（fail-closed）**：env `KPI_METRIC_TIER_A_ENABLED`（默认 `true`，紧急杀闸）+ `system_config`
   同名行；**行缺失 / 非法 / 读异常 ⇒ 关**。生产当前**没有该行** ⇒ 生产仍走旧行为。
@@ -182,9 +182,10 @@ L1 hit ──┬─ 开关关 ────────────────�
   Tier B 路径都带值；流式两处 meta 帧同名字段。**按意图门控**：只有会落到
   `_handleGenericQuery` 的意图（QUERY / NEW_QUERY / REFINE / FOLLOW_UP / CLARIFY）才发；
   重分类到 CHITCHAT / METRIC 等早退意图时，第二帧显式发 `null` 覆盖首帧，与非流式保持一致。
-- **诊断对齐**：`kpi_diagnose._tierOf` 与运行时同口径（`COMPILED ⇒ B`）；仍存两处已知分歧
-  （`datasource_missing`、来源空/未知时诊断判 B 运行时判 C），登记在
-  `test_kpi_tier_parity.py` 的已知分歧用例里，P5 治理收口时统一。
+- **诊断对齐**：`kpi_diagnose._tierOf` 与运行时同口径（`COMPILED` 与 `ESCAPE_HATCH`
+  同属可执行源：对账 `isTierAEligible` ⇒ A，否则 B）；仍存一处已知分歧
+  （`datasource_missing`：运行时判 C、诊断无数据源视图判 A），登记在
+  `test_kpi_tier_parity.py` 的已知分歧用例里。
 - **一期时间策略**：显式时间限定一律降级 Tier B，**不做区间解析**（P4 参数化才解析）。检测器
   `hasExplicitTimeScope` 按「宁可多判」写（误判只多一次 LLM，漏判会让时段错的数字看起来合理），
   覆盖近 N 天/月/年、季度、半年、年度、`Q1–Q4`、`H1/H2`、`同比/环比`、`FY`、`TTM/LTM`、

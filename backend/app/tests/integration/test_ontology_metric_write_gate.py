@@ -10,8 +10,13 @@ owner ACL ⇒ 只能按 admin 收口（N3，2026-11-05 缺陷优先级计划 §8
 from __future__ import annotations
 
 from httpx import AsyncClient
+from sqlalchemy import select
 
-from app.services.messages_zh import MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN
+from app.domain.models import KpiCatalog, OntologyMetric
+from app.services.messages_zh import (
+    MSG_KPI_METRIC_STATUS_NULL,
+    MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN,
+)
 
 ADMIN_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
 USER_HEADERS = {"X-User-Id": "normal-user", "X-User-Roles": "user"}
@@ -181,3 +186,208 @@ async def test_update_metric_clear_time_column_with_placeholder_rejected(client:
     )
     assert resp.status_code == 422, resp.text
     assert resp.json()["error"] == MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN, resp.text
+
+
+# =============================================================================
+# P5：指标状态流转矩阵（PUBLISHED → DRAFT 仅当无已发布 KPI 挂靠）
+# =============================================================================
+
+
+async def _publishMetric(client: AsyncClient, metricId: int) -> None:
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metricId}",
+        json={"status": "PUBLISHED"},
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+
+
+async def _createPublishedKpiLinked(
+    client: AsyncClient, datasourceId: int, metricId: int, code: str
+) -> int:
+    resp = await client.post(
+        "/api/v1/kpi-catalog",
+        json={
+            "datasourceId": datasourceId,
+            "kpiCode": code,
+            "kpiName": "测试-P5",
+            "owner": "finance",
+            "metricId": metricId,
+            "status": "PUBLISHED",
+        },
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+async def test_metric_published_to_draft_blocked_when_published_kpi_links(
+    client: AsyncClient, dbSession, seed_data_source
+) -> None:
+    """有已发布 KPI 挂靠时退回 DRAFT ⇒ 409，且 metric.status 仍 PUBLISHED。"""
+    metricId = await _createMetric(client)
+    await _publishMetric(client, metricId)
+    await _createPublishedKpiLinked(
+        client, seed_data_source.id, metricId, "KPI_P5_METRIC_LINK"
+    )
+
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metricId}",
+        json={"status": "DRAFT"},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 409, resp.text
+    body = resp.json()
+    assert body["detail"] == "INVALID_STATUS_TRANSITION"
+    assert body["details"] == {"from": "PUBLISHED", "to": "DRAFT", "allowed": []}
+    row = (
+        await dbSession.execute(
+            select(OntologyMetric).where(OntologyMetric.id == metricId)
+        )
+    ).scalar_one()
+    assert row.status == "PUBLISHED"
+    kpiCount = (
+        await dbSession.execute(
+            select(KpiCatalog).where(KpiCatalog.metric_id == metricId)
+        )
+    ).scalars().all()
+    assert len(kpiCount) == 1
+
+
+async def _createDraftKpiLinked(
+    client: AsyncClient, datasourceId: int, metricId: int, code: str
+) -> int:
+    resp = await client.post(
+        "/api/v1/kpi-catalog",
+        json={
+            "datasourceId": datasourceId,
+            "kpiCode": code,
+            "kpiName": "测试-P5-草稿",
+            "owner": "finance",
+            "metricId": metricId,
+        },
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+async def test_metric_published_to_draft_allowed_when_only_draft_kpi_links(
+    client: AsyncClient, dbSession, seed_data_source
+) -> None:
+    """计数只看 PUBLISHED KPI：仅 DRAFT KPI 挂靠时退回 DRAFT 合法。"""
+    metricId = await _createMetric(client)
+    await _publishMetric(client, metricId)
+    await _createDraftKpiLinked(
+        client, seed_data_source.id, metricId, "KPI_P5_METRIC_DRAFT_LINK"
+    )
+
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metricId}",
+        json={"status": "DRAFT"},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "DRAFT"
+    row = (
+        await dbSession.execute(
+            select(OntologyMetric).where(OntologyMetric.id == metricId)
+        )
+    ).scalar_one()
+    assert row.status == "DRAFT"
+
+
+async def test_metric_published_to_draft_allowed_when_no_kpi_links(
+    client: AsyncClient, dbSession
+) -> None:
+    """无任何挂靠 KPI ⇒ 退回 DRAFT 合法。"""
+    metricId = await _createMetric(client)
+    await _publishMetric(client, metricId)
+
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metricId}",
+        json={"status": "DRAFT"},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "DRAFT"
+    row = (
+        await dbSession.execute(
+            select(OntologyMetric).where(OntologyMetric.id == metricId)
+        )
+    ).scalar_one()
+    assert row.status == "DRAFT"
+
+
+async def test_metric_transition_counts_only_kpis_linked_to_this_metric(
+    client: AsyncClient, dbSession, seed_data_source
+) -> None:
+    """计数必须按 metric_id 收窄：已发布 KPI 挂在 metric B 时，metric A 仍可退回 DRAFT。
+
+    变异证据：删掉 ``KpiCatalog.metric_id == entity.id`` 谓词后，A 会数到 B 的
+    PUBLISHED KPI ⇒ 误判 409，本用例转红。
+    """
+    metricA = await _createMetric(client)
+    createdB = await client.post(
+        "/api/v1/ontology/metrics",
+        json={**_METRIC_PAYLOAD, "metricName": "sales_amount_b"},
+        headers=ADMIN_HEADERS,
+    )
+    assert createdB.status_code == 201, createdB.text
+    metricB = createdB.json()["id"]
+    await _publishMetric(client, metricA)
+    await _publishMetric(client, metricB)
+    await _createPublishedKpiLinked(
+        client, seed_data_source.id, metricB, "KPI_P5_METRIC_B_LINK"
+    )
+
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metricA}",
+        json={"status": "DRAFT"},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "DRAFT"
+    row = (
+        await dbSession.execute(
+            select(OntologyMetric).where(OntologyMetric.id == metricA)
+        )
+    ).scalar_one()
+    assert row.status == "DRAFT"
+    # B 不受影响，且其已发布 KPI 仍在
+    rowB = (
+        await dbSession.execute(
+            select(OntologyMetric).where(OntologyMetric.id == metricB)
+        )
+    ).scalar_one()
+    assert rowB.status == "PUBLISHED"
+
+
+# =============================================================================
+# 终审修复波：显式 status=null 必须是受治理的 4xx（不是 NOT NULL 500）
+# =============================================================================
+
+
+async def test_update_metric_with_explicit_null_status_rejected(
+    client: AsyncClient,
+) -> None:
+    metricId = await _createMetric(client)
+
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metricId}",
+        json={"status": None},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"] == MSG_KPI_METRIC_STATUS_NULL
+    detail = await client.get(
+        f"/api/v1/ontology/metrics/{metricId}", headers=ADMIN_HEADERS
+    )
+    assert detail.status_code == 200
+    # 校验失败 ⇒ 状态保持原值（默认 DRAFT），零副作用。
+    assert detail.json()["status"] == "DRAFT"

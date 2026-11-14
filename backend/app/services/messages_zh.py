@@ -533,6 +533,17 @@ MSG_KPI_CATALOG_NOT_FOUND = "KPI Catalog id={id} 不存在"
 MSG_KPI_CATALOG_CODE_NOT_FOUND = "KPI 编码「{code}」不存在"
 MSG_KPI_CATALOG_DUPLICATE_CODE = "KPI 编码「{code}」已存在"
 MSG_KPI_CATALOG_STATUS_NULL = "KPI status 不允许为 null（NOT NULL 约束）"
+MSG_KPI_METRIC_STATUS_NULL = (
+    "指标 status 不允许为 null（NOT NULL 列）；不修改状态请省略 status 字段"
+)
+
+# P5 状态流转矩阵：非法流转 409（detail=INVALID_STATUS_TRANSITION，details 带结构）
+MSG_KPI_STATUS_TRANSITION_INVALID = (
+    "KPI 状态不允许从 {src} 流转到 {dst}（当前状态允许的目标：{allowed}）"
+)
+MSG_METRIC_STATUS_TRANSITION_INVALID = (
+    "指标状态不允许从 {src} 流转到 {dst}（当前状态允许的目标：{allowed}）"
+)
 
 # KPI Catalog datasource 绑定（F2 写入流收尾 — 2026-10-18 spec §4.4）
 # Reserved for 未来 Pydantic custom error 覆盖（当前 DTO 层 `Field(..., ge=1)` 直接抛 Pydantic 默认英文错误，service 层无引用）

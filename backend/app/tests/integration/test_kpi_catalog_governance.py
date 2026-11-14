@@ -628,3 +628,84 @@ class TestKpiAclRollbackOnFailure:
         ).scalars().all()
         assert len(rows) == 1
         assert rows[0].revision == 0
+
+
+class TestKpiStatusTransitionMatrix:
+    """P5：KPI 状态流转矩阵（非法流转 409，且零写副作用）。"""
+
+    ADMIN = {"X-User-Id": "root", "X-User-Roles": "admin"}
+
+    async def _createDraft(self, client, seed_data_source, code: str) -> int:
+        resp = await client.post(
+            "/api/v1/kpi-catalog",
+            json={
+                "datasourceId": seed_data_source.id,
+                "kpiCode": code,
+                "kpiName": f"测试-{code}",
+                "owner": PROCUREMENT,
+            },
+            headers=self.ADMIN,
+        )
+        assert resp.status_code == 201, resp.text
+        return resp.json()["id"]
+
+    async def test_published_kpi_cannot_revert_to_draft(
+        self, client, dbSession, seed_data_source
+    ) -> None:
+        """PUBLISHED → DRAFT 非法：409 + 结构 details，且不写库 / 不增修订 / 不入队。"""
+        await _Helper.clean(dbSession)
+        kpiId = await self._createDraft(client, seed_data_source, "KPI_GOV_TRANS_A")
+        published = await client.put(
+            f"/api/v1/kpi-catalog/{kpiId}", json={"status": "PUBLISHED"}, headers=self.ADMIN
+        )
+        assert published.status_code == 200, published.text
+        # 发布事件先消费，使 outbox 断言只反映「被拒绝的那次更新」
+        await _Helper.drainOutbox(dbSession)
+
+        rejected = await client.put(
+            f"/api/v1/kpi-catalog/{kpiId}", json={"status": "DRAFT"}, headers=self.ADMIN
+        )
+        assert rejected.status_code == 409, rejected.text
+        body = rejected.json()
+        assert body["detail"] == "INVALID_STATUS_TRANSITION"
+        assert body["details"] == {
+            "from": "PUBLISHED",
+            "to": "DRAFT",
+            "allowed": ["DEPRECATED"],
+        }
+
+        row = await dbSession.get(KpiCatalog, kpiId)
+        assert row is not None
+        await dbSession.refresh(row)
+        assert row.status == "PUBLISHED"
+        assert row.revision_count == 1  # 只有发布那次 +1；拒绝的更新未落库
+
+        pending = (
+            await dbSession.execute(
+                select(AuditOutbox).where(
+                    AuditOutbox.entity_type == "kpi_catalog",
+                    AuditOutbox.entity_id == kpiId,
+                    AuditOutbox.processed_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        assert pending == []
+
+    async def test_published_kpi_can_be_deprecated_then_draft(
+        self, client, dbSession, seed_data_source
+    ) -> None:
+        """合法链：DRAFT → PUBLISHED → DEPRECATED → DRAFT。"""
+        await _Helper.clean(dbSession)
+        kpiId = await self._createDraft(client, seed_data_source, "KPI_GOV_TRANS_B")
+        for target in ("PUBLISHED", "DEPRECATED", "DRAFT"):
+            resp = await client.put(
+                f"/api/v1/kpi-catalog/{kpiId}", json={"status": target}, headers=self.ADMIN
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["status"] == target
+
+        row = await dbSession.get(KpiCatalog, kpiId)
+        assert row is not None
+        await dbSession.refresh(row)
+        assert row.status == "DRAFT"
+        assert row.revision_count == 3

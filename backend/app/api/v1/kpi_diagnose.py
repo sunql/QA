@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import Field
@@ -34,8 +35,16 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getDb, requireAdmin
-from app.domain.models import KpiCatalog, OntologyMetric
-from app.domain.schemas import CamelModel
+from app.domain.models import AuditLog, KpiCatalog, OntologyMetric
+from app.domain.schemas import (
+    CamelModel,
+    KpiGovernanceGates,
+    KpiGovernanceKpiCounts,
+    KpiGovernanceMetricCounts,
+    KpiGovernanceReconcile,
+    KpiGovernanceSummary,
+    KpiGovernanceSyncHealth,
+)
 from app.infrastructure import neo4j_client as neo4j
 from app.infrastructure.milvus_client import queryKpiEmbeddings
 from app.services.kpi_alignment_resolver import ResolutionOutcome
@@ -44,6 +53,7 @@ from app.services.kpi_contract_builder import (
     buildKpiContractBlockWithCodes,
 )
 from app.services.kpi_match_cache import get_kpi_match_cache
+from app.services.kpi_metric_audit import RECONCILE_ENTITY_TYPE
 from app.services.kpi_metric_reconcile import (
     ReconcileResult,
     reconcileMetric,
@@ -54,9 +64,13 @@ from app.services.kpi_metric_spec import (
     techniqueOf,
 )
 from app.services.kpi_metric_switches import (
+    SWITCH_GATE,
     isKpiContractInjectionEnabled,
     isKpiMatchContainmentEnabled,
     isKpiMatchVectorEnabled,
+    isKpiMetricTierAEnabled,
+    isKpiSyncEnabled,
+    readKpiMetricSwitch,
 )
 from app.services.kpi_semantic_match_service import (
     KpiMatchResult,
@@ -75,6 +89,14 @@ EXECUTION_SOURCE_ESCAPE_HATCH = "ESCAPE_HATCH"
 TIER_A = "A"
 TIER_B = "B"
 TIER_C = "C"
+
+# 治理看板：对账统计窗口（天）与错误串截断长度。
+GOVERNANCE_RECONCILE_WINDOW_DAYS = 7
+GOVERNANCE_ERROR_MAX_CHARS = 200
+
+VERDICT_MISMATCH = "mismatch"
+VERDICT_PASS = "pass"
+VERDICT_UNKNOWN = "unknown"
 
 
 class KpiDiagnoseFinding(CamelModel):
@@ -158,18 +180,29 @@ def _isEscapeHatchSource(metric: OntologyMetric | None) -> bool:
     )
 
 
+def _isExecutableSource(metric: OntologyMetric | None) -> bool:
+    """COMPILED / ESCAPE_HATCH：可执行源（Tier A 直通候选）。"""
+    return _isCompiledSource(metric) or _isEscapeHatchSource(metric)
+
+
 def _tierOf(
     result: ReconcileResult | None, metric: OntologyMetric | None
 ) -> str:
-    """Tier 判定（与运行时 ``planKpiExecution`` 同源）。
+    """Tier 判定（静态可判部分；与运行时 ``planKpiExecution`` 同源）。
 
-    无 metric 或 NONE 源 ⇒ C（NONE 明确不允许 Tier A 直通）；
-    来源不是 ESCAPE_HATCH（COMPILED / 空 / 未知）⇒ B（运行时对空/未知判 C，
-    属已知分歧，P5 收口）；A = pass 无降级；其余 B。
+    无 metric、NONE 源、空或未知 source ⇒ C；COMPILED 与 ESCAPE_HATCH 同属
+    可执行源。ESCAPE_HATCH 的空 formula 在运行时是 ``formula_empty`` ⇒ B，
+    这里同样建模；COMPILED 的可执行性来自编译器（空 formula 是正常态），
+    不看 formula。其余按对账 ``isTierAEligible``：合格 ⇒ A，否则 B。
+
+    只建模**静态可判**条件：``datasource_missing`` / ``explicit_time_scope`` /
+    ``compiled_*`` 三条运行时分歧不在诊断侧建模（见 nl2sql-engine.md）。
     """
     if metric is None or _isNoneSource(metric):
         return TIER_C
-    if not _isEscapeHatchSource(metric):
+    if not _isExecutableSource(metric):
+        return TIER_C
+    if not _isCompiledSource(metric) and not (metric.formula or "").strip():
         return TIER_B
     if result is not None and result.isTierAEligible:
         return TIER_A
@@ -224,9 +257,10 @@ def _matchOf(
             governanceSpecOf(kpi), techniqueOf(metric), resolution=resolution
         )
     verdict = result.verdict if result is not None else VERDICT_NO_METRIC
+    # 可执行源（COMPILED / ESCAPE_HATCH）才可能直通；NONE / 空 / 未知一律 False。
     tierAEligible = (
         result.isTierAEligible if result is not None else False
-    ) and not _isNoneSource(metric) and not _isCompiledSource(metric)
+    ) and _isExecutableSource(metric)
     return KpiDiagnoseMatch(
         kpi_code=code,
         kpi_name=kpi.kpi_name if kpi is not None else kpiName,
@@ -377,4 +411,190 @@ async def diagnoseKpi(
         ambiguous=ambiguous,
         matches=diagnosticMatches,
         sync_health=syncHealth,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 治理看板聚合（P4b/P5 Task 5）
+#
+# 只读、admin only。所有「外部」计数（audit_log / Milvus / Neo4j）均 best-effort：
+# 失败降级成 0 / None + 错误串，绝不让看板整体 500（设计 §2.3、§4 风险表）。
+# ---------------------------------------------------------------------------
+
+
+def _truncateError(text: str) -> str:
+    """错误串截断：响应里只带短错误，避免把堆栈/超长消息塞给前端。"""
+    return text[:GOVERNANCE_ERROR_MAX_CHARS]
+
+
+def _governanceError(exc: Exception) -> str:
+    return _truncateError(f"{type(exc).__name__}: {exc}")
+
+
+async def _countBy(
+    session: AsyncSession, column: object
+) -> dict[str, int]:
+    """按单个列分组计数；NULL 值以空串键返回（由调用方决定桶名）。"""
+    rows = (
+        await session.execute(select(column, func.count()).group_by(column))
+    ).all()
+    buckets: dict[str, int] = {}
+    for value, count in rows:
+        key = "" if value is None else str(value)
+        # 累加而非覆盖：NULL 组与显式空串组都映射到 ""，二者是同源语义，
+        # 覆盖会静默丢掉其中一组的计数。
+        buckets[key] = buckets.get(key, 0) + int(count)
+    return buckets
+
+
+async def _governanceKpiCounts(
+    session: AsyncSession,
+) -> KpiGovernanceKpiCounts:
+    byStatus = await _countBy(session, KpiCatalog.status)
+    return KpiGovernanceKpiCounts(
+        total=sum(byStatus.values()), by_status=byStatus
+    )
+
+
+async def _governanceMetricCounts(
+    session: AsyncSession,
+) -> KpiGovernanceMetricCounts:
+    byStatus = await _countBy(session, OntologyMetric.status)
+    rawSources = await _countBy(session, OntologyMetric.execution_source)
+    bySource: dict[str, int] = {}
+    for source, count in rawSources.items():
+        # 看板口径刻意比运行时**窄**：运行时用
+        # `(execution_source or "").strip().upper()` 归一后判缺失
+        # （kpi_execution_service），看板只把 NULL / 空串归入 NONE。
+        # 非 API 写入的变体（如 " none "、"None"）各落各桶 —— 让数据面
+        # 异常暴露出来，而不是在看板上悄悄合并。
+        bucket = EXECUTION_SOURCE_NONE if source in (None, "") else source
+        bySource[bucket] = bySource.get(bucket, 0) + count
+    return KpiGovernanceMetricCounts(
+        total=sum(byStatus.values()),
+        by_execution_source=bySource,
+        by_status=byStatus,
+    )
+
+
+async def _governanceReconcile(
+    session: AsyncSession,
+) -> KpiGovernanceReconcile:
+    """近 7 天对账统计（audit_log，verdict 走 JSONB ->> 取值）。
+
+    ``pass_count`` **不代表通过率，且会严重低估真实 pass**：P1 起
+    ``recordReconcileResult`` 只在 findings 非空时写审计（避免噪声）⇒
+    **干净 pass 不落库**；但 ``reconcileMetric`` 的 verdict 只取层 2，
+    层 1/3 mismatch 会并入 findings 并置 ``degraded=True``，因此
+    **degraded pass 会以 verdict='pass', degraded=true 落库**。本计数只是
+    「窗口内实际落库的 pass 行数」——只有 degraded pass 会落库（干净 pass 从不落库）。
+    """
+    windowStart = datetime.now(UTC) - timedelta(
+        days=GOVERNANCE_RECONCILE_WINDOW_DAYS
+    )
+    try:
+        # savepoint：本段失败不得把调用方事务打成 failed 态（后续还要读开关）。
+        async with session.begin_nested():
+            rows = (
+                await session.execute(
+                    select(
+                        AuditLog.after_json["verdict"].astext,
+                        AuditLog.created_at,
+                    ).where(
+                        AuditLog.entity_type == RECONCILE_ENTITY_TYPE,
+                        AuditLog.created_at >= windowStart,
+                    )
+                )
+            ).all()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("KPI 治理看板对账统计失败: %s", exc)
+        return KpiGovernanceReconcile(
+            window_days=GOVERNANCE_RECONCILE_WINDOW_DAYS,
+            reconcile_error=_governanceError(exc),
+        )
+
+    mismatchCount = 0
+    passCount = 0
+    unknownCount = 0
+    mismatchTimes: list[datetime] = []
+    for verdict, createdAt in rows:
+        if verdict == VERDICT_MISMATCH:
+            mismatchCount += 1
+            mismatchTimes.append(createdAt)
+        elif verdict == VERDICT_PASS:
+            passCount += 1
+        elif verdict == VERDICT_UNKNOWN:
+            unknownCount += 1
+    return KpiGovernanceReconcile(
+        window_days=GOVERNANCE_RECONCILE_WINDOW_DAYS,
+        mismatch_count=mismatchCount,
+        pass_count=passCount,
+        unknown_count=unknownCount,
+        last_mismatch_at=max(mismatchTimes) if mismatchTimes else None,
+    )
+
+
+async def _governanceSyncHealth(
+    session: AsyncSession, kpiTotal: int
+) -> KpiGovernanceSyncHealth:
+    """三库同步健康；整段失败 ⇒ 三计数 None + ``syncHealthError``（不 500）。"""
+    try:
+        # savepoint：PG 计数失败同样不能污染调用方事务。
+        async with session.begin_nested():
+            health = await _kpiSyncHealth(session)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("KPI 治理看板同步健康快照失败: %s", exc)
+        return KpiGovernanceSyncHealth(
+            kpi_total=kpiTotal,
+            sync_health_error=_governanceError(exc),
+        )
+    return KpiGovernanceSyncHealth(
+        published_kpi_count=health.kpi_published_pg_count,
+        milvus_kpi_count=health.kpi_vector_count,
+        neo4j_kpi_count=health.kpi_graph_node_count,
+        kpi_total=kpiTotal,
+        # Milvus / Neo4j 单点失败由 `_kpiSyncHealth` 收集进 errors，这里透出；
+        # 与整段失败同口径截断（schema 承诺「短错误串」）。
+        sync_health_error=_truncateError("; ".join(health.errors)) or None,
+    )
+
+
+@router.get("/governance-summary", response_model=KpiGovernanceSummary)
+async def governanceSummary(
+    _admin: CurrentUser = Depends(requireAdmin),
+    db: AsyncSession = Depends(getDb),
+) -> KpiGovernanceSummary:
+    """KPI 治理看板聚合（admin only，只读，best-effort）。
+
+    形状契约见设计稿 §2.3：
+
+    - ``kpis`` / ``metrics``：单表 GROUP BY 计数；``metrics.byExecutionSource``
+      把 NULL / 空串统一归入 ``NONE``；
+    - ``reconcile``：近 7 天 ``audit_log``（entity_type 见
+      ``RECONCILE_ENTITY_TYPE``）按 ``after_json->>'verdict'`` 计数，查询失败
+      ⇒ 全 0 + ``reconcileError``，不 500。``passCount`` 只是「实际落库的
+      pass 行数」：只有 degraded pass 会落库（干净 pass 从不落库），
+      见 ``_governanceReconcile`` docstring，**不是通过率**；
+    - ``syncHealth``：复用 ``_kpiSyncHealth``（PG + Milvus + Neo4j），外部计数
+      失败保持 null + ``syncHealthError``；
+    - ``gates``：与运行时同源的三个开关（publish gate / Tier A / sync）。
+    """
+    kpis = await _governanceKpiCounts(db)
+    metrics = await _governanceMetricCounts(db)
+    reconcile = await _governanceReconcile(db)
+    syncHealth = await _governanceSyncHealth(db, kpis.total)
+    gates = KpiGovernanceGates(
+        publish_gate_enabled=await readKpiMetricSwitch(
+            db, SWITCH_GATE, False
+        ),
+        tier_a_enabled=await isKpiMetricTierAEnabled(db),
+        sync_enabled=await isKpiSyncEnabled(db),
+    )
+    return KpiGovernanceSummary(
+        kpis=kpis,
+        metrics=metrics,
+        reconcile=reconcile,
+        sync_health=syncHealth,
+        gates=gates,
+        generated_at=datetime.now(UTC),
     )

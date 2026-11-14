@@ -174,6 +174,249 @@ docker exec -w /app qa-backend uv run python scripts/preflight_kpi_fk.py
 **回滚**：`uv run alembic downgrade 0131` 恢复 SET NULL 语义（服务层 409 守卫
 仍在，数据不会被静默解绑）。回滚后前端必须同步回退，否则创建 KPI 仍会 422。
 
+## KPI 治理（P4b/P5，2026-11-14）
+
+本批给 KPI 链路加了三块治理能力：`execution_source=COMPILED` 指标的 measure→SQL
+编译器（Tier A，编译失败 fail-closed 回落 Tier B）、KPI/指标状态流转矩阵（非法流转
+409）、以及 admin 治理看板（`/kpi-governance`）。**零 DDL（无迁移）**；变更记录见
+`Harness/changes/feat-kpi-p4b-p5/summary.md`。
+
+### 开关一览与回滚
+
+六个开关都存在 `system_config`（主键 `key`），同名 env 只作**进程级止血闸**（需重启）。
+读值语义：`true/1/on/yes` 为真，`false/0/off/no` 为假，其它非空按 int（>0 为真）；
+空串 / 非法 / 读取异常回落到「行缺失」默认值。
+
+| system_config key | env 杀闸 | 行缺失时默认 | 备注 |
+|---|---|---|---|
+| `KPI_METRIC_TIER_A_ENABLED` | 同名 env，默认 `true`；置 `false` 一刀关 | **关** | Tier A 执行器双闸 |
+| `KPI_METRIC_GATE_ENABLED` | 无 env 闸 | **关** | 发布闸门；P5 明确保持默认关 |
+| `KPI_CONTRACT_INJECTION_ENABLED` | 同名 env，默认 `true` | **关** | 契约注入的两个面共用一个 key |
+| `KPI_MATCH_CONTAINMENT_ENABLED` | 同名 env，默认 `true` | **关** | 匹配器 v2 |
+| `KPI_MATCH_VECTOR_ENABLED` | 同名 env，**默认 `false`**（要开必须 env 显式 `true` 且行 = `true`） | **关** | 向量候选步 |
+| `KPI_SYNC_ENABLED` | 同名 env，默认 `true` | **开**（方向相反，刻意） | 缺行回落 on 才与旧行为一致 |
+
+> `KPI_SYNC_ENABLED` 是唯一「缺行 = 开」的开关：旧行为完全没有同步，缺行回落 on
+> 才是无行为变化；显式置 `false` 才是关同步。其余五个缺行一律关（fail-closed）。
+> `KPI_MATCH_VECTOR_ENABLED` 的 env 默认值是 `false`（`backend/app/config.py`），
+> 只把 `system_config` 行改成 `true` 不会打开向量步——env 与行是两个串联闸。
+
+开 / 关 / 回滚一个开关（以发布闸门为例）：
+
+```sql
+-- 开
+INSERT INTO system_config (key, value, description)
+VALUES ('KPI_METRIC_GATE_ENABLED', 'true', 'KPI 发布闸门（P5，默认关；开启需人工确认）')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_time = NOW();
+
+-- 关（保留行并置 false，便于审计「何时被人关过」）
+INSERT INTO system_config (key, value, description)
+VALUES ('KPI_METRIC_GATE_ENABLED', 'false', 'KPI 发布闸门（P5，默认关；开启需人工确认）')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_time = NOW();
+
+-- 回滚：删除该行，回落到「行缺失」默认值
+DELETE FROM system_config WHERE key = 'KPI_METRIC_GATE_ENABLED';
+```
+
+`system_config` 每请求读取，改行**不用重启**；只有 env 杀闸需要重启进程。
+
+### 发布 / 废弃 / 恢复
+
+写入口一律 admin（KPI 写入口走 `getAdminOnlyActor`，指标写入口走 `requireAdmin`；
+两者都是 admin-only，但 403 的错误形状不同）。下面的 `X-User-Roles: admin` 只是
+stub 模式示例；生产必须 `AUTH_MODE=real` +
+`AUTH_STUB_ENABLED=0`，否则任何客户端都能自填该头。
+
+```bash
+BASE=http://localhost:8000/api/v1
+# 发布 KPI（DRAFT → PUBLISHED，会先过发布闸门）
+curl -sS -X PUT "$BASE/kpi-catalog/123" \
+  -H 'Content-Type: application/json' -H 'X-User-Roles: admin' \
+  -d '{"status":"PUBLISHED"}'
+
+# 废弃（PUBLISHED → DEPRECATED）
+curl -sS -X PUT "$BASE/kpi-catalog/123" \
+  -H 'Content-Type: application/json' -H 'X-User-Roles: admin' \
+  -d '{"status":"DEPRECATED"}'
+
+# 恢复（DEPRECATED → DRAFT；需要重新发布时再走一次 PUBLISHED）
+curl -sS -X PUT "$BASE/kpi-catalog/123" \
+  -H 'Content-Type: application/json' -H 'X-User-Roles: admin' \
+  -d '{"status":"DRAFT"}'
+
+# 指标发布 / 退回（ontology_metric）
+curl -sS -X PUT "$BASE/ontology/metrics/45" \
+  -H 'Content-Type: application/json' -H 'X-User-Roles: admin' \
+  -d '{"status":"PUBLISHED"}'
+```
+
+状态矩阵：
+
+| 实体 | 允许流转 | 说明 |
+|---|---|---|
+| KPI | `DRAFT→PUBLISHED`、`PUBLISHED→DEPRECATED`、`DEPRECATED→DRAFT`；同状态 = 流转校验放行（但 PUT 仍会 +1 revision 并写审计/历史） | `DRAFT→PUBLISHED` 过发布闸门 |
+| 指标 | `DRAFT↔PUBLISHED` | `PUBLISHED→DRAFT` 仅当**没有** `PUBLISHED` KPI 挂靠该指标 |
+
+其余流转（含 `PUBLISHED→DRAFT`、`DRAFT→DEPRECATED`、`DEPRECATED→PUBLISHED`）一律
+409，响应体形如：
+
+```json
+{"success": false, "error": "…", "detail": "INVALID_STATUS_TRANSITION",
+ "details": {"from": "PUBLISHED", "to": "DRAFT", "allowed": ["DEPRECATED"]}}
+```
+
+处理 `INVALID_STATUS_TRANSITION`：读 `details.allowed` 走合法路径，**不要**直接改库。
+指标 `PUBLISHED→DRAFT` 被拦时，先把挂靠的 `PUBLISHED` KPI 废弃或改挂到别的指标，
+再重试。非法流转零副作用（不写库、不入 outbox、不写审计），因此不需要数据修复。
+
+### 发布闸门开启前检查（`KPI_METRIC_GATE_ENABLED`）
+
+闸门默认关；关闭时只写 warning 放行，开启后 KPI `DRAFT→PUBLISHED` 必须 5 项全过：
+
+1. `metric_linked`：KPI 挂有 metric；
+2. `metric_published`：该 metric 已是 `PUBLISHED`；
+3. `execution_source`：metric 的 `execution_source` 非空且不是 `NONE`；
+4. `reconcile`：层 2 对账 verdict 必须是 **PASS**（`mismatch` 与 `unknown` 都阻断）；
+5. `datasource`：KPI 已绑定 `datasource_id`。
+
+开闸前按**问题计数**核对，不要看「通过率」：
+
+```bash
+BASE=http://localhost:8000/api/v1
+# 近 7 天对账问题计数（mismatchCount / unknownCount）+ 三个闸门现状
+curl -sS "$BASE/admin/kpi/governance-summary" -H 'X-User-Roles: admin' | python3 -m json.tool
+
+# 逐条确认待发布 KPI 的 verdict / tier（question 用 KPI 名称或关键词）
+curl -sS "$BASE/admin/kpi/diagnose?question=<KPI名称或关键词>" \
+  -H 'X-User-Roles: admin' | python3 -m json.tool
+
+# 找出未绑定数据源的 KPI（发布闸门第 5 项会拦）
+curl -sS "$BASE/kpi-catalog?unbound=true" -H 'X-User-Roles: admin'
+```
+
+`reconcile.passCount` **不是通过率，且会严重低估真实 pass**：P1 起对账只在
+findings 非空时落 `audit_log`（避免噪声）⇒ **干净 pass 不落库**；但
+`reconcileMetric` 的 `verdict` 只取层 2，层 1/3 的 mismatch 会并入 findings 并置
+`degraded=true`，所以 **degraded pass 会以 `verdict="pass", degraded=true` 落库**。
+`passCount` 只是「窗口内实际落库的 pass 行数」——**只有 degraded pass 会落库
+（干净 pass 从不落库）**。
+
+因此闸门前判据不是单看 `mismatchCount=0` / `unknownCount=0`，还要排除 degraded pass：
+
+```sql
+-- 近 7 天 degraded=true 的对账行必须为 0（层 1/3 有 finding 的对账行，或层 2 unknown）
+SELECT count(*) FROM audit_log
+WHERE entity_type = 'kpi_metric_reconcile'
+  AND created_at >= now() - interval '7 days'
+  AND after_json->>'degraded' = 'true';
+```
+
+并对每条待发布 KPI 用 diagnose 确认 `verdict == "pass"` **且 `degraded == false`**。
+注意闸门本身只要求层 2 对账 PASS，degraded pass 能过闸但口径不完整，所以人工口径
+必须更严。「计数为 0」也可能只是从未对账过，不能单独当作通过证据。
+
+发现数据没补齐：保持闸门关闭（或执行上面的 `DELETE` 回滚），先修数据。回滚闸门
+**只需删除 `system_config` 行**，无需回滚代码。
+
+### 向量 / 图同步补偿
+
+同步钩子开关是 `KPI_SYNC_ENABLED`（缺行默认开）。外部存储故障时失败只进
+`failures`，不会 500；修好 Milvus / Neo4j 后补跑：
+
+```bash
+BASE=http://localhost:8000/api/v1
+# 全量对账（补缺失向量/图 + 删孤儿；幂等，复跑应全 0）
+curl -sS -X POST "$BASE/kpi-catalog/embeddings/sync-missing" -H 'X-User-Roles: admin'
+
+# 单条 KPI 向量重建（仅 PUBLISHED；非 PUBLISHED ⇒ 409）
+curl -sS -X POST "$BASE/kpi-catalog/123/embedding" -H 'X-User-Roles: admin'
+```
+
+批量响应字段：`vectorPublishedTotal` / `vectorMissingCount` / `vectorSyncedCount` /
+`vectorOrphanCount` / `graphMissingCount` / `graphSyncedCount` / `failedCount` /
+`failures[]`。`failedCount > 0` 时按 `failures[].entityType` / `failures[].error`
+逐个排查；Milvus / Neo4j 不可用属于降级明细，不是接口故障。单条端点只重建向量，
+不补图节点。
+
+**admin 前提**：两个端点都是 admin-only（`getAdminOnlyActor`）。生产必须
+`AUTH_MODE=real` + `AUTH_STUB_ENABLED=0`（同「批量写入口的鉴权前提」）。
+
+### 数据修复与审计查询
+
+KPI 合法流转沿用既有 outbox 管线，最终落到 `audit_log`（`entity_type='kpi_catalog'`）
+与 `kpi_catalog_history`。指标合法流转由 `ontology_service.updateMetric` **直接**写
+`audit_log`（`entity_type='ONTOLOGY_METRIC'`），**不经过 outbox，也没有
+`kpi_catalog_history` 快照**。非法流转不落任何一侧；运维查指标变更只看 `audit_log`。
+
+```sql
+-- KPI 修订快照（每次合法 PUT +1 revision）
+SELECT revision, changed_by, changed_at, snapshot_json->>'status' AS status
+FROM kpi_catalog_history
+WHERE kpi_id = 123
+ORDER BY revision DESC
+LIMIT 20;
+
+-- 对账审计：仅 findings 非空才落库（干净 pass 不落；degraded pass 会落）
+SELECT created_at,
+       entity_id,
+       after_json->>'kpi_code' AS kpi_code,
+       after_json->>'verdict'  AS verdict,
+       after_json->'findings'  AS findings
+FROM audit_log
+WHERE entity_type = 'kpi_metric_reconcile'
+ORDER BY created_at DESC
+LIMIT 50;
+
+-- 按 reason 聚合对账问题
+SELECT after_json->>'verdict' AS verdict,
+       finding->>'reason'     AS reason,
+       count(*)
+FROM audit_log, jsonb_array_elements(after_json->'findings') AS finding
+WHERE entity_type = 'kpi_metric_reconcile'
+GROUP BY 1, 2
+ORDER BY 3 DESC;
+```
+
+`after_json->>'verdict'` 可能是 `pass`（仅 degraded pass 会落库）、`mismatch` 或
+`unknown`；干净 pass 不落库。看板与巡检不得把 `passCount` 当通过率。
+
+状态与向量/图不一致时（例如 KPI 已 `PUBLISHED` 但向量缺失），先跑
+`embeddings/sync-missing` 对账；状态流转本身会自动删/建向量并更新图节点 `status`。
+
+### 生产发版硬闸门（不可自动执行）
+
+本批零 DDL，但代码依赖 P3 已合入的 0143 三列（`kpi_catalog.time_grain` /
+`ontology_metric.time_grain` / `time_column`）。生产当前仍在 0140 + 旧代码，发版必须
+按序、人工确认，**不得由脚本自动串跑**：
+
+1. `alembic upgrade head`（0140 → 0143）。
+2. 立即回填（硬闸门）：
+   ```bash
+   uv run python scripts/kpi_backfill_time_grain.py --apply --allow-prod-write
+   ```
+   预期 **`changes=11 noop=1`**；幂等复跑必须 **`changes=0 noop=12`** 才算回填成功。
+3. 通过后才部署新代码（backend 先、frontend 后）。
+
+顺序反了的后果：旧库跑新代码 ⇒ ORM 已声明 `time_grain` / `time_column` ⇒
+`UndefinedColumn`；回填前上线 ⇒ 治理侧有值、技术侧 NULL ⇒ 12/12 unknown，8 条基线
+pass KPI 暂失 Tier A（degraded 注入，不阻断，但口径不完整）。
+
+### 已知能力边界（本批不修）
+
+1. **显式时间问句 + COMPILED 走不到编译器**：路由门先判
+   `has_explicit_time_scope and not time_param_ready` ⇒ Tier B（`explicit_time_scope`）。
+   `time_param_ready` 要求 `metric.formula` 含 `{time_scope}` 占位符**且
+   `metric.time_column` 非空**；COMPILED 指标 formula 为空 ⇒ 恒 False。编译器本身
+   支持 timeScope（Oracle 方言），但当前路由在到达编译器前就降级，属 fail-safe 的
+   已知限制。
+2. **`COUNT(*)` 形态的 COMPILED 指标进不了 Tier A**：对账层 2 对「技术侧度量无表达式」
+   返回 `technical_measure_unjudgeable` / `UNKNOWN` ⇒ `isTierAEligible=False` ⇒ 路由落到
+   `reconcile_not_eligible`。要进 Tier A 必须写成 `COUNT(<列>)`（治理 / 产品决策项，
+   本批不改对账语义）。
+3. **`reconcile.passCount` 不代表通过率**：干净 pass 不落审计（P1 避免噪声），只有
+   degraded pass 落库 ⇒ 计数既漏掉干净 pass、又混入 degraded pass；闸门前须另查
+   `after_json->>'degraded'='true'` 行数为 0，并逐 KPI diagnose 确认 `degraded=false`。
+
 ## 日志
 
 - 后端日志级别由 `LOG_LEVEL` 控制。

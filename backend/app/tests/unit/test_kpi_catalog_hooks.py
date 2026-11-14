@@ -159,13 +159,18 @@ async def test_update_publish_draft_syncs_vector(
 async def test_update_unpublish_deletes_vector_keeps_graph(
     dbSession: AsyncSession, seedDataSource: DataSource, recorder: _Recorder
 ) -> None:
-    """D3：PUBLISHED → DRAFT ⇒ 删向量、**图节点保留**（status 属性更新）。"""
+    """D3：PUBLISHED → DEPRECATED ⇒ 删向量、**图节点保留**（status 属性更新）。
+
+    P5 状态矩阵后 PUBLISHED → DRAFT 非法；退市路径经 DEPRECATED 仍可删向量
+    （``kpi_catalog_service._syncKpiVectorAndGraph``: status != PUBLISHED 且
+    statusBefore == PUBLISHED ⇒ delete）。
+    """
     service = KpiCatalogService()
     dto = _createDto(seedDataSource.id, status="PUBLISHED")
     kpi = await service.createKpi(dbSession, dto, _actor())
     recorder.reset()
     await service.updateKpi(
-        dbSession, kpi.id, KpiCatalogUpdate(status="DRAFT"), _actor()
+        dbSession, kpi.id, KpiCatalogUpdate(status="DEPRECATED"), _actor()
     )
     assert recorder.vectorDeleted == [kpi.id]
     assert recorder.vectorSynced == []

@@ -1038,6 +1038,94 @@ class KpiDatasourceBulkBindResult(CamelModel):
     results: list[KpiDatasourceBulkBindResultRow]
 
 
+# ---------------------------------------------------------------------------
+# KPI 治理看板（P4b/P5 Task 5）：admin 只读聚合
+#
+# 形状契约见 docs/superpowers/specs/2026-11-14-kpi-p4b-p5-design.md §2.3。
+# 所有外部计数（audit_log / Milvus / Neo4j）都是 best-effort：取数失败时字段
+# 降级为 None / 0 并附错误串，绝不让看板整体 500。
+# ---------------------------------------------------------------------------
+
+
+class KpiGovernanceKpiCounts(CamelModel):
+    """KPI 按状态分布；``total`` = ``by_status`` 各桶之和。"""
+
+    total: int
+    by_status: dict[str, int] = Field(default_factory=dict)
+
+
+class KpiGovernanceMetricCounts(CamelModel):
+    """指标按执行来源 / 状态分布。
+
+    ``by_execution_source`` 把 NULL 或空串统一归入 ``NONE`` 桶：运行时对二者
+    都判定为 ``execution_source_missing``，看板沿用同一口径、不为缺失值另造
+    新桶。
+    """
+
+    total: int
+    by_execution_source: dict[str, int] = Field(default_factory=dict)
+    by_status: dict[str, int] = Field(default_factory=dict)
+
+
+class KpiGovernanceReconcile(CamelModel):
+    """近 ``window_days`` 天 KPI 口径对账统计（来自 audit_log，best-effort）。
+
+    ``pass_count`` **不是通过率，且会严重低估真实 pass**：P1 起
+    ``recordReconcileResult`` 只在 findings 非空时落审计（避免噪声）⇒
+    **干净 pass 不落库**；但 ``reconcileMetric`` 的 verdict 只取层 2，
+    层 1/3 mismatch 会并入 findings 并置 ``degraded=True``，因此
+    **degraded pass 会以 verdict='pass', degraded=true 落库**。该字段只表示
+    「窗口内实际落库的 pass 行数」——只有 degraded pass 会落库（干净 pass 从不落库）。
+    """
+
+    window_days: int
+    mismatch_count: int = 0
+    # 只统计实际落库的 pass 行；只有 degraded pass 落库，干净 pass 从不落库，不代表 pass rate。
+    pass_count: int = 0
+    unknown_count: int = 0
+    # 窗口内最近一条 verdict='mismatch' 的时间；无则 None（序列化为 ISO 串）。
+    last_mismatch_at: datetime | None = None
+    # 查询失败时的短错误串；正常为 None（失败不 500）。
+    reconcile_error: str | None = None
+
+
+class KpiGovernanceSyncHealth(CamelModel):
+    """KPI 三库同步健康快照（PG / Milvus / Neo4j）。"""
+
+    # PG 口径的已发布 KPI 数；同步健康整段失败时为 None。
+    published_kpi_count: int | None = None
+    milvus_kpi_count: int | None = None
+    # 显式 alias：`to_camel` 对「数字后紧跟小写字母」会拆词
+    # （neo4j_kpi_count → neo4JKpiCount），与设计稿/前端契约的
+    # `neo4jKpiCount` 不符 ⇒ 必须钉住。
+    neo4j_kpi_count: int | None = Field(
+        default=None, alias="neo4jKpiCount"
+    )
+    # KPI 总数（来自 kpi_catalog，与三库取数是否成功无关）。
+    kpi_total: int
+    # 外部计数失败 / 整段失败时的短错误串；正常为 None。
+    sync_health_error: str | None = None
+
+
+class KpiGovernanceGates(CamelModel):
+    """治理闸门开关快照（与运行时读取同源，未硬编码开关名）。"""
+
+    publish_gate_enabled: bool
+    tier_a_enabled: bool
+    sync_enabled: bool
+
+
+class KpiGovernanceSummary(CamelModel):
+    """治理看板聚合响应（admin only，只读）。"""
+
+    kpis: KpiGovernanceKpiCounts
+    metrics: KpiGovernanceMetricCounts
+    reconcile: KpiGovernanceReconcile
+    sync_health: KpiGovernanceSyncHealth
+    gates: KpiGovernanceGates
+    generated_at: datetime
+
+
 class FeatureDefinitionCreate(CamelModel):
     """AI 特征定义创建请求（Phase 4.3）。
 

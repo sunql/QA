@@ -39,7 +39,6 @@ REASON_METRIC_MISSING = "metric_missing"
 REASON_EXECUTION_SOURCE_MISSING = "execution_source_missing"
 REASON_EXECUTION_SOURCE_NONE = "execution_source_none"
 REASON_EXECUTION_SOURCE_UNKNOWN = "execution_source_unknown"
-REASON_COMPILED_NOT_SUPPORTED = "compiled_not_supported"
 REASON_DATASOURCE_MISSING = "datasource_missing"
 REASON_EXPLICIT_TIME_SCOPE = "explicit_time_scope"
 REASON_RECONCILE_NOT_ELIGIBLE = "reconcile_not_eligible"
@@ -76,9 +75,9 @@ def planKpiExecution(
         return KpiExecutionPlan(TIER_C, REASON_EXECUTION_SOURCE_MISSING)
     if source == SOURCE_NONE:
         return KpiExecutionPlan(TIER_C, REASON_EXECUTION_SOURCE_NONE)
-    if source == SOURCE_COMPILED:
-        return KpiExecutionPlan(TIER_B, REASON_COMPILED_NOT_SUPPORTED)
-    if source != SOURCE_ESCAPE_HATCH:
+    # COMPILED 与 ESCAPE_HATCH 同属可执行源，共享后半段全部检查；编译器本身
+    # 失败时由执行层降级，而不是在路由期一票否决。
+    if source not in (SOURCE_ESCAPE_HATCH, SOURCE_COMPILED):
         return KpiExecutionPlan(TIER_C, REASON_EXECUTION_SOURCE_UNKNOWN)
     if not has_datasource:
         return KpiExecutionPlan(TIER_C, REASON_DATASOURCE_MISSING)

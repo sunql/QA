@@ -151,3 +151,19 @@ NONE
   处理、同步补偿、`kpi_catalog_history` / `audit_log` 审计查询全部见
   `Harness/wiki/operations-runbook.md`「KPI 治理」。代码回滚用 `git revert`
   本批 commit（零 DDL，无迁移回滚）。
+
+## CI 验收（2026-11-14）
+
+- **判据**：失败集合对差净新增 0（main 基线本身为红，不等 CI 变绿）。
+- **PR round 2**（run 43556123906，head `23d47c08`）对 **main push 基线**（run 43430969673，
+  `e85f1ff8`，9 个 job 全部可用）逐分片对差：unit 0/1/2/3 = 0 净新增
+  （10/6/1/3 条与基线完全相同）；integration 0/1/2/3 = 0 净新增（26/21/32/23 条与基线完全相同）；
+  frontend 通过。
+- **round 1 发现并修复的 1 条净新增**：Task 4 把 `details` 通道提升到 `DomainError` 基类后，
+  `test_validation_error_details::test_other_domain_errors_have_no_details_attr_semantics`
+  仍断言 `ConflictError` **没有** `details` 属性 ⇒ 语义过期。`23d47c08` 改为断言
+  `ConflictError.details is None`（默认 None、行为不变），定向单测 17 passed。
+- **基线不可用修正**：最近一次 main push run 43457350459（`30c4097f`）的
+  integration shard 3 撞 90 分钟超时被 `cancelled` ⇒ 闸门判 `UNUSABLE_JOBS`
+  （该分片失败集合为空，27 条「净新增」全为假阳性）。按既定恢复流程整轮复跑该基线 run
+  （attempt 2），复跑收敛后推送本提交产生新的 PR CI 事件，闸门重新判定。

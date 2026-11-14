@@ -87,6 +87,8 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.bizConfig", "code": "item.lineage", "label_key": "menu.item.lineage", "icon_code": "node", "sort_order": 330, "path": "/lineage"},
     {"parent": "section.bizConfig", "code": "item.entityMapping", "label_key": "menu.item.entityMapping", "icon_code": "code", "sort_order": 340, "path": "/entity-mapping"},
     {"parent": "section.bizConfig", "code": "item.kpiCatalog", "label_key": "menu.item.kpiCatalog", "icon_code": "number", "sort_order": 350, "path": "/kpi-catalog"},
+    # P4b/P5 Task 6：KPI 治理看板（admin-only 只读聚合页）
+    {"parent": "section.bizConfig", "code": "item.kpiGovernance", "label_key": "menu.item.kpiGovernance", "icon_code": "dashboard", "sort_order": 352, "path": "/kpi-governance"},
     {"parent": "section.bizConfig", "code": "item.features", "label_key": "menu.item.features", "icon_code": "cluster", "sort_order": 360, "path": "/features"},
     {"parent": "section.bizConfig", "code": "item.adminFeatureRules", "label_key": "menu.item.adminFeatureRules", "icon_code": "tool", "sort_order": 365, "path": "/admin/feature-rules"},
     {"parent": "section.bizConfig", "code": "item.businessObjects", "label_key": "menu.item.businessObjects", "icon_code": "cluster", "sort_order": 370, "path": "/business-objects"},

@@ -21,6 +21,7 @@ import DataQualityReportPublicSharePage from "./pages/DataQualityReportPublicSha
 import DataQualityRuleBatchCreatePage from "./pages/DataQualityRuleBatchCreatePage";
 import { DataQualityRuleParamsPage } from "./pages/DataQualityRuleParamsPage";
 import KpiCatalogPage from "./pages/KpiCatalogPage";
+import KpiGovernancePage from "./pages/KpiGovernancePage";
 import FeatureCatalogPage from "./pages/FeatureCatalogPage";
 import LineagePage from "./pages/LineagePage";
 import EntityMappingPage from "./pages/EntityMappingPage";
@@ -107,6 +108,7 @@ export default function App() {
         <Route path="lineage" element={<LineagePage />} />
         <Route path="entity-mapping" element={<EntityMappingPage />} />
         <Route path="kpi-catalog" element={<KpiCatalogPage />} />
+        <Route path="kpi-governance" element={<KpiGovernancePage />} />
         <Route path="features" element={<FeatureCatalogPage />} />
         <Route path="usage" element={<UsagePage />} />
         <Route path="status" element={<ServiceStatusPage />} />

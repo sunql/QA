@@ -15,6 +15,7 @@ RED 覆盖 6 类：
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -23,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.api.v1.kpi_diagnose as kpiDiagnoseModule
 from app.domain.models import (
+    AuditLog,
     KpiCatalog,
     OntologyClass,
     OntologyMetric,
@@ -31,6 +33,7 @@ from app.domain.models import (
 )
 from app.models.system_config import SystemConfig
 from app.services.kpi_match_cache import get_kpi_match_cache
+from app.services.kpi_metric_audit import RECONCILE_ENTITY_TYPE
 from app.services.kpi_metric_switches import SWITCH_CONTRACT_INJECTION
 
 pytestmark = pytest.mark.asyncio
@@ -650,3 +653,116 @@ async def test_diagnose_match_exposes_distance_field(
     body = resp.json()
     assert len(body["matches"]) == 1
     assert body["matches"][0]["distance"] is None
+
+
+# ---------------------------------------------------------------------------
+# Task 5：治理看板聚合 API（admin-only，best-effort 计数）
+#
+# 形状契约见设计稿 §2.3。同步健康段复用 `_kpiSyncHealth` ⇒ 本文件顶部的
+# fakeKpiSyncHealthStores autouse 夹具同样兜住 Milvus / Neo4j，禁止连真实例。
+# ---------------------------------------------------------------------------
+
+_GOVERNANCE_URL = "/api/v1/admin/kpi/governance-summary"
+
+
+async def test_governance_summary_admin_only(client: AsyncClient) -> None:
+    """非 admin ⇒ 403 + 结构化 PERMISSION_DENIED（不是 404 也不是 200）。"""
+    resp = await client.get(
+        _GOVERNANCE_URL,
+        headers={"X-User-Roles": "user", "X-User-Id": "alice"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["code"] == "PERMISSION_DENIED"
+
+
+async def test_governance_summary_shape(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """种 1 DRAFT + 1 PUBLISHED KPI、1 COMPILED metric ⇒ 形状与计数可读。"""
+    compiledMetric = await _seedMetric(
+        dbSession, name="KPI_GOV_COMPILED-metric", source="COMPILED"
+    )
+    await _seedKpi(
+        dbSession,
+        "KPI_GOV_PUBLISHED",
+        metricId=compiledMetric.id,
+        numeratorColumns=["RECEIPT_DATE"],
+        denominatorColumns=["PROMISED_RECEIPT_DATE"],
+        grainKeys=["SUPPLIER_CODE"],
+    )
+    dbSession.add(
+        KpiCatalog(
+            kpi_code="KPI_GOV_DRAFT",
+            kpi_name="KPI_GOV_DRAFT 名称",
+            status="DRAFT",
+            metric_id=None,
+            numerator_columns=[],
+            denominator_columns=[],
+            grain_keys=[],
+            semantic_keywords=[],
+            match_threshold=Decimal("0.75"),
+        )
+    )
+    # 对账审计：pass 行真实运行不落库（无 finding），但这里直接种行验证
+    # JSONB `after_json->>'verdict'` 计数口径与 lastMismatchAt 取值。
+    now = datetime.now(UTC)
+    dbSession.add_all(
+        [
+            AuditLog(
+                entity_type=RECONCILE_ENTITY_TYPE,
+                entity_id=compiledMetric.id,
+                action="CREATE",
+                actor="system:kpi-contract",
+                after_json={
+                    "kpi_code": "KPI_GOV_PUBLISHED",
+                    "verdict": "mismatch",
+                    "degraded": False,
+                    "findings": [],
+                },
+                created_at=now,
+            ),
+            AuditLog(
+                entity_type=RECONCILE_ENTITY_TYPE,
+                entity_id=compiledMetric.id,
+                action="CREATE",
+                actor="system:kpi-contract",
+                after_json={
+                    "kpi_code": "KPI_GOV_PUBLISHED",
+                    "verdict": "pass",
+                    "degraded": False,
+                    "findings": [],
+                },
+                created_at=now - timedelta(days=1),
+            ),
+        ]
+    )
+    await dbSession.commit()
+
+    resp = await client.get(_GOVERNANCE_URL, headers=_ADMIN_HEADERS)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["kpis"]["total"] >= 2
+    assert body["kpis"]["byStatus"]["PUBLISHED"] >= 1
+    assert body["kpis"]["byStatus"]["DRAFT"] >= 1
+    assert body["metrics"]["byExecutionSource"]["COMPILED"] >= 1
+    assert "metrics" in body and "reconcile" in body and "gates" in body
+    assert body["reconcile"]["windowDays"] == 7
+    # 近 7 天审计：1 mismatch + 1 pass；unknown 桶为空。
+    assert body["reconcile"]["mismatchCount"] == 1
+    assert body["reconcile"]["passCount"] == 1
+    assert body["reconcile"]["unknownCount"] == 0
+    assert body["reconcile"]["lastMismatchAt"] is not None
+    assert body["reconcile"]["reconcileError"] is None
+    assert set(body["gates"]) == {
+        "publishGateEnabled",
+        "tierAEnabled",
+        "syncEnabled",
+    }
+    # 同步健康复用 `_kpiSyncHealth`：PG 计数取真值，Milvus/Neo4j 走假替身。
+    assert body["syncHealth"]["publishedKpiCount"] == 1
+    assert body["syncHealth"]["milvusKpiCount"] == 0
+    assert body["syncHealth"]["neo4jKpiCount"] == 0
+    assert body["syncHealth"]["kpiTotal"] == body["kpis"]["total"]
+    assert body["syncHealth"]["syncHealthError"] is None
+    assert body["generatedAt"]

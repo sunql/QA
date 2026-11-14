@@ -32,6 +32,7 @@ from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_publish_gate import enforceKpiPublishGate
 from app.services.kpi_metric_reconcile import GovernanceSpec
 from app.services.kpi_metric_switches import isKpiSyncEnabled
+from app.services.kpi_status_machine import assertKpiTransition
 from app.services.messages_zh import (
     MSG_KPI_CATALOG_DUPLICATE_CODE,
     MSG_KPI_CATALOG_NOT_FOUND,
@@ -300,6 +301,11 @@ class KpiCatalogService:
         # status / metric_id 是枚举/int；service 层把 KpiStatus 归一为字符串
         if "status" in updates and updates["status"] is not None:
             updates["status"] = updates["status"].value
+        # P5 状态流转矩阵：非法流转在写库 / 入队 / 审计之前拒绝（409，零副作用）。
+        # 必须按「目标状态」与实体当前状态判定 —— 归一化后状态值已变成字符串，
+        # 故用归一前捕获的 targetStatus。
+        if targetStatus is not None:
+            assertKpiTransition(entity.status, targetStatus.value)
         # Numeric 列归一为 Decimal：asyncpg 不接受 float 直接绑到 Numeric。
         # match_threshold 是 NOT NULL 列（DB 默认 0.75）；创建路径已把 None 归一为默认值
         # （见 createKpi），update 路径必须对称，否则显式 null 会写穿 NOT NULL 约束 ⇒

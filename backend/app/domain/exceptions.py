@@ -9,12 +9,24 @@ from typing import Any
 
 
 class DomainError(Exception):
-    """所有领域异常的基类。"""
+    """所有领域异常的基类。
 
-    def __init__(self, message: str, *, detail: str | None = None) -> None:
+    ``details`` 携带结构化数据（如状态流转的 from/to/allowed），由全局 handler
+    透传到响应体（``getattr(exc, "details", None)``）。纯附加字段，既有调用方
+    不传即为 None，行为不变。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        detail: str | None = None,
+        details: dict | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.detail = detail
+        self.details = details
 
 
 class ConfigError(DomainError):

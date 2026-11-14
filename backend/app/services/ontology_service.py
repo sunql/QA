@@ -22,7 +22,7 @@ from typing import Any
 
 from neo4j.exceptions import AuthError, ServiceUnavailable
 from pymilvus.exceptions import MilvusException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -35,6 +35,7 @@ from app.domain.exceptions import (
     ValidationError,
 )
 from app.domain.models import (
+    KpiCatalog,
     OntologyClass,
     OntologyJoin,
     OntologyMetric,
@@ -63,6 +64,7 @@ from app.services.id_mapping_service import IdMappingService
 from app.services.join_inference import SAGE_X3_REFERENCE_MAP
 from app.services.kpi_metric_publish_gate import enforceMetricPublishGate
 from app.services.kpi_metric_reconcile import MeasureSpec, MetricTechnique
+from app.services.kpi_status_machine import assertMetricTransition
 from app.services.kpi_vector_graph_sync import reconcileKpiGraph
 from app.services.messages_zh import (
     MSG_CLASS_ALREADY_EXPIRED,
@@ -1054,6 +1056,24 @@ class OntologyService:
             value = updates.get(key)
             if value is not None and hasattr(value, "value"):
                 updates[key] = value.value
+        # P5 状态流转矩阵：非法流转在写库 / 审计 / 图谱同步之前拒绝（409，零副作用）。
+        # 指标退回 DRAFT 仅当没有已发布 KPI 挂靠 —— 否则已发布 KPI 会指向草稿口径。
+        if targetStatus is not None:
+            publishedKpiCount = int(
+                (
+                    await session.execute(
+                        select(func.count(KpiCatalog.id)).where(
+                            KpiCatalog.metric_id == entity.id,
+                            KpiCatalog.status == "PUBLISHED",
+                        )
+                    )
+                ).scalar_one()
+            )
+            assertMetricTransition(
+                entity.status,
+                targetStatus.value,
+                publishedKpiCount=publishedKpiCount,
+            )
         # P4a：合并后的 formula/time_column 一致性（partial update 用原值补位）。
         _assertTimeScopePlaceholderConsistency(
             formula=updates.get("formula", entity.formula),

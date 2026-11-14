@@ -10,7 +10,9 @@ owner ACL ⇒ 只能按 admin 收口（N3，2026-11-05 缺陷优先级计划 §8
 from __future__ import annotations
 
 from httpx import AsyncClient
+from sqlalchemy import select
 
+from app.domain.models import KpiCatalog, OntologyMetric
 from app.services.messages_zh import MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN
 
 ADMIN_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
@@ -181,3 +183,70 @@ async def test_update_metric_clear_time_column_with_placeholder_rejected(client:
     )
     assert resp.status_code == 422, resp.text
     assert resp.json()["error"] == MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN, resp.text
+
+
+# =============================================================================
+# P5：指标状态流转矩阵（PUBLISHED → DRAFT 仅当无已发布 KPI 挂靠）
+# =============================================================================
+
+
+async def _publishMetric(client: AsyncClient, metricId: int) -> None:
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metricId}",
+        json={"status": "PUBLISHED"},
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+
+
+async def _createPublishedKpiLinked(
+    client: AsyncClient, datasourceId: int, metricId: int, code: str
+) -> int:
+    resp = await client.post(
+        "/api/v1/kpi-catalog",
+        json={
+            "datasourceId": datasourceId,
+            "kpiCode": code,
+            "kpiName": "测试-P5",
+            "owner": "finance",
+            "metricId": metricId,
+            "status": "PUBLISHED",
+        },
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+async def test_metric_published_to_draft_blocked_when_published_kpi_links(
+    client: AsyncClient, dbSession, seed_data_source
+) -> None:
+    """有已发布 KPI 挂靠时退回 DRAFT ⇒ 409，且 metric.status 仍 PUBLISHED。"""
+    metricId = await _createMetric(client)
+    await _publishMetric(client, metricId)
+    await _createPublishedKpiLinked(
+        client, seed_data_source.id, metricId, "KPI_P5_METRIC_LINK"
+    )
+
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metricId}",
+        json={"status": "DRAFT"},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 409, resp.text
+    body = resp.json()
+    assert body["detail"] == "INVALID_STATUS_TRANSITION"
+    assert body["details"] == {"from": "PUBLISHED", "to": "DRAFT", "allowed": []}
+    row = (
+        await dbSession.execute(
+            select(OntologyMetric).where(OntologyMetric.id == metricId)
+        )
+    ).scalar_one()
+    assert row.status == "PUBLISHED"
+    kpiCount = (
+        await dbSession.execute(
+            select(KpiCatalog).where(KpiCatalog.metric_id == metricId)
+        )
+    ).scalars().all()
+    assert len(kpiCount) == 1

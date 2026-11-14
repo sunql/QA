@@ -84,6 +84,16 @@ export interface ImportConflict {
   proposedName: string | null;
   /** 墓碑（class_tombstoned）专用：既有本体类的 valid_to 时间戳，ISO 字符串 */
   existingValidTo?: string | null;
+  /**
+   * 冲突是否源于**类名**被占（true）而不仅是源表相同（false）。
+   * true ⇒ createClass 必然拒（它只按 class_name 判重，**活类/墓碑一视同仁**）
+   *        ⇒ 前端禁勾并说明；
+   * false ⇒ 类名没被占 ⇒ 导入其实能成功 ⇒ 只提示，不禁勾。
+   * ⚠️ 缺失（undefined）或 null ≠ false：那是**后端未判定**（灰度期 / producer
+   * 忘了填）⇒ 前端走第三态「未知」⇒ 既不禁勾，也**不承诺**「可正常导入」
+   * （文案写「需在执行期确认」）。
+   */
+  nameCollision?: boolean | null;
   action: "skip" | "overwrite" | "rename";
 }
 

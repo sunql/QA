@@ -46,9 +46,15 @@ def _makeFakeSession(record: Any):
     get 接受任意 kwargs（e.g. options=[selectinload(...)]）以兼容 OntologyService.
     getClass 等用 selectinload 预加载关系的场景。
     execute 返回空结果（无重名）。
+    ⚠️ 必须同时支持 `.first()` 与 `.scalar_one_or_none()`：`updateClass` 的改名
+    撞名查询用 `.first()`（同名多行不抛 MultipleResultsFound），只用
+    `scalar_one_or_none()` 的替身会在改名校验处 AttributeError（fix-import-tombstone-name-guard）。
     """
     class _Result:
         def scalar_one_or_none(self):
+            return None
+
+        def first(self):
             return None
 
     class _Session:

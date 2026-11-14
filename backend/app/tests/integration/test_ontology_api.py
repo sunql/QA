@@ -10,9 +10,13 @@ Neo4j 和 Milvus 通过 monkeypatch mock，测试不依赖外部服务；
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.domain.models import OntologyClass
 
 # === mock Neo4j & Milvus（必须在 app 导入前 patch） ===
 
@@ -164,6 +168,117 @@ async def testCreateClassDuplicate(client: AsyncClient) -> None:
     )
     assert response.status_code == 422
     assert "已存在" in response.json().get("error", "")
+
+
+async def testCreateClassDuplicateAfterSoftDeleteNamesTheTombstone(
+    client: AsyncClient,
+) -> None:
+    """软删除后再建同名类 → 422，且错误信息点名**是哪个已删除的类**占着名。
+
+    fix-import-tombstone-name-guard：删除是软删除（valid_to 非空），行还在、
+    仍占着 class_name（唯一约束 uq_ontology_class_name_version），而「本体管理」
+    页默认过滤 valid_to ⇒ 用户看到「类名已存在」却在列表里查不到 ⇒ 死结。
+    故错误信息必须自带墓碑 id + 处置指引，而不是干巴巴一句「已存在」。
+    """
+    created = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "TombstoneOccupied", "sourceTable": "t_tombstone_occupied"},
+    )
+    assert created.status_code == 201
+    classId = created.json()["id"]
+
+    deleted = await client.delete(f"/api/v1/ontology/classes/{classId}")
+    assert deleted.status_code == 204
+
+    response = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "TombstoneOccupied", "sourceTable": "t_tombstone_occupied_v2"},
+    )
+    assert response.status_code == 422
+    error = response.json().get("error", "")
+    # 指名道姓：既要说清是「已删除的类」占着名，也要给出墓碑 id 供定位
+    assert "已删除" in error
+    # 断言 id=… 而不是裸数字：裸 id 可能被文案里的日期数字巧合命中（假绿）
+    assert f"id={classId}" in error
+
+
+async def testUpdateClassUnchangedNameIgnoresSameNameTombstone(
+    client: AsyncClient,
+    dbSession: AsyncSession,
+) -> None:
+    """原样回传 className **不应**被「同名墓碑」拦下。
+
+    fix-import-tombstone-name-guard（评审 MEDIUM-2）：本体编辑表单**每次都提交
+    className**（原样回传）⇒ 若改名判重不区分「真改名」与「原样回传」，则
+    「活类 X + 同名墓碑 X」这种形态下，用户**只想改个描述**也会被 422 拦下，
+    并被告知「去恢复那个类并改名」—— 用户根本没在改名，且改不动的**活类**
+    比看不见的墓碑更难办。原样回传不产生新的占名冲突 ⇒ 必须放行。
+
+    真正的改名（className 变了）仍然要拦 —— 那条由
+    `testUpdateClassRenameToTombstoneOccupiedName` 覆盖。
+    """
+    created = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "TwinName", "sourceTable": "t_twin_live"},
+    )
+    assert created.status_code == 201, created.text
+    classId = created.json()["id"]
+
+    # 造出「活类 X + 同名墓碑 X」：墓碑走 DB 直插（API 建不出第二行同名类 ——
+    # createClass 会先被占名校验拒掉；唯一约束是 (class_name, version)）。
+    now = datetime.now(timezone.utc)
+    dbSession.add(
+        OntologyClass(
+            class_name="TwinName",
+            source_table="t_twin_tombstone",
+            version=2,
+            valid_from=now,
+            valid_to=now,
+        )
+    )
+    await dbSession.commit()
+
+    # 原样回传 className + 改描述 ⇒ 不该被「同名墓碑」拦
+    response = await client.put(
+        f"/api/v1/ontology/classes/{classId}",
+        json={"className": "TwinName", "description": "只改描述"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["description"] == "只改描述"
+
+
+async def testUpdateClassRenameToTombstoneOccupiedName(
+    client: AsyncClient,
+    dbSession: AsyncSession,
+) -> None:
+    """**真改名**撞上同名墓碑 ⇒ 仍须 422 并指名占用者（不放宽改名口径）。"""
+    created = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "RenameSource", "sourceTable": "t_rename_src"},
+    )
+    assert created.status_code == 201, created.text
+    classId = created.json()["id"]
+
+    now = datetime.now(timezone.utc)
+    dbSession.add(
+        OntologyClass(
+            class_name="TakenByTombstone",
+            source_table="t_taken_tombstone",
+            version=2,
+            valid_from=now,
+            valid_to=now,
+        )
+    )
+    await dbSession.commit()
+
+    response = await client.put(
+        f"/api/v1/ontology/classes/{classId}",
+        json={"className": "TakenByTombstone"},
+    )
+    assert response.status_code == 422, response.text
+    error = response.json().get("error", "")
+    assert "已删除" in error
+    assert "id=" in error
 
 
 async def testGetClass(client: AsyncClient) -> None:

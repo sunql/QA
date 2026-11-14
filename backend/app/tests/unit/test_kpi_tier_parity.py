@@ -92,16 +92,57 @@ def test_runtime_and_diagnose_tier_agree(source: str, eligible: bool) -> None:
     )
 
 
-def test_known_divergences_are_documented() -> None:
-    """显式钉住两处**已知且本批不改**的分歧（计划 §3 原文）。
+def test_compiled_eligible_routes_to_tier_a() -> None:
+    """COMPILED 是受支持的执行源：对账可直通 ⇒ 运行时与诊断都判 A。"""
+    metric = _eligible_metric(SOURCE_COMPILED)
+    assert _result_of(metric, _kpi()).isTierAEligible is True
 
-    ① ``has_datasource=False``：运行时 C / 诊断 A（诊断没有 datasource 视图）；
-    ② ``execution_source`` 为空或未知值：运行时 C / 诊断 B（诊断侧来源不是
-       ESCAPE_HATCH ⇒ 不可 Tier A）。eligible True/False 两态都钉住。
+    plan = _runtime_plan(metric)
+    assert (plan.tier, plan.reason) == ("A", None)
+    assert kpi_diagnose._tierOf(_result_of(metric, _kpi()), metric) == "A"
 
+
+def test_compiled_ineligible_stays_tier_b() -> None:
+    """COMPILED 与 ESCAPE_HATCH 同分支：对账不合格仍降级 B。"""
+    metric = _ineligible_metric(SOURCE_COMPILED)
+    assert _result_of(metric, _kpi()).isTierAEligible is False
+
+    plan = _runtime_plan(metric)
+    assert (plan.tier, plan.reason) == ("B", "reconcile_not_eligible")
+    assert kpi_diagnose._tierOf(_result_of(metric, _kpi()), metric) == "B"
+
+
+def test_empty_source_is_tier_c_on_both_sides() -> None:
+    """空 source：运行时 / 诊断一致判 C（本任务收口的历史分歧）。"""
+    metric = _eligible_metric("")
+    plan = _runtime_plan(metric)
+    assert (plan.tier, plan.reason) == ("C", "execution_source_missing")
+    assert kpi_diagnose._tierOf(_result_of(metric, _kpi()), metric) == "C"
+
+
+def test_none_source_is_tier_c_on_both_sides() -> None:
+    metric = _eligible_metric(SOURCE_NONE)
+    plan = _runtime_plan(metric)
+    assert (plan.tier, plan.reason) == ("C", "execution_source_none")
+    assert kpi_diagnose._tierOf(_result_of(metric, _kpi()), metric) == "C"
+
+
+@pytest.mark.parametrize("eligible", [True, False])
+def test_unknown_source_is_tier_c_on_both_sides(eligible: bool) -> None:
+    metric = _eligible_metric("WEIRD") if eligible else _ineligible_metric("WEIRD")
+    assert _result_of(metric, _kpi()).isTierAEligible is eligible
+
+    plan = _runtime_plan(metric)
+    assert (plan.tier, plan.reason) == ("C", "execution_source_unknown")
+    assert kpi_diagnose._tierOf(_result_of(metric, _kpi()), metric) == "C"
+
+
+def test_known_divergence_datasource_missing() -> None:
+    """显式钉住仍**已知且本批不改**的分歧（计划 §3 原文）。
+
+    ``has_datasource=False``：运行时 C / 诊断 A（诊断没有 datasource 视图）。
     P5 治理收口跟进；若有人改了任一侧行为，这条会红，请同步更新 summary.md。
     """
-    # ① 无数据源绑定
     metricEscape = _eligible_metric(SOURCE_ESCAPE_HATCH)
     kpiWithoutDs = _kpi(datasource_id=None)
     resultEscape = _result_of(metricEscape, kpiWithoutDs)
@@ -109,13 +150,3 @@ def test_known_divergences_are_documented() -> None:
     assert planNoDs.tier == "C"
     assert planNoDs.reason == "datasource_missing"
     assert kpi_diagnose._tierOf(resultEscape, metricEscape) == "A"
-
-    # ② 来源为空 / 未知：eligible True 与 False 都必须落在运行时 C / 诊断 B
-    for source in ("", "WEIRD"):
-        for eligible in (True, False):
-            metric = _eligible_metric(source) if eligible else _ineligible_metric(source)
-            result = _result_of(metric, _kpi())
-            assert result.isTierAEligible is eligible
-            plan = _runtime_plan(metric)
-            assert plan.tier == "C"
-            assert kpi_diagnose._tierOf(result, metric) == "B"

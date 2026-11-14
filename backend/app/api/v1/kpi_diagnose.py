@@ -158,19 +158,23 @@ def _isEscapeHatchSource(metric: OntologyMetric | None) -> bool:
     )
 
 
+def _isExecutableSource(metric: OntologyMetric | None) -> bool:
+    """COMPILED / ESCAPE_HATCH：可执行源（Tier A 直通候选）。"""
+    return _isCompiledSource(metric) or _isEscapeHatchSource(metric)
+
+
 def _tierOf(
     result: ReconcileResult | None, metric: OntologyMetric | None
 ) -> str:
     """Tier 判定（与运行时 ``planKpiExecution`` 同源）。
 
-    无 metric 或 NONE 源 ⇒ C（NONE 明确不允许 Tier A 直通）；
-    来源不是 ESCAPE_HATCH（COMPILED / 空 / 未知）⇒ B（运行时对空/未知判 C，
-    属已知分歧，P5 收口）；A = pass 无降级；其余 B。
+    无 metric、NONE 源、空或未知 source ⇒ C；COMPILED 与 ESCAPE_HATCH 同属
+    可执行源：对账 ``isTierAEligible`` ⇒ A，否则 B。
     """
     if metric is None or _isNoneSource(metric):
         return TIER_C
-    if not _isEscapeHatchSource(metric):
-        return TIER_B
+    if not _isExecutableSource(metric):
+        return TIER_C
     if result is not None and result.isTierAEligible:
         return TIER_A
     return TIER_B
@@ -224,9 +228,10 @@ def _matchOf(
             governanceSpecOf(kpi), techniqueOf(metric), resolution=resolution
         )
     verdict = result.verdict if result is not None else VERDICT_NO_METRIC
+    # 可执行源（COMPILED / ESCAPE_HATCH）才可能直通；NONE / 空 / 未知一律 False。
     tierAEligible = (
         result.isTierAEligible if result is not None else False
-    ) and not _isNoneSource(metric) and not _isCompiledSource(metric)
+    ) and _isExecutableSource(metric)
     return KpiDiagnoseMatch(
         kpi_code=code,
         kpi_name=kpi.kpi_name if kpi is not None else kpiName,

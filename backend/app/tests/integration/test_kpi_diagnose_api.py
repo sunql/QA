@@ -357,10 +357,10 @@ async def test_diagnose_none_source_reports_tier_c(
     assert match["tierAEligible"] is False
 
 
-async def test_diagnose_compiled_source_reports_tier_b_not_eligible(
+async def test_diagnose_compiled_source_reports_tier_a_eligible(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:
-    """COMPILED 源与运行时同口径：tier=B，且不得再宣称 tierAEligible=True。"""
+    """COMPILED 与运行时同口径：对账可直通 ⇒ tier=A、tierAEligible=True。"""
     await _enableInjectionSwitch(dbSession)
     metric = await _seedMetric(
         dbSession, name="KPI_D2_COMPILED-metric", source="COMPILED"
@@ -387,8 +387,8 @@ async def test_diagnose_compiled_source_reports_tier_b_not_eligible(
     match = response.json()["matches"][0]
     assert match["executionSource"] == "COMPILED"
     assert match["verdict"] == "pass"
-    assert match["tier"] == "B"
-    assert match["tierAEligible"] is False
+    assert match["tier"] == "A"
+    assert match["tierAEligible"] is True
 
 
 async def test_diagnose_match_failure_is_not_swallowed(

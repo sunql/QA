@@ -1656,6 +1656,11 @@ class ChatService(
             timeScope=timeScope,
         )
         if compiled.ok:
+            if compiled.warnings:
+                # 编译成功但有降级提示（如 grain_keys 被忽略）：不改变行为，只让运维面可见。
+                logger.warning(
+                    "TierA 编译告警 kpi=%s warnings=%s", kpiCode, compiled.warnings
+                )
             return compiled.sql, None
         logger.warning("TierA 编译失败 kpi=%s reason=%s", kpiCode, compiled.reason)
         return None, compiled.reason

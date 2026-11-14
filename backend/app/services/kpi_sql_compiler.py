@@ -39,11 +39,19 @@ COMPILED_INVALID_FRAGMENT = "compiled_invalid_fragment"
 COMPILED_MEASURE_CLASS_UNRESOLVED = "compiled_measure_class_unresolved"
 COMPILED_CLASS_TABLE_MISSING = "compiled_class_table_missing"
 COMPILED_JOIN_PATH_MISSING = "compiled_join_path_missing"
+COMPILED_JOIN_DIRECTION_UNSUPPORTED = "compiled_join_direction_unsupported"
+COMPILED_EXPR_CROSS_TABLE_UNSUPPORTED = "compiled_expr_cross_table_unsupported"
+COMPILED_FILTER_SOURCE_UNSUPPORTED = "compiled_filter_source_unsupported"
 COMPILED_TIME_SCOPE_UNSUPPORTED = "compiled_time_scope_unsupported"
 COMPILED_TIME_COLUMN_MISSING = "compiled_time_column_missing"
 COMPILED_NOT_READ_ONLY = "compiled_not_read_only"
 
 WARNING_GRAIN_KEYS_IGNORED = "grain_keys_ignored"
+
+_ROLE_NUMERATOR = "NUMERATOR"
+_ROLE_DENOMINATOR = "DENOMINATOR"
+_ROLE_FILTER = "FILTER"
+_ROLE_BASE = "BASE"
 
 _SUPPORTED_DIALECTS = frozenset({"oracle", "postgresql", "mysql"})
 _SUPPORTED_METRIC_TYPES = frozenset({"MEASURE", "RATIO", "DIFFERENCE"})
@@ -125,11 +133,20 @@ def _isBalanced(text: str) -> bool:
 
 
 def _renderExpr(expr: str, quote: str, qualifier: str | None = None) -> str:
-    """裸标识符加方言引号（跨表时带表限定）；已守卫的算术表达式原样保留。"""
+    """裸标识符加方言引号（跨表时带表限定）；单表下算术表达式原样保留。
+
+    跨表复合表达式不在这里处理：调用方必须先拒绝（见 ``_isCrossTableCompoundExpr``），
+    否则 DB 可能把同名裸列解析到错误的表。
+    """
     if _IDENTIFIER_RE.fullmatch(expr):
         rendered = quote % expr
         return f"{qualifier}.{rendered}" if qualifier else rendered
     return expr
+
+
+def _isCrossTableCompoundExpr(expr: str | None, qualifier: str | None) -> bool:
+    """多表查询（qualifier 非 None，仅跨表时传入）且 expr 非裸标识符。"""
+    return qualifier is not None and expr is not None and not _IDENTIFIER_RE.fullmatch(expr)
 
 
 def _measureParts(measure: Any) -> tuple[str, str | None, str | None] | None:
@@ -165,6 +182,8 @@ def _renderAggregate(
         return "COUNT(*)", None
     if expr is None:
         return None, COMPILED_EXPR_MISSING
+    if _isCrossTableCompoundExpr(expr, qualifier):
+        return None, COMPILED_EXPR_CROSS_TABLE_UNSUPPORTED
 
     rendered = _renderExpr(expr, quote, qualifier)
     if filterText:
@@ -192,6 +211,8 @@ def _renderPerRow(
             return None, COMPILED_EXPR_MISSING
         rendered = "1"
     else:
+        if _isCrossTableCompoundExpr(expr, qualifier):
+            return None, COMPILED_EXPR_CROSS_TABLE_UNSUPPORTED
         rendered = _renderExpr(expr, quote, qualifier)
     if filterText:
         rendered = f"CASE WHEN {filterText} THEN {rendered} END"
@@ -200,18 +221,36 @@ def _renderPerRow(
 
 def _resolveMeasureClassId(
     measure: dict,
-    metric: OntologyMetric,
     sources: Sequence[OntologyMetricSource],
+    *,
+    role: str,
 ) -> int | None:
-    """measure.class_id → 唯一源类 → metric.target_class_id → None。"""
+    """measure.class_id → 角色唯一源类 → None。
+
+    分子：``NUMERATOR`` 优先、``BASE`` 兜底；分母：仅 ``DENOMINATOR``。
+    取首个非空角色层的 distinct class_id：恰好一个 ⇒ 采用；多个 ⇒ 歧义 ⇒ None。
+    ``metric.target_class_id`` 记的是 BASE 类（models.py:434-435），**不再**做任何
+    回退 —— 旧实现对分母也套用它，会把比率静默编到分子表上。
+    """
     explicit = measure.get("class_id")
     if explicit is not None:
         return explicit
-    sourceClassIds = {source.class_id for source in sources}
-    if len(sourceClassIds) == 1:
-        return next(iter(sourceClassIds))
-    if metric.target_class_id is not None:
-        return metric.target_class_id
+    tiers = (
+        (_ROLE_NUMERATOR, _ROLE_BASE)
+        if role == _ROLE_NUMERATOR
+        else (_ROLE_DENOMINATOR,)
+    )
+    for tier in tiers:
+        classIds = {
+            source.class_id
+            for source in sources
+            if _normalizeToken(source.role) == tier
+        }
+        if not classIds:
+            continue
+        if len(classIds) == 1:
+            return next(iter(classIds))
+        return None
     return None
 
 
@@ -286,6 +325,7 @@ def _reconstructPath(
 
 
 def _renderJoinStep(
+    fromClassId: int,
     toClassId: int,
     join: OntologyJoin,
     classById: dict[int, OntologyClass],
@@ -294,6 +334,14 @@ def _renderJoinStep(
     joinType = _normalizeToken(join.join_type) or "INNER"
     if joinType not in _SUPPORTED_JOIN_TYPES:
         return None, COMPILED_JOIN_PATH_MISSING
+    # LEFT 边是方向敏感的：从 target 往 source 反向遍历时，把 LEFT JOIN 渲染到
+    # source 表会保留错误的一侧、静默丢行。不猜翻转，直接 fail-closed。
+    if (
+        joinType == "LEFT"
+        and fromClassId == join.target_class_id
+        and toClassId == join.source_class_id
+    ):
+        return None, COMPILED_JOIN_DIRECTION_UNSUPPORTED
 
     sourceColumns = list(join.source_columns or [])
     targetColumns = list(join.target_columns or [])
@@ -336,10 +384,10 @@ def _renderJoinClauses(
         path = _findJoinPath(fromClassId, targetId, joins)
         if path is None:
             return None, COMPILED_JOIN_PATH_MISSING
-        for _fromId, toId, join in path:
+        for fromId, toId, join in path:
             if id(join) in usedJoinIds:
                 continue
-            clause, reason = _renderJoinStep(toId, join, classById, quote)
+            clause, reason = _renderJoinStep(fromId, toId, join, classById, quote)
             if reason is not None:
                 return None, reason
             usedJoinIds.add(id(join))
@@ -452,7 +500,9 @@ def compileMetricSql(
     numerator = metric.numerator_measure
     if not isinstance(numerator, dict):
         return _fail(COMPILED_MEASURE_MISSING, warnings)
-    numeratorClassId = _resolveMeasureClassId(numerator, metric, sources)
+    numeratorClassId = _resolveMeasureClassId(
+        numerator, sources, role=_ROLE_NUMERATOR
+    )
     if numeratorClassId is None:
         return _fail(COMPILED_MEASURE_CLASS_UNRESOLVED, warnings)
 
@@ -469,14 +519,32 @@ def compileMetricSql(
         if not isinstance(rawDenominator, dict):
             return _fail(COMPILED_MEASURE_MISSING, warnings)
         denominator = rawDenominator
-        denominatorClassId = _resolveMeasureClassId(denominator, metric, sources)
+        denominatorClassId = _resolveMeasureClassId(
+            denominator, sources, role=_ROLE_DENOMINATOR
+        )
         if denominatorClassId is None:
             return _fail(COMPILED_MEASURE_CLASS_UNRESOLVED, warnings)
         denominatorTable, reason = _classTable(denominatorClassId, classById)
         if reason is not None:
             return _fail(reason, warnings)
 
-    # 跨表 SELECT 必须限定值列，且按各度量自身类表限定（不是统一用 FROM 表）。
+    # FILTER 角色的源类编译器无法忠实渲染（1:N join 会放大聚合），fail-closed。
+    # 与分子/分母同类的 FILTER 源不算额外表（它不引入新的 join 需求）。
+    resolvedClassIds = {numeratorClassId}
+    if denominatorClassId is not None:
+        resolvedClassIds.add(denominatorClassId)
+    filterClassIds = {
+        source.class_id
+        for source in sources
+        if _normalizeToken(source.role) == _ROLE_FILTER
+    }
+    if filterClassIds - resolvedClassIds:
+        return _fail(COMPILED_FILTER_SOURCE_UNSUPPORTED, warnings)
+
+    # 跨表 SELECT：裸标识符值列按各度量自身类表限定（不是统一用 FROM 表）；
+    # 复合表达式（如 `A * B`）**拒绝**（fail-closed）—— 裸列可能被 DB 解析到
+    # 错误的表；measure.filter 片段仍在 CASE WHEN 内原样嵌入，靠 DB 解析，
+    # 同名歧义会报错 ⇒ 执行失败 ⇒ 降级 Tier B。
     multiTable = denominatorTable is not None and denominatorTable != numeratorTable
     numeratorQualifier = (
         _quoteTable(_bakeTableName(numeratorTable, safePrefix), quote) if multiTable else None

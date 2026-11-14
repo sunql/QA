@@ -220,9 +220,11 @@ def test_measure_without_class_id_and_multiple_sources_fails_closed() -> None:
         numerator_measure={"agg": "SUM", "expr": "AMOUNT"},
         target_class_id=None,
     )
+    # 两个 BASE 源 ⇒ 分子角色集合有歧义 ⇒ fail-closed（FILTER 源现在由
+    # test_filter_source_class_not_equal_to_measure_class_fails_closed 单独覆盖）。
     sources = [
         OntologyMetricSource(metric_id=1, class_id=10, role="BASE"),
-        OntologyMetricSource(metric_id=1, class_id=20, role="FILTER"),
+        OntologyMetricSource(metric_id=1, class_id=20, role="BASE"),
     ]
 
     result = _compile(metric, [_cls(10, "orders"), _cls(20, "order_lines")], sources=sources)
@@ -325,3 +327,255 @@ def test_postgres_time_scope_fails_closed() -> None:
 
     assert result.ok is False
     assert result.reason == "compiled_time_scope_unsupported"
+
+
+# =============================================================================
+# 终审修复波：角色感知的 measure→class 解析 / LEFT 方向 / 跨表复合表达式
+# =============================================================================
+
+
+def _src(class_id: int, role: str) -> OntologyMetricSource:
+    return OntologyMetricSource(metric_id=1, class_id=class_id, role=role)
+
+
+def _ratioMetric(numerator: dict, denominator: dict, **overrides) -> OntologyMetric:
+    return _metric(
+        metric_type="RATIO",
+        aggregation_order="WEIGHTED_RATIO",
+        numerator_measure=numerator,
+        denominator_measure=denominator,
+        **overrides,
+    )
+
+
+def test_ratio_denominator_resolves_by_role_not_target_class() -> None:
+    # T1.1（简报原断言为 unresolved，与 §1 角色语义矛盾：BASE 分子 A + DENOMINATOR
+    # 分母 B 各解析成功。这里改为钉住「分母不得再落回 target_class_id」这一修复点，
+    # 修复前旧代码会把分母编译成 A（无 JOIN、值列不限定）⇒ 本用例红。）
+    metric = _ratioMetric(
+        {"agg": "SUM", "expr": "NUM_QTY"},
+        {"agg": "SUM", "expr": "DEN_QTY"},
+        target_class_id=10,
+    )
+    sources = [_src(10, "BASE"), _src(20, "DENOMINATOR")]
+    join = OntologyJoin(
+        source_class_id=10,
+        source_columns=["ORDER_ID"],
+        target_class_id=20,
+        target_columns=["ID"],
+        join_type="INNER",
+    )
+
+    result = _compile(
+        metric,
+        [_cls(10, "orders"), _cls(20, "order_lines")],
+        [join],
+        sources=sources,
+    )
+
+    assert result.ok is True
+    assert result.reason is None
+    assert 'FROM "orders"' in result.sql
+    assert 'INNER JOIN "order_lines"' in result.sql
+    assert 'SUM("orders"."NUM_QTY")' in result.sql
+    assert 'SUM("order_lines"."DEN_QTY")' in result.sql
+
+
+def test_numerator_and_denominator_resolve_by_role() -> None:
+    metric = _ratioMetric(
+        {"agg": "SUM", "expr": "NUM_QTY"},
+        {"agg": "SUM", "expr": "DEN_QTY"},
+        target_class_id=None,
+    )
+    sources = [_src(10, "NUMERATOR"), _src(20, "DENOMINATOR")]
+    join = OntologyJoin(
+        source_class_id=10,
+        source_columns=["ORDER_ID"],
+        target_class_id=20,
+        target_columns=["ID"],
+        join_type="INNER",
+    )
+
+    result = _compile(
+        metric,
+        [_cls(10, "orders"), _cls(20, "order_lines")],
+        [join],
+        sources=sources,
+    )
+
+    assert result.ok is True
+    assert 'FROM "orders"' in result.sql
+    assert '"order_lines"' in result.sql
+    assert 'SUM("orders"."NUM_QTY")' in result.sql
+    assert 'SUM("order_lines"."DEN_QTY")' in result.sql
+
+
+def test_numerator_role_ambiguous_fails_closed() -> None:
+    metric = _metric(
+        numerator_measure={"agg": "SUM", "expr": "AMOUNT"},
+        target_class_id=None,
+    )
+    sources = [_src(10, "NUMERATOR"), _src(20, "NUMERATOR")]
+
+    result = _compile(
+        metric, [_cls(10, "orders"), _cls(20, "order_lines")], sources=sources
+    )
+
+    assert result.ok is False
+    assert result.reason == "compiled_measure_class_unresolved"
+
+
+def test_lone_denominator_source_does_not_resolve_measure_numerator() -> None:
+    metric = _metric(
+        numerator_measure={"agg": "SUM", "expr": "AMOUNT"},
+        target_class_id=None,
+    )
+    sources = [_src(20, "DENOMINATOR")]
+
+    result = _compile(metric, [_cls(20, "order_lines")], sources=sources)
+
+    assert result.ok is False
+    assert result.reason == "compiled_measure_class_unresolved"
+
+
+def test_filter_source_class_not_equal_to_measure_class_fails_closed() -> None:
+    metric = _ratioMetric(
+        {"agg": "SUM", "expr": "NUM_QTY"},
+        {"agg": "SUM", "expr": "DEN_QTY"},
+        target_class_id=None,
+    )
+    sources = [
+        _src(10, "BASE"),
+        _src(20, "DENOMINATOR"),
+        _src(30, "FILTER"),
+    ]
+    join = OntologyJoin(
+        source_class_id=10,
+        source_columns=["ORDER_ID"],
+        target_class_id=20,
+        target_columns=["ID"],
+        join_type="INNER",
+    )
+
+    result = _compile(
+        metric,
+        [_cls(10, "orders"), _cls(20, "order_lines"), _cls(30, "regions")],
+        [join],
+        sources=sources,
+    )
+
+    assert result.ok is False
+    assert result.reason == "compiled_filter_source_unsupported"
+
+
+def test_filter_source_same_class_as_measure_still_compiles() -> None:
+    metric = _metric(
+        numerator_measure={"agg": "SUM", "expr": "AMOUNT"},
+        target_class_id=None,
+    )
+    sources = [_src(10, "BASE"), _src(10, "FILTER")]
+
+    result = _compile(metric, [_cls(10, "orders")], sources=sources)
+
+    assert result.ok is True
+    assert 'FROM "orders"' in result.sql
+
+
+# ── LEFT 边方向 ────────────────────────────────────────────────────────────
+
+
+def _leftJoinMetric(numeratorClassId: int, denominatorClassId: int) -> OntologyMetric:
+    return _ratioMetric(
+        {"agg": "SUM", "expr": "QTY", "class_id": numeratorClassId},
+        {"agg": "SUM", "expr": "QTY", "class_id": denominatorClassId},
+    )
+
+
+def _leftJoin(joinType: str) -> OntologyJoin:
+    # 声明方向：source=customers(10) → target=orders(20)
+    return OntologyJoin(
+        source_class_id=10,
+        source_columns=["ID"],
+        target_class_id=20,
+        target_columns=["CUSTOMER_ID"],
+        join_type=joinType,
+    )
+
+
+def _joinClasses() -> list[OntologyClass]:
+    return [_cls(10, "customers"), _cls(20, "orders")]
+
+
+def test_left_join_reverse_traversal_fails_closed() -> None:
+    # 分子 = join.target(20)，分母 = join.source(10) ⇒ LEFT 从 target 往 source 遍历
+    result = _compile(
+        _leftJoinMetric(20, 10),
+        _joinClasses(),
+        [_leftJoin("LEFT")],
+    )
+
+    assert result.ok is False
+    assert result.reason == "compiled_join_direction_unsupported"
+
+
+def test_inner_join_reverse_traversal_still_compiles() -> None:
+    result = _compile(
+        _leftJoinMetric(20, 10),
+        _joinClasses(),
+        [_leftJoin("INNER")],
+    )
+
+    assert result.ok is True
+    assert 'FROM "orders"' in result.sql
+    assert 'INNER JOIN "customers"' in result.sql
+
+
+def test_left_join_declared_direction_compiles() -> None:
+    # 分子 = join.source(10)，分母 = join.target(20) ⇒ 与声明方向一致
+    result = _compile(
+        _leftJoinMetric(10, 20),
+        _joinClasses(),
+        [_leftJoin("LEFT")],
+    )
+
+    assert result.ok is True
+    assert 'FROM "customers"' in result.sql
+    assert 'LEFT JOIN "orders"' in result.sql
+
+
+# ── 跨表复合值表达式 ────────────────────────────────────────────────────────
+
+
+def test_compound_value_expr_in_multi_table_query_fails_closed() -> None:
+    metric = _ratioMetric(
+        {"agg": "SUM", "expr": "A * B", "class_id": 20},
+        {"agg": "SUM", "expr": "QTY", "class_id": 10},
+    )
+    join = OntologyJoin(
+        source_class_id=10,
+        source_columns=["ORDER_ID"],
+        target_class_id=20,
+        target_columns=["ID"],
+        join_type="INNER",
+    )
+
+    result = _compile(
+        metric,
+        [_cls(10, "orders"), _cls(20, "order_lines")],
+        [join],
+    )
+
+    assert result.ok is False
+    assert result.reason == "compiled_expr_cross_table_unsupported"
+
+
+def test_compound_value_expr_single_table_still_compiles() -> None:
+    metric = _metric(
+        numerator_measure={"agg": "SUM", "expr": "A * B", "class_id": 10},
+        target_class_id=10,
+    )
+
+    result = _compile(metric, [_cls(10, "orders")])
+
+    assert result.ok is True
+    assert result.sql == 'SELECT SUM(A * B) AS value FROM "orders"'

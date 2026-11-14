@@ -214,3 +214,14 @@ NONE
   integration shard 3 撞 90 分钟超时被 `cancelled` ⇒ 闸门判 `UNUSABLE_JOBS`
   （该分片失败集合为空，27 条「净新增」全为假阳性）。按既定恢复流程整轮复跑该基线 run
   （attempt 2），复跑收敛后推送本提交产生新的 PR CI 事件，闸门重新判定。
+
+### 追加批次（M4 运行时指标，PR #126）
+
+- **PR run** `43573796127`（head `e20f5d0f`）对 **main push 基线** `43570625919`
+  （`3029a559`，9 个 job 全部可用）逐分片对差：失败集合**净新增 0 / 净丢失 0**；
+  各分片失败数与基线完全一致（unit 10/6/1/3，integration 28/23/32/27），frontend 通过。
+- 工具报 `COVERAGE_MISMATCH` 的唯一原因是 **PR run 多出 `merge-gate / failure-set-diff`
+  job**（push 到 main 时该闸门另开一个 workflow，不在同一 run 内）——不是覆盖缺失；
+  该闸门 job 自身结论 **success**，即闸门侧判 MERGEABLE。
+- 现场工具命令：`python3 -m app.utils.ci_failure_set --repo sunql/QA
+  --base-run 43570625919 --pr-run 43573796127`。

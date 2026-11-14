@@ -28,7 +28,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -98,9 +98,12 @@ from app.services.chat_stream_output import (
 from app.services.kpi_execution_service import (
     REASON_DATASOURCE_MISSING,
     REASON_METRIC_MISSING,
+    SOURCE_COMPILED,
     TIER_A,
     KpiExecutionService,
 )
+from app.services.kpi_sql_compiler import loadAndCompileMetricSql
+from app.services.time_scope_resolver import parseTimeScope
 from app.services.time_scope_renderer import (
     REASON_TIME_SCOPE_PARSE_FAILED,
     TIME_SCOPE_PLACEHOLDER,
@@ -348,6 +351,42 @@ def _wrapMultistepInputs(
     safe_inj = wrapUntrusted(UntrustedLabel.STEP_RESULT, injection_text) if injection_text else None
     safe_st = wrapUntrusted(UntrustedLabel.HISTORY, statePrompt) if statePrompt else None
     return safe_sub, safe_inj, safe_st
+
+
+def _datasourceTypeToken(datasource: DataSource) -> str:
+    value = datasource.type
+    return value.value if hasattr(value, "value") else str(value)
+
+
+def _prepareEscapeHatchFormula(
+    metric: OntologyMetric,
+    datasource: DataSource,
+    question: str | None,
+    kpiCode: str,
+) -> tuple[str | None, str | None]:
+    """ESCAPE_HATCH：``{time_scope}`` 占位符确定性渲染（既有行为逐字保留）。
+
+    渲染失败返回 ``(None, reason)``，绝不把含占位符的原文发给数据库。
+    """
+    formula = metric.formula or ""
+    timeColumn = (metric.time_column or "").strip()
+    if TIME_SCOPE_PLACEHOLDER not in formula:
+        return formula, None
+    if not timeColumn or not (question or "").strip():
+        return None, REASON_TIME_SCOPE_PARSE_FAILED
+    prepared = prepareTimeParameterizedFormula(
+        formula=formula,
+        question=question,
+        timeColumn=timeColumn,
+        dialect=_datasourceTypeToken(datasource),
+    )
+    if not prepared.ok:
+        logger.warning(
+            "TierA 时间参数化失败 kpi=%s reason=%s", kpiCode, prepared.reason
+        )
+        return None, prepared.reason
+    # 渲染器契约保证 ok ⇒ formula 非 None；cast 仅用于类型收敛，不改变运行期值。
+    return cast(str, prepared.formula), None
 
 
 class ChatService(
@@ -1591,6 +1630,36 @@ class ChatService(
     # Phase 1.4：L1 KPI 语义匹配
     # =========================================================================
 
+    async def _resolveTierAFormula(
+        self,
+        metric: OntologyMetric,
+        datasource: DataSource,
+        question: str | None,
+        session: AsyncSession,
+        kpiCode: str,
+    ) -> tuple[str | None, str | None]:
+        """按 execution_source 取可执行 SQL：COMPILED 实时编译，其余用 formula。
+
+        COMPILED 编译失败返回 ``(None, reason)``（fail-closed），由调用方降级
+        Tier B；绝不执行空串/半成品 SQL。Tier A 路径拿不到 schema 前缀，编译
+        一律 ``schemaPrefix=None``。
+        """
+        source = (metric.execution_source or "").strip().upper()
+        if source != SOURCE_COMPILED:
+            return _prepareEscapeHatchFormula(metric, datasource, question, kpiCode)
+        timeScope = parseTimeScope(question) if (question or "").strip() else None
+        compiled = await loadAndCompileMetricSql(
+            session,
+            metric,
+            datasourceType=_datasourceTypeToken(datasource),
+            schemaPrefix=None,
+            timeScope=timeScope,
+        )
+        if compiled.ok:
+            return compiled.sql, None
+        logger.warning("TierA 编译失败 kpi=%s reason=%s", kpiCode, compiled.reason)
+        return None, compiled.reason
+
     async def _executeTierA(
         self,
         match: KpiMatchResult,
@@ -1598,7 +1667,8 @@ class ChatService(
         session: AsyncSession | None,
         question: str | None = None,
     ) -> tuple[ChatResponse | None, str | None]:
-        """Tier A：执行 metric.formula；失败返回 (None, reason) 交 preamble 降级。
+        """Tier A：执行 ESCAPE_HATCH formula 或 COMPILED 实时编译 SQL；失败返回
+        ``(None, reason)`` 交 preamble 降级。
 
         覆写 ``L1L4PreambleMixin`` 的失败占位实现。异常不在这里吞：调用方
         （``_runL1AndL4Preamble``）已把整段调用纳入降级边界，抛出 ⇒ Tier B。
@@ -1615,28 +1685,11 @@ class ChatService(
         if datasource is None:
             return None, REASON_DATASOURCE_MISSING
 
-        # P4a：占位符渲染（确定性三步：解析 → 渲染 → 替换）。
-        # 渲染失败 ⇒ (None, reason) 走 Tier B 哨兵；绝不能把含占位符原文的
-        # formula 发给数据库（花括号必语法错，且语义不可控）。
-        formula = metric.formula or ""
-        timeColumn = (metric.time_column or "").strip()
-        if TIME_SCOPE_PLACEHOLDER in formula:
-            if not timeColumn or not (question or "").strip():
-                return None, REASON_TIME_SCOPE_PARSE_FAILED
-            prepared = prepareTimeParameterizedFormula(
-                formula=formula,
-                question=question,
-                timeColumn=timeColumn,
-                dialect=datasource.type.value if hasattr(datasource.type, "value") else str(datasource.type),
-            )
-            if not prepared.ok:
-                logger.warning(
-                    "TierA 时间参数化失败 kpi=%s reason=%s", match.code, prepared.reason
-                )
-                return None, prepared.reason
-            # 走到这里 prepared.ok 为真，渲染器契约保证 formula 非 None；
-            # 不再回退到含 {time_scope} 占位符的原文（否则契约破坏时会把占位符发进 DB）。
-            formula = prepared.formula
+        formula, reason = await self._resolveTierAFormula(
+            metric, datasource, question, session, match.code
+        )
+        if reason is not None:
+            return None, reason
 
         result = await self._kpiExecutionService.execute(
             # formula 类型为 str；空串只可能出现在「计划被绕过」的防御性路径。

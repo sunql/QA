@@ -26,7 +26,7 @@ from decimal import Decimal
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -128,12 +128,19 @@ async def _seedKpiWithMetric(
     executionSource: str = "ESCAPE_HATCH",
     businessDefinition: str = "按测试元数据表计数",
     timeColumn: str | None = None,
+    metricOverrides: dict | None = None,
+    sourceTable: str | None = None,
+    sourceRole: str = "NUMERATOR",
 ) -> tuple[OntologyMetric, KpiCatalog]:
     """对账 pass 的最小形状：MEASURE + 分子 {cnt} + 粒度 {kpi_code}。
 
     P3 D3 起层 2 走别名解析：夹具按**回填后等价状态**种源类属性
     （``cnt`` / ``kpi_code`` 可解析）与时间粒度（``MONTH``），否则无源类会
     判 unknown、time_grain 缺失也会判 unknown，Tier A 判定被误伤。
+
+    ``metricOverrides`` 在 flush 前按 setattr 覆盖技术形态字段（COMPILED 用例
+    需要把分子换成物理列）；``sourceTable`` / ``sourceRole`` 供编译器用例给源类
+    落 ``source_table`` 与 BASE 角色。
     """
     metric = OntologyMetric(
         metric_name=f"{kpiCode}-metric",
@@ -146,6 +153,8 @@ async def _seedKpiWithMetric(
         time_column=timeColumn,
         created_by="tier-a-chat-test",
     )
+    for key, value in (metricOverrides or {}).items():
+        setattr(metric, key, value)
     dbSession.add(metric)
     await dbSession.flush()
 
@@ -168,6 +177,7 @@ async def _seedKpiWithMetric(
     ontologyClass = OntologyClass(
         class_name=f"{kpiCode}-source",
         version=1,
+        source_table=sourceTable,
         created_by="tier-a-chat-test",
     )
     dbSession.add(ontologyClass)
@@ -196,7 +206,7 @@ async def _seedKpiWithMetric(
         OntologyMetricSource(
             metric_id=metric.id,
             class_id=ontologyClass.id,
-            role="NUMERATOR",
+            role=sourceRole,
         )
     )
     await dbSession.commit()
@@ -888,3 +898,156 @@ async def test_placeholder_metric_oracle_renders_predicate_into_formula(
     assert "{time_scope}" not in sql
     assert "created_time >= DATE '" in sql
     assert "created_time < DATE '" in sql
+
+
+# ---------------------------------------------------------------------------
+# 9. COMPILED：结构化列实时编译，0 LLM
+# ---------------------------------------------------------------------------
+
+
+async def test_tier_a_compiled_metric_executes_without_llm(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """COMPILED：结构化列编译成单值只读 SELECT，0 LLM。
+
+    ``kpi_code`` 是 NOT NULL 列 ⇒ ``COUNT(kpi_code)`` 与 ``COUNT(*)`` 等价，
+    对账层 2 也能把治理分子列与技术 measure 对齐（``COUNT(*)`` 的 expr=None
+    会判 technical_measure_unjudgeable，永远进不了 Tier A）。
+    """
+    import app.api.v1.chat as chat_module
+
+    def _failLlm(_config):  # noqa: ANN001
+        raise AssertionError("Tier A COMPILED 不得调用 LLM")
+
+    monkeypatch.setattr(chat_module._service, "_llmFactory", _failLlm)
+
+    ds = await _seedSelfDatasource(dbSession)
+    await _seedSwitches(dbSession)
+    _, kpi = await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_TIER_A_COMPILED",
+        kpiName="编译指标",
+        keywords=["编译指标"],
+        formula="",
+        executionSource="COMPILED",
+        metricOverrides={
+            "numerator_measure": {"agg": "COUNT", "expr": "kpi_code"},
+        },
+        sourceTable="kpi_catalog",
+        sourceRole="BASE",
+    )
+    # 治理侧分子列必须与技术 measure 的物理列一致，否则层 2 判 unknown。
+    kpi.numerator_columns = ["kpi_code"]
+    await dbSession.commit()
+    await _warmKpiCache(dbSession)
+
+    baseline = await _countKpiCatalog(dbSession)
+    assert baseline >= 1
+
+    resp = await client.post(
+        _CHAT_URL,
+        json=_payload("编译指标统计", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["intent"] == "l1_match"
+    assert body["executionTier"] == "A"
+    assert body["degradedReason"] is None
+    assert body["tokensUsed"] == 0
+    assert body["cost"] == 0.0
+    assert body["kpiCode"] == kpi.kpi_code
+
+    data = body["data"]
+    assert data and len(data) == 1
+    value = next(v for v in data[0].values() if v is not None)
+    assert abs(float(value) - float(baseline)) <= 0.01, (
+        f"COMPILED 结果 {value!r} 与基线 COUNT(*)={baseline} 不一致"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 10. COMPILED：编译 fail-closed ⇒ Tier B（不是 500）
+# ---------------------------------------------------------------------------
+
+
+async def test_tier_a_compiled_missing_join_degrades_to_tier_b(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """跨两类但 join 目录无边 ⇒ 编译 fail-closed，走 Tier B 而不是 500。"""
+    ds = await _seedSelfDatasource(dbSession)
+    config = await _seedTierBPipelineSupport(dbSession)
+    _installTierBFakes(monkeypatch, config)
+    await _seedSwitches(dbSession)
+    metric, kpi = await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_TIER_A_NOJOIN",
+        kpiName="无连接指标",
+        keywords=["无连接指标"],
+        formula="",
+        executionSource="COMPILED",
+        sourceTable="kpi_catalog",
+        metricOverrides={
+            "metric_type": "DIFFERENCE",
+            "numerator_measure": {"agg": "COUNT", "expr": "cnt"},
+            "denominator_measure": {"agg": "COUNT", "expr": "den_cnt"},
+        },
+    )
+    numSource = (
+        await dbSession.execute(
+            select(OntologyMetricSource).where(
+                OntologyMetricSource.metric_id == metric.id
+            )
+        )
+    ).scalar_one()
+    numClass = await dbSession.get(OntologyClass, numSource.class_id)
+    denClass = OntologyClass(
+        class_name="KPI_TIER_A_NOJOIN-den",
+        version=1,
+        source_table="other_den_table",
+        created_by="tier-a-chat-test",
+    )
+    dbSession.add(denClass)
+    await dbSession.flush()
+    dbSession.add(
+        OntologyProperty(
+            class_id=denClass.id,
+            property_name="den_cnt",
+            source_column="den_cnt",
+            data_type="VARCHAR",
+        )
+    )
+    dbSession.add(
+        OntologyMetricSource(
+            metric_id=metric.id,
+            class_id=denClass.id,
+            role="DENOMINATOR",
+        )
+    )
+    # 两源类 ⇒ 编译器必须靠显式 class_id 才能各自定位源表。
+    metric.numerator_measure = {
+        "agg": "COUNT", "expr": "cnt", "class_id": numClass.id,
+    }
+    metric.denominator_measure = {
+        "agg": "COUNT", "expr": "den_cnt", "class_id": denClass.id,
+    }
+    kpi.denominator_columns = ["den_cnt"]
+    await dbSession.commit()
+    await _warmKpiCache(dbSession)
+
+    # 先钉住对账：本夹具确实有资格进 Tier A，失败只能来自编译。
+    reconciled = reconcileMetric(governanceSpecOf(kpi), techniqueOf(metric))
+    assert reconciled.isTierAEligible is True, reconciled.reasons()
+
+    resp = await client.post(
+        _CHAT_URL,
+        json=_payload("无连接指标统计", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["executionTier"] == "B", body
+    assert body["degradedReason"] == "compiled_join_path_missing", body

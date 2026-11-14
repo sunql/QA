@@ -10,22 +10,23 @@ import re
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import SqlSafetyError
+from app.domain.models import (
+    OntologyClass,
+    OntologyJoin,
+    OntologyMetric,
+    OntologyMetricSource,
+)
 from app.infrastructure.business_db_pool import _assert_read_only
 from app.services.time_scope_renderer import (
     TimeScopeRenderUnsupportedError,
     renderTimeScopePredicate,
 )
-
-if TYPE_CHECKING:  # 仅用于类型标注，避免运行期引入 ORM 依赖
-    from app.domain.models import (
-        OntologyClass,
-        OntologyJoin,
-        OntologyMetric,
-        OntologyMetricSource,
-    )
 
 # ── 原因码（全部 fail-closed；字符串是跨层契约，勿随意改名）───────────────
 COMPILED_DIALECT_UNSUPPORTED = "compiled_dialect_unsupported"
@@ -525,3 +526,92 @@ def compileMetricSql(
     except SqlSafetyError:
         return _fail(COMPILED_NOT_READ_ONLY, warnings)
     return CompiledSql(ok=True, sql=sql, warnings=warnings)
+
+
+_MAX_JOIN_HOPS = 4
+
+
+def _measureClassIds(metric: OntologyMetric) -> set[int]:
+    """显式 measure.class_id ∪ metric.target_class_id（都不是 bool）。"""
+    classIds: set[int] = set()
+    for raw in (metric.numerator_measure, metric.denominator_measure):
+        if isinstance(raw, dict):
+            classId = raw.get("class_id")
+            if isinstance(classId, int) and not isinstance(classId, bool):
+                classIds.add(classId)
+    if isinstance(metric.target_class_id, int):
+        classIds.add(metric.target_class_id)
+    return classIds
+
+
+async def _loadClassGraph(
+    session: AsyncSession, seedClassIds: set[int]
+) -> tuple[list[OntologyClass], list[OntologyJoin]]:
+    """按 join 边的度数向外扩展，最多 ``_MAX_JOIN_HOPS`` 层。
+
+    找不到路径时由 ``compileMetricSql`` fail-closed（``compiled_join_path_missing``），
+    不在这里猜表或生成半成品 SQL。
+    """
+    if not seedClassIds:
+        return [], []
+    classIds = set(seedClassIds)
+    joinsById: dict[int, OntologyJoin] = {}
+    for _ in range(_MAX_JOIN_HOPS):
+        rows = (
+            await session.execute(
+                select(OntologyJoin).where(
+                    or_(
+                        OntologyJoin.source_class_id.in_(classIds),
+                        OntologyJoin.target_class_id.in_(classIds),
+                    )
+                )
+            )
+        ).scalars().all()
+        joinsById = {join.id: join for join in rows}
+        endpointIds = {join.source_class_id for join in rows} | {
+            join.target_class_id for join in rows
+        }
+        if endpointIds <= classIds:
+            break
+        classIds |= endpointIds
+    classes = (
+        await session.execute(
+            select(OntologyClass).where(OntologyClass.id.in_(classIds))
+        )
+    ).scalars().all()
+    return list(classes), list(joinsById.values())
+
+
+async def loadAndCompileMetricSql(
+    session: AsyncSession,
+    metric: OntologyMetric,
+    *,
+    datasourceType: str,
+    schemaPrefix: str | None = None,
+    timeScope: Any | None = None,
+) -> CompiledSql:
+    """加载指标源类/类表/join 目录后调用 ``compileMetricSql``。
+
+    ``schemaPrefix=None``：chat Tier A 路径没有 NL2SQL 主路的 datasource/schema
+    解析结果，本批一律不带 schema 前缀（表名按 ``source_table`` 原样使用）。
+    """
+    sources = (
+        await session.execute(
+            select(OntologyMetricSource).where(
+                OntologyMetricSource.metric_id == metric.id
+            )
+        )
+    ).scalars().all()
+    seedClassIds = _measureClassIds(metric) | {
+        source.class_id for source in sources
+    }
+    classes, joins = await _loadClassGraph(session, seedClassIds)
+    return compileMetricSql(
+        metric,
+        sources=sources,
+        classes=classes,
+        joins=joins,
+        datasourceType=datasourceType,
+        schemaPrefix=schemaPrefix,
+        timeScope=timeScope,
+    )

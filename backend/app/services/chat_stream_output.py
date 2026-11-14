@@ -48,6 +48,7 @@ from app.services.chat_constants import (
 from app.services.kpi_execution_service import (
     REASON_EXECUTION_ERROR,
     REASON_EXECUTION_SOURCE_UNKNOWN,
+    SOURCE_COMPILED,
     TIER_A,
     TIER_B,
     TIER_C,
@@ -459,6 +460,15 @@ class L1L4PreambleMixin:
             and TIME_SCOPE_PLACEHOLDER in (metric.formula or "")
             and (metric.time_column or "").strip()
         )
+        executionSource = (
+            (metric.execution_source or "").strip().upper()
+            if metric is not None else ""
+        )
+        # COMPILED 的可执行性来自编译器，不依赖 formula 文本；空 formula 是正常态。
+        formulaPresent = bool(
+            metric is not None
+            and ((metric.formula or "").strip() or executionSource == SOURCE_COMPILED)
+        )
         plan = planKpiExecution(
             switch_on=True,
             kpi_found=True,
@@ -466,7 +476,7 @@ class L1L4PreambleMixin:
             execution_source=(metric.execution_source if metric is not None else None),
             tier_a_eligible=bool(reconcile is not None and reconcile.isTierAEligible),
             has_datasource=kpi.datasource_id is not None,
-            formula_present=bool(metric is not None and (metric.formula or "").strip()),
+            formula_present=formulaPresent,
             has_explicit_time_scope=hasExplicitTime,
             time_param_ready=timeParamReady,
         )

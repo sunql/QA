@@ -2,7 +2,7 @@
 
 - **日期**：2026-10-31
 - **分支**：`feat/chat-output-sync`（base `main` @ `4e535289`）
-- **状态**：T1–T7 已完成（见 §8 交付记录），待合并/部署
+- **状态**：T1–T7 已完成（见 §8 交付记录），**已合并并部署**（PR #93 squash → `af0ccc9a`；随 1101 批次部署，生产 alembic `0140`）
 - **关联**：[2026-10-31-chat-report-charts](../2026-10-31-chat-report-charts/summary.md)（本批是其 §5「非目标」的下一批）、[feat-pdf-export](../feat-pdf-export/summary.md)
 
 ---

@@ -3,7 +3,7 @@
 - **日期**：2026-10-18
 - **作者**：Claude / phase3-reconciler
 - **Phase**：Phase 3 P2 收尾（死代码清理 + hypothesis 验证状态 i18n）
-- **状态**：in-review
+- **状态**：**已合并**（PR #61 → `58a2253b`，删除无调用方死代码 + hypothesis 状态 i18n）；零迁移、无后端行为变更，后端随下次发布即可
 - **关联变更**：[2026-10-15-phase3-reconciled-main](../2026-10-15-phase3-reconciled-main/summary.md)（P2-1 / P1-5 初版）、[aichat-p2-followups-2026-10-16](../aichat-p2-followups-2026-10-16/remaining-work-ssot.md)
 - **迁移版本**：无
 - **MEMORY**：[qa-system-p2-dead-code-cleanup.md](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-p2-dead-code-cleanup.md)

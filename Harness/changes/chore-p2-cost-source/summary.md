@@ -3,7 +3,7 @@
 - **日期**：2026-10-18
 - **作者**：Claude / phase3-reconciler
 - **Phase**：Phase 3 P2 收尾（Token 台账成本口径写入标注 + 读契约）
-- **状态**：in-review
+- **状态**：**已合并**（PR #62 → `7a425746`，全部台账写入方标注 `cost_source` 并对外暴露）；零迁移
 - **关联变更**：[2026-10-15-phase3-reconciled-main](../2026-10-15-phase3-reconciled-main/summary.md)（P1-2 初版）、[chore-p2-residual-cleanup](../chore-p2-residual-cleanup/summary.md)（同批 P2 收尾）
 - **迁移版本**：无（`0126_session_token_usage_cost_source.py` 已存在）
 - **MEMORY**：[qa-system-cost-source-labeling.md](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-cost-source-labeling.md)

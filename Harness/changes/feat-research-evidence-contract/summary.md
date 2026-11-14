@@ -3,7 +3,7 @@
 - **日期**：2026-10-13
 - **作者**：Claude / 启琳
 - **Phase**：**环节一** 研究会话证据契约（Task 1–9）
-- **状态**：in-review（32 个提交已在分支 `feat/multi-step-persist`，HEAD `17cd1f0`；**未合并 main**）
+- **状态**：**已合并**（随分支 `feat/multi-step-persist` 经 PR #8 → merge commit `b3889ef2` 于 2026-10-14 入 main；本文记录的 HEAD `17cd1f0` 是 `origin/main` 祖先）
 - **关联变更**：
   - successor（计划中，**尚未启动**）：环节二 `feat-research-platform`（Tasks 10–16，平台级增强）
   - 邻近变更（同分支、不同域）：[feat-multi-step-persist](../feat-multi-step-persist/summary.md)（chat 侧多步落库/续跑）

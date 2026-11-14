@@ -3,7 +3,7 @@
 - **日期**：2026-10-01
 - **作者**：Claude / 启琳
 - **Phase**：NL2SQL 计划校验（`validatePlan` 公式分支三路口径 + CTE 判定 SSOT 化 + 失败留痕日志）
-- **状态**：**实现完成、测试绿、待部署**。生产 `alembic` 无变更（**本次无迁移**）。
+- **状态**：**已合并并部署**（`ef4d5d2`；已做真机回归，见 §8）。生产 `alembic` 无变更（**本次无迁移**）。
 - **关联变更**：[fix-nl2sql-derived-metric-formula-required](../fix-nl2sql-derived-metric-formula-required/summary.md)（占比类必须带 formula 的硬约束，正是它把本问题逼出来的前置）
 - **迁移版本**：**无**
 - **SSOT 出处**：`Harness/wiki/nl2sql-engine.md`（本变更新增 §语句形态 formula 的校验口径，并顺手修正该文件里 `validatePlan` 的过期路径与一处不实描述）

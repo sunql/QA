@@ -3,13 +3,13 @@
 - **日期**：2026-10-05
 - **作者**：Claude / 启琳
 - **Phase**：Phase 6 L5 AI Native：研究型 Agent 入口体验修复
-- **状态**：in-review
+- **状态**：**已合并并部署**（随分支 `feat/multi-step-persist` 经 PR #8 → merge commit `b3889ef2` 于 2026-10-14 入 main；迁移 `0113_research_session_model` 早已上线）
 - **关联变更**：[feat-research-entry](../feat-research-entry/summary.md)（predecessor：研究入口本体）
 - **迁移版本**：0113_research_session_model（W5，**已部署上线**，prod `alembic_version=0113`）
 - **MEMORY**：[qa-system-research-entry-ux-gaps.md](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-research-entry-ux-gaps.md)
 
 > **阶段说明**：§1–§10 已全部按实现实况填齐（§6 测试 / §7 安全审查 / §8 部署验证均为**实测数字与逐字结论**，非计划值；§10 为终审后的后续约束与裁定）。
-> 状态 `in-review` 表示**等待人工真机验收与代码评审**。
+> 状态 `in-review` 曾表示**等待人工真机验收与代码评审**；该批已随 PR #8 入 main 并上线（见上）。
 
 ---
 

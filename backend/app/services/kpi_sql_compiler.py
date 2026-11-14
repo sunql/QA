@@ -84,6 +84,13 @@ def _isSafeIdentifier(value: Any) -> bool:
     return isinstance(value, str) and bool(_IDENTIFIER_RE.fullmatch(value))
 
 
+def _isSafeTableName(value: Any) -> bool:
+    """表名可为 schema-qualified（``THBI.PO_HEADER``）；每段都须是合法标识符。"""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    return all(_IDENTIFIER_RE.fullmatch(segment) for segment in value.split("."))
+
+
 def _assertSafeFragment(fragment: Any) -> bool:
     """结构化片段守卫：拒绝注释/分号/多语句/不平衡括号引号/写操作关键词。"""
     if fragment is None:
@@ -116,10 +123,11 @@ def _isBalanced(text: str) -> bool:
     return quoteChar is None and not stack
 
 
-def _renderExpr(expr: str, quote: str) -> str:
-    """裸标识符加方言引号；已守卫的算术表达式原样保留。"""
+def _renderExpr(expr: str, quote: str, qualifier: str | None = None) -> str:
+    """裸标识符加方言引号（跨表时带表限定）；已守卫的算术表达式原样保留。"""
     if _IDENTIFIER_RE.fullmatch(expr):
-        return quote % expr
+        rendered = quote % expr
+        return f"{qualifier}.{rendered}" if qualifier else rendered
     return expr
 
 
@@ -137,7 +145,9 @@ def _measureParts(measure: Any) -> tuple[str, str | None, str | None] | None:
     return agg, expr or None, filterText or None
 
 
-def _renderAggregate(measure: Any, quote: str) -> tuple[str | None, str | None]:
+def _renderAggregate(
+    measure: Any, quote: str, qualifier: str | None = None
+) -> tuple[str | None, str | None]:
     """度量 → 聚合表达式（measure.filter 走 CASE WHEN，不进 WHERE）。"""
     if not isinstance(measure, dict):
         return None, COMPILED_MEASURE_MISSING
@@ -155,7 +165,7 @@ def _renderAggregate(measure: Any, quote: str) -> tuple[str | None, str | None]:
     if expr is None:
         return None, COMPILED_EXPR_MISSING
 
-    rendered = _renderExpr(expr, quote)
+    rendered = _renderExpr(expr, quote, qualifier)
     if filterText:
         rendered = f"CASE WHEN {filterText} THEN {rendered} END"
     if agg == "COUNT_DISTINCT":
@@ -163,7 +173,9 @@ def _renderAggregate(measure: Any, quote: str) -> tuple[str | None, str | None]:
     return f"{agg}({rendered})", None
 
 
-def _renderPerRow(measure: Any, quote: str) -> tuple[str | None, str | None]:
+def _renderPerRow(
+    measure: Any, quote: str, qualifier: str | None = None
+) -> tuple[str | None, str | None]:
     """AVG_OF_RATIOS 用：逐行表达式（忽略度量自身聚合）。"""
     if not isinstance(measure, dict):
         return None, COMPILED_MEASURE_MISSING
@@ -179,7 +191,7 @@ def _renderPerRow(measure: Any, quote: str) -> tuple[str | None, str | None]:
             return None, COMPILED_EXPR_MISSING
         rendered = "1"
     else:
-        rendered = _renderExpr(expr, quote)
+        rendered = _renderExpr(expr, quote, qualifier)
     if filterText:
         rendered = f"CASE WHEN {filterText} THEN {rendered} END"
     return rendered, None
@@ -208,9 +220,12 @@ def _classTable(
     if classId is None or classId not in classById:
         return None, COMPILED_MEASURE_CLASS_UNRESOLVED
     table = classById[classId].source_table
-    if not _isSafeIdentifier(table):
+    if table is None or not str(table).strip():
         return None, COMPILED_CLASS_TABLE_MISSING
-    return table, None
+    tableText = str(table).strip()
+    if not _isSafeTableName(tableText):
+        return None, COMPILED_INVALID_FRAGMENT
+    return tableText, None
 
 
 def _resolveSchemaPrefix(schemaPrefix: Any) -> tuple[str | None, str | None]:
@@ -359,45 +374,49 @@ def _renderWhere(
 
     if not predicates:
         return "", None
-    return " WHERE " + " AND ".join(predicates), None
+    if len(predicates) == 1:
+        return f" WHERE {predicates[0]}", None
+    # 多谓词必须各自加括号：否则 `A OR B AND time` 会让 OR 分支绕过时间过滤。
+    return " WHERE " + " AND ".join(f"({predicate})" for predicate in predicates), None
 
 
 def _renderValueExpr(
-    metric: OntologyMetric, metricType: str, quote: str
+    metricType: str,
+    numerator: dict,
+    denominator: dict | None,
+    quote: str,
+    aggregationOrder: Any,
+    numeratorQualifier: str | None = None,
+    denominatorQualifier: str | None = None,
 ) -> tuple[str | None, str | None]:
-    numerator = metric.numerator_measure
     if metricType == "MEASURE":
-        return _renderAggregate(numerator, quote)
-
-    if not isinstance(numerator, dict):
-        return None, COMPILED_MEASURE_MISSING
-    denominator = metric.denominator_measure
-    if not isinstance(denominator, dict):
+        return _renderAggregate(numerator, quote, numeratorQualifier)
+    if denominator is None:
         return None, COMPILED_MEASURE_MISSING
 
     if metricType == "DIFFERENCE":
-        numeratorExpr, reason = _renderAggregate(numerator, quote)
+        numeratorExpr, reason = _renderAggregate(numerator, quote, numeratorQualifier)
         if reason is not None:
             return None, reason
-        denominatorExpr, reason = _renderAggregate(denominator, quote)
+        denominatorExpr, reason = _renderAggregate(denominator, quote, denominatorQualifier)
         if reason is not None:
             return None, reason
         return f"{numeratorExpr} - {denominatorExpr}", None
 
-    order = _normalizeToken(metric.aggregation_order) or "WEIGHTED_RATIO"
+    order = _normalizeToken(aggregationOrder) or "WEIGHTED_RATIO"
     if order == "WEIGHTED_RATIO":
-        numeratorExpr, reason = _renderAggregate(numerator, quote)
+        numeratorExpr, reason = _renderAggregate(numerator, quote, numeratorQualifier)
         if reason is not None:
             return None, reason
-        denominatorExpr, reason = _renderAggregate(denominator, quote)
+        denominatorExpr, reason = _renderAggregate(denominator, quote, denominatorQualifier)
         if reason is not None:
             return None, reason
         return f"{numeratorExpr} / NULLIF({denominatorExpr}, 0)", None
     if order == "AVG_OF_RATIOS":
-        numeratorExpr, reason = _renderPerRow(numerator, quote)
+        numeratorExpr, reason = _renderPerRow(numerator, quote, numeratorQualifier)
         if reason is not None:
             return None, reason
-        denominatorExpr, reason = _renderPerRow(denominator, quote)
+        denominatorExpr, reason = _renderPerRow(denominator, quote, denominatorQualifier)
         if reason is not None:
             return None, reason
         return f"AVG({numeratorExpr} / NULLIF({denominatorExpr}, 0))", None
@@ -429,10 +448,6 @@ def compileMetricSql(
         return _fail(reason, warnings)
 
     quote = _QUOTE[dialect]
-    valueExpr, reason = _renderValueExpr(metric, metricType, quote)
-    if reason is not None:
-        return _fail(reason, warnings)
-
     numerator = metric.numerator_measure
     if not isinstance(numerator, dict):
         return _fail(COMPILED_MEASURE_MISSING, warnings)
@@ -445,14 +460,47 @@ def compileMetricSql(
     if reason is not None:
         return _fail(reason, warnings)
 
-    requiredClassIds: list[int] = []
+    denominator: dict | None = None
+    denominatorClassId: int | None = None
+    denominatorTable: str | None = None
     if metricType in {"RATIO", "DIFFERENCE"}:
-        denominator = metric.denominator_measure
+        rawDenominator = metric.denominator_measure
+        if not isinstance(rawDenominator, dict):
+            return _fail(COMPILED_MEASURE_MISSING, warnings)
+        denominator = rawDenominator
         denominatorClassId = _resolveMeasureClassId(denominator, metric, sources)
         if denominatorClassId is None:
             return _fail(COMPILED_MEASURE_CLASS_UNRESOLVED, warnings)
-        if denominatorClassId != numeratorClassId:
-            requiredClassIds.append(denominatorClassId)
+        denominatorTable, reason = _classTable(denominatorClassId, classById)
+        if reason is not None:
+            return _fail(reason, warnings)
+
+    # 跨表 SELECT 必须限定值列，且按各度量自身类表限定（不是统一用 FROM 表）。
+    multiTable = denominatorTable is not None and denominatorTable != numeratorTable
+    numeratorQualifier = (
+        _quoteTable(_bakeTableName(numeratorTable, safePrefix), quote) if multiTable else None
+    )
+    denominatorQualifier = (
+        _quoteTable(_bakeTableName(denominatorTable, safePrefix), quote)
+        if multiTable and denominatorTable is not None
+        else None
+    )
+
+    valueExpr, reason = _renderValueExpr(
+        metricType,
+        numerator,
+        denominator,
+        quote,
+        metric.aggregation_order,
+        numeratorQualifier,
+        denominatorQualifier,
+    )
+    if reason is not None:
+        return _fail(reason, warnings)
+
+    requiredClassIds: list[int] = []
+    if denominatorClassId is not None and denominatorClassId != numeratorClassId:
+        requiredClassIds.append(denominatorClassId)
 
     joinClauses, reason = _renderJoinClauses(
         numeratorClassId, requiredClassIds, joins, classById, quote

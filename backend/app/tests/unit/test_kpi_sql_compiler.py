@@ -166,8 +166,12 @@ def test_cross_table_measure_adds_join_from_catalog() -> None:
     )
 
     assert result.ok is True
-    assert '"order_lines"' in result.sql
-    assert 'JOIN "orders" ON "order_lines"."ORDER_ID" = "orders"."ID"' in result.sql
+    assert result.reason is None
+    assert result.sql == (
+        'SELECT SUM("order_lines"."QTY") / NULLIF(SUM("orders"."QTY"), 0) AS value '
+        'FROM "order_lines" '
+        'INNER JOIN "orders" ON "order_lines"."ORDER_ID" = "orders"."ID"'
+    )
 
 
 def test_no_join_path_fails_closed() -> None:
@@ -225,6 +229,45 @@ def test_measure_without_class_id_and_multiple_sources_fails_closed() -> None:
 
     assert result.ok is False
     assert result.reason == "compiled_measure_class_unresolved"
+
+
+def test_dotted_source_table_compiles_qualified() -> None:
+    # 真实本体类存 schema-qualified 表名（THBI.PO_HEADER / ZJTH.PRECEIPT）
+    result = _compile(_metric(), [_cls(10, "THBI.PO_HEADER")])
+
+    assert result.ok is True
+    assert result.reason is None
+    assert result.sql == 'SELECT SUM("AMOUNT") AS value FROM "THBI"."PO_HEADER"'
+
+
+@pytest.mark.parametrize("table", ["THBI.PO HEADER", "THBI.;DROP"])
+def test_invalid_dotted_source_table_fails_closed(table: str) -> None:
+    result = _compile(_metric(), [_cls(10, table)])
+
+    assert result.ok is False
+    assert result.reason == "compiled_invalid_fragment"
+
+
+def test_multiple_where_predicates_are_parenthesized() -> None:
+    metric = _metric(
+        filter_expression="A = 1 OR B = 2",
+        time_grain="month",
+        time_column="ORDER_DATE",
+    )
+
+    result = _compile(
+        metric,
+        [_cls(10, "orders")],
+        dialect="oracle",
+        timeScope=_monthScope(),
+    )
+
+    assert result.ok is True
+    assert result.sql == (
+        'SELECT SUM("AMOUNT") AS value FROM "orders" '
+        "WHERE (A = 1 OR B = 2) AND ("
+        '"ORDER_DATE" >= DATE \'2026-07-01\' AND "ORDER_DATE" < DATE \'2026-08-01\')'
+    )
 
 
 def test_derived_metric_type_fails_closed() -> None:

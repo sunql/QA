@@ -33,11 +33,16 @@ def _kpi(*, datasource_id: int | None = 1) -> KpiCatalog:
     )
 
 
-def _eligible_metric(source: str) -> OntologyMetric:
-    """层 1/2/3 全 pass：结构化列 ``cnt`` 出现在 formula 中，治理列 == 技术列。"""
+def _eligible_metric(
+    source: str, *, formula: str = "SELECT COUNT(cnt) AS cnt FROM t"
+) -> OntologyMetric:
+    """层 1/2/3 全 pass：结构化列 ``cnt`` 出现在 formula 中，治理列 == 技术列。
+
+    ``formula`` 可传空串构造生产 COMPILED 形态（编译器的可执行性不依赖 formula 文本）。
+    """
     return OntologyMetric(
         metric_name="parity-eligible",
-        formula="SELECT COUNT(cnt) AS cnt FROM t",
+        formula=formula,
         metric_type="MEASURE",
         numerator_measure={"agg": "COUNT", "expr": "cnt"},
         grain_keys=["grain_key"],
@@ -63,6 +68,9 @@ def _result_of(metric: OntologyMetric, kpi: KpiCatalog):
 
 def _runtime_plan(metric: OntologyMetric, *, has_datasource: bool = True):
     result = _result_of(metric, _kpi(datasource_id=1 if has_datasource else None))
+    source = (metric.execution_source or "").strip().upper()
+    # 与 chat_stream_output 同款覆盖：COMPILED 的可执行性来自编译器，空 formula 正常。
+    formulaPresent = bool((metric.formula or "").strip()) or source == SOURCE_COMPILED
     return planKpiExecution(
         switch_on=True,
         kpi_found=True,
@@ -70,7 +78,7 @@ def _runtime_plan(metric: OntologyMetric, *, has_datasource: bool = True):
         execution_source=metric.execution_source,
         tier_a_eligible=result.isTierAEligible,
         has_datasource=has_datasource,
-        formula_present=bool((metric.formula or "").strip()),
+        formula_present=formulaPresent,
         has_explicit_time_scope=False,
     )
 
@@ -135,6 +143,44 @@ def test_unknown_source_is_tier_c_on_both_sides(eligible: bool) -> None:
     plan = _runtime_plan(metric)
     assert (plan.tier, plan.reason) == ("C", "execution_source_unknown")
     assert kpi_diagnose._tierOf(_result_of(metric, _kpi()), metric) == "C"
+
+
+@pytest.mark.parametrize("source", [SOURCE_ESCAPE_HATCH, SOURCE_COMPILED])
+@pytest.mark.parametrize("formula", ["", "SELECT COUNT(cnt) AS cnt FROM t"])
+def test_formula_presence_parity(source: str, formula: str) -> None:
+    """formula 空/非空 × 两种可执行源：运行时与诊断 Tier 必须一致。"""
+    metric = _eligible_metric(source, formula=formula)
+    result = _result_of(metric, _kpi())
+    assert result.isTierAEligible is True
+
+    plan = _runtime_plan(metric)
+    diagnoseTier = kpi_diagnose._tierOf(result, metric)
+    assert plan.tier == diagnoseTier, (
+        f"source={source!r} formula={formula!r}: "
+        f"runtime={plan.tier}/{plan.reason} diagnose={diagnoseTier}"
+    )
+
+
+def test_escape_hatch_empty_formula_is_tier_b_on_both_sides() -> None:
+    """T4.1：ESCAPE_HATCH 空 formula ⇒ 运行时 B/formula_empty，诊断 B。"""
+    metric = _eligible_metric(SOURCE_ESCAPE_HATCH, formula="   ")
+    result = _result_of(metric, _kpi())
+    assert result.isTierAEligible is True
+
+    plan = _runtime_plan(metric)
+    assert (plan.tier, plan.reason) == ("B", "formula_empty")
+    assert kpi_diagnose._tierOf(result, metric) == "B"
+
+
+def test_compiled_empty_formula_is_tier_a_on_both_sides() -> None:
+    """T4.2：生产 COMPILED 形态（空 formula + 对账合格）⇒ 运行时与诊断都判 A。"""
+    metric = _eligible_metric(SOURCE_COMPILED, formula="")
+    result = _result_of(metric, _kpi())
+    assert result.isTierAEligible is True
+
+    plan = _runtime_plan(metric)
+    assert (plan.tier, plan.reason) == ("A", None)
+    assert kpi_diagnose._tierOf(result, metric) == "A"
 
 
 def test_known_divergence_datasource_missing() -> None:

@@ -188,15 +188,22 @@ def _isExecutableSource(metric: OntologyMetric | None) -> bool:
 def _tierOf(
     result: ReconcileResult | None, metric: OntologyMetric | None
 ) -> str:
-    """Tier 判定（与运行时 ``planKpiExecution`` 同源）。
+    """Tier 判定（静态可判部分；与运行时 ``planKpiExecution`` 同源）。
 
     无 metric、NONE 源、空或未知 source ⇒ C；COMPILED 与 ESCAPE_HATCH 同属
-    可执行源：对账 ``isTierAEligible`` ⇒ A，否则 B。
+    可执行源。ESCAPE_HATCH 的空 formula 在运行时是 ``formula_empty`` ⇒ B，
+    这里同样建模；COMPILED 的可执行性来自编译器（空 formula 是正常态），
+    不看 formula。其余按对账 ``isTierAEligible``：合格 ⇒ A，否则 B。
+
+    只建模**静态可判**条件：``datasource_missing`` / ``explicit_time_scope`` /
+    ``compiled_*`` 三条运行时分歧不在诊断侧建模（见 nl2sql-engine.md）。
     """
     if metric is None or _isNoneSource(metric):
         return TIER_C
     if not _isExecutableSource(metric):
         return TIER_C
+    if not _isCompiledSource(metric) and not (metric.formula or "").strip():
+        return TIER_B
     if result is not None and result.isTierAEligible:
         return TIER_A
     return TIER_B

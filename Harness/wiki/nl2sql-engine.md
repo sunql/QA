@@ -182,10 +182,11 @@ L1 hit ──┬─ 开关关 ────────────────�
   Tier B 路径都带值；流式两处 meta 帧同名字段。**按意图门控**：只有会落到
   `_handleGenericQuery` 的意图（QUERY / NEW_QUERY / REFINE / FOLLOW_UP / CLARIFY）才发；
   重分类到 CHITCHAT / METRIC 等早退意图时，第二帧显式发 `null` 覆盖首帧，与非流式保持一致。
-- **诊断对齐**：`kpi_diagnose._tierOf` 与运行时同口径（`COMPILED` 与 `ESCAPE_HATCH`
-  同属可执行源：对账 `isTierAEligible` ⇒ A，否则 B）；仍存一处已知分歧
-  （`datasource_missing`：运行时判 C、诊断无数据源视图判 A），登记在
-  `test_kpi_tier_parity.py` 的已知分歧用例里。
+- **诊断对齐**：`kpi_diagnose._tierOf` 只建模**静态可判资格**（可执行源 + formula 存在性
+  规则 + 对账 `isTierAEligible`；`COMPILED` 的可执行性来自编译器，空 formula 正常，故不看
+  formula；`ESCAPE_HATCH` 空 formula ⇒ B `formula_empty`）；三条**仅运行时**可判的分歧
+  故意未建模：`datasource_missing`（运行时 C / 诊断 A）、`explicit_time_scope`
+  （显式时间问句运行时 B）、`compiled_*`（编译失败运行时 B）。
 - **一期时间策略**：显式时间限定一律降级 Tier B，**不做区间解析**（P4 参数化才解析）。检测器
   `hasExplicitTimeScope` 按「宁可多判」写（误判只多一次 LLM，漏判会让时段错的数字看起来合理），
   覆盖近 N 天/月/年、季度、半年、年度、`Q1–Q4`、`H1/H2`、`同比/环比`、`FY`、`TTM/LTM`、

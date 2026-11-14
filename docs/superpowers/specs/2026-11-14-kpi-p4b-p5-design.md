@@ -142,6 +142,7 @@
   "kpis": {"total": 12, "byStatus": {"DRAFT": 3, "PUBLISHED": 8, "DEPRECATED": 1}},
   "metrics": {"total": 12, "byExecutionSource": {"COMPILED": 6, "ESCAPE_HATCH": 5, "NONE": 1}, "byStatus": {"DRAFT": 4, "PUBLISHED": 8}},
   "reconcile": {"windowDays": 7, "mismatchCount": 2, "passCount": 40, "unknownCount": 1, "lastMismatchAt": "..."},
+  "runtime": {"windowDays": 7, "total": 21, "byTier": {"A": 9, "B": 7, "C": 3, "LEGACY": 2}, "degradedReasons": [{"reason": "execution_error", "count": 4}], "chatAnswers": 30, "hitRate": 0.7, "runtimeError": null},
   "syncHealth": {"publishedKpiCount": 8, "milvusKpiCount": 8, "kpiTotal": 12, "neo4jKpiCount": 12},
   "gates": {"publishGateEnabled": false, "tierAEnabled": true, "syncEnabled": true},
   "generatedAt": "2026-11-14T00:00:00Z"
@@ -149,12 +150,19 @@
 ```
 
 - `reconcile` 统计来自 `audit_log`（`entity_type="kpi_metric_reconcile"`）近 7 天，按 `payload`/`action` 计数；无记录时全 0（不 500）。
+- `runtime` 统计来自 `audit_log`（`entity_type="kpi_runtime_event"`）近 7 天：每次 KPI 路由
+  （A/B/C/LEGACY）由 `_runL1AndL4Preamble` 写一行；**Tier A 执行失败降级时按实际服务的 B 记**，
+  故 `byTier` 反映实际执行层而非计划层；旧路径构答失败（`l1=None`，由 L4 回答）**不记**。
+  事件经**独立会话自提交**（流式终结分支不 commit 请求会话，依赖请求事务会丢事件）。
+  `hitRate = total / chatAnswers` 是近似命中率（分母为近 7 天 `channel="chat"` 的 assistant
+  消息数；分子不含澄清与旧路径失败问句；精确匹配命中率仍以 50 题语料评测为准），无回答时为
+  `null`。查询失败全 0 + `runtimeError`，不 500。
 - `syncHealth` 复用 `kpi_diagnose._kpiSyncHealth` 的查询口径（PG 计数 + Milvus/Neo4j 计数，失败降级为 `null` 并附 `syncHealthError`，不让看板整体 500）。
 - 新路由文件 `backend/app/api/v1/kpi_governance.py` 或并入 `kpi_diagnose.py`（选并入，保持单文件职责：KPI 管理面）。
 
 前端：
 
-- 新页 `frontend/src/pages/KpiGovernancePage.tsx`：统计卡片（KPI 总数/各状态、metric 执行来源分布、对账 mismatch、同步健康、闸门开关），带刷新；仅 admin 可见入口。
+- 新页 `frontend/src/pages/KpiGovernancePage.tsx`：统计卡片（KPI 总数/各状态、metric 执行来源分布、对账 mismatch、运行时 Tier 分布与降级原因、同步健康、闸门开关），带刷新；仅 admin 可见入口。
 - 路由 `/kpi-governance`（`App.tsx`），菜单 seed `backend/scripts/seed_menu_config.py` 增一项（幂等 upsert）。
 - i18n `zh-CN` / `en-US` 文案。
 

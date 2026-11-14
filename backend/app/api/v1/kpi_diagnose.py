@@ -35,13 +35,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getDb, requireAdmin
-from app.domain.models import AuditLog, KpiCatalog, OntologyMetric
+from app.domain.models import AuditLog, KpiCatalog, OntologyMetric, SessionMessage
 from app.domain.schemas import (
     CamelModel,
     KpiGovernanceGates,
     KpiGovernanceKpiCounts,
     KpiGovernanceMetricCounts,
     KpiGovernanceReconcile,
+    KpiGovernanceRuntime,
+    KpiGovernanceRuntimeReason,
     KpiGovernanceSummary,
     KpiGovernanceSyncHealth,
 )
@@ -72,6 +74,7 @@ from app.services.kpi_metric_switches import (
     isKpiSyncEnabled,
     readKpiMetricSwitch,
 )
+from app.services.kpi_runtime_audit import RUNTIME_ENTITY_TYPE
 from app.services.kpi_semantic_match_service import (
     KpiMatchResult,
     getKpiSemanticMatchService,
@@ -93,6 +96,9 @@ TIER_C = "C"
 # 治理看板：对账统计窗口（天）与错误串截断长度。
 GOVERNANCE_RECONCILE_WINDOW_DAYS = 7
 GOVERNANCE_ERROR_MAX_CHARS = 200
+# 运行时 Tier 分布窗口（天）与降级原因 Top N。
+GOVERNANCE_RUNTIME_WINDOW_DAYS = 7
+GOVERNANCE_DEGRADED_REASON_TOP_N = 5
 
 VERDICT_MISMATCH = "mismatch"
 VERDICT_PASS = "pass"
@@ -534,6 +540,123 @@ async def _governanceReconcile(
     )
 
 
+async def _runtimeQueryCounts(
+    session: AsyncSession, windowStart: datetime
+) -> tuple[list[tuple[str | None, int]], list[tuple[str | None, int]], int]:
+    """窗口内三组计数：Tier 分组、降级原因分组、chat 回答数。
+
+    在库里 ``GROUP BY``，而不是把窗口内所有事件行拉进内存：看板可反复刷新，
+    事件量与 KPI 流量同阶，逐行搬运在 7 天窗口下会随时间线性变贵。
+    """
+    tierText = AuditLog.after_json["tier"].astext
+    reasonText = AuditLog.after_json["reason"].astext
+    eventWindow = (
+        AuditLog.entity_type == RUNTIME_ENTITY_TYPE,
+        AuditLog.created_at >= windowStart,
+    )
+    tierRows = (
+        await session.execute(
+            select(tierText, func.count())
+            .where(*eventWindow)
+            .group_by(tierText)
+        )
+    ).all()
+    # 空串 / 纯空白原因不算降级原因（与写入侧口径一致）。
+    reasonRows = (
+        await session.execute(
+            select(reasonText, func.count())
+            .where(*eventWindow, func.trim(reasonText) != "")
+            .group_by(reasonText)
+        )
+    ).all()
+    chatAnswers = int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(SessionMessage)
+                .where(
+                    SessionMessage.role == "assistant",
+                    SessionMessage.channel == "chat",
+                    SessionMessage.created_time >= windowStart,
+                )
+            )
+        ).scalar_one()
+    )
+    return tierRows, reasonRows, chatAnswers
+
+
+def _bucketTiers(rows: list[tuple[str | None, int]]) -> dict[str, int]:
+    """空值/空白 tier 归 ``UNKNOWN``（不得静默丢弃，否则总数对不上）。"""
+    byTier: dict[str, int] = {}
+    for tier, count in rows:
+        tierKey = (tier or "").strip() or "UNKNOWN"
+        byTier[tierKey] = byTier.get(tierKey, 0) + int(count)
+    return byTier
+
+
+def _bucketReasons(rows: list[tuple[str | None, int]]) -> dict[str, int]:
+    """GROUP BY 按原始值分组；strip 后同名（如 ``" x "`` 与 ``"x"``）在此合并。"""
+    reasonCounts: dict[str, int] = {}
+    for reason, count in rows:
+        reasonKey = (reason or "").strip()
+        if reasonKey:
+            reasonCounts[reasonKey] = reasonCounts.get(reasonKey, 0) + int(count)
+    return reasonCounts
+
+
+async def _governanceRuntime(session: AsyncSession) -> KpiGovernanceRuntime:
+    """近 7 天运行时 Tier 分布 / 降级原因 / 路由占比（audit_log，best-effort）。
+
+    数据源 ``kpi_runtime_event``（见 ``kpi_runtime_audit``）：每次 KPI 路由
+    （A/B/C/LEGACY）写一行审计。Tier A 执行失败降级到 B 时按 B 记，因此
+    ``by_tier`` 反映的是**实际服务**的执行层，而不是计划层。
+
+    ``hit_rate`` 是**近似**口径（事件数 / 窗口内 chat 回答数）：澄清问句与
+    「KPI 命中但旧路径构答失败」的问句没有事件，故分子系统性偏小。
+    精确匹配命中率以 50 题语料评测为准（设计 §13 M1）。
+
+    查询失败 ⇒ 全 0 + ``runtimeError``，不 500。
+    """
+    windowStart = datetime.now(UTC) - timedelta(
+        days=GOVERNANCE_RUNTIME_WINDOW_DAYS
+    )
+    try:
+        # savepoint：本段失败不得把调用方事务打成 failed 态。
+        async with session.begin_nested():
+            tierRows, reasonRows, chatAnswers = await _runtimeQueryCounts(
+                session, windowStart
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("KPI 治理看板运行时统计失败: %s", exc)
+        return KpiGovernanceRuntime(
+            window_days=GOVERNANCE_RUNTIME_WINDOW_DAYS,
+            total=0,
+            runtime_error=_governanceError(exc),
+        )
+
+    byTier = _bucketTiers(tierRows)
+    total = sum(byTier.values())
+    topReasons = sorted(
+        _bucketReasons(reasonRows).items(),
+        key=lambda item: (-item[1], item[0]),
+    )[:GOVERNANCE_DEGRADED_REASON_TOP_N]
+    return KpiGovernanceRuntime(
+        window_days=GOVERNANCE_RUNTIME_WINDOW_DAYS,
+        total=total,
+        by_tier=byTier,
+        degraded_reasons=[
+            KpiGovernanceRuntimeReason(reason=reason, count=count)
+            for reason, count in topReasons
+        ],
+        chat_answers=chatAnswers,
+        # 近似命中率：KPI 执行路由事件 / 窗口内全部 chat 回答。
+        # 精确命中率口径见 50 条回归集（§13 M1），此处不做推断。
+        hit_rate=(
+            round(total / chatAnswers, 4) if chatAnswers > 0 else None
+        ),
+    )
+
+
 async def _governanceSyncHealth(
     session: AsyncSession, kpiTotal: int
 ) -> KpiGovernanceSyncHealth:
@@ -575,6 +698,9 @@ async def governanceSummary(
       ⇒ 全 0 + ``reconcileError``，不 500。``passCount`` 只是「实际落库的
       pass 行数」：只有 degraded pass 会落库（干净 pass 从不落库），
       见 ``_governanceReconcile`` docstring，**不是通过率**；
+    - ``runtime``：近 7 天 ``kpi_runtime_event`` 审计（Tier A/B/C/LEGACY 实际
+      服务分布 + 降级原因 Top N）+ 窗口回答总数，``hitRate`` = 事件数 / 回答数
+      （近似命中率）；查询失败 ⇒ 全 0 + ``runtimeError``，不 500；
     - ``syncHealth``：复用 ``_kpiSyncHealth``（PG + Milvus + Neo4j），外部计数
       失败保持 null + ``syncHealthError``；
     - ``gates``：与运行时同源的三个开关（publish gate / Tier A / sync）。
@@ -582,6 +708,7 @@ async def governanceSummary(
     kpis = await _governanceKpiCounts(db)
     metrics = await _governanceMetricCounts(db)
     reconcile = await _governanceReconcile(db)
+    runtime = await _governanceRuntime(db)
     syncHealth = await _governanceSyncHealth(db, kpis.total)
     gates = KpiGovernanceGates(
         publish_gate_enabled=await readKpiMetricSwitch(
@@ -594,6 +721,7 @@ async def governanceSummary(
         kpis=kpis,
         metrics=metrics,
         reconcile=reconcile,
+        runtime=runtime,
         sync_health=syncHealth,
         gates=gates,
         generated_at=datetime.now(UTC),

@@ -29,6 +29,13 @@ const EXECUTION_SOURCE_TAG_COLOR: Record<string, string> = {
   NONE: "default",
 };
 
+const RUNTIME_TIER_TAG_COLOR: Record<string, string> = {
+  A: "green",
+  B: "orange",
+  C: "default",
+  LEGACY: "purple",
+};
+
 /** 每张统计卡带 data-testid：测试按卡片断言字段映射，避免相同数值互相掩盖。 */
 function StatItem({
   testId,
@@ -54,6 +61,11 @@ function displayCount(value: number | null, fallback: string): string | number {
 /** 仅做显示裁剪，不引入时区换算：后端给 ISO-8601 UTC 串，调用方在 label 里标注 UTC。 */
 function formatTimestamp(value: string): string {
   return value.replace("T", " ").replace("Z", "").slice(0, 19);
+}
+
+/** 近似命中率是比值（事件/回答），可能大于 1；无回答时显式占位，不伪装成 0。 */
+function formatHitRate(value: number | null, fallback: string): string | number {
+  return value === null ? fallback : value.toFixed(2);
 }
 
 export default function KpiGovernancePage() {
@@ -272,6 +284,85 @@ export default function KpiGovernancePage() {
                     style={{ marginTop: 8 }}
                     message={t("kpiGovernance.reconcileError", {
                       error: data.reconcile.reconcileError,
+                    })}
+                  />
+                ) : null}
+              </Card>
+            </Col>
+
+            <Col xs={24} lg={12}>
+              <Card
+                title={t("kpiGovernance.runtimeTitle", {
+                  days: data.runtime.windowDays,
+                })}
+                size="small"
+              >
+                <Row gutter={[8, 8]}>
+                  <Col span={8}>
+                    <StatItem
+                      testId="stat-runtime-total"
+                      label={t("kpiGovernance.runtimeTotal")}
+                      value={data.runtime.total}
+                    />
+                  </Col>
+                  <Col span={8}>
+                    <StatItem
+                      testId="stat-runtime-hit-rate"
+                      label={t("kpiGovernance.runtimeHitRate")}
+                      value={formatHitRate(data.runtime.hitRate, t("common.emDash"))}
+                    />
+                  </Col>
+                  <Col span={8}>
+                    <StatItem
+                      testId="stat-runtime-chat-answers"
+                      label={t("kpiGovernance.runtimeChatAnswers")}
+                      value={data.runtime.chatAnswers}
+                    />
+                  </Col>
+                </Row>
+                <Space size={[4, 8]} wrap style={{ marginTop: 12 }}>
+                  {Object.entries(data.runtime.byTier).map(([tier, count]) => (
+                    <Tag
+                      key={tier}
+                      color={RUNTIME_TIER_TAG_COLOR[tier] ?? "default"}
+                      data-testid={`stat-runtime-tier-${tier}`}
+                    >
+                      {`${tier} ${count}`}
+                    </Tag>
+                  ))}
+                  {Object.keys(data.runtime.byTier).length === 0 ? (
+                    <Tag data-testid="stat-runtime-tier-none">
+                      {t("kpiGovernance.runtimeNoEvents")}
+                    </Tag>
+                  ) : null}
+                </Space>
+                <div style={{ marginTop: 8, color: "rgba(0, 0, 0, 0.45)" }}>
+                  {t("kpiGovernance.runtimeHitRateHint")}
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  {`${t("kpiGovernance.runtimeDegradedReasons")}: `}
+                  {data.runtime.degradedReasons.length === 0
+                    ? t("kpiGovernance.runtimeNoDegraded")
+                    : null}
+                </div>
+                <Space size={[4, 8]} wrap>
+                  {data.runtime.degradedReasons.map((item) => (
+                    <Tag
+                      key={item.reason}
+                      color="orange"
+                      data-testid={`runtime-reason-${item.reason}`}
+                    >
+                      {`${item.reason} ×${item.count}`}
+                    </Tag>
+                  ))}
+                </Space>
+                {data.runtime.runtimeError ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginTop: 8 }}
+                    message={t("kpiGovernance.runtimeError", {
+                      error: data.runtime.runtimeError,
                     })}
                   />
                 ) : null}

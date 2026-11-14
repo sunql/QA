@@ -20,6 +20,7 @@ from decimal import Decimal
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.api.v1.kpi_diagnose as kpiDiagnoseModule
@@ -30,6 +31,7 @@ from app.domain.models import (
     OntologyMetric,
     OntologyMetricSource,
     OntologyProperty,
+    SessionMessage,
 )
 from app.models.system_config import SystemConfig
 from app.services.kpi_match_cache import get_kpi_match_cache
@@ -38,6 +40,7 @@ from app.services.kpi_metric_switches import (
     SWITCH_CONTRACT_INJECTION,
     SWITCH_GATE,
 )
+from app.services.kpi_runtime_audit import RUNTIME_ENTITY_TYPE
 
 pytestmark = pytest.mark.asyncio
 
@@ -857,3 +860,149 @@ async def test_governance_summary_sync_health_degrades(
     assert "sync store down" in health["syncHealthError"]
     # 同步健康失败不应影响其余聚合段。
     assert "reconcile" in body and "gates" in body
+
+
+# ---------------------------------------------------------------------------
+# M4：运行时 Tier 分布 / 降级原因 / 近似命中率
+# ---------------------------------------------------------------------------
+
+def _runtimeEvent(
+    tier: str,
+    reason: str | None,
+    createdAt: datetime,
+    *,
+    entityType: str = RUNTIME_ENTITY_TYPE,
+) -> AuditLog:
+    return AuditLog(
+        entity_type=entityType,
+        entity_id=1,
+        action="CREATE",
+        actor="system:kpi-runtime",
+        after_json={
+            "kpi_code": "KPI_RT",
+            "tier": tier,
+            "reason": reason,
+            "match_method": "exact_code",
+        },
+        created_at=createdAt,
+    )
+
+
+async def test_governance_summary_runtime_tiers(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """运行时事件 ⇒ byTier / 降级原因 Top-N / 近似命中率；窗口与非本类事件均被排除。"""
+    now = datetime.now(UTC)
+    dbSession.add_all(
+        [
+            # Tier A 2 条、Tier B 3 条（同一降级原因）、C 1 条、LEGACY 4 条，
+            # 外加 1 条 tier 为空串的脏行 ⇒ 归 UNKNOWN 桶（不得静默丢弃）。
+            _runtimeEvent("A", None, now),
+            _runtimeEvent("A", None, now - timedelta(days=1)),
+            _runtimeEvent("", None, now),
+            *[
+                _runtimeEvent("B", "tier_a_execution_error", now - timedelta(hours=idx))
+                for idx in range(3)
+            ],
+            _runtimeEvent("C", "tier_c_direct", now),
+            _runtimeEvent("LEGACY", "reason_1", now),
+            _runtimeEvent("LEGACY", "reason_2", now),
+            _runtimeEvent("LEGACY", "reason_3", now),
+            _runtimeEvent("LEGACY", "reason_4", now),
+            # 窗口外（8 天前）：若丢掉时间谓词，A 计数 2→3、total 11→12。
+            _runtimeEvent("A", None, now - timedelta(days=8)),
+            # 其他 entity_type：若丢掉过滤，total 11→12。
+            _runtimeEvent("A", None, now, entityType="kpi_metric_reconcile"),
+        ]
+    )
+    # 近 7 天 chat 助手回答 2 条：非 assistant / 非 chat / 窗口外各 1 条须排除。
+    dbSession.add_all(
+        [
+            SessionMessage(
+                session_id="sess_rt", role="assistant", content="a",
+                channel="chat", created_time=now,
+            ),
+            SessionMessage(
+                session_id="sess_rt", role="assistant", content="a",
+                channel="chat", created_time=now - timedelta(days=1),
+            ),
+            SessionMessage(
+                session_id="sess_rt", role="assistant", content="a",
+                channel="doc_qa", created_time=now,
+            ),
+            SessionMessage(
+                session_id="sess_rt", role="user", content="q",
+                channel="chat", created_time=now,
+            ),
+            SessionMessage(
+                session_id="sess_rt", role="assistant", content="a",
+                channel="chat", created_time=now - timedelta(days=8),
+            ),
+        ]
+    )
+    await dbSession.commit()
+
+    resp = await client.get(_GOVERNANCE_URL, headers=_ADMIN_HEADERS)
+
+    assert resp.status_code == 200, resp.text
+    runtime = resp.json()["runtime"]
+    assert runtime["windowDays"] == 7
+    assert runtime["total"] == 11
+    assert runtime["byTier"] == {"A": 2, "B": 3, "C": 1, "LEGACY": 4, "UNKNOWN": 1}
+    # Top-N=5：最高频原因在前，同频按字母序；6 个不同原因 ⇒ tier_c_direct 被截断。
+    assert runtime["degradedReasons"][0] == {
+        "reason": "tier_a_execution_error",
+        "count": 3,
+    }
+    assert [item["reason"] for item in runtime["degradedReasons"]] == [
+        "tier_a_execution_error",
+        "reason_1",
+        "reason_2",
+        "reason_3",
+        "reason_4",
+    ]
+    assert runtime["chatAnswers"] == 2
+    assert runtime["hitRate"] == 5.5
+    assert runtime["runtimeError"] is None
+
+
+async def test_governance_summary_runtime_hit_rate_null_without_answers(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """窗口内无 chat 回答 ⇒ hitRate 为 null（不是 0、不除零）。"""
+    now = datetime.now(UTC)
+    dbSession.add(_runtimeEvent("A", None, now))
+    await dbSession.commit()
+
+    resp = await client.get(_GOVERNANCE_URL, headers=_ADMIN_HEADERS)
+
+    assert resp.status_code == 200, resp.text
+    runtime = resp.json()["runtime"]
+    assert runtime["total"] == 1
+    assert runtime["chatAnswers"] == 0
+    assert runtime["hitRate"] is None
+
+
+async def test_governance_summary_runtime_degrades(
+    dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """运行时统计查询抛错 ⇒ 全 0 + runtimeError（best-effort，事务不被污染）。"""
+
+    class _Exploding:
+        def __getattr__(self, name: str) -> object:
+            raise RuntimeError("runtime store down")
+
+    monkeypatch.setattr(kpiDiagnoseModule, "AuditLog", _Exploding())
+
+    runtime = await kpiDiagnoseModule._governanceRuntime(dbSession)
+
+    assert runtime.total == 0
+    assert runtime.by_tier == {}
+    assert runtime.degraded_reasons == []
+    assert runtime.chat_answers == 0
+    assert runtime.hit_rate is None
+    assert runtime.runtime_error is not None
+    assert "runtime store down" in runtime.runtime_error
+    # savepoint 已回滚：调用方事务仍可继续使用。
+    row = await dbSession.execute(text("SELECT 1"))
+    assert row.scalar_one() == 1

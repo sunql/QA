@@ -1115,12 +1115,42 @@ class KpiGovernanceGates(CamelModel):
     sync_enabled: bool
 
 
+class KpiGovernanceRuntimeReason(CamelModel):
+    """窗口内一条降级原因及其出现次数。"""
+
+    reason: str
+    count: int
+
+
+class KpiGovernanceRuntime(CamelModel):
+    """近 ``window_days`` 天 KPI 运行时分布（来自 ``kpi_runtime_event`` 审计流）。
+
+    - ``by_tier``：实际服务的执行层（A / B / C / LEGACY）。Tier A 执行失败
+      降级到 B 时按 **B** 记（看板不把降级掩盖成 A）。
+    - ``degraded_reasons``：窗口内各降级原因计数，按次数倒序取前 N。
+    - ``hit_rate``：``total / chat_answers`` —— KPI 执行路由问句占全部回答的
+      比例（近似命中率；精确命中率口径见 50 条回归集，不在此处）。分母为 0
+      时为 null。
+    """
+
+    window_days: int
+    total: int
+    by_tier: dict[str, int] = Field(default_factory=dict)
+    degraded_reasons: list[KpiGovernanceRuntimeReason] = Field(
+        default_factory=list
+    )
+    chat_answers: int = 0
+    hit_rate: float | None = None
+    runtime_error: str | None = None
+
+
 class KpiGovernanceSummary(CamelModel):
     """治理看板聚合响应（admin only，只读）。"""
 
     kpis: KpiGovernanceKpiCounts
     metrics: KpiGovernanceMetricCounts
     reconcile: KpiGovernanceReconcile
+    runtime: KpiGovernanceRuntime
     sync_health: KpiGovernanceSyncHealth
     gates: KpiGovernanceGates
     generated_at: datetime

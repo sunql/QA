@@ -47,6 +47,7 @@ from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_reconcile import reconcileMetric
 from app.services.kpi_metric_spec import governanceSpecOf, techniqueOf
 from app.services.kpi_metric_switches import SWITCH_MATCH_CONTAINMENT, SWITCH_TIER_A
+from app.services.kpi_runtime_audit import RUNTIME_ENTITY_TYPE
 from app.tests._pg_support import resolveTestDatabaseUrl
 
 pytestmark = pytest.mark.asyncio
@@ -1051,3 +1052,218 @@ async def test_tier_a_compiled_missing_join_degrades_to_tier_b(
     body = resp.json()
     assert body["executionTier"] == "B", body
     assert body["degradedReason"] == "compiled_join_path_missing", body
+
+
+# ---------------------------------------------------------------------------
+# 8. 运行时 Tier 事件：M4 看板的数据来源（audit_log kpi_runtime_event）
+# ---------------------------------------------------------------------------
+
+
+async def _runtimeEvents(dbSession: AsyncSession, kpiId: int) -> list[dict]:
+    """读该 KPI 的运行时事件（按写入顺序），用于钉住「实际服务」的 Tier。"""
+    result = await dbSession.execute(
+        text(
+            "SELECT after_json FROM audit_log "
+            "WHERE entity_type = :t AND entity_id = :id ORDER BY id"
+        ),
+        {"t": RUNTIME_ENTITY_TYPE, "id": kpiId},
+    )
+    events: list[dict] = []
+    for raw in result.scalars().all():
+        events.append(json.loads(raw) if isinstance(raw, str) else raw)
+    return events
+
+
+async def test_tier_a_chat_records_tier_a_event(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """Tier A 正常执行 ⇒ 落一条 tier=A、reason=NULL 的事件。"""
+    ds = await _seedSelfDatasource(dbSession)
+    await _seedSwitches(dbSession)
+    _, kpi = await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_RT_A",
+        kpiName="运行时A指标",
+        keywords=["运行时A指标"],
+        formula=_TIER_A_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    resp = await client.post(
+        _CHAT_URL, json=_payload("运行时A指标是多少", ds.id), headers=_HEADERS
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["executionTier"] == "A"
+
+    events = await _runtimeEvents(dbSession, kpi.id)
+    assert len(events) == 1, events
+    assert events[0]["kpi_code"] == "KPI_RT_A"
+    assert events[0]["tier"] == "A"
+    assert events[0]["reason"] is None
+    # v2 包含匹配优先于关键词匹配（_seedSwitches 已开 SWITCH_MATCH_CONTAINMENT）。
+    assert events[0]["match_method"] == "containment"
+
+
+async def test_streamed_tier_a_event_persists(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """流式终结分支只 yield SSE 帧就 return，从不 commit 请求会话。
+
+    事件必须走独立会话自提交，否则流式问句一条都记不上（实测：非流式 1 行、
+    流式 0 行），看板会把 Tier 分布系统性偏向 Tier B。
+    """
+    ds = await _seedSelfDatasource(dbSession)
+    await _seedSwitches(dbSession)
+    _, kpi = await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_RT_STREAM_A",
+        kpiName="流式运行时指标",
+        keywords=["流式运行时指标"],
+        formula=_TIER_A_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    resp = await client.post(
+        _CHAT_STREAM_URL,
+        json=_payload("流式运行时指标统计", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    metas = _metaFrames(resp.text)
+    assert metas and metas[0]["executionTier"] == "A"
+
+    events = await _runtimeEvents(dbSession, kpi.id)
+    assert len(events) == 1, events
+    assert events[0]["tier"] == "A"
+    assert events[0]["reason"] is None
+
+
+async def test_tier_c_chat_records_tier_c_event_with_reason(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """Tier C ⇒ tier=C，降级原因与响应里的一致（execution_source_none）。"""
+    ds = await _seedSelfDatasource(dbSession)
+    await _seedSwitches(dbSession)
+    _, kpi = await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_RT_C",
+        kpiName="运行时C指标",
+        keywords=["运行时C指标"],
+        formula=_TIER_A_FORMULA,
+        executionSource="NONE",
+        businessDefinition="该指标暂无技术形态",
+    )
+    await _warmKpiCache(dbSession)
+
+    resp = await client.post(
+        _CHAT_URL, json=_payload("运行时C指标是多少", ds.id), headers=_HEADERS
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["executionTier"] == "C"
+
+    events = await _runtimeEvents(dbSession, kpi.id)
+    assert len(events) == 1, events
+    assert events[0]["tier"] == "C"
+    assert events[0]["reason"] == "execution_source_none"
+
+
+async def test_tier_a_execution_failure_records_tier_b_event(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """Tier A 执行失败降级到 B ⇒ 事件按**实际服务**记 tier=B + execution_error。"""
+    ds = await _seedSelfDatasource(dbSession)
+    config = await _seedTierBPipelineSupport(dbSession)
+    _installTierBFakes(monkeypatch, config)
+    await _seedSwitches(dbSession)
+    _, kpi = await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_RT_A_ERR",
+        kpiName="运行时A报错指标",
+        keywords=["运行时A报错指标"],
+        formula=_BROKEN_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    resp = await client.post(
+        _CHAT_STREAM_URL,
+        json=_payload("运行时A报错指标统计", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    metas = _metaFrames(resp.text)
+    assert metas and metas[0]["executionTier"] == "B"
+
+    events = await _runtimeEvents(dbSession, kpi.id)
+    assert len(events) == 1, events
+    assert events[0]["tier"] == "B"
+    assert events[0]["reason"] == "execution_error"
+
+
+async def test_legacy_route_records_legacy_event(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """Tier A 开关行缺失 ⇒ 实际走旧路径，事件记 LEGACY + tier_a_disabled。"""
+    ds = await _seedSelfDatasource(dbSession)
+    await _seedSwitches(dbSession, tierA=False)
+    _, kpi = await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_RT_LEGACY",
+        kpiName="运行时Legacy指标",
+        keywords=["运行时Legacy指标"],
+        formula=_TIER_A_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    resp = await client.post(
+        _CHAT_URL, json=_payload("运行时Legacy指标是多少", ds.id), headers=_HEADERS
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["executionTier"] == "LEGACY"
+
+    events = await _runtimeEvents(dbSession, kpi.id)
+    assert len(events) == 1, events
+    assert events[0]["tier"] == "LEGACY"
+    assert events[0]["reason"] == "tier_a_disabled"
+
+
+async def test_legacy_build_failure_records_no_event(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """旧路径构答失败（``l1 is None``）⇒ 问句交给 L4，不能记成 LEGACY 事件。
+
+    与 Tier A 同形：只有 KPI 路径真的服务了这个问句才记；否则 L4 回答的
+    问句会被虚增进 Tier 分布。
+    """
+    ds = await _seedSelfDatasource(dbSession)
+    config = await _seedTierBPipelineSupport(dbSession)
+    _installTierBFakes(monkeypatch, config)
+    await _seedSwitches(dbSession, tierA=False)
+    _, kpi = await _seedKpiWithMetric(
+        dbSession,
+        datasourceId=ds.id,
+        kpiCode="KPI_RT_LEGACY_NONE",
+        kpiName="运行时Legacy失败指标",
+        keywords=["运行时Legacy失败指标"],
+        formula=_TIER_A_FORMULA,
+    )
+    await _warmKpiCache(dbSession)
+
+    import app.api.v1.chat as chat_module
+
+    async def _none(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(chat_module._service, "_buildL1Response", _none)
+
+    resp = await client.post(
+        _CHAT_URL,
+        json=_payload("运行时Legacy失败指标是多少", ds.id),
+        headers=_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    assert await _runtimeEvents(dbSession, kpi.id) == []

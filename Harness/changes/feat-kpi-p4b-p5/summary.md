@@ -152,6 +152,53 @@ NONE
   `Harness/wiki/operations-runbook.md`「KPI 治理」。代码回滚用 `git revert`
   本批 commit（零 DDL，无迁移回滚）。
 
+## 追加：M4 运行时指标（2026-11-14）
+
+设计 §13 M4 要求「看板可看到命中率、Tier 分布、失败原因」。此前 Tier 只在响应/SSE
+里出现，**不落库**：Tier A/C 回答存 `routing_layer="L1"`、Tier B 存 L2，`L1B` 是
+进程内哨兵（刻意不持久化），`execution_tier`/`degraded_reason` 无列可存 ⇒ 看板
+无法回答「昨天有多少问句降级、为什么」。本追加补上这条观测链路。
+
+### 实现（零 DDL）
+
+- **事件流**：复用 append-only `audit_log`（与 `kpi_metric_reconcile` 同一通道），
+  `entity_type="kpi_runtime_event"`、`action="CREATE"`、`entity_id=kpi_catalog.id`、
+  `after_json={kpi_code, tier, reason, match_method}`。无新表、无迁移。
+- **写入点**：`chat_stream_output._runL1AndL4Preamble`（普通与流式入口共用）在每个
+  决策分支记**实际服务**的 Tier：A 成功记 A；**A 执行失败降级记 B + 降级原因**；
+  B/C 各记自身；LEGACY 仅在旧路径**实际构答成功**时记（`l1 is None` ⇒ 交给 L4，
+  不记，否则虚增 Tier 分布）。
+- **写入方式（独立会话自提交）**：`recordKpiRuntimeEvent` 用
+  `getSessionFactory()` 开独立会话并立即 `commit`，best-effort（失败只 warning）。
+  原因：流式终结分支（Tier A/C/LEGACY）只 yield SSE 帧就 `return`，从不 commit
+  请求会话（`getDb` 收尾只关闭/回滚），请求会话里的审计行会被静默丢弃 —— 实测
+  Tier A 流式问句 0 行、非流式 1 行，看板会把 Tier 分布系统性偏向 Tier B。与 H4
+  断连兜底同理由：观测数据不该依附业务事务的提交时机，多一条连接换「必达」。
+- **看板**：`GET /api/v1/admin/kpi/governance-summary` 增加 `runtime` 段：
+  `byTier`（近 7 天，空值归 `UNKNOWN`）、`degradedReasons`（Top 5，次数倒序/同频按名）、
+  `chatAnswers`（`channel="chat"` 的 assistant 消息数）、`hitRate = total / chatAnswers`
+  （**近似**事件/回答比；分子不含澄清问句与「KPI 命中但旧路径构答失败」的问句，
+  故系统性偏小；精确匹配命中率仍以 50 题语料评测为准，分母 0 时为 null）。
+  查询失败全 0 + `runtimeError`，不 500。
+- **前端**：看板新增「运行时路由」卡片（事件数 / 近似命中率 / 回答数 / Tier 标签 /
+  降级原因标签 / 查询失败提示），i18n 双语。
+- **运行代价**：每个 KPI 问句一行审计（与 KPI 流量同阶），看板聚合在库里
+  `GROUP BY`（不把 7 天事件拉进内存）。`audit_log` 是 append-only，本批不引入清理；
+  若 KPI 流量上来需按保留策略归档/分区（与安全审计同表，排期时一并评估）。
+
+### 测试
+
+- 单测（并入 `test_kpi_metric_audit.py`）：payload 形状、审计行形状、NULL reason、
+  **独立连接可读到事件**（证明自提交，不依赖调用方 commit）、服务层失败与真实
+  DB 失败（不可序列化负载）均被吞且零残留。
+- 聚合（并入 `test_kpi_diagnose_api.py`）：Tier 计数、窗口 8 天诱饵、他类 entity
+  诱饵、6 个原因的真实 Top-5 截断、回答数三向过滤、分母 0 ⇒ hitRate=null、降级路径。
+- 端到端（并入 `test_kpi_tier_a_chat_api.py`）：A/C/LEGACY 与「A 失败⇒B」四条路径
+  各落一条正确 tier/reason 的事件；**流式 Tier A 事件落库**（证明终结分支不 commit
+  请求会话也不丢）；**旧路径构答失败（l1=None）不记事件**。
+- 前端：`KpiGovernancePage.test.tsx` 增运行时卡片三例（含 hitRate=null 占位符与
+  无事件/无降级原因空态）。
+
 ## CI 验收（2026-11-14）
 
 - **判据**：失败集合对差净新增 0（main 基线本身为红，不等 CI 变绿）。

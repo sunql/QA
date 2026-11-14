@@ -26,9 +26,11 @@ class TestValidationErrorDetails:
         assert err.detail == "str"
         assert err.details == {"n": 1}
 
-    def test_other_domain_errors_have_no_details_attr_semantics(self):
-        # 非 ValidationError 的 DomainError 不受影响（details 属性不存在语义）
+    def test_other_domain_errors_details_defaults_none(self):
+        # 2026-11-14：details 提升为 DomainError 基类通道 —— KPI 状态流转的
+        # from/to/allowed 由 ConflictError 携带（kpi_status_machine.py:68-76）。
+        # 非 ValidationError 的 DomainError 默认 details 仍为 None ⇒ 行为不变。
         from app.domain.exceptions import ConflictError
 
         err = ConflictError("m")
-        assert not hasattr(err, "details")
+        assert err.details is None

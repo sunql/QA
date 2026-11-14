@@ -20,12 +20,19 @@ from app.domain.exceptions import NotFoundError
 from app.domain.models import OntologyClass
 from app.domain.semantic_manifest_schema import manifestHash
 from app.domain.semantic_release_models import SemanticRelease
+from app.services.nl2sql_schema import buildSchemaText
+from app.services.ontology_service import OntologyService
 from app.services.semantic_compiler import compileManifest
 from app.services.semantic_registry_service import (
     SemanticReleaseIntegrityError,
     semanticRegistry,
 )
-from app.tests.unit._semantic_rows import makeClass
+from app.services.semantic_schema_adapter import (
+    SnapshotClass,
+    loadClassesForSchema,
+)
+from app.tests.unit._semantic_rows import makeClass, makeProperty
+from scripts.semantic_schema_shadow_diff import _blockContentMismatches
 
 _MINIMAL_MANIFEST: dict[str, Any] = {
     "schemaVersion": "v1",
@@ -306,3 +313,105 @@ async def test_list_releases_paginates(dbSession: AsyncSession) -> None:
 
     assert len(page) == 2
     assert [item.version for item in page] == ["2026.11.10-1", "2026.11.10-0"]
+
+
+# ---------------------------------------------------------------------------
+# D12：快照闸门在**真实 PG** 上的行为
+#
+# 为什么这条链必须真实库：判据是「从库里读出来的那一行**是不是被当成快照
+# 用**」—— 假 session 只能证明「代码调用了 registry」，证明不了「读出来的那
+# 行被复原成渲染视图」。
+#
+# 比对用的是影子比对工具（D13/D14）的**同一把尺**
+# （``_blockContentMismatches``：逐类块比较行多重集）：
+# ⇒ 集成测试与工具不会各用一套口径而互相漂移。
+# 逐块（而不是整段文本）比，是因为「类内列序」两侧本就不同（快照按属性名
+# 排序，直读按物理行序），而「事实归属」（哪一列挂在哪个类上）必须逐块相等。
+# ---------------------------------------------------------------------------
+
+
+async def test_active_release_makes_the_schema_path_use_the_snapshot(
+    dbSession: AsyncSession,
+) -> None:
+    dbSession.add(
+        makeClass(901, "供应商", alias="Supplier", sourceTable="DIM_SUPPLIER")
+    )
+    dbSession.add(
+        makeProperty(
+            901,
+            "SUPPLIER_CODE",
+            alias="供方编码",
+            sourceColumn="SUPPLIER_CODE",
+            isPrimaryKey=True,
+        )
+    )
+    await dbSession.commit()
+
+    manifest = await compileManifest(dbSession)
+    await _insertRelease(dbSession, status="ACTIVE", manifest=manifest)
+
+    ontology = OntologyService()
+    ormClasses = await ontology.listClasses(dbSession)
+    ormJoins = await ontology.listJoins(dbSession)
+    subset = [cls for cls in ormClasses if cls.class_name == "供应商"]
+    assert subset, "治理表里应当能读到刚种下的类"
+
+    snapshotClasses, snapshotJoins = await loadClassesForSchema(
+        subset, ormJoins, session=dbSession, enabled=True
+    )
+
+    # 走的确实是快照路径（复原视图），不是把 ORM 对象原样透传。
+    assert snapshotClasses
+    assert all(isinstance(cls, SnapshotClass) for cls in snapshotClasses)
+
+    # 两侧渲染出的**事实**必须等价（逐类块比行多重集）。
+    ormText = buildSchemaText(subset, joins=ormJoins)
+    snapshotText = buildSchemaText(snapshotClasses, joins=snapshotJoins)
+    assert _blockContentMismatches(
+        ormText.splitlines(), snapshotText.splitlines()
+    ) == []
+
+
+async def test_snapshot_path_degrades_to_direct_read_when_class_is_missing(
+    dbSession: AsyncSession,
+) -> None:
+    """ACTIVE 快照里没有被召回的类 ⇒ 降级直读治理表（不是失败）。
+
+    快照落后于治理表是**发布节奏的常态**（发布之后又加了类）⇒ 让问答整体
+    失败是错的。
+    """
+    # 治理表里有这个类，但 ACTIVE 快照（最小清单）里没有 ⇒ 快照陈旧。
+    dbSession.add(
+        makeClass(902, "采购订单", alias="PurchaseOrder", sourceTable="PURCHASE_ORDER")
+    )
+    await dbSession.commit()
+    await _insertRelease(dbSession, status="ACTIVE")
+
+    ontology = OntologyService()
+    ormClasses = await ontology.listClasses(dbSession)
+    ormJoins = await ontology.listJoins(dbSession)
+    subset = [cls for cls in ormClasses if cls.class_name == "采购订单"]
+    assert subset, "治理表里应当能读到刚种下的类"
+
+    restored, restoredJoins = await loadClassesForSchema(
+        subset, ormJoins, session=dbSession, enabled=True
+    )
+
+    assert restored is subset
+    assert restoredJoins is ormJoins
+
+
+async def test_disabled_switch_returns_the_input_objects_untouched(
+    dbSession: AsyncSession,
+) -> None:
+    """开关关 ⇒ 原样返回，连库都不碰（今天的行为必须逐字节不变）。"""
+    ontology = OntologyService()
+    ormClasses = await ontology.listClasses(dbSession)
+    ormJoins = await ontology.listJoins(dbSession)
+
+    restored, restoredJoins = await loadClassesForSchema(
+        ormClasses, ormJoins, session=dbSession, enabled=False
+    )
+
+    assert restored is ormClasses
+    assert restoredJoins is ormJoins

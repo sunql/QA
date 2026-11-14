@@ -16,7 +16,7 @@
 | P0 基线与裁决 | D1–D3 | 11-09 | `docs/update/1109/p0/`（环境基线 / 数据基线 / 裁决记录 / R01-R03 v1.1） | ✅ G1 通过 |
 | P1a 发布骨架 | D4–D7 | 11-09 23:17–23:59 | PR #114 → `849de29e` | ✅ |
 | P1b Registry + API | D8–D11 | 11-10 06:10–10:03 | PR #115 → `4777bfba` | ✅ G2 通过 |
-| **P2 NL2SQL 影子接入** | **D12–D17** | **未开工** | — | ⬜ **本计划** |
+| **P2 NL2SQL 影子接入** | **D12–D17** | **D12 已完成（11-15）** | 分支 `feat/semantic-registry-nl2sql`；证据 `daily/D12.md` | 🔄 进行中 |
 | P3a–P3d | D18–D31 | 未开工 | — | ⬜ |
 | P4 知识 Facade | D32–D37 | 未开工 | — | ⬜ |
 | P5 Workflow/Command | D38–D57 | 未开工 | — | ⬜ |
@@ -271,6 +271,14 @@ join.target_class_id     = synthetic_id(targetClassName)
 | ⑥ | D12「适配器」隐含「manifest 能直接喂 `buildSchemaText`」 | **需一层 id 合成**（§3.3）——manifest 无 id，`buildSchemaText` 全线按 id 索引 | 快照是 name-keyed，渲染器是 id-keyed |
 | ⑦ | D14「差异归零」隐含「差异只在文本层」 | 需额外断言「**召回子集不因快照而扩大**」 | 整份 manifest 复原 ⇒ schema 文本变长、JOIN 图变密 ⇒ 行为漂移（§3.3 ④） |
 
+### 4.1 D12 实测新增的偏差（3 条，2026-11-15）
+
+| # | 计划写法 | 实际需要 | 理由 |
+|---|---|---|---|
+| ⑧ | D12 只做适配器，比对工具属 D13 | 本日把比对工具一并做了并跑了**首轮** | 工具是「抓基线 fixture」的载体；两套代码路径 ⇒ 基线不可信。首轮报告落 `daily/D13-shadow-diff-round1.md`（D13 的证据顺带产出） |
+| ⑨ | 基线 fixture 进 `app/tests/fixtures/` | 基线落 `Harness/changes/.../baseline/`，**不进测试夹具** | 本体一改基线就变 ⇒ 进 CI 变成周期性假红。基线是**证据**不是**断言**；自动化断言改用**对象同一性**（`restored is classes`），比文本相等更强 |
+| ⑩ ⛔ | D14 完成定义「差异 = 0」 | **零差异判据必须拆成两个指标**：内容等价（行多重集）与顺序等价（逐行序列） | 实测：内容差异 **0**、顺序敏感差异 6524 行。根因是治理表侧 `for prop in cls.properties:` **不排序**（物理行序），快照侧按 `propertyName` 排序；快照是 name-keyed，**物理行序信息在编译时已丢失且不可重建**（按 id 排序会违反跨环境字节确定性）。详见 `daily/D12.md` F4 与 D14 的出路分析 |
+
 ---
 
 
@@ -282,8 +290,8 @@ join.target_class_id     = synthetic_id(targetClassName)
 | 日次 | 任务 | 产出 | 完成定义 |
 |---|---|---|---|
 | **D12** | ① 建 worktree + 分支 + venv；② 按 §2.2 抓当前 main 的「直读 schema 文本」基线 fixture；③ 按 §2.1 跑通真实发布链路拿一行 ACTIVE 快照；④ **id 合成层**（§3.3 方案 A）：`className → synthetic_id` 稳定映射 + camelCase→snake_case 字段映射 + `refClassName`/`parentClassName` 反查；⑤ 复原对象工厂（普通 class，**带 `__dict__`**，不用 slots）；⑥ 适配器 `loadClassesForSchema(domain?)`：**按召回子集的 `class_name` 过滤 manifest**；开关关 / 无发布 ⇒ **直读治理表（与现状逐字一致）** | 适配器 + id 合成层 + 双路径单测 + 基线 fixture + `daily/D12.md` | 关闭态输出与**当前 main** 逐字一致（fixture 对照）；ACTIVE 快照已入库且 `manifest_hash` 校验通过；**子集大小不因快照而变**（断言条数与类名清单） |
-| **D13** | 影子比对工具 `scripts/semantic_schema_shadow_diff.py`：同一本体生成「快照 schema 文本」与「直读 schema 文本」，差异落报告；测试环境跑首轮并归档 | 脚本 + 首轮报告 | 报告含差异条数与逐条定位；报告非空（否则说明比对没真跑） |
-| **D14** | 差异归零：只修快照渲染（排序 / 格式 / 缺字段），**不改 join 图 / 采样 / digest 算法**；补 §4-③ 的字段等价 golden + §4-⑦ 的**召回子集不变量**断言（条数 + 类名清单逐项相等） | 修正提交 + 归零报告 + golden | 差异 = 0（全部当前类/连接覆盖）；golden 钉死窄字段清单；**快照侧类名集合 == 治理表侧类名集合**（顺序亦一致） |
+| **D13** | 影子比对工具 `scripts/semantic_schema_shadow_diff.py`：同一本体生成「快照 schema 文本」与「直读 schema 文本」，差异落报告；测试环境跑首轮并归档。**评审增补**（2026-11-15）：① 退出码三态（0 = 内容 0 **且** 顺序 0 / 1 = 有内容差异 / 3 = 内容 0 但顺序 > 0）；② **子集模式** `--subset-mode each\|groups`（生产渲染的是召回子集，只比全集发现不了子集语义下的偏差）；③ 基线只在**比对后且内容差异 = 0** 时写 | 脚本 + 首轮报告 | 报告含差异条数与逐条定位；报告非空（否则说明比对没真跑）。**D12 已顺带产出**：`scripts/semantic_schema_shadow_diff.py` + `daily/D13-shadow-diff-round1.md`（内容差异 0 / 顺序差异 6524 行 / 类集合 37=37）；改写后复跑：全集与 **37 个逐类子集**内容差异均 = 0 |
+| **D14** | 差异归零：只修快照渲染（排序 / 格式 / 缺字段），**不改 join 图 / 采样 / digest 算法**；补 §4-③ 的字段等价 golden + §4-⑦ 的**召回子集不变量**断言（条数 + 类名清单逐项相等）。**⛔ 判据按 §4-⑩ 拆成两个指标**：内容等价（行多重集）必须 = 0；顺序等价需逐条给出结论（出路见 `daily/D12.md` F4 的 (a)/(b)/(c)）。**golden 已提前到 D12 落地**（评审要求：D15 接线前必须先钉死 ORM-vs-复原等价） | 修正提交 + 归零报告 + golden | **内容差异 = 0**（首轮已是 0，改写后逐类子集亦为 0）；golden 钉死窄字段清单（`app/tests/unit/test_semantic_schema_equivalence.py`，14 条，**D12 已落地**）；**快照侧类名集合 == 治理表侧类名集合**（顺序亦一致）；顺序差异要么归零、要么显式记录为已知差异并给出影响面评估 |
 | **D15** | 接入主路径：`nl2sql_service` / `nl2sql_plan` 经适配器取类（**仅 schema 文本路径**，见 §3.2）；开关 `ENABLE_SEMANTIC_REGISTRY_NL2SQL` 默认关 | 接入提交 + 定向测试 | 开关开/关两态下既有 NL2SQL 测试全过；反向守卫：开关开但快照缺字段 ⇒ 报错而非静默降级 |
 | **D16** | 运行记录钉住发布：加可空 `semantic_release_id`（落点现场确认，见 §4-④）+ 重放一致性测试；手写迁移（禁 autogenerate、只加法 DDL）+ downgrade 往返验证 | 迁移 + 测试 | 同一请求重放读取同一发布；空值兼容旧数据；迁移 upgrade→downgrade→upgrade 往返通过 |
 | **D17** | 内部切换演练（测试环境）+ chat/multistep 定向回归 + PR + 变更记录 | 演练报告、PR、`Harness/changes/feat-semantic-registry-nl2sql/summary.md` | 失败集合净新增 0；**G3 通过** |

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.exc import ProgrammingError
 
+import scripts.db_snapshot_guard as guardModule
 import scripts.kpi_metric_backfill as cliModule
 from app.services.nl2sql_semantic_guard import measureColumnIdentifiers
 from app.tests._pg_support import resolveTestDatabaseUrl
@@ -372,13 +373,25 @@ class _FakeSession:
 
 
 async def test_session_target_assertion_accepts_matching_database() -> None:
-    await _assertSameDatabase(_FakeSession("qa_metadata_test_t15"), "qa_metadata_test_t15")
+    await _assertSameDatabase(
+        _FakeSession("qa_metadata_test_t15"),
+        "qa_metadata_test_t15",
+        "postgresql+asyncpg://u:pw@localhost:5434/qa_metadata_test_t15",
+    )
 
 
 async def test_session_target_assertion_rejects_mismatched_database() -> None:
-    """T15-A：守卫放行的库名 ≠ 会话实连库名 ⇒ 必须拒绝落库。"""
-    with pytest.raises(RuntimeError, match="不一致"):
-        await _assertSameDatabase(_FakeSession("qa_metadata"), "qa_metadata_test_t15")
+    """T15-A：守卫放行的库名 ≠ 会话实连库名 ⇒ 必须拒绝落库。
+
+    异常类型与共享原语一致（``SystemExit``）：同一件事在两个写库脚本里
+    表现不同（一个干净退出、一个裸栈）就是「共享原语名义上共享」。
+    """
+    with pytest.raises(SystemExit, match="不一致"):
+        await _assertSameDatabase(
+            _FakeSession("qa_metadata"),
+            "qa_metadata_test_t15",
+            "postgresql+asyncpg://u:pw@localhost:5434/qa_metadata_test_t15",
+        )
 
 
 # ── M-1：度量类解析不得静默写 class_id=None / 别名必须一致 ─────────────
@@ -496,6 +509,36 @@ def test_require_database_url_rejects_missing_target() -> None:
     assert cliModule._requireDatabaseUrl("postgresql://x/y") == "postgresql://x/y"
 
 
+def test_require_database_url_rejects_target_override_query() -> None:
+    """query 能改驱动实际连的服务器 ⇒ 备份与写入会落到不同库 ⇒ 必须拒绝。"""
+    with pytest.raises(SystemExit, match="host"):
+        cliModule._requireDatabaseUrl(
+            "postgresql+asyncpg://u:p@localhost:5433/qa_metadata?host=evil.internal"
+        )
+
+
+def test_require_database_url_reads_env_variable(monkeypatch) -> None:
+    monkeypatch.setenv("QA_METADATA_DSN", "postgresql+asyncpg://u:p@host:5433/qa_metadata")
+    assert cliModule._requireDatabaseUrl(None, "QA_METADATA_DSN") == (
+        "postgresql+asyncpg://u:p@host:5433/qa_metadata"
+    )
+
+
+def test_require_database_url_warns_on_inline_password(capsys) -> None:
+    """运维既有契约：``--database-url`` 允许带口令，但必须提示改走环境变量。"""
+    cliModule._requireDatabaseUrl("postgresql+asyncpg://u:secretpw@host:5433/db")
+    assert "--database-url-env" in capsys.readouterr().out
+
+
+def test_require_database_url_rejects_dsn_without_explicit_host() -> None:
+    """DSN 没写主机 ⇒ 实际连哪台由 $PGHOST 决定 ⇒ 备份闸的「同一目标」无从谈起。
+
+    本脚本写正式库前要备份 ⇒ 目标必须**看得见**。
+    """
+    with pytest.raises(SystemExit, match="主机"):
+        cliModule._requireDatabaseUrl("postgresql+asyncpg://u:pw@/qa_metadata")
+
+
 def test_select_plans_filters_by_kpi_code() -> None:
     assert len(cliModule._selectPlans(None)) == 12
     picked = cliModule._selectPlans(" KPI_SUPPLIER_OTD , KPI_COST_SAVING ")
@@ -548,7 +591,7 @@ def test_pg_dump_failure_scrubs_password(
     def _fakeRun(*_args: object, **_kwargs: object) -> object:
         return _fakeDump(1, stderr)
 
-    monkeypatch.setattr(cliModule.subprocess, "run", _fakeRun)
+    monkeypatch.setattr(guardModule.subprocess, "run", _fakeRun)
 
     with pytest.raises(SystemExit) as excinfo:
         cliModule._pgDump(dsn, "t", tmp_path / "x.sql")
@@ -639,7 +682,7 @@ def test_pg_dump_refuses_symlinked_tmp_file(
     def _shouldNotRun(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("O_NOFOLLOW 失败后不得再调用 pg_dump")
 
-    monkeypatch.setattr(cliModule.subprocess, "run", _shouldNotRun)
+    monkeypatch.setattr(guardModule.subprocess, "run", _shouldNotRun)
 
     with pytest.raises(SystemExit, match="符号链接"):
         cliModule._pgDump(
@@ -658,19 +701,23 @@ def test_pg_dump_accepts_missing_table_and_rejects_other_errors(
     out = tmp_path / "a.sql"
 
     def _runSkip(
-        command: list[str], stdout: object, stderr: int, env: dict[str, str]
+        command: list[str],
+        stdout: object,
+        stderr: int,
+        env: dict[str, str],
+        **_kwargs: object,
     ) -> object:
         stdout.write(b"")  # type: ignore[attr-defined]
         return _fakeDump(1, b'pg_dump: error: no matching tables were found')
 
-    monkeypatch.setattr(cliModule.subprocess, "run", _runSkip)
+    monkeypatch.setattr(guardModule.subprocess, "run", _runSkip)
     cliModule._pgDump("postgresql+asyncpg://u:p@h:5432/qa_metadata", "t", out)
     assert not out.exists()
 
     monkeypatch.setattr(
-        cliModule.subprocess,
+        guardModule.subprocess,
         "run",
-        lambda command, stdout, stderr, env: _fakeDump(1, b"boom"),
+        lambda command, stdout, stderr, env, **_kwargs: _fakeDump(1, b"boom"),
     )
     with pytest.raises(SystemExit, match="备份失败"):
         cliModule._pgDump("postgresql+asyncpg://u:p@h:5432/qa_metadata", "t", out)
@@ -688,9 +735,9 @@ def test_pg_dump_failure_never_deletes_existing_backup(
     survivor.write_text("VALID-BACKUP-FROM-OTHER-PROCESS", encoding="utf-8")
 
     monkeypatch.setattr(
-        cliModule.subprocess,
+        guardModule.subprocess,
         "run",
-        lambda command, stdout, stderr, env: _fakeDump(1, b"boom"),
+        lambda command, stdout, stderr, env, **_kwargs: _fakeDump(1, b"boom"),
     )
 
     with pytest.raises(SystemExit, match="备份失败"):
@@ -707,13 +754,19 @@ def test_pg_dump_argv_never_contains_password(
     """FIX-I2：口令只走 ``PGPASSWORD`` 环境变量，argv 里永不出现。"""
     captured: dict[str, object] = {}
 
-    def _run(command: list[str], stdout: object, stderr: int, env: dict[str, str]) -> object:
+    def _run(
+        command: list[str],
+        stdout: object,
+        stderr: int,
+        env: dict[str, str],
+        **_kwargs: object,
+    ) -> object:
         captured["command"] = command
         captured["env"] = env
         stdout.write(b"-- dump")  # type: ignore[attr-defined]
         return _fakeDump(0, b"")
 
-    monkeypatch.setattr(cliModule.subprocess, "run", _run)
+    monkeypatch.setattr(guardModule.subprocess, "run", _run)
     dsn = "postgresql+asyncpg://qa_user:Tr0ub4dor-Secret@localhost:5433/qa_metadata"
     target = tmp_path / "a.sql"
 
@@ -746,7 +799,7 @@ def test_ensure_prod_backup_requires_all_tables(
     def _write(databaseUrl: str, table: str, path: Path) -> None:
         path.write_bytes(b"-- dump")
 
-    monkeypatch.setattr(cliModule, "_pgDump", _write)
+    monkeypatch.setattr(guardModule, "pgDump", _write)
     dsn = "postgresql://u:p@h/qa_metadata"
     paths = cliModule._ensureProdBackup(dsn, "0135")
     assert len(paths) == len(cliModule._BACKUP_TABLES)
@@ -756,7 +809,7 @@ def test_ensure_prod_backup_requires_all_tables(
 
     for path in paths:
         path.unlink()
-    monkeypatch.setattr(cliModule, "_pgDump", lambda *a, **k: None)
+    monkeypatch.setattr(guardModule, "pgDump", lambda *a, **k: None)
     with pytest.raises(SystemExit, match="备份不完整"):
         cliModule._ensureProdBackup("postgresql://u:p@h/qa_metadata", "0135")
 
@@ -794,6 +847,7 @@ def _cliArgs(**overrides: object) -> SimpleNamespace:
         "out": None,
         "only": None,
         "database_url": "postgresql+asyncpg://u:p@localhost:5434/qa_metadata_test_t15",
+        "database_url_env": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -842,7 +896,7 @@ async def test_run_backs_up_before_first_write(
         cliModule, "assertSafeTarget", lambda _dsn, allowProdWrite=False: "qa_metadata"
     )
 
-    async def _same(_session: object, _name: str) -> None:
+    async def _same(_session: object, _name: str, _dsn: str) -> None:
         events.append("assert-target")
 
     async def _context(_session: object, _plans: object) -> cliModule.PreviewContext:

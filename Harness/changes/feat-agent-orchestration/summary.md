@@ -3,7 +3,7 @@
 - **日期**：2026-10-28
 - **作者**：Claude
 - **Phase**：Phase 6.6 通用多工具 Agent 编排
-- **状态**：in-review
+- **状态**：**已合并并部署**（`b84d9b91` 已入 `origin/main`；迁移 `0135_agent_orchestration` 低于生产 `0140` ⇒ 已上线）
 - **关联变更**：无前序（本特性自成一条线；底座沿用 [[../../wiki/agent-runtime]] 记录的既有 Agent 运行时）
 - **迁移版本**：`0135_agent_orchestration`（revision `0135`，down_revision `0134`）
 - **MEMORY**：`qa-system-general-agent-orchestration.md`

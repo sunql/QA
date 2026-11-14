@@ -129,7 +129,7 @@
 
 | 项 | 状态 |
 |---|---|
-| PR #82 | ✅ 已推送（待合并） |
+| PR #82 | ✅ 已合并（`d6b2127f`） |
 | 生产部署 | ✅ `docker compose build backend && up -d backend`，容器内 `L4_TOOL_ROW_CAP=100` 验证通过 |
 | 真实复测 | ✅ 1 次 L4 运行，台账零丢轮 |
 | SSOT 本文档 + 证据 | ✅ |

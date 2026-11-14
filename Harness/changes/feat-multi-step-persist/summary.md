@@ -3,7 +3,7 @@
 - **日期**：2026-10-06
 - **作者**：Claude / 启琳
 - **Phase**：Chat 多步编排 — 落库 / 自动重试 / 动态压缩 / 手动续跑
-- **状态**：in-review（Task 1-9 已提交分支 `feat/multi-step-persist`；**未合并 main**）
+- **状态**：**已合并**（分支 `feat/multi-step-persist` 经 PR #8 → merge commit `b3889ef2` 于 2026-10-14 入 main）
 - **关联变更**：
   - [feat-multi-step-nl2sql](../feat-multi-step-nl2sql/summary.md)（predecessor：多步拆步本体）
   - [feat-qwen-multistep-uplift](../feat-qwen-multistep-uplift/summary.md)（同一批多步链路上的邻近变更）

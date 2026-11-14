@@ -533,6 +533,9 @@ MSG_KPI_CATALOG_NOT_FOUND = "KPI Catalog id={id} 不存在"
 MSG_KPI_CATALOG_CODE_NOT_FOUND = "KPI 编码「{code}」不存在"
 MSG_KPI_CATALOG_DUPLICATE_CODE = "KPI 编码「{code}」已存在"
 MSG_KPI_CATALOG_STATUS_NULL = "KPI status 不允许为 null（NOT NULL 约束）"
+MSG_KPI_METRIC_STATUS_NULL = (
+    "指标 status 不允许为 null（NOT NULL 列）；不修改状态请省略 status 字段"
+)
 
 # P5 状态流转矩阵：非法流转 409（detail=INVALID_STATUS_TRANSITION，details 带结构）
 MSG_KPI_STATUS_TRANSITION_INVALID = (

@@ -13,7 +13,10 @@ from httpx import AsyncClient
 from sqlalchemy import select
 
 from app.domain.models import KpiCatalog, OntologyMetric
-from app.services.messages_zh import MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN
+from app.services.messages_zh import (
+    MSG_KPI_METRIC_STATUS_NULL,
+    MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN,
+)
 
 ADMIN_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
 USER_HEADERS = {"X-User-Id": "normal-user", "X-User-Roles": "user"}
@@ -362,3 +365,29 @@ async def test_metric_transition_counts_only_kpis_linked_to_this_metric(
         )
     ).scalar_one()
     assert rowB.status == "PUBLISHED"
+
+
+# =============================================================================
+# 终审修复波：显式 status=null 必须是受治理的 4xx（不是 NOT NULL 500）
+# =============================================================================
+
+
+async def test_update_metric_with_explicit_null_status_rejected(
+    client: AsyncClient,
+) -> None:
+    metricId = await _createMetric(client)
+
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metricId}",
+        json={"status": None},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"] == MSG_KPI_METRIC_STATUS_NULL
+    detail = await client.get(
+        f"/api/v1/ontology/metrics/{metricId}", headers=ADMIN_HEADERS
+    )
+    assert detail.status_code == 200
+    # 校验失败 ⇒ 状态保持原值（默认 DRAFT），零副作用。
+    assert detail.json()["status"] == "DRAFT"

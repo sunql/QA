@@ -73,6 +73,7 @@ from app.services.messages_zh import (
     MSG_CLASS_NAME_EXISTS,
     MSG_CLASS_NOT_EXPIRED,
     MSG_INHERIT_CHECK_UNAVAILABLE,
+    MSG_KPI_METRIC_STATUS_NULL,
     MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN,
     MSG_ONTOLOGY_CLASS_EXPIRED,
     MSG_ONTOLOGY_CLASS_NOT_FOUND,
@@ -1049,6 +1050,10 @@ class OntologyService:
         entity = await self.getMetric(session, id)
         before = _entityToDict(entity)
         updates = dto.model_dump(exclude_unset=True)
+        # status 是 NOT NULL 列；显式 null 必须是受治理的 4xx，不能落到 NOT NULL 500。
+        # 前端清空表单用「不改」，不想改状态应省略该字段。
+        if "status" in updates and updates["status"] is None:
+            raise ValidationError(MSG_KPI_METRIC_STATUS_NULL)
         # 目标状态（枚举成员，归一前取）—— 发布闸门据此判断是否要过闸
         targetStatus = updates.get("status")
         # 枚举列归一为字符串：model_dump(python 模式) 返回枚举成员而非 .value

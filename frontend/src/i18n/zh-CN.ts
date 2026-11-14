@@ -2156,7 +2156,8 @@ export const zhCN = {
     mismatchCount: "不一致",
     unknownCount: "未知",
     passCount: "Pass 记录数",
-    passCountHint: "Pass 记录数预期为 0：无发现即不落审计，它不是通过率。",
+    passCountHint:
+      "Pass 记录数只含落库的 degraded pass（干净 pass 不落审计），不是通过率。",
     lastMismatchAt: "最近不一致时间（UTC）",
     reconcileError: "对账查询失败：{error}",
     syncHealthTitle: "三库同步健康",

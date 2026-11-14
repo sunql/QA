@@ -104,8 +104,9 @@ NONE
 
 - **三项已知能力边界（本批不修）**：
   1. 显式时间问句 + COMPILED 走不到编译器：路由门要求 `time_param_ready`
-     （formula 含 `{time_scope}`），COMPILED formula 为空 ⇒ 恒降级 Tier B
-     `explicit_time_scope`；编译器本身支持 timeScope（Oracle 方言）。
+     （formula 含 `{time_scope}` **且 `metric.time_column` 非空**），COMPILED
+     formula 为空 ⇒ 恒降级 Tier B `explicit_time_scope`；编译器本身支持 timeScope
+     （Oracle 方言）。
   2. `COUNT(*)` 形态的 COMPILED 指标进不了 Tier A：对账层 2 返回
      `technical_measure_unjudgeable` / `UNKNOWN` ⇒ `isTierAEligible=False`；
      要进 Tier A 须写成 `COUNT(<列>)`（治理/产品决策项）。

@@ -1075,12 +1075,12 @@ class KpiGovernanceReconcile(CamelModel):
     **干净 pass 不落库**；但 ``reconcileMetric`` 的 verdict 只取层 2，
     层 1/3 mismatch 会并入 findings 并置 ``degraded=True``，因此
     **degraded pass 会以 verdict='pass', degraded=true 落库**。该字段只表示
-    「窗口内实际落库的（多为 degraded）pass 行数」，干净 pass 不在其中。
+    「窗口内实际落库的 pass 行数」——只有 degraded pass 会落库（干净 pass 从不落库）。
     """
 
     window_days: int
     mismatch_count: int = 0
-    # 只统计实际落库的（多为 degraded）pass 行；干净 pass 不落库，不代表 pass rate。
+    # 只统计实际落库的 pass 行；只有 degraded pass 落库，干净 pass 从不落库，不代表 pass rate。
     pass_count: int = 0
     unknown_count: int = 0
     # 窗口内最近一条 verdict='mismatch' 的时间；无则 None（序列化为 ISO 串）。

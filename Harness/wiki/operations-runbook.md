@@ -298,12 +298,13 @@ curl -sS "$BASE/kpi-catalog?unbound=true" -H 'X-User-Roles: admin'
 findings 非空时落 `audit_log`（避免噪声）⇒ **干净 pass 不落库**；但
 `reconcileMetric` 的 `verdict` 只取层 2，层 1/3 的 mismatch 会并入 findings 并置
 `degraded=true`，所以 **degraded pass 会以 `verdict="pass", degraded=true` 落库**。
-`passCount` 只是「窗口内实际落库的（多为 degraded）pass 行数」。
+`passCount` 只是「窗口内实际落库的 pass 行数」——**只有 degraded pass 会落库
+（干净 pass 从不落库）**。
 
 因此闸门前判据不是单看 `mismatchCount=0` / `unknownCount=0`，还要排除 degraded pass：
 
 ```sql
--- 近 7 天 degraded=true 的对账行必须为 0（层 1/3 有 finding 的 pass）
+-- 近 7 天 degraded=true 的对账行必须为 0（层 1/3 有 finding 的 pass，或层 2 unknown）
 SELECT count(*) FROM audit_log
 WHERE entity_type = 'kpi_metric_reconcile'
   AND created_at >= now() - interval '7 days'

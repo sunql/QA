@@ -731,7 +731,7 @@ async def test_governance_summary_shape(
     # 对账审计只写 findings 非空的行：干净 pass 不落库，但 degraded pass
     # （层 1/3 mismatch + 层 2 pass）会以 verdict=pass 落库。这里直接种行
     # 只为验证 JSONB `after_json->>'verdict'` 的计数口径。
-    # ⇒ `passCount` 只是「实际落库的（多为 degraded）pass 行数」，**不是通过率**。
+    # ⇒ `passCount` 只是「实际落库的 pass 行数」——只有 degraded pass 会落库，**不是通过率**。
     now = datetime.now(UTC)
     dbSession.add_all(
         [

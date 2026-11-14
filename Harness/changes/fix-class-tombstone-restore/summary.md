@@ -159,6 +159,16 @@ DWD 历史样张；用户最关心的是 `DWD_BUSINESS_PARTNER` (id=9) 与
   2. 有 tombstoned 冲突 → 渲染 Alert 列表，列出源表 + 「将于 YYYY-MM-DD 软删除」
   3. 初始选中集合**自动剔除**墓碑源表（通过 `useEffect` 在 mount 时设置 `selectedRowKeys`）
   4. 用户手动勾选墓碑源表 → 仍允许（与 `Alert` 文案「请先到本体管理页恢复或确认忽略」一致，不强禁）
+     ⚠️ **2026-11-14 已被推翻**：改为**禁勾**（`getCheckboxProps` disabled）+ 就地状态标注。
+     理由：`createClass` 按 `class_name` 判重且**含墓碑** ⇒ 手动勾选注定在执行期失败，
+     而占用者在「本体管理」页默认查不到 ⇒ 用户两头找不着。
+     ⚠️ **2026-11-14 再订正**：禁勾**只针对「占用类名」的行**（后端 `name_collision=true`）；
+     **仅源表相同、类名未被占**的墓碑**不禁勾**（`createClass` 会成功 ⇒ 堵死它就是误杀）。
+     ⚠️ **活类与墓碑一视同仁**：占住类名的**活类**（`type=class` + `name_collision=true`）
+     **同样禁勾** —— `createClass` 只按 `class_name` 判重，活类占名同样让该行在执行期
+     必然失败。活类/墓碑的差别**只在文案**（「已被软删除类占用」vs「类名已被现有类占用」），
+     不影响禁勾谓词。
+     见 `Harness/changes/2026-11-14-fix-import-tombstone-name-guard/summary.md`。
 
 **实现**：
 - `types/localImport.ts`: `ImportConflict.type` 联合类型 + `existingValidTo?: string | null`

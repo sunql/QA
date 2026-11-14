@@ -2045,8 +2045,42 @@ export const zhCN = {
       inferredBy: "推断方式",
       inferredByDeclaredFk: "声明外键",
       inferredByNameConvention: "列名约定",
-      tombstonedAlert: "以下表已被同名软删除类占用",
-      tombstonedAlertItem: "已于 {when} 软删除；请到「本体管理」页恢复后再导入",
+      tombstonedAlert: "以下表与已软删除的类冲突",
+      tombstonedAlertItem: "已于 {when} 软删除",
+      tombstonedAlertOccupiedBy: "占用类名 {name}（id={id}）",
+      tombstonedAlertTableOnly: "（仅源表相同，类名未被占用 ⇒ 可正常导入）",
+      tombstonedAlertUnknown: "（后端未提供占名判定 ⇒ 需在执行期确认）",
+      // fix-import-tombstone-name-guard：占名的行（活类/墓碑一视同仁）禁勾 + 就地说明
+      status: "状态",
+      tombstoneTag: "已被软删除类占用",
+      tombstoneRowHint: "墓碑 id={id} · 删除于 {when}",
+      // ⚠️ 处置链两步权限不同：恢复 = owner 部门成员或 admin；改名 = admin-only
+      // ⇒ 两步都要点明，否则非 admin 用户会被指去做自己做不到的事。
+      tombstoneTooltip:
+        "类名 {name} 已被一个已删除的类占用（id={id}，删除于 {when}）：请到「本体管理」页开启「显示已删除」，恢复该类（需 owner 部门成员或管理员）后将其改名以释放该类名（改名需本体管理员权限）；或改用其他类名",
+      tombstoneCheckboxDisabled:
+        "类名 {name} 已被软删除的类占用（id={id}），无法勾选：请到「本体管理」页开启「显示已删除」，恢复该类（需 owner 部门成员或管理员）后改名以释放类名（改名需本体管理员权限）；或改用其他类名",
+      tombstoneTableOnlyTag: "同源表有软删除类",
+      tombstoneTableOnlyHint: "墓碑 id={id} · 删除于 {when}",
+      tombstoneTableOnlyTooltip:
+        "已删除的类 {name}（id={id}，删除于 {when}）用的是同一张源表，但类名不同 ⇒ 不影响本次导入",
+      tombstoneUnknownTooltip:
+        "已删除的类 {name}（id={id}，删除于 {when}）与本表同源；后端未提供占名判定 ⇒ 需在执行期确认",
+      // 活类占名（type="class"）：文案不能复用墓碑那套（「已被软删除」不成立）
+      nameTakenAlert: "以下表的类名已被现有类占用",
+      nameTakenAlertItem: "被现有类 {name}（id={id}）占用",
+      nameTakenTag: "类名已被现有类占用",
+      nameTakenRowHint: "占用类 id={id}",
+      // ⚠️ 必须点明权限：改名（PUT）与删除（DELETE）都是 admin-only
+      // ⇒ 否则会把非 admin 用户指去做自己做不到的事（安全评审 MEDIUM）。
+      nameTakenTooltip:
+        "类名 {name} 已被现有类占用（id={id}）：请到「本体管理」页将该类改名或删除（改名/删除需本体管理员权限）；或改用其他类名",
+      nameTakenCheckboxDisabled:
+        "类名 {name} 已被现有类占用（id={id}），无法勾选：请到「本体管理」页将该类改名或删除（改名/删除需本体管理员权限）；或改用其他类名",
+      // 活类 + unknown（后端未升级，没给 nameCollision）⇒ 中性提示，不断言占名
+      nameTakenUnknownTag: "与现有类同名，待确认",
+      nameTakenUnknownTooltip:
+        "现有类 {name}（id={id}）与本表同名；后端未提供占名判定 ⇒ 需在执行期确认",
     },
   },
 

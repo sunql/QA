@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, NamedTuple
 
 from neo4j.exceptions import AuthError, ServiceUnavailable
 from pymilvus.exceptions import MilvusException
@@ -71,6 +71,8 @@ from app.services.messages_zh import (
     MSG_CLASS_INHERIT_CYCLE,
     MSG_CLASS_INHERIT_SELF,
     MSG_CLASS_NAME_EXISTS,
+    MSG_CLASS_NAME_OCCUPIED_BY_TOMBSTONE,
+    MSG_CLASS_NAME_OCCUPIED_BY_TOMBSTONE_RENAME,
     MSG_CLASS_NOT_EXPIRED,
     MSG_INHERIT_CHECK_UNAVAILABLE,
     MSG_KPI_METRIC_STATUS_NULL,
@@ -236,6 +238,60 @@ def _assertTimeScopePlaceholderConsistency(
         raise ValidationError(MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN)
 
 
+class _ClassOccupant(NamedTuple):
+    """占住类名的那一行（只取需要的列，避免把整个实体连同 selectin 关系拉进来）。"""
+
+    id: int
+    class_name: str | None
+    valid_to: datetime | None
+
+
+def _isoUtc(value: datetime) -> str:
+    """把时间戳格式化成**带时区偏移**的 ISO 串。
+
+    DB 列是 timestamptz（asyncpg 返回 aware）⇒ 线上恒带偏移量。
+    但若混入 naive 值，`isoformat()` 会输出不带偏移的串 ⇒ 前端
+    `new Date(...)` 按**本地时区**解析 ⇒ 显示时间凭空差一个时区。
+    ⇒ naive 一律按 UTC 解释（与 PG 对 timestamptz 的口径一致）。
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
+def _classNameConflictError(
+    occupant: _ClassOccupant, name: str, *, renaming: bool = False
+) -> ValidationError:
+    """类名占用的统一错误（fix-import-tombstone-name-guard）。
+
+    占用者分两种，用户处境完全不同：
+    - **活类**（valid_to IS NULL）：真的同名类存在 ⇒ 「类名 X 已存在」；
+    - **软删墓碑**（valid_to 非空）：行还在、仍占着类名（业务层的类名判重 +
+      DB 唯一约束 ``uq_ontology_class_name_version``），但「本体管理」页默认
+      过滤 valid_to ⇒ 用户**查不到**。只说「已存在」会让用户反复撞墙 ⇒ 专用
+      文案点名墓碑 id + 删除时间 + 处置路径。
+      ⚠️ 处置路径写全：``恢复`` 只是把墓碑复活成**活类**，类名**照样被占**
+      ⇒ 真正释放类名还要「恢复后**改名**」⇒ 只写「恢复」会把用户送进第二个死胡同。
+
+    renaming=True（改名路径）：用户正在把类改成这个名字，处置路径要写成
+    「恢复**那个**类并给它改名」——否则读起来像让用户再改一次同名。
+    """
+    if occupant.valid_to is not None:
+        template = (
+            MSG_CLASS_NAME_OCCUPIED_BY_TOMBSTONE_RENAME
+            if renaming
+            else MSG_CLASS_NAME_OCCUPIED_BY_TOMBSTONE
+        )
+        return ValidationError(
+            template.format(
+                name=name,
+                id=occupant.id,
+                when=_isoUtc(occupant.valid_to),
+            )
+        )
+    return ValidationError(MSG_CLASS_NAME_EXISTS.format(name=name))
+
+
 # =============================================================================
 # Class
 # =============================================================================
@@ -279,13 +335,29 @@ class OntologyService:
         client body 中的 object_owner（DTO 已移除），防止越权。
         """
         # 名称占用校验：任一行（含墓碑）同名即拒绝
+        # fix-import-tombstone-name-guard：占用者是**软删除墓碑**时给专用文案 ——
+        # 墓碑行在「本体管理」页默认不可见（valid_to 过滤），只说「已存在」会让
+        # 用户既查不到也建不了 ⇒ 死结。故点名墓碑 id + 删除时间 + 处置路径。
         existing = await session.execute(
-            select(OntologyClass).where(
-                OntologyClass.class_name == dto.class_name,
+            # 只取判重需要的 3 列：不加载整个实体（否则会连带拉起 selectin 关系）。
+            select(OntologyClass.id, OntologyClass.class_name, OntologyClass.valid_to)
+            .where(OntologyClass.class_name == dto.class_name)
+            # 同名多行时**活类优先**（valid_to NULLS FIRST）：活类是用户看得见的
+            # 占用者（能改名/能删除），报它才可执行；也与导入预览的判定口径一致。
+            # 排序还让报错在同名多行时**确定**（无序 first() 是任意的）：
+            # valid_to NULLS FIRST → version DESC → id ASC ⇒ 全序。
+            # 口径与 import_conflict_resolver._occupantOrderKey 一致 ⇒ 预览期
+            # 报出的占用者 id 就是这里报错的那一行。
+            .order_by(
+                OntologyClass.valid_to.asc().nullsfirst(),
+                OntologyClass.version.desc(),
+                OntologyClass.id.asc(),
             )
         )
-        if existing.scalar_one_or_none() is not None:
-            raise ValidationError(MSG_CLASS_NAME_EXISTS.format(name=dto.class_name))
+        # first() 而非 scalar_one_or_none()：同名多行不应炸 500
+        row = existing.first()
+        if row is not None:
+            raise _classNameConflictError(_ClassOccupant(*row), dto.class_name)
 
         # 校验父类存在（FK 约束兜底，但显式校验给出更清晰的错误）
         if dto.parent_class_id is not None:
@@ -445,17 +517,36 @@ class OntologyService:
         # 改名重名校验：原地更新后 class_name 无 DB 唯一约束，若改名为另一行
         # 的同名（含墓碑），会产生同名双行（或 IntegrityError 500）。与 createClass
         # 同口径：class_name 被任一行占用（含软删除墓碑）即拒绝。
+        # fix-import-tombstone-name-guard：占用者是墓碑时同样给专用文案（口径统一）。
+        # ⚠️ **只在真的改名时校验**：本体编辑表单**每次都提交 className**（原样回传），
+        # 若不区分「真改名」与「原样回传」，则「活类 X v2 + 同名墓碑 X v1」这种形态下，
+        # 用户只想改描述也会被拦，并被告知「去恢复那个类并改名」——用户**根本没在改名**，
+        # 且改不动的活类比看不见的墓碑更难办。原样回传不产生新的占名冲突 ⇒ 跳过。
         if "class_name" in updates:
             newName = updates["class_name"]
-            if newName is not None:
+            if newName is not None and newName != existing.class_name:
                 clash = await session.execute(
-                    select(OntologyClass.id).where(
+                    # 同 createClass：只取 3 列，不加载整个实体。
+                    select(
+                        OntologyClass.id,
+                        OntologyClass.class_name,
+                        OntologyClass.valid_to,
+                    )
+                    .where(
                         OntologyClass.class_name == newName,
                         OntologyClass.id != id,
                     )
+                    # 同 createClass：同名多行时活类优先，报错确定（全序）
+                    .order_by(
+                        OntologyClass.valid_to.asc().nullsfirst(),
+                        OntologyClass.version.desc(),
+                        OntologyClass.id.asc(),
+                    )
                 )
-                if clash.scalar_one_or_none() is not None:
-                    raise ValidationError(MSG_CLASS_NAME_EXISTS.format(name=newName))
+                # first() 而非 scalar_one_or_none()：同名多行不应炸 500
+                row = clash.first()
+                if row is not None:
+                    raise _classNameConflictError(_ClassOccupant(*row), newName, renaming=True)
 
         # 继承校验：仅在显式更新 parent_class_id 时执行
         id_mapping_svc = IdMappingService()
@@ -611,7 +702,11 @@ class OntologyService:
           5. Milvus 向量复活（best-effort 后台同步）
 
         createClass / deleteClass 在 §7 不动 createClass 占名校验的前提下，
-        本接口是「释放名字」的唯一入口。
+        本接口是**让被删的类重新可见**的唯一入口。
+        ⚠️ **它不是「释放类名」的入口**（fix-import-tombstone-name-guard 订正）：
+        恢复只是把 `valid_to` 置空 ⇒ 墓碑复活成**活类** ⇒ 该 `class_name`
+        **照样被占用**（createClass 只按 class_name 判重，含活类与墓碑）
+        ⇒ 真正释放类名还要「**恢复后改名**」⇒ 只写「恢复」会把用户送进第二个死胡同。
         """
         entity = await self.getClass(session, id)
         self._acl.assertCanModify(

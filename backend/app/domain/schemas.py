@@ -1852,13 +1852,27 @@ class ImportConflict(CamelModel):
     """本地导入时，建议的类/属性与既有本体的冲突。"""
 
     type: ConflictType = Field(..., description="冲突类型：class | property | class_tombstoned")
-    source_table: str | None = Field(default=None, description="冲突涉及的源表名")
+    # 类冲突时 source_table 恒为**提议的那张表**（= 冲突落点，前端据此定位要禁勾/提示的行），
+    # 而 existing_name 是**占用者**的类名（可能与 proposed_name 不同：唯一约束只认 class_name）。
+    source_table: str | None = Field(default=None, description="冲突涉及的源表名（类冲突=提议的那张表）")
     source_column: str | None = Field(default=None, description="冲突涉及的源列名（仅属性冲突）")
     existing_id: int = Field(..., description="既有本体类/属性的 id")
     existing_name: str | None = Field(default=None, description="既有本体类/属性名称")
     proposed_name: str | None = Field(default=None, description="建议的类/属性名称")
     # 仅 CLASS_TOMBSTONED 时填充：墓碑的 valid_to 时间戳，方便前端渲染「已于 X 软删除」
     existing_valid_to: datetime | None = Field(default=None, description="既有本体类的 valid_to（仅墓碑冲突）")
+    # fix-import-tombstone-name-guard：**类名**被占（True）还是仅源表相同（False）。
+    # True ⇒ createClass 必然拒（它只按 class_name 判重，活类/墓碑一视同仁）
+    #        ⇒ 前端必须禁勾并说明；False ⇒ 类名没被占 ⇒ 导入其实能成功 ⇒ 只提示不禁勾。
+    # ⚠️ 活类占名同样禁勾：只按「冲突类型是不是墓碑」判定会漏掉活类占名，
+    #    那一行注定在执行期失败，却要等失败才知道。
+    # ⚠️ 缺省取 **None（三态）而非 False**：若某个 producer 忘了填这个字段，
+    #    False 会被前端读成「仅撞表 ⇒ 类名没被占」⇒ 文案说错（「同源表有软删除类」）
+    #    ⇒ None 走「未判定」文案（需在执行期确认）⇒ **fail-safe**。
+    name_collision: bool | None = Field(
+        default=None,
+        description="冲突是否源于类名被占（True）还是仅源表相同（False）；None = 未判定",
+    )
     # 处置动作：skip（默认，保留既有）| overwrite（覆盖）| rename（改名新建）
     action: str = "skip"
 

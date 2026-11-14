@@ -11,6 +11,7 @@ client/dbSession fixtures），并从 HTTP 入口走完整 API 链路。
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from sqlalchemy import func, select
@@ -226,6 +227,149 @@ async def test_import_preview_detects_conflict_with_existing_class(client) -> No
     assert resp.status_code == 200, resp.text
     conflicts = resp.json()["conflicts"]
     assert any(c["type"] == "class" and c["sourceTable"] == "orders" for c in conflicts)
+
+
+async def test_import_preview_reports_tombstone_name_collision(client) -> None:
+    """墓碑占用**类名**（源表不同）⇒ 预览期报 class_tombstoned 且 nameCollision=True。
+
+    修复前：预览只按 source_table 匹配 ⇒ 这类冲突（墓碑源表不同、类名相同）
+    完全不报 ⇒ 用户勾了行、执行期才炸「类名 orders 已存在」，而那个墓碑在
+    「本体管理」页默认查不到 ⇒ 死结。
+    """
+    _useFakeSchema(client)
+    ds_id = await _create_datasource(client)
+
+    created = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "orders", "sourceTable": "legacy_orders"},
+    )
+    assert created.status_code == 201, created.text
+    class_id = created.json()["id"]
+
+    deleted = await client.delete(f"/api/v1/ontology/classes/{class_id}")
+    assert deleted.status_code == 204, deleted.text
+
+    resp = await client.post(
+        f"/api/v1/datasources/{ds_id}/import-preview",
+        json={"rules": {}},
+    )
+    assert resp.status_code == 200, resp.text
+    conflicts = resp.json()["conflicts"]
+    tombstones = [c for c in conflicts if c["type"] == "class_tombstoned"]
+    assert len(tombstones) == 1, conflicts
+    tomb = tombstones[0]
+    # 冲突落在**提议的那张表**（前端按它定位要禁勾的行）
+    assert tomb["sourceTable"] == "orders"
+    # 占用者就是那个墓碑（类名 orders）
+    assert tomb["existingName"] == "orders"
+    assert tomb["existingValidTo"] is not None
+    # 占类名 ⇒ createClass 必然拒 ⇒ 前端必须禁勾
+    assert tomb["nameCollision"] is True
+
+
+async def test_import_preview_marks_table_only_tombstone_as_non_blocking(client) -> None:
+    """仅源表相同（类名未被占）⇒ nameCollision=False（导入其实能成功）。
+
+    提议类名恒等于表名（local_import_service: class_name=table_name）⇒ 占用者
+    类名不同 ⇒ 类名没被占 ⇒ createClass 会成功 ⇒ 前端**不得**禁勾这一行。
+    """
+    _useFakeSchema(client)
+    ds_id = await _create_datasource(client)
+
+    created = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "CustomersMaster", "sourceTable": "customers"},
+    )
+    assert created.status_code == 201, created.text
+    class_id = created.json()["id"]
+
+    deleted = await client.delete(f"/api/v1/ontology/classes/{class_id}")
+    assert deleted.status_code == 204, deleted.text
+
+    resp = await client.post(
+        f"/api/v1/datasources/{ds_id}/import-preview",
+        json={"rules": {}},
+    )
+    assert resp.status_code == 200, resp.text
+    conflicts = resp.json()["conflicts"]
+    tombstones = [c for c in conflicts if c["type"] == "class_tombstoned"]
+    assert len(tombstones) == 1, conflicts
+    tomb = tombstones[0]
+    assert tomb["sourceTable"] == "customers"
+    assert tomb["existingName"] == "CustomersMaster"
+    # 仅撞表、没占名 ⇒ 导入可成功 ⇒ 不阻断
+    assert tomb["nameCollision"] is False
+
+
+async def test_preview_occupant_id_matches_create_class_error_id(client) -> None:
+    """预览报出的占用者 id **必须等于**执行期 createClass 报错文案里的 id。
+
+    前端提示用户「去恢复 id=N」⇒ 若两侧指向不同行（哪怕是同名多行时排序口径
+    分叉），用户恢复完还是撞「类名已存在」⇒ 提示就成了假线索。
+    """
+    _useFakeSchema(client)
+    ds_id = await _create_datasource(client)
+
+    created = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "orders", "sourceTable": "legacy_orders"},
+    )
+    assert created.status_code == 201, created.text
+    class_id = created.json()["id"]
+
+    deleted = await client.delete(f"/api/v1/ontology/classes/{class_id}")
+    assert deleted.status_code == 204, deleted.text
+
+    # 预览：报出的占用者 id
+    resp = await client.post(
+        f"/api/v1/datasources/{ds_id}/import-preview",
+        json={"rules": {}},
+    )
+    assert resp.status_code == 200, resp.text
+    conflicts = resp.json()["conflicts"]
+    hits = [c for c in conflicts if c["type"] == "class_tombstoned"]
+    assert len(hits) == 1, conflicts
+    preview_id = hits[0]["existingId"]
+
+    # 执行期：createClass 报错文案里的 id
+    failed = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "orders", "sourceTable": "another_table"},
+    )
+    assert failed.status_code == 422, failed.text
+    error = failed.json()["error"]
+    matched = re.search(r"id=(\d+)", error)
+    assert matched is not None, error
+    assert int(matched.group(1)) == preview_id == class_id
+
+
+async def test_import_preview_marks_live_class_name_collision_as_blocking(client) -> None:
+    """**活类**占用类名（源表不同）⇒ 预览期报 class 且 nameCollision=True。
+
+    前端据此**禁勾**：createClass 只按 class_name 判重（含活类）⇒ 这一行在
+    执行期必然失败（类名已存在），执行期才报错等于让用户白等一轮。
+    """
+    _useFakeSchema(client)
+    ds_id = await _create_datasource(client)
+
+    created = await client.post(
+        "/api/v1/ontology/classes",
+        json={"className": "orders", "sourceTable": "legacy_orders"},
+    )
+    assert created.status_code == 201, created.text
+
+    resp = await client.post(
+        f"/api/v1/datasources/{ds_id}/import-preview",
+        json={"rules": {}},
+    )
+    assert resp.status_code == 200, resp.text
+    conflicts = resp.json()["conflicts"]
+    hits = [c for c in conflicts if c["type"] == "class" and c["sourceTable"] == "orders"]
+    assert len(hits) == 1, conflicts
+    assert hits[0]["existingName"] == "orders"
+    assert hits[0]["existingValidTo"] is None
+    # 占类名 ⇒ createClass 必然拒 ⇒ 前端必须禁勾
+    assert hits[0]["nameCollision"] is True
 
 
 async def test_import_execute_respects_is_selected(client, dbSession) -> None:

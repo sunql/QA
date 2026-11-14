@@ -2003,8 +2003,45 @@ export const enUS = {
       inferredBy: "Inferred by",
       inferredByDeclaredFk: "Declared FK",
       inferredByNameConvention: "Name convention",
-      tombstonedAlert: "The following tables are occupied by same-named soft-deleted classes",
-      tombstonedAlertItem: "soft-deleted at {when}; please restore them on the Ontology page before importing",
+      tombstonedAlert: "The following tables conflict with a soft-deleted class",
+      tombstonedAlertItem: "soft-deleted at {when}",
+      tombstonedAlertOccupiedBy: "occupied by class {name} (id={id})",
+      tombstonedAlertTableOnly:
+        "(same source table only — the class name is free, so importing still works)",
+      tombstonedAlertUnknown:
+        "(the backend did not report whether the class name is taken — confirmed at execution time)",
+      // fix-import-tombstone-name-guard：占名的行（活类/墓碑一视同仁）不可勾选
+      status: "Status",
+      tombstoneTag: "Occupied by a deleted class",
+      tombstoneRowHint: "tombstone id={id} · deleted at {when}",
+      // ⚠️ The two remediation steps need different permissions: restore = owning-department member or admin; rename = admin only.
+      //    Name both, otherwise non-admins are pointed at an action they cannot perform.
+      tombstoneTooltip:
+        "Class name {name} is occupied by a deleted class (id={id}, deleted at {when}). Enable \"Show deleted\" on the Ontology page, restore it (requires membership of its owning department or admin), then rename it to release the class name (renaming requires ontology admin permission); or use a different class name.",
+      tombstoneCheckboxDisabled:
+        "Class name {name} is occupied by a soft-deleted class (id={id}), so this row cannot be selected. Enable \"Show deleted\" on the Ontology page, restore it (requires membership of its owning department or admin), then rename it to release the name (renaming requires ontology admin permission); or use a different class name.",
+      tombstoneTableOnlyTag: "Soft-deleted class on the same table",
+      tombstoneTableOnlyHint: "tombstone id={id} · deleted at {when}",
+      tombstoneTableOnlyTooltip:
+        "The deleted class {name} (id={id}, deleted at {when}) uses the same source table but a different class name ⇒ it does not block this import.",
+      tombstoneUnknownTooltip:
+        "The deleted class {name} (id={id}, deleted at {when}) uses the same source table; the backend did not report whether the class name is taken ⇒ confirmed at execution time.",
+      // 活类占名（type="class"）：文案不能复用墓碑那套（「已被软删除」不成立）
+      nameTakenAlert:
+        "The class names of the following tables are already taken by existing classes",
+      nameTakenAlertItem: "taken by existing class {name} (id={id})",
+      nameTakenTag: "Class name already taken",
+      nameTakenRowHint: "occupying class id={id}",
+      // ⚠️ 必须点明权限：改名（PUT）与删除（DELETE）都是 admin-only
+      // ⇒ 否则会把非 admin 用户指去做自己做不到的事（安全评审 MEDIUM）。
+      nameTakenTooltip:
+        "Class name {name} is already taken by an existing class (id={id}). Rename or delete that class on the Ontology page (renaming/deleting requires ontology admin permission), or use a different class name.",
+      nameTakenCheckboxDisabled:
+        "Class name {name} is already taken by an existing class (id={id}), so this row cannot be selected. Rename or delete that class on the Ontology page (renaming/deleting requires ontology admin permission), or use a different class name.",
+      // 活类 + unknown（后端未升级，没给 nameCollision）⇒ 中性提示，不断言占名
+      nameTakenUnknownTag: "Same name as an existing class, to be confirmed",
+      nameTakenUnknownTooltip:
+        "The existing class {name} (id={id}) has the same name as this table; the backend did not report whether the class name is taken ⇒ confirmed at execution time.",
     },
     config: {
       selectTablesTitle: "Select tables to import",

@@ -289,6 +289,28 @@ MSG_EMBEDDING_PROVIDER_TYPE_UNKNOWN = (
 
 # Class 错误
 MSG_CLASS_NAME_EXISTS = "类名 {name} 已存在"
+# fix-import-tombstone-name-guard：类名被**软删除墓碑**占用时的专用文案。
+# 只说「已存在」会让用户两头找不着：本体管理页默认过滤 valid_to（看不见墓碑），
+# 导入期又反复报已存在 ⇒ 死结。故此处点名墓碑 id + 删除时间 + 处置路径。
+# ⚠️ 处置路径写全：恢复只是把墓碑复活成**活类**，类名**照样被占**
+# ⇒ 真正释放类名还要「恢复后改名」⇒ 只写「恢复」会把用户送进第二个死胡同。
+# ⚠️ **改名需本体管理员权限**（PUT /ontology/classes/{id} 是 admin-only），
+# 而「恢复」对 owner 部门成员开放 ⇒ 非 admin 用户照做会被 403 挡在第二步
+# ⇒ 用户从「看不见的死结」变成「看得见且改不掉的活类」⇒ 文案要点明权限要求。
+# 两步权限**不同** ⇒ 都要写明：恢复 = owner 部门成员或管理员；改名 = 仅管理员。
+MSG_CLASS_NAME_OCCUPIED_BY_TOMBSTONE = (
+    "类名 {name} 已被一个已删除的类占用（id={id}，删除于 {when}）："
+    "请到「本体管理」页开启「显示已删除」，恢复该类（需 owner 部门成员或管理员）"
+    "后将其改名以释放该类名（改名需本体管理员权限）；或改用其他类名"
+)
+# 改名路径专用：用户正在把类改成 {name}，而 {name} 被墓碑占着 ⇒ 处置动作是
+# 「恢复**那个**类并给它改名」，而不是「把它（用户正在改名的类）改名」——
+# 后者读起来像绕圈（用户以为自己已经在改名了）。
+MSG_CLASS_NAME_OCCUPIED_BY_TOMBSTONE_RENAME = (
+    "目标类名 {name} 已被一个已删除的类占用（id={id}，删除于 {when}）："
+    "请到「本体管理」页开启「显示已删除」，恢复该类（需 owner 部门成员或管理员）"
+    "并将它改名以释放类名 {name}（改名需本体管理员权限）；或改用其他类名"
+)
 MSG_PARENT_CLASS_NOT_FOUND = "父类 id={id} 不存在"
 MSG_ONTOLOGY_CLASS_NOT_FOUND = "OntologyClass id={id} 不存在"
 MSG_ONTOLOGY_CLASS_EXPIRED = (

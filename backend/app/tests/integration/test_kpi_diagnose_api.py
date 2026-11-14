@@ -34,7 +34,10 @@ from app.domain.models import (
 from app.models.system_config import SystemConfig
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_audit import RECONCILE_ENTITY_TYPE
-from app.services.kpi_metric_switches import SWITCH_CONTRACT_INJECTION
+from app.services.kpi_metric_switches import (
+    SWITCH_CONTRACT_INJECTION,
+    SWITCH_GATE,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -676,9 +679,11 @@ async def test_governance_summary_admin_only(client: AsyncClient) -> None:
 
 
 async def test_governance_summary_shape(
-    client: AsyncClient, dbSession: AsyncSession
+    client: AsyncClient,
+    dbSession: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """种 1 DRAFT + 1 PUBLISHED KPI、1 COMPILED metric ⇒ 形状与计数可读。"""
+    """种 KPI/metric/审计/开关双面数据 ⇒ 形状、分桶、窗口、闸门、映射都可读。"""
     compiledMetric = await _seedMetric(
         dbSession, name="KPI_GOV_COMPILED-metric", source="COMPILED"
     )
@@ -690,21 +695,42 @@ async def test_governance_summary_shape(
         denominatorColumns=["PROMISED_RECEIPT_DATE"],
         grainKeys=["SUPPLIER_CODE"],
     )
-    dbSession.add(
-        KpiCatalog(
-            kpi_code="KPI_GOV_DRAFT",
-            kpi_name="KPI_GOV_DRAFT 名称",
-            status="DRAFT",
-            metric_id=None,
-            numerator_columns=[],
-            denominator_columns=[],
-            grain_keys=[],
-            semantic_keywords=[],
-            match_threshold=Decimal("0.75"),
-        )
+    dbSession.add_all(
+        [
+            KpiCatalog(
+                kpi_code="KPI_GOV_DRAFT",
+                kpi_name="KPI_GOV_DRAFT 名称",
+                status="DRAFT",
+                metric_id=None,
+                numerator_columns=[],
+                denominator_columns=[],
+                grain_keys=[],
+                semantic_keywords=[],
+                match_threshold=Decimal("0.75"),
+            ),
+            # execution_source 缺失的两种形态：NULL 与空串，都必须落 NONE 桶。
+            OntologyMetric(
+                metric_name="KPI_GOV_NULL_SOURCE-metric",
+                formula="",
+                agg_function="SUM",
+                metric_type="MEASURE",
+                created_by="gov-test",
+            ),
+            OntologyMetric(
+                metric_name="KPI_GOV_EMPTY_SOURCE-metric",
+                formula="",
+                agg_function="SUM",
+                metric_type="MEASURE",
+                execution_source="",
+                created_by="gov-test",
+            ),
+            # 发布闸门打开；Tier A / sync 不种行 ⇒ 保持默认（False / True）。
+            SystemConfig(key=SWITCH_GATE, value="true"),
+        ]
     )
-    # 对账审计：pass 行真实运行不落库（无 finding），但这里直接种行验证
-    # JSONB `after_json->>'verdict'` 计数口径与 lastMismatchAt 取值。
+    # 对账审计：pass 行真实运行不落库（P1 只为 finding 写审计、避免噪声），
+    # 这里直接种行只为验证 JSONB `after_json->>'verdict'` 的计数口径。
+    # ⇒ `passCount` 只是「实际落库的 pass 行数」，**不是通过率**，生产恒为 0。
     now = datetime.now(UTC)
     dbSession.add_all(
         [
@@ -734,9 +760,40 @@ async def test_governance_summary_shape(
                 },
                 created_at=now - timedelta(days=1),
             ),
+            # 窗口外（8 天前）：若丢掉时间谓词，mismatchCount 会 1→2。
+            AuditLog(
+                entity_type=RECONCILE_ENTITY_TYPE,
+                entity_id=compiledMetric.id,
+                action="CREATE",
+                actor="system:kpi-contract",
+                after_json={
+                    "kpi_code": "KPI_GOV_OLD",
+                    "verdict": "mismatch",
+                    "degraded": False,
+                    "findings": [],
+                },
+                created_at=now - timedelta(days=8),
+            ),
+            # 非对账 entity_type：若丢掉 entity_type 谓词，mismatchCount 1→2。
+            AuditLog(
+                entity_type="kpi_catalog",
+                entity_id=compiledMetric.id,
+                action="CREATE",
+                actor="test",
+                after_json={"verdict": "mismatch"},
+                created_at=now,
+            ),
         ]
     )
     await dbSession.commit()
+
+    # 两个假存储返回不同计数：交换 milvus/neo4j 映射会立刻对不上。
+    monkeypatch.setattr(
+        kpiDiagnoseModule,
+        "queryKpiEmbeddings",
+        lambda: [{"ontology_id": 1}, {"ontology_id": 2}, {"ontology_id": 3}],
+    )
+    _FakeSyncHealthNeo4j.ids = {"obj:KPI:1", "obj:KPI:2"}
 
     resp = await client.get(_GOVERNANCE_URL, headers=_ADMIN_HEADERS)
 
@@ -746,23 +803,56 @@ async def test_governance_summary_shape(
     assert body["kpis"]["byStatus"]["PUBLISHED"] >= 1
     assert body["kpis"]["byStatus"]["DRAFT"] >= 1
     assert body["metrics"]["byExecutionSource"]["COMPILED"] >= 1
+    # NULL / 空串 metric 都落 NONE，且响应里不得出现空串键。
+    assert body["metrics"]["byExecutionSource"]["NONE"] >= 2
+    assert "" not in body["metrics"]["byExecutionSource"]
     assert "metrics" in body and "reconcile" in body and "gates" in body
     assert body["reconcile"]["windowDays"] == 7
-    # 近 7 天审计：1 mismatch + 1 pass；unknown 桶为空。
+    # 仅窗口内 + 对账 entity_type 的 1 mismatch + 1 pass 被计数；
+    # 窗口外行与非对账行都被排除（见上方两条变异说明）。
     assert body["reconcile"]["mismatchCount"] == 1
     assert body["reconcile"]["passCount"] == 1
     assert body["reconcile"]["unknownCount"] == 0
     assert body["reconcile"]["lastMismatchAt"] is not None
     assert body["reconcile"]["reconcileError"] is None
-    assert set(body["gates"]) == {
-        "publishGateEnabled",
-        "tierAEnabled",
-        "syncEnabled",
-    }
-    # 同步健康复用 `_kpiSyncHealth`：PG 计数取真值，Milvus/Neo4j 走假替身。
+    # 只开了发布闸门：Tier A 缺行 ⇒ False；sync 在测试环境被 conftest 的
+    # `KPI_SYNC_ENABLED=false` 一键止血置 False（生产缺行默认 True）。
+    assert body["gates"]["publishGateEnabled"] is True
+    assert body["gates"]["tierAEnabled"] is False
+    assert body["gates"]["syncEnabled"] is False
+    # 同步健康复用 `_kpiSyncHealth`：PG 计数取真值，Milvus=3 / Neo4j=2。
     assert body["syncHealth"]["publishedKpiCount"] == 1
-    assert body["syncHealth"]["milvusKpiCount"] == 0
-    assert body["syncHealth"]["neo4jKpiCount"] == 0
+    assert body["syncHealth"]["milvusKpiCount"] == 3
+    assert body["syncHealth"]["neo4jKpiCount"] == 2
     assert body["syncHealth"]["kpiTotal"] == body["kpis"]["total"]
     assert body["syncHealth"]["syncHealthError"] is None
     assert body["generatedAt"]
+
+
+async def test_governance_summary_sync_health_degrades(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同步健康整段抛错 ⇒ 仍 200，三计数 null + syncHealthError（不 500）。
+
+    reconcile 的 best-effort 分支不另立用例：两段用的是同一 savepoint 隔离
+    模式（各自 `begin_nested()` + 降级返回），这里只钉住用户可见的降级契约。
+    """
+
+    async def _boom(session: AsyncSession) -> object:
+        raise RuntimeError("sync store down")
+
+    monkeypatch.setattr(kpiDiagnoseModule, "_kpiSyncHealth", _boom)
+
+    resp = await client.get(_GOVERNANCE_URL, headers=_ADMIN_HEADERS)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    health = body["syncHealth"]
+    assert health["publishedKpiCount"] is None
+    assert health["milvusKpiCount"] is None
+    assert health["neo4jKpiCount"] is None
+    assert health["kpiTotal"] == body["kpis"]["total"]
+    assert health["syncHealthError"] is not None
+    assert "sync store down" in health["syncHealthError"]
+    # 同步健康失败不应影响其余聚合段。
+    assert "reconcile" in body and "gates" in body

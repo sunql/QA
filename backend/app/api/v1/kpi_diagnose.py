@@ -415,9 +415,13 @@ async def diagnoseKpi(
 # ---------------------------------------------------------------------------
 
 
-def _governanceError(exc: Exception) -> str:
+def _truncateError(text: str) -> str:
     """错误串截断：响应里只带短错误，避免把堆栈/超长消息塞给前端。"""
-    return f"{type(exc).__name__}: {exc}"[:GOVERNANCE_ERROR_MAX_CHARS]
+    return text[:GOVERNANCE_ERROR_MAX_CHARS]
+
+
+def _governanceError(exc: Exception) -> str:
+    return _truncateError(f"{type(exc).__name__}: {exc}")
 
 
 async def _countBy(
@@ -427,10 +431,13 @@ async def _countBy(
     rows = (
         await session.execute(select(column, func.count()).group_by(column))
     ).all()
-    return {
-        ("" if value is None else str(value)): int(count)
-        for value, count in rows
-    }
+    buckets: dict[str, int] = {}
+    for value, count in rows:
+        key = "" if value is None else str(value)
+        # 累加而非覆盖：NULL 组与显式空串组都映射到 ""，二者是同源语义，
+        # 覆盖会静默丢掉其中一组的计数。
+        buckets[key] = buckets.get(key, 0) + int(count)
+    return buckets
 
 
 async def _governanceKpiCounts(
@@ -449,7 +456,11 @@ async def _governanceMetricCounts(
     rawSources = await _countBy(session, OntologyMetric.execution_source)
     bySource: dict[str, int] = {}
     for source, count in rawSources.items():
-        # NULL 与空串同源：运行时都判 execution_source_missing，看板统一落 NONE。
+        # 看板口径刻意比运行时**窄**：运行时用
+        # `(execution_source or "").strip().upper()` 归一后判缺失
+        # （kpi_execution_service），看板只把 NULL / 空串归入 NONE。
+        # 非 API 写入的变体（如 " none "、"None"）各落各桶 —— 让数据面
+        # 异常暴露出来，而不是在看板上悄悄合并。
         bucket = EXECUTION_SOURCE_NONE if source in (None, "") else source
         bySource[bucket] = bySource.get(bucket, 0) + count
     return KpiGovernanceMetricCounts(
@@ -462,7 +473,13 @@ async def _governanceMetricCounts(
 async def _governanceReconcile(
     session: AsyncSession,
 ) -> KpiGovernanceReconcile:
-    """近 7 天对账统计（audit_log，verdict 走 JSONB ->> 取值）。"""
+    """近 7 天对账统计（audit_log，verdict 走 JSONB ->> 取值）。
+
+    ``pass_count`` 预期长期为 0 且**不代表通过率**：P1 起
+    ``recordReconcileResult`` 只在存在 finding 时写审计（避免噪声），而
+    verdict='pass' 只在 findings 为空时产生 ⇒ pass 行从不落库。本计数只是
+    「窗口内实际落库的 pass 行数」，在 pass 持久化决策前恒为 0。
+    """
     windowStart = datetime.now(UTC) - timedelta(
         days=GOVERNANCE_RECONCILE_WINDOW_DAYS
     )
@@ -527,8 +544,9 @@ async def _governanceSyncHealth(
         milvus_kpi_count=health.kpi_vector_count,
         neo4j_kpi_count=health.kpi_graph_node_count,
         kpi_total=kpiTotal,
-        # Milvus / Neo4j 单点失败由 `_kpiSyncHealth` 收集进 errors，这里透出。
-        sync_health_error="; ".join(health.errors) or None,
+        # Milvus / Neo4j 单点失败由 `_kpiSyncHealth` 收集进 errors，这里透出；
+        # 与整段失败同口径截断（schema 承诺「短错误串」）。
+        sync_health_error=_truncateError("; ".join(health.errors)) or None,
     )
 
 
@@ -545,7 +563,8 @@ async def governanceSummary(
       把 NULL / 空串统一归入 ``NONE``；
     - ``reconcile``：近 7 天 ``audit_log``（entity_type 见
       ``RECONCILE_ENTITY_TYPE``）按 ``after_json->>'verdict'`` 计数，查询失败
-      ⇒ 全 0 + ``reconcileError``，不 500；
+      ⇒ 全 0 + ``reconcileError``，不 500。``passCount`` 预期恒为 0（P1 起
+      pass 不落审计，见 ``_governanceReconcile`` docstring），**不是通过率**；
     - ``syncHealth``：复用 ``_kpiSyncHealth``（PG + Milvus + Neo4j），外部计数
       失败保持 null + ``syncHealthError``；
     - ``gates``：与运行时同源的三个开关（publish gate / Tier A / sync）。

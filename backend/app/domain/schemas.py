@@ -1068,10 +1068,17 @@ class KpiGovernanceMetricCounts(CamelModel):
 
 
 class KpiGovernanceReconcile(CamelModel):
-    """近 ``window_days`` 天 KPI 口径对账统计（来自 audit_log，best-effort）。"""
+    """近 ``window_days`` 天 KPI 口径对账统计（来自 audit_log，best-effort）。
+
+    ``pass_count`` **不是通过率，且预期长期为 0**：P1 起
+    ``recordReconcileResult`` 只在存在 finding 时落审计（避免噪声），而
+    verdict='pass' 只在 findings 为空时产生 ⇒ pass 行从不落库。在 pass
+    持久化决策落地前，该字段只表示「窗口内实际落库的 pass 行数」。
+    """
 
     window_days: int
     mismatch_count: int = 0
+    # 预期恒为 0（pass 不落审计），不代表 pass rate。
     pass_count: int = 0
     unknown_count: int = 0
     # 窗口内最近一条 verdict='mismatch' 的时间；无则 None（序列化为 ISO 串）。

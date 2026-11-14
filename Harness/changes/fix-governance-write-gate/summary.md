@@ -3,7 +3,7 @@
 - **日期**：2026-11-10
 - **作者**：Claude
 - **Phase**：Phase 10 工程治理（越权面收敛）
-- **状态**：待合并（分支 `fix/governance-write-gate`，base `main@4777bfba`）
+- **状态**：**已合并**（PR #116 → `851d6049`；零 DDL、零生产写、**不部署**）
 - **迁移版本**：无（零 DDL、零生产写、**不部署**）
 - **计划**：[plan.md](./plan.md)
 - **MEMORY**：[qa-system-term-dictionary-drift.md](../../../../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-term-dictionary-drift.md)

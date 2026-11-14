@@ -3,7 +3,7 @@
 - **日期**：2026-09-30
 - **作者**：Claude / 启琳
 - **Phase**：v3.1 B6 补完（会话归属守卫铺开）+ 前端会话恢复（原 B 方案）
-- **状态**：in-review（代码 / 测试 / 部署 / e2e 全绿；7 项收尾清单见 §10，其中 5 项已做、2 项**明确不做**并留痕）
+- **状态**：**已合并并部署**（`3d0f5124`，随 PR #8 入 main；代码 / 测试 / 部署 / e2e 全绿；7 项收尾清单见 §10，其中 5 项已做、2 项**明确不做**并留痕）
 - **关联变更**：[feat-chat-history-panel](../feat-chat-history-panel/summary.md)（`/chat-history` 与会话端点）
   > 注：守卫的前身 `_assertChatSessionOwnership`（v3.1 B6）**没有**对应变更记录（`grep` 全库 `Harness/changes/` 无命中）——
   > 属既有文档缺口，本变更把它的语义完整写进了 `session_guard.py` 与本文档。 

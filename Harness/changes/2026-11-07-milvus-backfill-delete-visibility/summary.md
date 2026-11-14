@@ -3,7 +3,7 @@
 - **日期**：2026-11-07
 - **作者**：Claude
 - **Phase**：Phase 7 缺陷治理 · ⑦ 测试侧根因（Milvus 回填脚本 delete 可见性）
-- **状态**：in-review
+- **状态**：**已合并**（PR #110 → squash `87f8e8e6`；配套白名单退休 PR #111 → `30c81001`；零 DDL、零生产写、**不部署**）
 - **关联变更**：[fix-milvus-delete-visibility](../fix-milvus-delete-visibility/summary.md)（2026-09-27 的可见性实测）、
   [2026-11-06-merge-gate-flake-whitelist](../2026-11-06-merge-gate-flake-whitelist/summary.md)（本批要退休的那条白名单）
 - **迁移版本**：无（本批零 DDL）

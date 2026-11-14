@@ -3,7 +3,7 @@
 - **日期**：2026-10-28
 - **作者**：Claude
 - **Phase**：Phase 1（B1+B5，提案 `../2026-10-27-kpi-governance-into-nl2sql-proposal.md`）+ B2 对账 + B3 注入 + B4 守卫（同日追加）
-- **状态**：**in-review** —— 已实现并合入 `main`（PR #70 → squash `607ad254`，2026-10-30）；
+- **状态**：**已合并并部署** —— 已实现并合入 `main`（PR #70 → squash `607ad254`，2026-10-30）；
   prod 已于 2026-10-30 部署，但注入开关 `KPI_CONTRACT_INJECTION_ENABLED=false`（先关后开）
   ⇒ 线上走关闭态，**开关打开后的验收待补**（见 §8 第 8 段）。
 - **关联变更**：[KPI 治理注入提案](../2026-10-27-kpi-governance-into-nl2sql-proposal.md)（B1–B5 已全量实施）

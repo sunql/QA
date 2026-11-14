@@ -317,3 +317,48 @@ async def test_metric_published_to_draft_allowed_when_no_kpi_links(
         )
     ).scalar_one()
     assert row.status == "DRAFT"
+
+
+async def test_metric_transition_counts_only_kpis_linked_to_this_metric(
+    client: AsyncClient, dbSession, seed_data_source
+) -> None:
+    """计数必须按 metric_id 收窄：已发布 KPI 挂在 metric B 时，metric A 仍可退回 DRAFT。
+
+    变异证据：删掉 ``KpiCatalog.metric_id == entity.id`` 谓词后，A 会数到 B 的
+    PUBLISHED KPI ⇒ 误判 409，本用例转红。
+    """
+    metricA = await _createMetric(client)
+    createdB = await client.post(
+        "/api/v1/ontology/metrics",
+        json={**_METRIC_PAYLOAD, "metricName": "sales_amount_b"},
+        headers=ADMIN_HEADERS,
+    )
+    assert createdB.status_code == 201, createdB.text
+    metricB = createdB.json()["id"]
+    await _publishMetric(client, metricA)
+    await _publishMetric(client, metricB)
+    await _createPublishedKpiLinked(
+        client, seed_data_source.id, metricB, "KPI_P5_METRIC_B_LINK"
+    )
+
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metricA}",
+        json={"status": "DRAFT"},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "DRAFT"
+    row = (
+        await dbSession.execute(
+            select(OntologyMetric).where(OntologyMetric.id == metricA)
+        )
+    ).scalar_one()
+    assert row.status == "DRAFT"
+    # B 不受影响，且其已发布 KPI 仍在
+    rowB = (
+        await dbSession.execute(
+            select(OntologyMetric).where(OntologyMetric.id == metricB)
+        )
+    ).scalar_one()
+    assert rowB.status == "PUBLISHED"

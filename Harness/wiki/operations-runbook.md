@@ -304,7 +304,7 @@ findings 非空时落 `audit_log`（避免噪声）⇒ **干净 pass 不落库**
 因此闸门前判据不是单看 `mismatchCount=0` / `unknownCount=0`，还要排除 degraded pass：
 
 ```sql
--- 近 7 天 degraded=true 的对账行必须为 0（层 1/3 有 finding 的 pass，或层 2 unknown）
+-- 近 7 天 degraded=true 的对账行必须为 0（层 1/3 有 finding 的对账行，或层 2 unknown）
 SELECT count(*) FROM audit_log
 WHERE entity_type = 'kpi_metric_reconcile'
   AND created_at >= now() - interval '7 days'

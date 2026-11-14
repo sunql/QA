@@ -2137,7 +2137,7 @@ export const enUS = {
     unknownCount: "Unknown",
     passCount: "Pass Records",
     passCountHint:
-      "Pass Records counts persisted degraded passes only (clean passes are not audited) — this is not a pass rate.",
+      "Pass Records shows persisted degraded passes only (clean passes are not audited) — this is not a pass rate.",
     lastMismatchAt: "Last mismatch at (UTC)",
     reconcileError: "Reconcile query failed: {error}",
     syncHealthTitle: "Three-Store Sync Health",

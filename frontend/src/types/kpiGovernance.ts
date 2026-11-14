@@ -22,7 +22,7 @@ export interface KpiGovernanceMetricCounts {
 export interface KpiGovernanceReconcile {
   windowDays: number;
   mismatchCount: number;
-  /** 窗口内实际落库的 pass 行数；预期恒为 0，**不是通过率**。 */
+  /** 窗口内实际落库的 pass 行数；只有 degraded pass 会落库（干净 pass 不落审计），不是通过率。 */
   passCount: number;
   unknownCount: number;
   /** 窗口内最近一条 mismatch 时间；无则 null。 */

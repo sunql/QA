@@ -49,6 +49,18 @@ const SUMMARY: KpiGovernanceSummary = {
     lastMismatchAt: "2026-11-13T10:00:00Z",
     reconcileError: null,
   },
+  runtime: {
+    windowDays: 7,
+    total: 21,
+    byTier: { A: 9, B: 7, C: 3, LEGACY: 2 },
+    degradedReasons: [
+      { reason: "execution_error", count: 4 },
+      { reason: "explicit_time_scope", count: 3 },
+    ],
+    chatAnswers: 30,
+    hitRate: 0.7,
+    runtimeError: null,
+  },
   syncHealth: {
     publishedKpiCount: 8,
     milvusKpiCount: 7,
@@ -64,6 +76,7 @@ const SUMMARY: KpiGovernanceSummary = {
 const DEGRADED_SUMMARY: KpiGovernanceSummary = {
   ...SUMMARY,
   reconcile: { ...SUMMARY.reconcile, reconcileError: "audit down" },
+  runtime: { ...SUMMARY.runtime, hitRate: null, runtimeError: "runtime down" },
   syncHealth: {
     ...SUMMARY.syncHealth,
     milvusKpiCount: null,
@@ -125,6 +138,55 @@ describe("KpiGovernancePage", () => {
     // best-effort 的 null 计数是「取不到」，不能伪装成 0
     expect(screen.getByTestId("stat-milvus-count")).toHaveTextContent("—");
     expect(screen.getByTestId("stat-milvus-count")).not.toHaveTextContent("0");
+  });
+
+  it("运行时卡片显示 Tier 分布、近似命中率与降级原因", async () => {
+    render(<KpiGovernancePage />);
+
+    expect(await screen.findByTestId("stat-runtime-total")).toHaveTextContent("21");
+    // 近似命中率是比值（事件/回答），不是百分比：0.7 ⇒ 0.70
+    expect(screen.getByTestId("stat-runtime-hit-rate")).toHaveTextContent("0.70");
+    expect(screen.getByTestId("stat-runtime-chat-answers")).toHaveTextContent("30");
+    // 按实际服务层分布 —— 各 Tier 独立断言，避免相同数字互相掩盖
+    expect(screen.getByTestId("stat-runtime-tier-A")).toHaveTextContent("A 9");
+    expect(screen.getByTestId("stat-runtime-tier-B")).toHaveTextContent("B 7");
+    expect(screen.getByTestId("stat-runtime-tier-LEGACY")).toHaveTextContent("LEGACY 2");
+    expect(screen.getByTestId("runtime-reason-execution_error")).toHaveTextContent(
+      "execution_error ×4",
+    );
+  });
+
+  it("运行时窗口内无事件与无降级原因时显示空态，而不是留白", async () => {
+    vi.mocked(api.getKpiGovernanceSummary).mockResolvedValue({
+      ...SUMMARY,
+      runtime: {
+        ...SUMMARY.runtime,
+        total: 0,
+        byTier: {},
+        degradedReasons: [],
+        chatAnswers: 0,
+        hitRate: null,
+      },
+    });
+    render(<KpiGovernancePage />);
+
+    expect(await screen.findByTestId("stat-runtime-tier-none")).toHaveTextContent(
+      "窗口内无路由事件",
+    );
+    // 与「降级原因（Top 5）: 」同处一个 div ⇒ 用包含匹配
+    expect(screen.getByText(/无降级记录/)).toBeInTheDocument();
+    // 分母为 0 ⇒ null，必须显示占位符（不是 0，也不是 NaN）
+    expect(screen.getByTestId("stat-runtime-hit-rate")).toHaveTextContent("—");
+  });
+
+  it("运行时查询失败时显示错误串，命中率 null 显示占位符", async () => {
+    vi.mocked(api.getKpiGovernanceSummary).mockResolvedValue(DEGRADED_SUMMARY);
+    render(<KpiGovernancePage />);
+
+    expect(
+      await screen.findByText(/运行时统计查询失败：runtime down/),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("stat-runtime-hit-rate")).toHaveTextContent("—");
   });
 
   it("闸门卡片按开关值显示开启/关闭", async () => {

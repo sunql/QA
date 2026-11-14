@@ -52,11 +52,11 @@ from app.services.kpi_execution_service import (
     TIER_A,
     TIER_B,
     TIER_C,
+    TIER_LEGACY,
     KpiExecutionPlan,
     hasExplicitTimeScope,
     planKpiExecution,
 )
-from app.services.time_scope_renderer import TIME_SCOPE_PLACEHOLDER
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_metric_reconcile import reconcileMetric
 from app.services.kpi_metric_spec import (
@@ -69,12 +69,14 @@ from app.services.kpi_metric_switches import (
     isKpiMatchVectorEnabled,
     isKpiMetricTierAEnabled,
 )
+from app.services.kpi_runtime_audit import recordKpiRuntimeEvent
 from app.services.kpi_semantic_match_service import (
     KpiMatchResult,
     KpiMatchRoute,
     buildKpiClarifyAnswer,
 )
 from app.services.prompts_zh import PROMPT_ANSWER_SYSTEM as _ANSWER_SYSTEM_PROMPT
+from app.services.time_scope_renderer import TIME_SCOPE_PLACEHOLDER
 from app.services.visual_rationale import buildVisualRationale
 
 logger = logging.getLogger(__name__)
@@ -415,6 +417,33 @@ class L1L4PreambleMixin:
         """Tier A 执行器开关（单点，测试可覆写；session=None 纯单元 ⇒ 关）。"""
         return await isKpiMetricTierAEnabled(session)
 
+    async def _recordKpiRuntime(
+        self,
+        kpi: Any | None,
+        match: KpiMatchResult,
+        tier: str,
+        reason: str | None,
+    ) -> None:
+        """记一条运行时 Tier 事件（best-effort；目录行缺失时跳过）。
+
+        ``kpi`` 为 ``KpiCatalog`` 行；目录缺失（``kpi is None``）时没有
+        ``entity_id`` 可挂，事件对看板无意义，直接跳过。写失败由
+        ``recordKpiRuntimeEvent`` 内部吞掉并告警，不影响回答。
+
+        不接收请求会话：事件用独立会话自提交（见 ``recordKpiRuntimeEvent``），
+        否则流式终结分支不 commit 请求会话，事件会随回滚一起丢失。
+        """
+        kpiId = getattr(kpi, "id", None)
+        if kpiId is None:
+            return
+        await recordKpiRuntimeEvent(
+            kpiId=int(kpiId),
+            kpiCode=match.code,
+            tier=tier,
+            reason=reason,
+            matchMethod=match.method,
+        )
+
     async def _planKpiTier(
         self, question: str, kpi: Any | None, session: AsyncSession | None
     ) -> KpiExecutionPlan:
@@ -623,6 +652,9 @@ class L1L4PreambleMixin:
             else:
                 if plan.tier == TIER_B:
                     # L4 不注入契约块：Tier B 必须交给主 NL2SQL 流水线。
+                    await self._recordKpiRuntime(
+                        kpi, match, TIER_B, plan.reason
+                    )
                     return self._tierBPreamble(
                         match, kpi, plan.reason, dto.datasourceId
                     )
@@ -639,14 +671,30 @@ class L1L4PreambleMixin:
                         )
                         l1, degradedReason = None, REASON_EXECUTION_ERROR
                     if l1 is None:
+                        # 实际服务的是降级后的 Tier B —— 事件按真实 tier 记，
+                        # 不按计划 tier 记（否则看板会把降级掩盖成 Tier A）。
+                        await self._recordKpiRuntime(
+                            kpi, match, TIER_B,
+                            degradedReason or REASON_EXECUTION_ERROR,
+                        )
                         return self._tierBPreamble(
                             match, kpi, degradedReason or REASON_EXECUTION_ERROR,
                             dto.datasourceId,
                         )
+                    await self._recordKpiRuntime(kpi, match, TIER_A, None)
                 elif plan.tier == TIER_C:
                     l1 = self._buildTierCResponse(match, kpi, plan.reason)
+                    await self._recordKpiRuntime(
+                        kpi, match, TIER_C, plan.reason
+                    )
                 else:  # TIER_LEGACY：开关关 / 目录缺失 ⇒ 现有 FD 执行路径
                     l1 = await self._buildL1Response(match, session)
+                    if l1 is not None:
+                        # 与 Tier A 同形：只有 KPI 路径真的服务了这个问句才记；
+                        # l1 为空 ⇒ 交给 L4 回答，记 LEGACY 会虚增 Tier 分布。
+                        await self._recordKpiRuntime(
+                            kpi, match, TIER_LEGACY, plan.reason
+                        )
 
                 if l1 is not None:
                     # P0 合并项 6：仅在 KPI 实际绑定了数据源时比较（沿用原判断）。

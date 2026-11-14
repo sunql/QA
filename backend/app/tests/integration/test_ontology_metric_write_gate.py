@@ -250,3 +250,70 @@ async def test_metric_published_to_draft_blocked_when_published_kpi_links(
         )
     ).scalars().all()
     assert len(kpiCount) == 1
+
+
+async def _createDraftKpiLinked(
+    client: AsyncClient, datasourceId: int, metricId: int, code: str
+) -> int:
+    resp = await client.post(
+        "/api/v1/kpi-catalog",
+        json={
+            "datasourceId": datasourceId,
+            "kpiCode": code,
+            "kpiName": "测试-P5-草稿",
+            "owner": "finance",
+            "metricId": metricId,
+        },
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+async def test_metric_published_to_draft_allowed_when_only_draft_kpi_links(
+    client: AsyncClient, dbSession, seed_data_source
+) -> None:
+    """计数只看 PUBLISHED KPI：仅 DRAFT KPI 挂靠时退回 DRAFT 合法。"""
+    metricId = await _createMetric(client)
+    await _publishMetric(client, metricId)
+    await _createDraftKpiLinked(
+        client, seed_data_source.id, metricId, "KPI_P5_METRIC_DRAFT_LINK"
+    )
+
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metricId}",
+        json={"status": "DRAFT"},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "DRAFT"
+    row = (
+        await dbSession.execute(
+            select(OntologyMetric).where(OntologyMetric.id == metricId)
+        )
+    ).scalar_one()
+    assert row.status == "DRAFT"
+
+
+async def test_metric_published_to_draft_allowed_when_no_kpi_links(
+    client: AsyncClient, dbSession
+) -> None:
+    """无任何挂靠 KPI ⇒ 退回 DRAFT 合法。"""
+    metricId = await _createMetric(client)
+    await _publishMetric(client, metricId)
+
+    resp = await client.put(
+        f"/api/v1/ontology/metrics/{metricId}",
+        json={"status": "DRAFT"},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "DRAFT"
+    row = (
+        await dbSession.execute(
+            select(OntologyMetric).where(OntologyMetric.id == metricId)
+        )
+    ).scalar_one()
+    assert row.status == "DRAFT"

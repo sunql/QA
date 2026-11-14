@@ -47,7 +47,8 @@ _METRIC_PUBLISHED = "PUBLISHED"
 def _statusValue(value: object) -> str:
     """把 DB 值（str）或枚举成员归一为状态字符串。
 
-    未知类型转空串 ⇒ 后续矩阵查不到 ⇒ 失败关闭。
+    枚举成员取 ``.value``；``str`` 原样返回；其它非 None 类型 ``str(value)``
+    （矩阵查不到 ⇒ 失败关闭）；仅 ``None`` 映射为 ``""``。
     """
     raw = getattr(value, "value", None)
     if isinstance(raw, str):

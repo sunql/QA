@@ -305,7 +305,8 @@ class KpiCatalogService:
         # 必须按「目标状态」与实体当前状态判定 —— 归一化后状态值已变成字符串，
         # 故用归一前捕获的 targetStatus。
         if targetStatus is not None:
-            assertKpiTransition(entity.status, targetStatus.value)
+            # 传已归一化的字符串（不是枚举 .value）：DTO 若给出 plain str 也不会 AttributeError
+            assertKpiTransition(entity.status, updates["status"])
         # Numeric 列归一为 Decimal：asyncpg 不接受 float 直接绑到 Numeric。
         # match_threshold 是 NOT NULL 列（DB 默认 0.75）；创建路径已把 None 归一为默认值
         # （见 createKpi），update 路径必须对称，否则显式 null 会写穿 NOT NULL 约束 ⇒

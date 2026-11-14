@@ -246,6 +246,13 @@ class TestKpiCatalogApi:
             json=_kpiPayload(seed_data_source, kpiCode="KPI_DEP", kpiName="D"),
         )
         cid = created.json()["id"]
+        # P5 状态矩阵：DEPRECATED 只能从 PUBLISHED 流转；先发布（闸门默认关闭）
+        published = await client.put(
+            f"/api/v1/kpi-catalog/{cid}",
+            json={"status": "PUBLISHED"},
+            headers=ADMIN_HEADERS,
+        )
+        assert published.status_code == 200, published.text
         resp = await client.put(
             f"/api/v1/kpi-catalog/{cid}",
             json={"status": "DEPRECATED"},

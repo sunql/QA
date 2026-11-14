@@ -1071,7 +1071,7 @@ class OntologyService:
             )
             assertMetricTransition(
                 entity.status,
-                targetStatus.value,
+                updates["status"],  # 已归一化的字符串（兼容 plain str DTO）
                 publishedKpiCount=publishedKpiCount,
             )
         # P4a：合并后的 formula/time_column 一致性（partial update 用原值补位）。

@@ -9,7 +9,7 @@
 | **分支** | `feat/semantic-release-graph-mirror`（worktree `/private/tmp/qa-graph-mirror`），base = `origin/main` `b6af98a1` |
 | **迁移版本** | **无**（零 DDL：不改 PG 表结构、不加列、不改索引） |
 | **关联变更** | [feat-semantic-registry-rag](../feat-semantic-registry-rag/summary.md)（P3a RAG 过滤）· [P1a/P1b 语义发布](../feat-semantic-release-a/summary.md) |
-| **状态** | D22 完成（设计 + 实现 + 评审整改 + 真实数据实证；随 PR 合并，**不部署**）；D23–D25 未开始 |
+| **状态** | D22 完成（设计 + 实现 + 评审整改 + 真实数据实证；随 PR 合并，**不部署**）；**D23 完成**（物化 Job：幂等 / dry-run / 分批 / 断点续跑 / 状态台账 + 真实数据实证；**不部署**）；D24–D25 未开始 |
 
 ---
 
@@ -37,7 +37,7 @@ P2 把 NL2SQL 的 schema 渲染接到发布快照上（钉住某一版发布 ⇒
 | 日次 | 任务 | 产出 | 完成定义 |
 |---|---|---|---|
 | D22 | 发布镜像**方案设计** + 测试环境实现 | `daily/D22.md`、`app/domain/semantic_graph_mirror_spec.py`（契约）、`app/domain/id_mapping.py`（业务对象字面量 SSOT）、`app/services/semantic_graph_mirror.py`（纯计划构建）、`app/services/semantic_graph_mirror_resolution.py`（PG 解析）、`app/infrastructure/neo4j_mirror_client.py`（镜像写函数，**独立模块**：`neo4j_client.py` 已 1024 行超 800 行上限）、`app/infrastructure/neo4j_write_target_guard.py`（**库层写目标闸门**） | 方案对比留档；镜像节点走**独立 label**（主图零影响）；镜像内容 = manifest 实体/关系（**含 `REFERENCES`**，与主图本体子图同构）；纯逻辑有单测；真实写/回读/幂等/主图零影响/生产拒写/双保险清理有实证 |
-| D23 | 物化 Job：幂等 / dry-run / 分批 / 断点续跑 | `scripts/semantic_graph_sync.py` | 重复执行结果一致；dry-run 不写图；按 label 分批、每批有耗时与条数记录；失败可续跑 |
+| D23 | 物化 Job：幂等 / dry-run / 分批 / 断点续跑 | `scripts/semantic_graph_sync.py` + `app/services/semantic_graph_mirror_job.py`（编排层，IO-free）+ `app/services/semantic_graph_mirror_ledger.py`（台账行转换） | 重复执行结果一致；dry-run 不写图；按 label 分批、每批有耗时与条数记录；失败可续跑 —— **已完成**（详见 `daily/D23.md`） |
 | D24 | 一致性对账：镜像 vs Manifest 实体/关系 | `scripts/verify_graph_mirror.py` + 对账报告 | 实体 100% 对账；关系逐条解释（manifest 无 relations 分区 ⇒ 语义关系边**不在对账范围**） |
 | D25 | 切换演练 + 回归 + PR | 演练报告、PR | 「按发布读图」开关打开后读到的是镜像；一键回退到主图 |
 
@@ -55,6 +55,13 @@ P2 把 NL2SQL 的 schema 渲染接到发布快照上（钉住某一版发布 ⇒
 | C-6 | 业务图规模：BusinessEntity 节点 ~51 万、关系 ~145 万 | `scripts/sync_business_graph_from_thbi.py` 文档串 | 镜像**默认不含业务图**；启用需另做批次方案（D23 附录） |
 | C-7 | Neo4j **无写目标闸门、无自动备份** | 仓内无对应 guard（Milvus 有 `scripts/milvus_write_target_guard.py`） | 镜像写函数必须**自带守卫**（只允许写 `Release*` label + 显式 release_id） |
 | C-8 | 消费方 `MATCH (c:Class)` / `getClassIds()` 等不带发布维度 | `app/infrastructure/neo4j_client.py` | 镜像节点必须用**独立 label** ⇒ 现有消费方零影响、无需改 |
+| C-11 | 镜像写全是 `MERGE`（节点键 = `unified_id + release_id`，边键 = 两端 + relType） | `app/infrastructure/neo4j_mirror_client.py` | 幂等天然具备；但属性**就地覆盖** ⇒ D23 需「已物化默认拒写」的闸门（L-7） |
+| C-12 | Neo4j **无自动备份** | 仓内无备份件 | 裁剪**不可逆** ⇒ D23 必须 `--prune --expect-delete N` 双保险 |
+| C-13 | PG 侧放台账 = 新表 + 迁移 + **部署** | 本批「零 DDL、不部署」约束 | D23 台账**落图里**（独立 label）⇒ 零迁移 |
+| C-14 | 图与台账同库 ⇒ 图被清空时台账随之消失 | Neo4j 无跨库引用 | 语义正确（图没了就该重建）；台账**不是备份** |
+| C-15 | 写目标闸门在**库层**（每个写函数自己调） | `app/infrastructure/neo4j_write_target_guard.py` | D23 的物化 Job **天然继承**同一道闸门 |
+| C-16 | 台账若用镜像 label 会**混进对账计数** | D24 对账按 4 个镜像 label 计数 | 台账用**独立 label**（`MirrorJobState` / `MirrorJobBatch`） |
+| C-17 | 边无独立键 ⇒ 计划外的边只能靠「两端都还在、但这批没写」判定 | `pruneReleaseMirror` 残留边清理逻辑 | 裁剪须**按 relType 分别**清，否则镜像 ≠ 计划 ⇒ 对账永远红 |
 
 ---
 
@@ -82,3 +89,8 @@ P2 把 NL2SQL 的 schema 渲染接到发布快照上（钉住某一版发布 ⇒
 | R-8 | 解析失败有**三种不同原因**（歧义 / 未登记 `id_mapping` / 本体不存在），混成一种会把运维引到错方向 | 三态分开记录（`EntityResolution.unmapped`）+ 各自文案指向具体动作（D22 §3.3） |
 | R-9 | **镜像 ≠ 主图本体子图**（评审 HIGH）：manifest 的 `properties[].refClassName` 承载「属性 → 类」引用，主图会物化成 `(:Property)-[:REFERENCES]->(:Class)`；镜像原本没有这一类边 ⇒ D25 读侧切换会**静默丢引用/外键导航路径** | **已修**：relType 白名单 5→**6**（加 `REFERENCES`）+ 计划器 + 端点类型契约；悬空引用归一为 `null` |
 | R-10 | **写目标闸门**：Neo4j 侧**无** Milvus 那样的闸门件（C-7）⇒ 误写生产图库不可逆 | **已修**：闸门下沉到**库层** `app/infrastructure/neo4j_write_target_guard.py`（**每个**镜像写函数自己调 ⇒ D23 的物化 Job 天然继承）；判定按**端口白名单**（只准 7688；无端口按 7687 判 ⇒ 生产被拒）；脚本层另加 `--expect-delete` 双保险 |
+| R-11 | **续跑死锁**：台账说「成功」但图上东西被人工删了 ⇒ 按台账跳过 ⇒ **永远修不好** | **已修**（D23 真实踩到）：跳过条件加「**图上计数 == 计划计数**」⇒ 原则「**台账 = 意图，图 = 事实**」；另有依赖失效规则（节点批次重跑 ⇒ 边批次不许跳过） |
+| R-12 | **已物化快照可被覆盖**（L-7）：MERGE 键 = (unified_id, release_id) ⇒ 重跑会就地覆盖属性 | **已修**（D23）：作业状态 `materialized` ⇒ 默认拒写（退出码 2）；台账哈希与快照哈希不一致也拒写；重建必须显式 `--force-rebuild` |
+| R-13 | **dry-run 被「已物化」闸门挡住**：运维想看「会怎么分批」却拿不到任何信息 | **已修**（D23）：闸门移到 dry-run 分支**之后** ⇒ 只挡写、不挡看 |
+| R-14 | **台账不是备份**（C-14）：图库整体清空时台账一并消失 | 语义正确（图没了就该重建）；已在 `daily/D23.md` 遗留项 L-11 登记，运维须知 |
+| R-15 | **物化无跨系统事务**：PG 发布状态与图侧物化状态可能不一致（L-8） | 图侧有状态台账；PG 侧不写状态（会引入 DDL）⇒ D24 对账脚本负责判定 |

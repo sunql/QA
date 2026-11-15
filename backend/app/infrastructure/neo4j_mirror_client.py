@@ -18,10 +18,13 @@ label / 关系类型在 CQL 里不可参数化，只能拼字符串 ⇒ 一律�
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from app.domain.id_mapping import UNIFIED_ID_PREFIX, UNIFIED_ID_SEPARATOR
 from app.domain.semantic_graph_mirror_spec import (
+    MIRROR_JOB_BATCH_LABEL,
+    MIRROR_JOB_STATE_LABEL,
     RELEASE_MIRROR_ENTITY_BUSINESS_OBJECTS,
     RELEASE_MIRROR_ENTITY_TYPES,
     RELEASE_MIRROR_LABELS,
@@ -327,3 +330,143 @@ def _pruneStaleEdges(
             releaseId=releaseId,
             keep=list(keepUnifiedIds),
         )
+
+
+# =============================================================================
+# 物化作业台账（P3b D23）
+# =============================================================================
+#
+# 台账节点用**独立 label**（`MirrorJobState` / `MirrorJobBatch`）⇒
+# ① 对账时「镜像实体数」不受台账影响；② 台账不会长成主图实体被消费方命中。
+#
+# 台账写入同样过写目标闸门：它是**写**图数据（且会被读出来当判据）⇒
+# 生产目标必须显式放行。
+
+
+def writeMirrorJobState(
+    state: Mapping[str, Any], *, allowProdWrite: bool = False
+) -> None:
+    """写作业级状态标记（`materializing → materialized/failed`）。
+
+    幂等：MERGE 键 = release_id ⇒ 同一发布反复写只更新同一行。
+    """
+    assertSafeNeo4jTarget(_effectiveTargetUri(), allowProdWrite=allowProdWrite)
+    cql = f"""
+        MERGE (s:{MIRROR_JOB_STATE_LABEL} {{release_id: $releaseId}})
+        SET s.release_version = $releaseVersion,
+            s.status = $status,
+            s.manifest_hash = $manifestHash,
+            s.node_count = $nodeCount,
+            s.edge_count = $edgeCount,
+            s.unresolved_count = $unresolvedCount,
+            s.started_at = $startedAt,
+            s.updated_at = $updatedAt,
+            s.finished_at = $finishedAt,
+            s.error = $error
+    """
+    driver = getDriver()
+    with driver.session() as session:
+        session.run(
+            cql,
+            releaseId=int(state.get("release_id") or 0),
+            releaseVersion=str(state.get("release_version") or ""),
+            status=str(state.get("status") or ""),
+            manifestHash=str(state.get("manifest_hash") or ""),
+            nodeCount=int(state.get("node_count") or 0),
+            edgeCount=int(state.get("edge_count") or 0),
+            unresolvedCount=int(state.get("unresolved_count") or 0),
+            startedAt=str(state.get("started_at") or ""),
+            updatedAt=str(state.get("updated_at") or ""),
+            finishedAt=str(state.get("finished_at") or ""),
+            error=str(state.get("error") or ""),
+        )
+
+
+def readMirrorJobState(releaseId: int) -> dict[str, Any] | None:
+    """读作业级状态标记；没有则返回 None（还没物化过）。"""
+    driver = getDriver()
+    with driver.session() as session:
+        record = session.run(
+            f"MATCH (s:{MIRROR_JOB_STATE_LABEL} {{release_id: $releaseId}}) "
+            f"RETURN s LIMIT 1",
+            releaseId=releaseId,
+        ).single()
+    if record is None:
+        return None
+    node = record["s"]
+    return {key: node[key] for key in node}
+
+
+def writeMirrorJobBatch(
+    batch: Mapping[str, Any], *, allowProdWrite: bool = False
+) -> None:
+    """写批次台账（批次号 / 条数 / 耗时 / 失败原因）。
+
+    幂等：MERGE 键 = (release_id, batch_no) ⇒ 同批次反复写只更新同一行。
+    """
+    assertSafeNeo4jTarget(_effectiveTargetUri(), allowProdWrite=allowProdWrite)
+    cql = f"""
+        MERGE (b:{MIRROR_JOB_BATCH_LABEL} {{release_id: $releaseId, batch_no: $batchNo}})
+        SET b.kind = $kind,
+            b.status = $status,
+            b.count = $count,
+            b.elapsed_ms = $elapsedMs,
+            b.error = $error,
+            b.manifest_hash = $manifestHash,
+            b.updated_at = $updatedAt
+    """
+    driver = getDriver()
+    with driver.session() as session:
+        session.run(
+            cql,
+            releaseId=int(batch.get("release_id") or 0),
+            batchNo=str(batch.get("batch_no") or ""),
+            kind=str(batch.get("kind") or ""),
+            status=str(batch.get("status") or ""),
+            count=int(batch.get("count") or 0),
+            elapsedMs=int(batch.get("elapsed_ms") or 0),
+            error=str(batch.get("error") or ""),
+            manifestHash=str(batch.get("manifest_hash") or ""),
+            updatedAt=str(batch.get("updated_at") or ""),
+        )
+
+
+def readMirrorJobBatches(releaseId: int) -> list[dict[str, Any]]:
+    """读该发布的批次台账（按批次号排序）。"""
+    driver = getDriver()
+    batches: list[dict[str, Any]] = []
+    with driver.session() as session:
+        result = session.run(
+            f"MATCH (b:{MIRROR_JOB_BATCH_LABEL} {{release_id: $releaseId}}) "
+            f"RETURN b ORDER BY b.batch_no",
+            releaseId=releaseId,
+        )
+        for record in result:
+            node = record["b"]
+            batches.append({key: node[key] for key in node})
+    return batches
+
+
+def countStaleReleaseMirrorNodes(
+    releaseId: int, keepUnifiedIds: set[str]
+) -> int:
+    """统计「计划外」的镜像节点数（裁剪前的预演计数）。
+
+    裁剪是破坏性操作 ⇒ 脚本层用 `--expect-delete` 跟这个数对账，对不上就拒绝执行。
+    """
+    driver = getDriver()
+    stale = 0
+    with driver.session() as session:
+        for entityType in RELEASE_MIRROR_ENTITY_TYPES:
+            label = RELEASE_MIRROR_LABELS[entityType]
+            record = session.run(
+                f"""
+                MATCH (n:{label} {{release_id: $releaseId}})
+                WHERE NOT n.unified_id IN $keep
+                RETURN count(n) AS cnt
+                """,
+                releaseId=releaseId,
+                keep=list(keepUnifiedIds),
+            ).single()
+            stale += int(record["cnt"]) if record else 0
+    return stale

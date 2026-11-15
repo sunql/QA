@@ -322,9 +322,37 @@ Neo4j **无备份、误写不可逆** ⇒ 镜像写路径自带闸门
 | `backend/app/domain/id_mapping.py` | 业务对象字面量 SSOT（`CLASS`/`PROPERTY`/`METRIC`/`KPI`） |
 | `backend/app/services/semantic_graph_mirror.py` | 纯计划构建（无 IO）+ 解析表构造 |
 | `backend/app/services/semantic_graph_mirror_resolution.py` | 名字 → `unified_id` 解析（连 PG；名单分块查，避 PG 参数上限） |
-| `backend/app/infrastructure/neo4j_mirror_client.py` | 镜像写/读/清理（独立模块，独立白名单；driver 复用 `neo4j_client.getDriver()`） |
+| `backend/app/infrastructure/neo4j_mirror_client.py` | 镜像写/读/清理 + **物化台账**（独立模块，独立白名单；driver 复用 `neo4j_client.getDriver()`） |
 | `backend/app/infrastructure/neo4j_write_target_guard.py` | 写目标闸门（库层；端口白名单 + 凭据剥离） |
+| `backend/app/services/semantic_graph_mirror_job.py` | **物化 Job 编排层（IO-free）**：状态机 + 批次执行 + 跳过决策 + 收尾核对 |
+| `backend/app/services/semantic_graph_mirror_ledger.py` | 台账行 ↔ 状态对象转换（单向依赖，无环） |
+| `backend/scripts/semantic_graph_sync.py` | 物化 Job 的 CLI（**唯一装配点**）+ 退出码契约 |
 | `backend/scripts/semantic_graph_mirror_realdata.py` | 真实数据验证（默认只读；`--write` 才写；`--cleanup` 需配 `--expect-delete`） |
+
+### 物化 Job（D23）
+
+一次物化 = **读发布快照 → 解析实体 → 建镜像计划 → 按批次幂等写图 → 记台账 → 收尾核对**。
+编排层（`semantic_graph_mirror_job.py`）**不做 IO**：所有读写走注入的 `MirrorJobPorts` ⇒
+单测用替身端口即可（不连 PG、不连图库）；`scripts/semantic_graph_sync.py` 是**唯一装配点**。
+
+| 概念 | 内容 |
+|---|---|
+| **批次** | B1 类 / B2 属性 / B3 指标 / B4 KPI / B5:`<relType>`（6 种边各一批）/ B6 裁剪（显式 opt-in） |
+| **作业状态** | `materializing` → `materialized` \| `failed` |
+| **批次状态** | `running` → `succeeded` \| `failed` \| `skipped`（已完好）\| `planned`（dry-run 预览，不落库） |
+| **台账** | 落在 **Neo4j**（`:MirrorJobState` / `:MirrorJobBatch` 两个**独立 label**）⇒ **零 DDL、不部署**；台账**不是备份**（图没了台账也没了） |
+| **退出码** | `0` 成功 / `1` 运行失败 / `2` 前置阻断 / `3` 物化完成但有未解析（镜像不完整） |
+
+**三条最容易踩的规则**
+
+1. **台账 = 意图，图 = 事实**：跳过一个批次的条件是「台账 succeeded」**且**
+   「图上该类型的计数 == 计划计数」。只信台账 ⇒ 人工删了图上的东西后**永远修不好**。
+2. **依赖失效**：本轮真重跑了节点批次 ⇒ 边批次/裁剪批次**不许**跳过（端点变了边必须跟着重写）。
+3. **拒绝只保护写**：已物化的发布默认拒写（退出码 2，要重建须显式 `--force-rebuild`），
+   但 **dry-run 不受此限** —— dry-run 是只读的，运维要能看到「会怎么分批」。
+
+设计细节与实证见
+[`Harness/changes/feat-semantic-release-graph-mirror/daily/D23.md`](../changes/feat-semantic-release-graph-mirror/daily/D23.md)。
 
 ### 边界
 

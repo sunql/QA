@@ -85,3 +85,30 @@ RELEASE_MIRROR_REL_TYPES: frozenset[str] = frozenset(
 
 # 实体类型的稳定顺序（镜像计划排序、写入分批顺序都按它 ⇒ 结果可复现）
 RELEASE_MIRROR_ENTITY_TYPES: tuple[str, ...] = ("class", "property", "metric", "kpi")
+
+# =============================================================================
+# 物化作业台账（P3b D23）
+# =============================================================================
+#
+# 台账节点**不是镜像实体**：对账只认上面 4 个 label ⇒ 台账用独立 label，
+# 不会混进「镜像实体数」。
+#
+# 为什么台账放在图里而不是 PG 表：① 本批**零 DDL**（不新增表/列 ⇒ 不触发迁移
+# 与部署）；② 台账描述的正是「图里的镜像物化到什么程度」⇒ 与被描述对象同库，
+# 图被清空时台账随之消失 ⇒ 允许重新物化（正确语义：图没了就该重建）；
+# ③ 镜像的写目标闸门在库层 ⇒ 台账写入自动受同一道闸门保护。
+MIRROR_JOB_STATE_LABEL = "MirrorJobState"
+MIRROR_JOB_BATCH_LABEL = "MirrorJobBatch"
+
+# 作业级状态：materializing → materialized（成功）/ failed（中途失败）
+MIRROR_JOB_STATUS_MATERIALIZING = "materializing"
+MIRROR_JOB_STATUS_MATERIALIZED = "materialized"
+MIRROR_JOB_STATUS_FAILED = "failed"
+
+# 批次级状态
+MIRROR_JOB_BATCH_STATUS_RUNNING = "running"
+MIRROR_JOB_BATCH_STATUS_SUCCEEDED = "succeeded"
+MIRROR_JOB_BATCH_STATUS_FAILED = "failed"
+MIRROR_JOB_BATCH_STATUS_SKIPPED = "skipped"
+# dry-run 预览用的状态：批次「打算怎么跑」，但**没跑**（不写台账、不写图）
+MIRROR_JOB_BATCH_STATUS_PLANNED = "planned"

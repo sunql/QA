@@ -198,6 +198,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _semanticRagAuthReason = semanticRegistryRagAuthMisconfiguration(settings)
     if _semanticRagAuthReason:
         logger.error("🚨 安全告警：%s", _semanticRagAuthReason)
+    # 语义注册表 RAG 过滤（P3a）：开关打开时探一次 v2 就绪度 ——
+    # v2 缺失/空 ⇒ 带过滤的召回「安静地」返回空（fail-closed），没有任何降级痕迹
+    # ⇒ 用户只看到「查不到实体」⇒ 启动期就喊出来，别等到问答时才排查。
+    if settings.enableSemanticRegistryRag:
+        from app.services.semantic_registry_rag_gate import registryRagReadiness
+
+        try:
+            _ragReadiness = registryRagReadiness()
+            _ragNotReady = {t: c for t, c in _ragReadiness.items() if c <= 0}
+            if _ragNotReady:
+                logger.error(
+                    "🚨 语义注册表 RAG 开关已开启，但 v2 集合未就绪：%s "
+                    "⇒ 带过滤的召回会返回空结果（fail-closed）。"
+                    "请先执行回填 scripts/backfill_registry_v2.py。",
+                    _ragNotReady,
+                )
+            else:
+                logger.info("语义注册表 RAG v2 就绪：%s", _ragReadiness)
+        except Exception as exc:  # noqa: BLE001 —— 探针不许把启动带崩
+            logger.error("🚨 语义注册表 RAG 就绪探针失败：%s", exc)
     # config 重复字段批：jwtSecret 曾有两份声明（旧块 default="" 被占位符覆盖），
     # 漏配时静默用公开已知的开发密钥；旧注释承诺的「启动期校验」当时从未实现，此处补上。
     from app.config import jwtSecretInsecurityReason

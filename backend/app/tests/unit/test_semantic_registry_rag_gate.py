@@ -104,8 +104,13 @@ class Test开关:
         assert result.usedRegistryV2 is False
         assert result.degradedReason is None
 
-    def test_开关关闭时即便传了过滤器也不改读路径(self, switchOff, monkeypatch) -> None:
-        """开关关 = 这项能力整体未启用 ⇒ 读路径与今天一致（不过滤、不碰 v2）。"""
+    def test_开关关闭且调用方声明了作用域时fail_closed(self, switchOff, monkeypatch) -> None:
+        """开关关 = 这项能力整体未启用 ⇒ **不能**拿「不过滤的 v1」冒充「按域收窄的答案」。
+
+        调用方声明了作用域（域/组织/实体/发布/有效期任一），而闸门无法施加该作用域
+        ⇒ 与「v2 不可用」同款处置：**fail-closed（空结果）**。
+        回落成无过滤的 v1 = 把调用方本来不想看到的行全部放进来 = 泄漏。
+        """
         calls = _installV1(monkeypatch)
         exprs = _installV2(monkeypatch)
 
@@ -115,10 +120,11 @@ class Test开关:
             registryFilter=RegistryFilter(domainCodes=("SUP",)),
         )
 
-        assert calls == ["v1:None"]
+        assert calls == []  # v1 一次都没碰
         assert exprs == []
+        assert result.hits == []
         assert result.usedRegistryV2 is False
-        # 口径失真必须可观测：调用方以为按域收窄了，实际没有
+        # 口径失真必须可观测：调用方以为按域收窄了，实际什么都没召回
         assert result.degradedReason == "switch_off_with_filter"
 
 
@@ -239,3 +245,54 @@ class Test降级:
         assert calls == []
         assert result.hits == []
         assert result.degradedReason == "filter_invalid"
+
+    def test_非法发布版本时fail_closed(self, switchOn, monkeypatch) -> None:
+        """``releaseId=0``（哨兵值）不是合法发布版本 ⇒ 表达式构造失败 ⇒ 空结果。"""
+        calls = _installV1(monkeypatch)
+        exprs = _installV2(monkeypatch)
+
+        result = gate.searchRegistryEmbeddings(
+            [0.1] * 4,
+            topK=5,
+            registryFilter=RegistryFilter(releaseId=0),
+        )
+
+        assert calls == []
+        assert exprs == []
+        assert result.hits == []
+        assert result.degradedReason == "filter_invalid"
+
+
+class Test空作用域:
+    """「声明了作用域但取值为空」= deny-all（什么都不许看到）。"""
+
+    def test_作用域已声明但取值为空时fail_closed(self, switchOn, monkeypatch) -> None:
+        calls = _installV1(monkeypatch)
+        exprs = _installV2(monkeypatch, hits=_V1_HITS)
+
+        result = gate.searchRegistryEmbeddings(
+            [0.1] * 4,
+            topK=5,
+            registryFilter=RegistryFilter(isScopeBound=True),
+        )
+
+        assert calls == []  # v1 一次都没碰
+        assert exprs == []  # v2 也没碰（无过滤的 v2 召回 = 放行）
+        assert result.hits == []
+        assert result.usedRegistryV2 is False
+        assert result.degradedReason == "scope_denied"
+
+    def test_开关关且作用域已声明但取值为空时fail_closed(self, switchOff, monkeypatch) -> None:
+        calls = _installV1(monkeypatch)
+        exprs = _installV2(monkeypatch)
+
+        result = gate.searchRegistryEmbeddings(
+            [0.1] * 4,
+            topK=5,
+            registryFilter=RegistryFilter(isScopeBound=True),
+        )
+
+        assert calls == []
+        assert exprs == []
+        assert result.hits == []
+        assert result.degradedReason == "switch_off_with_filter"

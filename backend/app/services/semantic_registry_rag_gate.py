@@ -7,8 +7,8 @@
 ------------------
 1. **开关关 ⇒ 与今天逐字节一致**：读 v1 集合、不带任何过滤、不碰 v2。
    过滤是 P3a 新增的**能力**，开关关 = 这项能力整体未启用（不是「启用但不生效」）。
-   调用方在开关关时传了过滤器 ⇒ 记 warning + ``degradedReason`` 可观测
-   （否则「以为在按域收窄、其实全量召回」是个静默的口径失真）。
+   调用方在开关关时**声明了作用域** ⇒ fail-closed（空结果）+ ``degradedReason``
+   可观测 —— 这条路径没有能力施加收窄，回落成「不过滤的 v1」= 泄漏。
 2. **有作用域时，v2 不可用 ⇒ fail-closed（空结果），不许回落成无过滤的 v1**。
    回落 = 把越权行放进来 = 泄漏。宁可召回为空（上层有 fallback 路径），
    也不许用「更宽的答案」冒充「按权限过滤的答案」。
@@ -33,6 +33,7 @@ from app.infrastructure import milvus_client as milvus
 from app.infrastructure.milvus_registry_v2 import (
     buildRegistryFilterExpr,
     hasRegistryV2Collection,
+    registryV2RowCount,
     requiredRegistryV2Types,
     searchRegistryV2,
 )
@@ -58,6 +59,26 @@ class RegistrySearchResult:
 def registryRagEnabled() -> bool:
     """P3a 开关（``ENABLE_SEMANTIC_REGISTRY_RAG``，默认关）。"""
     return bool(getSettings().enableSemanticRegistryRag)
+
+
+def registryRagReadiness() -> dict[str, int]:
+    """v2 集合的行数快照（**只读探针**；开关打开时用于启动期告警）。
+
+    为什么需要：v2 缺失或为空 ⇒ 带过滤的召回**安静地**返回空 ⇒
+    用户看到的是「查不到实体」，没有任何降级痕迹 ⇒ 排查成本极高
+    （且容易被误判成「模型没召回」）。故在启动期探一次，把未就绪喊出来。
+
+    Returns:
+        ``{类型: 物理行数}``；探不到（异常）记 ``-1``，与「集合为空（0）」区分开。
+    """
+    rows: dict[str, int] = {}
+    for type_ in requiredRegistryV2Types(None):
+        try:
+            rows[type_] = registryV2RowCount(type_)
+        except Exception as exc:  # noqa: BLE001 —— 探针不许把启动带崩
+            logger.warning("语义注册表 RAG 就绪探针失败（%s）：%s", type_, exc)
+            rows[type_] = -1
+    return rows
 
 
 def searchRegistryEmbeddings(
@@ -96,22 +117,28 @@ def _searchV1(
 ) -> RegistrySearchResult:
     """读 v1 集合（不过滤）。
 
-    开关关却带了过滤器 ⇒ 口径失真（以为按域收窄、实际全量）⇒ 必须可观测。
+    开关关却带了作用域 ⇒ **fail-closed（空结果）**：这条路径没有能力施加
+    调用方声明的收窄，回落成「不过滤的 v1」= 把调用方本来不想看到的行
+    全部放进来 = 泄漏。降级痕迹落在 ``degradedReason`` 上（可观测）。
     """
-    degraded: str | None = None
     if registryFilter is not None and registryFilter.hasScope():
-        degraded = "switch_off_with_filter"
         logger.warning(
-            "语义注册表 RAG 开关关闭，调用方却带了过滤维度（域/组织/实体）⇒ "
-            "本次召回未按维度收窄（口径失真）。去重维度：domain=%s org=%s entity=%s",
+            "语义注册表 RAG 开关关闭，调用方却声明了作用域（域/组织/实体/发布/有效期）⇒ "
+            "本次召回 fail-closed（空结果），不回落成不过滤的 v1。"
+            "维度：domain=%s org=%s entity=%s release=%s validAt=%s",
             list(registryFilter.domainCodes),
             list(registryFilter.orgCodes),
             list(registryFilter.entityTypes),
+            registryFilter.releaseId,
+            registryFilter.validAt,
+        )
+        return RegistrySearchResult(
+            hits=[], usedRegistryV2=False, degradedReason="switch_off_with_filter"
         )
     hits = milvus.searchEmbeddingsByTypeRouted(
         queryEmbedding, topK=topK, typeFilter=typeFilter
     )
-    return RegistrySearchResult(hits=hits, usedRegistryV2=False, degradedReason=degraded)
+    return RegistrySearchResult(hits=hits, usedRegistryV2=False, degradedReason=None)
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +163,16 @@ def _searchV2(
         if hasScope:
             return RegistrySearchResult(hits=[], usedRegistryV2=False, degradedReason="filter_invalid")
         return _fallbackToV1(queryEmbedding, topK, typeFilter, "filter_invalid")
+
+    if hasScope and expr is None:
+        # 「有作用域但构造不出表达式」= 调用方声明了作用域却没给任何取值
+        # （例如 isScopeBound=True 的空作用域）⇒ 语义是 deny-all。
+        # 放行（拿不过滤的 v2 结果）= 恰好在本该「什么都看不到」的一轮全量可见。
+        logger.warning(
+            "语义注册表 RAG：调用方声明了作用域但没有任何可过滤的取值 ⇒ "
+            "本次召回 fail-closed（deny-all），不返回未过滤结果。"
+        )
+        return RegistrySearchResult(hits=[], usedRegistryV2=False, degradedReason="scope_denied")
 
     missing = _missingV2Types(typeFilter)
     if missing:

@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from scripts import backfill_registry_v2 as bf
@@ -93,18 +95,43 @@ class Test覆盖统计:
         assert summary["byType"] == {"class": 2, "property": 1}
 
 
-class Test类型过滤:
-    def test_只保留指定类型(self) -> None:
-        rows = [
-            {"type": "class", "ontology_id": 1},
-            {"type": "property", "ontology_id": 2},
-            {"type": "metric", "ontology_id": 3},
-            {"type": "kpi", "ontology_id": 4},
-        ]
+class _FakeMilvusClient:
+    """最小 MilvusClient 替身：按 ``offset``/``limit`` 分页返回固定行。"""
 
-        kept = bf._filterByTypes(rows, ("class", "metric"))
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
 
-        assert [r["ontology_id"] for r in kept] == [1, 3]
+    def query(self, name: str, **kwargs: Any) -> list[dict[str, Any]]:
+        offset = int(kwargs.get("offset") or 0)
+        limit = int(kwargs.get("limit") or 0)
+        return self._rows[offset : offset + limit]
+
+
+class Test读取限流:
+    """``--limit`` 必须在**任何集合大小**下都成立。
+
+    坑：分页读取的「取不满一页就收尾」判断若排在 limit 判断之前 ⇒
+    行数少于单页大小的集合（本地 12~37 行，生产 12~18 行）会**全量返回**，
+    ``--limit`` 形同虚设 ⇒ 抽样回填会写出超出预期的行数。
+    """
+
+    _ROWS = [{"ontology_id": i, "type": "metric"} for i in range(1, 6)]
+
+    def test_限流小于集合行数时只返回限流行数(self) -> None:
+        rows = bf._readV1Rows(_FakeMilvusClient(self._ROWS), "metric", limit=2)
+
+        assert len(rows) == 2
+        assert [r["ontology_id"] for r in rows] == [1, 2]
+
+    def test_限流大于集合行数时返回全部(self) -> None:
+        rows = bf._readV1Rows(_FakeMilvusClient(self._ROWS), "metric", limit=100)
+
+        assert len(rows) == 5
+
+    def test_不限流时返回全部(self) -> None:
+        rows = bf._readV1Rows(_FakeMilvusClient(self._ROWS), "metric", limit=None)
+
+        assert len(rows) == 5
 
 
 class Test写目标闸门:

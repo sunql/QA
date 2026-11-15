@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.domain.registry_filter import RegistryFilter
 from app.infrastructure.milvus_registry_v2 import buildRegistryFilterExpr
 
@@ -42,6 +44,16 @@ def test_空元组维度不产生条件() -> None:
     assert buildRegistryFilterExpr(
         RegistryFilter(domainCodes=(), orgCodes=(), entityTypes=())
     ) is None
+
+
+def test_声明了作用域但取值为空时不产生条件() -> None:
+    """「声明了作用域但取值为空」⇒ 表达式层无法表达 ⇒ 返回 None。
+
+    ⚠️ **返回 None 不等于「不过滤」**：闸门看到「有作用域 + 无表达式」
+    必须判成 deny-all（空结果），而不是拿无过滤的答案冒充。
+    这个分工由闸门单测钉死。
+    """
+    assert buildRegistryFilterExpr(RegistryFilter(isScopeBound=True)) is None
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +93,26 @@ def test_多实体类型用or连接() -> None:
 def test_发布版本用标量等值() -> None:
     expr = buildRegistryFilterExpr(RegistryFilter(releaseId=42))
     assert expr == "release_id == 42"
+
+
+# ---------------------------------------------------------------------------
+# 非法发布版本（哨兵冲突）
+# ---------------------------------------------------------------------------
+
+
+def test_release_id为0不是合法过滤条件() -> None:
+    """``release_id == 0`` 是「无激活发布」的**哨兵值**，不是发布版本。
+
+    放它进表达式 ⇒ 过滤条件退化成「召回所有没有激活发布的行」，
+    而调用方以为自己限定了某个发布 ⇒ 口径完全错位 ⇒ 必须当非法输入拒绝。
+    """
+    with pytest.raises(ValueError):
+        buildRegistryFilterExpr(RegistryFilter(releaseId=0))
+
+
+def test_release_id为负数不是合法过滤条件() -> None:
+    with pytest.raises(ValueError):
+        buildRegistryFilterExpr(RegistryFilter(releaseId=-1))
 
 
 def test_有效期用闭开区间且把零当长期有效() -> None:

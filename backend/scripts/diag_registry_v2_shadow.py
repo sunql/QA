@@ -55,8 +55,12 @@ from typing import Any
 import numpy as np
 from pymilvus import MilvusClient
 
+from app.domain.registry_filter import RegistryFilter
 from app.infrastructure import milvus_client as milvus
-from app.infrastructure.milvus_registry_v2 import REGISTRY_V2_COLLECTION_NAMES
+from app.infrastructure.milvus_registry_v2 import (
+    REGISTRY_V2_COLLECTION_NAMES,
+    buildRegistryFilterExpr,
+)
 
 V1_COLLECTION_NAMES: dict[str, str] = {
     "class": milvus._CLASS_COLLECTION_NAME,
@@ -85,62 +89,19 @@ _READ_PAGE = 1000
 # ---------------------------------------------------------------------------
 
 
-def buildScopeExpr(values: tuple[str, ...]) -> str | None:
-    """域范围的过滤表达式（多值域码用 OR 枚举）。
+def _scopeExprFor(dimension: str, values: tuple[str, ...]) -> str | None:
+    """本维度的过滤表达式 —— **委托生产构造器**。
 
-    ⚠️ **不能用** ``not array_contains``（D18 实测：它会命中空数组行 ⇒
-    未归域的行反而被放进来）。
+    ⚠️ 影子脚本**不得**自己写一份表达式：自建的那份不认识字面量转义、
+    也不认识哨兵语义 ⇒ 与线上真正跑的表达式分叉 ⇒ 影子比对验证的就不是
+    生产路径，证据失效（转义探针见 ``test_registry_v2_shadow_script.py``）。
     """
-    if not values:
-        return None
-    return " or ".join(
-        f'array_contains(domain_codes, "{value}")' for value in values
+    registryFilter = RegistryFilter(
+        domainCodes=values if dimension == DIMENSION_DOMAIN else (),
+        orgCodes=values if dimension == DIMENSION_ORG else (),
+        entityTypes=values if dimension == DIMENSION_ENTITY else (),
     )
-
-
-def buildOrgScopeExpr(values: tuple[str, ...]) -> str | None:
-    """组织范围的过滤表达式（结构同域，但打在 ``org_codes`` 上）。"""
-    if not values:
-        return None
-    return " or ".join(
-        f'array_contains(org_codes, "{value}")' for value in values
-    )
-
-
-def buildEntityScopeExpr(values: tuple[str, ...]) -> str | None:
-    """业务对象范围的过滤表达式（标量字段 ⇒ 用 ``==``）。"""
-    if not values:
-        return None
-    return " or ".join(f'entity_type == "{value}"' for value in values)
-
-
-def classifyDropped(
-    droppedIds: list[int],
-    scopeValues: tuple[str, ...],
-    dims: dict[int, tuple[str, ...]],
-) -> dict[str, int]:
-    """把「被过滤掉的行」归因到三类（外加「本该留下」的计数）。
-
-    - ``unmapped``：该行**没有这一维**（未归域）⇒ 归因缺口（本体没归域）；
-    - ``otherScope``：该行归了别的范围 ⇒ **预期的策略排除**；
-    - ``missingInV2``：v2 里压根没有这一行 ⇒ 数据缺口；
-    - ``inScope``：该行在范围内却仍被过滤 ⇒ **异常**（必须为 0）。
-    """
-    counts = {"inScope": 0, "unmapped": 0, "otherScope": 0, "missingInV2": 0}
-    scopeSet = set(scopeValues)
-    for ontologyId in droppedIds:
-        rowDims = dims.get(ontologyId)
-        if rowDims is None:
-            counts["missingInV2"] += 1
-            continue
-        if not rowDims:
-            counts["unmapped"] += 1
-            continue
-        if scopeSet.intersection(rowDims):
-            counts["inScope"] += 1
-        else:
-            counts["otherScope"] += 1
-    return counts
+    return buildRegistryFilterExpr(registryFilter)
 
 
 def detectLeakage(
@@ -315,14 +276,6 @@ def _search(
         entity = hit.get("entity") or {}
         found.append((int(entity.get("ontology_id")), float(hit.get("distance", 0.0))))
     return found
-
-
-def _scopeExprFor(dimension: str, values: tuple[str, ...]) -> str | None:
-    if dimension == DIMENSION_DOMAIN:
-        return buildScopeExpr(values)
-    if dimension == DIMENSION_ORG:
-        return buildOrgScopeExpr(values)
-    return buildEntityScopeExpr(values)
 
 
 def _dimensionOf(row: dict[str, Any], dimension: str) -> tuple[str, ...]:

@@ -200,3 +200,12 @@ v2 集合 = v1 字段 + 5 个过滤标量：
 | R-3 | Milvus 无自动备份 ⇒ drop 不可逆 | 回填脚本**只增不删**；v2 与 v1 并存 |
 | R-4 | Milvus 批量 delete 要 release+load 才可见 | v2 写路径沿用同款处理，并在单测钉住 |
 | R-5 | 新集合与生产同库同实例 | 回填脚本必须过 `scripts/milvus_write_target_guard.assertSafeMilvusTarget` |
+
+### 5.1 D21R 评审整改新增的遗留（登记，不在本批修）
+
+| ID | 风险 / 遗留 | 处置 |
+|---|---|---|
+| R-6 | 降级痕迹未透传到 API 响应（服务层只返回 hits） | fail-closed 后为空结果 + WARNING 日志；改响应契约要动前端 ⇒ 另立变更 |
+| R-7 | `business_object` / `data_domain` 写入口未收 admin ⇒ 域/组织维度可被污染 | 与治理写入口收口合并（受控变更） |
+| R-8 | 语义发布维度（`release_id`）恒 0 ⇒ 发布维度不可用 | 属 P3b（D22–D25）发布镜像；`releaseId <= 0` 已判非法输入（fail-closed） |
+| R-9 | 就绪探针只判「有没有行」 | 未来加「按类型行数 < PG 实体数」告警 |

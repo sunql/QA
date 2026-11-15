@@ -23,34 +23,6 @@ _DIMS: dict[int, tuple[str, ...]] = {
 }
 
 
-class Test归因:
-    def test_未归域的行归因到unmapped(self) -> None:
-        counts = shadow.classifyDropped([4], ("PROCUREMENT",), _DIMS)
-
-        assert counts["unmapped"] == 1
-        assert counts["otherScope"] == 0
-        assert counts["missingInV2"] == 0
-
-    def test_归了别的域的行归因到otherScope(self) -> None:
-        counts = shadow.classifyDropped([3], ("PROCUREMENT",), _DIMS)
-
-        assert counts["otherScope"] == 1
-        assert counts["unmapped"] == 0
-
-    def test_v2里不存在的行归因到missingInV2(self) -> None:
-        counts = shadow.classifyDropped([999], ("PROCUREMENT",), _DIMS)
-
-        assert counts["missingInV2"] == 1
-
-    def test_在范围内的行不算被过滤掉(self) -> None:
-        """范围内且已归域的行被过滤 ⇒ 那是 bug，必须被算成 otherScope 之外的独立计数。"""
-        counts = shadow.classifyDropped([1, 2], ("PROCUREMENT",), _DIMS)
-
-        assert counts["inScope"] == 2
-        assert counts["unmapped"] == 0
-        assert counts["otherScope"] == 0
-
-
 class Test泄漏检测:
     def test_范围内且已归域的行不算泄漏(self) -> None:
         leaks = shadow.detectLeakage([1, 2], ("PROCUREMENT",), _DIMS)
@@ -204,18 +176,44 @@ class Test范围结果比对:
 
 
 class Test范围构造:
-    def test_范围表达式按域码枚举(self) -> None:
-        expr = shadow.buildScopeExpr(("PROCUREMENT",))
+    """影子脚本的过滤表达式**必须走生产构造器**。
+
+    若脚本自己写一份表达式 ⇒ 转义规则 / 哨兵语义会与生产分叉 ⇒
+    影子比对「验证的」就不是线上真正跑的那条路径 ⇒ 证据失效。
+    这里用「含引号的字面量是否被转义」做探针：生产构造器会转义，
+    脚本自建的那份**不会**。
+    """
+
+    def test_域范围走生产构造器(self) -> None:
+        expr = shadow._scopeExprFor(shadow.DIMENSION_DOMAIN, ("PROCUREMENT",))
 
         assert expr == 'array_contains(domain_codes, "PROCUREMENT")'
 
+    def test_组织范围走生产构造器(self) -> None:
+        expr = shadow._scopeExprFor(shadow.DIMENSION_ORG, ("ORG_A",))
+
+        assert expr == 'array_contains(org_codes, "ORG_A")'
+
+    def test_实体范围走生产构造器(self) -> None:
+        expr = shadow._scopeExprFor(shadow.DIMENSION_ENTITY, ("SUPPLIER",))
+
+        assert expr == 'entity_type == "SUPPLIER"'
+
     def test_多值范围用or连接(self) -> None:
-        expr = shadow.buildScopeExpr(("PROCUREMENT", "QUALITY"))
+        expr = shadow._scopeExprFor(
+            shadow.DIMENSION_DOMAIN, ("PROCUREMENT", "QUALITY")
+        )
 
         assert expr == (
             'array_contains(domain_codes, "PROCUREMENT") or '
             'array_contains(domain_codes, "QUALITY")'
         )
 
+    def test_含引号的域码按生产规则转义(self) -> None:
+        """生产构造器会转义字面量；脚本自建的那份不会 ⇒ 这条是「是否委托」的探针。"""
+        expr = shadow._scopeExprFor(shadow.DIMENSION_DOMAIN, ('A"B',))
+
+        assert expr == 'array_contains(domain_codes, "A\\"B")'
+
     def test_空范围不构造表达式(self) -> None:
-        assert shadow.buildScopeExpr(()) is None
+        assert shadow._scopeExprFor(shadow.DIMENSION_DOMAIN, ()) is None

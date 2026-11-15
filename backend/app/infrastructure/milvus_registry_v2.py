@@ -172,7 +172,16 @@ def buildRegistryFilterExpr(registryFilter: RegistryFilter | None) -> str | None
         )
 
     if registryFilter.releaseId is not None:
-        parts.append(f"release_id == {int(registryFilter.releaseId)}")
+        releaseId = int(registryFilter.releaseId)
+        if releaseId <= 0:
+            # release_id == 0 是「无激活发布」的**哨兵值**，不是发布版本。
+            # 放它进表达式 ⇒ 条件退化成「召回所有没有激活发布的行」，
+            # 而调用方以为自己限定了某个发布 ⇒ 口径完全错位。
+            # ⇒ 当非法输入拒绝（上层 fail-closed 成空结果）。
+            raise ValueError(
+                f"releaseId 必须是正的发布 id（0 是「无激活发布」哨兵），收到 {releaseId}"
+            )
+        parts.append(f"release_id == {releaseId}")
 
     if registryFilter.validAt is not None:
         at = int(registryFilter.validAt)
@@ -217,6 +226,30 @@ def hasRegistryV2Collection(type_: str) -> bool:
     if name is None:
         return False
     return hasEmbeddingCollection(name)
+
+
+def _collectionEntityCount(name: str) -> int:
+    """集合的**物理**行数（只读；含墓碑）。
+
+    ⚠️ 物理行数 ≠ 可见行数：删除只打墓碑，行数不减 ⇒ 物理行数只能判
+    「有没有写过」，**不能**当「召回会看到多少行」用（可见行数见回填脚本
+    ``_countV2Rows`` 的去重计数）。
+    """
+    collection = Collection(name, using=_connAlias())
+    return int(collection.num_entities)
+
+
+def registryV2RowCount(type_: str) -> int:
+    """v2 集合的物理行数；集合不存在返回 ``0``。
+
+    只读探针（开关打开时用于启动期就绪告警）。
+    """
+    name = REGISTRY_V2_COLLECTION_NAMES.get(type_)
+    if name is None:
+        raise ValueError(f"unknown embedding type: {type_!r}")
+    if not hasEmbeddingCollection(name):
+        return 0
+    return _collectionEntityCount(name)
 
 
 def insertRegistryV2(records: list[dict[str, Any]]) -> None:

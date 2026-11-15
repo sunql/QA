@@ -114,12 +114,6 @@ def _dedupeByKey(rows: list[dict[str, Any]]) -> dict[tuple[str, int], dict[str, 
     return best
 
 
-def _filterByTypes(rows: list[dict[str, Any]], types: tuple[str, ...]) -> list[dict[str, Any]]:
-    """只保留指定类型的行。"""
-    allowed = set(types)
-    return [r for r in rows if str(r.get("type") or "") in allowed]
-
-
 def _dimensionToDict(dim: DimensionSet) -> dict[str, Any]:
     """``DimensionSet`` → 普通 dict（写入侧只认 dict，避免两层模型耦合）。"""
     return {
@@ -240,14 +234,17 @@ def _readV1Rows(
             break
         rows.extend(page)
         offset += len(page)
+        # 限流必须**先于**「取不满一页就收尾」的判断：本地 metric/kpi 只有
+        # 12~18 行、行数永远小于单页 ⇒ 若顺序反了，--limit 会被静默忽略
+        # ⇒ 抽样回填写出超预期行数。
+        if limit is not None and len(rows) >= limit:
+            return rows[:limit]
         if len(page) < _READ_PAGE:
             break
         if len(rows) > _MAX_ROWS_PER_TYPE:
             raise SystemExit(
                 f"{name}: 行数超过上限 {_MAX_ROWS_PER_TYPE}，疑似读到了错库，终止"
             )
-        if limit is not None and len(rows) >= limit:
-            return rows[:limit]
     return rows
 
 

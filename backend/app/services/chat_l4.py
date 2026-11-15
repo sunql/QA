@@ -125,7 +125,9 @@ class L4Mixin:
             pinnedState = await self._loadQueryState(
                 session,
                 dto.sessionId,
-                userId=user.userId if user else None,
+                # 与 classifyAndRecall 同一约定：**dbUserId**（int | None）——
+                # user.userId 是 JWT subject 字符串，拿去比 BIGINT 列会炸
+                userId=user.dbUserId if user is not None else None,
                 datasourceId=dto.datasourceId,
             )
             sessionPinnedReleaseId = getattr(pinnedState, "semantic_release_id", None)

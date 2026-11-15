@@ -264,6 +264,56 @@ def countReleaseMirrorEdges(releaseId: int) -> dict[str, int]:
     return counts
 
 
+def readReleaseMirrorNodes(entityType: str, releaseId: int) -> list[dict[str, Any]]:
+    """读某次发布某类实体的**全部**镜像节点行（D24 对账的输入；只读）。"""
+    _assertEntityType(entityType)
+    label = RELEASE_MIRROR_LABELS[entityType]
+    driver = getDriver()
+    rows: list[dict[str, Any]] = []
+    with driver.session() as session:
+        result = session.run(
+            f"MATCH (n:{label} {{release_id: $releaseId}}) "
+            f"RETURN n ORDER BY n.unified_id",
+            releaseId=releaseId,
+        )
+        for record in result:
+            node = record["n"]
+            rows.append({key: node[key] for key in node})
+    return rows
+
+
+def readReleaseMirrorEdges(releaseId: int) -> list[tuple[str, str, str]]:
+    """读某次发布的全部镜像边 ⇒ (relType, 源 uid, 目标 uid) 列表。
+
+    relType **不能**拼进 CQL（不可参数化）⇒ 改用 `type(r) IN $relTypes`：
+    关系类型作为**参数列表**传入（先过白名单），一次查询拿全所有白名单边型。
+    """
+    driver = getDriver()
+    mirrorLabels = [RELEASE_MIRROR_LABELS[t] for t in RELEASE_MIRROR_ENTITY_TYPES]
+    labelFilter = " OR ".join(f"a:{label}" for label in mirrorLabels)
+    targetFilter = " OR ".join(f"b:{label}" for label in mirrorLabels)
+    edges: list[tuple[str, str, str]] = []
+    with driver.session() as session:
+        result = session.run(
+            f"""
+            MATCH (a)-[r]->(b)
+            WHERE ({labelFilter}) AND ({targetFilter})
+              AND a.release_id = $releaseId AND b.release_id = $releaseId
+              AND type(r) IN $relTypes
+            RETURN type(r) AS rel_type, a.unified_id AS source_uid,
+                   b.unified_id AS target_uid
+            ORDER BY rel_type, source_uid, target_uid
+            """,
+            releaseId=releaseId,
+            relTypes=sorted(RELEASE_MIRROR_REL_TYPES),
+        )
+        for record in result:
+            edges.append(
+                (record["rel_type"], record["source_uid"], record["target_uid"])
+            )
+    return edges
+
+
 def pruneReleaseMirror(
     releaseId: int,
     keepUnifiedIds: set[str],
@@ -470,3 +520,77 @@ def countStaleReleaseMirrorNodes(
             ).single()
             stale += int(record["cnt"]) if record else 0
     return stale
+
+
+def _releaseIds(label: str, releaseId: int) -> set[str]:
+    """读某发布某 label 的全部 unified_id（读路径；与主图 getId 系列同形）。"""
+    driver = getDriver()
+    with driver.session() as session:
+        return {
+            str(record["uid"])
+            for record in session.run(
+                f"MATCH (n:{label} {{release_id: $releaseId}}) "
+                f"RETURN n.unified_id AS uid",
+                releaseId=releaseId,
+            )
+        }
+
+
+def getReleaseClassIds(releaseId: int) -> set[str]:
+    """读该发布镜像里的全部类 unified_id（读侧切换用，与主图 getClassIds 同形）。"""
+    return _releaseIds(RELEASE_MIRROR_LABELS["class"], releaseId)
+
+
+def getReleasePropertyIds(releaseId: int) -> set[str]:
+    return _releaseIds(RELEASE_MIRROR_LABELS["property"], releaseId)
+
+
+def getReleaseMetricIds(releaseId: int) -> set[str]:
+    return _releaseIds(RELEASE_MIRROR_LABELS["metric"], releaseId)
+
+
+def getReleaseKpiCatalogIds(releaseId: int) -> set[str]:
+    return _releaseIds(RELEASE_MIRROR_LABELS["kpi"], releaseId)
+
+
+def getReleaseJoinPairs(releaseId: int) -> set[tuple[str, str]]:
+    """读该发布的全部 JOIN 边 (源 uid, 目标 uid)（与主图 getJoinPairs 同形）。"""
+    driver = getDriver()
+    label = RELEASE_MIRROR_LABELS["class"]
+    with driver.session() as session:
+        return {
+            (str(record["sourceUid"]), str(record["targetUid"]))
+            for record in session.run(
+                f"MATCH (a:{label})-[:JOIN]->(b:{label}) "
+                f"WHERE a.release_id = $releaseId AND b.release_id = $releaseId "
+                f"RETURN a.unified_id AS sourceUid, b.unified_id AS targetUid",
+                releaseId=releaseId,
+            )
+        }
+
+
+def getReleaseRelationTriples(releaseId: int) -> set[tuple[str, str, str]]:
+    """读该发布的语义关系三元组（与主图 getRelationTriples 同形）。
+
+    ⚠️ 范围声明（L-2/R-2）：镜像的 class→class 非 JOIN 边**只有 SUBCLASS_OF**
+    （`REFERENCES` 是 property→class，不在本口径；`ontology_relation` 驱动的
+    语义关系边**不在镜像**——manifest 无 relations 分区）。
+    ⇒ 按发布读图在关系维度的覆盖 = SUBCLASS_OF，这是显式范围声明，不是漏查。
+    """
+    driver = getDriver()
+    label = RELEASE_MIRROR_LABELS["class"]
+    with driver.session() as session:
+        return {
+            (
+                str(record["sourceUid"]),
+                str(record["targetUid"]),
+                record["relType"],
+            )
+            for record in session.run(
+                f"MATCH (a:{label})-[:SUBCLASS_OF]->(b:{label}) "
+                f"WHERE a.release_id = $releaseId AND b.release_id = $releaseId "
+                f"RETURN a.unified_id AS sourceUid, b.unified_id AS targetUid, "
+                f"'SUBCLASS_OF' AS relType",
+                releaseId=releaseId,
+            )
+        }

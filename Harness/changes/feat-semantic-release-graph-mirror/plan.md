@@ -9,7 +9,7 @@
 | **分支** | `feat/semantic-release-graph-mirror`（worktree `/private/tmp/qa-graph-mirror`），base = `origin/main` `b6af98a1` |
 | **迁移版本** | **无**（零 DDL：不改 PG 表结构、不加列、不改索引） |
 | **关联变更** | [feat-semantic-registry-rag](../feat-semantic-registry-rag/summary.md)（P3a RAG 过滤）· [P1a/P1b 语义发布](../feat-semantic-release-a/summary.md) |
-| **状态** | D22 完成（设计 + 实现 + 评审整改 + 真实数据实证；随 PR 合并，**不部署**）；**D23 完成**（物化 Job：幂等 / dry-run / 分批 / 断点续跑 / 状态台账 + 真实数据实证；**不部署**）；D24–D25 未开始 |
+| **状态** | D22 完成（设计 + 实现 + 评审整改 + 真实数据实证；随 PR 合并，**不部署**）；**D23 完成**（物化 Job：幂等 / dry-run / 分批 / 断点续跑 / 状态台账 + 真实数据实证；**不部署**）；**D24 完成**（对账脚本：计划 vs 图逐条求差 + 退出码 0/1/2/3 + 真实数据实证含自愈闭环；**不部署**）；**D25 完成**（「按发布读图」开关 + 一键回退演练实证；**不部署**）⇒ **P3b 全部完成** |
 
 ---
 
@@ -38,8 +38,8 @@ P2 把 NL2SQL 的 schema 渲染接到发布快照上（钉住某一版发布 ⇒
 |---|---|---|---|
 | D22 | 发布镜像**方案设计** + 测试环境实现 | `daily/D22.md`、`app/domain/semantic_graph_mirror_spec.py`（契约）、`app/domain/id_mapping.py`（业务对象字面量 SSOT）、`app/services/semantic_graph_mirror.py`（纯计划构建）、`app/services/semantic_graph_mirror_resolution.py`（PG 解析）、`app/infrastructure/neo4j_mirror_client.py`（镜像写函数，**独立模块**：`neo4j_client.py` 已 1024 行超 800 行上限）、`app/infrastructure/neo4j_write_target_guard.py`（**库层写目标闸门**） | 方案对比留档；镜像节点走**独立 label**（主图零影响）；镜像内容 = manifest 实体/关系（**含 `REFERENCES`**，与主图本体子图同构）；纯逻辑有单测；真实写/回读/幂等/主图零影响/生产拒写/双保险清理有实证 |
 | D23 | 物化 Job：幂等 / dry-run / 分批 / 断点续跑 | `scripts/semantic_graph_sync.py` + `app/services/semantic_graph_mirror_job.py`（编排层，IO-free）+ `app/services/semantic_graph_mirror_ledger.py`（台账行转换） | 重复执行结果一致；dry-run 不写图；按 label 分批、每批有耗时与条数记录；失败可续跑 —— **已完成**（详见 `daily/D23.md`） |
-| D24 | 一致性对账：镜像 vs Manifest 实体/关系 | `scripts/verify_graph_mirror.py` + 对账报告 | 实体 100% 对账；关系逐条解释（manifest 无 relations 分区 ⇒ 语义关系边**不在对账范围**） |
-| D25 | 切换演练 + 回归 + PR | 演练报告、PR | 「按发布读图」开关打开后读到的是镜像；一键回退到主图 |
+| D24 | 一致性对账：镜像 vs Manifest 实体/关系 | `scripts/verify_graph_mirror.py` + `app/services/semantic_graph_mirror_verify.py`（纯对账） | 实体 100% 对账；关系逐条解释（manifest 无 relations 分区 ⇒ 语义关系边**不在对账范围**）—— **已完成**（详见 `daily/D24.md`） |
+| D25 | 切换演练 + 回归 + PR | `app/services/semantic_graph_reader.py`（路由器）+ 演练报告（D24+D25 同 PR，D25 产出本来就是 PR） | 「按发布读图」开关打开后读到的是镜像；一键回退到主图 —— **已完成**（详见 `daily/D25.md`） |
 
 ---
 
@@ -94,3 +94,8 @@ P2 把 NL2SQL 的 schema 渲染接到发布快照上（钉住某一版发布 ⇒
 | R-13 | **dry-run 被「已物化」闸门挡住**：运维想看「会怎么分批」却拿不到任何信息 | **已修**（D23）：闸门移到 dry-run 分支**之后** ⇒ 只挡写、不挡看 |
 | R-14 | **台账不是备份**（C-14）：图库整体清空时台账一并消失 | 语义正确（图没了就该重建）；已在 `daily/D23.md` 遗留项 L-11 登记，运维须知 |
 | R-15 | **物化无跨系统事务**：PG 发布状态与图侧物化状态可能不一致（L-8） | 图侧有状态台账；PG 侧不写状态（会引入 DDL）⇒ D24 对账脚本负责判定 |
+| R-16 | **对账基准选谁**：重算计划 vs 发布时冻结计划 | **D24 裁决：重算计划**（与物化同一计划器 ⇒ 永不失配；冻结要加存储破坏零 DDL）。代价：解析漂移（L-13）表现为「成对差异」⇒ 报告给足判断材料，机器不替人下结论 |
+| R-17 | **「不完整」≠「不一致」**：图忠实于计划但计划有未解析（解析缺口） vs 图和计划对不上（镜像缺陷）——混成一个退出码会把运维引到错方向 | **D24 已拆**：exit 3 = 不完整（去治理面补解析）/ exit 1 = 不一致（去图查差异）；不一致优先于不完整 |
+| R-18 | **现有主图消费方误切到镜像**：图同步差分是写侧（写主图必须读主图）；状态计数报治理面 | **D25 已声明**：路由器只服务「按发布读」的新消费面；两个现有消费方刻意不切（切了是 bug） |
+| R-19 | **开关非法值静默回主图 = 假切换**（运维以为切了，实际没切） | **D25 已防**：非数字开关值显式报错；`0` 视同不钉住 |
+| R-20 | **镜像的关系维度覆盖只有 SUBCLASS_OF**（ontology_relation 边不在镜像） | 显式范围声明（docstring + D25.md）；按发布读要完整语义关系 ⇒ 关系镜像另立卡 |

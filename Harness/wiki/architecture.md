@@ -327,6 +327,9 @@ Neo4j **无备份、误写不可逆** ⇒ 镜像写路径自带闸门
 | `backend/app/services/semantic_graph_mirror_job.py` | **物化 Job 编排层（IO-free）**：状态机 + 批次执行 + 跳过决策 + 收尾核对 |
 | `backend/app/services/semantic_graph_mirror_ledger.py` | 台账行 ↔ 状态对象转换（单向依赖，无环） |
 | `backend/scripts/semantic_graph_sync.py` | 物化 Job 的 CLI（**唯一装配点**）+ 退出码契约 |
+| `backend/app/services/semantic_graph_mirror_verify.py` | **对账（纯比较，无 IO）**：计划 vs 图逐条求差（缺/多节点、逐字段不符、缺/多边） |
+| `backend/scripts/verify_graph_mirror.py` | 对账 CLI（只读；退出码 0 一致 / 1 不一致 / 2 前置阻断 / 3 不完整） |
+| `backend/app/services/semantic_graph_reader.py` | **「按发布读图」路由器**（D25）：开关 `SEMANTIC_GRAPH_RELEASE_ID` ⇒ 主图 / 发布镜像，两侧同形六方法 |
 | `backend/scripts/semantic_graph_mirror_realdata.py` | 真实数据验证（默认只读；`--write` 才写；`--cleanup` 需配 `--expect-delete`） |
 
 ### 物化 Job（D23）
@@ -353,6 +356,40 @@ Neo4j **无备份、误写不可逆** ⇒ 镜像写路径自带闸门
 
 设计细节与实证见
 [`Harness/changes/feat-semantic-release-graph-mirror/daily/D23.md`](../changes/feat-semantic-release-graph-mirror/daily/D23.md)。
+
+### 对账（D24）
+
+对账 = **计划（应然） vs 图（实然）**，两者用**同一个计划器**（重算 `buildMirrorPlan`）
+⇒ 口径永不失配。对账**只读**（读路径不需要写目标闸门）。
+
+| 概念 | 内容 |
+|---|---|
+| 节点对账 | 按 (entityType, unified_id) 求差；共有节点**逐字段**比（实体字段 + `release_id`/`release_version`/`mirror_of` 发布标识） |
+| 边对账 | 按 (relType, 源, 目标) 求差（边无属性 ⇒ 无字段可比）；全量读用 `type(r) IN $relTypes` **参数化**（relType 不拼字符串） |
+| 退出码 | `0` 一致 / `1` 不一致（去图查差异）/ `2` 前置阻断（发布不存在 / DRAFT）/ `3` 不完整（图忠实于计划但计划有未解析 ⇒ 去治理面补解析）；不一致优先于不完整 |
+| 已知口径限制 | 计划用**当前** `id_mapping` ⇒ 物化后映射变了会出「成对差异」（解析漂移，L-13/L-14）⇒ 报告给足材料、机器不替人下结论 |
+
+**运维闭环**（真实数据实证）：`verify_graph_mirror` 点名差异 → `semantic_graph_sync --apply`
+续跑修复（只重跑图上缺的批次）→ 再对账归零。
+
+细节与实证见
+[`Harness/changes/feat-semantic-release-graph-mirror/daily/D24.md`](../changes/feat-semantic-release-graph-mirror/daily/D24.md)。
+
+### 读侧切换（D25）
+
+开关 = 配置 `SEMANTIC_GRAPH_RELEASE_ID`（发布 id）：
+
+- **不设 / 0**（默认）⇒ 主图（与现状一致 ⇒ 不部署行为不变）；**设了 id** ⇒ 那一版的镜像；
+- **一键回退 = 拿掉环境变量**（settings 进程级缓存 ⇒ 重载生效）；
+- **切换前置条件**：`verify_graph_mirror` 退出码 0（对账一致才允许切）；
+- **非法开关值显式报错**（静默回主图 = 假切换，比炸更危险）；
+- **刻意不切的消费方**：`ontology_service.syncAllToGraph`（写侧——写主图必须读主图）、
+  `knowledge_compiler_service` 状态计数（治理面）；路由器只服务「按发布读」的新消费面（P4 起）；
+- **关系维度范围**：镜像 reader 的 `relationTriples()` 只覆盖 `SUBCLASS_OF`
+  （ontology_relation 语义关系边不在镜像，L-2/R-2 —— 显式范围声明）。
+
+细节与实证见
+[`Harness/changes/feat-semantic-release-graph-mirror/daily/D25.md`](../changes/feat-semantic-release-graph-mirror/daily/D25.md)。
 
 ### 边界
 

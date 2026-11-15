@@ -431,3 +431,132 @@ def testCountStaleReleaseMirrorNodesCountsOnlyOutsideKeep(monkeypatch) -> None:
     cqls = [cql for cql, _ in driver.sessionObj.calls]
     assert any(":ReleaseClass" in cql for cql in cqls)
     assert all("NOT n.unified_id IN $keep" in cql for cql in cqls)
+
+
+# =============================================================================
+# D24：镜像**全量读**（对账脚本的输入；只读，不走写目标闸门）
+# =============================================================================
+
+
+def testReadReleaseMirrorNodesReturnsRows(monkeypatch) -> None:
+    driver = _FakeDriver(
+        records=[
+            {"n": {"unified_id": "obj:CLASS:1", "name": "采购订单", "release_id": 7}},
+            {"n": {"unified_id": "obj:CLASS:2", "name": "供应商", "release_id": 7}},
+        ]
+    )
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _TEST_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: driver)
+    rows = mirror.readReleaseMirrorNodes("class", 7)
+    assert [row["unified_id"] for row in rows] == ["obj:CLASS:1", "obj:CLASS:2"]
+    cql, params = driver.sessionObj.calls[0]
+    assert ":ReleaseClass" in cql
+    assert params["releaseId"] == 7
+
+
+def testReadReleaseMirrorNodesRejectsNonMirrorType(monkeypatch) -> None:
+    """`Class` 不是镜像 label ⇒ 拒绝（读路径也守住「镜像只读 Release*」）。"""
+    driver = _useTestTarget(monkeypatch)
+    with pytest.raises(ValueError):
+        mirror.readReleaseMirrorNodes("Class", 7)
+    assert driver.sessionObj.calls == []
+
+
+def testReadReleaseMirrorEdgesReturnsTypedTriples(monkeypatch) -> None:
+    driver = _FakeDriver(
+        records=[
+            {"rel_type": "JOIN", "source_uid": "obj:CLASS:1", "target_uid": "obj:CLASS:2"},
+            {"rel_type": "HAS_PROPERTY", "source_uid": "obj:CLASS:1", "target_uid": "obj:PROPERTY:1"},
+        ]
+    )
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _TEST_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: driver)
+    edges = mirror.readReleaseMirrorEdges(7)
+    assert ("JOIN", "obj:CLASS:1", "obj:CLASS:2") in edges
+    assert ("HAS_PROPERTY", "obj:CLASS:1", "obj:PROPERTY:1") in edges
+    cql, params = driver.sessionObj.calls[0]
+    # relType **不可**拼进 CQL（label/relType 注入防线）⇒ 必须走参数化白名单
+    assert "type(r) IN $relTypes" in cql
+    assert set(params["relTypes"]) <= {"HAS_PROPERTY", "SUBCLASS_OF", "JOIN",
+                                       "DERIVED_FROM", "MEASURED_BY", "REFERENCES"}
+    assert params["releaseId"] == 7
+
+
+def testReadReleaseMirrorEdgesConstrainsBothEndpointsToMirrorLabels(monkeypatch) -> None:
+    """两端都必须带 Release* label 约束 ⇒ 不扫主图边。"""
+    driver = _FakeDriver(records=[])
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _TEST_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: driver)
+    mirror.readReleaseMirrorEdges(7)
+    cql, _ = driver.sessionObj.calls[0]
+    assert ":ReleaseClass" in cql and ":ReleaseProperty" in cql
+
+
+# =============================================================================
+# D25：发布钉住的**本体读**（读侧切换的镜像侧；与主图 neo4j_client 读函数同形）
+# =============================================================================
+
+
+def testGetReleaseClassIdsReturnsMirrorIds(monkeypatch) -> None:
+    driver = _FakeDriver(
+        records=[{"uid": "obj:CLASS:1"}, {"uid": "obj:CLASS:2"}]
+    )
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _TEST_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: driver)
+    ids = mirror.getReleaseClassIds(7)
+    assert ids == {"obj:CLASS:1", "obj:CLASS:2"}
+    cql, params = driver.sessionObj.calls[0]
+    assert ":ReleaseClass" in cql
+    assert params["releaseId"] == 7
+
+
+def testGetReleasePropertyIdsAndMetricIdsUseOwnLabels(monkeypatch) -> None:
+    driver = _FakeDriver(records=[{"uid": "obj:PROPERTY:1"}])
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _TEST_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: driver)
+    assert mirror.getReleasePropertyIds(7) == {"obj:PROPERTY:1"}
+    assert ":ReleaseProperty" in driver.sessionObj.calls[0][0]
+    driver2 = _FakeDriver(records=[{"uid": "obj:METRIC:1"}])
+    monkeypatch.setattr(mirror, "getDriver", lambda: driver2)
+    assert mirror.getReleaseMetricIds(7) == {"obj:METRIC:1"}
+    assert ":ReleaseMetric" in driver2.sessionObj.calls[0][0]
+
+
+def testGetReleaseKpiCatalogIdsUsesKpiLabel(monkeypatch) -> None:
+    driver = _FakeDriver(records=[{"uid": "obj:KPI:1"}])
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _TEST_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: driver)
+    assert mirror.getReleaseKpiCatalogIds(7) == {"obj:KPI:1"}
+    assert ":ReleaseKpiCatalog" in driver.sessionObj.calls[0][0]
+
+
+def testGetReleaseJoinPairsReturnsEndpointPairs(monkeypatch) -> None:
+    driver = _FakeDriver(
+        records=[
+            {"sourceUid": "obj:CLASS:1", "targetUid": "obj:CLASS:2"},
+            {"sourceUid": "obj:CLASS:1", "targetUid": "obj:CLASS:3"},
+        ]
+    )
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _TEST_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: driver)
+    pairs = mirror.getReleaseJoinPairs(7)
+    assert pairs == {("obj:CLASS:1", "obj:CLASS:2"), ("obj:CLASS:1", "obj:CLASS:3")}
+    cql, _ = driver.sessionObj.calls[0]
+    assert "[:JOIN]" in cql
+
+
+def testGetReleaseRelationTriplesReadsSubclassOnly(monkeypatch) -> None:
+    """镜像的 class→class 非 JOIN 边只有 SUBCLASS_OF ⇒ 只读到它。
+
+    语义关系边（ontology_relation）不在镜像（manifest 无 relations 分区，D22 C-4）
+    ⇒ 按发布读图在关系维度的覆盖 = SUBCLASS_OF，**这是显式范围声明**（L-2/R-2）。
+    """
+    driver = _FakeDriver(
+        records=[{"sourceUid": "obj:CLASS:1", "targetUid": "obj:CLASS:2", "relType": "SUBCLASS_OF"}]
+    )
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _TEST_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: driver)
+    triples = mirror.getReleaseRelationTriples(7)
+    assert triples == {("obj:CLASS:1", "obj:CLASS:2", "SUBCLASS_OF")}
+    cql, _ = driver.sessionObj.calls[0]
+    assert "[:SUBCLASS_OF]" in cql

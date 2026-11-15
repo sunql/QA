@@ -3,7 +3,7 @@
 - **日期**：2026-11-15
 - **作者**：Claude
 - **Phase**：P3b Neo4j 发布镜像（SemanticRelease → 图谱快照）
-- **状态**：in-review（D22 已交付并实证；**D23 已交付并实证**；D24–D25 续接中）
+- **状态**：in-review（D22 已交付并实证（PR #131）；**D23 已交付并实证**（PR #132）；**D24/D25 已交付并实证**（D24+D25 同 PR）⇒ **P3b 全部完成**）
 - **关联变更**：[feat-semantic-release](../feat-semantic-release-a/summary.md)（P1a/P1b 语义发布，快照来源）· [feat-semantic-registry-rag](../feat-semantic-registry-rag/summary.md)（P3a RAG 过滤，向量侧发布维度）
 - **迁移版本**：无（**零 DDL**：不改 PG 表结构、不加列、不改索引）
 - **MEMORY**：[qa-system-graph-mirror-release](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-graph-mirror-release.md)
@@ -44,6 +44,24 @@ P2 把 NL2SQL 的 schema 渲染接到发布快照上。但**图谱这一侧完�
 | 9 | **破坏性操作有双保险** | 裁剪须 `--prune --expect-delete N`；实际将删数 ≠ N ⇒ 拒绝执行 |
 | 10 | **失败可判** | 退出码 4 档互斥：`0` 成功 / `1` 运行失败 / `2` 前置阻断 / `3` 物化完成但有未解析 |
 
+**D24（对账）追加的验收标准**
+
+| # | 标准 | 判据 |
+|---|---|---|
+| 11 | **实体 100% 对账** | 计划（同一计划器复算）每个实体在图上都有、字段逐个相等；图上无计划外节点 |
+| 12 | **差异可定位** | 报告逐条列出缺/多/不符（类型 + unified_id + 字段名 + 双方值） |
+| 13 | **对账只读** | 一个字节不写；不需要写目标闸门（读不设防） |
+| 14 | **不完整 ≠ 不一致** | exit 3 = 图忠实于计划但计划有未解析（去治理面补解析）；exit 1 = 图与计划对不上（去图查差异） |
+
+**D25（读侧切换）追加的验收标准**
+
+| # | 标准 | 判据 |
+|---|---|---|
+| 15 | 开关打开后读到的是**镜像** | `SEMANTIC_GRAPH_RELEASE_ID=1` ⇒ 六个本体读全部来自 `Release*` label |
+| 16 | **一键回退** | 拿掉开关 ⇒ 主图读数与切换前完全一致 |
+| 17 | **切换有前置条件** | 对账（D24）退出码 0 才允许切 |
+| 18 | **默认关闭 = 现状** | 开关不设 ⇒ 主图 ⇒ 不部署时行为不变 |
+
 ## 2. 设计评审
 
 三个候选（详见 [`daily/D22.md`](daily/D22.md) §二）：
@@ -79,6 +97,21 @@ P2 把 NL2SQL 的 schema 渲染接到发布快照上。但**图谱这一侧完�
 | **续跑跳过的依据** | ① 只信台账 ② 只信图 ③ 台账 + 图计数 | **③ 采纳**：只信台账 ⇒ 人工删了图上的东西后**永远修不好**（D23 真实踩到）；只信图 ⇒ 全量重写。原则：**台账 = 意图，图 = 事实** |
 | **裁剪确认** | ① 只给 `--prune` ② `--prune --expect-delete N` | **② 采纳**：Neo4j 无备份 ⇒ 裁剪**不可逆** ⇒ 数量对不上就拒绝 |
 | **dry-run 是否受「已物化」闸门约束** | ① 一律拒绝 ② 只挡写、不挡看 | **② 采纳**：闸门要保护的是**不可逆的写**；初版把闸门放在 dry-run 分支之前 ⇒ 运维连「会怎么分批」都看不到（本批修的真 bug） |
+
+**D24（对账）的三个候选与裁决**（详见 [`daily/D24.md`](daily/D24.md) §二）：
+
+| 候选 | 做法 | 结论 |
+|---|---|---|
+| **对账基准** | ① 重算计划 ② 发布时冻结计划 | **① 采纳**：与物化**同一计划器** ⇒ 永不失配；冻结要加存储破坏零 DDL。代价：解析漂移（L-13）表现为「成对差异」⇒ 报告给足材料、机器不下结论 |
+| **边全量读** | ① 单查询 `type(r) IN $relTypes`（参数化） ② 按 relType 循环 6 次 | **① 采纳**：relType 作为参数列表 ⇒ 无拼接（Cypher 里唯一不给 relType 拼字符串的全量读法） |
+| **「不完整」的退出码** | ① exit 3 独立 ② 混进不一致 | **① 采纳**：3 ⇒ 去治理面补解析；1 ⇒ 去图查差异——两种原因动作指向不同，混了必查错方向 |
+
+**D25（读侧切换）的两个候选与裁决**（详见 [`daily/D25.md`](daily/D25.md) §二）：
+
+| 候选 | 做法 | 结论 |
+|---|---|---|
+| **开关形态** | ① 全局 env（`SEMANTIC_GRAPH_RELEASE_ID`）② 每请求传 releaseId | **① 先交**（演练 + 运维回退语义清楚）；P4 若需按请求钉再在调用点传参（reader 两侧同形 ⇒ 换实现不动调用方） |
+| **镜像 relationTriples** | ① 真读 SUBCLASS_OF ② 一律空集 | **① 采纳**：镜像真有 SUBCLASS_OF 数据；空集会把「范围」混成「没有关系」误导消费方 |
 
 ## 3. 数据模型变更
 
@@ -117,6 +150,24 @@ P2 把 NL2SQL 的 schema 渲染接到发布快照上。但**图谱这一侧完�
 
 - 台账**用独立 label**（不是镜像实体 label）⇒ D24 的对账计数（按 4 个镜像 label）**不受污染**；
 - 台账与镜像**同库** ⇒ 图被清空时台账随之消失（语义正确）；**台账不是备份**。
+
+**D24 新增：对账读路径（无 PG 变更，图侧只读）**
+
+| 契约 | 内容 |
+|---|---|
+| `readReleaseMirrorNodes(entityType, releaseId)` | 按实体类型**全量读**镜像节点（label + `release_id` 约束；只读不走写目标闸门） |
+| `readReleaseMirrorEdges(releaseId)` | 全量读镜像边 ⇒ `(relType, 源 uid, 目标 uid)` 三元组（`type(r) IN $relTypes` **参数化**白名单 ⇒ 无 relType 拼接；两端 label 约束 ⇒ 不扫主图边） |
+| `verifyMirrorAgainstPlan(plan, actualNodes, actualEdges)` | **纯对账**（无 IO）：缺/多节点（按 unified_id）、共有节点**逐字段**比（实体字段 + 发布标识）、缺/多边（按端点对）；输出确定性排序 ⇒ 报告可 diff |
+| 退出码契约 | `0` 一致 / `1` 不一致 / `2` 前置阻断（发布不存在 / DRAFT）/ `3` 不完整（图忠实于计划但计划有未解析）；不一致优先于不完整 |
+
+**D25 新增：读侧路由（`semantic_graph_reader.py`）**
+
+| 契约 | 内容 |
+|---|---|
+| `resolveOntologyGraphReader()` | 按配置路由 ⇒ `MainGraphReader` \| `ReleaseGraphReader`（两侧**同形**六方法）；非法开关值**显式炸**（静默回主图 = 假切换） |
+| 配置 | `SEMANTIC_GRAPH_RELEASE_ID`（发布 id）；不设/0 = 主图（默认 ⇒ 不部署行为不变）；一键回退 = 拿掉 env（settings 进程级缓存 ⇒ 重载生效） |
+| 发布钉住读 6 件套（`neo4j_mirror_client`） | `getReleaseClassIds/PropertyIds/MetricIds/KpiCatalogIds/JoinPairs/RelationTriples`；**relationTriples 只读 SUBCLASS_OF**（ontology_relation 边不在镜像 ⇒ 显式范围声明） |
+| 刻意不切的消费方 | `ontology_service.syncAllToGraph`（写侧，写主图必须读主图）、`knowledge_compiler_service` 状态计数（治理面）⇒ 切了是 bug |
 
 ## 4. 接口契约变更
 
@@ -170,6 +221,8 @@ infrastructure 共用，避免两份白名单漂移：
 | `backend/app/services/semantic_graph_mirror_job.py` | **D23 物化 Job 编排层（IO-free，723 行）**：端口协议 `MirrorJobPorts` + 状态机 + 批次执行 + 跳过决策（`_canSkip` / `_OutputIntact`）+ 收尾核对 |
 | `backend/app/services/semantic_graph_mirror_ledger.py` | **D23 台账行 ↔ 状态对象转换**（87 行；缺字段走默认值 ⇒ 老台账行不读崩；单向依赖无环） |
 | `backend/scripts/semantic_graph_sync.py` | **D23 物化 Job 唯一装配点**（405 行）：接真实 PG/Neo4j + 退出码契约 0/1/2/3 + 写目标双保险（库层闸门之外脚本再拦一道） |
+| `backend/app/services/semantic_graph_mirror_verify.py` | **D24 纯对账**（159 行，无 IO）：`verifyMirrorAgainstPlan` ⇒ 缺/多节点、逐字段不符、缺/多边；确定性排序 |
+| `backend/scripts/verify_graph_mirror.py` | **D24 对账装配点**（212 行）：复用物化脚本的 `_Ports`（只调读方法）；退出码 0/1/2/3 |
 
 **关键算法**
 
@@ -213,7 +266,14 @@ infrastructure 共用，避免两份白名单漂移：
 | `backend/app/tests/unit/test_semantic_graph_sync_script.py` | **13** | **退出码契约**（0/1/2/3 各自含义 + 四码互不相同）、默认 dry-run 不写图、DRAFT ⇒ 2、发布不存在 ⇒ 2、裁剪缺 `--expect-delete` ⇒ 2、裁剪数量不符 ⇒ 2、部分物化 ⇒ 3、报告含批次明细（条数 + 耗时）、命令行默认值 |
 | `backend/app/tests/unit/test_semantic_graph_mirror_ledger.py` | **2** | 台账行 ↔ 状态对象**往返无损**；台账行**缺字段**走默认值（老行不读崩） |
 
-（`test_neo4j_mirror_client.py` 由 22 增至 **30**：台账 API 的读写幂等键与缺字段容错。）
+（`test_neo4j_mirror_client.py` 由 22 增至 **30**：台账 API 的读写幂等键与缺字段容错；D24 再增至 **34**：全量读路径。）
+
+**D24 新增测试**
+
+| 文件 | 用例 | 关键场景 |
+|---|---|---|
+| `backend/app/tests/unit/test_semantic_graph_mirror_verify.py` | **8** | 一致通过 / 缺节点 / 多节点 / 逐字段不符（含发布标识 `release_version`）/ 缺边与多边 / 确定性（打乱输入同输出）/ 空计划语义 |
+| `backend/app/tests/unit/test_verify_graph_mirror_script.py` | **10** | 退出码 0/1/2/3 + 四码互不相同；不一致优先于不完整；DRAFT 拦下；发布不存在 ⇒ 2；报告带计划规模；命令行契约 |
 
 - **覆盖率（实测，`pytest --cov`）**：
   `semantic_graph_mirror_spec.py` 100% · `neo4j_mirror_client.py` 96% ·
@@ -350,12 +410,25 @@ joinKey**（`DWD_GOODS_RECEIPT_DTL → DWD_PURCHASE_ORDER_DTL` 的 PO_LINE_NO / 
 | **续跑自愈** | 手工删 1 个镜像属性 + 状态置 `failed` 后再 `... --apply` | 退出码 0；**只有 B2 重跑（图上缺 1 个）+ 6 种边批次全重跑（依赖失效）**，B1/B3/B4 跳过；计数回到 3328 / 3293；主图不变 |
 | dry-run 不受「已物化」闸门限制 | 已物化发布上再跑 dry-run | 退出码 0；出完整计划；图上零写入 |
 
+**D24 真实数据验证**（`backend/scripts/verify_graph_mirror.py`，dev 5433 + 测试 Neo4j 7688；详见 [`daily/D24.md`](daily/D24.md) §五）
+
+| 场景 | 实测 |
+|---|---|
+| 完好镜像对账 | 退出码 0；`consistent`；planNodes 3328 / planEdges 3293 / diffCount 0 |
+| 人工删 1 个镜像属性节点后对账 | 退出码 1；逐条点名：缺节点 `obj:PROPERTY:1` + 缺边 `HAS_PROPERTY: obj:CLASS:1→obj:PROPERTY:1`（diffCount=2） |
+| **运维闭环**：对账点名 → sync 续跑修复 → 再对账 | sync 退出码 0 ⇒ verify 退出码 0（差异归零） |
+| 不完整镜像（测试库 5434 合成发布含未知实体） | sync `--allow-partial` ⇒ 退出码 3；verify ⇒ 退出码 3 `incomplete`，点名「本体中不存在该实体」 |
+| 清理 | 合成发布 + release_id=99 镜像/台账全删净（回读全 0；release 1 不受影响） |
+
 ## 9. 关联
 
 - **设计稿 / 每日证据**：[`daily/D22.md`](daily/D22.md)（方案对比、recon 事实 C-1..C-10、
   三态解析、批次方案 D22-B、遗留项 L-1..**L-7**）·
   [`daily/D23.md`](daily/D23.md)（物化 Job：候选对比、台账落图、「台账 = 意图，图 = 事实」、
-  退出码契约、遗留项 L-8..**L-13**）· [`plan.md`](plan.md)（D22–D25 任务卡、约束、风险 R-1..**R-15**）
+  退出码契约、遗留项 L-8..**L-13**）·
+  [`daily/D24.md`](daily/D24.md)（对账：基准候选、`type(r) IN` 参数化读、exit 3 独立、
+  自愈闭环实证、遗留项 L-14..**L-16**）·
+  [`plan.md`](plan.md)（D22–D25 任务卡、约束、风险 R-1..**R-17**）
 - **Wiki**：[`Harness/wiki/architecture.md`](../../wiki/architecture.md)「发布维度：语义发布（P1）与图谱镜像（P3b）」
 - **Rules**：[`Harness/rules/变更记录强制规范.md`](../../rules/变更记录强制规范.md) ·
   [`Harness/rules/开发流程规范.md`](../../rules/开发流程规范.md) ·
@@ -381,3 +454,4 @@ joinKey**（`DWD_GOODS_RECEIPT_DTL → DWD_PURCHASE_ORDER_DTL` 的 PO_LINE_NO / 
 - [x] 至少 1 条 MEMORY 索引已在 `MEMORY.md` 添加
 - [x] 真实数据验证脚本 `scripts/semantic_graph_mirror_realdata.py` 已跑通（含写 + 回读 + 幂等 + 清理）
 - [x] D23 物化 Job `scripts/semantic_graph_sync.py` 已跑通（dry-run / apply / 拒写 / 幂等 / 裁剪对账 / 续跑自愈）
+- [x] D24 对账脚本 `scripts/verify_graph_mirror.py` 已跑通（一致 / 点名差异 / 自愈闭环 / exit 3 不完整 / 清理）

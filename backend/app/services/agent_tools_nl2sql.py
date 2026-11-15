@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +28,7 @@ from app.domain.exceptions import SqlSafetyError
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
 from app.infrastructure.business_db_pool import _assert_read_only
 from app.infrastructure.llm.base_client import ToolCall
+from app.services.agent_tools_semantic_gate import ToolOntologyView, loadToolOntology
 
 log = logging.getLogger(__name__)
 
@@ -96,9 +98,18 @@ class ToolResult:
 # =============================================================================
 
 
-async def handle_list_tables(*, session: AsyncSession) -> ToolResult:
-    """列出 ontology 全部表（schema.table 格式，仅未软删除）。"""
+async def handle_list_tables(
+    *, session: AsyncSession, pinnedReleaseId: int | None = None
+) -> ToolResult:
+    """列出 ontology 全部表（schema.table 格式，仅未软删除）。
+
+    钉住了发布（P3c D27 冻结进 run 的 `semantic_release_id`）⇒ 读那一版快照；
+    没钉住/钉不住 ⇒ 直读治理表（与现状逐字一致）。
+    """
     try:
+        view = await loadToolOntology(session, pinnedReleaseId=pinnedReleaseId)
+        if view is not None:
+            return _listTablesFromView(view)
         stmt = (
             select(OntologyClass.source_table)
             .where(OntologyClass.valid_to.is_(None))
@@ -117,80 +128,96 @@ async def handle_list_tables(*, session: AsyncSession) -> ToolResult:
         return _errorResult("", "list_tables", exc)
 
 
-async def handle_describe_table(*, session: AsyncSession, table_name: str) -> ToolResult:
-    """返回指定表的列定义（property 行 + 类型 + 是否 PK/FK）。"""
+async def handle_describe_table(
+    *, session: AsyncSession, table_name: str, pinnedReleaseId: int | None = None
+) -> ToolResult:
+    """返回指定表的列定义（property 行 + 类型 + 是否 PK/FK）。钉住语义同 list_tables。"""
     try:
-        # 1. 找到对应的 ontology_class
-        stmt = select(OntologyClass).where(
-            OntologyClass.source_table == table_name,
-            OntologyClass.valid_to.is_(None),
-        )
-        result = await session.execute(stmt)
-        cls = result.scalar_one_or_none()
-        if cls is None:
-            return ToolResult(
-                tool_call_id="",
-                name="describe_table",
-                content=json.dumps(
-                    {"error": "TABLE_NOT_FOUND", "detail": f"表 {table_name} 不存在"},
-                    ensure_ascii=False,
-                ),
-                is_error=True,
-            )
+        view = await loadToolOntology(session, pinnedReleaseId=pinnedReleaseId)
+        if view is not None:
+            return _describeTableFromView(view, table_name=table_name)
+        return await _describeTableDirect(session=session, table_name=table_name)
+    except Exception as exc:
+        return _errorResult("", "describe_table", exc)
 
-        # 2. 读取属性列表
-        propStmt = (
-            select(OntologyProperty)
-            .where(OntologyProperty.class_id == cls.id)
-            .order_by(OntologyProperty.property_name)
-        )
-        propResult = await session.execute(propStmt)
-        props = list(propResult.scalars().all())
 
-        # 3. 外键目标 class_id → 表名（class_id 对 LLM 不可用：没有工具能映射）
-        refIds = sorted({p.ref_class_id for p in props if p.ref_class_id})
-        refTableById = await _loadClassTables(session, refIds)
-
-        columns: list[list[str]] = []
-        for prop in props:
-            alias = prop.property_alias or ""
-            if alias in (prop.property_name, prop.source_column):
-                alias = ""
-            flags = ",".join(
-                flag
-                for flag, enabled in (
-                    ("PK", prop.is_primary_key),
-                    ("FK", prop.is_foreign_key),
-                )
-                if enabled
-            )
-            ref = refTableById.get(prop.ref_class_id, "") if prop.ref_class_id else ""
-            columns.append(
-                [
-                    prop.property_name,
-                    alias,
-                    prop.data_type,
-                    prop.source_column,
-                    flags,
-                    ref,
-                ]
-            )
-
+async def _describeTableDirect(
+    *, session: AsyncSession, table_name: str
+) -> ToolResult:
+    """describe_table 的直读分支（未钉住 ⇒ 与现状逐字一致）。"""
+    # 1. 找到对应的 ontology_class
+    stmt = select(OntologyClass).where(
+        OntologyClass.source_table == table_name,
+        OntologyClass.valid_to.is_(None),
+    )
+    result = await session.execute(stmt)
+    cls = result.scalar_one_or_none()
+    if cls is None:
         return ToolResult(
             tool_call_id="",
             name="describe_table",
             content=json.dumps(
-                {
-                    "table": table_name,
-                    "column_format": DESCRIBE_TABLE_COLUMN_FORMAT,
-                    "columns": columns,
-                },
+                {"error": "TABLE_NOT_FOUND", "detail": f"表 {table_name} 不存在"},
                 ensure_ascii=False,
-                default=str,
             ),
+            is_error=True,
         )
-    except Exception as exc:
-        return _errorResult("", "describe_table", exc)
+
+    # 2. 读取属性列表
+    propStmt = (
+        select(OntologyProperty)
+        .where(OntologyProperty.class_id == cls.id)
+        .order_by(OntologyProperty.property_name)
+    )
+    propResult = await session.execute(propStmt)
+    props = list(propResult.scalars().all())
+
+    # 3. 外键目标 class_id → 表名（class_id 对 LLM 不可用：没有工具能映射）
+    refIds = sorted({p.ref_class_id for p in props if p.ref_class_id})
+    refTableById = await _loadClassTables(session, refIds)
+
+    return ToolResult(
+        tool_call_id="",
+        name="describe_table",
+        content=json.dumps(
+            {
+                "table": table_name,
+                "column_format": DESCRIBE_TABLE_COLUMN_FORMAT,
+                "columns": _describeColumns(props, refTableById),
+            },
+            ensure_ascii=False,
+            default=str,
+        ),
+    )
+
+
+def _describeColumns(props: list[Any], tableById: dict[int, str]) -> list[list[str]]:
+    """列构造（直读与快照**共用**：ORM 行与 SnapshotProperty 字段名逐字对齐）。"""
+    columns: list[list[str]] = []
+    for prop in props:
+        alias = prop.property_alias or ""
+        if alias in (prop.property_name, prop.source_column):
+            alias = ""
+        flags = ",".join(
+            flag
+            for flag, enabled in (
+                ("PK", prop.is_primary_key),
+                ("FK", prop.is_foreign_key),
+            )
+            if enabled
+        )
+        ref = tableById.get(prop.ref_class_id, "") if prop.ref_class_id else ""
+        columns.append(
+            [
+                prop.property_name,
+                alias,
+                prop.data_type,
+                prop.source_column,
+                flags,
+                ref,
+            ]
+        )
+    return columns
 
 
 async def handle_sample_rows(
@@ -266,15 +293,21 @@ async def handle_execute_sql(
 
 
 async def handle_list_joins(
-    *, session: AsyncSession, tables: list[str] | str | None = None
+    *,
+    session: AsyncSession,
+    tables: list[str] | str | None = None,
+    pinnedReleaseId: int | None = None,
 ) -> ToolResult:
-    """列出 join 关系，渲染成 ``TABLE.COL -> TABLE.COL`` 文本边。
+    """列出 join 关系，渲染成 ``TABLE.COL -> TABLE.COL`` 文本边。钉住语义同 list_tables。
 
     - class_id 批量解析成表名；端点不可解析（软删类等）的边跳过；
     - 反向重复边（A→B 与 B→A 同列）去重，同表对不同列的多条边保留；
     - ``tables`` 非空时只保留任一端命中的边（大小写不敏感，支持裸表名）。
     """
     try:
+        view = await loadToolOntology(session, pinnedReleaseId=pinnedReleaseId)
+        if view is not None:
+            return _listJoinsFromView(view, tables=tables)
         stmt = select(OntologyJoin).order_by(OntologyJoin.id)
         result = await session.execute(stmt)
         joins = list(result.scalars().all())
@@ -283,37 +316,7 @@ async def handle_list_joins(
             {j.source_class_id for j in joins} | {j.target_class_id for j in joins}
         )
         tableById = await _loadClassTables(session, classIds)
-
-        # LLM 可能把数组传成单个字符串：统一成列表再过滤（否则会逐字符迭代）
-        if isinstance(tables, str):
-            tables = [tables]
-        wanted = {t.strip().upper() for t in (tables or []) if t.strip()}
-        seen: set[tuple] = set()
-        edges: list[str] = []
-        skipped = 0
-        for join in joins:
-            sourceTable = tableById.get(join.source_class_id)
-            targetTable = tableById.get(join.target_class_id)
-            if not sourceTable or not targetTable:
-                skipped += 1
-                continue
-            sourceCols = _joinColumns(join.source_columns)
-            targetCols = _joinColumns(join.target_columns)
-            key = tuple(sorted([
-                (sourceTable.upper(), sourceCols),
-                (targetTable.upper(), targetCols),
-            ]))
-            if key in seen:
-                continue
-            seen.add(key)
-            if wanted and not (
-                _matchesTable(sourceTable, wanted) or _matchesTable(targetTable, wanted)
-            ):
-                continue
-            edges.append(
-                _renderEdge(join, sourceTable, sourceCols, targetTable, targetCols)
-            )
-
+        edges, skipped = _renderJoinEdges(joins, tableById, tables)
         if skipped:
             log.info("list_joins: 跳过 %d 条端点不可解析的边", skipped)
         return ToolResult(
@@ -325,6 +328,47 @@ async def handle_list_joins(
         )
     except Exception as exc:
         return _errorResult("", "list_joins", exc)
+
+
+def _renderJoinEdges(
+    joins: list[Any],
+    tableById: dict[int, str],
+    tables: list[str] | str | None,
+) -> tuple[list[str], int]:
+    """join 渲染管线（直读与快照**共用**：ORM Join 与 SnapshotJoin 字段对齐）。
+
+    返回 (edges, skipped)：端点不可解析的边计入 skipped（调用方自行记日志）。
+    """
+    # LLM 可能把数组传成单个字符串：统一成列表再过滤（否则会逐字符迭代）
+    if isinstance(tables, str):
+        tables = [tables]
+    wanted = {t.strip().upper() for t in (tables or []) if t.strip()}
+    seen: set[tuple] = set()
+    edges: list[str] = []
+    skipped = 0
+    for join in joins:
+        sourceTable = tableById.get(join.source_class_id)
+        targetTable = tableById.get(join.target_class_id)
+        if not sourceTable or not targetTable:
+            skipped += 1
+            continue
+        sourceCols = _joinColumns(join.source_columns)
+        targetCols = _joinColumns(join.target_columns)
+        key = tuple(sorted([
+            (sourceTable.upper(), sourceCols),
+            (targetTable.upper(), targetCols),
+        ]))
+        if key in seen:
+            continue
+        seen.add(key)
+        if wanted and not (
+            _matchesTable(sourceTable, wanted) or _matchesTable(targetTable, wanted)
+        ):
+            continue
+        edges.append(
+            _renderEdge(join, sourceTable, sourceCols, targetTable, targetCols)
+        )
+    return edges, skipped
 
 
 def _joinColumns(value: object) -> tuple[str, ...]:
@@ -378,6 +422,91 @@ async def _loadClassTables(
 
 
 # =============================================================================
+# 快照分支渲染（P3d D29）：从 ToolOntologyView 产出与直读**逐字节一致**的输出
+# =============================================================================
+
+
+def _listTablesFromView(view: ToolOntologyView) -> ToolResult:
+    """list_tables 的快照分支：按 source_table 排序 + 去重（直读口径）。"""
+    tables = list(
+        dict.fromkeys(
+            sorted(
+                c.source_table
+                for c in view.classes
+                if c.source_table is not None
+            )
+        )
+    )
+    return ToolResult(
+        tool_call_id="",
+        name="list_tables",
+        content=json.dumps({"tables": tables}, ensure_ascii=False),
+    )
+
+
+def _describeTableFromView(
+    view: ToolOntologyView, *, table_name: str
+) -> ToolResult:
+    """describe_table 的快照分支：列格式与直读一致（含 FK 目标表名解析）。"""
+    matches = [c for c in view.classes if c.source_table == table_name]
+    if len(matches) > 1:
+        # 与直读 scalar_one_or_none 同口径：多行 ⇒ 异常 ⇒ 统一错误返回
+        raise ValueError(f"表 {table_name} 对应多个类（{len(matches)} 个）")
+    if not matches:
+        return ToolResult(
+            tool_call_id="",
+            name="describe_table",
+            content=json.dumps(
+                {"error": "TABLE_NOT_FOUND", "detail": f"表 {table_name} 不存在"},
+                ensure_ascii=False,
+            ),
+            is_error=True,
+        )
+    cls = matches[0]
+    tableById = _tableByIdFromView(view)
+    columns = _describeColumns(
+        sorted(cls.properties, key=lambda p: p.property_name), tableById
+    )
+    return ToolResult(
+        tool_call_id="",
+        name="describe_table",
+        content=json.dumps(
+            {
+                "table": table_name,
+                "column_format": DESCRIBE_TABLE_COLUMN_FORMAT,
+                "columns": columns,
+            },
+            ensure_ascii=False,
+            default=str,
+        ),
+    )
+
+
+def _listJoinsFromView(
+    view: ToolOntologyView, *, tables: list[str] | str | None
+) -> ToolResult:
+    """list_joins 的快照分支：**同一条渲染管线**（_renderJoinEdges）。"""
+    tableById = _tableByIdFromView(view)
+    edges, _ = _renderJoinEdges(
+        sorted(view.joins, key=lambda j: j.id), tableById, tables
+    )
+    return ToolResult(
+        tool_call_id="",
+        name="list_joins",
+        content=json.dumps({"count": len(edges), "edges": edges}, ensure_ascii=False),
+    )
+
+
+def _tableByIdFromView(view: ToolOntologyView) -> dict[int, str]:
+    """合成 class_id → source_table（与直读 _loadClassTables 同口径：只取有表名的）。"""
+    return {
+        c.id: c.source_table
+        for c in view.classes
+        if c.source_table is not None
+    }
+
+
+# =============================================================================
 # 统一错误返回
 # =============================================================================
 
@@ -405,33 +534,21 @@ async def dispatch_tool_call(
     tool_call: ToolCall,
     *,
     session: AsyncSession,
+    pinnedReleaseId: int | None = None,
 ) -> ToolResult:
     """根据 tool_call.name 路由到对应 handler。
 
     所有 handler 共享同一个 AsyncSession（来自调用方注入）。
+    `pinnedReleaseId` = 编排 run 创建时冻结的语义发布 id（P3c D27）⇒
+    本体读工具改读那一版快照（D29）；不传 = 直读治理表（与现状一致）。
     SQL Guard 错误（SqlSafetyError）在 handle_execute_sql / handle_sample_rows 内部捕获。
     """
     name = tool_call.name
     args = tool_call.args
 
     try:
-        if name == "list_tables":
-            content_obj = await handle_list_tables(session=session)
-        elif name == "describe_table":
-            content_obj = await handle_describe_table(session=session, table_name=args["table_name"])
-        elif name == "sample_rows":
-            content_obj = await handle_sample_rows(
-                session=session,
-                table_name=args["table_name"],
-                limit=args.get("limit", 5),
-            )
-        elif name == "execute_sql":
-            content_obj = await handle_execute_sql(session=session, sql=args["sql"])
-        elif name == "list_joins":
-            content_obj = await handle_list_joins(
-                session=session, tables=args.get("tables")
-            )
-        else:
+        content_obj = await _routeToolContent(name, args, session, pinnedReleaseId)
+        if content_obj is None:
             return ToolResult(
                 tool_call_id=tool_call.id,
                 name=name,
@@ -454,6 +571,34 @@ async def dispatch_tool_call(
         )
     except Exception as exc:
         return _errorResult(tool_call.id, name, exc)
+
+
+async def _routeToolContent(
+    name: str,
+    args: dict,
+    session: AsyncSession,
+    pinnedReleaseId: int | None,
+) -> ToolResult | None:
+    """按工具名路由到 handler；未知工具 ⇒ None（调用方回 UNKNOWN_TOOL）。"""
+    if name == "list_tables":
+        return await handle_list_tables(session=session, pinnedReleaseId=pinnedReleaseId)
+    if name == "describe_table":
+        return await handle_describe_table(
+            session=session, table_name=args["table_name"], pinnedReleaseId=pinnedReleaseId
+        )
+    if name == "sample_rows":
+        return await handle_sample_rows(
+            session=session,
+            table_name=args["table_name"],
+            limit=args.get("limit", 5),
+        )
+    if name == "execute_sql":
+        return await handle_execute_sql(session=session, sql=args["sql"])
+    if name == "list_joins":
+        return await handle_list_joins(
+            session=session, tables=args.get("tables"), pinnedReleaseId=pinnedReleaseId
+        )
+    return None
 
 
 # =============================================================================

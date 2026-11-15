@@ -62,6 +62,11 @@ from app.services.agent_tools import (
     AgentToolContext,
     AgentToolRegistry,
 )
+from app.services.agent_tools_nl2sql import (
+    TOOL_SCHEMAS,
+    dispatch_tool_call,
+    encodeExecuteSqlResult,
+)
 from app.services.supplier_name_resolver import SupplierNameResolver
 
 logger = logging.getLogger(__name__)
@@ -681,6 +686,7 @@ async def _dispatchSingleTool(
     iteration: int = 0,
     executed_sqls: list[str] | None = None,
     trace_steps: list[dict] | None = None,
+    pinned_release_id: int | None = None,
 ) -> Any:  # ToolMessage
     """处理单个 tool_call → ToolMessage。
 
@@ -709,8 +715,6 @@ async def _dispatchSingleTool(
             if executed_sqls is not None:
                 executed_sqls.append(sql.strip())
             # 列式 + 行数上限：执行器取全量，只截喂给 LLM 的序列化（rowCount 仍真值）
-            from app.services.agent_tools_nl2sql import encodeExecuteSqlResult
-
             content = json.dumps(
                 encodeExecuteSqlResult(rows),
                 ensure_ascii=False,
@@ -723,9 +727,9 @@ async def _dispatchSingleTool(
                 ensure_ascii=False,
             )
     else:
-        from app.services.agent_tools_nl2sql import dispatch_tool_call
-
-        result = await dispatch_tool_call(tc_adapter, session=session)
+        result = await dispatch_tool_call(
+            tc_adapter, session=session, pinnedReleaseId=pinned_release_id
+        )
         isError = bool(getattr(result, "is_error", False))
         content = result.content
 
@@ -785,8 +789,13 @@ async def run_agent_loop(
     cost_per_1k_input: float = 0.0,
     cost_per_1k_output: float = 0.0,
     sessionId: str | None = None,
+    pinnedReleaseId: int | None = None,
 ) -> AgentLoopResult:
     """LLM 驱动的 agent loop（纯 Python async while 实现）。
+
+    `pinnedReleaseId`（P3d D29）：会话钉住的语义发布 id（`session_query_state`
+    的 P2 D16 快照）⇒ 本体读工具改读那一版快照；None = 直读治理表（与现状一致）。
+    
 
     Architecture 偏差说明：本实现用纯 Python async while loop，未采用 LangGraph StateGraph，
     因为所有 handler 都是 async、StateGraph node 包装复杂且测试 mock 困难。
@@ -799,8 +808,6 @@ async def run_agent_loop(
     终止条件：answered / max_iterations / cost_cap / error
     """
     from app.services.agent_state import AgentState  # noqa: F401 — future LangGraph upgrade
-    from app.services.agent_tools_nl2sql import TOOL_SCHEMAS
-
     _logLoopStart(user_id, question)
     startedAt = time.monotonic()
 
@@ -808,6 +815,8 @@ async def run_agent_loop(
     # 探针归因字段：runId 串起逐轮 profile / 工具结果行 / loop_end 汇总
     state["run_id"] = uuid.uuid4().hex[:12]
     state["session_id"] = sessionId
+    # P3d D29：本 loop 的工具本体读钉住哪一版语义发布（None = 直读治理表）
+    state["pinned_release_id"] = pinnedReleaseId
     state["cached_tokens"] = None
     messages = state["messages"]
 
@@ -1030,6 +1039,7 @@ async def _executePendingToolCalls(*, state: dict, session, executor) -> None:
                 iteration=state["iterations"],
                 executed_sqls=state["executed_sqls"],
                 trace_steps=traceSteps,
+                pinned_release_id=state.get("pinned_release_id"),
             )
             state["messages"].append(tm)
     finally:

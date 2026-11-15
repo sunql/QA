@@ -97,30 +97,77 @@ class L4Mixin:
             return None
         llm_client, llm_config = resolved
         try:
-            # 冷启动修复（2026-10-31 取证发现）：此前传 ds=None，进程内 adapter 池
-            # 冷缓存时 get_adapter 解引用 None.password_encrypted → AttributeError
-            # → 容器重启后第一次 L4 必失败回退 L2/L3（历史上全靠其它路径先焐热
-            # 池子掩盖）。与 _buildPipelineContext 同模式先取真实 ds 再传。
             ds = await self._datasource.get(session, dto.datasourceId)
-            result = await self._agentRuntime.run_agent_loop(
-                session=session,
-                user_id=user.userId if user else 0,
-                question=dto.question,
-                llm_client=llm_client,
-                executor=self._adapterProvider(ds.id, ds),
-                ontology=self._ontology,
-                # 单价的唯一来源是本次实际使用的 model config：agent loop 内部
-                # 无从得知用了哪个模型（历史实现硬编码 gpt-4o-mini 参考价，与实际
-                # config 单价脱钩，监控埋点上的 L4 成本随之失真）。
-                cost_per_1k_input=float(llm_config.cost_per_1k_input),
-                cost_per_1k_output=float(llm_config.cost_per_1k_output),
-                # 探针归因：逐轮 token profile 与台账行 / session_message 对齐
-                sessionId=dto.sessionId,
-            )
+            result = await self._callAgentLoop(session, dto, user, llm_client, llm_config, ds)
         except Exception:
             # L4 异常不阻断：log warning + 降级 L2/L3（与 L1 同模式）
             logger.warning("L4 agent loop failed, falling back to L2/L3", exc_info=True)
             return None
+        return await self._recordL4Usage(session, dto, llm_config, result)
+
+    async def _callAgentLoop(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        user: CurrentUser | None,
+        llm_client,
+        llm_config,
+        ds,
+    ) -> AgentLoopResult:
+        """组装参数并跑一次 agent loop（异常向上抛，由调用方降级）。"""
+        # 冷启动修复（2026-10-31 取证发现）：此前传 ds=None，进程内 adapter 池
+        # 冷缓存时 get_adapter 解引用 None.password_encrypted → AttributeError
+        # → 容器重启后第一次 L4 必失败回退 L2/L3（历史上全靠其它路径先焐热
+        # 池子掩盖）。与 _buildPipelineContext 同模式先取真实 ds 再传。
+        # P3d D29：本会话钉住的语义发布（P2 D16 写进 session_query_state）⇒
+        # L4 loop 的本体读工具改读那一版快照；取不到（未发布/未钉）⇒ None = 直读。
+        try:
+            pinnedState = await self._loadQueryState(
+                session,
+                dto.sessionId,
+                userId=user.userId if user else None,
+                datasourceId=dto.datasourceId,
+            )
+            sessionPinnedReleaseId = getattr(pinnedState, "semantic_release_id", None)
+        except Exception:  # noqa: BLE001 - 钉住读取失败不杀 L4（降级直读）
+            logger.warning("读取会话钉住的语义发布失败，L4 工具本次直读治理表", exc_info=True)
+            sessionPinnedReleaseId = None
+        return await self._agentRuntime.run_agent_loop(
+            session=session,
+            user_id=user.userId if user else 0,
+            question=dto.question,
+            llm_client=llm_client,
+            executor=self._adapterProvider(ds.id, ds),
+            ontology=self._ontology,
+            # 单价的唯一来源是本次实际使用的 model config：agent loop 内部
+            # 无从得知用了哪个模型（历史实现硬编码 gpt-4o-mini 参考价，与实际
+            # config 单价脱钩，监控埋点上的 L4 成本随之失真）。
+            cost_per_1k_input=float(llm_config.cost_per_1k_input),
+            cost_per_1k_output=float(llm_config.cost_per_1k_output),
+            # 探针归因：逐轮 token profile 与台账行 / session_message 对齐
+            sessionId=dto.sessionId,
+            # P3d D29：钉住会话选定的语义发布（None = 直读治理表）
+            pinnedReleaseId=sessionPinnedReleaseId,
+        )
+
+    async def _recordL4Usage(
+        self,
+        session: AsyncSession,
+        dto: ChatRequest,
+        llm_config,
+        result: AgentLoopResult,
+    ) -> AgentLoopResult:
+        """L4 计量（核心约束 #3）：花了钱必须记账，与调用方是否采纳无关。"""
+        if result.prompt_tokens or result.completion_tokens:
+            await self._recordUsage(
+                session,
+                dto.sessionId,
+                llm_config,
+                result.prompt_tokens,
+                result.completion_tokens,
+                purpose=USAGE_PURPOSE_L4_AGENT_LOOP,
+            )
+        return result
 
         # 计量（核心约束 #3）：L4 是全项目最后一条「花钱不记账」的路径。此前
         # AgentLoopResult 只有一个 USD 数字、token 数无处承载 ⇒ 台账零记录，L4 的

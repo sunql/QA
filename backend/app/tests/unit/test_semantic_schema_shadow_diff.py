@@ -118,6 +118,14 @@ class Test退出码语义:
         """内容多重集整体相等但块归属不同 ⇒ 不是纯列序 ⇒ 按内容差异处理。"""
         assert diffModule._exitCode(0, 12, blockMismatches=2) == 1
 
+    def test_块顺序变了退出1而不是3(self) -> None:
+        """块（类）之间的先后变了 ⇒ **不是** D14 接受的「已知顺序差异」。
+
+        D14 接受的已知差异只有两类：类内列序、JOIN 条目序。
+        块顺序不在其中 ⇒ 归到「必须修」⇒ 退出码 1。
+        """
+        assert diffModule._exitCode(0, 12, blockOrderGap=2) == 1
+
 
 class _FakeSnapshot:
     """Registry 快照替身：影子比对只读这几个字段。"""
@@ -214,3 +222,123 @@ class Test写文件:
         with pytest.raises(SystemExit):
             diffModule._write(str(link), "新内容")
         assert real.read_text(encoding="utf-8") == "原有内容"
+
+
+class Test顺序归因分类:
+    """D14 的顺序判据：**每个顺序差异块都要归到一类**，归因缺口必须为 0。
+
+    为什么不能只报一个「顺序敏感差异行数」：那个数字只说明「有差异」，
+    不说明「差异是什么」。D14 要回答的是「切换到快照路径后，prompt 变了什么」
+    ⇒ 必须能把差异归到「类内列序」还是「JOIN 条目序」两类，
+    并确认**没有第三类**（那就是归因缺口 = 事实变了 = 内容差异）。
+    """
+
+    def test_类块里的顺序差异归到类块(self) -> None:
+        direct = ["### A (甲): table=A", "  col1: STRING", "  col2: INT"]
+        snapshot = ["### A (甲): table=A", "  col2: INT", "  col1: STRING"]
+
+        attribution = diffModule._orderAttribution(direct, snapshot)
+
+        assert attribution["byKind"] == {"类块": 1}
+        assert attribution["gaps"] == []
+
+    def test_JOIN段的顺序差异归到JOIN段(self) -> None:
+        direct = ["### JOIN 关系", "  A.x → B.x", "  A.y → B.y"]
+        snapshot = ["### JOIN 关系", "  A.y → B.y", "  A.x → B.x"]
+
+        attribution = diffModule._orderAttribution(direct, snapshot)
+
+        assert attribution["byKind"] == {"JOIN 段": 1}
+        assert attribution["gaps"] == []
+
+    def test_内容不等的块算归因缺口而不是顺序差异(self) -> None:
+        """块里少了一行 ⇒ 差异**不是**顺序问题 ⇒ 必须进缺口（⇒ 退出码 1）。"""
+        direct = ["### A (甲): table=A", "  col1: STRING", "  col2: INT"]
+        snapshot = ["### A (甲): table=A", "  col1: STRING"]
+
+        attribution = diffModule._orderAttribution(direct, snapshot)
+
+        assert attribution["byKind"] == {}
+        assert attribution["gaps"] == ["### A (甲): table=A"]
+
+    def test_完全一致的块不进归因(self) -> None:
+        lines = ["### A (甲): table=A", "  col1: STRING"]
+
+        attribution = diffModule._orderAttribution(lines, list(lines))
+
+        assert attribution["byKind"] == {}
+        assert attribution["gaps"] == []
+
+    def test_块之间的顺序不同归到块顺序(self) -> None:
+        """两个类块整体换了位置 ⇒ 差异在**块之间** ⇒ 归到「块顺序」。
+
+        这类差异比块内列序更值得警惕：块的先后会改变模型看到的重点顺序。
+        ⇒ 单独归一类，不许混进「类内列序」。
+        """
+        direct = ["### A (甲): table=A", "  col1: STRING", "### B (乙): table=B", "  col2: INT"]
+        snapshot = ["### B (乙): table=B", "  col2: INT", "### A (甲): table=A", "  col1: STRING"]
+
+        attribution = diffModule._orderAttribution(direct, snapshot)
+
+        assert attribution["byKind"] == {"块顺序": 2}
+        assert attribution["gaps"] == []
+
+    def test_块顺序一致时不归到块顺序(self) -> None:
+        direct = ["### A (甲): table=A", "  col1: STRING", "### B (乙): table=B", "  col2: INT"]
+        snapshot = ["### A (甲): table=A", "  col1: STRING", "### B (乙): table=B", "  col2: INT"]
+
+        attribution = diffModule._orderAttribution(direct, snapshot)
+
+        assert "块顺序" not in attribution["byKind"]
+        assert attribution["gaps"] == []
+
+    def test_摘要段的顺序差异算归因缺口而不是类块(self) -> None:
+        """「关键过滤口径摘要」**不是**类块 ⇒ 它的顺序差异不在已知差异清单里。
+
+        排除法分类的漏洞：只要「不是 JOIN 段」就归成「类块」，任何新段落都能
+        借「类块」的名义绕过退出码 1 ⇒ 已知差异清单就不再封闭。
+        """
+        header = "### 关键过滤口径摘要（管理员维护的业务口径，生成查询时必须遵循）"
+        direct = [header, "  a: 1", "  b: 2"]
+        snapshot = [header, "  b: 2", "  a: 1"]
+
+        attribution = diffModule._orderAttribution(direct, snapshot)
+
+        assert "类块" not in attribution["byKind"]
+        assert attribution["gaps"] == [header]
+
+    def test_间接JOIN段的顺序差异归到JOIN段(self) -> None:
+        """「间接 JOIN 路径参考」也是 JOIN 条目列表 ⇒ 归 JOIN 段（已知差异）。"""
+        header = "### 间接 JOIN 路径参考（无直接外键时可经中间表中转）"
+        direct = [header, "  A → B", "  C → D"]
+        snapshot = [header, "  C → D", "  A → B"]
+
+        attribution = diffModule._orderAttribution(direct, snapshot)
+
+        assert attribution["byKind"] == {"JOIN 段": 1}
+        assert attribution["gaps"] == []
+
+    def test_未知段落类型的顺序差异算归因缺口(self) -> None:
+        """未来新增的段落类型 ⇒ 既不是类块也不是 JOIN 段 ⇒ 进缺口（退出码 1）。
+
+        这条是「已知差异清单封闭」的兜底：清单外的顺序差异必须逼人显式决定，
+        不许默认按「类内列序」放行。
+        """
+        header = "### 未来新增段落"
+        direct = [header, "  a", "  b"]
+        snapshot = [header, "  b", "  a"]
+
+        attribution = diffModule._orderAttribution(direct, snapshot)
+
+        assert attribution["byKind"] == {}
+        assert attribution["gaps"] == [header]
+
+    def test_公共段落的顺序差异算归因缺口(self) -> None:
+        """首个 `### ` 之前的公共段落 ⇒ 空标题 ⇒ 不在清单内 ⇒ 进缺口。"""
+        direct = ["前言", "  a", "  b"]
+        snapshot = ["前言", "  b", "  a"]
+
+        attribution = diffModule._orderAttribution(direct, snapshot)
+
+        assert attribution["byKind"] == {}
+        assert attribution["gaps"] == [""]

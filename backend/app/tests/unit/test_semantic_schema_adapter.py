@@ -670,3 +670,54 @@ class Test严格取值:
         )
         assert restored is classes
         assert restoredJoins is joins
+
+
+class Test顺序确定性:
+    """D14 的顺序判据之一：同一份快照，复原出来的顺序**必须可复现**。
+
+    为什么这条比「与直读侧顺序一致」更重要：直读侧的列序来自
+    `OntologyClass.properties` 关系（**没有 ORDER BY** ⇒ SQL 层面不保证），
+    JOIN 顺序来自自增 id（插入序 ⇒ 跨环境不同）⇒ 直读侧的顺序**本身不是契约**。
+    快照侧必须自己给出**确定的**顺序，否则同一份发布在不同机器上会渲染出
+    不同的 prompt ⇒ 发布快照的字节确定性就白做了。
+    """
+
+    def test_同一份manifest两次复原渲染出逐字节相同的文本(self) -> None:
+        from app.services.nl2sql_schema import buildSchemaText
+
+        names = ["Supplier", "PurchaseOrder", "Material"]
+        firstClasses, firstJoins = restoreSnapshotSchema(_manifest(), names)
+        secondClasses, secondJoins = restoreSnapshotSchema(_manifest(), names)
+
+        firstText = buildSchemaText(firstClasses, joins=firstJoins)
+        secondText = buildSchemaText(secondClasses, joins=secondJoins)
+
+        assert firstText == secondText
+        assert firstText.encode("utf-8") == secondText.encode("utf-8")
+
+    def test_列顺序忠实于manifest里属性的顺序(self) -> None:
+        """复原层**不额外排序**：列顺序 = manifest 里该类 properties 的顺序。
+
+        为什么钉这条：快照侧的列序若由复原层自己排（而不是由编译器排），
+        排序键就换成了「复原层看得见的东西」—— 一旦复原层引入了新字段
+        （比如改按 sourceColumn 排），列序就会在**不重新发布**的情况下改变
+        ⇒ 已发布的快照不再是稳定契约。
+
+        「编译器按属性名排序」那一半由 P1a 的 golden manifest 反向守卫负责
+        （`test_semantic_manifest_golden.py`）。
+        """
+        from app.services.nl2sql_schema import buildSchemaText
+
+        manifest = _manifest()
+        supplier = manifest["classes"][0]
+        assert [p["propertyName"] for p in supplier["properties"]] == [
+            "SUPPLIER_CODE",
+            "SUPPLIER_NAME",
+        ]
+        # 手工把属性倒序 —— 复原层不该把它排回来。
+        supplier["properties"] = list(reversed(supplier["properties"]))
+
+        classes, joins = restoreSnapshotSchema(manifest, ["Supplier"])
+        text = buildSchemaText(classes, joins=joins)
+
+        assert text.index("SUPPLIER_NAME") < text.index("SUPPLIER_CODE")

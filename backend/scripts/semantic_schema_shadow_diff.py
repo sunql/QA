@@ -83,6 +83,31 @@ _MAX_DIFF_LINES = 200
 # 子集模式：逐类切分时的分组大小（groups 模式）。
 _SUBSET_GROUP_SIZE = 5
 
+# 顺序差异的归因类别（D14 的顺序判据）。
+_ORDER_KIND_CLASS = "类块"
+_ORDER_KIND_JOIN = "JOIN 段"
+_ORDER_KIND_BLOCK_ORDER = "块顺序"
+_ORDER_KIND_PREAMBLE = "公共段落"
+_ORDER_KIND_OTHER = "其它"
+
+# **已知差异清单**（封闭）：只有这两类的顺序差异可以被接受。
+# 清单外的顺序差异一律进「归因缺口」⇒ 退出码 1 ⇒ 必须显式决定，不许默认放行。
+_ACCEPTED_ORDER_KINDS = frozenset({_ORDER_KIND_CLASS, _ORDER_KIND_JOIN})
+
+# 渲染器里**非类块**的固定段落标题前缀（`nl2sql_schema.buildSchemaText`）。
+# 「JOIN 关系」与「间接 JOIN 路径参考」两段都是 JOIN 条目列表 ⇒ 同归 JOIN 段。
+_JOIN_SECTION_PREFIXES = ("### JOIN 关系", "### 间接 JOIN 路径参考")
+
+# 类块标题的判别标记：渲染器对每个类无条件追加 `: table=<表名>`
+# （`nl2sql_schema.py:317`）⇒ 用它**正面**认类块，而不是「不是 JOIN 就是类块」。
+#
+# 为什么必须正面认：排除法（「不是 JOIN 段 ⇒ 类块」）会让任何**新段落**
+# （如「关键过滤口径摘要」）的顺序差异借「类块」的名义混进已知差异清单
+# ⇒ 清单就不再封闭，第三类差异能绕过退出码 1。
+# 正面认的失败方向是**安全**的：渲染器改了标题格式 ⇒ 类块不再被认出
+# ⇒ 顺序差异进缺口 ⇒ 退出码 1（吵闹），而不是静默放行（安静）。
+_CLASS_HEADER_MARKER = ": table="
+
 
 async def _collect(session) -> tuple[list, list]:
     """直读侧：治理表里的全部活类 + 全部 join。"""
@@ -198,6 +223,7 @@ def _compareSubset(
         "contentDiff": _contentDiff(directLines, snapshotLines),
         "orderOnly": _orderOnlyClasses(directLines, snapshotLines),
         "blockMismatches": _blockContentMismatches(directLines, snapshotLines),
+        "orderAttribution": _orderAttribution(directLines, snapshotLines),
     }
 
 
@@ -312,7 +338,11 @@ def _report(
     """出报告 + 落基线 + 算退出码。"""
     totalContent = sum(item["contentDiff"] for item in subsetResults)
     totalOrder = sum(item["changeCount"] for item in subsetResults)
-    totalBlockGaps = sum(len(item["blockMismatches"]) for item in subsetResults)
+    totalBlockGaps = sum(len(item["orderAttribution"]["gaps"]) for item in subsetResults)
+    totalBlockOrderGap = sum(
+        item["orderAttribution"]["byKind"].get(_ORDER_KIND_BLOCK_ORDER, 0)
+        for item in subsetResults
+    )
     worst = max(subsetResults, key=lambda item: item["contentDiff"], default=None)
 
     report = _renderReport(
@@ -322,6 +352,7 @@ def _report(
         totalContent=totalContent,
         totalOrder=totalOrder,
         totalBlockGaps=totalBlockGaps,
+        totalBlockOrderGap=totalBlockOrderGap,
         directNames=directNames,
     )
     if args.report_out:
@@ -341,7 +372,12 @@ def _report(
         f"内容差异行数：{totalContent} / 顺序敏感差异行数：{totalOrder}"
         f" / 子集数：{len(subsetResults)}"
     )
-    exitCode = _exitCode(totalContent, totalOrder, blockMismatches=totalBlockGaps)
+    exitCode = _exitCode(
+        totalContent,
+        totalOrder,
+        blockMismatches=totalBlockGaps,
+        blockOrderGap=totalBlockOrderGap,
+    )
     if worst is not None and worst["contentDiff"] > 0:
         print(f"❌ 最差子集：{worst['label']}（内容差异 {worst['contentDiff']} 行）")
     elif exitCode == 3:
@@ -349,7 +385,13 @@ def _report(
     return exitCode
 
 
-def _exitCode(totalContent: int, totalOrder: int, *, blockMismatches: int = 0) -> int:
+def _exitCode(
+    totalContent: int,
+    totalOrder: int,
+    *,
+    blockMismatches: int = 0,
+    blockOrderGap: int = 0,
+) -> int:
     """差异指标 → 进程退出码。
 
     - ``0``：内容差异 0 **且** 顺序差异 0（完全一致）；
@@ -362,8 +404,12 @@ def _exitCode(totalContent: int, totalOrder: int, *, blockMismatches: int = 0) -
     `blockMismatches`（D14 新增）：**逐块**内容不等价的块数。全局行多重集
     相等但块归属不同（某行从类 A 搬到类 B）⇒ 事实挂到了别的表上 ⇒ 这是
     **内容差异**，不是顺序差异 ⇒ 退出码必须是 1，不能记成「已知差异 3」。
+
+    `blockOrderGap`（D14 新增）：**块之间**的顺序差。块顺序变 = 「哪个类
+    先出现」变了 ⇒ 影响面比列序大，且**不在** D14 接受的已知差异清单里
+    （清单只有「类内列序」「JOIN 条目序」两类）⇒ 按必须修处理 ⇒ 退出码 1。
     """
-    if totalContent > 0 or blockMismatches > 0:
+    if totalContent > 0 or blockMismatches > 0 or blockOrderGap > 0:
         return 1
     if totalOrder > 0:
         return 3
@@ -446,6 +492,79 @@ def _blockContentMismatches(directLines: list[str], snapshotLines: list[str]) ->
     return mismatches
 
 
+def _orderBlockKind(header: str) -> str:
+    """顺序差异块的归类。
+
+    - ``类块``：一个本体类的块（标题带 ``: table=``）—— 块内是「列清单」，
+      顺序差异 = **类内列序**；
+    - ``JOIN 段``：``### JOIN 关系`` / ``### 间接 JOIN 路径参考`` —— 块内是
+      「边清单」，顺序差异 = **JOIN 条目序**；
+    - ``公共段落`` / ``其它``：**不在**已知差异清单里（公共前言、摘要段、
+      未来新增的段落）⇒ 它们的顺序差异进**归因缺口** ⇒ 退出码 1。
+
+    归类只承认两类（已知差异清单封闭）：多出第三类 = 有没归因掉的差异
+    ⇒ 那不是顺序问题 ⇒ 归因缺口。
+    """
+    if not header:
+        return _ORDER_KIND_PREAMBLE
+    if header.startswith(_JOIN_SECTION_PREFIXES):
+        return _ORDER_KIND_JOIN
+    if _CLASS_HEADER_MARKER in header:
+        return _ORDER_KIND_CLASS
+    return _ORDER_KIND_OTHER
+
+
+def _orderAttribution(directLines: list[str], snapshotLines: list[str]) -> dict:
+    """顺序差异的**归因**（D14 的顺序判据）。
+
+    返回 ``{"byKind": {类别: 块数}, "gaps": [块标题], "orderOnly": [块标题]}``：
+
+    - ``byKind``：**落在已知差异清单内**的纯顺序差异块，按类别计数
+      （类块 / JOIN 段；另含「块顺序」这一项，见 ``_blockHeaderOrderGap``）；
+    - ``gaps``：**归因缺口** —— ① 块级**内容**不等价的块（差异不是顺序造成的）；
+      ② 纯顺序差异但**落在已知差异清单外**的块（摘要段 / 未来新增段落 /
+      公共段落）—— 两者都 ⇒ 退出码 1 而不是 3。
+
+    为什么必须归因：D14 要回答的是「切到快照路径后 prompt 变了什么」。
+    只报「顺序敏感差异 N 行」回答不了这个问题 —— 那个数字不区分
+    「类内列序变了」和「JOIN 条目序变了」，两者的影响面不同。
+    """
+    gaps = _blockContentMismatches(directLines, snapshotLines)
+    orderOnly = _orderOnlyClasses(directLines, snapshotLines)
+    byKind: dict[str, int] = {}
+    for header in orderOnly:
+        kind = _orderBlockKind(header)
+        if kind not in _ACCEPTED_ORDER_KINDS:
+            # 不在已知差异清单里的顺序差异 ⇒ 归因缺口（逼人显式决定）
+            if header not in gaps:
+                gaps.append(header)
+            continue
+        byKind[kind] = byKind.get(kind, 0) + 1
+    blockOrderGap = _blockHeaderOrderGap(directLines, snapshotLines)
+    if blockOrderGap:
+        byKind[_ORDER_KIND_BLOCK_ORDER] = blockOrderGap
+    return {"byKind": byKind, "gaps": gaps, "orderOnly": orderOnly}
+
+
+def _blockHeaderOrderGap(directLines: list[str], snapshotLines: list[str]) -> int:
+    """块**之间**的顺序差了多少个位置（D14 的第三类顺序差异）。
+
+    为什么单独一类：块内列序变的是「同一个类的列谁先谁后」，块顺序变的是
+    「哪个类先出现」—— 后者会改变模型看到的重点顺序，影响面更大，
+    不许混进「类内列序」里被稀释掉。
+
+    计数口径 = 两侧块标题序列**位置上不一致**的块数。
+    """
+    directHeaders = list(_splitBlocks(directLines).keys())
+    snapshotHeaders = list(_splitBlocks(snapshotLines).keys())
+    gap = 0
+    for left, right in zip(directHeaders, snapshotHeaders, strict=False):
+        if left != right:
+            gap += 1
+    gap += abs(len(directHeaders) - len(snapshotHeaders))
+    return gap
+
+
 def _splitBlocks(lines: list[str]) -> dict[str, list[str]]:
     """按 `### ` 标题把文本切成块；标题前的公共段落归到 "" 键。"""
     blocks: dict[str, list[str]] = {}
@@ -468,6 +587,7 @@ def _renderReport(
     totalContent: int,
     totalOrder: int,
     totalBlockGaps: int,
+    totalBlockOrderGap: int,
     directNames: list[str],
 ) -> str:
     lines: list[str] = []
@@ -486,10 +606,28 @@ def _renderReport(
     )
     lines.append(f"- 顺序敏感差异行数：{totalOrder}（逐行序列；含纯顺序差异）")
     orderOnlyTotal = sum(len(item["orderOnly"]) for item in subsetResults)
-    lines.append(f"- 仅列序不同的块：{orderOnlyTotal}")
+    lines.append(
+        f"- 仅顺序不同的块：{orderOnlyTotal}"
+        "（落在已知差异清单外的块会计入下面的「归因缺口」）"
+    )
+    byKind: dict[str, int] = {}
+    for item in subsetResults:
+        for kind, count in item["orderAttribution"]["byKind"].items():
+            byKind[kind] = byKind.get(kind, 0) + count
+    kindText = "、".join(f"{kind} {count}" for kind, count in sorted(byKind.items()))
+    lines.append(
+        f"- 顺序差异归因：{kindText or '（无）'}"
+        "（类块 = 类内列序；JOIN 段 = JOIN 条目序；已知差异清单**封闭**，只有这两类）"
+    )
     lines.append(
         f"- 顺序差异归因缺口：{totalBlockGaps}"
-        "（块级内容不一致的块数；**必须为 0**，否则顺序差异不只是列序问题）"
+        "（块级内容不一致，或顺序差异落在已知差异清单外；**必须为 0**，"
+        "否则差异不只是列序问题）"
+    )
+    lines.append(
+        f"- 块顺序差：{totalBlockOrderGap}"
+        "（块与块之间的先后差；**必须为 0** —— 块顺序变 = 哪个类先出现变了，"
+        "不在 D14 接受的已知差异清单里）"
     )
     lines.append("")
     if totalContent == 0:
@@ -515,8 +653,11 @@ def _renderReport(
     if orderOnlyTotal:
         lines.append("")
         lines.append(
-            "已知差异来源：治理表侧属性顺序 = 物理行序，快照侧 = propertyName 排序"
-            f"（{orderOnlyTotal} 个块受影响：类块 / 关键口径摘要块 / JOIN 块）。"
+            "已知差异来源（按归因分类，不写死块类型）："
+            "治理表侧属性顺序 = 物理行序（`OntologyClass.properties` 关系**没有 ORDER BY**），"
+            "快照侧 = propertyName 排序；"
+            "治理表侧 JOIN 顺序 = 自增 id（插入序，跨环境不同），快照侧 = joinKey 排序。"
+            f"受影响块：{kindText or '（无）'}。"
         )
     return "\n".join(lines) + "\n"
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -74,7 +75,7 @@ def _bakeTableName(name: str, safePrefix: str | None) -> str:
     return name
 
 
-def _renderJoinColumns(bakedTable: str, columns: list[str]) -> str:
+def _renderJoinColumns(bakedTable: str, columns: Sequence[str]) -> str:
     """渲染 join 单侧列：单列 `表.列`，多列 `表.列1 + 表.列2`（全部完整限定，避免歧义）。
 
     表名与列名都来自本体配置（外部输入），渲染前与属性行同标准净化，

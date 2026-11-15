@@ -16,6 +16,7 @@ import pytest
 from app.domain.exceptions import Nl2SqlError
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
 from app.domain.query_plan import JoinSpec, PlanResult, QueryPlan
+from app.services.nl2sql_schema import buildSchemaText
 from app.services.nl2sql_service import (
     Nl2SqlService,
     _buildJoinGraph,
@@ -330,12 +331,12 @@ class TestFinalizePlan:
 
 class TestBuildSchemaTextWithHints:
     def test_schema_text_includes_indirect_join_hints(self) -> None:
-        text = _service().buildSchemaText(_chainABC(), joins=_chainABCJoins())
+        text = buildSchemaText(_chainABC(), joins=_chainABCJoins())
         assert "间接 JOIN 路径参考" in text
         assert "A -> B -> C" in text
 
     def test_schema_text_renders_join_catalog(self) -> None:
-        text = _service().buildSchemaText(_chainABC(), joins=_chainABCJoins())
+        text = buildSchemaText(_chainABC(), joins=_chainABCJoins())
         assert "### JOIN 关系" in text
         assert "T_A.b_id → T_B.b_id" in text
         assert "T_B.c_id → T_C.c_id" in text
@@ -348,6 +349,6 @@ class TestBuildSchemaTextWithHints:
             _makeJoin(1, ["b_id"], 2, ["b_id"]),
             _makeJoin(1, ["x_id"], 9, ["x_id"]),
         ]
-        text = _service().buildSchemaText([a, b], joins=joins)
+        text = buildSchemaText([a, b], joins=joins)
         assert "T_A.b_id → T_B.b_id" in text
         assert "x_id" not in text

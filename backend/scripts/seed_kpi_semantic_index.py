@@ -318,7 +318,7 @@ async def _runSeed(args: argparse.Namespace) -> int:
     factory = buildSessionFactory(databaseUrl)
     try:
         async with factory() as session:
-            await _assertSameDatabase(session, targetDb)
+            await _assertSameDatabase(session, targetDb, databaseUrl)
             if args.dry_run:
                 pending = await previewKpiSemanticIndex(session)
                 print("预览模式：未写库。将更新以下 KPI：")

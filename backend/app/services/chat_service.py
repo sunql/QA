@@ -253,6 +253,7 @@ from app.services.chat_helpers import (
     _hasDataStepResult,
     _logEmbeddingTaskFailure,
     _looks_like_compound_question,
+    _mergeExecutedRelease,
     _retryFailure,
     _snapshotRound,
     _speakerFor,
@@ -757,7 +758,12 @@ class ChatService(
         if featureResponse is not None:
             return featureResponse
         try:
-            data, finalSql, retryTokens = await self._runQueryWithRetry(session, dto, pc, outcome)
+            data, finalSql, retryTokens, retryResult = await self._runQueryWithRetry(
+                session, dto, pc, outcome
+            )
+            # P2 D16：重试生成的那条 SQL 就是本轮**实际执行**的 SQL ⇒ 口径载体是它，
+            # 不是首次生成那一版（重试可能换版：钉住的那一版被删 ⇒ 降级直读）。
+            outcome = _mergeExecutedRelease(outcome, retryResult)
         except Exception as exc:
             # 双失败时「重试生成」的 token 随异常交回：无论随后回退多步还是原样上抛都
             # 必须落账（核心约束 #3——失败路径也是计量路径；单步两处此前都漏了）
@@ -872,6 +878,10 @@ class ChatService(
             inheritance_snapshot=snap,
             userId=user.dbUserId if user is not None else None,
             datasourceId=dto.datasourceId,
+            # P2 D16：本轮实际用的语义发布 id ⇒ 下一轮据此钉住同一版。
+            semanticReleaseId=getattr(outcome, "semanticReleaseId", None),
+            # P2 D16：本轮尝试过钉住但没用上 ⇒ 清掉那个钉住（死钉自愈）。
+            pinInvalidated=getattr(outcome, "pinInvalidated", False),
         )
         # v3.1 B6（M7）：单步出数据后的可选假设后处理（best-effort，不阻断）
         hypotheses = await self._maybeGenerateHypotheses(
@@ -1151,6 +1161,8 @@ class ChatService(
         intent: IntentType, state: SessionQueryState | None,
         *, sub_question: str | None = None, injection_text: str | None = None,
         global_filters: GlobalFilters | None = None,
+        pinned_release_id: int | None = None,
+        direct_only: bool = False,
     ) -> _SqlOutcome:
         """ReAct 两阶段（计划→校验→SQL）+ REFINE 捷径 + 降级 + 用量记录。
 
@@ -1160,8 +1172,21 @@ class ChatService(
 
         sub_question：多步时使用子问题（代替 dto.question）；None 时用 dto.question。
         injection_text：前序步骤结果注入文本，不为空时追加到 statePrompt 末尾。
+        pinned_release_id（P2 D16）：钉住那一版语义发布；None 时从上一轮的运行记录
+        （`state.semantic_release_id`）取 —— **取不到就不钉**（照旧取当前 ACTIVE）。
+        direct_only（P2 D16）：确定地直读治理表（不查发布、不钉）。
+            用于「本轮已定直读」的场景（多步里前一步走了直读）——
+            否则本步会从运行记录里捞回上一轮的旧钉住 ⇒ **同一轮里两步口径不一致**。
         """
         question = sub_question if sub_question is not None else dto.question
+
+        # P2 D16：钉住上一轮记下的那一版发布（没有就不钉）。
+        # 显式传入优先（多步场景下一步沿用本轮定的版本）；否则从运行记录取。
+        # direct_only 时**不取**：本轮已确定直读 ⇒ 连旧钉住都不看。
+        if not direct_only and pinned_release_id is None and state is not None:
+            pinned_release_id = getattr(state, "semantic_release_id", None)
+        if direct_only:
+            pinned_release_id = None
 
         if intent == IntentType.REFINE and state is not None and state.last_sql:
             rewritten = self._tryRefineDirect(state, question, pc.ds.type)
@@ -1239,6 +1264,10 @@ class ChatService(
                 kpiContractBlock=kpi_contract_block,
                 # 魔数治理 Phase 2 hard tier：session 传入让 nl2sql 编排层现读阈值。
                 session=session,
+                # P2 D16：钉住那一版语义发布（运行记录 → 钉住）。
+                pinnedReleaseId=pinned_release_id,
+                # P2 D16：本轮确定直读时，两阶段都别去查发布。
+                directOnly=direct_only,
             ),
             forced=pc.forcedModel,
         )
@@ -1270,6 +1299,8 @@ class ChatService(
         if not sqlResult.sql:
             # 计划 target=无法回答：未生成 SQL（哨兵），sql 置 None 交由调用方短路。
             # 计划阶段 token 已在上面记录；sqlConfig 仍用实际服务模型，保证 cost 正确计量。
+            # 口径载体 = 计划阶段（没有 SQL 就没有 SQL 阶段的 schema 文本）。
+            planReleaseId = getattr(planResult, "semanticReleaseId", None)
             return _SqlOutcome(
                 plan=planResult.plan,
                 sql=None,
@@ -1278,7 +1309,17 @@ class ChatService(
                 completionTokens=planResult.completionTokens,
                 wasted=(wastedPt, wastedCt),
                 cachedTokens=planResult.cachedTokens,
+                semanticReleaseId=planReleaseId,
+                # 「钉住失效」**由闸门说了算**（`pinInvalidated` 一路带下来），
+                # 编排层不许自己推导：「有钉住 id 且结果 id 为空 ⇒ 失效」这种近似
+                # 会在 kill switch 关闭时误判 ⇒ 把所有会话的钉住静默抹掉。
+                pinInvalidated=getattr(planResult, "pinInvalidated", False),
             )
+        # 口径载体 = **SQL 阶段**：真正要执行的 SQL 是在 SQL 阶段那套 schema 文本
+        # 下生成的 ⇒ 记账必须记它，而不是计划阶段那一版。
+        # 两者可能不同：计划阶段拿到快照、SQL 阶段拿不到（那一版刚被删）⇒
+        # 此时事实是「本轮直读」，记账必须记 None（纪律 2），并把钉住作废。
+        sqlReleaseId = getattr(sqlResult, "semanticReleaseId", None)
         return _SqlOutcome(
             plan=planResult.plan,
             sql=sqlResult.sql,
@@ -1287,6 +1328,14 @@ class ChatService(
             completionTokens=planResult.completionTokens + sqlResult.completionTokens,
             wasted=(wastedPt, wastedCt),
             cachedTokens=mergedCachedTokens,
+            semanticReleaseId=sqlReleaseId,
+            # 两阶段**任一**报了失效就算失效（取或）：
+            # 计划阶段钉住失败 ⇒ SQL 阶段随之直读（它的信号是 False）⇒
+            # 若取「SQL 阶段那一个」就把失效信号吃掉了。
+            pinInvalidated=(
+                getattr(planResult, "pinInvalidated", False)
+                or getattr(sqlResult, "pinInvalidated", False)
+            ),
         )
 
     def _tryRefineDirect(
@@ -1579,6 +1628,8 @@ class ChatService(
         wikiRulesBlock: str | None = None,
         kpiContractBlock: str | None = None,
         session: Any = None,
+        pinnedReleaseId: int | None = None,
+        directOnly: bool = False,
     ) -> tuple[Any, Any]:
         """两阶段 LLM 调用：先生成并校验查询计划，再基于计划生成 SQL。
 
@@ -1598,6 +1649,10 @@ class ChatService(
         缺席时落默认值（既有调用零改动）。
         kpiContractBlock（feat-kpi-metric-technical-form Tier B）：KPI 口径契约块，
         透传进计划阶段 system prompt；None = 不注入。
+        pinnedReleaseId（P2 D16）：钉住那一版语义发布（不看当前 ACTIVE）——
+        计划阶段用它，SQL 阶段用**计划阶段实际用到的那一版**（见下）。
+        directOnly（P2 D16）：确定地直读治理表（不查发布、不钉）。
+            本轮已定直读时（如多步里前一步走了直读）⇒ 两阶段都直读。
         """
         planResult = await self._nl2sql.generateValidatedPlan(
             question, classes, client, cfg,
@@ -1611,9 +1666,17 @@ class ChatService(
             wikiRulesBlock=wikiRulesBlock,
             kpiContractBlock=kpiContractBlock,
             session=session,
+            pinnedReleaseId=pinnedReleaseId,
+            directOnly=directOnly,
         )
         if planResult.plan.isUnanswerable:
             return planResult, SqlResult(sql="", promptTokens=0, completionTokens=0)
+        # P2 D16：SQL 阶段**钉住计划阶段实际用到的那一版**。
+        # 为什么不各自取 ACTIVE：两阶段之间可能刚好有一次发布上线 ⇒ 计划阶段看
+        # 旧版、SQL 阶段看新版 ⇒ 同一轮里两个 prompt 的口径不一致。
+        # 计划阶段没拿到发布（降级 / 开关关）⇒ SQL 阶段也直读（directOnly），
+        # 宁可两阶段都直读，也不要一个快照一个直读。
+        planReleaseId = getattr(planResult, "semanticReleaseId", None)
         sqlResult = await self._nl2sql.generateSql(
             question, classes, client, cfg,
             plan=planResult.plan,
@@ -1623,6 +1686,8 @@ class ChatService(
             joins=joins,
             scopeQuestion=scopeQuestion,
             session=session,
+            pinnedReleaseId=planReleaseId,
+            directOnly=directOnly or planReleaseId is None,
         )
         return planResult, sqlResult
 
@@ -2055,6 +2120,9 @@ class ChatService(
             inheritance_snapshot=None,
             userId=user.dbUserId if user is not None else None,
             datasourceId=dto.datasourceId,
+            # P2 D16：预计算特征路径没渲染 schema ⇒ None ⇒ 保留既有钉住。
+            semanticReleaseId=getattr(outcome, "semanticReleaseId", None),
+            pinInvalidated=getattr(outcome, "pinInvalidated", False),
         )
         totalTokens = outcome.promptTokens + outcome.completionTokens
         affinity = await self._buildAffinityStatus(
@@ -2112,6 +2180,10 @@ class ChatService(
             inheritance_snapshot=None,
             userId=user.dbUserId if user is not None else None,
             datasourceId=dto.datasourceId,
+            # P2 D16：不可回答路径的「口径载体」是**计划阶段**（它渲染过 schema 文本；
+            # 计划阶段的发布 id 由 `_planAndGenerateSql` 回报）。没渲染 ⇒ None ⇒ 保留既有钉住。
+            semanticReleaseId=getattr(outcome, "semanticReleaseId", None),
+            pinInvalidated=getattr(outcome, "pinInvalidated", False),
         )
         totalTokens = outcome.promptTokens + outcome.completionTokens + outcome.wasted[0] + outcome.wasted[1]
         affinityConfig = outcome.sqlConfig or pc.selected

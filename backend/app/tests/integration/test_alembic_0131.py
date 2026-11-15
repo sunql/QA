@@ -173,6 +173,11 @@ async def test_0131_downgrade_restores_null_and_clears_comment(
         await dbSession.commit()
         # 确认是 -1
         assert await _userIdBySessionId(dbSession, sid) == _TOMBSTONE_USER_ID
+        # 校验读把事务留在 idle-in-transaction，持有 session_query_state 的
+        # ACCESS SHARE；0144 的 downgrade（`DROP COLUMN semantic_release_id`）
+        # 需要 ACCESS EXCLUSIVE ⇒ 子进程会一直等锁到 120s 超时。DDL 之前必须
+        # 先放掉本会话的读事务。
+        await dbSession.rollback()
         # 回退 0127
         _alembic(url, "downgrade", _PREVIOUS)
         # 验证：-1 → NULL

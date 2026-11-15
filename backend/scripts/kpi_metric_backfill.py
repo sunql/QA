@@ -42,14 +42,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import re
-import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import BinaryIO
 
@@ -68,10 +65,29 @@ from sqlalchemy.exc import (  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 
 from app.domain.models import KpiCatalog, OntologyMetric  # noqa: E402
+from scripts.db_snapshot_guard import (  # noqa: E402
+    assertSameDatabase,
+    backupPath,
+    dumpTarget,
+    ensureBackupDir,
+    ensureBackups,
+    maskDatabaseUrl,
+    openExclusive,
+    pgDump,
+    resolveDatabaseUrl,
+    safeRevision,
+    scrubSecrets,
+    targetIdentity,
+)
+from scripts.db_snapshot_guard import (
+    buildSessionFactory as _buildSessionFactory,
+)
+from scripts.db_snapshot_guard import (
+    connectionErrorExit as _connectionErrorExit,
+)
 from scripts.kpi_metric_backfill_apply import (  # noqa: E402
     ApplySummary,
     applyPlans,
@@ -117,8 +133,6 @@ __all__ = [
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # 备份目录：**私有**（0700），位于系统临时目录下，跨运行稳定 ⇒ 当日备份可复用。
 _BACKUP_DIR = Path(tempfile.gettempdir()) / "kpi_metric_backups"
-_BACKUP_DIR_MODE = 0o700
-_BACKUP_FILE_MODE = 0o600
 _BACKUP_TABLES = ("ontology_metric", "ontology_metric_source", "kpi_catalog")
 _SQLSTATE_UNDEFINED = ("42703", "42P01")
 
@@ -146,11 +160,11 @@ class PreviewContext:
 def buildSessionFactory(databaseUrl: str) -> async_sessionmaker[AsyncSession]:
     """按**守卫放行的那个 DSN** 建会话工厂（T15-A：DSN 单一来源）。
 
-    ``expire_on_commit=False`` 与测试支撑（``app/tests/_pg_support.py``）一致：
-    commit 后仍可读实体属性，便于汇总输出。
+    实现已上收到 ``scripts/db_snapshot_guard.buildSessionFactory``（与语义发布
+    脚本共用同一份原语）：``expire_on_commit=False`` 与测试支撑
+    （``app/tests/_pg_support.py``）一致 —— commit 后仍可读实体属性，便于汇总输出。
     """
-    engine = create_async_engine(databaseUrl, echo=False, pool_pre_ping=True)
-    return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    return _buildSessionFactory(databaseUrl)
 
 
 def _tierCounts(plans: Sequence[KpiBackfillPlan]) -> dict[str, int]:
@@ -344,14 +358,34 @@ def _checklistSummary(
     return lines
 
 
-def _requireDatabaseUrl(explicit: str | None) -> str:
-    """闸 1：显式目标，不猜（不读 env 默认值 —— 5432 是 OpenMetadata）。"""
-    if not explicit:
-        raise SystemExit(
-            "缺少目标库：必须显式传 --database-url（不读 DATABASE_URL / "
-            "TEST_DATABASE_URL —— 本机 5432 的默认值指向 OpenMetadata 的 PG）。"
+def _requireDatabaseUrl(explicit: str | None, envName: str | None = None) -> str:
+    """闸 1：显式目标，不猜（不读 env 默认值 —— 5432 是 OpenMetadata）。
+
+    **解析逻辑已上收到** ``scripts/db_snapshot_guard.resolveDatabaseUrl``：
+    本脚本原来**自己抄了一份**（显式优先 / 环境变量 / query 不得改目标）⇒
+    闸门有两份实现，将来给共享版加一条硬约束时这份不会跟着改 ⇒ 行为分叉
+    且无测试能发现。
+
+    本脚本与共享解析器的**唯一差异**是 ``--database-url`` 允许带口令
+    （运维既有契约）⇒ 用显式的 ``allowInlinePassword=True`` 开关表达，
+    而不是复制一份实现。放开的是**口令**，不是目标：query 改目标、
+    没写主机这两道闸照旧拒绝。
+    """
+    databaseUrl = resolveDatabaseUrl(explicit, envName, allowInlinePassword=True)
+    if explicit and _hasInlinePassword(databaseUrl):
+        print(
+            "⚠️ --database-url 里带了口令 ⇒ 口令会进 ps / shell 历史 / CI 日志；"
+            "建议改用 --database-url-env <环境变量名>。"
         )
-    return explicit
+    return databaseUrl
+
+
+def _hasInlinePassword(databaseUrl: str) -> bool:
+    """DSN 的 userinfo 里是否带口令（只用于提示，不用于拒绝）。"""
+    try:
+        return bool(make_url(databaseUrl).password)
+    except (ArgumentError, ValueError):
+        return False
 
 
 def _selectPlans(only: str | None) -> list[KpiBackfillPlan]:
@@ -443,12 +477,7 @@ async def _previewContext(
 
 def _backupDir() -> Path:
     """创建（或复用）**私有**备份目录；权限只收紧不放宽。"""
-    directory = _BACKUP_DIR
-    if directory.is_symlink():
-        raise SystemExit(f"备份目录是符号链接 ⇒ 拒绝使用：{directory}")
-    directory.mkdir(mode=_BACKUP_DIR_MODE, parents=True, exist_ok=True)
-    os.chmod(directory, _BACKUP_DIR_MODE)
-    return directory
+    return ensureBackupDir(_BACKUP_DIR)
 
 
 def _targetIdentity(databaseUrl: str) -> str:
@@ -456,104 +485,37 @@ def _targetIdentity(databaseUrl: str) -> str:
 
     dev 与 prod 同名 ``qa_metadata`` ⇒ 文件名必须带 host/port 才能区分目标库。
     """
-    try:
-        url = make_url(databaseUrl)
-    except ArgumentError:
-        return "unknown-target"
-    raw = f"{url.host or 'localhost'}_{url.port or 5432}_{url.database or 'unknown'}"
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", raw)
+    return targetIdentity(databaseUrl)
 
 
 def _safeRevision(revision: str) -> str:
     """revision 只允许 ``[A-Za-z0-9_.-]``（防止 ``/``、``..`` 拼进路径）。"""
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "", revision or "")
-    # 单个 "." 可保留，但 ".." / 前导点会构成上跳或隐藏文件语义 ⇒ 折叠/去掉。
-    cleaned = re.sub(r"\.{2,}", ".", cleaned).strip(".")
-    return cleaned or "unknown"
+    return safeRevision(revision)
 
 
 def _backupPath(table: str, revision: str, databaseUrl: str) -> Path:
     """备份文件名带日期 + **目标库身份** + revision（跨库/旧版本备份均可辨识）。"""
-    name = (
-        f"{table}_{date.today():%Y%m%d}_"
-        f"{_targetIdentity(databaseUrl)}_{_safeRevision(revision)}.sql"
-    )
-    return _backupDir() / name
+    return backupPath(_backupDir(), table, revision, databaseUrl)
 
 
 def _openExclusive(path: Path) -> BinaryIO:
     """``O_EXCL | O_NOFOLLOW`` 打开文件：已存在 / 符号链接 ⇒ 失败，不覆盖。"""
-    try:
-        fd = os.open(
-            path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            _BACKUP_FILE_MODE,
-        )
-    except OSError as exc:
-        # O_NOFOLLOW 命中符号链接时 POSIX 报 ELOOP（不是 FileExistsError），
-        # 与 O_EXCL 的「已存在」一并按失败处理：绝不跟随 / 覆盖。
-        raise SystemExit(
-            f"备份临时文件已存在或不可安全创建（可能是符号链接，拒绝跟随）：{path}"
-        ) from exc
-    return os.fdopen(fd, "wb")
+    return openExclusive(path)
 
 
 def _dumpTarget(databaseUrl: str) -> tuple[list[str], dict[str, str]]:
     """把 DSN 拆成 argv 前缀 + 环境变量（FIX-I2：**口令永不进 argv**）。"""
-    try:
-        url = make_url(databaseUrl)
-    except ArgumentError as exc:
-        raise SystemExit(
-            f"备份要求可解析的 PostgreSQL DSN，当前为：{maskDsn(databaseUrl)}"
-        ) from exc
-    if not url.drivername.startswith("postgresql") or not url.database:
-        raise SystemExit(f"备份要求 PostgreSQL DSN，当前为：{maskDsn(databaseUrl)}")
-    command = [
-        "pg_dump",
-        "-h",
-        url.host or "localhost",
-        "-p",
-        str(url.port or 5432),
-        "-U",
-        url.username or "",
-        "-d",
-        url.database,
-    ]
-    env = dict(os.environ)
-    if url.password:
-        env["PGPASSWORD"] = str(url.password)
-    return command, env
+    return dumpTarget(databaseUrl)
 
 
 def _pgDump(databaseUrl: str, table: str, path: Path) -> None:
-    """单表备份：先写 ``.tmp`` 再原子替换（M-4：半截 dump 不会被当成合法备份）。"""
-    command, env = _dumpTarget(databaseUrl)
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        with _openExclusive(tmp) as handle:
-            result = subprocess.run(
-                [*command, "-t", table], stdout=handle, stderr=subprocess.PIPE, env=env
-            )
-    except FileNotFoundError as exc:
-        tmp.unlink(missing_ok=True)
-        raise SystemExit("备份失败：找不到 pg_dump（写正式库必须先备份）。") from exc
-    if result.returncode == 0:
-        os.replace(tmp, path)
-        return
-    tmp.unlink(missing_ok=True)
-    # ⚠️ **绝不删除最终 ``path``**（并发 TOCTOU，复审 Important #1）：
-    # 本函数只写 ``.tmp`` 再 ``os.replace`` 原子替换 ⇒ ``path`` 此时要么不存在，
-    # 要么是**另一个进程刚刚写好的完整有效备份**。若在这里 ``path.unlink()``，
-    # 并发场景下会把别人的回滚点删掉，而那个进程可能已经通过备份检查、开始写 prod。
-    # 「失败不留半截文件」由 ``.tmp`` + 原子替换保证，不需要碰 ``path``。
-    stderr = result.stderr.decode("utf-8", "replace")
-    if "no matching tables" in stderr:
-        print(f"⚠️ 备份跳过 {table}：目标库尚无该表（迁移未应用）")
-        return
-    # stderr 可能回显 DSN / 口令 ⇒ 必须打码
-    raise SystemExit(
-        _scrubSecrets(f"备份失败（{table}）：{stderr[-500:]}", databaseUrl)
-    )
+    """单表备份：先写 ``.tmp`` 再原子替换（M-4：半截 dump 不会被当成合法备份）。
+
+    实现已上收到 ``scripts/db_snapshot_guard.pgDump``（与语义发布脚本共用同一份
+    闸门原语）：多了 ``pg_dump`` 超时与 ``stdin=DEVNULL`` —— DSN 里没口令而服务端
+    要口令时，进程会挂在交互式提示上，整个流水线静默卡死。
+    """
+    pgDump(databaseUrl, table, path)
 
 
 async def _alembicRevision(databaseUrl: str) -> str:
@@ -577,19 +539,13 @@ def _ensureProdBackup(databaseUrl: str, revision: str) -> tuple[Path, ...]:
     """闸 4：写正式库前必须完成当日备份（存在且非空则复用）⇒ T15-B。
 
     文件名含目标库身份（host/port/db）⇒ 复用只可能复用**同一目标库**的备份。
+
+    实现已上收到 ``scripts/db_snapshot_guard.ensureBackups``（与语义发布脚本
+    共用同一份闸门原语）：本脚本原来**自己抄了一份**（软链拒绝 / 缺失即 dump /
+    数量不齐即拒绝写）⇒ 闸门有两份实现，将来给共享版加一条硬约束时这份不会
+    跟着改 ⇒ 行为分叉且无测试能发现。
     """
-    paths: list[Path] = []
-    for table in _BACKUP_TABLES:
-        path = _backupPath(table, revision, databaseUrl)
-        if path.is_symlink():
-            raise SystemExit(f"备份文件是符号链接 ⇒ 拒绝复用/覆盖：{path}")
-        if not path.exists() or path.stat().st_size == 0:
-            _pgDump(databaseUrl, table, path)
-        if path.exists() and path.stat().st_size > 0:
-            paths.append(path)
-    if len(paths) != len(_BACKUP_TABLES):
-        raise SystemExit("备份不完整 ⇒ 拒绝写正式库。")
-    return tuple(paths)
+    return ensureBackups(databaseUrl, _BACKUP_TABLES, revision, _BACKUP_DIR)
 
 
 def _printBanner(targetDb: str, backups: Sequence[Path]) -> None:
@@ -642,24 +598,16 @@ def _schemaGapHint(exc: ProgrammingError, databaseUrl: str) -> str | None:
 
 def _scrubSecrets(message: str, databaseUrl: str) -> str:
     """错误文本里若出现 DSN 口令则打码（FIX-I2 的同类风险：日志泄密）。"""
-    try:
-        password = make_url(databaseUrl).password
-    except (ArgumentError, ValueError):
-        return message
-    if password:
-        return message.replace(str(password), "***")
-    return message
+    return scrubSecrets(message, databaseUrl)
 
 
 def connectionErrorExit(exc: BaseException, databaseUrl: str) -> SystemExit:
     """FIX-I4：连接类失败统一转 SystemExit（不吐 traceback、不带口令）。"""
-    root = getattr(exc, "orig", None) or exc
-    detail = _scrubSecrets(str(root), databaseUrl)
-    return SystemExit(f"❌ 连接目标库失败（{maskDsn(databaseUrl)}）：{detail}")
+    return _connectionErrorExit(exc, databaseUrl)
 
 
 async def _run(args: argparse.Namespace) -> int:
-    databaseUrl = _requireDatabaseUrl(args.database_url)
+    databaseUrl = _requireDatabaseUrl(args.database_url, args.database_url_env)
     targetDb = assertSafeTarget(databaseUrl, allowProdWrite=args.allow_prod_write)
     plans = _selectPlans(args.only)
 
@@ -669,11 +617,11 @@ async def _run(args: argparse.Namespace) -> int:
         backups = _ensureProdBackup(databaseUrl, revision)
         _printBanner(targetDb, backups)
 
-    print(f"目标库：{targetDb}（{maskDsn(databaseUrl)}）")
+    print(f"目标库：{targetDb}（{maskDatabaseUrl(databaseUrl)}）")
     factory = buildSessionFactory(databaseUrl)
     try:
         async with factory() as session:
-            await _assertSameDatabase(session, targetDb)
+            await _assertSameDatabase(session, targetDb, databaseUrl)
             context = await _previewContext(session, plans)
             print(renderPreview(plans, context))
             _writeChecklist(args.out, renderReviewChecklist(plans, context))
@@ -700,13 +648,19 @@ async def _run(args: argparse.Namespace) -> int:
         await factory.kw["bind"].dispose()
 
 
-async def _assertSameDatabase(session: AsyncSession, allowedDbName: str) -> None:
-    """T15-A 核心：守卫放行的库名必须等于会话**真正连的**库。"""
-    actual = (await session.execute(text("SELECT current_database()"))).scalar_one()
-    if actual != allowedDbName:
-        raise RuntimeError(
-            f"落库目标与守卫放行目标不一致：{actual!r} != {allowedDbName!r}"
-        )
+async def _assertSameDatabase(
+    session: AsyncSession,
+    allowedDbName: str,
+    databaseUrl: str,
+) -> None:
+    """T15-A 核心：守卫放行的库名必须等于会话**真正连的**库。
+
+    实现已上收到 ``scripts.db_snapshot_guard.assertSameDatabase``：那边抛
+    ``SystemExit``（带打码 DSN、干净退出、不吐裸 traceback）。本脚本原来抛
+    ``RuntimeError`` ⇒ 同样的事故在两个脚本里表现不同（一个干净退出、一个
+    裸栈 + 退出码 1）⇒ 「共享原语名义上共享、行为上分叉」。
+    """
+    await assertSameDatabase(session, allowedDbName, databaseUrl)
 
 
 def _writeChecklist(out: str | None, content: str) -> None:
@@ -742,7 +696,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", default=None, help="审核清单输出路径（markdown）")
     parser.add_argument("--only", default=None, help="只处理指定 KPI（逗号分隔）")
     parser.add_argument(
-        "--database-url", default=None, help="目标库 DSN（必填，不读环境变量）"
+        "--database-url", default=None, help="目标库 DSN（必填；口令建议改用 --database-url-env）"
+    )
+    parser.add_argument(
+        "--database-url-env",
+        default=None,
+        help="从该环境变量读目标库 DSN（口令不进 argv；与 --database-url 二选一）",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
     return asyncio.run(_run(args))

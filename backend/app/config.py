@@ -167,6 +167,14 @@ class Settings(BaseSettings):
     # 只读发布 API 的总开关；关闭时 /api/v1/semantic/releases 整组不注册（404）。
     # Registry 服务本身不受开关影响：运行期消费快照不依赖 HTTP 层。
     enableSemanticRelease: bool = Field(default=False, alias="ENABLE_SEMANTIC_RELEASE")
+    # ===== 语义注册表 NL2SQL 影子接入（P2 D15）=====
+    # schema 文本渲染路径改读「已发布语义快照」的开关。**默认关**：
+    # 关时逐字节等于今天的直读渲染（连库都不碰）⇒ 开关本身零风险。
+    # 作用域只限 schema 文本（三个出口：计划阶段 / SQL 阶段 / 概念解释），
+    # 其余 11 个 pc.classes 消费方仍读治理表（见 plan §3.2）。
+    enableSemanticRegistryNl2sql: bool = Field(
+        default=False, alias="ENABLE_SEMANTIC_REGISTRY_NL2SQL"
+    )
 
     # ===== 通用 Agent 编排 =====
     enableAgentOrchestration: bool = Field(default=False, alias="ENABLE_AGENT_ORCHESTRATION")
@@ -361,6 +369,31 @@ def semanticReleaseAuthMisconfiguration(settings: Settings) -> str | None:
         "ENABLE_SEMANTIC_RELEASE=true 但鉴权仍为 stub"
         f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
         "任意客户端可伪造 X-User-Roles=admin 读取完整语义快照。"
+        "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
+    )
+
+
+def semanticRegistryNl2sqlAuthMisconfiguration(settings: Settings) -> str | None:
+    """启用语义注册表影子接入时鉴权必须是「真鉴权」；否则返回原因（纯函数）。
+
+    语义快照（类/属性/JOIN/描述/指标口径）是**治理 IP**：只读 API 因此收 admin
+    （见 `semanticReleaseAuthMisconfiguration`）。
+
+    影子接入开关 `ENABLE_SEMANTIC_REGISTRY_NL2SQL` 让**问答链路**也按已发布
+    快照的口径作答 —— 在 stub 鉴权下这条路对**匿名请求**同样开放 ⇒ 与只读 API
+    同一类暴露面（治理内容外泄），而且更难察觉（不报错、不留痕）。
+
+    不阻塞启动：本地开发与测试套件依赖 stub 鉴权。但必须大声告警，
+    由部署方决定是否真的在非真鉴权环境启用该开关。
+    """
+    if not settings.enableSemanticRegistryNl2sql:
+        return None
+    if settings.authMode == "real" and not settings.authStubEnabled:
+        return None
+    return (
+        "ENABLE_SEMANTIC_REGISTRY_NL2SQL=true 但鉴权仍为 stub"
+        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
+        "问答链路会按已发布语义快照作答，任意客户端可伪造身份读到治理 IP 口径。"
         "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
     )
 

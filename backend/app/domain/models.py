@@ -1236,6 +1236,18 @@ class SessionQueryState(Base, TimestampMixin):
         nullable=True,
         comment="B5 字段继承快照：inherited_metric / inherited_time / inherited_filters / inheritance_confidence（v3.1 §15.3）",
     )
+    # P2 D16（0144 迁移）：**本会话当前钉住的那一版语义发布（下一轮要用的）**。
+    # NULL = 没钉住 ⇒ 下一轮照旧取当前 ACTIVE，行为与今天一致（存量旧行天然 NULL）。
+    # 不 NULL = 下一轮**钉住**那一版 ⇒ 同一请求重放读到同一发布、同一口径
+    # （发布中途上位不会把进行中的会话口径改掉）。
+    # 写侧三态：给了 id ⇒ 覆盖；None 且本轮没失效 ⇒ 保留；None 且本轮
+    # **钉住失效**（那一版被删 / id 非法 / 完整性失败 / 版本不符 / 陈旧）⇒ 清空
+    # ⇒ 下一轮回到当前 ACTIVE（死钉自愈）。
+    semantic_release_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="0144，P2 D16：本会话当前钉住的语义发布 id（NULL = 未钉住；下一轮要用的那版）",
+    )
 
     __table_args__ = (
         UniqueConstraint("user_id", "datasource_id", "session_id",

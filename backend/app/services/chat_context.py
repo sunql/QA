@@ -697,6 +697,8 @@ class ContextMixin:
         datasourceId: int | None = None,  # P0-3
         schemaName: str | None = None,  # P0-3
         datasourceVersion: int | None = None,  # P0-3
+        semanticReleaseId: int | None = None,  # P2 D16
+        pinInvalidated: bool = False,  # P2 D16
     ) -> SessionQueryState:
         """UPSERT 会话查询状态。
 
@@ -713,6 +715,24 @@ class ContextMixin:
         后续补齐 —— 读侧也加上了同一道 `user_id IS NULL`（见 `_loadQueryState`）。
         现在两侧口径一致：**写得进的桶，就是读得到的桶**，读写共享同一个候选集
         定义，`_selectStateRow` 的选择口径在两侧也就真正一致了。
+
+        P2 D16 的 `semanticReleaseId`（**三态**）：
+
+        | 入参 | 含义 | 落库动作 |
+        |---|---|---|
+        | 给了 id | 本轮**真正用了**那一版发布 | 覆盖成该 id |
+        | `None` 且 `pinInvalidated=False` | **不知道**（本轮没渲染 schema / 调用点拿不到 id） | **保留**既有值 |
+        | `None` 且 `pinInvalidated=True` | 本轮**尝试过钉住但没用上**（那一版被删 / id 非法 / 完整性失败 / 版本不符 / 快照陈旧） | **清空**（置 NULL） |
+
+        为什么「None = 保留」：既有调用点（17+）大多拿不到本轮的发布 id，
+        让它们把列清空 ⇒ 上一轮钉住的版本被**静默丢掉** ⇒ 重放口径漂移。
+
+        为什么要有第三态（清空）：钉住的那一版一旦用不了（被删 / 失效），
+        保留它 ⇒ 下一轮继续钉它 ⇒ 每轮都降级直读、每轮记一条 WARNING ⇒
+        **死钉**，该会话再也起不来。清空 ⇒ 下一轮回到当前 ACTIVE ⇒ 自愈。
+
+        列的语义因此是「**本会话当前钉住的那一版发布（下一轮要用的）**」，
+        不是「本轮用过哪一版」—— 后者会让记录声称一个**没用上**的版本。
         """
         # P0-3：按三元查 existing（不传新参数时退化为按 session_id 唯一）
         stmt = select(SessionQueryState).where(
@@ -791,6 +811,12 @@ class ContextMixin:
                 existing.schema_name = schemaName
             if datasourceVersion is not None:
                 existing.datasource_version = datasourceVersion
+            # P2 D16 三态：给了 id ⇒ 覆盖（换版了就换钉）；None 且没失效 ⇒ 保留；
+            # None 且失效 ⇒ 清空（那一版用不了了 ⇒ 别再钉它，否则死钉）。
+            if semanticReleaseId is not None:
+                existing.semantic_release_id = semanticReleaseId
+            elif pinInvalidated:
+                existing.semantic_release_id = None
             session.add(existing)
             await session.commit()
             await session.refresh(existing)
@@ -810,6 +836,7 @@ class ContextMixin:
             schema_name=schemaName,
             datasource_version=datasourceVersion,
             is_stub=userId is None,  # M5
+            semantic_release_id=semanticReleaseId,  # P2 D16
         )
         session.add(state)
         await session.commit()

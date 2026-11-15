@@ -536,6 +536,109 @@ class TestQueryState:
         result = await dbSession.execute(select(SessionQueryState))
         assert len(list(result.scalars().all())) == 1
 
+    # ------------------------------------------------------------------
+    # P2 D16：semantic_release_id（钉住语义发布）的写侧语义
+    # ------------------------------------------------------------------
+
+    async def test_save_writes_semantic_release_id_on_insert(self, dbSession) -> None:
+        """D16：INSERT 分支写入 semantic_release_id，并可读回。"""
+        service, _, _, _ = _buildService()
+        state = await service._saveQueryState(
+            dbSession, "s-d16-insert", question="q", plan=None, sql="SELECT 1",
+            resultColumns=[], userId=1, datasourceId=1, semanticReleaseId=41,
+        )
+        assert state.semantic_release_id == 41
+        loaded = await service._loadQueryState(
+            dbSession, "s-d16-insert", userId=1, datasourceId=1
+        )
+        assert loaded is not None
+        assert loaded.semantic_release_id == 41
+
+    async def test_save_without_semantic_release_id_keeps_existing_pin(
+        self, dbSession
+    ) -> None:
+        """D16：**不传** semanticReleaseId ⇒ 保留既有钉住（不清空）。
+
+        反向断言：钉死「None = 保留」而不是「None = 清空」的契约 ——
+        既有 17+ 调用点大多拿不到本轮发布 id，若它们把列清空 ⇒
+        上一轮钉住的版本被静默丢掉 ⇒ 重放口径漂移。
+        """
+        service, _, _, _ = _buildService()
+        await service._saveQueryState(
+            dbSession, "s-d16-keep", question="q1", plan=None, sql="SELECT 1",
+            resultColumns=[], userId=1, datasourceId=1, semanticReleaseId=41,
+        )
+        state = await service._saveQueryState(
+            dbSession, "s-d16-keep", question="q2", plan=None, sql="SELECT 2",
+            resultColumns=[], userId=1, datasourceId=1,
+        )
+        assert state.turn_count == 2
+        assert state.semantic_release_id == 41
+
+    async def test_save_overwrites_semantic_release_id_with_new_pin(
+        self, dbSession
+    ) -> None:
+        """D16：给了新的 id ⇒ 覆盖旧的钉住（换版了就换钉）。"""
+        service, _, _, _ = _buildService()
+        await service._saveQueryState(
+            dbSession, "s-d16-overwrite", question="q1", plan=None, sql="SELECT 1",
+            resultColumns=[], userId=1, datasourceId=1, semanticReleaseId=41,
+        )
+        state = await service._saveQueryState(
+            dbSession, "s-d16-overwrite", question="q2", plan=None, sql="SELECT 2",
+            resultColumns=[], userId=1, datasourceId=1, semanticReleaseId=42,
+        )
+        assert state.semantic_release_id == 42
+
+    async def test_save_clears_semantic_release_id_when_pin_invalidated(
+        self, dbSession
+    ) -> None:
+        """D16 第三态：**钉住失效** ⇒ 清掉那个钉住（死钉自愈）。
+
+        钉住的那一版被删 / id 非法 / 完整性失败 / 版本不符 / 快照陈旧 ⇒
+        本轮用不上它 ⇒ 运行记录若还留着它 ⇒ 下一轮继续钉它 ⇒ 每轮都降级直读、
+        每轮一条 WARNING ⇒ **死钉**，会话永远起不来。
+        ⇒ 这一态必须把列置 NULL，让下一轮回到当前 ACTIVE。
+        """
+        service, _, _, _ = _buildService()
+        await service._saveQueryState(
+            dbSession, "s-d16-invalidated", question="q1", plan=None, sql="SELECT 1",
+            resultColumns=[], userId=1, datasourceId=1, semanticReleaseId=41,
+        )
+        state = await service._saveQueryState(
+            dbSession, "s-d16-invalidated", question="q2", plan=None, sql="SELECT 2",
+            resultColumns=[], userId=1, datasourceId=1,
+            semanticReleaseId=None, pinInvalidated=True,
+        )
+        assert state.semantic_release_id is None, (
+            "钉住失效后必须清掉那个钉住，否则下一轮继续钉一版用不了的发布"
+        )
+        loaded = await service._loadQueryState(
+            dbSession, "s-d16-invalidated", userId=1, datasourceId=1
+        )
+        assert loaded is not None
+        assert loaded.semantic_release_id is None
+
+    async def test_save_keeps_pin_when_not_invalidated_and_no_id(
+        self, dbSession
+    ) -> None:
+        """D16 第三态的**反向取证**：没失效 ⇒ 保留（不许误清）。
+
+        与 `test_save_clears_semantic_release_id_when_pin_invalidated` 构成一对：
+        清空**只**由「钉住失效」触发，不由「没给 id」触发。
+        """
+        service, _, _, _ = _buildService()
+        await service._saveQueryState(
+            dbSession, "s-d16-not-invalidated", question="q1", plan=None, sql="SELECT 1",
+            resultColumns=[], userId=1, datasourceId=1, semanticReleaseId=41,
+        )
+        state = await service._saveQueryState(
+            dbSession, "s-d16-not-invalidated", question="q2", plan=None, sql="SELECT 2",
+            resultColumns=[], userId=1, datasourceId=1,
+            semanticReleaseId=None, pinInvalidated=False,
+        )
+        assert state.semantic_release_id == 41
+
     async def test_load_roundtrips_plan(self, dbSession) -> None:
         service, _, _, _ = _buildService()
         plan = QueryPlan(
@@ -866,3 +969,89 @@ class TestStatePromptWiring:
             state, IntentType.REFINE, _STATE_HISTORY_FIELD_LIMIT_DEFAULT
         )
         assert "继承字段（" not in prompt
+
+
+class TestSemanticReleasePinMigration:
+    """P2 D16：手写迁移 `0144` 的**实库**往返（upgrade → downgrade → upgrade）。
+
+    离线 SQL 往返由 unit/test_semantic_release_pin.py 承担（不碰库 ⇒ 不受
+    CI 分片轮转影响）；这里补「真库」那一半：列真的建得出来、真的能删回去。
+
+    **写库闸**：alembic/env.py 只读 DATABASE_URL（TEST_DATABASE_URL 被静默忽略），
+    传错就会打到 prod ⇒ 执行 DDL 前强制校验库名白名单。
+    """
+
+    _REVISION = "0144"
+    _PREVIOUS = "0143"
+    _ALEMBIC_TIMEOUT_SEC = 120
+
+    @staticmethod
+    def _assertTestDb(url: str) -> None:
+        from scripts.kpi_metric_db_guard import databaseNameOf
+
+        name = databaseNameOf(url)
+        if not name.startswith("qa_metadata_test"):
+            raise RuntimeError(
+                f"拒绝对非测试库执行迁移：解析到库名 {name!r}，"
+                "要求 qa_metadata_test*（alembic 只读 DATABASE_URL，传错会打到 prod）。"
+            )
+
+    def _alembic(self, url: str, *args: str) -> str:
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        self._assertTestDb(url)
+        env = dict(os.environ)
+        env["DATABASE_URL"] = url
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            cwd=Path(__file__).resolve().parents[3],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=self._ALEMBIC_TIMEOUT_SEC,
+        )
+        assert result.returncode == 0, (
+            f"alembic {' '.join(args)} 失败（rc={result.returncode}）：{result.stderr[-2000:]}"
+        )
+        return result.stdout
+
+    async def _columnInfo(self, dbSession: AsyncSession) -> tuple[str | None, str | None]:
+        """读 (列是否存在, 是否可空)；不依赖 ORM（降级后 ORM 会查不到该列）。"""
+        from sqlalchemy import text
+
+        await dbSession.rollback()
+        row = (
+            await dbSession.execute(
+                text(
+                    "SELECT is_nullable FROM information_schema.columns "
+                    "WHERE table_name = 'session_query_state' "
+                    "AND column_name = 'semantic_release_id'"
+                )
+            )
+        ).first()
+        return (None if row is None else row[0],)
+
+    async def test_0144_roundtrip_upgrade_downgrade_upgrade(
+        self, dbSession: AsyncSession
+    ) -> None:
+        """downgrade 0143 ⇒ 列消失；upgrade 0144 ⇒ 列回来且可空。"""
+        from app.tests._pg_support import resolveTestDatabaseUrl
+
+        url = resolveTestDatabaseUrl()
+        self._assertTestDb(url)
+
+        self._alembic(url, "downgrade", self._PREVIOUS)
+        try:
+            assert await self._columnInfo(dbSession) == (None,), (
+                "downgrade 到 0143 后 semantic_release_id 必须不存在"
+            )
+            self._alembic(url, "upgrade", self._REVISION)
+            assert await self._columnInfo(dbSession) == ("YES",), (
+                "upgrade 回 0144 后 semantic_release_id 必须存在且可空"
+                "（存量旧行没有这个值 ⇒ NOT NULL 会让迁移失败）"
+            )
+        finally:
+            self._alembic(url, "upgrade", "head")

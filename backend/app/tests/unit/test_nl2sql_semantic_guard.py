@@ -395,7 +395,7 @@ class TestRunQueryShareCheckWiring:
 
     async def test_warning_returns_data_normally(self) -> None:
         svc = self._stubService([{"TOP3_SHARE": 1.0}])
-        data, sql, retryTokens = await svc._runQueryWithRetry(
+        data, sql, retryTokens, _retryResult = await svc._runQueryWithRetry(
             None, self._dto(), self._pc(), self._outcome(_sharePlan())
         )
         assert data == [{"TOP3_SHARE": 1.0}]
@@ -404,7 +404,7 @@ class TestRunQueryShareCheckWiring:
     async def test_non_share_query_unaffected(self) -> None:
         plan = QueryPlan(target="数量", perGroupLimit=3)
         svc = self._stubService([{"QTY": 5}])
-        data, _, _ = await svc._runQueryWithRetry(
+        data, _, _, _retryResult = await svc._runQueryWithRetry(
             None, self._dto(), self._pc(), self._outcome(plan)
         )
         assert data == [{"QTY": 5}]

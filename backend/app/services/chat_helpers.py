@@ -15,7 +15,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
@@ -571,6 +571,15 @@ class _SqlOutcome:
     # 4-1（feat-token-cache）：DeepSeek prompt cache 命中 token 数。None =
     # 未读/不支持。_costForSql 用它按差额计费（命中部分不计 input）。
     cachedTokens: int | None = None
+    # P2 D16：本轮 schema 文本**实际使用**的语义发布 id。None = 没走快照
+    # （开关关 / 降级直读 / REFINE 捷径零 LLM）。落进 session_query_state，
+    # 下一轮据此钉住同一版 ⇒ 重放口径一致。
+    semanticReleaseId: int | None = None
+    # P2 D16：这一轮**尝试过**钉住某一版发布，但**没用上**（那一版被删 /
+    # id 非法 / 完整性校验失败 / 版本不符 / 快照陈旧）⇒ 运行记录据此**清掉**
+    # 那个钉住（否则会话永远钉着一版用不了的快照 = 死钉）。
+    # 本轮压根没钉 ⇒ False（否则会误清既有钉住）。
+    pinInvalidated: bool = False
 
 
 @dataclass(frozen=True)
@@ -582,6 +591,9 @@ class _StepRun:
         无论成功失败都已实际花掉，由调用方计入总量与审计行（核心约束 #3）。
     modelName：该步骤实际服务的模型名（供响应的 modelName 展示）。
     plan：仅成功步骤有值；调用方据此更新「最后一个成功步骤」的追问锚点。
+    semanticReleaseId（P2 D16）：本步的 schema 文本实际用到的语义发布 id；
+        None = 本步没走快照（降级直读 / 开关关）。调用方据此把「本轮口径」
+        记进运行记录 ⇒ 下一轮钉住同一版。
     """
 
     result: StepResult
@@ -589,9 +601,40 @@ class _StepRun:
     cost: Decimal = Decimal("0")
     modelName: str | None = None
     plan: QueryPlan | None = None
+    semanticReleaseId: int | None = None
+    # P2 D16：本步**尝试过**钉住某一版但没用上 ⇒ 调用方据此清掉运行记录里的钉住。
+    pinInvalidated: bool = False
     # 本步是否用掉了语义标签分类器（>0 即用过）。多步一轮只允许一次分类调用，
     # 调用方据此在 with_step 时把预算标记为已用。
     chart_label_calls: int = 0
+
+
+def _mergeExecutedRelease(outcome: _SqlOutcome, retryResult: Any | None) -> _SqlOutcome:
+    """回灌重试之后，用**实际执行的那条 SQL**的口径版本改写 outcome（P2 D16）。
+
+    为什么需要这一步：回灌重试生成的那条 SQL **就是本轮实际执行的 SQL** ⇒
+    它才是「口径载体」。若重试与首次生成**不同版**（钉住的那一版在重试前被删 ⇒
+    重试降级直读），那么：
+    - 运行记录若继续记首次那一版 ⇒ **声称用了某版、而实际执行的 SQL 根本不是
+      那一版的口径**（口径骗人）；
+    - 且那个钉住指向一个已经用不了的发布 ⇒ 死钉 ⇒ 下一轮继续钉它。
+
+    ⇒ 这里把 outcome 换成「实际执行的那一版」，并把钉住判为失效（⇒ 运行记录
+    清空那一列 ⇒ 死钉自愈，下一轮回到当前 ACTIVE）。
+
+    `retryResult` 为 None（没触发重试）⇒ 原样返回。
+    """
+    if retryResult is None:
+        return outcome
+    retryReleaseId = getattr(retryResult, "semanticReleaseId", None)
+    retryPinInvalidated = bool(getattr(retryResult, "pinInvalidated", False))
+    if retryReleaseId == outcome.semanticReleaseId and not retryPinInvalidated:
+        return outcome
+    return replace(
+        outcome,
+        semanticReleaseId=retryReleaseId,
+        pinInvalidated=outcome.pinInvalidated or retryPinInvalidated,
+    )
 
 
 # 断连兜底状态在 session.info 上的槽位键（H4）。用会话自身当载体，是因为

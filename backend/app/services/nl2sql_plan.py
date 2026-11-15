@@ -16,6 +16,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.config import getSettings
 from app.domain.enums import DataSourceType
 from app.domain.exceptions import Nl2SqlError
@@ -43,11 +45,11 @@ from app.services.nl2sql_refs import (
     formulaHasSqlStructure,
 )
 from app.services.nl2sql_schema import (
-    buildSchemaText,
     supplementJoinPath,
     _buildJoinGraph,
 )
 from app.services.nl2sql_scope import _applyScopeRowLimit
+from app.services.semantic_schema_gate import renderSchemaWithRelease
 from app.services.think_block import stripThinkBlocks
 
 logger = logging.getLogger(__name__)
@@ -198,6 +200,9 @@ async def generateQueryPlan(
     kpiContractText: str | None = None,
     kpiContractBlock: str | None = None,
     timeScopeFact: str | None = None,
+    session: AsyncSession | None = None,
+    pinnedReleaseId: int | None = None,
+    directOnly: bool = False,
     maxTokens: int = _NL2SQL_MAX_TOKENS_DEFAULT,
     ownerHintMaxClasses: int = _OWNER_HINT_MAX_CLASSES_DEFAULT,
 ) -> PlanResult:
@@ -225,13 +230,19 @@ async def generateQueryPlan(
     if maxRetries is None:
         maxRetries = getSettings().nl2sqlMaxRetries
     dialect = resolveDialect(datasourceType, oracle_version)
-    schemaText = buildSchemaText(
+    # schema 文本经**语义快照闸门**渲染（开关默认关 ⇒ 与今天逐字节一致）。
+    # P2 D16：pinnedReleaseId = 钉住那一版发布；directOnly = 上层要求直读。
+    schemaRender = await renderSchemaWithRelease(
         classes,
+        joins=joins,
+        session=session,
+        pinnedReleaseId=pinnedReleaseId,
+        directOnly=directOnly,
         schemaPrefix=schemaPrefix if dialect.useSchemaPrefix else None,
         valueSamples=valueSamples,
         driftWarning=driftWarning,
-        joins=joins,
     )
+    schemaText = schemaRender.text
     errors: list[str] = list(initialErrors or [])
     totalPrompt = 0
     totalCompletion = 0
@@ -327,6 +338,10 @@ async def generateQueryPlan(
         return PlanResult(
             plan=outcome.plan, promptTokens=totalPrompt, completionTokens=totalCompletion,
             cachedTokens=totalCached,
+            semanticReleaseId=schemaRender.semanticReleaseId,
+            # P2 D16：闸门说「这一轮尝试过钉住但没用上」⇒ 一路带到编排层
+            # （编排层据此清掉运行记录里的钉住 ⇒ 死钉自愈）。
+            pinInvalidated=schemaRender.pinInvalidated,
         )
 
     raise Nl2SqlError(
@@ -364,6 +379,8 @@ def _finalizePlan(
         promptTokens=planResult.promptTokens,
         completionTokens=planResult.completionTokens,
         cachedTokens=planResult.cachedTokens,
+        semanticReleaseId=planResult.semanticReleaseId,
+        pinInvalidated=planResult.pinInvalidated,
     )
 
 

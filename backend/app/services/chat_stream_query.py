@@ -28,6 +28,7 @@ from app.services.chat_constants import (
 )
 from app.services.chat_helpers import (
     _looks_like_compound_question,
+    _mergeExecutedRelease,
     _PipelineContext,
     _clipText,
     buildSingleStepSnapshot,
@@ -232,6 +233,10 @@ class StreamQueryMixin:
                 # F1：dbUserId 是 int 主键，对齐 session_query_state.user_id 的 BigInteger
                 userId=user.dbUserId if user is not None else None,
                 datasourceId=dto.datasourceId,
+                # P2 D16：不可回答路径的「口径载体」是计划阶段（它渲染过 schema 文本）。
+                # 没渲染 ⇒ None ⇒ 保留既有钉住。
+                semanticReleaseId=getattr(outcome, "semanticReleaseId", None),
+                pinInvalidated=getattr(outcome, "pinInvalidated", False),
             )
             yield StreamEvent(
                 EVENT_DONE,
@@ -275,6 +280,10 @@ class StreamQueryMixin:
                 # F1：dbUserId 是 int 主键，对齐 session_query_state.user_id 的 BigInteger
                 userId=user.dbUserId if user is not None else None,
                 datasourceId=dto.datasourceId,
+                # P2 D16：不可回答路径的「口径载体」是计划阶段（它渲染过 schema 文本）。
+                # 没渲染 ⇒ None ⇒ 保留既有钉住。
+                semanticReleaseId=getattr(outcome, "semanticReleaseId", None),
+                pinInvalidated=getattr(outcome, "pinInvalidated", False),
             )
             affinity = await self._buildAffinityStatus(
                 session, dto.sessionId, pc.selected.id, pc.selected.model_name,
@@ -321,7 +330,12 @@ class StreamQueryMixin:
         totalCost = self._costForSql(outcome, pc.selected, cacheHitMultiplier=cacheHitMultiplier)
 
         try:
-            data, finalSql, retryTokens = await self._runQueryWithRetry(session, dto, pc, outcome)
+            data, finalSql, retryTokens, retryResult = await self._runQueryWithRetry(
+                session, dto, pc, outcome
+            )
+            # P2 D16：重试生成的那条 SQL 就是本轮**实际执行**的 SQL ⇒ 口径载体是它
+            # （与非流式同口径）。
+            outcome = _mergeExecutedRelease(outcome, retryResult)
         except Exception as exc:
             # 双失败时「重试生成」的 token 随异常交回：无论随后回退多步还是原样上抛都
             # 必须落账。流式尤其关键：上抛会被收敛成 error 事件后正常收尾（HTTP 200、
@@ -507,6 +521,10 @@ class StreamQueryMixin:
             # 从 API 层的 `Depends(getCurrentUser)` 一路透传，见 L567/L608）。
             userId=user.dbUserId if user is not None else None,
             datasourceId=dto.datasourceId,
+            # P2 D16：本轮 schema 文本实际用到的语义发布 id ⇒ 下一轮钉住同一版。
+            semanticReleaseId=getattr(outcome, "semanticReleaseId", None),
+            # P2 D16：本轮尝试过钉住但没用上 ⇒ 清掉那个钉住（死钉自愈）。
+            pinInvalidated=getattr(outcome, "pinInvalidated", False),
         )
         # affinity 需用 answerConfig（实际服务的回答模型），与 PC.selected 解耦
         answerConfigId = (await self._tokenUsage.getLastModelId(session, dto.sessionId)) or pc.selected.id

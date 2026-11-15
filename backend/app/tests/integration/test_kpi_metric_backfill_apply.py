@@ -612,6 +612,7 @@ async def test_cli_preview_reads_target_and_writes_nothing(
         out=str(out),
         only="KPI_SUPPLIER_OTD",
         database_url=resolveTestDatabaseUrl(),
+        database_url_env=None,
     )
 
     assert await cliModule._run(args) == 0

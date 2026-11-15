@@ -278,6 +278,9 @@ async def test_vector_role_property_uses_existing_sync_entry(
     )
     fakeOntology = MagicMock()
     fakeOntology.syncEmbedding = MagicMock()
+    # P3a 双写入口 ``syncEmbeddingToRegistryV2`` 是 **async**（真实实现 await
+    # Milvus 写）⇒ 替身必须保真，否则 ``await`` 一个 MagicMock 会炸。
+    fakeOntology.syncEmbeddingToRegistryV2 = AsyncMock(return_value=None)
 
     svc = KnowledgeCompilerService(ontology=fakeOntology)
     role = await svc._compileVector(dbSession, "property", prop)
@@ -288,6 +291,8 @@ async def test_vector_role_property_uses_existing_sync_entry(
     assert kwargs["ontologyId"] == prop.id
     assert kwargs["type"] == "property"
     assert len(kwargs["embedding"]) == 1024
+    # P3a：同一次编译同时写 v1 与 v2（v2 带治理维度）
+    fakeOntology.syncEmbeddingToRegistryV2.assert_awaited_once()
 
 
 async def test_sql_metadata_role_skips_non_metric(dbSession: AsyncSession) -> None:

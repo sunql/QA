@@ -486,6 +486,16 @@ class KnowledgeCompilerService:
                 description=entity.description,
                 embedding=vec,
             )
+            # P3a 双写：v2 集合（带治理维度）。
+            await self._ontology.syncEmbeddingToRegistryV2(
+                ontologyId=entity.id,
+                type="property",
+                name=entity.property_name,
+                alias=entity.property_alias,
+                description=entity.description,
+                embedding=vec,
+                session=session,
+            )
         else:
             self._ontology.syncEmbedding(
                 ontologyId=entity.id,
@@ -494,6 +504,16 @@ class KnowledgeCompilerService:
                 alias=entity.metric_alias,
                 description=entity.agg_function,
                 embedding=vec,
+            )
+            # P3a 双写：v2 集合（带治理维度）。
+            await self._ontology.syncEmbeddingToRegistryV2(
+                ontologyId=entity.id,
+                type="metric",
+                name=entity.metric_name,
+                alias=entity.metric_alias,
+                description=entity.agg_function,
+                embedding=vec,
+                session=session,
             )
         return CompileRoleResult(
             role=_ROLE_VECTOR, status=_STATUS_SUCCESS, detail=f"{objectType} 向量已同步"

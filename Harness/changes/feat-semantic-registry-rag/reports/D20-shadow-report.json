@@ -1,0 +1,214 @@
+{
+  "sourceDb": "default",
+  "targetDb": "qa_registry_v2",
+  "topK": 5,
+  "coverage": {
+    "total": 3791,
+    "withDomain": 592,
+    "withoutDomain": 3199,
+    "withOrg": 737,
+    "withEntity": 592,
+    "byType": {
+      "class": {
+        "total": 37,
+        "withDomain": 6,
+        "withoutDomain": 31,
+        "withOrg": 10,
+        "withEntity": 6,
+        "v1Rows": 37,
+        "v1Distinct": 37
+      },
+      "property": {
+        "total": 3730,
+        "withDomain": 586,
+        "withoutDomain": 3144,
+        "withOrg": 727,
+        "withEntity": 586,
+        "v1Rows": 3731,
+        "v1Distinct": 3730
+      },
+      "metric": {
+        "total": 12,
+        "withDomain": 0,
+        "withoutDomain": 12,
+        "withOrg": 0,
+        "withEntity": 0,
+        "v1Rows": 12,
+        "v1Distinct": 12
+      },
+      "kpi": {
+        "total": 12,
+        "withDomain": 0,
+        "withoutDomain": 12,
+        "withOrg": 0,
+        "withEntity": 0,
+        "v1Rows": 12,
+        "v1Distinct": 12
+      }
+    }
+  },
+  "vectorDrift": [],
+  "scopes": [
+    {
+      "dimension": "domain",
+      "value": "PROCUREMENT",
+      "queries": 20,
+      "truthRows": 50,
+      "baselineHits": 100,
+      "filteredHits": 50,
+      "v2Missing": 0,
+      "v2Extra": 0,
+      "baselineMissed": 29,
+      "attribution": {
+        "unmapped": 79,
+        "otherScope": 0,
+        "missingInV2": 0,
+        "v2MissingInScope": 0,
+        "tieBreak": 0,
+        "baselineOver": 0
+      },
+      "leaks": []
+    },
+    {
+      "dimension": "org",
+      "value": "procurement",
+      "queries": 20,
+      "truthRows": 50,
+      "baselineHits": 100,
+      "filteredHits": 50,
+      "v2Missing": 0,
+      "v2Extra": 0,
+      "baselineMissed": 22,
+      "attribution": {
+        "unmapped": 72,
+        "otherScope": 0,
+        "missingInV2": 0,
+        "v2MissingInScope": 0,
+        "tieBreak": 0,
+        "baselineOver": 0
+      },
+      "leaks": []
+    },
+    {
+      "dimension": "entity",
+      "value": "AR",
+      "queries": 16,
+      "truthRows": 26,
+      "baselineHits": 80,
+      "filteredHits": 26,
+      "v2Missing": 0,
+      "v2Extra": 0,
+      "baselineMissed": 17,
+      "attribution": {
+        "unmapped": 61,
+        "otherScope": 10,
+        "missingInV2": 0,
+        "v2MissingInScope": 0,
+        "tieBreak": 0,
+        "baselineOver": 0
+      },
+      "leaks": []
+    },
+    {
+      "dimension": "entity",
+      "value": "GR",
+      "queries": 16,
+      "truthRows": 26,
+      "baselineHits": 80,
+      "filteredHits": 26,
+      "v2Missing": 0,
+      "v2Extra": 0,
+      "baselineMissed": 15,
+      "attribution": {
+        "unmapped": 60,
+        "otherScope": 9,
+        "missingInV2": 0,
+        "v2MissingInScope": 0,
+        "tieBreak": 0,
+        "baselineOver": 0
+      },
+      "leaks": []
+    },
+    {
+      "dimension": "entity",
+      "value": "INVOICE",
+      "queries": 16,
+      "truthRows": 26,
+      "baselineHits": 80,
+      "filteredHits": 26,
+      "v2Missing": 0,
+      "v2Extra": 0,
+      "baselineMissed": 15,
+      "attribution": {
+        "unmapped": 63,
+        "otherScope": 5,
+        "missingInV2": 0,
+        "v2MissingInScope": 0,
+        "tieBreak": 0,
+        "baselineOver": 1
+      },
+      "leaks": []
+    },
+    {
+      "dimension": "entity",
+      "value": "MATERIAL",
+      "queries": 16,
+      "truthRows": 26,
+      "baselineHits": 80,
+      "filteredHits": 26,
+      "v2Missing": 0,
+      "v2Extra": 0,
+      "baselineMissed": 18,
+      "attribution": {
+        "unmapped": 70,
+        "otherScope": 2,
+        "missingInV2": 0,
+        "v2MissingInScope": 0,
+        "tieBreak": 0,
+        "baselineOver": 0
+      },
+      "leaks": []
+    },
+    {
+      "dimension": "entity",
+      "value": "PO",
+      "queries": 16,
+      "truthRows": 26,
+      "baselineHits": 80,
+      "filteredHits": 26,
+      "v2Missing": 0,
+      "v2Extra": 0,
+      "baselineMissed": 18,
+      "attribution": {
+        "unmapped": 63,
+        "otherScope": 9,
+        "missingInV2": 0,
+        "v2MissingInScope": 0,
+        "tieBreak": 0,
+        "baselineOver": 0
+      },
+      "leaks": []
+    },
+    {
+      "dimension": "entity",
+      "value": "SUPPLIER",
+      "queries": 16,
+      "truthRows": 26,
+      "baselineHits": 80,
+      "filteredHits": 26,
+      "v2Missing": 0,
+      "v2Extra": 0,
+      "baselineMissed": 20,
+      "attribution": {
+        "unmapped": 69,
+        "otherScope": 5,
+        "missingInV2": 0,
+        "v2MissingInScope": 0,
+        "tieBreak": 0,
+        "baselineOver": 0
+      },
+      "leaks": []
+    }
+  ],
+  "leaks": []
+}

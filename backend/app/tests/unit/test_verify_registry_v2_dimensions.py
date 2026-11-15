@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from scripts import verify_registry_v2_dimensions as verify
 
 
@@ -188,3 +190,105 @@ class Test逐行比对:
 
         assert report["compared"] == 2
         assert report["mismatched"] == 0
+
+    def test_跨类型同号各自计为不一致(self) -> None:
+        """回归守卫：``ontology_id`` 在不同类型下会重号 ⇒ 不一致计数必须用复合键。
+
+        旧口径只用 ``ontology_id`` 做键 ⇒ 同号跨类型会被并成 1 个 ⇒
+        ``mismatched``/``matched`` 计数失真。
+        """
+        report = verify.compareDimensions(
+            [
+                _v2Row(type="class", ontology_id=1, domain_codes=["WRONG"]),
+                _v2Row(type="property", ontology_id=1, domain_codes=["WRONG"]),
+            ],
+            [
+                _expectedRow(dim_type="class", ontology_id=1),
+                _expectedRow(dim_type="property", ontology_id=1),
+            ],
+        )
+
+        assert report["mismatched"] == 2
+        assert report["compared"] == 2
+        assert report["matched"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 退出码分层（安全评审 MEDIUM-5）
+# ---------------------------------------------------------------------------
+
+
+def _report(**kwargs) -> dict:
+    report = {
+        "v2Rows": 0,
+        "compared": 0,
+        "matched": 0,
+        "mismatched": 0,
+        "orphanRows": [],
+        "missingInV2": [],
+        "mismatches": [],
+    }
+    report.update(kwargs)
+    return report
+
+
+class Test退出码:
+    @pytest.fixture(autouse=True)
+    def _databaseUrl(self, monkeypatch) -> None:
+        """脚本要求显式的 ``DATABASE_URL``（防默认 DSN 打到别的库）。"""
+        monkeypatch.setenv(
+            "DATABASE_URL",
+            "postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata",
+        )
+
+    def test_环境异常返回二(self, monkeypatch) -> None:
+        """环境故障（PG/Milvus 不可达）不是「维度错乱」⇒ 必须与 1 区分开。"""
+
+        async def _boom(args):
+            raise RuntimeError("pg down")
+
+        monkeypatch.setattr(verify, "run", _boom)
+
+        assert verify.main(["--target-db", "qa_registry_v2"]) == 2
+
+    def test_零行比对返回三(self, monkeypatch) -> None:
+        """零行比对 = 假绿（未回填 / 指错库）⇒ 必须非 0。"""
+
+        async def _fake(args):
+            return _report()
+
+        monkeypatch.setattr(verify, "run", _fake)
+
+        assert verify.main(["--target-db", "qa_registry_v2"]) == 3
+
+    def test_有不一致返回一(self, monkeypatch) -> None:
+        async def _fake(args):
+            return _report(compared=2, matched=1, mismatched=1)
+
+        monkeypatch.setattr(verify, "run", _fake)
+
+        assert verify.main(["--target-db", "qa_registry_v2"]) == 1
+
+    def test_全部一致返回零(self, monkeypatch) -> None:
+        async def _fake(args):
+            return _report(v2Rows=2, compared=2, matched=2)
+
+        monkeypatch.setattr(verify, "run", _fake)
+
+        assert verify.main(["--target-db", "qa_registry_v2"]) == 0
+
+    def test_缺少数据库地址返回二(self, monkeypatch) -> None:
+        """不显式给 ``DATABASE_URL`` ⇒ 拒绝执行（防默认 DSN 打到别的库）。"""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+
+        called = False
+
+        async def _fake(args):
+            nonlocal called
+            called = True
+            return _report()
+
+        monkeypatch.setattr(verify, "run", _fake)
+
+        assert verify.main(["--target-db", "qa_registry_v2"]) == 2
+        assert called is False

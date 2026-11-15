@@ -1,19 +1,18 @@
-"""P3a 复核：过滤器的**作用域声明**语义（不可变值对象）。
+"""P3a 复核：过滤器的**作用域语义**（不可变值对象）。
 
-为什么单独钉死
---------------
-``hasScope()`` 决定闸门的**降级口径**：有作用域 ⇒ v2 不可用时必须 fail-closed
-（空结果），无作用域才允许回落 v1（回落 = 把越权行放进来 = 泄漏）。
+口径（D21R2 起）
+---------------
+**过滤器的「存在」本身就是作用域声明**：
 
-「有作用域」有两种表达：
+- ``registryFilter=None`` ⇒ 本轮**无作用域**（不收窄）；
+- 任何 ``RegistryFilter`` 实例 ⇒ **已声明作用域**；各维度取值为空 ⇒ deny-all。
 
-1. 给了任一维度的**取值**（域码 / 组织码 / 实体码 / 发布版本 / 有效期）；
-2. 调用方**声明了作用域但取值为空**（``isScopeBound=True``）——
-   例如「我这一轮有权看的域是空集」⇒ 语义是**什么都不许看到**（deny-all），
-   不是「没有作用域、随便看」。
-
-第 2 种若无法表达，「空作用域」就会被当成「无作用域」⇒
-恰好在「本轮什么都看不到」的场景下变成**全量可见** ⇒ 越权。
+为什么不用「标志位」表达
+------------------------
+上一轮用 ``isScopeBound=True`` 表达「声明了作用域但取值为空」，
+但**默认那一种（不写标志位）仍是不安全的** —— ``RegistryFilter(domainCodes=())``
+会被当成「无作用域」⇒ 恰好在本该最严格的一轮变成全量可见。
+⇒ 标志位被下线（见 ``test_registry_filter_hardening.py``）：不写就不会错。
 
 全部纯对象 —— 不连 Milvus、不连 PG。
 """
@@ -27,28 +26,42 @@ import pytest
 from app.domain.registry_filter import RegistryFilter
 
 
-class Test作用域判定:
-    def test_未声明作用域且各维度取值为空时过滤器认为无作用域(self) -> None:
-        assert RegistryFilter().hasScope() is False
+class Test过滤器契约:
+    def test_不再有作用域标志位(self) -> None:
+        """``isScopeBound`` 已下线 ⇒ 过滤器的字段集合就是「各维度的取值」。"""
+        fieldNames = {f.name for f in dataclasses.fields(RegistryFilter)}
 
-    def test_声明了作用域但各维度取值为空时过滤器认为有作用域(self) -> None:
-        """「声明了作用域但取值为空」= deny-all 的语义，必须与「无作用域」区分开。"""
-        assert RegistryFilter(isScopeBound=True).hasScope() is True
+        assert fieldNames == {
+            "domainCodes",
+            "orgCodes",
+            "entityTypes",
+            "releaseId",
+            "validAt",
+        }
 
-    def test_给了域码时过滤器认为有作用域(self) -> None:
-        assert RegistryFilter(domainCodes=("SUP",)).hasScope() is True
+    def test_各维度默认值均为空(self) -> None:
+        registryFilter = RegistryFilter()
 
-    def test_给了组织码时过滤器认为有作用域(self) -> None:
-        assert RegistryFilter(orgCodes=("ORG_A",)).hasScope() is True
+        assert registryFilter.domainCodes == ()
+        assert registryFilter.orgCodes == ()
+        assert registryFilter.entityTypes == ()
+        assert registryFilter.releaseId is None
+        assert registryFilter.validAt is None
 
-    def test_给了实体码时过滤器认为有作用域(self) -> None:
-        assert RegistryFilter(entityTypes=("SUPPLIER",)).hasScope() is True
+    def test_给了域码时取值得以保留(self) -> None:
+        assert RegistryFilter(domainCodes=("SUP",)).domainCodes == ("SUP",)
 
-    def test_给了发布版本时过滤器认为有作用域(self) -> None:
-        assert RegistryFilter(releaseId=1).hasScope() is True
+    def test_给了组织码时取值得以保留(self) -> None:
+        assert RegistryFilter(orgCodes=("ORG_A",)).orgCodes == ("ORG_A",)
 
-    def test_给了有效期时过滤器认为有作用域(self) -> None:
-        assert RegistryFilter(validAt=1_700_000_000_000).hasScope() is True
+    def test_给了实体码时取值得以保留(self) -> None:
+        assert RegistryFilter(entityTypes=("SUPPLIER",)).entityTypes == ("SUPPLIER",)
+
+    def test_给了发布版本时取值得以保留(self) -> None:
+        assert RegistryFilter(releaseId=1).releaseId == 1
+
+    def test_给了有效期时取值得以保留(self) -> None:
+        assert RegistryFilter(validAt=1_700_000_000_000).validAt == 1_700_000_000_000
 
 
 class Test不可变性:

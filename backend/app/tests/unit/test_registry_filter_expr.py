@@ -52,8 +52,11 @@ def test_声明了作用域但取值为空时不产生条件() -> None:
     ⚠️ **返回 None 不等于「不过滤」**：闸门看到「有作用域 + 无表达式」
     必须判成 deny-all（空结果），而不是拿无过滤的答案冒充。
     这个分工由闸门单测钉死。
+
+    D21R2 起「声明了作用域」由**过滤器的存在**表达（无标志位），
+    故这里用一个空过滤器即可。
     """
-    assert buildRegistryFilterExpr(RegistryFilter(isScopeBound=True)) is None
+    assert buildRegistryFilterExpr(RegistryFilter()) is None
 
 
 # ---------------------------------------------------------------------------

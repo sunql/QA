@@ -424,7 +424,7 @@ def _parseArgs(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="回填 Milvus v2 集合（不重算向量）")
     parser.add_argument("--dry-run", action="store_true", help="只读与解析，不写集合")
     parser.add_argument("--types", default="", help="逗号分隔：class,property,metric,kpi")
-    parser.add_argument("--limit", type=int, default=None, help="每类型最多处理 N 行")
+    parser.add_argument("--limit", type=int, default=None, help="每类型最多处理 N 行（>= 0）")
     parser.add_argument("--allow-prod", action="store_true", help="显式放行生产库 default")
     parser.add_argument(
         "--source-db",
@@ -432,7 +432,19 @@ def _parseArgs(argv: list[str]) -> argparse.Namespace:
         help="v1 向量的来源库（只读）；缺省=目标库。隔离实验常用：--source-db default",
     )
     parser.add_argument("--report-json", default="", help="摘要 JSON 输出路径")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.limit is not None and args.limit < 0:
+        # limit=-1 会让 rows[:-1] 变成「除最后一行外的全部」⇒ 静默丢行。
+        parser.error("--limit 必须 >= 0")
+    if args.limit is not None:
+        # 限流早退在「行数上限」护栏之前 ⇒ --limit 场景下护栏不触发
+        # ⇒ 读错库时只会安静地抽样。写目标闸门仍在，但读侧这条绊线没了 ⇒ 明说。
+        logging.getLogger(__name__).warning(
+            "回填：--limit=%d ⇒ 「疑似读到了错库」的行数上限护栏（%d）不生效。",
+            args.limit,
+            _MAX_ROWS_PER_TYPE,
+        )
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:

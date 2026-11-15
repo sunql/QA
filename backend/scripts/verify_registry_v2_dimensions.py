@@ -28,7 +28,14 @@ D20 的影子比对里，「哪些行属于该范围」的**真值**是从 **v2 
         uv run python scripts/verify_registry_v2_dimensions.py \
             --target-db qa_registry_v2
 
-退出码：0 = 全部一致；1 = 有不一致（逐条打印）；2 = 参数/环境问题。
+退出码
+------
+====== ==================================================================
+0      全部一致（且**确实比对到了行**）
+1      有不一致（逐条打印）
+2      参数 / 环境问题（PG 或 Milvus 不可达、未给 DATABASE_URL）
+3      **零行比对** —— 假绿信号（v2 为空 / 读到了别的库）⇒ 不可判为「一致」
+====== ==================================================================
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 from datetime import UTC, datetime
@@ -43,12 +51,33 @@ from typing import Any
 
 from pymilvus import MilvusClient
 
-from app.infrastructure.milvus_registry_v2 import REGISTRY_V2_COLLECTION_NAMES
+from app.infrastructure.milvus_registry_v2 import (
+    _MAX_CODE_COUNT,
+    _MAX_CODE_LENGTH,
+    REGISTRY_V2_COLLECTION_NAMES,
+)
 
 ALL_TYPES: tuple[str, ...] = ("class", "property", "metric", "kpi")
 
 # 单页读取行数
 _READ_PAGE = 1000
+
+# 退出码（分层：环境故障 ≠ 数据不一致 ≠ 零行假绿）
+EXIT_OK = 0
+EXIT_MISMATCH = 1
+EXIT_ENV = 2
+EXIT_NO_ROWS = 3
+
+
+def _defaultTargetDb() -> str:
+    """缺省的 Milvus 目标库 = **应用配置**的库（回填脚本写的就是它）。
+
+    ⚠️ 别写死字面量：写死会让「PG 侧读应用库、Milvus 侧读另一个库」⇒
+    两边环境不一致而脚本毫无察觉。
+    """
+    from app.infrastructure.milvus_client import getDbName
+
+    return getDbName()
 
 # 独立 SQL：从治理表直接推导期望维度（**不经过** ontology_dimension_service）。
 _EXPECTED_DIMENSIONS_SQL = """
@@ -135,6 +164,19 @@ def _epochMs(value: Any) -> int:
     return int(value)
 
 
+def _expectedCodes(values: tuple[str, ...]) -> tuple[str, ...]:
+    """期望侧的码归一（**镜像写入口径**，否则会报假不一致）。
+
+    写路径是「``_sortedCodes``：去空 / 去重 / 排序」⇒「``_codeList``：
+    逐个截断到 64 字、最多留 8 个」。核对脚本若不镜像这两步 ⇒
+    一个挂了 9 个域的 BO（或超长码）会被报成「不一致」，
+    而实际 v2 存的值是对的（只是被截断）⇒ **假不一致 ⇒ 查一个不存在的 bug**。
+    """
+    codes = sorted({c for c in values if c})
+    trimmed = [c[:_MAX_CODE_LENGTH] for c in codes]
+    return tuple(trimmed[:_MAX_CODE_COUNT])
+
+
 def expectedDimension(row: dict[str, Any]) -> dict[str, Any]:
     """SQL 行 → **期望维度**（纯函数）。
 
@@ -142,23 +184,19 @@ def expectedDimension(row: dict[str, Any]) -> dict[str, Any]:
         row: ``_EXPECTED_DIMENSIONS_SQL`` 的一行（键名与 SQL 列名一致）。
 
     Returns:
-        ``{维度字段: 值}``；域码/组织码是**排序去重**后的元组（与写入口径一致）。
+        ``{维度字段: 值}``；域码/组织码是**排序去重并按写入口径截断**后的元组。
     """
     primary = str(row.get("primary_domain") or "").strip()
     attached = tuple(
-        sorted({c for c in str(row.get("attached_domains") or "").split(",") if c})
+        c.strip()
+        for c in str(row.get("attached_domains") or "").split(",")
+        if c.strip()
     )
-    domainCodes = tuple(sorted({primary, *attached} - {""}))
-    orgCodes = tuple(
-        sorted(
-            {
-                c
-                for c in (
-                    str(row.get("domain_org") or "").strip(),
-                    str(row.get("owner_org") or "").strip(),
-                )
-                if c
-            }
+    domainCodes = _expectedCodes((primary, *attached))
+    orgCodes = _expectedCodes(
+        (
+            str(row.get("domain_org") or "").strip(),
+            str(row.get("owner_org") or "").strip(),
         )
     )
     return {
@@ -237,7 +275,7 @@ def compareDimensions(
     ]
 
     compared = len(seen) - len(orphanRows)
-    mismatchedKeys = {m["ontology_id"] for m in mismatches}
+    mismatchedKeys = {(m["type"], m["ontology_id"]) for m in mismatches}
     return {
         "v2Rows": len(v2Rows),
         "compared": compared,
@@ -266,8 +304,14 @@ async def _readExpectedDimensions() -> list[dict[str, Any]]:
 
 
 def _readV2Rows(client: MilvusClient, type_: str) -> list[dict[str, Any]]:
-    """读 v2 集合里的维度字段（**不含向量**，只要治理维度）。"""
+    """读 v2 集合里的维度字段（**不含向量**，只要治理维度）。
+
+    集合不存在（``kpi_catalog_embeddings_v2`` 在第一次 KPI 写入前本来就没有）
+    ⇒ 返回空列表，**不抛** —— 抛了会被误读成「维度对不上」。
+    """
     name = REGISTRY_V2_COLLECTION_NAMES[type_]
+    if not client.has_collection(name):
+        return []
     rows: list[dict[str, Any]] = []
     offset = 0
     while True:
@@ -309,31 +353,75 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     expectedRows = await _readExpectedDimensions()
     report = compareDimensions(v2Rows, expectedRows)
     report["targetDb"] = args.target_db
+    report["pgDatabase"] = _pgDatabaseName()
+    report["missingInV2Count"] = len(report["missingInV2"])
     return report
+
+
+def _pgDatabaseName() -> str:
+    """PG 目标库名（**不含口令**）—— 报告要能绑定到具体实例。"""
+    raw = os.environ.get("DATABASE_URL", "")
+    if not raw:
+        return ""
+    try:
+        from sqlalchemy.engine import make_url
+
+        return make_url(raw).database or ""
+    except Exception:  # noqa: BLE001 —— 解析失败不炸核对
+        return ""
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="核对 v2 集合的治理维度与 PG 治理事实")
-    parser.add_argument("--target-db", default="qa_registry_v2", help="v2 集合所在 Milvus 库")
+    parser.add_argument(
+        "--target-db",
+        default=_defaultTargetDb(),
+        help="v2 集合所在 Milvus 库（缺省 = 应用配置的库，须与写入目标库一致）",
+    )
     parser.add_argument("--milvus-uri", default=None, help="Milvus URI（缺省取 MILVUS_URI）")
     parser.add_argument("--report-json", default=None, help="把报告写成 JSON")
     args = parser.parse_args(argv)
 
-    report = asyncio.run(run(args))
+    # 显式的 PG 目标：默认值会静默落到开发 DSN（5432 端口在本仓是 OpenMetadata！）⇒ 必须显式给。
+    if not os.environ.get("DATABASE_URL"):
+        print(
+            "✗ 未设置 DATABASE_URL ⇒ 拒绝执行（默认 DSN 可能指向别的库）",
+            file=sys.stderr,
+        )
+        return EXIT_ENV
+    # SQL echo 会把整段 SQL 打到 stdout ⇒ 报告文件/管道不可直接解析。
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+
+    try:
+        report = asyncio.run(run(args))
+    except Exception as exc:  # noqa: BLE001 —— 环境故障 ≠ 数据不一致
+        print(f"✗ 环境/连接问题，核对未完成：{exc}", file=sys.stderr)
+        return EXIT_ENV
 
     print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
     if args.report_json:
         with open(args.report_json, "w", encoding="utf-8") as handle:
             json.dump(report, handle, ensure_ascii=False, indent=2, default=str)
 
+    if report["compared"] == 0:
+        # 零行比对 = 假绿：v2 集合为空 / 指错了库 / 回填根本没跑。
+        print(
+            "✗ 未比对到任何行（v2 集合为空、或读到了别的库）⇒ 不能判为「一致」",
+            file=sys.stderr,
+        )
+        return EXIT_NO_ROWS
     if report["mismatched"]:
         print(f"✗ 维度不一致：{report['mismatched']} 行", file=sys.stderr)
-        return 1
+        return EXIT_MISMATCH
+    missingInV2Count = report.get("missingInV2Count")
+    if missingInV2Count is None:
+        missingInV2Count = len(report.get("missingInV2") or [])
     print(
         f"✓ 维度一致：比对 {report['compared']} 行，"
         f"不一致 {report['mismatched']} 行，孤儿行 {len(report['orphanRows'])} 行"
+        f"（PG 有实体但无向量行 {missingInV2Count} 行 —— 不是每个实体都有向量）"
     )
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":

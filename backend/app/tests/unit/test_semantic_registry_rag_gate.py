@@ -125,7 +125,7 @@ class Test开关:
         assert result.hits == []
         assert result.usedRegistryV2 is False
         # 口径失真必须可观测：调用方以为按域收窄了，实际什么都没召回
-        assert result.degradedReason == "switch_off_with_filter"
+        assert result.degradedReason == "switch_off_denied"
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +273,7 @@ class Test空作用域:
         result = gate.searchRegistryEmbeddings(
             [0.1] * 4,
             topK=5,
-            registryFilter=RegistryFilter(isScopeBound=True),
+            registryFilter=RegistryFilter(),
         )
 
         assert calls == []  # v1 一次都没碰
@@ -289,10 +289,10 @@ class Test空作用域:
         result = gate.searchRegistryEmbeddings(
             [0.1] * 4,
             topK=5,
-            registryFilter=RegistryFilter(isScopeBound=True),
+            registryFilter=RegistryFilter(),
         )
 
         assert calls == []
         assert exprs == []
         assert result.hits == []
-        assert result.degradedReason == "switch_off_with_filter"
+        assert result.degradedReason == "switch_off_denied"

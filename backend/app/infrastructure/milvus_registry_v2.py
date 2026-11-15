@@ -59,6 +59,12 @@ REGISTRY_V2_COLLECTION_NAMES: dict[str, str] = {
 _MAX_CODE_COUNT = 8
 _MAX_CODE_LENGTH = 64
 
+# ``entity_type`` 是标量列，列宽比数组元素窄（见 ``_registryV2Fields``）。
+_MAX_ENTITY_TYPE_LENGTH = 32
+
+# 探针/核对读集合时的单页行数。
+_READ_PAGE = 1000
+
 # 去重超取倍数（与 v1 同口径）：Milvus 的 limit 按「实体」计数，
 # 集合里残留同一 ontology_id 的多份向量会吃光 topK 窗口。
 _DEDUP_OVERFETCH = 8
@@ -136,38 +142,92 @@ def _escapeLiteral(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _normalizeFilterCodes(
+    values: tuple[str, ...], dimension: str, maxLength: int
+) -> tuple[str, ...]:
+    """过滤侧字面量归一 + 校验（与写侧 ``_codeList`` **同口径**）。
+
+    为什么必须与写侧对齐：写侧会 strip / 丢空串 / 截断到列宽上限，
+    过滤侧若不同步 ⇒ 同一个码在两侧的判定不一致 ⇒
+
+    - **空字面量**：``entity_type == ""`` 命中**所有非 BO 头类**
+      （空串是存储层的合法哨兵值）⇒ 调用方传一个空实体类型，
+      得到的是「放大」而不是「收窄」；
+    - **超长字面量**：写侧被静默截断，过滤侧若持**被截断的前缀**，
+      可能命中「真实码更长」的域行 ⇒ 跨域可见（**泄漏方向**）。
+
+    ⇒ 空 / 纯空白 / 超长 / 含控制字符 一律 **fail fast 拒绝**
+    （闸门把异常转成空结果 ⇒ fail-closed）。
+
+    控制字符：实测裸 LF/CR 会让 Milvus 表达式解析失败
+    （``token recognition error``）⇒ 整条表达式报错 ⇒ 该域召回全挂
+    （可用性攻击）。域码/组织码里换行从来不是合法值。
+    """
+    codes: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError(
+                f"{dimension}过滤字面量必须是字符串，收到 {type(value).__name__}"
+            )
+        text = value.strip()
+        if not text:
+            raise ValueError(f"{dimension}过滤字面量不得为空或纯空白")
+        if len(text) > maxLength:
+            raise ValueError(
+                f"{dimension}过滤字面量长度 {len(text)} 超过上限 {maxLength}"
+            )
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text):
+            raise ValueError(f"{dimension}过滤字面量含控制字符")
+        if text not in codes:
+            codes.append(text)
+    return tuple(codes)
+
+
 def buildRegistryFilterExpr(registryFilter: RegistryFilter | None) -> str | None:
     """把过滤维度编译成 Milvus ``expr``；无过滤返回 ``None``（不收窄）。
 
     同维度内 OR、跨维度 AND。**绝不生成 ``not array_contains(...)``**
     （实测会命中空数组行 ⇒ 未归域的行会被当成「非该域」放进来）。
+
+    ⚠️ 字面量不合法（空 / 超长 / 含控制字符）⇒ **抛 ``ValueError``**：
+    闸门把异常转成空结果（fail-closed）；放行则会把「收窄」变成「放大」。
     """
     if registryFilter is None:
         return None
 
+    domainCodes = _normalizeFilterCodes(
+        registryFilter.domainCodes, "域", _MAX_CODE_LENGTH
+    )
+    orgCodes = _normalizeFilterCodes(
+        registryFilter.orgCodes, "组织", _MAX_CODE_LENGTH
+    )
+    entityTypes = _normalizeFilterCodes(
+        registryFilter.entityTypes, "实体", _MAX_ENTITY_TYPE_LENGTH
+    )
+
     parts: list[str] = []
 
-    if registryFilter.domainCodes:
+    if domainCodes:
         parts.append(
             " or ".join(
                 f'array_contains(domain_codes, "{_escapeLiteral(code)}")'
-                for code in registryFilter.domainCodes
+                for code in domainCodes
             )
         )
 
-    if registryFilter.orgCodes:
+    if orgCodes:
         parts.append(
             " or ".join(
                 f'array_contains(org_codes, "{_escapeLiteral(code)}")'
-                for code in registryFilter.orgCodes
+                for code in orgCodes
             )
         )
 
-    if registryFilter.entityTypes:
+    if entityTypes:
         parts.append(
             " or ".join(
                 f'entity_type == "{_escapeLiteral(code)}"'
-                for code in registryFilter.entityTypes
+                for code in entityTypes
             )
         )
 
@@ -250,6 +310,60 @@ def registryV2RowCount(type_: str) -> int:
     if not hasEmbeddingCollection(name):
         return 0
     return _collectionEntityCount(name)
+
+
+def _collectionRows(name: str) -> list[dict[str, Any]]:
+    """读集合的**治理维度行**（只读；不含向量）。
+
+    用 ``query``（返回可见行）而不是 ``num_entities``（物理行数，含墓碑）：
+    维度探针要回答的是「**能召回的行**里有多少带维度」。
+    """
+    collection = Collection(name, using=_connAlias())
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        page = collection.query(
+            expr="id >= 0",
+            limit=_READ_PAGE,
+            offset=offset,
+            output_fields=[
+                "ontology_id",
+                "domain_codes",
+                "org_codes",
+                "entity_type",
+            ],
+        )
+        if not page:
+            break
+        rows.extend(page)
+        offset += len(page)
+        if len(page) < _READ_PAGE:
+            break
+    return rows
+
+
+def _rowHasDimension(row: dict[str, Any]) -> bool:
+    """该行是否带了**任一**治理维度（域 / 组织 / 实体）。"""
+    if row.get("domain_codes"):
+        return True
+    if row.get("org_codes"):
+        return True
+    return bool(str(row.get("entity_type") or "").strip())
+
+
+def registryV2DimensionedRowCount(type_: str) -> int:
+    """**带任一治理维度**的可见行数；集合不存在返回 ``0``。
+
+    为什么物理行数不够：v2 里「行在、维度全空」是完全可能的
+    （维度解析失败写空 / 只回填了未归域的行）⇒ 带过滤的召回**恒空** ⇒
+    只看行数的探针会误报「就绪」⇒ 又是静默零召回。
+    """
+    name = REGISTRY_V2_COLLECTION_NAMES.get(type_)
+    if name is None:
+        raise ValueError(f"unknown embedding type: {type_!r}")
+    if not hasEmbeddingCollection(name):
+        return 0
+    return sum(1 for row in _collectionRows(name) if _rowHasDimension(row))
 
 
 def insertRegistryV2(records: list[dict[str, Any]]) -> None:

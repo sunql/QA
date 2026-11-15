@@ -2,15 +2,16 @@
 
 - **日期**：2026-11-15
 - **作者**：Claude（with user direction）
-- **Phase**：1109 WP-ONT-AI · P3a（D18–D21）+ **D21R 评审整改轮**
+- **Phase**：1109 WP-ONT-AI · P3a（D18–D21）+ **D21R / D21R2 评审整改轮**
 - **状态**：**代码完成、可合**；**CI 失败集合净新增 0**；**生产不部署**
 - **分支**：`feat/semantic-registry-rag`（worktree `/private/tmp/qa-rag-p3a`），base = `origin/main` `b6af98a1`
 - **迁移版本**：**无**（本批**零 DDL**：不改 PG 表结构、不加列、不改索引）
 - **上位计划**：[plan.md](./plan.md)（续接 `docs/update/1109/智能采购平台升级计划_日级排程_1109.md` §6）
-- **日常证据**：[D18](./daily/D18.md) · [D19](./daily/D19.md) · [D20](./daily/D20.md) · [D21](./daily/D21.md) · **[D21R](./daily/D21R.md)**（评审整改）
+- **日常证据**：[D18](./daily/D18.md) · [D19](./daily/D19.md) · [D20](./daily/D20.md) · [D21](./daily/D21.md) · **[D21R](./daily/D21R.md)**（评审整改）· **[D21R2](./daily/D21R2.md)**（二轮整改：作用域语义反转 + 字面量硬化）
 
-> **零部署**：开关 `ENABLE_SEMANTIC_REGISTRY_RAG` **默认关**，关态读路径逐字节等于今天
-> （读 v1、不碰 v2、不过滤；写路径同理不写 v2）⇒ 合并后不触发发版。
+> **零部署**：开关 `ENABLE_SEMANTIC_REGISTRY_RAG` **默认关**，关态**且调用方未声明作用域**时读路径
+> 逐字节等于今天（读 v1、不碰 v2、不过滤；写路径同理不写 v2）⇒ 合并后不触发发版。
+> ⚠️ 开关关**且调用方声明了作用域** ⇒ **fail-closed（空结果）**，不回落成不过滤的 v1。
 
 ---
 
@@ -36,17 +37,27 @@ P1a/P1b/P2 已把「语义发布」做成自包含快照并接进 NL2SQL 的 sch
 | D20 | `90652543` | 回填脚本 + 影子比对脚本 + 报告 | 泄漏 0、漏召回 0、多召回 0 |
 | D21 | 见 PR | 回归对差 + 文档 | 净新增失败 0 |
 | D21R | 见 PR | **评审整改**：fail-closed 口径补全 + 就绪探针 + 影子脚本委托生产构造器 + 死代码清理 + `--limit` 修复 + **独立维度交叉核对** | RED 10 → GREEN 73；交叉核对 3,791 行 **0 不一致** |
+| D21R2 | 见 PR | **二轮整改**：**作用域语义反转**（删 `isScopeBound`，「实例存在 = 已声明作用域」）+ **字面量校验**（空/超长/控制字符 ⇒ 拒绝）+ 探针增报**带维度行数** + 核对脚本**分层退出码**（零行比对 = 假绿） | RED 27 → GREEN 89 |
 
 ### 2.1 关键设计
 
 - **闸门是唯一出口**：`semantic_registry_rag_gate.searchRegistryEmbeddings` ——
   `ontology_service.searchByKeyword/searchByEmbedding` 都走它 ⇒ 过滤口径只有一处。
-- **有作用域一律 fail-closed**（D21R 补全为**四种**情形）：
-  ① v2 缺失；② v2 检索异常；③ 过滤表达式非法（含 `releaseId <= 0` 这种非法发布版本）；
-  ④ **开关关**（这条路径没有能力施加收窄）；⑤ **作用域已声明但取值为空**（deny-all）。
+- **有作用域一律 fail-closed**（D21R 补全为**五种**情形）：
+  ① v2 缺失；② v2 检索异常；③ 过滤表达式非法（含 `releaseId <= 0` 这种非法发布版本，
+  以及 D21R2 新增的**非法字面量**）；④ **开关关**（这条路径没有能力施加收窄）；
+  ⑤ **作用域已声明但取值为空**（deny-all）。
   五种都**返回空结果**，**绝不回落成无过滤的 v1**（回落即泄漏）；**无作用域**才回落 v1。
-- **「声明了作用域」与「没有作用域」必须能区分**：新增 `RegistryFilter.isScopeBound` ——
-  「我这一轮有权看的域是空集」= **什么都不许看到**，不是「随便看」。
+- **「有作用域」= 过滤器的「存在」**（D21R2）：`registryFilter=None` ⇒ 无作用域；
+  **任何 `RegistryFilter` 实例** ⇒ 已声明作用域（各维度取值为空 ⇒ deny-all）。
+  ⚠️ 曾用 `isScopeBound` 标志位表达「已声明但取值为空」——**已下线**：标志位可忘记，
+  默认写法（忘写）会变成「全量可见」⇒ 越权。**存在即声明** ⇒ 不可能忘。
+- **降级原因可观测**：`degradedReason` 五种取值
+  （`switch_off_denied` / `filter_invalid` / `scope_denied` / `v2_missing` / `v2_error`）
+  **全是「拒绝/降级」，没有「放行」**。
+- **过滤侧字面量 fail fast**（D21R2）：空 / 纯空白 / 超长（域码组织码 > 64 字、实体码 > 32 字）/
+  含控制字符 / 非字符串 ⇒ `ValueError` ⇒ 闸门转 `filter_invalid` ⇒ 空结果。
+  理由：空串是存储层合法哨兵值 ⇒ 放行 = 「放大」；写侧静默截断 ⇒ 前缀可跨域命中。
 - **维度解析不猜**：查不到治理事实 ⇒ 写空维度（显式「未归域」）⇒ 在域过滤下被排除，
   行为可解释；写路径**不原地改调用方的 record**（返回新行）。
 - **不重算向量**：回填直接搬 v1 现有 embedding —— 一旦重算，影子比对的差异会混入向量漂移，
@@ -120,6 +131,16 @@ D20 的「泄漏 0」若只在 v2 行内部自洽 ⇒ 可能是**假绿**。新�
 | `unit -k "milvus or ontology or kpi_vector or knowledge_compil or registry"` | 见 `daily/D21R.md`（整改后复跑） |
 | 新增纯逻辑用例 | 闸门/表达式/作用域/就绪探针/独立核对：**73 + 6 + 17 全绿** |
 
+### 4.5 D21R2 回归（二轮整改后）
+
+| 套件 | RED | GREEN |
+|---|---|---|
+| `test_registry_filter_hardening` + `test_registry_filter_scope` + `test_registry_filter_expr` + `test_semantic_registry_rag_gate` + `test_registry_v2_readiness` + `test_verify_registry_v2_dimensions` | **27 failed / 62 passed** | **89 passed** |
+
+新增用例覆盖：作用域语义反转（空/半声明过滤器 = deny-all）、字面量校验（6 类非法输入）、
+非法字面量在闸门里 fail-closed、探针异常记 `None`、核对脚本**分层退出码**（2/3/1/0）、
+跨类型同号各计不一致。全部**纯对象/纯函数**层（不连 Milvus / PG）。
+
 ---
 
 ## 5. 遗留与后续
@@ -134,6 +155,8 @@ D20 的「泄漏 0」若只在 v2 行内部自洽 ⇒ 可能是**假绿**。新�
 | L-6 | 降级痕迹（`degradedReason`）**未透传到 API 响应**（服务层只返回 hits） | fail-closed 之后 = 空结果 + WARNING 日志（不构成越权）；改响应契约要动前端 ⇒ 另立变更 |
 | L-7 | `business_object` / `data_domain` 写入口**未收 admin** ⇒ 域/组织维度可被污染 | 与治理写入口收口合并（受控变更） |
 | L-8 | 语义发布维度（`release_id`）当前**恒 0** ⇒ 发布维度事实上不可用 | 属 **P3b（D22–D25）** 发布镜像；接线后再放开 `releaseId` 过滤 |
-| L-9 | 就绪探针只判「有没有行」，判不出「行数是否少于预期」 | 未来可加「按类型行数 < PG 实体数」告警 |
+| L-9 | 就绪探针只判「有没有行」「有没有维度」，判不出「行数是否**少于预期**」 | 未来可加「按类型行数 < PG 实体数」告警（需治理表实时基线） |
+| L-10 | 过滤字面量仍**无字符白名单**（D21R2 只拒了控制字符与超长） | 合法中文/连字符域码不能被白名单误伤 ⇒ 观察项 |
+| L-11 | 独立核对脚本**不比对 `release_id`**（本仓尚无「发布 → 向量行」接线，恒为 0） | P3b 接线后再纳入比对 |
 
 **续接**：1109 排程 **P3b（D22–D25）** —— Neo4j 发布镜像。

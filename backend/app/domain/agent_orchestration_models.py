@@ -89,6 +89,23 @@ class AgentOrchestrationRun(Base, TimestampMixin):
     tool_bindings_snapshot: Mapped[list[dict]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
+    # ===== 语义发布钉住（P3c D26，迁移 0145；三列可空 ⇒ 旧 run 语义不变）=====
+    # 注释与迁移 0145 的字面量逐字一致（alembic 比对列注释 ⇒ 漂移防线）。
+    semantic_release_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="0145，P3c D26：本 run 钉住的语义发布 id（NULL = 未钉住 = 照旧取当前 ACTIVE）",
+    )
+    semantic_release_version: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="0145，P3c D26：钉住发布的版本号快照（冗余，防发布行被删后 run 不可读）",
+    )
+    semantic_manifest_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="0145，P3c D26：钉住发布的 manifest 哈希快照（完整性核对用）",
+    )
     max_observation_chars: Mapped[int] = mapped_column(Integer, nullable=False)
     question: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[str] = mapped_column(String(64), nullable=False)

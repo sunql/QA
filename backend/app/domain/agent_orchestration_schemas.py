@@ -196,6 +196,10 @@ class AgentRunRead(CamelModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     revision: int
+    # 语义发布钉住（P3c D26/D27；NULL = 未钉住 = 照旧取当前 ACTIVE）
+    semantic_release_id: int | None = None
+    semantic_release_version: str | None = None
+    semantic_manifest_hash: str | None = None
 
 
 class AgentRunStepRead(CamelModel):

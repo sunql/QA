@@ -180,6 +180,16 @@ class _Ports:
 
         return mirror.countReleaseMirrorEdges(releaseId)
 
+    def readNodes(self, entityType, releaseId) -> list[dict]:
+        from app.infrastructure import neo4j_mirror_client as mirror
+
+        return mirror.readReleaseMirrorNodes(entityType, releaseId)
+
+    def readEdges(self, releaseId) -> list[tuple[str, str, str]]:
+        from app.infrastructure import neo4j_mirror_client as mirror
+
+        return mirror.readReleaseMirrorEdges(releaseId)
+
     # --- 台账 -------------------------------------------------------------
     def readState(self, releaseId):
         from app.infrastructure import neo4j_mirror_client as mirror

@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     neo4jUri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
     neo4jUser: str = Field(default="neo4j", alias="NEO4J_USER")
     neo4jPassword: str = Field(default="qa_neo4j_dev_2026", alias="NEO4J_PASSWORD")
+    # 「按发布读图」开关（P3b D25）：设成某次语义发布的 id ⇒ 本体读路由到
+    # 那一版的图谱镜像（Release* label）；不设（默认）/0 ⇒ 主图（与现状一致）。
+    # 一键回退 = 拿掉这个环境变量。切换前置条件：先跑 verify_graph_mirror 且退出码 0。
+    semanticGraphReleaseId: int | None = Field(
+        default=None, alias="SEMANTIC_GRAPH_RELEASE_ID"
+    )
 
     # ===== Milvus 向量库 =====
     milvusUri: str = Field(default="http://localhost:19530", alias="MILVUS_URI")

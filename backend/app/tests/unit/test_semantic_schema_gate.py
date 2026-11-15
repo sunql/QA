@@ -615,6 +615,40 @@ class Test接线点:
         assert reference in systemPrompt
         assert systemPrompt.count(reference) == 1
 
+    async def test_开关打开走快照时generateSql仍过SQL_Guard链(
+        self, switchOn, monkeypatch
+    ) -> None:
+        """G3 第 3 条：守卫链与 schema 文本来源**无关** —— 走快照时也必须在。
+
+        守卫在 `generateSql` 里、位于渲染之后；本条钉的是「开关打开时那一段仍然跑到」：
+        违规 SQL（DELETE）必须被拒并回注原因重试，合法 SQL 必须放行。
+
+        为什么要单独钉：守卫链有无与 schema 来源在代码上是两件事，但删掉
+        `_assert_read_only(sql)` 这一行时，**只有**这类用例会红 ——
+        `test_datasource_pool` 那组只测守卫函数本身，测不到它有没有被调用。
+        """
+        from app.services.nl2sql_service import Nl2SqlService
+
+        classes, properties, joins = _dataset()
+        snapshot = _FakeSnapshot(_manifest(classes, properties, joins))
+        _installSnapshot(monkeypatch, snapshot)
+        fake = _ScriptedLlm([
+            _Resp("```sql\nDELETE FROM SUPPLIER\n```"),
+            _Resp("```sql\nSELECT SUPPLIER_CODE FROM SUPPLIER\n```"),
+        ])
+
+        result = await Nl2SqlService().generateSql(
+            "问题", classes, fake, _llmConfig(), joins=joins,
+            session=_FakeSession(), maxRetries=1,
+        )
+
+        assert result.sql == "SELECT SUPPLIER_CODE FROM SUPPLIER"
+        # 对照 snapshot 自己的 id（不要写死数值），断言本用例确实处在「走快照」那一态
+        assert result.semanticReleaseId == snapshot.id, "本条必须在「走快照」的那一态下成立"
+        assert len(fake.calls) == 2, "违规 SQL 必须被拦下并重试一次"
+        # 回注的是守卫原因（而不是解析失败等别的分支）⇒ 证明确实是守卫拦的
+        assert "安全校验" in fake.calls[1]["messages"][1].content
+
     async def test_generateQueryPlan走闸门_快照新鲜时prompt列序按快照(
         self, switchOn, monkeypatch
     ) -> None:

@@ -43,6 +43,10 @@ from app.infrastructure.milvus_client import (
 )
 from app.services.embedding_service import EmbeddingService
 from app.services.id_mapping_service import IdMappingService
+from app.services.registry_v2_write import (
+    deleteRegistryV2Embedding,
+    syncRegistryV2Embeddings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +220,8 @@ async def syncKpiVectorNow(session: AsyncSession, kpiId: int) -> None:
     if kpi.status != PUBLISHED_STATUS:
         async with _milvusWriteLock():
             await asyncio.to_thread(deleteByOntologyIdDual, kpi.id, KPI_VECTOR_TYPE)
+            # P3a 双写：v2 集合同样删（非 PUBLISHED ⇒ 不该被召回）。
+            await deleteRegistryV2Embedding(kpi.id, KPI_VECTOR_TYPE)
         logger.info(
             "KPI id=%d status=%s 非 PUBLISHED，向量保持删除", kpiId, kpi.status
         )
@@ -225,7 +231,7 @@ async def syncKpiVectorNow(session: AsyncSession, kpiId: int) -> None:
     )
     async with _milvusWriteLock():
         await asyncio.to_thread(deleteByOntologyIdDual, kpi.id, KPI_VECTOR_TYPE)
-        await asyncio.to_thread(insertEmbeddingsDual, [{
+        record = {
             "ontology_id": kpi.id,
             "type": KPI_VECTOR_TYPE,
             "name": kpi.kpi_name,
@@ -233,7 +239,10 @@ async def syncKpiVectorNow(session: AsyncSession, kpiId: int) -> None:
             "description": kpi.business_definition or "",
             "embedding": vec,
             "external_id": kpi.kpi_code,
-        }])
+        }
+        await asyncio.to_thread(insertEmbeddingsDual, [record])
+        # P3a 双写：v2 集合（带治理维度：KPI → metric → class 的域/组织/实体）。
+        await syncRegistryV2Embeddings([record], session=session)
 
 
 async def deleteKpiVectorNow(kpiId: int) -> None:
@@ -244,6 +253,8 @@ async def deleteKpiVectorNow(kpiId: int) -> None:
     """
     async with _milvusWriteLock():
         await asyncio.to_thread(deleteByOntologyIdDual, kpiId, KPI_VECTOR_TYPE)
+        # P3a 双写：v2 集合同删。
+        await deleteRegistryV2Embedding(kpiId, KPI_VECTOR_TYPE)
 
 
 async def deleteKpiGraphNow(session: AsyncSession, kpiId: int) -> None:

@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.dependencies import CurrentUser
+from app.domain.registry_filter import RegistryFilter
 from app.domain.enums import ClassRelationType, MetricStatus, MetricType
 from app.domain.exceptions import (
     MilvusError,
@@ -92,6 +93,11 @@ from app.services.messages_zh import (
     MSG_VECTOR_SEARCH_FAILED,
     MSG_VECTOR_SYNC_FAILED,
 )
+from app.services.registry_v2_write import (
+    deleteRegistryV2Embedding,
+    syncRegistryV2Embeddings,
+)
+from app.services.semantic_registry_rag_gate import searchRegistryEmbeddings
 from app.services.time_scope_renderer import TIME_SCOPE_PLACEHOLDER
 from app.services.vector_similarity import distanceToSimilarity
 
@@ -680,6 +686,8 @@ class OntologyService:
             _logNeo4jFailure("节点删除", id, exc)
         try:
             milvus.deleteByOntologyIdDual(id, "class")
+            # P3a 双写：v2 集合同删（软删除的类不该再被召回）。
+            await deleteRegistryV2Embedding(id, "class")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Milvus 记录删除失败 id=%d: %s", id, exc)
         logger.info("软删除本体类 id=%d（valid_to=%s）", id, entity.valid_to)
@@ -1006,6 +1014,8 @@ class OntologyService:
             _logNeo4jFailure("节点删除", id, exc)
         try:
             milvus.deleteByOntologyIdDual(id, "property")
+            # P3a 双写：v2 集合同删。
+            await deleteRegistryV2Embedding(id, "property")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Milvus 记录删除失败 id=%d: %s", id, exc)
         logger.info("删除本体属性 id=%d", id)
@@ -1267,6 +1277,8 @@ class OntologyService:
             _logNeo4jFailure("节点删除", id, exc)
         try:
             milvus.deleteByOntologyIdDual(id, "metric")
+            # P3a 双写：v2 集合同删。
+            await deleteRegistryV2Embedding(id, "metric")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Milvus 记录删除失败 id=%d: %s", id, exc)
         logger.info("删除本体指标 id=%d", id)
@@ -1685,6 +1697,7 @@ class OntologyService:
         *,
         topK: int = 5,
         typeFilter: str | None = None,
+        registryFilter: RegistryFilter | None = None,
     ) -> list[OntologySearchResult]:
         """端到端语义检索：文本 -> embedding -> Milvus 近邻搜索。
 
@@ -1692,18 +1705,23 @@ class OntologyService:
         供 API 层直接以关键词调用。embedding 生成失败抛 LlmClientError，
         Milvus 检索失败抛 MilvusError（均为领域异常，由全局处理器转 4xx）。
 
+        P3a：检索经**语义注册表 RAG 闸门**（读 v1 还是读带治理维度的 v2、
+        要不要带过滤维度，由闸门按开关决定）。开关关 ⇒ 与今天逐字节一致。
+
         Args:
             query: 自然语言关键词。
             topK: 返回条数。
             typeFilter: 可选，限定类型（class/property/metric）。
+            registryFilter: 可选，治理维度过滤（``None`` = 不收窄）。
         """
         embedding = await self._ensureEmbedding().generateEmbedding(query)
         try:
-            hits = await asyncio.to_thread(
-                milvus.searchEmbeddingsByTypeRouted, embedding, topK, typeFilter
+            result = await asyncio.to_thread(
+                searchRegistryEmbeddings, embedding, topK, typeFilter, registryFilter
             )
         except (MilvusException, OSError) as exc:
             raise MilvusError(MSG_VECTOR_SEARCH_FAILED, detail=str(exc)) from exc
+        hits = result.hits
 
         # L2 距离 -> [0,1] 相似度（口径单源：services/vector_similarity.py）
         return [
@@ -1723,9 +1741,15 @@ class OntologyService:
         queryEmbedding: list[float],
         topK: int = 5,
         typeFilter: str | None = None,
+        registryFilter: RegistryFilter | None = None,
     ) -> list[dict[str, Any]]:
-        """向量相似度搜索（embedding 由调用方通过 LLM 生成）。"""
-        return milvus.searchEmbeddingsByTypeRouted(queryEmbedding, topK, typeFilter)
+        """向量相似度搜索（embedding 由调用方通过 LLM 生成）。
+
+        P3a：经语义注册表 RAG 闸门（开关关 ⇒ 与今天逐字节一致）。
+        """
+        return searchRegistryEmbeddings(
+            queryEmbedding, topK, typeFilter, registryFilter
+        ).hits
 
     def syncEmbedding(
         self,
@@ -1752,6 +1776,40 @@ class OntologyService:
             logger.error("Milvus embedding 同步失败 id=%d: %s", ontologyId, exc)
             raise OntologyError(MSG_VECTOR_SYNC_FAILED.format(exc=exc)) from exc
 
+    async def syncEmbeddingToRegistryV2(
+        self,
+        ontologyId: int,
+        type: str,
+        name: str,
+        alias: str | None,
+        description: str | None,
+        embedding: list[float],
+        *,
+        session: AsyncSession | None = None,
+    ) -> None:
+        """v2 双写（best-effort）：同一条 embedding 连同治理维度写进 v2 集合。
+
+        开关关时**不写**（P3a 整体未启用 ⇒ 写路径也与今天逐字节一致）。
+        v2 写失败只告警（影子副本挂了不该拖垮 CRUD）——「能不能用 v2 召回」
+        由读路径闸门 fail-closed 兜底。
+
+        ``session`` 省略时自开短会话（短会话看不到未提交的行 ⇒ 调用方应在
+        **提交后**调用；CRUD 路径的 commit 都在 Milvus 同步之前 ✓）。
+        """
+        await syncRegistryV2Embeddings(
+            [
+                {
+                    "ontology_id": ontologyId,
+                    "type": type,
+                    "name": name,
+                    "alias": alias,
+                    "description": description,
+                    "embedding": embedding,
+                }
+            ],
+            session=session,
+        )
+
     async def syncClassEmbedding(self, session: AsyncSession, id: int) -> None:
         """手动同步单个类的向量：以 PG 当前数据重新生成 embedding 并覆盖 Milvus。
 
@@ -1768,6 +1826,16 @@ class OntologyService:
             alias=entity.class_alias,
             description=entity.description,
             embedding=vec,
+        )
+        # P3a 双写：同一条向量连同治理维度写进 v2 集合（开关关时不写）。
+        await self.syncEmbeddingToRegistryV2(
+            ontologyId=entity.id,
+            type="class",
+            name=entity.class_name,
+            alias=entity.class_alias,
+            description=entity.description,
+            embedding=vec,
+            session=session,
         )
 
     async def syncMissingClassEmbeddings(
@@ -1893,6 +1961,8 @@ class OntologyService:
         if records:
             try:
                 milvus.insertEmbeddingsDual(records)
+                # P3a 双写：同批记录连同治理维度写进 v2 集合（开关关时不写）。
+                await syncRegistryV2Embeddings(records, session=session)
                 syncedClasses = sum(1 for r in records if r["type"] == "class")
                 syncedProps = sum(1 for r in records if r["type"] == "property")
                 syncedMetrics = sum(1 for r in records if r["type"] == "metric")
@@ -2357,6 +2427,16 @@ class OntologyService:
                 description=entity.description,
                 embedding=vec,
             )
+            # P3a 双写：v2 集合（带治理维度）。类行此时**已提交**
+            # （CRUD 先 commit 再同步向量）⇒ 自开短会话能查到治理事实。
+            await self.syncEmbeddingToRegistryV2(
+                ontologyId=entity.id,
+                type="class",
+                name=entity.class_name,
+                alias=entity.class_alias,
+                description=entity.description,
+                embedding=vec,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Milvus 类向量自动同步失败 id=%d name=%s: %s",
@@ -2386,6 +2466,15 @@ class OntologyService:
                 description=entity.description,
                 embedding=vec,
             )
+            # P3a 双写：v2 集合（带治理维度，继承其 class 的维度）。
+            await self.syncEmbeddingToRegistryV2(
+                ontologyId=entity.id,
+                type="property",
+                name=entity.property_name,
+                alias=entity.property_alias,
+                description=entity.description,
+                embedding=vec,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Milvus 属性向量自动同步失败 id=%d name=%s: %s",
@@ -2408,6 +2497,15 @@ class OntologyService:
                 _metricEmbeddingText(entity)
             )
             self.syncEmbedding(
+                ontologyId=entity.id,
+                type="metric",
+                name=entity.metric_name,
+                alias=entity.metric_alias,
+                description=entity.agg_function,
+                embedding=vec,
+            )
+            # P3a 双写：v2 集合（带治理维度，继承其目标类的维度）。
+            await self.syncEmbeddingToRegistryV2(
                 ontologyId=entity.id,
                 type="metric",
                 name=entity.metric_name,

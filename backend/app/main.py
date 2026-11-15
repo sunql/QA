@@ -191,6 +191,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _semanticNl2sqlAuthReason = semanticRegistryNl2sqlAuthMisconfiguration(settings)
     if _semanticNl2sqlAuthReason:
         logger.error("🚨 安全告警：%s", _semanticNl2sqlAuthReason)
+    # 语义注册表 RAG 过滤（P3a D19）：过滤维度若来自「按身份解析的可见域」，
+    # 它就是授权边界；stub 鉴权下身份可伪造 ⇒ 收窄形同虚设。与上面同一处理方式。
+    from app.config import semanticRegistryRagAuthMisconfiguration
+
+    _semanticRagAuthReason = semanticRegistryRagAuthMisconfiguration(settings)
+    if _semanticRagAuthReason:
+        logger.error("🚨 安全告警：%s", _semanticRagAuthReason)
     # config 重复字段批：jwtSecret 曾有两份声明（旧块 default="" 被占位符覆盖），
     # 漏配时静默用公开已知的开发密钥；旧注释承诺的「启动期校验」当时从未实现，此处补上。
     from app.config import jwtSecretInsecurityReason

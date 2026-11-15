@@ -9,6 +9,8 @@ Embeddings are orthogonal basis vectors for deterministic L2 distances.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.infrastructure.milvus_client import (
@@ -94,3 +96,113 @@ def test_search_type_routed_no_filter_merges_3_collections(milvusCleanClient):
     assert hits[0]["type"] == "class"
     assert hits[0]["distance"] == pytest.approx(0.0, abs=1e-6)
     assert hits[0]["ontology_id"] == 2001
+
+# ---------------------------------------------------------------------------
+# P3a：语义注册表 RAG —— 带治理维度的 v2 召回（**双向**用例）
+#
+# 为什么放在这个文件：P3a 是「检索路径的第二次演进」（v1 无过滤 → v2 带治理维度
+# 过滤），与本文件同属「检索路由」主题。**不新建 integration 文件** ——
+# CI 的 integration 分片按「文件排序后下标 mod 4」分配，新增文件会把后续文件
+# 换分片（假 net-new 失败，见 Harness/rules/测试规范.md）。
+# ---------------------------------------------------------------------------
+
+_REGISTRY_V2_DIM = 1024
+
+
+@pytest.fixture(scope="module", autouse=True)
+def ensureMilvusTestDatabase() -> None:
+    """确保 Milvus 隔离库存在（分片归属会变，不能靠同分片文件先跑建库）。"""
+    from app.tests.milvus_isolation import ensureIsolatedDatabaseForTest
+
+    ensureIsolatedDatabaseForTest()
+
+
+@pytest.fixture
+def registryV2CleanClient():
+    """v2 集合清理夹具：drop 前先过**隔离闸门**（默认库=生产，误删不可逆）。"""
+    from app.infrastructure.milvus_client import _connAlias, hasEmbeddingCollection
+    from app.infrastructure.milvus_registry_v2 import REGISTRY_V2_COLLECTION_NAMES
+    from app.tests.milvus_isolation import guardIsolatedDatabase
+    from pymilvus import utility
+
+    def _dropRegistryV2Collections() -> None:
+        for name in REGISTRY_V2_COLLECTION_NAMES.values():
+            if hasEmbeddingCollection(name):
+                utility.drop_collection(name, using=_connAlias())
+
+    guardIsolatedDatabase()
+    _dropRegistryV2Collections()
+    yield
+    _dropRegistryV2Collections()
+
+
+def _seedRegistryV2Rows() -> list[float]:
+    """种 3 行 v2 类向量：命中域 SUP / 命中域 MAT / **未归域**（空维度）。
+
+    三行用同一个向量 ⇒ 未过滤时三者都会进 topK；过滤后只剩命中域的那行。
+    """
+    from app.infrastructure.milvus_registry_v2 import insertRegistryV2
+
+    vec = [0.5] * _REGISTRY_V2_DIM
+    insertRegistryV2([
+        {"ontology_id": 9101, "type": "class", "name": "供应商", "alias": "",
+         "description": "", "embedding": vec,
+         "domain_codes": ("SUP",), "org_codes": ("org_sup",), "entity_type": "SUPPLIER"},
+        {"ontology_id": 9102, "type": "class", "name": "物料", "alias": "",
+         "description": "", "embedding": vec,
+         "domain_codes": ("MAT",), "org_codes": ("org_mat",), "entity_type": "MATERIAL"},
+        {"ontology_id": 9103, "type": "class", "name": "未归域类", "alias": "",
+         "description": "", "embedding": vec},
+    ])
+    return vec
+
+
+@pytest.mark.integration
+def test_有权限能召回无权限不能召回(registryV2CleanClient):
+    """双向用例（D19 验收口径）：域命中 ⇒ 召回；域不命中 ⇒ **不**召回。
+
+    另外钉死 fail-closed：**未归域**（空维度）的行在域过滤下被排除
+    （空数组行不会被 ``array_contains`` 命中）。
+    """
+    from app.domain.registry_filter import RegistryFilter
+    from app.infrastructure.milvus_registry_v2 import (
+        buildRegistryFilterExpr,
+        searchRegistryV2,
+    )
+
+    vec = _seedRegistryV2Rows()
+
+    expr = buildRegistryFilterExpr(RegistryFilter(domainCodes=("SUP",)))
+    assert expr is not None
+    hits = searchRegistryV2(vec, topK=10, typeFilter="class", expr=expr)
+    ids = {h["ontology_id"] for h in hits}
+    assert 9101 in ids, "命中域的行必须能召回"
+    assert 9102 not in ids, "未命中域的行不得被召回（越权召回=泄漏）"
+    assert 9103 not in ids, "未归域的行在域过滤下必须被排除（fail-closed）"
+
+    exprMat = buildRegistryFilterExpr(RegistryFilter(domainCodes=("MAT",)))
+    assert exprMat is not None
+    idsMat = {h["ontology_id"] for h in
+              searchRegistryV2(vec, topK=10, typeFilter="class", expr=exprMat)}
+    assert idsMat == {9102}, "换一个域 ⇒ 只召回该域的行"
+
+
+@pytest.mark.integration
+def test_闸门按维度收窄且不回落到无过滤结果(registryV2CleanClient, monkeypatch):
+    """闸门（有作用域）必须读 v2 并带过滤；v2 不可用时也不许回落成无过滤的 v1。"""
+    from app.domain.registry_filter import RegistryFilter
+    from app.services import semantic_registry_rag_gate as gate
+
+    vec = _seedRegistryV2Rows()
+    monkeypatch.setattr(
+        gate, "getSettings", lambda: SimpleNamespace(enableSemanticRegistryRag=True)
+    )
+
+    result = gate.searchRegistryEmbeddings(
+        vec, topK=10, typeFilter="class",
+        registryFilter=RegistryFilter(domainCodes=("SUP",)),
+    )
+
+    assert result.usedRegistryV2 is True
+    assert result.degradedReason is None
+    assert {h["ontology_id"] for h in result.hits} == {9101}

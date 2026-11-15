@@ -19,6 +19,24 @@ from app.domain.exceptions import ValidationError
 UNIFIED_ID_PREFIX = "obj"
 UNIFIED_ID_SEPARATOR = ":"
 
+# `business_object` 的取值（SSOT）。
+#
+# 为什么要收口到一处：`id_mapping.business_object` 的字面量此前散落在
+# `ontology_service`（CLASS / PROPERTY / METRIC）与 `kpi_vector_graph_sync`
+# （KPI）里。解析侧若抄错一个字母 ⇒ 关联条件不成立 ⇒ **全部**解析静默落空，
+# 报出来的是「未登记统一 ID」——**把排查引向错方向**。
+BUSINESS_OBJECT_CLASS = "CLASS"
+BUSINESS_OBJECT_PROPERTY = "PROPERTY"
+BUSINESS_OBJECT_METRIC = "METRIC"
+BUSINESS_OBJECT_KPI = "KPI"
+
+BUSINESS_OBJECTS: tuple[str, ...] = (
+    BUSINESS_OBJECT_CLASS,
+    BUSINESS_OBJECT_PROPERTY,
+    BUSINESS_OBJECT_METRIC,
+    BUSINESS_OBJECT_KPI,
+)
+
 BUSINESS_OBJECT_MAX_LENGTH = 32
 EXTERNAL_ID_MAX_LENGTH = 128
 UNIFIED_ID_MAX_LENGTH = 128

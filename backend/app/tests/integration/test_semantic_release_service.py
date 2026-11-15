@@ -21,10 +21,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
-from app.domain.models import AuditLog
+from app.domain.models import (
+    AuditLog,
+    IdMapping,
+    KpiCatalog,
+    OntologyClass,
+    OntologyMetric,
+    OntologyProperty,
+)
 from app.domain.semantic_manifest_schema import manifestHash
 from app.domain.semantic_release_models import SemanticRelease
 from app.services import semantic_release_service as releaseServiceModule
+from app.services.semantic_graph_mirror_resolution import resolveManifestEntities
 from app.services.semantic_registry_service import (
     SemanticReleaseIntegrityError,
     semanticRegistry,
@@ -441,3 +449,119 @@ async def test_only_one_active_row_survives_concurrent_scope(
     assert activeCount == 1
     await session.refresh(first)
     assert first.status == "ACTIVE"
+
+
+# =============================================================================
+# P3b D22：发布镜像的名字 → unified_id 解析（真实 PG）
+# =============================================================================
+
+
+async def test_resolve_manifest_entities_maps_names_to_unified_ids(
+    session: AsyncSession,
+) -> None:
+    """manifest 用名字、图谱用 unified_id：解析必须对上真实 id_mapping 行。"""
+    cls = OntologyClass(
+        class_name="MIRROR_CLASS_A",
+        class_alias=None,
+        description=None,
+        source_table=None,
+        object_type=None,
+        object_owner=None,
+        parent_class_id=None,
+        created_by=None,
+        version=1,
+    )
+    session.add(cls)
+    await session.flush()
+    prop = OntologyProperty(
+        class_id=cls.id,
+        property_name="MIRROR_PROP_A",
+        property_alias=None,
+        description=None,
+        data_type="STRING",
+        is_primary_key=False,
+        is_foreign_key=False,
+        source_column=None,
+    )
+    metric = OntologyMetric(
+        metric_name="MIRROR_METRIC_A",
+        metric_alias=None,
+        formula="SUM(1)",
+        agg_function="SUM",
+        target_class_id=None,
+        created_by=None,
+    )
+    kpi = KpiCatalog(kpi_code="MIRROR_KPI_A", kpi_name="镜像 KPI")
+    session.add_all([prop, metric, kpi])
+    await session.flush()
+    session.add_all(
+        [
+            IdMapping(
+                unified_id=f"obj:CLASS:{cls.id}",
+                business_object="CLASS",
+                external_id=str(cls.id),
+                pg_table="ontology_class",
+                pg_id=str(cls.id),
+            ),
+            IdMapping(
+                unified_id=f"obj:PROPERTY:{prop.id}",
+                business_object="PROPERTY",
+                external_id=str(prop.id),
+                pg_table="ontology_property",
+                pg_id=str(prop.id),
+            ),
+            IdMapping(
+                unified_id=f"obj:METRIC:{metric.id}",
+                business_object="METRIC",
+                external_id=str(metric.id),
+                pg_table="ontology_metric",
+                pg_id=str(metric.id),
+            ),
+            IdMapping(
+                unified_id=f"obj:KPI:{kpi.id}",
+                business_object="KPI",
+                external_id=str(kpi.id),
+                pg_table="kpi_catalog",
+                pg_id=str(kpi.id),
+            ),
+        ]
+    )
+    await session.commit()
+
+    resolution = await resolveManifestEntities(
+        session,
+        {
+            "classes": [
+                {
+                    "className": "MIRROR_CLASS_A",
+                    "properties": [{"propertyName": "MIRROR_PROP_A"}],
+                }
+            ],
+            "metrics": [{"metricName": "MIRROR_METRIC_A"}],
+            "kpis": [{"kpiCode": "MIRROR_KPI_A"}],
+            "joins": [],
+        },
+    )
+
+    assert resolution.classIds["MIRROR_CLASS_A"] == f"obj:CLASS:{cls.id}"
+    assert resolution.propertyIds[("MIRROR_CLASS_A", "MIRROR_PROP_A")] == (
+        f"obj:PROPERTY:{prop.id}"
+    )
+    assert resolution.metricIds["MIRROR_METRIC_A"] == f"obj:METRIC:{metric.id}"
+    assert resolution.kpiIds["MIRROR_KPI_A"] == f"obj:KPI:{kpi.id}"
+
+
+async def test_resolve_manifest_entities_reports_missing_entities(
+    session: AsyncSession,
+) -> None:
+    """本体里没有的实体 ⇒ 解析不到（键不存在），镜像计划里逐条记为未解析。"""
+    resolution = await resolveManifestEntities(
+        session,
+        {
+            "classes": [{"className": "MIRROR_CLASS_MISSING", "properties": []}],
+            "metrics": [],
+            "kpis": [],
+            "joins": [],
+        },
+    )
+    assert "MIRROR_CLASS_MISSING" not in resolution.classIds

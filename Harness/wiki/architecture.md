@@ -260,3 +260,79 @@ SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = to_regclass
 7. **alembic 升级后复核盲区结论**：`alembic>=1.13.0` 是开放区间，autogenerate 的比较逻辑
    会随版本变 ⇒ 「alembic 不比较索引谓词」这类结论是**版本相关**的，升级后需重新实测
    （当前实测版本 **1.19.1**）。
+
+---
+
+## 发布维度：语义发布（P1）与图谱镜像（P3b）
+
+### 为什么有这一层
+
+发布（`semantic_release`）落的是一份**自包含快照** `manifest_json`（6 个分区：
+domains / classes / joins / metrics / kpis / businessObjects），但**图谱侧原本没有任何
+发布维度**：
+
+- 节点写路径是 `MERGE (c:Class {unified_id})` ⇒ 同一节点被所有发布共享，属性原地覆盖
+  ⇒ 「A 版发布时的类 X 长什么样」在图里查不到；
+- 边是 `MERGE (a)-[:REL]->(b)`，**无属性、无键** ⇒ 边也没有版本；
+- 消费方 `MATCH (c:Class)` / `getClassIds()` / `getJoinPairs()` 一律不带发布维度。
+
+⇒ 图谱只能回答「**现在**的图是什么」，回答不了「**某一版发布**的图是什么」。
+
+### 三层结构
+
+| 层 | 载体 | 生命周期 | 消费者 |
+|---|---|---|---|
+| **活治理表** | `ontology_class` / `ontology_property` / `ontology_metric` / `kpi_catalog` / `ontology_join` | 随编辑变化 | 治理台、NL2SQL 取 schema |
+| **发布快照** | `semantic_release.manifest_json`（+ `manifest_hash`） | DRAFT → VALIDATED → **ACTIVE** → ARCHIVED | 审阅、回放基线 |
+| **图谱镜像** | Neo4j `:ReleaseClass` / `:ReleaseProperty` / `:ReleaseMetric` / `:ReleaseKpiCatalog` | 随发布版本存在，**不可变** | 「按发布读图」（D25 切换） |
+
+### 图谱镜像的关键设计（方案 C：独立镜像节点）
+
+| 决策 | 做法 | 原因 |
+|---|---|---|
+| 节点身份 | MERGE 键 = (`unified_id`, `release_id`)，label 独立 | 同一实体在不同发布各有一份节点 ⇒ 互不覆盖、可回退 |
+| 边作用域 | **由端点继承**（边连的是镜像节点） | 图边无键无属性 ⇒ 给边加版本就得删边重建；端点继承后**边不需要任何属性** |
+| 主图隔离 | `MATCH (c:Class)` **不命中** `ReleaseClass` | 现有 4 个生产消费方**一行都不用改** |
+| 身份解析 | manifest 用**名字**，图谱用 `unified_id` ⇒ PG 侧解析 | 解析在 PG 批量做一次；解析不到分**三种原因**逐条报告（歧义 / 未登记 `id_mapping` / 本体不存在） |
+| 幂等 | 节点 MERGE + 边 MERGE 两端 | 同一发布重复物化结果完全一致 |
+
+关系类型**白名单**（**6** 种）：`HAS_PROPERTY` / `SUBCLASS_OF` / `JOIN` / `DERIVED_FROM` /
+`MEASURED_BY` / `REFERENCES`。
+`REFERENCES`（属性 → 类，取自 manifest 的 `properties[].refClassName`）**必须有** ——
+漏了它 ⇒ 镜像 ≠ 主图本体子图 ⇒ 读侧切换会静默丢引用/外键导航路径。
+语义关系边（`ontology_relation` 驱动）与业务图（~51 万节点）**不在镜像范围**。
+
+### 写目标闸门（Neo4j 侧）
+
+Neo4j **无备份、误写不可逆** ⇒ 镜像写路径自带闸门
+`backend/app/infrastructure/neo4j_write_target_guard.py`：
+
+- **库层**（不是脚本层）⇒ **每个**镜像写函数（节点/边/prune）自己调用
+  ⇒ 后续的物化 Job（D23）**天然继承**，不会因为绕过脚本而失守；
+- 判定按**端口白名单**：默认只准写**测试实例**（7688）；其它目标（含生产 7687、
+  **无端口的 `bolt://neo4j`** —— 按默认端口 7687 判）一律拒绝；
+- 目标描述**剥掉 userinfo** ⇒ 报告与日志不打印凭据；
+- 破坏性操作（prune）另需显式确认 + 数量对账（`--expect-delete`）。
+
+### 关键文件
+
+| 文件 | 职责 |
+|---|---|
+| `backend/app/domain/semantic_graph_mirror_spec.py` | label / 字段 / relType / 端点类型契约（service 与 infrastructure 共用） |
+| `backend/app/domain/id_mapping.py` | 业务对象字面量 SSOT（`CLASS`/`PROPERTY`/`METRIC`/`KPI`） |
+| `backend/app/services/semantic_graph_mirror.py` | 纯计划构建（无 IO）+ 解析表构造 |
+| `backend/app/services/semantic_graph_mirror_resolution.py` | 名字 → `unified_id` 解析（连 PG；名单分块查，避 PG 参数上限） |
+| `backend/app/infrastructure/neo4j_mirror_client.py` | 镜像写/读/清理（独立模块，独立白名单；driver 复用 `neo4j_client.getDriver()`） |
+| `backend/app/infrastructure/neo4j_write_target_guard.py` | 写目标闸门（库层；端口白名单 + 凭据剥离） |
+| `backend/scripts/semantic_graph_mirror_realdata.py` | 真实数据验证（默认只读；`--write` 才写；`--cleanup` 需配 `--expect-delete`） |
+
+### 边界
+
+- **图谱镜像不会让 Milvus 的 `release_id` 变非零** —— RAG 的发布维度过滤需要**向量侧**
+  发布物化，是另一件事；
+- 写图**不在 `activate()` 事务内** —— 跨系统写在 PG 事务里会拉长事务、造成部分失败 ⇒
+  物化是**独立可重跑的 Job**（D23）；
+- 读侧切换（消费方改读镜像）是 D25，本阶段只保证「镜像存在、可对账、可回放」。
+
+设计细节与实证见
+[`Harness/changes/feat-semantic-release-graph-mirror/daily/D22.md`](../changes/feat-semantic-release-graph-mirror/daily/D22.md)。

@@ -93,6 +93,8 @@ P1a/P1b 已交付「语义发布 = 语义的自包含快照」，但**没有任�
 | `main` 基线（`5ab1313c`，干净库、alembic head 0143，17 文件） | **577 passed / 7 failed** |
 | **净新增失败** | **0**（7 条失败逐条相同，全是 `test_chat_service.py` / `test_chat_service_stream.py` 存量红） |
 | 分支独有 7 个测试文件 | 214 条全过 |
+| CI merge-gate 首轮（`43688061607` vs 基线 `43611930922`） | 净新增 **3** 条（两真缺陷 + 一测试雷，详见 `daily/D17.md` §11）→ `7b41a7ee` 修复：种子 CLI 守卫少传 `databaseUrl`、CLI 用例缺 `database_url_env`、0131 迁移用例持读锁跨 DDL 被 0144 的 `DROP COLUMN` 卡到 120s 超时 |
+| CI merge-gate 第二轮（`43692742410` @ `7b41a7ee`） | **净新增 0 / 净丢失 0**，8 个后端 job 失败条数逐分片与基线相同；结论 `CI_SURFACE_CHANGED`（exit 6，三个文件落在 CI 面清单）⇒ 人工仲裁「无掩盖失败能力」，见 `daily/D17.md` §11.1 |
 
 > 基线用共享库会得出相反结论：`qa_metadata_test_semantic` 已被分支迁到 `0144`，main 侧 ORM 对不上 ⇒ 567 errors（环境问题）。
 

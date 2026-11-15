@@ -1,0 +1,84 @@
+# P3b Neo4j 发布镜像 —— 执行计划（续接 1109 日级排程 D22–D25）
+
+> 本文档只管 P3b（D22–D25）。P3c–P6 另有计划文档，不在本文件内。
+> 上位：[`docs/update/1109/智能采购平台升级计划_日级排程_1109.md`](../../../docs/update/1109/智能采购平台升级计划_日级排程_1109.md) §7。
+
+| 项 | 值 |
+|---|---|
+| **变更** | P3b Neo4j 发布镜像（SemanticRelease → 图谱快照） |
+| **分支** | `feat/semantic-release-graph-mirror`（worktree `/private/tmp/qa-graph-mirror`），base = `origin/main` `b6af98a1` |
+| **迁移版本** | **无**（零 DDL：不改 PG 表结构、不加列、不改索引） |
+| **关联变更** | [feat-semantic-registry-rag](../feat-semantic-registry-rag/summary.md)（P3a RAG 过滤）· [P1a/P1b 语义发布](../feat-semantic-release-a/summary.md) |
+| **状态** | D22 完成（设计 + 实现 + 评审整改 + 真实数据实证；随 PR 合并，**不部署**）；D23–D25 未开始 |
+
+---
+
+## 1. 背景（为什么做）
+
+P1a/P1b 把「语义发布」做成了**自包含快照**（`semantic_release.manifest_json`），
+P2 把 NL2SQL 的 schema 渲染接到发布快照上（钉住某一版发布 ⇒ 用那一版的语义）。
+但**图谱这一侧完全没有任何发布维度**：
+
+- 节点写路径全是 `MERGE (c:Class {unified_id})` ⇒ **同一个节点被所有发布共享**，
+  属性原地覆盖 ⇒ 「A 版发布时的类 X 长什么样」在图里**查不到**；
+- 边 `MERGE (a)-[:REL]->(b)` **无属性、无键** ⇒ 边也没有版本；
+- 消费方 `MATCH (c:Class)` / `getClassIds()` 等一律**不带发布维度**。
+
+⇒ 结果：图谱只能回答「**现在**的图是什么」，回答不了「**某一版发布**的图是什么」。
+发布要回放、要对比、要钉住，图谱这一路**对不上**。
+
+本批交付：**图谱的发布镜像**（每个已发布版本一份**不可变**的图谱快照），
+让「按发布版本读图」成为可能，并为后续把图谱接进 NL2SQL/RAG 消费面（P3c/P3d）铺路。
+
+---
+
+## 2. 日次任务卡
+
+| 日次 | 任务 | 产出 | 完成定义 |
+|---|---|---|---|
+| D22 | 发布镜像**方案设计** + 测试环境实现 | `daily/D22.md`、`app/domain/semantic_graph_mirror_spec.py`（契约）、`app/domain/id_mapping.py`（业务对象字面量 SSOT）、`app/services/semantic_graph_mirror.py`（纯计划构建）、`app/services/semantic_graph_mirror_resolution.py`（PG 解析）、`app/infrastructure/neo4j_mirror_client.py`（镜像写函数，**独立模块**：`neo4j_client.py` 已 1024 行超 800 行上限）、`app/infrastructure/neo4j_write_target_guard.py`（**库层写目标闸门**） | 方案对比留档；镜像节点走**独立 label**（主图零影响）；镜像内容 = manifest 实体/关系（**含 `REFERENCES`**，与主图本体子图同构）；纯逻辑有单测；真实写/回读/幂等/主图零影响/生产拒写/双保险清理有实证 |
+| D23 | 物化 Job：幂等 / dry-run / 分批 / 断点续跑 | `scripts/semantic_graph_sync.py` | 重复执行结果一致；dry-run 不写图；按 label 分批、每批有耗时与条数记录；失败可续跑 |
+| D24 | 一致性对账：镜像 vs Manifest 实体/关系 | `scripts/verify_graph_mirror.py` + 对账报告 | 实体 100% 对账；关系逐条解释（manifest 无 relations 分区 ⇒ 语义关系边**不在对账范围**） |
+| D25 | 切换演练 + 回归 + PR | 演练报告、PR | 「按发布读图」开关打开后读到的是镜像；一键回退到主图 |
+
+---
+
+## 3. 关键约束（recon 事实，2026-11-15 实测/实读）
+
+| # | 事实 | 出处 | 对设计的影响 |
+|---|---|---|---|
+| C-1 | Neo4j 是 **5.23-community** | `docker/docker-compose.yml` | Community **不支持多 database** ⇒ 「独立镜像库」方案不可行 |
+| C-2 | 节点写全是 `MERGE (x:Label {unified_id})` | `app/infrastructure/neo4j_client.py` | 同一节点被所有发布共享 ⇒ 发布维度**不能**落在主节点上（会互相覆盖） |
+| C-3 | 边 `MERGE (a)-[:REL]->(b)`，无属性、无键 | 同上 | 边级发布维度要么 delete-then-create，要么**把作用域放到端点上**（本批采纳后者） |
+| C-4 | manifest 只有 6 个分区（domains/classes/joins/metrics/kpis/businessObjects），**无 relations 分区** | `app/domain/semantic_manifest_schema.py`、`app/tests/unit/test_semantic_manifest_golden.py` | 语义关系边（`ontology_relation`）**无法从快照自包含重建** ⇒ 镜像不含该类边（显式声明范围） |
+| C-5 | manifest 用**名字**标识实体（`className`/`propertyName`/`metricName`/`kpiCode`），图谱用 `unified_id` | golden fixture | 物化前必须做 **name → unified_id** 解析；解析不到 ⇒ 计入「未解析」并逐条报告 |
+| C-6 | 业务图规模：BusinessEntity 节点 ~51 万、关系 ~145 万 | `scripts/sync_business_graph_from_thbi.py` 文档串 | 镜像**默认不含业务图**；启用需另做批次方案（D23 附录） |
+| C-7 | Neo4j **无写目标闸门、无自动备份** | 仓内无对应 guard（Milvus 有 `scripts/milvus_write_target_guard.py`） | 镜像写函数必须**自带守卫**（只允许写 `Release*` label + 显式 release_id） |
+| C-8 | 消费方 `MATCH (c:Class)` / `getClassIds()` 等不带发布维度 | `app/infrastructure/neo4j_client.py` | 镜像节点必须用**独立 label** ⇒ 现有消费方零影响、无需改 |
+
+---
+
+## 4. 方案对比与裁决（详见 `daily/D22.md`）
+
+| 方案 | 做法 | 结论 |
+|---|---|---|
+| A 独立镜像库 | 整个 Neo4j database 复制一份 | ❌ Community 不支持多库（C-1） |
+| B 主节点加 `release_id` 属性/标签 | 给现有节点打标 | ❌ 同一节点无法同时持有两版属性；标签只增不减 ⇒ 无法回退（C-2） |
+| **C 独立镜像节点** | 新建 `:ReleaseClass` 等独立 label，节点身份 = (label, unified_id, release_id)；边连镜像节点 | ✅ **采纳**：镜像不可变、边靠端点继承发布作用域、主图零影响、可回退 |
+
+---
+
+## 5. 遗留与风险
+
+| ID | 风险 / 遗留 | 处置 |
+|---|---|---|
+| R-1 | 镜像**不覆盖**业务图（~51 万节点 / ~145 万边） | 显式声明范围；启用需另做批次方案与耗时预算 |
+| R-2 | 镜像**不含**语义关系边（manifest 无 relations 分区，C-4） | 显式声明范围；对账口径同步写明 |
+| R-3 | name → unified_id 解析依赖 PG 活数据 | 解析失败 ⇒ 计入「未解析」并报告（改名后重跑会暴露） |
+| R-4 | Neo4j 无备份（C-7） | 镜像写**只增不删**（除显式 prune）；prune 必须显式传参 |
+| R-5 | 图谱消费面**尚未**接入发布维度（读侧仍是主图） | 读侧切换是 D25；本批只交付「镜像存在且可对账」 |
+| R-6 | **图谱镜像不会让 Milvus 的 `release_id` 变非零** | RAG 的 release 维度过滤需要**向量侧发布物化**（另立卡）；本批不冒充已解决 |
+| R-7 | **列级 join 信息在图上丢失**：同一对类之间的多条 join 合并成一条 `JOIN` 边（边无属性，C-3） | 与主图同粒度（主图 `linkClassJoin` 也是无属性边）⇒ 不是漏写；但列级回放需要给边加属性，届时单独立项 |
+| R-8 | 解析失败有**三种不同原因**（歧义 / 未登记 `id_mapping` / 本体不存在），混成一种会把运维引到错方向 | 三态分开记录（`EntityResolution.unmapped`）+ 各自文案指向具体动作（D22 §3.3） |
+| R-9 | **镜像 ≠ 主图本体子图**（评审 HIGH）：manifest 的 `properties[].refClassName` 承载「属性 → 类」引用，主图会物化成 `(:Property)-[:REFERENCES]->(:Class)`；镜像原本没有这一类边 ⇒ D25 读侧切换会**静默丢引用/外键导航路径** | **已修**：relType 白名单 5→**6**（加 `REFERENCES`）+ 计划器 + 端点类型契约；悬空引用归一为 `null` |
+| R-10 | **写目标闸门**：Neo4j 侧**无** Milvus 那样的闸门件（C-7）⇒ 误写生产图库不可逆 | **已修**：闸门下沉到**库层** `app/infrastructure/neo4j_write_target_guard.py`（**每个**镜像写函数自己调 ⇒ D23 的物化 Job 天然继承）；判定按**端口白名单**（只准 7688；无端口按 7687 判 ⇒ 生产被拒）；脚本层另加 `--expect-delete` 双保险 |

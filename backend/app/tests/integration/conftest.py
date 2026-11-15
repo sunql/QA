@@ -104,7 +104,9 @@ async def neo4jCleanDriver() -> AsyncIterator[Driver]:
     assertAppNeo4jIsIsolated()  # 清理前复查配置未漂移
     with driver.session() as session:
         session.run(
-            "MATCH (n) WHERE n:Class OR n:Property OR n:Metric DETACH DELETE n"
+            "MATCH (n) WHERE n:Class OR n:Property OR n:Metric "
+            "OR n:ReleaseClass OR n:ReleaseProperty OR n:ReleaseMetric "
+            "OR n:ReleaseKpiCatalog DETACH DELETE n"
         )
     driver.close()
 
@@ -193,8 +195,8 @@ async def warmAgentCaches(dbSession: AsyncSession) -> AsyncIterator[None]:
     # warmUp feature_rule_registry（feat-feature-rule-config）：集成测试无
     # lifespan，必须显式 warmUp，否则 runtime 测试会因 'Registry 未 warmUp'
     # 抛 RuntimeError。seedFeatureRules 先行确保运行时测试有规则可评估。
-    from scripts.seed_feature_rules import seedFeatureRules
     from app.services.feature_rule_registry import feature_rule_registry
+    from scripts.seed_feature_rules import seedFeatureRules
 
     await seedFeatureRules(dbSession)
     await dbSession.commit()

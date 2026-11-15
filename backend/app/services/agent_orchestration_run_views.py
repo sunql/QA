@@ -72,6 +72,9 @@ def runToRead(run: AgentOrchestrationRun) -> AgentRunRead:
         started_at=run.started_at,
         finished_at=run.finished_at,
         revision=run.revision,
+        semantic_release_id=run.semantic_release_id,
+        semantic_release_version=run.semantic_release_version,
+        semantic_manifest_hash=run.semantic_manifest_hash,
     )
 
 
@@ -111,6 +114,10 @@ def runToAuditDict(run: AgentOrchestrationRun) -> dict[str, Any]:
         "question": run.question,
         "instructionsSnapshot": run.instructions_snapshot,
         "toolBindingsSnapshot": copy.deepcopy(run.tool_bindings_snapshot or []),
+        # 语义发布钉住（P3c D26/D27）：审计要能回答「这个 run 用的是哪版发布」
+        "semanticReleaseId": run.semantic_release_id,
+        "semanticReleaseVersion": run.semantic_release_version,
+        "semanticManifestHash": run.semantic_manifest_hash,
         "maxIterations": run.max_iterations,
         "maxToolCalls": run.max_tool_calls,
         "maxCostUsd": float(run.max_cost_usd),

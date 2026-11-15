@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -134,11 +135,14 @@ class AgentOrchestrationRunService:
         outbox: OutboxService | None = None,
         registry: AgentToolConfigRegistry | None = None,
         runtime: AgentRuntimeService | None = None,
+        semanticRegistry: Any | None = None,
     ) -> None:
         self._agents = agents or AgentRegistryService()
         self._outbox = outbox or OutboxService()
         self._registry = registry or agent_tool_config_registry
         self._runtime = runtime or AgentRuntimeService()
+        # 语义 Registry：测试可注入替身；生产走模块级单例（延迟 import 防环）
+        self._semanticRegistry = semanticRegistry or _defaultSemanticRegistry()
 
     # ------------------------------------------------------------------
     # 创建
@@ -158,6 +162,8 @@ class AgentOrchestrationRunService:
         snapshot = await self._buildToolSnapshot(session, profile)
         limits = self._mergeLimits(profile, dto.limits)
         assertWithinSystemCeilings(limits)
+        # P3c D27：创建时冻结「当前激活的语义发布」⇒ 运行期发布变更不影响本 run
+        semanticPin = await resolveSemanticPin(session, self._semanticRegistry)
 
         run = _newQueuedRun(
             agent=agent,
@@ -167,6 +173,7 @@ class AgentOrchestrationRunService:
             limits=limits,
             question=dto.input,
             createdBy=actor.userId,
+            semanticRelease=semanticPin,
         )
         session.add(run)
         await session.flush()
@@ -656,6 +663,51 @@ class AgentOrchestrationRunService:
 # ---------------------------------------------------------------------------
 
 
+def _defaultSemanticRegistry() -> Any:
+    """生产用的语义 Registry 单例（延迟 import：语义模块不依赖编排模块 ⇒ 防环）。"""
+    from app.services.semantic_registry_service import semanticRegistry
+
+    return semanticRegistry
+
+
+@dataclass(frozen=True)
+class SemanticReleasePin:
+    """创建 run 时冻结的语义发布身份（P3c D27）。
+
+    三个值都从**那一刻**的 ACTIVE 快照抄下来 ⇒ 运行期发布变更不影响该 run。
+    `version` / `manifestHash` 是冗余快照：发布行将来被删/被改，run 仍可自证。
+    """
+
+    releaseId: int
+    version: str
+    manifestHash: str
+
+
+async def resolveSemanticPin(session: AsyncSession | None, registry: Any) -> SemanticReleasePin | None:
+    """解析「当前激活的语义发布」⇒ 钉住三要素；钉不住就返回 None。
+
+    - 无激活发布 = 正常状态（还没发布过）⇒ None（旧 run 语义）；
+    - **语义面故障不许挡 run 创建**：Registry 抛任何异常 ⇒ 降级 None + 告警
+      （问答可用性优先；缺钉住只影响「重放同一发布」，不影响本轮能跑）。
+    """
+    try:
+        snapshot = await registry.getActive(session)
+    except Exception as exc:  # noqa: BLE001 - 语义面任何故障都不挡 run 创建
+        logger.warning(
+            "解析激活语义发布失败，本 run 不钉住（照旧走未钉住语义）：%s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    if snapshot is None:
+        return None
+    return SemanticReleasePin(
+        releaseId=snapshot.id,
+        version=snapshot.version,
+        manifestHash=snapshot.manifest_hash,
+    )
+
+
 def _newQueuedRun(
     *,
     agent: AgentDefinition,
@@ -665,9 +717,13 @@ def _newQueuedRun(
     limits: dict[str, Any],
     question: str,
     createdBy: str,
+    semanticRelease: SemanticReleasePin | None = None,
 ) -> AgentOrchestrationRun:
-    """构造一条 QUEUED 的 run 行（instructions + 工具快照 + 预算在创建时冻结）。"""
+    """构造一条 QUEUED 的 run 行（instructions + 工具快照 + 预算 + 语义钉住，创建时冻结）。"""
     return AgentOrchestrationRun(
+        semantic_release_id=None if semanticRelease is None else semanticRelease.releaseId,
+        semantic_release_version=None if semanticRelease is None else semanticRelease.version,
+        semantic_manifest_hash=None if semanticRelease is None else semanticRelease.manifestHash,
         run_id=str(uuid.uuid4()),
         agent_id=agent.id,
         agent_code=agent.agent_code,

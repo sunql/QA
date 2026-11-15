@@ -31,11 +31,15 @@ class _FakeSnapshot:
     """Registry 快照替身：只带适配器真正用到的几个字段。"""
 
     def __init__(
-        self, manifest: dict, version: str = "v-test", schema_version: str | None = None
+        self, manifest: dict, version: str = "v-test", schema_version: str | None = None,
+        releaseId: int = 1,
     ) -> None:
         self.manifest = manifest
         self.version = version
         self.schema_version = schema_version or manifest.get("schemaVersion")
+        # 真实 `SemanticReleaseSnapshot.id` 是主键，必有 ⇒ 替身必须带
+        # （缺了它，适配器会按「契约违规」降级直读，测试就测不到快照路径了）。
+        self.id = releaseId
 
 
 class _FakeRegistry:

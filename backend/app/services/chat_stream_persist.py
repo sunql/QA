@@ -82,6 +82,11 @@ class StreamPersistMixin:
                 # （与同层 `assertSessionOwnership` 用的是同一个对象）。
                 userId=user.dbUserId if user is not None else None,
                 datasourceId=dto.datasourceId,
+                # P2 D16：断连兜底拿不到本轮的 outcome ⇒ 不知道本轮用了哪一版
+                # ⇒ None ⇒ **保留**既有钉住（宁可沿用旧的钉住，也不记没用过的版本）。
+                # 也没尝试过钉住 ⇒ 失效信号显式为 False（不许清）。
+                semanticReleaseId=None,
+                pinInvalidated=False,
             )
         logger.info(
             "流式断连兜底落库: session=%s 已下发片段=%d 内容长度=%d",

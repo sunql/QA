@@ -314,6 +314,17 @@ class PlanResult:
     # None = 字段缺失/不支持（OpenAI/MOONSHOT/AZURE）。由 plan 阶段 LLM 响应
     # 累计；与 SQL 阶段 cachedTokens 合并后用于 _costFor 按差额计费。
     cachedTokens: int | None = None
+    # P2 D16：本轮计划阶段的 schema 文本**实际使用**的语义发布 id。
+    # None = 这一轮没走快照（开关关 / 会话缺席 / 降级直读）。
+    # SQL 阶段据此钉住同一版 ⇒ 一轮之内两阶段口径一致。
+    semanticReleaseId: int | None = None
+    # P2 D16：本轮**尝试过**钉住某一版发布但**没用上**（那一版被删 / id 非法 /
+    # 完整性校验失败 / 版本不符 / 快照陈旧）。
+    # 由闸门（`SchemaRenderResult.pinInvalidated`）判定并一路带下来 ——
+    # **编排层不许自己推导**（「有钉住 id 且结果 id 为空 ⇒ 失效」这种近似推导
+    # 会在 kill switch 关闭时误判 ⇒ 把所有会话的钉住静默抹掉）。
+    # False = 没尝试钉住（开关关 / 会话缺席 / 上层要求直读）⇒ 保留既有钉住。
+    pinInvalidated: bool = False
 
 
 def planToText(plan: QueryPlan) -> str:

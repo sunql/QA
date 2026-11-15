@@ -75,7 +75,7 @@ class UsageMixin:
         question: str | None = None,
         prior_state: str | None = None,
         scope_question: str | None = None,
-    ) -> tuple[list[dict], str, tuple[int, int]]:
+    ) -> tuple[list[dict], str, tuple[int, int], Any | None]:
         """执行 SQL；执行报错时回灌错误重试一轮（1-3）。
 
         旧实现把生成阶段通过校验的 SQL 直接交给适配器执行，执行报错（表名/列名拼错、
@@ -83,8 +83,15 @@ class UsageMixin:
         回灌给 generateSql 重新生成一次 SQL；重试仍失败则抛原始执行错误（保持原有
         可观测行为不变）。
 
-        返回 (数据, 最终生效 SQL, 重试额外消耗的 prompt/completion token 二元组)；
-        未触发重试时第三元为 (0, 0)。不改动入参。
+        返回 (数据, 最终生效 SQL, 重试额外消耗的 prompt/completion token 二元组,
+        重试那一次的生成结果 或 None)；
+        未触发重试时第三元为 (0, 0)、第四元为 None。不改动入参。
+
+        第四元（P2 D16）：**回灌重试生成的那条 SQL 就是本轮实际执行的 SQL** ⇒
+        它才是「口径载体」。重试可能与首次生成**不同版**（钉住的那一版在重试前
+        被删 ⇒ 降级直读）⇒ 调用方据它把运行记录改成「实际执行的那一版」，
+        并把死钉清掉。没这一元，调用方只能沿用首次生成的版本 ⇒ 运行记录会
+        **声称用了某版、而实际执行的 SQL 根本不是那一版的口径**。
 
         question / prior_state / scope_question（C4）：多步场景下调用方传入子问题、前序
         步骤注入文本与主问题，使重试生成的上下文与本步骤**首次**生成一致。此前恒用
@@ -118,6 +125,13 @@ class UsageMixin:
                     # 缺席 ⇒ 这一轮确定地直读治理表 ⇒ **首次生成用快照、重试用直读**
                     # ⇒ 同一轮问答里两次 prompt 的 schema 口径不一致。
                     session=session,
+                    # P2 D16：重试生成的 SQL **就是这一轮实际执行的 SQL** ⇒
+                    # 它必须与首次生成**同一版**发布，否则「运行记录里记的那一版」
+                    # 与「实际执行的那条 SQL 的口径」不是同一版 ⇒ 重放漂移。
+                    # 本轮没走快照（outcome.semanticReleaseId is None）⇒ 重试也
+                    # 确定地直读（directOnly），不许中途换成快照口径。
+                    pinnedReleaseId=outcome.semanticReleaseId,
+                    directOnly=outcome.semanticReleaseId is None,
                 )
             except Exception as genErr:
                 # 重试生成本身失败：抛原始执行错误（异常类型与消息不变，行为与旧实现
@@ -150,7 +164,24 @@ class UsageMixin:
                 )
                 raise firstErr
             self._checkShareResult(outcome.plan, data, retryResult.sql)
-            return data, retryResult.sql, (retryResult.promptTokens, retryResult.completionTokens)
+            # P2 D16：重试那一版的发布与首次生成不同 ⇒ 这一轮**实际执行的 SQL**
+            # 的口径已经和运行记录里记的那一版对不上 ⇒ 必须留痕（不许静默），
+            # 并把「实际执行的那一版」交回调用方（第四元）⇒ 调用方据此改写
+            # 运行记录（记实际执行的那版）并把死钉清掉。
+            retryReleaseId = getattr(retryResult, "semanticReleaseId", None)
+            if retryReleaseId != outcome.semanticReleaseId:
+                logger.warning(
+                    "回灌重试的语义发布与首次生成不一致：首次=%s 重试=%s"
+                    "（该轮实际执行的 SQL 口径已与运行记录记录的版本不同）",
+                    outcome.semanticReleaseId,
+                    retryReleaseId,
+                )
+            return (
+                data,
+                retryResult.sql,
+                (retryResult.promptTokens, retryResult.completionTokens),
+                retryResult,
+            )
         else:
             # L3 占比不变量核验（feat-nl2sql-share-denominator-guard）：Top-N 占比
             # 之和/单值 > 100% 数学上不可能（Top-N 是总量子集）→ 结果必然错误。
@@ -158,7 +189,7 @@ class UsageMixin:
             # 走既有失败路径（单步回退多步拆解 / 多步步级隔离），绝不带病返回，
             # 也绝不能被本函数的执行失败重试逻辑吞掉重生成（决策 3a：直接失败）。
             self._checkShareResult(outcome.plan, data, outcome.sql)
-            return data, outcome.sql, (0, 0)
+            return data, outcome.sql, (0, 0), None
 
     def _checkShareResult(
         self, plan: QueryPlan | None, data: list[dict], sql: str | None,

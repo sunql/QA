@@ -119,10 +119,13 @@ def _manifest(classes, properties, joins) -> dict:
 
 
 class _FakeSnapshot:
-    def __init__(self, manifest: dict, version: str = "v-test") -> None:
+    def __init__(self, manifest: dict, version: str = "v-test", releaseId: int = 1) -> None:
         self.manifest = manifest
         self.version = version
         self.schema_version = manifest.get("schemaVersion")
+        # 真实 `SemanticReleaseSnapshot.id` 是主键，必有 ⇒ 替身必须带
+        # （缺了它，适配器会按「契约违规」降级直读，测试就测不到快照路径了）。
+        self.id = releaseId
 
 
 class _FakeSession:
@@ -217,6 +220,31 @@ class Test开关:
         text = await gate.renderSchemaText(classes, joins=joins, session=_FakeSession())
 
         assert text == buildSchemaText(classes, joins=joins)
+
+    async def test_开关打开但没有发布时记info让影子未生效可观测(
+        self, switchOn, monkeypatch, caplog
+    ) -> None:
+        """**生产路径**（走闸门）也必须可观测「没有 ACTIVE 快照」。
+
+        没有 ACTIVE 快照 = 影子**没生效**。静默直读 ⇒ 现场只看到「开关开了但
+        口径没变」，无从判断是配置没生效、还是发布没做、还是域作用域没查到。
+
+        ⚠️ 这条断言守的是**闸门路径**：D15 的同款断言只覆盖适配器入口
+        （`loadClassesForSchema`，仅测试/诊断用）。D16 把适配器拆成
+        「取发布」+「复原」两段后，生产路径不再经过那个入口 ⇒ 日志必须补在
+        取发布那一段，否则生产上「影子没生效」变成**无声**。
+        """
+        classes, properties, joins = _dataset()
+        _installSnapshot(monkeypatch, None)
+
+        with caplog.at_level("INFO"):
+            await gate.renderSchemaText(classes, joins=joins, session=_FakeSession())
+
+        assert any(
+            "没有" in r.getMessage() and "快照" in r.getMessage()
+            for r in caplog.records
+            if r.levelname == "INFO"
+        ), "生产闸门路径上无 ACTIVE 快照时必须记 info，说明影子未生效"
 
     async def test_开关打开且快照新鲜时内容等价但列序按快照(self, switchOn, monkeypatch) -> None:
         """D14 的结论在运行期的体现：内容不变、**类内列序**按快照（按名排序）。"""

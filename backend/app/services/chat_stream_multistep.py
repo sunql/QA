@@ -158,6 +158,13 @@ class StreamMultiStepMixin:
         last_plan: QueryPlan | None = None
         last_sql: str | None = None
         last_data: list[dict] = []
+        # P2 D16：最后一个成功数据步骤用到的语义发布 id（None = 直读）。
+        last_release_id: int | None = None
+        # P2 D16：本轮**已定**的口径（各数据步必须同一版发布；与非流式同口径）。
+        round_release_id: int | None = None
+        round_direct: bool = False
+        # P2 D16：本轮是否出现过「钉住失效」⇒ 运行记录据此清掉那个钉住。
+        pin_invalidated: bool = False
 
         # 落库只针对**数据步**（汇总步不执行 SQL、没有 sql/data 可落）。
         # 汇总步仍计入 completedCount（见下方 early-return 封口），故 runStatusFor
@@ -288,6 +295,10 @@ class StreamMultiStepMixin:
                     # 由 5 个调用点统一透传（见 L467/L486/L503/L523/L676）
                     userId=user.dbUserId if user is not None else None,
                     datasourceId=dto.datasourceId,
+                    # P2 D16：本轮实际用的发布 id ⇒ 下一轮钉住同一版。
+                    semanticReleaseId=last_release_id,
+                    # P2 D16：本轮出现过钉住失效 ⇒ 清掉那个钉住（死钉自愈）。
+                    pinInvalidated=pin_invalidated,
                 )
                 affinity = await self._buildAffinityStatus(
                     session, dto.sessionId, agg_config.id, agg_config.model_name,
@@ -376,7 +387,12 @@ class StreamMultiStepMixin:
             # chat_multistep._executeMultiStep 的同名注释：helper 内部已有瞬态/回灌
             # 重试，外层重包会让用量重复计账且覆盖不到「返回 error 行」的软失败。
             try:
-                stepRun = await self._executeDataStep(session, dto, pc, ctx, step_plan, state)
+                stepRun = await self._executeDataStep(
+                    session, dto, pc, ctx, step_plan, state,
+                    # P2 D16：本轮已定的口径往下传 ⇒ 各数据步同一版发布。
+                    pinned_release_id=round_release_id,
+                    direct_only=round_direct,
+                )
             except Exception as exc:  # noqa: BLE001 - 步骤级隔离：单步硬失败不阻断后续步
                 logger.warning("多步步骤硬失败，隔离该步骤: step=%d", index, exc_info=True)
                 if run is not None:
@@ -418,11 +434,19 @@ class StreamMultiStepMixin:
                 )
                 completedCount += 1
             ctx = ctx.with_step(stepRun.result, chartLabelUsed=stepRun.chart_label_calls > 0)
+            # P2 D16：钉住失效**不论这一步成功与否**都要累计（与非流式同口径）——
+            # 失败步同样可能发现「钉住的那一版已被删」（降级直读）⇒ 必须让
+            # 运行记录清掉那个钉住 ⇒ 死钉自愈。
+            pin_invalidated = pin_invalidated or stepRun.pinInvalidated
             if stepRun.result.sql is not None:
                 # 只有成功步骤才更新追问锚点（与非流式同口径）
                 last_plan = stepRun.plan
                 last_sql = stepRun.result.sql
                 last_data = stepRun.result.data
+                last_release_id = stepRun.semanticReleaseId
+                # P2 D16：本轮口径就此定下（后续数据步都按它走）。
+                round_release_id = stepRun.semanticReleaseId
+                round_direct = stepRun.semanticReleaseId is None
             yield self._stepResultEvent(stepRun.result)
 
         # 计划里没有汇总步（异常形态）时的统一收尾。分母用 len(multiStepPlan.steps)
@@ -441,6 +465,10 @@ class StreamMultiStepMixin:
         degrade_answer = await self._finalizeMultiStepDegrade(
             session, dto, completed,
             last_plan=last_plan, last_sql=last_sql, last_data=last_data,
+            # P2 D16：降级收尾同样记下本轮用到的发布 id。
+            last_release_id=last_release_id,
+            # P2 D16：本轮出现过钉住失效 ⇒ 清掉那个钉住。
+            pin_invalidated=pin_invalidated,
             total_cost=total_cost, _t0=_ms_t0,
             inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
             userId=user.dbUserId if user is not None else None,

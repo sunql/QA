@@ -92,7 +92,7 @@ from app.services.nl2sql_schema import (
     _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
     _VALUE_SAMPLE_VALUE_MAX_DEFAULT,
 )
-from app.services.semantic_schema_gate import renderSchemaText
+from app.services.semantic_schema_gate import renderSchemaText, renderSchemaWithRelease
 from app.services.nl2sql_scope import (
     _applyScopeRowLimit,
     _coerceRowLimit,
@@ -128,6 +128,12 @@ class SqlResult:
     # 4-1（feat-token-cache）：DeepSeek prompt cache 命中 token 数；透传
     # LlmResponse.cachedTokens；与 plan 阶段 cachedTokens 合并进 _costFor。
     cachedTokens: int | None = None
+    # P2 D16：本轮 SQL 阶段的 schema 文本**实际使用**的语义发布 id。
+    # None = 这一轮没走快照（开关关 / 会话缺席 / 降级直读 / 上层要求直读）。
+    semanticReleaseId: int | None = None
+    # P2 D16：本轮**尝试过**钉住某一版发布但**没用上**（闸门判定，见
+    # `SchemaRenderResult.pinInvalidated`）。False = 没尝试钉住 ⇒ 保留既有钉住。
+    pinInvalidated: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +553,8 @@ class Nl2SqlService:
         wikiRulesBlock: str | None = None,
         kpiContractBlock: str | None = None,
         session: AsyncSession | None = None,
+        pinnedReleaseId: int | None = None,
+        directOnly: bool = False,
     ) -> Any:
         """生成并通过本体 schema 校验的查询计划（ReAct 两阶段流水线阶段一）。
 
@@ -578,6 +586,10 @@ class Nl2SqlService:
             kpiContractBlock=kpiContractBlock,
             # 语义快照闸门（D15）：session 缺席也能跑（闸门会降级直读）。
             session=session,
+            # 语义发布钉住（D16）：钉住那一版发布（不看当前 ACTIVE）⇒
+            # 同一请求重放读到同一发布、同一口径。
+            pinnedReleaseId=pinnedReleaseId,
+            directOnly=directOnly,
             # 季度/半年口径由服务端确定性解析（主问题+子问题并集），
             # 不让 LLM 仅凭「今天是 X」自行推算边界（2026-10-31）。
             timeScopeFact=_timeScopeFactFor(scopeQuestion, question, priorState),
@@ -704,6 +716,8 @@ class Nl2SqlService:
         scopeQuestion: str | None = None,
         prior_cte: str | None = None,
         session: AsyncSession | None = None,
+        pinnedReleaseId: int | None = None,
+        directOnly: bool = False,
     ) -> SqlResult:
         """生成 SQL。最多 maxRetries+1 次尝试；失败注入错误重试。
 
@@ -746,10 +760,14 @@ class Nl2SqlService:
             _pruneClassesForSql(plan, classes) if schemaCfg["pruneSchema"] else classes
         )
         # schema 文本经**语义快照闸门**渲染（开关默认关 ⇒ 与今天逐字节一致）。
-        schemaText = await renderSchemaText(
+        # P2 D16：pinnedReleaseId = 钉住那一版发布（不看当前 ACTIVE）；
+        # directOnly = 上层已判定这一轮直读（计划阶段降级）⇒ 连发布都不查。
+        schemaRender = await renderSchemaWithRelease(
             schemaClasses,
             joins=joins,
             session=session,
+            pinnedReleaseId=pinnedReleaseId,
+            directOnly=directOnly,
             schemaPrefix=schemaPrefix if dialect.useSchemaPrefix else None,
             valueSamples=valueSamples,
             driftWarning=driftWarning,
@@ -757,6 +775,7 @@ class Nl2SqlService:
             digestMaxDescChars=schemaCfg["digestMaxDescChars"],
             valueSampleValueMax=schemaCfg["valueSampleValueMax"],
         )
+        schemaText = schemaRender.text
         errors: list[str] = []
         totalPrompt = 0
         totalCompletion = 0
@@ -850,6 +869,10 @@ class Nl2SqlService:
                 promptTokens=totalPrompt,
                 completionTokens=totalCompletion,
                 cachedTokens=totalCached,
+                semanticReleaseId=schemaRender.semanticReleaseId,
+                # P2 D16：闸门说「这一轮尝试过钉住但没用上」⇒ 一路带到编排层
+                # （编排层据此清掉运行记录里的钉住 ⇒ 死钉自愈）。
+                pinInvalidated=schemaRender.pinInvalidated,
             )
 
         raise Nl2SqlError(

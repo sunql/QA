@@ -44,6 +44,7 @@ from app.services.chat_helpers import (
     _STEP_GEN_FAILED_PREFIX,
     _failedStepResult,
     _hasDataStepResult,
+    _mergeExecutedRelease,
     _multiStepResponse,
     _PipelineContext,
     _step_result_to_read,
@@ -292,6 +293,9 @@ class MultiStepMixin:
         ctx: StepExecutionContext,
         step_plan: StepPlan,
         state: SessionQueryState | None,
+        *,
+        pinned_release_id: int | None = None,
+        direct_only: bool = False,
     ) -> _StepRun:
         """执行单个数据步骤（两阶段生成 → 执行 + 回灌重试），失败隔离为步骤错误行。
 
@@ -302,6 +306,10 @@ class MultiStepMixin:
         已完成步骤的数据与已花的 token 全部作废，对外 500 / internal 错误事件。
         现在收敛为 `StepResult(error=..., sql=None)` —— sql=None 是失败标记，
         同时保证「无数据」不会被下游 prompt 渲染成「结果为 0 行」。
+
+        pinned_release_id / direct_only（P2 D16）：**本轮已定的那一版发布**
+        （多步的一轮里各数据步必须同一口径）。`direct_only=True` 表示本轮
+        确定直读 ⇒ 这一步也直读（不许从运行记录捞回上一轮的旧钉住）。
         """
         # 失败尝试的用量（spec §6.2）：`tokens` / `cost` 要到生成阶段之后才
         # 累加，一旦异常从本方法**逃逸**（召回 / 落账 / 图表等意外失败），调用点
@@ -337,6 +345,9 @@ class MultiStepMixin:
                     session, dto, pc, IntentType.NEW_QUERY, state,
                     sub_question=step_plan.sub_question, injection_text=injection_text,
                     global_filters=ctx.global_filters,
+                    # P2 D16：本轮已定的那一版发布（各数据步同一口径）。
+                    pinned_release_id=pinned_release_id,
+                    direct_only=direct_only,
                 )
             except Exception as exc:
                 logger.warning(
@@ -356,13 +367,19 @@ class MultiStepMixin:
 
             if outcome.sql is None or outcome.plan is None or outcome.plan.isUnanswerable:
                 # 软失败（LLM 判定无法回答）：非硬异常，一直就是步骤级隔离
+                # P2 D16：**这两个字段不能丢**。本步的钉住可能已经失效了
+                # （钉住的那一版被删 ⇒ 降级直读 ⇒ pinInvalidated=True）⇒
+                # 丢了 ⇒ 运行记录保留那个已经用不了的钉住 ⇒ 下一轮继续钉它 ⇒
+                # 每轮都降级、每轮一条 WARNING ⇒ **死钉永不自愈**。
                 return _StepRun(
                     result=_failedStepResult(step_plan, _MSG_STEP_UNANSWERABLE),
                     tokens=tokens, cost=cost, modelName=model_name,
+                    semanticReleaseId=getattr(outcome, "semanticReleaseId", None),
+                    pinInvalidated=getattr(outcome, "pinInvalidated", False),
                 )
 
             try:
-                data, final_sql, retry_tokens = await self._runQueryWithRetry(
+                data, final_sql, retry_tokens, retry_result = await self._runQueryWithRetry(
                     session, dto, pc, outcome,
                     # C4：重试必须沿用本步骤的子问题与前序注入（否则退回原始复合问题，
                     # 丢子问题范围与「前序步骤结果」约束，与本步首次生成口径不一致）
@@ -371,6 +388,9 @@ class MultiStepMixin:
                     # 「主问题 ∪ 子问题」并集判定沿用
                     scope_question=dto.question,
                 )
+                # P2 D16：重试生成的那条 SQL 就是本步**实际执行**的 SQL ⇒ 口径载体
+                # 是它（重试可能换版）⇒ 本步产物与运行记录都要按它记。
+                outcome = _mergeExecutedRelease(outcome, retry_result)
             except Exception as exc:
                 logger.warning(
                     "多步步骤执行失败（含回灌重试），隔离该步骤: step=%s",
@@ -431,6 +451,10 @@ class MultiStepMixin:
                 ),
                 tokens=tokens, cost=cost, modelName=model_name, plan=outcome.plan,
                 chart_label_calls=1 if (chartPt or chartCt) else 0,
+                # P2 D16：本步的 schema 文本实际用到的发布 id（None = 直读）。
+                semanticReleaseId=getattr(outcome, "semanticReleaseId", None),
+                # P2 D16：本步尝试过钉住但没用上 ⇒ 调用方据此清掉运行记录里的钉住。
+                pinInvalidated=getattr(outcome, "pinInvalidated", False),
             )
         except Exception as exc:
             # 更早的阶段（还没产生任何用量）失败时 tokens/cost 仍是 0 —— 那确实
@@ -581,6 +605,11 @@ class MultiStepMixin:
             question=dto.question, plan=None, sql=None, resultColumns=[],
             userId=userId,
             datasourceId=dto.datasourceId,
+            # P2 D16：计划过大被拒 ⇒ 这一轮**没渲染过 schema** ⇒ 没有口径载体
+            # ⇒ None ⇒ 保留既有钉住（别把上一轮钉住的版本弄丢）。
+            # 也没尝试过钉住 ⇒ 失效信号显式为 False（不许清）。
+            semanticReleaseId=None,
+            pinInvalidated=False,
         )
         return answer
 
@@ -650,6 +679,19 @@ class MultiStepMixin:
         last_plan: QueryPlan | None = None
         last_sql: str | None = None
         last_data: list[dict] = []
+        # P2 D16：最后一个成功数据步骤用到的语义发布 id（None = 直读）。
+        # 记进运行记录 ⇒ 下一轮钉住同一版 ⇒ 重放口径一致。
+        last_release_id: int | None = None
+        # P2 D16：本轮**已定**的口径（各数据步必须同一版发布）。
+        # round_release_id = 本轮钉住的那一版（None = 本轮确定直读）；
+        # round_direct = True 表示本轮确定直读（不许后续步去捞回旧钉住）。
+        # 两者在**第一个成功的数据步**之后才定下来（失败步没产出 SQL，
+        # 不构成口径）⇒ 初始都为 None（= 还没定，第一步照旧解析）。
+        round_release_id: int | None = None
+        round_direct: bool = False
+        # P2 D16：本轮是否出现过「钉住失效」（那一版用不了了）。
+        # ⇒ 运行记录据此**清掉**那个钉住（否则下一轮继续钉它 = 死钉）。
+        pin_invalidated: bool = False
 
         # 落库只针对**数据步**（汇总步不执行 SQL、没有 sql/data 可落）。
         # 汇总步仍计入 completedCount（见下方 early-return 封口），故 runStatusFor
@@ -746,6 +788,10 @@ class MultiStepMixin:
                     inheritance_snapshot=snap,
                     userId=userId,
                     datasourceId=dto.datasourceId,
+                    # P2 D16：本轮（最后一个数据步）实际用的发布 id ⇒ 下一轮钉住同一版。
+                    semanticReleaseId=last_release_id,
+                    # P2 D16：本轮出现过钉住失效 ⇒ 清掉那个钉住（死钉自愈）。
+                    pinInvalidated=pin_invalidated,
                 )
                 affinity = await self._buildAffinityStatus(
                     session, dto.sessionId, agg_config.id, agg_config.model_name,
@@ -806,7 +852,12 @@ class MultiStepMixin:
             # 且无新收益；且该 helper 绝大多数失败是**返回** error 行而非抛出（见下方
             # 软失败分支），包一层也覆盖不到。
             try:
-                stepRun = await self._executeDataStep(session, dto, pc, ctx, step_plan, state)
+                stepRun = await self._executeDataStep(
+                    session, dto, pc, ctx, step_plan, state,
+                    # P2 D16：本轮已定的口径往下传 ⇒ 各数据步同一版发布。
+                    pinned_release_id=round_release_id,
+                    direct_only=round_direct,
+                )
             except Exception as exc:  # noqa: BLE001 - 步骤级隔离：单步硬失败不阻断后续步
                 logger.warning("多步步骤硬失败，隔离该步骤: step=%d", index, exc_info=True)
                 if run is not None:
@@ -845,11 +896,21 @@ class MultiStepMixin:
                 )
                 completedCount += 1
             ctx = ctx.with_step(stepRun.result, chartLabelUsed=stepRun.chart_label_calls > 0)
+            # P2 D16：钉住失效**不论这一步成功与否**都要累计 ——
+            # 失败步同样可能发现「钉住的那一版已被删」（降级直读）⇒ 必须让
+            # 运行记录清掉那个钉住 ⇒ 死钉自愈。只在成功分支累计 ⇒ 死钉永不自愈。
+            pin_invalidated = pin_invalidated or stepRun.pinInvalidated
             if stepRun.result.sql is not None:
                 # 只有成功步骤才更新追问锚点：失败步骤没有 SQL/数据可作下一轮基准
                 last_plan = stepRun.plan
                 last_sql = stepRun.result.sql
                 last_data = stepRun.result.data
+                last_release_id = stepRun.semanticReleaseId
+                # P2 D16：本轮口径就此定下（后续数据步都按它走）：
+                # 拿到了发布 ⇒ 后续步钉住那一版；没拿到 ⇒ 后续步确定直读
+                # （不许中途从运行记录捞回旧钉住 ⇒ 同一轮里两步口径不一致）。
+                round_release_id = stepRun.semanticReleaseId
+                round_direct = stepRun.semanticReleaseId is None
 
         # 计划里没有汇总步（异常形态）时的统一收尾。分母用 len(multiStepPlan.steps)
         # （含汇总步）与汇总分支的封口同口径。
@@ -869,6 +930,10 @@ class MultiStepMixin:
         answer = await self._finalizeMultiStepDegrade(
             session, dto, completed,
             last_plan=last_plan, last_sql=last_sql, last_data=last_data,
+            # P2 D16：降级收尾同样记下本轮用到的发布 id。
+            last_release_id=last_release_id,
+            # P2 D16：本轮出现过钉住失效 ⇒ 清掉那个钉住。
+            pin_invalidated=pin_invalidated,
             total_cost=total_cost, _t0=_t0,
             inheritance_snapshot=priorSnapshot,  # B5 HIGH-1：传递用于下一轮追问
             userId=userId,
@@ -904,6 +969,8 @@ class MultiStepMixin:
         _t0: float,
         inheritance_snapshot: dict | None = None,
         userId: int | None = None,  # P0-3
+        last_release_id: int | None = None,  # P2 D16
+        pin_invalidated: bool = False,  # P2 D16
     ) -> str:
         """无汇总步骤时的降级收尾：落库 + 保存查询状态，返回给用户的文案。
 
@@ -946,6 +1013,10 @@ class MultiStepMixin:
             inheritance_snapshot=inheritance_snapshot,
             userId=userId,
             datasourceId=dto.datasourceId,
+            # P2 D16：本轮实际用的发布 id ⇒ 下一轮钉住同一版。
+            semanticReleaseId=last_release_id,
+            # P2 D16：本轮出现过钉住失效 ⇒ 清掉那个钉住（死钉自愈）。
+            pinInvalidated=pin_invalidated,
         )
         return answer
 

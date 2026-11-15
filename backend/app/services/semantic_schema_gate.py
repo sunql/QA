@@ -54,11 +54,15 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any
 
 from app.config import getSettings
 from app.services.nl2sql_schema import buildSchemaText
-from app.services.semantic_schema_adapter import loadClassesForSchema
+from app.services.semantic_schema_adapter import (
+    resolveSchemaRelease,
+    restoreSchemaFromSnapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +70,26 @@ logger = logging.getLogger(__name__)
 _MAX_REPORTED_GAPS = 5
 # 差异样本最多记多少字符（渲染出的列行带 description，可能是很长的业务文本）。
 _MAX_SAMPLE_CHARS = 80
+
+
+@dataclass(frozen=True)
+class SchemaRenderResult:
+    """一次 schema 文本渲染的结果 + **本轮真正用到的发布 id** + **钉住失效信号**。
+
+    `semanticReleaseId` 的语义是「这一轮的 schema 文本是用哪一版发布渲染出来的」。
+    它为 `None` 表示**这一轮没走快照**（开关关 / 会话缺席 / 降级直读）——
+    此时**不许记账**：记账等于声称「本轮用的是那一版」，而事实并非如此。
+
+    `pinInvalidated` 的语义是「**这一轮尝试过钉住某一版，但没用上**」
+    （那一版已被删除 / 完整性校验失败 / id 非法 / 版本不符 / 快照陈旧）。
+    运行记录据此**清掉**那个钉住：钉住还在、那一版却已经用不了 ⇒ 下一轮继续钉它
+    ⇒ 每轮都降级直读、每轮都记一条 warning ⇒ **死钉**，会话再也起不来。
+    没有钉住可失效时（本轮压根没钉）它为 `False` —— 否则会误清既有钉住。
+    """
+
+    text: str
+    semanticReleaseId: int | None = None
+    pinInvalidated: bool = False
 
 
 def _flagEnabled() -> bool:
@@ -78,15 +102,62 @@ async def renderSchemaText(
     joins: list[Any] | None = None,
     *,
     session: Any = None,
+    pinnedReleaseId: int | None = None,
+    directOnly: bool = False,
     **renderParams: Any,
 ) -> str:
     """渲染 schema 文本（**唯一的 schema 文本出口**）。
 
     `renderParams` 原样透传给 `nl2sql_schema.buildSchemaText`
     （schemaPrefix / valueSamples / driftWarning / digest* 等）。
+
+    `pinnedReleaseId` 给了 ⇒ 钉住那一版发布（不看当前 ACTIVE），
+    用于「同一请求重放 ⇒ 同一发布 ⇒ 同一口径」。
+
+    `directOnly=True` ⇒ 确定地直读治理表（不查发布、不碰 registry）。
     """
+    result = await renderSchemaWithRelease(
+        classes,
+        joins=joins,
+        session=session,
+        pinnedReleaseId=pinnedReleaseId,
+        directOnly=directOnly,
+        **renderParams,
+    )
+    return result.text
+
+
+async def renderSchemaWithRelease(
+    classes: list[Any],
+    joins: list[Any] | None = None,
+    *,
+    session: Any = None,
+    pinnedReleaseId: int | None = None,
+    directOnly: bool = False,
+    **renderParams: Any,
+) -> SchemaRenderResult:
+    """渲染 schema 文本，并回报**本轮真正用到的发布 id** + **钉住失效信号**。
+
+    与 `renderSchemaText` 的区别只在于多回报一个 id 与一个失效信号；
+    渲染口径**完全同一条**。
+
+    守卫分两档（D16 偏差 ⑭）
+    ----------------------
+    - **未钉住**（取当前 ACTIVE）：快照与**当前本体**事实不一致 ⇒ 拒绝用快照、
+      降级直读、记 **error**（事实缺口，D15 原语义不变）。
+    - **已钉住**（按主键取那一版）：**不与当前本体比**。钉住的意义就是
+      「这一轮读的还是上一轮那一版」；它与当前本体不同是**发布之后的常态**，
+      不是数据事故 ⇒ 照旧降级的话，钉住永远拿不到那一版，「重放读同一发布」落空。
+      钉住路径只做**自完整性**校验（manifest_hash / 体量 / schema 版本，
+      由 Registry 的 `getById` 保证），差异**记 warning 但不降级**（不许静默）。
+    """
+    if directOnly:
+        # 编排层显式要求直读（上游那一阶段没钉住发布 ⇒ 两阶段不许一半快照一半直读）。
+        # ⇒ 不查 registry、不回报 id（id 为 None 即「本轮没走快照」）。
+        return SchemaRenderResult(buildSchemaText(classes, joins=joins, **renderParams))
+
     if not _flagEnabled():
-        return buildSchemaText(classes, joins=joins, **renderParams)
+        return SchemaRenderResult(buildSchemaText(classes, joins=joins, **renderParams))
 
     if session is None:
         # 会话缺席 ⇒ 取快照只能靠 Registry 的进程内缓存：
@@ -94,11 +165,21 @@ async def renderSchemaText(
         # ⇒ prompt 的 schema 口径不可复现（连类内列序都不同）⇒ 问题难定位。
         # ⇒ 这里确定地直读：不查快照、不试一把。
         logger.debug("语义快照闸门：会话缺席，确定地直读治理表")
-        return buildSchemaText(classes, joins=joins, **renderParams)
+        return SchemaRenderResult(buildSchemaText(classes, joins=joins, **renderParams))
+
+    # 本轮是否**尝试过**钉住某一版（用于回报「钉住失效」，也用于分档守卫）。
+    pinAttempted = pinnedReleaseId is not None
+
+    def _direct(pinInvalidated: bool = False) -> SchemaRenderResult:
+        return SchemaRenderResult(
+            buildSchemaText(classes, joins=joins, **renderParams),
+            None,
+            pinInvalidated,
+        )
 
     try:
-        restoredClasses, restoredJoins = await loadClassesForSchema(
-            classes, joins, session=session, enabled=True
+        snapshot, releaseId = await resolveSchemaRelease(
+            session, releaseId=pinnedReleaseId
         )
     except Exception as exc:  # noqa: BLE001 - 取快照失败不许炸问答（P0 裁决一）
         # 例：`semantic_release` 表还没建（生产未部署 0142）⇒ 查询报错。
@@ -106,11 +187,26 @@ async def renderSchemaText(
         # （error 级在本模块的语义是「快照与当前本体事实不一致」，那才是要人看的信号）。
         logger.warning("语义发布快照不可用，本次降级为直读治理表: %s", exc)
         logger.debug("语义发布快照不可用的详细堆栈", exc_info=True)
-        return buildSchemaText(classes, joins=joins, **renderParams)
+        return _direct(pinInvalidated=pinAttempted)
 
-    if restoredClasses is classes:
-        # 适配器已降级（无发布 / 版本不符 / 陈旧 / 畸形）⇒ 直读渲染。
-        return buildSchemaText(classes, joins=joins, **renderParams)
+    if snapshot is None:
+        # 没有发布 / 钉住的那一版已被删除 ⇒ 适配器已降级并留痕 ⇒ 直读渲染。
+        return _direct(pinInvalidated=pinAttempted)
+
+    try:
+        restored = restoreSchemaFromSnapshot(snapshot, classes, joins)
+    except Exception as exc:  # noqa: BLE001 - 复原失败不许炸问答（P0 裁决一）
+        logger.warning("语义快照守卫渲染失败，本次降级为直读治理表: %s", exc)
+        logger.debug("语义快照守卫渲染失败的详细堆栈", exc_info=True)
+        return _direct(pinInvalidated=pinAttempted)
+
+    if restored is None:
+        # 版本不符 / 陈旧 / 畸形 ⇒ 适配器已降级并留痕 ⇒ 直读渲染。
+        # 「陈旧」（快照缺召回子集里的类）意味着**这一版已经覆盖不了本轮的问题**
+        # ⇒ 钉住它没有意义 ⇒ 钉住失效（下一轮回到当前 ACTIVE，自愈）。
+        return _direct(pinInvalidated=pinAttempted)
+
+    restoredClasses, restoredJoins = restored
 
     try:
         directText = buildSchemaText(classes, joins=joins, **renderParams)
@@ -118,18 +214,29 @@ async def renderSchemaText(
     except Exception as exc:  # noqa: BLE001 - 守卫渲染失败不许炸问答（P0 裁决一）
         logger.warning("语义快照守卫渲染失败，本次降级为直读治理表: %s", exc)
         logger.debug("语义快照守卫渲染失败的详细堆栈", exc_info=True)
-        return buildSchemaText(classes, joins=joins, **renderParams)
+        return _direct(pinInvalidated=pinAttempted)
 
     gaps = _factDiff(directText, snapshotText)
     if gaps:
+        if pinAttempted:
+            # 钉住路径：差异是**发布之后的常态**，不是事实缺口 ⇒ 不降级、不换版
+            # （换了就不是「钉住」了）；但必须留痕（不许静默）。
+            logger.warning(
+                "钉住的语义发布与当前本体已不一致（releaseId=%s），按钉住语义仍用这一版："
+                "差异块数=%d 示例=%s",
+                releaseId,
+                len(gaps),
+                gaps[:_MAX_REPORTED_GAPS],
+            )
+            return SchemaRenderResult(snapshotText, releaseId)
         logger.error(
             "语义发布快照与当前本体事实不一致（缺/多/改），本次降级为直读治理表："
             "差异块数=%d 示例=%s",
             len(gaps),
             gaps[:_MAX_REPORTED_GAPS],
         )
-        return directText
-    return snapshotText
+        return SchemaRenderResult(directText)
+    return SchemaRenderResult(snapshotText, releaseId)
 
 
 def _sample(line: str) -> str:

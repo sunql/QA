@@ -49,7 +49,7 @@ from app.services.nl2sql_schema import (
     _buildJoinGraph,
 )
 from app.services.nl2sql_scope import _applyScopeRowLimit
-from app.services.semantic_schema_gate import renderSchemaText
+from app.services.semantic_schema_gate import renderSchemaWithRelease
 from app.services.think_block import stripThinkBlocks
 
 logger = logging.getLogger(__name__)
@@ -201,6 +201,8 @@ async def generateQueryPlan(
     kpiContractBlock: str | None = None,
     timeScopeFact: str | None = None,
     session: AsyncSession | None = None,
+    pinnedReleaseId: int | None = None,
+    directOnly: bool = False,
     maxTokens: int = _NL2SQL_MAX_TOKENS_DEFAULT,
     ownerHintMaxClasses: int = _OWNER_HINT_MAX_CLASSES_DEFAULT,
 ) -> PlanResult:
@@ -229,14 +231,18 @@ async def generateQueryPlan(
         maxRetries = getSettings().nl2sqlMaxRetries
     dialect = resolveDialect(datasourceType, oracle_version)
     # schema 文本经**语义快照闸门**渲染（开关默认关 ⇒ 与今天逐字节一致）。
-    schemaText = await renderSchemaText(
+    # P2 D16：pinnedReleaseId = 钉住那一版发布；directOnly = 上层要求直读。
+    schemaRender = await renderSchemaWithRelease(
         classes,
         joins=joins,
         session=session,
+        pinnedReleaseId=pinnedReleaseId,
+        directOnly=directOnly,
         schemaPrefix=schemaPrefix if dialect.useSchemaPrefix else None,
         valueSamples=valueSamples,
         driftWarning=driftWarning,
     )
+    schemaText = schemaRender.text
     errors: list[str] = list(initialErrors or [])
     totalPrompt = 0
     totalCompletion = 0
@@ -332,6 +338,10 @@ async def generateQueryPlan(
         return PlanResult(
             plan=outcome.plan, promptTokens=totalPrompt, completionTokens=totalCompletion,
             cachedTokens=totalCached,
+            semanticReleaseId=schemaRender.semanticReleaseId,
+            # P2 D16：闸门说「这一轮尝试过钉住但没用上」⇒ 一路带到编排层
+            # （编排层据此清掉运行记录里的钉住 ⇒ 死钉自愈）。
+            pinInvalidated=schemaRender.pinInvalidated,
         )
 
     raise Nl2SqlError(
@@ -369,6 +379,8 @@ def _finalizePlan(
         promptTokens=planResult.promptTokens,
         completionTokens=planResult.completionTokens,
         cachedTokens=planResult.cachedTokens,
+        semanticReleaseId=planResult.semanticReleaseId,
+        pinInvalidated=planResult.pinInvalidated,
     )
 
 

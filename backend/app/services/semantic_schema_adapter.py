@@ -46,7 +46,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from app.domain.exceptions import DomainError
+from app.domain.exceptions import DomainError, NotFoundError, ValidationError
 from app.domain.semantic_manifest_schema import SCHEMA_VERSION
 from app.services.semantic_registry_service import (
     SemanticReleaseIntegrityError,
@@ -209,38 +209,80 @@ def restoreSnapshotSchema(
     return classes, joins
 
 
-async def loadClassesForSchema(
-    classes: list[Any],
-    joins: list[Any] | None,
-    *,
+async def resolveSchemaRelease(
     session: Any,
-    enabled: bool,
+    *,
     domainCode: str | None = None,
     registry: Any = None,
-) -> tuple[list[Any], list[Any] | None]:
-    """schema 文本渲染路径的取类闸门：**开关关 / 无发布 ⇒ 原样返回**。
+    releaseId: int | None = None,
+) -> tuple[Any | None, int | None]:
+    """取「这一轮该用哪一版发布」⇒ `(快照, 发布 id)`。
 
-    - 开关关 ⇒ 直接返回传入的治理表对象，与今天的输出**逐字节一致**（连库都不碰）。
-    - 无 ACTIVE 发布 ⇒ 同上（未发布是正常状态，不是错误）。
-    - 快照陈旧（缺召回子集里的类）⇒ **降级回直读治理表**并告警。
-      快照落后于治理表是发布节奏的常态，不该让问答整体失败。
+    - **钉住**（给了 `releaseId`）⇒ 按主键取**那一版**，**不去问 ACTIVE**。
+      钉住的意义就是「这一轮读的还是上次那一版」；若顺手问 ACTIVE，
+      那一版被删除 / 改名 / 重新发布时就会**静默换版** ⇒ 重放不可复现。
+    - 没钉住 ⇒ 取当前 ACTIVE（发布 id 取快照行上的 `id`）。
 
-    `registry` 供测试注入替身；生产走模块级单例 `semanticRegistry`。
+    取不到（没有发布 / 那一版已被删除 / 完整性校验不过）⇒ `(None, None)`
+    —— 调用方据此降级直读治理表，**不许炸问答**（P0 裁决一）。
     """
-    if not enabled:
-        return classes, joins
-
     activeRegistry = registry if registry is not None else semanticRegistry
+    if releaseId is not None:
+        try:
+            snapshot = await activeRegistry.getById(session, releaseId)
+        except NotFoundError:
+            # 钉住的那一版被删了 = 运行记录指向了一个已消失的发布。
+            # 降级直读（问答主路径不许失败），但要留痕：这是「运行记录与发布
+            # 生命周期脱节」的信号，不是事实缺口 ⇒ warning 级。
+            logger.warning(
+                "钉住的语义发布已不存在（releaseId=%s），本次降级为直读治理表", releaseId
+            )
+            return None, None
+        except ValidationError:
+            # id 越界（<1 或 > 上限）⇒ 非法引用，不是「不存在」。
+            # 必须在这里接住：漏接 ⇒ 异常穿透到闸门的兜底 except ⇒ 日志退化成
+            # 泛化的「快照不可用」，**丢掉 releaseId** ⇒ 恰恰是需要被看到的信号。
+            logger.warning(
+                "钉住的语义发布 id 非法（releaseId=%s），本次降级为直读治理表", releaseId
+            )
+            return None, None
+        except SemanticReleaseIntegrityError as exc:
+            logger.error(
+                "钉住的语义发布完整性校验失败，本次降级为直读治理表：releaseId=%s %s",
+                releaseId,
+                exc,
+            )
+            return None, None
+        return snapshot, releaseId
+
     snapshot = await _activeSnapshot(activeRegistry, session, domainCode)
     if snapshot is None:
         # 「没有 ACTIVE 快照」= 影子**没生效**（还没发布 / 域作用域没查到）。
         # 这件事必须**可观测**：静默直读 ⇒ 现场只会看到「开关开了但口径没变」，
         # 无从判断是配置没生效、还是发布没做、还是发布在别的域。
-        logger.info(
-            "当前没有 ACTIVE 语义发布快照（domain=%s），本次直读治理表", domainCode
-        )
-        return classes, joins
+        # ⚠️ 日志必须打在这里（而不是只在 `loadClassesForSchema` 里）：
+        # 生产问答链路走的是闸门 ⇒ 它只经过 `resolveSchemaRelease` 这一段。
+        logger.info("当前没有 ACTIVE 语义发布快照（domain=%s），本次直读治理表", domainCode)
+        return None, None
+    # 快照必须带 id（`SemanticReleaseSnapshot.id` 是主键）：没有它就**记不上账**
+    # ⇒ 下一轮钉不住 ⇒ 重放漂移。宁可降级直读，也不「用了快照却不记账」。
+    snapshotId = getattr(snapshot, "id", None)
+    if snapshotId is None:
+        logger.error("语义发布快照缺少 id（契约违规），本次降级为直读治理表")
+        return None, None
+    return snapshot, snapshotId
 
+
+def restoreSchemaFromSnapshot(
+    snapshot: Any,
+    classes: list[Any],
+    joins: list[Any] | None,
+) -> tuple[list[Any], list[Any] | None] | None:
+    """快照 → 渲染视图；版本不符 / 陈旧 / 畸形 ⇒ `None`（降级直读治理表）。
+
+    与「取快照」分开是为了让**钉住**与**取 ACTIVE**共用同一条复原口径 ——
+    两条路径若各写一份，早晚会长歪。
+    """
     mismatch = schemaVersionMismatch(snapshot)
     if mismatch:
         logger.warning(
@@ -250,11 +292,11 @@ async def loadClassesForSchema(
             mismatch,
             SCHEMA_VERSION,
         )
-        return classes, joins
+        return None
 
     restored = _restoreForSchema(snapshot, classes)
     if restored is None:
-        return classes, joins
+        return None
     restoredClasses, restoredJoins = restored
 
     # 调用方传 `joins=None` = 不要 JOIN 段 ⇒ 快照侧也不塞一份进去，
@@ -268,6 +310,49 @@ async def loadClassesForSchema(
         len(restoredClasses),
     )
     return restoredClasses, restoredJoins
+
+
+async def loadClassesForSchema(
+    classes: list[Any],
+    joins: list[Any] | None,
+    *,
+    session: Any,
+    enabled: bool,
+    domainCode: str | None = None,
+    registry: Any = None,
+    releaseId: int | None = None,
+) -> tuple[list[Any], list[Any] | None]:
+    """schema 文本渲染路径的取类闸门：**开关关 / 无发布 ⇒ 原样返回**。
+
+    - 开关关 ⇒ 直接返回传入的治理表对象，与今天的输出**逐字节一致**（连库都不碰）。
+    - 无 ACTIVE 发布 ⇒ 同上（未发布是正常状态，不是错误）。
+    - 快照陈旧（缺召回子集里的类）⇒ **降级回直读治理表**并告警。
+      快照落后于治理表是发布节奏的常态，不该让问答整体失败。
+    - 给了 `releaseId` ⇒ 钉住那一版（不看 ACTIVE）。
+
+    `registry` 供测试注入替身；生产走模块级单例 `semanticRegistry`。
+
+    ⚠️ **仅供测试 / 诊断脚本使用**：生产问答链路不走这个函数，而是走
+    `semantic_schema_gate.renderSchemaWithRelease`（闸门 = 唯一出口）。
+    这里保留它是为了让集成测试与 `scripts/diag_semantic_registry_gate.py`
+    能直接驱动「取快照 + 复原」这一段，而不必绕开闸门。
+    **新增生产调用点一律禁止**（会绕开闸门的开关与守卫）。
+    """
+    if not enabled:
+        return classes, joins
+
+    snapshot, _ = await resolveSchemaRelease(
+        session, domainCode=domainCode, registry=registry, releaseId=releaseId
+    )
+    if snapshot is None:
+        # 「没有 ACTIVE 快照」的 INFO 日志已在 `resolveSchemaRelease` 里打（那里
+        # 才分得清「未钉住 ⇒ 没 ACTIVE」与「钉住 ⇒ 那一版没了」两种情形）。
+        return classes, joins
+
+    restored = restoreSchemaFromSnapshot(snapshot, classes, joins)
+    if restored is None:
+        return classes, joins
+    return restored
 
 
 async def _activeSnapshot(

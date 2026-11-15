@@ -14,7 +14,7 @@ for line in env.read_text(encoding="utf-8").splitlines():
         os.environ["SECRET_KEY"] = line.strip().split("=", 1)[1].strip()
 
 from app.infrastructure.database import getSessionFactory  # noqa: E402
-from app.services.nl2sql_service import Nl2SqlService
+from app.services.nl2sql_schema import buildSchemaText  # noqa: E402
 from app.services.ontology_service import OntologyService  # noqa: E402
 
 
@@ -24,7 +24,9 @@ async def main() -> None:
         service = OntologyService()
         classes = await service.listClasses(session)
         joins = await service.listJoins(session)
-    text = Nl2SqlService().buildSchemaText(classes, joins=joins)
+    # 直接调渲染器（绕过语义快照闸门）：本脚本要的就是「**今天的**渲染口径」，
+    # 闸门是问答链路专用的（语义快照接入）。
+    text = buildSchemaText(classes, joins=joins)
     lines = text.splitlines()
     print(f"schema 文本 {len(lines)} 行\n")
     print("== PPRICLIST 段 ==")

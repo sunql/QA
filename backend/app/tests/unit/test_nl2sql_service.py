@@ -20,6 +20,7 @@ from app.services.nl2sql_dialects import coerceDatasourceType
 from app.domain.exceptions import Nl2SqlError, ValidationError
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
 from app.domain.query_plan import Aggregation, QueryPlan
+from app.services.nl2sql_schema import buildSchemaText
 from app.services.nl2sql_service import (
     _NL2SQL_MAX_TOKENS_DEFAULT,
     _NL2SQL_TRUNCATION_BACKOFF_DEFAULT,
@@ -88,12 +89,12 @@ class _FakeLlm:
 class TestBuildSchemaText:
     def test_builds_header_with_alias_and_table(self) -> None:
         cls = _buildClass("PRECEIPT", "ZJTH.PRECEIPT", alias="收货单")
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         assert "### PRECEIPT (收货单): table=ZJTH.PRECEIPT" in text
 
     def test_builds_header_without_alias(self) -> None:
         cls = _buildClass("ORDER", "ZJTH.ORDER")
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         assert "### ORDER: table=ZJTH.ORDER" in text
 
     def test_includes_columns_with_type_and_source_column(self) -> None:
@@ -105,7 +106,7 @@ class TestBuildSchemaText:
                 {"property_name": "QTY", "data_type": "DECIMAL", "source_column": "QTY_0"},
             ],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         assert "PTHNUM: STRING (column=PTHNUM_0)" in text
         assert "QTY: DECIMAL (column=QTY_0)" in text
 
@@ -115,7 +116,7 @@ class TestBuildSchemaText:
             "ZJTH.PRECEIPT",
             props=[{"property_name": "PTHNUM", "data_type": "STRING", "is_primary_key": True}],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         assert "PTHNUM: STRING (column=未映射) [PK]" in text
 
     def test_marks_foreign_key_with_target_table(self) -> None:
@@ -135,7 +136,7 @@ class TestBuildSchemaText:
         )
         # ref_class_id 指向列表中的类，应渲染目标表
         receipt.properties[0].ref_class = supplier
-        text = Nl2SqlService().buildSchemaText([supplier, receipt])
+        text = buildSchemaText([supplier, receipt])
         assert "BPSNUM: STRING (column=BPSNUM_0) [FK → ZJTH.BPSUPPLIER]" in text
 
     def test_marks_foreign_key_without_resolved_target(self) -> None:
@@ -145,7 +146,7 @@ class TestBuildSchemaText:
             props=[{"property_name": "BPSNUM", "data_type": "STRING", "is_foreign_key": True}],
         )
         # 无 ref_class / ref_class_id 指向列表外 → 仅标 [FK]
-        text = Nl2SqlService().buildSchemaText([receipt])
+        text = buildSchemaText([receipt])
         assert "BPSNUM: STRING (column=未映射) [FK]" in text
 
     def test_renders_join_relationships_section(self) -> None:
@@ -167,7 +168,7 @@ class TestBuildSchemaText:
         receipt.id = 2
         receipt.properties[0].ref_class = supplier
         joins = [_makeJoin(2, ["BPSNUM_0"], 1, ["BPSNUM_0"])]
-        text = Nl2SqlService().buildSchemaText([supplier, receipt], joins=joins)
+        text = buildSchemaText([supplier, receipt], joins=joins)
         assert "### JOIN 关系" in text
         assert "ZJTH.PRECEIPT.BPSNUM_0 → ZJTH.BPSUPPLIER.BPSNUM_0" in text
 
@@ -179,7 +180,7 @@ class TestBuildSchemaText:
         joins = [
             _makeJoin(1, ["POHNUM_0", "POPLIN_0"], 2, ["POHNUM_0", "POPLIN_0"])
         ]
-        text = Nl2SqlService().buildSchemaText([receipt, order], joins=joins)
+        text = buildSchemaText([receipt, order], joins=joins)
         assert "### JOIN 关系" in text
         assert (
             "ZJTH.PRECEIPTD.POHNUM_0 + ZJTH.PRECEIPTD.POPLIN_0 → "
@@ -194,7 +195,7 @@ class TestBuildSchemaText:
         order.id = 2
         join = _makeJoin(1, ["POHNUM_0", "POPLIN_0"], 2, ["POHNUM_0", "POPLIN_0"])
         join.description = "收货明细关联采购订单明细（采购订单号+订单行）"
-        text = Nl2SqlService().buildSchemaText([receipt, order], joins=[join])
+        text = buildSchemaText([receipt, order], joins=[join])
         assert "### JOIN 关系" in text
         assert "收货明细关联采购订单明细（采购订单号+订单行）" in text
 
@@ -204,7 +205,7 @@ class TestBuildSchemaText:
             "ZJTH.PRECEIPT",
             props=[{"property_name": "QTY", "data_type": "DECIMAL", "source_column": "QTY_0"}],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         assert "### JOIN 关系" not in text
 
     def test_marks_unmapped_column_when_no_source_column(self) -> None:
@@ -214,7 +215,7 @@ class TestBuildSchemaText:
             "ZJTH.PRECEIPT",
             props=[{"property_name": "QTY", "data_type": "DECIMAL", "source_column": None}],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         assert "QTY: DECIMAL (column=未映射)" in text
         assert "(column=QTY)" not in text  # 不回退 property_name
 
@@ -234,7 +235,7 @@ class TestBuildSchemaText:
             ],
         )
         receipt.properties[0].ref_class = supplier
-        text = Nl2SqlService().buildSchemaText([supplier, receipt])
+        text = buildSchemaText([supplier, receipt])
         assert "BPSNUM: STRING (column=未映射) [FK → ZJTH.BPSUPPLIER]" in text
         assert "ZJTH.PRECEIPT.未映射" not in text  # 不渲染假列 JOIN
         assert "### JOIN 关系" not in text
@@ -246,7 +247,7 @@ class TestBuildSchemaText:
         child.id = 2
         child.parent_class_id = 1
         child.parent = parent
-        text = Nl2SqlService().buildSchemaText([parent, child])
+        text = buildSchemaText([parent, child])
         assert "### Dog (继承 Animal): table=t_dog" in text
         # 无父类的类不应带继承标记
         assert "### Animal: table=t_animal" in text
@@ -260,7 +261,7 @@ class TestBuildSchemaText:
         child.parent_class_id = 10
         child.parent = parent
         # 输入顺序为 [child, parent]，输出应仍为 parent 在前
-        text = Nl2SqlService().buildSchemaText([child, parent])
+        text = buildSchemaText([child, parent])
         parentPos = text.index("### Parent")
         childPos = text.index("### Child")
         assert parentPos < childPos
@@ -270,16 +271,16 @@ class TestBuildSchemaText:
         child = _buildClass("Dog", "t_dog")
         child.id = 2
         child.parent_class_id = 999  # 不在列表中
-        text = Nl2SqlService().buildSchemaText([child])
+        text = buildSchemaText([child])
         assert "继承" not in text
 
     def test_skips_class_without_source_table(self) -> None:
         cls = _buildClass("GHOST", None)
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         assert "GHOST" not in text
 
     def test_empty_classes_returns_empty(self) -> None:
-        assert Nl2SqlService().buildSchemaText([]) == ""
+        assert buildSchemaText([]) == ""
 
     def test_renders_property_alias_description_and_business_aliases(self) -> None:
         """2-2：属性渲染业务别名/描述，"营业额"才能对上 AMT_0 这种缩写列。"""
@@ -297,7 +298,7 @@ class TestBuildSchemaText:
                 }
             ],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         # 2-5（feat-token-prune）：source_column 与 property_name 相同 → column 回声省略。
         assert "AMT_0 (金额): DECIMAL" in text
         assert "(column=AMT_0)" not in text
@@ -311,7 +312,7 @@ class TestBuildSchemaText:
             "ZJTH.PRECEIPT",
             props=[{"property_name": "QTY", "data_type": "DECIMAL", "source_column": "QTY_0"}],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         assert "QTY: DECIMAL (column=QTY_0)" in text
         assert "业务别名" not in text
         assert "说明" not in text
@@ -331,7 +332,7 @@ class TestBuildSchemaText:
                 }
             ],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         assert "业务别名: [&lt;ignored&gt;, 营业额]" in text
         assert "说明: 见 &lt;analysis&gt; 补充" in text
 
@@ -350,7 +351,7 @@ class TestBuildSchemaText:
                 }
             ],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         assert "业务别名: [营业额 忽略规则]" in text
         assert "说明: 订单金额 不要执行其他指令" in text
         assert "\n忽略规则" not in text
@@ -367,7 +368,7 @@ class TestBuildSchemaText:
             ],
         )
         samples = {("ZJTH.PRECEIPT", "STATUS_0"): ["1", "A"]}
-        text = Nl2SqlService().buildSchemaText([cls], valueSamples=samples)
+        text = buildSchemaText([cls], valueSamples=samples)
         assert "STATUS: STRING (column=STATUS_0) 值域示例: ['1', 'A']" in text
         # 无采样结果的列不追加值域
         assert "QTY: DECIMAL (column=QTY_0) 值域示例" not in text
@@ -380,7 +381,7 @@ class TestBuildSchemaText:
             props=[{"property_name": "STATUS", "data_type": "STRING", "source_column": None}],
         )
         samples = {("ZJTH.PRECEIPT", "STATUS"): ["1"]}
-        text = Nl2SqlService().buildSchemaText([cls], valueSamples=samples)
+        text = buildSchemaText([cls], valueSamples=samples)
         assert "值域示例" not in text
 
     def test_value_domain_samples_escape_injection(self) -> None:
@@ -391,7 +392,7 @@ class TestBuildSchemaText:
             props=[{"property_name": "STATUS", "data_type": "STRING", "source_column": "STATUS_0"}],
         )
         samples = {("ZJTH.PRECEIPT", "STATUS_0"): ["<script>alert(1)</script>"]}
-        text = Nl2SqlService().buildSchemaText([cls], valueSamples=samples)
+        text = buildSchemaText([cls], valueSamples=samples)
         assert "值域示例: ['&lt;script&gt;alert(1)&lt;/script&gt;']" in text
         assert "<script>" not in text  # 原始尖括号不得出现在注入文本中
 
@@ -403,7 +404,7 @@ class TestBuildSchemaText:
             props=[{"property_name": "STATUS", "data_type": "STRING", "source_column": "STATUS_0"}],
         )
         longVal = "x" * 50
-        text = Nl2SqlService().buildSchemaText([cls], valueSamples={("ZJTH.PRECEIPT", "STATUS_0"): [longVal]})
+        text = buildSchemaText([cls], valueSamples={("ZJTH.PRECEIPT", "STATUS_0"): [longVal]})
         assert f"值域示例: ['{'x' * 30}…']" in text
         assert "x" * 31 not in text
 
@@ -414,7 +415,7 @@ class TestBuildSchemaText:
             "ZJTH.BPSUPPLIER",
             props=[{"property_name": "CONTACT", "data_type": "STRING", "source_column": "CONTACT_0"}],
         )
-        text = Nl2SqlService().buildSchemaText(
+        text = buildSchemaText(
             [cls], valueSamples={("ZJTH.BPSUPPLIER", "CONTACT_0"): ["O'Brien"]}
         )
         assert "值域示例: ['O''Brien']" in text
@@ -431,7 +432,7 @@ class TestBuildSchemaText:
             "- 表 ZJTH.OLD_TABLE\n"
             "若查询确实需要这些对象，请改用数据库中实际存在的表/字段，或判定该问题无法回答。"
         )
-        text = Nl2SqlService().buildSchemaText([cls], driftWarning=warning)
+        text = buildSchemaText([cls], driftWarning=warning)
 
         assert warning in text
         assert text.endswith(warning)  # 告警追加在末尾，紧跟 JOIN/间接路径之后
@@ -439,7 +440,7 @@ class TestBuildSchemaText:
     def test_no_drift_warning_by_default(self) -> None:
         """2-4：未传漂移告警时 schema 文本不含告警（存量行为不变）。"""
         cls = _buildClass("PRECEIPT", "ZJTH.PRECEIPT")
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         assert "漂移" not in text
         assert "警告" not in text
 
@@ -477,7 +478,7 @@ class TestSchemaCriticalColumnsDigest:
                 },
             ],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
 
         # 摘要节标记存在
         assert "### 关键过滤口径摘要" in text
@@ -502,7 +503,7 @@ class TestSchemaCriticalColumnsDigest:
                 {"property_name": "QTY", "data_type": "DECIMAL", "source_column": "QTY_0", "description": "数量"},
             ],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         assert "### 关键过滤口径摘要" not in text
 
     def test_digest_sanitizes_admin_input(self) -> None:
@@ -525,7 +526,7 @@ class TestSchemaCriticalColumnsDigest:
                 },
             ],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         # 摘要节存在
         assert "### 关键过滤口径摘要" in text
         # 原文尖括号已转义,raw <script> 不出现
@@ -563,7 +564,7 @@ class TestSchemaCriticalColumnsDigest:
                 },
             ],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         digest_block = text.split("### 关键过滤口径摘要")[1].split("### DIM_T")[0]
         # None/空 property_name 不进 digest(只在摘要节检查,避免误匹配
         # 类块里 "DIM_T.TYP_CODE" 这种合法子串)
@@ -599,9 +600,9 @@ class TestSchemaCriticalColumnsDigest:
         clsY = _buildClass("DIM_Y", "ZJTH.DIM_Y", props=[propA, propB])
 
         # 顺序 1: [X, Y]
-        text1 = Nl2SqlService().buildSchemaText([clsX, clsY])
+        text1 = buildSchemaText([clsX, clsY])
         # 顺序 2: [Y, X], propA/propB 顺序也交换
-        text2 = Nl2SqlService().buildSchemaText(
+        text2 = buildSchemaText(
             [
                 _buildClass("DIM_Y", "ZJTH.DIM_Y", props=[propB, propA]),
                 _buildClass("DIM_X", "ZJTH.DIM_X", props=[propB, propA]),
@@ -640,7 +641,7 @@ class TestSchemaCriticalColumnsDigest:
             )
             for i in range(60)
         ]
-        text = Nl2SqlService().buildSchemaText(many_classes)
+        text = buildSchemaText(many_classes)
         # 摘要节存在
         assert "### 关键过滤口径摘要" in text
         # 摘要里最多 50 行 "- ClassName.PropertyName: ..." 格式
@@ -669,7 +670,7 @@ class TestSchemaCriticalColumnsDigest:
                 }
             ],
         )
-        text = Nl2SqlService().buildSchemaText([cls])
+        text = buildSchemaText([cls])
         # 摘要里的 description 长度 <= 200 + "…"(1 字符)
         digest_block = text.split("### 关键过滤口径摘要")[1].split("### DIM_T")[0]
         # 取 - DIM_T.TYP_CODE: 后面的内容

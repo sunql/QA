@@ -99,7 +99,10 @@ class DomainCommandMixin:
         self, session: AsyncSession, dto: ChatRequest, pc: _PipelineContext,
     ) -> ChatResponse:
         """CLARIFY：概念解释。不执行 SQL、不更新查询状态，仅记录 usage 与对话。"""
-        schemaText = self._nl2sql.buildSchemaText(pc.classes, joins=pc.joins)
+        # schema 文本经**语义快照闸门**渲染（开关默认关 ⇒ 与今天逐字节一致）。
+        schemaText = await self._nl2sql.renderSchemaText(
+            pc.classes, joins=pc.joins, session=session
+        )
         answerResp, answerConfig, (wastedPt, wastedCt) = await self._callWithFallback(
             session, dto.sessionId, pc.configs, pc.selected, "clarify",
             lambda cfg: self._llmFactory(cfg).complete(

@@ -16,7 +16,7 @@
 | P0 基线与裁决 | D1–D3 | 11-09 | `docs/update/1109/p0/`（环境基线 / 数据基线 / 裁决记录 / R01-R03 v1.1） | ✅ G1 通过 |
 | P1a 发布骨架 | D4–D7 | 11-09 23:17–23:59 | PR #114 → `849de29e` | ✅ |
 | P1b Registry + API | D8–D11 | 11-10 06:10–10:03 | PR #115 → `4777bfba` | ✅ G2 通过 |
-| **P2 NL2SQL 影子接入** | **D12–D17** | **D12 / D14 已完成（11-15）** | 分支 `feat/semantic-registry-nl2sql`；证据 `daily/D12.md`、`daily/D14.md` | 🔄 进行中 |
+| **P2 NL2SQL 影子接入** | **D12–D17** | **D12 / D14 / D15 已完成（11-15）** | 分支 `feat/semantic-registry-nl2sql`；证据 `daily/D12.md`、`daily/D14.md`、`daily/D15.md` | 🔄 进行中 |
 | P3a–P3d | D18–D31 | 未开工 | — | ⬜ |
 | P4 知识 Facade | D32–D37 | 未开工 | — | ⬜ |
 | P5 Workflow/Command | D38–D57 | 未开工 | — | ⬜ |
@@ -190,6 +190,22 @@ D12 的完成定义是「关闭态与现状输出完全相同（fixture 对照�
 > 即在 `chat_domain.py:102` 处做一次「治理表 classes ↔ 快照 classes」的二选一渲染。
 > 这样 #2–#10 一行不动。
 
+> **D15 落地形态（2026-11-15）**：那个「二选一」收敛成新模块
+> `app/services/semantic_schema_gate.py` 的 `renderSchemaText()`——**schema 文本的唯一出口**，
+> 三个接线点（`nl2sql_service.generateSql` / `nl2sql_plan.generateQueryPlan` /
+> `chat_domain._handleClarify`）都改走它；开关 `ENABLE_SEMANTIC_REGISTRY_NL2SQL` 默认关，
+> 关时**连库都不碰**、输出与今天逐字节一致 ⇒ #2–#10 与其余消费方**一行未改**。
+>
+> **评审返工后收紧的四条契约**（两轮评审 `code-reviewer` + `security-reviewer` 收敛，见
+> `daily/D15.md` §2）：
+> ① **会话缺席 ⇒ 确定地直读**（不查快照）——`getActive(None)` 冷缓存抛、热缓存命中 ⇒
+>    否则同一轮的两次渲染可能一次快照一次直读 ⇒ prompt 口径不可复现；
+> ② **日志级别分工**：**error 级专供「事实缺口」**（要人看），「快照不可用/降级」
+>    走 **warning**、堆栈走 **debug** —— 否则生产未部署 0142 时的常态降级会把真告警淹没；
+> ③ **删掉 `Nl2SqlService.buildSchemaText` 门面**（绕过闸门的后门 ⇒ 影子接入半生效），
+>    并加**结构性守卫**（服务层只有闸门模块可持有渲染器）；
+> ④ **回灌重试那一轮也必须带 session** —— 否则首次生成用快照、重试用直读。
+
 ---
 
 ## 3.3 ⛔ 关键发现：Manifest 是 **name-keyed**，而 `buildSchemaText` 全线 **id-keyed**
@@ -279,6 +295,14 @@ join.target_class_id     = synthetic_id(targetClassName)
 | ⑨ | 基线 fixture 进 `app/tests/fixtures/` | 基线落 `Harness/changes/.../baseline/`，**不进测试夹具** | 本体一改基线就变 ⇒ 进 CI 变成周期性假红。基线是**证据**不是**断言**；自动化断言改用**对象同一性**（`restored is classes`），比文本相等更强 |
 | ⑩ ⛔ | D14 完成定义「差异 = 0」 | **零差异判据必须拆成三个机检指标**（D14 已定稿，见 §4.1-⑩） | 实测：内容差异 **0**、顺序敏感差异 6524 行。根因是治理表侧 `for prop in cls.properties:` **不排序**（物理行序），快照侧按 `propertyName` 排序；快照是 name-keyed，**物理行序信息在编译时已丢失且不可重建**（按 id 排序会违反跨环境字节确定性）。详见 `daily/D12.md` F4 与 `daily/D14.md` 的决断与影响面评估 |
 
+### 4.2 D15 实测新增的偏差（3 条，2026-11-15）
+
+| # | 计划写法 | 实际需要 | 理由 |
+|---|---|---|---|
+| ⑪ | D15 完成定义「开关开但快照缺字段 ⇒ **报错**而非静默降级」 | 实现为「**降级为直读治理表 + ERROR 级日志 + 显式告警**」，**不抛异常** | ① **P0 裁决一「坏快照不许炸问答」**：快照陈旧（发布后本体又改了）是**发布节奏的常态**，不是数据事故 ⇒ 让整轮问答 500 是错的；② 本仓最忌讳的是**静默**降级，本实现**不静默**（error 级 + 降级方向明确：宁可少信息也不错信息）；③ 缺口**不会中断问答** ⇒ 现场可能长时间不知情 ⇒ **需在 D17 前拍板**是否补第二档（指标 / 告警升级 / 页面提示） |
+| ⑫ | D15 完成定义「开关 `ENABLE_SEMANTIC_REGISTRY_NL2SQL` 默认关」 | 开关关只保证**行为**不变；**鉴权面**另需一条告警：开关开 + stub 鉴权 ⇒ 问答链路按已发布快照作答 = **治理 IP 对匿名可达**（与只读 API 收 admin 同一类暴露） | 新增 `semanticRegistryNl2sqlAuthMisconfiguration` + 启动期 ERROR 告警（只告警不阻塞，与 `ENABLE_SEMANTIC_RELEASE` 同处理） |
+| ⑬ | D15 完成定义只提「接线 + 守卫」 | 另补一条**结构性守卫**：服务层**只有闸门模块**可持有 `buildSchemaText`（否则门面后门会让影子接入**半生效**——开关开着时有的问答用快照、有的用直读 ⇒ 对比结论不可信） | `Nl2SqlService.buildSchemaText` **已删**；`Test生产侧不许绕过闸门` 2 条测试钉死（变异 M4 ⇒ 2 条红） |
+
 ### 4.1-⑩ ⛔ D14 的零差异判据（**2026-11-15 定稿**，D12 的 F4 出路分析结论）
 
 D12 只取证不决策，D14 拍板。三个候选出路：
@@ -344,7 +368,7 @@ D12 只取证不决策，D14 拍板。三个候选出路：
 | **D12** | ① 建 worktree + 分支 + venv；② 按 §2.2 抓当前 main 的「直读 schema 文本」基线 fixture；③ 按 §2.1 跑通真实发布链路拿一行 ACTIVE 快照；④ **id 合成层**（§3.3 方案 A）：`className → synthetic_id` 稳定映射 + camelCase→snake_case 字段映射 + `refClassName`/`parentClassName` 反查；⑤ 复原对象工厂（普通 class，**带 `__dict__`**，不用 slots）；⑥ 适配器 `loadClassesForSchema(domain?)`：**按召回子集的 `class_name` 过滤 manifest**；开关关 / 无发布 ⇒ **直读治理表（与现状逐字一致）** | 适配器 + id 合成层 + 双路径单测 + 基线 fixture + `daily/D12.md` | 关闭态输出与**当前 main** 逐字一致（fixture 对照）；ACTIVE 快照已入库且 `manifest_hash` 校验通过；**子集大小不因快照而变**（断言条数与类名清单） |
 | **D13** | 影子比对工具 `scripts/semantic_schema_shadow_diff.py`：同一本体生成「快照 schema 文本」与「直读 schema 文本」，差异落报告；测试环境跑首轮并归档。**评审增补**（2026-11-15）：① 退出码三态（0 = 内容 0 **且** 顺序 0 / 1 = 有内容差异 / 3 = 内容 0 但顺序 > 0）；② **子集模式** `--subset-mode each\|groups`（生产渲染的是召回子集，只比全集发现不了子集语义下的偏差）；③ 基线只在**比对后且内容差异 = 0** 时写 | 脚本 + 首轮报告 | 报告含差异条数与逐条定位；报告非空（否则说明比对没真跑）。**D12 已顺带产出**：`scripts/semantic_schema_shadow_diff.py` + `daily/D13-shadow-diff-round1.md`（内容差异 0 / 顺序差异 6524 行 / 类集合 37=37）；改写后复跑：全集与 **37 个逐类子集**内容差异均 = 0 |
 | **D14** | 差异归零：只修快照渲染（排序 / 格式 / 缺字段），**不改 join 图 / 采样 / digest 算法**；补 §4-③ 的字段等价 golden + §4-⑦ 的**召回子集不变量**断言（条数 + 类名清单逐项相等）。**⛔ 判据按 §4-⑩ 拆成两个指标**：内容等价（行多重集）必须 = 0；顺序等价需逐条给出结论（出路见 `daily/D12.md` F4 的 (a)/(b)/(c)）。**golden 已提前到 D12 落地**（评审要求：D15 接线前必须先钉死 ORM-vs-复原等价）。**✅ 11-15 完成**：决断采纳出路 (b)，三条判据（内容等价 / 归因缺口 / 块顺序差）全部机检、全部实测 0；**无需改渲染**（内容差异本来就是 0） | 修正提交 + 归零报告 + golden | **内容差异 = 0**（首轮已是 0，改写后逐类子集亦为 0）；golden 钉死窄字段清单（`app/tests/unit/test_semantic_schema_equivalence.py`，14 条，**D12 已落地**）；**快照侧类名集合 == 治理表侧类名集合**（顺序亦一致）；顺序差异要么归零、要么显式记录为已知差异并给出影响面评估 —— **实测：内容等价 0 / 归因缺口 0 / 块顺序差 0；已知差异封闭为「类内列序」「JOIN 条目序」两类（第三类 ⇒ 退出码 1）**。证据 `daily/D14.md` |
-| **D15** | 接入主路径：`nl2sql_service` / `nl2sql_plan` 经适配器取类（**仅 schema 文本路径**，见 §3.2）；开关 `ENABLE_SEMANTIC_REGISTRY_NL2SQL` 默认关 | 接入提交 + 定向测试 | 开关开/关两态下既有 NL2SQL 测试全过；反向守卫：开关开但快照缺字段 ⇒ 报错而非静默降级 |
+| **D15** | 接入主路径：`nl2sql_service` / `nl2sql_plan` 经适配器取类（**仅 schema 文本路径**，见 §3.2）；开关 `ENABLE_SEMANTIC_REGISTRY_NL2SQL` 默认关 | 接入提交 + 定向测试 | 开关开/关两态下既有 NL2SQL 测试全过；反向守卫：开关开但快照缺字段 ⇒ 报错而非静默降级 —— **✅ 11-15 完成**：新增闸门模块 `app/services/semantic_schema_gate.py`（**schema 文本的唯一出口**），三个接线点（`nl2sql_service.generateSql` / `nl2sql_plan.generateQueryPlan` / `chat_domain._handleClarify`），其余 11 个 `pc.classes` 消费方**零改动**；开关默认关（关时**连库都不碰**、逐字节等于今天）；守卫用 **D14 的内容等价判据**（按块行多重集）⇒ 快照缺/多/改事实 ⇒ 拒绝用快照 + **ERROR 级日志** + 降级直读（**偏差 ⑪**：卡片写「报错」，实现是「降级 + 响」，见 §4.2）。实测：闸门 + 重试 + 适配器 + 配置 **92 passed**；受门面删除影响的既有单测 **265 passed**；广域定向回归 **1385 passed / 7 failed**（基线 HEAD `941fb02f` 同口径 **1355 passed / 7 failed**，**失败集合逐条相同 ⇒ 净新增 0**；差值 +30 = 本批新增测试数）；**真实 dev 库实跑**快照路径确实走到、守卫未降级、按块差异 **0**。证据 `daily/D15.md` |
 | **D16** | 运行记录钉住发布：加可空 `semantic_release_id`（落点现场确认，见 §4-④）+ 重放一致性测试；手写迁移（禁 autogenerate、只加法 DDL）+ downgrade 往返验证 | 迁移 + 测试 | 同一请求重放读取同一发布；空值兼容旧数据；迁移 upgrade→downgrade→upgrade 往返通过 |
 | **D17** | 内部切换演练（测试环境）+ chat/multistep 定向回归 + PR + 变更记录 | 演练报告、PR、`Harness/changes/feat-semantic-registry-nl2sql/summary.md` | 失败集合净新增 0；**G3 通过** |
 

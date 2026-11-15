@@ -26,6 +26,7 @@ from app.domain.schemas import (
 )
 from app.services.acl_service import ADMIN_ROLE
 from app.services.ontology_service import OntologyService
+from app.services.nl2sql_schema import buildSchemaText
 
 
 # Phase 4.5 ACL 扩展后 updateClass/deleteClass 要求 actor。
@@ -337,7 +338,7 @@ class TestUpdatedSchemaFeedsNl2Sql:
         await service.updateClass(dbSession, cls.id, OntologyClassUpdate(class_alias="收货单v2"), actor=_ADMIN)
         current = await service.listClasses(dbSession)
 
-        text = Nl2SqlService().buildSchemaText(current)
+        text = buildSchemaText(current)
         assert "PRECEIPT" in text
         assert "STATUS: STRING (column=STATUS_0)" in text  # 列仍在
 

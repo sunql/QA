@@ -79,7 +79,6 @@ from app.services.nl2sql_refs import (
     _splitCompoundRef,
 )
 from app.services.nl2sql_schema import (
-    buildSchemaText,
     supplementJoinPath,
     _pruneClassesForSql,
     _buildIndirectJoinHints,
@@ -93,6 +92,7 @@ from app.services.nl2sql_schema import (
     _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT,
     _VALUE_SAMPLE_VALUE_MAX_DEFAULT,
 )
+from app.services.semantic_schema_gate import renderSchemaText
 from app.services.nl2sql_scope import (
     _applyScopeRowLimit,
     _coerceRowLimit,
@@ -323,22 +323,22 @@ class Nl2SqlService:
         """按数据源类型解析方言；未指定或未知类型回退 Oracle（历史行为）。"""
         return resolveDialect(datasourceType, oracle_version)
 
-    def buildSchemaText(
+    async def renderSchemaText(
         self,
         classes: list[OntologyClass],
-        *,
-        schemaPrefix: str | None = None,
-        valueSamples: dict[tuple[str, str], list[str]] | None = None,
-        driftWarning: str | None = None,
         joins: list[OntologyJoin] | None = None,
+        *,
+        session: AsyncSession | None = None,
+        **renderParams: Any,
     ) -> str:
-        """将本体类列表渲染为 LLM 可读的 schema 文本（含外键 JOIN 关系与继承层级）。"""
-        return buildSchemaText(
-            classes,
-            schemaPrefix=schemaPrefix,
-            valueSamples=valueSamples,
-            driftWarning=driftWarning,
-            joins=joins,
+        """schema 文本渲染（**带语义快照闸门**的唯一出口，P2 D15）。
+
+        开关 `ENABLE_SEMANTIC_REGISTRY_NL2SQL` 关时，与 `buildSchemaText`
+        **逐字节一致**（连库都不碰）；开时改读已发布语义快照，快照与当前本体
+        事实不一致则降级直读并记 error 级日志（不许静默降级）。
+        """
+        return await renderSchemaText(
+            classes, joins, session=session, **renderParams
         )
 
     def supplementJoinPath(
@@ -576,6 +576,8 @@ class Nl2SqlService:
             wikiRulesBlock=wikiRulesBlock,
             kpiContractText=await _buildKpiContractOrNone(session, question),
             kpiContractBlock=kpiContractBlock,
+            # 语义快照闸门（D15）：session 缺席也能跑（闸门会降级直读）。
+            session=session,
             # 季度/半年口径由服务端确定性解析（主问题+子问题并集），
             # 不让 LLM 仅凭「今天是 X」自行推算边界（2026-10-31）。
             timeScopeFact=_timeScopeFactFor(scopeQuestion, question, priorState),
@@ -743,12 +745,14 @@ class Nl2SqlService:
         schemaClasses = (
             _pruneClassesForSql(plan, classes) if schemaCfg["pruneSchema"] else classes
         )
-        schemaText = buildSchemaText(
+        # schema 文本经**语义快照闸门**渲染（开关默认关 ⇒ 与今天逐字节一致）。
+        schemaText = await renderSchemaText(
             schemaClasses,
+            joins=joins,
+            session=session,
             schemaPrefix=schemaPrefix if dialect.useSchemaPrefix else None,
             valueSamples=valueSamples,
             driftWarning=driftWarning,
-            joins=joins,
             digestMaxItems=schemaCfg["digestMaxItems"],
             digestMaxDescChars=schemaCfg["digestMaxDescChars"],
             valueSampleValueMax=schemaCfg["valueSampleValueMax"],

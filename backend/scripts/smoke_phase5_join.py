@@ -35,7 +35,7 @@ from app.domain.schemas import ChatRequest, HistoryMessage
 from app.infrastructure.database import getSessionFactory
 from app.infrastructure.llm.base_client import StreamChunk
 from app.services.chat_service import ChatService
-from app.services.nl2sql_service import Nl2SqlService
+from app.services.nl2sql_schema import buildSchemaText
 from app.services.ontology_service import OntologyService
 from app.api.v1 import chat as chat_module
 
@@ -144,7 +144,7 @@ async def main() -> None:
     async with sessionFactory() as session:
         ontology = OntologyService()
         classes = await ontology.listClasses(session)
-        schemaText = Nl2SqlService().buildSchemaText(classes)
+        schemaText = buildSchemaText(classes)
     assert "### JOIN 关系" in schemaText, "缺少 JOIN 关系段落"
     assert "[FK → PRECEIPT]" in schemaText, "缺少 [FK → PRECEIPT] 标注"
     print("[5.1] buildSchemaText 渲染 FK JOIN 提示 ✅")

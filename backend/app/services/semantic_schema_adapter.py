@@ -233,6 +233,12 @@ async def loadClassesForSchema(
     activeRegistry = registry if registry is not None else semanticRegistry
     snapshot = await _activeSnapshot(activeRegistry, session, domainCode)
     if snapshot is None:
+        # 「没有 ACTIVE 快照」= 影子**没生效**（还没发布 / 域作用域没查到）。
+        # 这件事必须**可观测**：静默直读 ⇒ 现场只会看到「开关开了但口径没变」，
+        # 无从判断是配置没生效、还是发布没做、还是发布在别的域。
+        logger.info(
+            "当前没有 ACTIVE 语义发布快照（domain=%s），本次直读治理表", domainCode
+        )
         return classes, joins
 
     mismatch = schemaVersionMismatch(snapshot)
@@ -257,7 +263,7 @@ async def loadClassesForSchema(
         restoredJoins = None
 
     logger.info(
-        "语义发布快照已用于 schema 渲染：version=%s classes=%s",
+        "语义发布快照已复原为 schema 渲染视图：version=%s classes=%s",
         snapshot.version,
         len(restoredClasses),
     )

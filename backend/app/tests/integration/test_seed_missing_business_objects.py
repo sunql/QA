@@ -139,7 +139,7 @@ class TestSeedMissingObjectsRealPg:
         self, client, dbSession, monkeypatch
     ) -> None:
         """NL2SQL schema 文本能渲染新类与复合键 JOIN（可被 LLM 引用）。"""
-        from app.services.nl2sql_service import Nl2SqlService
+        from app.services.nl2sql_schema import buildSchemaText
 
         await _runSeed(monkeypatch)
 
@@ -149,7 +149,7 @@ class TestSeedMissingObjectsRealPg:
         joins = (
             await dbSession.execute(select(OntologyJoin))
         ).scalars().all()
-        text = Nl2SqlService().buildSchemaText(classes, joins=joins)
+        text = buildSchemaText(classes, joins=joins)
 
         # 新类头渲染（含中文别名 + 表名）
         assert "### PurchaseInvoice (采购发票): table=PINVOICE" in text

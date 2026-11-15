@@ -114,6 +114,10 @@ class UsageMixin:
                     fewShot=pc.fewShot, valueSamples=pc.valueSamples,
                     driftWarning=pc.driftWarning, maxRetries=0,
                     joins=pc.joins, scopeQuestion=scope_question,
+                    # 会话必须一起带过去：语义快照闸门靠 session 取已发布快照。
+                    # 缺席 ⇒ 这一轮确定地直读治理表 ⇒ **首次生成用快照、重试用直读**
+                    # ⇒ 同一轮问答里两次 prompt 的 schema 口径不一致。
+                    session=session,
                 )
             except Exception as genErr:
                 # 重试生成本身失败：抛原始执行错误（异常类型与消息不变，行为与旧实现

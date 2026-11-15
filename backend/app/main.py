@@ -184,6 +184,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _semanticAuthReason = semanticReleaseAuthMisconfiguration(settings)
     if _semanticAuthReason:
         logger.error("🚨 安全告警：%s", _semanticAuthReason)
+    # 语义注册表影子接入（P2 D15）：问答链路按已发布快照作答 = 治理 IP 对匿名可达。
+    # 与上面同一处理方式：只告警，不阻塞（本地/测试依赖 stub）。
+    from app.config import semanticRegistryNl2sqlAuthMisconfiguration
+
+    _semanticNl2sqlAuthReason = semanticRegistryNl2sqlAuthMisconfiguration(settings)
+    if _semanticNl2sqlAuthReason:
+        logger.error("🚨 安全告警：%s", _semanticNl2sqlAuthReason)
     # config 重复字段批：jwtSecret 曾有两份声明（旧块 default="" 被占位符覆盖），
     # 漏配时静默用公开已知的开发密钥；旧注释承诺的「启动期校验」当时从未实现，此处补上。
     from app.config import jwtSecretInsecurityReason

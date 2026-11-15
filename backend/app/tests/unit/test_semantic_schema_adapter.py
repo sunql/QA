@@ -329,6 +329,26 @@ class Test取类闸门:
         assert restoredJoins is joins
         assert registry.calls == [None]
 
+    async def test_无激活发布时记info让影子未生效可观测(self, caplog) -> None:
+        """没有 ACTIVE 快照 ⇒ 影子**没生效** ⇒ 这件事必须可观测。
+
+        静默直读 ⇒ 现场只会看到「开关开了但口径没变」，无从判断是配置没生效、
+        还是发布还没做、还是域作用域发布没被查到。
+        """
+        classes = [_OrmStub("Supplier")]
+        registry = _FakeRegistry(None)
+
+        with caplog.at_level("INFO"):
+            await loadClassesForSchema(
+                classes, None, session=None, enabled=True, registry=registry
+            )
+
+        assert any(
+            "没有" in r.getMessage() and "快照" in r.getMessage()
+            for r in caplog.records
+            if r.levelname == "INFO"
+        ), "无 ACTIVE 快照时必须记 info，说明影子未生效"
+
     async def test_有激活发布时返回复原视图(self) -> None:
         classes = [_OrmStub("Supplier"), _OrmStub("PurchaseOrder")]
         registry = _FakeRegistry(_FakeSnapshot(_manifest()))

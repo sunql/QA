@@ -175,6 +175,14 @@ class Settings(BaseSettings):
     enableSemanticRegistryNl2sql: bool = Field(
         default=False, alias="ENABLE_SEMANTIC_REGISTRY_NL2SQL"
     )
+    # ===== 语义注册表 RAG 过滤（P3a D19）=====
+    # 向量召回走「带治理维度（域/实体/组织/有效期/release_id）的 v2 集合」的开关。
+    # **默认关**：关时读路径逐字节等于今天（读 v1 集合、不带任何过滤、不碰 v2）。
+    # 开启后：有过滤维度 ⇒ v2 不可用一律 fail-closed（空结果），绝不回落成
+    # 「不过滤的 v1」（那等于把越权行放进来）；无过滤维度 ⇒ 可回落 v1（语义等价）。
+    enableSemanticRegistryRag: bool = Field(
+        default=False, alias="ENABLE_SEMANTIC_REGISTRY_RAG"
+    )
 
     # ===== 通用 Agent 编排 =====
     enableAgentOrchestration: bool = Field(default=False, alias="ENABLE_AGENT_ORCHESTRATION")
@@ -394,6 +402,28 @@ def semanticRegistryNl2sqlAuthMisconfiguration(settings: Settings) -> str | None
         "ENABLE_SEMANTIC_REGISTRY_NL2SQL=true 但鉴权仍为 stub"
         f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
         "问答链路会按已发布语义快照作答，任意客户端可伪造身份读到治理 IP 口径。"
+        "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
+    )
+
+
+def semanticRegistryRagAuthMisconfiguration(settings: Settings) -> str | None:
+    """启用语义注册表 RAG 过滤时鉴权必须是「真鉴权」；否则返回原因（纯函数）。
+
+    该开关让向量召回按**治理维度**（数据域/组织/业务对象）收窄——一旦过滤维度
+    来自「按调用方身份解析的可见域」，它就是一条**授权边界**。在 stub 鉴权下
+    身份可被任意客户端伪造（``X-User-Roles``）⇒ 收窄依据本身不可信 ⇒ 过滤形同虚设。
+
+    不阻塞启动：本地开发与测试套件依赖 stub 鉴权。但必须大声告警，
+    由部署方决定是否真的在非真鉴权环境启用该开关。
+    """
+    if not settings.enableSemanticRegistryRag:
+        return None
+    if settings.authMode == "real" and not settings.authStubEnabled:
+        return None
+    return (
+        "ENABLE_SEMANTIC_REGISTRY_RAG=true 但鉴权仍为 stub"
+        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
+        "过滤维度（域/组织/实体）的来源身份不可信，治理维度收窄形同虚设。"
         "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
     )
 

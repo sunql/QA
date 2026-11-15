@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -28,6 +29,10 @@ from app.infrastructure.rate_limit import limiter, rateLimitDep, rateLimitExceed
 from app.services.error_classification import classifyError, sanitizeErrorMessage
 
 logger = logging.getLogger(__name__)
+
+# 启动期 Milvus 就绪探针的时限（秒）：探针要真连 Milvus，
+# Milvus 端口黑洞时不能把容器启动拖住（pymilvus 单次连接超时 10s × 类型数）。
+RAG_READINESS_TIMEOUT_SECONDS = 10.0
 
 
 async def _bootstrapChatConcurrencyConfig() -> None:
@@ -191,6 +196,63 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _semanticNl2sqlAuthReason = semanticRegistryNl2sqlAuthMisconfiguration(settings)
     if _semanticNl2sqlAuthReason:
         logger.error("🚨 安全告警：%s", _semanticNl2sqlAuthReason)
+    # 语义注册表 RAG 过滤（P3a D19）：过滤维度若来自「按身份解析的可见域」，
+    # 它就是授权边界；stub 鉴权下身份可伪造 ⇒ 收窄形同虚设。与上面同一处理方式。
+    from app.config import semanticRegistryRagAuthMisconfiguration
+
+    _semanticRagAuthReason = semanticRegistryRagAuthMisconfiguration(settings)
+    if _semanticRagAuthReason:
+        logger.error("🚨 安全告警：%s", _semanticRagAuthReason)
+    # 语义注册表 RAG 过滤（P3a）：开关打开时探一次 v2 就绪度 ——
+    # v2 缺失/空 ⇒ 带过滤的召回「安静地」返回空（fail-closed），没有任何降级痕迹
+    # ⇒ 用户只看到「查不到实体」⇒ 启动期就喊出来，别等到问答时才排查。
+    if settings.enableSemanticRegistryRag:
+        from app.services.semantic_registry_rag_gate import registryRagReadiness
+
+        try:
+            # 探针要连 Milvus（阻塞）⇒ 放线程里跑 + 限时，
+            # 否则 Milvus 不可达会把容器启动拖住（pymilvus 连接超时 10s × 类型数）。
+            _ragReadiness = await asyncio.wait_for(
+                asyncio.to_thread(registryRagReadiness),
+                timeout=RAG_READINESS_TIMEOUT_SECONDS,
+            )
+            # 三种情形分别给不同处置（别都写成「请先回填」——那是误导排障方向）：
+            # ① 探不到（Milvus 不可达）② 集合为空/缺失 ③ 行在但维度全空。
+            _ragUnreachable = {
+                t: r for t, r in _ragReadiness.items() if r.rows is None
+            }
+            _ragEmpty = {t: r for t, r in _ragReadiness.items() if r.rows == 0}
+            _ragNoDimension = {
+                t: r
+                for t, r in _ragReadiness.items()
+                if r.rows is not None
+                and r.rows > 0
+                and r.dimensionedRows == 0
+            }
+            if _ragUnreachable:
+                logger.error(
+                    "🚨 语义注册表 RAG 就绪探针失败（Milvus 不可达或集合未加载）：%s "
+                    "⇒ 无法确认 v2 是否回填；带过滤的召回可能恒空。",
+                    {t: "unreachable" for t in _ragUnreachable},
+                )
+            if _ragEmpty:
+                logger.error(
+                    "🚨 语义注册表 RAG 开关已开启，但 v2 集合缺失或为空：%s "
+                    "⇒ 带过滤的召回会返回空结果（fail-closed）。"
+                    "请先执行回填 scripts/backfill_registry_v2.py。",
+                    {t: r.rows for t, r in _ragEmpty.items()},
+                )
+            if _ragNoDimension:
+                logger.error(
+                    "🚨 语义注册表 RAG v2 有行但治理维度全空：%s "
+                    "⇒ 带过滤的召回恒空（fail-closed）。"
+                    "请检查回填的维度解析（scripts/backfill_registry_v2.py）。",
+                    {t: r.rows for t, r in _ragNoDimension.items()},
+                )
+            if not (_ragUnreachable or _ragEmpty or _ragNoDimension):
+                logger.info("语义注册表 RAG v2 就绪：%s", _ragReadiness)
+        except Exception as exc:  # noqa: BLE001 —— 探针不许把启动带崩
+            logger.error("🚨 语义注册表 RAG 就绪探针失败：%s", exc)
     # config 重复字段批：jwtSecret 曾有两份声明（旧块 default="" 被占位符覆盖），
     # 漏配时静默用公开已知的开发密钥；旧注释承诺的「启动期校验」当时从未实现，此处补上。
     from app.config import jwtSecretInsecurityReason

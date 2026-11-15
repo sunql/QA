@@ -33,14 +33,24 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """记录 CQL 与参数，按 countOf 决定返回的计数。"""
+    """记录 CQL 与参数，按 countOf 决定返回的计数。
 
-    def __init__(self, countOf) -> None:
+    `record` / `records` 用于读路径（台账读取）：给了就按它返回，
+    不给就走计数口径（与既有测试的默认行为一致）。
+    """
+
+    def __init__(self, countOf, *, record=None, records=None) -> None:
         self.calls: list[tuple[str, dict]] = []
         self._countOf = countOf
+        self._record = record
+        self._records = records
 
     def run(self, cql: str, **params):
         self.calls.append((cql, params))
+        if self._records is not None:
+            return _FakeResult(self._records)
+        if self._record is not None:
+            return _FakeResult([self._record])
         rows = params.get("rows") or []
         return _FakeResult([{"cnt": self._countOf(len(rows))}])
 
@@ -52,9 +62,9 @@ class _FakeSession:
 
 
 class _FakeDriver:
-    def __init__(self, countOf=None) -> None:
+    def __init__(self, countOf=None, *, record=None, records=None) -> None:
         self.countOf = countOf or (lambda n: n)
-        self.sessionObj = _FakeSession(self.countOf)
+        self.sessionObj = _FakeSession(self.countOf, record=record, records=records)
 
     def session(self) -> _FakeSession:
         return self.sessionObj
@@ -304,3 +314,120 @@ def testCountReleaseMirrorEdgesConstrainsBothEndpointLabels(monkeypatch) -> None
         ":ReleaseClass)-[r:HAS_PROPERTY]->(b:ReleaseProperty" in cql for cql in cqls
     )
     assert all("MATCH (a)-[r]->(b)" not in cql for cql in cqls)
+
+
+# =============================================================================
+# 物化作业台账（P3b D23）
+# =============================================================================
+#
+# 台账节点**不是镜像实体**：独立 label（MirrorJobState / MirrorJobBatch）⇒
+# 对账时「镜像实体数」不受台账影响；台账写入同样受写目标闸门保护。
+
+
+def _stateRow(**overrides) -> dict:
+    row = {
+        "release_id": 7,
+        "release_version": "2026.11.09-1",
+        "status": "materialized",
+        "manifest_hash": "a" * 64,
+        "node_count": 3,
+        "edge_count": 2,
+        "unresolved_count": 0,
+        "started_at": "2026-11-15T10:00:00+00:00",
+        "updated_at": "2026-11-15T10:00:05+00:00",
+        "finished_at": "2026-11-15T10:00:05+00:00",
+        "error": "",
+    }
+    row.update(overrides)
+    return row
+
+
+def testWriteMirrorJobStateUsesLedgerLabelOnly(monkeypatch) -> None:
+    driver = _useTestTarget(monkeypatch)
+    mirror.writeMirrorJobState(_stateRow())
+    cql = driver.sessionObj.calls[0][0]
+    assert ":MirrorJobState" in cql
+    # 台账绝不能长成主图实体（否则会被消费方当成本体）
+    for mainLabel in (":Class", ":Property", ":Metric", ":KpiCatalog"):
+        assert mainLabel not in cql
+
+
+def testWriteMirrorJobStateRefusesNonTestTarget(monkeypatch) -> None:
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _PROD_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: _FakeDriver())
+    with pytest.raises(ValueError, match="拒绝向"):
+        mirror.writeMirrorJobState(_stateRow())
+
+
+def testWriteMirrorJobBatchUsesLedgerLabelOnly(monkeypatch) -> None:
+    driver = _useTestTarget(monkeypatch)
+    mirror.writeMirrorJobBatch(
+        {
+            "release_id": 7,
+            "batch_no": "B2",
+            "kind": "nodes",
+            "status": "succeeded",
+            "count": 1,
+            "elapsed_ms": 12,
+            "error": "",
+            "manifest_hash": "a" * 64,
+            "updated_at": "2026-11-15T10:00:02+00:00",
+        }
+    )
+    cql = driver.sessionObj.calls[0][0]
+    assert ":MirrorJobBatch" in cql
+    assert "batch_no" in cql
+
+
+def testWriteMirrorJobBatchRefusesNonTestTarget(monkeypatch) -> None:
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _PROD_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: _FakeDriver())
+    with pytest.raises(ValueError, match="拒绝向"):
+        mirror.writeMirrorJobBatch(
+            {
+                "release_id": 7,
+                "batch_no": "B1",
+                "kind": "nodes",
+                "status": "running",
+            }
+        )
+
+
+def testReadMirrorJobStateReturnsProperties(monkeypatch) -> None:
+    driver = _FakeDriver(record={"s": _stateRow()})
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _TEST_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: driver)
+    state = mirror.readMirrorJobState(7)
+    assert state is not None
+    assert state["status"] == "materialized"
+    assert state["manifest_hash"] == "a" * 64
+    assert state["node_count"] == 3
+
+
+def testReadMirrorJobStateReturnsNoneWhenAbsent(monkeypatch) -> None:
+    driver = _FakeDriver(records=[])
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _TEST_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: driver)
+    assert mirror.readMirrorJobState(7) is None
+
+
+def testReadMirrorJobBatchesReturnsRows(monkeypatch) -> None:
+    driver = _FakeDriver(
+        records=[
+            {"b": {"release_id": 7, "batch_no": "B1", "kind": "nodes", "status": "succeeded"}},
+            {"b": {"release_id": 7, "batch_no": "B2", "kind": "nodes", "status": "failed"}},
+        ]
+    )
+    monkeypatch.setattr(mirror, "_effectiveTargetUri", lambda: _TEST_TARGET_URI)
+    monkeypatch.setattr(mirror, "getDriver", lambda: driver)
+    batches = mirror.readMirrorJobBatches(7)
+    assert [batch["batch_no"] for batch in batches] == ["B1", "B2"]
+    assert batches[1]["status"] == "failed"
+
+
+def testCountStaleReleaseMirrorNodesCountsOnlyOutsideKeep(monkeypatch) -> None:
+    driver = _useTestTarget(monkeypatch)
+    mirror.countStaleReleaseMirrorNodes(7, {"obj:CLASS:1"})
+    cqls = [cql for cql, _ in driver.sessionObj.calls]
+    assert any(":ReleaseClass" in cql for cql in cqls)
+    assert all("NOT n.unified_id IN $keep" in cql for cql in cqls)

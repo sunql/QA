@@ -28,7 +28,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -85,7 +85,7 @@ def _epochMs(value: datetime | None) -> int:
     if value is None:
         return 0
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        value = value.replace(tzinfo=UTC)
     return int(value.timestamp() * 1000)
 
 

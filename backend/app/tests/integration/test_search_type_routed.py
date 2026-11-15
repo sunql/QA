@@ -120,10 +120,11 @@ def ensureMilvusTestDatabase() -> None:
 @pytest.fixture
 def registryV2CleanClient():
     """v2 集合清理夹具：drop 前先过**隔离闸门**（默认库=生产，误删不可逆）。"""
+    from pymilvus import utility
+
     from app.infrastructure.milvus_client import _connAlias, hasEmbeddingCollection
     from app.infrastructure.milvus_registry_v2 import REGISTRY_V2_COLLECTION_NAMES
     from app.tests.milvus_isolation import guardIsolatedDatabase
-    from pymilvus import utility
 
     def _dropRegistryV2Collections() -> None:
         for name in REGISTRY_V2_COLLECTION_NAMES.values():

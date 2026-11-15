@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.dependencies import CurrentUser
-from app.domain.registry_filter import RegistryFilter
 from app.domain.enums import ClassRelationType, MetricStatus, MetricType
 from app.domain.exceptions import (
     MilvusError,
@@ -43,6 +42,7 @@ from app.domain.models import (
     OntologyProperty,
     OntologyRelation,
 )
+from app.domain.registry_filter import RegistryFilter
 from app.domain.schemas import (
     IdMappingCreate,
     OntologyClassCreate,

@@ -27,7 +27,6 @@ import pytest
 from app.domain.registry_filter import RegistryFilter
 from app.services import semantic_registry_rag_gate as gate
 
-
 _V1_HITS = [{"ontology_id": 1, "type": "class", "name": "供应商", "distance": 0.1}]
 
 

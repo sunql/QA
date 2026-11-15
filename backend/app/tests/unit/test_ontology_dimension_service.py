@@ -23,7 +23,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,7 +33,6 @@ from app.services.ontology_dimension_service import (
     buildClassDimension,
     resolveDimensions,
 )
-
 
 # ---------------------------------------------------------------------------
 # 1. 纯映射
@@ -98,8 +97,8 @@ class Test纯映射:
 
     def test_有效期转epoch毫秒(self) -> None:
         dim = buildClassDimension(
-            validFrom=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            validTo=datetime(2026, 2, 1, tzinfo=timezone.utc),
+            validFrom=datetime(2026, 1, 1, tzinfo=UTC),
+            validTo=datetime(2026, 2, 1, tzinfo=UTC),
             boCode=None,
             primaryDomainCode=None,
             attachedDomainCodes=(),
@@ -110,7 +109,7 @@ class Test纯映射:
 
     def test_无结束时间视为长期有效哨兵零(self) -> None:
         dim = buildClassDimension(
-            validFrom=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            validFrom=datetime(2026, 1, 1, tzinfo=UTC),
             validTo=None,
             boCode=None,
             primaryDomainCode=None,
@@ -185,7 +184,7 @@ async def _seedClass(
         class_alias=None,
         description="维度解析用例",
         version=1,
-        valid_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        valid_from=datetime(2026, 1, 1, tzinfo=UTC),
         valid_to=None,
         object_owner=objectOwner,
     )

@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -217,7 +217,7 @@ async def _seedClass(
         class_alias=None,
         description="写路径用例",
         version=1,
-        valid_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        valid_from=datetime(2026, 1, 1, tzinfo=UTC),
         valid_to=None,
         object_owner=None,
     )

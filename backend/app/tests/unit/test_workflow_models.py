@@ -36,7 +36,7 @@ from app.domain.workflow_models import (
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "alembic" / "versions"
 
-# 迁移号已串行占号（2026-11-16）：P5 = 0149–0151，WP-ONT-AI 从 0152 起。
+# 迁移号已串行占号（2026-11-16）：P5 = 0149–0152，WP-ONT-AI 从 0153 起。
 _MIGRATION_STEMS = (
     "0149_workflow_definition",
     "0150_workflow_step_command",
@@ -314,7 +314,12 @@ def test_审批对象模型开放可复用():
 
 
 def test_幂等键是独立唯一约束列():
-    """D-2：幂等键**独立列** + ``UniqueConstraint``（JSONB 里的键做不了唯一约束）。"""
+    """D-2：幂等键**独立列** + ``UniqueConstraint``（JSONB 里的键做不了唯一约束）。
+
+    实例的幂等作用域 = ``(definition_id, created_by, idempotency_key)``：
+    **按提交人私有** ⇒ ① 别人的键不会被「占死」（DoS）；② 复用别人的键只会
+    拿到**自己的**实例（不泄露别人的实例、也不泄露「这个键存在」）。
+    """
 
     uniques = _uniqueConstraints(BusinessCommand.__table__)
     assert uniques["uq_business_command_idempotency"] == (
@@ -324,8 +329,12 @@ def test_幂等键是独立唯一约束列():
     instanceUniques = _uniqueConstraints(WorkflowInstance.__table__)
     assert instanceUniques["uq_workflow_instance_idempotency"] == (
         "definition_id",
+        "created_by",
         "idempotency_key",
     )
+    # ⚠️ 约束作用域里不能有 NULL 列：PG 里 NULL 互不相等 ⇒ created_by 可空时
+    #    幂等保证会**静默失效**（同一个键能落两行）。
+    assert WorkflowInstance.__table__.columns["created_by"].nullable is False
     # 幂等键是**独立标量列**（不是 JSONB 里的字段）⇒ 库级可加唯一约束
     keyColumn = BusinessCommand.__table__.columns["idempotency_key"]
     assert keyColumn.type.__class__.__name__ == "String"
@@ -387,7 +396,7 @@ def test_状态字面量被check钉死():
         ),
         BusinessCommand: (
             "ck_business_command_status",
-            "status IN ('PENDING','EXECUTING','SUCCEEDED','FAILED','COMPENSATED')",
+            "status IN ('PENDING','EXECUTING','SUCCEEDED','FAILED','COMPENSATED','CANCELLED','ABORTED')",
         ),
         ApprovalTask: (
             "ck_approval_task_status",

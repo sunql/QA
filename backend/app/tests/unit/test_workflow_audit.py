@@ -58,7 +58,7 @@ async def definition(dbSession, approverRole) -> WorkflowDefinition:
         definition_json={
             "riskLevel": "MEDIUM",
             "steps": [
-                {"code": "collect", "order": 0},
+                {"code": "collect", "order": 0, "commandType": "po.collect"},
                 {"code": "approve", "order": 1, "requiresApproval": True},
             ],
             "approvalMatrix": _MATRIX,

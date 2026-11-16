@@ -596,6 +596,26 @@ MSG_WORKFLOW_DEFINITION_NOT_FOUND = (
 )
 MSG_WORKFLOW_DEFINITION_NOT_PUBLISHED = "工作流定义「{version}」尚未发布，不能提交实例"
 
+# P5 取消：权限与终态
+MSG_WORKFLOW_CANCEL_NOT_AUTHORIZED = "只有提交人或管理员可以取消该工作流实例"
+# P5 取消：要求**已校验**身份（stub 头可冒充任意 DB 账号 ⇒ 治理写面必须验签）
+MSG_WORKFLOW_CANCEL_REAL_AUTH_REQUIRED = (
+    "取消工作流实例要求已校验的登录身份"
+    "（请求头身份可被任意客户端伪造，不可用于治理写操作）"
+)
+MSG_WORKFLOW_CANCEL_NOT_ALLOWED = (
+    "工作流实例已处于终态（{status}），不能再取消"
+)
+MSG_WORKFLOW_CANCEL_BUSY = (
+    "工作流实例有命令正在执行（{commandIds}），外部写可能已经发生，"
+    "此时取消会与在飞的写冲突，请等命令结束后再取消"
+)
+
+# P5 审批后推进失败：决策保留（事实），实例失败关闭（需人工介入）
+MSG_WORKFLOW_DRIVE_FAILED = (
+    "审批已生效，但工作流推进失败，实例已失败关闭（需人工介入重试）"
+)
+
 # KPI Catalog datasource 绑定（F2 写入流收尾 — 2026-10-18 spec §4.4）
 # Reserved for 未来 Pydantic custom error 覆盖（当前 DTO 层 `Field(..., ge=1)` 直接抛 Pydantic 默认英文错误，service 层无引用）
 MSG_KPI_DATASOURCE_REQUIRED = "KPI 必须绑定一个数据源（datasource_id 必填）"

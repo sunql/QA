@@ -118,6 +118,35 @@ async def test_模拟适配器失败次数用尽后成功():
     assert result["simulated"] is True
 
 
+async def test_模拟适配器认得命名空间后的演练指令():
+    """编排器把**步骤**载荷放进 ``payload["step"]`` ⇒ 演练指令仍要认得。
+
+    为什么：控制键（``simulate``）只允许来自**工作流定义**（作者）⇒ 它留在
+    ``step`` 命名空间里；用户输入在 ``request`` 命名空间 ⇒ 两者不再混淆。
+    """
+
+    handler = SimulatedCommandHandler()
+    command = _StubCommand(
+        payload={"request": {"amount": 100}, "step": {"simulate": {"outcome": "fail", "message": "下游不可达"}}}
+    )
+
+    with pytest.raises(CommandExecutionError) as excinfo:
+        await handler.execute(None, command=command)
+
+    assert "下游不可达" in str(excinfo.value)
+
+
+async def test_模拟适配器忽略用户命名空间里的演练指令():
+    """``request.simulate`` **不生效**（用户不能左右适配器行为）。"""
+
+    handler = SimulatedCommandHandler()
+    command = _StubCommand(payload={"request": {"simulate": {"outcome": "fail"}}})
+
+    result = await handler.execute(None, command=command)
+
+    assert result["simulated"] is True
+
+
 async def test_模拟适配器补偿可调用():
     handler = SimulatedCommandHandler()
 

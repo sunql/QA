@@ -33,6 +33,7 @@ ACTION_APPROVE = "APPROVE"
 ACTION_REJECT = "REJECT"
 ACTION_TIMEOUT = "WORKFLOW_TIMEOUT"
 ACTION_COMPENSATE = "COMPENSATE"
+ACTION_CANCEL = "WORKFLOW_CANCEL"
 
 # 审计实体类型（与 audit_log.entity_type 一致）。
 ENTITY_INSTANCE = "workflow_instance"
@@ -150,8 +151,15 @@ class WorkflowAuditService:
         instance: WorkflowInstance,
         actor: str,
         reason: str,
+        succeededCount: int = 0,
+        failedCount: int = 0,
+        skippedCount: int = 0,
     ) -> None:
-        """失败补偿（逆序回滚已成功的命令）。"""
+        """失败补偿（逆序回滚已成功的命令）。
+
+        带上**补偿计数**：审计不能只说「已补偿」而不说补偿了几条 ——
+        补偿失败时必须看得见（否则「补偿」与纸面动作无法区分）。
+        """
 
         await self._audit.record(
             session,
@@ -160,5 +168,37 @@ class WorkflowAuditService:
             action=ACTION_COMPENSATE,
             actor=actor,
             before={"status": "FAILED"},
-            after={"status": instance.status, "reason": reason[:500]},
+            after={
+                "status": instance.status,
+                "reason": reason[:500],
+                "succeededCount": succeededCount,
+                "failedCount": failedCount,
+                "skippedCount": skippedCount,
+            },
+        )
+
+    async def recordCancel(
+        self,
+        session: AsyncSession,
+        *,
+        instance: WorkflowInstance,
+        actor: str,
+        beforeStatus: str,
+        reason: str | None = None,
+        actorDepartments: DepartmentsInput = None,
+    ) -> None:
+        """取消工作流实例（待审批 / 待执行命令一并取消 ⇒ 外部写不再发生）。"""
+
+        await self._audit.record(
+            session,
+            entity_type=ENTITY_INSTANCE,
+            entity_id=instance.id,
+            action=ACTION_CANCEL,
+            actor=actor,
+            actor_departments=actorDepartments,
+            before={"status": beforeStatus},
+            after={
+                "status": instance.status,
+                "reason": (reason or "")[:500],
+            },
         )

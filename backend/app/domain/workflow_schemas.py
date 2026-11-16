@@ -135,3 +135,15 @@ class WorkflowApprovalDecision(CamelModel):
 
     decision: Literal["APPROVE", "REJECT"]
     note: str | None = Field(default=None, max_length=DECISION_NOTE_MAX_LENGTH)
+
+
+class WorkflowInstanceCancel(CamelModel):
+    """``POST /instances/{instanceId}/cancel`` 请求体。
+
+    ``reason`` 落 ``workflow_instance.error_message`` 与治理审计 ⇒ 取消
+    也会留痕（「谁在什么时候为什么停了这件事」）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=DECISION_NOTE_MAX_LENGTH)

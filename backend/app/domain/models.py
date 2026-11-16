@@ -1695,14 +1695,15 @@ class AuditLog(Base):
         CheckConstraint(
             # 'RESTORE' 是 DB 上的既有取值（ORM 漏写 ⇒ 表达式与 DB 不一致，
             # 且 alembic 不比较 CHECK 表达式 ⇒ 只会静默漂移）。
-            # P5 的 6 个动作（迁移 0152 同步放宽 DB 侧）：
+            # P5 的 7 个动作（迁移 0152 同步放宽 DB 侧）：
             # APPROVE / REJECT / COMPENSATE / WORKFLOW_SUBMIT /
-            # WORKFLOW_APPROVAL_REQUESTED / WORKFLOW_TIMEOUT。
+            # WORKFLOW_APPROVAL_REQUESTED / WORKFLOW_TIMEOUT / WORKFLOW_CANCEL。
             "action IN ('CREATE','UPDATE','DELETE','RESTORE','REUSE',"
             "'auth.login','auth.login_failed','auth.logout',"
             "'auth.password_changed','user.password_reset',"
             "'APPROVE','REJECT','COMPENSATE','WORKFLOW_SUBMIT',"
-            "'WORKFLOW_APPROVAL_REQUESTED','WORKFLOW_TIMEOUT')",
+            "'WORKFLOW_APPROVAL_REQUESTED','WORKFLOW_TIMEOUT',"
+            "'WORKFLOW_CANCEL')",
             name="ck_audit_log_action",
         ),
         # DB 实际是 (entity_type, entity_id, created_at DESC) / (actor, created_at DESC)

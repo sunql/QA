@@ -54,6 +54,9 @@ _VALID_ACTIONS = frozenset({
     "WORKFLOW_SUBMIT",
     "WORKFLOW_APPROVAL_REQUESTED",
     "WORKFLOW_TIMEOUT",
+    # P5 取消（W5）：取消是**写入口**（能让已入队的命令不再执行）
+    # ⇒ 与决策同纪律，必须留痕。
+    "WORKFLOW_CANCEL",
 })
 
 # 查询默认上限（防止一次拉太多）

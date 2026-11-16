@@ -94,6 +94,14 @@ def test_矩阵的键集合等于目标状态集合():
         ("command", "EXECUTING", "FAILED"),
         ("command", "FAILED", "EXECUTING"),
         ("command", "SUCCEEDED", "COMPENSATED"),
+        # 取消：PENDING / FAILED 都必须能被取消（否则取消后仍可被领取）
+        ("command", "PENDING", "CANCELLED"),
+        ("command", "FAILED", "CANCELLED"),
+        # Worker 领走后、真正执行前发现实例已取消 ⇒ 不执行
+        ("command", "EXECUTING", "CANCELLED"),
+        # 终态失败（不可重试 / 次数耗尽）⇒ 落库即终态
+        ("command", "PENDING", "ABORTED"),
+        ("command", "FAILED", "ABORTED"),
         ("approval", "PENDING", "APPROVED"),
         ("approval", "PENDING", "REJECTED"),
         ("approval", "PENDING", "TIMEOUT"),
@@ -130,6 +138,8 @@ def test_终态没有出边():
         ("step", "SKIPPED"),
         ("step", "COMPENSATED"),
         ("command", "COMPENSATED"),
+        ("command", "CANCELLED"),
+        ("command", "ABORTED"),
         ("approval", "APPROVED"),
         ("approval", "REJECTED"),
         ("approval", "CANCELLED"),

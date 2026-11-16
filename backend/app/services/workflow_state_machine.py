@@ -9,13 +9,15 @@
 
 - **instance**（工作流实例）：PENDING → RUNNING → （WAITING_APPROVAL → APPROVED）
   → COMPLETED；失败可重试（FAILED → RUNNING）或补偿（→ COMPENSATED）。
-- **step**（步骤）：PENDING → RUNNING → SUCCEEDED / FAILED；失败可重试或补偿。
+- **step**（步骤）：PENDING → RUNNING → SUCCEEDED / FAILED；失败可重试或补偿；
+  命令执行前被取消 ⇒ RUNNING → SKIPPED（这一步其实没跑）。
 - **command**（业务命令）：PENDING → EXECUTING → SUCCEEDED / FAILED；
-  失败可重试（FAILED → EXECUTING）或补偿（→ COMPENSATED）。
+  失败可重试（FAILED → EXECUTING）或补偿（→ COMPENSATED）；
+  **未执行即可取消**（PENDING → CANCELLED ⇒ 实例取消 / 补偿后不再执行）。
 - **approval**（审批任务）：PENDING → APPROVED / REJECTED / CANCELLED / TIMEOUT。
 
 终态（无出边）：instance 的 REJECTED / CANCELLED / COMPENSATED；step 的
-SKIPPED / COMPENSATED；command 的 COMPENSATED；approval 的四个终态。
+SKIPPED / COMPENSATED；command 的 CANCELLED / COMPENSATED；approval 的四个终态。
 
 ⚠️ 矩阵里的状态集合必须与**库层 CHECK 表达式**的字面量集合一致
 （`app/tests/unit/test_workflow_state_machine.py` 的最后一条用例把两侧钉在一起）
@@ -52,7 +54,9 @@ _INSTANCE: Mapping[str, frozenset[str]] = MappingProxyType(
 _STEP: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "PENDING": frozenset({"RUNNING", "SKIPPED"}),
-        "RUNNING": frozenset({"SUCCEEDED", "FAILED"}),
+        # RUNNING → SKIPPED：**命令在执行前被取消**（实例取消 / 补偿）
+        # ⇒ 这一步其实没跑 ⇒ 记「跳过」，而不是吊在 RUNNING。
+        "RUNNING": frozenset({"SUCCEEDED", "FAILED", "SKIPPED"}),
         "SUCCEEDED": frozenset({"COMPENSATED"}),
         "FAILED": frozenset({"RUNNING", "COMPENSATED"}),
         "SKIPPED": frozenset(),
@@ -62,10 +66,19 @@ _STEP: Mapping[str, frozenset[str]] = MappingProxyType(
 
 _COMMAND: Mapping[str, frozenset[str]] = MappingProxyType(
     {
-        "PENDING": frozenset({"EXECUTING", "FAILED"}),
-        "EXECUTING": frozenset({"SUCCEEDED", "FAILED"}),
+        "PENDING": frozenset({"EXECUTING", "FAILED", "CANCELLED", "ABORTED"}),
+        # EXECUTING → CANCELLED：Worker 领走命令后、真正调适配器**之前**，
+        # 发现实例已被取消 ⇒ 不执行（外部写不再发生），命令落终态。
+        "EXECUTING": frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
         "SUCCEEDED": frozenset({"COMPENSATED"}),
-        "FAILED": frozenset({"EXECUTING", "COMPENSATED"}),
+        # FAILED → CANCELLED：可重试失败的命令也必须能被取消
+        # （否则取消后它仍在可领取集合里 ⇒ Worker 照样写外部系统）。
+        # FAILED → ABORTED：重试到终态失败 ⇒ 落终态，不再被领取。
+        "FAILED": frozenset({"EXECUTING", "COMPENSATED", "CANCELLED", "ABORTED"}),
+        "CANCELLED": frozenset(),
+        # ABORTED：**终态失败**（业务上不可重试 / 尝试次数耗尽）
+        # ⇒ 落库即终态 ⇒ Worker 不会再把它当「可重试失败」重领。
+        "ABORTED": frozenset(),
         "COMPENSATED": frozenset(),
     }
 )
@@ -88,6 +101,26 @@ WORKFLOW_TRANSITIONS: Mapping[str, Mapping[str, frozenset[str]]] = MappingProxyT
         "approval": _APPROVAL,
     }
 )
+
+# 实例状态的**两个口径**（单一出口：编排器 / 服务层 / 执行器都从这里取，
+# 避免「终态集合」在三处各写一份、越写越歪）。
+#
+# - ``LIVE_INSTANCE_STATUSES``：实例还在跑 ⇒ 允许继续推进、允许领取它的命令。
+# - ``STOPPED_INSTANCE_STATUSES``：实例已停止 ⇒ **不得**再发起新的外部写
+#   （取消 / 补偿 / 完成 / 拒绝 / 失败后的实例都不许再动外部系统）。
+#
+# ⚠️ ``FAILED`` 归入 STOPPED：状态机允许 ``FAILED → RUNNING``（显式重试），
+# 但**在状态被显式改回 RUNNING 之前**，不得领取它的命令。
+LIVE_INSTANCE_STATUSES = frozenset({"PENDING", "RUNNING", "WAITING_APPROVAL", "APPROVED"})
+STOPPED_INSTANCE_STATUSES = frozenset(
+    {"COMPLETED", "FAILED", "CANCELLED", "REJECTED", "COMPENSATED"}
+)
+
+
+def isLiveInstance(status: str) -> bool:
+    """实例是否还在跑（可继续推进 / 可领取它的命令）。"""
+
+    return status in LIVE_INSTANCE_STATUSES
 
 
 def workflowStatuses(kind: str) -> frozenset[str]:

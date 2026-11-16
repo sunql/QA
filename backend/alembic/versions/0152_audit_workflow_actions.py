@@ -5,7 +5,7 @@
 ``AuditService._VALID_ACTIONS`` 与 DB CHECK 都是白名单 ⇒ 只改服务层会被
 DB 拒收（``23514`` CHECK 违例 ⇒ 审批写入口整条 500）。
 
-**新增动作**（6 个）：
+**新增动作**（7 个）：
 
 | 动作 | 语义 |
 |---|---|
@@ -15,6 +15,7 @@ DB 拒收（``23514`` CHECK 违例 ⇒ 审批写入口整条 500）。
 | ``WORKFLOW_SUBMIT`` | 提交工作流实例 |
 | ``WORKFLOW_APPROVAL_REQUESTED`` | 发起一轮审批 |
 | ``WORKFLOW_TIMEOUT`` | 审批超时（任务转 TIMEOUT、实例转 FAILED） |
+| ``WORKFLOW_CANCEL`` | 取消工作流实例（待审批 / 待执行命令一并取消） |
 
 **变更**：DROP 旧 CK + ADD 新 CK（放宽 CHECK 而非加列 —— 与 ``0083`` /
 ``0110`` / ``0148`` 同一套做法）。``action`` 列是 VARCHAR(32)，
@@ -46,7 +47,8 @@ _NEW_CK = (
     "'auth.login','auth.login_failed','auth.logout',"
     "'auth.password_changed','user.password_reset',"
     "'APPROVE','REJECT','COMPENSATE','WORKFLOW_SUBMIT',"
-    "'WORKFLOW_APPROVAL_REQUESTED','WORKFLOW_TIMEOUT')"
+    "'WORKFLOW_APPROVAL_REQUESTED','WORKFLOW_TIMEOUT',"
+    "'WORKFLOW_CANCEL')"
 )
 _OLD_CK = (
     "action IN ('CREATE','UPDATE','DELETE','RESTORE','REUSE',"

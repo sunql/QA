@@ -154,7 +154,7 @@ def test_解析步骤():
     steps = parseWorkflowSteps(
         {
             "steps": [
-                {"code": "collect", "order": 0},
+                {"code": "collect", "order": 0, "commandType": "po.collect"},
                 {"code": "approve", "order": 1, "requiresApproval": True},
             ]
         }
@@ -163,16 +163,26 @@ def test_解析步骤():
     assert [s.code for s in steps] == ["collect", "approve"]
     assert steps[0].requiresApproval is False
     assert steps[1].requiresApproval is True
+    # 步骤↔命令的链接（编排器据此入队）
+    assert steps[0].commandType == "po.collect"
+    assert steps[1].commandType is None
 
 
 def test_步骤缺编码则拒绝():
     with pytest.raises(ValidationError):
-        parseWorkflowSteps({"steps": [{"order": 0}]})
+        parseWorkflowSteps({"steps": [{"order": 0, "commandType": "po.collect"}]})
 
 
 def test_步骤编码重复则拒绝():
     with pytest.raises(ValidationError):
-        parseWorkflowSteps({"steps": [{"code": "a"}, {"code": "a"}]})
+        parseWorkflowSteps(
+            {
+                "steps": [
+                    {"code": "a", "commandType": "po.a"},
+                    {"code": "a", "commandType": "po.b"},
+                ]
+            }
+        )
 
 
 # =============================================================================
@@ -199,7 +209,7 @@ async def definition(dbSession, approverRole) -> WorkflowDefinition:
         definition_json={
             "riskLevel": "MEDIUM",
             "steps": [
-                {"code": "collect", "order": 0},
+                {"code": "collect", "order": 0, "commandType": "po.collect"},
                 {"code": "approve", "order": 1, "requiresApproval": True},
             ],
             "approvalMatrix": _VALID_MATRIX,

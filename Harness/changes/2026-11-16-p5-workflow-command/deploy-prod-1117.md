@@ -17,11 +17,31 @@
 
 | | 内容 |
 |---|---|
-| **是** | ① 4 张工作流表族（`workflow_definition` / `workflow_instance` / `workflow_step` / `business_command` / `approval_task` / `workflow_outbox` 共 6 张）② `audit_log.action` CHECK 放宽（新增 `APPROVE` / `REJECT` / `COMPENSATE` / `WORKFLOW_*`）③ 一个独立进程 Worker（默认**不启动**）④ 开关默认关 ⇒ `/api/v1/workflow/*` 路由 **404** |
+| **是** | ① **6 张**工作流表（`workflow_definition` / `workflow_instance` / `workflow_step` / `business_command` / `approval_task` / `workflow_outbox`）② `audit_log.action` CHECK 放宽（新增 **7 个**动作：`APPROVE` / `REJECT` / `COMPENSATE` / `WORKFLOW_SUBMIT` / `WORKFLOW_APPROVAL_REQUESTED` / `WORKFLOW_TIMEOUT` / `WORKFLOW_CANCEL`）③ 一个独立进程 Worker（默认**不启动**）④ 开关默认关 ⇒ `/api/v1/workflow/*` 路由 **404** |
 | **不是** | ① 真实 ERP/SRM 写入 —— Worker 只注册了**模拟适配器**（`SimulatedCommandHandler`，只回显、不写外部系统）② 不新增中间件、不新增镜像（Worker **复用 backend 现役镜像**）③ 不改既有镜像版本 ④ 不动前端 |
 
 ⇒ **风险面**：本批上生产后，**默认没有任何新能力对外可见**（路由 404、无 Worker）。
 真正的能力在 §7「开启」之后才生效，且即便生效，写入也只落在 P5 自己的表里。
+
+---
+
+## 0.1 W5 收口带来的行为变化（**开启开关后才会看到**）
+
+本批实现期间补上了「命令没有生产调用方 ⇒ Worker 永远空转」的缺口，
+因此**开启开关后**行为与最初规划有出入，**上线前必读**：
+
+| 变化 | 说明 |
+|---|---|
+| **提交实例即入队命令** | 定义里带 `commandType` 的步骤，**提交时就落一条 `business_command`（PENDING）** ⇒ Worker 会领走它。之前是「提交了但没人写」，现在是「提交了就会走命令」。 |
+| **未注册的 `commandType` 会失败关闭** | Worker 只注册了 **`po.write`**（模拟适配器）。定义里写了别的 `commandType` ⇒ `UnknownCommandTypeError` ⇒ 命令终态 FAILED ⇒ **触发实例补偿**（实例 → COMPENSATED）⇒ **不是**静默挂起。 |
+| **步骤定义必须「有活儿」** | 一步**必须**有 `commandType` **或** `requiresApproval=true`；两者皆无 ⇒ **定义解析期就拒绝**（422），不会创建实例。 |
+| **新增取消路由** | `POST /api/v1/workflow/instances/{instanceId}/cancel` ⇒ 实例 CANCELLED、待审批 CANCELLED、**待执行命令 CANCELLED**（Worker 不再领走）、未开始的步骤 SKIPPED。权限：提交人本人或**真实** admin。 |
+| **命令状态多了 `CANCELLED`** | `business_command.status` 的 CHECK 多了 `CANCELLED`（终态，不可领取）。 |
+| **审计动作 7 个** | `audit_log.action` 新增 `WORKFLOW_CANCEL`（取消也留痕）。 |
+
+> ⚠️ **取消权限的真实身份要求**：stub 鉴权下 `X-User-Roles` 可伪造 ⇒
+> 跨用户取消要求 `dbUserId` 来自 DB / JWT；**自取消（提交人本人）** 不要求。
+> 这与 §9.1 的硬停条件（必须真鉴权）方向一致。
 
 ---
 
@@ -310,6 +330,25 @@ docker inspect qa-backend qa-workflow-worker --format '{{.Name}} => {{.Image}}'
 # ⑤ 无鉴权告警（说明 §9.1 前提成立）
 docker logs qa-backend --since 10m 2>&1 | grep -c 'ENABLE_WORKFLOW=true 但鉴权仍为 stub'
 # 期望：0
+
+# ⑥ 取消路由已注册（未带 token ⇒ 403 而不是 404 ⇒ 证明开关已生效）
+curl -s -o /dev/null -w "workflow_cancel=%{http_code}\n" \
+  -X POST http://localhost:8000/api/v1/workflow/instances/1/cancel \
+  -H 'Content-Type: application/json' -d '{"reason":"probe"}'
+# 期望：403（real 模式无 Bearer）；**404 ⇒ 开关没生效**
+
+# ⑦ 命令状态 CHECK 含 CANCELLED（PG 把 IN 渲染成 = ANY(ARRAY[...])，抠出值列表再比）
+docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+  "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+   WHERE conrelid = \x27business_command\x27::regclass \
+     AND conname = \x27ck_business_command_status\x27;"'
+# 期望：值列表里含 CANCELLED
+
+# ⑧ audit_log CHECK 含 WORKFLOW_CANCEL（7 个新动作）
+docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+  "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+   WHERE conrelid = \x27audit_log\x27::regclass AND conname = \x27ck_audit_log_action\x27;"'
+# 期望：值列表里含 WORKFLOW_CANCEL
 ```
 
 ---
@@ -375,8 +414,8 @@ docker exec qa-backend sh -c 'alembic downgrade 0148'   # 由新镜像执行 ⇒
 
 | 位置 | 变化 |
 |---|---|
-| 工作流 API | 开关关：**404**（对外完全不存在）；开关开：需要真鉴权（无 Bearer ⇒ 403） |
-| 数据库 | 新增 6 张空表；`audit_log.action` 的 CHECK 白名单变宽（**旧值全部仍可用**） |
+| 工作流 API | 开关关：**404**（对外完全不存在）；开关开：需要真鉴权（无 Bearer ⇒ 403）；**新增取消路由** |
+| 数据库 | 新增 6 张空表；`audit_log.action` 的 CHECK 白名单变宽（**旧值全部仍可用**）；`business_command.status` 多一个 `CANCELLED` |
 | 后台进程 | 新增 1 个独立 Worker 容器（默认不启动）；它**只**写 P5 自己的表（模拟适配器不写外部系统） |
 | 用户界面 | **无变化** |
 
@@ -389,4 +428,7 @@ docker exec qa-backend sh -c 'alembic downgrade 0148'   # 由新镜像执行 ⇒
 3. **审批超时**：默认 24 小时（矩阵里的 `timeoutHours`）⇒ 实例会卡在「等待审批」直到清扫。
 4. **本批不含真实 ERP/SRM 写入**：Worker 只注册了 `po.write` 的**模拟**适配器
    ⇒ 即使开关全开，也不会有任何外部系统被写。
+   ⚠️ 但定义里写了别的 `commandType` ⇒ 命令**失败关闭**并触发补偿（见 §0.1）。
 5. **每次发版都要重建 Worker**：它与 backend 同一镜像 ⇒ retag 不会自动更新已运行的容器。
+6. **提交即入队**（§0.1）：开启开关后，提交实例会立刻产生一条 `business_command`（PENDING），
+   Worker 会在**下一次轮询**（默认 2s）领走它 ⇒ 这条链路是**活的**，不是纸面能力。

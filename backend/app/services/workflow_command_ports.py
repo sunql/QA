@@ -13,16 +13,62 @@ D-8：**外部写先接口 + 模拟器**。仓内没有任何真实写接口证�
    「业务上不可重试」（如参数非法）与「暂时性故障」（如下游超时）必须能区分，
    否则毒丸命令会被无限重试。
 
+**载荷契约（命名空间化）**：命令载荷固定是
+``{"request": <用户输入>, "step": <工作流定义的步骤载荷>}``：
+
+- 两个命名空间**互不覆盖** ⇒ 用户输入顶不掉流程字段（mass-assignment 收口）；
+- **保留键**（``simulate`` 等适配器控制面）**只允许来自步骤载荷**（作者可信），
+  用户输入里的同名键一律剔除 ⇒ 用户不能左右适配器行为。
+
 **Agent 仍只读**：本模块不提供任何 Agent 可调用的入口 ——
 写能力只在 Command 执行器里（且执行器只在 Worker 进程内被调用）。
 """
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Protocol
 
 from app.domain.exceptions import ConflictError
 from app.domain.workflow_models import BusinessCommand
+
+# 命令载荷的**契约形状**（编排器产出 ⇒ 适配器消费）。
+PAYLOAD_KEY_REQUEST = "request"
+PAYLOAD_KEY_STEP = "step"
+
+# 保留键 = **适配器控制面**（演练指令等）⇒ 只允许来自工作流定义（作者），
+# **不得**来自用户输入（否则用户能强制失败 / 改写适配器行为）。
+RESERVED_PAYLOAD_KEYS = frozenset({"simulate"})
+
+
+def buildCommandPayload(
+    *, requestJson: dict[str, Any] | None, stepPayload: dict[str, Any] | None
+) -> dict[str, Any]:
+    """构造命令载荷（**命名空间化**）。
+
+    - 用户输入 ⇒ ``request`` 命名空间，**保留键剔除**（控制面只认作者）；
+    - 步骤载荷 ⇒ ``step`` 命名空间（原样，作者可信）；
+    - 两个命名空间互不覆盖 ⇒ 用户输入**顶不掉**流程字段。
+
+    ⚠️ 深拷贝：载荷与实例行共享嵌套对象 ⇒ 适配器若就地改写，会**污染实例行**
+    的内存态（不可变数据纪律）。
+    """
+
+    return {
+        PAYLOAD_KEY_REQUEST: {
+            key: copy.deepcopy(value)
+            for key, value in (requestJson or {}).items()
+            if key not in RESERVED_PAYLOAD_KEYS
+        },
+        PAYLOAD_KEY_STEP: copy.deepcopy(dict(stepPayload or {})),
+    }
+
+
+def stepPayloadOf(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """取载荷里的**步骤命名空间**（非对象 ⇒ 空字典）。"""
+
+    candidate = (payload or {}).get(PAYLOAD_KEY_STEP)
+    return candidate if isinstance(candidate, dict) else {}
 
 # ---------------------------------------------------------------- 异常
 
@@ -116,12 +162,20 @@ class CommandHandlerRegistry:
 class SimulatedCommandHandler:
     """**默认模拟适配器**（D-8）：不写任何外部系统，只回显 + 可注入失败。
 
-    payload 指令（放在 ``payload["simulate"]``）：
+    payload 指令（**控制面**，只认作者写的地方）：
+
+    - ``payload["step"]["simulate"]`` —— 编排器产出的载荷（步骤载荷命名空间）；
+    - ``payload["simulate"]`` —— 直接构造命令行时的兼容位置；
+
+    指令内容：
 
     - ``{"outcome": "success"}`` —— 成功（默认）；
     - ``{"outcome": "fail", "message": "..."}`` —— 每次都失败；
     - ``{"outcome": "fail", "failTimes": 2, "message": "..."}`` —— 前 N 次失败，
       之后成功（演练重试语义）。
+
+    ⚠️ **不认** ``payload["request"]["simulate"]``：用户输入命名空间里的控制键
+    一律无效（否则用户能左右适配器行为）。
 
     真实适配器落地后，本类只用于**本地演练与契约自检**，不再承载生产写。
     """
@@ -155,6 +209,10 @@ class SimulatedCommandHandler:
 
     @staticmethod
     def _instruction(command: BusinessCommand) -> dict[str, Any]:
+        """取演练指令（**只认控制面**：顶层 / 步骤命名空间）。"""
+
         payload = command.payload or {}
-        instruction = payload.get("simulate")
-        return instruction if isinstance(instruction, dict) else {}
+        for candidate in (payload.get("simulate"), stepPayloadOf(payload).get("simulate")):
+            if isinstance(candidate, dict):
+                return candidate
+        return {}

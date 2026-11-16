@@ -9,13 +9,15 @@
 | POST | ``/instances/{instanceId}/approval-request`` | 发起一轮审批（按矩阵生成审批任务） |
 | GET | ``/instances/{instanceId}/approvals`` | 列出该实例的审批任务 |
 | POST | ``/approvals/{taskId}/decision`` | 审批决策（APPROVE / REJECT） |
+| POST | ``/instances/{instanceId}/cancel`` | 取消实例（提交人或 admin；待执行命令一并取消） |
 
 **鉴权**：全部路由依赖 ``getCurrentUser``（无匿名访问）。写入口用
 ``enforceRouteLimit`` 显式限流（``@limiter.limit`` 在本仓是死代码，见
 ``app/infrastructure/rate_limit.py`` 的说明）。
 
-**审批决策额外要求真实身份**（``dbUserId is not None``）：stub 身份可被任意
-客户端伪造 ⇒ 审批人身份必须来自 DB / JWT。
+**审批决策额外要求已校验身份**（``CurrentUser.isRealIdentity``：JWT 验签过 ⇒
+``jti`` 非空）：stub 头可被任意客户端伪造（``X-User-Id: lead`` 即冒充 lead）
+⇒ 审批人必须是**验过签的人**（四眼原则 + 审计可信）。
 
 **七守卫**在服务层（``workflow_approval_service``）：越权 403 / 重复审批 409 /
 超时 409 / 对象级不可见 404 ⇒ 拒绝即零副作用。
@@ -36,6 +38,7 @@ from app.domain.workflow_schemas import (
     WorkflowApprovalDecision,
     WorkflowApprovalRead,
     WorkflowApprovalRequest,
+    WorkflowInstanceCancel,
     WorkflowInstanceCreate,
     WorkflowInstanceDetail,
     WorkflowInstanceRead,
@@ -51,6 +54,7 @@ router = APIRouter()
 SCOPE_SUBMIT_INSTANCE = "workflow:submit-instance"
 SCOPE_REQUEST_APPROVAL = "workflow:request-approval"
 SCOPE_APPROVAL_DECISION = "workflow:approval-decision"
+SCOPE_CANCEL_INSTANCE = "workflow:cancel-instance"
 
 # 审批决策要求真实身份（stub 身份可伪造 ⇒ 不能用于审批）。
 DETAIL_APPROVAL_REAL_AUTH_REQUIRED = "APPROVAL_REAL_AUTH_REQUIRED"
@@ -194,25 +198,31 @@ async def decideApproval(
     payload: WorkflowApprovalDecision,
     currentUser: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
-    approvalService: WorkflowApprovalService = Depends(getWorkflowApprovalService),
+    service: WorkflowService = Depends(getWorkflowService),
 ) -> WorkflowApprovalRead:
     """审批决策。
 
     七守卫在服务层：对象级不可见 404 / 越权 403（含禁止自审批）/
     重复审批 409 / 超时 409。
 
-    **要求真实身份**：``dbUserId is None`` ⇒ 403（stub 身份可被任意客户端伪造）。
+    **要求已校验身份**（``isRealIdentity``：JWT 验签过 ⇒ ``jti`` 非空）：
+    stub 头可被任意客户端伪造（``X-User-Id: lead`` 即冒充 lead）⇒ 四眼原则
+    与「谁批的」审计都必须是**验过签的人**。
+
+    ⚠️ **两段事务**（在 ``WorkflowService.decideApprovalAndAdvance`` 里）：
+    决策先落库（**决策是事实**）⇒ 推进失败**不会**把已发生的审批抹掉；
+    推进失败 ⇒ 实例失败关闭（``FAILED``）⇒ 不会「看起来还在跑」。
     """
 
     enforceRouteLimit(request, rateLimitValue(), SCOPE_APPROVAL_DECISION)
 
-    if currentUser.dbUserId is None:
+    if not currentUser.isRealIdentity:
         raise PermissionDeniedError(
             MSG_APPROVAL_REAL_AUTH_REQUIRED,
             detail=DETAIL_APPROVAL_REAL_AUTH_REQUIRED,
         )
 
-    task = await approvalService.decideApproval(
+    task = await service.decideApprovalAndAdvance(
         session,
         taskId=taskId,
         decision=payload.decision,
@@ -221,5 +231,45 @@ async def decideApproval(
         note=payload.note,
         actorDepartments=currentUser.departments,
     )
-    await session.commit()
     return WorkflowApprovalRead.model_validate(task)
+
+
+@router.post(
+    "/instances/{instanceId}/cancel",
+    response_model=WorkflowInstanceRead,
+    summary="取消工作流实例（提交人或 admin）",
+)
+async def cancelInstance(
+    request: Request,
+    instanceId: int,
+    payload: WorkflowInstanceCancel,
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowService = Depends(getWorkflowService),
+) -> WorkflowInstanceRead:
+    """取消工作流实例。
+
+    取消 = **真的不再写外部系统**：待审批任务 → CANCELLED；待执行命令 →
+    CANCELLED（**不再被 Worker 领取**）；未开始的步骤 → SKIPPED。
+
+    - **身份**：必须**已校验**（``isRealIdentity``：JWT 验签过）⇒ 否则 403
+      （stub 头可冒充任意 DB 账号 ⇒ 治理写面必须验签）；
+    - 权限：只有**提交人**（自作用域）或**真实** admin ⇒ 其它人 **404**
+      （与「实例不存在」同码 ⇒ 不泄露存在性）；
+    - 实例已是终态 ⇒ 409；重复取消 ⇒ **幂等**（200，返回既有实例）。
+    """
+
+    enforceRouteLimit(request, rateLimitValue(), SCOPE_CANCEL_INSTANCE)
+
+    instance = await service.cancelInstance(
+        session,
+        instanceId=instanceId,
+        actor=currentUser.userId,
+        roles=currentUser.roles,
+        dbUserId=currentUser.dbUserId,
+        isRealIdentity=currentUser.isRealIdentity,
+        reason=payload.reason,
+        actorDepartments=currentUser.departments,
+    )
+    await session.commit()
+    return WorkflowInstanceRead.model_validate(instance)

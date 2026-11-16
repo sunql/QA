@@ -62,7 +62,9 @@ COLUMN_COMMENTS = {
 CHECK_EXPRESSIONS = {
     "step_status": "status IN ('PENDING','RUNNING','SUCCEEDED','FAILED','SKIPPED','COMPENSATED')",
     "step_order": "step_order >= 0",
-    "command_status": "status IN ('PENDING','EXECUTING','SUCCEEDED','FAILED','COMPENSATED')",
+    "command_status": (
+        "status IN ('PENDING','EXECUTING','SUCCEEDED','FAILED','COMPENSATED','CANCELLED','ABORTED')"
+    ),
     "command_attempts": "attempts >= 0",
 }
 

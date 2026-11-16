@@ -6,7 +6,7 @@
 {
   "riskLevel": "MEDIUM",
   "steps": [
-    {"code": "collect", "order": 0},
+    {"code": "collect", "order": 0, "commandType": "po.collect"},
     {"code": "approve", "order": 1, "requiresApproval": true}
   ],
   "approvalMatrix": [
@@ -21,6 +21,10 @@
   ]
 }
 ```
+
+⚠️ **每一步都要有可执行动作**：``commandType``（有活儿可干）**或**
+``requiresApproval=true``（纯审批门）—— 两者皆无 ⇒ 定义**失败关闭**
+（解析期拒绝，不「悄悄跳过」）。
 
 设计约束（D-1）：
 
@@ -63,11 +67,34 @@ KEY_RISK_LEVEL = "riskLevel"
 
 @dataclass(frozen=True)
 class WorkflowStepSpec:
-    """编排里的一步（**只读**，不改库）。"""
+    """编排里的一步（**只读**，不改库）。
+
+    ``commandType`` = 这一步要执行的**业务命令类型**（与
+    ``app/services/workflow_command_ports.py`` 的注册表键对应）⇒
+    **步骤↔命令的链接**。为空 ⇒ 这一步是「纯审批门」（审批通过即完成）。
+
+    ``payload`` = 该步骤附加的命令载荷（与实例请求载荷合并；步骤载荷优先）。
+    """
 
     code: str
     order: int
     requiresApproval: bool
+    commandType: str | None = None
+    payload: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class StepRuntimeSpec:
+    """步骤行上的**编排快照**（``workflow_step.input_json``）。
+
+    为什么要有快照：定义是**可改的**（``workflow_definition`` 没有不可变触发器）
+    ⇒ 若运行时回头读定义，定义一改，**在跑的实例**的行为会跟着变。
+    ⇒ 提交时把这一步的编排快照写进行里，运行时只认快照。
+    """
+
+    commandType: str | None
+    requiresApproval: bool
+    payload: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -229,6 +256,14 @@ def parseWorkflowSteps(
 
     缺 ``steps`` ⇒ 空元组（无步骤的定义合法：一步即完成）。
     步骤编码在实例内必须唯一 ⇒ 重复直接拒绝（解析期发现，别等落库撞唯一约束）。
+
+    两条**失败关闭**规则（否则定义写得含糊 ⇒ 运行时行为不可预期）：
+
+    1. **每一步都要有可执行动作**：要么 ``commandType``（有活儿可干），
+       要么 ``requiresApproval=true``（纯审批门）⇒ 两者皆无 = 定义写错了，
+       **拒绝**（不「悄悄跳过」——跳过的步骤会让实例假成功）。
+    2. **单轮审批**：审批面只支持一轮（守卫⑥），定义里出现第二个审批环节
+       ⇒ 运行到那儿必然 409 ⇒ 定义直接拒绝。
     """
 
     if not definitionJson:
@@ -257,5 +292,65 @@ def parseWorkflowSteps(
         if not isinstance(requiresApproval, bool):
             raise ValidationError(f"步骤 {code} 的 requiresApproval 必须是布尔值")
 
-        specs.append(WorkflowStepSpec(code=code, order=order, requiresApproval=requiresApproval))
+        commandType = item.get("commandType")
+        if commandType is not None:
+            commandType = _requireText(commandType, "steps[].commandType", _KEY_MAX_LENGTH)
+
+        payload = item.get("payload")
+        if payload is not None and not isinstance(payload, Mapping):
+            raise ValidationError(f"步骤 {code} 的 payload 必须是对象")
+
+        if not requiresApproval and commandType is None:
+            raise ValidationError(
+                f"步骤 {code} 既无 commandType 也不要求审批：没有可执行动作"
+                "（要么声明 commandType，要么 requiresApproval=true）"
+            )
+
+        specs.append(
+            WorkflowStepSpec(
+                code=code,
+                order=order,
+                requiresApproval=requiresApproval,
+                commandType=commandType,
+                payload=dict(payload) if payload is not None else None,
+            )
+        )
+
+    approvalCodes = [spec.code for spec in specs if spec.requiresApproval]
+    if len(approvalCodes) > 1:
+        raise ValidationError(
+            "当前只支持单轮审批，一个定义最多一个审批环节："
+            + ", ".join(approvalCodes)
+        )
     return tuple(specs)
+
+
+def parseStepRuntimeSpec(inputJson: Mapping[str, Any] | None) -> StepRuntimeSpec:
+    """读取步骤行上的编排快照（``workflow_step.input_json``）。
+
+    缺失 / 非法 ⇒ **失败关闭**（ValidationError）：没有快照就不知道这一步要做什么
+    ⇒ 宁可报错，也不把步骤当成「已完成」（假成功比报错更危险）。
+    """
+
+    if not isinstance(inputJson, Mapping):
+        raise ValidationError("步骤缺少编排快照（input_json 为空）：无法判断该步骤要做什么")
+
+    commandType = inputJson.get("commandType")
+    if commandType is not None:
+        commandType = _requireText(commandType, "input_json.commandType", _KEY_MAX_LENGTH)
+
+    requiresApproval = inputJson.get("requiresApproval", False)
+    if not isinstance(requiresApproval, bool):
+        raise ValidationError("步骤编排快照的 requiresApproval 必须是布尔值")
+
+    payload = inputJson.get("payload")
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, Mapping):
+        raise ValidationError("步骤编排快照的 payload 必须是对象")
+
+    return StepRuntimeSpec(
+        commandType=commandType,
+        requiresApproval=requiresApproval,
+        payload=dict(payload),
+    )

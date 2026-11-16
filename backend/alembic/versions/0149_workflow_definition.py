@@ -7,12 +7,17 @@
   `definition_json` 里 ⇒ 矩阵变更只改数据，不改代码、不改表结构。
 - `workflow_instance`：一次执行的运行态。`idempotency_key` 是**独立唯一列**
   （D-2：JSONB 里的键做不了唯一约束 ⇒ 并发下「重复提交只执行一次」保证不住），
-  作用域 = `(definition_id, idempotency_key)`。
+  作用域 = `(definition_id, created_by, idempotency_key)` ⇒ **幂等键按提交人
+  私有**：① 别人的键不会被「占死」（DoS）；② 复用别人的键只拿到**自己的**
+  实例（不泄露别人的实例、也不泄露「这个键存在」）。
+
+  ⚠️ 作用域里的 `created_by` **NOT NULL**：PG 里 NULL 互不相等 ⇒ 该列可空时
+  幂等保证会**静默失效**（同一个键能落两行 ⇒ 重复执行）。
 
 约束各有明确目的：
 
 - `uq_workflow_definition_scope`：同一域能力下版本号唯一。
-- `uq_workflow_instance_idempotency`：重复提交只落一条实例。
+- `uq_workflow_instance_idempotency`：重复提交只落一条实例（按提交人隔离）。
 - `ck_workflow_definition_status` / `ck_workflow_instance_status`：
   状态字面量钉死在库侧（状态机是纯函数矩阵，未知状态**入不了库** ⇒ 失败关闭）。
 - `ck_workflow_definition_json` / `ck_workflow_instance_request`：
@@ -52,12 +57,13 @@ COLUMN_COMMENTS = {
     "definition_json": "0149，P5：定义体（审批矩阵 / 步骤编排等纯数据，JSON 对象）",
     "definition_status": "0149，P5：定义状态（DRAFT / PUBLISHED / DISABLED）",
     "instance_definition_id": "0149，P5：所属定义（workflow_definition.id）",
-    "instance_idempotency_key": "0149，P5：幂等键（同一定义下唯一；重复提交只执行一次）",
+    "instance_idempotency_key": "0149，P5：幂等键（同一定义+同一提交人下唯一；重复提交只执行一次）",
     "instance_business_key": "0149，P5：业务键（业务侧单号，可空）",
     "instance_status": "0149，P5：实例状态（状态机字面量集合）",
     "instance_current_step": "0149，P5：当前步骤编码（workflow_step.step_code）",
     "instance_request_json": "0149，P5：实例请求体（JSON 对象）",
     "instance_result_json": "0149，P5：实例结果体（JSON 对象，可空）",
+    "instance_created_by": "0149，P5：提交人（幂等作用域的一环 ⇒ NOT NULL）",
 }
 
 # 与 ORM 逐字一致的 CHECK 表达式。
@@ -190,7 +196,12 @@ def upgrade() -> None:
             comment=COLUMN_COMMENTS["instance_result_json"],
         ),
         sa.Column("error_message", sa.Text(), nullable=True),
-        sa.Column("created_by", sa.String(length=64), nullable=True),
+        sa.Column(
+            "created_by",
+            sa.String(length=64),
+            nullable=False,
+            comment=COLUMN_COMMENTS["instance_created_by"],
+        ),
         sa.Column(
             "created_time",
             sa.DateTime(timezone=True),
@@ -211,6 +222,7 @@ def upgrade() -> None:
         ),
         sa.UniqueConstraint(
             "definition_id",
+            "created_by",
             "idempotency_key",
             name="uq_workflow_instance_idempotency",
         ),

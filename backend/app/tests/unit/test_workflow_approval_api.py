@@ -12,8 +12,10 @@ CI 的 ``backend-integration`` 分片按「排序下标 mod 4」轮转 ⇒ **新
 
 ⚠️ 断言口径：断**状态码 + 响应体语义**（``detail`` 携带错误码），并落到真实 PG 行上核对。
 
-⚠️ 审批决策要求**真实身份**（``dbUserId is not None``）⇒ 本文件必须**播种真实
-用户与角色**（stub 头在命中 DB 用户时，角色来自 DB 而非请求头 ⇒ 伪造头无效）。
+⚠️ 审批决策要求**已校验身份**（``CurrentUser.isRealIdentity``：JWT 验签过 ⇒
+``jti`` 非空）⇒ 本文件必须**播种真实用户与角色**并走**真实 JWT 链路**
+（``app/tests/_auth_support.py``）。stub 头**只能**冒充某个 DB 账号
+（``X-User-Id: lead``）⇒ 治理写面绝不能只信它。
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import getSettings
 from app.domain.workflow_models import ApprovalTask, WorkflowDefinition
 from app.models.rbac import Role, User, UserRole
-from app.tests import _pg_support
+from app.tests import _auth_support, _pg_support
 
 _MATRIX = [
     {
@@ -99,7 +101,7 @@ async def _seedDefinition(dbSession: AsyncSession) -> WorkflowDefinition:
         definition_json={
             "riskLevel": "MEDIUM",
             "steps": [
-                {"code": "collect", "order": 0},
+                {"code": "collect", "order": 0, "commandType": "po.collect"},
                 {"code": "approve", "order": 1, "requiresApproval": True},
             ],
             "approvalMatrix": _MATRIX,
@@ -112,8 +114,11 @@ async def _seedDefinition(dbSession: AsyncSession) -> WorkflowDefinition:
     return row
 
 
-async def _seedActors(dbSession: AsyncSession) -> None:
-    """播种真实用户与角色（决策接口要求真实身份 ⇒ 必须有 DB 用户）。"""
+async def _seedActors(dbSession: AsyncSession) -> dict[str, dict[str, str]]:
+    """播种真实用户与角色 + 签发 JWT ⇒ 返回 ``{用户名: Bearer 头}``。
+
+    决策接口要求**已校验身份** ⇒ 每个要发起决策的角色都必须拿到真 JWT。
+    """
 
     managerRole = Role(code=_ROLE_PURCHASE_MANAGER, name="采购经理")
     internRole = Role(code=_ROLE_INTERN, name="实习生")
@@ -136,6 +141,12 @@ async def _seedActors(dbSession: AsyncSession) -> None:
         ]
     )
     await dbSession.commit()
+
+    headers: dict[str, dict[str, str]] = {}
+    for user in (submitter, lead, intern, forged):
+        token = await _auth_support.issueToken(dbSession, user)
+        headers[user.username] = _auth_support.bearerHeaders(token)
+    return headers
 
 
 async def _submit(ac: AsyncClient, *, idempotencyKey: str = "api-key-1") -> int:
@@ -194,14 +205,14 @@ async def test_提交后发起审批产生任务(workflowClient, dbSession):
 
 async def test_越权审批返回403(workflowClient, dbSession):
     await _seedDefinition(dbSession)
-    await _seedActors(dbSession)
+    actors = await _seedActors(dbSession)
     instanceId = await _submit(workflowClient)
     tasks = await _requestApproval(workflowClient, instanceId)
 
     resp = await workflowClient.post(
         f"/api/v1/workflow/approvals/{tasks[0]['id']}/decision",
         json={"decision": "APPROVE"},
-        headers=_headers("intern"),
+        headers=actors["intern"],
     )
     assert resp.status_code == 403, resp.text
     assert resp.json()["detail"] == "APPROVAL_NOT_AUTHORIZED"
@@ -217,14 +228,14 @@ async def test_提交人不能自审批(workflowClient, dbSession):
     """四眼原则：提交人即使角色对也不能批自己的单。"""
 
     await _seedDefinition(dbSession)
-    await _seedActors(dbSession)
+    actors = await _seedActors(dbSession)
     instanceId = await _submit(workflowClient)
     tasks = await _requestApproval(workflowClient, instanceId)
 
     resp = await workflowClient.post(
         f"/api/v1/workflow/approvals/{tasks[0]['id']}/decision",
         json={"decision": "APPROVE"},
-        headers=_headers("submitter", _ROLE_PURCHASE_MANAGER),
+        headers=actors["submitter"],
     )
     assert resp.status_code == 403, resp.text
     assert resp.json()["detail"] == "APPROVAL_SELF_FORBIDDEN"
@@ -232,14 +243,14 @@ async def test_提交人不能自审批(workflowClient, dbSession):
 
 async def test_重复审批返回409(workflowClient, dbSession):
     await _seedDefinition(dbSession)
-    await _seedActors(dbSession)
+    actors = await _seedActors(dbSession)
     instanceId = await _submit(workflowClient)
     tasks = await _requestApproval(workflowClient, instanceId)
 
     first = await workflowClient.post(
         f"/api/v1/workflow/approvals/{tasks[0]['id']}/decision",
         json={"decision": "APPROVE"},
-        headers=_headers("lead"),
+        headers=actors["lead"],
     )
     assert first.status_code == 200, first.text
     assert first.json()["status"] == "APPROVED"
@@ -247,7 +258,7 @@ async def test_重复审批返回409(workflowClient, dbSession):
     second = await workflowClient.post(
         f"/api/v1/workflow/approvals/{tasks[0]['id']}/decision",
         json={"decision": "APPROVE"},
-        headers=_headers("lead"),
+        headers=actors["lead"],
     )
     assert second.status_code == 409, second.text
     assert second.json()["detail"] == "APPROVAL_ALREADY_DECIDED"
@@ -255,7 +266,7 @@ async def test_重复审批返回409(workflowClient, dbSession):
 
 async def test_超时审批返回409(workflowClient, dbSession):
     await _seedDefinition(dbSession)
-    await _seedActors(dbSession)
+    actors = await _seedActors(dbSession)
     instanceId = await _submit(workflowClient)
     tasks = await _requestApproval(workflowClient, instanceId)
 
@@ -271,7 +282,7 @@ async def test_超时审批返回409(workflowClient, dbSession):
     resp = await workflowClient.post(
         f"/api/v1/workflow/approvals/{tasks[0]['id']}/decision",
         json={"decision": "APPROVE"},
-        headers=_headers("lead"),
+        headers=actors["lead"],
     )
     assert resp.status_code == 409, resp.text
     assert resp.json()["detail"] == "APPROVAL_TIMEOUT"
@@ -291,14 +302,14 @@ async def test_超时审批返回409(workflowClient, dbSession):
 
 async def test_审批通过后实例变APPROVED(workflowClient, dbSession):
     await _seedDefinition(dbSession)
-    await _seedActors(dbSession)
+    actors = await _seedActors(dbSession)
     instanceId = await _submit(workflowClient)
     tasks = await _requestApproval(workflowClient, instanceId)
 
     resp = await workflowClient.post(
         f"/api/v1/workflow/approvals/{tasks[0]['id']}/decision",
         json={"decision": "APPROVE", "note": "同意"},
-        headers=_headers("lead"),
+        headers=actors["lead"],
     )
     assert resp.status_code == 200, resp.text
 
@@ -401,7 +412,7 @@ async def test_客户端自传风险级别被拒422(workflowClient, dbSession):
 
 
 async def test_stub身份不能审批(workflowClient, dbSession):
-    """非 DB 用户（stub 身份）⇒ 403（决策面要求真实身份）。"""
+    """非 DB 用户（stub 身份）⇒ 403（决策面要求已校验身份）。"""
 
     await _seedDefinition(dbSession)
     await _seedActors(dbSession)
@@ -417,8 +428,14 @@ async def test_stub身份不能审批(workflowClient, dbSession):
     assert resp.json()["detail"] == "APPROVAL_REAL_AUTH_REQUIRED"
 
 
-async def test_伪造角色头不能越权(workflowClient, dbSession):
-    """DB 用户的角色来自 DB ⇒ 请求头里的 X-User-Roles 无效。"""
+async def test_用请求头冒充DB用户不能审批(workflowClient, dbSession):
+    """**冒充**：请求头写着审批人的名字 ⇒ 403（决策面要求已校验身份）。
+
+    回归点：旧实现只查 ``dbUserId is not None`` ⇒ stub 头命中 DB 用户即放行 ⇒
+    **任意客户端**发 ``X-User-Id: lead`` 就能以 lead 的身份审批 ⇒ 四眼原则与
+    「谁批的」审计同时失真。
+    ⇒ 决策必须验签（``jti`` 非空 ⇒ 服务端验过 JWT）。
+    """
 
     await _seedDefinition(dbSession)
     await _seedActors(dbSession)
@@ -428,7 +445,37 @@ async def test_伪造角色头不能越权(workflowClient, dbSession):
     resp = await workflowClient.post(
         f"/api/v1/workflow/approvals/{tasks[0]['id']}/decision",
         json={"decision": "APPROVE"},
-        headers=_headers("forged", _ROLE_PURCHASE_MANAGER),
+        headers=_headers("lead"),
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "APPROVAL_REAL_AUTH_REQUIRED"
+    # 拒绝即零副作用：任务仍是 PENDING
+    row = (
+        await dbSession.execute(
+            select(ApprovalTask)
+            .where(ApprovalTask.id == tasks[0]["id"])
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert row.status == "PENDING"
+
+
+async def test_伪造角色头不能越权(workflowClient, dbSession):
+    """DB 用户的角色来自 DB ⇒ 请求头里的 X-User-Roles 无效。
+
+    身份已校验（真 JWT）⇒ 能走到角色判定 ⇒ 但角色**来自 DB**（``forged``
+    没有采购经理角色）⇒ 请求头自称 ``purchase_manager`` 仍然被拒。
+    """
+
+    await _seedDefinition(dbSession)
+    actors = await _seedActors(dbSession)
+    instanceId = await _submit(workflowClient)
+    tasks = await _requestApproval(workflowClient, instanceId)
+
+    resp = await workflowClient.post(
+        f"/api/v1/workflow/approvals/{tasks[0]['id']}/decision",
+        json={"decision": "APPROVE"},
+        headers={**actors["forged"], "X-User-Roles": _ROLE_PURCHASE_MANAGER},
     )
     assert resp.status_code == 403, resp.text
     assert resp.json()["detail"] == "APPROVAL_NOT_AUTHORIZED"

@@ -424,8 +424,10 @@ async def test_步骤状态机拒绝非法流转(dbSession: AsyncSession, defini
     await dbSession.commit()
     assert updated.status == "RUNNING"
 
+    # ⚠️ RUNNING → SKIPPED 现在是**合法**边（命令执行前被取消 ⇒ 这一步其实没跑），
+    #    所以这里用「回到 PENDING」当非法流转的样本。
     with pytest.raises(ConflictError):
-        await _store.advanceStep(dbSession, steps[0].id, "SKIPPED")
+        await _store.advanceStep(dbSession, steps[0].id, "PENDING")
     await dbSession.rollback()
 
 

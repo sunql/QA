@@ -63,12 +63,13 @@ _DEFINITION_JSON_COMMENT = "0149，P5：定义体（审批矩阵 / 步骤编排�
 _DEFINITION_STATUS_COMMENT = "0149，P5：定义状态（DRAFT / PUBLISHED / DISABLED）"
 
 _INSTANCE_DEFINITION_COMMENT = "0149，P5：所属定义（workflow_definition.id）"
-_INSTANCE_IDEMPOTENCY_COMMENT = "0149，P5：幂等键（同一定义下唯一；重复提交只执行一次）"
+_INSTANCE_IDEMPOTENCY_COMMENT = "0149，P5：幂等键（同一定义+同一提交人下唯一；重复提交只执行一次）"
 _INSTANCE_BUSINESS_KEY_COMMENT = "0149，P5：业务键（业务侧单号，可空）"
 _INSTANCE_STATUS_COMMENT = "0149，P5：实例状态（状态机字面量集合）"
 _INSTANCE_CURRENT_STEP_COMMENT = "0149，P5：当前步骤编码（workflow_step.step_code）"
 _INSTANCE_REQUEST_COMMENT = "0149，P5：实例请求体（JSON 对象）"
 _INSTANCE_RESULT_COMMENT = "0149，P5：实例结果体（JSON 对象，可空）"
+_INSTANCE_CREATED_BY_COMMENT = "0149，P5：提交人（幂等作用域的一环 ⇒ NOT NULL）"
 
 # ---------------------------------------------------------------- 步骤与命令
 
@@ -211,11 +212,14 @@ class WorkflowInstance(Base, TimestampMixin):
         JSONB, nullable=True, comment=_INSTANCE_RESULT_COMMENT
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment=_INSTANCE_CREATED_BY_COMMENT
+    )
 
     __table_args__ = (
         UniqueConstraint(
             "definition_id",
+            "created_by",
             "idempotency_key",
             name="uq_workflow_instance_idempotency",
         ),
@@ -360,7 +364,7 @@ class BusinessCommand(Base, TimestampMixin):
             name="uq_business_command_idempotency",
         ),
         CheckConstraint(
-            "status IN ('PENDING','EXECUTING','SUCCEEDED','FAILED','COMPENSATED')",
+            "status IN ('PENDING','EXECUTING','SUCCEEDED','FAILED','COMPENSATED','CANCELLED','ABORTED')",
             name="ck_business_command_status",
         ),
         CheckConstraint("attempts >= 0", name="ck_business_command_attempts"),

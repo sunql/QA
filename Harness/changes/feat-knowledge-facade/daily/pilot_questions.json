@@ -1,0 +1,175 @@
+{
+  "version": "pilot-2026.11.16",
+  "note": "P4 D36 试点问题集：判据 = 权限结果 + 证据命中 + 引用可回溯（三项同时成立才算通过，通过率目标 100%）。问题集刻意成对：同一问题在两个域各问一次（P-06 / P-07），证明域切片真的切掉了别的域，而不是「换个 domain 参数结果不变」。",
+  "questions": [
+    {
+      "id": "P-01",
+      "question": "供应商交付天数",
+      "domain": "PROCUREMENT",
+      "identity": {"roles": ["user"], "departments": ["PROCUREMENT_ORG"]},
+      "expect": {
+        "visibility": "VISIBLE",
+        "channels": {"GRAPH": "OK", "METRIC": "OK", "RAG": "DEGRADED", "SQL": "OK"},
+        "evidenceRefs": ["Supplier", "Supplier.delivery_days", "supplier_delivery_days", "KPI_DELIVERY"],
+        "minEvidence": 4
+      }
+    },
+    {
+      "id": "P-02",
+      "question": "采购订单金额",
+      "domain": "PROCUREMENT",
+      "identity": {"roles": ["user"], "departments": ["PROCUREMENT_ORG"]},
+      "expect": {
+        "visibility": "VISIBLE",
+        "channels": {"GRAPH": "OK", "METRIC": "OK", "RAG": "DEGRADED", "SQL": "OK"},
+        "evidenceRefs": ["PurchaseOrder", "PurchaseOrder.order_amount", "po_amount", "KPI_PO_AMOUNT"],
+        "minEvidence": 4
+      }
+    },
+    {
+      "id": "P-03",
+      "question": "采购订单和供应商怎么关联",
+      "domain": "PROCUREMENT",
+      "identity": {"roles": ["user"], "departments": ["PROCUREMENT_ORG"]},
+      "expect": {
+        "visibility": "VISIBLE",
+        "channels": {"GRAPH": "OK", "METRIC": "EMPTY", "RAG": "DEGRADED", "SQL": "OK"},
+        "evidenceRefs": ["PurchaseOrder", "Supplier", "po_supplier"],
+        "minEvidence": 3
+      }
+    },
+    {
+      "id": "P-04",
+      "question": "收货单收货数量",
+      "domain": "PROCUREMENT",
+      "identity": {"roles": ["user"], "departments": ["PROCUREMENT_ORG"]},
+      "expect": {
+        "visibility": "VISIBLE",
+        "channels": {"GRAPH": "OK", "METRIC": "EMPTY", "RAG": "DEGRADED", "SQL": "OK"},
+        "evidenceRefs": ["Receipt", "Receipt.receipt_qty"],
+        "minEvidence": 2
+      }
+    },
+    {
+      "id": "P-05",
+      "question": "物料规格",
+      "domain": "PROCUREMENT",
+      "identity": {"roles": ["user"], "departments": ["PROCUREMENT_ORG"]},
+      "expect": {
+        "visibility": "VISIBLE",
+        "channels": {"GRAPH": "OK", "METRIC": "EMPTY", "RAG": "DEGRADED", "SQL": "OK"},
+        "evidenceRefs": ["ItemMaster", "ItemMaster.material_spec"],
+        "minEvidence": 2
+      }
+    },
+    {
+      "id": "P-06",
+      "question": "来料合格率",
+      "domain": "PROCUREMENT",
+      "identity": {"roles": ["user"], "departments": ["PROCUREMENT_ORG"]},
+      "expect": {
+        "visibility": "VISIBLE",
+        "channels": {"GRAPH": "EMPTY", "METRIC": "EMPTY", "RAG": "DEGRADED", "SQL": "EMPTY"},
+        "evidenceRefs": [],
+        "minEvidence": 0
+      }
+    },
+    {
+      "id": "P-07",
+      "question": "来料合格率",
+      "domain": "QUALITY",
+      "identity": {"roles": ["user"], "departments": ["QUALITY_ORG"]},
+      "expect": {
+        "visibility": "VISIBLE",
+        "channels": {"GRAPH": "OK", "METRIC": "OK", "RAG": "DEGRADED", "SQL": "OK"},
+        "evidenceRefs": ["IncomingInspection.pass_rate", "iqc_pass_rate", "KPI_IQC"],
+        "minEvidence": 3
+      }
+    },
+    {
+      "id": "P-08",
+      "question": "供应商交付天数",
+      "domain": "PROCUREMENT",
+      "identity": {"roles": ["user"], "departments": ["QUALITY_ORG"]},
+      "expect": {
+        "visibility": "DENIED",
+        "channels": {"GRAPH": "DENIED", "METRIC": "DENIED", "RAG": "DENIED", "SQL": "DENIED"},
+        "evidenceRefs": [],
+        "minEvidence": 0
+      }
+    },
+    {
+      "id": "P-09",
+      "question": "供应商交付天数",
+      "domain": "PROCUREMENT",
+      "identity": {"roles": ["user"], "departments": ["OUTSIDE_ORG"]},
+      "expect": {
+        "visibility": "DENIED",
+        "channels": {"GRAPH": "DENIED", "METRIC": "DENIED", "RAG": "DENIED", "SQL": "DENIED"},
+        "evidenceRefs": [],
+        "minEvidence": 0
+      }
+    },
+    {
+      "id": "P-10",
+      "question": "供应商交付天数",
+      "domain": "PROCUREMENT",
+      "identity": {"roles": ["user"], "departments": []},
+      "expect": {
+        "visibility": "DENIED",
+        "channels": {"GRAPH": "DENIED", "METRIC": "DENIED", "RAG": "DENIED", "SQL": "DENIED"},
+        "evidenceRefs": [],
+        "minEvidence": 0
+      }
+    },
+    {
+      "id": "P-11",
+      "question": "物流到货情况",
+      "domain": "LOGISTICS",
+      "identity": {"roles": ["user"], "departments": ["PROCUREMENT_ORG"]},
+      "expect": {
+        "visibility": "DENIED",
+        "channels": {"GRAPH": "DENIED", "METRIC": "DENIED", "RAG": "DENIED", "SQL": "DENIED"},
+        "evidenceRefs": [],
+        "minEvidence": 0
+      }
+    },
+    {
+      "id": "P-12",
+      "question": "物流到货情况",
+      "domain": "LOGISTICS",
+      "identity": {"roles": ["admin"], "departments": ["PROCUREMENT_ORG"]},
+      "expect": {
+        "visibility": "VISIBLE",
+        "channels": {"GRAPH": "DEGRADED", "METRIC": "DEGRADED", "RAG": "DEGRADED", "SQL": "DEGRADED"},
+        "evidenceRefs": [],
+        "minEvidence": 0
+      }
+    },
+    {
+      "id": "P-13",
+      "question": "供应商交付天数",
+      "domain": "PROCUREMENT",
+      "identity": {"roles": ["user"], "departments": ["PROCUREMENT_ORG"]},
+      "scope": {"orgCodes": ["QUALITY_ORG"]},
+      "expect": {
+        "visibility": "DENIED",
+        "channels": {"GRAPH": "DENIED", "METRIC": "DENIED", "RAG": "DENIED", "SQL": "DENIED"},
+        "evidenceRefs": [],
+        "minEvidence": 0
+      }
+    },
+    {
+      "id": "P-14",
+      "question": "今天天气怎么样",
+      "domain": "PROCUREMENT",
+      "identity": {"roles": ["user"], "departments": ["PROCUREMENT_ORG"]},
+      "expect": {
+        "visibility": "VISIBLE",
+        "channels": {"GRAPH": "EMPTY", "METRIC": "EMPTY", "RAG": "DEGRADED", "SQL": "EMPTY"},
+        "evidenceRefs": [],
+        "minEvidence": 0
+      }
+    }
+  ]
+}

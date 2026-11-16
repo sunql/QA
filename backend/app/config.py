@@ -189,6 +189,12 @@ class Settings(BaseSettings):
     enableSemanticRegistryRag: bool = Field(
         default=False, alias="ENABLE_SEMANTIC_REGISTRY_RAG"
     )
+    # ===== 知识服务 Facade（P4 D32）=====
+    # `/api/v1/semantic/knowledge/query` 与采购薄别名的总开关；
+    # 关闭时两组路由整组不注册（404）⇒ 未部署时对外**完全不存在**。
+    # **默认关**：P4 是读侧编排面，开着也只是多一条查询入口；
+    # 但默认关能保证「没开 = 没有这个面」，不给人「悄悄多了一个能查的接口」的错觉。
+    enableKnowledgeFacade: bool = Field(default=False, alias="ENABLE_KNOWLEDGE_FACADE")
 
     # ===== 通用 Agent 编排 =====
     enableAgentOrchestration: bool = Field(default=False, alias="ENABLE_AGENT_ORCHESTRATION")
@@ -430,6 +436,33 @@ def semanticRegistryRagAuthMisconfiguration(settings: Settings) -> str | None:
         "ENABLE_SEMANTIC_REGISTRY_RAG=true 但鉴权仍为 stub"
         f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
         "过滤维度（域/组织/实体）的来源身份不可信，治理维度收窄形同虚设。"
+        "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
+    )
+
+
+def knowledgeFacadeAuthMisconfiguration(settings: Settings) -> str | None:
+    """启用知识服务 Facade 时鉴权必须是「真鉴权」；否则返回原因（纯函数）。
+
+    知识 Facade 的**域可见性**是按调用方身份推导的
+    （`data_domain.primary_org_id → organizations.code ∈ user.departments`，
+    见 `app/services/knowledge/permission.py`）⇒ 它就是一条**授权边界**。
+    在 stub 鉴权下身份可被任意客户端用 ``X-User-Roles`` /
+    ``X-User-Departments`` 之类头伪造 ⇒ 可见域推导的依据不可信 ⇒ 域级隔离形同虚设。
+
+    与 `semanticRegistryRagAuthMisconfiguration` 是**同一类风险**（收窄维度来自
+    可伪造的身份），只是这条开关影响的是整个知识查询入口。
+
+    不阻塞启动：本地开发与测试套件依赖 stub 鉴权。但必须大声告警，
+    由部署方决定是否真的在非真鉴权环境启用该开关。
+    """
+    if not settings.enableKnowledgeFacade:
+        return None
+    if settings.authMode == "real" and not settings.authStubEnabled:
+        return None
+    return (
+        "ENABLE_KNOWLEDGE_FACADE=true 但鉴权仍为 stub"
+        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
+        "知识查询的域可见性按可伪造的调用方身份推导，域级隔离形同虚设。"
         "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
     )
 

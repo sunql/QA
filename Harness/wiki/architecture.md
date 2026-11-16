@@ -393,6 +393,32 @@ Neo4j **无备份、误写不可逆** ⇒ 镜像写路径自带闸门
 图表显示名、research 检索源（检索/向量侧无发布维度，与向量 R-6 同根）。
 完整 15 处清单见 [`Harness/changes/feat-semantic-nl2sql-call-sites/plan.md`](../changes/feat-semantic-nl2sql-call-sites/plan.md) §3。
 
+### 知识服务 Facade（P4）：按发布读的第五个消费面
+
+| 项 | 内容 |
+|---|---|
+| 入口 | `POST /api/v1/semantic/knowledge/query`（跨域通用）+ `POST /api/v1/procurement/knowledge/query`（**采购薄别名**） |
+| 开关 | `ENABLE_KNOWLEDGE_FACADE`（默认 **false** ⇒ 整组路由不注册 ⇒ 404） |
+| 四路 | `GRAPH`（类 / 属性 / JOIN）· `METRIC`（指标 / KPI）· `RAG`（向量召回）· `SQL`（物理 schema 复原渲染） |
+| 语义源 | **发布快照**（manifest）+ **域切片**（`sliceManifestByDomain`）⇒ 换 `domain` 即服务第二个域，**零代码改动** |
+| 权限源 | `knowledge/permission.py`：域可见性按 `data_domain.primary_org_id → organizations.code ∈ user.departments` 推导；请求 `scope` **只能收窄** |
+| 编排顺序 | **先解 scope → 再判域可见性 → 最后才解发布面** ⇒ 域不可见时一路都不跑、连发布面都不解（不侧漏域是否存在） |
+| 引用 | 发布读 ⇒ 每条证据带 `releaseId` + `releaseVersion` + `source=RELEASE`；**降级 ⇒ 零证据 + 显式降级标记**（不直读治理表 ⇒ `source=LIVE` 本批不产出） |
+| 钉住的发布 | `releaseId` 也要授权：域不匹配 / 非 admin 只见 ACTIVE ⇒ **降级 + 与「不存在」同一条消息**（不给存在性探针） |
+| 启动自检 | `ENABLE_KNOWLEDGE_FACADE` 打开而鉴权仍是 stub ⇒ **启动告警**（域可见性按可伪造身份推导） |
+| 采购薄别名 | 独立文件 + **零业务分支**（AST 守卫）+ **运行时等价**（主接口与别名响应逐路状态 / 证据集合一致） |
+
+**为什么 Facade 不调 LLM**：`answerDraft` 由路由结果**确定性拼装** ⇒ 通过率可客观判定
+（证据命中 + 权限结果 + 引用可回溯三项同时成立），不引入计量 / 预算 / 评测三张皮。
+
+**已知边界**：`RAG` 路在 P3a 闸门未开时恒为 `DEGRADED`（fail-closed，不回落成不过滤的召回）；
+业务实体多跳遍历（Neo4j 主图）**不进** Facade；用户级安全等级无权威来源（admin ⇒ L3、其余 ⇒ L1）。
+
+细节与实证见
+[`Harness/changes/feat-knowledge-facade/daily/D33.md`](../changes/feat-knowledge-facade/daily/D33.md)、
+[`D35.md`](../changes/feat-knowledge-facade/daily/D35.md)、
+[`D36.md`](../changes/feat-knowledge-facade/daily/D36.md)。
+
 ### 读侧切换（D25）
 
 开关 = 配置 `SEMANTIC_GRAPH_RELEASE_ID`（发布 id）：

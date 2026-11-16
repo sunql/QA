@@ -203,6 +203,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _semanticRagAuthReason = semanticRegistryRagAuthMisconfiguration(settings)
     if _semanticRagAuthReason:
         logger.error("🚨 安全告警：%s", _semanticRagAuthReason)
+    # 知识服务 Facade（P4）：域可见性按调用方身份推导 ⇒ stub 鉴权下身份可伪造
+    # ⇒ 域级隔离形同虚设。与上面同一处理方式：只告警，不阻塞。
+    from app.config import knowledgeFacadeAuthMisconfiguration
+
+    _knowledgeFacadeAuthReason = knowledgeFacadeAuthMisconfiguration(settings)
+    if _knowledgeFacadeAuthReason:
+        logger.error("🚨 安全告警：%s", _knowledgeFacadeAuthReason)
     # 本体发现域（WP-ONT-AI A1）：路由**无条件挂载**，写入口是 requireAdmin，
     # 读入口回吐业务库 schema 结构 ⇒ 生产必须跑真鉴权。
     # ⚠️ 这里**不再**加域级自检（安全审查 LOW-1）：`validateProduction()` 已在
@@ -686,6 +693,24 @@ def createApp() -> FastAPI:
         tags=["ontology-discovery"],
         dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
+    # 知识服务 Facade（P4 D32）：跨域通用知识查询 + 采购薄别名。
+    # 开关关闭时整组不注册（404）⇒ 未部署时对外完全不存在。
+    # 读侧只要求登录（域级可见性由服务层的权限口径判定 ⇒ 不可见 = 查不到，不是 403）。
+    if settings.enableKnowledgeFacade:
+        from app.api.v1 import knowledge_facade, procurement_knowledge
+
+        app.include_router(
+            knowledge_facade.router,
+            prefix="/api/v1/semantic/knowledge",
+            tags=["semantic-knowledge"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
+        app.include_router(
+            procurement_knowledge.router,
+            prefix="/api/v1/procurement/knowledge",
+            tags=["procurement-knowledge"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
     app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     # auth.router 和 authRouter.router 不加 guard：白名单路径 /auth/me、/auth/change-password、/auth/logout 需无条件放行

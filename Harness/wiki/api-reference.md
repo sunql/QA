@@ -315,3 +315,51 @@ agent_tool_in_use_orchestration; referencingAgents=['legacy_agent']; orchestrati
 
 > 事实源：`backend/app/api/v1/ontology_discovery.py`、
 > `backend/app/domain/discovery_schemas.py`。
+
+## 知识服务 Facade（P4）
+
+**日期**：2026-11-16 · **变更**：[feat-knowledge-facade](../changes/feat-knowledge-facade/summary.md)
+开关 `ENABLE_KNOWLEDGE_FACADE`（**默认 false** ⇒ 整组路由不注册 ⇒ 404 ⇒ 未部署时对外不存在）。
+只读端点、裸 DTO（**不套 `{success,data}` 信封**）、`Cache-Control: no-store`。
+鉴权 = 任意登录用户（+ 改密守卫 + 限流）——**域级可见性由服务层权限口径判定**，
+不可见 = **200 + 空结果 + 警告**，**不是 403**（不侧漏域是否存在）。
+
+| 端点 | 说明 |
+|---|---|
+| `POST /api/v1/semantic/knowledge/query` | 跨域通用知识查询：`domain` 是**唯一的域参数**（换 domain 即服务第二个域，零代码改动） |
+| `POST /api/v1/procurement/knowledge/query` | **采购薄别名**：请求体少一个 `domain`（固定 `PROCUREMENT`），其余逐字一致；**别名文件里没有任何业务分支**（AST 守卫 + 运行时等价判据） |
+
+**请求**（主接口）
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `domain` | str | ✅ | 数据域 code |
+| `question` | str | ✅ | 1..500 字 |
+| `channels` | list[str] | ✖ | 缺省 = 四路全开；`GRAPH` / `METRIC` / `RAG` / `SQL` |
+| `entityHints` | list[{type,code}] | ✖ | 实体提示（**只提示，不放宽权限**） |
+| `topK` | int | ✖ | 1..50，缺省 8 |
+| `releaseId` | int | ✖ | 钉住某版发布；缺省 = 该域 ACTIVE（无则**降级为空 + 显式标记**）。⚠️ 钉住的发布**不可见**（域不匹配 / 非 admin 看不到该状态）⇒ 同样降级为空，且**不区分「不存在」与「无权」** |
+| `scope` | {orgCodes, entityTypes, maxSecurityLevel} | ✖ | **只收窄**（不得放宽）。`entityTypes` **真的收窄**（请求侧 ∩ 可见集 ⇒ 空则空结果 + 警告）；`maxSecurityLevel` **本批不被消费**（用户级安全等级无权威来源 ⇒ 显式告警） |
+
+**响应**：`question` / `domain` / `release` `{id, version, manifestHash, degraded}` /
+`answerDraft`（**确定性编排摘要，非 LLM**）/ `entities[]` / `evidence[]`
+`{channel, kind, ref, title, snippet, releaseId, releaseVersion, source}` /
+`routeResults[]` `{channel, status, itemCount, degradedReason, warnings[]}` / `warnings[]`。
+
+**四路状态语义**（`routeResults[].status`）：
+
+| 状态 | 含义 |
+|---|---|
+| `OK` | 查到了 |
+| `EMPTY` | 查了但没命中（**与 `DENIED` 分开**） |
+| `DEGRADED` | 能力不可用（如 RAG 闸门关）⇒ 带 `degradedReason` |
+| `DENIED` | **域不可见**（无权查）⇒ 零证据 + 警告；一路都不跑，且**连发布面都不解** |
+
+**引用可回溯**：发布读 ⇒ 每条证据带 `releaseId` + `releaseVersion` + `source=RELEASE`。
+**降级不是「无版本的证据」**：降级 ⇒ **零证据** + `release.degraded=true` + 警告
+（**不直读治理表** ⇒ 证据永远有版本可引；`source=LIVE` 是**保留常量，本批不产出**）。
+
+> 事实源：`backend/app/api/v1/knowledge_facade.py`、
+> `backend/app/api/v1/procurement_knowledge.py`、
+> `backend/app/domain/knowledge_schemas.py`、
+> `backend/app/services/knowledge/`（编排 + 权限 + 域切片 + 四路）。

@@ -525,3 +525,74 @@ request_time    TIMESTAMPTZ NOT NULL
 
 - `(run_id, iteration_no, kind)` **没有** DB 级唯一索引（靠应用层保证幂等）；
 - `agent_orchestration_usage` **没有** `run_id` 索引（用量台账按 run 聚合时会全表扫）。
+
+## WP-ONT-AI 增量：本体发现域（不可变快照 + 差异引擎）
+
+**日期**：2026-11-16 · **变更**：[2026-11-16-ontology-discovery-ai](../changes/2026-11-16-ontology-discovery-ai/summary.md)
+（批次 A1「发现底座」；**零 LLM、零外部授权**；迁移 `0146` / `0147`）
+
+发现域**只写自己的两张表**，不写治理表、不写业务库（红线：AI 只产出候选，人工裁决，
+机器发布）。与 `schema_cache` 的分工：`schema_cache` 是**当前态缓存**（内容变化即覆盖，
+追求快），`metadata_snapshot` 是**证据**（只增不改、内容寻址、可被候选/剖析/提案引用）。
+
+### discovery_source（授权目录，不新建连接）
+
+| 列 | 类型 | 约束 / 默认 | 说明 |
+|---|---|---|---|
+| `id` | BIGINT PK | | |
+| `name` | VARCHAR(100) | NOT NULL，**唯一** `uq_discovery_source_name` | 同一实例内唯一 |
+| `datasource_id` | BIGINT | NOT NULL，FK → `data_source.id` **RESTRICT**（`fk_discovery_source_datasource`） | **只引用既有连接**（不出现第二套数据源真相源） |
+| `owner` | VARCHAR(100) | NOT NULL | **业务责任人** |
+| `access_policy` | JSONB | NOT NULL，默认 `'{}'::jsonb` | 访问策略，见下 |
+| `status` | VARCHAR(20) | 默认 `'ACTIVE'`，CHECK `status IN ('ACTIVE','DISABLED')` | `DISABLED` = 撤销授权（采集被拒） |
+| `note` | TEXT | 可空 | |
+| `created_by` / `created_time` | | | |
+
+索引：`ix_discovery_source_datasource(datasource_id)`。
+
+**`access_policy` 的契约（刻意只承认已实现的键）**：
+
+- `mode`：只允许 `READ_ONLY`（发现域只读）；
+- `schema_owner`：**库模式属主**（Oracle schema / MySQL 库），内省时的目标命名空间；
+  ⚠️ 与 `discovery_source.owner`（业务责任人）是两件事，刻意不同名；
+- **未知键直接拒绝**（不静默忽略）：「我配了 schemas 白名单、以为生效了其实没生效」
+  是最危险的失败模式；
+- 策略 JSON ≤ 4096 字节（策略是配置不是数据载荷）。
+
+### metadata_snapshot（不可变元数据快照，只增不改）
+
+| 列 | 类型 | 约束 / 默认 | 说明 |
+|---|---|---|---|
+| `id` | BIGINT PK | | |
+| `source_id` | BIGINT | NOT NULL，FK → `discovery_source.id` **RESTRICT**（`fk_metadata_snapshot_source`） | 快照证据不悬空 |
+| `schema_hash` | VARCHAR(64) | NOT NULL，**源内唯一** `uq_metadata_snapshot_source_hash`，CHECK `schema_hash ~ '^[0-9a-f]{64}$'` | 内容寻址键 |
+| `snapshot_json` | JSONB | NOT NULL，CHECK `jsonb_typeof(snapshot_json) = 'object'` | 规范化结构快照（只收结构，不收样本） |
+| `table_count` / `column_count` | INTEGER | 默认 0，CHECK `>= 0` | 冗余计数 |
+| `captured_at` | TIMESTAMPTZ | NOT NULL | 冻结时刻 |
+| `created_by` / `created_time` | | | |
+
+索引：`ix_metadata_snapshot_source(source_id)`。
+
+- **刻意无 `updated_time`**：快照只增不改 ⇒ 没有「最后更新时间」的语义。
+- **内容寻址**：`schema_hash` = 规范化 JSON 的 SHA-256，**与 Manifest 哈希同一把尺子**
+  （复用 `app/domain/semantic_manifest_schema.manifestHash`）。同源同内容 ⇒ 复用既有行
+  （幂等）；内容变化 ⇒ **新增**一行。
+- **库级不可变**（迁移 `0147`）：`metadata_snapshot` 上挂 `BEFORE UPDATE OR DELETE` 行级
+  触发器 `tr_metadata_snapshot_immutable` ⇒ 应用层纪律之外再加一道库层闸
+  （误操作 / DBA 直连 / 将来新写的代码路径都绕不过）。**TRUNCATE 不受影响** ⇒ 测试夹具的
+  「每测试清库」照常工作。
+
+### 迁移文件
+
+- `alembic/versions/0146_discovery_snapshot.py` — 建 2 张表 + 2 个索引（纯加法）
+  - **文件主干（stem）** = `0146_discovery_snapshot`（22 字符）；文件名含 `.py` = 26 字符
+  - **revision id** = `0146`，**down_revision = "0145"**
+- `alembic/versions/0147_snapshot_immutability.py` — 建不可变触发器 + 触发函数
+  - **文件主干（stem）** = `0147_snapshot_immutability`（26 字符）；文件名含 `.py` = 29 字符
+  - **revision id** = `0147`，**down_revision = "0146"**
+  - `downgrade()` 用 `IF EXISTS` 幂等删触发器与函数
+- **ORM ↔ 迁移逐字一致**：列注释与 CHECK 表达式由 `app/tests/unit/test_discovery_models.py`
+  **双向字典比对**钉住（`alembic check` 只比约束名不比式，只补名 = 假绿）。
+
+> 事实源：`backend/app/domain/discovery_models.py`、
+> `backend/app/services/discovery_snapshot_service.py`。

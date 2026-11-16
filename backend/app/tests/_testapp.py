@@ -270,6 +270,15 @@ def buildTestApp(testFactory: Any) -> FastAPI:
                 Depends(requireAdmin),
             ],
         )
+    # 本体发现 API（WP-ONT-AI A1-4）：与 main.py 同一前缀、同一门禁分层。
+    from app.api.v1 import ontology_discovery
+
+    testApp.include_router(
+        ontology_discovery.router,
+        prefix="/api/v1/ontology-discovery",
+        tags=["ontology-discovery"],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+    )
     testApp.include_router(users.router, tags=["users"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(roles.router, tags=["roles"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(organizations.router, tags=["organizations"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])

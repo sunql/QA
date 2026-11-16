@@ -16,9 +16,19 @@ from __future__ import annotations
 from decimal import Decimal
 
 import app.api.v1.chat as chat_module
-from app.domain.models import DataSource, LlmConfig, OntologyClass, OntologyProperty, SchemaCache
+from sqlalchemy import select
+
+from app.domain.models import (
+    AuditLog,
+    DataSource,
+    LlmConfig,
+    OntologyClass,
+    OntologyProperty,
+    SchemaCache,
+)
+from app.domain.schemas import ColumnSchemaRead, TableSchemaRead
 from app.infrastructure.security.crypto import encryptApiKey
-from app.services.schema_introspection_service import _schemaVersion
+from app.services.schema_introspection_service import SchemaIntrospectionService, _schemaVersion
 
 ROWS = [{"NAME": "A", "QTY": Decimal(10)}, {"NAME": "B", "QTY": Decimal(20)}]
 
@@ -273,3 +283,259 @@ class TestChatDriftWarning:
         # SQL 阶段 system prompt 同样携带告警
         sqlSystem = llm.calls[1][0][1]
         assert "漂移" in sqlSystem
+
+
+# ---------------------------------------------------------------------------
+# 本体发现 API（WP-ONT-AI A1-4）
+#
+# 与上面的漂移校验同属「本体 × 业务库 schema」这一面，故并入本文件
+# （**不新建 integration 测试文件**：新文件会按「排序下标 mod 4」轮转 CI 分片
+# 归属 ⇒ 假 net-new）。
+#
+# 业务库内省是外部依赖 ⇒ 以 fake 注入（与本文件既有口径一致：外部依赖 fake，
+# 数据层真实 PG）；真实业务库采集由 `scripts/ontology_discovery_realdata.py` 覆盖。
+# ---------------------------------------------------------------------------
+
+_ADMIN_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
+_USER_HEADERS = {"X-User-Id": "test-user", "X-User-Roles": "user"}
+
+
+def _fakeTables() -> list[TableSchemaRead]:
+    return [
+        TableSchemaRead(
+            table_name="PRECEIPT",
+            owner="ZJTH",
+            columns=[
+                ColumnSchemaRead(column_name="NAME", data_type="VARCHAR2", nullable=False),
+                ColumnSchemaRead(column_name="QTY", data_type="NUMBER", nullable=True),
+            ],
+            primary_keys=["NAME"],
+            foreign_keys=[],
+            comment="收货单",
+        )
+    ]
+
+
+def _patchIntrospection(monkeypatch, tables: list[TableSchemaRead]) -> None:
+    async def _fake(self, ds, *, owner=None):  # noqa: ANN001 - 测试替身
+        return list(tables)
+
+    monkeypatch.setattr(SchemaIntrospectionService, "introspect", _fake)
+
+
+async def _registerSource(client, dbSession) -> tuple[int, int]:
+    """登记一个发现源，返回 (sourceId, datasourceId)。"""
+
+    ds = await _persist(dbSession, _datasource())
+    resp = await client.post(
+        "/api/v1/ontology-discovery/sources",
+        json={
+            "name": "ZJTH发现源",
+            "datasource_id": ds.id,
+            "owner": "张业务",
+            "access_policy": {"mode": "READ_ONLY"},
+        },
+        headers=_ADMIN_HEADERS,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"], ds.id
+
+
+class TestOntologyDiscoveryApi:
+    async def test_登记发现源需要管理员(self, client, dbSession) -> None:
+        ds = await _persist(dbSession, _datasource())
+
+        resp = await client.post(
+            "/api/v1/ontology-discovery/sources",
+            json={"name": "越权源", "datasource_id": ds.id, "owner": "张业务"},
+            headers=_USER_HEADERS,
+        )
+
+        assert resp.status_code == 403, resp.text
+
+    async def test_登记发现源后可被普通登录用户列出(self, client, dbSession) -> None:
+        sourceId, _ = await _registerSource(client, dbSession)
+
+        resp = await client.get("/api/v1/ontology-discovery/sources")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["total"] == 1
+        row = body["rows"][0]
+        assert row["id"] == sourceId
+        assert row["name"] == "ZJTH发现源"
+        assert row["status"] == "ACTIVE"
+        assert row["snapshotCount"] == 0
+
+    async def test_采集快照写入快照行并可读详情(self, client, dbSession, monkeypatch) -> None:
+        _patchIntrospection(monkeypatch, _fakeTables())
+        sourceId, _ = await _registerSource(client, dbSession)
+
+        resp = await client.post(
+            f"/api/v1/ontology-discovery/snapshots?sourceId={sourceId}",
+            headers=_ADMIN_HEADERS,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["reused"] is False
+        assert body["tableCount"] == 1
+        assert body["columnCount"] == 2
+        assert len(body["schemaHash"]) == 64
+
+        listResp = await client.get(
+            f"/api/v1/ontology-discovery/snapshots?sourceId={sourceId}"
+        )
+        assert listResp.status_code == 200, listResp.text
+        assert listResp.json()["total"] == 1
+
+        detailResp = await client.get(
+            f"/api/v1/ontology-discovery/snapshots/{body['snapshotId']}"
+        )
+        assert detailResp.status_code == 200, detailResp.text
+        detail = detailResp.json()
+        assert detail["schemaHash"] == body["schemaHash"]
+        assert detail["snapshot"]["tables"][0]["tableName"] == "PRECEIPT"
+
+    async def test_重复采集同内容复用既有快照(self, client, dbSession, monkeypatch) -> None:
+        _patchIntrospection(monkeypatch, _fakeTables())
+        sourceId, _ = await _registerSource(client, dbSession)
+
+        first = await client.post(
+            f"/api/v1/ontology-discovery/snapshots?sourceId={sourceId}",
+            headers=_ADMIN_HEADERS,
+        )
+        second = await client.post(
+            f"/api/v1/ontology-discovery/snapshots?sourceId={sourceId}",
+            headers=_ADMIN_HEADERS,
+        )
+
+        assert first.status_code == 200, first.text
+        assert second.status_code == 200, second.text
+        assert second.json()["reused"] is True
+        assert second.json()["snapshotId"] == first.json()["snapshotId"]
+
+        listResp = await client.get(
+            f"/api/v1/ontology-discovery/snapshots?sourceId={sourceId}"
+        )
+        assert listResp.json()["total"] == 1
+
+    async def test_采集快照需要管理员(self, client, dbSession, monkeypatch) -> None:
+        _patchIntrospection(monkeypatch, _fakeTables())
+        sourceId, _ = await _registerSource(client, dbSession)
+
+        resp = await client.post(
+            f"/api/v1/ontology-discovery/snapshots?sourceId={sourceId}",
+            headers=_USER_HEADERS,
+        )
+
+        assert resp.status_code == 403, resp.text
+
+    async def test_快照不存在返回404(self, client) -> None:
+        resp = await client.get("/api/v1/ontology-discovery/snapshots/999999")
+
+        assert resp.status_code == 404, resp.text
+
+    async def test_差异端点返回基线与风险分级(self, client) -> None:
+        resp = await client.get("/api/v1/ontology-discovery/diff")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "baselineReleaseId" in body
+        assert body["hasBreakingChanges"] is False
+        assert body["overallRiskLevel"] in {"LOW", "INFO"}
+        for change in body["changes"]:
+            assert change["riskLevel"] in {"HIGH", "LOW", "INFO"}
+            assert change["severity"] in {"BREAKING", "ADDITIVE", "COSMETIC"}
+
+
+class TestOntologyDiscoverySourceUpdate:
+    """H-1：发现源必须有**停用 / 更新**路径，否则 `status=DISABLED` 是空承诺。"""
+
+    async def test_更新发现源需要管理员(self, client, dbSession) -> None:
+        sourceId, _ = await _registerSource(client, dbSession)
+
+        resp = await client.patch(
+            f"/api/v1/ontology-discovery/sources/{sourceId}",
+            json={"status": "DISABLED"},
+            headers=_USER_HEADERS,
+        )
+
+        assert resp.status_code == 403, resp.text
+
+    async def test_管理员可停用发现源且停用后采集被拒(
+        self, client, dbSession, monkeypatch
+    ) -> None:
+        _patchIntrospection(monkeypatch, _fakeTables())
+        sourceId, _ = await _registerSource(client, dbSession)
+
+        resp = await client.patch(
+            f"/api/v1/ontology-discovery/sources/{sourceId}",
+            json={"status": "DISABLED"},
+            headers=_ADMIN_HEADERS,
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "DISABLED"
+
+        capture = await client.post(
+            f"/api/v1/ontology-discovery/snapshots?sourceId={sourceId}",
+            headers=_ADMIN_HEADERS,
+        )
+        assert capture.status_code == 422, capture.text
+
+    async def test_更新发现源不允许改数据源(self, client, dbSession) -> None:
+        """`datasource_id` 是授权根：改它等于换一条被授权的连接 ⇒ 拒绝。"""
+
+        sourceId, _ = await _registerSource(client, dbSession)
+
+        resp = await client.patch(
+            f"/api/v1/ontology-discovery/sources/{sourceId}",
+            json={"datasourceId": 999},
+            headers=_ADMIN_HEADERS,
+        )
+
+        assert resp.status_code == 422, resp.text
+
+    async def test_访问策略含未知键被拒(self, client, dbSession) -> None:
+        """M-1/M-2：未知策略键不静默忽略（否则「配了没生效」无人知晓）。"""
+
+        ds = await _persist(dbSession, _datasource())
+
+        resp = await client.post(
+            "/api/v1/ontology-discovery/sources",
+            json={
+                "name": "未知键源",
+                "datasource_id": ds.id,
+                "owner": "张业务",
+                "access_policy": {"mode": "READ_ONLY", "schemas": ["A"]},
+            },
+            headers=_ADMIN_HEADERS,
+        )
+
+        assert resp.status_code == 422, resp.text
+
+    async def test_写端点落审计日志(self, client, dbSession, monkeypatch) -> None:
+        """M-4：治理写动作必须留痕（登记 / 采集 / 停用）。"""
+
+        _patchIntrospection(monkeypatch, _fakeTables())
+        sourceId, _ = await _registerSource(client, dbSession)
+        await client.post(
+            f"/api/v1/ontology-discovery/snapshots?sourceId={sourceId}",
+            headers=_ADMIN_HEADERS,
+        )
+        await client.patch(
+            f"/api/v1/ontology-discovery/sources/{sourceId}",
+            json={"status": "DISABLED"},
+            headers=_ADMIN_HEADERS,
+        )
+
+        rows = await dbSession.execute(
+            select(AuditLog)
+            .where(AuditLog.entity_type.in_(["discovery_source", "metadata_snapshot"]))
+            .order_by(AuditLog.id)
+        )
+        actions = [(row.entity_type, row.action) for row in rows.scalars().all()]
+
+        assert ("discovery_source", "CREATE") in actions
+        assert ("metadata_snapshot", "CREATE") in actions
+        assert ("discovery_source", "UPDATE") in actions

@@ -1649,9 +1649,10 @@ class AuditLog(Base):
     由 service 层纪律保证；DB 无 trigger 拦截「UPDATE/DELETE by app」，
     因为应用层从不发出这类 SQL。
 
-    action ∈ {'CREATE', 'UPDATE', 'DELETE'}：
+    action ∈ {'CREATE', 'UPDATE', 'DELETE', 'RESTORE', 'REUSE'}：
         CREATE：after_json 必有，before_json 为空
         UPDATE：before_json + after_json 双端
+        REUSE：内容寻址复用既有行（**没有新建**），after_json 记复用事实
     entity_type / entity_id 用 VARCHAR(50)/BIGINT 而非 FK 关联，保留
     对任意实体类型（kpi_catalog / ontology_class / data_quality_rule /
     entity_mapping ...）的扩展性。
@@ -1694,7 +1695,7 @@ class AuditLog(Base):
         CheckConstraint(
             # 'RESTORE' 是 DB 上的既有取值（ORM 漏写 ⇒ 表达式与 DB 不一致，
             # 且 alembic 不比较 CHECK 表达式 ⇒ 只会静默漂移）。
-            "action IN ('CREATE','UPDATE','DELETE','RESTORE',"
+            "action IN ('CREATE','UPDATE','DELETE','RESTORE','REUSE',"
             "'auth.login','auth.login_failed','auth.logout',"
             "'auth.password_changed','user.password_reset')",
             name="ck_audit_log_action",
@@ -2862,3 +2863,8 @@ from app.domain import multi_step_models as _multi_step_models  # noqa: E402,F40
 from app.domain import research_models as _research_models  # noqa: E402,F401
 from app.domain import wiki_graph_insight as _wiki_graph_insight  # noqa: E402,F401
 from app.domain import semantic_release_models as _semantic_release_models  # noqa: E402,F401
+
+# 本体发现域（WP-ONT-AI A1，0146）：`discovery_source` / `metadata_snapshot`。
+# 同理由——**Schema drift 校验与 alembic autogenerate 都靠 Base.metadata 看见这些表**，
+# 漏 import ⇒ 被误报成 `extra_table`（drift）或被 autogenerate 提议 DROP。
+from app.domain import discovery_models as _discovery_models  # noqa: E402,F401

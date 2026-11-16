@@ -38,6 +38,10 @@ _WRITE_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/ontology/metrics"),
         ("PUT", "/api/v1/ontology/metrics/{id}"),
         ("DELETE", "/api/v1/ontology/metrics/{id}"),
+        # 本体发现（WP-ONT-AI A1-4）：登记授权目录 / 采集快照 / 停用发现源是治理写动作。
+        ("POST", "/api/v1/ontology-discovery/sources"),
+        ("PATCH", "/api/v1/ontology-discovery/sources/{sourceId}"),
+        ("POST", "/api/v1/ontology-discovery/snapshots"),
     }
 )
 
@@ -47,11 +51,17 @@ _READ_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/term-dictionary"),
         ("GET", "/api/v1/ontology/metrics"),
         ("GET", "/api/v1/ontology/metrics/{id}"),
+        # 本体发现（WP-ONT-AI A1-4）：快照 / 差异是只读元数据，普通登录用户可看。
+        ("GET", "/api/v1/ontology-discovery/sources"),
+        ("GET", "/api/v1/ontology-discovery/snapshots"),
+        ("GET", "/api/v1/ontology-discovery/snapshots/{snapshotId}"),
+        ("GET", "/api/v1/ontology-discovery/diff"),
     }
 )
 
 _TERM_PREFIX = "/api/v1/term-dictionary"
 _METRIC_PREFIX = "/api/v1/ontology/metrics"
+_DISCOVERY_PREFIX = "/api/v1/ontology-discovery"
 
 
 def _productionRoutes() -> list[tuple[str, APIRoute, tuple[Any, ...]]]:
@@ -64,7 +74,7 @@ def _routeIndex() -> dict[tuple[str, str], tuple[APIRoute, tuple[Any, ...]]]:
     """(method, path) → (route, include 依赖)。只保留本守卫关心的前缀。"""
     index: dict[tuple[str, str], tuple[APIRoute, tuple[Any, ...]]] = {}
     for path, route, inherited in _productionRoutes():
-        if not path.startswith((_TERM_PREFIX, _METRIC_PREFIX)):
+        if not path.startswith((_TERM_PREFIX, _METRIC_PREFIX, _DISCOVERY_PREFIX)):
             continue
         for method in route.methods:
             index[(method, path)] = (route, inherited)

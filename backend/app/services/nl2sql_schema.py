@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
 
+from app.domain.external_text import escapeAngleBrackets, sanitizeSchemaField
 from app.domain.models import OntologyClass, OntologyJoin
 from app.domain.query_plan import JoinSpec, QueryPlan
 
@@ -28,13 +29,10 @@ def _sanitizeContext(context: str) -> str:
     相比删除标签更彻底：分片拼接（`</conversation_his<conversation_history>tory>`）、
     大小写变体（`</CONVERSATION_HISTORY>`）或自闭合/带属性变体都无法重组出
     闭合标签——因为所有 `<`/`>` 已被替换为 HTML 实体，LLM 只将其视为字面文本。
+
+    ⚠️ 实现收敛到 `app/domain/external_text.py`（单一事实源），行为逐字不变。
     """
-    return context.replace("<", "&lt;").replace(">", "&gt;")
-
-
-# 行分隔符全集：LLM/日志/前端对「换行」的识别并不只认 \r\n，U+2028/U+2029
-# （JS 行终止符）、U+0085（NEL）以及 \v/\f 都能把一行拆成两行。
-_LINE_SEPARATORS = ("\r", "\n", "\u2028", "\u2029", "\u0085", "\v", "\f")
+    return escapeAngleBrackets(context)
 
 
 def _sanitizeSchemaField(value: str) -> str:
@@ -42,11 +40,10 @@ def _sanitizeSchemaField(value: str) -> str:
 
     换行不折叠会向 schema 文本注入裸行，形成"忽略规则"式指令行；本体配置虽是
     管理员写入，但属外部输入，按同一防御标准处理。
+
+    ⚠️ 实现收敛到 `app/domain/external_text.py`（单一事实源），行为逐字不变。
     """
-    sanitized = _sanitizeContext(value)
-    for sep in _LINE_SEPARATORS:
-        sanitized = sanitized.replace(sep, " ")
-    return sanitized
+    return sanitizeSchemaField(value)
 
 
 # schema 前缀（数据源用户名）仅允许合法标识符，防止提示注入

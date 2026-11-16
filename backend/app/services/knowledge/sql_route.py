@@ -14,10 +14,13 @@
 知识服务这边一旦直读治理表，**引用就无法回溯到发布版本**（D33 的发布面口径）。
 
 ⇒ 本路改为：**从 manifest 复原渲染视图**（`restoreSnapshotSchema`，P2 的复原层）
-⇒ 用**仓内唯一的渲染器**渲染（`nl2sql_schema.buildSchemaText`）
+⇒ 用**闸门模块的快照专用入口**渲染（`semantic_schema_gate.renderSnapshotText`）
 ⇒ 渲染结果**天生出自那一版发布** ⇒ 不需要任何开关。
 
 复用的是**复原层 + 渲染器**（不重复实现），不复用的是**闸门的策略**（开关 / 直读降级）。
+渲染**不直接**调 `nl2sql_schema.buildSchemaText`：服务层直接调它会被
+`Test生产侧不许绕过闸门` 判为「第二个渲染后门」⇒ 让闸门模块继续做**唯一**调用方
+（`renderSnapshotText` 只是把「快照专用渲染」收编进闸门，没有第二种渲染实现）。
 
 召回口径
 --------
@@ -49,8 +52,8 @@ from app.services.knowledge.messages import MSG_RELEASE_UNAVAILABLE, MSG_SQL_REN
 from app.services.knowledge.release_context import ResolvedRelease
 from app.services.knowledge.route_input import RouteInput
 from app.services.knowledge.route_outcome import RouteOutcome
-from app.services.nl2sql_schema import buildSchemaText
 from app.services.semantic_schema_adapter import restoreSnapshotSchema
+from app.services.semantic_schema_gate import renderSnapshotText
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +163,7 @@ async def runSqlRoute(inp: RouteInput) -> RouteOutcome:
     classNames = [className for _score, className, _cls in ordered][: inp.top_k]
     try:
         classes, joins = restoreSnapshotSchema(release.manifest, classNames)
-        text = buildSchemaText(classes, joins=joins)
+        text = renderSnapshotText(classes, joins=joins)
     except DomainError as exc:
         logger.warning("SQL 路：发布快照不可复原，本次降级：%s", exc)
         return RouteOutcome(

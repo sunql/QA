@@ -13,7 +13,7 @@
 | **迁移版本** | **无**（零 DDL：只加路由 + 服务 + 读侧权限推导，不加列不加表） |
 | **开关** | `ENABLE_KNOWLEDGE_FACADE`（默认 **false**；关 ⇒ 整组路由不注册 ⇒ 404） |
 | **关联变更** | 同上行 |
-| **状态** | **D32 完成**（契约 + 骨架 + 20 unit + 13 integration 全绿）；**D33 完成**（图谱路 + 指标路 + 统一权限源 + 域切片；知识相关 unit 109 例 / 集成文件 48 例全绿）；**D34 完成**（RAG 路 + SQL 路 + 四路统一输入协议；知识相关 unit 126 例 / 集成文件 49 例全绿）；**D35 完成**（三轴验收矩阵：身份 / 请求侧收窄 / 引用可回溯 + 错误处理；知识相关 unit 131 例 / 集成文件 54 例全绿）；**D36 完成**（采购薄别名收口 + 试点问题集端到端：试点 **14/14 通过（通过率 100%）**、别名运行时等价判据通过）；**D37 完成**（审查修复批 8 项 + 文档口径统一 + 回归取证：知识相关 unit **172 例** / 集成文件 **59 例**全绿，净新增失败 0）⇒ **G5 通过** |
+| **状态** | **D32 完成**（契约 + 骨架 + 20 unit + 13 integration 全绿）；**D33 完成**（图谱路 + 指标路 + 统一权限源 + 域切片；知识相关 unit 109 例 / 集成文件 48 例全绿）；**D34 完成**（RAG 路 + SQL 路 + 四路统一输入协议；知识相关 unit 126 例 / 集成文件 49 例全绿）；**D35 完成**（三轴验收矩阵：身份 / 请求侧收窄 / 引用可回溯 + 错误处理；知识相关 unit 131 例 / 集成文件 54 例全绿）；**D36 完成**（采购薄别名收口 + 试点问题集端到端：试点 **14/14 通过（通过率 100%）**、别名运行时等价判据通过）；**D37 完成**（审查修复批 10 项 + 文档口径统一 + 回归取证：知识相关 unit **172 例** / 集成文件 **59 例**全绿，净新增失败 0）⇒ **G5 通过** |
 
 ---
 
@@ -39,7 +39,7 @@
 | **图谱路 GRAPH** | 语义层：类 / 属性 / JOIN 关系 | ✅ | 从**钉住的发布 manifest** 的 `classes[]` / `joins[]` 取（`semantic_registry_service.getActive/getById`）**（D33 ✅）** |
 | **指标路 METRIC** | 指标 / KPI 定义 | ✅ | 同上，从 manifest 的 `metrics[]` / `kpis[]` 取（**仓内目前零消费方，本批是第一个**）**（D33 ✅）** |
 | **RAG 路 RAG** | 向量召回 | ✅（注册表侧） | `searchRegistryEmbeddings(..., registryFilter=RegistryFilter(releaseId=…, domainCodes=…, orgCodes=…, entityTypes=…))`（P3a 闸门；**先判开关 ⇒ 能力未启用时零外部调用**）**（D34 ✅）** |
-| **SQL 路 SQL** | 物理层：表 / 列 / 类型 / JOIN 键 | ✅ | `restoreSnapshotSchema`（P2 复原层）+ `nl2sql_schema.buildSchemaText`（**仓内唯一渲染器**），只渲染命中候选类（**不走 NL2SQL 闸门**，见裁决 9）**（D34 ✅）** |
+| **SQL 路 SQL** | 物理层：表 / 列 / 类型 / JOIN 键 | ✅ | `restoreSnapshotSchema`（P2 复原层）+ `semantic_schema_gate.renderSnapshotText`（快照专用入口，内部仍调**仓内唯一渲染器** `buildSchemaText`），只渲染命中候选类（**不走 NL2SQL 闸门的开关/降级策略**，见裁决 9）**（D34 ✅）** |
 
 > ⚠️ **指标路现状是纯直读**：`kpi_catalog_service` / `kpi_execution_service` / `kpi_sql_compiler` 全链路 **零 release 引用**。
 > 但 manifest **已经含** `metrics[]` / `kpis[]`（`semantic_manifest_schema.py:239-240`）⇒ 指标路**按发布读**是**读现成数据**，不需要新建发布机制。
@@ -60,7 +60,7 @@
 | 6 | 采购薄别名 = **独立文件 + 零业务分支**，只 `domain` 固定 + 转发同一个 facade 方法 | G5 第二条判据（「别名无逻辑」）需要**可检查**：别名文件里若出现任何 `if`（除转发参数固定）即为违规 ⇒ 由单测钉住 |
 | 7 | 新增路由**必须同时**注册进 `app/main.py` 与 `app/tests/_testapp.py` | 两套 wiring 手工平行维护（`_testapp.py:1-4` 明写）；漏改 `_testapp.py` ⇒ 集成测试 404 |
 | 8 | 路由必须注册在 `/api/v1/health` 与 MCP `Mount("/mcp")` **之前** | Starlette 按注册顺序匹配，`Mount("")` 之后注册的路由永久 404（`test_app_wiring.py` 有守卫） |
-| 9 | **SQL 路不走 `semantic_schema_gate.renderSchemaWithRelease`**，改走 `restoreSnapshotSchema`（P2 复原层）+ `buildSchemaText`（仓内唯一渲染器） | 那个闸门的开关 `ENABLE_SEMANTIC_REGISTRY_NL2SQL` 是 **NL2SQL 特性开关**（默认关），其降级语义是「直读治理表」⇒ 知识服务一旦直读治理表，**引用就没有版本可引**（与 G5「引用可回溯」直接冲突）。而 manifest **带物理层**（`sourceTable` / `sourceColumn` / `dataType`）⇒ 按发布渲染**不需要开关**，是构造出来的。复用复原层 + 渲染器 ⇒ 快照解析与渲染口径都**只有一份**（不会与 NL2SQL prompt 漂移） |
+| 9 | **SQL 路不走 `semantic_schema_gate.renderSchemaWithRelease`**，改走 `restoreSnapshotSchema`（P2 复原层）+ `semantic_schema_gate.renderSnapshotText`（D37 补：**不直接**调 `buildSchemaText`） | 那个闸门的开关 `ENABLE_SEMANTIC_REGISTRY_NL2SQL` 是 **NL2SQL 特性开关**（默认关），其降级语义是「直读治理表」⇒ 知识服务一旦直读治理表，**引用就没有版本可引**（与 G5「引用可回溯」直接冲突）。而 manifest **带物理层**（`sourceTable` / `sourceColumn` / `dataType`）⇒ 按发布渲染**不需要开关**，是构造出来的。复用复原层 + 渲染器 ⇒ 快照解析与渲染口径都**只有一份**（不会与 NL2SQL prompt 漂移）。**D37 修订**：服务层直接调 `buildSchemaText` 会被既有守卫 `Test生产侧不许绕过闸门` 判为「第二个渲染后门」（CI 抓出）⇒ 在闸门模块加**同步、只渲染已复原视图**的 `renderSnapshotText`，让闸门继续做渲染器的**唯一**调用方 |
 | 10 | **四路统一输入 `RouteInput`**（`scope` 必填、无默认值） | RAG 路必须拿权限口径（否则过滤无从谈起）；四路签名分叉成四种形状 ⇒ 「同一口径」变成靠约定。改成同形协议后，「四路拿到的是同一个对象」由**构造**保证；编排层只剩一个调用点 |
 
 ## 4. 统一权限模型（`KnowledgeScope`）
@@ -110,7 +110,7 @@ class KnowledgeScope:
 | **D34** | RAG 路 + SQL 路组合 | 组合服务 + 测试 | ✅ **完成**（证据见 [`daily/D34.md`](daily/D34.md)）：RAG 路（按发布 + 按权限**下推**过滤，开关关 ⇒ 零外部调用的 fail-closed 降级）+ SQL 路（按发布复原渲染物理 schema）；四路统一输入协议 `RouteInput`（`scope` 必填 ⇒ 同源由构造保证）；编排层单路异常兜底降级 |
 | **D35** | 统一权限判定（四路同一口径）+ 引用回溯到发布版本 + 错误处理 | 权限层 + 测试 | ✅ **完成**（证据见 [`daily/D35.md`](daily/D35.md)）：三轴验收矩阵（身份 / 请求侧收窄 / 引用可回溯）——四路拿到**同一个** scope 对象（身份断言）；域不可见 ⇒ 四路 `DENIED` + 空 + 警告 + **一路都不跑**且**连发布面都不解**；请求侧收窄**只在权限源一处**；逐条证据带 `releaseId` / `releaseVersion` / `source=RELEASE`，降级则**剥版本号**；新增 unit 6 例（知识相关 unit 131 例 / 集成文件 54 例全绿） |
 | **D36** | 采购薄别名 + 试点问题集端到端 | 别名路由 + 试点报告 | ✅ **完成**（证据见 [`daily/D36.md`](daily/D36.md)）：试点问题集 **14 条 / 通过率 100%**（判据 = 权限结果 + 证据命中 + 引用可回溯，三项同时成立）；采购薄别名除 AST 守卫（无分支）外补**运行时等价**判据（两边响应逐路状态 + 证据集合一致）；真实发布写路径播种（两域各一版 ACTIVE）；知识相关 unit 147 例全绿 |
-| **D37** | 回归 + 文档 + PR | 变更记录、PR | ✅ **完成**（证据见 [`daily/D37.md`](daily/D37.md)）：审查修复批 8 项（**钉住的发布补授权** / 收窄要诚实 / 试点判据假绿 / 播种脚本 `--force` 守卫 / 别名守卫去 CWD 依赖 / JOIN 标题用类名 / 报告相对路径 / `_seed` 拆小）+ stub 鉴权启动自检；文档口径统一（降级 = **空 + 标记**，`LIVE` 保留不产出）；知识相关 unit **172 例** / 集成文件 **59 例**全绿；试点重跑 **14/14 = 100%**；净新增失败 **0** ⇒ **G5 通过** |
+| **D37** | 回归 + 文档 + PR | 变更记录、PR | ✅ **完成**（证据见 [`daily/D37.md`](daily/D37.md)）：审查修复批 10 项（**钉住的发布补授权** / 收窄要诚实 / 试点判据假绿 / 播种脚本 `--force` 守卫 / 别名守卫去 CWD 依赖 / JOIN 标题用类名 / 报告相对路径 / `_seed` 拆小）+ stub 鉴权启动自检；文档口径统一（降级 = **空 + 标记**，`LIVE` 保留不产出）；知识相关 unit **172 例** / 集成文件 **59 例**全绿；试点重跑 **14/14 = 100%**；净新增失败 **0** ⇒ **G5 通过** |
 
 ## 6. 试点问题集口径（D36）
 

@@ -127,6 +127,28 @@ async def renderSchemaText(
     return result.text
 
 
+def renderSnapshotText(
+    classes: list[Any],
+    joins: list[Any] | None = None,
+    **renderParams: Any,
+) -> str:
+    """渲染**已复原的快照视图**（不判开关、不读治理表、不查发布）。
+
+    为什么要这个入口：知识服务（P4 的 SQL 路）手里拿到的**已经是**按发布快照
+    `restoreSnapshotSchema` 复原出来的视图——它要的是「渲染」，不是闸门的
+    「用快照还是用活表」这个决策（那两个决策在它上游已经做完了）。
+    若让它直接调 `nl2sql_schema.buildSchemaText`，服务层就会出现**第二个渲染后门**
+    （`Test生产侧不许绕过闸门` 会红）；而把渲染器复制一份又是更坏的口径漂移。
+
+    ⇒ 用本函数把「快照专用渲染」收编在闸门模块里：**schema 文本的来源仍然只有一处**
+    （`buildSchemaText`），闸门是唯一调用方。
+
+    与 `renderSchemaText` 的区别：**同步**、**不读开关**、**不降级**（调用方给的视图
+    就是它想渲染的东西，没有「活表」可回落）。
+    """
+    return buildSchemaText(classes, joins=joins, **renderParams)
+
+
 async def renderSchemaWithRelease(
     classes: list[Any],
     joins: list[Any] | None = None,

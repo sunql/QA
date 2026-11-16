@@ -27,6 +27,13 @@
 - `GET /actions/runs/<PR run>/jobs` 是按 run 取的 ⇒ 这个 job 是 GitHub
   把 `workflow_run` 触发的那条 workflow 的 job **挂到了触发它的 run 上**。
 - 5ab1 会话里观察到的 gate 输出：`PR 有而基线没有：['merge-gate / failure-set-diff']`。
+- **挂载发生在闸门 job 完成之后**：`merge-gate.yml` 的 run 全部在 ~30 秒内完成
+  （`43811205138`/`43809657501`/`43800550658`；其中「等 job 结论收敛」那步若看见
+  自己的 job 是 `null` 就会空转 30 分钟 ⇒ 实际没有空转 ⇒ 拉 job 列表时它还不在列表里）。
+  ⇒ **同一个 head 的第一次闸门裁决可能通过，任何复跑都会转红（退出码 4）** ——
+  这解释了此前「有时绿有时红」的间歇性。
+  ⇒ 「自己还在跑时结论为 null ⇒ 退出码 2」是**理论上**的通道，本次未实测到；
+  过滤对三种形态一律生效（测试里四种结论都覆盖）。
 
 ## 3. 根因
 
@@ -61,7 +68,8 @@
 | `test_collectRunFailures_excludes_the_gate_own_job` | 闸门 job 不进逐 job 判定、不进失败并集 |
 | `test_verdict_is_mergeable_when_only_the_pr_side_has_the_gate_job[failure/''/success/cancelled]` | 四种结论下都仍可合并（覆盖不等价 / 净新增 / 不可用三条自拦通道全关） |
 | `test_collectRunFromGithub_does_not_even_fetch_the_gate_job_log` | 连日志都不拉（不白等 404） |
-| `test_gate_job_name_constant_matches_the_workflow` | 常量与 workflow 文件同源，改名即红 |
+| `test_gate_job_name_constant_matches_the_workflow` | 常量与 workflow 文件同源（workflow 名 / job id / **job 级 `name:` 必须不存在** / 脚本里的 `CHECK_NAME` 三处一起钉住），改名即红 |
+| `test_main_discloses_that_the_gate_own_job_is_excluded` | 报告里那一行提示不得被删（剔除是设计，但不能静默） |
 
 - RED：5 条失败（`ImportError: GATE_JOB_NAME` + 4 条参数化）+ 2 条判定为假（断言失败）
   —— 失败原因均为「闸门自己的 job 参与了判据」。
@@ -75,6 +83,19 @@
 - ⚠️ 本 PR 改了 **CI 相关面**（`ci_*.py` + `merge-gate.yml`）⇒ 闸门对**本 PR 自己**
   会判退出码 6（`CI_SURFACE_CHANGED`）⇒ 按既定纪律走 **owner bypass**，并在此留痕。
 - 修复生效后：闸门对**后续** PR 才不再自指。本 PR 的 check 仍是旧的（闸门代码取自默认分支）。
+
+## 6.1 复查处置（code-reviewer）
+
+审查结论：0 CRITICAL / 0 HIGH / 1 MEDIUM / 3 LOW，**APPROVE**（不含 fail-open 路径；
+把生产侧过滤临时换成恒等函数后，新用例 6 项转红 ⇒ 守卫不是恒绿）。处置：
+
+| 级别 | 问题 | 处置 |
+|---|---|---|
+| MEDIUM | 守卫只比派生值，若将来给 job 加 job 级 `name:` ⇒ 实际名字变了而守卫照样绿（假绿守卫） | 已加断言：job 级 `name:` 必须不存在；并把脚本里的 `CHECK_NAME` 字面量也钉到同一常量 |
+| LOW | 报告里的披露提示没有测试 | 已加 `test_main_discloses_that_the_gate_own_job_is_excluded` |
+| LOW | `测试规范` 之外的 `开发流程规范.md` 仍引用旧的 `_mainTipRemedyNote` | 已改为 `ci_report.mainTipRemedyNote` |
+| LOW | 参数化用例单独看分辨不出「剔对了」与「剔光了」 | 已加 `prAssessments == ["Backend / unit shard 0"]` 局部断言 |
+| 残留风险 | 闸门 workflow 的「等 job 结论收敛」步骤会不会被自己的 job 卡住 30 分钟 | **已用实测排除**：闸门 run 全部 ~30 秒完成 ⇒ 拉 job 列表时自己的 job 还没挂上（见 §2） |
 
 ## 7. 验证
 

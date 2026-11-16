@@ -711,6 +711,9 @@ def test_verdict_is_mergeable_when_only_the_pr_side_has_the_gate_job(
 
     assert verdict.canMerge is True
     assert verdict.blockingReason is None
+    # ⚠️ 这条断言防「过滤器把**所有** job 都剔掉」：那样两侧都空 ⇒ 覆盖「等价」
+    # ⇒ 结论照样可合并 ⇒ 上面两条断言分辨不出「剔对了」还是「剔光了」。
+    assert [item.job.name for item in prAssessments] == ["Backend / unit shard 0"]
 
 
 def test_collectRunFromGithub_does_not_even_fetch_the_gate_job_log(
@@ -1089,6 +1092,26 @@ def test_main_returns_zero_when_mergeable(monkeypatch: pytest.MonkeyPatch) -> No
     exitCode = ci_failure_set.main(["--repo", "sunql/QA", "--base-run", "111", "--pr-run", "222"])
 
     assert exitCode == 0
+
+
+def test_main_discloses_that_the_gate_own_job_is_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """剔除闸门自身的 job 是**设计**，但**不得静默**：报告里必须有一行提示。
+
+    否则看报告的人会以为「PR 侧的 job 列表就只有这 9 个」⇒ 下次真有 job
+    消失（少跑分片）时，分不清「被工具剔掉了」还是「CI 少跑了」。
+    """
+    result = _oneRedShard()
+    _stubGithub(monkeypatch, result, result)
+
+    exitCode = ci_failure_set.main(["--repo", "sunql/QA", "--base-run", "111", "--pr-run", "222"])
+
+    out = capsys.readouterr().out
+    assert exitCode == 0
+    assert "判据不含闸门自身的 job" in out
+    assert ci_judge.GATE_JOB_NAME in out
 
 
 def test_main_returns_one_when_new_failures(monkeypatch: pytest.MonkeyPatch) -> None:

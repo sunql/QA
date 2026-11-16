@@ -204,6 +204,27 @@ def _exemptionLines(exemptions: Iterable) -> list[str]:
     return lines
 
 
+def mainTipRemedyNote() -> str:
+    """处置办法：**推一个新 commit** ⇒ 产生一次**新的 CI 事件派发**。
+
+    （呈现层的固定措辞 ⇒ 放本模块：`ci_failure_set` 只管「什么时候加这条提示」。）
+
+    ⚠️⚠️ **不能叫操作者「重新运行 PR 的 CI」**（2026-11-07 代码评审 HIGH-1）：
+    `pull_request` 事件的**合并 commit 在事件派发那一刻就被冻结**了
+    ⇒ 复跑（re-run）**不会**重新计算它 ⇒ 复跑检出的仍是**同一个**合并 commit
+    ⇒ 判定依旧不成立 ⇒ 照着这句话做会**白跑一轮**还拿不到新结论。
+    实测（PR #105 run `41908498247`，attempt=2）：复跑仍执行
+    `57a267a93f…`（= attempt-1 的那个合并 commit），其第一父仍是派发那一刻的 main。
+    ⇒ 正确的处置 = **推一个新 commit**（产生新的事件派发 ⇒ 新的合并 commit
+    ⇒ 新的 main 侧底座）。
+    """
+    return (
+        "处置：若判「CI 相关面变更」，请**推一个新 commit 到 PR 分支**"
+        "（或 rebase 到最新 main / 重开 PR）以产生一次**新的 CI 事件派发**"
+        "；⚠️ **单纯复跑 run 无效**（合并 commit 在派发那一刻已冻结）"
+    )
+
+
 def _assembleLines(
     baseRunId: str,
     prRunId: str,

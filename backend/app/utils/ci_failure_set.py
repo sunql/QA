@@ -63,6 +63,10 @@
 15. **PR run 必须跑的就是 PR 当前那版代码。** PR 又推了新 commit 而操作者
     拿的是上一次 push 的 run ⇒ 对差的是**旧代码** ⇒ 「净新增 0」是假的
     （而 GitHub 上最新那次 CI 可能已经红了，没人看）。见 `app.utils.ci_head`。
+16. **闸门自身的 job 不参与判据（自指）。** GitHub 会把闸门的 job 挂到
+    **触发它的那轮 CI run** 的 job 列表里（PR 侧有、main 的 push run 没有）⇒
+    不剔除它 ⇒ 覆盖不等价（4）/ 它自己的红被记成净新增（1）/ 它还在跑时
+    结论为 null ⇒ 不可用（2）⇒ **闸门自己拦自己**。见 `ci_judge.GATE_JOB_NAME`。
 
 ⚠️ 威胁模型的边界（务必读，别把它当成「防住了所有假绿」）
 ------------------------------------------------------------------
@@ -132,6 +136,7 @@ from app.utils.ci_head import HeadFreshness, resolveHeadFreshness
 from app.utils.ci_judge import (
     _REASON_COVERAGE,
     _REASON_NEEDS_REVIEW,
+    GATE_JOB_NAME,
     CiJob,
     FailureDiff,
     JobAssessment,
@@ -146,7 +151,7 @@ from app.utils.ci_pytest_log import (
     extractFailureIds,
     parseShardDoneMarkers,
 )
-from app.utils.ci_report import renderReport
+from app.utils.ci_report import mainTipRemedyNote, renderReport
 from app.utils.ci_surface import CiSurfaceInfo, detectCiSurfaceChanges, resolveCiSurface
 from app.utils.ci_text import sanitizeForReport
 
@@ -263,7 +268,7 @@ def _mainTipMismatchNote(surface: CiSurfaceInfo) -> str | None:
     ⇒ 两次 run 的 CI 定义可能不同 ⇒ 失败集合原则上不可比。
 
     ⚠️⚠️ **本函数只讲事实，不讲处置**（2026-11-07 代码评审 HIGH-1）：
-    处置在 `_mainTipRemedyNote` 里，**分成两行**。
+    处置在 `ci_report.mainTipRemedyNote` 里，**分成两行**。
     理由：报告的每个字段都会被 `sanitizeForReport` 截到 **200 字符**
     ⇒ 事实 + 处置塞进同一个字符串 ⇒ 处置被截掉 ⇒ 操作者只看到「拦」
     ⇒ 看不到该做什么 ⇒ 白跑一轮。
@@ -279,25 +284,6 @@ def _mainTipMismatchNote(surface: CiSurfaceInfo) -> str | None:
         f"基线 run 跑的 commit（{surface.baseSha[:12]}…）"
         f"不是 PR run 的 main 侧底座（{surface.mainTipSha[:12]}…）"
         "⇒ main 在基线之后推进过 ⇒ 两次 run 的 CI 定义可能不同"
-    )
-
-
-def _mainTipRemedyNote() -> str:
-    """处置办法：**推一个新 commit** ⇒ 产生一次**新的 CI 事件派发**。
-
-    ⚠️⚠️ **不能叫操作者「重新运行 PR 的 CI」**（2026-11-07 代码评审 HIGH-1）：
-    `pull_request` 事件的**合并 commit 在事件派发那一刻就被冻结**了
-    ⇒ 复跑（re-run）**不会**重新计算它 ⇒ 复跑检出的仍是**同一个**合并 commit
-    ⇒ 判定依旧不成立 ⇒ 照着这句话做会**白跑一轮**还拿不到新结论。
-    实测（PR #105 run `41908498247`，attempt=2）：复跑仍执行
-    `57a267a93f…`（= attempt-1 的那个合并 commit），其第一父仍是派发那一刻的 main。
-    ⇒ 正确的处置 = **推一个新 commit**（产生新的事件派发 ⇒ 新的合并 commit
-    ⇒ 新的 main 侧底座）。
-    """
-    return (
-        "处置：若判「CI 相关面变更」，请**推一个新 commit 到 PR 分支**"
-        "（或 rebase 到最新 main / 重开 PR）以产生一次**新的 CI 事件派发**"
-        "；⚠️ **单纯复跑 run 无效**（合并 commit 在派发那一刻已冻结）"
     )
 
 
@@ -420,7 +406,12 @@ def _isCiSurfaceChange(surface: CiSurfaceInfo) -> bool:
 
 def _reportNotes(surface: CiSurfaceInfo, freshness: HeadFreshness, allowCiChanges: bool) -> list[str]:
     """报告里要显式留痕的提示（「不拦但必须让人看见」的那几件事）。"""
-    notes: list[str] = []
+    notes: list[str] = [
+        # 剔除本身是**设计**，不是「静默忽略」⇒ 报告里留痕（否则看报告的人
+        # 会以为「PR 侧的 job 列表就只有这 9 个」）。
+        f"判据不含闸门自身的 job（{GATE_JOB_NAME}）：它是本工具自己的判定结果，"
+        "不参与覆盖等价 / 可用性 / 失败集合对差"
+    ]
     if freshness.note is not None:
         notes.append(freshness.note)
     if allowCiChanges:
@@ -438,7 +429,7 @@ def _reportNotes(surface: CiSurfaceInfo, freshness: HeadFreshness, allowCiChange
         mismatchNote = _mainTipMismatchNote(surface)
         if mismatchNote is not None:
             notes.append(mismatchNote)
-            notes.append(_mainTipRemedyNote())
+            notes.append(mainTipRemedyNote())
     if surface.error is not None:
         notes.append(f"CI 相关面判定失败：{surface.error}")
     return notes

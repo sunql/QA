@@ -427,3 +427,27 @@ def test_merge_gate_leaves_the_main_tip_to_the_tool() -> None:
     assert hasattr(ci_surface, "fetchMainTipShaAt"), (
         "ci_surface 没有引用取 M_T 的入口 ⇒ M_T 的来源不受工具侧复核"
     )
+
+
+def test_gate_job_name_constant_matches_the_workflow() -> None:
+    """工具侧剔除闸门自身 job 用的名字，必须与 workflow 文件里的**实际名字**一致。
+
+    ⚠️ 为什么需要这条：闸门的 job 会被 GitHub 挂到**触发它的那轮 CI run** 的 job
+    列表里（实测 PR #137 run `43800518364`）⇒ 工具必须按名字把它剔除
+    （否则每一轮 PR 都判「job 集合不等价」⇒ 闸门**自己拦自己**）。
+    而 GitHub 的 job 名是 `<workflow 名> / <job id>` 形态 ⇒ **workflow 改名或
+    job 改名都会让剔除静默失效** ⇒ 闸门对所有 PR 死锁（退出码 4 / 2 / 1）。
+
+    ⇒ 这条守卫把常量钉在 **workflow 文件**上：改名 ⇒ 本用例立刻转红。
+    """
+    from app.utils.ci_judge import GATE_JOB_NAME
+
+    workflow = _workflow()
+    workflowName = workflow["name"]
+    jobId = next(iter(_jobs()))
+
+    assert f"{workflowName} / {jobId}" == GATE_JOB_NAME, (
+        f"GATE_JOB_NAME={GATE_JOB_NAME!r} 与 workflow 里的实际 job 名"
+        f"（{workflowName} / {jobId}）不一致 ⇒ 闸门自己的 job 不会被剔除"
+        " ⇒ 闸门自己拦自己（对所有 PR 死锁）"
+    )

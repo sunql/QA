@@ -84,7 +84,8 @@ export MILVUS_DB_NAME=qa_test
 
 | 批次 | 范围 | 交付 | 依赖 | 状态 |
 |---|---|---|---|---|
-| **A1** | 发现底座 | `discovery_source` / `metadata_snapshot` 不可变快照 + **语义差异引擎**（纯函数）+ API + 真实数据脚本 | 无（零 LLM、零外部授权） | **本批执行** |
+| **A1** | 发现底座 | `discovery_source` / `metadata_snapshot` 不可变快照 + **语义差异引擎**（纯函数）+ API + 真实数据脚本 | 无（零 LLM、零外部授权） | ✅ 已合 main `26059c95`（PR #137，不部署） |
+| **A2a** | 列长度 / 精度进快照 | 解冻 D-20 / L-9；快照列项 +3 字段（`v1 → v2`） | 无 | ✅ 已合 main `6e5376e8`（PR #139，不部署） |
 | A2 | 剖析与证据 | `profile_result` 列级 metrics + 证据引用（脱敏 + 采样策略） | Q3（采样白名单） | 待排期 |
 | A3 | 候选生成 | `discovery_run` + `ontology_candidate` + LLM 结构化发现 + Prompt/模型版本落库 | A1/A2 + Q5 | 待排期 |
 | A4 | 提案与发布 | `ontology_change_proposal` + `ontology_review`（四眼）+ 影响分析 + 发布适配（→ Compiler/Registry） | A3 + Q4 | 待排期 |
@@ -332,6 +333,11 @@ PII 掩码只收**形状几乎不会误伤业务数据**的三类：邮箱、大
 ⇒ 类型 `NUMBER(10,2)` 与 `NUMBER(10,4)` 哈希相同 ⇒ 内容寻址漏判「精度变了」。
 **不在 A1 修**：要改**共享** `ColumnSchemaRead` + 内省 SQL（12 方言）⇒ 口径升级风险
 远大于本批收益，且列长度/精度属 A2「列级剖析」的范围。⇒ **延后 A2**，在此登记。
+> **已解冻（2026-11-16）**：**A2a 增量**已把列精度 / 长度采进快照（快照版本 `v1 → v2`）。
+> ⚠️ 本段「12 方言」的措辞**不准确**：schema 内省只覆盖 **3 种**业务库类型
+> （mysql / postgresql / oracle）；12 个方言是 NL2SQL **SQL 生成**用的注册表。
+> 证据见 [`daily/A2a.md`](./daily/A2a.md)。剩余缺口：Oracle 真实库取证（L-14）、
+> MySQL `unsigned`（L-15）、时间列小数秒精度（L-16）。
 
 ### D-21 「不可擦除」是证据日志的**设计属性**，不是缺陷
 

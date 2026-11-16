@@ -109,8 +109,26 @@
 revert 该 commit ⇒ 恢复「闸门自拦」的旧行为（只能 owner bypass）。
 `merge-gate.yml` 只改了注释，回滚不影响行为。
 
+## 7.1 修复后的实测（PR #141）
+
+PR #141（纯 docs）的闸门 run `133163851197`：
+
+- **自指消失**：报告里没有任何「PR 有而基线没有：`merge-gate / failure-set-diff`」；
+  逐 job 清单 PR 侧只有 9 个 CI job；并出现新提示「判据不含闸门自身的 job」。
+- 结论仍是退出码 6（`CI_SURFACE_CHANGED`），但**原因不同**：基线 run 是
+  main@`26059c95`（旧基线），而该 PR 的 CI 跑的是 merge(main@`3f691c60`, PR 头)
+  —— 中间 main 连续合了 #139 与 **#140 自己**（改了 `ci_*.py`）⇒ 两次 run 的
+  CI 相关面不同且**归因不到本 PR** ⇒ 工具按设计判 6，并给出处置：
+  **推一个新 commit（新 CI 事件派发）**，复跑无效（合并 commit 已在派发时冻结）。
+- ⇒ 这是**基线陈旧**的独立现象（main 在 PR 派发与闸门执行之间推进过），不是自指回归。
+  正常节奏下「基线 = 派发前最后一条已完成的 main run」即自动对齐。
+
 ## 9. 遗留
 
+- **基线陈旧 ⇒ 退出码 6**：main 在「PR 的 CI 派发」与「闸门执行」之间推进（含 CI 面变更）时，
+  闸门对**老 PR** 会判 6。处置是推新 commit / rebase / 重开 PR（复跑无效）。
+  这是既有行为，本次未改；若频繁发生，可考虑「基线自动取 PR run 的 main 侧底座」
+  （工具已能算出 `merge-base` 侧底座并打印，但取 run 仍按「派发前最后完成」规则）。
 - 这次按**名字**精确剔除一个 job，没有泛化成「凡不是 CI workflow 的 job 都剔除」：
   实测那个 job 的 `workflow_name` 就是 `CI`（GitHub 把它挂进触发 run 时丢掉了来源信息）
   ⇒ 无法用 `workflow_name` 区分。若将来再加 `workflow_run` 触发的 workflow，

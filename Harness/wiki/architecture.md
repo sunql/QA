@@ -419,3 +419,51 @@ Neo4j **无备份、误写不可逆** ⇒ 镜像写路径自带闸门
 
 设计细节与实证见
 [`Harness/changes/feat-semantic-release-graph-mirror/daily/D22.md`](../changes/feat-semantic-release-graph-mirror/daily/D22.md)。
+## 本体向量后台同步：请求回滚存活 + 同实体写入串行化
+
+**提交者**：Claude · **日期**：2026-11-16
+**关联变更**：[fix-ontology-bg-vector-sync](../changes/2026-11-16-fix-ontology-bg-vector-sync/summary.md)
+
+2026-11-16 生产事故：`ontology_service.py` 的 `_syncPropertyEmbeddingNow` 抛
+`MissingGreenlet`，且 except 分支二次访问同一属性把**原始异常**盖成
+「During handling of the above exception…」。
+
+### 1. 根因：后台任务借用了请求级 session 的 identity map
+
+写路径（create/update）在**请求事务内**读出 ORM 实体，再把实体交给
+`asyncio.create_task` 后台同步 Milvus。请求失败时 `getDb`
+（`app/infrastructure/database.py:77`）的 `except` 分支执行 `await session.rollback()`
+⇒ SQLAlchemy `SessionTransaction._restore_snapshot` 把 identity map 里**所有** state
+标记 expired（`expire_on_commit=False` 只约束 commit，不约束 rollback）
+⇒ 后台任务读 `entity.id` 触发**同步懒加载** ⇒ 在 async 上下文做 IO ⇒
+`MissingGreenlet`。
+
+### 2. 修复：`ownSession()` + 锁内重读 + 同步 SDK 移出事件循环
+
+| 层 | 做法 | 理由 |
+|---|---|---|
+| 会话 | 后台任务一律 `app.infrastructure.database.ownSession()` 自开会话 | 与请求生命周期彻底解耦；请求回滚再也影响不到任务 |
+| 读取 | 锁内按 `entityId` **重新查库**拿不可变快照 `_VectorSnapshot` | 不用陈旧内存态；任务执行时刻的最新已提交状态胜出 |
+| 串行 | `_vectorSyncLock(type_, entityId)`：`asyncio.Lock`，key = `(event_loop, type, id)`，带 refcount 清理 | 同一实体并发写入按锁序落库 ⇒ **最后一个写入者携带最新状态**；key 带 loop 是因为 `asyncio.Lock` 首次使用即绑定 loop，pytest-asyncio 每个用例新 loop，跨 loop 复用会 `RuntimeError` |
+| 删除 | `_deleteMilvusVectorUnderLock(type_, id)`：`deleteClass/deleteProperty/deleteMetric` 的 Milvus 删除**也拿同一把锁**；管理员手动 `syncClassEmbedding` 同理 | 否则「任务已读到存活行 → 停在 embedding → 删除提交 → 任务恢复写入」会把已删实体的向量**复活**（对账只补缺失、不删多余 ⇒ 无人修复） |
+| Milvus | `asyncio.to_thread(self.syncEmbedding, …)` | pymilvus 是同步 SDK，直接调用会阻塞事件循环（与 `kpi_vector_graph_sync.py` 同款） |
+| 缺失 | `NotFoundError` ⇒ info 跳过；墓碑类（`valid_to is not None`）⇒ 跳过 | 已删实体不回写孤儿向量 |
+
+### 3. 为什么不是「任务创建前先把字段抄出来」
+
+那样避免了 MissingGreenlet，但**快照固定在入队时刻**：请求 A 的老任务可能晚于请求 B
+的新任务落库，用旧描述覆盖新描述（评审阶段实测复现）。锁内重读是唯一能同时满足
+「不碰请求 session」与「最后写入者最新」的写法。
+
+### 4. 验证入口
+
+- 集成测试：`backend/app/tests/integration/test_ontology_property_service.py`
+  （回滚存活 / 锁序最终态 / 缺失跳过 / 失败隔离 / **删除不被在途写入复活**）
+- 真实数据脚本：`backend/scripts/ontology_background_sync_realdata.py`
+  （真实 PG + Milvus + Neo4j，含**旧写法必须抛 MissingGreenlet** 的对照实验；
+  三道 fail-fast 隔离闸门：PG 库名 `^qa_metadata_test($|_)`、Milvus `qa_test` 前缀、
+  Neo4j 禁 7687。**必须在镜像内跑**——先 `grep _deleteMilvusVectorUnderLock`
+  确认镜像含修复，否则验的是旧代码）
+- ⚠️ Milvus 删除可见性：默认 Bounded 一致性下 `flush()` 后 0~5s 仍可能查到残留行，
+  per-request `consistency_level="Strong"` 也无效；delete-then-query 断言必须
+  `refreshCollection`（release+load）后再查（见 `milvus_client.py:579-650`）。

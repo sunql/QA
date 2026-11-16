@@ -62,6 +62,7 @@
 - [_template/summary.md](../changes/_template/summary.md) - 变更 SSOT 模板
 - [feat-agent-orchestration](../changes/feat-agent-orchestration/summary.md) - 通用多工具 Agent 编排（Phase 6.6；第三条执行路径 + 迁移 0135 + 默认关闭 + 灰度手册）
 - **近 30 天热点（按 SSOT 性质）**：
+  - [2026-11-16-fix-ontology-bg-vector-sync](../changes/2026-11-16-fix-ontology-bg-vector-sync/summary.md) - 本体向量后台同步请求回滚存活（`MissingGreenlet` 生产事故；`ownSession()` + 锁内重读 + 同实体串行化；含旧写法对照实验）
   - [2026-10-28-kpi-metric-technical-form](../changes/2026-10-28-kpi-metric-technical-form/summary.md) - 指标技术形态治理 → NL2SQL 动态消费（**draft，设计已批准未实施**；方案A 权威链 + 双轨制 + Tier A/B/C + 三层对账；P1+P1-数据 范围；分支处置=选项3）
   - [2026-09-30-chat-session-restore](../changes/2026-09-30-chat-session-restore/summary.md) - 刷新恢复上次会话（分渠道指针 + 挂载回放）+ 会话归属守卫铺到 6 个端点（守卫归属查询改按渠道并集）
   - [chore-magic-number-governance](../changes/chore-magic-number-governance/summary.md) - 魔数治理 Phase 2 15/15（0087 easy + 0088 medium + 0089 hard）

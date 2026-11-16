@@ -616,9 +616,15 @@ def _spawn(coro: Coroutine[Any, Any, None], *, kpiId: int, operation: str) -> No
 
 
 def _ownSession() -> AsyncSession:
-    from app.infrastructure.database import getSessionFactory
+    """后台任务自开会话（共享实现见 ``app.infrastructure.database.ownSession``）。
 
-    return getSessionFactory()()
+    保留本模块内的同名薄封装：单测用 ``monkeypatch.setattr(sync, "_ownSession", ...)``
+    替换会话来源（见 app/tests/unit/test_kpi_vector_graph_sync.py），是既有的
+    替换缝隙，不要改成直接调用 ``ownSession``。
+    """
+    from app.infrastructure.database import ownSession
+
+    return ownSession()
 
 
 async def _runGraphOwnSession(kpiId: int) -> None:

@@ -85,6 +85,24 @@ async def getDb() -> AsyncIterator[AsyncSession]:
             raise
 
 
+def ownSession() -> AsyncSession:
+    """后台任务自开会话（**不复用请求级会话**）。
+
+    为什么后台任务不能借用请求会话：请求失败时 ``getDb`` 的 except 分支会
+    ``await session.rollback()``（见上），而 SQLAlchemy 的
+    ``SessionTransaction._restore_snapshot`` 会把 identity map 里**所有** state
+    标记 expired ⇒ 后台任务再访问请求实体的属性就触发**同步懒加载** ⇒ 在
+    async 上下文里做 IO（没有 ``greenlet_spawn``）⇒ ``MissingGreenlet``；
+    except 分支再访问一次同样的属性 ⇒ 二次 MissingGreenlet，把原始异常盖成
+    "During handling of the above exception, another exception occurred"
+    （2026-11-16 生产事故）。
+
+    与 ``getSessionFactory`` 的关系：只是「新开一个会话」的薄封装，不改变
+    ``expire_on_commit=False`` / ``autoflush=False`` 等工厂语义。
+    """
+    return getSessionFactory()()
+
+
 async def disposeEngine() -> None:
     """应用关闭时释放引擎连接池。"""
     global _engine, _sessionFactory

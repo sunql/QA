@@ -10,7 +10,7 @@
 | **分支** | `feat/semantic-agent-snapshot`（worktree `/private/tmp/qa-graph-mirror` 续用），base = 合并 D24/D25 后的 `origin/main` |
 | **迁移版本** | **0145**（手写、只加法：`agent_orchestration_run` 三列可空） |
 | **关联变更** | 同上行 |
-| **状态** | D26 完成（迁移 + ORM + 审计/读视图 + 单测 + 往返实证）；D27 完成（创建时钉住 + 运行期变更不影响 + 集成实证）；D28 进行中（回归 + PR） |
+| **状态** | ✅ **已合入 main**（PR #134，squash `0cb73dff`，不部署）：D26 迁移 + ORM + 审计/读视图 + 单测 + 往返实证；D27 创建时钉住 + 运行期变更不影响 + 集成实证；D28 回归 + PR 已随同批走完 ⇒ 变更记录见 [summary.md](summary.md) |
 
 ---
 
@@ -45,6 +45,6 @@ P2 给 NL2SQL 的会话层做了发布钉住（`session_query_state.semantic_rel
 | ID | 风险 / 遗留 | 处置 |
 |---|---|---|
 | L-21 | run **没有域上下文** ⇒ 只钉全局发布；领域级 ACTIVE 不在钉住范围 | run 要域上下文时另立卡（DTO/表都要加列） |
-| L-22 | run 的**执行期**消费（NL2SQL 工具用钉住的那版）在 **P3d/D29** 接线 | 本批只交付「钉住被记录 + 展示」；工具消费是 P3d |
+| L-22 | run 的**执行期**消费（NL2SQL 工具用钉住的那版）：本批只交付「钉住被记录 + 展示」 | **仍未闭合**：P3d/D29（#135）透传给工具的是**会话钉住**（`session_query_state.semantic_release_id`），run 的三列执行期**未被消费** ⇒ 接 run 钉住需 run → loop 的 id 透传（另立卡）；详见 [summary.md](summary.md) §5 |
 | R-21 | 钉住的三列与发布行的 id/version/hash 漂移 | `manifest_hash` 冗余列专门为核对存在；对账（P3d 或运维脚本）可比对 |
 | R-22 | 迁移在生产是 DDL（0145） | 随常规发版（P0–P4 不部署生产；迁移在手写链上，downgrade 可回滚） |

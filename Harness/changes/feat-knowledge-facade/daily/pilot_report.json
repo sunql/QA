@@ -1,0 +1,1127 @@
+{
+  "questionSet": "Harness/changes/feat-knowledge-facade/daily/pilot_questions.json",
+  "database": "postgresql+asyncpg://qa_user:***@localhost:5434/qa_metadata_test_pilot",
+  "total": 14,
+  "passed": 14,
+  "passRate": 1.0,
+  "target": 1.0,
+  "ok": true,
+  "records": [
+    {
+      "id": "P-01",
+      "question": "供应商交付天数",
+      "domain": "PROCUREMENT",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": [
+          "PROCUREMENT_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": 1,
+        "version": "pilot-2026.11.16-1",
+        "degraded": false
+      },
+      "routes": {
+        "GRAPH": "OK",
+        "METRIC": "OK",
+        "RAG": "DEGRADED",
+        "SQL": "OK"
+      },
+      "evidence": [
+        {
+          "channel": "GRAPH",
+          "kind": "CLASS",
+          "ref": "Supplier",
+          "title": "供应商",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "PROPERTY",
+          "ref": "Supplier.delivery_days",
+          "title": "交付天数",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "PROPERTY",
+          "ref": "Supplier.supplier_name",
+          "title": "供应商名称",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "JOIN",
+          "ref": "po_supplier",
+          "title": "PurchaseOrder → Supplier",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "METRIC",
+          "kind": "METRIC",
+          "ref": "supplier_delivery_days",
+          "title": "供应商交付天数",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "METRIC",
+          "kind": "KPI",
+          "ref": "KPI_DELIVERY",
+          "title": "供应商交付及时率",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "SQL",
+          "kind": "TABLE",
+          "ref": "Supplier",
+          "title": "供应商",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "至少一路有权查"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 4 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 pilot-2026.11.16-1"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 7 条，期望 ≥ 4 条"
+        },
+        {
+          "name": "alias_equivalence",
+          "passed": true,
+          "detail": "采购薄别名与主接口响应一致"
+        }
+      ]
+    },
+    {
+      "id": "P-02",
+      "question": "采购订单金额",
+      "domain": "PROCUREMENT",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": [
+          "PROCUREMENT_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": 1,
+        "version": "pilot-2026.11.16-1",
+        "degraded": false
+      },
+      "routes": {
+        "GRAPH": "OK",
+        "METRIC": "OK",
+        "RAG": "DEGRADED",
+        "SQL": "OK"
+      },
+      "evidence": [
+        {
+          "channel": "GRAPH",
+          "kind": "CLASS",
+          "ref": "PurchaseOrder",
+          "title": "采购订单",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "PROPERTY",
+          "ref": "PurchaseOrder.order_amount",
+          "title": "订单金额",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "JOIN",
+          "ref": "gr_po",
+          "title": "Receipt → PurchaseOrder",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "JOIN",
+          "ref": "po_supplier",
+          "title": "PurchaseOrder → Supplier",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "METRIC",
+          "kind": "METRIC",
+          "ref": "po_amount",
+          "title": "采购订单金额",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "METRIC",
+          "kind": "KPI",
+          "ref": "KPI_PO_AMOUNT",
+          "title": "采购订单金额",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "SQL",
+          "kind": "TABLE",
+          "ref": "PurchaseOrder",
+          "title": "采购订单",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "至少一路有权查"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 4 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 pilot-2026.11.16-1"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 7 条，期望 ≥ 4 条"
+        },
+        {
+          "name": "alias_equivalence",
+          "passed": true,
+          "detail": "采购薄别名与主接口响应一致"
+        }
+      ]
+    },
+    {
+      "id": "P-03",
+      "question": "采购订单和供应商怎么关联",
+      "domain": "PROCUREMENT",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": [
+          "PROCUREMENT_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": 1,
+        "version": "pilot-2026.11.16-1",
+        "degraded": false
+      },
+      "routes": {
+        "GRAPH": "OK",
+        "METRIC": "EMPTY",
+        "RAG": "DEGRADED",
+        "SQL": "OK"
+      },
+      "evidence": [
+        {
+          "channel": "GRAPH",
+          "kind": "CLASS",
+          "ref": "PurchaseOrder",
+          "title": "采购订单",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "CLASS",
+          "ref": "Supplier",
+          "title": "供应商",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "PROPERTY",
+          "ref": "Supplier.supplier_name",
+          "title": "供应商名称",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "JOIN",
+          "ref": "gr_po",
+          "title": "Receipt → PurchaseOrder",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "JOIN",
+          "ref": "po_supplier",
+          "title": "PurchaseOrder → Supplier",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "SQL",
+          "kind": "TABLE",
+          "ref": "PurchaseOrder",
+          "title": "采购订单",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "SQL",
+          "kind": "TABLE",
+          "ref": "Supplier",
+          "title": "供应商",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "SQL",
+          "kind": "JOIN",
+          "ref": "po_supplier",
+          "title": "PurchaseOrder → Supplier",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "至少一路有权查"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 3 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 pilot-2026.11.16-1"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 8 条，期望 ≥ 3 条"
+        },
+        {
+          "name": "alias_equivalence",
+          "passed": true,
+          "detail": "采购薄别名与主接口响应一致"
+        }
+      ]
+    },
+    {
+      "id": "P-04",
+      "question": "收货单收货数量",
+      "domain": "PROCUREMENT",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": [
+          "PROCUREMENT_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": 1,
+        "version": "pilot-2026.11.16-1",
+        "degraded": false
+      },
+      "routes": {
+        "GRAPH": "OK",
+        "METRIC": "EMPTY",
+        "RAG": "DEGRADED",
+        "SQL": "OK"
+      },
+      "evidence": [
+        {
+          "channel": "GRAPH",
+          "kind": "CLASS",
+          "ref": "Receipt",
+          "title": "收货单",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "PROPERTY",
+          "ref": "Receipt.receipt_qty",
+          "title": "收货数量",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "JOIN",
+          "ref": "gr_po",
+          "title": "Receipt → PurchaseOrder",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "SQL",
+          "kind": "TABLE",
+          "ref": "Receipt",
+          "title": "收货单",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "至少一路有权查"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 2 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 pilot-2026.11.16-1"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 4 条，期望 ≥ 2 条"
+        },
+        {
+          "name": "alias_equivalence",
+          "passed": true,
+          "detail": "采购薄别名与主接口响应一致"
+        }
+      ]
+    },
+    {
+      "id": "P-05",
+      "question": "物料规格",
+      "domain": "PROCUREMENT",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": [
+          "PROCUREMENT_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": 1,
+        "version": "pilot-2026.11.16-1",
+        "degraded": false
+      },
+      "routes": {
+        "GRAPH": "OK",
+        "METRIC": "EMPTY",
+        "RAG": "DEGRADED",
+        "SQL": "OK"
+      },
+      "evidence": [
+        {
+          "channel": "GRAPH",
+          "kind": "CLASS",
+          "ref": "ItemMaster",
+          "title": "物料",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "PROPERTY",
+          "ref": "ItemMaster.material_name",
+          "title": "物料名称",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "PROPERTY",
+          "ref": "ItemMaster.material_spec",
+          "title": "物料规格",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "SQL",
+          "kind": "TABLE",
+          "ref": "ItemMaster",
+          "title": "物料",
+          "releaseId": 1,
+          "releaseVersion": "pilot-2026.11.16-1",
+          "source": "RELEASE"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "至少一路有权查"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 2 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 pilot-2026.11.16-1"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 4 条，期望 ≥ 2 条"
+        },
+        {
+          "name": "alias_equivalence",
+          "passed": true,
+          "detail": "采购薄别名与主接口响应一致"
+        }
+      ]
+    },
+    {
+      "id": "P-06",
+      "question": "来料合格率",
+      "domain": "PROCUREMENT",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": [
+          "PROCUREMENT_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": 1,
+        "version": "pilot-2026.11.16-1",
+        "degraded": false
+      },
+      "routes": {
+        "GRAPH": "EMPTY",
+        "METRIC": "EMPTY",
+        "RAG": "DEGRADED",
+        "SQL": "EMPTY"
+      },
+      "evidence": [],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "至少一路有权查"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 0 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 pilot-2026.11.16-1"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 0 条，期望 ≥ 0 条"
+        },
+        {
+          "name": "alias_equivalence",
+          "passed": true,
+          "detail": "采购薄别名与主接口响应一致"
+        }
+      ]
+    },
+    {
+      "id": "P-07",
+      "question": "来料合格率",
+      "domain": "QUALITY",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": [
+          "QUALITY_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": 2,
+        "version": "pilot-2026.11.16-2",
+        "degraded": false
+      },
+      "routes": {
+        "GRAPH": "OK",
+        "METRIC": "OK",
+        "RAG": "DEGRADED",
+        "SQL": "OK"
+      },
+      "evidence": [
+        {
+          "channel": "GRAPH",
+          "kind": "CLASS",
+          "ref": "IncomingInspection",
+          "title": "来料检验单",
+          "releaseId": 2,
+          "releaseVersion": "pilot-2026.11.16-2",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "GRAPH",
+          "kind": "PROPERTY",
+          "ref": "IncomingInspection.pass_rate",
+          "title": "合格率",
+          "releaseId": 2,
+          "releaseVersion": "pilot-2026.11.16-2",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "METRIC",
+          "kind": "METRIC",
+          "ref": "iqc_pass_rate",
+          "title": "来料合格率",
+          "releaseId": 2,
+          "releaseVersion": "pilot-2026.11.16-2",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "METRIC",
+          "kind": "KPI",
+          "ref": "KPI_IQC",
+          "title": "来料合格率",
+          "releaseId": 2,
+          "releaseVersion": "pilot-2026.11.16-2",
+          "source": "RELEASE"
+        },
+        {
+          "channel": "SQL",
+          "kind": "TABLE",
+          "ref": "IncomingInspection",
+          "title": "来料检验单",
+          "releaseId": 2,
+          "releaseVersion": "pilot-2026.11.16-2",
+          "source": "RELEASE"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "至少一路有权查"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 3 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 pilot-2026.11.16-2"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 5 条，期望 ≥ 3 条"
+        }
+      ]
+    },
+    {
+      "id": "P-08",
+      "question": "供应商交付天数",
+      "domain": "PROCUREMENT",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": [
+          "QUALITY_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": null,
+        "version": null,
+        "degraded": true
+      },
+      "routes": {
+        "GRAPH": "DENIED",
+        "METRIC": "DENIED",
+        "RAG": "DENIED",
+        "SQL": "DENIED"
+      },
+      "evidence": [],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "四路均不可见且零证据"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 0 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 None"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 0 条，期望 ≥ 0 条"
+        },
+        {
+          "name": "alias_equivalence",
+          "passed": true,
+          "detail": "采购薄别名与主接口响应一致"
+        }
+      ]
+    },
+    {
+      "id": "P-09",
+      "question": "供应商交付天数",
+      "domain": "PROCUREMENT",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": [
+          "OUTSIDE_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": null,
+        "version": null,
+        "degraded": true
+      },
+      "routes": {
+        "GRAPH": "DENIED",
+        "METRIC": "DENIED",
+        "RAG": "DENIED",
+        "SQL": "DENIED"
+      },
+      "evidence": [],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "四路均不可见且零证据"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 0 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 None"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 0 条，期望 ≥ 0 条"
+        },
+        {
+          "name": "alias_equivalence",
+          "passed": true,
+          "detail": "采购薄别名与主接口响应一致"
+        }
+      ]
+    },
+    {
+      "id": "P-10",
+      "question": "供应商交付天数",
+      "domain": "PROCUREMENT",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": []
+      },
+      "passed": true,
+      "release": {
+        "id": null,
+        "version": null,
+        "degraded": true
+      },
+      "routes": {
+        "GRAPH": "DENIED",
+        "METRIC": "DENIED",
+        "RAG": "DENIED",
+        "SQL": "DENIED"
+      },
+      "evidence": [],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "四路均不可见且零证据"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 0 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 None"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 0 条，期望 ≥ 0 条"
+        },
+        {
+          "name": "alias_equivalence",
+          "passed": true,
+          "detail": "采购薄别名与主接口响应一致"
+        }
+      ]
+    },
+    {
+      "id": "P-11",
+      "question": "物流到货情况",
+      "domain": "LOGISTICS",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": [
+          "PROCUREMENT_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": null,
+        "version": null,
+        "degraded": true
+      },
+      "routes": {
+        "GRAPH": "DENIED",
+        "METRIC": "DENIED",
+        "RAG": "DENIED",
+        "SQL": "DENIED"
+      },
+      "evidence": [],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "四路均不可见且零证据"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 0 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 None"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 0 条，期望 ≥ 0 条"
+        }
+      ]
+    },
+    {
+      "id": "P-12",
+      "question": "物流到货情况",
+      "domain": "LOGISTICS",
+      "identity": {
+        "roles": [
+          "admin"
+        ],
+        "departments": [
+          "PROCUREMENT_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": null,
+        "version": null,
+        "degraded": true
+      },
+      "routes": {
+        "GRAPH": "DEGRADED",
+        "METRIC": "DEGRADED",
+        "RAG": "DEGRADED",
+        "SQL": "DEGRADED"
+      },
+      "evidence": [],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "至少一路有权查"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 0 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 None"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 0 条，期望 ≥ 0 条"
+        }
+      ]
+    },
+    {
+      "id": "P-13",
+      "question": "供应商交付天数",
+      "domain": "PROCUREMENT",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": [
+          "PROCUREMENT_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": null,
+        "version": null,
+        "degraded": true
+      },
+      "routes": {
+        "GRAPH": "DENIED",
+        "METRIC": "DENIED",
+        "RAG": "DENIED",
+        "SQL": "DENIED"
+      },
+      "evidence": [],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "四路均不可见且零证据"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 0 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 None"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 0 条，期望 ≥ 0 条"
+        },
+        {
+          "name": "alias_equivalence",
+          "passed": true,
+          "detail": "采购薄别名与主接口响应一致"
+        }
+      ]
+    },
+    {
+      "id": "P-14",
+      "question": "今天天气怎么样",
+      "domain": "PROCUREMENT",
+      "identity": {
+        "roles": [
+          "user"
+        ],
+        "departments": [
+          "PROCUREMENT_ORG"
+        ]
+      },
+      "passed": true,
+      "release": {
+        "id": 1,
+        "version": "pilot-2026.11.16-1",
+        "degraded": false
+      },
+      "routes": {
+        "GRAPH": "EMPTY",
+        "METRIC": "EMPTY",
+        "RAG": "DEGRADED",
+        "SQL": "EMPTY"
+      },
+      "evidence": [],
+      "checks": [
+        {
+          "name": "visibility",
+          "passed": true,
+          "detail": "至少一路有权查"
+        },
+        {
+          "name": "channels",
+          "passed": true,
+          "detail": "各通道状态与期望一致"
+        },
+        {
+          "name": "evidence_refs",
+          "passed": true,
+          "detail": "命中期望证据 0 项"
+        },
+        {
+          "name": "citation_traceable",
+          "passed": true,
+          "detail": "全部证据可回溯到 pilot-2026.11.16-1"
+        },
+        {
+          "name": "min_evidence",
+          "passed": true,
+          "detail": "证据 0 条，期望 ≥ 0 条"
+        },
+        {
+          "name": "alias_equivalence",
+          "passed": true,
+          "detail": "采购薄别名与主接口响应一致"
+        }
+      ]
+    }
+  ]
+}

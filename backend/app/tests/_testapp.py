@@ -323,6 +323,23 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(id_mapping.router, prefix="/api/v1", tags=["id-mapping"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     from app.api.v1.admin_wiki_links import router as admin_wiki_links_router
     testApp.include_router(admin_wiki_links_router, dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    # 知识服务 Facade（P4 D32）：与 main.py 同一开关、同一前缀、同一依赖。
+    # 漏掉这里 ⇒ 集成测试打过去 404（两套 wiring 是手工平行维护的）。
+    if settings.enableKnowledgeFacade:
+        from app.api.v1 import knowledge_facade, procurement_knowledge
+
+        testApp.include_router(
+            knowledge_facade.router,
+            prefix="/api/v1/semantic/knowledge",
+            tags=["semantic-knowledge"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
+        testApp.include_router(
+            procurement_knowledge.router,
+            prefix="/api/v1/procurement/knowledge",
+            tags=["procurement-knowledge"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
 
     @testApp.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:

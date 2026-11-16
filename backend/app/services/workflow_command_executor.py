@@ -49,6 +49,15 @@ STATUS_SUCCEEDED = "SUCCEEDED"
 STATUS_FAILED = "FAILED"
 STATUS_SKIPPED = "SKIPPED"
 STATUS_COMPENSATED = "COMPENSATED"
+STATUS_EXECUTING = "EXECUTING"
+STATUS_PENDING = "PENDING"
+STATUS_RUNNING = "RUNNING"
+STATUS_COMPLETED = "COMPLETED"
+
+# 步骤「已完成」集合（全部落在集合里 ⇒ 实例可置 COMPLETED）。
+_STEP_DONE_STATUSES = frozenset({STATUS_SUCCEEDED, STATUS_SKIPPED})
+# 实例允许置 COMPLETED 的来源状态（其它状态说明还在等审批 / 已终态）。
+_INSTANCE_COMPLETABLE_STATUSES = frozenset({STATUS_RUNNING, "APPROVED"})
 
 
 @dataclass(frozen=True)
@@ -103,9 +112,39 @@ class CommandExecutor:
                 isTerminal=True,
             )
 
+        return await self.executeClaimed(session, command, workerId=workerId)
+
+    async def executeClaimed(
+        self,
+        session: AsyncSession,
+        command: BusinessCommand,
+        *,
+        workerId: str,
+    ) -> CommandOutcome:
+        """执行**已领取**的命令（调用方已完成条件 UPDATE claim）。
+
+        Worker 走这条路：它用 ``claimNextCommand``（``SKIP LOCKED``）原子领走
+        一条命令后交给本方法 ⇒ claim → 执行 → 终态仍在**同一个事务**里
+        （worker 中途死掉 ⇒ 事务回滚 ⇒ 命令回到 PENDING ⇒ 被别的 worker 重领）。
+
+        ⚠️ 归属校验：只有「本 worker 领的、处于 EXECUTING」的命令才执行
+        （否则等于给未领取的命令开写入口）。
+        """
+
+        if command.status != STATUS_EXECUTING or command.executed_by != workerId:
+            return CommandOutcome(
+                commandId=command.id,
+                status=STATUS_SKIPPED,
+                attempts=command.attempts,
+                errorMessage="命令未被本 worker 领取（状态/归属不符）",
+                isTerminal=True,
+            )
+
         # ⚠️ rollback 会 expire 全部 ORM 实例 ⇒ 先把需要的标量取出来。
+        commandId = command.id
         instanceId = command.instance_id
         commandType = command.command_type
+        stepId = command.step_id
         attemptedCount = command.attempts
 
         try:
@@ -144,6 +183,7 @@ class CommandExecutor:
             )
 
         await self._store.completeCommand(session, commandId, STATUS_SUCCEEDED, result=result)
+        await self._advanceAfterSuccess(session, instanceId=instanceId, stepId=stepId)
         await session.commit()
 
         return CommandOutcome(
@@ -188,6 +228,78 @@ class CommandExecutor:
             errorMessage=message,
             isTerminal=isTerminal,
         )
+
+    # ---------------------------------------------------------------- 推进
+
+    async def _advanceAfterSuccess(
+        self,
+        session: AsyncSession,
+        *,
+        instanceId: int,
+        stepId: int | None,
+    ) -> None:
+        """命令成功 ⇒ 步骤 SUCCEEDED；**所有**步骤都成功 ⇒ 实例 COMPLETED。
+
+        没有这一步 ⇒ 步骤永远卡在 RUNNING、实例永远到不了 COMPLETED
+        ⇒ 工作流的「完成」路径不可达（G6「状态机全路径」落空）。
+        """
+
+        if stepId is not None:
+            await self._advanceStepToSucceeded(session, stepId)
+        await self._completeInstanceIfStepsDone(session, instanceId)
+
+    async def _advanceStepToSucceeded(self, session: AsyncSession, stepId: int) -> None:
+        """步骤 → SUCCEEDED（PENDING 先补一跳 RUNNING：状态机不允许多跳）。"""
+
+        current = (
+            await session.execute(
+                select(WorkflowStep)
+                .where(WorkflowStep.id == stepId)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if current is None:
+            return
+
+        status = current.status
+        if status == STATUS_PENDING:
+            await self._store.advanceStep(session, stepId, STATUS_RUNNING)
+            status = STATUS_RUNNING
+        if status == STATUS_RUNNING:
+            await self._store.advanceStep(session, stepId, STATUS_SUCCEEDED)
+
+    async def _completeInstanceIfStepsDone(
+        self, session: AsyncSession, instanceId: int
+    ) -> None:
+        """全部步骤都成功（或跳过）⇒ 实例 COMPLETED。"""
+
+        rows = (
+            (
+                await session.execute(
+                    select(WorkflowStep).where(WorkflowStep.instance_id == instanceId)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not rows:
+            return
+        if not all(row.status in _STEP_DONE_STATUSES for row in rows):
+            return
+
+        instance = (
+            await session.execute(
+                select(WorkflowInstance)
+                .where(WorkflowInstance.id == instanceId)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if instance is None:
+            return
+        if instance.status in _INSTANCE_COMPLETABLE_STATUSES:
+            await self._store.advanceInstance(session, instanceId, STATUS_COMPLETED)
 
     # ---------------------------------------------------------------- 补偿
 
@@ -333,5 +445,5 @@ class CommandExecutor:
         if status in {"PENDING", "RUNNING", "WAITING_APPROVAL", "APPROVED"}:
             await self._store.advanceInstance(session, instanceId, STATUS_FAILED, errorMessage=reason)
             status = STATUS_FAILED
-        if status == STATUS_FAILED:
+        if status in {STATUS_FAILED, STATUS_COMPLETED}:
             await self._store.advanceInstance(session, instanceId, STATUS_COMPENSATED)

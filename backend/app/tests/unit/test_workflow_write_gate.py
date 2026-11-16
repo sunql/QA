@@ -243,6 +243,18 @@ def test_只有存储层能写P5表():
     )
 
 
+def test_守卫覆盖Worker层():
+    """Worker 也是「写入口候选」⇒ 必须落在扫描范围内。
+
+    ⚠️ 别把扫描范围缩到 ``app/services/``：Worker 会 claim / 提交，
+    它若绕过存储层直写 P5 表，上面的守卫就漏了一处。
+    """
+
+    names = {path.name for path in _sourceFiles()}
+
+    assert "workflow_worker.py" in names, "Worker 未被守卫覆盖（扫描范围可能被人为收窄）"
+
+
 def test_存储层本身确实在写P5表():
     """守卫不是空转：存储层**必须**真的在写 P5 表（否则上面的守卫会永远绿）。"""
 

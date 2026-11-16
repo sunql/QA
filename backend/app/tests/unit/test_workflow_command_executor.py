@@ -340,3 +340,103 @@ async def test_一条命令失败不影响其它命令(dbSession, definition):
 
     assert failed.status == "FAILED"
     assert succeeded.status == "SUCCEEDED"
+
+
+# =============================================================================
+# 成功后推进：步骤 → SUCCEEDED，实例 → COMPLETED
+# =============================================================================
+
+
+async def test_命令成功后步骤置SUCCEEDED(dbSession, definition):
+    """命令成功 ⇒ 它所属的步骤 SUCCEEDED（否则步骤永远卡在 RUNNING）。"""
+
+    instance, step = await _instanceWithStep(dbSession, definition)
+    command = await _enqueue(dbSession, instance, step, commandType="po.write", key="k-20")
+    executor = _executor()
+
+    await executor.execute(dbSession, command.id, workerId="worker-1")
+
+    stepRow = (
+        await dbSession.execute(select(WorkflowStep).where(WorkflowStep.id == step.id))
+    ).scalar_one()
+    assert stepRow.status == "SUCCEEDED"
+
+
+async def test_全部步骤成功后实例置COMPLETED(dbSession, definition):
+    """所有步骤都成功后 ⇒ 实例 COMPLETED（实例的「完成」路径必须可达）。"""
+
+    instance, _ = await _store.createInstance(
+        dbSession,
+        definitionId=definition.id,
+        idempotencyKey="k-21",
+        requestJson={},
+        actor="submitter",
+    )
+    steps = await _store.createSteps(
+        dbSession,
+        instanceId=instance.id,
+        steps=[{"code": "a", "order": 0}, {"code": "b", "order": 1}],
+    )
+    await dbSession.commit()
+    await _store.advanceInstance(dbSession, instance.id, "RUNNING")
+    await dbSession.commit()
+    for step in steps:
+        await _store.advanceStep(dbSession, step.id, "RUNNING")
+    await dbSession.commit()
+
+    commands = []
+    for index, step in enumerate(steps):
+        commands.append(
+            await _enqueue(
+                dbSession,
+                instance,
+                step,
+                commandType="po.write",
+                key=f"k-21-{index}",
+            )
+        )
+
+    executor = _executor()
+    for command in commands:
+        await executor.execute(dbSession, command.id, workerId="worker-1")
+
+    instanceRow = (
+        await dbSession.execute(
+            select(WorkflowInstance).where(WorkflowInstance.id == instance.id)
+        )
+    ).scalar_one()
+    assert instanceRow.status == "COMPLETED"
+
+
+async def test_仍有步骤未完成时实例不置COMPLETED(dbSession, definition):
+    """只完成一步 ⇒ 实例**不得** COMPLETED（不能提前宣布完成）。"""
+
+    instance, _ = await _store.createInstance(
+        dbSession,
+        definitionId=definition.id,
+        idempotencyKey="k-22",
+        requestJson={},
+        actor="submitter",
+    )
+    steps = await _store.createSteps(
+        dbSession,
+        instanceId=instance.id,
+        steps=[{"code": "a", "order": 0}, {"code": "b", "order": 1}],
+    )
+    await dbSession.commit()
+    await _store.advanceInstance(dbSession, instance.id, "RUNNING")
+    await dbSession.commit()
+    for step in steps:
+        await _store.advanceStep(dbSession, step.id, "RUNNING")
+    await dbSession.commit()
+
+    first = await _enqueue(dbSession, instance, steps[0], commandType="po.write", key="k-22-0")
+    executor = _executor()
+    await executor.execute(dbSession, first.id, workerId="worker-1")
+
+    instanceRow = (
+        await dbSession.execute(
+            select(WorkflowInstance).where(WorkflowInstance.id == instance.id)
+        )
+    ).scalar_one()
+    assert instanceRow.status == "RUNNING"

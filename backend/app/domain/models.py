@@ -2868,3 +2868,9 @@ from app.domain import semantic_release_models as _semantic_release_models  # no
 # 同理由——**Schema drift 校验与 alembic autogenerate 都靠 Base.metadata 看见这些表**，
 # 漏 import ⇒ 被误报成 `extra_table`（drift）或被 autogenerate 提议 DROP。
 from app.domain import discovery_models as _discovery_models  # noqa: E402,F401
+
+# P5 工作流域（0149–0151）：`workflow_definition` / `workflow_instance` /
+# `workflow_step` / `business_command` / `approval_task` / `workflow_outbox`。
+# 同理由——**Schema drift 校验与 alembic autogenerate 都靠 Base.metadata 看见这些表**，
+# 漏 import ⇒ 被误报成 `extra_table`（drift）或被 autogenerate 提议 DROP。
+from app.domain import workflow_models as _workflow_models  # noqa: E402,F401

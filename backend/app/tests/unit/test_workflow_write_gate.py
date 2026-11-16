@@ -39,10 +39,19 @@ import pathlib
 
 import pytest
 
-# 允许直接触碰 P5 表的模块（**唯一**写入口）——按**路径**白名单。
+# 允许直接触碰 P5 表的模块（**唯一**写入口 = 存储层）——按**路径**白名单。
 # ⚠️ 不能按文件名放行：新建一个 ``scripts/workflow_store.py`` 就能整体豁免
 #    ⇒ 白名单形同虚设。
-_ALLOWED_WRITERS = frozenset({"app/services/workflow_store.py"})
+# ⚠️ 存储层按职责域拆成了 4 个文件（底座 / 实例+步骤 / 命令 / 审批）⇒ 白名单
+#    跟着拆；新增存储层文件必须**显式**加进来（⇒ 走评审）。
+_ALLOWED_WRITERS = frozenset(
+    {
+        "app/services/workflow_store_base.py",
+        "app/services/workflow_instance_store.py",
+        "app/services/workflow_command_store.py",
+        "app/services/workflow_approval_store.py",
+    }
+)
 
 # 允许注册 Command 适配器的模块（**唯一**注册点 = 组装根）。
 _ALLOWED_REGISTRARS = frozenset({"app/workers/workflow_worker.py"})
@@ -56,6 +65,9 @@ _WRITE_CALL_NAMES = frozenset({"update", "delete", "insert", "merge"})
 
 # ``session.<方法>`` 形态的写入口（属性赋值是另一种形态，见 ``findWriteOffenders``）。
 _SESSION_WRITE_METHODS = frozenset({"add", "add_all", "delete", "merge"})
+
+# 硬规则（项目 CLAUDE.md）：单文件不超过 800 行。
+_MAX_MODULE_LINES = 800
 
 _APP_DIR = pathlib.Path(__file__).resolve().parents[2]
 _BACKEND_DIR = _APP_DIR.parent
@@ -535,6 +547,33 @@ def test_组装根确实注册了适配器():
     assert offenders, "组装根没有注册任何适配器 ⇒ 注册点收口守卫形同虚设"
 
 
+def test_P5模块不超过行数上限():
+    """硬规则（项目 CLAUDE.md）：**单文件不超过 800 行**。
+
+    为什么要有守卫：P5 的存储层一度长到 1010 行 ⇒ 违反硬规则 ⇒ 而且这类
+    「越滚越大」是**静默**的（没人会在提交时数行数）⇒ 必须**机械**判定。
+    """
+
+    offenders: list[str] = []
+    for path, rel in _sourceFiles():
+        if not rel.startswith("app/"):
+            continue
+        if not (
+            rel.startswith("app/services/workflow_")
+            or rel.startswith("app/api/v1/workflow")
+            or rel.startswith("app/workers/workflow_")
+            or rel.startswith("app/domain/workflow_")
+        ):
+            continue
+        lineCount = len(path.read_text(encoding="utf-8").splitlines())
+        if lineCount > _MAX_MODULE_LINES:
+            offenders.append(f"{rel}: {lineCount} 行（上限 {_MAX_MODULE_LINES}）")
+
+    assert offenders == [], "P5 模块超出单文件行数上限（须按职责拆分）：\n" + "\n".join(
+        offenders
+    )
+
+
 def test_扫描器不误报只读查询():
     """只读路径（select / 属性访问 / 类型注解）**不得**被误判。"""
 
@@ -614,20 +653,25 @@ def test_白名单按路径而非文件名():
     ``scripts/workflow_store.py`` 就能整体豁免 ⇒ 白名单形同虚设。
     """
 
-    assert _isAllowedWriter("app/services/workflow_store.py") is True
-    assert _isAllowedWriter("app/services/nested/workflow_store.py") is False
-    assert _isAllowedWriter("scripts/workflow_store.py") is False
+    assert _isAllowedWriter("app/services/workflow_store_base.py") is True
+    assert _isAllowedWriter("app/services/nested/workflow_store_base.py") is False
+    assert _isAllowedWriter("scripts/workflow_store_base.py") is False
     assert _isAllowedWriter("app/api/v1/workflow.py") is False
+    # 门面只**组合**三个子存储、自己不写表 ⇒ 不在白名单（写入口在子存储里）。
+    assert _isAllowedWriter("app/services/workflow_store.py") is False
 
 
 def test_存储层本身确实在写P5表():
     """守卫不是空转：存储层**必须**真的在写 P5 表（否则上面的守卫会永远绿）。"""
 
-    source = (
-        pathlib.Path(_APP_DIR) / "services" / "workflow_store.py"
-    ).read_text(encoding="utf-8")
-
-    offenders = findWriteOffenders(source, "workflow_store.py", _p5OrmClassNames())
+    ormNames = _p5OrmClassNames()
+    offenders: list[str] = []
+    for rel in sorted(_ALLOWED_WRITERS):
+        path = pathlib.Path(_BACKEND_DIR) / rel
+        assert path.exists(), f"白名单里的存储层文件不存在：{rel}"
+        offenders.extend(
+            findWriteOffenders(path.read_text(encoding="utf-8"), rel, ormNames)
+        )
 
     assert offenders, "存储层没有写 P5 表 ⇒ 守卫白名单形同虚设"
 

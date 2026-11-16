@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ConflictError, NotFoundError
 from app.domain.workflow_models import (
+    ApprovalTask,
     BusinessCommand,
     WorkflowInstance,
     WorkflowStep,
@@ -38,6 +39,13 @@ from app.services.workflow_state_machine import assertWorkflowTransition
 # 命令 / 步骤的初始状态字面量（与状态机矩阵、库层 CHECK 一致）。
 _STATUS_PENDING = "PENDING"
 _STATUS_EXECUTING = "EXECUTING"
+_STATUS_FAILED = "FAILED"
+
+# 可被 claim 的来源状态：首次执行（PENDING）或重试（FAILED）。
+_CLAIMABLE_STATUSES = (_STATUS_PENDING, _STATUS_FAILED)
+
+# 审批任务的初始状态（与状态机矩阵、库层 CHECK 一致）。
+_APPROVAL_PENDING = "PENDING"
 
 # 幂等冲突的错误信息（ConflictError ⇒ 409）。
 _MSG_STEP_INSTANCE_MISMATCH = "步骤 {stepId} 不属于实例 {instanceId}（拒绝跨实例挂载）"
@@ -305,16 +313,25 @@ class WorkflowStore:
         return existing, insertedId is not None
 
     async def claimCommand(
-        self, session: AsyncSession, commandId: int, *, workerId: str
+        self, session: AsyncSession, commandId: int, *, workerId: str, maxAttempts: int = 1
     ) -> BusinessCommand | None:
-        """条件 UPDATE claim：``PENDING → EXECUTING``。已被别人领走 ⇒ None。"""
+        """条件 UPDATE claim：``PENDING → EXECUTING``（重试时 ``FAILED → EXECUTING``）。
+
+        ``maxAttempts`` = 该命令允许的**最大尝试次数**（毒丸防护）：已尝试次数
+        达到上限 ⇒ 不再可领取（返回 ``None``）。
+        ``maxAttempts=1``（默认）⇒ 只有 ``PENDING`` 可领（不重试），
+        与 W1 的既有语义一致。
+
+        已被别人领走 / 已终态 / 次数耗尽 ⇒ ``None``（不报错，不覆盖）。
+        """
 
         row = (
             await session.execute(
                 update(BusinessCommand)
                 .where(
                     BusinessCommand.id == commandId,
-                    BusinessCommand.status == _STATUS_PENDING,
+                    BusinessCommand.status.in_(_CLAIMABLE_STATUSES),
+                    BusinessCommand.attempts < maxAttempts,
                 )
                 .values(
                     status=_STATUS_EXECUTING,
@@ -328,13 +345,21 @@ class WorkflowStore:
         ).scalar_one_or_none()
         return row
 
-    async def claimNextCommand(self, session: AsyncSession, *, workerId: str) -> BusinessCommand | None:
-        """领取一条待执行命令（``SKIP LOCKED``：跳过别人锁住的行）。"""
+    async def claimNextCommand(
+        self, session: AsyncSession, *, workerId: str, maxAttempts: int = 1
+    ) -> BusinessCommand | None:
+        """领取一条待执行命令（``SKIP LOCKED``：跳过别人锁住的行）。
+
+        候选 = ``PENDING``，或 ``FAILED`` 且尝试次数未达上限（重试候选）。
+        """
 
         candidateId = (
             await session.execute(
                 select(BusinessCommand.id)
-                .where(BusinessCommand.status == _STATUS_PENDING)
+                .where(
+                    BusinessCommand.status.in_(_CLAIMABLE_STATUSES),
+                    BusinessCommand.attempts < maxAttempts,
+                )
                 .order_by(BusinessCommand.id)
                 .limit(1)
                 .with_for_update(skip_locked=True)
@@ -342,7 +367,7 @@ class WorkflowStore:
         ).scalar_one_or_none()
         if candidateId is None:
             return None
-        return await self.claimCommand(session, candidateId, workerId=workerId)
+        return await self.claimCommand(session, candidateId, workerId=workerId, maxAttempts=maxAttempts)
 
     async def completeCommand(
         self,
@@ -381,6 +406,205 @@ class WorkflowStore:
             fromStatus=current.status,
             values=values,
         )
+
+    async def failCommand(
+        self,
+        session: AsyncSession,
+        commandId: int,
+        *,
+        attempts: int,
+        errorMessage: str,
+    ) -> BusinessCommand:
+        """把命令置 ``FAILED`` 并**显式写回尝试次数**。
+
+        为什么必须显式写 attempts：执行器在适配器抛错后会 ``rollback()`` 回滚
+        「本次执行」的事务（撤销适配器的半写副作用），而 claim 时的
+        ``attempts + 1`` 与它在同一事务里 ⇒ 回滚后次数丢失 ⇒ 毒丸命令会被
+        无限重试。故失败路径必须**显式**把尝试次数落库。
+        """
+
+        current = (
+            await session.execute(
+                select(BusinessCommand)
+                .where(BusinessCommand.id == commandId)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if current is None:
+            raise NotFoundError(f"业务命令 {commandId} 不存在")
+
+        assertWorkflowTransition("command", current.status, _STATUS_FAILED)
+
+        return await self._writeStatus(
+            session,
+            BusinessCommand,
+            commandId,
+            fromStatus=current.status,
+            values={
+                "status": _STATUS_FAILED,
+                "attempts": attempts,
+                "error_message": errorMessage,
+                "updated_time": _utcnow(),
+            },
+        )
+
+    # ---------------------------------------------------------------- 审批
+
+    async def getApprovalTask(self, session: AsyncSession, taskId: int) -> ApprovalTask | None:
+        """无锁读审批任务（返回 None 表示不存在）。"""
+
+        return (
+            await session.execute(
+                select(ApprovalTask).where(ApprovalTask.id == taskId)
+            )
+        ).scalar_one_or_none()
+
+    async def listApprovalTasks(self, session: AsyncSession, *, instanceId: int) -> list[ApprovalTask]:
+        """列出实例的审批任务（按 id 升序）。"""
+
+        rows = (
+            (
+                await session.execute(
+                    select(ApprovalTask)
+                    .where(ApprovalTask.instance_id == instanceId)
+                    .order_by(ApprovalTask.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return list(rows)
+
+    async def createApprovalTask(
+        self,
+        session: AsyncSession,
+        *,
+        instanceId: int,
+        subjectType: str,
+        subjectId: str,
+        matrixCode: str,
+        approverRole: str | None,
+        approverUser: str | None,
+        dueAt: datetime,
+        createdBy: str | None,
+    ) -> tuple[ApprovalTask, bool]:
+        """幂等创建审批任务。返回 ``(任务, 是否本次新建)``。
+
+        幂等键 = ``(instance_id, matrix_code)``（库层唯一约束 ``uq_approval_task_matrix``）
+        ⇒ 同一实例同一矩阵条目只落一条任务。
+        """
+
+        insertedId = (
+            await session.execute(
+                pg_insert(ApprovalTask)
+                .values(
+                    instance_id=instanceId,
+                    subject_type=subjectType,
+                    subject_id=subjectId,
+                    matrix_code=matrixCode,
+                    status=_APPROVAL_PENDING,
+                    approver_role=approverRole,
+                    approver_user=approverUser,
+                    due_at=dueAt,
+                    created_by=createdBy,
+                )
+                .on_conflict_do_nothing(index_elements=["instance_id", "matrix_code"])
+                .returning(ApprovalTask.id)
+            )
+        ).scalar_one_or_none()
+
+        existing = (
+            await session.execute(
+                select(ApprovalTask)
+                .where(
+                    ApprovalTask.instance_id == instanceId,
+                    ApprovalTask.matrix_code == matrixCode,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+
+        return existing, insertedId is not None
+
+    async def decideApprovalTask(
+        self,
+        session: AsyncSession,
+        taskId: int,
+        *,
+        fromStatus: str,
+        toStatus: str,
+        actor: str,
+        note: str | None = None,
+        decidedAt: datetime | None = None,
+    ) -> ApprovalTask:
+        """决策审批任务（行锁 + 状态机校验 + 条件 UPDATE）。
+
+        ``approver_user`` 在此刻写入 = **实际审批人（签署人）**；
+        「谁有资格批」由定义体的审批矩阵判定，不落在任务行上。
+        """
+
+        current = await self._lockApprovalTask(session, taskId)
+        assertWorkflowTransition("approval", current.status, toStatus)
+
+        values: dict[str, Any] = {
+            "status": toStatus,
+            "updated_time": _utcnow(),
+            "approver_user": actor,
+        }
+        if decidedAt is not None:
+            values["decided_at"] = decidedAt
+        if note is not None:
+            values["decision_note"] = note
+
+        return await self._writeStatus(
+            session,
+            ApprovalTask,
+            taskId,
+            fromStatus=fromStatus,
+            values=values,
+        )
+
+    async def markApprovalTask(
+        self,
+        session: AsyncSession,
+        taskId: int,
+        *,
+        fromStatus: str,
+        toStatus: str,
+        decidedAt: datetime | None = None,
+    ) -> ApprovalTask:
+        """推进审批任务状态（不写签署人）—— 超时置 TIMEOUT 走这条。"""
+
+        current = await self._lockApprovalTask(session, taskId)
+        assertWorkflowTransition("approval", current.status, toStatus)
+
+        values: dict[str, Any] = {"status": toStatus, "updated_time": _utcnow()}
+        if decidedAt is not None:
+            values["decided_at"] = decidedAt
+
+        return await self._writeStatus(
+            session,
+            ApprovalTask,
+            taskId,
+            fromStatus=fromStatus,
+            values=values,
+        )
+
+    async def _lockApprovalTask(self, session: AsyncSession, taskId: int) -> ApprovalTask:
+        """在行锁内**重读**审批任务（`populate_existing` ⇒ 拿到最新状态）。"""
+
+        current = (
+            await session.execute(
+                select(ApprovalTask)
+                .where(ApprovalTask.id == taskId)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if current is None:
+            raise NotFoundError(f"审批任务 {taskId} 不存在")
+        return current
 
     # ---------------------------------------------------------------- 内部
 

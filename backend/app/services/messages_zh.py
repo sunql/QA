@@ -573,6 +573,29 @@ MSG_WORKFLOW_STATUS_TRANSITION_INVALID = (
     "{kind} 状态不允许从 {src} 流转到 {dst}（当前状态允许的目标：{allowed}）"
 )
 
+# P5 审批面提示
+MSG_WORKFLOW_APPROVAL_NOT_AUTHORIZED = "你不是该审批任务的审批人，无权决策"
+MSG_WORKFLOW_APPROVAL_ALREADY_DECIDED = "该审批任务已被决策过，不能重复审批"
+MSG_WORKFLOW_APPROVAL_TIMEOUT = "该审批任务已超时，不能再审批"
+MSG_WORKFLOW_APPROVAL_MATRIX_NOT_MATCHED = (
+    "审批矩阵未覆盖该组合（主体类型 / 能力编码 / 风险等级），无法发起审批"
+)
+MSG_WORKFLOW_APPROVAL_MATRIX_UNAVAILABLE = (
+    "审批矩阵条目 {matrixCode} 已不可用（定义体中查不到），无法决策"
+)
+MSG_WORKFLOW_APPROVAL_ROUND_EXISTS = "该实例已有审批轮次，不能叠加发起新的审批"
+MSG_WORKFLOW_APPROVAL_RISK_LEVEL_NOT_DEFINED = (
+    "工作流定义未声明风险级别（definition_json.riskLevel），无法发起审批"
+)
+MSG_WORKFLOW_APPROVAL_APPROVER_UNKNOWN = (
+    "审批矩阵条目 {matrixCode} 的审批人 {approver} 在库中不存在（{kind}），"
+    "无法发起审批（否则该任务谁也批不了）"
+)
+MSG_WORKFLOW_DEFINITION_NOT_FOUND = (
+    "工作流定义不存在（domain_code={domain_code}、capability_code={capability_code}、version={version}）"
+)
+MSG_WORKFLOW_DEFINITION_NOT_PUBLISHED = "工作流定义「{version}」尚未发布，不能提交实例"
+
 # KPI Catalog datasource 绑定（F2 写入流收尾 — 2026-10-18 spec §4.4）
 # Reserved for 未来 Pydantic custom error 覆盖（当前 DTO 层 `Field(..., ge=1)` 直接抛 Pydantic 默认英文错误，service 层无引用）
 MSG_KPI_DATASOURCE_REQUIRED = "KPI 必须绑定一个数据源（datasource_id 必填）"

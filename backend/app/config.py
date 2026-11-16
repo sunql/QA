@@ -196,6 +196,16 @@ class Settings(BaseSettings):
     # 但默认关能保证「没开 = 没有这个面」，不给人「悄悄多了一个能查的接口」的错觉。
     enableKnowledgeFacade: bool = Field(default=False, alias="ENABLE_KNOWLEDGE_FACADE")
 
+    # ===== P5 工作流 / 审批 =====
+    # 整组开关：关闭时工作流路由**不注册**（对外 404）⇒「没开 = 没有这个面」，
+    # 回滚 = 关开关 + 停 Worker。**默认关**。
+    enableWorkflow: bool = Field(default=False, alias="ENABLE_WORKFLOW")
+    # Worker 轮询间隔（秒）与指令租约时长（秒）。
+    workflowPollSeconds: float = Field(default=2.0, alias="WORKFLOW_POLL_SECONDS")
+    workflowLeaseSeconds: int = Field(default=60, alias="WORKFLOW_LEASE_SECONDS")
+    # 单条指令的最大重试次数（超过 ⇒ 置 FAILED 并触发补偿）。
+    workflowMaxCommandAttempts: int = Field(default=3, alias="WORKFLOW_MAX_COMMAND_ATTEMPTS")
+
     # ===== 通用 Agent 编排 =====
     enableAgentOrchestration: bool = Field(default=False, alias="ENABLE_AGENT_ORCHESTRATION")
     agentOrchestrationPollSeconds: float = Field(default=2.0, alias="AGENT_ORCHESTRATION_POLL_SECONDS")
@@ -463,6 +473,32 @@ def knowledgeFacadeAuthMisconfiguration(settings: Settings) -> str | None:
         "ENABLE_KNOWLEDGE_FACADE=true 但鉴权仍为 stub"
         f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
         "知识查询的域可见性按可伪造的调用方身份推导，域级隔离形同虚设。"
+        "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
+    )
+
+
+def workflowAuthMisconfiguration(settings: Settings) -> str | None:
+    """启用工作流审批面时鉴权必须是「真鉴权」；否则返回原因（纯函数）。
+
+    审批面是**写入口**：能推进审批 = 能放行业务写操作。在 stub 鉴权下
+    ``X-User-Roles`` 可被任意客户端伪造 ⇒ 「角色才有资格批」形同虚设；
+    决策接口虽然额外要求 ``dbUserId is not None``，但 stub 头命中 DB 用户时
+    依然可由客户端指定用户名来顶替。
+
+    与 `semanticReleaseAuthMisconfiguration` 是同一类风险（治理面暴露），
+    但这条开关影响的是**写路径** ⇒ 后果更重。
+
+    不阻塞启动：本地开发与测试套件依赖 stub 鉴权。但必须大声告警，
+    由部署方决定是否真的在非真鉴权环境启用该开关。
+    """
+    if not settings.enableWorkflow:
+        return None
+    if settings.authMode == "real" and not settings.authStubEnabled:
+        return None
+    return (
+        "ENABLE_WORKFLOW=true 但鉴权仍为 stub"
+        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
+        "任意客户端可伪造 X-User-Roles / X-User-Id 冒充审批人，推进审批并放行业务写。"
         "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
     )
 

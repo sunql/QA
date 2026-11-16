@@ -210,6 +210,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _knowledgeFacadeAuthReason = knowledgeFacadeAuthMisconfiguration(settings)
     if _knowledgeFacadeAuthReason:
         logger.error("🚨 安全告警：%s", _knowledgeFacadeAuthReason)
+    # 工作流审批面（P5）：审批是**写入口**（能推进审批 = 能放行业务写）。
+    # stub 鉴权下 X-User-Id / X-User-Roles 可伪造 ⇒ 「谁有资格批」形同虚设。
+    # 与上面同一处理方式：只告警，不阻塞（本地/测试依赖 stub）。
+    from app.config import workflowAuthMisconfiguration
+
+    _workflowAuthReason = workflowAuthMisconfiguration(settings)
+    if _workflowAuthReason:
+        logger.error("🚨 安全告警：%s", _workflowAuthReason)
     # 本体发现域（WP-ONT-AI A1）：路由**无条件挂载**，写入口是 requireAdmin，
     # 读入口回吐业务库 schema 结构 ⇒ 生产必须跑真鉴权。
     # ⚠️ 这里**不再**加域级自检（安全审查 LOW-1）：`validateProduction()` 已在
@@ -709,6 +717,17 @@ def createApp() -> FastAPI:
             procurement_knowledge.router,
             prefix="/api/v1/procurement/knowledge",
             tags=["procurement-knowledge"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
+    # P5 工作流 / 审批（L 级独立立项）：开关关闭时整组不注册（404）⇒
+    # 「没开 = 没有这个面」；import 也留在条件内（未启用的子系统不加载）。
+    if settings.enableWorkflow:
+        from app.api.v1 import workflow
+
+        app.include_router(
+            workflow.router,
+            prefix="/api/v1/workflow",
+            tags=["workflow"],
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
         )
     app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])

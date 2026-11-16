@@ -141,8 +141,9 @@ DB `CHECK`）：只改两处 ⇒ 运行时报错或库层拒绝写入。
 
 - **ORM 与迁移的列注释 / CHECK 表达式逐字一致**，由 `test_discovery_models.py`（17 例）双向钉住
   —— 因为 `alembic check` **只比名不比式**，只补名会假绿。
-- `alembic check` 对这两张新表**零漂移**（唯一报出的 `remove_table po_lines_sandbox` 是
-  `test_l2_cte_avg_of_ratios.py` 留下的既有残留噪音）。
+- `alembic check` 对这两张新表**零漂移**：在**全新库**（从零跑完整迁移链）上实测
+  `No new upgrade operations detected.`（复用测试库唯一报出的
+  `remove_table po_lines_sandbox` 是 `test_l2_cte_avg_of_ratios.py` 留下的既有残留噪音）。
 
 ---
 
@@ -344,6 +345,14 @@ for p in sorted(x for x in app.openapi()['paths'] if 'ontology-discovery' in x):
 export DATABASE_URL='postgresql+asyncpg://qa_user:***@127.0.0.1:5434/qa_metadata_test'
 .venv/bin/alembic current   # ⇒ 0148 (head)
 .venv/bin/alembic check     # ⇒ 仅 remove_table po_lines_sandbox（既有残留噪音；新两表零漂移）
+```
+
+**全新库复核**（从零跑完整迁移链 ⇒ CI 的真实条件）：
+
+```bash
+export DATABASE_URL='postgresql+asyncpg://qa_user:***@127.0.0.1:5434/qa_metadata_test_a1fresh'
+.venv/bin/alembic upgrade head   # ⇒ 0145 → 0146 → 0147 → 0148 逐条成功
+.venv/bin/alembic check           # ⇒ No new upgrade operations detected.
 ```
 
 - `0148` 的 `ck_audit_log_action` 白名单实测已含 `REUSE`（`\d audit_log` 可见）。

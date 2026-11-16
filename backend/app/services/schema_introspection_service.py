@@ -101,8 +101,40 @@ def _emptyTable() -> dict[str, Any]:
     return {"owner": "", "columns": [], "primary_keys": [], "foreign_keys": []}
 
 
+# 异常取值的日志截断长度：库侧返回值理论上很短，但「理论上」不是防线。
+_LOG_VALUE_LIMIT = 40
+
+
+def _optionalInt(value: Any) -> int | None:
+    """把库侧返回的精度 / 长度归一为 int 或 None。
+
+    DB 侧可能是 int / Decimal / str（如 Oracle 的 NUMBER 列）⇒ 统一成 int；
+    采集不到（None）或形状异常 ⇒ None（**不用 0 兜底**：0 与「未定义」语义不同）。
+
+    形状异常**不静默**：留一条 WARNING（截断后打印取值）供排障——否则「精度一直
+    是 null」会被当成「这个库不报精度」，而真实原因是驱动返回了意料之外的形状。
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raw = repr(value)
+        logger.warning(
+            "列精度 / 长度取值形状异常，按「采集不到」处理为 None：value=%s",
+            raw if len(raw) <= _LOG_VALUE_LIMIT else f"{raw[:_LOG_VALUE_LIMIT]}…",
+        )
+        return None
+
+
 def _mergeRows(columnRows: list[dict], pkRows: list[dict], fkRows: list[dict]) -> dict[str, dict]:
-    """按表名合并三份数据字典查询结果。"""
+    """按表名合并三份数据字典查询结果。
+
+    列的精度 / 长度键名**三方言统一**（`numeric_precision` / `numeric_scale` /
+    `character_max_length`）⇒ 取键口径只有一套；SQL 侧负责把各方言的原生列名
+    别名成这组规范键（Oracle: DATA_PRECISION / DATA_SCALE / CHAR_LENGTH；
+    PG/MySQL: NUMERIC_PRECISION / NUMERIC_SCALE / CHARACTER_MAXIMUM_LENGTH）。
+    """
     tables: dict[str, dict] = {}
     for row in columnRows:
         entry = tables.setdefault(row["table_name"], _emptyTable())
@@ -112,6 +144,9 @@ def _mergeRows(columnRows: list[dict], pkRows: list[dict], fkRows: list[dict]) -
                 "column_name": row["column_name"],
                 "data_type": row["data_type"],
                 "nullable": bool(row["nullable"]),
+                "numeric_precision": _optionalInt(row.get("numeric_precision")),
+                "numeric_scale": _optionalInt(row.get("numeric_scale")),
+                "character_max_length": _optionalInt(row.get("character_max_length")),
             }
         )
     for row in pkRows:
@@ -535,7 +570,10 @@ _ORACLE_COLUMNS_SQL = """
 SELECT table_name AS "table_name", column_name AS "column_name",
        data_type AS "data_type",
        CASE WHEN nullable = 'Y' THEN 1 ELSE 0 END AS "nullable",
-       '{owner}' AS "owner"
+       '{owner}' AS "owner",
+       data_precision AS "numeric_precision",
+       data_scale AS "numeric_scale",
+       char_length AS "character_max_length"
 FROM ALL_TAB_COLUMNS
 WHERE owner = '{owner}'
 ORDER BY table_name, column_id
@@ -582,7 +620,10 @@ def _buildInfoSchemaQueries(schemaExpr: str) -> dict[str, str]:
         "columns": f"""
 SELECT table_name AS table_name, column_name AS column_name, data_type AS data_type,
        CASE WHEN is_nullable = 'YES' THEN 1 ELSE 0 END AS nullable,
-       table_schema AS owner
+       table_schema AS owner,
+       numeric_precision AS numeric_precision,
+       numeric_scale AS numeric_scale,
+       character_maximum_length AS character_max_length
 FROM information_schema.columns
 WHERE table_schema = {schemaExpr}
 ORDER BY table_name, ordinal_position

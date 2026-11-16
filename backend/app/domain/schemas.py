@@ -1694,6 +1694,15 @@ class ColumnSchemaRead(CamelModel):
     # 缺该字段自动取默认值（None），向后兼容。导入时作为 ontology_property.description
     # 的最高优先级来源（高于 LLM 增强）。
     comment: str | None = None
+    # 列精度 / 长度（WP-ONT-AI A2a，L-9）：`data_type` 只带**类型名**（"NUMBER" /
+    # "VARCHAR"）⇒ NUMBER(10,2) 与 NUMBER(10,4)、VARCHAR(10) 与 VARCHAR(50) 在旧口径下
+    # **不可区分** ⇒ 采集出的快照逐字相同 ⇒ 内容哈希相同 ⇒ 发现引擎看不见「精度 / 长度
+    # 变了」这类变更。三个字段各自独立（**不拼进 data_type**）⇒ 可分别判「类型变了」
+    # 与「精度变了」。采集不到时为 None（老 schema_cache JSON 缺该键自动取默认值 ⇒
+    # 向后兼容；0 与「未定义」语义不同 ⇒ 不用 0 兜底）。
+    numeric_precision: int | None = None
+    numeric_scale: int | None = None
+    character_max_length: int | None = None
 
 
 class ForeignKeySchemaRead(CamelModel):

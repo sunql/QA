@@ -48,7 +48,11 @@ from app.services.schema_introspection_service import SchemaIntrospectionService
 logger = logging.getLogger(__name__)
 
 # 快照结构版本（与 Manifest 的 `schemaVersion` 同风格，便于将来演进）。
-SNAPSHOT_SCHEMA_VERSION = "v1"
+# v2（WP-ONT-AI A2a）：列项新增 `numericPrecision` / `numericScale` / `characterMaxLength`
+# ⇒ 快照 JSON 形状变了 ⇒ **旧快照行（v1）与新快照不可比**：同一份 schema 采集两次
+# （v1 时代与 v2 时代）会得到不同哈希 ⇒ 发现域会新增一行快照。这是**预期**行为：
+# 形状变了就是变了，版本号就是用来显式记录这件事的。
+SNAPSHOT_SCHEMA_VERSION = "v2"
 
 # 允许的访问策略模式。发现域**只读**——策略声明可写直接拒绝登记与采集。
 ALLOWED_POLICY_MODES = frozenset({"READ_ONLY"})
@@ -204,6 +208,11 @@ def normalizeSnapshot(tables: Sequence[TableSchemaRead]) -> dict[str, Any]:
                 "dataType": sanitizeIdentifierValue(column.data_type) or "",
                 "nullable": bool(column.nullable),
                 "comment": sanitizeComment(column.comment),
+                # 精度 / 长度（L-9）：数值不是外部文本 ⇒ 无需净化；
+                # 「采集不到」= None（与 comment 同口径：键恒在、值可为 None）。
+                "numericPrecision": column.numeric_precision,
+                "numericScale": column.numeric_scale,
+                "characterMaxLength": column.character_max_length,
             }
             for column in table.columns
         ]

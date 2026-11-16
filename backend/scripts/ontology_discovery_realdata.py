@@ -103,7 +103,7 @@ _DEFAULT_SOURCE_NAME = "asset-demo-mysql 发现源"
 _DEFAULT_DATASOURCE_NAME = "asset-demo-mysql"
 
 # 快照 JSON 的结构版本（与发现服务常量一致）
-_EXPECTED_SCHEMA_VERSION = "v1"
+_EXPECTED_SCHEMA_VERSION = "v2"
 
 # 报告里最多列出的变更条数（全部计数仍完整）
 _MAX_REPORTED_CHANGES = 20

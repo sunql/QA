@@ -17,8 +17,15 @@ W3 完成定义：「**注入失败后补偿执行；新适配器不改核心**�
    实例 COMPENSATED（先 FAILED 再 COMPENSATED，状态机只允许这一条路径）。
    适配器不支持补偿 ⇒ 跳过并**留痕**（不假装补偿过）。
 
-⚠️ 写操作的**唯一**入口是本模块 + 其适配器层；其它服务层不得绕过它直接写外部系统
-（G6 判据，由源码级反向守卫钉住）。
+⚠️ **P5 表写入的唯一入口**是存储层（``workflow_store.py``）⇒ 其它模块直接改
+``workflow_*`` / ``business_command`` / ``approval_task`` 会被源码级反向守卫判红
+（``app/tests/unit/test_workflow_write_gate.py``）。
+
+⚠️ **守卫钉不住的部分（别当成事实）**：守卫只管**库表**写入，管不了「外部系统
+写」——适配器注册表是**开放**的，任何模块都能 ``register`` 一个直写外部系统的
+handler ⇒「所有外部写都经 Command」是**约定 + 评审**，不是守卫能证明的事实。
+⇒ 注册点已收口到**组装根**（``app/workers/workflow_worker.py``）：新增适配器必须
+改到那里 ⇒ 必然过评审。
 """
 
 from __future__ import annotations

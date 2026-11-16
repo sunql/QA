@@ -8,19 +8,28 @@
 
 守卫口径（机械可判定）：
 
-1. **写入口收敛到存储层**：``app/`` 下（除测试）**只有**
+1. **写入口收敛到存储层**：``app/`` + ``scripts/`` 下（除测试）**只有**
    ``app/services/workflow_store.py`` 允许触碰 P5 表的 ORM 实体 ——
-   其余模块（服务层 / API 层 / Worker）一律不得直接构造 / update / delete
-   P5 的 ORM 实体。
+   其余模块（服务层 / API 层 / Worker / 运维脚本）一律不得直接构造 /
+   update / delete / **改属性** P5 的 ORM 实体。
 2. **ORM 定义点唯一**：P5 表的 ``__tablename__`` 只允许出现在
    ``app/domain/workflow_models.py``（否则「写入口收敛」会漏掉一处定义）。
 3. **原始 SQL 不直写**：不得用 ``text("... INSERT/UPDATE/DELETE workflow_...")``
-   绕过 ORM。
-4. **Agent 仍只读**：Agent 工具注册表里**不得**出现工作流 / 审批 / 命令类写工具。
-5. **默认关闭**：``ENABLE_WORKFLOW`` 默认 ``false``（关 ⇒ 路由 404、Worker 不轮询）。
+   绕过 ORM，**也不得**用裸字符串（``session.execute("UPDATE workflow_...")``）。
+4. **适配器注册点收口**：注册表是**开放**的 ⇒ 任何模块都能 ``register`` 一个直写
+   外部系统的 handler ⇒ 注册点只允许在**组装根**（``app/workers/workflow_worker.py``）。
+5. **Agent 仍只读**：Agent 工具注册表里**不得**出现工作流 / 审批 / 命令类写工具。
+6. **默认关闭**：``ENABLE_WORKFLOW`` 默认 ``false``（关 ⇒ 路由 404、Worker 不轮询）。
 
 ⚠️ 断言口径：断**「源码里是否出现违规调用」**，用**合成样本**反向验证扫描器本身
 （扫描器写错 ⇒ 守卫空转 ⇒ 必须能被抓出来）。
+
+⚠️ **守卫的已知边界（别当成事实）**：
+
+- 只管**库表**写入，**管不了**「外部系统写」⇒「所有外部写都经 Command」是
+  **约定 + 评审**，不是守卫能证明的事实（注册点已收口到组装根作为补偿手段）。
+- 实体追踪是**保守**的启发式（识别 ORM 类引用 / 形参标注 / 经存储层取回）⇒
+  极端变形（``getattr`` 反射拿实体再改属性）**可能漏报**。
 """
 
 from __future__ import annotations
@@ -30,8 +39,13 @@ import pathlib
 
 import pytest
 
-# 允许直接触碰 P5 表的模块（**唯一**写入口）。
-_ALLOWED_WRITERS = {"workflow_store.py"}
+# 允许直接触碰 P5 表的模块（**唯一**写入口）——按**路径**白名单。
+# ⚠️ 不能按文件名放行：新建一个 ``scripts/workflow_store.py`` 就能整体豁免
+#    ⇒ 白名单形同虚设。
+_ALLOWED_WRITERS = frozenset({"app/services/workflow_store.py"})
+
+# 允许注册 Command 适配器的模块（**唯一**注册点 = 组装根）。
+_ALLOWED_REGISTRARS = frozenset({"app/workers/workflow_worker.py"})
 
 # P5 表名前缀（用于「ORM 定义点唯一」这条守卫）。
 _P5_TABLE_PREFIXES = ("workflow_",)
@@ -40,7 +54,24 @@ _P5_TABLE_NAMES = frozenset({"business_command", "approval_task"})
 # 存储层之外的模块一旦出现这些调用 ⇒ 绕过写入口。
 _WRITE_CALL_NAMES = frozenset({"update", "delete", "insert", "merge"})
 
+# ``session.<方法>`` 形态的写入口（属性赋值是另一种形态，见 ``findWriteOffenders``）。
+_SESSION_WRITE_METHODS = frozenset({"add", "add_all", "delete", "merge"})
+
 _APP_DIR = pathlib.Path(__file__).resolve().parents[2]
+_BACKEND_DIR = _APP_DIR.parent
+_SCRIPTS_DIR = _BACKEND_DIR / "scripts"
+
+
+def _isAllowedWriter(relPath: str) -> bool:
+    """该模块是否在**写入口白名单**里（按相对 ``backend/`` 的 posix 路径判定）。"""
+
+    return relPath in _ALLOWED_WRITERS
+
+
+def _isAllowedRegistrar(relPath: str) -> bool:
+    """该模块是否是**唯一**的适配器注册点（组装根）。"""
+
+    return relPath in _ALLOWED_REGISTRARS
 
 
 def _p5ModelPairs() -> tuple[frozenset[str], frozenset[str]]:
@@ -83,6 +114,86 @@ def _rawWriteKeywords(line: str) -> bool:
     return any(kw in upper for kw in ("INSERT INTO", "UPDATE ", "DELETE FROM"))
 
 
+def _mentionsOrmClass(node: ast.AST, ormNames: frozenset[str]) -> bool:
+    """表达式 / 注解里是否**引用**了 P5 ORM 类名。"""
+
+    return any(isinstance(sub, ast.Name) and sub.id in ormNames for sub in ast.walk(node))
+
+
+def _rootName(node: ast.AST) -> str | None:
+    """``a.b.c`` ⇒ ``"a"``（属性赋值的归属根）。"""
+
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _mentionsStoreCall(node: ast.AST) -> bool:
+    """表达式里是否是「经存储层拿到的实体」（``self._store.getInstance(...)``）。"""
+
+    return any(
+        (isinstance(sub, ast.Attribute) and sub.attr in {"_store", "store"})
+        or (isinstance(sub, ast.Name) and sub.id in {"_store", "store"})
+        for sub in ast.walk(node)
+    )
+
+
+def _trackedEntityNames(tree: ast.AST, ormNames: frozenset[str]) -> set[str]:
+    """追踪「**持有 P5 ORM 实例**」的变量名。
+
+    为什么要追踪：``task.status = "APPROVED"`` 这种**属性赋值**既不走 ``add`` /
+    ``update()`` / 原始 SQL ⇒ 只盯「调用形态」的扫描器会漏掉它 ⇒ 必须先把
+    「哪些变量是 P5 实体」认出来，才能把属性赋值判成违规。
+
+    认法（保守，宁可漏报也不误报）：
+
+    - 赋值语句的**右值**引用了 ORM 类名 ⇒ 目标变量就是实体
+      （``task = (await session.execute(select(ApprovalTask))).scalar_one()``）；
+    - 函数**形参**标注了 ORM 类 ⇒ 该形参就是实体
+      （``def decide(task: ApprovalTask)``）。
+    """
+
+    names: set[str] = set()
+
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        value: ast.expr | None = None
+        annotation: ast.expr | None = None
+
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+            annotation = node.annotation
+        else:
+            continue
+
+        if value is not None:
+            mentions = _mentionsOrmClass(value, ormNames) or _mentionsStoreCall(value)
+        else:
+            # 只有注解（``x: ApprovalTask``）⇒ 注解说了算。
+            mentions = annotation is not None and _mentionsOrmClass(annotation, ormNames)
+        if not mentions:
+            continue
+
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+
+    # 形参标注 ⇒ 形参名即实体名。
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        args = node.args
+        for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]:
+            if arg.annotation is not None and _mentionsOrmClass(arg.annotation, ormNames):
+                names.add(arg.arg)
+
+    return names
+
+
 def findWriteOffenders(
     source: str,
     fileName: str,
@@ -103,29 +214,39 @@ def findWriteOffenders(
     except SyntaxError as exc:  # pragma: no cover —— 解析失败要暴露而不是放过
         return [f"{fileName}:0: 源码无法解析（SyntaxError: {exc}）"]
 
+    tracked = _trackedEntityNames(tree, ormNames)
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
 
         func = node.func
+        callName = (
+            func.id
+            if isinstance(func, ast.Name)
+            else (func.attr if isinstance(func, ast.Attribute) else "")
+        )
         # ① update(...) / delete(...) / insert(...) / merge(...) 直接作用于 ORM 类
+        #    （含 ``sa.update(...)`` 这种带命名空间的写法）。
         if (
-            isinstance(func, ast.Name)
-            and func.id in _WRITE_CALL_NAMES
+            callName in _WRITE_CALL_NAMES
             and node.args
             and _isOrmName(node.args[0], ormNames)
         ):
-            offenders.append(f"{fileName}:{node.lineno}: {func.id}(<P5 ORM 实体>)")
+            offenders.append(f"{fileName}:{node.lineno}: {callName}(<P5 ORM 实体>)")
 
         # ② ORM 实体构造（``WorkflowInstance(...)``）= 潜在写入
         if _isOrmName(func, ormNames):
             offenders.append(f"{fileName}:{node.lineno}: 直接构造 P5 ORM 实体 {func.id}(...)")
 
-        # ③ session.add / session.add_all 传入 P5 ORM 实体
-        if isinstance(func, ast.Attribute) and func.attr in {"add", "add_all"}:
+        # ③ session.add / add_all / delete / merge 传入 P5 ORM 实体
+        #    （实体既可以是**就地构造**，也可以是**已跟踪的变量**）。
+        if isinstance(func, ast.Attribute) and func.attr in _SESSION_WRITE_METHODS:
             for arg in node.args:
-                if _hasOrmConstructor(arg, ormNames):
-                    offenders.append(f"{fileName}:{node.lineno}: session.{func.attr}(<P5 ORM 实体>)")
+                if _hasOrmConstructor(arg, ormNames) or _rootName(arg) in tracked:
+                    offenders.append(
+                        f"{fileName}:{node.lineno}: session.{func.attr}(<P5 ORM 实体>)"
+                    )
 
         # ④ 原始 SQL 直写 P5 表（表名可能在语句中部：``UPDATE workflow_instance SET …``）
         if isinstance(func, ast.Name) and func.id == "text":
@@ -138,17 +259,89 @@ def findWriteOffenders(
                 ):
                     offenders.append(f"{fileName}:{node.lineno}: text() 原始 SQL 直写 P5 表")
 
+        # ⑤ 裸字符串 execute（``session.execute("UPDATE workflow_instance …")``）：
+        #    不在 ``text()`` 包装里 ⇒ 早期扫描器放行 ⇒ 后门。
+        if isinstance(func, ast.Attribute) and func.attr == "execute":
+            for arg in node.args:
+                if (
+                    isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, str)
+                    and _rawWriteKeywords(arg.value)
+                    and any(table in arg.value for table in tableNames)
+                ):
+                    offenders.append(f"{fileName}:{node.lineno}: 裸字符串 execute 直写 P5 表")
+
+    # ⑥ 属性赋值（``task.status = "APPROVED"``）= ORM 的另一种写入口。
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            if not isinstance(target, ast.Attribute):
+                continue
+            root = _rootName(target)
+            if root in tracked:
+                offenders.append(
+                    f"{fileName}:{node.lineno}: 属性赋值绕过存储层 {root}.{target.attr} = ..."
+                )
+
     return offenders
 
 
-def _sourceFiles() -> list[pathlib.Path]:
-    """被扫描的源码文件（``app/`` 下、排除测试目录）。"""
+def findRegistryOffenders(source: str, fileName: str) -> list[str]:
+    """在**单份源码**里找出「注册 Command 适配器」的调用点。
 
-    return [
-        path
-        for path in sorted(_APP_DIR.rglob("*.py"))
-        if "tests" not in path.relative_to(_APP_DIR).parts
-    ]
+    为什么要单独一道：适配器注册表是**开放**的（任何模块都能 ``register`` 一个
+    直写外部系统的 handler）⇒ 「写操作全部经 Command」会被悄悄绕过 ⇒ 注册点
+    必须收口在**组装根**（Worker 启动处）。
+
+    只在**导入了注册表类**的文件里查（``CommandHandlerRegistry``）⇒ 不会把
+    仓内其它同名 ``register``（``IdMappingService.register`` 等）误判成命令适配器注册。
+    """
+
+    if "CommandHandlerRegistry" not in source:
+        return []
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:  # pragma: no cover —— 解析失败要暴露而不是放过
+        return [f"{fileName}:0: 源码无法解析（SyntaxError: {exc}）"]
+
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "register":
+            offenders.append(f"{fileName}:{node.lineno}: 注册适配器 {func.attr}(...)")
+
+    return offenders
+
+
+def _sourceFiles() -> list[tuple[pathlib.Path, str]]:
+    """被扫描的源码文件。
+
+    返回 ``[(路径, 相对 backend/ 的 posix 路径), ...]``。
+
+    范围 = ``app/``（排除测试目录）**+** ``scripts/``：
+    脚本是运维侧的第二个写入口（回填 / 修复脚本），它若绕过存储层直写 P5 表，
+    只扫 ``app/`` 的守卫就漏了一处。
+    """
+
+    roots = ((_APP_DIR, True), (_SCRIPTS_DIR, False))
+    files: list[tuple[pathlib.Path, str]] = []
+    for root, skipTests in roots:
+        for path in sorted(root.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            if skipTests and "tests" in path.relative_to(root).parts:
+                continue
+            files.append((path, path.relative_to(_BACKEND_DIR).as_posix()))
+    return files
 
 
 # =============================================================================
@@ -197,6 +390,151 @@ SQL = text("UPDATE workflow_instance SET status = 'FAILED'")
     assert any("原始 SQL" in item for item in offenders), offenders
 
 
+def test_扫描器能抓出实体属性赋值():
+    """绕过存储层的**属性赋值**（``task.status = "APPROVED"``）也必须被抓出来。
+
+    为什么补这条：属性赋值是 ORM 的**另一种**写入口——它不经过 ``add`` /
+    ``update()`` / 原始 SQL ⇒ 只盯「调用形态」的扫描器会漏掉它。
+    """
+
+    source = """
+from sqlalchemy import select
+
+async def run(session):
+    task = (await session.execute(select(ApprovalTask))).scalar_one()
+    task.status = "APPROVED"
+"""
+    offenders = findWriteOffenders(source, "synthetic.py", _p5OrmClassNames())
+
+    assert any("属性赋值" in item for item in offenders), offenders
+
+
+def test_扫描器能抓出session_delete():
+    source = """
+from sqlalchemy import select
+
+async def run(session):
+    task = (await session.execute(select(ApprovalTask))).scalar_one()
+    await session.delete(task)
+"""
+    offenders = findWriteOffenders(source, "synthetic.py", _p5OrmClassNames())
+
+    assert any("session.delete" in item for item in offenders), offenders
+
+
+def test_扫描器能抓出session_merge():
+    source = """
+async def run(session):
+    await session.merge(WorkflowInstance(id=1))
+"""
+    offenders = findWriteOffenders(source, "synthetic.py", _p5OrmClassNames())
+
+    assert any("session.merge" in item for item in offenders), offenders
+
+
+def test_扫描器能抓出已跟踪实体的session_add():
+    """``session.add(row)``（row 是查出来的实体）同样绕过存储层。"""
+
+    source = """
+from sqlalchemy import select
+
+async def run(session):
+    row = (await session.execute(select(BusinessCommand))).scalar_one()
+    session.add(row)
+"""
+    offenders = findWriteOffenders(source, "synthetic.py", _p5OrmClassNames())
+
+    assert any("session.add" in item for item in offenders), offenders
+
+
+def test_扫描器能抓出裸字符串execute():
+    """``session.execute("UPDATE workflow_instance …")``（裸字符串）也必须被抓出来。
+
+    为什么补这条：``text("…")`` 形态已被覆盖，但**裸字符串**（驱动层自己拼的
+    SQL）不在 ``text()`` 包装里 ⇒ 早期扫描器放行 ⇒ 后门。
+    """
+
+    source = """
+async def run(session):
+    await session.execute("UPDATE workflow_instance SET status = 'FAILED'")
+"""
+    offenders = findWriteOffenders(source, "synthetic.py", _p5OrmClassNames())
+
+    assert any("裸字符串" in item for item in offenders), offenders
+
+
+def test_扫描器能抓出sa_update形式():
+    """``sa.update(BusinessCommand)``（带命名空间的 update）也是后门。"""
+
+    source = """
+import sqlalchemy as sa
+
+async def run(session):
+    await session.execute(sa.update(BusinessCommand).where(BusinessCommand.id == 1))
+"""
+    offenders = findWriteOffenders(source, "synthetic.py", _p5OrmClassNames())
+
+    assert any("update(<P5 ORM 实体>)" in item for item in offenders), offenders
+
+
+def test_扫描器能抓出存储层取回后直接改属性():
+    """最真实的绕过形态：从存储层**取回**实体后直接改属性。"""
+
+    source = """
+async def run(session, store):
+    instance = await store.getInstance(session, 1)
+    instance.status = "FAILED"
+"""
+    offenders = findWriteOffenders(source, "synthetic.py", _p5OrmClassNames())
+
+    assert any("属性赋值" in item for item in offenders), offenders
+
+
+def test_扫描器能抓出适配器注册():
+    """注册 Command 适配器 ⇒ 写入口从「组装根」扩散 ⇒ 必须被抓出来。"""
+
+    source = """
+from app.services.workflow_command_ports import CommandHandlerRegistry
+
+registry = CommandHandlerRegistry()
+registry.register("po.write", handler)
+"""
+    offenders = findRegistryOffenders(source, "synthetic.py")
+
+    assert any("注册适配器" in item for item in offenders), offenders
+
+
+def test_适配器注册点收口在组装根():
+    """适配器**只能**在组装根（Worker 启动处）注册。
+
+    为什么：注册表是**开放**的（任何模块都能 ``register`` 一个直写外部系统的
+    handler）⇒ 「写操作全部经 Command」就会被悄悄绕过 ⇒ 注册点必须收口，
+    新增适配器必须改到组装根 ⇒ 走评审。
+    """
+
+    offenders: list[str] = []
+    for path, rel in _sourceFiles():
+        if _isAllowedRegistrar(rel):
+            continue
+        offenders.extend(findRegistryOffenders(path.read_text(encoding="utf-8"), rel))
+
+    assert offenders == [], (
+        "适配器注册点扩散到组装根之外（写入口被绕过）：\n" + "\n".join(offenders)
+    )
+
+
+def test_组装根确实注册了适配器():
+    """注册点收口守卫**不是空转**：组装根必须真的注册了适配器。"""
+
+    source = (
+        pathlib.Path(_APP_DIR) / "workers" / "workflow_worker.py"
+    ).read_text(encoding="utf-8")
+
+    offenders = findRegistryOffenders(source, "app/workers/workflow_worker.py")
+
+    assert offenders, "组装根没有注册任何适配器 ⇒ 注册点收口守卫形同虚设"
+
+
 def test_扫描器不误报只读查询():
     """只读路径（select / 属性访问 / 类型注解）**不得**被误判。"""
 
@@ -230,11 +568,11 @@ def test_只有存储层能写P5表():
     assert ormNames, "P5 ORM 实体集合为空（守卫会空转 ⇒ 必须先确认模型定义）"
 
     offenders: list[str] = []
-    for path in _sourceFiles():
-        if path.name in _ALLOWED_WRITERS:
+    for path, rel in _sourceFiles():
+        if _isAllowedWriter(rel):
             continue
         offenders.extend(
-            findWriteOffenders(path.read_text(encoding="utf-8"), path.name, ormNames)
+            findWriteOffenders(path.read_text(encoding="utf-8"), rel, ormNames)
         )
 
     assert offenders == [], (
@@ -250,9 +588,36 @@ def test_守卫覆盖Worker层():
     它若绕过存储层直写 P5 表，上面的守卫就漏了一处。
     """
 
-    names = {path.name for path in _sourceFiles()}
+    names = {rel for _path, rel in _sourceFiles()}
 
-    assert "workflow_worker.py" in names, "Worker 未被守卫覆盖（扫描范围可能被人为收窄）"
+    assert any(rel.endswith("workflow_worker.py") for rel in names), (
+        "Worker 未被守卫覆盖（扫描范围可能被人为收窄）"
+    )
+
+
+def test_守卫覆盖脚本目录():
+    """``backend/scripts/`` 也是写入口候选（回填 / 修复脚本）⇒ 必须落在扫描范围内。
+
+    ⚠️ 别把扫描范围缩到 ``app/``：脚本是运维侧的第二个写入口，它若绕过存储层
+    直写 P5 表，上面的守卫就漏了一处。
+    """
+
+    rels = {rel for _path, rel in _sourceFiles()}
+
+    assert any(rel.startswith("scripts/") for rel in rels), "scripts/ 未被守卫覆盖"
+
+
+def test_白名单按路径而非文件名():
+    """白名单必须按**路径**放行 ⇒ 任何目录下的同名文件都不能豁免。
+
+    早期按文件名放行（``path.name in {"workflow_store.py"}``）⇒ 新建一个
+    ``scripts/workflow_store.py`` 就能整体豁免 ⇒ 白名单形同虚设。
+    """
+
+    assert _isAllowedWriter("app/services/workflow_store.py") is True
+    assert _isAllowedWriter("app/services/nested/workflow_store.py") is False
+    assert _isAllowedWriter("scripts/workflow_store.py") is False
+    assert _isAllowedWriter("app/api/v1/workflow.py") is False
 
 
 def test_存储层本身确实在写P5表():
@@ -271,7 +636,7 @@ def test_P5表的ORM定义点唯一():
     """P5 表的 ``__tablename__`` 只允许出现在 ``app/domain/workflow_models.py``。"""
 
     offenders: list[str] = []
-    for path in _sourceFiles():
+    for path, rel in _sourceFiles():
         if path.name == "workflow_models.py":
             continue
         source = path.read_text(encoding="utf-8")
@@ -281,10 +646,10 @@ def test_P5表的ORM定义点唯一():
                 continue
             for table in _P5_TABLE_NAMES:
                 if table in stripped:
-                    offenders.append(f"{path.name}:{no}: {stripped}")
+                    offenders.append(f"{rel}:{no}: {stripped}")
             for prefix in _P5_TABLE_PREFIXES:
                 if prefix in stripped:
-                    offenders.append(f"{path.name}:{no}: {stripped}")
+                    offenders.append(f"{rel}:{no}: {stripped}")
                     break
 
     assert offenders == [], (

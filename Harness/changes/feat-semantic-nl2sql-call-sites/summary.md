@@ -3,7 +3,7 @@
 - **日期**：2026-11-16
 - **作者**：Claude
 - **Phase**：P3d 其余 NL2SQL 调用点（D29–D31）
-- **状态**：in-review（D29/D30 已交付并实证；D31 回归+PR 中）⇒ **P3 全阶段完成**
+- **状态**：**已合入 main**（PR #135，squash `55fa8188`）⇒ **P3 全阶段完成**
 - **关联变更**：[feat-semantic-agent-snapshot](../feat-semantic-agent-snapshot/summary.md)（P3c，run 钉住）·
   [feat-semantic-release-graph-mirror](../feat-semantic-release-graph-mirror/summary.md)（P3b，图谱面）·
   [feat-semantic-registry-nl2sql](../feat-semantic-registry-nl2sql/summary.md)（P2，schema 渲染面）·
@@ -83,6 +83,13 @@ P2/P3a/P3b/P3c 各自交付后，剩两个**未接**的本体消费面：
 | **合计** | **331 passed** | ruff 干净（agent_runtime_service 的 7 条为 HEAD 既有债，错误集与 base 相同） |
 
 **TDD**：RED（模块 ImportError / 视图分支缺）→ GREEN → 重构（抽取共享渲染管线回 <50 行）。
+
+**CI 对差（PR #135）**：基线 = main push run `43720575939`（`a45d8667`）；PR run =
+`43749497295`（`9563d3a3`）。逐 job 失败集合**完全一致**（backend unit 0–3 + integration
+0–3 共 8 红），merge-gate `failure-set-diff` = success ⇒ **净新增 0**。
+首轮 CI 曾净新增 4 条（`test_l4_agent_loop_metering.py`）：`chat_l4._loadQueryState` 传了
+`user.userId`（JWT subject 字符串）而非约定的 `user.dbUserId`（int）⇒ BIGINT 比字符串报
+UndefinedFunctionError ⇒ 共享事务中止 ⇒ 后续 commit 全挂。修复见 `daily/D31.md`。
 
 ## 7. 安全审查
 

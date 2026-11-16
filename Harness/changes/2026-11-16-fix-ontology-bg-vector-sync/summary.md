@@ -163,6 +163,14 @@ schema 与 HEAD 完全一致。
 
 ## 8. 部署验证
 
+> **两条线的分工（2026-11-16 rebase 后）**：
+> **生产热修** = fix-only 镜像（构建自 `5dd4ed86`，base `5ab1313c` ⇒ alembic head **0143**
+> = 生产当前版本 ⇒ 启动迁移 no-op）；
+> **仓库分支** = 已 rebase 到 `origin/main @ 0b97d33c`（含上游 P3a v2 双写 + **0145–0148
+> 四个新迁移**）⇒ **其镜像不得用于本次生产热修**（会自动跑 4 个迁移，有 DDL/锁表风险）。
+> 冲突按「锁内快照 + v1/v2 双写都在锁内」逐处合并，未丢上游任何改动；合并后
+> 12 例真 PG 集成测试 + 27 例 KPI 单测全绿，ruff 4 条与上游逐条相同（仅行号偏移）。
+
 **镜像**：`docker compose -f docker/docker-compose.yml build backend` ⇒
 `Image qa-system-backend Built`。镜像内自检：
 

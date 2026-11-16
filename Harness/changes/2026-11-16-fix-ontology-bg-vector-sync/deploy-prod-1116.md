@@ -1,6 +1,16 @@
 # 生产部署：本体向量后台同步修复（MissingGreenlet）
 
-- **代码版本**：分支 `fix/ontology-bg-vector-sync` @ `5dd4ed86`（base `main @ 5ab1313c`）
+- **代码版本**：分支 `fix/ontology-bg-vector-sync` @ `584bc361`（base `origin/main @ 0b97d33c`）
+
+> 🔴 **生产热修镜像 ≠ 仓库分支 HEAD**：镜像 `amd64-1116-vecsync` 构建自**热修专用提交**
+> `5dd4ed86`（base `5ab1313c` = 生产现役 `10c79bb3` + 纯 docs 提交）⇒ **alembic head = 0143
+> = 生产当前版本 ⇒ 启动迁移 no-op**。
+> 仓库分支后来 rebase 到 `origin/main @ 0b97d33c`（含上游 P3a v2 双写 + **0145–0148 四个新迁移**）
+> ⇒ **该分支的镜像不得用于本次生产热修**：起容器会自动执行 4 个新迁移
+> （`0145` 加列/删列、`0146` 建 2 表 2 索引、`0147` 建不可变触发器、`0148` 改 CHECK 约束）
+> ⇒ 有 DDL、有锁表风险，远超「零 DDL 热修」的承诺。
+> 两条线的分工：**生产部署 = fix-only 镜像**；**仓库分支 = 代码归档与后续合并**。
+> 0145–0148 的迁移需要**单独的发版批次**（含锁表评估与回填），不属于本次热修。
 - **变更性质**：**零 DDL**、**零业务数据写**、**零新环境变量**、**仅后端**
 - **迁移链**：head 仍是 `0143_kpi_time_grain`，与生产当前版本相同 ⇒ 启动时的
   `alembic upgrade head` 是 **no-op**
@@ -18,7 +28,7 @@
 
 | 文件 | 镜像 | sha256 | 大小 |
 |---|---|---|---|
-| `/tmp/qa-backend-amd64-1116-vecsync.tar.gz` | `qa-system-backend:amd64-1116-vecsync`（linux/amd64，源 `fix/ontology-bg-vector-sync @ 5dd4ed86`） | `0ca1b1a8dccf092938a8cacfae6d052581f3465a07566a289fba2d22fd560d54` | 278M |
+| `/tmp/qa-backend-amd64-1116-vecsync.tar.gz` | `qa-system-backend:amd64-1116-vecsync`（linux/amd64，源 `fix/ontology-bg-vector-sync @ 584bc361`） | `0ca1b1a8dccf092938a8cacfae6d052581f3465a07566a289fba2d22fd560d54` | 278M |
 
 **不需要前端包**：本修复无任何用户界面变化。
 

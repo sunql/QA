@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, NamedTuple
@@ -24,7 +26,7 @@ from neo4j.exceptions import AuthError, ServiceUnavailable
 from pymilvus.exceptions import MilvusException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import lazyload, selectinload
 
 from app.dependencies import CurrentUser
 from app.domain.enums import ClassRelationType, MetricStatus, MetricType
@@ -58,6 +60,7 @@ from app.domain.schemas import (
 )
 from app.infrastructure import milvus_client as milvus
 from app.infrastructure import neo4j_client as neo4j
+from app.infrastructure.database import ownSession
 from app.services.acl_service import AclService
 from app.services.audit_service import AuditService
 from app.services.embedding_service import EmbeddingService
@@ -189,6 +192,94 @@ def _metricEmbeddingText(metric: OntologyMetric) -> str:
 
 # 自动同步后台任务的强引用集合（create_task 弱引用会被 GC，需持握防丢失）
 _PENDING_SYNC_TASKS: set[asyncio.Task] = set()
+
+
+@dataclass(frozen=True)
+class _VectorSnapshot:
+    """向量同步所需的**不可变快照**（后台任务专用；类/属性/指标同形）。
+
+    为什么是快照而不是 ORM 实体：后台任务要跨一次 **10-25s 的 embedding 网络
+    调用** + 一次 **10-25s 的 Milvus flush**。若把 ORM 实体带出会话，
+    ① 期间会话一旦过期/关闭就是 ``DetachedInstanceError``；② 会话/连接会被
+    长时间占住（连接池 30 条，批量导入时 N 个属性任务会把池打满 ⇒
+    ``pool_timeout`` ⇒ 向量静默写不进去）。快照在**会话内**取好、**会话外**使用。
+
+    三个类型同形（字段名/语义一致，只是取值来源不同：指标的历史口径是把
+    ``agg_function`` 放进 description），故共用一个 dataclass，不重复三份。
+    """
+
+    ontologyId: int
+    name: str
+    alias: str | None
+    description: str | None
+    embeddingText: str
+
+
+# 每 (事件循环, 类型, 实体 id) 一把写入锁：同一实体的向量写入串行化。
+# asyncio.Lock 在 Python 3.10+ 构造时不绑 loop，但**首次使用**时绑定当时的
+# loop ⇒ 跨 loop 复用会抛 RuntimeError（pytest-asyncio 每测试一个新 loop）。
+# 故 key 里带 loop；引用计数归零即删除 ⇒ 既不跨 loop 误用，也不泄漏。
+_VECTOR_SYNC_LOCKS: dict[tuple[asyncio.AbstractEventLoop, str, int], asyncio.Lock] = {}
+_VECTOR_SYNC_LOCK_USERS: dict[tuple[asyncio.AbstractEventLoop, str, int], int] = {}
+
+
+@asynccontextmanager
+async def _vectorSyncLock(type_: str, entityId: int):
+    """同一实体的向量写入**串行化**（防「旧快照后写」覆盖新向量）。
+
+    为什么需要：后台任务在**自己读到的那一版**行上生成向量，而 create/update
+    连着来时两个任务会并发跑。若不加串行化，慢的那个任务（读的是**旧**行）
+    可能后写 Milvus ⇒ 最终向量是旧描述 ⇒ 语义检索永远拿旧含义
+    （2026-09-18 报障的形状）。``syncMissingClassEmbeddings`` 只补**缺失**向量，
+    发现不了「已存在但过期」的向量 ⇒ 陈旧向量会长期滞留。
+
+    为什么「锁内重读」就够：拿到锁之后再读一次行，读到的必然是该实体**当时
+    已提交的最新**状态；而同一实体的写入被这把锁串起来 ⇒ 最后写入的那次
+    一定带着最新状态 ⇒ 与任务到达顺序无关。
+
+    锁的粒度是 (类型, id) ⇒ 不同实体互不阻塞（批量导入 N 个属性仍是并行的）。
+    """
+    loop = asyncio.get_running_loop()
+    key = (loop, type_, entityId)
+    lock = _VECTOR_SYNC_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _VECTOR_SYNC_LOCKS[key] = lock
+    _VECTOR_SYNC_LOCK_USERS[key] = _VECTOR_SYNC_LOCK_USERS.get(key, 0) + 1
+    try:
+        async with lock:
+            yield
+    finally:
+        remaining = _VECTOR_SYNC_LOCK_USERS.get(key, 1) - 1
+        if remaining <= 0:
+            _VECTOR_SYNC_LOCK_USERS.pop(key, None)
+            _VECTOR_SYNC_LOCKS.pop(key, None)
+        else:
+            _VECTOR_SYNC_LOCK_USERS[key] = remaining
+
+
+async def _deleteMilvusVectorUnderLock(type_: str, entityId: int) -> None:
+    """在**同一把实体锁**下删除 Milvus 向量。
+
+    删除路径必须与后台同步共用 ``_vectorSyncLock``，否则存在「复活」竞态：
+    后台同步在锁内读到实体仍存活 → 停在 10-25s 的 embedding 调用 → 删除路径
+    提交并删掉 Milvus 向量 → 同步任务恢复并 ``syncEmbedding``（delete+insert）
+    把**已删实体**的向量写回去 ⇒ 语义召回永远命中一个不存在的属性/指标；
+    而 ``syncMissingClassEmbeddings`` 只补缺失、不删多余 ⇒ 孤儿向量长期滞留。
+
+    拿同一把锁后，删除必然发生在任何在途写入**之后** ⇒ 最终态 = 已删。
+    代价：若恰有该实体的写入在途，删除请求要等它写完（上限 ≈ 一次 Milvus 写入）。
+    这是刻意取舍——正确的最终态优先于删除延迟。
+
+    Milvus 是同步 SDK ⇒ ``asyncio.to_thread``，不阻塞事件循环。
+
+    v1 与 v2（P3a 语义注册表）**两个集合都在同一把锁内删**：后台同步的 v2 双写
+    也持这把锁 ⇒ 否则在途双写会把 v2 侧的向量写回来（v1 已删、v2 残留）。
+    """
+    async with _vectorSyncLock(type_, entityId):
+        await asyncio.to_thread(milvus.deleteByOntologyIdDual, entityId, type_)
+        # P3a 双写：v2 集合同删（软删除的类不该再被召回）。
+        await deleteRegistryV2Embedding(entityId, type_)
 
 
 def _mergedTechnique(entity: OntologyMetric, updates: dict) -> MetricTechnique:
@@ -685,9 +776,7 @@ class OntologyService:
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点删除", id, exc)
         try:
-            milvus.deleteByOntologyIdDual(id, "class")
-            # P3a 双写：v2 集合同删（软删除的类不该再被召回）。
-            await deleteRegistryV2Embedding(id, "class")
+            await _deleteMilvusVectorUnderLock("class", id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Milvus 记录删除失败 id=%d: %s", id, exc)
         logger.info("软删除本体类 id=%d（valid_to=%s）", id, entity.valid_to)
@@ -1013,9 +1102,7 @@ class OntologyService:
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点删除", id, exc)
         try:
-            milvus.deleteByOntologyIdDual(id, "property")
-            # P3a 双写：v2 集合同删。
-            await deleteRegistryV2Embedding(id, "property")
+            await _deleteMilvusVectorUnderLock("property", id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Milvus 记录删除失败 id=%d: %s", id, exc)
         logger.info("删除本体属性 id=%d", id)
@@ -1276,9 +1363,7 @@ class OntologyService:
         except Exception as exc:  # noqa: BLE001
             _logNeo4jFailure("节点删除", id, exc)
         try:
-            milvus.deleteByOntologyIdDual(id, "metric")
-            # P3a 双写：v2 集合同删。
-            await deleteRegistryV2Embedding(id, "metric")
+            await _deleteMilvusVectorUnderLock("metric", id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Milvus 记录删除失败 id=%d: %s", id, exc)
         logger.info("删除本体指标 id=%d", id)
@@ -1814,29 +1899,45 @@ class OntologyService:
         """手动同步单个类的向量：以 PG 当前数据重新生成 embedding 并覆盖 Milvus。
 
         类不存在时抛 NotFoundError（404）。
+
+        手动路径与后台同步**共用同一把实体锁**：否则管理员触发的同步可能与在途
+        后台任务乱序落库，或把刚被删除的类向量写回（见 ``_deleteMilvusVectorUnderLock``）。
+        读 + 生成 + 写整段在锁内，保证「最后写入者携带读取时的最新状态」。
         """
-        entity = await self.getClass(session, id)
-        vec = await self._ensureEmbedding().generateEmbedding(
-            _classEmbeddingText(entity)
-        )
-        self.syncEmbedding(
-            ontologyId=entity.id,
-            type="class",
-            name=entity.class_name,
-            alias=entity.class_alias,
-            description=entity.description,
-            embedding=vec,
-        )
-        # P3a 双写：同一条向量连同治理维度写进 v2 集合（开关关时不写）。
-        await self.syncEmbeddingToRegistryV2(
-            ontologyId=entity.id,
-            type="class",
-            name=entity.class_name,
-            alias=entity.class_alias,
-            description=entity.description,
-            embedding=vec,
-            session=session,
-        )
+        async with _vectorSyncLock("class", id):
+            entity = await self.getClass(session, id)
+            # 先在会话内取快照：跨 embedding / Milvus 两个 await 都不再碰 ORM 实体
+            snapshot = _VectorSnapshot(
+                ontologyId=entity.id,
+                name=entity.class_name,
+                alias=entity.class_alias,
+                description=entity.description,
+                embeddingText=_classEmbeddingText(entity),
+            )
+            vec = await self._ensureEmbedding().generateEmbedding(
+                snapshot.embeddingText
+            )
+            # Milvus 是同步 SDK ⇒ 移出事件循环（可达 10-25s）
+            await asyncio.to_thread(
+                self.syncEmbedding,
+                ontologyId=snapshot.ontologyId,
+                type="class",
+                name=snapshot.name,
+                alias=snapshot.alias,
+                description=snapshot.description,
+                embedding=vec,
+            )
+            # P3a 双写：同一条向量连同治理维度写进 v2 集合（开关关时不写）。
+            # 与 v1 同在锁内 ⇒ 删除不会与双写交错。
+            await self.syncEmbeddingToRegistryV2(
+                ontologyId=snapshot.ontologyId,
+                type="class",
+                name=snapshot.name,
+                alias=snapshot.alias,
+                description=snapshot.description,
+                embedding=vec,
+                session=session,
+            )
 
     async def syncMissingClassEmbeddings(
         self, session: AsyncSession
@@ -2409,38 +2510,101 @@ class OntologyService:
         下单次可达 10-25s，await 会把类的新增/保存响应拖到同一量级。向量晚
         数十秒落地对语义召回无感（chat 检索同样容忍 Neo4j/向量的最终一致）。
         任务引用挂到模块级集合防 GC，完成即回收。
+
+        传给后台任务的是**实体 id**（不是 ORM 实例）—— 任务自开会话重读，
+        详见 ``_syncClassEmbeddingNow`` 与 ``app.infrastructure.database.ownSession``。
         """
-        task = asyncio.create_task(self._syncClassEmbeddingNow(entity))
+        task = asyncio.create_task(self._syncClassEmbeddingNow(entity.id))
         _PENDING_SYNC_TASKS.add(task)
         task.add_done_callback(_PENDING_SYNC_TASKS.discard)
 
-    async def _syncClassEmbeddingNow(self, entity: OntologyClass) -> None:
+    async def _readClassForSync(self, entityId: int) -> _VectorSnapshot | None:
+        """读类向量所需字段（**读完即关会话**）。
+
+        返回 None ⇒ 类已软删除（墓碑，``deleteClass`` 已删过向量）⇒ 调用方跳过。
+        类行不存在 ⇒ 抛 ``NotFoundError`` ⇒ 调用方跳过。
+
+        为什么用 ``session.get`` + ``lazyload('*')`` 而不是 ``getClass``：
+        ``OntologyClass`` 的 ``parent/children/properties/metrics`` 全是
+        ``lazy="selectin"``（见 ``domain/models.py``）⇒ 平凡 ``session.get`` 也会
+        连带发多条二级 SELECT，甚至沿 ``parent`` 逐层展开图谱；而向量文本只用到
+        三个标量列。``lazyload('*')`` 把这些关系压成惰性加载，本方法只读标量 ⇒
+        不会触发懒加载 IO。⚠️ 将来若在此之后要读关系字段，必须显式
+        ``selectinload``，否则异步上下文里会 ``MissingGreenlet``。
+
+        为什么必须在会话内取好文本：``embeddingText`` 由共享口径函数
+        ``_classEmbeddingText`` 产出（与 backfill 脚本同口径），它要读 ORM 实体；
+        会话一关实体就 detached，再读属性会 ``DetachedInstanceError``。
+        """
+        async with ownSession() as session:
+            cls = await session.get(
+                OntologyClass, entityId, options=[lazyload("*")]
+            )
+            if cls is None:
+                raise NotFoundError(MSG_ONTOLOGY_CLASS_NOT_FOUND.format(id=entityId))
+            if cls.valid_to is not None:
+                logger.info("Milvus 类向量自动同步跳过 id=%d：类已软删除", entityId)
+                return None
+            return _VectorSnapshot(
+                ontologyId=cls.id,
+                name=cls.class_name,
+                alias=cls.class_alias,
+                description=cls.description,
+                embeddingText=_classEmbeddingText(cls),
+            )
+
+    async def _syncClassEmbeddingNow(self, entityId: int) -> None:
+        """在**自开会话**里重读类再落向量（2026-11-16 事故修复）。
+
+        为什么不能直接用请求会话里的 ORM 实例：请求失败 ⇒ ``getDb`` rollback
+        ⇒ SQLAlchemy 把 identity map 全部 expire ⇒ 任务访问 ``entity.id``
+        触发同步懒加载 ⇒ async 上下文里 IO ⇒ ``MissingGreenlet``（且 except
+        分支再访问一次 ⇒ 原始异常被盖掉）。详见
+        ``app.infrastructure.database.ownSession``。
+
+        为什么锁内重读：重读拿到的是**读到那一刻**已提交的状态；锁把同一实体
+        的写入串起来 ⇒ 最后写入的那次一定带最新状态 ⇒ 不会把旧描述写回去
+        （create / update 连着来的场景）。详见 ``_vectorSyncLock``。
+
+        为什么读和写要分开：embedding 网络调用 + Milvus flush 各 10-25s，
+        全程占着 PG 连接会把连接池（20+10）打满（批量导入 N 个属性 ⇒ N 个
+        任务）⇒ ``pool_timeout`` ⇒ 向量静默写不进去。故**读完立刻关会话**，
+        慢活在外面干。
+        """
+        snapshot: _VectorSnapshot | None = None
         try:
-            vec = await self._ensureEmbedding().generateEmbedding(
-                _classEmbeddingText(entity)
-            )
-            self.syncEmbedding(
-                ontologyId=entity.id,
-                type="class",
-                name=entity.class_name,
-                alias=entity.class_alias,
-                description=entity.description,
-                embedding=vec,
-            )
-            # P3a 双写：v2 集合（带治理维度）。类行此时**已提交**
-            # （CRUD 先 commit 再同步向量）⇒ 自开短会话能查到治理事实。
-            await self.syncEmbeddingToRegistryV2(
-                ontologyId=entity.id,
-                type="class",
-                name=entity.class_name,
-                alias=entity.class_alias,
-                description=entity.description,
-                embedding=vec,
-            )
+            async with _vectorSyncLock("class", entityId):
+                snapshot = await self._readClassForSync(entityId)
+                if snapshot is None:
+                    return
+                vec = await self._ensureEmbedding().generateEmbedding(snapshot.embeddingText)
+                # Milvus 是同步 SDK ⇒ 移出事件循环（与 kpi_vector_graph_sync 同款）
+                await asyncio.to_thread(
+                    self.syncEmbedding,
+                    ontologyId=snapshot.ontologyId,
+                    type="class",
+                    name=snapshot.name,
+                    alias=snapshot.alias,
+                    description=snapshot.description,
+                    embedding=vec,
+                )
+                # P3a 双写：v2 集合（带治理维度）。类行此时**已提交**
+                # （CRUD 先 commit 再同步向量）⇒ 自开短会话能查到治理事实。
+                await self.syncEmbeddingToRegistryV2(
+                    ontologyId=snapshot.ontologyId,
+                    type="class",
+                    name=snapshot.name,
+                    alias=snapshot.alias,
+                    description=snapshot.description,
+                    embedding=vec,
+                )
+        except NotFoundError:
+            # 实体已被硬删除 ⇒ 删除路径已删向量，无需补写
+            logger.info("Milvus 类向量自动同步跳过 id=%d：类已删除", entityId)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Milvus 类向量自动同步失败 id=%d name=%s: %s",
-                entity.id, entity.class_name, exc,
+                entityId, snapshot.name if snapshot else "-", exc,
             )
 
     async def _syncPropertyEmbeddingBestEffort(self, entity: OntologyProperty) -> None:
@@ -2448,37 +2612,66 @@ class OntologyService:
 
         embedding 文本口径 = property_name + business_aliases + description
         （与 backfill_milvus_embeddings.py 同口径）。
+
+        传给后台任务的是**实体 id**（不是 ORM 实例）—— 任务自开会话重读，
+        详见 ``_syncPropertyEmbeddingNow`` 与 ``app.infrastructure.database.ownSession``。
         """
-        task = asyncio.create_task(self._syncPropertyEmbeddingNow(entity))
+        task = asyncio.create_task(self._syncPropertyEmbeddingNow(entity.id))
         _PENDING_SYNC_TASKS.add(task)
         task.add_done_callback(_PENDING_SYNC_TASKS.discard)
 
-    async def _syncPropertyEmbeddingNow(self, entity: OntologyProperty) -> None:
+    async def _readPropertyForSync(self, entityId: int) -> _VectorSnapshot:
+        """读属性向量所需字段（读完即关会话，见 ``_readClassForSync``）。"""
+        async with ownSession() as session:
+            prop = await session.get(OntologyProperty, entityId)
+            if prop is None:
+                raise NotFoundError(MSG_ONTOLOGY_PROPERTY_NOT_FOUND.format(id=entityId))
+            return _VectorSnapshot(
+                ontologyId=prop.id,
+                name=prop.property_name,
+                alias=prop.property_alias,
+                description=prop.description,
+                embeddingText=_propertyEmbeddingText(prop),
+            )
+
+    async def _syncPropertyEmbeddingNow(self, entityId: int) -> None:
+        """在**自开会话**里重读属性再落向量（2026-11-16 事故修复）。
+
+        同 ``_syncClassEmbeddingNow``：不碰请求会话的 ORM 状态（rollback 会
+        expire 掉 ⇒ MissingGreenlet），改为自开会话重读当前状态；同一属性的
+        写入在 ``_vectorSyncLock`` 里串行化 ⇒ 不会把旧描述写回去。
+        """
+        snapshot: _VectorSnapshot | None = None
         try:
-            vec = await self._ensureEmbedding().generateEmbedding(
-                _propertyEmbeddingText(entity)
-            )
-            self.syncEmbedding(
-                ontologyId=entity.id,
-                type="property",
-                name=entity.property_name,
-                alias=entity.property_alias,
-                description=entity.description,
-                embedding=vec,
-            )
-            # P3a 双写：v2 集合（带治理维度，继承其 class 的维度）。
-            await self.syncEmbeddingToRegistryV2(
-                ontologyId=entity.id,
-                type="property",
-                name=entity.property_name,
-                alias=entity.property_alias,
-                description=entity.description,
-                embedding=vec,
-            )
+            async with _vectorSyncLock("property", entityId):
+                snapshot = await self._readPropertyForSync(entityId)
+                vec = await self._ensureEmbedding().generateEmbedding(snapshot.embeddingText)
+                # Milvus 是同步 SDK ⇒ 移出事件循环（与 kpi_vector_graph_sync 同款）
+                await asyncio.to_thread(
+                    self.syncEmbedding,
+                    ontologyId=snapshot.ontologyId,
+                    type="property",
+                    name=snapshot.name,
+                    alias=snapshot.alias,
+                    description=snapshot.description,
+                    embedding=vec,
+                )
+                # P3a 双写：v2 集合（带治理维度，继承其 class 的维度）。
+                await self.syncEmbeddingToRegistryV2(
+                    ontologyId=snapshot.ontologyId,
+                    type="property",
+                    name=snapshot.name,
+                    alias=snapshot.alias,
+                    description=snapshot.description,
+                    embedding=vec,
+                )
+        except NotFoundError:
+            # 属性已被硬删除 ⇒ 删除路径已删向量，无需补写
+            logger.info("Milvus 属性向量自动同步跳过 id=%d：属性已删除", entityId)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Milvus 属性向量自动同步失败 id=%d name=%s: %s",
-                entity.id, entity.property_name, exc,
+                entityId, snapshot.name if snapshot else "-", exc,
             )
 
     async def _syncMetricEmbeddingBestEffort(self, entity: OntologyMetric) -> None:
@@ -2486,37 +2679,67 @@ class OntologyService:
 
         embedding 文本口径 = metric_name + metric_alias + agg=<agg_function> + formula
         （公式是检索召回关键信号，「占比」「环比」等术语走 alias，公式让模型识别形态）。
+
+        传给后台任务的是**实体 id**（不是 ORM 实例）—— 任务自开会话重读，
+        详见 ``_syncMetricEmbeddingNow`` 与 ``app.infrastructure.database.ownSession``。
         """
-        task = asyncio.create_task(self._syncMetricEmbeddingNow(entity))
+        task = asyncio.create_task(self._syncMetricEmbeddingNow(entity.id))
         _PENDING_SYNC_TASKS.add(task)
         task.add_done_callback(_PENDING_SYNC_TASKS.discard)
 
-    async def _syncMetricEmbeddingNow(self, entity: OntologyMetric) -> None:
+    async def _readMetricForSync(self, entityId: int) -> _VectorSnapshot:
+        """读指标向量所需字段（读完即关会话，见 ``_readClassForSync``）。"""
+        async with ownSession() as session:
+            metric = await session.get(OntologyMetric, entityId)
+            if metric is None:
+                raise NotFoundError(MSG_ONTOLOGY_METRIC_NOT_FOUND.format(id=entityId))
+            return _VectorSnapshot(
+                ontologyId=metric.id,
+                name=metric.metric_name,
+                alias=metric.metric_alias,
+                # 历史口径：指标的 Milvus description 存的是聚合方式（见 backfill 脚本）
+                description=metric.agg_function,
+                embeddingText=_metricEmbeddingText(metric),
+            )
+
+    async def _syncMetricEmbeddingNow(self, entityId: int) -> None:
+        """在**自开会话**里重读指标再落向量（2026-11-16 事故修复）。
+
+        同 ``_syncClassEmbeddingNow``：不碰请求会话里的 ORM 状态（rollback 会
+        expire 掉 ⇒ MissingGreenlet），改为自开会话重读当前状态；同一指标的
+        写入在 ``_vectorSyncLock`` 里串行化 ⇒ 不会把旧描述写回去。
+        """
+        snapshot: _VectorSnapshot | None = None
         try:
-            vec = await self._ensureEmbedding().generateEmbedding(
-                _metricEmbeddingText(entity)
-            )
-            self.syncEmbedding(
-                ontologyId=entity.id,
-                type="metric",
-                name=entity.metric_name,
-                alias=entity.metric_alias,
-                description=entity.agg_function,
-                embedding=vec,
-            )
-            # P3a 双写：v2 集合（带治理维度，继承其目标类的维度）。
-            await self.syncEmbeddingToRegistryV2(
-                ontologyId=entity.id,
-                type="metric",
-                name=entity.metric_name,
-                alias=entity.metric_alias,
-                description=entity.agg_function,
-                embedding=vec,
-            )
+            async with _vectorSyncLock("metric", entityId):
+                snapshot = await self._readMetricForSync(entityId)
+                vec = await self._ensureEmbedding().generateEmbedding(snapshot.embeddingText)
+                # Milvus 是同步 SDK ⇒ 移出事件循环（与 kpi_vector_graph_sync 同款）
+                await asyncio.to_thread(
+                    self.syncEmbedding,
+                    ontologyId=snapshot.ontologyId,
+                    type="metric",
+                    name=snapshot.name,
+                    alias=snapshot.alias,
+                    description=snapshot.description,
+                    embedding=vec,
+                )
+                # P3a 双写：v2 集合（带治理维度，继承其目标类的维度）。
+                await self.syncEmbeddingToRegistryV2(
+                    ontologyId=snapshot.ontologyId,
+                    type="metric",
+                    name=snapshot.name,
+                    alias=snapshot.alias,
+                    description=snapshot.description,
+                    embedding=vec,
+                )
+        except NotFoundError:
+            # 指标已被硬删除 ⇒ 删除路径已删向量，无需补写
+            logger.info("Milvus 指标向量自动同步跳过 id=%d：指标已删除", entityId)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Milvus 指标向量自动同步失败 id=%d name=%s: %s",
-                entity.id, entity.metric_name, exc,
+                entityId, snapshot.name if snapshot else "-", exc,
             )
 
     def syncMissingClassEmbeddingsBestEffort(self) -> None:
@@ -2543,3 +2766,4 @@ class OntologyService:
             return
         if summary["failedCount"]:
             logger.warning("批量类向量补齐部分失败: %s", summary)
+

@@ -134,6 +134,37 @@ async def _waitFor(check, timeout: float = 10.0) -> bool:
     return check()
 
 
+async def _drainVectorSyncTasks(timeout: float = 30.0) -> None:
+    """等待本体向量**后台同步任务全部结束**（消除"写入与断言窗口交错"的竞态）。
+
+    为什么需要显式等待（2026-11-16 修复后暴露）：
+    类新增/更新触发的向量同步是 fire-and-forget 后台任务（embedding 网络调用 +
+    Milvus flush 各 10-25s ⇒ 不能挡在请求里）。**旧实现**的任务体在第一次真正
+    挂起之前就跑完了向量写入（读的是请求内存里的 ORM 实体、Milvus 写入是同步
+    调用），于是"响应返回时写入已完成"这一**偶然**成立，测试直接断言瞬时条数。
+    2026-11-16 修复（后台任务不再借用请求会话）后，任务体必须**自开会话回读
+    实体**（这正是修复的核心：不能跨请求持有 ORM 实体）⇒ 任务体必然挂起 ⇒
+    写入与响应返回**不再有先后保证**。
+
+    ⇒ 正确做法是测试显式等待任务结束（而不是假设写入已完成）。等待语义：
+    每条 mutation 触发**恰好一次**后台同步 ⇒ 排空后写入条数是确定的；
+    且同一实体的写入按实体锁串行 ⇒ **最后一次写入携带最新状态**（旧实现下
+    这个性质并未被测试覆盖，现在被覆盖了）。
+
+    ⚠️ 只排空**本体向量**后台任务；不碰 Milvus/Neo4j（测试里已 monkeypatch）。
+    """
+    import app.services.ontology_service as ontology_module
+
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        pending = [t for t in ontology_module._PENDING_SYNC_TASKS if not t.done()]
+        if not pending:
+            return
+        if asyncio.get_event_loop().time() >= deadline:
+            raise AssertionError(f"本体向量后台同步任务未在 {timeout}s 内结束")
+        await asyncio.wait(pending, timeout=1.0)
+
+
 async def testListClassesEmpty(client: AsyncClient) -> None:
     response = await client.get("/api/v1/ontology/classes")
     assert response.status_code == 200
@@ -1386,6 +1417,10 @@ async def testUpdateClassAutoSyncsEmbedding(
     assert create.status_code == 201
     classId = create.json()["id"]
 
+    # 创建触发的后台同步先排空（它写的是**更新前**的文本）⇒ 清空记录缓冲区
+    # 之后，剩下的写入只可能来自本次更新。
+    await _drainVectorSyncTasks()
+
     inserted.clear()
     texts.clear()
     resp = await client.put(
@@ -1393,8 +1428,11 @@ async def testUpdateClassAutoSyncsEmbedding(
         json={"classAlias": "更新后别名", "description": "更新后描述"},
     )
     assert resp.status_code == 200
-    assert await _waitFor(lambda: len(inserted) == 1), "更新后应重新同步类向量"
+    # 更新触发的后台同步同样排空后再断言（写入与响应返回无先后保证）。
+    await _drainVectorSyncTasks()
+    assert len(inserted) == 1, f"更新后应重新同步 1 条类向量，实际 {len(inserted)}"
     assert inserted[0]["ontology_id"] == classId
+    # 同实体写入按实体锁串行 ⇒ 最后一次写入携带最新状态（更新后的别名）。
     assert "更新后别名" in texts[0]
 
 
@@ -1429,6 +1467,9 @@ async def testSyncClassEmbeddingManually(
         json={"className": "ManualSyncCls", "sourceTable": "t_manual_sync"},
     )
     classId = create.json()["id"]
+
+    # 创建触发的后台同步先排空 ⇒ 清空后只统计**手动**同步的写入。
+    await _drainVectorSyncTasks()
 
     inserted.clear()
     resp = await client.post(f"/api/v1/ontology/classes/{classId}/embedding")

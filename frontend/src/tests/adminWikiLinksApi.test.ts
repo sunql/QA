@@ -114,4 +114,33 @@ describe("api/adminWikiLinks", () => {
     const [url] = fetchMock.mock.calls[0];
     expect(url).toBe(`${BASE}/linkables?type=property&q=abc`);
   });
+
+  // ⚠️ 回归锚点（2026-11-16 生产 422 实锤）：裸 fetch 传**字符串 body**时若不显式声明
+  // Content-Type，浏览器实际会发 `Content-Type: text/plain;charset=UTF-8`
+  // ⇒ FastAPI 不把 body 当 JSON 解析 ⇒ POST/PATCH 一律 422
+  // （detail: "Input should be a valid dictionary or object to extract fields from"）。
+  // 本仓库其它裸 fetch 调用都写 `authHeaders({ "Content-Type": "application/json" })`，
+  // 只有本文件漏了 ⇒ 所有写入类操作 100% 失败，而单测因 mock 了 fetch 依旧全绿。
+  it("createWikiLink 必须显式声明 Content-Type: application/json", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: 1 }));
+    await createWikiLink({
+      page_id: "PAGE-A",
+      chunk_id: null,
+      ontology_type: "class" as const,
+      ontology_id: 10,
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    expect((init as RequestInit).headers).toMatchObject({
+      "Content-Type": "application/json",
+    });
+  });
+
+  it("updateWikiLink 必须显式声明 Content-Type: application/json", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: 3, weight: 0.8 }));
+    await updateWikiLink(3, { weight: 0.8, note: "备注" });
+    const [, init] = fetchMock.mock.calls[0];
+    expect((init as RequestInit).headers).toMatchObject({
+      "Content-Type": "application/json",
+    });
+  });
 });

@@ -36,7 +36,10 @@ export async function createWikiLink(
 ): Promise<WikiLink> {
   const resp = await fetch(BASE, {
     method: "POST",
-    headers: authHeaders(),
+    // 裸 fetch 传字符串 body 时浏览器默认发 `text/plain;charset=UTF-8`
+    // ⇒ FastAPI 不把 body 当 JSON 解析 ⇒ 任何 POST/PATCH 都 422。
+    // 必须显式声明 JSON（同 chat.ts / document.ts / wikiChat.ts 的写法）。
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   return resp.json();
@@ -56,7 +59,7 @@ export async function updateWikiLink(
 ): Promise<WikiLink> {
   const resp = await fetch(`${BASE}/${id}`, {
     method: "PATCH",
-    headers: authHeaders(),
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   return resp.json();

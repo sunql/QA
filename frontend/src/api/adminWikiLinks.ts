@@ -19,6 +19,22 @@ import type {
 
 const BASE = "/api/v1/admin/wiki-links";
 
+/**
+ * 读取 JSON 响应；非 2xx 直接抛错。
+ *
+ * 为什么必须有这一步（2026-11-16 生产事故复盘）：
+ * FastAPI 的 4xx/5xx 响应体**也是 JSON**（`{"detail": ...}`），
+ * 直接 `resp.json()` 会 **resolve 而不是 reject** ⇒ 调用方永远进不了 catch
+ * ⇒ 页面照样弹「添加成功」，但库里根本没有这条记录（静默假成功）。
+ * 仓库其它裸 fetch 模块（document.ts / wikiChat.ts / chat.ts）都有这道判断。
+ */
+async function readJson<T>(resp: Response): Promise<T> {
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status}`);
+  }
+  return (await resp.json()) as T;
+}
+
 export async function listWikiLinks(
   filter: Partial<{ page_id: string; ontology_type: string }> = {},
 ): Promise<WikiLink[]> {
@@ -28,7 +44,7 @@ export async function listWikiLinks(
   const resp = await fetch(`${BASE}${qs ? `?${qs}` : ""}`, {
     headers: authHeaders(),
   });
-  return resp.json();
+  return readJson<WikiLink[]>(resp);
 }
 
 export async function createWikiLink(
@@ -42,7 +58,7 @@ export async function createWikiLink(
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
-  return resp.json();
+  return readJson<WikiLink>(resp);
 }
 
 export async function revokeWikiLink(id: number): Promise<WikiLink> {
@@ -50,7 +66,7 @@ export async function revokeWikiLink(id: number): Promise<WikiLink> {
     method: "DELETE",
     headers: authHeaders(),
   });
-  return resp.json();
+  return readJson<WikiLink>(resp);
 }
 
 export async function updateWikiLink(
@@ -62,7 +78,7 @@ export async function updateWikiLink(
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
-  return resp.json();
+  return readJson<WikiLink>(resp);
 }
 
 export async function listLinkableTargets(
@@ -76,5 +92,5 @@ export async function listLinkableTargets(
   const resp = await fetch(`${BASE}/linkables?${qs}`, {
     headers: authHeaders(),
   });
-  return resp.json();
+  return readJson<WikiLinkableTarget[]>(resp);
 }

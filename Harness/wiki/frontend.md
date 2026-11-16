@@ -1,6 +1,6 @@
 ---
 created: 2026-09-01
-updated: 2026-10-18
+updated: 2026-11-16
 ---
 
 # Frontend
@@ -228,3 +228,39 @@ const [read, incoming] = await Promise.all([
 - `useAgentRunTracker.ts:224-226` 的 `useCallAction` catch 把 `resumeRun` 的异常转成
   `setActionError`（`resumeRun` 因此**正常 resolve**）⇒ 恢复被拒（409/422）时
   `useResumeActions.ts:46-51` 的 `reset()` 仍会执行，用户填的内容丢失。
+
+## 请求头约定：JSON body 必须显式 Content-Type（fix-wiki-links-content-type）
+
+**规矩**：任何**裸 `fetch`** 发送 `body: JSON.stringify(...)` 的请求，
+必须写 `headers: authHeaders({ "Content-Type": "application/json" })`。
+
+**为什么**（2026-11-16 生产事故，两段都实测过）：
+
+1. **浏览器侧**：WHATWG fetch 对**字符串** body 的默认 Content-Type 是
+   `text/plain;charset=UTF-8`（Chromium 实测）——不显式声明就不是 JSON。
+2. **服务端侧**：FastAPI 只在 content-type 是 `application/json`（或 `application/*+json`）
+   时才把 body 当 JSON 解析；否则**整个 body 被跳过** ⇒ 请求体模型拿不到任何字段 ⇒ **422**
+   （`detail: [{"loc":["body"], "msg":"Input should be a valid dictionary or object to extract fields from"}]`）。
+
+⇒ 表现为「**所有 POST/PATCH 100% 失败**」，而 GET / DELETE（无 body）不受影响。
+nginx **不改** Content-Type（透传），反代层不会掩盖或制造这个问题。
+
+**排查口诀**：看到 422 + `loc:["body"]` ⇒ 先怀疑 **body 没被解析**
+（content-type 不对 / body 不是 JSON），而不是先去查字段校验规则。
+
+**为什么单测抓不到**：api 层单测**全部 mock 了 fetch**，只断言 `url`/`method`/`body`/返回值，
+**从不检查请求头** ⇒ 漏写 Content-Type 时测试永远绿，只有生产会炸。
+
+**两道防线**：
+
+| 防线 | 位置 | 作用 |
+|---|---|---|
+| 源码级反向守卫 | `src/tests/apiJsonContentTypeGuard.test.ts` | 扫 `src/` 下所有 fetch 调用：`body` 是 `JSON.stringify` 却没声明 content-type ⇒ 失败。含守卫自检用例（喂合成源码证明自己能抓） |
+| 非 2xx 必须 reject | `src/api/adminWikiLinks.ts` 的 `readJson` | FastAPI 的 4xx/5xx 响应体**也是 JSON** ⇒ 直接 `resp.json()` 会 resolve ⇒ 页面弹「添加成功」但库里没记录（**静默假成功**） |
+
+**已知边界**：守卫对「headers 传变量」（`const h = authHeaders(...); ... headers,`）
+与「init 整体传变量」（`fetch(url, init)`）**静态判不出** ⇒ 跳过，不误报。
+仓库主流写法（`chat.ts`）正是变量形态 ⇒ 这两类只能靠人工与 code review 兜底。
+
+**未做**：`adminWikiLinks.ts` 整体迁到 axios `httpClient`（默认已带 Content-Type，
+迁了这类漏写在结构上不可能发生）——属独立重构，本次只做最小必要修复。

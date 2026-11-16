@@ -18,7 +18,12 @@ import {
 const BASE = "/api/v1/admin/wiki-links";
 
 function jsonResponse(payload: unknown) {
-  return { json: async () => payload };
+  return { ok: true, status: 200, json: async () => payload };
+}
+
+/** 错误响应：FastAPI 的 4xx/5xx 响应体也是 JSON（`{"detail": ...}`）。 */
+function errorResponse(status: number, payload: unknown = { detail: [] }) {
+  return { ok: false, status, json: async () => payload };
 }
 
 describe("api/adminWikiLinks", () => {
@@ -142,5 +147,51 @@ describe("api/adminWikiLinks", () => {
     expect((init as RequestInit).headers).toMatchObject({
       "Content-Type": "application/json",
     });
+  });
+
+  // ⚠️ 补 Content-Type 不能削弱鉴权头（security-review L4）
+  it("写入路径的请求头同时带上鉴权头（X-Tenant-Id + Authorization）", async () => {
+    useAuthStore.setState({ token: "test-jwt" });
+    fetchMock.mockResolvedValue(jsonResponse({ id: 1 }));
+    await createWikiLink({
+      page_id: "PAGE-A",
+      chunk_id: null,
+      ontology_type: "class" as const,
+      ontology_id: 10,
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    expect((init as RequestInit).headers).toMatchObject({
+      "Content-Type": "application/json",
+      "X-Tenant-Id": DEFAULT_TENANT_ID,
+      Authorization: "Bearer test-jwt",
+    });
+  });
+
+  // ⚠️ 回归锚点：后端 4xx/5xx 的响应体也是 JSON ⇒ 直接 resp.json() 会 resolve
+  // ⇒ 页面弹「添加成功」但库里没记录（静默假成功）。必须 reject。
+  it("后端返回 422 时 createWikiLink 必须 reject（不得吞成成功）", async () => {
+    fetchMock.mockResolvedValue(
+      errorResponse(422, { detail: [{ loc: ["body"], msg: "invalid" }] }),
+    );
+    await expect(
+      createWikiLink({
+        page_id: "PAGE-A",
+        chunk_id: null,
+        ontology_type: "class" as const,
+        ontology_id: 10,
+      }),
+    ).rejects.toThrow("HTTP 422");
+  });
+
+  it("后端返回 403 时 updateWikiLink 必须 reject", async () => {
+    fetchMock.mockResolvedValue(errorResponse(403, { detail: "forbidden" }));
+    await expect(updateWikiLink(3, { weight: 0.8 })).rejects.toThrow(
+      "HTTP 403",
+    );
+  });
+
+  it("后端返回 500 时 listWikiLinks 必须 reject", async () => {
+    fetchMock.mockResolvedValue(errorResponse(500, { detail: "boom" }));
+    await expect(listWikiLinks()).rejects.toThrow("HTTP 500");
   });
 });

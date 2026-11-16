@@ -19,6 +19,7 @@ from app.domain.enums import IntentType
 from app.domain.schemas import ChatRequest, ClassRecallInfo
 from app.services.chat_helpers import _clipText
 from app.services.intent_service import IntentResult
+from app.services.semantic_recall_gate import RecallOntology, loadRecallOntology
 
 if TYPE_CHECKING:
     from app.domain.models import SessionQueryState
@@ -160,6 +161,8 @@ def _isDimensionHint(question: str) -> bool:
     return any(kw in (question or "") for kw in _DIMENSION_HINTS)
 
 
+
+
 class RecallMixin:
     """类召回 / 过滤 / 排序（由 ChatService 组合）。"""
 
@@ -210,9 +213,18 @@ class RecallMixin:
             )
         if session is None:
             raise ValueError("classifyAndRecall 召回路径需要真实 session")
-        allClasses = await self._ontology.listClasses(session)
+        # P3d D30：会话钉住了语义发布（P2 D16 写进 session_query_state）⇒
+        # **整条召回链**（全量类 / DIM 补拉 / join 扩边）都读那一版快照；
+        # 没钉住/钉不住 ⇒ 视图为 None ⇒ 照旧直读治理表（与现状一致）。
+        pinnedReleaseId = getattr(state, "semantic_release_id", None)
+        view: RecallOntology | None = await loadRecallOntology(
+            session, pinnedReleaseId=pinnedReleaseId
+        )
+        allClasses: list[Any] = (
+            list(view.classes) if view is not None else await self._ontology.listClasses(session)
+        )
         classes, recallInfo = await self._selectRelevantClasses(
-            session, question, allClasses
+            session, question, allClasses, view=view
         )
         return ClassifyAndRecallResult(
             intentResult=result, classes=classes, recallInfo=recallInfo, state=state
@@ -429,6 +441,7 @@ class RecallMixin:
         *,
         dimension_hint: bool,
         session: AsyncSession,
+        view: RecallOntology | None = None,
     ) -> list:
         """按层优先排序：DIM 拉满（DIM 层按 dimension_hint 决定是否全拉）。
 
@@ -436,7 +449,11 @@ class RecallMixin:
         """
         merged = list(classes)
         if dimension_hint:
-            dim_classes = await self._fetchAllDimClasses(session)
+            if view is not None:
+                # 钉住 ⇒ DIM 类也取自那一版快照（混合口径会破坏「按发布读」合同）
+                dim_classes = [c for c in view.classes if (c.source_table or "").upper().startswith("DIM_")]
+            else:
+                dim_classes = await self._fetchAllDimClasses(session)
             # 去重（按 id）
             seen = {c.id for c in merged if c.id is not None}
             for c in dim_classes:
@@ -466,7 +483,12 @@ class RecallMixin:
         return list(rows)
 
     async def _selectRelevantClasses(
-        self, session: AsyncSession, question: str, allClasses: list[Any]
+        self,
+        session: AsyncSession,
+        question: str,
+        allClasses: list[Any],
+        *,
+        view: RecallOntology | None = None,
     ) -> list[Any]:
         """从全部本体类中筛出与当前问题相关的子集（1-1，根因修复）。
 
@@ -501,11 +523,11 @@ class RecallMixin:
             # 只留堆栈：reason=/计数由 _fallbackRecall 单点透出，避免回退率翻倍
             logger.warning("本体类裁剪检索失败，进入降级路径", exc_info=True)
             return await self._fallbackRecall(
-                session, question, allClasses, reason="search_error"
+                session, question, allClasses, reason="search_error", view=view
             )
         if not hits:
             return await self._fallbackRecall(
-                session, question, allClasses, reason="no_hits"
+                session, question, allClasses, reason="no_hits", view=view
             )
         hitIds = {hit.id for hit in hits}
         # feat-ontology-recall-pruning step D：按 ADS 层加权召回。
@@ -571,14 +593,14 @@ class RecallMixin:
             ]
             if not odsFiltered:
                 return await self._fallbackRecall(
-                    session, question, allClasses, reason="no_match_ods_filtered"
+                    session, question, allClasses, reason="no_match_ods_filtered", view=view
                 )
             return await self._fallbackRecall(
-                session, question, allClasses, reason="ods_only_hits"
+                session, question, allClasses, reason="ods_only_hits", view=view
             )
         if not relevant:
             return await self._fallbackRecall(
-                session, question, allClasses, reason="no_match", hitCount=len(hits)
+                session, question, allClasses, reason="no_match", hitCount=len(hits), view=view
             )
         matchedRatio = len(relevant) / len(hits)
         hitMatchMin = await self._getClassFilterHitMatchMin(session)
@@ -598,7 +620,7 @@ class RecallMixin:
 
         # 按层排序
         relevant = await self._rankByLayer(
-            relevant, dimension_hint=dimension_hint, session=session
+            relevant, dimension_hint=dimension_hint, session=session, view=view
         )
 
         # 截取 top K
@@ -606,7 +628,7 @@ class RecallMixin:
         selected = relevant[:max_classes]
         pre_expand_truncated = len(relevant) > max_classes
         expanded, truncated_from_expand = await self._expandByJoinNeighbors(
-            session, selected, allClasses
+            session, selected, allClasses, view=view
         )
         truncated = pre_expand_truncated or truncated_from_expand
 
@@ -631,6 +653,7 @@ class RecallMixin:
         *,
         reason: str,
         hitCount: int | None = None,
+        view: RecallOntology | None = None,
     ) -> tuple[list[Any], ClassRecallInfo]:
         """召回不可用时的统一降级：ODS 过滤 + 层优先排序 + max 截断（H5）。
 
@@ -668,7 +691,9 @@ class RecallMixin:
             odsFiltered = 0
         # dimension_hint=False：入参本就是全量类，DIM 已在其中（_rankByLayer 的 DIM
         # 补拉是给召回子集用的），降级路径也不再引入一次 DB 读取。
-        ranked = await self._rankByLayer(candidates, dimension_hint=False, session=session)
+        ranked = await self._rankByLayer(
+            candidates, dimension_hint=False, session=session, view=view
+        )
         max_classes = await self._getClassFilterMaxClasses(session)
         selected = ranked[:max_classes]
         truncated = len(ranked) > max_classes
@@ -690,7 +715,12 @@ class RecallMixin:
         )
 
     async def _expandByJoinNeighbors(
-        self, session: AsyncSession, relevant: list[Any], allClasses: list[Any]
+        self,
+        session: AsyncSession,
+        relevant: list[Any],
+        allClasses: list[Any],
+        *,
+        view: RecallOntology | None = None,
     ) -> tuple[list[Any], bool]:
         """召回结果沿本体 JOIN 目录 1-hop 扩边，返回 (新列表, 是否截断)（不改动入参）。
 
@@ -707,7 +737,11 @@ class RecallMixin:
         # admin 可调上限：缺席/格式错走默认（与 _isL4AgentLoopEnabled 同口径）
         maxClasses = await self._getClassFilterMaxClasses(session)
         try:
-            joins = await self._ontology.listJoins(session)
+            if view is not None:
+                # 钉住 ⇒ join 目录也取自那一版快照（合成 id 与视图类一致）
+                joins = list(view.joins)
+            else:
+                joins = await self._ontology.listJoins(session)
         except Exception:
             logger.warning("JOIN 目录加载失败，跳过类召回扩边", exc_info=True)
             return relevant, False

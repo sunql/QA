@@ -375,6 +375,24 @@ Neo4j **无备份、误写不可逆** ⇒ 镜像写路径自带闸门
 细节与实证见
 [`Harness/changes/feat-semantic-release-graph-mirror/daily/D24.md`](../changes/feat-semantic-release-graph-mirror/daily/D24.md)。
 
+### 四个消费面与 G4（P2/P3 全链收口）
+
+| 消费面 | 开关（钉住来源） | 闸门 |
+|---|---|---|
+| NL2SQL schema 渲染 | 会话钉住（`session_query_state.semantic_release_id`，P2 D16） | `renderSchemaWithRelease`（唯一出口） |
+| RAG 向量过滤 | Milvus v2 集合 `release_id` 过滤（P3a） | `semantic_registry_rag_gate` |
+| RAG 本体召回 | 会话钉住（D30） | `semantic_recall_gate.loadRecallOntology`（**整链**切换：全量类 + DIM + join 目录同一版快照；可变 `RecallClass`——召回管线要写 `_recall_score`） |
+| 图谱按发布读 | `SEMANTIC_GRAPH_RELEASE_ID`（P3b D25） | `semantic_graph_reader` |
+| Agent 工具本体读 | 会话钉住（D29，L4 loop 透传）/ run 钉住（P3c D27 记录） | `agent_tools_semantic_gate.loadToolOntology`（全量复原）+ `dispatch_tool_call(pinnedReleaseId)` 穿透链 |
+
+**统一降级口径**：没钉住 / 钉不住 / 语义面故障 ⇒ `None` + warning 留痕 ⇒
+**直读治理表**（与现状逐字一致）——工具/召回/渲染绝不因语义面失败（G4「随时可回落」）。
+
+**保持直读的调用点**（切了是 bug）：治理 CRUD/导入、编译器（发布的源头）、
+图同步差分（写侧）、admin 选择器、DQ 生成、血缘、维度配置、join 健康检查、
+图表显示名、research 检索源（检索/向量侧无发布维度，与向量 R-6 同根）。
+完整 15 处清单见 [`Harness/changes/feat-semantic-nl2sql-call-sites/plan.md`](../changes/feat-semantic-nl2sql-call-sites/plan.md) §3。
+
 ### 读侧切换（D25）
 
 开关 = 配置 `SEMANTIC_GRAPH_RELEASE_ID`（发布 id）：

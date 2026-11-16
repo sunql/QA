@@ -3,7 +3,8 @@
 - **日期**：2026-11-16
 - **作者**：Claude
 - **Phase**：P4 知识服务 Facade（D32–D37）
-- **状态**：**in-review**（PR 待合；bypass squash 合并后切 `done`）⇒ **P4 / G5 完成**
+- **状态**：**done**（PR [#144](https://github.com/sunql/QA/pull/144) 已 squash 合并进 main `75a435a3`；
+  merge-gate 判 **净新增 0 / 净丢失 0**，因改动 CI 面（`config.py` / `_testapp.py`）判 exit 6 ⇒ owner 仲裁后 bypass 合并）⇒ **P4 / G5 完成**
 - **关联变更**：[feat-semantic-nl2sql-call-sites](../feat-semantic-nl2sql-call-sites/summary.md)（P3d，工具 / 召回接 Registry）·
   [feat-semantic-agent-snapshot](../feat-semantic-agent-snapshot/summary.md)（P3c，Agent 快照）·
   [feat-semantic-release-graph-mirror](../feat-semantic-release-graph-mirror/summary.md)（P3b，图谱发布镜像）·

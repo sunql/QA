@@ -203,6 +203,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _semanticRagAuthReason = semanticRegistryRagAuthMisconfiguration(settings)
     if _semanticRagAuthReason:
         logger.error("🚨 安全告警：%s", _semanticRagAuthReason)
+    # 本体发现域（WP-ONT-AI A1）：路由**无条件挂载**，写入口是 requireAdmin，
+    # 读入口回吐业务库 schema 结构 ⇒ 生产必须跑真鉴权。
+    # ⚠️ 这里**不再**加域级自检（安全审查 LOW-1）：`validateProduction()` 已在
+    # 生产硬闸（stub 鉴权 ⇒ 进程起不来），上面的 `productionAuthMisconfiguration`
+    # 也已按 Settings 判定并告警 ⇒ 再加一条只告警不阻塞的域级检查 = 冗余，
+    # 且会给人「本域另有更强守卫」的错觉。
     # 语义注册表 RAG 过滤（P3a）：开关打开时探一次 v2 就绪度 ——
     # v2 缺失/空 ⇒ 带过滤的召回「安静地」返回空（fail-closed），没有任何降级痕迹
     # ⇒ 用户只看到「查不到实体」⇒ 启动期就喊出来，别等到问答时才排查。
@@ -667,6 +673,19 @@ def createApp() -> FastAPI:
                 Depends(requireAdmin),
             ],
         )
+    # 本体发现 API（WP-ONT-AI A1-4）：发现源登记 / 快照采集 / 差异分析。
+    # **写入口逐路由挂 requireAdmin**（登记授权目录、采集快照是治理动作），
+    # 读入口只要求登录（快照与差异是只读元数据）。
+    # 注意：必须**直接 include 子路由**——FastAPI 0.141 的 include 上下文会让
+    # v1Router.include_router(sub) 的 prefix 双重叠加。
+    from app.api.v1 import ontology_discovery
+
+    app.include_router(
+        ontology_discovery.router,
+        prefix="/api/v1/ontology-discovery",
+        tags=["ontology-discovery"],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+    )
     app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     # auth.router 和 authRouter.router 不加 guard：白名单路径 /auth/me、/auth/change-password、/auth/logout 需无条件放行

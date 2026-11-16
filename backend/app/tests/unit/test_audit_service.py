@@ -82,6 +82,25 @@ class TestAuditServiceRecord:
                 )
             )
 
+    def test_reuse_action_accepted(self) -> None:
+        """快照复用场景：内容未变 ⇒ 复用既有行 ⇒ 审计动作是 REUSE 而非 CREATE。
+
+        MEDIUM-8：把复用记成 CREATE 会让「新增了多少行」的台账虚高。
+        """
+
+        import asyncio
+
+        asyncio.run(
+            self._svc.record(
+                self._session,
+                entity_type="metadata_snapshot",
+                entity_id=7,
+                action="REUSE",
+                actor="alice",
+                after={"reused": True},
+            )
+        )
+
     def test_invalid_action_rejected(self) -> None:
         import asyncio
 

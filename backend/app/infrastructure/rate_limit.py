@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from slowapi.wrappers import LimitGroup
 
 from app.config import getSettings
 from app.dependencies import CurrentUser, getCurrentUser, getDb
@@ -256,6 +257,55 @@ async def rateLimitDep(
     except Exception as exc:
         logger.warning("限流检查异常: %s", exc)
         raise
+
+
+def enforceRouteLimit(request: Request, limitValue: str, scope: str) -> None:
+    """在**端点内**显式执行一次路由级限流（超限抛 ``RateLimitExceeded``）。
+
+    ## 为什么不用 ``@limiter.limit`` 装饰器
+
+    本仓的限流有一条**已知的键空间错配**（2026-11-16 定位，遗留项待专项修复）：
+
+    1. slowapi 的装饰器自检与中间件自检都由 ``limiter._auto_check`` 开关控制，
+       而本仓把它关掉了（见下方 ``limiter._auto_check = False``）；
+    2. ``main.py`` **没有**挂 ``SlowAPIMiddleware`` ⇒ 中间件路径根本不存在；
+    3. 唯一的执行路径是 ``rateLimitDep``，它按 **URL 路径** 查
+       ``limiter._route_limits``；而 slowapi 的装饰器把限额登记在
+       **``module.func``** 键上 ⇒ 装饰器登记的路由级限额**永远命不中**。
+
+    ⇒ 结论：装饰器登记的路由级限额在本仓是**死代码**（存量端点同样如此，
+    已登记为遗留项，不在单次变更范围内顺手改）。
+
+    ## 本函数的语义
+
+    用 slowapi **同一套** ``Limit`` 语义在端点内显式执行：
+
+    - 桶键 = (key_func 结果, ``scope``) ⇒ 与全局默认限额的桶（scope = URL 路径）
+      互相独立，两条限额**同时**生效（先到者触发 429）；
+    - 超限抛 ``RateLimitExceeded`` ⇒ 由应用注册的 ``rateLimitExceededHandler``
+      转成 429 + 标准包络 + ``Retry-After``；
+    - ``limiter.enabled=False`` 时直接放行（与 ``rateLimitDep`` 一致）。
+
+    ``scope`` 建议用「领域:动作」形式的**常量**（如 ``"ontology-discovery:capture"``），
+    不要用 URL 路径 —— 挂载前缀会变，路径做键会静默失效。
+    """
+
+    if not limiter.enabled:
+        return
+    limits = list(
+        LimitGroup(
+            limitValue,
+            limiter._key_func,
+            scope,
+            False,  # per_method
+            None,  # methods
+            None,  # error_message
+            None,  # exempt_when
+            1,  # cost
+            True,  # override_defaults
+        )
+    )
+    limiter._Limiter__evaluate_limits(request, scope, limits)
 
 
 def _retryAfterSeconds(currentLimit: tuple[Any, list[str]]) -> int | None:

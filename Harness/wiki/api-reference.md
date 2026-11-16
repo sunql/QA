@@ -283,3 +283,35 @@ agent_tool_in_use_orchestration; referencingAgents=['legacy_agent']; orchestrati
 
 > 事实源：`backend/app/api/v1/id_mapping.py`、`backend/app/domain/id_mapping.py`、
 > `backend/app/domain/schemas.py`（`IdMappingCreate` / `IdMappingUpdate`）。
+
+## 本体发现（WP-ONT-AI A1）
+
+**日期**：2026-11-16 · **变更**：[2026-11-16-ontology-discovery-ai](../changes/2026-11-16-ontology-discovery-ai/summary.md)
+前缀 `/api/v1/ontology-discovery`；**发现域只写自己的表**（`discovery_source` /
+`metadata_snapshot`），不写治理表。全部端点 `Cache-Control: no-store`。
+
+| 端点 | 鉴权 | 说明 |
+|---|---|---|
+| `POST /api/v1/ontology-discovery/sources` | **admin** | 登记发现源 → **201**；重名 → **409**；策略非法 → **422** |
+| `PATCH /api/v1/ontology-discovery/sources/{sourceId}` | **admin** | 改 `status` / `owner` / `access_policy` / `note`；`datasource_id` 与 `name` **不可改**（改 `datasource_id` = 换一条被授权的连接） |
+| `GET /api/v1/ontology-discovery/sources?limit=&offset=` | 任意登录用户 | 发现源列表（附各源快照数，一次 GROUP BY 取回，不做 N+1） |
+| `GET /api/v1/ontology-discovery/snapshots?sourceId=&limit=&offset=` | 任意登录用户 | 快照列表（新→旧）；快照只增不改 ⇒ 列表即历史 |
+| `GET /api/v1/ontology-discovery/snapshots/{snapshotId}` | 任意登录用户 | 快照详情（含 `snapshot` 内容）；不存在 → **404** |
+| `POST /api/v1/ontology-discovery/snapshots?sourceId=` | **admin** | 采集快照（内容寻址：内容未变 ⇒ `reused=true`，不新增行） |
+| `GET /api/v1/ontology-discovery/diff?domainCode=` | 任意登录用户 | 基线（已发布 ACTIVE）vs 当前治理表的差异 |
+
+**`/diff` 的覆盖度披露**（避免「无破坏性变更」被误读成「全量无破坏」）：
+
+- `scope` 恒为 `GLOBAL`：`domainCode` **只用于定位基线**，不裁剪候选侧（候选是全域编译结果）；
+- `covered_sections` / `uncovered_sections` / `partial`：当前差异引擎只比
+  **classes / properties / joins** 三分区 ⇒ metrics/kpis/domains/businessObjects **未覆盖**；
+- `change_count`（本次返回条数）/ `total_change_count`（真实总数）/ `truncated`
+  （上限 500 条）⇒ 大清单下响应体可控且不隐瞒总量；
+- `has_breaking_changes` / `overall_risk_level`：`BREAKING→HIGH` / `ADDITIVE→LOW` /
+  `COSMETIC→INFO`。
+
+**审计**：三个写端点（登记 / 更新 / 采集）都落 `audit_log`（entity_type =
+`discovery_source` / `metadata_snapshot`，含 before / after 摘要）。
+
+> 事实源：`backend/app/api/v1/ontology_discovery.py`、
+> `backend/app/domain/discovery_schemas.py`。

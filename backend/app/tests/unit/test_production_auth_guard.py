@@ -29,10 +29,14 @@ import pytest
 import pytest_asyncio
 
 from app import __file__ as appInitFile
-from app.config import Settings, productionAuthMisconfiguration
+from app.config import (
+    Settings,
+    productionAuthMisconfiguration,
+)
 
 _APP_DIR = Path(appInitFile).resolve().parent
 _MAIN_PY = _APP_DIR / "main.py"
+_CONFIG_PY = _APP_DIR / "config.py"
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +47,24 @@ _MAIN_PY = _APP_DIR / "main.py"
 def dbSession() -> Any:
     """覆写 conftest autouse dbSession —— 本文件不用 DB。"""
     return None
+
+
+def _codeOnlyOf(path: Path) -> str:
+    """文件的**代码骨架**（剥掉 STRING / COMMENT，防 docstring 误命中）。"""
+
+    codeOnly = io.StringIO()
+    with tokenize.open(str(path)) as fh:
+        for tok in tokenize.generate_tokens(fh.readline):
+            if tok.type in (tokenize.STRING, tokenize.COMMENT):
+                continue
+            codeOnly.write(tok.string)
+    return codeOnly.getvalue()
+
+
+def _mainCodeOnly() -> str:
+    """main.py 的**代码骨架**（剥掉 STRING / COMMENT，防 docstring 误命中）。"""
+
+    return _codeOnlyOf(_MAIN_PY)
 
 
 @pytest_asyncio.fixture()
@@ -109,12 +131,39 @@ def test_production_real_mode_with_stub_headers_is_flagged() -> None:
 
 def test_main_lifespan_wires_the_guard() -> None:
     """main.py 骨架（剥掉 STRING/COMMENT，防 docstring 误命中）必须引用自检函数。"""
-    codeOnly = io.StringIO()
-    with tokenize.open(str(_MAIN_PY)) as fh:
-        for tok in tokenize.generate_tokens(fh.readline):
-            if tok.type in (tokenize.STRING, tokenize.COMMENT):
-                continue
-            codeOnly.write(tok.string)
-    assert "productionAuthMisconfiguration" in codeOnly.getvalue(), (
+    assert "productionAuthMisconfiguration" in _mainCodeOnly(), (
         "main.py 未接线 productionAuthMisconfiguration 启动自检（守卫在 config.py 里休眠）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 本体发现域（WP-ONT-AI A1）的鉴权保障
+#
+# 此前本文件有一组「域级」自检 `ontologyDiscoveryAuthMisconfiguration`
+# （生产 + stub 鉴权 ⇒ 告警），现已**删除**（安全审查 LOW-1）：
+#
+# - 硬闸在 `validateProduction()`：生产 + `AUTH_MODE != real` / `AUTH_STUB_ENABLED=1`
+#   ⇒ 直接 `ProductionConfigError`，**进程起不来**（不是告警）；
+# - 设置面告警在 `productionAuthMisconfiguration`（同一条件，按 Settings 判定）；
+# - 域级那条只告警不阻塞 ⇒ 与上面两条同条件、同结论 ⇒ 纯冗余，
+#   且会让人误以为「本域另有更强的守卫」。
+#
+# 发现域写入口挂 `requireAdmin`、读入口要求登录 ⇒ 鉴权强度由**通用**守卫保证，
+# 不再按域重复钉一遍。覆盖仍在：
+#   - 硬闸：`app/tests/integration/test_startup_gate.py`
+#   - 设置面告警：本文件上文的 `productionAuthMisconfiguration` 用例
+# ---------------------------------------------------------------------------
+
+
+def test_本体发现域不再有独立的鉴权自检() -> None:
+    """域级自检已删除 ⇒ config.py 与 main.py 都不得再有它的影子。
+
+    防止「以后有人又加回来」（冗余守卫 = 假安全感）。
+    """
+
+    assert "ontologyDiscoveryAuthMisconfiguration" not in _mainCodeOnly(), (
+        "main.py 仍接线已删除的 ontologyDiscoveryAuthMisconfiguration"
+    )
+    assert "ontologyDiscoveryAuthMisconfiguration" not in _codeOnlyOf(_CONFIG_PY), (
+        "config.py 仍定义已删除的 ontologyDiscoveryAuthMisconfiguration"
     )

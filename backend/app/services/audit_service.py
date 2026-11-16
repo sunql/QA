@@ -36,6 +36,9 @@ _VALID_ACTIONS = frozenset({
     "DELETE",
     # 本体类恢复（fix-class-tombstone-restore，2026-10-03）
     "RESTORE",
+    # 内容寻址复用（WP-ONT-AI A1）：内容未变 ⇒ 复用既有行（**没有新建**）
+    # ⇒ 审计动作不能记 CREATE（会让「新增了多少行」的台账虚高）。
+    "REUSE",
     # 认证事件（feat-user-auth，2026-09-20）
     "auth.login",
     "auth.login_failed",

@@ -347,3 +347,99 @@ PII 掩码只收**形状几乎不会误伤业务数据**的三类：邮箱、大
 ② **「不可擦除」** ⇒ 视为**证据日志的设计属性**：更正的方式是**追加新行**，
 不是原地删除（与本仓 `audit_log` 不可变触发器同构）。⇒ 不引入「原地 UPDATE 覆盖」
 这条会破坏内容寻址的路径。
+
+---
+
+## A2 / A3 / A4 任务卡（2026-11-16 补写；批次总览见上文「批次总览」）
+
+> **状态**：A2/A3/A4 **待排期**（阻塞见本节末「阻塞解除清单」）。
+> **排序裁决**：本线排在 **P5 Workflow/Command/Approval 之后**（理由与边界见
+> [`../2026-11-16-p5-workflow-command/plan.md`](../2026-11-16-p5-workflow-command/plan.md) §8）；
+> A2 → A3 → A4 的内部顺序**不变**（依赖倒排）。
+> ⚠️ **迁移号**：本线与 P5 都要 0149+ ⇒ **先合并者占号**（否则 alembic 链分叉）。
+
+### A2 剖析与证据（`profile_result` 列级 metrics + 证据引用）
+
+**目标**：把「快照的结构」升级为「快照的**统计特征**」——列级 metrics + 可回溯的证据引用（脱敏 + 采样）。
+
+- [ ] **A2-1** 迁移：`discovery_profile_result` 表（`snapshot_id` / `class_name` / `column_name` /
+      `metrics_json` / `evidence_ref` / `sampled` / `captured_at`）+ ORM（`app/domain/discovery_models.py`）；
+      约束：`(snapshot_id, class_name, column_name)` 唯一；**只增不改**（同 D-21 口径）。
+- [ ] **A2-2** 剖析服务（`app/services/discovery_profile_service.py`）：复用
+      `SchemaIntrospectionService` 的内省结果 + `semantic_diff_service` 的归一化口径
+      ⇒ 列级 metrics（行数估计、空值率、基数估计、长度分布、类型分布）。
+      **口径 SSOT**：归一化只认 `semantic_diff_service` 那一套（不另立第二份归一化）。
+- [ ] **A2-3** 证据引用：每条 metric 指向**可复现的采样语句标识**（不落原始样本行 ⇒ 不可擦除问题不扩大）。
+- [ ] **A2-4** 脱敏 + 采样策略（`app/domain/external_text.py` SSOT，D-16）：
+      **采样默认关闭**；采样白名单未回（Q3）前，只允许**聚合统计**，**禁止**落任何样本值。
+      ⇒ 这是「fail-closed 方向」的落点，与 A1 的「RAG 空维度 = 拒一切」同向。
+- [ ] **A2-5** API：候选类/列级 metrics 查询 + 证据引用查询（**只读**，不新增写面 ⇒ 无需扩治理写入口守卫）。
+- [ ] **A2-6** 测试：unit 新文件（安全）+ integration **并入既有文件**（禁新建 integration 文件）。
+- [ ] **A2-7** 真实数据脚本：对本地 MySQL 演示源跑剖析，输出可复现证据（掩码主机名）。
+
+**完成定义**：列级 metrics 可从快照复算；**采样白名单缺失时零样本落库**（硬断言）。
+
+### A3 候选生成（`discovery_run` + `ontology_candidate` + LLM 结构化发现）
+
+**目标**：把「差异」变成「**候选**」——LLM 提语义候选，人工裁决（红线：AI 只产出候选）。
+
+- [ ] **A3-1** 迁移：`discovery_run`（触发参数 / 模型 / Prompt 版本 / 状态 / 耗时）+ `ontology_candidate`
+      （`run_id` / `class_name` / `property_name` / `candidate_json` / `confidence` / `evidence_ref` /
+      `status`）+ ORM；约束：候选**只增不改**（不可擦除 ⇒ 同 D-21）。
+- [ ] **A3-2** **按用途选模型**路由（补 Q5 三项代码缺口之一）：新增「用途（discovery / profile / proposal）→ 模型配置」
+      映射，复用 `ModelConfigService.get()` + `createClient(config)` 的既有 per-request 切换路径
+      （**不新造模型路由**，别与 chat 的模型选择器分叉）。
+- [ ] **A3-3** **Prompt 版本落库**（补 Q5 代码缺口之二）：`discovery_run` 记 `prompt_version` +
+      `prompt_hash` ⇒ 候选可归因到「哪版 Prompt、哪个模型」。
+- [ ] **A3-4** 结构化发现：LLM 输出**受限 JSON**（Pydantic 校验）⇒ 解析失败**降级为该 run 失败**，
+      不落半截候选；每候选**必须**带证据引用（无证据的候选直接拒绝入库）。
+- [ ] **A3-5** 实体解析候选匹配：把候选类名匹配到既有本体类（复用 P1a 的匹配口径，不另立）。
+- [ ] **A3-6** 评测集骨架（Q5 三项缺口之三的**可做部分**）：评测集结构 + 指标（候选准确率/召回率/误合并率）
+      + 跑批脚本；**阈值不在本仓虚构**（设计稿 §139 要求业务/数据/研发共同签署）。
+- [ ] **A3-7** API：发起 run / 查询 run / 候选列表（**只读面**；候选转提案属 A4 的写面）。
+- [ ] **A3-8** 审计 + 计量：LLM 调用**必须**记录 Token 与成本（本仓硬约束）。
+- [ ] **A3-9** 测试：unit 新文件 + integration 并入既有文件。
+
+**完成定义**：run 可复现（同 Prompt 版本 + 同输入 ⇒ 同候选集）；无证据候选不入库。
+
+### A4 提案与发布（`ontology_change_proposal` + 四眼审核 + 影响分析 + 发布适配）
+
+**目标**：候选 → 提案 → 审核 → 校验 → **经既有 Compiler/Registry 发布** ⇒ 与 P1a/P1b 的发布面**同一条出口**。
+
+- [ ] **A4-1** 迁移：`ontology_change_proposal`（`base_version` / `diff_json` / `impact_json` / `proposer` /
+      `status`）+ `ontology_review`（`proposal_id` / `reviewer` / `decision` / `comment` / `reviewed_at`）+ ORM。
+      状态机照设计稿 §113：`DISCOVERED → CANDIDATE → PROPOSED → IN_REVIEW → APPROVED → VALIDATED → PUBLISHED`，
+      旁路 `REJECTED` / `NEEDS_EVIDENCE`，发布后可 `DEPRECATED` / 按版本回滚。
+- [ ] **A4-2** **影响分析**：复用 `semantic_diff_service`（差异）+ **下游依赖检查**
+      （Graph / RAG / NL2SQL / Agent 四类消费方的回归用例集）；覆盖度与截断**必须披露**（D-14 口径）。
+- [ ] **A4-3** **四眼审核 = 复用 P5 审批面**（**依赖 P5**）：审批流 / 矩阵 / 超时 / 幂等 走
+      P5 的 `approval_task`（subject_type = `ontology_proposal`）；本表**只留「谁签的字」的业务记录**。
+      ⇒ **不自建第二套审批栈**；若 P5 未就绪 ⇒ A4 只做「提交评审」不落签审结果（不允许临时手搓审批表）。
+- [ ] **A4-4** 发布适配：调用既有 `semanticReleaseService`（`DRAFT → VALIDATED → ACTIVE`），
+      **不直接写正式语义表**（设计稿 §109 的硬约束）；发布前**必须**过下游回归用例集。
+- [ ] **A4-5** 权限：写入口 `requireAdmin` + 登记进治理写入口守卫（`test_governance_write_route_auth.py`）。
+- [ ] **A4-6** 回滚：按版本回滚 = 走既有发布面回滚（`DEPRECATED` + 指回旧版本），
+      **不新增回滚路径**。
+- [ ] **A4-7** 测试：unit 新文件 + integration 并入既有文件；发布链路用**真实 PostgreSQL** 走完整 HTTP 链路。
+
+**完成定义**：提案可发布 ⇒ 走的是既有发布面；下游回归未过 ⇒ **发不出去**（硬断言）。
+
+### 阻塞解除清单（业务答复；A2/A3/A4 的开工前提）
+
+> 三个批次**各自**卡在一份业务答复上 ⇒ 答复没到，代码就只有「不依赖答复的那部分」可做。
+> 下面把「需要谁答什么」写成**可直接发出去**的清单（避免来回问）。
+
+| # | 缺口 | 问谁 | 需要什么（可直接抄走） |
+|---|---|---|---|
+| **Q3** | 可授权连接范围 / 敏感字段 / 数据质量基线 | 数据 Owner + DBA | ① 允许接入的数据源清单（连接 + 库 + 责任人）② 每个数据源**允许采样**的 schema/表/列白名单（**默认全禁**）③ 敏感字段的脱敏规则（哪些列禁止出现样本值）④ 采集窗口与频率上限 ⑤ 采集结果留存期限 |
+| **Q4** | 供应商/物料统一标识与映射责任人 + 审核工作台分派规则 | 业务 Owner + 治理委员会 | ① 审核人按什么分派（域 / 能力 / 风险级别？）② 四眼的**具体实现**：谁审、能否自审、是否需第三人 ③ 驳回 / 补证 / 超时默认动作 ④ 争议仲裁人 ⑤ 审核记录留存与导出要求 |
+| **Q5** | LLM 部署方式 / 调用安全策略 / 预算 / 评测集 | 平台 Owner + 安全 | ① LLM 部署形态（本地 oMLX 还是云端；数据能否出境）② 按用途的模型清单与**预算上限**（按 token 还是按次）③ Prompt 版本策略（谁维护、如何灰度）④ 评测集与**指标阈值**（设计稿 §139 要求三方签署，仓内不虚构阈值）⑤ 敏感 schema 是否可进 Prompt |
+
+### 与 P5 的接口约定（只此两处，其余各自独立）
+
+| 方向 | 约定 |
+|---|---|
+| P5 → A4 | 提供**通用审批面**（`approval_task` + 数据驱动矩阵 + 超时/幂等/越权守卫），A4 以 `subject_type=ontology_proposal` 挂靠 |
+| A4 → P5 | 提供**差异与影响分析**（`semantic_diff_service` + 下游依赖检查），供 P5「审批前可解释性」引用（A4 不反向依赖 P5 的执行器） |
+
+> ⚠️ 两条线**互不为前置**（除 A4-3 需要 P5 的审批面就绪）⇒ 排期上 P5 在前，但技术上只此一处耦合。

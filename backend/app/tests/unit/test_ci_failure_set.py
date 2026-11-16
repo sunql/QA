@@ -49,7 +49,7 @@ from app.tests.unit._ci_gate_support import (
 from app.tests.unit._ci_gate_support import (
     stubHeadFreshness as _stubHeadFreshness,
 )
-from app.utils import ci_failure_set
+from app.utils import ci_failure_set, ci_judge
 from app.utils.ci_failure_set import (
     assessJob,
     collectRunFailures,
@@ -653,6 +653,97 @@ def test_verdict_is_blocked_when_failures_were_removed() -> None:
 
 
 # --------------------------------------------------------------------------
+# 闸门自身的 job（自指）
+# --------------------------------------------------------------------------
+
+
+def test_collectRunFailures_excludes_the_gate_own_job() -> None:
+    """闸门**自己**的 job 不得参与判据。
+
+    实测（PR #137 run `43800518364`）：闸门的 job 会被 GitHub 挂到**触发它的那轮
+    CI run** 的 job 列表里（`workflow_name=CI`、`run_id` 就是该 CI run），
+    而 main 的 push run 里没有它（闸门只在 `pull_request` run 上裁决）。
+    ⇒ 不剔除它 ⇒ 每一轮 PR 都判「job 集合不等价」（退出码 4）；
+    它自己跑红了还会以 `job:merge-gate / failure-set-diff` 的形态记成**净新增失败**
+    ⇒ 闸门**自己红 ⇒ 自己拦**，任何 PR 都无法通过。
+    """
+    jobs = [
+        _job(jobId=1, name="Backend / unit shard 0", conclusion="failure"),
+        _job(jobId=2, name="merge-gate / failure-set-diff", conclusion="failure"),
+    ]
+
+    failures, assessments = collectRunFailures(jobs, {1: _RED_LOG})
+
+    assert [item.job.name for item in assessments] == ["Backend / unit shard 0"]
+    assert failures == frozenset(
+        {
+            "app/tests/unit/test_chat_service.py::test_reply",
+            "app/tests/unit/test_rate_limit.py::test_burst",
+        }
+    )
+
+
+@pytest.mark.parametrize("gateConclusion", ["failure", "", "success", "cancelled"])
+def test_verdict_is_mergeable_when_only_the_pr_side_has_the_gate_job(
+    gateConclusion: str,
+) -> None:
+    """PR 侧多出闸门自己的 job（任意结论）⇒ 仍然可合并。
+
+    三种自指形态都会被自己拦下：
+    - `failure` ⇒ 覆盖不等价（退出码 4）+ 净新增 `job:merge-gate / failure-set-diff`（1）；
+    - 结论还是 null（闸门**正在跑**时拉的是 job 列表）⇒ 判 UNUSABLE（退出码 2）；
+    - `cancelled` ⇒ 同样判 UNUSABLE（退出码 2）。
+    ⇒ 剔除它之后，这三条都不成立 ⇒ 结论回到「净新增 0 ⇒ 可合并」。
+    """
+    baseFailures, baseAssessments = collectRunFailures(
+        [_job(jobId=1, name="Backend / unit shard 0", conclusion="success")],
+        {1: _GREEN_LOG},
+    )
+    prFailures, prAssessments = collectRunFailures(
+        [
+            _job(jobId=11, name="Backend / unit shard 0", conclusion="success"),
+            _job(jobId=12, name="merge-gate / failure-set-diff", conclusion=gateConclusion),
+        ],
+        {11: _GREEN_LOG},
+    )
+
+    verdict = verdictFor(diffFailureSets(baseFailures, prFailures), baseAssessments, prAssessments)
+
+    assert verdict.canMerge is True
+    assert verdict.blockingReason is None
+    # ⚠️ 这条断言防「过滤器把**所有** job 都剔掉」：那样两侧都空 ⇒ 覆盖「等价」
+    # ⇒ 结论照样可合并 ⇒ 上面两条断言分辨不出「剔对了」还是「剔光了」。
+    assert [item.job.name for item in prAssessments] == ["Backend / unit shard 0"]
+
+
+def test_collectRunFromGithub_does_not_even_fetch_the_gate_job_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """闸门自己的 job 连日志都不拉。
+
+    它的日志是闸门自己的输出（没有 pytest 完成标记）⇒ 拉了也没用；
+    更实际的是：那一步没有日志归档（实测 `BlobNotFound`）⇒ 白等一次 404。
+    """
+    rawJobs = [
+        {"id": 1, "name": "Backend / unit shard 0", "conclusion": "success"},
+        {"id": 2, "name": "merge-gate / failure-set-diff", "conclusion": "failure"},
+    ]
+    fetchedJobIds: list[int] = []
+
+    def fakeFetchJobLog(repo: str, jobId: int) -> str:
+        fetchedJobIds.append(jobId)
+        return _GREEN_LOG
+
+    monkeypatch.setattr(ci_judge, "fetchJobPayloads", lambda repo, runId: rawJobs)
+    monkeypatch.setattr(ci_judge, "fetchJobLog", fakeFetchJobLog)
+
+    _, assessments = ci_judge.collectRunFromGithub("sunql/QA", "222")
+
+    assert [item.job.jobId for item in assessments] == [1]
+    assert fetchedJobIds == [1]
+
+
+# --------------------------------------------------------------------------
 # 非分片 job（frontend 等）：没有标记协议
 # --------------------------------------------------------------------------
 
@@ -1001,6 +1092,26 @@ def test_main_returns_zero_when_mergeable(monkeypatch: pytest.MonkeyPatch) -> No
     exitCode = ci_failure_set.main(["--repo", "sunql/QA", "--base-run", "111", "--pr-run", "222"])
 
     assert exitCode == 0
+
+
+def test_main_discloses_that_the_gate_own_job_is_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """剔除闸门自身的 job 是**设计**，但**不得静默**：报告里必须有一行提示。
+
+    否则看报告的人会以为「PR 侧的 job 列表就只有这 9 个」⇒ 下次真有 job
+    消失（少跑分片）时，分不清「被工具剔掉了」还是「CI 少跑了」。
+    """
+    result = _oneRedShard()
+    _stubGithub(monkeypatch, result, result)
+
+    exitCode = ci_failure_set.main(["--repo", "sunql/QA", "--base-run", "111", "--pr-run", "222"])
+
+    out = capsys.readouterr().out
+    assert exitCode == 0
+    assert "判据不含闸门自身的 job" in out
+    assert ci_judge.GATE_JOB_NAME in out
 
 
 def test_main_returns_one_when_new_failures(monkeypatch: pytest.MonkeyPatch) -> None:

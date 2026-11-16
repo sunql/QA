@@ -52,6 +52,22 @@ _COMPLETED_STATUSES = frozenset({0, 1})
 # 128+N = 被信号 N 杀死（137=SIGKILL、143=SIGTERM）
 _SIGNAL_EXIT_BASE = 128
 
+# 闸门**自身**的 job 名（`merge-gate.yml` 的 `<workflow 名> / <job id>`）。
+#
+# ⚠️ 为什么必须把它从判据里剔除（**自指**）：
+# GitHub 会把这个 job 挂到**触发它的那轮 CI run** 的 job 列表里
+# （实测 PR #137 run `43800518364`：它的 `workflow_name` 就是 `CI`、
+#   `run_id` 就是该 CI run），而 main 的 push run 里没有它（闸门只在
+# `pull_request` run 上裁决）⇒ 不剔除就三种自拦：
+#   - 两次 run 的 job 集合不等价 ⇒ COVERAGE_MISMATCH（退出码 4）；
+#   - 闸门自己跑红 ⇒ `job:merge-gate / failure-set-diff` 被记成**净新增失败**（1）；
+#   - 闸门**正在跑**时拉到的 job 列表里它的 conclusion 还是 null ⇒ UNUSABLE（2）。
+# ⇒ 任何 PR 都无法通过。
+#
+# ⚠️ 名字是 `<workflow 名> / <job id>` ⇒ **workflow 改名或 job 改名这里就静默失效**
+# ⇒ 守卫：`test_ci_merge_gate_workflow.py::test_gate_job_name_constant_matches_the_workflow`。
+GATE_JOB_NAME = "merge-gate / failure-set-diff"
+
 # 结论码
 _REASON_MERGEABLE = "MERGEABLE"
 _REASON_NEW_FAILURES = "NEW_FAILURES"
@@ -330,12 +346,23 @@ def _unionUsableFailures(assessments: Iterable[JobAssessment]) -> frozenset[str]
     )
 
 
+def _withoutGateOwnJob(jobs: Iterable[CiJob]) -> tuple[CiJob, ...]:
+    """剔除闸门自身的 job（见 `GATE_JOB_NAME`：自指 ⇒ 它不能参与自己的判据）。
+
+    两侧都剔除（PR 侧可能有、基线侧通常没有）⇒ 覆盖等价 / 可用性 / 失败集合
+    三条判据都不再被自己的判定结果污染。
+    """
+    return tuple(job for job in jobs if job.name != GATE_JOB_NAME)
+
+
 def collectRunFailures(
     jobs: Iterable[CiJob],
     logs: Mapping[int, str],
 ) -> tuple[frozenset[str], tuple[JobAssessment, ...]]:
     """汇总一轮 run 的失败集合（**只取可用 job** 的）与逐 job 判定。"""
-    assessments = tuple(assessJob(job, logs.get(job.jobId, "")) for job in jobs)
+    assessments = tuple(
+        assessJob(job, logs.get(job.jobId, "")) for job in _withoutGateOwnJob(jobs)
+    )
     return _unionUsableFailures(assessments), assessments
 
 
@@ -456,8 +483,12 @@ def collectRunFromGithub(repo: str, runId: str) -> tuple[frozenset[str], tuple[J
 
     **逐个 job 拉日志、拉完立刻判定并丢弃原文** ⇒ 内存里最多留一份日志，
     而不是把一轮 run 的所有日志同时留在内存里（integration 日志可达数十 MB/份）。
+
+    闸门自身的 job 在**拉日志之前**就被剔除（见 `GATE_JOB_NAME`）——
+    它的日志是闸门自己的输出（没有 pytest 完成标记），拉了也判不出东西，
+    而且实测那一步没有归档日志（`BlobNotFound`）⇒ 白等一次 404。
     """
-    jobs = _toCiJobs(fetchJobPayloads(repo, runId))
+    jobs = _withoutGateOwnJob(_toCiJobs(fetchJobPayloads(repo, runId)))
     assessments: list[JobAssessment] = []
     for job in jobs:
         logFetchError: str | None = None

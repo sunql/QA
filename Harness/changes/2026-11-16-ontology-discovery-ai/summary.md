@@ -7,7 +7,8 @@
 - **关联变更**：[feat-semantic-release-graph-mirror](../feat-semantic-release-graph-mirror/summary.md)（P3b 发布镜像，提供发布侧基线）、[feat-semantic-release-a](../feat-semantic-release-a/summary.md)（P1a 语义发布，Compiler/Registry 是本批的上游）
 - **迁移版本**：`0146_discovery_snapshot.py`（26 字符，建两表）/ `0147_snapshot_immutability.py`（29 字符，库级不可变触发器）/ `0148_audit_reuse_action.py`（26 字符，审计动作 `REUSE`）—— 文件名均 ≤ 32 字符，版本号均 4 字符（`alembic_version.version_num` 是 `varchar(32)`）
 - **MEMORY**：[`qa-system-ontology-discovery-a1.md`](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-ontology-discovery-a1.md)
-- **计划**：[`plan.md`](./plan.md)（A1–A4 全量计划）；**证据**：[`daily/A1.md`](./daily/A1.md)
+- **计划**：[`plan.md`](./plan.md)（A1–A4 全量计划）；**证据**：[`daily/A1.md`](./daily/A1.md)、[`daily/A2a.md`](./daily/A2a.md)（A2a 增量）
+- **增量批次**：**A2a「列长度 / 精度进快照」**（解冻 A1 遗留项 L-9；零 DDL、零新增端点、零 LLM、不部署）。证据与真实数据实测见 [`daily/A2a.md`](./daily/A2a.md)；本文件 §4/§5/§6/§7.5 同步收录
 
 ---
 
@@ -173,7 +174,23 @@ DB `CHECK`）：只改两处 ⇒ 运行时报错或库层拒绝写入。
 
 **响应头**：全部端点 `Cache-Control: no-store`（治理元数据不进浏览器与代理缓存）。
 
-**既有契约零变更**：未改任何既有端点、字段或状态机。
+**既有契约**：A1 **零变更**；**A2a 起既有 schema 响应 DTO 加法式增 3 字段**（详见下节）。
+
+### 4.1 A2a 对既有 schema 契约的加法式变更（**必须登记**，否则后人只看 A1 会漏判面）
+
+| 项 | 变更 | 传播链 |
+|---|---|---|
+| 共享 DTO `ColumnSchemaRead` | 新增 3 个**可选**字段 `numeric_precision` / `numeric_scale` / `character_max_length`（JSON 为 camelCase `numericPrecision` / `numericScale` / `characterMaxLength`） | `app/domain/schemas.py`（`SchemaIntrospectResponse` 的列项）→ 因此**既有** `POST /api/v1/datasources/{id}/introspect` 与 `GET /api/v1/datasources/{id}/schema` 的响应里，每个列项多 3 个键 |
+| `schema_cache.schema_data` | 下一次内省写入的行**携带**三键（老行缺键 ⇒ Pydantic 取默认 `None`，**无需数据迁移**） | `SchemaIntrospectionService.introspectAndCache`（`schemaData = [t.model_dump() ...]`）；`_schemaVersion` 摘要变化 ⇒ 各数据源**一次性**全量重探（预期） |
+| 快照 JSON | 列项恒带三键（采集不到为 `null`）；`schemaVersion v1 → v2` | `normalizeSnapshot` → `metadata_snapshot.snapshot_json` |
+
+- **不是端点/字段删除或改型**：三字段全部可选、默认 `None`，老调用方与老缓存行不受影响
+  （`CamelModel` 是 `populate_by_name=True` 且非 `extra="forbid"`）。
+- **不进任何 LLM prompt**（逐路径核实）：`import_llm_enhancer` 只取 `name`+`data_type`；
+  数据质量规则生成只取 `column_name`/`data_type`/`nullable`；`nl2sql_schema` 走 Manifest 不走缓存。
+- **快照 JSON 不可跨源比较**：方言不落 JSON，权威来源是
+  `metadata_snapshot.source_id → discovery_source.datasource_id → data_source.type`；
+  且 `schema_hash` 唯一约束是 `(source_id, schema_hash)` ⇒ 哈希本来就只在源内可比。
 
 ---
 
@@ -191,6 +208,10 @@ DB `CHECK`）：只改两处 ⇒ 运行时报错或库层拒绝写入。
 | `app/main.py` | `include_router(ontology_discovery.router, prefix="/api/v1/ontology-discovery", dependencies=[mustChangePasswordGuard, rateLimitDep])` —— **必须直接 include 子路由**（FastAPI 0.141 前缀双重叠加坑） |
 | `app/tests/_testapp.py` | 测试 app **同前缀同依赖**挂载 ⇒ 生产 / 测试装配一致 |
 | `scripts/ontology_discovery_realdata.py` | 真实数据验证脚本：采集面（写隔离测试库）+ 差异面（只读治理库），见第 8 段 |
+| `app/domain/schemas.py`（A2a） | `ColumnSchemaRead` 增 `numeric_precision` / `numeric_scale` / `character_max_length`（三字段**独立**，不拼进 `data_type`；全可选 ⇒ 老缓存行兼容） |
+| `app/services/schema_introspection_service.py`（A2a） | `_optionalInt` 归一（异常形状 ⇒ `None` + **WARNING**，不静默、不用 0 兜底）；`_mergeRows` 携带三字段；Oracle 列 SQL 增 `DATA_PRECISION`/`DATA_SCALE`/`CHAR_LENGTH`，PG/MySQL 增 `NUMERIC_PRECISION`/`NUMERIC_SCALE`/`CHARACTER_MAXIMUM_LENGTH`，**别名统一**为同一组规范键 |
+| `app/services/discovery_snapshot_service.py`（A2a） | `normalizeSnapshot` 列项增三键；`SNAPSHOT_SCHEMA_VERSION` `v1 → v2`（v1 与 v2 **不可比**，跨版本采集会新增一行——预期） |
+| `frontend/src/types/datasource.ts`（A2a） | `ColumnSchema` 增三个可选字段（无 UI 变更、不回传请求体） |
 
 **依赖注入点**：FastAPI `Depends(getDb)`（会话）/ `Depends(requireAdmin)` / `Depends(getCurrentUser)`；
 服务层 `DiscoverySnapshotService(*, introspectionService=None, datasourceService=None)` 支持替换。
@@ -211,6 +232,9 @@ DB `CHECK`）：只改两处 ⇒ 运行时报错或库层拒绝写入。
 | unit | `test_audit_service.py`（`REUSE` 动作） | ✅ |
 | integration | `test_governance_write_route_auth.py`（生产装配门禁守卫） | ✅ 全绿 |
 | integration | `test_ontology_drift_api.py`（含 `TestOntologyDiscoveryApi` / `TestOntologyDiscoverySourceUpdate`） | ✅ 新增用例全绿／❌ **2 既有红基线** |
+| unit（A2a） | `test_discovery_snapshot_service.py` 增 5 例：精度 / 长度差异 ⇒ 哈希不同；快照列携带与恒含三键；**仅精度变化 ⇒ 新增一行且旧行逐字不变**（原生 SQL 读 JSON 文本） | ✅ 先 RED 后 GREEN |
+| unit（A2a） | `test_schema_introspection_service.py` 新增 `TestColumnPrecisionAndLength` 7 例：两方言 SQL 别名统一；`_mergeRows` 携带 / 缺失为 `None`；端到端内省带精度；**老缓存行缺键 ⇒ 响应给 `None`**；`_optionalInt` 异常形状留 WARNING | ✅ 先 RED 后 GREEN |
+| integration（A2a） | `test_datasource_schema_api.py`（既有文件，**未新建**） | ✅ 8 passed |
 
 - **单测合计 167 passed**（A1 相关 7 个 unit 文件，87.48s）；再加 `test_audit_service.py`
   + `test_nl2sql_schema.py` 的 9 文件集合 **212 passed**（115.62s）。
@@ -307,6 +331,27 @@ DB `CHECK`）：只改两处 ⇒ 运行时报错或库层拒绝写入。
 | 生产写库无备份前置 | 真实数据脚本对 `--allow-prod-write` 之外**无备份前置**——本脚本只 INSERT 自己那两张新表（无 UPDATE / DELETE，已读代码确认）⇒ 不存在破坏既有数据的路径，且默认闸门只允许隔离测试库 |
 | **全仓装饰器限流是死代码** | D-18 只修了本域端点。**全仓 `@limiter.limit` 装饰器限额（含 `datasources.py` 的 introspect 10/分钟）当前均未被执行**（`_auto_check=False` + 无 `SlowAPIMiddleware` + `rateLimitDep` 按 URL 路径查而 slowapi 按 `module.func` 登记）⇒ 修它是**全仓语义变更**（会一次性激活大量休眠限额）⇒ **单独立项**，本批只登记 |
 | 读入口门禁 | D-19 的显式安全决议；「读入口 admin 化」待产品决策 |
+
+### 7.5 A2a 复查（`security-reviewer` + `code-reviewer`）
+
+**结论**：security **0 CRITICAL / 0 HIGH / 2 MEDIUM / 3 LOW**；code **0 CRITICAL / 1 HIGH
+（= 就是本节 §4.1 的文档漂移，已修） / 4 MEDIUM / 4 LOW**。逐条处置：
+
+| 项 | 内容 | 处置 |
+|---|---|---|
+| S-M1 | 三个新字段的**跨方言语义**未标注，而快照**不可擦除 + 全员可读** ⇒ 语义歧义会被永久固化 | **登记 + 文档钉死**：方言不落 JSON，权威来源 `source_id → discovery_source.datasource_id → data_source.type`；哈希唯一约束本就是 `(source_id, schema_hash)` ⇒ 跨源比较无意义；各方言整型 / TEXT 口径差异写进 wiki（`TEXT` 的 `characterMaxLength` 是引擎上限，不是声明长度）。**不加顶层方言键**：来源已由行锚定，加键只会再造一个可能与外键不一致的真相源 |
+| S-M2 | 变更溢出到共享 `ColumnSchemaRead` / `schema_cache` / 内省 API，与「只做快照」口径不符 | **已在 §4.1 显式登记传播链** + 逐路径核实「不进任何 LLM prompt」；`daily/A2a.md` 措辞改为「零新增端点；既有 schema 响应加法式增 3 字段」 |
+| S-L1 | Oracle 分支**零真实库证据**（本机无 Oracle 实例） | **如实登记**为遗留 L-14；脚本已支持 `--datasource-id`，接 Oracle 源即可复跑。⚠️ 首次生产采集**之前**必须补——快照不可擦除 |
+| S-L2 | 三列成为内省**硬依赖**（老/裁剪版库无此列 ⇒ 整条内省失败） | **登记最低版本**：Oracle 8i+ / PG 9.0+ / MySQL 5.7+ / MariaDB 10.0+（`information_schema` 三列自这些版本起稳定存在）；写入 wiki |
+| S-L3 | 列宽 / 精度构成「信息泄露新维度」 | **显式披露决策**：列宽 / 精度属**结构元数据**，判定为可公开；已知边际推断 = 定长敏感列的格式长度（价值极低，且被既有「列名 + 类型 + 注释 + 主外键图」暴露严格支配）。写入 wiki |
+| C-M1 | MySQL `INT` vs `INT UNSIGNED` 仍同哈希（`unsigned` 不在这三列里） | **登记为已知缺口 L-15**（`DATA_TYPE` 在 MySQL 里是 `int` 两种写法都是 `int`，符号性在 `COLUMN_TYPE`）——需要第 4 个字段才能解决，本增量不做 |
+| C-M2 | DB 层「精度变化 ⇒ 新增快照行、旧行不变」只钉在纯函数层 | **补 DB 层用例** `test_仅精度变化新增一行且旧行不变`（原生 SQL 读 JSON 文本，绕开 identity map） |
+| C-M3 | 老 `schema_cache` JSON 向后兼容零覆盖 | **补用例** `test_build_response_tolerates_legacy_cache_rows` |
+| C-M4 / C-L1 | Oracle 无真实证据 / `_optionalInt` 静默吞异常 | 同 S-L1；`_optionalInt` 失败分支**加 WARNING**（取值截断打印）+ 用例 |
+| C-L2 | TEXT/BLOB 的 `characterMaxLength` 语义不同（MySQL 报引擎上限） | **写入 wiki** 的方言口径表 |
+| C-L3 | v1 / v2 快照行不可直接比较 | 已写入 wiki（读侧必须按 `schemaVersion` 分流） |
+
+> 遗留编号续 A1：**L-14**（Oracle 真实库未取证）、**L-15**（MySQL `unsigned` 不进哈希）。
 
 ---
 

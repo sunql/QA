@@ -97,6 +97,11 @@ export interface ColumnSchema {
   columnName: string;
   dataType: string;
   nullable: boolean;
+  // 列精度 / 长度（WP-ONT-AI A2a）：`dataType` 只带类型名 ⇒ NUMBER(10,2) 与
+  // NUMBER(10,4) 不可区分。三个字段为**可选**（老缓存 / 采集不到时后端给 null）。
+  numericPrecision?: number | null;
+  numericScale?: number | null;
+  characterMaxLength?: number | null;
 }
 
 export interface ForeignKeySchema {

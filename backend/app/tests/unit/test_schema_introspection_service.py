@@ -478,3 +478,159 @@ class TestCommentEnrichment:
             upper = sql.upper()
             for dml in ("INSERT ", "UPDATE ", "DELETE ", "DROP ", "ALTER ", "TRUNCATE "):
                 assert dml not in upper, f"非只读 SQL 被执行: {sql!r}"
+
+
+class TestColumnPrecisionAndLength:
+    """列精度 / 长度采集（WP-ONT-AI A2a，L-9）。
+
+    旧口径下 `data_type` 只带类型名 ⇒ `NUMBER(10,2)` 与 `NUMBER(10,4)` 采集结果
+    **逐字相同** ⇒ 快照哈希相同 ⇒ 发现引擎看不见精度变更。
+    ⇒ 三方言都要把精度 / 长度读出来，且**别名统一**为同一组规范键
+    （`numeric_precision` / `numeric_scale` / `character_max_length`），
+    让 `_mergeRows` 只有一套取键口径。
+    """
+
+    async def test_oracle_columns_sql_reads_precision_and_length(self) -> None:
+        adapter = _FakeSchemaAdapter(columnRows=[], pkRows=[], fkRows=[])
+        await _service(adapter).introspect(_datasource())
+
+        columnSql = next(sql for sql in adapter.executed if "ALL_TAB_COLUMNS" in sql)
+        assert "data_precision" in columnSql
+        assert "data_scale" in columnSql
+        assert "char_length" in columnSql
+        # 别名统一到规范键（_mergeRows 只有一套取键口径）
+        assert '"numeric_precision"' in columnSql
+        assert '"numeric_scale"' in columnSql
+        assert '"character_max_length"' in columnSql
+
+    @pytest.mark.parametrize("type_", ["mysql", "postgresql"])
+    async def test_info_schema_columns_sql_reads_precision_and_length(self, type_: str) -> None:
+        adapter = _FakeSchemaAdapter(columnRows=[], pkRows=[], fkRows=[])
+        await _service(adapter).introspect(_datasource(type_=type_))
+
+        columnSql = next(
+            sql
+            for sql in adapter.executed
+            if "information_schema.columns" in sql and "column_comment" not in sql
+        )
+        assert "numeric_precision" in columnSql
+        assert "numeric_scale" in columnSql
+        assert "character_maximum_length" in columnSql
+        assert "character_max_length" in columnSql
+
+    async def test_merge_rows_carries_precision_fields(self) -> None:
+        merged = schema_module._mergeRows(
+            [
+                {
+                    "table_name": "T",
+                    "column_name": "AMOUNT",
+                    "data_type": "NUMBER",
+                    "nullable": 0,
+                    "numeric_precision": 10,
+                    "numeric_scale": 2,
+                    "character_max_length": None,
+                }
+            ],
+            [],
+            [],
+        )
+
+        column = merged["T"]["columns"][0]
+        assert column["numeric_precision"] == 10
+        assert column["numeric_scale"] == 2
+        assert column["character_max_length"] is None
+
+    async def test_merge_rows_without_precision_is_none(self) -> None:
+        """采集不到的精度 ⇒ None（不猜、不填 0：0 与「未定义」语义不同）。"""
+
+        merged = schema_module._mergeRows(
+            [{"table_name": "T", "column_name": "A", "data_type": "NUMBER", "nullable": 0}],
+            [],
+            [],
+        )
+
+        column = merged["T"]["columns"][0]
+        assert column["numeric_precision"] is None
+        assert column["numeric_scale"] is None
+        assert column["character_max_length"] is None
+
+    async def test_introspect_exposes_precision_on_columns(self) -> None:
+        adapter = _FakeSchemaAdapter(
+            columnRows=[
+                {
+                    "table_name": "PRECEIPT",
+                    "column_name": "TOTQTY_0",
+                    "data_type": "NUMBER",
+                    "nullable": 1,
+                    "owner": "ZJTH",
+                    "numeric_precision": 12,
+                    "numeric_scale": 4,
+                    "character_max_length": None,
+                },
+                {
+                    "table_name": "PRECEIPT",
+                    "column_name": "PTHNUM_0",
+                    "data_type": "VARCHAR2",
+                    "nullable": 0,
+                    "owner": "ZJTH",
+                    "numeric_precision": None,
+                    "numeric_scale": None,
+                    "character_max_length": 20,
+                },
+            ],
+            pkRows=[],
+            fkRows=[],
+        )
+
+        tables = await _service(adapter).introspect(_datasource())
+
+        columns = {column.column_name: column for column in tables[0].columns}
+        assert columns["TOTQTY_0"].numeric_precision == 12
+        assert columns["TOTQTY_0"].numeric_scale == 4
+        assert columns["TOTQTY_0"].character_max_length is None
+        assert columns["PTHNUM_0"].character_max_length == 20
+        assert columns["PTHNUM_0"].numeric_precision is None
+
+    def test_build_response_tolerates_legacy_cache_rows(self) -> None:
+        """老 `schema_cache.schema_data` 行**没有**精度三键 ⇒ 不加迁移也能读。
+
+        A2a 之前写入的缓存行只有四个键；`ColumnSchemaRead` 三字段可选 ⇒
+        Pydantic 取默认 `None`。若哪天把三字段改成必填，这里会先红。
+        """
+
+        legacyRow = {
+            "table_name": "DIM_ASSET",
+            "owner": "",
+            "columns": [{"column_name": "AMOUNT", "data_type": "DECIMAL", "nullable": True}],
+            "primary_keys": [],
+            "foreign_keys": [],
+        }
+        from datetime import UTC, datetime
+
+        cache = SimpleNamespace(schema_data=[legacyRow], updated_time=datetime.now(UTC))
+
+        response = SchemaIntrospectionService.buildResponse(cache)
+
+        column = response.tables[0].columns[0]
+        assert column.numeric_precision is None
+        assert column.numeric_scale is None
+        assert column.character_max_length is None
+
+    def test_optional_int_logs_unexpected_value(self, caplog) -> None:
+        """形状异常不是静默：归一为 None，但留一条 WARNING 供排障。
+
+        正常取值（int / Decimal / 数字串）不该打日志——日志噪音会让真实异常被淹没。
+        """
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger=schema_module.logger.name):
+            assert schema_module._optionalInt("abc") is None
+            assert schema_module._optionalInt("12.5") is None
+            assert schema_module._optionalInt(10) == 10
+            assert schema_module._optionalInt("12") == 12
+            assert schema_module._optionalInt(None) is None
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert len(messages) == 2
+        assert all("numeric_precision" in message or "精度" in message for message in messages)

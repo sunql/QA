@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.domain.discovery_models import DiscoverySource, MetadataSnapshot
 from app.domain.exceptions import ConflictError, ValidationError
@@ -45,12 +45,24 @@ def _table(name: str, *, columns=None, pks=None, fks=None, owner: str = "", comm
     )
 
 
-def _column(name: str, dataType: str = "VARCHAR", nullable: bool = True, comment=None):
+def _column(
+    name: str,
+    dataType: str = "VARCHAR",
+    nullable: bool = True,
+    comment=None,
+    *,
+    numeric_precision: int | None = None,
+    numeric_scale: int | None = None,
+    character_max_length: int | None = None,
+):
     return ColumnSchemaRead(
         column_name=name,
         data_type=dataType,
         nullable=nullable,
         comment=comment,
+        numeric_precision=numeric_precision,
+        numeric_scale=numeric_scale,
+        character_max_length=character_max_length,
     )
 
 
@@ -91,6 +103,20 @@ def _service(tables: list[TableSchemaRead]) -> DiscoverySnapshotService:
     return DiscoverySnapshotService(introspectionService=_FakeIntrospection(tables))
 
 
+async def _nativeJson(session, snapshotId: int) -> str:
+    """**原生 SQL** 读快照 JSON 文本。
+
+    同一 session 里 `session.get()` 可能拿回 identity map 里的同一个实例 ⇒
+    「只增不改」的断言会变成「和它自己比」⇒ 恒过、不可红。原生读永远打到库。
+    """
+
+    result = await session.execute(
+        text("SELECT snapshot_json::text FROM metadata_snapshot WHERE id = :id"),
+        {"id": snapshotId},
+    )
+    return result.scalar_one()
+
+
 # ---------------------------------------------------------------- 规范化
 
 
@@ -108,7 +134,7 @@ def test_规范化输出结构完整():
 
     snapshot = normalizeSnapshot(tables)
 
-    assert snapshot["schemaVersion"] == "v1"
+    assert snapshot["schemaVersion"] == "v2"
     table = snapshot["tables"][0]
     assert table["tableName"] == "订单"
     assert table["owner"] == "THBI"
@@ -119,6 +145,9 @@ def test_规范化输出结构完整():
         "dataType": "BIGINT",
         "nullable": False,
         "comment": None,
+        "numericPrecision": None,
+        "numericScale": None,
+        "characterMaxLength": None,
     }
     assert table["foreignKeys"] == [
         {"columnName": "客户号", "refTable": "客户", "refColumn": "id"}
@@ -175,6 +204,61 @@ def test_快照哈希对内容变化敏感():
     changed = normalizeSnapshot([_table("T", columns=[_column("a", "VARCHAR")])])
 
     assert computeSnapshotHash(base) != computeSnapshotHash(changed)
+
+
+# ---------------------------------------------------------------- 精度 / 长度（L-9）
+#
+# 旧口径下 `dataType` 只带**类型名**（"NUMBER" / "VARCHAR"）⇒ NUMBER(10,2) 与
+# NUMBER(10,4)、VARCHAR(10) 与 VARCHAR(50) 采集出的快照**逐字相同** ⇒ 哈希相同
+# ⇒ 发现引擎看不见「精度 / 长度变了」这类变更。
+# ⇒ 精度与长度独立成字段进快照：可分别判「类型变了」与「精度变了」。
+
+
+def test_仅数值精度不同哈希不同():
+    base = normalizeSnapshot(
+        [_table("T", columns=[_column("a", "NUMBER", numeric_precision=10, numeric_scale=2)])]
+    )
+    changed = normalizeSnapshot(
+        [_table("T", columns=[_column("a", "NUMBER", numeric_precision=10, numeric_scale=4)])]
+    )
+
+    assert computeSnapshotHash(base) != computeSnapshotHash(changed)
+
+
+def test_仅字符长度不同哈希不同():
+    base = normalizeSnapshot(
+        [_table("T", columns=[_column("a", "VARCHAR", character_max_length=10)])]
+    )
+    changed = normalizeSnapshot(
+        [_table("T", columns=[_column("a", "VARCHAR", character_max_length=50)])]
+    )
+
+    assert computeSnapshotHash(base) != computeSnapshotHash(changed)
+
+
+def test_快照列携带精度值():
+    snapshot = normalizeSnapshot(
+        [_table("T", columns=[_column("a", "NUMBER", numeric_precision=12, numeric_scale=3)])]
+    )
+
+    column = snapshot["tables"][0]["columns"][0]
+    assert column["numericPrecision"] == 12
+    assert column["numericScale"] == 3
+    assert column["characterMaxLength"] is None
+
+
+def test_快照列恒含精度三键():
+    """采集不到精度时也要有键（值为 None）⇒ 快照 JSON 形状稳定、跨版本可比。
+
+    与 `comment` 的既有口径一致（无注释 ⇒ 键存在、值为 None）。
+    """
+
+    snapshot = normalizeSnapshot([_table("T", columns=[_column("a")])])
+
+    column = snapshot["tables"][0]["columns"][0]
+    assert column["numericPrecision"] is None
+    assert column["numericScale"] is None
+    assert column["characterMaxLength"] is None
 
 
 # ---------------------------------------------------------------- 服务
@@ -285,6 +369,50 @@ async def test_内容变化新增一行且旧行不变(dbSession):
     assert old is not None
     assert old.column_count == 1
     assert old.schema_hash == first.schemaHash
+
+
+async def test_仅精度变化新增一行且旧行不变(dbSession):
+    """L-9 的正面答复（DB 层）：只改列精度 ⇒ 新增快照行，旧行逐字不变。
+
+    与 `test_内容变化新增一行且旧行不变` 的差别：那条改的是**列集合**（多一列），
+    这条**列集合完全相同**、只有 `DECIMAL(10,2) → DECIMAL(10,4)` 的精度不同
+    ⇒ 旧口径下两次采集哈希相同（看不见变更）；现在必须新增一行。
+    """
+
+    ds = await _seedDatasource(dbSession)
+    fake = _FakeIntrospection(
+        [_table("订单", columns=[_column("金额", "DECIMAL", numeric_precision=10, numeric_scale=2)])]
+    )
+    service = DiscoverySnapshotService(introspectionService=fake)
+    source = await service.registerSource(
+        dbSession, name="精度演进源", datasourceId=ds.id, owner="张业务"
+    )
+    await dbSession.commit()
+
+    first = await service.captureSnapshot(dbSession, sourceId=source.id)
+    await dbSession.commit()
+    oldJson = await _nativeJson(dbSession, first.snapshotId)
+
+    fake.tables = [
+        _table("订单", columns=[_column("金额", "DECIMAL", numeric_precision=10, numeric_scale=4)])
+    ]
+    second = await service.captureSnapshot(dbSession, sourceId=source.id)
+    await dbSession.commit()
+
+    assert second.reused is False
+    assert second.snapshotId != first.snapshotId
+    assert second.schemaHash != first.schemaHash
+    # 旧行必须逐字不变（原生读 JSON 文本 ⇒ 不受 ORM identity map 影响）
+    assert await _nativeJson(dbSession, first.snapshotId) == oldJson
+    assert '"numericScale": 2' in oldJson
+    newJson = await _nativeJson(dbSession, second.snapshotId)
+    assert '"numericScale": 4' in newJson
+    count = await dbSession.scalar(
+        select(func.count())
+        .select_from(MetadataSnapshot)
+        .where(MetadataSnapshot.source_id == source.id)
+    )
+    assert count == 2
 
 
 async def test_停用的发现源拒绝采集(dbSession):

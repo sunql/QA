@@ -1,7 +1,7 @@
 # 本体发现与差异引擎（WP-ONT-AI）
 
 **日期**：2026-11-16 · **变更**：[2026-11-16-ontology-discovery-ai](../changes/2026-11-16-ontology-discovery-ai/summary.md)
-**批次**：A1「发现底座」—— 零 LLM、零外部授权。
+**批次**：A1「发现底座」—— 零 LLM、零外部授权；**A2a**「列长度 / 精度进快照」（L-9 解冻）。
 
 ## 一句话
 
@@ -45,6 +45,48 @@ A1 补的正是「发布面之前」缺的两件底座：
 - **只收结构，不收样本**：表 / 列 / 类型 / 可空 / 主键 / 外键 / 注释。行级样本属 A2
   （依赖 Q3 采样授权白名单）⇒ 不把 PII 带进元数据库。
 - **注释是外部不可信文本**：业务库注释由低权限账号可写 ⇒ 入库前净化。
+- **列精度 / 长度进快照（A2a，L-9 解冻）**：快照列项除 `dataType`（**只有类型名**）外，
+  另有 `numericPrecision` / `numericScale` / `characterMaxLength` 三个**独立**字段 ⇒
+  `NUMBER(10,2)` 与 `NUMBER(10,4)`、`VARCHAR(10)` 与 `VARCHAR(50)` **哈希不同**
+  ⇒ 发现引擎看得见「精度 / 长度变了」。未知一律 `null`（**不用 0 兜底**）。
+  采集口径与落地：
+
+  | 业务库类型 | 原生列 | 统一别名（`_mergeRows` 的取键口径） |
+  |---|---|---|
+  | Oracle（`ALL_TAB_COLUMNS`） | `DATA_PRECISION` / `DATA_SCALE` / `CHAR_LENGTH`（**字符数**，与 PG/MySQL 同量纲） | `numeric_precision` / `numeric_scale` / `character_max_length` |
+  | PostgreSQL / MySQL（`information_schema.columns`） | `NUMERIC_PRECISION` / `NUMERIC_SCALE` / `CHARACTER_MAXIMUM_LENGTH` | 同上 |
+
+  - 快照结构版本 `schemaVersion` 随之上 `v1 → v2` ⇒ **旧 v1 快照与新快照不可比**
+    （同一 schema 跨版本采集会新增一行快照）——**预期行为**，版本号就是用来显式记录形状变更的。
+    ⚠️ **读侧必须按 `schemaVersion` 分流**：v1 行没有精度三键，与 v2 行直接比对会得出「精度全部新增」的假差异。
+  - 精度**不进 NL2SQL prompt**（`nl2sql_schema` 只用 `dataType`）⇒ prompt 文本零变化。
+    逐路径已核实：导入增强、数据质量规则生成、NL2SQL 三条路径都不读这三个字段。
+  - 内省**只覆盖 3 种业务库类型**（mysql / postgresql / oracle）⇒ 方言注册表的 12 个方言
+    与 schema 内省无关。
+  - **方言不在快照 JSON 里**：权威来源是 `metadata_snapshot.source_id → discovery_source.datasource_id
+    → data_source.type`；而 `schema_hash` 的唯一约束是 `(source_id, schema_hash)`
+    ⇒ 哈希**本来就只在源内可比**。读 JSON 的人必须顺着 `source_id` 查方言。
+  - ⚠️ **各方言口径不同（刻意不归一，本地实测）**：
+
+    | 列定义 | PostgreSQL | MySQL |
+    |---|---|---|
+    | `int` / `bigint` | `32/0` / `64/0` | `10/0` / `19/0`（**显示宽度**） |
+    | `decimal`（未声明） | `null/null` | `10/0` |
+    | `decimal(12,4)` | `12/4` | `12/4` |
+    | `varchar(50)` | `50` | `50` |
+    | `text` | `null` | **`65535`**（引擎上限，不是声明长度） |
+
+    ⇒ 副作用是**整数列改宽也会被看见**（正是想要的效果）；但「同一个 bigint 主键」在 PG 记 64、
+    MySQL 记 19 ⇒ **跨方言比较这三个数字毫无意义**（快照按源分源，本就不是这个场景）。
+  - **已知缺口（登记在案）**：MySQL `INT` 与 `INT UNSIGNED` 三字段完全相同 ⇒ 同哈希（符号性在
+    `COLUMN_TYPE`）；时间列小数秒精度（`datetime(3)` vs `datetime(6)`）在独立的 `datetime_precision`
+    列，**未采** ⇒ 看不见；Oracle 分支未做真实库取证。
+  - **最低支持版本**：Oracle 8i+ / PG 9.0+ / MySQL 5.7+ / MariaDB 10.0+。三列是 `SELECT` 列表成员
+    ⇒ 老版本 / 裁剪版库缺列会让**整条内省失败**（不是只丢精度）；接这类库前必须先验列存在。
+  - **披露决策（显式记录，不是副产品）**：列宽 / 精度属**结构元数据**，判定为**可公开**；
+    已知边际推断是定长敏感列的格式长度（如手机列 `maxLength=20`），价值极低且被既有的
+    「列名 + 类型 + 注释 + 主外键图」暴露严格支配。**要收紧就收读门禁**（`GET /snapshots/{id}`
+    现在登录可见），不要在采集层过滤——快照不可擦除，过滤对已入库行无效。
 
 ## 外部文本净化（SSOT：`app/domain/external_text.py`）
 
@@ -198,6 +240,6 @@ A1 补的正是「发布面之前」缺的两件底座：
 
 | 批次 | 接在哪 |
 |---|---|
-| A2 剖析与证据 | 快照 JSON 之外新增列级 metrics（`profile_result`），引用 `schema_hash` 作证据锚点；**并在本批补列长度 / 精度**（`NUMBER(10,2)` 与 `NUMBER(10,4)` 当前同哈希 ⇒ 需改共享 `ColumnSchemaRead` + 12 方言内省 SQL，D-20 延后） |
+| A2 剖析与证据 | 快照 JSON 之外新增列级 metrics（`profile_result`），引用 `schema_hash` 作证据锚点。~~列长度 / 精度~~ **已由 A2a 提前完成**（`NUMBER(10,2)` vs `(10,4)` 现在哈希不同） |
 | A3 候选生成 | LLM 产出的候选 manifest → **同一个** `diffManifests()` 出差异 → 落 `ontology_candidate` |
 | A4 提案与发布 | 差异 ⇒ 提案 ⇒ 四眼审核 ⇒ 调用既有 `semanticReleaseService` 走 `DRAFT → VALIDATED → ACTIVE`（发布出口唯一） |

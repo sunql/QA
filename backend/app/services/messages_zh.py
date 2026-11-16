@@ -567,6 +567,12 @@ MSG_METRIC_STATUS_TRANSITION_INVALID = (
     "指标状态不允许从 {src} 流转到 {dst}（当前状态允许的目标：{allowed}）"
 )
 
+# P5 工作流状态流转矩阵：非法流转 409（detail=INVALID_STATUS_TRANSITION）
+# kind ∈ instance / step / command / approval
+MSG_WORKFLOW_STATUS_TRANSITION_INVALID = (
+    "{kind} 状态不允许从 {src} 流转到 {dst}（当前状态允许的目标：{allowed}）"
+)
+
 # KPI Catalog datasource 绑定（F2 写入流收尾 — 2026-10-18 spec §4.4）
 # Reserved for 未来 Pydantic custom error 覆盖（当前 DTO 层 `Field(..., ge=1)` 直接抛 Pydantic 默认英文错误，service 层无引用）
 MSG_KPI_DATASOURCE_REQUIRED = "KPI 必须绑定一个数据源（datasource_id 必填）"

@@ -128,6 +128,34 @@ schema 与 HEAD 完全一致。
   分支侧**净新增失败 0**（既有失败均为基线，与本改动无关）。
 - KPI 向量/图同步单测：**27 passed**（`_ownSession` 委派后无破坏）。
 
+**CI 闸门 net-new 失败修复（2026-11-16，PR #143）**：
+
+首次 push 后 merge-gate 判 `exit 1`（NEW_FAILURES）：净新增 2 例，均在
+`test_ontology_api.py`（集成分片 3）——
+`testUpdateClassAutoSyncsEmbedding`（断言 `更新后别名 in texts[0]` 实际拿到
+**更新前**的 `UpdSyncCls`）与 `testSyncClassEmbeddingManually`（断言 `len(inserted)==1`
+实际 2）。
+
+- **根因（不是回归，是"测试写死了旧实现的偶然时序"）**：旧实现的后台任务体在
+  第一次真正挂起之前就跑完了向量写入（读请求内存里的 ORM 实体 + Milvus 同步写），
+  于是"响应返回时写入已完成"这一**偶然**成立，测试直接断言瞬时条数。
+  本次修复的核心恰恰要求后台任务**自开会话回读实体**（不能跨请求持有 ORM 实体）
+  ⇒ 任务体必然挂起 ⇒ 写入与响应返回**不再有先后保证**：
+  - 创建触发的后台写入会落在测试清空记录缓冲区**之后** ⇒ `texts[0]` 是旧文本；
+  - 创建触发的后台写入与手动同步的写入叠加 ⇒ 2 条。
+- **最终态仍然正确**（设计未变）：同一实体的写入按 `_vectorSyncLock` 串行，
+  且每次写入都在锁内**回读已提交状态** ⇒ 最后写入者必带最新状态。
+  `test_ontology_property_service.py::TestBackgroundSyncWritesLatestState`
+  正是对这条性质的回归锁（断言**末条**记录携带新描述）。
+- **处置**：修**测试的时序假设**（不是修实现）：
+  1. 新增 helper `_drainVectorSyncTasks()` —— 显式等待本体向量后台同步任务结束
+     （每条 mutation 触发**恰好一次**同步 ⇒ 排空后写入条数确定）；
+  2. 两个用例在"清空记录缓冲区"前后各排空一次 ⇒ 断言回到原来的强语义
+     （`len(inserted)==1` + 末条携带更新后别名），并**新增**覆盖"末条携带最新状态"。
+- **本地实测**：改前整文件 `6 failed / 49 passed`（4 个基线失败 + 本次 2 个）；
+  改后 `4 failed / 51 passed`（**只剩同一批 4 个基线失败，净新增 0**）。
+  定向 3 例（create/update/manual 同步）**3 passed**。
+
 **覆盖率（诚实标注，未达 80% 门禁）**：
 
 - `test_ontology_property_service.py` 单文件：`ontology_service.py` **37%**、

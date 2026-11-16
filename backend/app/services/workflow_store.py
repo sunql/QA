@@ -32,6 +32,7 @@ from app.domain.workflow_models import (
     ApprovalTask,
     BusinessCommand,
     WorkflowInstance,
+    WorkflowOutbox,
     WorkflowStep,
 )
 from app.services.workflow_state_machine import assertWorkflowTransition
@@ -47,6 +48,25 @@ _CLAIMABLE_STATUSES = (_STATUS_PENDING, _STATUS_FAILED)
 # 审批任务的初始状态（与状态机矩阵、库层 CHECK 一致）。
 _APPROVAL_PENDING = "PENDING"
 
+# 领域事件类型（**每步可追溯**的事件流词汇表；worker 据此路由）。
+#
+# ⚠️ 事件行与业务写**同事务**（只 add 不 commit）⇒ 业务回滚时事件一起消失，
+# 不会留下「幽灵事件」。
+EVENT_INSTANCE_CREATED = "instance_created"
+EVENT_STEPS_CREATED = "steps_created"
+EVENT_INSTANCE_STATUS_CHANGED = "instance_status_changed"
+EVENT_STEP_STATUS_CHANGED = "step_status_changed"
+EVENT_COMMAND_REQUESTED = "command_requested"
+EVENT_COMMAND_CLAIMED = "command_claimed"
+EVENT_COMMAND_COMPLETED = "command_completed"
+EVENT_COMMAND_FAILED = "command_failed"
+EVENT_APPROVAL_REQUESTED = "approval_requested"
+EVENT_APPROVAL_DECIDED = "approval_decided"
+EVENT_APPROVAL_TIMED_OUT = "approval_timed_out"
+
+# 事件载荷里的错误摘要长度上限（错误全文已落 business_command.error_message）。
+_MAX_EVENT_ERROR_LEN = 500
+
 # 幂等冲突的错误信息（ConflictError ⇒ 409）。
 _MSG_STEP_INSTANCE_MISMATCH = "步骤 {stepId} 不属于实例 {instanceId}（拒绝跨实例挂载）"
 
@@ -60,7 +80,34 @@ class WorkflowStore:
 
     **不 commit**：所有写操作与调用方业务写在同一事务里原子提交（照
     `app/services/outbox_service.py` 的同事务语义）。
+
+    **同时是「每步可追溯」的唯一入口**：所有状态流转都在这里写一条
+    ``workflow_outbox`` 事件（同事务）⇒ 事件流不可能被绕过。
     """
+
+    # ---------------------------------------------------------------- 事件流
+
+    async def enqueueEvent(
+        self,
+        session: AsyncSession,
+        *,
+        instanceId: int | None,
+        eventType: str,
+        payload: dict[str, Any] | None = None,
+    ) -> WorkflowOutbox:
+        """把领域事件写入 P5 自有 outbox（**同事务**：只 add 不 commit）。
+
+        「每步可追溯」的事实流：实例创建 / 步骤创建 / 状态流转 / 命令请求 /
+        审批请求 / 审批决策 / 超时 全部走这里。
+        """
+
+        row = WorkflowOutbox(
+            instance_id=instanceId,
+            event_type=eventType,
+            payload=payload or {},
+        )
+        session.add(row)
+        return row
 
     # ---------------------------------------------------------------- 实例
 
@@ -114,6 +161,19 @@ class WorkflowStore:
             )
         ).scalar_one()
 
+        if insertedId is not None:
+            # 只在**本次新建**时留事件（幂等重放不重复留痕）
+            await self.enqueueEvent(
+                session,
+                instanceId=existing.id,
+                eventType=EVENT_INSTANCE_CREATED,
+                payload={
+                    "definitionId": definitionId,
+                    "idempotencyKey": idempotencyKey,
+                    "actor": actor,
+                },
+            )
+
         return existing, insertedId is not None
 
     async def advanceInstance(
@@ -139,13 +199,20 @@ class WorkflowStore:
         if resultJson is not None:
             values["result_json"] = resultJson
 
-        return await self._writeStatus(
+        updated = await self._writeStatus(
             session,
             WorkflowInstance,
             instanceId,
             fromStatus=current.status,
             values=values,
         )
+        await self.enqueueEvent(
+            session,
+            instanceId=instanceId,
+            eventType=EVENT_INSTANCE_STATUS_CHANGED,
+            payload={"from": current.status, "to": toStatus},
+        )
+        return updated
 
     async def _lockInstance(self, session: AsyncSession, instanceId: int) -> WorkflowInstance:
         """在行锁内**重读**实例（`populate_existing` ⇒ 拿到最新状态）。"""
@@ -213,6 +280,12 @@ class WorkflowStore:
         ]
         session.add_all(rows)
         await session.flush()
+        await self.enqueueEvent(
+            session,
+            instanceId=instanceId,
+            eventType=EVENT_STEPS_CREATED,
+            payload={"stepCodes": [row.step_code for row in rows]},
+        )
         return rows
 
     async def advanceStep(
@@ -249,13 +322,20 @@ class WorkflowStore:
         if toStatus in {"SUCCEEDED", "FAILED", "SKIPPED", "COMPENSATED"}:
             values["finished_at"] = _utcnow()
 
-        return await self._writeStatus(
+        updated = await self._writeStatus(
             session,
             WorkflowStep,
             stepId,
             fromStatus=current.status,
             values=values,
         )
+        await self.enqueueEvent(
+            session,
+            instanceId=current.instance_id,
+            eventType=EVENT_STEP_STATUS_CHANGED,
+            payload={"stepId": stepId, "from": current.status, "to": toStatus},
+        )
+        return updated
 
     # ---------------------------------------------------------------- 命令
 
@@ -310,6 +390,18 @@ class WorkflowStore:
             )
         ).scalar_one()
 
+        if insertedId is not None:
+            await self.enqueueEvent(
+                session,
+                instanceId=instanceId,
+                eventType=EVENT_COMMAND_REQUESTED,
+                payload={
+                    "commandId": existing.id,
+                    "commandType": commandType,
+                    "stepId": stepId,
+                },
+            )
+
         return existing, insertedId is not None
 
     async def claimCommand(
@@ -343,6 +435,13 @@ class WorkflowStore:
                 .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
+        if row is not None:
+            await self.enqueueEvent(
+                session,
+                instanceId=row.instance_id,
+                eventType=EVENT_COMMAND_CLAIMED,
+                payload={"commandId": row.id, "workerId": workerId, "attempts": row.attempts},
+            )
         return row
 
     async def claimNextCommand(
@@ -399,13 +498,20 @@ class WorkflowStore:
         if errorMessage is not None:
             values["error_message"] = errorMessage
 
-        return await self._writeStatus(
+        updated = await self._writeStatus(
             session,
             BusinessCommand,
             commandId,
             fromStatus=current.status,
             values=values,
         )
+        await self.enqueueEvent(
+            session,
+            instanceId=current.instance_id,
+            eventType=EVENT_COMMAND_COMPLETED,
+            payload={"commandId": commandId, "to": toStatus},
+        )
+        return updated
 
     async def failCommand(
         self,
@@ -436,7 +542,7 @@ class WorkflowStore:
 
         assertWorkflowTransition("command", current.status, _STATUS_FAILED)
 
-        return await self._writeStatus(
+        updated = await self._writeStatus(
             session,
             BusinessCommand,
             commandId,
@@ -448,6 +554,17 @@ class WorkflowStore:
                 "updated_time": _utcnow(),
             },
         )
+        await self.enqueueEvent(
+            session,
+            instanceId=current.instance_id,
+            eventType=EVENT_COMMAND_FAILED,
+            payload={
+                "commandId": commandId,
+                "attempts": attempts,
+                "error": errorMessage[:_MAX_EVENT_ERROR_LEN],
+            },
+        )
+        return updated
 
     # ---------------------------------------------------------------- 审批
 
@@ -525,6 +642,20 @@ class WorkflowStore:
             )
         ).scalar_one()
 
+        if insertedId is not None:
+            await self.enqueueEvent(
+                session,
+                instanceId=instanceId,
+                eventType=EVENT_APPROVAL_REQUESTED,
+                payload={
+                    "taskId": existing.id,
+                    "matrixCode": matrixCode,
+                    "subjectType": subjectType,
+                    "subjectId": subjectId,
+                    "dueAt": dueAt.isoformat() if dueAt is not None else None,
+                },
+            )
+
         return existing, insertedId is not None
 
     async def decideApprovalTask(
@@ -557,13 +688,25 @@ class WorkflowStore:
         if note is not None:
             values["decision_note"] = note
 
-        return await self._writeStatus(
+        updated = await self._writeStatus(
             session,
             ApprovalTask,
             taskId,
             fromStatus=fromStatus,
             values=values,
         )
+        await self.enqueueEvent(
+            session,
+            instanceId=current.instance_id,
+            eventType=EVENT_APPROVAL_DECIDED,
+            payload={
+                "taskId": taskId,
+                "from": fromStatus,
+                "to": toStatus,
+                "actor": actor,
+            },
+        )
+        return updated
 
     async def markApprovalTask(
         self,
@@ -583,13 +726,22 @@ class WorkflowStore:
         if decidedAt is not None:
             values["decided_at"] = decidedAt
 
-        return await self._writeStatus(
+        updated = await self._writeStatus(
             session,
             ApprovalTask,
             taskId,
             fromStatus=fromStatus,
             values=values,
         )
+        await self.enqueueEvent(
+            session,
+            instanceId=current.instance_id,
+            eventType=(
+                EVENT_APPROVAL_TIMED_OUT if toStatus == "TIMEOUT" else EVENT_APPROVAL_DECIDED
+            ),
+            payload={"taskId": taskId, "from": fromStatus, "to": toStatus},
+        )
+        return updated
 
     async def _lockApprovalTask(self, session: AsyncSession, taskId: int) -> ApprovalTask:
         """在行锁内**重读**审批任务（`populate_existing` ⇒ 拿到最新状态）。"""

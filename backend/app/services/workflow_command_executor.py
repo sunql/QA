@@ -31,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.workflow_models import BusinessCommand, WorkflowInstance, WorkflowStep
+from app.services.workflow_audit_service import WorkflowAuditService
 from app.services.workflow_command_ports import (
     CommandExecutionError,
     CommandHandlerRegistry,
@@ -40,6 +41,9 @@ from app.services.workflow_command_ports import (
 from app.services.workflow_store import WorkflowStore
 
 logger = logging.getLogger(__name__)
+
+# 补偿是**系统事件**（执行失败触发的自动回滚）⇒ 默认 actor 用系统标识。
+SYSTEM_ACTOR_COMPENSATION = "system:command-compensation"
 
 STATUS_SUCCEEDED = "SUCCEEDED"
 STATUS_FAILED = "FAILED"
@@ -68,11 +72,13 @@ class CommandExecutor:
         *,
         maxAttempts: int = 3,
         compensateOnFailure: bool = True,
+        audit: WorkflowAuditService | None = None,
     ) -> None:
         self._registry = registry
         self._maxAttempts = maxAttempts
         self._compensateOnFailure = compensateOnFailure
         self._store = WorkflowStore()
+        self._audit = audit or WorkflowAuditService()
 
     # ---------------------------------------------------------------- 执行
 
@@ -113,6 +119,7 @@ class CommandExecutor:
                 attemptedCount=attemptedCount,
                 message=str(exc),
                 retryable=False,
+                actor=workerId,
             )
         except CommandExecutionError as exc:
             return await self._handleFailure(
@@ -122,6 +129,7 @@ class CommandExecutor:
                 attemptedCount=attemptedCount,
                 message=exc.message,
                 retryable=exc.retryable,
+                actor=workerId,
             )
         except Exception as exc:  # noqa: BLE001 —— 失败隔离：兜住一切适配器异常
             logger.exception("命令执行异常（已收敛为失败）：commandId=%s type=%s", commandId, commandType)
@@ -132,6 +140,7 @@ class CommandExecutor:
                 attemptedCount=attemptedCount,
                 message=f"{type(exc).__name__}: {exc}",
                 retryable=True,
+                actor=workerId,
             )
 
         await self._store.completeCommand(session, commandId, STATUS_SUCCEEDED, result=result)
@@ -154,6 +163,7 @@ class CommandExecutor:
         attemptedCount: int,
         message: str,
         retryable: bool,
+        actor: str = SYSTEM_ACTOR_COMPENSATION,
     ) -> CommandOutcome:
         """失败收敛：回滚半写副作用 → 显式落 FAILED + 次数 → 判定是否终态。"""
 
@@ -169,7 +179,7 @@ class CommandExecutor:
 
         isTerminal = (not retryable) or attemptedCount >= self._maxAttempts
         if isTerminal and self._compensateOnFailure:
-            await self.compensateInstance(session, instanceId, reason=message)
+            await self.compensateInstance(session, instanceId, reason=message, actor=actor)
 
         return CommandOutcome(
             commandId=commandId,
@@ -182,7 +192,12 @@ class CommandExecutor:
     # ---------------------------------------------------------------- 补偿
 
     async def compensateInstance(
-        self, session: AsyncSession, instanceId: int, *, reason: str
+        self,
+        session: AsyncSession,
+        instanceId: int,
+        *,
+        reason: str,
+        actor: str = SYSTEM_ACTOR_COMPENSATION,
     ) -> list[CommandOutcome]:
         """补偿同实例内**已成功**的命令（逆序），并把步骤/实例收敛到 COMPENSATED。
 
@@ -255,9 +270,25 @@ class CommandExecutor:
             await self._compensateStep(session, stepId)
 
         await self._compensateInstance(session, instanceId, reason=reason)
+        await self._recordCompensation(session, instanceId=instanceId, reason=reason, actor=actor)
         await session.commit()
 
         return outcomes
+
+    async def _recordCompensation(
+        self, session: AsyncSession, *, instanceId: int, reason: str, actor: str
+    ) -> None:
+        """补偿留痕（治理审计：谁触发的补偿、为什么）。"""
+
+        instance = await self._store.getInstance(session, instanceId)
+        if instance is None:
+            return
+        await self._audit.recordCompensation(
+            session,
+            instance=instance,
+            actor=actor,
+            reason=reason,
+        )
 
     async def _compensateStep(self, session: AsyncSession, stepId: int) -> None:
         """步骤 → COMPENSATED（RUNNING 需先 FAILED：状态机不允许多跳）。"""

@@ -21,10 +21,12 @@ from app.domain.workflow_models import (
     WorkflowInstance,
     WorkflowStep,
 )
+from app.services.actor_departments import DepartmentsInput
 from app.services.messages_zh import (
     MSG_WORKFLOW_DEFINITION_NOT_FOUND,
     MSG_WORKFLOW_DEFINITION_NOT_PUBLISHED,
 )
+from app.services.workflow_audit_service import WorkflowAuditService
 from app.services.workflow_definition import parseWorkflowSteps
 from app.services.workflow_store import WorkflowStore
 
@@ -35,8 +37,13 @@ _STATUS_RUNNING = "RUNNING"
 class WorkflowService:
     """工作流实例的提交与查询。"""
 
-    def __init__(self, store: WorkflowStore | None = None) -> None:
+    def __init__(
+        self,
+        store: WorkflowStore | None = None,
+        audit: WorkflowAuditService | None = None,
+    ) -> None:
         self._store = store or WorkflowStore()
+        self._audit = audit or WorkflowAuditService()
 
     async def submitInstance(
         self,
@@ -48,6 +55,7 @@ class WorkflowService:
         idempotencyKey: str,
         requestJson: dict[str, Any],
         actor: str,
+        actorDepartments: DepartmentsInput = None,
     ) -> tuple[WorkflowInstance, bool]:
         """提交一个工作流实例。返回 ``(实例, 是否本次新建)``。
 
@@ -68,6 +76,13 @@ class WorkflowService:
         if not created:
             # 幂等重放：既有实例原样返回（**不重建步骤、不重置状态**）
             return instance, False
+
+        await self._audit.recordSubmit(
+            session,
+            instance=instance,
+            actor=actor,
+            actorDepartments=actorDepartments,
+        )
 
         specs = parseWorkflowSteps(definition.definition_json)
         if specs:

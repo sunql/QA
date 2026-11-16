@@ -96,6 +96,7 @@ async def submitInstance(
         idempotencyKey=payload.idempotency_key,
         requestJson=payload.request,
         actor=currentUser.userId,
+        actorDepartments=currentUser.departments,
     )
     await session.commit()
     if not created:
@@ -156,6 +157,7 @@ async def requestApproval(
         instanceId=instanceId,
         actor=currentUser.userId,
         roles=currentUser.roles,
+        actorDepartments=currentUser.departments,
     )
     await session.commit()
     return [WorkflowApprovalRead.model_validate(task) for task in tasks]
@@ -217,6 +219,7 @@ async def decideApproval(
         actor=currentUser.userId,
         roles=currentUser.roles,
         note=payload.note,
+        actorDepartments=currentUser.departments,
     )
     await session.commit()
     return WorkflowApprovalRead.model_validate(task)

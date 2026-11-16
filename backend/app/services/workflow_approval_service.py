@@ -45,6 +45,7 @@ from app.domain.workflow_models import (
     WorkflowInstance,
 )
 from app.models.rbac import ADMIN_ROLE_CODE, Role, User
+from app.services.actor_departments import DepartmentsInput
 from app.services.messages_zh import (
     MSG_WORKFLOW_APPROVAL_ALREADY_DECIDED,
     MSG_WORKFLOW_APPROVAL_APPROVER_UNKNOWN,
@@ -55,6 +56,7 @@ from app.services.messages_zh import (
     MSG_WORKFLOW_APPROVAL_ROUND_EXISTS,
     MSG_WORKFLOW_APPROVAL_TIMEOUT,
 )
+from app.services.workflow_audit_service import WorkflowAuditService
 from app.services.workflow_definition import (
     ApprovalMatrixEntry,
     matrixEntryByCode,
@@ -93,6 +95,9 @@ _INSTANCE_REJECTED = "REJECTED"
 _INSTANCE_FAILED = "FAILED"
 _INSTANCE_WAITING_APPROVAL = "WAITING_APPROVAL"
 
+# 超时是**系统事件**（时钟 / 清扫器），不是某个人的决定 ⇒ 审计 actor 用系统标识。
+SYSTEM_ACTOR_TIMEOUT = "system:approval-timeout"
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -101,8 +106,13 @@ def _utcnow() -> datetime:
 class WorkflowApprovalService:
     """审批面运行时。"""
 
-    def __init__(self, store: WorkflowStore | None = None) -> None:
+    def __init__(
+        self,
+        store: WorkflowStore | None = None,
+        audit: WorkflowAuditService | None = None,
+    ) -> None:
         self._store = store or WorkflowStore()
+        self._audit = audit or WorkflowAuditService()
 
     # ---------------------------------------------------------------- 生成
 
@@ -114,6 +124,7 @@ class WorkflowApprovalService:
         actor: str,
         roles: Sequence[str] = (),
         subjectType: str = SUBJECT_TYPE_WORKFLOW_INSTANCE,
+        actorDepartments: DepartmentsInput = None,
     ) -> list[ApprovalTask]:
         """为实例发起一轮审批（**失败关闭**：矩阵未覆盖 ⇒ 拒绝，不落任何行）。
 
@@ -162,6 +173,12 @@ class WorkflowApprovalService:
                 dueAt=now + timedelta(hours=entry.timeoutHours),
                 createdBy=actor,
             )
+            await self._audit.recordApprovalRequested(
+                session,
+                task=task,
+                actor=actor,
+                actorDepartments=actorDepartments,
+            )
             tasks.append(task)
         return tasks
 
@@ -176,6 +193,7 @@ class WorkflowApprovalService:
         actor: str,
         roles: Sequence[str] = (),
         note: str | None = None,
+        actorDepartments: DepartmentsInput = None,
     ) -> ApprovalTask:
         """审批决策（APPROVE / REJECT）。七守卫见模块文档。"""
 
@@ -212,6 +230,7 @@ class WorkflowApprovalService:
             )
 
         targetStatus = self._targetStatus(decision)
+        beforeStatus = task.status
         updated = await self._store.decideApprovalTask(
             session,
             task.id,
@@ -222,6 +241,15 @@ class WorkflowApprovalService:
             decidedAt=now,
         )
 
+        await self._audit.recordDecision(
+            session,
+            task=updated,
+            decision=decision,
+            actor=actor,
+            beforeStatus=beforeStatus,
+            note=note,
+            actorDepartments=actorDepartments,
+        )
         await self._syncInstanceStatus(session, instance)
         return updated
 
@@ -572,12 +600,17 @@ class WorkflowApprovalService:
         """超时 ⇒ 任务 TIMEOUT，实例不再死等（FAILED）。"""
 
         assertWorkflowTransition("approval", task.status, _STATUS_TIMED_OUT)
-        await self._store.markApprovalTask(
+        updated = await self._store.markApprovalTask(
             session,
             task.id,
             fromStatus=task.status,
             toStatus=_STATUS_TIMED_OUT,
             decidedAt=now,
+        )
+        await self._audit.recordTimeout(
+            session,
+            task=updated,
+            actor=SYSTEM_ACTOR_TIMEOUT,
         )
         await self._syncInstanceStatus(session, instance)
 

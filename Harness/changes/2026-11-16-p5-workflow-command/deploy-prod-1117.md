@@ -25,7 +25,7 @@
 
 ---
 
-## 0.1 W5 收口带来的行为变化（**开启开关后才会看到**）
+## 0.1 W5 / R11 收口带来的行为变化（**开启开关后才会看到**）
 
 本批实现期间补上了「命令没有生产调用方 ⇒ Worker 永远空转」的缺口，
 因此**开启开关后**行为与最初规划有出入，**上线前必读**：
@@ -37,6 +37,7 @@
 | **步骤定义必须「有活儿」** | 一步**必须**有 `commandType` **或** `requiresApproval=true`；两者皆无 ⇒ **定义解析期就拒绝**（422），不会创建实例。 |
 | **新增取消路由** | `POST /api/v1/workflow/instances/{instanceId}/cancel` ⇒ 实例 CANCELLED、待审批 CANCELLED、**待执行命令 CANCELLED**（Worker 不再领走）、未开始的步骤 SKIPPED。权限：提交人本人或**真实** admin。 |
 | **命令状态多了 `CANCELLED`** | `business_command.status` 的 CHECK 多了 `CANCELLED`（终态，不可领取）。 |
+| **终态失败落 `ABORTED`**（R11） | 不可重试 / 尝试次数耗尽的命令落 **`ABORTED`**（终态，Worker 领不走）。⇒ 巡检读法：`FAILED` = **还会重试**（可重试失败），`ABORTED` = **不会再试**（终态失败）。看到 `ABORTED` 不是新故障，是终态失败的正常落点。 |
 | **审计动作 7 个** | `audit_log.action` 新增 `WORKFLOW_CANCEL`（取消也留痕）。 |
 
 > ⚠️ **取消权限的真实身份要求**：stub 鉴权下 `X-User-Roles` 可伪造 ⇒
@@ -55,6 +56,7 @@
 | 4 | 备份可用（pg_dump 落盘 + 校验） | §4 | 无备份 ⇒ 不执行 §5 之后的任何步骤 |
 | 5 | 迁移已在**测试库**演练过（upgrade + downgrade 往返） | CI / 本地 `qa_metadata_test_p5` | 未演练 ⇒ 不上线 |
 | 6 | **确认这是生产环境**（`APP_ENV=production`） | §3 ⓪⓪ | 不是 production ⇒ **停下**（本 runbook 会 `pg_dump` / `docker load` / `docker-compose up` ⇒ 在开发机上误跑 = 把开发库当生产库操作） |
+| 7 | **开发库（5433）的 P5 表结构已重建**（**非生产前置，但本地验收前必做**） | §14.3 | 开发库的 `0149`–`0151` 是**旧快照**（迁移后来原地改过）⇒ 结构与代码不一致 ⇒ 按 §14 一次性重建 |
 
 > ⚠️ **前置 1 的来历**：P5 的迁移接在 `0148` 之后（`0149`–`0152`），而生产现在停在
 > `0143`。若直接上 P5 镜像，一次要跑 `0144`–`0152` 共 **9 个**迁移，其中 `0145`（加列/删列）、
@@ -436,7 +438,7 @@ docker exec qa-backend sh -c 'alembic downgrade 0148'   # 由新镜像执行 ⇒
 | 位置 | 变化 |
 |---|---|
 | 工作流 API | 开关关：**404**（对外完全不存在）；开关开：需要真鉴权（无 Bearer ⇒ 403）；**新增取消路由** |
-| 数据库 | 新增 6 张空表；`audit_log.action` 的 CHECK 白名单变宽（**旧值全部仍可用**）；`business_command.status` 多一个 `CANCELLED` |
+| 数据库 | 新增 6 张空表；`audit_log.action` 的 CHECK 白名单变宽（**旧值全部仍可用**）；`business_command.status`（**新表，整套状态都是新的**）= `PENDING` / `EXECUTING` / `SUCCEEDED` / `FAILED` / `COMPENSATED` / `CANCELLED` / `ABORTED` |
 | 后台进程 | 新增 1 个独立 Worker 容器（默认不启动）；它**只**写 P5 自己的表（模拟适配器不写外部系统） |
 | 用户界面 | **无变化** |
 
@@ -453,3 +455,87 @@ docker exec qa-backend sh -c 'alembic downgrade 0148'   # 由新镜像执行 ⇒
 5. **每次发版都要重建 Worker**：它与 backend 同一镜像 ⇒ retag 不会自动更新已运行的容器。
 6. **提交即入队**（§0.1）：开启开关后，提交实例会立刻产生一条 `business_command`（PENDING），
    Worker 会在**下一次轮询**（默认 2s）领走它 ⇒ 这条链路是**活的**，不是纸面能力。
+   ⇒ R11 起 Worker **一轮排空**：单轮最多领走 50 条待执行命令（**可重试失败不在同轮热转**，
+   仍按轮询节奏重试）⇒ 批量提交不会被 2s 轮询间隔压死。
+
+---
+
+## 14. 开发库（5433）的 P5 漂移与一次性重建（**非生产**）
+
+### 14.1 漂移是怎么来的（**别再当成「没发生过」**）
+
+P5 的迁移 `0149`–`0151` 在**开发期**已在**开发库**（5433 `qa_metadata`）执行过
+（反复 `upgrade head` 建表 + 跑 P5 用例）。之后这些迁移被**原地编辑**过：
+
+| 迁移 | 原地编辑内容 |
+|---|---|
+| 0149 | 删 `workflow_instance.current_step` / `business_key` / `result_json`；`created_by` 改 **NOT NULL**；幂等唯一约束改成 `(definition_id, created_by, idempotency_key)` |
+| 0151 | `workflow_outbox.event_type` 注释纠偏（「worker 据此路由」→「事件流词汇表；当前无消费者：只写不读」） |
+
+⇒ **开发库里的 P5 表结构 ≠ 当前迁移文件**（2026-11-17 实测：多 3 列、
+`created_by` 仍可空、唯一约束少 `created_by` 一列、3 处列注释过期）
+⇒ 开发库上 `alembic check` 必报漂移（且开发库停在 `0151` ⇒ 连 `check` 都进不去：
+「Target database is not up to date」）。
+
+> ✅ **生产不受影响**：生产停在 `0143` ⇒ 从未跑过 `0149` ⇒ 生产按**当前**
+> 迁移文件执行，零漂移。**本节的一切操作都不许在生产上做。**
+> ✅ **测试库（5434 `qa_metadata_test_p5`）不受影响**：R11 改完 0149/0151 后
+> **重建过**测试库再验 `alembic check`（实测 `No new upgrade operations detected`）。
+
+### 14.2 为什么是「重建」而不是「ALTER 补齐」
+
+漂移里有 **NOT NULL 收紧**与 **唯一约束换列** ⇒ 逐条 `ALTER` 反而更脆
+（改一半失败 ⇒ 库里半新半旧）。6 张表**实测全空** ⇒ 直接重建最省事也最安全。
+
+### 14.3 一次性重建脚本（**只对开发库**）
+
+前置确认（**必须先跑**）：6 张 P5 表**全空** ⇒ 重建不丢数据。
+
+```bash
+# 开发机（**不是生产**）：确认 P5 表为空
+PW=$(docker exec qa-postgres printenv POSTGRES_PASSWORD)   # 密码不落盘、不打印
+docker exec -e PGPASSWORD="$PW" qa-postgres psql -U qa_user -d qa_metadata -tAc \
+  "select count(*) from workflow_instance union all select count(*) from workflow_step
+   union all select count(*) from business_command union all select count(*) from approval_task
+   union all select count(*) from workflow_outbox union all select count(*) from workflow_definition;"
+# 期望：6 行，全是 0（**非 0 ⇒ 停下，先确认能不能丢**）
+
+# ① 删 6 张 P5 表（含 FK ⇒ CASCADE 一次删干净）+ 版本戳退回 0148
+docker exec -i -e PGPASSWORD="$PW" qa-postgres psql -U qa_user -d qa_metadata -v ON_ERROR_STOP=1 <<'SQL'
+DROP TABLE IF EXISTS workflow_outbox, approval_task, business_command,
+                   workflow_step, workflow_instance, workflow_definition CASCADE;
+UPDATE alembic_version SET version_num = '0148';
+SQL
+
+# ② 用**当前**迁移文件重放 0149 → 0152
+cd backend
+DATABASE_URL="postgresql+asyncpg://qa_user:${PW}@127.0.0.1:5433/qa_metadata" \
+  python -m alembic upgrade head
+
+# ③ 验证（判据 = **P5 相关漂移为 0**，不是整库零漂移 —— 见下）
+DATABASE_URL="postgresql+asyncpg://qa_user:${PW}@127.0.0.1:5433/qa_metadata" \
+  python -m alembic check
+```
+
+**实测（2026-11-17，已执行）**：
+
+| 检查 | 结果 |
+|---|---|
+| `alembic_version` | `0152` ✅ |
+| `workflow_instance` 列集合 | `id / definition_id / idempotency_key / status / request_json / error_message / created_by / created_time / updated_time`（3 个死列已不在）✅ |
+| `uq_workflow_instance_idempotency` | `UNIQUE (definition_id, created_by, idempotency_key)` ✅ |
+| `alembic check` 的漂移清单 | **不含**任何 `workflow_*` / `business_command` / `approval_task` 项 ⇒ **P5 漂移 = 0** ✅ |
+
+> ⚠️ 开发库另有**与 P5 无关的历史漂移**（`alembic check` 仍会报）：
+> `PORDER` / `PORDERQ` / `BPSUPPLIER` / `*_20260930` / `*_20260918` 等**备份表**
+> （ORM 不声明、迁移也不管）+ `wiki_compile_task_created` 索引写法差异 +
+> `wiki_token_usage` 的 FK 差异 ⇒ **不属于本批**（各有各的账本），**别把它
+> 当成 P5 没修干净**。⇒ 本节的判据是「**P5 相关**漂移为 0」。
+
+> ⚠️ **`docker exec` 少了 `-i` ⇒ heredoc 静默失效**：`docker exec -i … psql <<'SQL'`
+> 不加 `-i` 时 psql **收不到脚本**（**退出码仍是 0、无任何输出**）⇒ 看着像
+> 跑过了，其实一条 SQL 都没执行 ⇒ 上面的重建步骤**必须带 `-i`**。
+
+> ⚠ `alembic_version` 手工改戳**只在开发库**做；**生产绝不可手改版本戳**。
+> ⚠ 重建后开发库的 P5 表为空 ⇒ 本地 P5 演示数据要**重新造**（走 §8 探针的
+> 「提交实例」接口现造，无脚本依赖）。

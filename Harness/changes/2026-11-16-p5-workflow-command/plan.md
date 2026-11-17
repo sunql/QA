@@ -1,6 +1,6 @@
 # P5 Workflow / Command / Approval —— 执行计划（D38–D57）
 
-> **状态**：**implemented**（W0–W4 已提交 7 个 commit；W5 评审整改 R1–R10 全部完成，待 PR 合并）
+> **状态**：**implemented**（W0–W4 已提交 7 个 commit；W5 评审整改 R1–R12 全部完成，待 PR 合并）
 > 事实台账见 [`summary.md`](./summary.md)；部署手册见 [`deploy-prod-1117.md`](./deploy-prod-1117.md)
 > 上位：[`docs/update/1109/智能采购平台升级计划_日级排程_1109.md`](../../../docs/update/1109/智能采购平台升级计划_日级排程_1109.md) §11 ·
 > 契约来源：[`docs/update/1109/智能采购平台评估与渐进升级计划_跨板块扩展_1109.md`](../../../docs/update/1109/智能采购平台评估与渐进升级计划_跨板块扩展_1109.md) §6 P5
@@ -65,7 +65,7 @@
 | **W2 审批面** | D42–D43 | 审批任务生成 + **数据驱动审批矩阵**（`definition_json`）+ 审批 API + 三守卫 | 矩阵变更只改数据；三守卫用例通过 | ✅ `7ff69b46` |
 | **W3 Command 执行器** | D44–D46 | 执行器骨架 + 模拟适配器 + 补偿钩子 + 失败隔离 + 重试语义 + 外部写接口抽象（Protocol） | 注入失败后补偿执行；新适配器不改核心 | ✅ `21d871db` |
 | **W4 审计与 Worker** | D47–D48 | 审计接入（每步可追溯）+ Worker 集成（开关门控）+ **compose v1 片段** + 部署 runbook | `docker-compose config --quiet` 通过；默认不启动；开启后跑通 | ✅ `fd2c026c` / `e79935a2` / `ef0088ed` |
-| **W5 评审与收口** | D49–D57 | 安全评审 ×2 + 全路径 e2e + 性能容量核对 + 回归 + 文档 + PR（+ 3 天缓冲） | CRITICAL/HIGH 清零；净新增失败 0；演练手册可执行 | ✅ 整改 R1–R10 全完成（`21d60a66` / `9503255a` / `9cd63990` / `09631e26` / `4c3ae22a`；裁决见 §4 D-13~D-19，台账见 summary §7.4）· 待 PR 合并 |
+| **W5 评审与收口** | D49–D57 | 安全评审 ×2 + 全路径 e2e + 性能容量核对 + 回归 + 文档 + PR（+ 3 天缓冲） | CRITICAL/HIGH 清零；净新增失败 0；演练手册可执行 | ✅ 整改 R1–R12 全完成（`21d60a66` / `9503255a` / `9cd63990` / `09631e26` / `4c3ae22a` / `35d538b6` / R11 批 / R12 批（均待合并）；裁决见 §4 D-13~D-19，台账见 summary §7.4）· 待 PR 合并 |
 
 ---
 
@@ -194,10 +194,14 @@ CI 集成分片按「排序下标 mod 4」轮转归属 ⇒ **新建 integration 
 ⇒ stub 身份默认即 admin ⇒ 伪造 `X-User-Roles: admin` 头即可取消他人实例
 ⇒ 跨用户取消必须 `dbUserId is not None`。**自取消保持放行**（自作用域）。
 
-### D-18 幂等键归属校验（`IDEMPOTENCY_KEY_CONFLICT`）
+### D-18 幂等键**按提交人隔离**（不是 409）
 
-`submitInstance` 幂等重放时若 `instance.created_by != actor` ⇒ 409；
-否则用户 B 用同幂等键会拿到**用户 A 的实例**（IDOR）。
+幂等作用域 = `(definition_id, created_by, idempotency_key)`（**库层唯一约束**）⇒ 撞键的
+用户**各得各的实例** ⇒ 不存在「拿到别人的实例」（IDOR）。
+
+⚠️ 规划期写的「归属不符 ⇒ 409 `IDEMPOTENCY_KEY_CONFLICT`」**已废弃**：那是**存在性预言机**
+（把「这个键存在」泄露给所有人）＋ 别人的键可被占死（DoS）⇒ 改为按提交人隔离
+（落地与理由见 [`summary.md`](./summary.md) D-18）。
 
 ### D-19 执行器的「先提交再驱动」与补偿
 

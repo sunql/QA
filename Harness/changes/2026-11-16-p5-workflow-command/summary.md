@@ -6,9 +6,10 @@
 
 | 项 | 值 |
 |---|---|
-| **状态** | **implemented**（W0–W4 已提交；W5 收口在工作区） |
+| **状态** | **implemented**（W0–W4 已提交；W5 评审整改 R1–R10 全部完成；待 PR 合并） |
 | **规模** | L（唯一 L 级事项） |
 | **分支** | `feat/workflow-command`（worktree `/private/tmp/qa-p5`，从 `origin/main` 新开） |
+| **合并** | PR #<<PR_NO>> squash ⇒ `main @ <<MERGE_SHA>>`（合并后回填） |
 | **迁移** | **0149–0152**（4 个：0149 定义/实例 · 0150 步骤/命令 · 0151 审批/outbox · 0152 放宽 `audit_log` CHECK）⇒ **WP-ONT-AI 从 `0153` 起** |
 | **开关** | `ENABLE_WORKFLOW`（默认 **false**；不进生产 `.env`） |
 | **门禁** | **G6**：写操作全走 Command；Agent 仍只读；默认关闭可上线；回滚 = 关开关 + 停 Worker |
@@ -159,6 +160,31 @@ Worker 照样领走待执行命令去写外部系统。
 - ORM ↔ 迁移的 CHECK 表达式**逐字一致**（单测钉住；`alembic check` 只比名不比式 ⇒ 只补名 = 假绿）。
 - 每个迁移**只建自己的新表**，不 alter/drop 既有表（纯加法 DDL）。
 - `downgrade()` 与 `upgrade()` **对称**（单测钉住）。
+
+### 7.4 W5 评审整改台账（R1–R10）
+
+> 每一轮都带 **RED→GREEN 证据**（先写守卫/用例看它红，再改实现看它绿），
+> 关键项另做**变异取证**（把实现改坏 ⇒ 用例必须判红 ⇒ 用例非空转）。
+
+| 轮 | 主题 | 关键内容 |
+|---|---|---|
+| **R1–R6** | W5 评审 **CRITICAL / HIGH** | R1 命令无调用方 ⇒ 补编排器（提交即入队）· R2 审批决策与推进改**两段事务**（决策是事实，不被推进失败抹掉）· R3/R4 审批与决策面**真实身份校验** · R5 命令载荷**命名空间化** `{request, step}`（用户输入顶不掉流程字段、注入不了适配器控制键）· R6 幂等键**按提交人私有**（消除 DoS 与 IDOR） |
+| **R7** | G6 写入口守卫加固 | 守卫从「调用形态」扩到**属性赋值 / delete / merge / 裸字符串 / 带命名空间的 update**；扫描范围扩到 `backend/scripts/`；白名单改按**路径**；适配器**注册点收口**到组装根；同步**收回执行器 docstring 的过度声明**（库表写唯一入口 ≠ 外部写唯一入口） |
+| **R8** | 存储层拆分 | `workflow_store.py` 1010 行 ⇒ 底座 + 三子存储 + 门面（多继承 ⇒ 调用点零改动）；补「P5 模块单文件 ≤ 800 行」机械守卫 |
+| **R9** | 运维硬化 | Worker 清扫与执行**各自独立 try/except**（清扫失败不再拖垮命令领取）· `workerId` 按 `executed_by` **实际列宽 64** 截断（照 128 截 ⇒ 超长主机名写不进 ⇒ 命令永远执行不了）· 部署片段 `ENABLE_WORKFLOW` 改 `${ENABLE_WORKFLOW:-false}`（追加片段零副作用）· runbook 补 `APP_ENV=production` 断言与 `umask 077` |
+| **R10** | MEDIUM / LOW 收尾 | **MEDIUM-7** 定义必须声明至少一步（缺步骤 ⇒ 零步骤实例 ⇒ **外部写零发生却报成功 = 假成功**）· **MEDIUM-6** 终态集合**单一出口**（只以 `workflow_state_machine` 为准）· **MEDIUM-5** 全部 >50 行函数拆分（存储层 5 + 审批面 2 + 服务层 2 + 执行器 2）· **LOW-13** 删死列 `workflow_instance.current_step`（迁移/ORM/DTO/存储层同删）· **LOW-14** 删死配置 `WORKFLOW_LEASE_SECONDS`（无人读）· **LOW-15/16** 幂等入队与「重复取消不重复留痕」的**变异取证** · **新守卫** 三个子存储**方法名（含私有）互不遮蔽**（门面是多继承 ⇒ 同名私有方法会被 MRO 静默遮蔽 ⇒ 本批真的撞过一次） |
+
+**R10 变异取证（用例非空转的证据）**：
+
+| 编号 | 变异 | 预期 | 实测 |
+|---|---|---|---|
+| LOW-15 | 删 `enqueueCommand` 的 `on_conflict_do_nothing` | 幂等用例报 `IntegrityError`（重复键 `wf-1-step-1`） | ✅ 判红 |
+| LOW-16 | 往 `cancelInstance` 幂等短路分支塞一条 `recordCancel` | 服务层 + API 层两处审计行数断言失败 | ✅ 判红 |
+| 新守卫 | 把命令子存储的私有方法改成与审批子存储同名 | 结构守卫判红 | ✅ 判红（`子存储方法名互相遮蔽：_recordApprovalRequestedEvent（…）`） |
+
+**R10 回归**：workflow 单测 **292 passed**；CI 工具单测 **674 passed / 19 skipped**
+（macOS bash 3.2 ⇒ 4 条 `mapfile` 用例本机跳过，CI 必跑）；`ruff check` 通过；
+P5 模块**全部函数 ≤ 50 行、单文件 ≤ 800 行**（机械扫描 + 守卫用例）。
 
 ## 8. 风险与缓解（实施后状态）
 

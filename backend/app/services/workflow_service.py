@@ -49,8 +49,10 @@ from app.services.messages_zh import (
     MSG_WORKFLOW_CANCEL_BUSY,
     MSG_WORKFLOW_CANCEL_NOT_ALLOWED,
     MSG_WORKFLOW_CANCEL_REAL_AUTH_REQUIRED,
+    MSG_WORKFLOW_DEFINITION_AMBIGUOUS,
     MSG_WORKFLOW_DEFINITION_NOT_FOUND,
     MSG_WORKFLOW_DEFINITION_NOT_PUBLISHED,
+    MSG_WORKFLOW_DEFINITION_VERSION_MISMATCH,
     MSG_WORKFLOW_DRIVE_FAILED,
 )
 from app.services.workflow_approval_service import WorkflowApprovalService
@@ -79,6 +81,9 @@ DETAIL_WORKFLOW_CANCEL_NOT_AUTHORIZED = "WORKFLOW_CANCEL_NOT_AUTHORIZED"
 DETAIL_WORKFLOW_CANCEL_NOT_ALLOWED = "WORKFLOW_CANCEL_NOT_ALLOWED"
 DETAIL_WORKFLOW_CANCEL_BUSY = "WORKFLOW_CANCEL_BUSY"
 DETAIL_WORKFLOW_CANCEL_REAL_AUTH_REQUIRED = "WORKFLOW_CANCEL_REAL_AUTH_REQUIRED"
+DETAIL_WORKFLOW_DEFINITION_NOT_PUBLISHED = "WORKFLOW_DEFINITION_NOT_PUBLISHED"
+DETAIL_WORKFLOW_DEFINITION_VERSION_MISMATCH = "WORKFLOW_DEFINITION_VERSION_MISMATCH"
+DETAIL_WORKFLOW_DEFINITION_AMBIGUOUS = "WORKFLOW_DEFINITION_AMBIGUOUS"
 
 
 class WorkflowService:
@@ -504,30 +509,114 @@ class WorkflowService:
         capabilityCode: str,
         version: str,
     ) -> WorkflowDefinition:
-        definition = (
+        """解析**当前生效**的定义（服务端判定版本，客户端不得自选）。
+
+        ⚠️ **为什么不能由客户端自选版本**：审批层级写在定义体的审批矩阵里 ⇒
+        一个「宽松审批矩阵」的旧版本一旦可被自选，调用方就能**挑低审批层级**
+        绕过高层审批 ⇒ 发布审批矩阵不是「发版动作」，而是**安全边界**。
+        ⇒ 生效版本由服务端按 `(domain_code, capability_code)` 唯一确定
+        （库层部分唯一索引 ``uq_workflow_definition_published`` 兜底），
+        客户端指定的版本与之不符 ⇒ 409。
+
+        错误口径：
+
+        - 域能力下**没有任何生效版本**，且该版本号压根不存在 ⇒ 404；
+        - 域能力下**没有任何生效版本**，但该版本号存在（草稿 / 已停用）⇒ 409；
+        - 生效版本存在但与客户端指定的不一致 ⇒ 409。
+        """
+
+        published = await self._loadPublishedDefinition(
+            session, domainCode=domainCode, capabilityCode=capabilityCode
+        )
+        if published is None:
+            raise await self._definitionUnavailableError(
+                session,
+                domainCode=domainCode,
+                capabilityCode=capabilityCode,
+                version=version,
+            )
+        if published.version != version:
+            raise ConflictError(
+                MSG_WORKFLOW_DEFINITION_VERSION_MISMATCH.format(
+                    requestedVersion=version,
+                    publishedVersion=published.version,
+                ),
+                detail=DETAIL_WORKFLOW_DEFINITION_VERSION_MISMATCH,
+                details={
+                    "requestedVersion": version,
+                    "publishedVersion": published.version,
+                },
+            )
+        return published
+
+    async def _loadPublishedDefinition(
+        self,
+        session: AsyncSession,
+        *,
+        domainCode: str,
+        capabilityCode: str,
+    ) -> WorkflowDefinition | None:
+        """取该域能力下的**生效定义**（至多一条；多于一条 ⇒ 数据坏了 ⇒ 失败关闭）。"""
+
+        rows = (
+            (
+                await session.execute(
+                    select(WorkflowDefinition)
+                    .where(
+                        WorkflowDefinition.domain_code == domainCode,
+                        WorkflowDefinition.capability_code == capabilityCode,
+                        WorkflowDefinition.status == _STATUS_PUBLISHED,
+                    )
+                    .limit(2)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if len(rows) <= 1:
+            return rows[0] if rows else None
+        raise ConflictError(
+            MSG_WORKFLOW_DEFINITION_AMBIGUOUS.format(
+                domainCode=domainCode,
+                capabilityCode=capabilityCode,
+                versions="、".join(sorted(row.version for row in rows)),
+            ),
+            detail=DETAIL_WORKFLOW_DEFINITION_AMBIGUOUS,
+            details={"domainCode": domainCode, "capabilityCode": capabilityCode},
+        )
+
+    async def _definitionUnavailableError(
+        self,
+        session: AsyncSession,
+        *,
+        domainCode: str,
+        capabilityCode: str,
+        version: str,
+    ) -> Exception:
+        """「没有生效版本」时的错误：不存在 ⇒ 404；存在但未生效 ⇒ 409。"""
+
+        existing = (
             await session.execute(
-                select(WorkflowDefinition).where(
+                select(WorkflowDefinition.id).where(
                     WorkflowDefinition.domain_code == domainCode,
                     WorkflowDefinition.capability_code == capabilityCode,
                     WorkflowDefinition.version == version,
                 )
             )
         ).scalar_one_or_none()
-        if definition is None:
-            raise NotFoundError(
+        if existing is None:
+            return NotFoundError(
                 MSG_WORKFLOW_DEFINITION_NOT_FOUND.format(
-                    domainCode=domainCode,
-                    capabilityCode=capabilityCode,
+                    domain_code=domainCode,
+                    capability_code=capabilityCode,
                     version=version,
                 )
             )
-        if definition.status != _STATUS_PUBLISHED:
-            raise ConflictError(
-                MSG_WORKFLOW_DEFINITION_NOT_PUBLISHED.format(status=definition.status),
-                detail="WORKFLOW_DEFINITION_NOT_PUBLISHED",
-                details={"definitionId": definition.id, "status": definition.status},
-            )
-        return definition
+        return ConflictError(
+            MSG_WORKFLOW_DEFINITION_NOT_PUBLISHED.format(version=version),
+            detail=DETAIL_WORKFLOW_DEFINITION_NOT_PUBLISHED,
+            details={"definitionId": existing, "version": version},
+        )
 
     @staticmethod
     def _assertCanCancel(

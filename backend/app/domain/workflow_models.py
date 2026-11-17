@@ -159,6 +159,17 @@ class WorkflowDefinition(Base, TimestampMixin):
             "domain_code",
             "capability_code",
         ),
+        # ⚠️ **生效版本唯一**（部分唯一索引）：同一域能力下**至多一条** PUBLISHED。
+        # 为什么必须落到库层：审批层级写在定义体的审批矩阵里 ⇒ 若同时存在两条
+        # 生效定义，客户端就能挑一条「宽松矩阵」的来跑 ⇒ **绕过高层审批**。
+        # 服务层只做「读出唯一生效版本」，**并发写**（同时发布两条）由本索引兜底。
+        Index(
+            "uq_workflow_definition_published",
+            "domain_code",
+            "capability_code",
+            unique=True,
+            postgresql_where=sa_text("status = 'PUBLISHED'"),
+        ),
     )
 
     def __repr__(self) -> str:

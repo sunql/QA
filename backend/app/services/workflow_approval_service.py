@@ -125,6 +125,7 @@ class WorkflowApprovalService:
         roles: Sequence[str] = (),
         subjectType: str = SUBJECT_TYPE_WORKFLOW_INSTANCE,
         actorDepartments: DepartmentsInput = None,
+        isRealIdentity: bool = False,
     ) -> list[ApprovalTask]:
         """为实例发起一轮审批（**失败关闭**：矩阵未覆盖 ⇒ 拒绝，不落任何行）。
 
@@ -133,10 +134,20 @@ class WorkflowApprovalService:
 
         **风险级别不由调用方传入** —— 由定义体顶层 ``riskLevel`` 决定
         （服务端绑定 ⇒ 客户端不能挑低风险绕过高层审批）。
+
+        ⚠️ ``isRealIdentity``：**跨用户**发起审批必须已校验身份（治理写）。
+        自作用域（实例创建人本人发起）不受此限 —— 他本来就能提交实例，
+        发起审批不构成越权；真正的闸门在**审批决策**（那里强制真实身份）。
         """
 
         instance, definition = await self._loadInstanceAndDefinition(session, instanceId)
-        await self._assertInstanceVisible(session, instance=instance, actor=actor, roles=roles)
+        await self._assertInstanceVisible(
+            session,
+            instance=instance,
+            actor=actor,
+            roles=roles,
+            isRealIdentity=isRealIdentity,
+        )
 
         entries = self._selectEntries(definition=definition, subjectType=subjectType)
         await self._assertApproversResolvable(session, entries)
@@ -365,13 +376,23 @@ class WorkflowApprovalService:
         *,
         actor: str,
         roles: Sequence[str] = (),
+        isRealIdentity: bool = False,
     ) -> WorkflowInstance:
-        """按**对象级授权**取实例；无权 ⇒ 404（不泄露「存在但无权」）。"""
+        """按**对象级授权**取实例；无权 ⇒ 404（不泄露「存在但无权」）。
+
+        ⚠️ ``isRealIdentity``：跨用户访问必须已校验身份（见 ``_assertInstanceVisible``）。
+        """
 
         instance = await self._store.getInstance(session, instanceId)
         if instance is None:
             raise NotFoundError(f"工作流实例 {instanceId} 不存在")
-        await self._assertInstanceVisible(session, instance=instance, actor=actor, roles=roles)
+        await self._assertInstanceVisible(
+            session,
+            instance=instance,
+            actor=actor,
+            roles=roles,
+            isRealIdentity=isRealIdentity,
+        )
         return instance
 
     async def listApprovals(self, session: AsyncSession, *, instanceId: int) -> list[ApprovalTask]:
@@ -385,10 +406,17 @@ class WorkflowApprovalService:
         *,
         actor: str,
         roles: Sequence[str] = (),
+        isRealIdentity: bool = False,
     ) -> list[ApprovalTask]:
         """对象级授权后的审批任务列表；实例不存在 / 无权 ⇒ 404。"""
 
-        await self.assertInstanceVisible(session, instanceId, actor=actor, roles=roles)
+        await self.assertInstanceVisible(
+            session,
+            instanceId,
+            actor=actor,
+            roles=roles,
+            isRealIdentity=isRealIdentity,
+        )
         return await self._store.listApprovalTasks(session, instanceId=instanceId)
 
     # ---------------------------------------------------------------- 内部
@@ -520,11 +548,21 @@ class WorkflowApprovalService:
         instance: WorkflowInstance,
         actor: str,
         roles: Sequence[str],
+        isRealIdentity: bool = False,
     ) -> None:
-        """对象级授权：无权 ⇒ 404（**不泄露存在性**）。"""
+        """对象级授权：无权 ⇒ 404（**不泄露存在性**）。
+
+        ⚠️ **跨用户访问必须「已校验身份」**（``isRealIdentity`` ⇒ JWT 验过签）：
+        stub 身份的缺省角色带 ``admin``（``DEFAULT_STUB_ROLES``）⇒ 只看角色，
+        任意客户端发一个 ``X-User-Id: ghost`` 就能把整个工作流面读穿。
+        ⇒ 跨用户（admin / 审批持有人）两条分支都要求真实身份；
+        **自作用域**（实例创建人本人）不受此限（读自己的实例不构成越权）。
+        """
 
         if instance.created_by and instance.created_by == actor:
             return
+        if not isRealIdentity:
+            raise NotFoundError(f"工作流实例 {instance.id} 不存在")
         if ADMIN_ROLE_CODE in (roles or ()):
             return
         if await self._isApprovalHolder(session, instance=instance, actor=actor, roles=roles):

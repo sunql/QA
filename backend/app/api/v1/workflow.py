@@ -125,6 +125,7 @@ async def getInstance(
         instanceId,
         actor=currentUser.userId,
         roles=currentUser.roles,
+        isRealIdentity=currentUser.isRealIdentity,
     )
     steps = await service.listSteps(session, instanceId)
     approvals = await approvalService.listApprovals(session, instanceId=instanceId)
@@ -162,6 +163,7 @@ async def requestApproval(
         actor=currentUser.userId,
         roles=currentUser.roles,
         actorDepartments=currentUser.departments,
+        isRealIdentity=currentUser.isRealIdentity,
     )
     await session.commit()
     return [WorkflowApprovalRead.model_validate(task) for task in tasks]
@@ -183,6 +185,7 @@ async def listApprovals(
         instanceId,
         actor=currentUser.userId,
         roles=currentUser.roles,
+        isRealIdentity=currentUser.isRealIdentity,
     )
     return [WorkflowApprovalRead.model_validate(task) for task in tasks]
 

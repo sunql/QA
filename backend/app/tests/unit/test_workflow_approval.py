@@ -267,12 +267,13 @@ async def _makeInstance(dbSession, definition, *, createdBy="submitter"):
     return instance
 
 
-async def _requestApproval(dbSession, instance, *, actor="submitter", roles=()):
+async def _requestApproval(dbSession, instance, *, actor="submitter", roles=(), isRealIdentity=False):
     tasks = await _service.requestApproval(
         dbSession,
         instanceId=instance.id,
         actor=actor,
         roles=roles,
+        isRealIdentity=isRealIdentity,
     )
     await dbSession.commit()
     return tasks
@@ -487,6 +488,13 @@ async def test_无权者看不到实例(dbSession, definition):
 
 
 async def test_审批角色持有者可看实例(dbSession, definition):
+    """审批持有人（**已校验身份**）可看实例。
+
+    ⚠️ ``isRealIdentity=True``：跨用户可见性要求已校验身份（stub 身份的缺省
+    角色带 admin ⇒ 只看角色会让任意客户端读穿工作流面）。本用例断的是
+    **授权维度**（审批持有人可读），不是认证维度 ⇒ 显式给真实身份。
+    """
+
     instance = await _makeInstance(dbSession, definition)
     tasks = await _requestApproval(dbSession, instance)
     taskId = tasks[0].id
@@ -496,6 +504,7 @@ async def test_审批角色持有者可看实例(dbSession, definition):
         instance.id,
         actor="manager",
         roles=("purchase_manager",),
+        isRealIdentity=True,
     )
     assert visible.id == instance.id
     assert taskId is not None
@@ -558,8 +567,14 @@ async def test_本轮发起人不能审批(dbSession, definition):
     """四眼原则第二个比对对象：由他人代发起的审批，发起人自己也不能批。"""
 
     instance = await _makeInstance(dbSession, definition, createdBy="submitter")
-    # admin 代为发起（admin 对实例可见）
-    tasks = await _requestApproval(dbSession, instance, actor="boss", roles=("admin",))
+    # admin 代为发起（admin 对实例可见 ⇒ 已校验身份的跨用户 admin）
+    tasks = await _requestApproval(
+        dbSession,
+        instance,
+        actor="boss",
+        roles=("admin",),
+        isRealIdentity=True,
+    )
 
     with pytest.raises(PermissionDeniedError):
         await _service.decideApproval(

@@ -78,7 +78,7 @@ def _recordedOps(module, funcName: str) -> list[tuple]:
             calls.append(("create_table", tableName, tuple(columns)))
 
         def create_index(self, name, tableName, *columns, **kwargs):
-            calls.append(("create_index", name, tableName))
+            calls.append(("create_index", name, tableName, kwargs))
 
         def __getattr__(self, name):
             def _unexpected(*args, **kwargs):
@@ -451,6 +451,37 @@ def test_索引齐备():
     assert "ix_approval_task_instance" in _indexNames(ApprovalTask.__table__)
     assert "ix_approval_task_status" in _indexNames(ApprovalTask.__table__)
     assert "ix_workflow_outbox_pending" in _indexNames(WorkflowOutbox.__table__)
+
+
+def test_生效版本部分唯一索引_orm与迁移逐字一致():
+    """同一域能力下**至多一条** PUBLISHED（审批层级 = 安全边界 ⇒ 库层钉死）。
+
+    ORM 与迁移两侧的**谓词**必须逐字一致 —— 只比对「索引名存在」不够：
+    谓词写错（少了 WHERE、或条件不同）⇒ 索引要么失效、要么误伤草稿版本。
+    """
+
+    expectedPredicate = "status = 'PUBLISHED'"
+
+    ormIndex = {
+        index.name: index for index in WorkflowDefinition.__table__.indexes
+    }["uq_workflow_definition_published"]
+    assert ormIndex.unique is True, "生效版本唯一索引必须是 UNIQUE"
+    assert [column.name for column in ormIndex.columns] == ["domain_code", "capability_code"]
+    ormWhere = ormIndex.dialect_options["postgresql"]["where"]
+    assert str(ormWhere) == expectedPredicate, f"ORM 谓词变了：{ormWhere}"
+
+    migrationCalls = [
+        call
+        for call in _recordedOps(_loadMigration("0149_workflow_definition"), "upgrade")
+        if call[0] == "create_index"
+    ]
+    migrationIndex = {call[1]: call[3] for call in migrationCalls}[
+        "uq_workflow_definition_published"
+    ]
+    assert migrationIndex["unique"] is True, "迁移侧索引必须 UNIQUE"
+    assert str(migrationIndex["postgresql_where"]) == expectedPredicate, (
+        f"迁移谓词变了：{migrationIndex['postgresql_where']}"
+    )
 
 
 # ---------------------------------------------------------------- 迁移一致性

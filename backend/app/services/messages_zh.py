@@ -595,6 +595,16 @@ MSG_WORKFLOW_DEFINITION_NOT_FOUND = (
     "工作流定义不存在（domain_code={domain_code}、capability_code={capability_code}、version={version}）"
 )
 MSG_WORKFLOW_DEFINITION_NOT_PUBLISHED = "工作流定义「{version}」尚未发布，不能提交实例"
+# 版本不匹配：客户端指定了**非生效版本**（生效版本由服务端按域能力唯一确定）。
+MSG_WORKFLOW_DEFINITION_VERSION_MISMATCH = (
+    "工作流定义「{requestedVersion}」不是当前生效版本"
+    "（当前生效版本：{publishedVersion}），不能提交实例"
+)
+# 多个生效版本 ⇒ 数据坏了 ⇒ 失败关闭（不猜）。
+MSG_WORKFLOW_DEFINITION_AMBIGUOUS = (
+    "工作流定义「{domainCode}/{capabilityCode}」存在多个生效版本（{versions}），"
+    "无法判定（请修数据）"
+)
 
 # P5 取消：权限与终态
 MSG_WORKFLOW_CANCEL_NOT_AUTHORIZED = "只有提交人或管理员可以取消该工作流实例"

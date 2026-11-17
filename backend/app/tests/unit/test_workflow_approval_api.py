@@ -542,3 +542,94 @@ async def test_开关关闭时路由不存在(offClient, dbSession):
         headers=_headers("submitter"),
     )
     assert resp.status_code == 404, resp.text
+
+
+# =============================================================================
+# R11：跨用户读取的对象级授权（stub 身份不得越权读）
+# =============================================================================
+#
+# 背景：``CurrentUser.roles`` 在 **stub 头路径**下缺省带 ``admin``
+# （``DEFAULT_STUB_ROLES = ("user", "admin")``）⇒ 只看「角色里有 admin」
+# 就能读**别人**的实例 ⇒ 任意客户端发一个 ``X-User-Id: ghost`` 就能把整个
+# 工作流面读穿（实例详情 + 审批任务）。
+#
+# ⇒ 口径：**跨用户**访问必须「已校验身份」（``isRealIdentity`` ⇒ JWT 验过签）
+# 且命中 admin / 审批持有人；**自作用域**（实例创建人本人）不受此限。
+#
+# ⚠️ 为什么 stub 身份在库里**有**角色时也读不到别人的实例：DB 用户的角色
+# 来自 DB（请求头里的 ``X-User-Roles`` 无效）⇒ 但「审批持有人」分支同样要
+# 真实身份 ⇒ 否则 ``X-User-Id: lead`` 就能以 lead 的身份读别人的实例。
+
+
+async def test_stub身份不能读他人实例(workflowClient, dbSession):
+    """非 DB 用户（stub 身份，缺省角色含 admin）⇒ 404（不得越权读）。"""
+
+    await _seedDefinition(dbSession)
+    await _seedActors(dbSession)
+    instanceId = await _submit(workflowClient)
+
+    resp = await workflowClient.get(
+        f"/api/v1/workflow/instances/{instanceId}",
+        headers=_headers("ghost", "admin"),
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_stub身份不能读他人审批任务(workflowClient, dbSession):
+    """审批任务列表同样受对象级授权约束（同一个洞，两条读路径）。"""
+
+    await _seedDefinition(dbSession)
+    await _seedActors(dbSession)
+    instanceId = await _submit(workflowClient)
+    await _requestApproval(workflowClient, instanceId)
+
+    resp = await workflowClient.get(
+        f"/api/v1/workflow/instances/{instanceId}/approvals",
+        headers=_headers("ghost", "admin"),
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_冒充审批人不能读他人实例(workflowClient, dbSession):
+    """**冒充**：请求头写着审批人的名字 ⇒ 仍不得跨用户读（决策面已验签，读面同样）。"""
+
+    await _seedDefinition(dbSession)
+    await _seedActors(dbSession)
+    instanceId = await _submit(workflowClient)
+    await _requestApproval(workflowClient, instanceId)
+
+    resp = await workflowClient.get(
+        f"/api/v1/workflow/instances/{instanceId}",
+        headers=_headers("lead"),
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_stub身份不能跨用户发起审批(workflowClient, dbSession):
+    """跨用户发起审批 ⇒ 404（发起审批是治理写 ⇒ 跨用户必须已校验身份）。"""
+
+    await _seedDefinition(dbSession)
+    await _seedActors(dbSession)
+    instanceId = await _submit(workflowClient)
+
+    resp = await workflowClient.post(
+        f"/api/v1/workflow/instances/{instanceId}/approval-request",
+        json={},
+        headers=_headers("ghost", "admin"),
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_创建人可读自己的实例(workflowClient, dbSession):
+    """自作用域放行（不许把上面几条的修复做成「谁都不许读」）。"""
+
+    await _seedDefinition(dbSession)
+    await _seedActors(dbSession)
+    instanceId = await _submit(workflowClient)
+
+    resp = await workflowClient.get(
+        f"/api/v1/workflow/instances/{instanceId}",
+        headers=_headers("submitter"),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["instance"]["id"] == instanceId

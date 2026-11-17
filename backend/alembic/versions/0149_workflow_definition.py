@@ -146,6 +146,16 @@ def upgrade() -> None:
         _TABLE_DEFINITION,
         ["domain_code", "capability_code"],
     )
+    # ⚠️ **生效版本唯一**（部分唯一索引）：同一域能力下至多一条 PUBLISHED。
+    # 审批层级写在定义体的审批矩阵里 ⇒ 两条生效定义并存 ⇒ 客户端可挑「宽松矩阵」
+    # 的那条来跑 ⇒ **绕过高层审批** ⇒ 必须在库层钉死（服务层只负责读）。
+    op.create_index(
+        "uq_workflow_definition_published",
+        _TABLE_DEFINITION,
+        ["domain_code", "capability_code"],
+        unique=True,
+        postgresql_where=sa.text("status = 'PUBLISHED'"),
+    )
 
     op.create_table(
         _TABLE_INSTANCE,
@@ -244,5 +254,6 @@ def downgrade() -> None:
     op.drop_index("ix_workflow_instance_status", table_name=_TABLE_INSTANCE)
     op.drop_index("ix_workflow_instance_definition", table_name=_TABLE_INSTANCE)
     op.drop_table(_TABLE_INSTANCE)
+    op.drop_index("uq_workflow_definition_published", table_name=_TABLE_DEFINITION)
     op.drop_index("ix_workflow_definition_scope", table_name=_TABLE_DEFINITION)
     op.drop_table(_TABLE_DEFINITION)

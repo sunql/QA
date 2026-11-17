@@ -57,6 +57,7 @@ from app.services.messages_zh import (
     MSG_WORKFLOW_APPROVAL_SELF_FORBIDDEN,
     MSG_WORKFLOW_APPROVAL_TIMEOUT,
 )
+from app.services.workflow_approval_query import WorkflowApprovalQueryService
 from app.services.workflow_audit_service import WorkflowAuditService
 from app.services.workflow_definition import (
     ApprovalMatrixEntry,
@@ -116,9 +117,11 @@ class WorkflowApprovalService:
         self,
         store: WorkflowStore | None = None,
         audit: WorkflowAuditService | None = None,
+        query: WorkflowApprovalQueryService | None = None,
     ) -> None:
         self._store = store or WorkflowStore()
         self._audit = audit or WorkflowAuditService()
+        self._query = query or WorkflowApprovalQueryService(store=self._store)
 
     # ---------------------------------------------------------------- 生成
 
@@ -609,42 +612,12 @@ class WorkflowApprovalService:
             raise NotFoundError(f"工作流实例 {instance.id} 不存在")
         if ADMIN_ROLE_CODE in (roles or ()):
             return
-        if await self._isApprovalHolder(session, instance=instance, actor=actor, roles=roles):
+        # 持有人判定只有一份（读路径 / 写路径同口径，见 workflow_approval_query）
+        if await self._query.isApprovalHolder(
+            session, instance=instance, actor=actor, roles=roles
+        ):
             return
         raise NotFoundError(f"工作流实例 {instance.id} 不存在")
-
-    async def _isApprovalHolder(
-        self,
-        session: AsyncSession,
-        *,
-        instance: WorkflowInstance,
-        actor: str,
-        roles: Sequence[str],
-    ) -> bool:
-        """该 actor 是否持有本实例的审批任务（指定人 / 角色 / 已签署）。"""
-
-        tasks = await self._store.listApprovalTasks(session, instanceId=instance.id)
-        if not tasks:
-            return False
-        definition = await self._loadDefinition(session, instance.definition_id)
-        matrixByCode = {
-            entry.matrixCode: entry
-            for entry in parseApprovalMatrix(definition.definition_json)
-        }
-        for task in tasks:
-            if task.approver_user == actor:
-                return True
-            entry = matrixByCode.get(task.matrix_code)
-            if entry is None:
-                continue
-            if entry.approverUser:
-                if entry.approverUser == actor:
-                    return True
-            elif entry.approverRole and entry.approverRole in (roles or ()):
-                return True
-            if task.approver_role and task.approver_role in (roles or ()):
-                return True
-        return False
 
     async def _lockTask(self, session: AsyncSession, taskId: int) -> ApprovalTask:
         task = (

@@ -14,12 +14,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ConflictError, NotFoundError
-from app.domain.workflow_models import WorkflowInstance, WorkflowStep
+from app.domain.workflow_models import WorkflowDefinition, WorkflowInstance, WorkflowStep
 from app.services.workflow_state_machine import assertWorkflowTransition
 from app.services.workflow_store_base import (
     EVENT_INSTANCE_CREATED,
@@ -56,6 +56,72 @@ class WorkflowInstanceStore(WorkflowStoreBase):
                 select(WorkflowInstance.status).where(WorkflowInstance.id == instanceId)
             )
         ).scalar_one_or_none()
+
+    async def listInstances(
+        self,
+        session: AsyncSession,
+        *,
+        createdBy: str | None,
+        instanceIds: Sequence[int] | None,
+        status: str | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[tuple[WorkflowInstance, WorkflowDefinition]], int]:
+        """列出实例（带定义上下文），返回 ``(rows, total)``。
+
+        ``createdBy=None`` ⇒ 不按提交人过滤（真实 admin 的全局视图）；
+        否则 = 自作用域 ∪ ``instanceIds``（审批持有人可见的实例）。
+        ``total`` 独立于 ``limit`` / ``offset``，供前端翻页。
+
+        排序新→旧（``id DESC``）：工作流列表的第一诉求是「我刚提交的那单在哪」。
+        """
+
+        conditions = self._instanceListConditions(
+            createdBy=createdBy, instanceIds=instanceIds, status=status
+        )
+        total = (
+            await session.execute(
+                select(func.count()).select_from(WorkflowInstance).where(*conditions)
+            )
+        ).scalar_one()
+        rows = (
+            await session.execute(
+                select(WorkflowInstance, WorkflowDefinition)
+                .join(
+                    WorkflowDefinition,
+                    WorkflowDefinition.id == WorkflowInstance.definition_id,
+                )
+                .where(*conditions)
+                .order_by(WorkflowInstance.id.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
+        return [(instance, definition) for instance, definition in rows], int(total)
+
+    @staticmethod
+    def _instanceListConditions(
+        *,
+        createdBy: str | None,
+        instanceIds: Sequence[int] | None,
+        status: str | None,
+    ) -> list[Any]:
+        """列表过滤条件（count 与分页共用同一份 ⇒ 不会「总数与行对不上」）。"""
+
+        conditions: list[Any] = []
+        if createdBy is not None:
+            if instanceIds:
+                conditions.append(
+                    or_(
+                        WorkflowInstance.created_by == createdBy,
+                        WorkflowInstance.id.in_(instanceIds),
+                    )
+                )
+            else:
+                conditions.append(WorkflowInstance.created_by == createdBy)
+        if status:
+            conditions.append(WorkflowInstance.status == status)
+        return conditions
 
     async def createInstance(
         self,

@@ -1,4 +1,4 @@
-"""seed_menu_config - 幂等 upsert 8 类 43 项菜单（共 51 行）。
+"""seed_menu_config - 幂等 upsert 8 类 50 项菜单（共 58 行）。
 
 与 AppLayout 的旧 key 一一对应；feat-rbac-identity 追加 4 个 RBAC 管理页
 （用户/角色/组织/菜单）叶子项；feat-wiki-knowledge 追加 1 个一级类
@@ -95,6 +95,10 @@ ITEMS: list[dict[str, Any]] = [
     # feat-data-domain-layer：数据域管理页（业务对象主域/附域的授权源）
     {"parent": "section.bizConfig", "code": "item.dataDomains", "label_key": "menu.item.dataDomains", "icon_code": "cluster", "sort_order": 372, "path": "/data-domains"},
     {"parent": "section.bizConfig", "code": "item.ontologyProperties", "label_key": "menu.item.ontologyProperties", "icon_code": "tags", "sort_order": 375, "path": "/ontology-properties"},
+    # P5 Workflow/Command/Approval：实例列表（提交入口在页内）+ 待办审批。
+    # 两项都只是**读/操作面**：写接口受 ENABLE_WORKFLOW 开关与审批持有人校验约束。
+    {"parent": "section.bizConfig", "code": "item.workflowInstances", "label_key": "menu.item.workflowInstances", "icon_code": "workflow", "sort_order": 377, "path": "/workflow"},
+    {"parent": "section.bizConfig", "code": "item.workflowApprovals", "label_key": "menu.item.workflowApprovals", "icon_code": "approval", "sort_order": 378, "path": "/workflow/approvals"},
     # Foundation
     {"parent": "section.foundation", "code": "item.datasource", "label_key": "menu.item.datasource", "icon_code": "database", "sort_order": 410, "path": "/datasource"},
     # feat-local-import-evolution：本地数据初始化独立入口页 /local-import（复用 ImportWizard）
@@ -135,7 +139,7 @@ ITEMS: list[dict[str, Any]] = [
 async def seed_menu_config(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
-    """幂等 upsert 8 个一级类 + 43 个叶子项。返回总行数（51）。
+    """幂等 upsert 8 个一级类 + 50 个叶子项。返回总行数（58）。
 
     冲突键：`code`（全局唯一）。重复运行不新增行，也不刷新任何字段 —— 已存在的行
     完全交给菜单管理 UI 维护（见文件头「UI 优先策略」）。

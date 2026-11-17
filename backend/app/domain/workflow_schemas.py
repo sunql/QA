@@ -114,6 +114,83 @@ class WorkflowInstanceDetail(CamelModel):
     approvals: list[WorkflowApprovalRead]
 
 
+class WorkflowInstanceListItem(CamelModel):
+    """实例列表行（最小前端批次）。
+
+    比 ``WorkflowInstanceRead`` 多带定义上下文（``domainCode`` /
+    ``capabilityCode`` / ``definitionVersion``）—— 否则页面只能显示裸
+    ``definitionId``，用户看不出「这是哪个业务能力的哪次执行」。
+    """
+
+    id: int
+    definition_id: int
+    domain_code: str
+    capability_code: str
+    definition_version: str
+    status: str
+    idempotency_key: str
+    created_by: str | None = None
+    error_message: str | None = None
+    created_time: datetime
+    updated_time: datetime
+
+
+class WorkflowInstancePage(CamelModel):
+    """实例分页响应；``total`` 独立于 ``limit`` / ``offset``（前端用于翻页）。"""
+
+    rows: list[WorkflowInstanceListItem]
+    total: int
+
+
+class WorkflowApprovalListItem(CamelModel):
+    """「我的待办」行：审批任务 + 所属实例上下文。
+
+    待办页必须能直接回答「这是什么业务、卡在什么状态、谁提交的」，
+    因此把实例侧字段一并带出，前端不必逐行再拉详情。
+    """
+
+    id: int
+    instance_id: int
+    matrix_code: str
+    subject_type: str
+    subject_id: str
+    status: str
+    approver_role: str | None = None
+    approver_user: str | None = None
+    decision_note: str | None = None
+    due_at: datetime | None = None
+    decided_at: datetime | None = None
+    created_by: str | None = None
+    domain_code: str
+    capability_code: str
+    definition_version: str
+    instance_status: str
+    instance_created_by: str | None = None
+
+
+class WorkflowApprovalPage(CamelModel):
+    """待办分页响应。"""
+
+    rows: list[WorkflowApprovalListItem]
+    total: int
+
+
+class WorkflowDefinitionRead(CamelModel):
+    """已发布定义摘要（提交表单的候选集）。
+
+    ⚠️ **不含 ``definition_json``**：审批矩阵里有审批人 ⇒ 下发等于把
+    「谁批这件事」暴露给所有登录用户。
+    """
+
+    id: int
+    domain_code: str
+    capability_code: str
+    version: str
+    status: str
+    created_by: str | None = None
+    created_time: datetime
+
+
 class WorkflowApprovalRequest(CamelModel):
     """``POST /instances/{instanceId}/approval-request`` 请求体。
 

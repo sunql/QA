@@ -35,6 +35,7 @@ import type {
 import { SEMANTIC_RELATION_TYPE_OPTIONS } from "../../types/ontology";
 import { useTranslation } from "../../i18n";
 import { classOptions } from "./classOptions";
+import { useTablePagination } from "../../utils/useTablePagination";
 
 const { TextArea } = Input;
 const { Text } = Typography;
@@ -73,6 +74,9 @@ export default function SemanticRelationTab({ classes }: SemanticRelationTabProp
   const [backfilling, setBackfilling] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm<SemanticRelationFormValues>();
+  // 标准分页（与类/属性/指标/关联四个 Tab 同一套）：每页 20 条 + 总条数 +
+  // 每页条数选择 + 快速跳页（见 utils/useTablePagination）。
+  const { pagination } = useTablePagination();
 
   const relationTypeOptions = SEMANTIC_RELATION_TYPE_OPTIONS.map((o) => ({
     value: o.value,
@@ -226,7 +230,13 @@ export default function SemanticRelationTab({ classes }: SemanticRelationTabProp
           </Button>
         </Space>
       </div>
-      <Table rowKey="id" loading={loading} dataSource={relations} columns={columns} />
+      <Table
+        rowKey="id"
+        loading={loading}
+        dataSource={relations}
+        columns={columns}
+        pagination={pagination}
+      />
       <Modal
         title={t("forms.ontology.addSemanticRelationModalTitle")}
         open={modalOpen}

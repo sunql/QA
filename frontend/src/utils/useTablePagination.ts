@@ -15,7 +15,7 @@
  *   <Table pagination={pagination} dataSource={items} columns={cols} />
  */
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import type { TablePaginationConfig } from "antd";
 import { useTranslation } from "../i18n";
 
@@ -62,12 +62,20 @@ export function useTablePagination(options?: {
     onChange: (current, pageSize) => setState({ current, pageSize }),
   };
 
+  // reset / setPage 用 useCallback 固定身份 ⇒ 消费方可以安全地把它们放进
+  // useCallback / useEffect 依赖里（否则每次渲染都是新函数 ⇒ 依赖数组永远变）。
+  const reset = useCallback(() => setState({ current: 1, pageSize: 20 }), []);
+  // 切换过滤条件时回到第 1 页，但保留用户选的 pageSize。
+  // 单独 reset() 会把 pageSize 也回到 20，影响用户已经调好的页大小。
+  const setPage = useCallback(
+    (page: number) => setState((s) => ({ ...s, current: page })),
+    [],
+  );
+
   return {
     pagination,
-    reset: () => setState({ current: 1, pageSize: 20 }),
-    // 切换过滤条件时回到第 1 页，但保留用户选的 pageSize。
-    // 单独 reset() 会把 pageSize 也回到 20，影响用户已经调好的页大小。
-    setPage: (page: number) => setState((s) => ({ ...s, current: page })),
+    reset,
+    setPage,
     state,
   };
 }

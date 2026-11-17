@@ -34,6 +34,7 @@ import FilterBar from "./FilterBar";
 import type { FilterField } from "./FilterBar";
 import { filterProperties } from "../../utils/ontologyFilter";
 import type { FilterValues } from "../../utils/ontologyFilter";
+import { useTablePagination } from "../../utils/useTablePagination";
 import { classOptions } from "./classOptions";
 
 interface PropertyFormValues {
@@ -105,9 +106,16 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
   }));
 
   const [filters, setFilters] = useState<FilterValues>({});
+  // 标准分页（与类/指标/关联/语义关系四个 Tab 同一套）：每页 20 条 + 总条数 +
+  // 每页条数选择 + 快速跳页（见 utils/useTablePagination）。
+  const { pagination, setPage } = useTablePagination();
   const updateFilter = useCallback(
-    (k: string, v: string) => setFilters((prev) => ({ ...prev, [k]: v })),
-    []
+    (k: string, v: string) => {
+      setFilters((prev) => ({ ...prev, [k]: v }));
+      // 命中数变化后回到第 1 页（保留用户选的每页条数），否则可能停在空页上。
+      setPage(1);
+    },
+    [setPage]
   );
   const resetFilters = useCallback(() => setFilters({}), []);
   const filteredProperties = useMemo(
@@ -298,7 +306,13 @@ export default function PropertyTab({ classes, refreshClasses }: PropertyTabProp
         onChange={updateFilter}
         onReset={resetFilters}
       />
-      <Table rowKey="id" loading={loading} dataSource={filteredProperties} columns={columns} />
+      <Table
+        rowKey="id"
+        loading={loading}
+        dataSource={filteredProperties}
+        columns={columns}
+        pagination={pagination}
+      />
       <Modal
         title={
           editing

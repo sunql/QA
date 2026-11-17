@@ -595,6 +595,11 @@ MSG_WORKFLOW_APPROVAL_APPROVER_UNKNOWN = (
     "审批矩阵条目 {matrixCode} 的审批人 {approver} 在库中不存在（{kind}），"
     "无法发起审批（否则该任务谁也批不了）"
 )
+# P5 审批待办：要求**已校验**身份（stub 头可冒充任意 DB 账号 ⇒ 跨用户读必须验签）
+MSG_WORKFLOW_APPROVAL_REAL_AUTH_REQUIRED = (
+    "审批决策与待办列表要求真实登录身份"
+    "（stub 身份可被任意客户端伪造，不可用于审批）"
+)
 MSG_WORKFLOW_DEFINITION_NOT_FOUND = (
     "工作流定义不存在（domain_code={domain_code}、capability_code={capability_code}、version={version}）"
 )

@@ -114,6 +114,137 @@ class WorkflowInstanceDetail(CamelModel):
     approvals: list[WorkflowApprovalRead]
 
 
+class WorkflowInstanceListItem(CamelModel):
+    """实例列表行（最小前端批次）。
+
+    比 ``WorkflowInstanceRead`` 多带定义上下文（``domainCode`` /
+    ``capabilityCode`` / ``definitionVersion``）—— 否则页面只能显示裸
+    ``definitionId``，用户看不出「这是哪个业务能力的哪次执行」。
+    """
+
+    id: int
+    definition_id: int
+    domain_code: str
+    capability_code: str
+    definition_version: str
+    status: str
+    idempotency_key: str
+    created_by: str | None = None
+    error_message: str | None = None
+    created_time: datetime
+    updated_time: datetime
+
+
+class WorkflowInstancePage(CamelModel):
+    """实例分页响应；``total`` 独立于 ``limit`` / ``offset``（前端用于翻页）。"""
+
+    rows: list[WorkflowInstanceListItem]
+    total: int
+
+
+class WorkflowApprovalListItem(CamelModel):
+    """「我的待办」行：审批任务 + 所属实例上下文。
+
+    待办页必须能直接回答「这是什么业务、卡在什么状态、谁提交的」，
+    因此把实例侧字段一并带出，前端不必逐行再拉详情。
+    """
+
+    id: int
+    instance_id: int
+    matrix_code: str
+    subject_type: str
+    subject_id: str
+    status: str
+    approver_role: str | None = None
+    approver_user: str | None = None
+    decision_note: str | None = None
+    due_at: datetime | None = None
+    decided_at: datetime | None = None
+    created_by: str | None = None
+    domain_code: str
+    capability_code: str
+    definition_version: str
+    instance_status: str
+    instance_created_by: str | None = None
+
+
+class WorkflowApprovalPage(CamelModel):
+    """待办分页响应。"""
+
+    rows: list[WorkflowApprovalListItem]
+    total: int
+
+
+class WorkflowDefinitionRead(CamelModel):
+    """已发布定义摘要（提交表单的候选集）。
+
+    ⚠️ **不含 ``definition_json``**：审批矩阵里有审批人 ⇒ 下发等于把
+    「谁批这件事」暴露给所有登录用户。
+    """
+
+    id: int
+    domain_code: str
+    capability_code: str
+    version: str
+    status: str
+    created_by: str | None = None
+    created_time: datetime
+
+
+class WorkflowDefinitionWrite(CamelModel):
+    """``POST/PUT /admin/definitions`` 请求体（定义管理面，仅 admin）。
+
+    ``definitionJson`` 的结构由 ``workflow_definition.py`` 的纯函数校验
+    （步骤可执行性 / 单轮审批 / 矩阵条目必须有审批人），这里只管
+    「是可 JSON 序列化的对象且不超 64KB」这一层边界。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    domain_code: str = Field(min_length=1, max_length=DOMAIN_CODE_MAX_LENGTH)
+    capability_code: str = Field(min_length=1, max_length=CAPABILITY_CODE_MAX_LENGTH)
+    version: str = Field(min_length=1, max_length=VERSION_MAX_LENGTH)
+    definition_json: dict[str, Any]
+
+    @field_validator("definition_json")
+    @classmethod
+    def _capDefinitionSize(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """定义体体积上限：与实例请求体同一把尺（写入口不放大闸口）。"""
+
+        try:
+            encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("definitionJson 必须是可 JSON 序列化的对象") from exc
+        if len(encoded) > MAX_REQUEST_BYTES:
+            raise ValueError(f"definitionJson 体积超限（上限 {MAX_REQUEST_BYTES} 字节）")
+        return value
+
+
+class WorkflowDefinitionAdminRead(CamelModel):
+    """管理面定义行（**含定义体**：编辑表单要用）。
+
+    与公共面 ``WorkflowDefinitionRead``（不含 ``definition_json``）刻意分型：
+    公共面给所有登录用户看，管理面只给 admin。
+    """
+
+    id: int
+    domain_code: str
+    capability_code: str
+    version: str
+    status: str
+    definition_json: dict[str, Any]
+    created_by: str | None = None
+    created_time: datetime
+    updated_time: datetime
+
+
+class WorkflowDefinitionAdminPage(CamelModel):
+    """定义管理列表分页响应。"""
+
+    rows: list[WorkflowDefinitionAdminRead]
+    total: int
+
+
 class WorkflowApprovalRequest(CamelModel):
     """``POST /instances/{instanceId}/approval-request`` 请求体。
 

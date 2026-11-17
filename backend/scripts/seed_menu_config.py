@@ -1,10 +1,11 @@
-"""seed_menu_config - 幂等 upsert 8 类 43 项菜单（共 51 行）。
+"""seed_menu_config - 幂等 upsert 8 类 51 项菜单（共 59 行）。
 
 与 AppLayout 的旧 key 一一对应；feat-rbac-identity 追加 4 个 RBAC 管理页
 （用户/角色/组织/菜单）叶子项；feat-wiki-knowledge 追加 1 个一级类
 「企业 Wiki」+ 9 个二级项（对话/知识条目/导入/冲突/建议/覆盖度/知识图谱/
 关联/分类）；feat-research-entry 追加 1 个一级类「研究代理」+ 2 个叶子项
-（研究会话/研究对比）。
+（研究会话/研究对比）；P5 Workflow 追加 3 个叶子项（工作流实例/待办审批/
+工作流定义）。
 
 UI 优先策略：本 seed 只在「行不存在」时 INSERT 默认值；行已存在时
 **不覆盖任何 UI 可编辑字段**（label_key / icon_code / path / visible /
@@ -95,6 +96,13 @@ ITEMS: list[dict[str, Any]] = [
     # feat-data-domain-layer：数据域管理页（业务对象主域/附域的授权源）
     {"parent": "section.bizConfig", "code": "item.dataDomains", "label_key": "menu.item.dataDomains", "icon_code": "cluster", "sort_order": 372, "path": "/data-domains"},
     {"parent": "section.bizConfig", "code": "item.ontologyProperties", "label_key": "menu.item.ontologyProperties", "icon_code": "tags", "sort_order": 375, "path": "/ontology-properties"},
+    # P5 Workflow/Command/Approval：实例列表（提交入口在页内）+ 待办审批。
+    # 两项都只是**读/操作面**：写接口受 ENABLE_WORKFLOW 开关与审批持有人校验约束。
+    {"parent": "section.bizConfig", "code": "item.workflowInstances", "label_key": "menu.item.workflowInstances", "icon_code": "workflow", "sort_order": 377, "path": "/workflow"},
+    {"parent": "section.bizConfig", "code": "item.workflowApprovals", "label_key": "menu.item.workflowApprovals", "icon_code": "approval", "sort_order": 378, "path": "/workflow/approvals"},
+    # 定义（模板）管理面：新建/编辑/发布/停用定义。写接口 admin-only，
+    # 且已发布定义不可改（只能停用 + 新建版本）—— 改审批矩阵 = 改「谁批」。
+    {"parent": "section.bizConfig", "code": "item.workflowDefinitions", "label_key": "menu.item.workflowDefinitions", "icon_code": "workflow", "sort_order": 379, "path": "/workflow/definitions"},
     # Foundation
     {"parent": "section.foundation", "code": "item.datasource", "label_key": "menu.item.datasource", "icon_code": "database", "sort_order": 410, "path": "/datasource"},
     # feat-local-import-evolution：本地数据初始化独立入口页 /local-import（复用 ImportWizard）
@@ -135,7 +143,7 @@ ITEMS: list[dict[str, Any]] = [
 async def seed_menu_config(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
-    """幂等 upsert 8 个一级类 + 43 个叶子项。返回总行数（51）。
+    """幂等 upsert 8 个一级类 + 51 个叶子项。返回总行数（59）。
 
     冲突键：`code`（全局唯一）。重复运行不新增行，也不刷新任何字段 —— 已存在的行
     完全交给菜单管理 UI 维护（见文件头「UI 优先策略」）。

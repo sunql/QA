@@ -24,6 +24,8 @@ const KNOWN_DB_ICON_CODES = [
   "partition", "audit", "node", "code", "number", "cluster",
   "tags", "tool", "file", "dashboard", "apartment", "heart",
   "experiment", "link",
+  // P5 workflow
+  "workflow", "approval",
 ] as const;
 
 describe("ICON_REGISTRY 与 menu_config.icon_code 对齐", () => {

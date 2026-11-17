@@ -61,6 +61,9 @@ import ResearchReportPage from "./pages/research/ResearchReportPage";
 import ResearchComparePage from "./pages/research/ResearchComparePage";
 import BusinessObjectPage from "./pages/BusinessObjectPage";
 import DataDomainPage from "./pages/DataDomainPage";
+import WorkflowInstancesPage from "./pages/WorkflowInstancesPage";
+import WorkflowApprovalsPage from "./pages/WorkflowApprovalsPage";
+import WorkflowDefinitionsPage from "./pages/WorkflowDefinitionsPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
 import { setMessageApi } from "./api/client";
@@ -140,6 +143,9 @@ export default function App() {
         <Route path="admin/wiki-categories" element={<AdminWikiCategoriesPage />} />
         <Route path="business-objects" element={<BusinessObjectPage />} />
         <Route path="data-domains" element={<DataDomainPage />} />
+        <Route path="workflow" element={<WorkflowInstancesPage />} />
+        <Route path="workflow/approvals" element={<WorkflowApprovalsPage />} />
+        <Route path="workflow/definitions" element={<WorkflowDefinitionsPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />
         <Route path="profile" element={<ProfilePage />} />

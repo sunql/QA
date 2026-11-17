@@ -9,9 +9,9 @@
 守卫口径（机械可判定）：
 
 1. **写入口收敛到存储层**：``app/`` + ``scripts/`` 下（除测试）**只有**
-   ``app/services/workflow_store.py`` 允许触碰 P5 表的 ORM 实体 ——
-   其余模块（服务层 / API 层 / Worker / 运维脚本）一律不得直接构造 /
-   update / delete / **改属性** P5 的 ORM 实体。
+   存储层（``app/services/workflow_*_store*.py``，按**路径**白名单）允许
+   触碰 P5 表的 ORM 实体 —— 其余模块（服务层 / API 层 / Worker / 运维脚本）
+   一律不得直接构造 / update / delete / **改属性** P5 的 ORM 实体。
 2. **ORM 定义点唯一**：P5 表的 ``__tablename__`` 只允许出现在
    ``app/domain/workflow_models.py``（否则「写入口收敛」会漏掉一处定义）。
 3. **原始 SQL 不直写**：不得用 ``text("... INSERT/UPDATE/DELETE workflow_...")``
@@ -42,14 +42,17 @@ import pytest
 # 允许直接触碰 P5 表的模块（**唯一**写入口 = 存储层）——按**路径**白名单。
 # ⚠️ 不能按文件名放行：新建一个 ``scripts/workflow_store.py`` 就能整体豁免
 #    ⇒ 白名单形同虚设。
-# ⚠️ 存储层按职责域拆成了 4 个文件（底座 / 实例+步骤 / 命令 / 审批）⇒ 白名单
+# ⚠️ 存储层按职责域拆成了 5 个文件（底座 / 实例+步骤 / 命令 / 审批 / 定义）⇒ 白名单
 #    跟着拆；新增存储层文件必须**显式**加进来（⇒ 走评审）。
+#    （2026-11-17：定义管理面 ``workflow_definition_store.py`` —— 定义体决定
+#    「谁批」⇒ 写它同样是安全边界操作 ⇒ 必须收口到存储层。）
 _ALLOWED_WRITERS = frozenset(
     {
         "app/services/workflow_store_base.py",
         "app/services/workflow_instance_store.py",
         "app/services/workflow_command_store.py",
         "app/services/workflow_approval_store.py",
+        "app/services/workflow_definition_store.py",
     }
 )
 

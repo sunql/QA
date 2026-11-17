@@ -55,6 +55,7 @@ from app.services.messages_zh import (
     MSG_WORKFLOW_DEFINITION_VERSION_MISMATCH,
     MSG_WORKFLOW_DRIVE_FAILED,
 )
+from app.services.workflow_approval_query import WorkflowApprovalQueryService
 from app.services.workflow_approval_service import WorkflowApprovalService
 from app.services.workflow_audit_service import WorkflowAuditService
 from app.services.workflow_definition import WorkflowStepSpec, parseWorkflowSteps
@@ -99,7 +100,8 @@ class WorkflowService:
         self._store = store or WorkflowStore()
         self._audit = audit or WorkflowAuditService()
         self._orchestrator = orchestrator or WorkflowOrchestrator(store=self._store)
-        self._approval = approval or WorkflowApprovalService()
+        self._approval = approval or WorkflowApprovalService(store=self._store)
+        self._approvalQuery = WorkflowApprovalQueryService(store=self._store)
 
     async def submitInstance(
         self,
@@ -480,6 +482,69 @@ class WorkflowService:
             )
         ).scalar_one()
         return row
+
+    async def listInstances(
+        self,
+        session: AsyncSession,
+        *,
+        actor: str,
+        roles: Sequence[str] = (),
+        isRealIdentity: bool = False,
+        status: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[tuple[WorkflowInstance, WorkflowDefinition]], int]:
+        """实例列表；可见范围与详情面 ``_assertInstanceVisible`` **逐条一致**。
+
+        - 真实 admin ⇒ 全部；
+        - 其他 ⇒ 自作用域（``created_by == actor``）∪ 审批持有人可见的实例；
+        - 未验签的非 admin ⇒ 只剩自作用域（自读不构成越权）。
+        """
+
+        isAdmin = isRealIdentity and ADMIN_ROLE_CODE in (roles or ())
+        if isAdmin:
+            createdBy: str | None = None
+            instanceIds: list[int] | None = None
+        else:
+            createdBy = actor
+            instanceIds = await self._approvalQuery.listVisibleInstanceIds(
+                session, actor=actor, roles=roles, isRealIdentity=isRealIdentity
+            )
+        return await self._store.listInstances(
+            session,
+            createdBy=createdBy,
+            instanceIds=instanceIds,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def listPublishedDefinitions(
+        self, session: AsyncSession, *, limit: int = 100
+    ) -> list[WorkflowDefinition]:
+        """已发布定义（提交表单的候选集）。
+
+        只回 PUBLISHED：DRAFT / DISABLED 提交不了，列出来只会让用户点了报错。
+        定义体（含审批矩阵）**不下发**（见 ``WorkflowDefinitionRead``）。
+        """
+
+        rows = (
+            (
+                await session.execute(
+                    select(WorkflowDefinition)
+                    .where(WorkflowDefinition.status == _STATUS_PUBLISHED)
+                    .order_by(
+                        WorkflowDefinition.domain_code,
+                        WorkflowDefinition.capability_code,
+                        WorkflowDefinition.version,
+                    )
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return list(rows)
 
     async def getInstance(self, session: AsyncSession, instanceId: int) -> WorkflowInstance:
         instance = await self._store.getInstance(session, instanceId)

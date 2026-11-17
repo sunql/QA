@@ -77,9 +77,16 @@ export default function AppLayout() {
   const allItems: MenuItem[] = menuConfig
     ? menuConfig.sections.flatMap((s) => s.children)
     : [];
+  // 选中的菜单项 = **最长路径匹配**（不是「先匹配到谁算谁」）：
+  // P5 的 `/workflow` 是 `/workflow/approvals` 与 `/workflow/definitions` 的
+  // **前缀** ⇒ 按首次命中算，子页面的页头标题与菜单高亮会停在父项上
+  // （用户在「工作流定义」页看到「工作流实例」）。最长匹配才是路由语义。
   const selectedItem =
-    allItems.find((i) => i.path && location.pathname.startsWith(i.path)) ??
-    allItems[0] ?? null;
+    allItems
+      .filter((i) => i.path && location.pathname.startsWith(i.path))
+      .sort((a, b) => (b.path?.length ?? 0) - (a.path?.length ?? 0))[0] ??
+    allItems[0] ??
+    null;
 
   // Persist openKeys（会话内手动展开的 section 写 localStorage 仅供同 session 刷新用；
 //   跨登录/重启会被 getInitialOpenKeys reset 回 DEFAULT_OPENED_SECTIONS）

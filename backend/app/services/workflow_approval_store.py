@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -17,7 +18,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import NotFoundError
-from app.domain.workflow_models import ApprovalTask
+from app.domain.workflow_models import (
+    ApprovalTask,
+    WorkflowDefinition,
+    WorkflowInstance,
+)
 from app.services.workflow_state_machine import assertWorkflowTransition
 from app.services.workflow_store_base import (
     EVENT_APPROVAL_DECIDED,
@@ -58,6 +63,36 @@ class WorkflowApprovalStore(WorkflowStoreBase):
             .all()
         )
         return list(rows)
+
+    async def listTasksWithContext(
+        self,
+        session: AsyncSession,
+        *,
+        statuses: Sequence[str] | None,
+        limit: int,
+    ) -> list[tuple[ApprovalTask, WorkflowInstance, WorkflowDefinition]]:
+        """列出审批任务（带实例与定义上下文），按到期时刻升序。
+
+        ⚠️ **不带授权过滤**：审批持有人匹配需要定义体审批矩阵
+        （``approver_user`` 列只在决策那一刻写签署人 ⇒ 待审批时为空），
+        SQL 无法只看任务行判定 ⇒ 由服务层用 ``_matchesHolder`` 过滤。
+        调用方必须给 ``limit`` 上界（扫描上限），不能拉全表。
+        """
+
+        stmt = (
+            select(ApprovalTask, WorkflowInstance, WorkflowDefinition)
+            .join(WorkflowInstance, WorkflowInstance.id == ApprovalTask.instance_id)
+            .join(
+                WorkflowDefinition,
+                WorkflowDefinition.id == WorkflowInstance.definition_id,
+            )
+            .order_by(ApprovalTask.due_at.asc(), ApprovalTask.id.asc())
+            .limit(limit)
+        )
+        if statuses is not None:
+            stmt = stmt.where(ApprovalTask.status.in_(statuses))
+        rows = (await session.execute(stmt)).all()
+        return [(task, instance, definition) for task, instance, definition in rows]
 
     async def createApprovalTask(
         self,

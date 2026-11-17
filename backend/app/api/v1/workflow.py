@@ -5,11 +5,14 @@
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | POST | ``/instances`` | 提交工作流实例（**幂等**：同 idempotencyKey 只落一行） |
+| GET | ``/instances`` | 实例列表（自作用域 / 审批持有人 / 真实 admin） |
 | GET | ``/instances/{instanceId}`` | 实例详情（实例 + 步骤 + 审批任务） |
 | POST | ``/instances/{instanceId}/approval-request`` | 发起一轮审批（按矩阵生成审批任务） |
 | GET | ``/instances/{instanceId}/approvals`` | 列出该实例的审批任务 |
+| GET | ``/approvals`` | **我的待办**（审批持有人匹配；要求已校验身份） |
 | POST | ``/approvals/{taskId}/decision`` | 审批决策（APPROVE / REJECT） |
 | POST | ``/instances/{instanceId}/cancel`` | 取消实例（提交人或 admin；待执行命令一并取消） |
+| GET | ``/definitions`` | 已发布定义列表（提交表单候选集；**不含定义体**） |
 
 **鉴权**：全部路由依赖 ``getCurrentUser``（无匿名访问）。写入口用
 ``enforceRouteLimit`` 显式限流（``@limiter.limit`` 在本仓是死代码，见
@@ -29,23 +32,44 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import CurrentUser, getCurrentUser, getDb
+from app.dependencies import CurrentUser, getCurrentUser, getDb, requireAdmin
 from app.domain.exceptions import PermissionDeniedError
+from app.domain.workflow_models import (
+    ApprovalTask,
+    WorkflowDefinition,
+    WorkflowInstance,
+)
 from app.domain.workflow_schemas import (
     WorkflowApprovalDecision,
+    WorkflowApprovalListItem,
+    WorkflowApprovalPage,
     WorkflowApprovalRead,
     WorkflowApprovalRequest,
+    WorkflowDefinitionAdminPage,
+    WorkflowDefinitionAdminRead,
+    WorkflowDefinitionRead,
+    WorkflowDefinitionWrite,
     WorkflowInstanceCancel,
     WorkflowInstanceCreate,
     WorkflowInstanceDetail,
+    WorkflowInstanceListItem,
+    WorkflowInstancePage,
     WorkflowInstanceRead,
     WorkflowStepRead,
 )
 from app.infrastructure.rate_limit import enforceRouteLimit, rateLimitValue
+from app.services.messages_zh import MSG_WORKFLOW_APPROVAL_REAL_AUTH_REQUIRED
+from app.services.workflow_approval_query import (
+    DETAIL_APPROVAL_REAL_AUTH_REQUIRED,
+    WorkflowApprovalQueryService,
+)
 from app.services.workflow_approval_service import WorkflowApprovalService
+from app.services.workflow_definition_service import WorkflowDefinitionService
 from app.services.workflow_service import WorkflowService
 
 router = APIRouter()
@@ -56,11 +80,11 @@ SCOPE_REQUEST_APPROVAL = "workflow:request-approval"
 SCOPE_APPROVAL_DECISION = "workflow:approval-decision"
 SCOPE_CANCEL_INSTANCE = "workflow:cancel-instance"
 
-# 审批决策要求真实身份（stub 身份可伪造 ⇒ 不能用于审批）。
-DETAIL_APPROVAL_REAL_AUTH_REQUIRED = "APPROVAL_REAL_AUTH_REQUIRED"
-MSG_APPROVAL_REAL_AUTH_REQUIRED = (
-    "审批决策要求真实登录身份（stub 身份可被任意客户端伪造，不可用于审批）"
-)
+# 列表上限：与前端 Table 的页大小选项（10/20/50/100）对齐，留 200 的余量。
+LIST_LIMIT_DEFAULT = 20
+LIST_LIMIT_MAX = 200
+DEFINITION_LIST_LIMIT_DEFAULT = 100
+DEFINITION_LIST_LIMIT_MAX = 500
 
 
 def getWorkflowService() -> WorkflowService:
@@ -69,6 +93,14 @@ def getWorkflowService() -> WorkflowService:
 
 def getWorkflowApprovalService() -> WorkflowApprovalService:
     return WorkflowApprovalService()
+
+
+def getWorkflowApprovalQueryService() -> WorkflowApprovalQueryService:
+    return WorkflowApprovalQueryService()
+
+
+def getWorkflowDefinitionService() -> WorkflowDefinitionService:
+    return WorkflowDefinitionService()
 
 
 @router.post(
@@ -106,6 +138,62 @@ async def submitInstance(
     if not created:
         response.status_code = status.HTTP_200_OK
     return WorkflowInstanceRead.model_validate(instance)
+
+
+def _instanceListItem(
+    instance: WorkflowInstance, definition: WorkflowDefinition
+) -> WorkflowInstanceListItem:
+    """实例行 + 定义上下文（页面要显示「哪个业务能力的哪次执行」）。"""
+
+    return WorkflowInstanceListItem(
+        id=instance.id,
+        definition_id=instance.definition_id,
+        domain_code=definition.domain_code,
+        capability_code=definition.capability_code,
+        definition_version=definition.version,
+        status=instance.status,
+        idempotency_key=instance.idempotency_key,
+        created_by=instance.created_by,
+        error_message=instance.error_message,
+        created_time=instance.created_time,
+        updated_time=instance.updated_time,
+    )
+
+
+@router.get(
+    "/instances",
+    response_model=WorkflowInstancePage,
+    summary="工作流实例列表",
+)
+async def listInstances(
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowService = Depends(getWorkflowService),
+    statusFilter: Annotated[
+        str | None, Query(alias="status", max_length=32, description="实例状态过滤")
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=LIST_LIMIT_MAX)] = LIST_LIMIT_DEFAULT,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> WorkflowInstancePage:
+    """实例列表（新→旧）。
+
+    可见范围与详情接口**逐条一致**：真实 admin 全部；其他人 = 自己提交的
+    ∪ 自己作为审批持有人可见的。未验签的非 admin 只剩自作用域。
+    """
+
+    rows, total = await service.listInstances(
+        session,
+        actor=currentUser.userId,
+        roles=currentUser.roles,
+        isRealIdentity=currentUser.isRealIdentity,
+        status=statusFilter,
+        limit=limit,
+        offset=offset,
+    )
+    return WorkflowInstancePage(
+        rows=[_instanceListItem(instance, definition) for instance, definition in rows],
+        total=total,
+    )
 
 
 @router.get(
@@ -190,6 +278,228 @@ async def listApprovals(
     return [WorkflowApprovalRead.model_validate(task) for task in tasks]
 
 
+def _approvalListItem(
+    task: ApprovalTask,
+    instance: WorkflowInstance,
+    definition: WorkflowDefinition,
+) -> WorkflowApprovalListItem:
+    """待办行 = 审批任务 + 实例上下文（页面不必逐行再拉详情）。"""
+
+    return WorkflowApprovalListItem(
+        id=task.id,
+        instance_id=task.instance_id,
+        matrix_code=task.matrix_code,
+        subject_type=task.subject_type,
+        subject_id=task.subject_id,
+        status=task.status,
+        approver_role=task.approver_role,
+        approver_user=task.approver_user,
+        decision_note=task.decision_note,
+        due_at=task.due_at,
+        decided_at=task.decided_at,
+        created_by=task.created_by,
+        domain_code=definition.domain_code,
+        capability_code=definition.capability_code,
+        definition_version=definition.version,
+        instance_status=instance.status,
+        instance_created_by=instance.created_by,
+    )
+
+
+@router.get(
+    "/approvals",
+    response_model=WorkflowApprovalPage,
+    summary="我的待办审批",
+)
+async def listMyApprovals(
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    approvalQuery: WorkflowApprovalQueryService = Depends(getWorkflowApprovalQueryService),
+    statusFilter: Annotated[
+        str | None, Query(alias="status", max_length=32, description="任务状态过滤（默认 PENDING）")
+    ] = "PENDING",
+    limit: Annotated[int, Query(ge=1, le=LIST_LIMIT_MAX)] = LIST_LIMIT_DEFAULT,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> WorkflowApprovalPage:
+    """当前用户可审批的任务（默认只看待审批）。
+
+    ⚠️ **要求已校验身份**（``isRealIdentity``）：待办是跨用户读 ⇒ stub 头
+    可冒充任意账号 ⇒ 未验签一律 403（与决策面同口径）。
+    传 ``status=""`` 可取消状态过滤（跨状态看全部）。
+    """
+
+    rows, total = await approvalQuery.listMyApprovals(
+        session,
+        actor=currentUser.userId,
+        roles=currentUser.roles,
+        isRealIdentity=currentUser.isRealIdentity,
+        status=statusFilter or None,
+        limit=limit,
+        offset=offset,
+    )
+    return WorkflowApprovalPage(
+        rows=[_approvalListItem(task, instance, definition) for task, instance, definition in rows],
+        total=total,
+    )
+
+
+@router.get(
+    "/definitions",
+    response_model=list[WorkflowDefinitionRead],
+    summary="已发布工作流定义列表",
+)
+async def listDefinitions(
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowService = Depends(getWorkflowService),
+    limit: Annotated[
+        int, Query(ge=1, le=DEFINITION_LIST_LIMIT_MAX)
+    ] = DEFINITION_LIST_LIMIT_DEFAULT,
+) -> list[WorkflowDefinitionRead]:
+    """提交表单的候选集：只回 PUBLISHED，**不含定义体**（审批矩阵里有审批人）。"""
+
+    rows = await service.listPublishedDefinitions(session, limit=limit)
+    return [WorkflowDefinitionRead.model_validate(row) for row in rows]
+
+
+# =============================================================================
+# 定义管理面（admin-only 写入口）
+#
+# 为什么单开 ``/admin`` 子路径而不是给 ``/definitions`` 加写方法：
+# 公共面「已发布 + 不含定义体」是**给所有登录用户**的读契约（提交表单候选集）；
+# 管理面要「全状态 + 含定义体」。两者权限与载荷都不同 ⇒ 分开表达，
+# 避免「同一条路径按角色返回不同形状」的隐式契约。
+# =============================================================================
+
+
+def _definitionAdminRead(row: WorkflowDefinition) -> WorkflowDefinitionAdminRead:
+    return WorkflowDefinitionAdminRead.model_validate(row)
+
+
+@router.get(
+    "/admin/definitions",
+    response_model=WorkflowDefinitionAdminPage,
+    summary="定义管理列表（仅 admin，含定义体）",
+)
+async def listAdminDefinitions(
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowDefinitionService = Depends(getWorkflowDefinitionService),
+    statusFilter: Annotated[
+        Literal["DRAFT", "PUBLISHED", "DISABLED"] | None,
+        Query(alias="status", description="状态过滤（默认全部）"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=DEFINITION_LIST_LIMIT_MAX)] = LIST_LIMIT_DEFAULT,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> WorkflowDefinitionAdminPage:
+    """全部状态的定义（**含 ``definitionJson``**：编辑表单要用）。"""
+
+    rows, total = await service.listDefinitions(
+        session, status=statusFilter, limit=limit, offset=offset
+    )
+    return WorkflowDefinitionAdminPage(
+        rows=[_definitionAdminRead(row) for row in rows], total=total
+    )
+
+
+@router.post(
+    "/admin/definitions",
+    response_model=WorkflowDefinitionAdminRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="新建工作流定义（DRAFT）",
+)
+async def createDefinition(
+    payload: WorkflowDefinitionWrite,
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowDefinitionService = Depends(getWorkflowDefinitionService),
+) -> WorkflowDefinitionAdminRead:
+    """新建定义，**一律 DRAFT**（发布后才能被提交）。
+
+    定义体由 ``workflow_definition.py`` 的纯函数校验（与运行时同一套）：
+    步骤可执行性 / 单轮审批 / 矩阵条目必须有审批人，非法 ⇒ 422。
+    """
+
+    row = await service.createDefinition(
+        session,
+        domainCode=payload.domain_code,
+        capabilityCode=payload.capability_code,
+        version=payload.version,
+        definitionJson=payload.definition_json,
+        actor=admin.userId,
+    )
+    return _definitionAdminRead(row)
+
+
+@router.put(
+    "/admin/definitions/{definitionId}",
+    response_model=WorkflowDefinitionAdminRead,
+    summary="编辑工作流定义（仅 DRAFT）",
+)
+async def updateDefinition(
+    definitionId: int,
+    payload: WorkflowDefinitionWrite,
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowDefinitionService = Depends(getWorkflowDefinitionService),
+) -> WorkflowDefinitionAdminRead:
+    """编辑 DRAFT；已发布定义改「谁批」= 改审批层级 ⇒ 409，请另建版本。"""
+
+    row = await service.updateDefinition(
+        session,
+        definitionId=definitionId,
+        domainCode=payload.domain_code,
+        capabilityCode=payload.capability_code,
+        version=payload.version,
+        definitionJson=payload.definition_json,
+        actor=admin.userId,
+    )
+    return _definitionAdminRead(row)
+
+
+@router.post(
+    "/admin/definitions/{definitionId}/publish",
+    response_model=WorkflowDefinitionAdminRead,
+    summary="发布工作流定义（DRAFT → PUBLISHED）",
+)
+async def publishDefinition(
+    definitionId: int,
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowDefinitionService = Depends(getWorkflowDefinitionService),
+) -> WorkflowDefinitionAdminRead:
+    """发布，发布前做**可运行性**校验。
+
+    - 有审批门但矩阵覆盖不到该域能力/风险级别 ⇒ 422（否则实例必卡死）；
+    - 同一域能力已有生效版本 ⇒ 409（**不自动替换**：自动替换 = 静默改审批层级，
+      请先停用旧版本）。
+    """
+
+    row = await service.publishDefinition(
+        session, definitionId=definitionId, actor=admin.userId
+    )
+    return _definitionAdminRead(row)
+
+
+@router.post(
+    "/admin/definitions/{definitionId}/disable",
+    response_model=WorkflowDefinitionAdminRead,
+    summary="停用工作流定义（PUBLISHED → DISABLED）",
+)
+async def disableDefinition(
+    definitionId: int,
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowDefinitionService = Depends(getWorkflowDefinitionService),
+) -> WorkflowDefinitionAdminRead:
+    """停用（≠ 删除：历史实例仍引用它；停用后可发布新版本接替）。"""
+
+    row = await service.disableDefinition(
+        session, definitionId=definitionId, actor=admin.userId
+    )
+    return _definitionAdminRead(row)
+
+
 @router.post(
     "/approvals/{taskId}/decision",
     response_model=WorkflowApprovalRead,
@@ -222,7 +532,7 @@ async def decideApproval(
 
     if not currentUser.isRealIdentity:
         raise PermissionDeniedError(
-            MSG_APPROVAL_REAL_AUTH_REQUIRED,
+            MSG_WORKFLOW_APPROVAL_REAL_AUTH_REQUIRED,
             detail=DETAIL_APPROVAL_REAL_AUTH_REQUIRED,
         )
 

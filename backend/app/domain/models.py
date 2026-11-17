@@ -1695,9 +1695,15 @@ class AuditLog(Base):
         CheckConstraint(
             # 'RESTORE' 是 DB 上的既有取值（ORM 漏写 ⇒ 表达式与 DB 不一致，
             # 且 alembic 不比较 CHECK 表达式 ⇒ 只会静默漂移）。
+            # P5 的 7 个动作（迁移 0152 同步放宽 DB 侧）：
+            # APPROVE / REJECT / COMPENSATE / WORKFLOW_SUBMIT /
+            # WORKFLOW_APPROVAL_REQUESTED / WORKFLOW_TIMEOUT / WORKFLOW_CANCEL。
             "action IN ('CREATE','UPDATE','DELETE','RESTORE','REUSE',"
             "'auth.login','auth.login_failed','auth.logout',"
-            "'auth.password_changed','user.password_reset')",
+            "'auth.password_changed','user.password_reset',"
+            "'APPROVE','REJECT','COMPENSATE','WORKFLOW_SUBMIT',"
+            "'WORKFLOW_APPROVAL_REQUESTED','WORKFLOW_TIMEOUT',"
+            "'WORKFLOW_CANCEL')",
             name="ck_audit_log_action",
         ),
         # DB 实际是 (entity_type, entity_id, created_at DESC) / (actor, created_at DESC)
@@ -2868,3 +2874,9 @@ from app.domain import semantic_release_models as _semantic_release_models  # no
 # 同理由——**Schema drift 校验与 alembic autogenerate 都靠 Base.metadata 看见这些表**，
 # 漏 import ⇒ 被误报成 `extra_table`（drift）或被 autogenerate 提议 DROP。
 from app.domain import discovery_models as _discovery_models  # noqa: E402,F401
+
+# P5 工作流域（0149–0151）：`workflow_definition` / `workflow_instance` /
+# `workflow_step` / `business_command` / `approval_task` / `workflow_outbox`。
+# 同理由——**Schema drift 校验与 alembic autogenerate 都靠 Base.metadata 看见这些表**，
+# 漏 import ⇒ 被误报成 `extra_table`（drift）或被 autogenerate 提议 DROP。
+from app.domain import workflow_models as _workflow_models  # noqa: E402,F401

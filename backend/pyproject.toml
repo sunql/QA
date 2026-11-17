@@ -80,6 +80,19 @@ asyncio_mode = "auto"
 testpaths = ["app/tests"]
 python_files = ["test_*.py"]
 addopts = "-ra --strict-markers"
+# ⚠️ **卡死取证**（2026-11-17）：单个用例超过 300 秒 ⇒ 打印**所有线程的调用栈**。
+#
+# 为什么要开：CI 的 integration 分片曾在 pytest 里**静默挂死 82 分钟**
+# （期间 PG 日志零查询 ⇒ 不是数据库锁，是卡在外部调用上），最后被 job 的
+# 90 分钟上限杀掉 ⇒ `cancelled` ⇒ 失败集合为空 ⇒ 闸门判 UNUSABLE_JOBS
+# ⇒ 整轮作废，**而且从日志里看不出到底卡在哪个用例、哪一行**
+# （`-q` 只打进度点，不带用例名）。
+# 开了它，到点就把栈打进日志 ⇒ 下一次挂死可以直接定位。
+#
+# 语义备忘：faulthandler **只打印、不中断** ⇒ 不影响用例结论、不改失败集合
+# （判据仍是「净新增失败 0」）；300 秒这个阈值远高于实测最慢的用例
+# （Milvus 往返最慢 ~9 秒；integration 整片 20 分钟跑 337 个文件）。
+faulthandler_timeout = 300
 markers = [
     "integration: marks integration tests (require external services)",
     "e2e: marks end-to-end tests",

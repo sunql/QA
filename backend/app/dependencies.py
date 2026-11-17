@@ -106,6 +106,21 @@ class CurrentUser:
     jti: str | None = None
     tokenExp: int | None = None
 
+    @property
+    def isRealIdentity(self) -> bool:
+        """身份是否**经服务端校验**（JWT / 可信会话）。
+
+        为什么不能只看 ``dbUserId is not None``：stub 头路径下 ``dbUserId`` 只说明
+        「请求头里的用户名命中了某个 DB 账号」⇒ **任意客户端**都能冒充那个账号
+        （发 ``X-User-Id: lead`` 即可）⇒ 只看它等于没校验。
+
+        ``jti`` **只在 Bearer/JWT 路径**填（``authenticateBearer``）⇒
+        ``jti is not None`` ⟺ 服务端验过签、查过 ``user_sessions``。
+        ⇒ 治理写面（审批决策 / 取消实例）必须用本口径，而不是 ``dbUserId``。
+        """
+
+        return self.dbUserId is not None and self.jti is not None
+
 
 async def getCurrentUser(
     authorization: str | None = Header(default=None, alias="Authorization"),

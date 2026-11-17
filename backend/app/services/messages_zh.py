@@ -567,6 +567,69 @@ MSG_METRIC_STATUS_TRANSITION_INVALID = (
     "指标状态不允许从 {src} 流转到 {dst}（当前状态允许的目标：{allowed}）"
 )
 
+# P5 工作流状态流转矩阵：非法流转 409（detail=INVALID_STATUS_TRANSITION）
+# kind ∈ instance / step / command / approval
+MSG_WORKFLOW_STATUS_TRANSITION_INVALID = (
+    "{kind} 状态不允许从 {src} 流转到 {dst}（当前状态允许的目标：{allowed}）"
+)
+
+# P5 审批面提示
+# ⚠️ **没有「你不是审批人」这条文案**：越权一律按「对你不可见」处理（404，
+#    与「任务不存在」逐字相同 ⇒ 无存在性预言机）⇒ 对外不区分「不存在」与
+#    「不是你的」。只有**自审批**（你确实是审批人，但不能批自己发起的）才
+#    对外可见地报错 ⇒ 那不是存在性泄露（你本来就有权看到这条任务）。
+MSG_WORKFLOW_APPROVAL_SELF_FORBIDDEN = "不能审批自己发起的审批（四眼原则），请由他人审批"
+MSG_WORKFLOW_APPROVAL_ALREADY_DECIDED = "该审批任务已被决策过，不能重复审批"
+MSG_WORKFLOW_APPROVAL_TIMEOUT = "该审批任务已超时，不能再审批"
+MSG_WORKFLOW_APPROVAL_MATRIX_NOT_MATCHED = (
+    "审批矩阵未覆盖该组合（主体类型 / 能力编码 / 风险等级），无法发起审批"
+)
+MSG_WORKFLOW_APPROVAL_MATRIX_UNAVAILABLE = (
+    "审批矩阵条目 {matrixCode} 已不可用（定义体中查不到），无法决策"
+)
+MSG_WORKFLOW_APPROVAL_ROUND_EXISTS = "该实例已有审批轮次，不能叠加发起新的审批"
+MSG_WORKFLOW_APPROVAL_RISK_LEVEL_NOT_DEFINED = (
+    "工作流定义未声明风险级别（definition_json.riskLevel），无法发起审批"
+)
+MSG_WORKFLOW_APPROVAL_APPROVER_UNKNOWN = (
+    "审批矩阵条目 {matrixCode} 的审批人 {approver} 在库中不存在（{kind}），"
+    "无法发起审批（否则该任务谁也批不了）"
+)
+MSG_WORKFLOW_DEFINITION_NOT_FOUND = (
+    "工作流定义不存在（domain_code={domain_code}、capability_code={capability_code}、version={version}）"
+)
+MSG_WORKFLOW_DEFINITION_NOT_PUBLISHED = "工作流定义「{version}」尚未发布，不能提交实例"
+# 版本不匹配：客户端指定了**非生效版本**（生效版本由服务端按域能力唯一确定）。
+MSG_WORKFLOW_DEFINITION_VERSION_MISMATCH = (
+    "工作流定义「{requestedVersion}」不是当前生效版本"
+    "（当前生效版本：{publishedVersion}），不能提交实例"
+)
+# 多个生效版本 ⇒ 数据坏了 ⇒ 失败关闭（不猜）。
+MSG_WORKFLOW_DEFINITION_AMBIGUOUS = (
+    "工作流定义「{domainCode}/{capabilityCode}」存在多个生效版本（{versions}），"
+    "无法判定（请修数据）"
+)
+
+# P5 取消：权限与终态
+MSG_WORKFLOW_CANCEL_NOT_AUTHORIZED = "只有提交人或管理员可以取消该工作流实例"
+# P5 取消：要求**已校验**身份（stub 头可冒充任意 DB 账号 ⇒ 治理写面必须验签）
+MSG_WORKFLOW_CANCEL_REAL_AUTH_REQUIRED = (
+    "取消工作流实例要求已校验的登录身份"
+    "（请求头身份可被任意客户端伪造，不可用于治理写操作）"
+)
+MSG_WORKFLOW_CANCEL_NOT_ALLOWED = (
+    "工作流实例已处于终态（{status}），不能再取消"
+)
+MSG_WORKFLOW_CANCEL_BUSY = (
+    "工作流实例有命令正在执行（{commandIds}），外部写可能已经发生，"
+    "此时取消会与在飞的写冲突，请等命令结束后再取消"
+)
+
+# P5 审批后推进失败：决策保留（事实），实例失败关闭（需人工介入）
+MSG_WORKFLOW_DRIVE_FAILED = (
+    "审批已生效，但工作流推进失败，实例已失败关闭（需人工介入重试）"
+)
+
 # KPI Catalog datasource 绑定（F2 写入流收尾 — 2026-10-18 spec §4.4）
 # Reserved for 未来 Pydantic custom error 覆盖（当前 DTO 层 `Field(..., ge=1)` 直接抛 Pydantic 默认英文错误，service 层无引用）
 MSG_KPI_DATASOURCE_REQUIRED = "KPI 必须绑定一个数据源（datasource_id 必填）"

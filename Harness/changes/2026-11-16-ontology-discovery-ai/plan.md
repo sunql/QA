@@ -357,6 +357,9 @@ PII 掩码只收**形状几乎不会误伤业务数据**的三类：邮箱、大
 > [`../2026-11-16-p5-workflow-command/plan.md`](../2026-11-16-p5-workflow-command/plan.md) §8）；
 > A2 → A3 → A4 的内部顺序**不变**（依赖倒排）。
 > ⚠️ **迁移号**：本线与 P5 都要 0149+ ⇒ **先合并者占号**（否则 alembic 链分叉）。
+> **占号结果（2026-11-17）**：P5 先合，占用 **0149–0152**（`0149_workflow_definition` /
+> `0150_workflow_step_command` / `0151_approval_outbox` / `0152_audit_workflow_actions`）
+> ⇒ **本线从 `0153` 起**（A2 / A3 / A4 依次占号，**不得**回插 0153 以下的号）。
 
 ### A2 剖析与证据（`profile_result` 列级 metrics + 证据引用）
 

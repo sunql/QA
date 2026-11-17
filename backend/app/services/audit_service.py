@@ -45,6 +45,18 @@ _VALID_ACTIONS = frozenset({
     "auth.logout",
     "auth.password_changed",
     "user.password_reset",
+    # P5 工作流 / 审批（D-6，2026-11-17）：
+    # 审批是**写入口**（能推进审批 = 能放行业务写）⇒ 决策必须留痕。
+    # 动作与 DB CHECK 约束同步放宽（迁移 0152），否则服务层放行、DB 拒收。
+    "APPROVE",
+    "REJECT",
+    "COMPENSATE",
+    "WORKFLOW_SUBMIT",
+    "WORKFLOW_APPROVAL_REQUESTED",
+    "WORKFLOW_TIMEOUT",
+    # P5 取消（W5）：取消是**写入口**（能让已入队的命令不再执行）
+    # ⇒ 与决策同纪律，必须留痕。
+    "WORKFLOW_CANCEL",
 })
 
 # 查询默认上限（防止一次拉太多）

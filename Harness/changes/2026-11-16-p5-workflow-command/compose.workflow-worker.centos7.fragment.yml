@@ -1,0 +1,47 @@
+# ⚠️ 本文件是**片段**，不是完整 compose 文件（不能直接 `docker-compose -f` 它）。
+#
+# 用法（**追加**到生产唯一权威 compose）：
+#   cat compose.workflow-worker.centos7.fragment.yml \
+#       >> /opt/qa-system/docker/docker-compose.centos7.yml
+#   qa_compose config --quiet && echo COMPOSE_OK
+#
+# 生产硬约束（Compose **v1 1.29.2**；生产未装 v2 插件 ⇒ 以下写法直接炸）：
+#   - 禁 `!override` / `!reset`：v2 ≥ 2.24 才有 ⇒ v1 解析即报错；
+#   - 禁 `profiles:`：v2 特性 ⇒ v1 **静默忽略** ⇒ 以为"默认不启动"其实开关失效；
+#   - 禁 `docker compose` 子命令：生产只有 `docker-compose`（连字符）；
+#   - 禁 `depends_on:`：v1 各 version 格式形状不一 ⇒ 一律不写
+#     （worker 对 DB 不可达有异常隔离，下一轮自愈）；
+#   - 禁 `build:`：生产是离线镜像 ⇒ 带 build 会触发现场构建；
+#   - 不发布宿主端口：worker 只出站访问 PG，不对外提供服务。
+#
+# 镜像：**复用 backend 现役镜像**（`qa-backend:offline`）⇒ 不新增镜像、不新增中间件
+#   （计划 D-9 / D-11）。
+#   为什么这里必须显式写 `image:`：仓库的 `docker/docker-compose.yml` 里 worker 靠
+#   `build:` 派生镜像名，而生产是离线 load + 显式 tag ⇒ 不写 `image:` 会让 compose
+#   去拉一个**根本不存在**的镜像名。
+#
+# 开关：**只写在 worker 侧**（`environment` 覆盖 `env_file` 的同名变量）。
+#   ⚠️ **默认关闭**（`${ENABLE_WORKFLOW:-false}`）：把本片段追加进生产 compose
+#   **本身零副作用** ⇒ 追加片段 ≠ 开闸 ⇒ 真正开闸由 runbook §9（独立窗口、
+#   单独决策）在 `.env` 里显式写 `ENABLE_WORKFLOW=true`。
+#   ⚠️ 不要写死 `"true"`：那会让「追加片段」这一步就**当场开闸** ⇒ 与 G6 第三条
+#   「默认关闭可上线」冲突 ⇒ 上线即开闸，现场没有回滚窗口。
+#   后端 API 侧的 `ENABLE_WORKFLOW` 由 `/opt/qa-system/docker/.env` 控制
+#   （默认关 ⇒ `/api/v1/workflow/*` 路由 404 ⇒ 对外完全不存在）。
+#   ⇒ 两者都开 = 完整上线；只开 worker = 空转（没有实例可执行）。
+#
+# ⚠️ 关闭开关后**必须同时停容器**：worker 在开关关时**立即退出**（不建会话、
+#   不轮询），而 `restart: unless-stopped` 会把它反复拉起 ⇒ 空转日志。
+#   回滚顺序见 `deploy-prod-1117.md` §8。
+
+  workflow-worker:
+    image: qa-backend:offline
+    container_name: qa-workflow-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ENABLE_WORKFLOW: "${ENABLE_WORKFLOW:-false}"
+    # 覆盖镜像默认 CMD（默认是 `alembic upgrade head && uvicorn …`）：
+    # worker 是纯轮询进程，**不跑迁移**（迁移由 backend 容器负责），也不监听端口。
+    command: ["python", "-m", "app.workers.workflow_worker"]

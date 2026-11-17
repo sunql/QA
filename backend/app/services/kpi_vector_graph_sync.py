@@ -41,6 +41,8 @@ from app.infrastructure.milvus_client import (
     queryKpiEmbeddings,
     refreshCollection,
 )
+from app.infrastructure.milvus_collections import embeddingCollectionForType
+from app.infrastructure.milvus_write_lock import milvusWriteLock
 from app.services.embedding_service import EmbeddingService
 from app.services.id_mapping_service import IdMappingService
 from app.services.registry_v2_write import (
@@ -65,31 +67,23 @@ SECTION_FAILURE_ENTITY_ID = 0
 # 后台同步任务的强引用（create_task 弱引用会被 GC，需持握防丢失）
 _PENDING_KPI_SYNC_TASKS: set[asyncio.Task] = set()
 
-# Milvus 写入串行化锁：pymilvus 的 insert/delete 之后必须 flush（单次 8-25s），
+# Milvus 写入串行化：pymilvus 的 insert/delete 之后必须 flush（单次 8-25s），
 # N 个并发写入并发 flush 同一集合会拖垮 Milvus（同
 # OntologyService.syncMissingClassEmbeddingsBestEffort 的教训）。
 # 一次 KPI 的「删 + 插」构成一个临界区。
 #
+# ⚠️ 锁**统一用** `milvus_write_lock.milvusWriteLock("kpi_catalog_embeddings")`
+# —— 先前这里有一把自己维护的全局锁，而本体侧新加的锁按**集合名**取键；同一个
+# 集合上有两把互不相识的锁 ⇒ 任何走 `syncEmbeddingAsync(type="kpi")` 的调用方
+# 会与本模块的写入**并发 flush 同一集合**（互斥彻底失效）。集合级锁天然覆盖本
+# 模块（KPI 是单个集合）且自带超时上限。
+#
 # 锁**下沉到函数内部**（syncKpiVectorNow / deleteKpiVectorNow）⇒ 后台 best-effort
 # 与「直接调用」路径（reconcile / admin 端点 / 回填脚本）走的是同一把锁。
 # ⚠️ asyncio.Lock **不可重入** ⇒ 包装层与函数层只能取一次；调用方也不要自己取。
-#
-# asyncio.Lock 在 Python 3.10+ 不在构造时绑定 loop（3.12+ 本仓要求），但它**绑定
-# 首次使用它的那个 loop**；跨 loop 使用（如 pytest-asyncio 每测试一个新 loop）
-# 会抛 RuntimeError。故按「当前运行 loop」缓存锁对象：生产是单 worker 单 loop
-# ⇒ 始终复用同一把；测试多 loop ⇒ 每个 loop 各一把（互斥语义不跨 loop，也不需要）。
-_MILVUS_WRITE_LOCK: asyncio.Lock | None = None
-_MILVUS_WRITE_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
-
-
-def _milvusWriteLock() -> asyncio.Lock:
-    """取当前事件循环的 Milvus 写入锁（见 _MILVUS_WRITE_LOCK 的说明）。"""
-    global _MILVUS_WRITE_LOCK, _MILVUS_WRITE_LOCK_LOOP  # noqa: PLW0603
-    loop = asyncio.get_running_loop()
-    if _MILVUS_WRITE_LOCK is None or _MILVUS_WRITE_LOCK_LOOP is not loop:
-        _MILVUS_WRITE_LOCK = asyncio.Lock()
-        _MILVUS_WRITE_LOCK_LOOP = loop
-    return _MILVUS_WRITE_LOCK
+def _kpiWriteLock():
+    """KPI 集合的写入锁（= 与本体侧同一把集合级锁）。"""
+    return milvusWriteLock(embeddingCollectionForType(KPI_VECTOR_TYPE))
 
 
 def kpiEmbeddingText(kpi: KpiCatalog, metricAlias: str | None) -> str:
@@ -218,7 +212,7 @@ async def syncKpiVectorNow(session: AsyncSession, kpiId: int) -> None:
     if kpi is None:
         raise ValueError(f"KPI 不存在: id={kpiId}")
     if kpi.status != PUBLISHED_STATUS:
-        async with _milvusWriteLock():
+        async with _kpiWriteLock():
             await asyncio.to_thread(deleteByOntologyIdDual, kpi.id, KPI_VECTOR_TYPE)
             # P3a 双写：v2 集合同样删（非 PUBLISHED ⇒ 不该被召回）。
             await deleteRegistryV2Embedding(kpi.id, KPI_VECTOR_TYPE)
@@ -229,7 +223,7 @@ async def syncKpiVectorNow(session: AsyncSession, kpiId: int) -> None:
     vec = await EmbeddingService().generateEmbedding(
         kpiEmbeddingText(kpi, metricAlias)
     )
-    async with _milvusWriteLock():
+    async with _kpiWriteLock():
         await asyncio.to_thread(deleteByOntologyIdDual, kpi.id, KPI_VECTOR_TYPE)
         record = {
             "ontology_id": kpi.id,
@@ -251,7 +245,7 @@ async def deleteKpiVectorNow(kpiId: int) -> None:
     同 syncKpiVectorNow：阻塞式 Milvus 调用走 `asyncio.to_thread`（不占事件循环）；
     本函数**内部**持有 Milvus 写入锁 ⇒ 与其它 KPI 的向量写入互斥。
     """
-    async with _milvusWriteLock():
+    async with _kpiWriteLock():
         await asyncio.to_thread(deleteByOntologyIdDual, kpiId, KPI_VECTOR_TYPE)
         # P3a 双写：v2 集合同删。
         await deleteRegistryV2Embedding(kpiId, KPI_VECTOR_TYPE)

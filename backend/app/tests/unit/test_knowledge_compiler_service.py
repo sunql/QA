@@ -277,7 +277,9 @@ async def test_vector_role_property_uses_existing_sync_entry(
         kc_module.EmbeddingService, "generateEmbedding", fakeGenerateEmbedding
     )
     fakeOntology = MagicMock()
-    fakeOntology.syncEmbedding = MagicMock()
+    # 2026-11-17：Milvus 写路径改走 async 入口（集合级串行 + 移出事件循环）
+    # ⇒ 替身必须是 AsyncMock，否则 await 一个 MagicMock 会炸。
+    fakeOntology.syncEmbeddingAsync = AsyncMock(return_value=None)
     # P3a 双写入口 ``syncEmbeddingToRegistryV2`` 是 **async**（真实实现 await
     # Milvus 写）⇒ 替身必须保真，否则 ``await`` 一个 MagicMock 会炸。
     fakeOntology.syncEmbeddingToRegistryV2 = AsyncMock(return_value=None)
@@ -286,8 +288,8 @@ async def test_vector_role_property_uses_existing_sync_entry(
     role = await svc._compileVector(dbSession, "property", prop)
 
     assert role.status == "success"
-    fakeOntology.syncEmbedding.assert_called_once()
-    kwargs = fakeOntology.syncEmbedding.call_args.kwargs
+    fakeOntology.syncEmbeddingAsync.assert_awaited_once()
+    kwargs = fakeOntology.syncEmbeddingAsync.await_args.kwargs
     assert kwargs["ontologyId"] == prop.id
     assert kwargs["type"] == "property"
     assert len(kwargs["embedding"]) == 1024

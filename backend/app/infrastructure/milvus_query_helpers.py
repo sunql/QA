@@ -20,15 +20,18 @@ from app.infrastructure.milvus_client import (
     _connect,
     hasEmbeddingCollection,
 )
-
-
-# ---------------------------------------------------------------------------
-# Collection name constants (imported from milvus_client.py for centralization)
-# ---------------------------------------------------------------------------
-_CLASS_COLLECTION_NAME = "ontology_class_embeddings"
-_PROPERTY_COLLECTION_NAME = "ontology_property_embeddings"
-_METRIC_COLLECTION_NAME = "ontology_metric_embeddings"
-_KPI_COLLECTION_NAME = "kpi_catalog_embeddings"
+from app.infrastructure.milvus_collections import (
+    CLASS_COLLECTION_NAME as _CLASS_COLLECTION_NAME,
+)
+from app.infrastructure.milvus_collections import (
+    KPI_COLLECTION_NAME as _KPI_COLLECTION_NAME,
+)
+from app.infrastructure.milvus_collections import (
+    METRIC_COLLECTION_NAME as _METRIC_COLLECTION_NAME,
+)
+from app.infrastructure.milvus_collections import (
+    PROPERTY_COLLECTION_NAME as _PROPERTY_COLLECTION_NAME,
+)
 
 
 # ---------------------------------------------------------------------------

@@ -789,7 +789,9 @@ async def syncEmbedding(
     user: CurrentUser = Depends(requireAdmin),
 ) -> None:
     """将单条 embedding 同步到 Milvus（新建或覆盖）。仅 admin：会覆盖共享向量。"""
-    _ontologyService.syncEmbedding(
+    # 走 async 入口：Milvus 是同步 SDK ⇒ 移出事件循环；同集合的写入串行化
+    # （flush 令牌桶 0.1 qps ⇒ 并发写互相抢令牌，2026-11-17 事故）。
+    await _ontologyService.syncEmbeddingAsync(
         ontologyId=payload.ontologyId,
         type=payload.type,
         name=payload.name,

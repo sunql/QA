@@ -61,6 +61,12 @@ from app.domain.schemas import (
 from app.infrastructure import milvus_client as milvus
 from app.infrastructure import neo4j_client as neo4j
 from app.infrastructure.database import ownSession
+from app.infrastructure.milvus_collections import embeddingCollectionForType
+from app.infrastructure.milvus_write_lock import (
+    MilvusWriteLockTimeout,
+    milvusWriteLock,
+    milvusWriteLocks,
+)
 from app.services.acl_service import AclService
 from app.services.audit_service import AuditService
 from app.services.embedding_service import EmbeddingService
@@ -277,7 +283,10 @@ async def _deleteMilvusVectorUnderLock(type_: str, entityId: int) -> None:
     也持这把锁 ⇒ 否则在途双写会把 v2 侧的向量写回来（v1 已删、v2 残留）。
     """
     async with _vectorSyncLock(type_, entityId):
-        await asyncio.to_thread(milvus.deleteByOntologyIdDual, entityId, type_)
+        # 集合级串行化：删除路径也会 flush ⇒ 与同集合的写入互斥
+        # （Milvus flush 令牌桶 0.1 qps ⇒ 并发写互相抢令牌）。
+        async with milvusWriteLock(embeddingCollectionForType(type_)):
+            await asyncio.to_thread(milvus.deleteByOntologyIdDual, entityId, type_)
         # P3a 双写：v2 集合同删（软删除的类不该再被召回）。
         await deleteRegistryV2Embedding(entityId, type_)
 
@@ -887,8 +896,17 @@ class OntologyService:
         *,
         actor: str,
         actor_departments: str | None = None,
+        sync_embedding: bool = True,
     ) -> OntologyProperty:
-        """创建属性：写入 PG + Neo4j 节点 + 建立与 Class 的 HAS_PROPERTY 关系。"""
+        """创建属性：写入 PG + Neo4j 节点 + 建立与 Class 的 HAS_PROPERTY 关系。
+
+        ``sync_embedding=False`` 抑制**逐条**后台向量同步 —— 批量导入路径用
+        （循环结束后由 ``syncMissingClassEmbeddingsBestEffort`` 整批补齐，单次
+        flush）。不抑制的话 N 个属性各起一个后台任务 ⇒ N 个并发 flush 同一集合
+        ⇒ 抢 Milvus 集合级 flush 令牌（出厂 0.1 qps ⇒ 每 10 秒 1 次）⇒ 有人把
+        pymilvus 的 75 次重试预算耗光 ⇒ 该属性的向量同步**硬失败**
+        （2026-11-17 生产事故）。
+        """
         # 验证 class 存在并拿到实体，供内存关系维护
         cls = await self.getClass(session, dto.class_id)
 
@@ -964,7 +982,9 @@ class OntologyService:
         # 属性向量自动同步（best-effort，后台执行）：createProperty 此前漏调，
         # 导致属性语义召回永远找不到新建属性（必须等 syncMissingClassEmbeddings 兜底）。
         # 现在与 createClass / updateProperty 同款，后台异步落 Milvus。
-        await self._syncPropertyEmbeddingBestEffort(entity)
+        # 批量导入路径传 sync_embedding=False 抑制（改由导入后整批补齐）。
+        if sync_embedding:
+            await self._syncPropertyEmbeddingBestEffort(entity)
 
         logger.info("创建本体属性 id=%d name=%s", entity.id, entity.property_name)
         return entity
@@ -1845,7 +1865,28 @@ class OntologyService:
         description: str | None,
         embedding: list[float],
     ) -> None:
-        """同步单条 embedding 到 Milvus（新建或覆盖）。"""
+        """同步单条 embedding 到 Milvus（新建或覆盖）。
+
+        **写路径是「先删后插」的两步，各带一次 flush**（Milvus 的 flush 是
+        **集合级**的 ⇒ 两次 flush = 同一集合 2 个令牌）。这是**刻意的**，不要
+        「优化」成一次 flush：
+
+        - Milvus 不保证「同一次 flush 里 delete 与 insert 的先后」⇒ 合并成一次
+          flush 时，先落地的 delete 表达式（``ontology_id == X``）有可能把
+          **同一次 flush 里新插入的那一行**一起删掉 ⇒ 向量静默消失（比现在
+          更难查）。
+        - 本地 Milvus（19530）是**生产数据面**，禁写测试 ⇒ 这种顺序语义无法在
+          本仓库实测验证 ⇒ 不做无法验证的语义改动。
+
+        真正让这条路径在配额下**不失败**的是「同集合写入串行化」
+        （``syncEmbeddingAsync`` 取集合级写入锁）：服务端限流是**拒绝**不是排队
+        ⇒ 并发写者互相抢令牌 ⇒ 有人把 pymilvus 的 75 次重试预算耗光 ⇒ 硬失败
+        （2026-11-17 生产事故）。串行化后同一时刻只有一个 flush 在飞 ⇒ 令牌不会
+        被兄弟请求抢走 ⇒ 重试必然在预算内拿到令牌。
+
+        本方法**不负责并发串行化**（它是同步函数，拿不到 async 锁）⇒ 调用方
+        走 ``syncEmbeddingAsync``（取集合级写入锁）或自行保证不并发。
+        """
         try:
             milvus.deleteByOntologyIdDual(ontologyId, type)
             milvus.insertEmbeddingsDual([{
@@ -1859,6 +1900,49 @@ class OntologyService:
             logger.info("Milvus embedding 已同步 id=%d type=%s", ontologyId, type)
         except Exception as exc:  # noqa: BLE001
             logger.error("Milvus embedding 同步失败 id=%d: %s", ontologyId, exc)
+            raise OntologyError(MSG_VECTOR_SYNC_FAILED.format(exc=exc)) from exc
+
+    async def syncEmbeddingAsync(
+        self,
+        ontologyId: int,
+        type: str,
+        name: str,
+        alias: str | None,
+        description: str | None,
+        embedding: list[float],
+    ) -> None:
+        """同步单条 embedding 到 Milvus（**集合级串行化** + 移出事件循环）。
+
+        为什么必须有这把锁：Milvus 的 flush 令牌桶是**每集合**的
+        （0.1 qps ⇒ 每 10 秒 1 次），而服务端限流是**拒绝**不是排队 ⇒ N 个并发
+        写者各自重试、互相抢令牌 ⇒ 必然有人把 75 次重试预算耗光 ⇒ 硬失败。
+        客户端把同集合的写入串起来 ⇒ 任一时刻只有一个 flush 在飞 ⇒ 令牌不会被
+        兄弟请求抢走 ⇒ 最终必成功。
+
+        Milvus 是同步 SDK ⇒ ``asyncio.to_thread`` 移出事件循环（否则一次写入
+        会堵住该 worker 上的所有其它请求）。
+
+        等锁有上限（``milvus_write_lock.WRITE_LOCK_TIMEOUT_SECONDS``）⇒ 排队过久
+        时转成 ``OntologyError``（业务错误、可重试 / 可由对账补齐），**不让请求
+        无限挂起**。
+        """
+        collection = embeddingCollectionForType(type)
+        try:
+            async with milvusWriteLock(collection):
+                await asyncio.to_thread(
+                    self.syncEmbedding,
+                    ontologyId=ontologyId,
+                    type=type,
+                    name=name,
+                    alias=alias,
+                    description=description,
+                    embedding=embedding,
+                )
+        except MilvusWriteLockTimeout as exc:
+            logger.error(
+                "Milvus 集合写入锁等待超时 id=%d type=%s collection=%s: %s",
+                ontologyId, type, collection, exc,
+            )
             raise OntologyError(MSG_VECTOR_SYNC_FAILED.format(exc=exc)) from exc
 
     async def syncEmbeddingToRegistryV2(
@@ -1917,9 +2001,10 @@ class OntologyService:
             vec = await self._ensureEmbedding().generateEmbedding(
                 snapshot.embeddingText
             )
-            # Milvus 是同步 SDK ⇒ 移出事件循环（可达 10-25s）
-            await asyncio.to_thread(
-                self.syncEmbedding,
+            # Milvus 是同步 SDK ⇒ 移出事件循环；同一集合的写入串行化
+            # （集合级 flush 令牌桶 0.1 qps ⇒ 并发写会互相抢令牌，见
+            #  syncEmbeddingAsync 的说明）。
+            await self.syncEmbeddingAsync(
                 ontologyId=snapshot.ontologyId,
                 type="class",
                 name=snapshot.name,
@@ -1986,9 +2071,24 @@ class OntologyService:
                     "error": str(exc),
                 })
 
-        # 属性对账：类之后补齐（属性向量此前只能靠 backfill 脚本手工收敛）
+        # 属性对账：类之后补齐（属性向量此前只能靠 backfill 脚本手工收敛）。
+        # 必须联到未软删的父类：`OntologyProperty` 是**硬删**、没有 valid_to，而
+        # 类删除只删类向量、**不删其属性向量** ⇒ 不过滤父类的话，墓碑类的属性
+        # 一旦缺向量就会被对账**重新写回** ⇒ 墓碑实体的向量复活（召回层面
+        # 重新出现已删除的类）。
         props = list(
-            (await session.execute(select(OntologyProperty))).scalars().all()
+            (
+                await session.execute(
+                    select(OntologyProperty)
+                    .join(
+                        OntologyClass,
+                        OntologyProperty.class_id == OntologyClass.id,
+                    )
+                    .where(OntologyClass.valid_to.is_(None))
+                )
+            )
+            .scalars()
+            .all()
         )
         presentPropIds = {
             r["ontology_id"] for r in rows if r.get("type") == "property"
@@ -2061,7 +2161,37 @@ class OntologyService:
         syncedMetrics = 0
         if records:
             try:
-                milvus.insertEmbeddingsDual(records)
+                # 集合级串行化：整批写横跨 class/property/metric 三个集合 ⇒ 按
+                # **固定顺序**取三把锁（milvusWriteLocks 内部排序 ⇒ 不会死锁）。
+                # 目的：批量补齐与在线单条写入**不并发 flush 同一集合**
+                # （Milvus flush 令牌桶 0.1 qps ⇒ 并发写互相抢令牌 ⇒ 硬失败，
+                #  2026-11-17 生产事故）。
+                collections = sorted({
+                    embeddingCollectionForType(r["type"]) for r in records
+                })
+                async with milvusWriteLocks(collections):
+                    # 锁内**重读**一次存在性再插入：上面的 `rows` 快照是在
+                    # 生成 N 条 embedding（秒~分钟级）**之前**取的，持锁只保护
+                    # 写入、不保护「读-判-写」⇒ 两个并发对账（或对账与在线
+                    # syncEmbedding 交错）会各自认为「缺失」⇒ 同一 ontology_id
+                    # **重复写两行**（本仓已有 698 组重复向量的历史）。
+                    # 对账路径只补不删 ⇒ 重复行会长期滞留 ⇒ 必须在锁内重判。
+                    refreshed = await asyncio.to_thread(
+                        milvus.listEmbeddingsAcross3Collections
+                    )
+                    presentKeys = {
+                        (r.get("type"), r["ontology_id"]) for r in refreshed
+                    }
+                    toInsert = [
+                        r for r in records
+                        if (r["type"], r["ontology_id"]) not in presentKeys
+                    ]
+                    if toInsert:
+                        # Milvus 是同步 SDK ⇒ 移出事件循环（整批 insert 可达数秒）
+                        await asyncio.to_thread(
+                            milvus.insertEmbeddingsDual, toInsert
+                        )
+                    records = toInsert
                 # P3a 双写：同批记录连同治理维度写进 v2 集合（开关关时不写）。
                 await syncRegistryV2Embeddings(records, session=session)
                 syncedClasses = sum(1 for r in records if r["type"] == "class")
@@ -2578,9 +2708,9 @@ class OntologyService:
                 if snapshot is None:
                     return
                 vec = await self._ensureEmbedding().generateEmbedding(snapshot.embeddingText)
-                # Milvus 是同步 SDK ⇒ 移出事件循环（与 kpi_vector_graph_sync 同款）
-                await asyncio.to_thread(
-                    self.syncEmbedding,
+                # Milvus 是同步 SDK ⇒ 移出事件循环（与 kpi_vector_graph_sync 同款）；
+                # 同一集合的写入串行化（flush 令牌桶 0.1 qps ⇒ 并发写互相抢令牌）
+                await self.syncEmbeddingAsync(
                     ontologyId=snapshot.ontologyId,
                     type="class",
                     name=snapshot.name,
@@ -2646,9 +2776,9 @@ class OntologyService:
             async with _vectorSyncLock("property", entityId):
                 snapshot = await self._readPropertyForSync(entityId)
                 vec = await self._ensureEmbedding().generateEmbedding(snapshot.embeddingText)
-                # Milvus 是同步 SDK ⇒ 移出事件循环（与 kpi_vector_graph_sync 同款）
-                await asyncio.to_thread(
-                    self.syncEmbedding,
+                # Milvus 是同步 SDK ⇒ 移出事件循环（与 kpi_vector_graph_sync 同款）；
+                # 同一集合的写入串行化（flush 令牌桶 0.1 qps ⇒ 并发写互相抢令牌）
+                await self.syncEmbeddingAsync(
                     ontologyId=snapshot.ontologyId,
                     type="property",
                     name=snapshot.name,
@@ -2714,9 +2844,9 @@ class OntologyService:
             async with _vectorSyncLock("metric", entityId):
                 snapshot = await self._readMetricForSync(entityId)
                 vec = await self._ensureEmbedding().generateEmbedding(snapshot.embeddingText)
-                # Milvus 是同步 SDK ⇒ 移出事件循环（与 kpi_vector_graph_sync 同款）
-                await asyncio.to_thread(
-                    self.syncEmbedding,
+                # Milvus 是同步 SDK ⇒ 移出事件循环（与 kpi_vector_graph_sync 同款）；
+                # 同一集合的写入串行化（flush 令牌桶 0.1 qps ⇒ 并发写互相抢令牌）
+                await self.syncEmbeddingAsync(
                     ontologyId=snapshot.ontologyId,
                     type="metric",
                     name=snapshot.name,

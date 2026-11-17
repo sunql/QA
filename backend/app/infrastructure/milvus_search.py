@@ -21,12 +21,22 @@ from app.infrastructure.milvus_client import (
 
 
 # ---------------------------------------------------------------------------
-# Collection name constants (imported from milvus_client.py for centralization)
+# Collection name constants — 唯一来源 = milvus_collections.py（SSOT）。
+# 不要在这里另写一份字面量：写锁按集合名取键（milvus_write_lock），读侧与写侧
+# 集合名一旦漂移 ⇒ 写进 A 集合、查 B 集合 ⇒ 向量「写成功但召回不到」。
 # ---------------------------------------------------------------------------
-_CLASS_COLLECTION_NAME = "ontology_class_embeddings"
-_PROPERTY_COLLECTION_NAME = "ontology_property_embeddings"
-_METRIC_COLLECTION_NAME = "ontology_metric_embeddings"
-_KPI_COLLECTION_NAME = "kpi_catalog_embeddings"
+from app.infrastructure.milvus_collections import (
+    CLASS_COLLECTION_NAME as _CLASS_COLLECTION_NAME,
+)
+from app.infrastructure.milvus_collections import (
+    KPI_COLLECTION_NAME as _KPI_COLLECTION_NAME,
+)
+from app.infrastructure.milvus_collections import (
+    METRIC_COLLECTION_NAME as _METRIC_COLLECTION_NAME,
+)
+from app.infrastructure.milvus_collections import (
+    PROPERTY_COLLECTION_NAME as _PROPERTY_COLLECTION_NAME,
+)
 
 # 去重超取倍数：Milvus 的 limit 按「实体」而非「不同 ontology_id」计数，集合里
 # 一旦残留同一 ontology_id 的多份向量（delete-then-insert 在批量负载下不可靠，

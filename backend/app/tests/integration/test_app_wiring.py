@@ -156,6 +156,7 @@ class TestRealAppWorkflowRouteGating:
             "/api/v1/workflow/instances/{instanceId}",
             "/api/v1/workflow/instances/{instanceId}/approval-request",
             "/api/v1/workflow/instances/{instanceId}/approvals",
+            "/api/v1/workflow/instances/{instanceId}/cancel",
         ], f"工作流路由不齐备：{paths}"
 
 

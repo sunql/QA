@@ -13,7 +13,9 @@
 Milvus 出厂把**每个集合的 flush 频率限死在 0.1 qps（每 10 秒 1 次）**，
 而本系统的本体向量写路径是「删一次 + 插一次 = 同一集合 2 次 flush」。
 批量导入时 N 个属性并发同步 ⇒ 2N 次 flush 抢一个「10 秒 1 次」的桶 ⇒
-pymilvus 重试 75 次（约 210 秒）耗尽 ⇒ **该属性的向量被删了却没写回 ⇒ 语义召回失效**。
+pymilvus 重试 75 次（约 210 秒）耗尽 ⇒ **该属性的向量同步硬失败**（CRUD 仍返回 200，
+用户无感；旧向量还在不在取决于 delete 的落地与可见性，单看这条日志判不出来 ⇒
+§5 的对账补齐同时就是**真实影响面的测量**）。
 
 **立即止血两步**：
 1. **抬配额**（本文件 §2–§4）：把 `flushRate.collection.max` 从 `0.1` 改成 `5` ⇒
@@ -173,11 +175,69 @@ docker logs qa-backend --since 5m 2>&1 | grep -E "rate limit exceeded|向量自�
 
 > 观察窗口内其它属性也可能被同步（同一批改的）⇒ 只要没有 `rate limit exceeded` 就算通过。
 
+> ⚠️ **这一步是唯一判据**：挂上 `user.yaml` **不等于**配额生效 —— Milvus 是否在 2.4.6
+> 这个版本上真的读取并叠加 `/milvus/configs/user.yaml`，**必须靠这里的「无 rate limit
+> exceeded」来证明**，不能靠配置文件存在来推断。若这里仍出现 `rate limit exceeded`，
+> 走 **§4.1 备选方案**。
+
+### 4.1 备选方案：直接覆盖 `milvus.yaml`（`user.yaml` 叠加无效时）
+
+若 §4 仍然报 `rate limit exceeded[rate=0.1]` ⇒ 说明该版本的 Milvus **没有**读取
+`user.yaml` ⇒ 改为**导出容器里的完整 `milvus.yaml`，只改那一行**，再挂载覆盖：
+
+```bash
+cd /opt/qa-system/docker
+
+# 4.1.1 导出容器里的出厂配置（先留档原文件）
+docker exec qa-milvus sh -c 'cat /milvus/configs/milvus.yaml' > milvus.yaml.prod.bak.20261117
+wc -l milvus.yaml.prod.bak.20261117
+
+# 4.1.2 确认要改的那一行的上下文（应当看到 collection: max: 0.1）
+grep -n -B4 -A2 "flushRate" milvus.yaml.prod.bak.20261117
+
+# 4.1.3 只改 collection.max 这一处（0.1 → 5），不改其它任何行
+python3 - <<'PY'
+import re, pathlib
+p = pathlib.Path("milvus.yaml.prod.bak.20261117")
+text = p.read_text(encoding="utf-8")
+new, n = re.subn(
+    r"(quotaAndLimits:\s*\n(?:.*\n)*?\s*flushRate:\s*\n(?:.*\n)*?\s*collection:\s*\n\s*max:\s*)0\.1(\s*)",
+    r"\g<1>5\g<2>",
+    text,
+    count=1,
+)
+print("replacements:", n)
+assert n == 1, "没有定位到唯一目标行 —— 停下人工确认后再改"
+pathlib.Path("milvus.yaml.override.20261117").write_text(new, encoding="utf-8")
+PY
+
+# 4.1.4 确认只改了那一处
+diff -u milvus.yaml.prod.bak.20261117 milvus.yaml.override.20261117
+```
+
+**期望**：`diff -u` **只输出一处**改动（`max: 0.1` → `max: 5`）。
+若输出多于一处 ⇒ 不要挂载，回到 §4.1.3 人工核对。
+
+然后把 §3.2 挂的那行换成：
+
+```yaml
+      - /opt/qa-system/docker/milvus.yaml.override.20261117:/milvus/configs/milvus.yaml:ro
+```
+
+（`user.yaml` 那行可以保留——无害；但若担心叠加语义不明，可以删掉。）
+
+再执行 §3.3 的 `config --quiet` + `up -d --no-deps milvus`，然后**重新跑 §4**
+（这次判据同样是「无 `rate limit exceeded`」）。
+
+> ⚠️ **不要 `sed -i` 直接改容器里的 `milvus.yaml`** —— 容器重建就没了，且不利于回滚。
+> 覆盖式挂载可回滚（把 volumes 那行删掉再 `up -d`）。
+
 ---
 
-## 5. Phase 4 — 补回丢失的向量
+## 5. Phase 4 — 按 PG 为真源对账补齐（同时测出真实影响面）
 
-失败的实体是「**旧向量已删、新向量没写回**」⇒ 需要按 PG 为真源补齐**缺失**向量。
+失败的实体**最新向量没有按预期固化**；旧向量是否还在**不能凭日志断言**（Milvus 的 delete
+可见性要 release+load 才生效）⇒ 用**对账**来定论：按 PG 为真源补齐**缺失**向量。
 仓库已有现成入口（**admin**）：
 
 ### 方式 A：管理页按钮（推荐）
@@ -248,5 +308,14 @@ Milvus 官方口径：**数据可见性由查询一致性保证，flush 只负�
 `milvus_client.refreshCollection` 的注释与「重复向量」历史问题）⇒
 去掉在线路径的 flush 会改变删除可见性时序，**需要真实 Milvus 行为验证**，
 而本地 Milvus 是生产数据面（禁连测试）⇒ 本次不动语义。
-代码加固（合并成 1 次 flush + 客户端 flush 闸 + 批量路径收口）放在
+代码加固（**集合级写入串行化** + 导入路径批量收口 + 同步入口异步化）放在
 `fix/milvus-flush-quota` 分支，作为**下一次发版**。
+
+## 附二：为什么不把「删 + 插」的两次 flush 合并成一次
+
+Milvus **不保证同一次 flush 里 delete 与 insert 的先后** ⇒ 合并后，delete 表达式
+（`ontology_id == X`）有可能把**同一次 flush 里刚插入的那一行**一起删掉 ⇒ 向量
+**静默消失**（比现在更难查：没有任何报错）。这条顺序语义**无法在本仓库实测**
+（本地 Milvus 是生产数据面、禁写测试）⇒ 不做无法验证的语义改动。
+替代做法就是本文件的 **§2 抬配额**：两次 flush 拉开到约 200ms，不再落在同一个
+令牌窗口里。

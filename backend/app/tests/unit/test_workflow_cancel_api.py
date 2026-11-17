@@ -283,6 +283,8 @@ async def test_取消不存在的实例返回404(workflowClient, dbSession):
 
 
 async def test_重复取消是幂等的(workflowClient, dbSession):
+    """重复取消 ⇒ 200 + 状态不变 + **不重复留痕**（治理面只看到一次取消）。"""
+
     await _seedDefinition(dbSession)
     actors = await _seedActors(dbSession)
     instanceId = await _submit(workflowClient)
@@ -293,6 +295,21 @@ async def test_重复取消是幂等的(workflowClient, dbSession):
     assert first.status_code == 200, first.text
     assert second.status_code == 200, second.text
     assert second.json()["status"] == "CANCELLED"
+
+    rows = (
+        (
+            await dbSession.execute(
+                select(AuditLog).where(
+                    AuditLog.entity_type == "workflow_instance",
+                    AuditLog.entity_id == instanceId,
+                    AuditLog.action == "WORKFLOW_CANCEL",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1, f"重复取消留下了 {len(rows)} 条取消审计行（应恰好 1 条）"
 
 
 async def test_取消留痕(workflowClient, dbSession):

@@ -57,7 +57,6 @@ def _settings(**overrides: Any) -> Any:
     values: dict[str, Any] = {
         "enableWorkflow": True,
         "workflowPollSeconds": 0.01,
-        "workflowLeaseSeconds": 60,
         "workflowMaxCommandAttempts": 3,
     }
     values.update(overrides)
@@ -295,6 +294,21 @@ async def test_清扫失败不阻断命令执行(seedEngine, dbSession, definiti
 # =============================================================================
 # workerId 列宽
 # =============================================================================
+
+
+def test_死配置已删除():
+    """``WORKFLOW_LEASE_SECONDS`` **无人读** ⇒ 死配置 ⇒ 删掉。
+
+    留着它 ⇒ 运维在 ``.env`` 里配了租约时长，以为「命令超时会被回收」，
+    实际没有任何代码读它 ⇒ 误解 ⇒ 真出事时按错误的心智模型排查。
+
+    ⚠️ 命令的「在飞」状态由 claim 的**条件 UPDATE**（``PENDING → EXECUTING``）
+    原子化，不需要租约超时兜底。
+    """
+
+    from app.config import Settings
+
+    assert "workflowLeaseSeconds" not in Settings.model_fields
 
 
 def test_workerId被截到executed_by列宽():

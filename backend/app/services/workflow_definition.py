@@ -252,9 +252,14 @@ def matrixEntryByCode(
 def parseWorkflowSteps(
     definitionJson: Mapping[str, Any] | None,
 ) -> tuple[WorkflowStepSpec, ...]:
-    """解析 ``definition_json`` 里的步骤编排。
+    """解析 ``definition_json`` 里的步骤编排（**失败关闭**）。
 
-    缺 ``steps`` ⇒ 空元组（无步骤的定义合法：一步即完成）。
+    ⚠️ **必须声明至少一个步骤**：缺 ``steps`` / ``steps: []`` ⇒ **拒绝**。
+    早期实现对缺失的 ``steps`` 返回空元组（「无步骤的定义合法：一步即完成」）
+    ⇒ 定义漏写步骤时提交会落一个**零步骤**的实例 ⇒ 编排器走「没有步骤 ⇒ 直接
+    COMPLETED」⇒ **外部写一次都没发生**，接口却报成功 ⇒ **假成功**
+    （G6 第一条「写操作全部经 Command」在这条路径上被绕过且无人察觉）。
+
     步骤编码在实例内必须唯一 ⇒ 重复直接拒绝（解析期发现，别等落库撞唯一约束）。
 
     两条**失败关闭**规则（否则定义写得含糊 ⇒ 运行时行为不可预期）：
@@ -266,55 +271,12 @@ def parseWorkflowSteps(
        ⇒ 运行到那儿必然 409 ⇒ 定义直接拒绝。
     """
 
-    if not definitionJson:
-        return ()
-    raw = definitionJson.get(KEY_STEPS)
-    if raw is None:
-        return ()
-    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
-        raise ValidationError("definition_json.steps 必须是数组")
+    raw = _requireStepsArray(definitionJson)
 
     specs: list[WorkflowStepSpec] = []
     seenCodes: set[str] = set()
     for index, item in enumerate(raw):
-        if not isinstance(item, Mapping):
-            raise ValidationError(f"步骤第 {index} 条必须是对象")
-        code = _requireText(item.get("code"), "steps[].code", _KEY_MAX_LENGTH)
-        if code in seenCodes:
-            raise ValidationError(f"步骤编码重复：{code}")
-        seenCodes.add(code)
-
-        order = item.get("order", index)
-        if isinstance(order, bool) or not isinstance(order, int) or order < 0:
-            raise ValidationError(f"步骤 {code} 的 order 必须是非负整数")
-
-        requiresApproval = item.get("requiresApproval", False)
-        if not isinstance(requiresApproval, bool):
-            raise ValidationError(f"步骤 {code} 的 requiresApproval 必须是布尔值")
-
-        commandType = item.get("commandType")
-        if commandType is not None:
-            commandType = _requireText(commandType, "steps[].commandType", _KEY_MAX_LENGTH)
-
-        payload = item.get("payload")
-        if payload is not None and not isinstance(payload, Mapping):
-            raise ValidationError(f"步骤 {code} 的 payload 必须是对象")
-
-        if not requiresApproval and commandType is None:
-            raise ValidationError(
-                f"步骤 {code} 既无 commandType 也不要求审批：没有可执行动作"
-                "（要么声明 commandType，要么 requiresApproval=true）"
-            )
-
-        specs.append(
-            WorkflowStepSpec(
-                code=code,
-                order=order,
-                requiresApproval=requiresApproval,
-                commandType=commandType,
-                payload=dict(payload) if payload is not None else None,
-            )
-        )
+        specs.append(_parseStepSpec(item, index=index, seenCodes=seenCodes))
 
     approvalCodes = [spec.code for spec in specs if spec.requiresApproval]
     if len(approvalCodes) > 1:
@@ -323,6 +285,67 @@ def parseWorkflowSteps(
             + ", ".join(approvalCodes)
         )
     return tuple(specs)
+
+
+def _requireStepsArray(definitionJson: Mapping[str, Any] | None) -> Sequence[Any]:
+    """取出 ``steps`` 数组；缺失 / 不是数组 / 为空 ⇒ **失败关闭**。"""
+
+    if not isinstance(definitionJson, Mapping):
+        raise ValidationError("definition_json 必须是对象（且必须声明 steps）")
+    raw = definitionJson.get(KEY_STEPS)
+    if raw is None:
+        raise ValidationError("definition_json.steps 缺失：定义必须声明至少一个步骤")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        raise ValidationError("definition_json.steps 必须是数组")
+    if len(raw) == 0:
+        raise ValidationError("definition_json.steps 不能为空：定义必须声明至少一个步骤")
+    return raw
+
+
+def _parseStepSpec(
+    item: Any,
+    *,
+    index: int,
+    seenCodes: set[str],
+) -> WorkflowStepSpec:
+    """解析单条步骤（并登记编码，用于查重）。"""
+
+    if not isinstance(item, Mapping):
+        raise ValidationError(f"步骤第 {index} 条必须是对象")
+    code = _requireText(item.get("code"), "steps[].code", _KEY_MAX_LENGTH)
+    if code in seenCodes:
+        raise ValidationError(f"步骤编码重复：{code}")
+    seenCodes.add(code)
+
+    order = item.get("order", index)
+    if isinstance(order, bool) or not isinstance(order, int) or order < 0:
+        raise ValidationError(f"步骤 {code} 的 order 必须是非负整数")
+
+    requiresApproval = item.get("requiresApproval", False)
+    if not isinstance(requiresApproval, bool):
+        raise ValidationError(f"步骤 {code} 的 requiresApproval 必须是布尔值")
+
+    commandType = item.get("commandType")
+    if commandType is not None:
+        commandType = _requireText(commandType, "steps[].commandType", _KEY_MAX_LENGTH)
+
+    payload = item.get("payload")
+    if payload is not None and not isinstance(payload, Mapping):
+        raise ValidationError(f"步骤 {code} 的 payload 必须是对象")
+
+    if not requiresApproval and commandType is None:
+        raise ValidationError(
+            f"步骤 {code} 既无 commandType 也不要求审批：没有可执行动作"
+            "（要么声明 commandType，要么 requiresApproval=true）"
+        )
+
+    return WorkflowStepSpec(
+        code=code,
+        order=order,
+        requiresApproval=requiresApproval,
+        commandType=commandType,
+        payload=dict(payload) if payload is not None else None,
+    )
 
 
 def parseStepRuntimeSpec(inputJson: Mapping[str, Any] | None) -> StepRuntimeSpec:

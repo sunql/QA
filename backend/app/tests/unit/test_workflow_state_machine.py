@@ -28,6 +28,8 @@ from app.domain.workflow_models import (
 )
 from app.services.workflow_state_machine import (
     DETAIL_INVALID_STATUS_TRANSITION,
+    LIVE_INSTANCE_STATUSES,
+    STOPPED_INSTANCE_STATUSES,
     WORKFLOW_TRANSITIONS,
     assertWorkflowTransition,
     workflowStatuses,
@@ -219,3 +221,42 @@ def _parseStatusLiterals(expression: str) -> frozenset[str]:
     assert expression.startswith("status IN (")
     inner = expression[len("status IN (") : expression.rindex(")")]
     return frozenset(part.strip().strip("'") for part in inner.split(","))
+
+
+# ------------------------------------------------- LIVE / STOPPED 是实例状态的全划分
+
+
+def test_live与stopped恰好划分实例状态():
+    """两个口径必须是**互斥且完备**的划分。
+
+    ⚠️ 这是「终态集合单一出口」的证据：服务层 / 编排器 / 存储层都从
+    ``workflow_state_machine`` 取这两个集合 ⇒ 只要它们仍是对实例状态全集的
+    划分，任何「终态判定」都不会漏掉某个状态、也不会把活着的实例当终态。
+    """
+
+    allStatuses = workflowStatuses("instance")
+
+    assert LIVE_INSTANCE_STATUSES & STOPPED_INSTANCE_STATUSES == frozenset()
+    assert LIVE_INSTANCE_STATUSES | STOPPED_INSTANCE_STATUSES == allStatuses
+
+
+def test_终态判定都从状态机模块取():
+    """服务层 / 编排器**不得**再自带一份终态集合（单一出口的回归守卫）。
+
+    早期两份副本（``workflow_service._TERMINAL_INSTANCE_STATUSES`` /
+    ``workflow_orchestrator._TERMINAL_INSTANCE_STATUSES``）各写一遍 ⇒ 状态机
+    加了终态时，两份副本漏改 ⇒ 「实例已终态」判定在某一层失效（取消会打到
+    已完成的实例上）。
+    """
+
+    from app.services import workflow_orchestrator, workflow_service
+
+    allowed = {LIVE_INSTANCE_STATUSES, STOPPED_INSTANCE_STATUSES}
+    for module in (workflow_service, workflow_orchestrator):
+        for name in dir(module):
+            if not name.endswith("_INSTANCE_STATUSES"):
+                continue
+            value = getattr(module, name)
+            assert value in allowed, (
+                f"{module.__name__}.{name} 是自带副本，不是状态机模块那一份：{value}"
+            )

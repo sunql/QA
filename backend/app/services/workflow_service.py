@@ -57,6 +57,7 @@ from app.services.workflow_approval_service import WorkflowApprovalService
 from app.services.workflow_audit_service import WorkflowAuditService
 from app.services.workflow_definition import WorkflowStepSpec, parseWorkflowSteps
 from app.services.workflow_orchestrator import WorkflowOrchestrator
+from app.services.workflow_state_machine import STOPPED_INSTANCE_STATUSES
 from app.services.workflow_store import (
     EVENT_APPROVAL_CANCELLED,
     WorkflowStore,
@@ -69,10 +70,9 @@ _STATUS_CANCELLED = "CANCELLED"
 _STATUS_EXECUTING = "EXECUTING"
 _STATUS_FAILED = "FAILED"
 
-# 实例终态（不可再取消）。
-_TERMINAL_INSTANCE_STATUSES = frozenset(
-    {"COMPLETED", "CANCELLED", "REJECTED", "COMPENSATED", "FAILED"}
-)
+# 实例终态（不可再取消 / 不可再被失败关闭覆盖）。
+# ⚠️ **单一出口**：终态集合只写在 ``workflow_state_machine``（状态机模块）里，
+#    服务层 / 编排器 / 存储层都从这里取 ⇒ 不再各写一份、越写越歪。
 
 # 错误细节码（前端可据此分支，不依赖文案）。
 DETAIL_WORKFLOW_CANCEL_NOT_AUTHORIZED = "WORKFLOW_CANCEL_NOT_AUTHORIZED"
@@ -121,6 +121,36 @@ class WorkflowService:
         # 先解析编排（定义写错 ⇒ 提交前就拒，不落任何行）
         specs = parseWorkflowSteps(definition.definition_json)
 
+        instance, created = await self._createInstanceWithSteps(
+            session,
+            definition=definition,
+            specs=specs,
+            idempotencyKey=idempotencyKey,
+            requestJson=requestJson,
+            actor=actor,
+            actorDepartments=actorDepartments,
+        )
+        if not created:
+            # 幂等重放：既有实例原样返回（**不重建步骤、不重置状态**）
+            return instance, False
+
+        # 驱动：入队当前步骤的命令 / 发起审批 / 收尾（幂等，可反复调用）
+        await self._orchestrator.drive(session, instanceId=instance.id)
+        return instance, True
+
+    async def _createInstanceWithSteps(
+        self,
+        session: AsyncSession,
+        *,
+        definition: WorkflowDefinition,
+        specs: Sequence[WorkflowStepSpec],
+        idempotencyKey: str,
+        requestJson: dict[str, Any],
+        actor: str,
+        actorDepartments: DepartmentsInput = None,
+    ) -> tuple[WorkflowInstance, bool]:
+        """建实例 + 留提交审计 + 建步骤行（幂等重放**不重复留痕**）。"""
+
         instance, created = await self._store.createInstance(
             session,
             definitionId=definition.id,
@@ -129,7 +159,6 @@ class WorkflowService:
             actor=actor,
         )
         if not created:
-            # 幂等重放：既有实例原样返回（**不重建步骤、不重置状态**）
             # ⚠️ 幂等作用域**按提交人隔离**（库层约束含 ``created_by``）⇒ 别人用
             #    同一个键只会拿到**自己的**实例 ⇒ 不存在「拿到别人的实例」的路径，
             #    也不需要「键被他人占用」的 409（那等于泄露键空间的存在性）。
@@ -142,22 +171,20 @@ class WorkflowService:
             actorDepartments=actorDepartments,
         )
 
-        if specs:
-            await self._store.createSteps(
-                session,
-                instanceId=instance.id,
-                steps=[
-                    {
-                        "code": spec.code,
-                        "order": spec.order,
-                        "input": _stepSnapshot(spec),
-                    }
-                    for spec in specs
-                ],
-            )
-
-        # 驱动：入队当前步骤的命令 / 发起审批 / 收尾（幂等，可反复调用）
-        await self._orchestrator.drive(session, instanceId=instance.id)
+        # ⚠️ 解析已保证**至少一步**（缺步骤 ⇒ 提交前就 422，零副作用）
+        # ⇒ 这里无条件建步骤行（不再有「零步骤实例」这种假成功形态）。
+        await self._store.createSteps(
+            session,
+            instanceId=instance.id,
+            steps=[
+                {
+                    "code": spec.code,
+                    "order": spec.order,
+                    "input": _stepSnapshot(spec),
+                }
+                for spec in specs
+            ],
+        )
         return instance, True
 
     async def cancelInstance(
@@ -177,28 +204,53 @@ class WorkflowService:
         取消 = 之后**不再发起新的**外部写：待审批任务 → CANCELLED；待执行命令 →
         CANCELLED（**不再被 Worker 领取**）；未开始的步骤 → SKIPPED。
 
-        ⚠️ **命令在飞 ⇒ 失败关闭（409）**：Worker 正拿着命令跑 ⇒ 外部写可能已经
-        发生 ⇒ 此时把实例判成 CANCELLED 就是**治理面承诺与实际行为不符**
-        （外部写照旧发生、步骤永久悬在 RUNNING）。⇒ 失败关闭，让调用方稍后重试
-        （取消是幂等的，可重试）。
+        ⚠️ **命令在飞 ⇒ 失败关闭（409）**：外部写可能已经发生 ⇒ 此时把实例判成
+        CANCELLED 就是**治理面承诺与实际行为不符** ⇒ 让调用方稍后重试（幂等）。
+        ⚠️ **已在飞的写无法撤回**（外部系统写入不可回滚）⇒ 只能靠补偿钩子。
+        """
 
-        ⚠️ **已在飞的写无法撤回**（外部系统的写入不可回滚）⇒ 只能靠补偿钩子。
+        instance, alreadyCancelled = await self._resolveCancellable(
+            session,
+            instanceId=instanceId,
+            actor=actor,
+            roles=roles,
+            dbUserId=dbUserId,
+            isRealIdentity=isRealIdentity,
+        )
+        if alreadyCancelled:
+            # 幂等：重复取消不报错（也不重复留痕）。
+            return instance
 
-        - **身份未校验 ⇒ 403**（``isRealIdentity``：stub 头可冒充任意 DB 账号 ⇒
-          治理写面必须验签）；
-        - 无权取消 ⇒ **404**（与「实例不存在」同码 ⇒ 不泄露存在性）；
-        - 实例已是终态 ⇒ 409；
-        - 重复取消 ⇒ **幂等**（返回既有实例，不报错）。
+        beforeStatus = instance.status
+        instance = await self._applyCancellation(session, instanceId=instanceId, reason=reason)
+        await self._recordCancelAudit(
+            session,
+            instance=instance,
+            actor=actor,
+            beforeStatus=beforeStatus,
+            reason=reason,
+            actorDepartments=actorDepartments,
+        )
+        return instance
+
+    async def _resolveCancellable(
+        self,
+        session: AsyncSession,
+        *,
+        instanceId: int,
+        actor: str,
+        roles: Sequence[str],
+        dbUserId: int | None,
+        isRealIdentity: bool,
+    ) -> tuple[WorkflowInstance, bool]:
+        """按「身份 → 归属 → 在飞命令 → 终态」顺序判定可否取消。
+
+        返回 ``(实例, 是否已取消)``（已取消 ⇒ 幂等短路，**不重复留痕**）。
         """
 
         # 0) 身份闸：**先于存在性判定** ⇒ 未校验身份者对任何实例 id 都得同一个
         #    403（不构成存在性预言机）。
-        if not isRealIdentity:
-            raise PermissionDeniedError(
-                MSG_WORKFLOW_CANCEL_REAL_AUTH_REQUIRED,
-                detail=DETAIL_WORKFLOW_CANCEL_REAL_AUTH_REQUIRED,
-                details={"instanceId": instanceId},
-            )
+        self._assertRealIdentity(instanceId=instanceId, isRealIdentity=isRealIdentity)
 
         # 1) 无锁读：存在性 + 归属（``created_by`` 不会变 ⇒ 无需加锁）
         snapshot = await self._store.getInstance(session, instanceId)
@@ -211,16 +263,7 @@ class WorkflowService:
 
         # 2) 锁命令（与 Worker 的 claim **互斥**）⇒ 看得到在飞的命令。
         #    ⚠️ 锁序：命令 → 实例（与执行器一致）⇒ 不会 40P01。
-        lockedCommands = await self._store.lockInstanceCommands(
-            session, instanceId=instanceId
-        )
-        executingIds = [row.id for row in lockedCommands if row.status == _STATUS_EXECUTING]
-        if executingIds:
-            raise ConflictError(
-                MSG_WORKFLOW_CANCEL_BUSY,
-                detail=DETAIL_WORKFLOW_CANCEL_BUSY,
-                details={"instanceId": instanceId, "commandIds": executingIds},
-            )
+        await self._assertNoExecutingCommand(session, instanceId=instanceId)
 
         # 3) 锁实例（重读）⇒ 终态判定用**最新**值（等锁期间实例可能已推进）
         instance = await self._store.lockInstance(session, instanceId)
@@ -228,19 +271,101 @@ class WorkflowService:
             raise NotFoundError(f"工作流实例 {instanceId} 不存在")
 
         if instance.status == _STATUS_CANCELLED:
-            # 幂等：重复取消不报错（也不重复留痕）。
-            return instance
-        if instance.status in _TERMINAL_INSTANCE_STATUSES:
+            return instance, True
+        self._assertCancellable(instance=instance, instanceId=instanceId)
+        return instance, False
+
+    @staticmethod
+    def _assertCancellable(*, instance: WorkflowInstance, instanceId: int) -> None:
+        """终态实例不可取消（409）—— 真实结局不被「取消」覆盖。"""
+
+        if instance.status in STOPPED_INSTANCE_STATUSES:
             raise ConflictError(
                 MSG_WORKFLOW_CANCEL_NOT_ALLOWED.format(status=instance.status),
                 detail=DETAIL_WORKFLOW_CANCEL_NOT_ALLOWED,
                 details={"instanceId": instanceId, "status": instance.status},
             )
 
-        beforeStatus = instance.status
+    async def _applyCancellation(
+        self, session: AsyncSession, *, instanceId: int, reason: str | None
+    ) -> WorkflowInstance:
+        """把待审批 / 待执行命令 / 未开始步骤一并收干净，再把实例判成 CANCELLED。"""
+
         cancelReason = reason or "实例被取消"
 
         # 待审批任务 → CANCELLED（不再等审批）
+        await self._cancelPendingApprovals(session, instanceId=instanceId)
+        # 待执行命令 → CANCELLED（**Worker 再也领不到它** ⇒ 外部写不再发生）
+        cancelledStepIds = await self._store.cancelPendingCommands(
+            session, instanceId=instanceId, reason=cancelReason
+        )
+        # 步骤：没开始的（PENDING）与「命令被取消」的（RUNNING）⇒ SKIPPED
+        await self._skipPendingSteps(
+            session, instanceId=instanceId, cancelledStepIds=cancelledStepIds
+        )
+        return await self._store.advanceInstance(
+            session, instanceId, _STATUS_CANCELLED, errorMessage=reason
+        )
+
+    async def _recordCancelAudit(
+        self,
+        session: AsyncSession,
+        *,
+        instance: WorkflowInstance,
+        actor: str,
+        beforeStatus: str,
+        reason: str | None,
+        actorDepartments: DepartmentsInput = None,
+    ) -> None:
+        """留痕：取消是治理动作（谁取消的、为什么）。"""
+
+        await self._audit.recordCancel(
+            session,
+            instance=instance,
+            actor=actor,
+            beforeStatus=beforeStatus,
+            reason=reason,
+            actorDepartments=actorDepartments,
+        )
+
+    @staticmethod
+    def _assertRealIdentity(*, instanceId: int, isRealIdentity: bool) -> None:
+        """身份闸（**先于存在性判定** ⇒ 不构成存在性预言机）。"""
+
+        if isRealIdentity:
+            return
+        raise PermissionDeniedError(
+            MSG_WORKFLOW_CANCEL_REAL_AUTH_REQUIRED,
+            detail=DETAIL_WORKFLOW_CANCEL_REAL_AUTH_REQUIRED,
+            details={"instanceId": instanceId},
+        )
+
+    async def _assertNoExecutingCommand(
+        self, session: AsyncSession, *, instanceId: int
+    ) -> None:
+        """在飞的命令 ⇒ **失败关闭（409）**（取消 = 不再写外部系统）。
+
+        ⚠️ Worker 正拿着命令跑 ⇒ 外部写可能已经发生 ⇒ 此时把实例判成
+        CANCELLED 就是治理面承诺与实际行为不符 ⇒ 让调用方稍后重试。
+        """
+
+        lockedCommands = await self._store.lockInstanceCommands(
+            session, instanceId=instanceId
+        )
+        executingIds = [row.id for row in lockedCommands if row.status == _STATUS_EXECUTING]
+        if not executingIds:
+            return
+        raise ConflictError(
+            MSG_WORKFLOW_CANCEL_BUSY,
+            detail=DETAIL_WORKFLOW_CANCEL_BUSY,
+            details={"instanceId": instanceId, "commandIds": executingIds},
+        )
+
+    async def _cancelPendingApprovals(
+        self, session: AsyncSession, *, instanceId: int
+    ) -> None:
+        """待审批任务 → CANCELLED（不再等审批）。"""
+
         for task in await self._store.listApprovalTasks(session, instanceId=instanceId):
             if task.status == "PENDING":
                 await self._store.markApprovalTask(
@@ -251,29 +376,21 @@ class WorkflowService:
                     eventType=EVENT_APPROVAL_CANCELLED,
                 )
 
-        # 待执行命令 → CANCELLED（**Worker 再也领不到它** ⇒ 外部写不再发生）
-        cancelledStepIds = await self._store.cancelPendingCommands(
-            session, instanceId=instanceId, reason=cancelReason
-        )
+    async def _skipPendingSteps(
+        self,
+        session: AsyncSession,
+        *,
+        instanceId: int,
+        cancelledStepIds: Sequence[int],
+    ) -> None:
+        """没开始的步骤（PENDING）与「命令被取消」的步骤 ⇒ SKIPPED。
 
-        # 步骤：没开始的（PENDING）与「命令被取消」的（RUNNING）⇒ SKIPPED
-        # （命令没跑 ⇒ 这一步其实没跑；不吊在半路）。
+        （命令没跑 ⇒ 这一步其实没跑；不吊在半路。）
+        """
+
         for step in await self._store.listSteps(session, instanceId=instanceId):
             if step.status == "PENDING" or step.id in cancelledStepIds:
                 await self._store.advanceStep(session, step.id, "SKIPPED")
-
-        instance = await self._store.advanceInstance(
-            session, instanceId, _STATUS_CANCELLED, errorMessage=reason
-        )
-        await self._audit.recordCancel(
-            session,
-            instance=instance,
-            actor=actor,
-            beforeStatus=beforeStatus,
-            reason=reason,
-            actorDepartments=actorDepartments,
-        )
-        return instance
 
     # ------------------------------------------------------- 审批决策 + 推进
 
@@ -337,7 +454,7 @@ class WorkflowService:
         """
 
         instance = await self._store.lockInstance(session, instanceId)
-        if instance is None or instance.status in _TERMINAL_INSTANCE_STATUSES:
+        if instance is None or instance.status in STOPPED_INSTANCE_STATUSES:
             return instance
         return await self._store.advanceInstance(
             session, instanceId, _STATUS_FAILED, errorMessage=reason

@@ -68,14 +68,61 @@ class WorkflowCommandStore(WorkflowStoreBase):
         步骤必须属于同一实例 ⇒ 拒绝跨实例挂载（写错实例会污染审计链）。
         """
 
-        if stepId is not None:
-            stepInstanceId = (
-                await session.execute(select(WorkflowStep.instance_id).where(WorkflowStep.id == stepId))
-            ).scalar_one_or_none()
-            if stepInstanceId is None or stepInstanceId != instanceId:
-                raise ConflictError(MSG_STEP_INSTANCE_MISMATCH.format(stepId=stepId, instanceId=instanceId))
+        await self._assertStepBelongsToInstance(
+            session, stepId=stepId, instanceId=instanceId
+        )
 
-        insertedId = (
+        insertedId = await self._insertCommand(
+            session,
+            instanceId=instanceId,
+            stepId=stepId,
+            commandType=commandType,
+            idempotencyKey=idempotencyKey,
+            payload=payload,
+            executedBy=executedBy,
+        )
+
+        existing = await self._loadCommandByIdempotency(
+            session, commandType=commandType, idempotencyKey=idempotencyKey
+        )
+
+        if insertedId is not None:
+            await self._recordCommandRequestedEvent(
+                session,
+                instanceId=instanceId,
+                command=existing,
+                stepId=stepId,
+            )
+
+        return existing, insertedId is not None
+
+    async def _assertStepBelongsToInstance(
+        self, session: AsyncSession, *, stepId: int | None, instanceId: int
+    ) -> None:
+        """步骤必须属于同一实例（跨实例挂载 ⇒ 拒绝）。"""
+
+        if stepId is None:
+            return
+        stepInstanceId = (
+            await session.execute(select(WorkflowStep.instance_id).where(WorkflowStep.id == stepId))
+        ).scalar_one_or_none()
+        if stepInstanceId is None or stepInstanceId != instanceId:
+            raise ConflictError(MSG_STEP_INSTANCE_MISMATCH.format(stepId=stepId, instanceId=instanceId))
+
+    async def _insertCommand(
+        self,
+        session: AsyncSession,
+        *,
+        instanceId: int,
+        stepId: int | None,
+        commandType: str,
+        idempotencyKey: str,
+        payload: dict[str, Any],
+        executedBy: str | None,
+    ) -> int | None:
+        """插入命令行（幂等键冲突则不插）⇒ 返回新行 id；冲突时返回 ``None``。"""
+
+        return (
             await session.execute(
                 pg_insert(BusinessCommand)
                 .values(
@@ -92,7 +139,12 @@ class WorkflowCommandStore(WorkflowStoreBase):
             )
         ).scalar_one_or_none()
 
-        existing = (
+    async def _loadCommandByIdempotency(
+        self, session: AsyncSession, *, commandType: str, idempotencyKey: str
+    ) -> BusinessCommand:
+        """按（命令类型, 幂等键）读回命令行。"""
+
+        return (
             await session.execute(
                 select(BusinessCommand)
                 .where(
@@ -103,19 +155,26 @@ class WorkflowCommandStore(WorkflowStoreBase):
             )
         ).scalar_one()
 
-        if insertedId is not None:
-            await self.enqueueEvent(
-                session,
-                instanceId=instanceId,
-                eventType=EVENT_COMMAND_REQUESTED,
-                payload={
-                    "commandId": existing.id,
-                    "commandType": commandType,
-                    "stepId": stepId,
-                },
-            )
+    async def _recordCommandRequestedEvent(
+        self,
+        session: AsyncSession,
+        *,
+        instanceId: int,
+        command: BusinessCommand,
+        stepId: int | None,
+    ) -> None:
+        """落「命令已入队」事件（只在本轮**新建**时写）。"""
 
-        return existing, insertedId is not None
+        await self.enqueueEvent(
+            session,
+            instanceId=instanceId,
+            eventType=EVENT_COMMAND_REQUESTED,
+            payload={
+                "commandId": command.id,
+                "commandType": command.command_type,
+                "stepId": stepId,
+            },
+        )
 
     async def claimCommand(
         self, session: AsyncSession, commandId: int, *, workerId: str, maxAttempts: int = 1
@@ -383,16 +442,7 @@ class WorkflowCommandStore(WorkflowStoreBase):
         （终态此前只存在于内存 ⇒ 库里仍是 FAILED 且次数未耗尽 ⇒ 无限重试。）
         """
 
-        current = (
-            await session.execute(
-                select(BusinessCommand)
-                .where(BusinessCommand.id == commandId)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-        ).scalar_one_or_none()
-        if current is None:
-            raise NotFoundError(f"业务命令 {commandId} 不存在")
+        current = await self._lockCommand(session, commandId)
 
         toStatus = STATUS_ABORTED if terminal else STATUS_FAILED
         assertWorkflowTransition("command", current.status, toStatus)

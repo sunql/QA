@@ -42,7 +42,7 @@ from app.services.workflow_approval_service import WorkflowApprovalService
 from app.services.workflow_command_executor import CommandExecutor
 from app.services.workflow_command_ports import CommandHandlerRegistry, SimulatedCommandHandler
 from app.services.workflow_definition import parseWorkflowSteps
-from app.services.workflow_orchestrator import WorkflowOrchestrator
+from app.services.workflow_orchestrator import WorkflowOrchestrator, commandIdempotencyKey
 from app.services.workflow_service import WorkflowService
 from app.services.workflow_store import WorkflowStore
 
@@ -318,18 +318,60 @@ async def test_步骤行携带编排快照(dbSession: AsyncSession):
 
 
 async def test_重复驱动不重复入队(dbSession: AsyncSession):
-    """幂等：命令幂等键 = 实例 + 步骤 ⇒ 反复驱动只落一条命令。"""
+    """幂等：命令幂等键 = 实例 + 步骤 ⇒ 重入驱动**不新建**命令。
+
+    ⚠️ **这条用例早先是假绿**：第二次 ``drive`` 时步骤已是 RUNNING ⇒ 编排器在
+    「当前步骤还在跑 ⇒ 等 Worker」处就返回了 ⇒ **压根没再调用**
+    ``enqueueCommand`` ⇒ 断言「只有一条命令」证明的是「步骤没被重复推进」，
+    而**不是**「幂等键生效」⇒ 把 ``enqueueCommand`` 的幂等性删掉，这用例照样绿。
+
+    ⇒ 现在摆出**真实的重入场景**：上一次驱动已经入队了命令，但在推进步骤前
+    崩了（步骤仍是 PENDING）⇒ 重入驱动会**再次走到入队口** ⇒ 必须不新建命令。
+    """
 
     definition = await _seedDefinition(
         dbSession, [{"code": "write", "order": 0, "commandType": "po.write"}]
     )
-    instance, _ = await _submit(dbSession, definition)
+    # 直接造实例 + 步骤（不走 submit 的首次驱动，避免把步骤推成 RUNNING）
+    instance, _ = await _store.createInstance(
+        dbSession,
+        definitionId=definition.id,
+        idempotencyKey="orch-reentrant",
+        requestJson={"amount": 100},
+        actor="submitter",
+    )
+    steps = await _store.createSteps(
+        dbSession,
+        instanceId=instance.id,
+        steps=[
+            {
+                "code": "write",
+                "order": 0,
+                "input": {"commandType": "po.write", "requiresApproval": False, "payload": {}},
+            }
+        ],
+    )
+    await dbSession.commit()
 
+    # 模拟「上次驱动入队了命令，但还没推进步骤就崩了」
+    await _store.enqueueCommand(
+        dbSession,
+        instanceId=instance.id,
+        stepId=steps[0].id,
+        commandType="po.write",
+        idempotencyKey=commandIdempotencyKey(instance.id, steps[0].id),
+        payload={},
+    )
+    await dbSession.commit()
+    assert len(await _commands(dbSession, instance.id)) == 1
+
+    # 重入驱动 ⇒ 仍只有一条命令（幂等键生效）
     await _orchestrator.drive(dbSession, instanceId=instance.id)
     await dbSession.commit()
 
     commands = await _commands(dbSession, instance.id)
     assert len(commands) == 1
+    assert commands[0].status == "PENDING"
 
 
 # =============================================================================
@@ -381,13 +423,31 @@ async def test_全部步骤完成后实例完成(dbSession: AsyncSession):
     assert instance.status == "COMPLETED"
 
 
-async def test_无步骤定义一步即完成(dbSession: AsyncSession):
-    """没有步骤就没有活儿可干 ⇒ 实例直接完成（不吊在 RUNNING）。"""
+async def test_零步骤实例直接收尾(dbSession: AsyncSession):
+    """**历史数据**里若已有零步骤实例 ⇒ 编排器直接收尾（不吊在 RUNNING）。
 
-    definition = await _seedDefinition(dbSession, [])
-    instance, _ = await _submit(dbSession, definition)
+    ⚠️ 这条路径现在**提交面已不可达**：定义必须声明至少一步
+    （``parseWorkflowSteps`` 失败关闭 ⇒ 提交就 422）⇒ 零步骤实例只可能来自
+    旧数据 / 手工改库。⇒ 编排器仍要能把它收干净（不吊死）。
+    """
 
-    assert instance.status == "COMPLETED"
+    definition = await _seedDefinition(
+        dbSession, [{"code": "write", "order": 0, "commandType": "po.write"}]
+    )
+    # 绕过提交面，直接造一个「有定义、无步骤行」的实例（模拟旧数据）。
+    instance, _ = await _store.createInstance(
+        dbSession,
+        definitionId=definition.id,
+        idempotencyKey="legacy-no-steps",
+        requestJson={},
+        actor="submitter",
+    )
+    await dbSession.commit()
+
+    driven = await _orchestrator.drive(dbSession, instanceId=instance.id)
+    await dbSession.commit()
+
+    assert driven.status == "COMPLETED"
 
 
 # =============================================================================

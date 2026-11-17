@@ -29,6 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ConflictError, NotFoundError, PermissionDeniedError
+from app.domain.models import AuditLog
 from app.domain.workflow_models import (
     ApprovalTask,
     BusinessCommand,
@@ -37,6 +38,7 @@ from app.domain.workflow_models import (
     WorkflowStep,
 )
 from app.models.rbac import Role
+from app.services.workflow_audit_service import ACTION_CANCEL, ENTITY_INSTANCE
 from app.services.workflow_service import WorkflowService
 from app.services.workflow_store import WorkflowStore
 
@@ -342,9 +344,18 @@ async def test_未校验身份即使带admin角色也不能取消(dbSession: Asy
 
 
 async def test_已完成的实例不能取消(dbSession: AsyncSession):
-    definition = await _seedDefinition(dbSession, [])
+    """已完成的实例不能取消（409）。
+
+    ⚠️ 早期这条用例靠「零步骤定义 ⇒ 实例直接 COMPLETED」搭前置 ⇒ 该前置已被
+    「定义必须声明至少一步」废掉 ⇒ 改为**显式推进**到 COMPLETED。
+    """
+
+    definition = await _seedDefinition(
+        dbSession, [{"code": "write", "order": 0, "commandType": "po.write"}]
+    )
     instance = await _submit(dbSession, definition)
-    assert instance.status == "COMPLETED"
+    await _store.advanceInstance(dbSession, instance.id, "COMPLETED")
+    await dbSession.commit()
 
     with pytest.raises(ConflictError):
         await _service.cancelInstance(dbSession, instanceId=instance.id, actor="submitter", isRealIdentity=True)
@@ -352,10 +363,18 @@ async def test_已完成的实例不能取消(dbSession: AsyncSession):
 
 
 async def test_重复取消是幂等的(dbSession: AsyncSession):
+    """重复取消：返回既有实例、不报错，**且不重复留痕**。
+
+    ⚠️ 「不重复留痕」是这条用例的另一半：早先只断言了实例状态 ⇒ 即使第二次
+    取消又写了一条 ``WORKFLOW_CANCEL`` 审计行，用例照样绿 ⇒ 治理面会看到
+    「取消发生了两次」⇒ 事后追责/统计口径全歪。
+    """
+
     definition = await _seedDefinition(
         dbSession, [{"code": "write", "order": 0, "commandType": "po.write"}]
     )
     instance = await _submit(dbSession, definition)
+    instanceId = instance.id
 
     await _service.cancelInstance(dbSession, instanceId=instance.id, actor="submitter", isRealIdentity=True)
     await dbSession.commit()
@@ -363,6 +382,23 @@ async def test_重复取消是幂等的(dbSession: AsyncSession):
     await dbSession.commit()
 
     assert instance.status == "CANCELLED"
+
+    cancelRows = (
+        (
+            await dbSession.execute(
+                select(AuditLog)
+                .where(
+                    AuditLog.entity_type == ENTITY_INSTANCE,
+                    AuditLog.entity_id == instanceId,
+                    AuditLog.action == ACTION_CANCEL,
+                )
+                .order_by(AuditLog.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(cancelRows) == 1, f"重复取消留下了 {len(cancelRows)} 条取消审计行（应恰好 1 条）"
 
 
 async def test_取消不存在的实例报404(dbSession: AsyncSession):

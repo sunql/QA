@@ -45,6 +45,7 @@ from app.domain.workflow_models import WorkflowInstance, WorkflowStep
 from app.services.workflow_approval_service import WorkflowApprovalService
 from app.services.workflow_command_ports import buildCommandPayload
 from app.services.workflow_definition import parseStepRuntimeSpec
+from app.services.workflow_state_machine import STOPPED_INSTANCE_STATUSES
 from app.services.workflow_store import WorkflowStore
 
 # 实例状态字面量（与 `workflow_state_machine` 的矩阵、库层 CHECK 一致）。
@@ -54,17 +55,6 @@ _STATUS_APPROVED = "APPROVED"
 _STATUS_COMPLETED = "COMPLETED"
 _STATUS_SUCCEEDED = "SUCCEEDED"
 _STATUS_SKIPPED = "SKIPPED"
-
-# 实例进入终态 ⇒ 编排器不再驱动（已取消 / 已拒绝 / 已补偿 / 已失败 / 已完成）。
-_TERMINAL_INSTANCE_STATUSES = frozenset(
-    {
-        _STATUS_COMPLETED,
-        "CANCELLED",
-        "REJECTED",
-        "COMPENSATED",
-        "FAILED",
-    }
-)
 
 # 步骤已完成（⇒ 轮到下一步）。
 _DONE_STEP_STATUSES = frozenset({_STATUS_SUCCEEDED, _STATUS_SKIPPED})
@@ -116,7 +106,7 @@ class WorkflowOrchestrator:
         instance = await self._store.lockInstance(session, instanceId)
         if instance is None:
             raise NotFoundError(f"工作流实例 {instanceId} 不存在")
-        if instance.status in _TERMINAL_INSTANCE_STATUSES:
+        if instance.status in STOPPED_INSTANCE_STATUSES:
             return instance
 
         if instance.status == _STATUS_PENDING:

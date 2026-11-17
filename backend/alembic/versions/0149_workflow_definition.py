@@ -60,7 +60,6 @@ COLUMN_COMMENTS = {
     "instance_idempotency_key": "0149，P5：幂等键（同一定义+同一提交人下唯一；重复提交只执行一次）",
     "instance_business_key": "0149，P5：业务键（业务侧单号，可空）",
     "instance_status": "0149，P5：实例状态（状态机字面量集合）",
-    "instance_current_step": "0149，P5：当前步骤编码（workflow_step.step_code）",
     "instance_request_json": "0149，P5：实例请求体（JSON 对象）",
     "instance_result_json": "0149，P5：实例结果体（JSON 对象，可空）",
     "instance_created_by": "0149，P5：提交人（幂等作用域的一环 ⇒ NOT NULL）",
@@ -175,12 +174,6 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("'PENDING'"),
             comment=COLUMN_COMMENTS["instance_status"],
-        ),
-        sa.Column(
-            "current_step",
-            sa.String(length=64),
-            nullable=True,
-            comment=COLUMN_COMMENTS["instance_current_step"],
         ),
         sa.Column(
             "request_json",

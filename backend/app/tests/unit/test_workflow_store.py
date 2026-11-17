@@ -30,6 +30,9 @@ from app.domain.workflow_models import (
     WorkflowInstance,
     WorkflowStep,
 )
+from app.services.workflow_approval_store import WorkflowApprovalStore
+from app.services.workflow_command_store import WorkflowCommandStore
+from app.services.workflow_instance_store import WorkflowInstanceStore
 from app.services.workflow_store import WorkflowStore
 
 _store = WorkflowStore()
@@ -515,3 +518,42 @@ async def test_步骤行可查(dbSession: AsyncSession, definition):
         .all()
     )
     assert len(rows) == 1
+
+
+# ---------------------------------------------------------------- 结构守卫
+
+
+def _ownMethodNames(cls: type) -> set[str]:
+    """该类**自己**定义的方法名（不含继承来的、不含 dunder）。"""
+
+    return {
+        name
+        for name, member in vars(cls).items()
+        if not name.startswith("__")
+        and (callable(member) or isinstance(member, (staticmethod, classmethod)))
+    }
+
+
+def test_三个子存储的方法名互不遮蔽():
+    """门面 ``WorkflowStore`` 是**多继承** ⇒ 同名方法会被 MRO **静默遮蔽**。
+
+    为什么危险：审批子存储调 ``self._recordXxxEvent`` 时，若命令子存储也有同名
+    方法 ⇒ 实际调到的是**另一个实现** ⇒ 要么 ``TypeError``（当场炸），要么
+    **签名恰好兼容但语义不同**（静默走错分支 ⇒ 事件写错表 / 漏写事件）。
+    ⇒ 子存储之间的方法名必须**互不相同**（**含私有方法** —— 私有名最容易撞）。
+    """
+
+    groups = {
+        "WorkflowInstanceStore": _ownMethodNames(WorkflowInstanceStore),
+        "WorkflowCommandStore": _ownMethodNames(WorkflowCommandStore),
+        "WorkflowApprovalStore": _ownMethodNames(WorkflowApprovalStore),
+    }
+
+    collisions: list[str] = []
+    allNames = {name for group in groups.values() for name in group}
+    for name in sorted(allNames):
+        owners = [cls for cls, group in groups.items() if name in group]
+        if len(owners) > 1:
+            collisions.append(f"{name}（{', '.join(owners)}）")
+
+    assert not collisions, "子存储方法名互相遮蔽：" + "；".join(collisions)

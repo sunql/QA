@@ -22,6 +22,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.exceptions import ValidationError
 from app.domain.workflow_models import (
     ApprovalTask,
     BusinessCommand,
@@ -173,6 +174,53 @@ async def test_全路径_提交到实例完成(dbSession: AsyncSession, approver
     assert [s.status for s in steps] == ["SUCCEEDED", "SUCCEEDED"]
     row = await _instanceRow(dbSession, instanceId)
     assert row.status == "COMPLETED"
+
+
+async def test_全路径_定义缺步骤则拒绝且零副作用(dbSession: AsyncSession):
+    """定义没写 ``steps`` ⇒ 提交**失败关闭**，且**一行都不落**。
+
+    ⚠️ 零副作用是关键：失败若落在「已建实例、没建步骤」的状态，实例就会
+    永远停在 PENDING，界面上还看得见一个「提交成功」的实例 ⇒ 更难排查。
+    """
+
+    definition = WorkflowDefinition(
+        domain_code="procurement",
+        capability_code=_CAPABILITY,
+        version="v1",
+        definition_json={"riskLevel": "MEDIUM"},  # ⚠️ 漏写 steps
+        status="PUBLISHED",
+        created_by="tester",
+    )
+    dbSession.add(definition)
+    await dbSession.commit()
+    # ⚠️ rollback 会 expire 全部 ORM 实例 ⇒ 先取出标量（之后访问属性会触发
+    #    同步懒加载 ⇒ MissingGreenlet）。
+    definitionId = definition.id
+
+    with pytest.raises(ValidationError):
+        await _service.submitInstance(
+            dbSession,
+            domainCode=definition.domain_code,
+            capabilityCode=definition.capability_code,
+            version=definition.version,
+            idempotencyKey="e2e-nosteps",
+            requestJson={"amount": 100},
+            actor="submitter",
+        )
+    await dbSession.rollback()
+
+    instances = (
+        (
+            await dbSession.execute(
+                select(WorkflowInstance).where(
+                    WorkflowInstance.definition_id == definitionId
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert instances == []
 
 
 async def test_全路径_审批拒绝则命令不再入队(dbSession: AsyncSession, approverRole):

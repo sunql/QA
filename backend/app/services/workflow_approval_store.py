@@ -78,7 +78,50 @@ class WorkflowApprovalStore(WorkflowStoreBase):
         ⇒ 同一实例同一矩阵条目只落一条任务。
         """
 
-        insertedId = (
+        insertedId = await self._insertApprovalTask(
+            session,
+            instanceId=instanceId,
+            subjectType=subjectType,
+            subjectId=subjectId,
+            matrixCode=matrixCode,
+            approverRole=approverRole,
+            approverUser=approverUser,
+            dueAt=dueAt,
+            createdBy=createdBy,
+        )
+
+        existing = await self._loadApprovalTaskByMatrix(
+            session, instanceId=instanceId, matrixCode=matrixCode
+        )
+
+        if insertedId is not None:
+            await self._recordApprovalRequestedEvent(
+                session,
+                instanceId=instanceId,
+                task=existing,
+                subjectType=subjectType,
+                subjectId=subjectId,
+                dueAt=dueAt,
+            )
+
+        return existing, insertedId is not None
+
+    async def _insertApprovalTask(
+        self,
+        session: AsyncSession,
+        *,
+        instanceId: int,
+        subjectType: str,
+        subjectId: str,
+        matrixCode: str,
+        approverRole: str | None,
+        approverUser: str | None,
+        dueAt: datetime,
+        createdBy: str | None,
+    ) -> int | None:
+        """插入审批任务行（冲突则不插）⇒ 返回新行 id；冲突时返回 ``None``。"""
+
+        return (
             await session.execute(
                 pg_insert(ApprovalTask)
                 .values(
@@ -97,7 +140,12 @@ class WorkflowApprovalStore(WorkflowStoreBase):
             )
         ).scalar_one_or_none()
 
-        existing = (
+    async def _loadApprovalTaskByMatrix(
+        self, session: AsyncSession, *, instanceId: int, matrixCode: str
+    ) -> ApprovalTask:
+        """按（实例, 矩阵条目）读回审批任务行。"""
+
+        return (
             await session.execute(
                 select(ApprovalTask)
                 .where(
@@ -108,21 +156,30 @@ class WorkflowApprovalStore(WorkflowStoreBase):
             )
         ).scalar_one()
 
-        if insertedId is not None:
-            await self.enqueueEvent(
-                session,
-                instanceId=instanceId,
-                eventType=EVENT_APPROVAL_REQUESTED,
-                payload={
-                    "taskId": existing.id,
-                    "matrixCode": matrixCode,
-                    "subjectType": subjectType,
-                    "subjectId": subjectId,
-                    "dueAt": dueAt.isoformat() if dueAt is not None else None,
-                },
-            )
+    async def _recordApprovalRequestedEvent(
+        self,
+        session: AsyncSession,
+        *,
+        instanceId: int,
+        task: ApprovalTask,
+        subjectType: str,
+        subjectId: str,
+        dueAt: datetime | None,
+    ) -> None:
+        """落「审批已发起」事件（只在本轮**新建**时写）。"""
 
-        return existing, insertedId is not None
+        await self.enqueueEvent(
+            session,
+            instanceId=instanceId,
+            eventType=EVENT_APPROVAL_REQUESTED,
+            payload={
+                "taskId": task.id,
+                "matrixCode": task.matrix_code,
+                "subjectType": subjectType,
+                "subjectId": subjectId,
+                "dueAt": dueAt.isoformat() if dueAt is not None else None,
+            },
+        )
 
     async def decideApprovalTask(
         self,

@@ -200,9 +200,12 @@ class Settings(BaseSettings):
     # 整组开关：关闭时工作流路由**不注册**（对外 404）⇒「没开 = 没有这个面」，
     # 回滚 = 关开关 + 停 Worker。**默认关**。
     enableWorkflow: bool = Field(default=False, alias="ENABLE_WORKFLOW")
-    # Worker 轮询间隔（秒）与指令租约时长（秒）。
+    # Worker 轮询间隔（秒）。
+    # ⚠️ **没有**租约时长：命令的「在飞」状态由 claim 的条件 UPDATE（``PENDING →
+    #    EXECUTING``）原子化 ⇒ 不需要租约超时兜底 ⇒ 早期那个
+    #    ``WORKFLOW_LEASE_SECONDS`` 是**死配置**（无人读）⇒ 已删（避免「配了
+    #    以为生效」）。
     workflowPollSeconds: float = Field(default=2.0, alias="WORKFLOW_POLL_SECONDS")
-    workflowLeaseSeconds: int = Field(default=60, alias="WORKFLOW_LEASE_SECONDS")
     # 单条指令的最大重试次数（超过 ⇒ 置 FAILED 并触发补偿）。
     workflowMaxCommandAttempts: int = Field(default=3, alias="WORKFLOW_MAX_COMMAND_ATTEMPTS")
 

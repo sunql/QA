@@ -159,6 +159,25 @@ class WorkflowApprovalService:
             _INSTANCE_WAITING_APPROVAL,
         )
 
+        return await self._createRoundTasks(
+            session,
+            instance=instance,
+            entries=entries,
+            actor=actor,
+            actorDepartments=actorDepartments,
+        )
+
+    async def _createRoundTasks(
+        self,
+        session: AsyncSession,
+        *,
+        instance: WorkflowInstance,
+        entries: Sequence[ApprovalMatrixEntry],
+        actor: str,
+        actorDepartments: DepartmentsInput = None,
+    ) -> list[ApprovalTask]:
+        """按矩阵条目逐条生成审批任务并留痕。"""
+
         now = _utcnow()
         tasks: list[ApprovalTask] = []
         for entry in entries:
@@ -197,19 +216,7 @@ class WorkflowApprovalService:
     ) -> ApprovalTask:
         """审批决策（APPROVE / REJECT）。七守卫见模块文档。"""
 
-        snapshot = await self._store.getApprovalTask(session, taskId)
-        if snapshot is None:
-            raise NotFoundError(f"审批任务 {taskId} 不存在")
-
-        # 锁顺序恒为 instance → task（多处并发 ⇒ 固定顺序杜绝死锁）
-        instance = await self._lockInstance(session, snapshot.instance_id)
-        task = await self._lockTask(session, taskId)
-
-        definition = await self._loadDefinition(session, instance.definition_id)
-        entry = matrixEntryByCode(
-            parseApprovalMatrix(definition.definition_json),
-            task.matrix_code,
-        )
+        instance, task, entry = await self._lockDecisionContext(session, taskId)
 
         # ① 越权（含矩阵失效 ⇒ 失败关闭）
         self._assertAuthorized(task=task, entry=entry, instance=instance, actor=actor, roles=roles)
@@ -220,14 +227,78 @@ class WorkflowApprovalService:
 
         # ③ 超时（顺带把任务落成 TIMEOUT ⇒ 实例不再死等）
         now = _utcnow()
-        if task.due_at is not None and now > task.due_at:
-            await self._markTimedOut(session, task=task, instance=instance, now=now)
-            await session.commit()
-            raise ConflictError(
-                MSG_WORKFLOW_APPROVAL_TIMEOUT.format(taskId=task.id),
-                detail=DETAIL_APPROVAL_TIMEOUT,
-                details={"taskId": task.id},
-            )
+        await self._assertNotTimedOut(session, task=task, instance=instance, now=now)
+
+        updated = await self._applyDecision(
+            session,
+            task=task,
+            decision=decision,
+            actor=actor,
+            note=note,
+            now=now,
+            actorDepartments=actorDepartments,
+        )
+        await self._syncInstanceStatus(session, instance)
+        return updated
+
+    async def _lockDecisionContext(
+        self, session: AsyncSession, taskId: int
+    ) -> tuple[WorkflowInstance, ApprovalTask, ApprovalMatrixEntry | None]:
+        """取决策上下文（锁住的实例 + 锁住的任务 + 矩阵条目）。
+
+        ⚠️ **锁顺序恒为 instance → task**（多处并发 ⇒ 固定顺序杜绝死锁）。
+        """
+
+        snapshot = await self._store.getApprovalTask(session, taskId)
+        if snapshot is None:
+            raise NotFoundError(f"审批任务 {taskId} 不存在")
+
+        instance = await self._lockInstance(session, snapshot.instance_id)
+        task = await self._lockTask(session, taskId)
+
+        definition = await self._loadDefinition(session, instance.definition_id)
+        entry = matrixEntryByCode(
+            parseApprovalMatrix(definition.definition_json),
+            task.matrix_code,
+        )
+        return instance, task, entry
+
+    async def _assertNotTimedOut(
+        self,
+        session: AsyncSession,
+        *,
+        task: ApprovalTask,
+        instance: WorkflowInstance,
+        now: datetime,
+    ) -> None:
+        """超时 ⇒ 任务落 TIMEOUT（并提交）+ 实例不再死等；随后抛 409。
+
+        ⚠️ 这里**自己 commit**：超时是**状态推进**（不是拒绝）⇒ 必须在抛 409
+        之前落库（否则实例永远卡在「等待审批」，而清扫器并不总在跑）。
+        """
+
+        if task.due_at is None or now <= task.due_at:
+            return
+        await self._markTimedOut(session, task=task, instance=instance, now=now)
+        await session.commit()
+        raise ConflictError(
+            MSG_WORKFLOW_APPROVAL_TIMEOUT.format(taskId=task.id),
+            detail=DETAIL_APPROVAL_TIMEOUT,
+            details={"taskId": task.id},
+        )
+
+    async def _applyDecision(
+        self,
+        session: AsyncSession,
+        *,
+        task: ApprovalTask,
+        decision: str,
+        actor: str,
+        note: str | None,
+        now: datetime,
+        actorDepartments: DepartmentsInput = None,
+    ) -> ApprovalTask:
+        """落决策（状态机校验 + 条件 UPDATE）并留痕。"""
 
         targetStatus = self._targetStatus(decision)
         beforeStatus = task.status
@@ -250,7 +321,6 @@ class WorkflowApprovalService:
             note=note,
             actorDepartments=actorDepartments,
         )
-        await self._syncInstanceStatus(session, instance)
         return updated
 
     # ---------------------------------------------------------------- 清扫

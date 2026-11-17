@@ -77,7 +77,47 @@ class WorkflowInstanceStore(WorkflowStoreBase):
         （存在性预言机）；② 别人的键不会被占死（DoS）。
         """
 
-        insertedId = (
+        insertedId = await self._insertInstance(
+            session,
+            definitionId=definitionId,
+            idempotencyKey=idempotencyKey,
+            requestJson=requestJson,
+            actor=actor,
+            businessKey=businessKey,
+        )
+
+        existing = await self._loadInstanceByIdempotency(
+            session,
+            definitionId=definitionId,
+            idempotencyKey=idempotencyKey,
+            actor=actor,
+        )
+
+        if insertedId is not None:
+            # 只在**本次新建**时留事件（幂等重放不重复留痕）
+            await self._recordCreatedEvent(
+                session,
+                instanceId=existing.id,
+                definitionId=definitionId,
+                idempotencyKey=idempotencyKey,
+                actor=actor,
+            )
+
+        return existing, insertedId is not None
+
+    async def _insertInstance(
+        self,
+        session: AsyncSession,
+        *,
+        definitionId: int,
+        idempotencyKey: str,
+        requestJson: dict[str, Any],
+        actor: str,
+        businessKey: str | None,
+    ) -> int | None:
+        """插入实例行（幂等键冲突则不插）⇒ 返回新行 id；冲突时返回 ``None``。"""
+
+        return (
             await session.execute(
                 pg_insert(WorkflowInstance)
                 .values(
@@ -95,7 +135,17 @@ class WorkflowInstanceStore(WorkflowStoreBase):
             )
         ).scalar_one_or_none()
 
-        existing = (
+    async def _loadInstanceByIdempotency(
+        self,
+        session: AsyncSession,
+        *,
+        definitionId: int,
+        idempotencyKey: str,
+        actor: str,
+    ) -> WorkflowInstance:
+        """按（定义, 提交人, 幂等键）读回实例行。"""
+
+        return (
             await session.execute(
                 select(WorkflowInstance)
                 .where(
@@ -107,20 +157,27 @@ class WorkflowInstanceStore(WorkflowStoreBase):
             )
         ).scalar_one()
 
-        if insertedId is not None:
-            # 只在**本次新建**时留事件（幂等重放不重复留痕）
-            await self.enqueueEvent(
-                session,
-                instanceId=existing.id,
-                eventType=EVENT_INSTANCE_CREATED,
-                payload={
-                    "definitionId": definitionId,
-                    "idempotencyKey": idempotencyKey,
-                    "actor": actor,
-                },
-            )
+    async def _recordCreatedEvent(
+        self,
+        session: AsyncSession,
+        *,
+        instanceId: int,
+        definitionId: int,
+        idempotencyKey: str,
+        actor: str,
+    ) -> None:
+        """落「实例已创建」事件（只在**本次新建**时写）。"""
 
-        return existing, insertedId is not None
+        await self.enqueueEvent(
+            session,
+            instanceId=instanceId,
+            eventType=EVENT_INSTANCE_CREATED,
+            payload={
+                "definitionId": definitionId,
+                "idempotencyKey": idempotencyKey,
+                "actor": actor,
+            },
+        )
 
     async def advanceInstance(
         self,
@@ -128,7 +185,6 @@ class WorkflowInstanceStore(WorkflowStoreBase):
         instanceId: int,
         toStatus: str,
         *,
-        currentStep: str | None = None,
         errorMessage: str | None = None,
         resultJson: dict[str, Any] | None = None,
     ) -> WorkflowInstance:
@@ -138,8 +194,6 @@ class WorkflowInstanceStore(WorkflowStoreBase):
         assertWorkflowTransition("instance", current.status, toStatus)
 
         values: dict[str, Any] = {"status": toStatus, "updated_time": utcnow()}
-        if currentStep is not None:
-            values["current_step"] = currentStep
         if errorMessage is not None:
             values["error_message"] = errorMessage
         if resultJson is not None:
@@ -202,6 +256,41 @@ class WorkflowInstanceStore(WorkflowStoreBase):
         库层唯一约束仍是并发下的兜底。
         """
 
+        await self._assertStepCodesUnique(session, instanceId=instanceId, steps=steps)
+
+        rows = [
+            WorkflowStep(
+                instance_id=instanceId,
+                step_code=step["code"],
+                step_order=int(step.get("order", index)),
+                status=STATUS_PENDING,
+                input_json=step.get("input"),
+            )
+            for index, step in enumerate(steps)
+        ]
+        session.add_all(rows)
+        await session.flush()
+        await self.enqueueEvent(
+            session,
+            instanceId=instanceId,
+            eventType=EVENT_STEPS_CREATED,
+            payload={"stepCodes": [row.step_code for row in rows]},
+        )
+        return rows
+
+    async def _assertStepCodesUnique(
+        self,
+        session: AsyncSession,
+        *,
+        instanceId: int,
+        steps: Sequence[dict[str, Any]],
+    ) -> None:
+        """实例内步骤编码必须唯一（含与既有步骤的冲突）⇒ 重复直接拒。
+
+        **不靠库层唯一约束报错**（那会变成 500 而不是可读的 409）。
+        库层唯一约束仍是并发下的兜底。
+        """
+
         existingCodes = set(
             (
                 await session.execute(
@@ -224,26 +313,6 @@ class WorkflowInstanceStore(WorkflowStoreBase):
             raise ConflictError(
                 f"步骤编码重复：{', '.join(sorted(duplicates))}（实例内必须唯一）"
             )
-
-        rows = [
-            WorkflowStep(
-                instance_id=instanceId,
-                step_code=step["code"],
-                step_order=int(step.get("order", index)),
-                status=STATUS_PENDING,
-                input_json=step.get("input"),
-            )
-            for index, step in enumerate(steps)
-        ]
-        session.add_all(rows)
-        await session.flush()
-        await self.enqueueEvent(
-            session,
-            instanceId=instanceId,
-            eventType=EVENT_STEPS_CREATED,
-            payload={"stepCodes": [row.step_code for row in rows]},
-        )
-        return rows
 
     async def listSteps(self, session: AsyncSession, *, instanceId: int) -> list[WorkflowStep]:
         """列出实例的步骤（按 ``step_order`` 升序，id 次序兜底）。"""

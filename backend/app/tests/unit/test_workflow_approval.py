@@ -173,6 +173,33 @@ def test_步骤缺编码则拒绝():
         parseWorkflowSteps({"steps": [{"order": 0, "commandType": "po.collect"}]})
 
 
+def test_定义缺步骤则拒绝():
+    """缺 ``steps`` ⇒ **失败关闭**（不是「无步骤 = 一步即完成」）。
+
+    早期实现对缺失的 ``steps`` 返回空元组 ⇒ 定义漏写步骤时，提交会落一个
+    **零步骤**的实例 ⇒ 编排器走「没有步骤 ⇒ 直接 COMPLETED」⇒ **外部写一次
+    都没发生**，接口却报成功 ⇒ 假成功（G6 第一条「写操作全部经 Command」在
+    这条路径上被绕过且无人察觉）。
+    """
+
+    with pytest.raises(ValidationError):
+        parseWorkflowSteps({"riskLevel": "MEDIUM"})
+
+
+def test_步骤为空数组则拒绝():
+    """``steps: []`` 与「缺 steps」同义（零步骤 = 零动作）⇒ 一律拒绝。"""
+
+    with pytest.raises(ValidationError):
+        parseWorkflowSteps({"steps": []})
+
+
+def test_定义体为空则拒绝():
+    """``definition_json`` 为空 ⇒ 同样没有步骤 ⇒ 拒绝。"""
+
+    with pytest.raises(ValidationError):
+        parseWorkflowSteps(None)
+
+
 def test_步骤编码重复则拒绝():
     with pytest.raises(ValidationError):
         parseWorkflowSteps(

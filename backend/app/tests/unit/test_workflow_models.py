@@ -207,13 +207,15 @@ def test_定义表列集合():
 
 
 def test_实例表列集合():
+    # ⚠️ 这里**没有** ``current_step``：那一列早期是「预留」（全仓无人写 ⇒ 永远
+    # 是 NULL ⇒ 接口恒返回 null ⇒ 一个会骗人的字段）⇒ 已从迁移 + ORM + DTO 一并
+    # 删除（0149 未在任何持久环境执行 ⇒ 原地改，不新开迁移）。
     assert set(WorkflowInstance.__table__.columns.keys()) == {
         "id",
         "definition_id",
         "idempotency_key",
         "business_key",
         "status",
-        "current_step",
         "request_json",
         "result_json",
         "error_message",

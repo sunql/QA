@@ -351,7 +351,12 @@ async def test_幂等重放返回200而非201(workflowClient, dbSession):
 
 
 async def test_矩阵未覆盖返回409(workflowClient, dbSession):
-    """定义的风险级别没有矩阵条目 ⇒ 失败关闭（409）。"""
+    """定义的风险级别没有矩阵条目 ⇒ 失败关闭（409）。
+
+    ⚠️ 定义里**必须有可执行步骤**（否则提交面就 422 了）：这里刻意用**不带审批门**
+    的步骤 ⇒ 提交能成功（201），409 落在**显式审批请求**这个接口上 ⇒ 断的正是
+    「矩阵未覆盖 ⇒ 拒绝发起审批」这条纪律。
+    """
 
     await _seedActors(dbSession)
     definition = WorkflowDefinition(
@@ -360,6 +365,7 @@ async def test_矩阵未覆盖返回409(workflowClient, dbSession):
         version="v9",
         definition_json={
             "riskLevel": "HIGH",
+            "steps": [{"code": "collect", "order": 0, "commandType": "po.collect"}],
             "approvalMatrix": _MATRIX,
         },
         status="PUBLISHED",

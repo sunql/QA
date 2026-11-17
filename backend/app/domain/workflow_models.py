@@ -66,7 +66,6 @@ _INSTANCE_DEFINITION_COMMENT = "0149，P5：所属定义（workflow_definition.i
 _INSTANCE_IDEMPOTENCY_COMMENT = "0149，P5：幂等键（同一定义+同一提交人下唯一；重复提交只执行一次）"
 _INSTANCE_BUSINESS_KEY_COMMENT = "0149，P5：业务键（业务侧单号，可空）"
 _INSTANCE_STATUS_COMMENT = "0149，P5：实例状态（状态机字面量集合）"
-_INSTANCE_CURRENT_STEP_COMMENT = "0149，P5：当前步骤编码（workflow_step.step_code）"
 _INSTANCE_REQUEST_COMMENT = "0149，P5：实例请求体（JSON 对象）"
 _INSTANCE_RESULT_COMMENT = "0149，P5：实例结果体（JSON 对象，可空）"
 _INSTANCE_CREATED_BY_COMMENT = "0149，P5：提交人（幂等作用域的一环 ⇒ NOT NULL）"
@@ -198,9 +197,6 @@ class WorkflowInstance(Base, TimestampMixin):
         server_default=sa_text("'PENDING'"),
         comment=_INSTANCE_STATUS_COMMENT,
     )
-    current_step: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, comment=_INSTANCE_CURRENT_STEP_COMMENT
-    )
     request_json: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,
@@ -237,9 +233,7 @@ class WorkflowInstance(Base, TimestampMixin):
     )
 
     def __repr__(self) -> str:
-        return (
-            f"<WorkflowInstance id={self.id} def={self.definition_id} {self.status} step={self.current_step}>"
-        )
+        return f"<WorkflowInstance id={self.id} def={self.definition_id} {self.status}>"
 
 
 class WorkflowStep(Base, TimestampMixin):

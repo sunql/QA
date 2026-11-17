@@ -132,3 +132,62 @@ export interface WorkflowApprovalDecision {
   decision: WorkflowDecision;
   note?: string | null;
 }
+
+/* ------------------------------------------------------------------ */
+/* 定义管理面（admin-only 写入口）                                        */
+/* ------------------------------------------------------------------ */
+
+export type WorkflowDefinitionStatus = "DRAFT" | "PUBLISHED" | "DISABLED";
+
+/** 定义体里的一步（与后端 `WorkflowStepSpec` 同构）。 */
+export interface WorkflowDefinitionStep {
+  code: string;
+  order: number;
+  commandType?: string | null;
+  requiresApproval?: boolean;
+}
+
+/** 审批矩阵条目（与后端 `ApprovalMatrixEntry` 同构，camelCase 键）。 */
+export interface WorkflowApprovalMatrixEntry {
+  matrixCode: string;
+  subjectType: string;
+  capabilityCode: string;
+  riskLevel: string;
+  approverRole?: string | null;
+  approverUser?: string | null;
+  timeoutHours?: number | null;
+}
+
+/** `definitionJson` 的形状（后端契约，见 `app/services/workflow_definition.py`）。 */
+export interface WorkflowDefinitionBody {
+  riskLevel?: string | null;
+  steps: WorkflowDefinitionStep[];
+  approvalMatrix?: WorkflowApprovalMatrixEntry[] | null;
+}
+
+/** 管理面定义行（**含定义体**：编辑表单要用）。 */
+export interface WorkflowDefinitionAdminRead {
+  id: number;
+  domainCode: string;
+  capabilityCode: string;
+  version: string;
+  status: WorkflowDefinitionStatus;
+  definitionJson: WorkflowDefinitionBody;
+  createdBy: string | null;
+  createdTime: string;
+  updatedTime: string;
+}
+
+export interface WorkflowDefinitionAdminPage {
+  rows: WorkflowDefinitionAdminRead[];
+  total: number;
+}
+
+/** 新建 / 编辑定义的请求体。 */
+export interface WorkflowDefinitionWrite {
+  domainCode: string;
+  capabilityCode: string;
+  version: string;
+  definitionJson: WorkflowDefinitionBody;
+}
+

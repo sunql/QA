@@ -99,6 +99,9 @@ ITEMS: list[dict[str, Any]] = [
     # 两项都只是**读/操作面**：写接口受 ENABLE_WORKFLOW 开关与审批持有人校验约束。
     {"parent": "section.bizConfig", "code": "item.workflowInstances", "label_key": "menu.item.workflowInstances", "icon_code": "workflow", "sort_order": 377, "path": "/workflow"},
     {"parent": "section.bizConfig", "code": "item.workflowApprovals", "label_key": "menu.item.workflowApprovals", "icon_code": "approval", "sort_order": 378, "path": "/workflow/approvals"},
+    # 定义（模板）管理面：新建/编辑/发布/停用定义。写接口 admin-only，
+    # 且已发布定义不可改（只能停用 + 新建版本）—— 改审批矩阵 = 改「谁批」。
+    {"parent": "section.bizConfig", "code": "item.workflowDefinitions", "label_key": "menu.item.workflowDefinitions", "icon_code": "workflow", "sort_order": 379, "path": "/workflow/definitions"},
     # Foundation
     {"parent": "section.foundation", "code": "item.datasource", "label_key": "menu.item.datasource", "icon_code": "database", "sort_order": 410, "path": "/datasource"},
     # feat-local-import-evolution：本地数据初始化独立入口页 /local-import（复用 ImportWizard）

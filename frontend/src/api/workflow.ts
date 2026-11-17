@@ -9,7 +9,11 @@ import type {
   WorkflowApproval,
   WorkflowApprovalDecision,
   WorkflowApprovalPage,
+  WorkflowDefinitionAdminPage,
+  WorkflowDefinitionAdminRead,
+  WorkflowDefinitionStatus,
   WorkflowDefinitionSummary,
+  WorkflowDefinitionWrite,
   WorkflowInstance,
   WorkflowInstanceCreate,
   WorkflowInstanceDetail,
@@ -97,6 +101,68 @@ export async function listWorkflowDefinitions(
   const res = await httpClient.get<WorkflowDefinitionSummary[]>(
     `${BASE}/definitions`,
     { params: { limit } },
+  );
+  return res.data;
+}
+
+/* ------------------------------------------------------------------ */
+/* 定义管理面（admin-only 写入口）                                       */
+/* ------------------------------------------------------------------ */
+
+export interface WorkflowDefinitionAdminListParams {
+  status?: WorkflowDefinitionStatus;
+  limit?: number;
+  offset?: number;
+}
+
+/** 全部状态的定义（含定义体；后端仅 admin 可见）。 */
+export async function listWorkflowDefinitionAdmin(
+  params: WorkflowDefinitionAdminListParams = {},
+): Promise<WorkflowDefinitionAdminPage> {
+  const res = await httpClient.get<WorkflowDefinitionAdminPage>(
+    `${BASE}/admin/definitions`,
+    { params },
+  );
+  return res.data;
+}
+
+export async function createWorkflowDefinition(
+  payload: WorkflowDefinitionWrite,
+): Promise<WorkflowDefinitionAdminRead> {
+  const res = await httpClient.post<WorkflowDefinitionAdminRead>(
+    `${BASE}/admin/definitions`,
+    payload,
+  );
+  return res.data;
+}
+
+export async function updateWorkflowDefinition(
+  definitionId: number,
+  payload: WorkflowDefinitionWrite,
+): Promise<WorkflowDefinitionAdminRead> {
+  const res = await httpClient.put<WorkflowDefinitionAdminRead>(
+    `${BASE}/admin/definitions/${definitionId}`,
+    payload,
+  );
+  return res.data;
+}
+
+export async function publishWorkflowDefinition(
+  definitionId: number,
+): Promise<WorkflowDefinitionAdminRead> {
+  const res = await httpClient.post<WorkflowDefinitionAdminRead>(
+    `${BASE}/admin/definitions/${definitionId}/publish`,
+    {},
+  );
+  return res.data;
+}
+
+export async function disableWorkflowDefinition(
+  definitionId: number,
+): Promise<WorkflowDefinitionAdminRead> {
+  const res = await httpClient.post<WorkflowDefinitionAdminRead>(
+    `${BASE}/admin/definitions/${definitionId}/disable`,
+    {},
   );
   return res.data;
 }

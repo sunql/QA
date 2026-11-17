@@ -197,6 +197,7 @@ export const zhCN = {
       researchCompare: "研究对比",
       workflowInstances: "工作流实例",
       workflowApprovals: "待办审批",
+      workflowDefinitions: "工作流定义",
     },
   },
 
@@ -3637,6 +3638,70 @@ export const zhCN = {
       decisionFailed: "审批失败：{detail}",
       realAuthRequired:
         "待办审批要求真实登录身份：桩身份（X-User-Id 请求头）可被任意客户端伪造，不能用于审批。请通过登录页登录后重试。",
+    },
+  },
+
+  // P5 工作流**定义管理面**（admin-only）：新建 / 编辑 / 发布 / 停用定义（模板）。
+  workflowDefinition: {
+    title: "工作流定义",
+    hint: "定义（模板）决定实例的步骤与审批层级；只有「已发布」的定义会出现在提交候选集里。",
+    status: {
+      DRAFT: "草稿",
+      PUBLISHED: "已发布",
+      DISABLED: "已停用",
+    },
+    columns: {
+      id: "ID",
+      capability: "能力",
+      version: "版本",
+      status: "状态",
+      createdBy: "创建人",
+      updatedTime: "更新时间",
+      actions: "操作",
+    },
+    actions: {
+      create: "新建定义",
+      edit: "编辑",
+      publish: "发布",
+      disable: "停用",
+      disabledHint: "需新建版本",
+      addStep: "加一步",
+      removeStep: "删步骤",
+      addMatrix: "加审批行",
+      removeMatrix: "删审批行",
+    },
+    editor: {
+      createTitle: "新建工作流定义",
+      editTitle: "编辑工作流定义",
+      domainCode: "域代码",
+      capabilityCode: "能力代码",
+      version: "版本",
+      riskLevel: "风险级别",
+      stepCode: "步骤编码",
+      commandType: "命令类型",
+      requiresApproval: "需要审批",
+      matrixCode: "矩阵编码",
+      approverRole: "审批角色",
+      approverUser: "审批用户",
+      timeoutHours: "超时小时",
+      matrixScope: "匹配键",
+      matrixScopeHint:
+        "审批矩阵按「对象类型 / 能力代码 / 风险级别」精确匹配，提交时自动套用上面的能力代码与风险级别。",
+    },
+    filters: {
+      status: "按状态过滤",
+    },
+    validation: {
+      matrixCodeRequired: "填了审批角色 / 审批用户就必须填矩阵编码",
+    },
+    messages: {
+      loadFailed: "加载失败：{detail}",
+      saveOk: "已保存",
+      saveFailed: "保存失败：{detail}",
+      publishOk: "已发布",
+      publishFailed: "发布失败：{detail}",
+      disableOk: "已停用",
+      disableFailed: "停用失败：{detail}",
     },
   },
 

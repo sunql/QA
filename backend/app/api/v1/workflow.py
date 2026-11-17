@@ -32,12 +32,12 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import CurrentUser, getCurrentUser, getDb
+from app.dependencies import CurrentUser, getCurrentUser, getDb, requireAdmin
 from app.domain.exceptions import PermissionDeniedError
 from app.domain.workflow_models import (
     ApprovalTask,
@@ -50,7 +50,10 @@ from app.domain.workflow_schemas import (
     WorkflowApprovalPage,
     WorkflowApprovalRead,
     WorkflowApprovalRequest,
+    WorkflowDefinitionAdminPage,
+    WorkflowDefinitionAdminRead,
     WorkflowDefinitionRead,
+    WorkflowDefinitionWrite,
     WorkflowInstanceCancel,
     WorkflowInstanceCreate,
     WorkflowInstanceDetail,
@@ -66,6 +69,7 @@ from app.services.workflow_approval_query import (
     WorkflowApprovalQueryService,
 )
 from app.services.workflow_approval_service import WorkflowApprovalService
+from app.services.workflow_definition_service import WorkflowDefinitionService
 from app.services.workflow_service import WorkflowService
 
 router = APIRouter()
@@ -93,6 +97,10 @@ def getWorkflowApprovalService() -> WorkflowApprovalService:
 
 def getWorkflowApprovalQueryService() -> WorkflowApprovalQueryService:
     return WorkflowApprovalQueryService()
+
+
+def getWorkflowDefinitionService() -> WorkflowDefinitionService:
+    return WorkflowDefinitionService()
 
 
 @router.post(
@@ -352,6 +360,144 @@ async def listDefinitions(
 
     rows = await service.listPublishedDefinitions(session, limit=limit)
     return [WorkflowDefinitionRead.model_validate(row) for row in rows]
+
+
+# =============================================================================
+# 定义管理面（admin-only 写入口）
+#
+# 为什么单开 ``/admin`` 子路径而不是给 ``/definitions`` 加写方法：
+# 公共面「已发布 + 不含定义体」是**给所有登录用户**的读契约（提交表单候选集）；
+# 管理面要「全状态 + 含定义体」。两者权限与载荷都不同 ⇒ 分开表达，
+# 避免「同一条路径按角色返回不同形状」的隐式契约。
+# =============================================================================
+
+
+def _definitionAdminRead(row: WorkflowDefinition) -> WorkflowDefinitionAdminRead:
+    return WorkflowDefinitionAdminRead.model_validate(row)
+
+
+@router.get(
+    "/admin/definitions",
+    response_model=WorkflowDefinitionAdminPage,
+    summary="定义管理列表（仅 admin，含定义体）",
+)
+async def listAdminDefinitions(
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowDefinitionService = Depends(getWorkflowDefinitionService),
+    statusFilter: Annotated[
+        Literal["DRAFT", "PUBLISHED", "DISABLED"] | None,
+        Query(alias="status", description="状态过滤（默认全部）"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=DEFINITION_LIST_LIMIT_MAX)] = LIST_LIMIT_DEFAULT,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> WorkflowDefinitionAdminPage:
+    """全部状态的定义（**含 ``definitionJson``**：编辑表单要用）。"""
+
+    rows, total = await service.listDefinitions(
+        session, status=statusFilter, limit=limit, offset=offset
+    )
+    return WorkflowDefinitionAdminPage(
+        rows=[_definitionAdminRead(row) for row in rows], total=total
+    )
+
+
+@router.post(
+    "/admin/definitions",
+    response_model=WorkflowDefinitionAdminRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="新建工作流定义（DRAFT）",
+)
+async def createDefinition(
+    payload: WorkflowDefinitionWrite,
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowDefinitionService = Depends(getWorkflowDefinitionService),
+) -> WorkflowDefinitionAdminRead:
+    """新建定义，**一律 DRAFT**（发布后才能被提交）。
+
+    定义体由 ``workflow_definition.py`` 的纯函数校验（与运行时同一套）：
+    步骤可执行性 / 单轮审批 / 矩阵条目必须有审批人，非法 ⇒ 422。
+    """
+
+    row = await service.createDefinition(
+        session,
+        domainCode=payload.domain_code,
+        capabilityCode=payload.capability_code,
+        version=payload.version,
+        definitionJson=payload.definition_json,
+        actor=admin.userId,
+    )
+    return _definitionAdminRead(row)
+
+
+@router.put(
+    "/admin/definitions/{definitionId}",
+    response_model=WorkflowDefinitionAdminRead,
+    summary="编辑工作流定义（仅 DRAFT）",
+)
+async def updateDefinition(
+    definitionId: int,
+    payload: WorkflowDefinitionWrite,
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowDefinitionService = Depends(getWorkflowDefinitionService),
+) -> WorkflowDefinitionAdminRead:
+    """编辑 DRAFT；已发布定义改「谁批」= 改审批层级 ⇒ 409，请另建版本。"""
+
+    row = await service.updateDefinition(
+        session,
+        definitionId=definitionId,
+        domainCode=payload.domain_code,
+        capabilityCode=payload.capability_code,
+        version=payload.version,
+        definitionJson=payload.definition_json,
+        actor=admin.userId,
+    )
+    return _definitionAdminRead(row)
+
+
+@router.post(
+    "/admin/definitions/{definitionId}/publish",
+    response_model=WorkflowDefinitionAdminRead,
+    summary="发布工作流定义（DRAFT → PUBLISHED）",
+)
+async def publishDefinition(
+    definitionId: int,
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowDefinitionService = Depends(getWorkflowDefinitionService),
+) -> WorkflowDefinitionAdminRead:
+    """发布，发布前做**可运行性**校验。
+
+    - 有审批门但矩阵覆盖不到该域能力/风险级别 ⇒ 422（否则实例必卡死）；
+    - 同一域能力已有生效版本 ⇒ 409（**不自动替换**：自动替换 = 静默改审批层级，
+      请先停用旧版本）。
+    """
+
+    row = await service.publishDefinition(
+        session, definitionId=definitionId, actor=admin.userId
+    )
+    return _definitionAdminRead(row)
+
+
+@router.post(
+    "/admin/definitions/{definitionId}/disable",
+    response_model=WorkflowDefinitionAdminRead,
+    summary="停用工作流定义（PUBLISHED → DISABLED）",
+)
+async def disableDefinition(
+    definitionId: int,
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+    service: WorkflowDefinitionService = Depends(getWorkflowDefinitionService),
+) -> WorkflowDefinitionAdminRead:
+    """停用（≠ 删除：历史实例仍引用它；停用后可发布新版本接替）。"""
+
+    row = await service.disableDefinition(
+        session, definitionId=definitionId, actor=admin.userId
+    )
+    return _definitionAdminRead(row)
 
 
 @router.post(

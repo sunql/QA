@@ -54,17 +54,21 @@ def _enumeratePaths(app: object) -> list[str]:
 
 
 class TestRealAppRouteTable:
-    """路由表结构不变量：catch-all Mount 必须是最后一条路由。"""
+    """路由表结构不变量：MCP Mount 必须是最后一条路由。"""
 
     def test_no_route_registered_after_catch_all_mount(self) -> None:
-        """catch-all Mount（path=""，MCP streamable-http 挂在这里）之后不得再有路由。
+        """MCP Mount 之后不得再有路由。
 
-        Starlette 按**注册顺序**匹配：`Mount("")` 对任何路径前缀都命中，因此它之后
-        注册的路由永远不会被匹配到（被静默吞掉，表现为 404）。`/api/v1/health` 就曾
-        因为被写在 MCP mount 之后而整条不可达。
+        Starlette 按**注册顺序**匹配：Mount 对其前缀命中，因此它之后注册的路由
+        永远不会被匹配到（被静默吞掉，表现为 404）。`/api/v1/health` 就曾因为被
+        写在 MCP mount 之后而整条不可达。
 
         本断言把「MCP mount 必须是路由表最后一条」钉成不变量：任何新路由若加在
         mount 之后，这里立刻变红，而不是等到线上探测 404 才发现。
+
+        ⚠️ 挂载点路径演进：最早 MCP 挂在 ``path=""``（catch-all，任何前缀都命中），
+        后来改成 ``path="/mcp"``（只吃 /mcp 前缀）。两种形态都接受 —— 否则本守卫
+        会因「找不到 catch-all Mount」而恒红（既不报警也不护栏，属实为假失效）。
         """
         routes = _realApp().router.routes
 
@@ -72,18 +76,18 @@ class TestRealAppRouteTable:
             (
                 i
                 for i, r in enumerate(routes)
-                if isinstance(r, Mount) and (r.path or "") == ""
+                if isinstance(r, Mount) and (r.path or "") in ("", "/mcp")
             ),
             None,
         )
         assert mountIdx is not None, (
-            "未在真实 app 路由表中找到 catch-all Mount（MCP 挂载点）—— "
+            "未在真实 app 路由表中找到 MCP Mount（挂载点）—— "
             "装配方式已变，请同步更新本守卫"
         )
 
         shadowed = routes[mountIdx + 1 :]
         assert not shadowed, (
-            f"catch-all Mount（第 {mountIdx} 条）之后仍有 {len(shadowed)} 条路由，"
+            f"MCP Mount（第 {mountIdx} 条）之后仍有 {len(shadowed)} 条路由，"
             f"它们会被永久遮蔽（请求一律落到 MCP 子 app）："
             f"{[_routePath(r) for r in shadowed]}"
         )
@@ -93,7 +97,12 @@ class TestRealAppWorkflowRouteGating:
     """P5 工作流路由的**开关门控**守卫（真实 app）。
 
     契约：``ENABLE_WORKFLOW`` 默认 **false** ⇒ 整组路由**不注册**（对外 404）
-    ⇒ 「没开 = 没有这个面」。开关打开 ⇒ 5 条路由都在。
+    ⇒ 「没开 = 没有这个面」。开关打开 ⇒ 整组工作流路由都在（含 admin 定义
+    管理面：``/workflow/admin/definitions*``）。
+
+    期望值是**逐条**列举的：``_workflowPaths`` 按 path 排序且**不去重**
+    （同一 path 的多个方法各占一条）⇒ 新增/删除任何一条工作流路由都必须
+    同步这里，否则本守卫立刻红。
 
     ⚠️ 本文件是**既有** integration 文件（D-12：不得新建 integration 文件，
     否则分片按「排序下标 mod 4」轮转 ⇒ 假 net-new）。
@@ -151,7 +160,15 @@ class TestRealAppWorkflowRouteGating:
             getSettings.cache_clear()
 
         assert paths == [
+            "/api/v1/workflow/admin/definitions",
+            "/api/v1/workflow/admin/definitions",
+            "/api/v1/workflow/admin/definitions/{definitionId}",
+            "/api/v1/workflow/admin/definitions/{definitionId}/disable",
+            "/api/v1/workflow/admin/definitions/{definitionId}/publish",
+            "/api/v1/workflow/approvals",
             "/api/v1/workflow/approvals/{taskId}/decision",
+            "/api/v1/workflow/definitions",
+            "/api/v1/workflow/instances",
             "/api/v1/workflow/instances",
             "/api/v1/workflow/instances/{instanceId}",
             "/api/v1/workflow/instances/{instanceId}/approval-request",

@@ -134,6 +134,7 @@ describe("AppLayout menu fetch + fallback", () => {
               <Route path="/chat" element={<div>聊天页</div>} />
               <Route path="/models" element={<div>模型页</div>} />
               <Route path="/data-quality" element={<div>质量页</div>} />
+              <Route path="/workflow/definitions" element={<div>定义页</div>} />
             </Route>
           </Routes>
         </MemoryRouter>
@@ -202,6 +203,59 @@ describe("AppLayout menu fetch + fallback", () => {
 
     // The data-quality child item should be reachable and rendered
     expect(await screen.findByText("数据质量")).toBeInTheDocument();
+  });
+
+  it("选中的菜单项按**最长路径**匹配（子路径不被父路径抢走）", async () => {
+    // P5 定义页回归：/workflow 是 /workflow/definitions 的**前缀** ⇒ 若按
+    // 「先匹配到谁算谁」，定义页的页头标题与菜单高亮会停在「工作流实例」上
+    // （用户看到的是另一个页面的名字）。正确口径 = **最长匹配**。
+    const nestedConfig = {
+      version: "2026-11-17",
+      sections: [
+        {
+          code: "section.bizConfig",
+          labelKey: "menu.section.bizConfig",
+          iconCode: "setting",
+          sortOrder: 300,
+          permissionCode: null,
+          roles: [],
+          path: null,
+          children: [
+            {
+              code: "item.workflowInstances",
+              labelKey: "menu.item.workflowInstances",
+              iconCode: "workflow",
+              sortOrder: 377,
+              permissionCode: null,
+              roles: [],
+              path: "/workflow",
+            },
+            {
+              code: "item.workflowDefinitions",
+              labelKey: "menu.item.workflowDefinitions",
+              iconCode: "workflow",
+              sortOrder: 379,
+              permissionCode: null,
+              roles: [],
+              path: "/workflow/definitions",
+            },
+          ],
+        },
+      ],
+    };
+    vi.mocked(fetchMenuConfig).mockResolvedValue(nestedConfig);
+    renderLayout("/workflow/definitions");
+
+    const header = document.querySelector("header")!;
+    await screen.findByText("业务配置");
+    expect(header.textContent).toContain("工作流定义");
+    expect(header.textContent).not.toContain("工作流实例");
+
+    // 展开所在 section（默认只展开 aiAgent）⇒ 叶子项进 DOM 后看高亮的是谁
+    const user = userEvent.setup();
+    await user.click(screen.getByText("业务配置"));
+    const selected = document.querySelector(".ant-menu-item-selected");
+    expect(selected?.textContent).toContain("工作流定义");
   });
 
   it("系统信息配置（section.systemConfig）始终折叠：localStorage 残留也过滤", async () => {

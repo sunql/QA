@@ -113,7 +113,7 @@
 
 | 项 | 处置 |
 |---|---|
-| 定义管理 UI（发布/版本/矩阵编辑） | 不做。定义目前由迁移/脚本播种；管理面属 A4 的审批面扩展 |
+| 定义管理 UI（发布/版本/矩阵编辑） | 本批次不做，已由**定义管理批次**补齐：[`../2026-11-17-p5-workflow-definition-admin/summary.md`](../2026-11-17-p5-workflow-definition-admin/summary.md)（`/workflow/definitions`，admin 写面 + 审批矩阵行编辑） |
 | 待办的扫描上限（D-U2） | A4-0：审批人落任务行 |
 | 「从业务对象页跳转提交」 | 不做，见 §1；P6 再谈 capability→UI 的映射 |
 | 页面在 stub 身份下的待办 | 按设计 403 并提示登录；本地验收需真实 JWT（见验收手册） |

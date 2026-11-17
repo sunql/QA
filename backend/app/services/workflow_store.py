@@ -1,6 +1,6 @@
 """P5 工作流存储层（**门面**）：写操作收敛的唯一入口。
 
-**为什么是门面**：存储层按职责域拆成三个子存储 + 一个共享底座，单文件都在行数
+**为什么是门面**：存储层按职责域拆成四个子存储 + 一个共享底座，单文件都在行数
 上限（800 行）内，且「谁写哪张表」一眼可见：
 
 ======================  ====================================================
@@ -10,10 +10,11 @@
 ``workflow_instance_store``  实例 + 步骤（``workflow_instance`` / ``workflow_step``）
 ``workflow_command_store``   业务命令（``business_command``）
 ``workflow_approval_store``  审批任务（``approval_task``）
-``workflow_store``（本文件） 门面：把三者组合成一个入口
+``workflow_definition_store`` 工作流定义（``workflow_definition``）
+``workflow_store``（本文件） 门面：把四者组合成一个入口
 ======================  ====================================================
 
-**调用方无须知道拆分**：门面同时继承三个子存储 ⇒ 方法名与拆分前**逐字一致**
+**调用方无须知道拆分**：门面同时继承四个子存储 ⇒ 方法名与拆分前**逐字一致**
 ⇒ 调用点零改动。
 
 三条纪律（对应实施计划 D-2 / D-3 / D-4，详见 ``workflow_store_base.py``）：
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 from app.services.workflow_approval_store import WorkflowApprovalStore
 from app.services.workflow_command_store import WorkflowCommandStore
+from app.services.workflow_definition_store import WorkflowDefinitionStore
 from app.services.workflow_instance_store import WorkflowInstanceStore
 from app.services.workflow_store_base import (
     EVENT_APPROVAL_CANCELLED,
@@ -73,8 +75,9 @@ class WorkflowStore(
     WorkflowInstanceStore,
     WorkflowCommandStore,
     WorkflowApprovalStore,
+    WorkflowDefinitionStore,
 ):
-    """存储层门面：实例+步骤 / 命令 / 审批 三块拼成一个入口。
+    """存储层门面：实例+步骤 / 命令 / 审批 / 定义 四块拼成一个入口。
 
     用**多继承**而不是逐个转发方法 ⇒ 方法名与拆分前逐字一致 ⇒ 调用点零改动，
     也不会出现「转发层与实现层签名漂移」。

@@ -191,6 +191,7 @@ export const enUS = {
       researchCompare: "Research Compare",
       workflowInstances: "Workflow Instances",
       workflowApprovals: "My Approvals",
+      workflowDefinitions: "Workflow Definitions",
     },
   },
 
@@ -3631,6 +3632,71 @@ export const enUS = {
       decisionFailed: "Decision failed: {detail}",
       realAuthRequired:
         "Approvals require a verified login identity: stub identity (X-User-Id header) can be forged by any client and must not be used for approvals. Please sign in and retry.",
+    },
+  },
+
+  // P5 workflow definition management (admin-only): create / edit / publish / disable.
+  workflowDefinition: {
+    title: "Workflow Definitions",
+    hint: "A definition (template) determines the steps and approval tier of an instance; only published definitions show up in the submit candidate list.",
+    status: {
+      DRAFT: "Draft",
+      PUBLISHED: "Published",
+      DISABLED: "Disabled",
+    },
+    columns: {
+      id: "ID",
+      capability: "Capability",
+      version: "Version",
+      status: "Status",
+      createdBy: "Created by",
+      updatedTime: "Updated",
+      actions: "Actions",
+    },
+    actions: {
+      create: "New Definition",
+      edit: "Edit",
+      publish: "Publish",
+      disable: "Disable",
+      disabledHint: "Create a new version",
+      addStep: "Add step",
+      removeStep: "Remove step",
+      addMatrix: "Add approval row",
+      removeMatrix: "Remove approval row",
+    },
+    editor: {
+      createTitle: "New Workflow Definition",
+      editTitle: "Edit Workflow Definition",
+      domainCode: "Domain code",
+      capabilityCode: "Capability code",
+      version: "Version",
+      riskLevel: "Risk level",
+      stepCode: "Step code",
+      commandType: "Command type",
+      requiresApproval: "Requires approval",
+      matrixCode: "Matrix code",
+      approverRole: "Approver role",
+      approverUser: "Approver user",
+      timeoutHours: "Timeout (hours)",
+      matrixScope: "Match key",
+      matrixScopeHint:
+        "Approval rows are matched exactly on subject type / capability code / risk level; the capability code and risk level above are applied automatically.",
+    },
+    filters: {
+      status: "Filter by status",
+    },
+    validation: {
+      matrixCodeRequired:
+        "A matrix code is required once an approver role / approver user is filled in",
+    },
+    messages: {
+      loadFailed: "Failed to load: {detail}",
+      saveOk: "Saved",
+      saveFailed: "Save failed: {detail}",
+      publishOk: "Published",
+      publishFailed: "Publish failed: {detail}",
+      disableOk: "Disabled",
+      disableFailed: "Disable failed: {detail}",
     },
   },
   profile: {

@@ -116,8 +116,11 @@ grep -n -A30 "^  milvus" docker-compose.centos7.yml
       - /opt/qa-system/docker/milvus-user.yaml:/milvus/configs/user.yaml:ro
 ```
 
-> ⚠️ **服务名与 `container_name` 以 3.2 第一条命令的输出为准**（本地仓库叫 `milvus-standalone`，
-> 生产可能是 `milvus`）。**只改 Milvus 这一个服务的 volumes**。
+> ⚠️ **服务名与 `container_name` 以 3.2 第一条命令的输出为准**。**只改 Milvus 这一个服务的 volumes**。
+> 2026-11-17 生产实测：服务名 **`milvus-standalone`**、`container_name` **`qa-milvus`**
+> ⇒ 命令末尾必须写 `milvus-standalone`（写 `milvus` 会 `ERROR: No such service`，不产生任何变更）。
+> 同一文件里还有 `milvus-etcd` / `milvus-minio` 两个服务块，`grep "^  milvus"` 会全部命中，
+> 别改错块。
 > ⚠️ 不要用 `sed -i` 盲改（可能改到别的服务的 volumes）；先看清缩进再手改，改完 diff 一遍。
 
 ### 3.3 校验 + 重建（**只重建 Milvus 一个容器**）

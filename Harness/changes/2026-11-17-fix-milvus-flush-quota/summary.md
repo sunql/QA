@@ -216,6 +216,31 @@ delete 后要 **release + load** 才在 QueryNode 可见（见 `milvus_client.re
 | M2 | `syncRegistryV2Embeddings` 仍是逐条 delete+flush | 整段受 `ENABLE_SEMANTIC_REGISTRY_RAG` 开关控制、生产默认**关** ⇒ 当前不产生 flush 扇出；开启前须先批量 |
 | M4 / M5 / M6、L1–L4 | 日志措辞、异常类型细化、常量命名等 | 不影响正确性；随下次触碰该文件时顺带 |
 
+## 8. 生产验收记录（逐步回填）
+
+### 8.1 Phase 0 取证（2026-11-17，ai-server）
+
+```text
+compose config_files : /opt/qa-system/docker/docker-compose.centos7.yml   ← 与 runbook 预期一致
+compose working_dir  : /opt/qa-system/docker
+mounts               : 仅 qa-system_milvus_data → /var/lib/milvus      ← 无任何配置覆盖
+flushRate            : collection.max: 0.1                              ← 出厂值，根因确认
+user.yaml            : No such file or directory
+milvus 服务名         : milvus-standalone（container_name = qa-milvus）
+                       ⇒ `up -d --no-deps` 必须写 milvus-standalone，写 milvus 报 No such service
+```
+
+影响面（`docker logs qa-backend --since 24h`）：
+
+| 指标 | 值 |
+|---|---|
+| `rate limit exceeded` 出现次数 | **2775** |
+| 受影响属性数（`属性向量自动同步失败` 去重 id） | **555** |
+| 平均每属性重试轮次 | ≈ 5 |
+
+⇒ 服务端配额就是 0.1 qps、生产**从未**挂过配置覆盖 ⇒ 根因第 1 层在生产侧实锤；
+555 个属性是 Phase 4 对账的真实工作量（≈ 555 次 embedding 调用，整批 insert = 单次 flush）。
+
 相关：[[qa-system-prod-hotfix-1116-vecsync]]（PR #143 = 2.4 里的热修）、
 [[qa-system-bg-task-session-isolation]]（热修的根因与锁约定）、
 [[qa-system-milvus-family]]（Milvus 家族其他坑）

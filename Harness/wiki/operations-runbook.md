@@ -53,6 +53,49 @@ docker compose --env-file .env up -d backend frontend
 
 后端镜像重建实测 ~9 分钟（apt + uv sync 层会 miss cache），别当卡死。
 
+### Milvus 必带 flush 配额覆盖（2026-11-17，CRITICAL）
+
+Milvus 镜像**出厂** `quotaAndLimits.flushRate.collection.max: 0.1` ⇒ **每集合每 10 秒
+只放行 1 次 flush**，且**拒绝不排队**。本体向量写路径「删+插」= 同集合 2 次 flush，
+导入 N 个属性并发同步 ⇒ 2N 次 flush 抢一个桶 ⇒ pymilvus 75 次重试（≈210s）耗尽 ⇒
+向量同步硬失败（CRUD 仍 200、语义召回静默失效）。
+
+**任何新装 / 重建 / 换机都必须挂覆盖**（新装机器最容易漏，因为它不在镜像里）：
+
+```bash
+cd /opt/qa-system/docker
+cat > milvus-user.yaml <<'EOF'
+quotaAndLimits:
+  flushRate:
+    enabled: true
+    collection:
+      max: 5
+EOF
+```
+
+在 compose 的 **`milvus-standalone`** 服务 `volumes:` 下追加：
+
+```yaml
+      - /opt/qa-system/docker/milvus-user.yaml:/milvus/configs/user.yaml:ro
+```
+
+```bash
+docker-compose -p qa-system --env-file .env -f docker-compose.centos7.yml config --quiet
+docker-compose -p qa-system --env-file .env -f docker-compose.centos7.yml \
+  up -d --no-deps milvus-standalone      # 服务名不是 milvus；不加 --remove-orphans
+```
+
+**判据（文件存在 ≠ 生效）**：编辑一个属性保存后
+
+```bash
+docker logs qa-backend --since 5m 2>&1 | grep -E "rate limit exceeded|向量自动同步失败"
+# 必须无输出
+```
+
+仍报 `rate=0.1` ⇒ 该版本没读 `user.yaml`，改用覆盖 `milvus.yaml` 的备选方案
+（`Harness/changes/2026-11-17-fix-milvus-flush-quota/deploy-prod-milvus-config.md` §4.1）。
+规则侧见 `Harness/rules/部署与访问规范.md` §六。
+
 ### 部署前必须过：镜像密钥 preflight
 
 `.dockerignore` 排的是 build context，而 `Dockerfile.backend` 里

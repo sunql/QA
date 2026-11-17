@@ -5,10 +5,10 @@
 
 | 项 | 值 |
 |---|---|
-| **状态** | **implemented**（待 PR） |
+| **状态** | **implemented**（已合入 main） |
 | **规模** | M（3 个页面级单元 + 1 个 api 模块 + 3 个后端只读接口 + 菜单 seed） |
 | **分支** | `docs/p5-acceptance-1117`（worktree `/private/tmp/qa-p5`） |
-| **合并** | PR #<<PR_NO>> squash ⇒ `main @ <<MERGE_SHA>>`（合并后回填） |
+| **合并** | PR **#150** squash ⇒ `main @ 1e04b46e`（2026-11-17） |
 | **迁移** | **无**（只追加 GET 接口） |
 | **开关** | 同 P5：`ENABLE_WORKFLOW` 关闭 ⇒ 三个新接口一并 404 |
 
@@ -117,3 +117,7 @@
 | 待办的扫描上限（D-U2） | A4-0：审批人落任务行 |
 | 「从业务对象页跳转提交」 | 不做，见 §1；P6 再谈 capability→UI 的映射 |
 | 页面在 stub 身份下的待办 | 按设计 403 并提示登录；本地验收需真实 JWT（见验收手册） |
+| 生产部署 | 未部署。窗口② **必须连前端镜像一起发**（前端路由已存在、后端路由未注册 ⇒ 点菜单 404）；步骤见 [`../2026-11-16-p5-workflow-command/deploy-prod-1117.md`](../2026-11-16-p5-workflow-command/deploy-prod-1117.md) §2.2 / §7.1 |
+
+> 合并仲裁记录（PR #150 判 exit 5：净新增 0 / 净丢失 1，净丢失已证伪为「修好恒红假失效」）
+> 见 [`../2026-11-17-p5-workflow-definition-admin/summary.md`](../2026-11-17-p5-workflow-definition-admin/summary.md) §6。

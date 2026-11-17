@@ -6,10 +6,10 @@
 
 | 项 | 值 |
 |---|---|
-| **状态** | **implemented**（W0–W4 已提交；W5 评审整改 R1–R11 全部完成；待 PR 合并） |
+| **状态** | **implemented**（W0–W4 已提交；W5 评审整改 R1–R11 全部完成；**已合入 main**） |
 | **规模** | L（唯一 L 级事项） |
 | **分支** | `feat/workflow-command`（worktree `/private/tmp/qa-p5`，从 `origin/main` 新开） |
-| **合并** | PR #<<PR_NO>> squash ⇒ `main @ <<MERGE_SHA>>`（合并后回填） |
+| **合并** | PR **#148** squash ⇒ `main @ a217fef0`（2026-11-17）；**两批前端**另见 [`../2026-11-17-p5-workflow-ui/summary.md`](../2026-11-17-p5-workflow-ui/summary.md)（PR #150）· [`../2026-11-17-p5-workflow-definition-admin/summary.md`](../2026-11-17-p5-workflow-definition-admin/summary.md)（PR #150） |
 | **迁移** | **0149–0152**（4 个：0149 定义/实例 · 0150 步骤/命令 · 0151 审批/outbox · 0152 放宽 `audit_log` CHECK）⇒ **WP-ONT-AI 从 `0153` 起** |
 | **开关** | `ENABLE_WORKFLOW`（默认 **false**；不进生产 `.env`） |
 | **门禁** | **G6**：写操作全走 Command；Agent 仍只读；默认关闭可上线；回滚 = 关开关 + 停 Worker |
@@ -282,7 +282,7 @@ P5 只挂 `workflow.router`（`include_router`，非 Mount）⇒ **不触碰挂�
 | 补偿不取消待执行命令 ⇒ 纸面回滚 | 高 | 补偿先取消 PENDING 命令（D-19） | 已修 |
 | 步骤定义含糊 ⇒ 实例假成功 | 高 | 失败关闭的解析期规则（D-13） | 已修 |
 | 审批面写死 ⇒ A4 返工 | 高 | 预留 subject 型引用；A4 只保留业务审核记录 | 已做 |
-| 一次上 9 个未验证迁移 | 高 | 先做「迁移链收口」批次（生产必须先到 0148） | **未做（部署前置）** |
+| 一次上 9 个未验证迁移 | 高 | **已拆两个窗口**：① 迁移链收口 `0143→0148`（源只认 `86ff4a1f`）② P5 本体 + 前端（源 `1e04b46e`）—— 见 `deploy-prod-1117.md` §0.2 / §0.3 | **待生产执行（部署前置）** |
 | compose v1 写法踩坑 | 中 | 硬约束 + `config --quiet` + 复刻既有 v1 兼容片段 + 片段守卫单测 | 已做 |
 | 并发丢步（identity map 不刷新） | 中 | `populate_existing=True` + 并发用例钉住 | 已做 |
 | 既有红基线掩盖新失败 | 中 | 净新增 0 判据 + 失败集合逐片对差 | 回归时判定 |

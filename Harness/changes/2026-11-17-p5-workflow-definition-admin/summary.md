@@ -6,10 +6,10 @@
 
 | 项 | 值 |
 |---|---|
-| **状态** | **implemented**（待 PR） |
+| **状态** | **implemented**（已合入 main） |
 | **规模** | M（5 个 admin 接口 + 1 个定义页 + 1 个存储层 + 菜单 seed + 1 处前端框架修复） |
 | **分支** | `docs/p5-acceptance-1117`（worktree `/private/tmp/qa-p5`） |
-| **合并** | PR #<<PR_NO>> squash ⇒ `main @ <<MERGE_SHA>>`（合并后回填） |
+| **合并** | PR **#150** squash ⇒ `main @ 1e04b46e`（2026-11-17） |
 | **迁移** | **无**（复用 P5 已有的 `workflow_definition` 表与既有约束） |
 | **开关** | 同 P5：`ENABLE_WORKFLOW` 关闭 ⇒ 整组 `/workflow/*` 路由不注册（404） |
 
@@ -125,4 +125,21 @@ capabilityCode=定义.capability_code, riskLevel=定义顶层 riskLevel)`）。
 | 定义体 JSON 的可视化编辑（嵌套结构） | 当前是结构化表单（步骤行 + 矩阵行），不是任意 JSON 编辑器；`payload` 仍是自由 JSON 文本 |
 | 定义的删除 | 不做。只有状态机（DRAFT/PUBLISHED/DISABLED），不物理删除历史行（对账需要） |
 | 提交权收口到角色/域 | 仍未做（见验收手册 §6 边界 3）：任何登录用户可提交任何已发布能力 —— 产品决策项 |
-| 生产部署 | 未部署；步骤见 `../2026-11-16-p5-workflow-command/deploy-prod-1117.md`（占位待回填） |
+| 生产部署 | 未部署；步骤见 `../2026-11-16-p5-workflow-command/deploy-prod-1117.md` —— **两个窗口**：① 迁移链收口（`0143`→`0148`，源 **只认 `86ff4a1f`**，同 head 0148 的 `68398378`/`75a435a3` 不含生产热修 ⇒ 会回退）② P5 本体 + **前端镜像**（源 `1e04b46e`；前端必发，`VITE_API_BASE_URL` 显式留空）③ 开启开关 + Worker（独立决策） |
+
+## 6. 合并仲裁记录（PR #150，2026-11-17）
+
+闸门（`merge-gate / failure-set-diff`）实测判 **exit 5**：基线 run 44053446789（main @ `a217fef0`）失败 130 条，
+PR run 44093051740（head `2f067856`）失败 129 条 ⇒ **净新增 0 条 / 净丢失 1 条** ⇒ owner 越权口仲裁合并
+（`gh pr merge --squash --admin --delete-branch` ⇒ `main @ 1e04b46e`）。
+
+**那 1 条「净丢失」不是藏失败**：`test_app_wiring.py::TestRealAppRouteTable::test_no_route_registered_after_catch_all_mount`
+在基线红因是 `AssertionError: 未在真实 app 路由表中找到 catch-all Mount（MCP 挂载点）` / `assert None is not None`
+—— 守卫只认 `Mount(path=="")`，而 app 的 MCP 早已挂在 `Mount("/mcp")`（`main.py:803`）⇒ **恒红的假失效**，
+从未触达它自己的真不变量。本批把守卫对齐现实形态（接受 `""` 或 `"/mcp"`），实测：真值 mount 位于 373 条
+真实路由的**最后一条**（下标 372）⇒ 断言通过；**注入**一条 mount 之后的路由 ⇒ 守卫立刻抓到 ⇒ **护栏真实有效**，
+不是把断言放松成空断言。本地复跑 `pytest app/tests/integration/test_app_wiring.py` ⇒ 4 passed。
+
+其余四件套：净新增 0（闸门 + 本地同款工具**双路独立复算一致**）· 9 个 job 全部 usable 且两侧 job 集合一致 ·
+未新建/删除任何 integration 测试文件（分片归属未变）· seed 改动属 CI 相关面（净丢失若为空本会判 exit 6，
+两种情形都需 owner 仲裁，一次 bypass 覆盖）。

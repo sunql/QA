@@ -36,6 +36,11 @@ KNOWN_ICON_CODES: frozenset[str] = frozenset({
     "user", "team", "org", "menu",
     # 本地导入 / 知识导入共用（ICON_REGISTRY 中已有 "import"）
     "import", "setting",
+    # P5 工作流：实例/定义用 "workflow"（BranchesOutlined）、待办审批用
+    # "approval"（CheckSquareOutlined）—— 与前端 ICON_REGISTRY 同批注册。
+    # ⚠️ 这里与 `frontend/src/tests/menuIcons.test.ts` 的白名单是**两份 SSOT**，
+    #    新增 icon 必须三处同改（registry + 前端白名单 + 本白名单）。
+    "workflow", "approval",
 })
 
 

@@ -31,6 +31,7 @@ import FilterBar from "./FilterBar";
 import type { FilterField } from "./FilterBar";
 import { filterJoins } from "../../utils/ontologyFilter";
 import type { FilterValues } from "../../utils/ontologyFilter";
+import { useTablePagination } from "../../utils/useTablePagination";
 import { classOptions } from "./classOptions";
 
 const { TextArea } = Input;
@@ -85,9 +86,16 @@ export default function JoinTab({ classes }: JoinTabProps) {
   const className = (id: number) => classes.find((c) => c.id === id)?.className ?? `ID:${id}`;
 
   const [filters, setFilters] = useState<FilterValues>({});
+  // 标准分页（与类/属性/指标/语义关系四个 Tab 同一套）：每页 20 条 + 总条数 +
+  // 每页条数选择 + 快速跳页（见 utils/useTablePagination）。
+  const { pagination, setPage } = useTablePagination();
   const updateFilter = useCallback(
-    (k: string, v: string) => setFilters((prev) => ({ ...prev, [k]: v })),
-    []
+    (k: string, v: string) => {
+      setFilters((prev) => ({ ...prev, [k]: v }));
+      // 命中数变化后回到第 1 页（保留用户选的每页条数），否则可能停在空页上。
+      setPage(1);
+    },
+    [setPage]
   );
   const resetFilters = useCallback(() => setFilters({}), []);
   // 「仅外来键」：只显示 relation_type=foreign_key 的边——这些多由本地导入
@@ -244,7 +252,11 @@ export default function JoinTab({ classes }: JoinTabProps) {
         <Space size="middle">
           <Checkbox
             checked={onlyForeignKeys}
-            onChange={(e) => setOnlyForeignKeys(e.target.checked)}
+            onChange={(e) => {
+              setOnlyForeignKeys(e.target.checked);
+              // 命中集合变化 ⇒ 回到第 1 页（否则可能停在空页上）。
+              setPage(1);
+            }}
           >
             {t("forms.ontology.joinOnlyForeignKeys")}
           </Checkbox>
@@ -274,7 +286,13 @@ export default function JoinTab({ classes }: JoinTabProps) {
         onChange={updateFilter}
         onReset={resetFilters}
       />
-      <Table rowKey="id" loading={loading} dataSource={filteredJoins} columns={columns} />
+      <Table
+        rowKey="id"
+        loading={loading}
+        dataSource={filteredJoins}
+        columns={columns}
+        pagination={pagination}
+      />
       <Modal
         title={t("forms.ontology.addJoinModalTitle")}
         open={modalOpen}

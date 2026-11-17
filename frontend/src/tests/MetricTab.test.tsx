@@ -498,6 +498,64 @@ describe("MetricTab — 结构化技术形态", () => {
     expect(payload.timeColumn).toBe("ORDER_DATE");
   });
 });
+// =============================================================================
+// 分页（2026-11-17：与类/属性/关联四个 Tab 统一到仓库标准分页）
+// =============================================================================
+
+/** 造 n 条可区分的指标：名字 `指标01`… 便于断言「第几条在当前页」。 */
+function manyMetrics(n: number): OntologyMetric[] {
+  return Array.from({ length: n }, (_, i) => ({
+    ...mockMetric,
+    id: 100 + i,
+    metricName: `指标${String(i + 1).padStart(2, "0")}`,
+    metricAlias: `metric_${i + 1}`,
+  }));
+}
+
+describe("MetricTab — 分页", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listMetrics.mockResolvedValue(manyMetrics(25));
+  });
+
+  it("默认每页 20 条并显示总条数", async () => {
+    renderTab();
+    await screen.findByText("指标01");
+
+    // 总条数：标准分页才有的 showTotal（antd 默认分页没有 ⇒ 这条是真断言）
+    expect(screen.getByText("共 25 条")).toBeInTheDocument();
+    // 每页 20 条 ⇒ 第 11 条在第 1 页、第 21 条不在（antd 默认 pageSize=10 ⇒ 第 11 条也不在）
+    expect(screen.getByText("指标11")).toBeInTheDocument();
+    expect(screen.queryByText("指标21")).not.toBeInTheDocument();
+  });
+
+  it("翻到第 2 页显示剩余 5 条", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByText("指标01");
+
+    await user.click(screen.getByTitle("2"));
+
+    expect(await screen.findByText("指标21")).toBeInTheDocument();
+    expect(screen.queryByText("指标01")).not.toBeInTheDocument();
+  });
+
+  it("筛选条件变化后回到第 1 页（否则停在第 2 页看不到首条）", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByText("指标01");
+
+    await user.click(screen.getByTitle("2"));
+    await screen.findByText("指标21");
+
+    // 过滤条件命中全部 25 条 ⇒ 仍是两页；若没重置页码，就停在第 2 页
+    await user.type(screen.getByPlaceholderText("指标名"), "指标");
+
+    expect(await screen.findByText("共 25 条")).toBeInTheDocument();
+    expect(screen.getByText("指标01")).toBeInTheDocument();
+  });
+});
+
 describe("MetricTab — 写入口 admin 门禁", () => {
   beforeEach(() => {
     vi.clearAllMocks();

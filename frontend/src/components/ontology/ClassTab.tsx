@@ -42,6 +42,7 @@ import FilterBar from "./FilterBar";
 import type { FilterField } from "./FilterBar";
 import { filterClasses } from "../../utils/ontologyFilter";
 import type { FilterValues } from "../../utils/ontologyFilter";
+import { useTablePagination } from "../../utils/useTablePagination";
 import { classOptions } from "./classOptions";
 
 const { TextArea } = Input;
@@ -108,9 +109,16 @@ export default function ClassTab({
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [versionsOf, setVersionsOf] = useState<string | null>(null);
   const [filters, setFilters] = useState<FilterValues>({});
+  // 标准分页（与属性/指标/关联/语义关系四个 Tab 同一套）：每页 20 条 + 总条数 +
+  // 每页条数选择 + 快速跳页（见 utils/useTablePagination）。
+  const { pagination, setPage } = useTablePagination();
   const updateFilter = useCallback(
-    (k: string, v: string) => setFilters((prev) => ({ ...prev, [k]: v })),
-    []
+    (k: string, v: string) => {
+      setFilters((prev) => ({ ...prev, [k]: v }));
+      // 命中数变化后回到第 1 页（保留用户选的每页条数），否则可能停在空页上。
+      setPage(1);
+    },
+    [setPage]
   );
   const resetFilters = useCallback(() => setFilters({}), []);
   const filteredClasses = useMemo(
@@ -532,7 +540,13 @@ export default function ClassTab({
         onChange={updateFilter}
         onReset={resetFilters}
       />
-      <Table rowKey="id" loading={loading} dataSource={filteredClasses} columns={columns} />
+      <Table
+        rowKey="id"
+        loading={loading}
+        dataSource={filteredClasses}
+        columns={columns}
+        pagination={pagination}
+      />
       <Modal
         title={editing ? t("forms.ontology.editClassModalTitle") : t("forms.ontology.addClassModalTitle")}
         open={modalOpen}

@@ -241,3 +241,45 @@ describe("SemanticRelationTab — 列渲染边界", () => {
     });
   });
 });
+
+// =============================================================================
+// 分页（2026-11-17：与类/属性/指标/关联四个 Tab 统一到仓库标准分页）
+// =============================================================================
+
+/** 造 n 条可区分的关系：描述 `关系01`… 便于断言「第几条在当前页」。 */
+function manyRelations(n: number): OntologySemanticRelation[] {
+  return Array.from({ length: n }, (_, i) => ({
+    ...mockRelation,
+    id: 100 + i,
+    description: `关系${String(i + 1).padStart(2, "0")}`,
+  }));
+}
+
+describe("SemanticRelationTab — 分页", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listSemanticRelations.mockResolvedValue(manyRelations(25));
+  });
+
+  it("默认每页 20 条并显示总条数", async () => {
+    renderTab();
+    await screen.findByText("关系01");
+
+    // 总条数：标准分页才有的 showTotal（antd 默认分页没有 ⇒ 这条是真断言）
+    expect(screen.getByText("共 25 条")).toBeInTheDocument();
+    // 每页 20 条 ⇒ 第 11 条在第 1 页、第 21 条不在（antd 默认 pageSize=10 ⇒ 第 11 条也不在）
+    expect(screen.getByText("关系11")).toBeInTheDocument();
+    expect(screen.queryByText("关系21")).not.toBeInTheDocument();
+  });
+
+  it("翻到第 2 页显示剩余 5 条", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByText("关系01");
+
+    await user.click(screen.getByTitle("2"));
+
+    expect(await screen.findByText("关系21")).toBeInTheDocument();
+    expect(screen.queryByText("关系01")).not.toBeInTheDocument();
+  });
+});

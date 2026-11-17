@@ -40,6 +40,7 @@ import FilterBar from "./FilterBar";
 import type { FilterField } from "./FilterBar";
 import { filterMetrics } from "../../utils/ontologyFilter";
 import type { FilterValues } from "../../utils/ontologyFilter";
+import { useTablePagination } from "../../utils/useTablePagination";
 import { classOptions } from "./classOptions";
 import MetricTechniqueForm from "./MetricTechniqueForm";
 import { fromMeasureSpec, resolveDenominatorMeasure, toMeasureSpec } from "../../utils/metricTechnique";
@@ -177,9 +178,16 @@ export default function MetricTab({ classes }: MetricTabProps) {
   // 后端更新是整块替换 JSONB，不回传就会抹掉回填脚本写入的源类信息。
   const existingMeasures = useRef<ExistingMeasures>({ numerator: null, denominator: null });
   const [filters, setFilters] = useState<FilterValues>({});
+  // 标准分页（与类/属性/关联/语义关系四个 Tab 同一套）：每页 20 条 + 总条数 +
+  // 每页条数选择 + 快速跳页（见 utils/useTablePagination）。
+  const { pagination, setPage } = useTablePagination();
   const updateFilter = useCallback(
-    (k: string, v: string) => setFilters((prev) => ({ ...prev, [k]: v })),
-    []
+    (k: string, v: string) => {
+      setFilters((prev) => ({ ...prev, [k]: v }));
+      // 命中数变化后回到第 1 页（保留用户选的每页条数），否则可能停在空页上。
+      setPage(1);
+    },
+    [setPage]
   );
   const resetFilters = useCallback(() => setFilters({}), []);
   const filteredMetrics = useMemo(() => filterMetrics(metrics, filters), [metrics, filters]);
@@ -408,7 +416,13 @@ export default function MetricTab({ classes }: MetricTabProps) {
         onChange={updateFilter}
         onReset={resetFilters}
       />
-      <Table rowKey="id" loading={loading} dataSource={filteredMetrics} columns={columns} />
+      <Table
+        rowKey="id"
+        loading={loading}
+        dataSource={filteredMetrics}
+        columns={columns}
+        pagination={pagination}
+      />
       <Modal
         title={
           editing

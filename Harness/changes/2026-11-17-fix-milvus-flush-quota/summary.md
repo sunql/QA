@@ -241,6 +241,31 @@ milvus 服务名         : milvus-standalone（container_name = qa-milvus）
 ⇒ 服务端配额就是 0.1 qps、生产**从未**挂过配置覆盖 ⇒ 根因第 1 层在生产侧实锤；
 555 个属性是 Phase 4 对账的真实工作量（≈ 555 次 embedding 调用，整批 insert = 单次 flush）。
 
+### 8.2 Phase 2/3 止血验收（2026-11-17，ai-server）—— **通过**
+
+```text
+docker inspect qa-milvus .Mounts
+  → {"Type":"bind","Source":"/opt/qa-system/docker/milvus-user.yaml",
+     "Destination":"/milvus/configs/user.yaml","Mode":"ro",...}
+  → 原有 qa-system_milvus_data volume 保留
+docker exec qa-milvus cat /milvus/configs/user.yaml
+  → quotaAndLimits.flushRate.collection.max: 5
+
+docker ps → qa-milvus Up 12 minutes (healthy) / qa-backend Up 24 hours
+docker exec qa-milvus curl localhost:9091/healthz → OK
+```
+
+**行为判据（非空窗）**：验证窗口内正在做批量导入，日志出现数百条
+`INFO ... Milvus embedding 已同步 id=… type=property`（id 10735 → 11307 连续），
+同一条 grep（`Milvus embedding 已同步|rate limit exceeded|向量自动同步失败`）
+**一条限流/失败都没有** ⇒
+
+- 写入**真的发生了**（不是空窗假绿）；
+- 配额**真的生效**（改前同场景 100% 报 `rate limit exceeded[rate=0.1]`）。
+
+> Milvus 日志里的 `WARN fail to get current user ... authorization:[token]` 是 auth 关闭时
+> 对带 token 元数据的老告警，非 error，与配额无关。
+
 相关：[[qa-system-prod-hotfix-1116-vecsync]]（PR #143 = 2.4 里的热修）、
 [[qa-system-bg-task-session-isolation]]（热修的根因与锁约定）、
 [[qa-system-milvus-family]]（Milvus 家族其他坑）

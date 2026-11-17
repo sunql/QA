@@ -33,7 +33,11 @@ from app.services.workflow_command_ports import (
     SimulatedCommandHandler,
 )
 from app.services.workflow_store import WorkflowStore
-from app.workers.workflow_worker import WorkflowWorker
+from app.workers.workflow_worker import (
+    WORKER_ID_MAX_LEN,
+    WorkflowWorker,
+    _defaultWorkerId,
+)
 
 _store = WorkflowStore()
 
@@ -243,6 +247,74 @@ async def test_命令失败不打断轮询(seedEngine, dbSession, definition):
         )
     ).scalar_one()
     assert row.status == "FAILED"
+
+
+# =============================================================================
+# 轮询隔离（清扫 vs 执行）
+# =============================================================================
+
+
+async def test_清扫失败不阻断命令执行(seedEngine, dbSession, definition):
+    """清扫是**次要**职责：它炸了不能拖住**主要**职责（执行命令）。
+
+    早期实现把两者放在**同一个** try 里 ⇒ 清扫（审批超时）一失败，命令就再也
+    领不到 ⇒ 外部写永久停摆，而现场日志只有一条「轮询失败」。
+    """
+
+    factory, _ = seedEngine
+    instance, step = await _instanceWithStep(dbSession, definition)
+    command, _ = await _store.enqueueCommand(
+        dbSession,
+        instanceId=instance.id,
+        stepId=step.id,
+        commandType="po.write",
+        idempotencyKey="cmd-sweep-boom",
+        payload={},
+    )
+    await dbSession.commit()
+    commandId = command.id
+
+    class _ExplodingApproval:
+        async def sweepTimedOutApprovals(self, session: Any) -> int:
+            raise RuntimeError("审批表查询失败（测试注入）")
+
+    worker = _worker(factory, approval=_ExplodingApproval())
+
+    await worker._pollOnce()
+
+    row = (
+        await dbSession.execute(
+            select(BusinessCommand)
+            .where(BusinessCommand.id == commandId)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert row.status == "SUCCEEDED"
+
+
+# =============================================================================
+# workerId 列宽
+# =============================================================================
+
+
+def test_workerId被截到executed_by列宽():
+    """``business_command.executed_by`` 是 ``String(64)`` ⇒ workerId 超长会写库失败。
+
+    ⚠️ 早期实现截到 128（按 ``lease_owner`` 的列宽）⇒ 主机名一长就**写不进**
+    ``executed_by`` ⇒ claim 直接报错 ⇒ 命令永远执行不了。
+    """
+
+    assert WORKER_ID_MAX_LEN == 64
+
+    worker = WorkflowWorker(
+        _settings(),
+        _ExplodingSessionFactory(),
+        _executor(),
+        workerId="w" * 300,
+    )
+    assert len(worker._workerId) == WORKER_ID_MAX_LEN
+
+    assert len(_defaultWorkerId()) <= WORKER_ID_MAX_LEN
 
 
 # =============================================================================

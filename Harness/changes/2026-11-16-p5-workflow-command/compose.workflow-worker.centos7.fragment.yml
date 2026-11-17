@@ -21,6 +21,11 @@
 #   去拉一个**根本不存在**的镜像名。
 #
 # 开关：**只写在 worker 侧**（`environment` 覆盖 `env_file` 的同名变量）。
+#   ⚠️ **默认关闭**（`${ENABLE_WORKFLOW:-false}`）：把本片段追加进生产 compose
+#   **本身零副作用** ⇒ 追加片段 ≠ 开闸 ⇒ 真正开闸由 runbook §9（独立窗口、
+#   单独决策）在 `.env` 里显式写 `ENABLE_WORKFLOW=true`。
+#   ⚠️ 不要写死 `"true"`：那会让「追加片段」这一步就**当场开闸** ⇒ 与 G6 第三条
+#   「默认关闭可上线」冲突 ⇒ 上线即开闸，现场没有回滚窗口。
 #   后端 API 侧的 `ENABLE_WORKFLOW` 由 `/opt/qa-system/docker/.env` 控制
 #   （默认关 ⇒ `/api/v1/workflow/*` 路由 404 ⇒ 对外完全不存在）。
 #   ⇒ 两者都开 = 完整上线；只开 worker = 空转（没有实例可执行）。
@@ -36,7 +41,7 @@
     env_file:
       - .env
     environment:
-      ENABLE_WORKFLOW: "true"
+      ENABLE_WORKFLOW: "${ENABLE_WORKFLOW:-false}"
     # 覆盖镜像默认 CMD（默认是 `alembic upgrade head && uvicorn …`）：
     # worker 是纯轮询进程，**不跑迁移**（迁移由 backend 容器负责），也不监听端口。
     command: ["python", "-m", "app.workers.workflow_worker"]

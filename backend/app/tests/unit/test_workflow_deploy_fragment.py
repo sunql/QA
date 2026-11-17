@@ -140,12 +140,49 @@ def test_启动命令指向仓内真实模块(service: dict):
 def test_开关名与配置别名一致(service: dict):
     """片段里的开关名必须等于 ``app/config.py`` 的 alias（改名漂移 ⇒ 开关静默失效）。"""
 
-    assert service.get("environment", {}).get("ENABLE_WORKFLOW") == "true"
+    assert "ENABLE_WORKFLOW" in service.get("environment", {})
 
     configText = (pathlib.Path(__file__).resolve().parents[2] / "config.py").read_text(encoding="utf-8")
     assert 'alias="ENABLE_WORKFLOW"' in configText, (
         "config.py 里没有 ENABLE_WORKFLOW 别名 ⇒ 片段写的开关名对不上（开关会静默失效）"
     )
+
+
+def test_开关默认关闭且可由环境覆盖(service: dict):
+    """片段里的开关必须**默认关闭**（``${ENABLE_WORKFLOW:-false}``）。
+
+    早期写死 ``"true"`` ⇒ 把片段追加进生产 compose 就**当场开了工作流**
+    ⇒ 与 G6 第三条「默认关闭可上线」冲突 ⇒ 上线即开闸，现场没有回滚窗口。
+    ⇒ 改成「环境变量覆盖、缺省为关」：追加片段本身是**零副作用**的，
+    真正开闸由 §9（独立窗口、单独决策）显式写 ``.env``。
+    """
+
+    assert (
+        service.get("environment", {}).get("ENABLE_WORKFLOW") == "${ENABLE_WORKFLOW:-false}"
+    ), (
+        "片段里的开关必须默认关闭（${ENABLE_WORKFLOW:-false}），实际："
+        f"{service.get('environment', {}).get('ENABLE_WORKFLOW')!r}"
+    )
+
+
+def test_runbook断言生产环境且备份权限收紧():
+    """runbook 必须钉住两件与「操作错环境」有关的事。
+
+    ① **确认是生产**（``APP_ENV=production``）：这份 runbook 会跑
+       ``pg_dump`` / ``docker load`` / ``docker-compose up`` ⇒ 在开发机上误跑
+       就会把**开发库**当生产库操作。
+    ② **备份文件权限收紧**（``umask 077``）：``pg_dump`` 落盘的是整库备份
+       （含用户 / 角色 / 业务数据）⇒ 默认 umask 下同机其它账号可读。
+    """
+
+    runbook = _repoRoot() / (
+        "Harness/changes/2026-11-16-p5-workflow-command/deploy-prod-1117.md"
+    )
+    assert runbook.exists(), f"runbook 缺失：{runbook}"
+    text = runbook.read_text(encoding="utf-8")
+
+    assert "APP_ENV=production" in text, "runbook 没有断言 APP_ENV=production（可能误在非生产环境操作）"
+    assert "umask 077" in text, "runbook 的 pg_dump 没有收紧 umask（备份文件同机可读）"
 
 
 def test_容器名钉死(service: dict):

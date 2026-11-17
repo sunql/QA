@@ -44,11 +44,23 @@ logger = logging.getLogger(__name__)
 # 审批超时清扫的默认节流间隔（秒）：太短 ⇒ 每轮都打一次 DB；太长 ⇒ 超时响应慢。
 DEFAULT_APPROVAL_SWEEP_SECONDS = 60.0
 
+# workerId 的长度上限。
+# ⚠️ 取 **64**（``business_command.executed_by`` 的列宽），不是 128
+#    （``workflow_outbox.lease_owner`` 的列宽）⇒ 取宽的那个会让超长主机名
+#    **写不进** executed_by ⇒ claim 直接报错 ⇒ 命令永远执行不了。
+WORKER_ID_MAX_LEN = 64
+
+
+def _truncateWorkerId(value: str) -> str:
+    """把 workerId 截到列宽内（``executed_by String(64)``）。"""
+
+    return value[:WORKER_ID_MAX_LEN]
+
 
 def _defaultWorkerId() -> str:
-    """进程级稳定标识（长度 <= 128，满足 ``executed_by`` / ``lease_owner`` 列宽）。"""
+    """进程级稳定标识（长度 <= ``executed_by`` 列宽）。"""
 
-    return f"{socket.gethostname()}:{os.getpid()}"[:128]
+    return _truncateWorkerId(f"{socket.gethostname()}:{os.getpid()}")
 
 
 class WorkflowWorker:
@@ -68,7 +80,7 @@ class WorkflowWorker:
         self._settings = settings
         self._sessionFactory = sessionFactory
         self._executor = executor
-        self._workerId = workerId or _defaultWorkerId()
+        self._workerId = _truncateWorkerId(workerId or _defaultWorkerId())
         self._store = store or WorkflowStore()
         self._approval = approval or WorkflowApprovalService()
         self._approvalSweepSeconds = approvalSweepSeconds
@@ -113,13 +125,23 @@ class WorkflowWorker:
             logger.info("工作流 worker 已停止（worker=%s）", self._workerId)
 
     async def _pollOnce(self) -> None:
-        """单轮异常隔离：DB/claim 故障记日志后由主循环等待重试。"""
+        """单轮异常隔离：**清扫**与**执行**各自独立。
+
+        ⚠️ 不能放在同一个 try 里：清扫（审批超时）是**次要**职责，执行命令是
+        **主要**职责 ⇒ 清扫一失败（DB 抖动 / 审批表被锁），命令就再也领不到 ⇒
+        外部写永久停摆，而现场只看到一条「轮询失败」。
+        ⇒ 两条职责各自 try/except：谁炸谁降级，另一条照常。
+        """
 
         try:
             await self.sweepApprovals()
+        except Exception:
+            logger.exception("worker %s 清扫超期审批失败（不影响命令执行）", self._workerId)
+
+        try:
             await self.runOnce()
         except Exception:
-            logger.exception("worker %s 轮询失败，下轮重试", self._workerId)
+            logger.exception("worker %s 本轮命令执行失败，下轮重试", self._workerId)
 
     # ------------------------------------------------------------------
     # 命令执行

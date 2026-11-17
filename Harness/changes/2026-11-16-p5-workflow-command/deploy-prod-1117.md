@@ -54,6 +54,7 @@
 | 3 | **生产鉴权是真鉴权** | §3 ③ | `AUTH_MODE` 必须是 `real` 且 `AUTH_STUB_ENABLED=0`；否则**不得开启**开关（见 §7 硬停条件） |
 | 4 | 备份可用（pg_dump 落盘 + 校验） | §4 | 无备份 ⇒ 不执行 §5 之后的任何步骤 |
 | 5 | 迁移已在**测试库**演练过（upgrade + downgrade 往返） | CI / 本地 `qa_metadata_test_p5` | 未演练 ⇒ 不上线 |
+| 6 | **确认这是生产环境**（`APP_ENV=production`） | §3 ⓪⓪ | 不是 production ⇒ **停下**（本 runbook 会 `pg_dump` / `docker load` / `docker-compose up` ⇒ 在开发机上误跑 = 把开发库当生产库操作） |
 
 > ⚠️ **前置 1 的来历**：P5 的迁移接在 `0148` 之后（`0149`–`0152`），而生产现在停在
 > `0143`。若直接上 P5 镜像，一次要跑 `0144`–`0152` 共 **9 个**迁移，其中 `0145`（加列/删列）、
@@ -103,6 +104,11 @@ docker run --rm --platform linux/amd64 --entrypoint sh qa-system-backend:amd64-1
 ## 3. Phase 1 生产预检（只读，不改动）
 
 ```bash
+# ⓪⓪ 环境断言 —— **先确认这是生产**，再做后面任何一步
+#     （本 runbook 会 pg_dump / docker load / docker-compose up）
+grep -E '^APP_ENV=' /opt/qa-system/docker/.env
+# 期望：APP_ENV=production（不是 ⇒ 停下，见 §1 前置 6）
+
 # ⓪ compose 入口 —— 从现役容器的 label 直接读，别靠 ls 猜
 docker inspect qa-backend \
   --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
@@ -146,10 +152,15 @@ docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
 ## 4. Phase 2 备份（**有 DDL ⇒ 硬前置**）
 
 ```bash
+# ⚠️ 先收紧 umask：pg_dump 落盘的是**整库备份**（含用户 / 角色 / 业务数据）
+#    ⇒ 默认 umask 下同机其它账号可读 ⇒ 备份文件本身成了泄漏面。
+umask 077
+
 # 备份整库（推荐：恢复时不用拼对象）
 docker exec qa-postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
   > /opt/qa-transfer/qa_metadata_pre-1117.dump
 ls -lh /opt/qa-transfer/qa_metadata_pre-1117.dump
+ls -l /opt/qa-transfer/qa_metadata_pre-1117.dump   # 期望：-rw-------（umask 生效）
 sha256sum /opt/qa-transfer/qa_metadata_pre-1117.dump
 ```
 
@@ -260,6 +271,9 @@ docker ps --format '{{.Names}}' | grep -c qa-workflow-worker || echo NO_WORKER
 `volumes:` ⇒ 片段会落进 `volumes:` 里 ⇒ compose 报
 `volumes.workflow-worker additional properties ... not allowed`（**片段必须挂在 `services:` 下**）。
 
+⚠️ 片段里的开关是 ``${ENABLE_WORKFLOW:-false}`` ⇒ **追加片段本身零副作用**
+（worker 侧默认关）⇒ 追加 ≠ 开闸 ⇒ 开闸只发生在 §9.3（写 `.env`）+ §9.4（起服务）。
+
 ```bash
 # ① 先把片段传到生产（仓内本目录）
 #    scp compose.workflow-worker.centos7.fragment.yml \
@@ -287,13 +301,18 @@ qa_compose config --quiet && echo COMPOSE_OK
 qa_compose config --services | grep workflow-worker    # 期望：workflow-worker
 ```
 
-### 9.3 打开 API 侧开关（**只追加一行**）
+### 9.3 打开开关（**只追加一行**）
 
 ```bash
 # ⚠️ 只**追加**，不改任何既有行（SECRET_KEY 是 Fernet 主密钥）
 grep -q '^ENABLE_WORKFLOW=' /opt/qa-system/docker/.env \
   || echo 'ENABLE_WORKFLOW=true' >> /opt/qa-system/docker/.env
 ```
+
+> 这一行同时打开**两侧**：API 侧（`app/config.py` 读 `.env` ⇒ 注册
+> `/api/v1/workflow/*` 路由）与 worker 侧（片段里的 ``${ENABLE_WORKFLOW:-false}``
+> 由 compose 从同一份 `.env` 插值 ⇒ 容器拿到 `true`）。
+> ⚠️ 两侧必须**同时**开：只开 API 侧 ⇒ 有实例没人执行；只开 worker ⇒ 空转。
 
 ### 9.4 起服务
 
@@ -362,6 +381,8 @@ docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
 qa_compose stop workflow-worker && qa_compose rm -f workflow-worker
 
 # ② 关 API 侧开关并重建 backend
+#    （删掉这一行 ⇒ **两侧同时关**：API 侧读不到 ⇒ 路由不注册；
+#      worker 侧片段的 ${ENABLE_WORKFLOW:-false} 回落成 false）
 sed -i '/^ENABLE_WORKFLOW=/d' /opt/qa-system/docker/.env
 qa_compose up -d --no-build --no-deps backend
 

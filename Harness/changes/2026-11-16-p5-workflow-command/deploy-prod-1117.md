@@ -154,20 +154,33 @@ Mac 是 arm64、生产内网隔离 ⇒ 两者都构建不出能跑的镜像。
 # 联网 x86_64 构建机
 git clone <repo> qa-p5 && cd qa-p5
 
+# ⚠️ **每个镜像构建前后都断言 HEAD**（同一工作区要 checkout 三个不同 commit
+#    ⇒ 构建到错的 commit 是本 runbook 最贵的失误：镜像里可能带另一窗口的迁移）
+assert_head() {  # $1 = 期望 SHA
+  actual=$(git rev-parse --short=8 HEAD)
+  [ "$actual" = "$1" ] || { echo "HEAD 不符：期望 $1，实际 $actual"; exit 1; }
+  git status --short | grep -q . && { echo "工作区不干净 ⇒ 先清干净"; exit 1; }
+  echo "HEAD=$actual OK"
+}
+
 # —— 窗口②（P5 本体）——
-git checkout 1e04b46e
+git checkout 1e04b46e && assert_head 1e04b46e
 docker build --platform linux/amd64 -f docker/Dockerfile.backend \
   -t qa-system-backend:amd64-1117-p5 .
 docker save qa-system-backend:amd64-1117-p5 | gzip > qa-backend-amd64-1117-p5.tar.gz
 sha256sum qa-backend-amd64-1117-p5.tar.gz > qa-backend-amd64-1117-p5.tar.gz.sha256
 
 # —— 窗口①（迁移链收口 0143→0148）——
-git checkout 86ff4a1f
+git checkout 86ff4a1f && assert_head 86ff4a1f
 docker build --platform linux/amd64 -f docker/Dockerfile.backend \
   -t qa-system-backend:amd64-1117-mig0148 .
 docker save qa-system-backend:amd64-1117-mig0148 | gzip > qa-backend-amd64-1117-mig0148.tar.gz
 sha256sum qa-backend-amd64-1117-mig0148.tar.gz > qa-backend-amd64-1117-mig0148.tar.gz.sha256
 ```
+
+> ⚠️ **一个工作区构建三个 commit** ⇒ 每次 `checkout` 后**必须**断言 HEAD 且工作区干净
+> （`git status --short` 为空）—— 否则会把上一个 commit 的残留文件烤进下一个镜像
+> （典型症状：窗口① 的镜像里混进 P5 的迁移 ⇒ 生产一次跑完 9 个迁移 ⇒ 正是本 runbook 要防的事）。
 
 **镜像自检（必做，缺一不放行）**：
 
@@ -191,7 +204,7 @@ docker run --rm --platform linux/amd64 --entrypoint sh qa-system-backend:amd64-1
 
 ```bash
 # 联网 x86_64 构建机
-git checkout 1e04b46e
+git checkout 1e04b46e && assert_head 1e04b46e    # assert_head 见 §2.1
 # ⚠️ **必须显式把 VITE_API_BASE_URL 留空** ⇒ 前端走同源相对路径 /api/v1（经 nginx 反代）
 docker build --platform linux/amd64 -f docker/Dockerfile.frontend \
   --build-arg VITE_API_BASE_URL= \

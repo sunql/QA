@@ -37,12 +37,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings, getSettings
 from app.services.workflow_approval_service import WorkflowApprovalService
 from app.services.workflow_command_executor import CommandExecutor
+from app.services.workflow_command_ports import CommandHandlerRegistry
 from app.services.workflow_store import WorkflowStore
 
 logger = logging.getLogger(__name__)
 
 # 审批超时清扫的默认节流间隔（秒）：太短 ⇒ 每轮都打一次 DB；太长 ⇒ 超时响应慢。
 DEFAULT_APPROVAL_SWEEP_SECONDS = 60.0
+
+# 单轮「排空」的批量上限：一条命令一次外部写 ⇒ 一轮最多做这么多外部写，
+# 剩下的下一轮再来（防止一条链式工作流把一轮拉得没边）。
+DEFAULT_DRAIN_BATCH_SIZE = 50
 
 # workerId 的长度上限。
 # ⚠️ 取 **64**（``business_command.executed_by`` 的列宽），不是 128
@@ -76,6 +81,7 @@ class WorkflowWorker:
         store: WorkflowStore | None = None,
         approval: WorkflowApprovalService | None = None,
         approvalSweepSeconds: float = DEFAULT_APPROVAL_SWEEP_SECONDS,
+        drainBatchSize: int = DEFAULT_DRAIN_BATCH_SIZE,
     ) -> None:
         self._settings = settings
         self._sessionFactory = sessionFactory
@@ -84,6 +90,7 @@ class WorkflowWorker:
         self._store = store or WorkflowStore()
         self._approval = approval or WorkflowApprovalService()
         self._approvalSweepSeconds = approvalSweepSeconds
+        self._drainBatchSize = max(1, drainBatchSize)
         self._stopEvent = asyncio.Event()
         # 首次清扫必然执行（-inf ⇒ 距今无限久）⇒ 启动即扫一次，不等一个周期。
         self._lastSweepAt = float("-inf")
@@ -148,32 +155,63 @@ class WorkflowWorker:
     # ------------------------------------------------------------------
 
     async def runOnce(self) -> bool:
-        """领取一条待处理命令并执行；没有可领取的命令时返回 ``False``。
+        """领取并执行待处理命令，直到本轮**排空**（批量上限保护）。
 
-        返回 ``True`` 表示「本轮领取成功并已交给执行器」——即使执行失败，
+        返回 ``True`` 表示「本轮至少领取成功一条」——即使执行失败，
         领取本身已完成，调用方仍应立即进入下一轮。
+
+        ⚠️ **三条纪律**：
+
+        1. **排空**：一轮只领一条 ⇒ 吞吐被 ``workflowPollSeconds``（默认 2s）
+           压死 ⇒ 约 30 条/分钟 ⇒ 实例越多越追不上 ⇒ 本轮把「未领取」的命令
+           全部处理掉（上限 ``drainBatchSize``）。
+        2. **重试有节奏**：可重试失败（``FAILED``）**每轮只给一次机会**
+           ⇒ 不会在同一轮里被反复领取（热转）⇒ 毒丸命令不烧 CPU；
+           同时它也不会饿死「未领取」的命令（排空只领 ``PENDING``）。
+        3. **预算含第一次领取**：本轮**总共**最多领 ``drainBatchSize`` 条
+           ⇒ 早期实现是「第一次 + 排空 N 条」= N+1 条 ⇒ 批量上限形同虚设
+           （宣称的 50 实际是 51 ⇒ 上限失真 ⇒ 批量大时一轮跑得比预期久）。
         """
 
+        claimedAny = False
         async with self._sessionFactory() as session:
-            command = await self._store.claimNextCommand(
-                session,
-                workerId=self._workerId,
-                maxAttempts=self._settings.workflowMaxCommandAttempts,
-            )
-            if command is None:
-                # 无候选 ⇒ 释放事务（别把空事务的快照挂到连接池里）。
-                await session.rollback()
-                return False
+            budget = self._drainBatchSize
+            # 第一次领取**允许**可重试失败（给上一轮的失败一次机会）。
+            if await self._executeOne(session, includeRetryable=True):
+                claimedAny = True
+                budget -= 1
+            while budget > 0:
+                if not await self._executeOne(session, includeRetryable=False):
+                    break
+                claimedAny = True
+                budget -= 1
+        return claimedAny
 
-            commandId = command.id
-            outcome = await self._executor.executeClaimed(session, command, workerId=self._workerId)
-            logger.info(
-                "worker %s 命令 %s 执行结果 %s",
-                self._workerId,
-                commandId,
-                outcome.status,
-            )
-            return True
+    async def _executeOne(self, session: AsyncSession, *, includeRetryable: bool) -> bool:
+        """领取并执行一条命令；没有可领取的命令时返回 ``False``。"""
+
+        command = await self._store.claimNextCommand(
+            session,
+            workerId=self._workerId,
+            # ⚠️ **取自执行器**（唯一出口）⇒ 领取过滤条件与失败终态判定
+            #   用的是**同一个**上限 ⇒ 不会出现「领得到却永远不判终态」。
+            maxAttempts=self._executor.maxAttempts,
+            includeRetryable=includeRetryable,
+        )
+        if command is None:
+            # 无候选 ⇒ 释放事务（别把空事务的快照挂到连接池里）。
+            await session.rollback()
+            return False
+
+        commandId = command.id
+        outcome = await self._executor.executeClaimed(session, command, workerId=self._workerId)
+        logger.info(
+            "worker %s 命令 %s 执行结果 %s",
+            self._workerId,
+            commandId,
+            outcome.status,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # 审批超时清扫
@@ -212,6 +250,25 @@ def registerSignalHandlers(requestStop: Any) -> None:
             signal.signal(sig, _handler)
 
 
+def buildCommandExecutor(
+    settings: Settings,
+    registry: CommandHandlerRegistry,
+) -> CommandExecutor:
+    """**组装根**：按设置构造执行器。
+
+    ⚠️ **为什么必须有这个函数**：最大尝试次数与适配器超时都从**设置**来，
+    而这两项在执行器里会被用到**两处**（领取过滤条件 / 失败终态判定）
+    ⇒ 必须**一处装配** ⇒ 否则改了设置忘了另一处 ⇒ 领取口径与终态口径打架
+    （命令领得到却永远不判终态 ⇒ 无限重试）。
+    """
+
+    return CommandExecutor(
+        registry,
+        maxAttempts=settings.workflowMaxCommandAttempts,
+        commandTimeoutSeconds=settings.workflowCommandTimeoutSeconds,
+    )
+
+
 async def main() -> None:
     """进程入口：
 
@@ -238,10 +295,7 @@ async def main() -> None:
     worker = WorkflowWorker(
         settings,
         getSessionFactory(),
-        CommandExecutor(
-            registry,
-            maxAttempts=settings.workflowMaxCommandAttempts,
-        ),
+        buildCommandExecutor(settings, registry),
     )
     await worker.run()
 

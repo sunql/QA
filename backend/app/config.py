@@ -208,6 +208,13 @@ class Settings(BaseSettings):
     workflowPollSeconds: float = Field(default=2.0, alias="WORKFLOW_POLL_SECONDS")
     # 单条指令的最大重试次数（超过 ⇒ 置 FAILED 并触发补偿）。
     workflowMaxCommandAttempts: int = Field(default=3, alias="WORKFLOW_MAX_COMMAND_ATTEMPTS")
+    # 单条指令调用适配器的**超时**（秒）。
+    # ⚠️ 为什么必须有：没有超时 ⇒ 一个卡死的下游能把 Worker 的那一轮永远占住
+    #    （事务不提交 ⇒ 连接不释放 ⇒ 连接池耗尽 ⇒ 全部命令停摆）。
+    #    超时按**基础设施错误**归类（可重试 ⇒ 等下游恢复）。
+    workflowCommandTimeoutSeconds: float = Field(
+        default=60.0, alias="WORKFLOW_COMMAND_TIMEOUT_SECONDS"
+    )
 
     # ===== 通用 Agent 编排 =====
     enableAgentOrchestration: bool = Field(default=False, alias="ENABLE_AGENT_ORCHESTRATION")

@@ -209,20 +209,44 @@ def test_定义表列集合():
 def test_实例表列集合():
     # ⚠️ 这里**没有** ``current_step``：那一列早期是「预留」（全仓无人写 ⇒ 永远
     # 是 NULL ⇒ 接口恒返回 null ⇒ 一个会骗人的字段）⇒ 已从迁移 + ORM + DTO 一并
-    # 删除（0149 未在任何持久环境执行 ⇒ 原地改，不新开迁移）。
+    # 删除。
+    #
+    # ⚠️ 这里也**没有** ``business_key`` / ``result_json``：两列**全仓无人写**
+    # （``createInstance(businessKey=…)`` / ``advanceInstance(resultJson=…)``
+    # 的参数没有任何调用方传值 ⇒ 永远是 NULL）⇒ 留着的代价是：
+    # ① 接口恒返回 null（骗人的字段）；② 运维看到列以为「有业务单号/结果体」
+    # ⇒ 与 ``current_step`` 同款 ⇒ 一并删除。
+    #
+    # ⚠️ **「原地改」的前提曾经是错的（2026-11-17 已纠正）**：这三列的删除、
+    # ``created_by`` 改 NOT NULL、幂等唯一约束（含 ``created_by``）都是
+    # **0149 已在开发库（5433）执行过之后**才改的 ⇒ 那个库的 P5 表结构
+    # **已陈旧**（多 3 列 / 缺 NOT NULL / 唯一约束少一列 / 3 处注释过期）
+    # ⇒ 开发库必须**重建**（一次性脚本见
+    # ``Harness/changes/2026-11-16-p5-workflow-command/deploy-prod-1117.md`` §14）。
+    # 生产从未跑过 0149（停在 0143）⇒ 生产不受影响。
     assert set(WorkflowInstance.__table__.columns.keys()) == {
         "id",
         "definition_id",
         "idempotency_key",
-        "business_key",
         "status",
         "request_json",
-        "result_json",
         "error_message",
         "created_by",
         "created_time",
         "updated_time",
     }
+
+
+def test_实例读DTO不含businessKey():
+    """实例摘要**不再暴露** ``businessKey``（死列已删 ⇒ 对外契约同步收口）。
+
+    留着它 ⇒ 客户端永远收到 ``businessKey: null`` ⇒ 又一个骗人的字段
+    （与被删掉的 ``current_step`` 同款）。
+    """
+
+    from app.domain.workflow_schemas import WorkflowInstanceRead
+
+    assert "business_key" not in WorkflowInstanceRead.model_fields
 
 
 def test_步骤表列集合():

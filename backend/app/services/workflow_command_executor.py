@@ -1,4 +1,4 @@
-"""P5 Command 执行器（执行 / 重试 / 补偿 / 失败隔离）。
+"""P5 Command 执行器（执行 / 重试 / 失败隔离）。
 
 W3 完成定义：「**注入失败后补偿执行；新适配器不改核心**」。本模块就是那个「核心」：
 它只认 ``command_type`` → 适配器 的注册表，**不认任何具体业务** ⇒ 新增 ERP/SRM 适配器
@@ -14,8 +14,8 @@ W3 完成定义：「**注入失败后补偿执行；新适配器不改核心**�
 3. **重试语义**：可重试失败 ⇒ 置 FAILED（仍可被再次领取）；尝试次数达上限 ⇒ 终态失败。
    不可重试失败（``retryable=False``）⇒ 直接终态。
 4. **补偿钩子**：终态失败 ⇒ 补偿同实例内**已成功**的命令（逆序）⇒ 命令/步骤 COMPENSATED、
-   实例 COMPENSATED（先 FAILED 再 COMPENSATED，状态机只允许这一条路径）。
-   适配器不支持补偿 ⇒ 跳过并**留痕**（不假装补偿过）。
+   实例 COMPENSATED。补偿实现见 ``workflow_compensation.py``（独立模块：它是另一条
+   事务线，混进来会让本文件超长、也让两条锁序看不清）。
 
 ⚠️ **P5 表写入的唯一入口**是存储层（``workflow_store.py``）⇒ 其它模块直接改
 ``workflow_*`` / ``business_command`` / ``approval_task`` 会被源码级反向守卫判红
@@ -26,26 +26,49 @@ W3 完成定义：「**注入失败后补偿执行；新适配器不改核心**�
 handler ⇒「所有外部写都经 Command」是**约定 + 评审**，不是守卫能证明的事实。
 ⇒ 注册点已收口到**组装根**（``app/workers/workflow_worker.py``）：新增适配器必须
 改到那里 ⇒ 必然过评审。
+
+⚠️ **错误消息落库前必过净化**（``workflow_errors.py``）：适配器抛的消息可能带
+凭据 / PII ⇒ 直接落库 = 凭据进库（不可逆）⇒ 落库前抹值、控长、压控制字符。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.exceptions import NotFoundError
-from app.domain.workflow_models import BusinessCommand, WorkflowInstance, WorkflowStep
+from app.domain.workflow_models import BusinessCommand, WorkflowStep
 from app.services.workflow_audit_service import WorkflowAuditService
 from app.services.workflow_command_ports import (
     CommandExecutionError,
     CommandHandlerRegistry,
     UnknownCommandTypeError,
-    isCompensable,
+)
+from app.services.workflow_command_types import (
+    STATUS_ABORTED,
+    STATUS_CANCELLED,
+    STATUS_EXECUTING,
+    STATUS_FAILED,
+    STATUS_PENDING,
+    STATUS_RUNNING,
+    STATUS_SKIPPED,
+    STATUS_SUCCEEDED,
+    CommandOutcome,
+)
+from app.services.workflow_compensation import (
+    SYSTEM_ACTOR_COMPENSATION,
+    CompensationRunner,
+)
+from app.services.workflow_errors import (
+    ERROR_KIND_ADAPTER,
+    ERROR_KIND_INFRA,
+    describeError,
+    sanitizeAndLabel,
+    sanitizeErrorMessage,
 )
 from app.services.workflow_orchestrator import WorkflowOrchestrator
 from app.services.workflow_state_machine import isLiveInstance
@@ -53,32 +76,16 @@ from app.services.workflow_store import WorkflowStore
 
 logger = logging.getLogger(__name__)
 
-# 补偿是**系统事件**（执行失败触发的自动回滚）⇒ 默认 actor 用系统标识。
-SYSTEM_ACTOR_COMPENSATION = "system:command-compensation"
+# 适配器调用的**默认超时**（秒）：没有超时 ⇒ 一个卡死的下游能把 Worker 的
+# 那一轮永远占住（事务不提交 ⇒ 连接不释放 ⇒ 连接池耗尽 ⇒ 全部命令停摆）。
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 60.0
 
-STATUS_SUCCEEDED = "SUCCEEDED"
-STATUS_FAILED = "FAILED"
-STATUS_ABORTED = "ABORTED"
-STATUS_SKIPPED = "SKIPPED"
-STATUS_COMPENSATED = "COMPENSATED"
-STATUS_CANCELLED = "CANCELLED"
-STATUS_EXECUTING = "EXECUTING"
-STATUS_PENDING = "PENDING"
-STATUS_RUNNING = "RUNNING"
-STATUS_COMPLETED = "COMPLETED"
-
-
-
-@dataclass(frozen=True)
-class CommandOutcome:
-    """一次命令执行的结果（不可变）。"""
-
-    commandId: int
-    status: str
-    attempts: int
-    result: dict[str, Any] | None = None
-    errorMessage: str | None = None
-    isTerminal: bool = False
+__all__ = [
+    "CommandExecutor",
+    "CommandOutcome",
+    "DEFAULT_COMMAND_TIMEOUT_SECONDS",
+    "SYSTEM_ACTOR_COMPENSATION",
+]
 
 
 @dataclass(frozen=True)
@@ -114,23 +121,6 @@ class _CommandContext:
         )
 
 
-@dataclass(frozen=True)
-class _CompensationSummary:
-    """一轮补偿的统计（计数在**这里定格** ⇒ 结果可复现）。"""
-
-    outcomes: tuple[CommandOutcome, ...]
-    compensatedStepIds: frozenset[int]
-    succeeded: int
-    failed: int
-    skipped: int
-
-    @property
-    def total(self) -> int:
-        """本轮**确实尝试过**的补偿条数（0 ⇒ 不留痕，不假称「已补偿」）。"""
-
-        return self.succeeded + self.failed + self.skipped
-
-
 class CommandExecutor:
     """业务命令执行器（核心）。"""
 
@@ -140,15 +130,42 @@ class CommandExecutor:
         *,
         maxAttempts: int = 3,
         compensateOnFailure: bool = True,
+        commandTimeoutSeconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
         audit: WorkflowAuditService | None = None,
         orchestrator: WorkflowOrchestrator | None = None,
     ) -> None:
         self._registry = registry
         self._maxAttempts = maxAttempts
         self._compensateOnFailure = compensateOnFailure
+        self._commandTimeoutSeconds = commandTimeoutSeconds
         self._store = WorkflowStore()
         self._audit = audit or WorkflowAuditService()
         self._orchestrator = orchestrator or WorkflowOrchestrator()
+        self._compensation = CompensationRunner(
+            registry,
+            store=self._store,
+            audit=self._audit,
+        )
+
+    # ---------------------------------------------------------------- 口径
+
+    @property
+    def maxAttempts(self) -> int:
+        """最大尝试次数（**唯一出口**）。
+
+        ⚠️ 为什么是 property：领取时的过滤条件（``attempts < maxAttempts``）与
+        失败后的终态判定（``attempts >= maxAttempts``）**必须用同一个值** ⇒
+        两个地方各读各的配置 ⇒ 改了一个忘了另一个 ⇒ 一条命令被永远重试或
+        永远不重试。⇒ 调用方（Worker）一律从这里取。
+        """
+
+        return self._maxAttempts
+
+    @property
+    def commandTimeoutSeconds(self) -> float:
+        """适配器调用的超时（秒）。"""
+
+        return self._commandTimeoutSeconds
 
     # ---------------------------------------------------------------- 执行
 
@@ -306,12 +323,24 @@ class CommandExecutor:
 
         try:
             handler = self._registry.resolve(ctx.commandType)
-            result = await handler.execute(session, command=command)
+            # ⚠️ **SAVEPOINT**：适配器的半写副作用要回滚，但**claim 不能回滚**
+            #   （claim = 归属 + 尝试次数 ⇒ 回滚了就是「没人执行过」的假象）。
+            #   ⇒ 只回滚 SAVEPOINT 之内的那一段。
+            async with session.begin_nested():
+                result = await asyncio.wait_for(
+                    handler.execute(session, command=command),
+                    timeout=self._commandTimeoutSeconds,
+                )
             return _HandlerRun(result=result)
         except UnknownCommandTypeError as exc:
             return _HandlerRun(
                 failure=await self._failureFor(
-                    session, ctx=ctx, message=str(exc), retryable=False, actor=workerId
+                    session,
+                    ctx=ctx,
+                    message=sanitizeAndLabel(str(exc), ERROR_KIND_ADAPTER),
+                    retryable=False,
+                    actor=workerId,
+                    kind=ERROR_KIND_ADAPTER,
                 )
             )
         except CommandExecutionError as exc:
@@ -319,9 +348,32 @@ class CommandExecutor:
                 failure=await self._failureFor(
                     session,
                     ctx=ctx,
-                    message=exc.message,
+                    message=sanitizeAndLabel(exc.message, ERROR_KIND_ADAPTER),
                     retryable=exc.retryable,
                     actor=workerId,
+                    kind=ERROR_KIND_ADAPTER,
+                )
+            )
+        except TimeoutError:
+            # ⚠️ 适配器**超时** ⇒ 归类为**基础设施错误**（下游没应答）
+            #   ⇒ 可重试（等下游恢复），且巡检时一眼能与「业务拒绝」区分。
+            logger.warning(
+                "命令执行超时（已收敛为失败）：commandId=%s type=%s timeout=%.1fs",
+                ctx.commandId,
+                ctx.commandType,
+                self._commandTimeoutSeconds,
+            )
+            return _HandlerRun(
+                failure=await self._failureFor(
+                    session,
+                    ctx=ctx,
+                    message=sanitizeAndLabel(
+                        f"适配器调用超过 {self._commandTimeoutSeconds:.0f} 秒未应答",
+                        ERROR_KIND_INFRA,
+                    ),
+                    retryable=True,
+                    actor=workerId,
+                    kind=ERROR_KIND_INFRA,
                 )
             )
         except Exception as exc:  # noqa: BLE001 —— 失败隔离：兜住一切适配器异常
@@ -330,13 +382,15 @@ class CommandExecutor:
                 ctx.commandId,
                 ctx.commandType,
             )
+            kind, message = describeError(exc)
             return _HandlerRun(
                 failure=await self._failureFor(
                     session,
                     ctx=ctx,
-                    message=f"{type(exc).__name__}: {exc}",
+                    message=message,
                     retryable=True,
                     actor=workerId,
+                    kind=kind,
                 )
             )
 
@@ -348,6 +402,7 @@ class CommandExecutor:
         message: str,
         retryable: bool,
         actor: str,
+        kind: str = ERROR_KIND_ADAPTER,
     ) -> CommandOutcome:
         """把适配器异常收敛成失败结果（落库 + 判定是否终态）。"""
 
@@ -359,6 +414,7 @@ class CommandExecutor:
             message=message,
             retryable=retryable,
             actor=actor,
+            kind=kind,
         )
 
     async def _handleFailure(
@@ -371,16 +427,21 @@ class CommandExecutor:
         message: str,
         retryable: bool,
         actor: str = SYSTEM_ACTOR_COMPENSATION,
+        kind: str = ERROR_KIND_ADAPTER,
     ) -> CommandOutcome:
-        """失败收敛：回滚半写副作用 → 显式落失败状态 + 次数 → 判定是否终态。
+        """失败收敛：显式落失败状态 + 次数 → 判定是否终态。
 
         ⚠️ **终态必须落库**：终态此前只存在于内存（``outcome.isTerminal``）⇒
         库里仍是 ``FAILED`` 且 ``attempts < maxAttempts`` ⇒ Worker 把它当
         「可重试失败」再领一次 ⇒ 业务上不可重试的命令被无限重试。
         ⇒ 终态失败落 ``ABORTED``（终态状态，Worker 领不走）。
-        """
 
-        await session.rollback()
+        ⚠️ **这里不再整事务回滚**：回滚会把 claim（``EXECUTING`` + 归属 +
+        ``attempts+1``）一并撤销 ⇒ ① 命令在回滚与落失败之间短暂回到 ``PENDING``
+        （可被别的 worker 领走）；② 「谁执行的」丢失（``executed_by`` 变 NULL）。
+        ⇒ 适配器的半写副作用改由 **SAVEPOINT** 回滚（见 ``_runHandler``），
+        claim 留在事务里与失败终态**一起提交**（事实与归属同生共死）。
+        """
 
         isTerminal = (not retryable) or attemptedCount >= self._maxAttempts
 
@@ -402,6 +463,7 @@ class CommandExecutor:
             attempts=attemptedCount,
             errorMessage=message,
             isTerminal=isTerminal,
+            errorKind=kind,
         )
 
     # ---------------------------------------------------------------- 推进
@@ -431,7 +493,10 @@ class CommandExecutor:
             await self.compensateInstance(
                 session,
                 instanceId,
-                reason=f"命令成功后推进失败：{type(exc).__name__}: {exc}",
+                reason=(
+                    f"命令成功后推进失败：{type(exc).__name__}: "
+                    f"{sanitizeErrorMessage(str(exc))}"
+                ),
                 actor=workerId,
             )
 
@@ -458,7 +523,6 @@ class CommandExecutor:
 
     # ---------------------------------------------------------------- 补偿
 
-
     async def compensateInstance(
         self,
         session: AsyncSession,
@@ -467,244 +531,14 @@ class CommandExecutor:
         reason: str,
         actor: str = SYSTEM_ACTOR_COMPENSATION,
     ) -> list[CommandOutcome]:
-        """补偿同实例内**已成功**的命令（逆序），并把步骤/实例收敛到 COMPENSATED。
+        """补偿同实例内**已成功**的命令（逆序），并把步骤 / 实例收敛到 COMPENSATED。
 
-        补偿是**尽力而为**：某条补偿失败**不影响**其余补偿（失败隔离），但会在
-        结果里留痕（status=FAILED + 错误信息）。
-
-        ⚠️ **待执行命令一并取消**（否则「回滚」只是纸面动作 —— Worker 照样领走
-        PENDING 命令去写外部系统）。
-        ⚠️ **锁序**：命令 → 实例 → 步骤（与取消路径不互锁 ⇒ 不会 40P01）。
-        ⚠️ **失败隔离用 SAVEPOINT**：整事务 ``rollback()`` 会把「已取消的待执行
-        命令」和「已完成的补偿」一起撤销 ⇒ 每条补偿一个 SAVEPOINT，失败只回滚那条。
+        实现见 ``workflow_compensation.py``（独立模块：补偿是另一条事务线）。
         """
 
-        await self._store.cancelPendingCommands(
+        return await self._compensation.compensateInstance(
             session,
-            instanceId=instanceId,
-            reason=f"实例已补偿，待执行命令不再执行：{reason}",
-        )
-
-        targets = await self._loadCompensationTargets(session, instanceId)
-        summary = await self._compensateAll(session, targets)
-
-        # 收敛实例（命令 → 实例）
-        await self._compensateInstance(session, instanceId, reason=reason)
-        # 收敛步骤（命令 → 实例 → 步骤）
-        for stepId in sorted(summary.compensatedStepIds):
-            await self._compensateStep(session, stepId)
-
-        # 留痕：**只在确实尝试过补偿时**写（不假称「已补偿」），并带上计数。
-        if summary.total > 0:
-            await self._recordCompensation(
-                session,
-                instanceId=instanceId,
-                reason=reason,
-                actor=actor,
-                succeededCount=summary.succeeded,
-                failedCount=summary.failed,
-                skippedCount=summary.skipped,
-            )
-        await session.commit()
-
-        return list(summary.outcomes)
-
-    async def _compensateAll(
-        self, session: AsyncSession, targets: Sequence[tuple[int, str, int | None, int]]
-    ) -> _CompensationSummary:
-        """逐条补偿并统计（失败隔离：单条失败不影响其余）。"""
-
-        outcomes: list[CommandOutcome] = []
-        compensatedStepIds: set[int] = set()
-        succeeded = 0
-        failed = 0
-        skipped = 0
-
-        for commandId, commandType, stepId, attempts in targets:
-            outcome = await self._compensateOne(
-                session,
-                commandId=commandId,
-                commandType=commandType,
-                attempts=attempts,
-            )
-            outcomes.append(outcome)
-            if outcome.status == STATUS_COMPENSATED:
-                succeeded += 1
-                if stepId is not None:
-                    compensatedStepIds.add(stepId)
-            elif outcome.status == STATUS_SKIPPED:
-                skipped += 1
-            else:
-                failed += 1
-
-        return _CompensationSummary(
-            outcomes=tuple(outcomes),
-            compensatedStepIds=frozenset(compensatedStepIds),
-            succeeded=succeeded,
-            failed=failed,
-            skipped=skipped,
-        )
-
-    async def _loadCompensationTargets(
-        self, session: AsyncSession, instanceId: int
-    ) -> list[tuple[int, str, int | None, int]]:
-        """取待补偿的命令（**已成功**的，逆序）。
-
-        ⚠️ 先把标量取出来：SAVEPOINT 回滚会让 ORM 实例 expire ⇒ 回滚之后
-        再访问 row.id / row.payload 会触发**同步懒加载** ⇒ MissingGreenlet。
-        """
-
-        rows = (
-            await session.execute(
-                select(BusinessCommand)
-                .where(
-                    BusinessCommand.instance_id == instanceId,
-                    BusinessCommand.status == STATUS_SUCCEEDED,
-                )
-                .order_by(BusinessCommand.id.desc())
-                .execution_options(populate_existing=True)
-            )
-        ).scalars().all()
-        return [(row.id, row.command_type, row.step_id, row.attempts) for row in rows]
-
-    async def _compensateOne(
-        self,
-        session: AsyncSession,
-        *,
-        commandId: int,
-        commandType: str,
-        attempts: int,
-    ) -> CommandOutcome:
-        """补偿**一条**命令（失败隔离：只回滚这一条 ⇒ SAVEPOINT）。
-
-        ⚠️ **失败隔离用 SAVEPOINT**：整事务 ``rollback()`` 会把「已取消的待执行
-        命令」和「已完成的补偿」一起撤销 ⇒ 实例却仍被标成 COMPENSATED ⇒
-        补偿名存实亡（外部写照旧发生）。⇒ 每条补偿一个 SAVEPOINT，失败只回滚
-        那一条。
-        """
-
-        handler = self._registry.resolveOptional(commandType)
-        if handler is None or not isCompensable(handler):
-            return CommandOutcome(
-                commandId=commandId,
-                status=STATUS_SKIPPED,
-                attempts=attempts,
-                errorMessage="适配器不支持补偿（跳过，不假称已补偿）",
-            )
-
-        try:
-            # 重读（刷新）⇒ 上一次 SAVEPOINT 回滚导致的 expire 不会传染到这条。
-            row = await self._reloadCommand(session, commandId)
-            async with session.begin_nested():
-                result = await handler.compensate(session, command=row)
-        except Exception as exc:  # noqa: BLE001 —— 补偿失败隔离
-            logger.exception("补偿失败：commandId=%s type=%s", commandId, commandType)
-            return CommandOutcome(
-                commandId=commandId,
-                status=STATUS_FAILED,
-                attempts=attempts,
-                errorMessage=f"补偿失败：{type(exc).__name__}: {exc}",
-            )
-
-        await self._store.completeCommand(session, commandId, STATUS_COMPENSATED, result=result)
-        return CommandOutcome(
-            commandId=commandId,
-            status=STATUS_COMPENSATED,
-            attempts=attempts,
-            result=result,
-            isTerminal=True,
-        )
-
-    async def _reloadCommand(
-        self, session: AsyncSession, commandId: int
-    ) -> BusinessCommand:
-        """重读命令行（刷新属性）—— SAVEPOINT 回滚后的 ORM 实例可能是过期态。"""
-
-        row = (
-            await session.execute(
-                select(BusinessCommand)
-                .where(BusinessCommand.id == commandId)
-                .execution_options(populate_existing=True)
-            )
-        ).scalar_one_or_none()
-        if row is None:
-            raise NotFoundError(f"业务命令 {commandId} 不存在")
-        return row
-
-    async def _recordCompensation(
-        self,
-        session: AsyncSession,
-        *,
-        instanceId: int,
-        reason: str,
-        actor: str,
-        succeededCount: int = 0,
-        failedCount: int = 0,
-        skippedCount: int = 0,
-    ) -> None:
-        """补偿留痕（治理审计：谁触发的补偿、为什么、补偿了几条）。"""
-
-        instance = (
-            await session.execute(
-                select(WorkflowInstance)
-                .where(WorkflowInstance.id == instanceId)
-                .execution_options(populate_existing=True)
-            )
-        ).scalar_one_or_none()
-        if instance is None:
-            return
-        await self._audit.recordCompensation(
-            session,
-            instance=instance,
-            actor=actor,
+            instanceId,
             reason=reason,
-            succeededCount=succeededCount,
-            failedCount=failedCount,
-            skippedCount=skippedCount,
+            actor=actor,
         )
-
-    async def _compensateStep(self, session: AsyncSession, stepId: int) -> None:
-        """步骤 → COMPENSATED（RUNNING 需先 FAILED：状态机不允许多跳）。"""
-
-        current = (
-            await session.execute(
-                select(WorkflowStep)
-                .where(WorkflowStep.id == stepId)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-        ).scalar_one_or_none()
-        if current is None:
-            return
-
-        status = current.status
-        if status == "SUCCEEDED":
-            await self._store.advanceStep(session, stepId, STATUS_COMPENSATED)
-            return
-        if status == "RUNNING":
-            await self._store.advanceStep(session, stepId, STATUS_FAILED)
-            await self._store.advanceStep(session, stepId, STATUS_COMPENSATED)
-            return
-        if status == STATUS_FAILED:
-            await self._store.advanceStep(session, stepId, STATUS_COMPENSATED)
-
-    async def _compensateInstance(self, session: AsyncSession, instanceId: int, *, reason: str) -> None:
-        """实例 → FAILED → COMPENSATED（状态机只允许 COMPENSATED 来自 FAILED / COMPLETED）。"""
-
-        current = (
-            await session.execute(
-                select(WorkflowInstance)
-                .where(WorkflowInstance.id == instanceId)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-        ).scalar_one_or_none()
-        if current is None:
-            return
-
-        status = current.status
-        if status in {"PENDING", "RUNNING", "WAITING_APPROVAL", "APPROVED"}:
-            await self._store.advanceInstance(session, instanceId, STATUS_FAILED, errorMessage=reason)
-            status = STATUS_FAILED
-        if status in {STATUS_FAILED, STATUS_COMPLETED}:
-            await self._store.advanceInstance(session, instanceId, STATUS_COMPENSATED)

@@ -1,4 +1,7 @@
-"""P5 Command 执行器（执行 / 重试 / 补偿 / 失败隔离）单测（W3）。
+"""P5 Command 执行器（执行 / 重试 / 失败隔离）单测（W3）。
+
+⚠️ **补偿用例不在本文件**：补偿相关用例集中在 ``test_workflow_compensation.py``
+（本文件一度逼近仓库 800 行硬上限）⇒ 本文件只留「执行 / 重试 / 失败隔离」。
 
 被测纪律（W3 完成定义「注入失败后补偿执行；新适配器不改核心」）：
 
@@ -70,36 +73,6 @@ async def _instanceWithStep(dbSession, definition, *, idempotencyKey: str = "exe
     await _store.advanceStep(dbSession, steps[0].id, "RUNNING")
     await dbSession.commit()
     return instance, steps[0]
-
-
-async def _instanceWithRunningSteps(dbSession, definition, *, idempotencyKey: str, count: int = 2):
-    """建实例 + 多个步骤（**全部 RUNNING**）。
-
-    为什么需要多步骤：单步骤实例在**第一条命令成功后**会被编排器收成 COMPLETED
-    ⇒ 归属实例不再「活着」⇒ 后续命令按契约**不得**再被领取（已取消 / 已补偿 /
-    已完成的实例不得再发起外部写）。⇒ 需要「实例保持 RUNNING」的场景（补偿、
-    多命令并存）必须给它留一个未完成的步骤。
-    """
-
-    instance, _ = await _store.createInstance(
-        dbSession,
-        definitionId=definition.id,
-        idempotencyKey=idempotencyKey,
-        requestJson={},
-        actor="submitter",
-    )
-    steps = await _store.createSteps(
-        dbSession,
-        instanceId=instance.id,
-        steps=[{"code": f"write-{index}", "order": index} for index in range(count)],
-    )
-    await dbSession.commit()
-    await _store.advanceInstance(dbSession, instance.id, "RUNNING")
-    await dbSession.commit()
-    for step in steps:
-        await _store.advanceStep(dbSession, step.id, "RUNNING")
-    await dbSession.commit()
-    return instance, steps
 
 
 async def _enqueue(dbSession, instance, step, *, commandType: str, key: str, payload: dict | None = None):
@@ -304,181 +277,6 @@ async def test_终态失败落库为终态不再被领取(dbSession, definition)
     assert claimed is None
 
 
-async def test_补偿后实例的命令不再被领取(dbSession, definition):
-    """补偿 ⇒ 实例终态 ⇒ 它的命令**不得**再被 Worker 领走（否则「补偿」只是纸面动作）。
-
-    回归点：补偿前命令是 ``FAILED``（可重试）⇒ 旧实现只取消 ``PENDING``
-    ⇒ ``FAILED`` 仍可被领取 ⇒ 已补偿的实例照样写外部系统。
-    """
-
-    instance, step = await _instanceWithStep(dbSession, definition)
-    # ⚠️ 失败路径里的 ``session.rollback()`` 会 **expire 全部 ORM 实例**
-    #    ⇒ 之后访问 ``instance.id`` 会触发同步懒加载 ⇒ MissingGreenlet。
-    #    ⇒ 先把标量取出来。
-    instanceId = instance.id
-    failed = await _enqueue(
-        dbSession,
-        instance,
-        step,
-        commandType="po.write",
-        key="k-31",
-        payload={"simulate": {"outcome": "fail"}},
-    )
-    executor = _executor(maxAttempts=3)
-
-    await executor.execute(dbSession, failed.id, workerId="worker-1")
-    await executor.compensateInstance(dbSession, instanceId, reason="人工补偿")
-
-    claimed = await _store.claimNextCommand(dbSession, workerId="worker-2", maxAttempts=3)
-    assert claimed is None
-
-
-# =============================================================================
-# 补偿
-# =============================================================================
-
-
-async def test_终态失败触发同实例成功命令的补偿(dbSession, definition):
-    """W3 完成定义：注入失败后补偿执行。"""
-
-    # ⚠️ 用**多步骤**实例：单步骤实例在第一条命令成功后即 COMPLETED ⇒ 归属实例
-    #    不再「活着」⇒ 第二条命令按契约不得被领取（补偿也就无从谈起）。
-    instance, steps = await _instanceWithRunningSteps(dbSession, definition, idempotencyKey="exec-comp")
-    step = steps[0]
-    okCommand = await _enqueue(dbSession, instance, step, commandType="po.write", key="k-8")
-    failCommand = await _enqueue(
-        dbSession,
-        instance,
-        step,
-        commandType="po.write",
-        key="k-9",
-        payload={"simulate": {"outcome": "fail", "message": "写库失败"}},
-    )
-    handler = SimulatedCommandHandler()
-    executor = _executor(handler, maxAttempts=1)
-
-    await executor.execute(dbSession, okCommand.id, workerId="worker-1")
-    outcome = await executor.execute(dbSession, failCommand.id, workerId="worker-1")
-
-    assert outcome.status == "ABORTED"
-    assert outcome.isTerminal is True
-
-    compensated = (
-        await dbSession.execute(
-            select(BusinessCommand).where(BusinessCommand.id == okCommand.id)
-        )
-    ).scalar_one()
-    assert compensated.status == "COMPENSATED"
-
-    instanceRow = (
-        await dbSession.execute(select(WorkflowInstance).where(WorkflowInstance.id == instance.id))
-    ).scalar_one()
-    assert instanceRow.status == "COMPENSATED"
-
-
-async def test_补偿跳过不支持补偿的适配器(dbSession, definition):
-    """适配器没有 compensate ⇒ 跳过并留痕，不假装补偿过。"""
-
-    instance, step = await _instanceWithStep(dbSession, definition)
-
-    class _NoCompensate:
-        async def execute(self, session, *, command):
-            return {"ok": True}
-
-    okCommand = await _enqueue(dbSession, instance, step, commandType="po.write", key="k-10")
-
-    registry = CommandHandlerRegistry()
-    registry.register("po.write", _NoCompensate())
-    executor = CommandExecutor(registry, maxAttempts=1)
-
-    await executor.execute(dbSession, okCommand.id, workerId="worker-1")
-    outcomes = await executor.compensateInstance(dbSession, instance.id, reason="人工触发")
-
-    assert [o.status for o in outcomes] == ["SKIPPED"]
-    row = (
-        await dbSession.execute(select(BusinessCommand).where(BusinessCommand.id == okCommand.id))
-    ).scalar_one()
-    assert row.status == "SUCCEEDED"
-
-
-async def test_补偿中途失败不影响已完成的补偿(dbSession, definition):
-    """一条补偿抛错**不得**回滚其它补偿（否则「补偿」名存实亡）。
-
-    回归点：旧实现用整事务 ``rollback()`` 兜补偿异常 ⇒ 把**已经完成**的补偿
-    （以及「取消待执行命令」）一起撤销 ⇒ 实例却仍被标成 COMPENSATED ⇒
-    外部写照旧发生、审计却说「已补偿」。
-
-    本用例钉住三件事：
-    1. 失败点**之前**的补偿仍然落库；
-    2. 失败点**之后**的补偿仍然执行（失败隔离）；
-    3. 全程不抛 ``MissingGreenlet``（回滚后不再访问过期 ORM 实例的属性）。
-    """
-
-    # ⚠️ 多步骤实例：单步骤实例在第一条命令成功后即 COMPLETED ⇒ 后续命令
-    #    按契约不得被领取（补偿就无从谈起）。
-    instance, steps = await _instanceWithRunningSteps(dbSession, definition, idempotencyKey="exec-mixed")
-    step = steps[0]
-    first = await _enqueue(dbSession, instance, step, commandType="po.write", key="k-40")
-    boom = await _enqueue(
-        dbSession, instance, step, commandType="po.write", key="k-41", payload={"boom": True}
-    )
-    last = await _enqueue(dbSession, instance, step, commandType="po.write", key="k-42")
-
-    class _Mixed:
-        async def execute(self, session, *, command):
-            return {"ok": True}
-
-        async def compensate(self, session, *, command):
-            if (command.payload or {}).get("boom"):
-                raise RuntimeError("补偿炸了")
-            return {"compensated": True}
-
-    registry = CommandHandlerRegistry()
-    registry.register("po.write", _Mixed())
-    executor = CommandExecutor(registry, maxAttempts=3)
-
-    for command in (first, boom, last):
-        await executor.execute(dbSession, command.id, workerId="worker-1")
-
-    outcomes = await executor.compensateInstance(dbSession, instance.id, reason="人工触发")
-
-    statuses = {o.commandId: o.status for o in outcomes}
-    assert statuses[first.id] == "COMPENSATED"
-    assert statuses[boom.id] == "FAILED"
-    assert statuses[last.id] == "COMPENSATED"
-
-    async def _statusOf(commandId: int) -> str:
-        row = (
-            await dbSession.execute(
-                select(BusinessCommand).where(BusinessCommand.id == commandId)
-            )
-        ).scalar_one()
-        return row.status
-
-    assert await _statusOf(first.id) == "COMPENSATED"
-    assert await _statusOf(boom.id) == "SUCCEEDED"
-    assert await _statusOf(last.id) == "COMPENSATED"
-
-
-async def test_补偿后步骤置COMPENSATED(dbSession, definition):
-    instance, step = await _instanceWithStep(dbSession, definition)
-    okCommand = await _enqueue(dbSession, instance, step, commandType="po.write", key="k-12")
-    executor = _executor()
-
-    await executor.execute(dbSession, okCommand.id, workerId="worker-1")
-    await executor.compensateInstance(dbSession, instance.id, reason="人工触发")
-
-    stepRow = (
-        await dbSession.execute(select(WorkflowStep).where(WorkflowStep.id == step.id))
-    ).scalar_one()
-    assert stepRow.status == "COMPENSATED"
-
-
-# =============================================================================
-# 失败隔离
-# =============================================================================
-
-
 async def test_一条命令失败不影响其它命令(dbSession, definition):
     """失败隔离：一条命令失败**不打断**其它命令（worker 主循环不被打断）。
 
@@ -642,3 +440,101 @@ async def test_仍有步骤未完成时实例不置COMPLETED(dbSession, definiti
         )
     ).scalar_one()
     assert instanceRow.status == "RUNNING"
+
+
+# =============================================================================
+# R11-E：补偿 ⇒ 被取消命令对应的步骤必须记 SKIPPED
+# =============================================================================
+
+
+async def test_命令失败时claim不被回滚(dbSession, definition, monkeypatch):
+    """失败收敛只回滚**适配器的半写副作用**，claim 本身必须留下。
+
+    回归点：``_handleFailure`` 此前用**整事务** ``rollback()`` 撤销「本次执行」
+    ⇒ claim（``status=EXECUTING`` + ``executed_by=worker`` + ``attempts+1``）
+    一并被撤销 ⇒
+    ① 命令在「回滚」与「落失败」之间**短暂回到 PENDING**（可被别的 worker 领走）；
+    ② 「谁执行的」丢失（``executed_by`` 变 NULL）⇒ 事后无法追责。
+
+    ⇒ 改为 SAVEPOINT：只回滚适配器写的那一段。
+    """
+
+    instance, step = await _instanceWithStep(dbSession, definition)
+    command = await _enqueue(
+        dbSession,
+        instance,
+        step,
+        commandType="po.write",
+        key="k-60",
+        payload={"simulate": {"outcome": "fail", "message": "下游超时"}},
+    )
+    commandId = command.id
+
+    observed: list[str] = []
+    original = _store.failCommand
+
+    async def _spy(session, commandId, *, attempts, errorMessage, terminal=False):
+        row = (
+            await session.execute(
+                select(BusinessCommand).where(BusinessCommand.id == commandId)
+            )
+        ).scalar_one()
+        observed.append(row.status)
+        return await original(
+            session, commandId, attempts=attempts, errorMessage=errorMessage, terminal=terminal
+        )
+
+    executor = _executor(maxAttempts=3)
+    monkeypatch.setattr(executor._store, "failCommand", _spy)
+
+    outcome = await executor.execute(dbSession, commandId, workerId="worker-1")
+
+    assert outcome.status == "FAILED"
+    # 落失败时命令仍处于「本 worker 已领取」状态 ⇒ claim 没被撤销
+    assert observed == ["EXECUTING"]
+
+    row = (
+        await dbSession.execute(select(BusinessCommand).where(BusinessCommand.id == commandId))
+    ).scalar_one()
+    assert row.status == "FAILED"
+    assert row.attempts == 1
+    assert row.executed_by == "worker-1"
+
+
+async def test_终态失败时claim同样不被回滚(dbSession, definition, monkeypatch):
+    """终态失败（ABORTED）走同一条收敛路径 ⇒ claim 同样保留。"""
+
+    instance, step = await _instanceWithStep(dbSession, definition)
+    command = await _enqueue(dbSession, instance, step, commandType="po.write", key="k-61")
+    commandId = command.id
+
+    class _NonRetryable:
+        async def execute(self, session, *, command):
+            raise CommandExecutionError("参数非法", retryable=False)
+
+    observed: list[str] = []
+    original = _store.failCommand
+
+    async def _spy(session, commandId, *, attempts, errorMessage, terminal=False):
+        row = (
+            await session.execute(
+                select(BusinessCommand).where(BusinessCommand.id == commandId)
+            )
+        ).scalar_one()
+        observed.append(row.status)
+        return await original(
+            session, commandId, attempts=attempts, errorMessage=errorMessage, terminal=terminal
+        )
+
+    executor = _executor(_NonRetryable(), maxAttempts=3)
+    monkeypatch.setattr(executor._store, "failCommand", _spy)
+
+    outcome = await executor.execute(dbSession, commandId, workerId="worker-1")
+
+    assert outcome.status == "ABORTED"
+    assert observed == ["EXECUTING"]
+    row = (
+        await dbSession.execute(select(BusinessCommand).where(BusinessCommand.id == commandId))
+    ).scalar_one()
+    assert row.status == "ABORTED"
+    assert row.executed_by == "worker-1"

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -223,19 +223,29 @@ class WorkflowCommandStore(WorkflowStoreBase):
         return row
 
     async def claimNextCommand(
-        self, session: AsyncSession, *, workerId: str, maxAttempts: int = 1
+        self,
+        session: AsyncSession,
+        *,
+        workerId: str,
+        maxAttempts: int = 1,
+        includeRetryable: bool = True,
     ) -> BusinessCommand | None:
         """领取一条待执行命令（``SKIP LOCKED``：跳过别人锁住的行）。
 
         候选 = ``PENDING``，或 ``FAILED`` 且尝试次数未达上限（重试候选），
         **且归属实例还活着**（已取消 / 已补偿 / 已完成的实例的命令不领）。
+
+        ⚠️ ``includeRetryable=False`` ⇒ 只领 ``PENDING``（**不含**可重试失败）
+        ⇒ Worker 的「排空」循环不会在**同一轮**里把刚失败的命令立刻再领一次
+        （热转 ⇒ 重试没有节奏 ⇒ 毒丸命令把 worker 烧满）。
         """
 
+        statuses = CLAIMABLE_STATUSES if includeRetryable else (STATUS_PENDING,)
         candidateId = (
             await session.execute(
                 select(BusinessCommand.id)
                 .where(
-                    BusinessCommand.status.in_(CLAIMABLE_STATUSES),
+                    BusinessCommand.status.in_(statuses),
                     BusinessCommand.attempts < maxAttempts,
                     BusinessCommand.instance_id.in_(liveInstanceIds()),
                 )
@@ -432,14 +442,16 @@ class WorkflowCommandStore(WorkflowStoreBase):
     ) -> BusinessCommand:
         """把命令置 ``FAILED`` 并**显式写回尝试次数**。
 
-        为什么必须显式写 attempts：执行器在适配器抛错后会 ``rollback()`` 回滚
-        「本次执行」的事务（撤销适配器的半写副作用），而 claim 时的
-        ``attempts + 1`` 与它在同一事务里 ⇒ 回滚后次数丢失 ⇒ 毒丸命令会被
-        无限重试。故失败路径必须**显式**把尝试次数落库。
+        为什么必须显式写 attempts：执行器在适配器抛错后用 **SAVEPOINT** 回滚
+        「适配器写的那一段」（撤销适配器的半写副作用），而 claim 时的
+        ``attempts + 1`` 留在外层事务里 ⇒ 次数**不会**丢；但这里仍**显式**写回，
+        让「落库值」不依赖调用方的事务边界（幂等、可读）。
 
         ``terminal=True`` ⇒ 落 ``ABORTED``（**终态失败**：业务上不可重试 /
         尝试次数耗尽）⇒ 落库即终态 ⇒ Worker 不会再把它当「可重试失败」重领。
         （终态此前只存在于内存 ⇒ 库里仍是 FAILED 且次数未耗尽 ⇒ 无限重试。）
+
+        ⚠️ 来源状态可以是 ``EXECUTING``（失败收敛保留 claim ⇒ 直接落终态）。
         """
 
         current = await self._lockCommand(session, commandId)
@@ -454,7 +466,10 @@ class WorkflowCommandStore(WorkflowStoreBase):
             fromStatus=current.status,
             values={
                 "status": toStatus,
-                "attempts": attempts,
+                # ⚠️ **只增不减**（``GREATEST``）：并发失败时两次写回可能带着
+                #   **不同的**尝试次数（谁后提交谁生效）⇒ 若直接覆盖，次数会
+                #   **往回退** ⇒ 毒丸命令永远达不到上限 ⇒ 无限重试。
+                "attempts": func.greatest(BusinessCommand.attempts, attempts),
                 "error_message": errorMessage,
                 "updated_time": utcnow(),
             },

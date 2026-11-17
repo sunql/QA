@@ -30,8 +30,17 @@
 
 **幂等性**：本迁移只建新表；表名固定，`downgrade()` 对称撤销。
 
-**修订策略**：本迁移随 PR 落地、尚未在任何持久环境执行 ⇒ 评审期补的约束
-原地加在本 revision 里，不新开迁移。
+**修订策略**：本迁移随 PR 落地 ⇒ 评审期补的约束原地加在本 revision 里，
+不新开迁移。
+
+⚠️ **「未在任何持久环境执行」这条前提曾经是错的（2026-11-17 已纠正）**：
+本迁移**已在开发库（5433 `qa_metadata`）执行过**（开发期反复 `upgrade head`
+建表 + 跑 P5 用例）⇒ 随后的原地编辑（删 ``current_step`` / ``business_key`` /
+``result_json``、``created_by`` 改 NOT NULL、幂等唯一约束加上 ``created_by``）
+**没有**回灌到那个库 ⇒ **开发库的 P5 表结构已陈旧**。
+⇒ 生产不受影响（生产停在 ``0143`` ⇒ 从未跑过 0149）⇒ 生产仍按本文件执行。
+⇒ 开发库必须**重建**（一次性脚本见
+``Harness/changes/2026-11-16-p5-workflow-command/deploy-prod-1117.md`` §14）。
 """
 
 from __future__ import annotations
@@ -58,10 +67,8 @@ COLUMN_COMMENTS = {
     "definition_status": "0149，P5：定义状态（DRAFT / PUBLISHED / DISABLED）",
     "instance_definition_id": "0149，P5：所属定义（workflow_definition.id）",
     "instance_idempotency_key": "0149，P5：幂等键（同一定义+同一提交人下唯一；重复提交只执行一次）",
-    "instance_business_key": "0149，P5：业务键（业务侧单号，可空）",
     "instance_status": "0149，P5：实例状态（状态机字面量集合）",
     "instance_request_json": "0149，P5：实例请求体（JSON 对象）",
-    "instance_result_json": "0149，P5：实例结果体（JSON 对象，可空）",
     "instance_created_by": "0149，P5：提交人（幂等作用域的一环 ⇒ NOT NULL）",
 }
 
@@ -173,12 +180,6 @@ def upgrade() -> None:
             comment=COLUMN_COMMENTS["instance_idempotency_key"],
         ),
         sa.Column(
-            "business_key",
-            sa.String(length=128),
-            nullable=True,
-            comment=COLUMN_COMMENTS["instance_business_key"],
-        ),
-        sa.Column(
             "status",
             sa.String(length=24),
             nullable=False,
@@ -191,12 +192,6 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("'{}'::jsonb"),
             comment=COLUMN_COMMENTS["instance_request_json"],
-        ),
-        sa.Column(
-            "result_json",
-            postgresql.JSONB(),
-            nullable=True,
-            comment=COLUMN_COMMENTS["instance_result_json"],
         ),
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column(

@@ -574,7 +574,11 @@ MSG_WORKFLOW_STATUS_TRANSITION_INVALID = (
 )
 
 # P5 审批面提示
-MSG_WORKFLOW_APPROVAL_NOT_AUTHORIZED = "你不是该审批任务的审批人，无权决策"
+# ⚠️ **没有「你不是审批人」这条文案**：越权一律按「对你不可见」处理（404，
+#    与「任务不存在」逐字相同 ⇒ 无存在性预言机）⇒ 对外不区分「不存在」与
+#    「不是你的」。只有**自审批**（你确实是审批人，但不能批自己发起的）才
+#    对外可见地报错 ⇒ 那不是存在性泄露（你本来就有权看到这条任务）。
+MSG_WORKFLOW_APPROVAL_SELF_FORBIDDEN = "不能审批自己发起的审批（四眼原则），请由他人审批"
 MSG_WORKFLOW_APPROVAL_ALREADY_DECIDED = "该审批任务已被决策过，不能重复审批"
 MSG_WORKFLOW_APPROVAL_TIMEOUT = "该审批任务已超时，不能再审批"
 MSG_WORKFLOW_APPROVAL_MATRIX_NOT_MATCHED = (

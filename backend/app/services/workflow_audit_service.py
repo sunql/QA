@@ -4,6 +4,8 @@
 
 - **每步可追溯** = ``workflow_outbox`` 事件流 —— 由 ``WorkflowStore`` 在
   每次状态流转时同事务写入（见 ``workflow_store.enqueueEvent``）。
+  ⚠️ 该表当前**没有机器消费者**（Worker 轮询的是 ``business_command``）⇒
+  事件流是**给人看 / 查 SQL** 的追溯记录。
 - **治理审计** = 本模块 —— 「**谁**做了什么」：提交 / 发起审批 / 通过 /
   拒绝 / 超时 / 补偿。
 
@@ -104,10 +106,16 @@ class WorkflowAuditService:
         decision: str,
         actor: str,
         beforeStatus: str,
+        beforeApproverUser: str | None = None,
         note: str | None = None,
         actorDepartments: DepartmentsInput = None,
     ) -> None:
-        """审批决策（APPROVE / REJECT）。"""
+        """审批决策（APPROVE / REJECT）。
+
+        ⚠️ ``before`` 必须是**决策前**的快照 ⇒ 签署人由调用方在更新**之前**
+        取好传进来（``beforeApproverUser``）⇒ 不能从**更新后**的任务行反推
+        （那会让「变更前」里出现「变更后」的值）。
+        """
 
         action = ACTION_APPROVE if decision == "APPROVE" else ACTION_REJECT
         await self._audit.record(
@@ -117,7 +125,7 @@ class WorkflowAuditService:
             action=action,
             actor=actor,
             actor_departments=actorDepartments,
-            before={"status": beforeStatus, "approverUser": task.approver_user},
+            before={"status": beforeStatus, "approverUser": beforeApproverUser},
             after={
                 "status": task.status,
                 "approverUser": task.approver_user,
@@ -131,8 +139,13 @@ class WorkflowAuditService:
         *,
         task: ApprovalTask,
         actor: str,
+        beforeStatus: str | None = None,
     ) -> None:
-        """审批超时（任务转 TIMEOUT、实例转 FAILED）。"""
+        """审批超时（任务转 TIMEOUT、实例转 FAILED）。
+
+        ⚠️ ``beforeStatus``：**真实的前态**（调用方在推进前取好）⇒ 不写死
+        ``PENDING`` —— 写死就是「审计说的事和库里发生的事不是一回事」。
+        """
 
         await self._audit.record(
             session,
@@ -140,7 +153,7 @@ class WorkflowAuditService:
             entity_id=task.id,
             action=ACTION_TIMEOUT,
             actor=actor,
-            before={"status": "PENDING"},
+            before={"status": beforeStatus or "PENDING"},
             after={"status": task.status},
         )
 
@@ -151,6 +164,7 @@ class WorkflowAuditService:
         instance: WorkflowInstance,
         actor: str,
         reason: str,
+        beforeStatus: str | None = None,
         succeededCount: int = 0,
         failedCount: int = 0,
         skippedCount: int = 0,
@@ -159,6 +173,10 @@ class WorkflowAuditService:
 
         带上**补偿计数**：审计不能只说「已补偿」而不说补偿了几条 ——
         补偿失败时必须看得见（否则「补偿」与纸面动作无法区分）。
+
+        ⚠️ ``beforeStatus``：**补偿前的真实实例状态**（多半是 ``RUNNING``）⇒
+        不写死 ``FAILED`` —— 写死就是**假审计**（审计会声称实例补偿前已失败，
+        而库里它当时还在跑）。
         """
 
         await self._audit.record(
@@ -167,7 +185,7 @@ class WorkflowAuditService:
             entity_id=instance.id,
             action=ACTION_COMPENSATE,
             actor=actor,
-            before={"status": "FAILED"},
+            before={"status": beforeStatus or "FAILED"},
             after={
                 "status": instance.status,
                 "reason": reason[:500],

@@ -5,8 +5,8 @@
 | # | 守卫 | 判定依据 | 失败 |
 |---|---|---|---|
 | ① | 对象级可见 | 实例创建人 / admin / 该实例审批任务的持有人 | 404（无存在性预言机） |
-| ② | 越权 | **审批矩阵条目**（指定人优先，其次角色） | 403 |
-| ③ | 四眼 | 决策人 ≠ 实例创建人 **且** ≠ 本轮发起人 | 403 |
+| ② | 越权 | **审批矩阵条目**（指定人优先，其次角色） | 404（与「不存在」逐字同形） |
+| ③ | 四眼 | 决策人 ≠ 实例创建人 **且** ≠ 本轮发起人 | 403（actor 本就能看见它 ⇒ 非存在性泄露） |
 | ④ | 重复审批 | 任务状态必须是 ``PENDING`` | 409 |
 | ⑤ | 超时 | ``now > due_at`` ⇒ 置 TIMEOUT + 实例 FAILED | 409 |
 | ⑥ | 单轮 | 一个实例只允许一轮审批（不叠加） | 409 |
@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
@@ -51,9 +52,9 @@ from app.services.messages_zh import (
     MSG_WORKFLOW_APPROVAL_APPROVER_UNKNOWN,
     MSG_WORKFLOW_APPROVAL_MATRIX_NOT_MATCHED,
     MSG_WORKFLOW_APPROVAL_MATRIX_UNAVAILABLE,
-    MSG_WORKFLOW_APPROVAL_NOT_AUTHORIZED,
     MSG_WORKFLOW_APPROVAL_RISK_LEVEL_NOT_DEFINED,
     MSG_WORKFLOW_APPROVAL_ROUND_EXISTS,
+    MSG_WORKFLOW_APPROVAL_SELF_FORBIDDEN,
     MSG_WORKFLOW_APPROVAL_TIMEOUT,
 )
 from app.services.workflow_audit_service import WorkflowAuditService
@@ -67,12 +68,12 @@ from app.services.workflow_definition import (
 from app.services.workflow_state_machine import assertWorkflowTransition
 from app.services.workflow_store import WorkflowStore
 
+logger = logging.getLogger(__name__)
+
 DETAIL_APPROVAL_ALREADY_DECIDED = "APPROVAL_ALREADY_DECIDED"
 DETAIL_APPROVAL_TIMEOUT = "APPROVAL_TIMEOUT"
-DETAIL_APPROVAL_NOT_AUTHORIZED = "APPROVAL_NOT_AUTHORIZED"
 DETAIL_APPROVAL_SELF_FORBIDDEN = "APPROVAL_SELF_FORBIDDEN"
 DETAIL_APPROVAL_MATRIX_NOT_MATCHED = "APPROVAL_MATRIX_NOT_MATCHED"
-DETAIL_APPROVAL_MATRIX_UNAVAILABLE = "APPROVAL_MATRIX_UNAVAILABLE"
 DETAIL_APPROVAL_ROUND_EXISTS = "APPROVAL_ROUND_ALREADY_EXISTS"
 DETAIL_APPROVAL_APPROVER_UNKNOWN = "APPROVAL_APPROVER_UNKNOWN"
 DETAIL_APPROVAL_RISK_LEVEL_NOT_DEFINED = "APPROVAL_RISK_LEVEL_NOT_DEFINED"
@@ -97,6 +98,11 @@ _INSTANCE_WAITING_APPROVAL = "WAITING_APPROVAL"
 
 # 超时是**系统事件**（时钟 / 清扫器），不是某个人的决定 ⇒ 审计 actor 用系统标识。
 SYSTEM_ACTOR_TIMEOUT = "system:approval-timeout"
+
+# 清扫**单批上限**：超期任务再多也不能一次全捞进内存与事务。
+# 一万个超期任务 = 一次事务里一万次行锁 + 实例推进 ⇒ 事务无限膨胀 ⇒
+# 清扫本身把库拖垮。⇒ 每轮只捞一批，剩下的下一轮再扫。
+SWEEP_BATCH_SIZE = 200
 
 
 def _utcnow() -> datetime:
@@ -187,12 +193,17 @@ class WorkflowApprovalService:
         actor: str,
         actorDepartments: DepartmentsInput = None,
     ) -> list[ApprovalTask]:
-        """按矩阵条目逐条生成审批任务并留痕。"""
+        """按矩阵条目逐条生成审批任务并留痕。
+
+        ⚠️ **只在任务真的新建时留痕**（``created``）：并发窗口下别人先插成功
+        ⇒ 本次未新建 ⇒ 再写一条「发起审批」就是**重复留痕**（且 actor 是
+        并发的那一方 ⇒ 审计指向错人）。
+        """
 
         now = _utcnow()
         tasks: list[ApprovalTask] = []
         for entry in entries:
-            task, _created = await self._store.createApprovalTask(
+            task, created = await self._store.createApprovalTask(
                 session,
                 instanceId=instance.id,
                 subjectType=entry.subjectType,
@@ -203,12 +214,13 @@ class WorkflowApprovalService:
                 dueAt=now + timedelta(hours=entry.timeoutHours),
                 createdBy=actor,
             )
-            await self._audit.recordApprovalRequested(
-                session,
-                task=task,
-                actor=actor,
-                actorDepartments=actorDepartments,
-            )
+            if created:
+                await self._audit.recordApprovalRequested(
+                    session,
+                    task=task,
+                    actor=actor,
+                    actorDepartments=actorDepartments,
+                )
             tasks.append(task)
         return tasks
 
@@ -313,6 +325,9 @@ class WorkflowApprovalService:
 
         targetStatus = self._targetStatus(decision)
         beforeStatus = task.status
+        # ⚠️ 签署人在决策这一刻才写入 ⇒ 「决策前」的签署人必须**先**取好
+        #   （审计的 before 快照不能用更新后的行反推）。
+        beforeApproverUser = task.approver_user
         updated = await self._store.decideApprovalTask(
             session,
             task.id,
@@ -329,6 +344,7 @@ class WorkflowApprovalService:
             decision=decision,
             actor=actor,
             beforeStatus=beforeStatus,
+            beforeApproverUser=beforeApproverUser,
             note=note,
             actorDepartments=actorDepartments,
         )
@@ -341,27 +357,55 @@ class WorkflowApprovalService:
 
         过期任务留在 ``PENDING`` 会让实例永远卡在「等待审批」⇒ 必须有清扫。
         **不 commit** —— 由调用方（Worker）统一提交。
+
+        ⚠️ **两条纪律**：
+
+        1. **有界**：候选查询带 ``LIMIT``（``SWEEP_BATCH_SIZE``）⇒ 超期任务再多
+           也不会把一次事务撑爆（剩下的下一轮再扫）。
+        2. **重读后再落**：候选是「捞的时候」的快照 ⇒ 落 TIMEOUT 前**重读**
+           （行锁 + ``populate_existing``）⇒ 已被并发决策掉的那条**只跳过它**，
+           不让一次并发决策把**整批**清扫全部回滚。
+        3. **逐条 SAVEPOINT**：某一条落库失败（脏数据 / 约束冲突 / 瞬时锁冲突）
+           ⇒ **只回滚那一条** ⇒ 其余超期任务照常清扫。
+           回归点：整批共用一个事务 ⇒ 一条坏数据就把本轮**所有**超期任务
+           全部作废（下一轮再来）⇒ 一条脏数据能无限期地让整批超期任务不落库
+           （⇒ 实例永远卡在「等待审批」）。
         """
 
         current = now or _utcnow()
-        overdue = (
+        candidates = (
             (
                 await session.execute(
-                    select(ApprovalTask).where(
+                    select(ApprovalTask.id, ApprovalTask.instance_id)
+                    .where(
                         ApprovalTask.status == _STATUS_PENDING,
                         ApprovalTask.due_at.is_not(None),
                         ApprovalTask.due_at < current,
                     )
+                    .order_by(ApprovalTask.id)
+                    .limit(SWEEP_BATCH_SIZE)
                 )
             )
-            .scalars()
             .all()
         )
         touched = 0
-        for task in overdue:
-            instance = await self._lockInstance(session, task.instance_id)
-            await self._markTimedOut(session, task=task, instance=instance, now=current)
-            touched += 1
+        for taskId, instanceId in candidates:
+            try:
+                async with session.begin_nested():
+                    # ⚠️ 锁序恒为 instance → task（与决策路径一致 ⇒ 不会 40P01）。
+                    instance = await self._lockInstance(session, instanceId)
+                    task = await self._lockTask(session, taskId)
+                    if task.status != _STATUS_PENDING:
+                        # 捞候选之后、落超时之前**已被并发决策** ⇒ 跳过这一条。
+                        continue
+                    await self._markTimedOut(session, task=task, instance=instance, now=current)
+                    touched += 1
+            except Exception:  # noqa: BLE001 —— 单条失败隔离（不得拖垮整批）
+                logger.exception(
+                    "清扫单条超期审批失败（只回滚这一条）：taskId=%s instanceId=%s",
+                    taskId,
+                    instanceId,
+                )
         return touched
 
     # ---------------------------------------------------------------- 查询
@@ -637,17 +681,31 @@ class WorkflowApprovalService:
         actor: str,
         roles: Sequence[str],
     ) -> None:
-        """越权判定（403）。判据 = **审批矩阵条目**（不是任务行的可变列）。"""
+        """越权判定。判据 = **审批矩阵条目**（不是任务行的可变列）。
+
+        ⚠️ **无存在性预言机**：越权与「任务不存在」必须**逐字同形**
+        （都 404、都只有一句「审批任务 N 不存在」、都没有 detail/details）
+        ⇒ 否则拿到任务 id 就能枚举出「哪些审批任务存在」
+        ⇒ 越权一律按「**对你不可见**」处理。
+
+        唯一的例外是**四眼（自审批）**：它保持 403 + 明说「不能审批自己发起的」
+        —— 这不是存在性泄露（actor 本来就是这条任务的审批人 ⇒ 他已经看得见它）
+        ⇒ 且必须与「你不是审批人」**可区分**（否则调用方分不清是「没权限」还是
+        「规矩不让批」⇒ 会去找错人）。
+        """
 
         if entry is None:
-            # 矩阵条目查不到 ⇒ 失败关闭（不猜、不放行）
-            raise ConflictError(
+            # 矩阵条目查不到 ⇒ 失败关闭（不猜、不放行）。
+            # ⚠️ 对外**不得**说「矩阵条目已不可用」——那会暴露「这条任务存在且
+            # 它的矩阵码是什么」⇒ 对外按「不可见」处理，配置漂移只进服务端日志。
+            logger.warning(
+                "审批矩阵条目失效（失败关闭）：%s（taskId=%s）",
                 MSG_WORKFLOW_APPROVAL_MATRIX_UNAVAILABLE.format(
                     matrixCode=task.matrix_code
                 ),
-                detail=DETAIL_APPROVAL_MATRIX_UNAVAILABLE,
-                details={"taskId": task.id, "matrixCode": task.matrix_code},
+                task.id,
             )
+            raise NotFoundError(f"审批任务 {task.id} 不存在")
 
         if entry.approverUser:
             allowed = entry.approverUser == actor
@@ -655,19 +713,15 @@ class WorkflowApprovalService:
             allowed = bool(entry.approverRole) and entry.approverRole in (roles or ())
 
         if not allowed:
-            # ⚠️ details 不带 approverRole / approverUser —— 不泄露审批规则
-            raise PermissionDeniedError(
-                MSG_WORKFLOW_APPROVAL_NOT_AUTHORIZED.format(taskId=task.id),
-                detail=DETAIL_APPROVAL_NOT_AUTHORIZED,
-                details={"taskId": task.id},
-            )
+            # 与「任务不存在」**逐字同形**（无 detail / 无 details）
+            raise NotFoundError(f"审批任务 {task.id} 不存在")
 
         # 四眼原则：决策人不得是「实例提交人」或「本轮审批发起人」
         if (instance.created_by and instance.created_by == actor) or (
             task.created_by and task.created_by == actor
         ):
             raise PermissionDeniedError(
-                MSG_WORKFLOW_APPROVAL_NOT_AUTHORIZED.format(taskId=task.id),
+                MSG_WORKFLOW_APPROVAL_SELF_FORBIDDEN,
                 detail=DETAIL_APPROVAL_SELF_FORBIDDEN,
                 details={"taskId": task.id, "reason": "SELF_APPROVAL_FORBIDDEN"},
             )
@@ -708,6 +762,7 @@ class WorkflowApprovalService:
         """超时 ⇒ 任务 TIMEOUT，实例不再死等（FAILED）。"""
 
         assertWorkflowTransition("approval", task.status, _STATUS_TIMED_OUT)
+        beforeStatus = task.status
         updated = await self._store.markApprovalTask(
             session,
             task.id,
@@ -719,6 +774,7 @@ class WorkflowApprovalService:
             session,
             task=updated,
             actor=SYSTEM_ACTOR_TIMEOUT,
+            beforeStatus=beforeStatus,
         )
         await self._syncInstanceStatus(session, instance)
 

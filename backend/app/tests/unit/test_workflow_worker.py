@@ -37,6 +37,7 @@ from app.workers.workflow_worker import (
     WORKER_ID_MAX_LEN,
     WorkflowWorker,
     _defaultWorkerId,
+    buildCommandExecutor,
 )
 
 _store = WorkflowStore()
@@ -419,3 +420,195 @@ async def test_清扫按节流执行(seedEngine, dbSession, definition, approver
 
     assert await worker.sweepApprovals(force=True) == 1
     assert await worker.sweepApprovals() == 0
+
+
+# =============================================================================
+# R11-H：一轮必须**排空**待执行命令（吞吐不能被轮询间隔压死）
+# =============================================================================
+
+
+async def test_一轮排空多条待执行命令(seedEngine, dbSession, definition):
+    """Worker 一轮把「未领取」的命令**排空**，不是只领一条。
+
+    回归点：``runOnce`` 一次只领一条 ⇒ 每轮只处理 1 条 ⇒ 吞吐被
+    ``workflowPollSeconds``（默认 2s）压死 ⇒ 约 30 条/分钟 ⇒
+    实例越多越追不上。
+    """
+
+    factory, _ = seedEngine
+    commandIds: list[int] = []
+    for index in range(3):
+        instance, step = await _instanceWithStep(
+            dbSession, definition, idempotencyKey=f"worker-drain-{index}"
+        )
+        command, _ = await _store.enqueueCommand(
+            dbSession,
+            instanceId=instance.id,
+            stepId=step.id,
+            commandType="po.write",
+            idempotencyKey=f"cmd-drain-{index}",
+            payload={},
+        )
+        await dbSession.commit()
+        commandIds.append(command.id)
+
+    worker = _worker(factory)
+
+    assert await worker.runOnce() is True
+
+    rows = (
+        (
+            await dbSession.execute(
+                select(BusinessCommand)
+                .where(BusinessCommand.id.in_(commandIds))
+                .order_by(BusinessCommand.id)
+                # ⚠️ 必须 populate_existing：dbSession 的 identity map 里**已经**
+                # 有这几条命令（入队时读过一次）⇒ 不刷新就会拿到**旧的**
+                # PENDING ⇒ 假失败（Worker 其实已经把三条都执行完了）。
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [row.status for row in rows] == ["SUCCEEDED"] * 3
+
+
+async def test_一轮排空不热转可重试失败(seedEngine, dbSession, definition):
+    """可重试失败的命令**每轮只被领一次**（重试要有节奏，不在同轮里热转）。
+
+    回归点：排空若把 ``FAILED``（可重试）也当普通候选反复领 ⇒ 同一条命令在
+    一轮里被领 ``maxAttempts`` 次 ⇒ 重试没有退避 ⇒ 毒丸命令把 worker 烧满。
+    """
+
+    factory, _ = seedEngine
+    instance, step = await _instanceWithStep(
+        dbSession, definition, idempotencyKey="worker-retry"
+    )
+    command, _ = await _store.enqueueCommand(
+        dbSession,
+        instanceId=instance.id,
+        stepId=step.id,
+        commandType="po.write",
+        idempotencyKey="cmd-retry",
+        payload={"simulate": {"outcome": "fail", "message": "下游超时"}},
+    )
+    await dbSession.commit()
+    commandId = command.id
+
+    worker = _worker(factory)
+    await worker.runOnce()
+
+    row = (
+        await dbSession.execute(
+            select(BusinessCommand)
+            .where(BusinessCommand.id == commandId)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    # 一轮只试一次（不是把 maxAttempts 用光）
+    assert row.status == "FAILED"
+    assert row.attempts == 1
+
+
+# =============================================================================
+# R12-M3 / R12-M8：装配口径 + 一轮的批量上限
+# =============================================================================
+
+
+def test_组装根把设置传给执行器():
+    """最大尝试次数与适配器超时都从**设置**来 ⇒ 必须**一处装配**。
+
+    回归点：这两项在执行器里被用到**两处**（领取过滤条件 / 失败终态判定）
+    ⇒ 各读各的配置 ⇒ 改了一个忘了另一个 ⇒ 领取口径与终态口径打架
+    （命令领得到却永远不判终态 ⇒ 无限重试）。
+    """
+
+    settings = _settings(
+        workflowMaxCommandAttempts=7,
+        workflowCommandTimeoutSeconds=12.5,
+    )
+    registry = CommandHandlerRegistry()
+    registry.register("po.write", SimulatedCommandHandler())
+
+    executor = buildCommandExecutor(settings, registry)
+
+    assert executor.maxAttempts == 7
+    assert executor.commandTimeoutSeconds == 12.5
+
+
+async def test_领取过滤用执行器的最大尝试次数(seedEngine, dbSession, monkeypatch):
+    """领取条件必须用**执行器**的 ``maxAttempts``（而不是设置里的另一份）。
+
+    回归点：Worker 若自读 ``settings.workflowMaxCommandAttempts``，而执行器
+    用的是别处装配的值 ⇒ 两处口径可能不同 ⇒ 「领得到却永远不判终态」。
+    """
+
+    factory, _ = seedEngine
+    captured: dict[str, Any] = {}
+
+    async def _patchedClaim(self, session, *, workerId, maxAttempts=1, includeRetryable=True):
+        captured["maxAttempts"] = maxAttempts
+        return None
+
+    monkeypatch.setattr(WorkflowStore, "claimNextCommand", _patchedClaim)
+
+    registry = CommandHandlerRegistry()
+    registry.register("po.write", SimulatedCommandHandler())
+    executor = CommandExecutor(registry, maxAttempts=5)
+    # 设置里故意给**不同的**值 ⇒ 若 Worker 自读设置，这里就会取到 3。
+    worker = WorkflowWorker(
+        _settings(workflowMaxCommandAttempts=3),
+        factory,
+        executor,
+        workerId="worker-test",
+    )
+
+    await worker.runOnce()
+
+    assert captured["maxAttempts"] == 5
+
+
+async def test_一轮排空不超过批量上限(seedEngine, dbSession, definition):
+    """一轮**总共**最多领 ``drainBatchSize`` 条（**含第一次领取**）。
+
+    回归点：早期实现是「第一次 + 排空 N 条」= N+1 条 ⇒ 批量上限形同虚设
+    （宣称的 50 实际是 51 ⇒ 上限失真 ⇒ 批量大时一轮跑得比预期久）。
+    """
+
+    factory, _ = seedEngine
+    commandIds: list[int] = []
+    for index in range(3):
+        instance, step = await _instanceWithStep(
+            dbSession, definition, idempotencyKey=f"worker-cap-{index}"
+        )
+        command, _ = await _store.enqueueCommand(
+            dbSession,
+            instanceId=instance.id,
+            stepId=step.id,
+            commandType="po.write",
+            idempotencyKey=f"cmd-cap-{index}",
+            payload={},
+        )
+        await dbSession.commit()
+        commandIds.append(command.id)
+
+    worker = _worker(factory, drainBatchSize=2)
+    assert await worker.runOnce() is True
+
+    rows = (
+        (
+            await dbSession.execute(
+                select(BusinessCommand)
+                .where(BusinessCommand.id.in_(commandIds))
+                .order_by(BusinessCommand.id)
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    statuses = [row.status for row in rows]
+    # 只处理 2 条（不是 3 条）⇒ 剩下的下一轮再来。
+    assert statuses.count("SUCCEEDED") == 2
+    assert statuses.count("PENDING") == 1

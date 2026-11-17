@@ -66,7 +66,6 @@ class WorkflowInstanceRead(CamelModel):
     definition_id: int
     status: str
     idempotency_key: str
-    business_key: str | None = None
     created_by: str | None = None
     error_message: str | None = None
     created_time: datetime

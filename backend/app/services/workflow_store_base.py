@@ -40,7 +40,12 @@ STATUS_FAILED = "FAILED"
 STATUS_CANCELLED = "CANCELLED"
 STATUS_ABORTED = "ABORTED"
 
-# 领域事件类型（**每步可追溯**的事件流词汇表；worker 据此路由）。
+# 领域事件类型（**每步可追溯**的事件流词汇表）。
+#
+# ⚠️ `workflow_outbox` 当前**没有消费者**：Worker 轮询的是 `business_command`
+#   （那张表才是命令的来源），这张表**只写不读** ⇒ 事件流是给人看/SQL 查的
+#   追溯记录，不是机器路由表（早前的注释写「worker 据此路由」⇒ 与事实不符
+#   ⇒ 照着注释做集成的人会找不到路由方）。已知限制见 `summary.md` §9。
 #
 # ⚠️ 事件行与业务写**同事务**（只 add 不 commit）⇒ 业务回滚时事件一起消失，
 # 不会留下「幽灵事件」。

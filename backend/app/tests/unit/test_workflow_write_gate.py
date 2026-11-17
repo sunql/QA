@@ -72,6 +72,7 @@ _MAX_MODULE_LINES = 800
 _APP_DIR = pathlib.Path(__file__).resolve().parents[2]
 _BACKEND_DIR = _APP_DIR.parent
 _SCRIPTS_DIR = _BACKEND_DIR / "scripts"
+_TESTS_DIR = _APP_DIR / "tests" / "unit"
 
 
 def _isAllowedWriter(relPath: str) -> bool:
@@ -552,6 +553,11 @@ def test_P5模块不超过行数上限():
 
     为什么要有守卫：P5 的存储层一度长到 1010 行 ⇒ 违反硬规则 ⇒ 而且这类
     「越滚越大」是**静默**的（没人会在提交时数行数）⇒ 必须**机械**判定。
+
+    ⚠️ **范围**：既扫 ``app/`` 下的 P5 模块，**也**扫 ``app/tests/unit/`` 下的
+    P5 单测文件 —— 测试文件同样受硬规则约束（``test_workflow_command_executor.py``
+    一度 809 行 ⇒ 补偿用例已拆到 ``test_workflow_compensation.py``）。
+    早期版本的守卫只扫 ``app/`` ⇒ 测试文件可以无声地越界 ⇒ 拆分压力被推迟。
     """
 
     offenders: list[str] = []
@@ -565,6 +571,12 @@ def test_P5模块不超过行数上限():
             or rel.startswith("app/domain/workflow_")
         ):
             continue
+        lineCount = len(path.read_text(encoding="utf-8").splitlines())
+        if lineCount > _MAX_MODULE_LINES:
+            offenders.append(f"{rel}: {lineCount} 行（上限 {_MAX_MODULE_LINES}）")
+
+    for path in sorted(_TESTS_DIR.glob("test_workflow_*.py")):
+        rel = path.relative_to(_BACKEND_DIR).as_posix()
         lineCount = len(path.read_text(encoding="utf-8").splitlines())
         if lineCount > _MAX_MODULE_LINES:
             offenders.append(f"{rel}: {lineCount} 行（上限 {_MAX_MODULE_LINES}）")

@@ -13,7 +13,8 @@
 5. **审批人必须在库中存在**：角色 / 指定人查无 ⇒ 发起时拒（否则死任务）。
 6. **七守卫**：
    - 对象级不可见（404）：无权者看不到实例（无存在性预言机）；
-   - 越权（403）：矩阵判据（指定人优先，其次角色）；
+   - 越权（404）：矩阵判据（指定人优先，其次角色）⇒ 与「任务不存在」**逐字
+     同形**（否则拿到任务 id 就能枚举出「哪些审批任务存在」）；
    - 四眼（403）：决策人 ≠ 实例提交人 **且** ≠ 本轮发起人；
    - 重复审批（409）：已决过 ⇒ 拒；
    - 超时（409）：过了 ``due_at`` ⇒ 任务置 TIMEOUT、实例置 FAILED。
@@ -425,8 +426,8 @@ async def test_指定审批人存在则可发起并可决策(dbSession, definiti
     # ⚠️ rollback 会 expire ORM 实例 ⇒ 先取 id
     taskId = tasks[0].id
 
-    # 角色对但不是指定人 ⇒ 拒
-    with pytest.raises(PermissionDeniedError):
+    # 角色对但不是指定人 ⇒ 拒（越权 ⇒ 404「对你不可见」，与「不存在」同形）
+    with pytest.raises(NotFoundError):
         await _service.decideApproval(
             dbSession,
             taskId=taskId,
@@ -532,10 +533,12 @@ async def test_发起审批需对实例可见(dbSession, definition):
 
 
 async def test_非授权角色不能审批(dbSession, definition):
+    """越权 ⇒ **404**（与「任务不存在」同形）⇒ 不是 403。"""
+
     instance = await _makeInstance(dbSession, definition)
     tasks = await _requestApproval(dbSession, instance)
 
-    with pytest.raises(PermissionDeniedError):
+    with pytest.raises(NotFoundError):
         await _service.decideApproval(
             dbSession,
             taskId=tasks[0].id,
@@ -544,6 +547,49 @@ async def test_非授权角色不能审批(dbSession, definition):
             roles=("intern",),
         )
     await dbSession.rollback()
+
+
+async def test_矩阵条目失效时对外不可见但日志可查(dbSession, definition, caplog):
+    """矩阵条目查不到 ⇒ **对外按「不可见」处理**（404），**日志里**才看得见。
+
+    回归点：矩阵条目失效原来回 409 +「矩阵条目 X 已不可用」⇒ 那句话**暴露了**
+    「这条审批任务存在，且它的矩阵码是什么」⇒ 存在性预言机（还能顺带枚举
+    矩阵码）⇒ 与「无存在性预言机」口径自相矛盾。
+
+    ⇒ 对外 404（与「任务不存在」逐字同形），配置漂移只进服务端日志。
+    """
+
+    instance = await _makeInstance(dbSession, definition)
+    tasks = await _requestApproval(dbSession, instance)
+    taskId = tasks[0].id
+
+    # 配置漂移：定义体里的矩阵条目被摘掉（任务行仍指向老矩阵码）。
+    definition.definition_json = {
+        **definition.definition_json,
+        "approvalMatrix": [],
+    }
+    await dbSession.commit()
+
+    with (
+        caplog.at_level("WARNING"),
+        pytest.raises(NotFoundError) as excinfo,
+    ):
+        await _service.decideApproval(
+            dbSession,
+            taskId=taskId,
+            decision="APPROVE",
+            actor="manager",
+            roles=("purchase_manager",),
+        )
+    await dbSession.rollback()
+
+    # 对外：与「任务不存在」**逐字同形**
+    assert str(excinfo.value) == f"审批任务 {taskId} 不存在"
+    assert excinfo.value.detail is None
+    assert excinfo.value.details is None
+    # 内部：漂移可见（否则矩阵被摘掉 ⇒ 审批静默卡死，无人知晓）
+    assert "审批矩阵条目失效" in caplog.text
+    assert "po_medium_manager" in caplog.text
 
 
 async def test_提交人不能自审批(dbSession, definition):

@@ -65,7 +65,6 @@ class WorkflowInstanceStore(WorkflowStoreBase):
         idempotencyKey: str,
         requestJson: dict[str, Any],
         actor: str,
-        businessKey: str | None = None,
     ) -> tuple[WorkflowInstance, bool]:
         """幂等创建实例。返回 ``(实例, 是否本次新建)``。
 
@@ -83,7 +82,6 @@ class WorkflowInstanceStore(WorkflowStoreBase):
             idempotencyKey=idempotencyKey,
             requestJson=requestJson,
             actor=actor,
-            businessKey=businessKey,
         )
 
         existing = await self._loadInstanceByIdempotency(
@@ -113,7 +111,6 @@ class WorkflowInstanceStore(WorkflowStoreBase):
         idempotencyKey: str,
         requestJson: dict[str, Any],
         actor: str,
-        businessKey: str | None,
     ) -> int | None:
         """插入实例行（幂等键冲突则不插）⇒ 返回新行 id；冲突时返回 ``None``。"""
 
@@ -123,7 +120,6 @@ class WorkflowInstanceStore(WorkflowStoreBase):
                 .values(
                     definition_id=definitionId,
                     idempotency_key=idempotencyKey,
-                    business_key=businessKey,
                     status=STATUS_PENDING,
                     request_json=requestJson,
                     created_by=actor,
@@ -186,7 +182,6 @@ class WorkflowInstanceStore(WorkflowStoreBase):
         toStatus: str,
         *,
         errorMessage: str | None = None,
-        resultJson: dict[str, Any] | None = None,
     ) -> WorkflowInstance:
         """推进实例状态（行锁 + 状态机校验）。"""
 
@@ -196,8 +191,6 @@ class WorkflowInstanceStore(WorkflowStoreBase):
         values: dict[str, Any] = {"status": toStatus, "updated_time": utcnow()}
         if errorMessage is not None:
             values["error_message"] = errorMessage
-        if resultJson is not None:
-            values["result_json"] = resultJson
 
         updated = await self._writeStatus(
             session,

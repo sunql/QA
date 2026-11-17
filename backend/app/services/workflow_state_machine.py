@@ -69,7 +69,9 @@ _COMMAND: Mapping[str, frozenset[str]] = MappingProxyType(
         "PENDING": frozenset({"EXECUTING", "FAILED", "CANCELLED", "ABORTED"}),
         # EXECUTING → CANCELLED：Worker 领走命令后、真正调适配器**之前**，
         # 发现实例已被取消 ⇒ 不执行（外部写不再发生），命令落终态。
-        "EXECUTING": frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
+        # EXECUTING → ABORTED：**终态失败**（不可重试 / 次数耗尽）⇒ 落库即终态。
+        #   （失败收敛用 SAVEPOINT ⇒ claim 保留 ⇒ 失败终态从 EXECUTING 直接落。）
+        "EXECUTING": frozenset({"SUCCEEDED", "FAILED", "CANCELLED", "ABORTED"}),
         "SUCCEEDED": frozenset({"COMPENSATED"}),
         # FAILED → CANCELLED：可重试失败的命令也必须能被取消
         # （否则取消后它仍在可领取集合里 ⇒ Worker 照样写外部系统）。

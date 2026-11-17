@@ -64,10 +64,8 @@ _DEFINITION_STATUS_COMMENT = "0149，P5：定义状态（DRAFT / PUBLISHED / DIS
 
 _INSTANCE_DEFINITION_COMMENT = "0149，P5：所属定义（workflow_definition.id）"
 _INSTANCE_IDEMPOTENCY_COMMENT = "0149，P5：幂等键（同一定义+同一提交人下唯一；重复提交只执行一次）"
-_INSTANCE_BUSINESS_KEY_COMMENT = "0149，P5：业务键（业务侧单号，可空）"
 _INSTANCE_STATUS_COMMENT = "0149，P5：实例状态（状态机字面量集合）"
 _INSTANCE_REQUEST_COMMENT = "0149，P5：实例请求体（JSON 对象）"
-_INSTANCE_RESULT_COMMENT = "0149，P5：实例结果体（JSON 对象，可空）"
 _INSTANCE_CREATED_BY_COMMENT = "0149，P5：提交人（幂等作用域的一环 ⇒ NOT NULL）"
 
 # ---------------------------------------------------------------- 步骤与命令
@@ -102,7 +100,7 @@ _APPROVAL_ROLE_COMMENT = "0151，P5：期望审批角色（矩阵条目声明；
 _APPROVAL_USER_COMMENT = "0151，P5：实际审批人"
 _APPROVAL_DUE_AT_COMMENT = "0151，P5：审批超时时刻（超时守卫判据）"
 
-_OUTBOX_EVENT_TYPE_COMMENT = "0151，P5：事件类型（worker 据此路由）"
+_OUTBOX_EVENT_TYPE_COMMENT = "0151，P5：事件类型（事件流词汇表；当前无消费者：只写不读）"
 _OUTBOX_PAYLOAD_COMMENT = "0151，P5：事件载荷（JSON 对象）"
 _OUTBOX_STATUS_COMMENT = "0151，P5：outbox 事件状态"
 _OUTBOX_ATTEMPTS_COMMENT = "0151，P5：已尝试次数（毒丸防护）"
@@ -198,9 +196,6 @@ class WorkflowInstance(Base, TimestampMixin):
     idempotency_key: Mapped[str] = mapped_column(
         String(128), nullable=False, comment=_INSTANCE_IDEMPOTENCY_COMMENT
     )
-    business_key: Mapped[str | None] = mapped_column(
-        String(128), nullable=True, comment=_INSTANCE_BUSINESS_KEY_COMMENT
-    )
     status: Mapped[str] = mapped_column(
         String(24),
         nullable=False,
@@ -214,9 +209,6 @@ class WorkflowInstance(Base, TimestampMixin):
         default=dict,
         server_default=sa_text("'{}'::jsonb"),
         comment=_INSTANCE_REQUEST_COMMENT,
-    )
-    result_json: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB, nullable=True, comment=_INSTANCE_RESULT_COMMENT
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str] = mapped_column(

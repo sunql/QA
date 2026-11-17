@@ -318,3 +318,87 @@ async def test_入队不自带commit():
 
     assert len(fake.added) == 1
     assert fake.committed is False
+
+
+# =============================================================================
+# R11-I / R11-J：审计快照必须反映「决策前」；未新建的任务不重复留痕
+# =============================================================================
+
+
+async def test_审批审计的before快照是决策前(dbSession, definition):
+    """``before_json`` 必须是**决策前**的快照。
+
+    回归点：``recordDecision`` 拿的是**更新后**的任务行来填 ``before``
+    ⇒ ``before.approverUser`` 显示的其实是**新**审批人 ⇒ 「变更前」快照里
+    出现了变更后的值 ⇒ 审计的 before/after 两端不再是同一件事的前后。
+    """
+
+    instanceId = await _submit(dbSession, definition)
+    approval = WorkflowApprovalService()
+    await approval.requestApproval(dbSession, instanceId=instanceId, actor="submitter")
+    await dbSession.commit()
+
+    task = (
+        await dbSession.execute(
+            select(ApprovalTask).where(ApprovalTask.instance_id == instanceId)
+        )
+    ).scalar_one()
+    taskId = task.id
+
+    await approval.decideApproval(
+        dbSession,
+        taskId=taskId,
+        decision="APPROVE",
+        actor="manager",
+        roles=(_APPROVER_ROLE_CODE,),
+        note="同意",
+    )
+    await dbSession.commit()
+
+    rows = await _auditRows(dbSession, entityType="approval_task")
+    approved = next(row for row in rows if row.action == "APPROVE")
+    assert approved.before_json["status"] == "PENDING"
+    # 决策前还没有签署人
+    assert approved.before_json["approverUser"] is None
+    assert approved.after_json["approverUser"] == "manager"
+
+
+async def test_审批任务未新建时不重复留审计(dbSession, definition, monkeypatch):
+    """并发窗口：任务**已存在**（别人先插成功）⇒ 本次**未新建** ⇒ 不重复留痕。
+
+    回归点：``_createRoundTasks`` 忽略了 ``createApprovalTask`` 返回的
+    ``created`` 标志 ⇒ 未新建也写一条 ``WORKFLOW_APPROVAL_REQUESTED``
+    ⇒ 审计里出现「同一任务被发起两次」，且第二次的 actor 是并发的那一方。
+    """
+
+    from datetime import UTC, datetime, timedelta
+
+    from app.services.workflow_store import WorkflowStore
+
+    instanceId = await _submit(dbSession, definition)
+    store = WorkflowStore()
+    await store.createApprovalTask(
+        dbSession,
+        instanceId=instanceId,
+        subjectType="workflow_instance",
+        subjectId=str(instanceId),
+        matrixCode="po_medium_manager",
+        approverRole="purchase_manager",
+        approverUser=None,
+        dueAt=datetime.now(UTC) + timedelta(hours=24),
+        createdBy="other",
+    )
+    await dbSession.commit()
+
+    async def _emptyList(session, *, instanceId):
+        # 模拟竞态窗口：检查时列表为空 ⇒ 走「创建」路径 ⇒ 唯一约束命中 ⇒ 未新建
+        return []
+
+    monkeypatch.setattr(store, "listApprovalTasks", _emptyList)
+    approval = WorkflowApprovalService(store=store)
+
+    await approval.requestApproval(dbSession, instanceId=instanceId, actor="submitter")
+    await dbSession.commit()
+
+    rows = await _auditRows(dbSession, entityType="approval_task")
+    assert rows == []

@@ -51,7 +51,7 @@ COLUMN_COMMENTS = {
     "approval_approver_role": "0151，P5：期望审批角色（矩阵条目声明；越权审批的判据）",
     "approval_approver_user": "0151，P5：实际审批人",
     "approval_due_at": "0151，P5：审批超时时刻（超时守卫判据）",
-    "outbox_event_type": "0151，P5：事件类型（worker 据此路由）",
+    "outbox_event_type": "0151，P5：事件类型（事件流词汇表；当前无消费者：只写不读）",
     "outbox_payload": "0151，P5：事件载荷（JSON 对象）",
     "outbox_status": "0151，P5：outbox 事件状态",
     "outbox_attempts": "0151，P5：已尝试次数（毒丸防护）",

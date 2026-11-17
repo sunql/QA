@@ -203,19 +203,49 @@ async def test_提交后发起审批产生任务(workflowClient, dbSession):
     assert len(rows) == 1
 
 
-async def test_越权审批返回403(workflowClient, dbSession):
+async def test_越权审批返回404且与任务不存在不可区分(workflowClient, dbSession):
+    """越权审批 ⇒ **404**，且响应体与「任务不存在」**除任务 id 外逐字相同**。
+
+    回归点：越权返回 403、任务不存在返回 404 ⇒ **状态码本身就是存在性预言机**
+    ⇒ 拿到任务 id 就能枚举出「哪些审批任务存在」⇒ 与本仓既定口径
+    （「对象级不可见 ⇒ 404（无存在性预言机）」）自相矛盾。
+
+    ⇒ 越权一律按「**对你不可见**」处理 ⇒ 调用方无法区分「不存在」与「不是你的」。
+    """
+
     await _seedDefinition(dbSession)
     actors = await _seedActors(dbSession)
     instanceId = await _submit(workflowClient)
     tasks = await _requestApproval(workflowClient, instanceId)
+    taskId = tasks[0]["id"]
 
     resp = await workflowClient.post(
-        f"/api/v1/workflow/approvals/{tasks[0]['id']}/decision",
+        f"/api/v1/workflow/approvals/{taskId}/decision",
         json={"decision": "APPROVE"},
         headers=actors["intern"],
     )
-    assert resp.status_code == 403, resp.text
-    assert resp.json()["detail"] == "APPROVAL_NOT_AUTHORIZED"
+    assert resp.status_code == 404, resp.text
+    body = resp.json()
+    # 响应体里**不得**有任何「越权」痕迹（否则 404 也照样泄露）。
+    assert body["detail"] is None
+    assert body["details"] is None
+
+    # 对照组：一个**不存在**的任务 id ⇒ 响应必须与越权响应逐字相同（除 id）。
+    missingId = taskId + 100000
+    missing = await workflowClient.post(
+        f"/api/v1/workflow/approvals/{missingId}/decision",
+        json={"decision": "APPROVE"},
+        headers=actors["intern"],
+    )
+    assert missing.status_code == 404, missing.text
+    missingBody = missing.json()
+    assert body.keys() == missingBody.keys()
+    assert body["detail"] == missingBody["detail"]
+    assert body["details"] == missingBody["details"]
+    assert body["error"].replace(str(taskId), "<id>") == missingBody["error"].replace(
+        str(missingId), "<id>"
+    )
+
     # 拒绝即零副作用：任务仍是 PENDING
     detail = await workflowClient.get(
         f"/api/v1/workflow/instances/{instanceId}/approvals",
@@ -471,20 +501,40 @@ async def test_伪造角色头不能越权(workflowClient, dbSession):
 
     身份已校验（真 JWT）⇒ 能走到角色判定 ⇒ 但角色**来自 DB**（``forged``
     没有采购经理角色）⇒ 请求头自称 ``purchase_manager`` 仍然被拒。
+
+    ⚠️ 拒绝口径 = **404**（与「任务不存在」逐字同形）⇒ 不是 403 ⇒
+    伪造者既拿不到「你无权」的明说，也拿不到「这条任务存在」的信号。
     """
 
     await _seedDefinition(dbSession)
     actors = await _seedActors(dbSession)
     instanceId = await _submit(workflowClient)
     tasks = await _requestApproval(workflowClient, instanceId)
+    taskId = tasks[0]["id"]
 
     resp = await workflowClient.post(
-        f"/api/v1/workflow/approvals/{tasks[0]['id']}/decision",
+        f"/api/v1/workflow/approvals/{taskId}/decision",
         json={"decision": "APPROVE"},
         headers={**actors["forged"], "X-User-Roles": _ROLE_PURCHASE_MANAGER},
     )
-    assert resp.status_code == 403, resp.text
-    assert resp.json()["detail"] == "APPROVAL_NOT_AUTHORIZED"
+    assert resp.status_code == 404, resp.text
+    body = resp.json()
+    assert body["detail"] is None
+    assert body["details"] is None
+
+    # 与「任务不存在」逐字同形（除 id）⇒ 无存在性预言机
+    missingId = taskId + 100000
+    missing = await workflowClient.post(
+        f"/api/v1/workflow/approvals/{missingId}/decision",
+        json={"decision": "APPROVE"},
+        headers={**actors["forged"], "X-User-Roles": _ROLE_PURCHASE_MANAGER},
+    )
+    assert missing.status_code == 404, missing.text
+    missingBody = missing.json()
+    assert body.keys() == missingBody.keys()
+    assert body["error"].replace(str(taskId), "<id>") == missingBody["error"].replace(
+        str(missingId), "<id>"
+    )
 
 
 async def test_无关第三方读实例返回404(workflowClient, dbSession):

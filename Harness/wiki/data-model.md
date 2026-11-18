@@ -15,6 +15,13 @@
   **采购域 5 个类的物理表绑定（2026-11-18 校准，迁移 `0153`）**：`Supplier`→`BPSUPPLIER`、`ItemMaster`→`ITMMASTER`、`PurchaseOrder`→`PORDER`、`Receipt`→`PRECEIPT`（**ERP 业务表词表**）、`IncomingInspection`→**NULL**（来料检验无物理表）。
   ⚠️ 迁移 `0039`/`0040` 当年写的是 **DWD_\* 词表**（`DWD_SUPPLIER` 等）—— 那张表在系统的查询目标里**不存在**，且与本体 SSOT（`backend/seed_ontology.py` 的 `CLASSES`）**分叉** ⇒ NL2SQL 指向不存在的表 + 干净库上 `seed_ontology.seed()` 撞 `uq_ontology_class_name_version` 唯一约束。`0153` 已校准（**纯数据迁移，无 DDL** ⇒ `alembic check` / drift 不受影响）。
   **绑定词表的 SSOT = `seed_ontology.CLASSES`**；`seed_ontology._seedClasses` 按 **`source_table`** 查重复用 ⇒ 两个种子的 `source_table` 必须同款，否则干净库上 seed 直接崩。门禁：`backend/scripts/procurement_class_source_table_realdata.py`（干净库真跑迁移链 + 断言无 `DWD_*` 残留 + 断言 seed 复用不崩）。
+  ⚠️ **DWD 族存在「两套并行命名」，同名 ≠ 同表（2026-11-18 源侧实测）**：`DWD_*` 类分两族 ——
+  **有效族**（`_DTL` 命名，如 `DWD_PURCHASE_ORDER_DTL` 1,023,442 行）与
+  **墓碑族**（`_LINE` 命名，如 `DWD_PURCHASE_ORDER_LINE` 927,648 行，`valid_to=2026-09-19`）——
+  二者是**不同的物理表**，且 `_DTL` 族**缺** `PROMISED_RECEIPT_DATE`/`ORDER_QTY`/`LINE_AMOUNT_EXCL_TAX`/`MATERIAL_CODE`/`RECEIPT_DATE`/`RECEIPT_NO`。
+  12 条采购 KPI 的公式引用的是**墓碑族** ⇒ 源绑定清单 = 34 有效候选 **＋ 7 个复活墓碑类 = 41 类**（[变更 SSOT](../changes/2026-11-18-procurement-m0-questionnaire-intake/summary.md)）。
+  墓碑族的物理列数 = 本体属性数（抽样 `missing=0`）⇒ **复活无列级缺口**。
+  另：`DWD_ARRIVAL_ORDER_DTL`（**81,754 行**，`ARR_QTY`/`QUALIFIED_QTY`/`INSPECT_DATE` 100% 填充）**就是来料检验的落地表** —— 与上面 `IncomingInspection→NULL`（ERP 业务表词表口径）不冲突，是两套词表。
 - `ontology_property`：属性，`data_type`、`is_primary_key`、`is_foreign_key`、`ref_class_id`、`source_column`。
 - `ontology_metric`：指标，**技术形态 SSOT**。现有列：`formula`(Text NN，逃生舱)、`agg_function`(varchar20 default 'SUM')、`target_class_id`(FK→ontology_class，单值，语义=role=BASE)、`dimension_defaults`(JSON，**零消费者**)。
   🔴 **该表在 NL2SQL 链路零消费者**（`nl2sql_service.py:34-35` 不 import、`nl2sql_prompts.py` 0 个 "etric"、`buildSchemaText` 只渲染类、`chat_recall` 用 `typeFilter="class"`）⇒ **补数据不改变任何一条 SQL**。

@@ -28,6 +28,18 @@ from app.domain.error_messages import (
     MSG_PARAM_MILVUS_DATASOURCE_ID,
     MSG_PARAM_MILVUS_ONTOLOGY_ID,
 )
+from app.infrastructure.milvus_collections import (
+    CLASS_COLLECTION_NAME as _CLASS_COLLECTION_NAME,
+)
+from app.infrastructure.milvus_collections import (
+    KPI_COLLECTION_NAME as _KPI_COLLECTION_NAME,
+)
+from app.infrastructure.milvus_collections import (
+    METRIC_COLLECTION_NAME as _METRIC_COLLECTION_NAME,
+)
+from app.infrastructure.milvus_collections import (
+    PROPERTY_COLLECTION_NAME as _PROPERTY_COLLECTION_NAME,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -685,12 +697,11 @@ def refreshDocumentCollection() -> None:
 # NOTE: The actual implementations are imported from milvus_dual_write.py,
 # milvus_query_helpers.py, and milvus_search.py above.
 # This section only re-exports the constants used by callers.
+#
+# 集合名的**唯一来源**是 milvus_collections.py（SSOT）—— 上面四个常量直接从那里
+# import，不在这里另写一份字面量：写锁按集合名取键（milvus_write_lock），
+# 读侧/写侧集合名一旦漂移 ⇒ 向量「写成功但召回不到」。
 # ---------------------------------------------------------------------------
-
-_CLASS_COLLECTION_NAME = "ontology_class_embeddings"
-_PROPERTY_COLLECTION_NAME = "ontology_property_embeddings"
-_METRIC_COLLECTION_NAME = "ontology_metric_embeddings"
-_KPI_COLLECTION_NAME = "kpi_catalog_embeddings"
 
 
 def closeConnection() -> None:

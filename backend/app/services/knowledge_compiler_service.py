@@ -478,7 +478,8 @@ class KnowledgeCompilerService:
         embeddingText = _TYPE_TO_EMBEDDING_TEXT[objectType](entity)
         vec = await EmbeddingService().generateEmbedding(embeddingText)
         if objectType == "property":
-            self._ontology.syncEmbedding(
+            # Milvus 是同步 SDK ⇒ 走 async 入口（移出事件循环 + 集合级串行化）
+            await self._ontology.syncEmbeddingAsync(
                 ontologyId=entity.id,
                 type="property",
                 name=entity.property_name,
@@ -497,7 +498,8 @@ class KnowledgeCompilerService:
                 session=session,
             )
         else:
-            self._ontology.syncEmbedding(
+            # Milvus 是同步 SDK ⇒ 走 async 入口（移出事件循环 + 集合级串行化）
+            await self._ontology.syncEmbeddingAsync(
                 ontologyId=entity.id,
                 type="metric",
                 name=entity.metric_name,

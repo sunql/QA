@@ -352,8 +352,10 @@ class LocalImportService:
                 created_classes += 1
                 created_class_by_table[proposed.source_table] = class_id
 
-        # 整批补齐类向量：单次对账 + 单次 flush，best-effort 不阻塞导入响应
-        if request.sync_embeddings and created_classes:
+        # 整批补齐向量（类 + 属性）：单次对账 + 单次 flush，best-effort 不阻塞
+        # 导入响应。属性也走批量路径（导入时已抑制逐条同步）⇒ 这里必须覆盖属性，
+        # 否则新建属性永远没有向量。
+        if request.sync_embeddings and (created_classes or created_properties):
             self._ontology_service.syncMissingClassEmbeddingsBestEffort()
 
         class_id_by_table = await self._build_table_to_class_id_map(
@@ -486,6 +488,12 @@ class LocalImportService:
                     actor_departments=(
                         ",".join(actor.departments) if actor.departments else None
                     ),
+                    # sync_embedding=False：抑制逐属性后台向量同步 —— 否则 N 个
+                    # 属性各起一个后台任务 ⇒ N 个并发 flush 同一集合 ⇒ 抢 Milvus
+                    # 集合级 flush 令牌（出厂 0.1 qps ⇒ 每 10 秒 1 次）⇒ 有人把
+                    # pymilvus 的 75 次重试预算耗光 ⇒ 硬失败（2026-11-17 生产
+                    # 事故）。属性与类一样，改由导入结束后整批补齐（单次 flush）。
+                    sync_embedding=False,
                 )
                 props_created += 1
             except Exception as exc:  # noqa: BLE001

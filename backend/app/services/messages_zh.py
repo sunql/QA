@@ -772,6 +772,12 @@ MSG_SEMANTIC_RELEASE_GATE_NO_SOURCE = "指标 {metric} 没有任何源类引用�
 MSG_SEMANTIC_RELEASE_GATE_NO_LANDING = "指标 {metric} 的{part}度量没有落点类（className 为空）"
 MSG_SEMANTIC_RELEASE_ACTOR_INVALID = "操作人标识必须为 1~{max} 个字符的非空字符串"
 MSG_SEMANTIC_RELEASE_DEPARTMENTS_TOO_LONG = "操作人部门信息超过 {max} 个字符，拒绝写入审计"
+MSG_SEMANTIC_RELEASE_CHECKS_TRUNCATED = (
+    "发布校验项共 {total} 条，超过上限 {max} 条 ⇒ 结论被截断（报告不完整，不得据此放行）"
+)
+MSG_SEMANTIC_RELEASE_CHECK_CONSTRAINT = (
+    "发布校验结论表写入被约束拒绝（{constraint}）"
+)
 
 # =============================================================================
 # 数据质量规则自动生成（dq-rule-auto-generation Task 4）

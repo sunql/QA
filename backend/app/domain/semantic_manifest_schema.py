@@ -30,6 +30,12 @@ from jsonschema import Draft202012Validator
 from app.domain.schemas import _MEASURE_AGG_ALLOWED
 
 SCHEMA_VERSION = "v1"
+
+# 契约允许的**指标条数上限**（`metrics` 数组的 maxItems）。
+# ⚠️ 公开常量：发布校验项的条数上限要**从它推导**（见
+# `app/services/semantic_release_checks.py` 的 `MAX_CHECKS_PER_RELEASE`）——
+# 写死一个上限就会出现「合法 manifest 也会被截断」⇒ 静默丢掉 ERROR 结论行。
+MAX_MANIFEST_METRICS = 2000
 """Manifest Schema 版本。编译器从这里取，避免两处各写各的。"""
 
 _MAX_REPORTED_ERRORS = 10
@@ -236,7 +242,7 @@ MANIFEST_SCHEMA: dict[str, Any] = {
             "domains": _array(_DOMAIN_SCHEMA, maxItems=1000),
             "classes": _array(_CLASS_SCHEMA, maxItems=5000),
             "joins": _array(_JOIN_SCHEMA, maxItems=20000),
-            "metrics": _array(_METRIC_SCHEMA, maxItems=2000),
+            "metrics": _array(_METRIC_SCHEMA, maxItems=MAX_MANIFEST_METRICS),
             "kpis": _array(_KPI_SCHEMA, maxItems=2000),
             "businessObjects": _array(_BUSINESS_OBJECT_SCHEMA, maxItems=1000),
         }

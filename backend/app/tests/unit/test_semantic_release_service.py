@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.domain.exceptions import ConflictError, ValidationError
 from app.services import semantic_release_service as releaseServiceModule
+from app.services import semantic_release_checks as checksModule
 from app.services.semantic_release_service import (
     PublishGateResult,
     evaluatePublishGate,
@@ -152,7 +154,7 @@ def test_gate_warning_report_is_capped() -> None:
 
     gate = evaluatePublishGate(_manifest(metrics))
 
-    assert len(gate.warnings) == releaseServiceModule._MAX_GATE_MESSAGES
+    assert len(gate.warnings) == checksModule.MAX_GATE_MESSAGES
 
 
 def test_gate_blocker_report_is_capped() -> None:
@@ -170,7 +172,7 @@ def test_gate_blocker_report_is_capped() -> None:
     gate = evaluatePublishGate(_manifest(metrics))
 
     assert gate.canPublish is False
-    assert len(gate.blockers) == releaseServiceModule._MAX_GATE_MESSAGES
+    assert len(gate.blockers) == checksModule.MAX_GATE_MESSAGES
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +238,54 @@ def test_fk_violation_maps_to_domain_validation_error() -> None:
 def test_unique_violation_maps_to_version_conflict() -> None:
     mapped = releaseServiceModule._mapCreateIntegrityError(
         _integrityError("23505"), "2026.11.10-1", None
+    )
+
+    assert isinstance(mapped, ConflictError)
+    assert "2026.11.10-1" in str(mapped)
+
+
+def _integrityErrorWithConstraint(sqlstate: str, constraint: str) -> IntegrityError:
+    """带 `diag.constraint_name` 的 IntegrityError（psycopg 3 的真实形状）。"""
+    orig = Exception("db error")
+    orig.sqlstate = sqlstate  # type: ignore[attr-defined]
+    orig.diag = SimpleNamespace(constraint_name=constraint)  # type: ignore[attr-defined]
+    return IntegrityError("statement", {}, orig)
+
+
+def test_check_table_constraint_maps_to_its_own_conflict() -> None:
+    """**按约束归因**：草稿落库会同时写 release 与 check 两张表。
+
+    撞的是 check 表约束时**不得**报「版本号已存在」—— 那会让调用方以为要改版本号，
+    而真实原因是校验结论表写不进去。
+    """
+    mapped = releaseServiceModule._mapCreateIntegrityError(
+        _integrityErrorWithConstraint("23505", "uq_semantic_release_check_unique"),
+        "2026.11.10-1",
+        None,
+    )
+
+    assert isinstance(mapped, ConflictError)
+    assert "uq_semantic_release_check_unique" in str(mapped)
+    assert "2026.11.10-1" not in str(mapped), "不得误导成版本冲突"
+
+
+def test_check_table_check_constraint_maps_to_its_own_conflict() -> None:
+    mapped = releaseServiceModule._mapCreateIntegrityError(
+        _integrityErrorWithConstraint("23514", "ck_semantic_release_check_severity"),
+        "2026.11.10-1",
+        None,
+    )
+
+    assert isinstance(mapped, ConflictError)
+    assert "ck_semantic_release_check_severity" in str(mapped)
+
+
+def test_release_constraint_still_maps_to_version_conflict() -> None:
+    """release 自己的唯一索引 ⇒ 仍然是「版本冲突」（口径不变）。"""
+    mapped = releaseServiceModule._mapCreateIntegrityError(
+        _integrityErrorWithConstraint("23505", "uq_semantic_release_global_version"),
+        "2026.11.10-1",
+        None,
     )
 
     assert isinstance(mapped, ConflictError)

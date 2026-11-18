@@ -12,6 +12,9 @@
 
 ### 后续表（Phase 2-3）
 - `ontology_class`：本体类，`source_table` 映射物理表，支持 `parent_class_id` 继承，`version` + `valid_from/to` 版本。
+  **采购域 5 个类的物理表绑定（2026-11-18 校准，迁移 `0153`）**：`Supplier`→`BPSUPPLIER`、`ItemMaster`→`ITMMASTER`、`PurchaseOrder`→`PORDER`、`Receipt`→`PRECEIPT`（**ERP 业务表词表**）、`IncomingInspection`→**NULL**（来料检验无物理表）。
+  ⚠️ 迁移 `0039`/`0040` 当年写的是 **DWD_\* 词表**（`DWD_SUPPLIER` 等）—— 那张表在系统的查询目标里**不存在**，且与本体 SSOT（`backend/seed_ontology.py` 的 `CLASSES`）**分叉** ⇒ NL2SQL 指向不存在的表 + 干净库上 `seed_ontology.seed()` 撞 `uq_ontology_class_name_version` 唯一约束。`0153` 已校准（**纯数据迁移，无 DDL** ⇒ `alembic check` / drift 不受影响）。
+  **绑定词表的 SSOT = `seed_ontology.CLASSES`**；`seed_ontology._seedClasses` 按 **`source_table`** 查重复用 ⇒ 两个种子的 `source_table` 必须同款，否则干净库上 seed 直接崩。门禁：`backend/scripts/procurement_class_source_table_realdata.py`（干净库真跑迁移链 + 断言无 `DWD_*` 残留 + 断言 seed 复用不崩）。
 - `ontology_property`：属性，`data_type`、`is_primary_key`、`is_foreign_key`、`ref_class_id`、`source_column`。
 - `ontology_metric`：指标，**技术形态 SSOT**。现有列：`formula`(Text NN，逃生舱)、`agg_function`(varchar20 default 'SUM')、`target_class_id`(FK→ontology_class，单值，语义=role=BASE)、`dimension_defaults`(JSON，**零消费者**)。
   🔴 **该表在 NL2SQL 链路零消费者**（`nl2sql_service.py:34-35` 不 import、`nl2sql_prompts.py` 0 个 "etric"、`buildSchemaText` 只渲染类、`chat_recall` 用 `typeFilter="class"`）⇒ **补数据不改变任何一条 SQL**。

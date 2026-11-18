@@ -1,6 +1,6 @@
 """confirm 批量落库 + outbox 审计 + 幂等跳过集成测试（dq-rule-auto-generation Task 5）。
 
-强制规则（Harness/rules/测试规范.md）：真实 PG（5433/qa_metadata_test），
+强制规则（Harness/rules/测试规范.md）：真实 PG（5434/qa_metadata_test），
 Alembic upgrade head 自动建表，每测试 TRUNCATE 隔离。
 """
 from __future__ import annotations

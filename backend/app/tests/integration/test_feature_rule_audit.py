@@ -4,7 +4,7 @@
 参照 feat-agent-tool-config-db 的 AgentToolConfigService 模式（pgSession
 独立 TRUNCATE 隔离 + _admin() helper + AuditWorker().drainOnce() flush）。
 
-强制规则（Harness/rules/测试规范.md）：真实 PG（5433/qa_metadata_test），
+强制规则（Harness/rules/测试规范.md）：真实 PG（5434/qa_metadata_test），
 Alembic upgrade head 自动建表，pgSession fixture 每测试 TRUNCATE 隔离。
 """
 from __future__ import annotations

@@ -1,0 +1,436 @@
+{
+  "meta": {
+    "version": "2026-11-18",
+    "stage": "M0.6 · G1 问卷汇合",
+    "branch": "feat/procurement-m0",
+    "deployed": false,
+    "source": "docs/update/1118/M0/业务问卷/（A/B/C/D 四卷，用户编写，不提交）",
+    "slotModel": "docs/update/1118/M0/M0.5-KPI口径槽位模板.md §2（13 槽位）",
+    "evidence": [
+      "docs/update/1118/M0/evidence/source-capability-scan.txt",
+      "docs/update/1118/M0/answers/source-capability.md",
+      "docs/update/1118/M0/answers/answers-registry.md",
+      "docs/update/1118/M0/answers/conflicts-and-degradations.md"
+    ],
+    "statusLegend": {
+      "confirmed": "答案直接采纳，可进槽位",
+      "conditional": "采纳但带条件（代理口径 / 近似 / 附注 / 待回问）",
+      "open": "答案已给但本次未落值，需在发布批次前补",
+      "blocked": "当前不可算，已按 R 系列降级",
+      "not_applicable": "该槽位对此指标不适用（不是「待填」）"
+    },
+    "candidateOnly": "本文件全部内容仍是 D-3 意义上的「候选」：未经 C 卷第 3 部分人工确认，不得进入生产读路径 / manifest。",
+  "stateSemantics": "本文件记录的是**目标口径状态**（M1 落库后应达成），不是 ontology_metric 的当前值。当前 DB 现状（5433/qa_metadata，2026-11-18 实查）：12 条指标的 time_column 仅 KPI_INVOICE_MATCH_RATE 非空（INVOICE_DATE），其余 11 条为 NULL；execution_source 8 条 ESCAPE_HATCH + 4 条 NONE（DEFECT/FPY 目标改为 ESCAPE_HATCH，因源类已存在）；KPI_PURCHASE_CYCLE_TIME 的 agg_function 现为 AVG、目标 SUM（加权平均 SUM(x*w)/SUM(w)）；KPI_SUPPLIER_DEFECT_RATE 现为 COUNT、目标 SUM。逐槽位差异已写在各槽位 note 中。",
+    "metricCount": 12,
+    "note": "A7.2 / A7.0 / A3.4 / A3.5 要求拆出的 4 条新指标（节约额、超支额、中位数周期、交期/处理时长两段）尚未建条，见 conflicts-and-degradations.md C-15。"
+  },
+  "kpis": [
+    {
+      "kpiCode": "KPI_SUPPLIER_OTD",
+      "metricId": 2,
+      "name": "供应商准时交付率",
+      "slots": {
+        "metric_type": {"value": "RATIO", "status": "confirmed", "answers": ["A1.1"]},
+        "numerator_measure": {
+          "value": {
+            "agg": "COUNT",
+            "expr": "COUNT(DISTINCT O.PO_NO || '#' || O.PO_LINE_NO)",
+            "filter": "TRUNC(R.RECEIPT_DATE) <= TRUNC(O.PROMISED_RECEIPT_DATE)",
+            "class_id": 20,
+            "class_alias": "DWD_PURCHASE_ORDER_LINE"
+          },
+          "status": "conditional",
+          "answers": ["A1.1", "A1.2", "A1.6"],
+          "note": "两种读法：甲=订单下全部行完成才计入分子（任一行部分完成/未完成⇒整单未完成）；乙=每个订单行各自判定。见 conflicts C-02 / Q3。实测完成度三档：177,137 全完成 / 9,244 部分完成 / 10,372 未完成（2025 起 196,753 行）。计数单位改为订单行。"
+        },
+        "denominator_measure": {
+          "value": {"agg": "COUNT", "expr": "COUNT(DISTINCT O.PO_NO || '#' || O.PO_LINE_NO)", "filter": null, "class_id": 20, "class_alias": "DWD_PURCHASE_ORDER_LINE"},
+          "status": "confirmed",
+          "answers": ["A1.1", "A1.4"],
+          "note": "未到货算分母 ⇒ JOIN 必须 LEFT JOIN 收货行，不能 INNER JOIN。"
+        },
+        "agg_function": {"value": "COUNT", "status": "confirmed", "answers": [], "note": "由分子分母的 agg 派生。"},
+        "aggregation_order": {"value": "WEIGHTED_RATIO", "status": "confirmed", "answers": ["A1.3"], "note": "行数等权 ⇒ 先聚合后相除。与现状一致。"},
+        "grain_keys": {"value": ["SUPPLIER_CODE", "FACILITY_CODE"], "status": "confirmed", "answers": ["A1.6"], "note": "跨工厂分别算 ⇒ 含 FACILITY_CODE。订单行是最小计数粒度，写在 measure.expr 里，不进 grain_keys。"},
+        "filter_expression": {"value": null, "status": "not_applicable", "answers": [], "note": "A1.4 说的是 JOIN 形状（分母含未到货），不是整条指标共用的 WHERE ⇒ 落在 measure/公式层，不落 filter_expression。"},
+        "time_grain": {"value": "month", "status": "confirmed", "answers": ["A·B3.1"], "note": "以月为基准累计。"},
+        "time_column": {
+          "value": "PROMISED_RECEIPT_DATE",
+          "status": "conditional",
+          "answers": ["A1.2", "A1.4"],
+          "note": "判定日=RECEIPT_DATE（A1.2），但统计期归属必须用订单行的 PROMISED_RECEIPT_DATE，否则未到货行会被时间过滤掉 ⇒ A1.4 的分母失真（conflicts C-04）。实测 THBI 该列填充 927,646/927,648（99.9998%），原「值为空」的判断只对 SRM 成立（C-11 / Q2）。"
+        },
+        "execution_source": {"value": "ESCAPE_HATCH", "status": "confirmed", "answers": [], "note": "现状即 ESCAPE_HATCH，发布闸门要求 ≠ NONE。"},
+        "formula": {"value": null, "status": "open", "answers": ["A1.1", "A1.4"], "note": "需重写：LEFT JOIN 收货行 + COUNT(DISTINCT PO#PO_LINE) + TRUNC 对齐 + time_column 换成 PROMISED_RECEIPT_DATE。必须能被 sqlglot 解析成 exp.Query。"},
+        "status": {"value": "DRAFT", "status": "open", "answers": [], "note": "发布前须 PUBLISHED。"},
+        "metric_alias": {"value": "KPI_SUPPLIER_OTD", "status": "open", "answers": [], "note": "问卷未给展示别名；A·B5.1 术语词典未确认 ⇒ 暂留 kpi_code。"}
+      }
+    },
+    {
+      "kpiCode": "KPI_SUPPLIER_OVERDUE_RATIO",
+      "metricId": 3,
+      "name": "供应商逾期率",
+      "slots": {
+        "metric_type": {"value": "RATIO", "status": "confirmed", "answers": []},
+        "numerator_measure": {
+          "value": {
+            "agg": "COUNT",
+            "expr": "COUNT(DISTINCT O.PO_NO || '#' || O.PO_LINE_NO)",
+            "filter": "TRUNC(R.RECEIPT_DATE) > TRUNC(O.PROMISED_RECEIPT_DATE)",
+            "class_id": 20,
+            "class_alias": "DWD_PURCHASE_ORDER_LINE"
+          },
+          "status": "conditional",
+          "answers": ["A1.1", "A1.2"],
+          "note": "与 OTD 同源同分母（A2.3）。读法待定同 C-02。"
+        },
+        "denominator_measure": {
+          "value": {"agg": "COUNT", "expr": "COUNT(DISTINCT O.PO_NO || '#' || O.PO_LINE_NO)", "filter": null, "class_id": 20, "class_alias": "DWD_PURCHASE_ORDER_LINE"},
+          "status": "confirmed",
+          "answers": ["A2.3", "A1.4"],
+          "note": "与 OTD 完全一致（A2.3 = 是）。"
+        },
+        "agg_function": {"value": "COUNT", "status": "confirmed", "answers": []},
+        "aggregation_order": {"value": "WEIGHTED_RATIO", "status": "confirmed", "answers": ["A1.3"]},
+        "grain_keys": {"value": ["SUPPLIER_CODE", "FACILITY_CODE"], "status": "confirmed", "answers": ["A1.6"]},
+        "filter_expression": {"value": null, "status": "not_applicable", "answers": []},
+        "time_grain": {"value": "month", "status": "confirmed", "answers": ["A·B3.1"]},
+        "time_column": {"value": "PROMISED_RECEIPT_DATE", "status": "conditional", "answers": ["A2.3"], "note": "与 OTD 同源（C-04）。"},
+        "execution_source": {"value": "ESCAPE_HATCH", "status": "confirmed", "answers": []},
+        "formula": {"value": null, "status": "open", "answers": [], "note": "与 OTD 同结构，LEFT JOIN + COUNT DISTINCT。"},
+        "status": {"value": "DRAFT", "status": "open", "answers": []},
+        "metric_alias": {"value": "KPI_SUPPLIER_OVERDUE_RATIO", "status": "open", "answers": []}
+      }
+    },
+    {
+      "kpiCode": "KPI_SUPPLIER_DELAY_DAYS",
+      "metricId": 7,
+      "name": "供应商延误天数",
+      "slots": {
+        "metric_type": {"value": "MEASURE", "status": "confirmed", "answers": []},
+        "numerator_measure": {
+          "value": {
+            "agg": "AVG",
+            "expr": "TRUNC(R.RECEIPT_DATE) - TRUNC(O.PROMISED_RECEIPT_DATE)",
+            "filter": "TRUNC(R.RECEIPT_DATE) > TRUNC(O.PROMISED_RECEIPT_DATE)",
+            "class_id": 20,
+            "class_alias": "DWD_PURCHASE_ORDER_LINE"
+          },
+          "status": "conditional",
+          "answers": ["A2.2", "A4.2"],
+          "note": "A4.2「只统计逾期行」是唯一可落地的一条 ⇒ filter 用 > 。A4.1（提前到货计入平均，允许负值）与 A4.2 互斥；A4.3（未到货也算）无法直接实现，因为未到货行没有 RECEIPT_DATE。倾向读法：只统计逾期行 + 未到货按统计截止日计逾期天数（这样 A4.1 自动满足）⇒ 必须回问（C-03 / Q4）。A2.2 等权 ⇒ 简单 AVG。"
+        },
+        "denominator_measure": {"value": null, "status": "not_applicable", "answers": [], "note": "MEASURE ⇒ 必须为空。"},
+        "agg_function": {"value": "AVG", "status": "confirmed", "answers": ["A2.2"]},
+        "aggregation_order": {"value": "NONE", "status": "confirmed", "answers": [], "note": "MEASURE ⇒ NONE。"},
+        "grain_keys": {"value": ["SUPPLIER_CODE", "FACILITY_CODE"], "status": "confirmed", "answers": ["A1.6"]},
+        "filter_expression": {"value": null, "status": "not_applicable", "answers": []},
+        "time_grain": {"value": "month", "status": "confirmed", "answers": ["A·B3.1"]},
+        "time_column": {"value": "PROMISED_RECEIPT_DATE", "status": "conditional", "answers": ["A4.2"], "note": "与 OTD/逾期率同源；未到货行的归属期也靠这一列（C-03 / C-04）。"},
+        "execution_source": {"value": "ESCAPE_HATCH", "status": "confirmed", "answers": []},
+        "formula": {"value": null, "status": "open", "answers": [], "note": "需重写：TRUNC 两端统一、filter 与 expr 的比较口径一致（A6 归因指出的边界不一致）。"},
+        "status": {"value": "DRAFT", "status": "open", "answers": []},
+        "metric_alias": {"value": "KPI_SUPPLIER_DELAY_DAYS", "status": "open", "answers": []}
+      }
+    },
+    {
+      "kpiCode": "KPI_PURCHASE_CYCLE_TIME",
+      "metricId": 6,
+      "name": "采购周期",
+      "slots": {
+        "metric_type": {"value": "MEASURE", "status": "confirmed", "answers": []},
+        "numerator_measure": {
+          "value": {
+            "agg": "SUM",
+            "expr": "SUM((TRUNC(R.RECEIPT_DATE) - TRUNC(L.CREATION_DATE)) * O.LINE_AMOUNT_EXCL_TAX) / NULLIF(SUM(O.LINE_AMOUNT_EXCL_TAX), 0)"
+          },
+          "status": "conditional",
+          "answers": ["A3.1", "A3.2", "A3.3"],
+          "note": "A3.3 订单金额加权 ⇒ 加权平均（现状是算术平均 AVG）。A3.1 起点=采购申请：**实测存在精确关联表 `DWD_REQUISITION_ORDER_LINK`**（138,118 行，键列 100% 填充）⇒ 起点可精确算，但只覆盖 2025+ 订单行 27,159/196,753（13.8%，PO 覆盖 8,096/54,554）⇒ 首期只统计可精确匹配的行并同屏输出覆盖率，**不做近似匹配**（C-19 / R-10 / Q12）。公式中的 L=关联表（→请购单 → `DWD_PURCHASE_REQUISITION_LINE.CREATION_DATE`），R=`DWD_GOODS_RECEIPT_LINE`。订单行金额列 LINE_AMOUNT_EXCL_TAX 100% 填充。"
+        },
+        "denominator_measure": {"value": null, "status": "not_applicable", "answers": []},
+        "agg_function": {"value": "SUM", "status": "confirmed", "answers": ["A3.3"], "note": "加权平均写成 SUM(x·w)/SUM(w)。"},
+        "aggregation_order": {"value": "NONE", "status": "confirmed", "answers": [], "note": "MEASURE ⇒ NONE。但加权平均只能写在 ESCAPE_HATCH 公式里，COMPILED 轨道表达不了（A7 §6 缺口 3）。"},
+        "grain_keys": {"value": ["SUPPLIER_CODE", "FACILITY_CODE"], "status": "confirmed", "answers": ["A1.6"]},
+        "filter_expression": {"value": null, "status": "not_applicable", "answers": []},
+        "time_grain": {"value": "month", "status": "confirmed", "answers": ["A·B3.1"]},
+        "time_column": {"value": "RECEIPT_DATE", "status": "confirmed", "answers": ["A3.2"], "note": "A3.2 终点=收货时间 ⇒ 归属期=收货发生期。"},
+        "execution_source": {"value": "ESCAPE_HATCH", "status": "confirmed", "answers": []},
+        "formula": {"value": null, "status": "open", "answers": ["A3.3"], "note": "需重写为加权平均并加近似匹配标注。"},
+        "status": {"value": "DRAFT", "status": "open", "answers": []},
+        "metric_alias": {"value": "KPI_PURCHASE_CYCLE_TIME", "status": "open", "answers": []},
+        "derivedMetrics": [
+          {"code": "(待命名) KPI_PURCHASE_CYCLE_TIME_MEDIAN", "answers": ["A3.4"], "note": "中位数；agg_function 白名单无 MEDIAN ⇒ 新建指标 + ESCAPE_HATCH。"},
+          {"code": "(待命名) 供应商交期 / 内部处理时长", "answers": ["A3.5"], "note": "拆两段 ⇒ 2 条新指标。"}
+        ]
+      }
+    },
+    {
+      "kpiCode": "KPI_PURCHASE_PRICE_VARIANCE",
+      "metricId": 9,
+      "name": "采购价格偏差率",
+      "slots": {
+        "metric_type": {"value": "RATIO", "status": "confirmed", "answers": []},
+        "numerator_measure": {
+          "value": {"agg": "AVG", "expr": "(O.UNIT_PRICE - B.BASE_PRICE)"},
+          "status": "conditional",
+          "answers": ["A5.1", "A5.3", "A5.4"],
+          "note": "A5.3 按行算后平均 ⇒ AVG_OF_RATIOS。基准价 B.BASE_PRICE 须由子查询给出（过去 1 年的历史均价）。不含税 ⇒ 取 UNIT_PRICE_EX_TAX。"
+        },
+        "denominator_measure": {
+          "value": {"agg": "AVG", "expr": "NULLIF(B.BASE_PRICE, 0)"},
+          "status": "conditional",
+          "answers": ["A5.1", "A5.2"],
+          "note": "基准价源改用 DWD_PURCHASE_QUOTATION_YEARLY_DTL（ITEM_CODE + UNIT_PRICE_EX_TAX + SEG_START_DATE/SEG_END_DATE），不用 DWD_SUPPLIER_PRICE_LIST —— 后者 MATERIAL_CODE 100% NULL，无法按物料关联（source-capability §4 修正 #2）。『过去 1 年』= 覆盖目标日期的前 12 个月区间。"
+        },
+        "agg_function": {"value": "AVG", "status": "confirmed", "answers": ["A5.3"]},
+        "aggregation_order": {"value": "AVG_OF_RATIOS", "status": "confirmed", "answers": ["A5.3"], "note": "与现状一致。"},
+        "grain_keys": {"value": ["MATERIAL_CODE", "FACILITY_CODE"], "status": "confirmed", "answers": ["A1.6"]},
+        "filter_expression": {"value": null, "status": "not_applicable", "answers": []},
+        "time_grain": {"value": "month", "status": "confirmed", "answers": ["A·B3.1"]},
+        "time_column": {"value": "ORDER_DATE", "status": "confirmed", "answers": [], "note": "口径归属期=下单期（基准价是历史均价，比较基准须与订单同期对应）。"},
+        "execution_source": {"value": "ESCAPE_HATCH", "status": "confirmed", "answers": []},
+        "formula": {"value": null, "status": "open", "answers": ["A5.1", "A5.2"], "note": "需窗口/子查询；measure.expr 表达不了。"},
+        "status": {"value": "DRAFT", "status": "open", "answers": []},
+        "metric_alias": {"value": "KPI_PURCHASE_PRICE_VARIANCE", "status": "open", "answers": []},
+        "coverageWarning": {
+          "baselineCoverage": 0.412,
+          "detail": "2025 起 196,753 订单行中，能按 (SUPPLIER_CODE + MATERIAL_CODE) 命中 2025+ 年度报价的只有 81,020 行（41.2%）；仅按物料命中 91,485 行（46.5%）。负偏差单独展示（A5.5）属展示层，无槽位。"
+        }
+      }
+    },
+    {
+      "kpiCode": "KPI_COST_SAVING",
+      "metricId": 8,
+      "name": "采购成本节约",
+      "slots": {
+        "metric_type": {"value": "MEASURE", "status": "confirmed", "answers": []},
+        "numerator_measure": {
+          "value": {"agg": "SUM", "expr": "(B.BASE_PRICE - O.UNIT_PRICE) * O.ORDER_QTY"},
+          "status": "conditional",
+          "answers": ["A7.1", "A7.4"],
+          "note": "基准价同 A5.1（历史均价，不含税）。A7.2 要求拆『节约额 / 超支额』两条 ⇒ 本条只承载其中一条。"
+        },
+        "denominator_measure": {"value": null, "status": "not_applicable", "answers": []},
+        "agg_function": {"value": "SUM", "status": "confirmed", "answers": []},
+        "aggregation_order": {"value": "NONE", "status": "confirmed", "answers": []},
+        "grain_keys": {"value": ["SUPPLIER_CODE", "MATERIAL_CODE"], "status": "confirmed", "answers": ["A1.6"]},
+        "filter_expression": {"value": null, "status": "not_applicable", "answers": []},
+        "time_grain": {"value": "month", "status": "confirmed", "answers": ["A·B3.1"]},
+        "time_column": {"value": "ORDER_DATE", "status": "confirmed", "answers": [], "note": "归属期=下单期。"},
+        "execution_source": {"value": "ESCAPE_HATCH", "status": "confirmed", "answers": []},
+        "formula": {"value": null, "status": "open", "answers": ["A7.3", "A7.5"], "note": "A7.3 只统计已收货的行（JOIN 形状）；A7.5 基准价缺失按 0 —— 但基准价覆盖仅 41.2%，按 0 抹平会系统性低估约 59% ⇒ 首期不抹平（R-09 / C-06 / Q14）：只算有基准价的行并同屏输出覆盖率。"},
+        "status": {"value": "DRAFT", "status": "open", "answers": []},
+        "metric_alias": {"value": "KPI_COST_SAVING", "status": "open", "answers": []},
+        "derivedMetrics": [
+          {"code": "(待命名) 成本超支额", "answers": ["A7.2"], "note": "A7.2「涨跌分开」⇒ 节约额/超支额两条。"}
+        ],
+        "coverageWarning": {"baselineCoverage": 0.412, "detail": "同价格偏差率。"}
+      }
+    },
+    {
+      "kpiCode": "KPI_INVOICE_MATCH_RATE",
+      "metricId": 5,
+      "name": "发票三单匹配率",
+      "slots": {
+        "metric_type": {"value": "RATIO", "status": "confirmed", "answers": ["A6.1"]},
+        "numerator_measure": {
+          "value": {
+            "agg": "SUM",
+            "expr": "LINE_AMOUNT_EXCL_TAX",
+            "filter": "PO_NO = O.PO_NO AND PO_LINE_NO = O.PO_LINE_NO AND QUANTITY = O.ORDER_QTY AND UNIT_PRICE_NET = O.UNIT_PRICE",
+            "class_id": 17,
+            "class_alias": "DWD_PURCHASE_INVOICE_LINE"
+          },
+          "status": "confirmed",
+          "answers": ["A6.2", "A6.3", "A6.4"],
+          "note": "按行匹配、零容差（数量与单价全等）、部分匹配算匹配。实测：发票行 2,486,311 行，RECEIPT_NO 填 2,474,258（99.55%）⇒ 三单接缝存在；收货行 2025 起 80.3% 有 PO 键。现有 filter 引用的列（PO_NO / PO_LINE_NO / QUANTITY / UNIT_PRICE_NET）全部实测存在于发票行表。"
+        },
+        "denominator_measure": {
+          "value": {"agg": "SUM", "expr": "AMOUNT_EXCL_TAX", "filter": null, "class_id": 16, "class_alias": "DWD_PURCHASE_INVOICE"},
+          "status": "confirmed",
+          "answers": ["A6.5"],
+          "note": "分母=全部发票行（发票头表）。"
+        },
+        "agg_function": {"value": "SUM", "status": "confirmed", "answers": []},
+        "aggregation_order": {"value": "WEIGHTED_RATIO", "status": "confirmed", "answers": ["A6.2"], "note": "按行 ⇒ 行级加权。"},
+        "grain_keys": {"value": ["SUPPLIER_CODE", "INVOICE_DATE"], "status": "confirmed", "answers": ["A6.2"]},
+        "filter_expression": {"value": null, "status": "not_applicable", "answers": []},
+        "time_grain": {"value": "month", "status": "confirmed", "answers": ["A·B3.1"]},
+        "time_column": {
+          "value": "INVOICE_DATE",
+          "status": "confirmed",
+          "answers": ["A6.1"],
+          "note": "唯一 time_column 本就非空的指标。但实测：INVOICE_DATE 只在发票**头**表 DWD_PURCHASE_INVOICE 上，发票行表上取不到（ORA-00904）⇒ 公式必须头行 JOIN，不能只查行表。"
+        },
+        "execution_source": {"value": "ESCAPE_HATCH", "status": "confirmed", "answers": []},
+        "formula": {"value": null, "status": "open", "answers": ["A6.1"], "note": "需补收货行 JOIN（三单）。"},
+        "status": {"value": "DRAFT", "status": "open", "answers": []},
+        "metric_alias": {"value": "KPI_INVOICE_MATCH_RATE", "status": "open", "answers": []}
+      }
+    },
+    {
+      "kpiCode": "KPI_PAYMENT_ON_TIME",
+      "metricId": 4,
+      "name": "付款及时率",
+      "slots": {
+        "metric_type": {"value": "RATIO", "status": "confirmed", "answers": []},
+        "numerator_measure": {
+          "value": {"agg": "COUNT", "expr": "BILL_DATE", "filter": "BILL_DATE <= DUE_DATE", "class_id": 27, "class_alias": "DWD_SUPPLIER_PAYMENT"},
+          "status": "conditional",
+          "answers": ["A8.1"],
+          "note": "A8.1 要求『付款申请日』，但数仓里没有该列：BANK_DATE 填充 0、VALUE_DATE/BILL_DATE/CREATION_DATE 全 100%，且 VALUE_DATE > BILL_DATE 仅 6 笔 ⇒ 用 BILL_DATE（单据日）代理，答案里必须标注『代理口径』（C-08 / R-11 / Q5）。"
+        },
+        "denominator_measure": {
+          "value": {"agg": "COUNT", "expr": "DUE_DATE", "filter": "DUE_DATE <= <统计截止>", "class_id": 27, "class_alias": "DWD_SUPPLIER_PAYMENT"},
+          "status": "confirmed",
+          "answers": ["A8.3"],
+          "note": "分母=已到期的付款笔数。"
+        },
+        "agg_function": {"value": "COUNT", "status": "confirmed", "answers": []},
+        "aggregation_order": {"value": "WEIGHTED_RATIO", "status": "confirmed", "answers": ["A8.4"], "note": "A8.4 粒度=单笔付款 ⇒ grain 收敛到单笔。"},
+        "grain_keys": {
+          "value": ["SUPPLIER_CODE", "PAYMENT_NO"],
+          "status": "conditional",
+          "answers": ["A8.4"],
+          "note": "现状是 ['SUPPLIER_CODE']（供应商级）；A8.4 明确『单笔付款』⇒ 加 PAYMENT_NO。"
+        },
+        "filter_expression": {"value": null, "status": "not_applicable", "answers": ["A8.3"], "note": "A8.3 是分母侧过滤 ⇒ 落在 denominator_measure.filter，不是整条指标共用的 filter_expression。"},
+        "time_grain": {"value": "month", "status": "confirmed", "answers": ["A·B3.1"]},
+        "time_column": {"value": "VALUE_DATE", "status": "conditional", "answers": ["A8.1"], "note": "按付款时点归属；但判定日改用 BILL_DATE 后，time_column 是否同步改需一并定（Q5）。"},
+        "execution_source": {"value": "ESCAPE_HATCH", "status": "confirmed", "answers": []},
+        "formula": {"value": null, "status": "open", "answers": ["A8.3"], "note": "需重写：分母加 DUE_DATE 截断过滤，分子改 BILL_DATE。"},
+        "status": {"value": "DRAFT", "status": "open", "answers": []},
+        "metric_alias": {"value": "KPI_PAYMENT_ON_TIME", "status": "open", "answers": []},
+        "dueDateNote": {"value": "DUE_DATE", "answers": ["A8.2"], "status": "conditional", "note": "A8.2 说『收货后固定天数』，实测 DUE_DATE − BILL_DATE ∈ [−146, +7] 天 ⇒ 实为账期。优先直接用 ERP 的 DUE_DATE（C-07 / Q5）。"}
+      }
+    },
+    {
+      "kpiCode": "KPI_SUPPLIER_DEFECT_RATE",
+      "metricId": 11,
+      "name": "供应商来料不良率",
+      "slots": {
+        "metric_type": {"value": "RATIO", "status": "confirmed", "answers": []},
+        "numerator_measure": {
+          "value": {"agg": "SUM", "expr": "SUM(A.ARR_QTY - A.QUALIFIED_QTY)", "class_id": 6, "class_alias": "DWD_ARRIVAL_ORDER_DTL"},
+          "status": "confirmed",
+          "answers": ["A9.1", "A9.3", "A9.4"],
+          "note": "A9.1 不良数量。源类 DWD_ARRIVAL_ORDER_DTL 已在 A8 的 34 个候选内，**不需要新建虚构类**（推翻 A6/A7 的『本体没有来料检验类』）。实测 81,754 行、ARR_QTY/QUALIFIED_QTY 100% 填充、不良行 1,300。A9.3 的 NCR 侧无数据 ⇒ 只按 IQC（C-18）。A9.4 不分档。"
+        },
+        "denominator_measure": {
+          "value": {"agg": "SUM", "expr": "SUM(A.ARR_QTY)", "class_id": 6, "class_alias": "DWD_ARRIVAL_ORDER_DTL"},
+          "status": "confirmed",
+          "answers": ["A9.2"],
+          "note": "A9.2 来料数量。"
+        },
+        "agg_function": {"value": "SUM", "status": "confirmed", "answers": []},
+        "aggregation_order": {"value": "WEIGHTED_RATIO", "status": "conditional", "answers": [], "note": "数量口径 ⇒ 先聚合后相除。"},
+        "grain_keys": {"value": ["SUPPLIER_CODE", "MATERIAL_CODE", "FACILITY_CODE"], "status": "conditional", "answers": [], "note": "到货检验表的物料列名是 ITEM_CODE、厂站点是 RCV_SITE_CODE ⇒ 落点前需确认是否映射到 MATERIAL_CODE / FACILITY_CODE（C 卷第 3 部分空白 ⇒ D-3 候选）。"},
+        "filter_expression": {"value": null, "status": "not_applicable", "answers": []},
+        "time_grain": {"value": "month", "status": "confirmed", "answers": ["A·B3.1"]},
+        "time_column": {"value": "ARR_DATE", "status": "confirmed", "answers": [], "note": "到货检验表的业务日期。"},
+        "execution_source": {"value": "ESCAPE_HATCH", "status": "confirmed", "answers": [], "note": "原为 NONE（源类缺失）；源类已存在 ⇒ 可改为 ESCAPE_HATCH。"},
+        "formula": {"value": null, "status": "open", "answers": ["A9.5"], "note": "A9.5（退货/让步接收算不良）无落数位置：SRM 退货表 0 行、THBI 收货行 REJECTED_QTY 合计恒为 0、RETURNED_QTY 带小数 ⇒ 该子口径不可执行（C-18）。另：DOC_STATUS_CODE 码义未确认 ⇒ 不做状态过滤（R-14）。"},
+        "status": {"value": "DRAFT", "status": "open", "answers": []},
+        "metric_alias": {"value": "KPI_SUPPLIER_DEFECT_RATE", "status": "open", "answers": []}
+      }
+    },
+    {
+      "kpiCode": "KPI_SUPPLIER_FPY",
+      "metricId": 12,
+      "name": "供应商来料一次合格率",
+      "slots": {
+        "metric_type": {"value": "RATIO", "status": "confirmed", "answers": []},
+        "numerator_measure": {
+          "value": {"agg": "COUNT", "expr": "COUNT(DISTINCT A.PO_NO || '#' || A.PO_LINE_NO) —— 首次检验即合格", "class_id": 6, "class_alias": "DWD_ARRIVAL_ORDER_DTL"},
+          "status": "conditional",
+          "answers": ["A10.1", "A10.4"],
+          "note": "A10.1 首次检验即合格 + A10.4 供应商返工合格不算 ⇒ 分子=同一 PO#PO_LINE 下 ARR_DATE 最早那条且 QUALIFIED_QTY = ARR_QTY。实测 2025 起 18,342 行 / 7,848 个 PO 行键（2.34 次/行）⇒ 『首次』可判。"
+        },
+        "denominator_measure": {
+          "value": {"agg": "COUNT", "expr": "COUNT(DISTINCT A.PO_NO || '#' || A.PO_LINE_NO)"},
+          "status": "conditional",
+          "answers": ["A10.2"],
+          "note": "A10.2『分母=行数』，但 A10.3 说与 A9（数量口径）互为补集 —— 单位不一致 ⇒ 待回问（C-05 / Q6）。若按行数，则分子分母同为行 ⇒ 补集关系不成立。"
+        },
+        "agg_function": {"value": "COUNT", "status": "confirmed", "answers": []},
+        "aggregation_order": {"value": "WEIGHTED_RATIO", "status": "conditional", "answers": [], "note": "取决于分母单位裁定。"},
+        "grain_keys": {"value": ["SUPPLIER_CODE", "MATERIAL_CODE", "FACILITY_CODE"], "status": "conditional", "answers": [], "note": "同不良率（ITEM_CODE / RCV_SITE_CODE 映射待确认）。"},
+        "filter_expression": {"value": null, "status": "not_applicable", "answers": []},
+        "time_grain": {"value": "month", "status": "confirmed", "answers": ["A·B3.1"]},
+        "time_column": {"value": "ARR_DATE", "status": "confirmed", "answers": []},
+        "execution_source": {"value": "ESCAPE_HATCH", "status": "confirmed", "answers": [], "note": "原为 NONE；源类已存在 ⇒ 可改为 ESCAPE_HATCH。"},
+        "formula": {"value": null, "status": "open", "answers": ["A10.1"], "note": "需窗口函数或 ROW_NUMBER 取首次检验。不做状态过滤（R-14）。"},
+        "status": {"value": "DRAFT", "status": "open", "answers": []},
+        "metric_alias": {"value": "KPI_SUPPLIER_FPY", "status": "open", "answers": []}
+      }
+    },
+    {
+      "kpiCode": "KPI_SUPPLIER_MAINTENANCE_RATIO",
+      "metricId": 10,
+      "name": "供应商资质合规率",
+      "slots": {
+        "metric_type": {"value": "RATIO", "status": "confirmed", "answers": []},
+        "numerator_measure": {
+          "value": {"agg": "COUNT", "expr": "COUNT(DISTINCT SUPPLIER_CODE)", "filter": "<4 项判定 AND>"},
+          "status": "blocked",
+          "answers": ["A12.1", "A12.2", "A12.4"],
+          "note": "四项判定：资质在有效期内 / 非黑名单 / 品类准入 / 银行信息完整；30 天内到期算合规。**当前不可执行**：SRM 品类准入表 supply_access_class 为 0 行；access_state 码值未确认（{51004:394, 51003:18, 51001:15, 51002:9}）不能写死『黑名单』；银行信息 437 行中 323 行 bank_name 为空；资质表仅 6 行（过期 1、30 天内到期 0）⇒ R-08：降级为『准入台账只读展示』。"
+        },
+        "denominator_measure": {
+          "value": {"agg": "COUNT", "expr": "COUNT(DISTINCT SUPPLIER_CODE)"},
+          "status": "conditional",
+          "answers": ["A12.2", "A12.5"],
+          "note": "A12.5『未停用的供应商』—— **停用标志列不存在**（SRM main_data_supplier.state 恒为 100001；THBI DIM_SUPPLIER 全是 SAP 混淆列）⇒ 首期取全部在册供应商，并回问停用列（C-14 / Q9）。实测在册 470 家。"
+        },
+        "agg_function": {"value": "COUNT", "status": "confirmed", "answers": []},
+        "aggregation_order": {"value": "WEIGHTED_RATIO", "status": "confirmed", "answers": []},
+        "grain_keys": {"value": ["SUPPLIER_CODE"], "status": "confirmed", "answers": []},
+        "filter_expression": {"value": null, "status": "not_applicable", "answers": []},
+        "time_grain": {"value": null, "status": "not_applicable", "answers": ["A12.3"], "note": "A12.3 当前时点快照 ⇒ time_grain / time_column 对本指标**不适用**（不是「待填」），保持为空是正确的。"},
+        "time_column": {"value": null, "status": "not_applicable", "answers": ["A12.3"], "note": "同上：当前时点快照，时间口径槽位对本指标不适用。"},
+        "execution_source": {"value": "NONE", "status": "blocked", "answers": [], "note": "分子不可执行 ⇒ 保持 NONE，不发布闸门（R-08）。"},
+        "formula": {"value": null, "status": "blocked", "answers": [], "note": "判定条件缺列，暂不出公式。"},
+        "status": {"value": "DRAFT", "status": "open", "answers": []},
+        "metric_alias": {"value": "KPI_SUPPLIER_MAINTENANCE_RATIO", "status": "open", "answers": []}
+      }
+    },
+    {
+      "kpiCode": "KPI_SUPPLIER_NCR_RATE",
+      "metricId": 13,
+      "name": "供应商 NCR 率",
+      "slots": {
+        "metric_type": {"value": "RATIO", "status": "blocked", "answers": ["A11.1"], "note": "治理侧从首期指标清单摘除；ontology_metric 保持 DRAFT（不是删指标）。"},
+        "numerator_measure": {"value": null, "status": "blocked", "answers": ["A11.1", "A11.2"]},
+        "denominator_measure": {"value": null, "status": "blocked", "answers": ["A11.2"]},
+        "agg_function": {"value": "COUNT", "status": "confirmed", "answers": []},
+        "aggregation_order": {"value": "WEIGHTED_RATIO", "status": "confirmed", "answers": []},
+        "grain_keys": {"value": ["SUPPLIER_CODE", "MATERIAL_CODE", "FACILITY_CODE"], "status": "confirmed", "answers": []},
+        "filter_expression": {"value": null, "status": "not_applicable", "answers": []},
+        "time_grain": {"value": "month", "status": "confirmed", "answers": []},
+        "time_column": {"value": null, "status": "blocked", "answers": ["A11.4"]},
+        "execution_source": {"value": "NONE", "status": "blocked", "answers": ["A11.1"], "note": "质量数据未进系统 ⇒ 不发布（R-15）。"},
+        "formula": {"value": null, "status": "blocked", "answers": []},
+        "status": {"value": "DRAFT", "status": "confirmed", "answers": ["A11.1"], "note": "保持 DRAFT 即可。"},
+        "metric_alias": {"value": "KPI_SUPPLIER_NCR_RATE", "status": "open", "answers": []},
+        "restoreCondition": "质量数据（QMS / NCR 单）进系统后重新立项。"
+      }
+    }
+  ],
+  "summary": {
+    "fullyConfirmed": ["KPI_SUPPLIER_OVERDUE_RATIO（分母侧）", "KPI_INVOICE_MATCH_RATE", "KPI_SUPPLIER_DEFECT_RATE", "KPI_SUPPLIER_NCR_RATE（维持摘除）"],
+    "conditional": ["KPI_SUPPLIER_OTD", "KPI_SUPPLIER_OVERDUE_RATIO", "KPI_SUPPLIER_DELAY_DAYS", "KPI_PURCHASE_CYCLE_TIME", "KPI_PURCHASE_PRICE_VARIANCE", "KPI_COST_SAVING", "KPI_PAYMENT_ON_TIME", "KPI_SUPPLIER_FPY"],
+    "blocked": ["KPI_SUPPLIER_MAINTENANCE_RATIO", "KPI_SUPPLIER_NCR_RATE"],
+    "slotCounts": {
+      "total": 156,
+      "confirmed": 77,
+      "conditional": 20,
+      "open": 33,
+      "blocked": 9,
+      "not_applicable": 17,
+      "scope": "口径 = 13 个模型槽位 × 12 KPI；不含补充注记槽（coverageWarning / derivedMetrics / dueDateNote / restoreCondition，另有 6 项，合计槽位条目 162）"
+    },
+    "publishableNow": ["KPI_SUPPLIER_OVERDUE_RATIO", "KPI_SUPPLIER_OTD", "KPI_INVOICE_MATCH_RATE", "KPI_SUPPLIER_DEFECT_RATE"],
+    "publishableAfterReask": ["KPI_SUPPLIER_DELAY_DAYS", "KPI_PURCHASE_CYCLE_TIME", "KPI_PURCHASE_PRICE_VARIANCE", "KPI_COST_SAVING", "KPI_PAYMENT_ON_TIME", "KPI_SUPPLIER_FPY"]
+  }
+}

@@ -1,18 +1,21 @@
 {
   "version": "2026-11-18",
   "status": "candidate",
-  "scope": "有效 DWD_* (14) + ODS_* (20) = 34 个采购类；与计划行「34 个采购类」逐字吻合",
-  "generatedFrom": "ontology_class.source_table ⨝ schema_cache(jsonb) —— 见 evidence/procurement-binding-resolve.txt",
+  "scope": "有效 DWD_* (14) + ODS_* (20) = 34 个采购类（与计划行逐字吻合） ＋ 7 个被 KPI 引用的墓碑类复活 = 绑定清单共 41 个类。**34 候选单独不足以支撑 12 条 KPI**：_DTL 族缺 OTD/三单/付款/发票关键列，详见 revivedTombstones 与 C-22",
+  "generatedFrom": "ontology_class.source_table ⨝ schema_cache(jsonb) —— 见 evidence/procurement-binding-resolve.txt；行数/列存在性 —— 见 evidence/source-capability-scan.txt（源侧只读实测）",
   "rules": {
     "bindingKey": "class_id + datasource_id + schema_name + source_table（同表双类必须靠 class_id 区分）",
     "resolution": "unique=唯一命中 / schema-ambiguous=同库多 schema 同名表 / datasource-ambiguous=跨库 / not-found=无源",
-    "candidateOnly": "全部 binding 的 status=candidate；未经 C 问卷确认不得被任何读路径消费（D-3）"
+    "candidateOnly": "全部 binding 的 status=candidate；未经 C 问卷确认不得被任何读路径消费（D-3）",
+    "reviveRule": "7 个墓碑类必须复活：其物理表与本体属性列一一对应（列数=属性数，抽样 missing=0），且是 12 条 KPI 公式实际引用的类"
   },
   "counts": {
     "bindings": 34,
     "unique": 28,
     "schemaAmbiguous": 6,
-    "notFound": 0
+    "notFound": 0,
+    "revivedTombstones": 7,
+    "totalBindingScope": 41
   },
   "bindings": [
     {
@@ -563,6 +566,156 @@
       "kpis": [
         "KPI_PAYMENT_ON_TIME"
       ]
+    }
+  ],
+  "revivedTombstones": [
+    {
+      "classId": 14,
+      "className": "DWD_GOODS_RECEIPT_LINE",
+      "validTo": "2026-09-19",
+      "action": "revive",
+      "status": "candidate",
+      "datasourceId": 1,
+      "schemaName": "THBI",
+      "sourceTable": "DWD_GOODS_RECEIPT_LINE",
+      "physicalColumnCount": 26,
+      "ontologyPropertyCount": 26,
+      "propertyColumnsMissing": null,
+      "rowCount": 3558008,
+      "kpiCount": 4,
+      "kpis": [
+        "KPI_PURCHASE_CYCLE_TIME",
+        "KPI_SUPPLIER_DELAY_DAYS",
+        "KPI_SUPPLIER_OTD",
+        "KPI_SUPPLIER_OVERDUE_RATIO"
+      ],
+      "notes": "收货行；KPI 读路径依赖 RECEIPT_DATE / REJECTED_QTY / RECEIPT_NO —— 这 3 列在 _DTL 变体里都不存在",
+      "evidence": "docs/update/1118/M0/evidence/source-capability-scan.txt（复活墓碑类 段）"
+    },
+    {
+      "classId": 16,
+      "className": "DWD_PURCHASE_INVOICE",
+      "validTo": "2026-09-19",
+      "action": "revive",
+      "status": "candidate",
+      "datasourceId": 1,
+      "schemaName": "THBI",
+      "sourceTable": "DWD_PURCHASE_INVOICE",
+      "physicalColumnCount": 17,
+      "ontologyPropertyCount": 17,
+      "propertyColumnsMissing": null,
+      "rowCount": 38323,
+      "kpiCount": 1,
+      "kpis": [
+        "KPI_INVOICE_MATCH_RATE"
+      ],
+      "notes": "发票头；INVOICE_DATE 只在此表（行表 ORA-00904）",
+      "evidence": "docs/update/1118/M0/evidence/source-capability-scan.txt（复活墓碑类 段）"
+    },
+    {
+      "classId": 17,
+      "className": "DWD_PURCHASE_INVOICE_LINE",
+      "validTo": "2026-09-19",
+      "action": "revive",
+      "status": "candidate",
+      "datasourceId": 1,
+      "schemaName": "THBI",
+      "sourceTable": "DWD_PURCHASE_INVOICE_LINE",
+      "physicalColumnCount": 23,
+      "ontologyPropertyCount": 23,
+      "propertyColumnsMissing": null,
+      "rowCount": 2486311,
+      "kpiCount": 1,
+      "kpis": [
+        "KPI_INVOICE_MATCH_RATE"
+      ],
+      "notes": "发票行；RECEIPT_NO 填充 99.55% ⇒ 三单匹配接缝存在",
+      "evidence": "docs/update/1118/M0/evidence/source-capability-scan.txt（复活墓碑类 段）"
+    },
+    {
+      "classId": 20,
+      "className": "DWD_PURCHASE_ORDER_LINE",
+      "validTo": "2026-09-19",
+      "action": "revive",
+      "status": "candidate",
+      "datasourceId": 1,
+      "schemaName": "THBI",
+      "sourceTable": "DWD_PURCHASE_ORDER_LINE",
+      "physicalColumnCount": 29,
+      "ontologyPropertyCount": 29,
+      "propertyColumnsMissing": null,
+      "rowCount": 927648,
+      "kpiCount": 6,
+      "kpis": [
+        "KPI_COST_SAVING",
+        "KPI_INVOICE_MATCH_RATE",
+        "KPI_PURCHASE_PRICE_VARIANCE",
+        "KPI_SUPPLIER_DELAY_DAYS",
+        "KPI_SUPPLIER_OTD",
+        "KPI_SUPPLIER_OVERDUE_RATIO"
+      ],
+      "notes": "采购订单行；PROMISED_RECEIPT_DATE 填充 99.9998% —— 这 4 列在 _DTL 变体里都不存在",
+      "evidence": "docs/update/1118/M0/evidence/source-capability-scan.txt（复活墓碑类 段）"
+    },
+    {
+      "classId": 22,
+      "className": "DWD_PURCHASE_REQUISITION_LINE",
+      "validTo": "2026-09-19",
+      "action": "revive",
+      "status": "candidate",
+      "datasourceId": 1,
+      "schemaName": "THBI",
+      "sourceTable": "DWD_PURCHASE_REQUISITION_LINE",
+      "physicalColumnCount": 23,
+      "ontologyPropertyCount": 23,
+      "propertyColumnsMissing": 0,
+      "rowCount": 181201,
+      "kpiCount": 1,
+      "kpis": [
+        "KPI_PURCHASE_CYCLE_TIME"
+      ],
+      "notes": "请购行；QUOTATION_NO 100% NULL ⇒ 报价单中转路径不成立",
+      "evidence": "docs/update/1118/M0/evidence/source-capability-scan.txt（复活墓碑类 段）"
+    },
+    {
+      "classId": 25,
+      "className": "DWD_REQUISITION_ORDER_LINK",
+      "validTo": "2026-09-19",
+      "action": "revive",
+      "status": "candidate",
+      "datasourceId": 1,
+      "schemaName": "THBI",
+      "sourceTable": "DWD_REQUISITION_ORDER_LINK",
+      "physicalColumnCount": 6,
+      "ontologyPropertyCount": 6,
+      "propertyColumnsMissing": 0,
+      "rowCount": 138118,
+      "kpiCount": 1,
+      "kpis": [
+        "KPI_PURCHASE_CYCLE_TIME"
+      ],
+      "notes": "PO↔请购关联表；覆盖 2025+ 订单行 13.8%（27,159/196,753）",
+      "evidence": "docs/update/1118/M0/evidence/source-capability-scan.txt（复活墓碑类 段）"
+    },
+    {
+      "classId": 27,
+      "className": "DWD_SUPPLIER_PAYMENT",
+      "validTo": "2026-09-19",
+      "action": "revive",
+      "status": "candidate",
+      "datasourceId": 1,
+      "schemaName": "THBI",
+      "sourceTable": "DWD_SUPPLIER_PAYMENT",
+      "physicalColumnCount": 17,
+      "ontologyPropertyCount": 17,
+      "propertyColumnsMissing": null,
+      "rowCount": 33576,
+      "kpiCount": 1,
+      "kpis": [
+        "KPI_PAYMENT_ON_TIME"
+      ],
+      "notes": "付款；BANK_DATE 填充 0 ⇒ 「付款申请日」无列（R-11 用 BILL_DATE 代理）",
+      "evidence": "docs/update/1118/M0/evidence/source-capability-scan.txt（复活墓碑类 段）"
     }
   ]
 }

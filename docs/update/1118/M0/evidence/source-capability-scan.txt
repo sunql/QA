@@ -1,0 +1,405 @@
+=== datasource 1 = THBI Oracle / oracle / db=X3V71ORA ===
+
+--- 行数 · 采购订单行 ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_PURCHASE_ORDER_LINE
+  n=927648
+
+--- 填充率 · 承诺交货日期 / 请求交货日期 ---
+SQL: SELECT COUNT(PROMISED_RECEIPT_DATE) AS promised_filled, COUNT(REQUESTED_RECEIPT_DATE) AS requested_filled, COUNT(*) AS total FROM THBI.DWD_PURCHASE_ORDER_LINE
+  promised_filled=927646 | requested_filled=0 | total=927648
+
+--- 订单行按年分布 ---
+SQL: SELECT TO_CHAR(O.ORDER_DATE,'YYYY') AS y, COUNT(*) AS n FROM THBI.DWD_PURCHASE_ORDER_LINE O GROUP BY TO_CHAR(O.ORDER_DATE,'YYYY') ORDER BY 1
+  y=2012 | n=6
+  y=2016 | n=36293
+  y=2017 | n=74375
+  y=2018 | n=67783
+  y=2019 | n=76236
+  y=2020 | n=66695
+  y=2021 | n=79212
+  y=2022 | n=102086
+  y=2023 | n=103261
+  y=2024 | n=124946
+  y=2025 | n=130289
+  y=2026 | n=66464
+  y=None | n=2
+
+--- 订单行完成度分布（2025 起）—— A1.1「全完成/部分完成/未完成」三分档 ---
+SQL: SELECT COUNT(*) AS lines, SUM(CASE WHEN O.RECEIVED_QTY >= O.ORDER_QTY THEN 1 ELSE 0 END) AS full_done, SUM(CASE WHEN O.RECEIVED_QTY > 0 AND O.RECEIVED_QTY < O.ORDER_QTY THEN 1 ELSE 0 END) AS partial, SUM(CASE WHEN NVL(O.RECEIVED_QTY,0) = 0 THEN 1 ELSE 0 END) AS none_done FROM THBI.DWD_PURCHASE_ORDER_LINE O WHERE O.ORDER_DATE >= DATE '2025-01-01'
+  lines=196753 | full_done=177137 | partial=9244 | none_done=10372
+
+--- 行数 · 收货行 ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_GOODS_RECEIPT_LINE
+  n=3558008
+
+--- 跨度 · 收货日期 ---
+SQL: SELECT MIN(RECEIPT_DATE) AS min_d, MAX(RECEIPT_DATE) AS max_d FROM THBI.DWD_GOODS_RECEIPT_LINE
+  min_d=2016-06-30 00:00:00 | max_d=2026-08-08 00:00:00
+
+--- 收货行：2025 起有 PO 键的比例 ---
+SQL: SELECT COUNT(*) AS total, COUNT(PO_NO) AS with_po, COUNT(PO_LINE_NO) AS with_po_line FROM THBI.DWD_GOODS_RECEIPT_LINE WHERE RECEIPT_DATE >= DATE '2025-01-01'
+  total=1189303 | with_po=955035 | with_po_line=955035
+
+--- 行数 · 到货检验行（IQC 落地表） ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_ARRIVAL_ORDER_DTL
+  n=81754
+
+--- 填充率 · 到货数量 / 合格数量 ---
+SQL: SELECT COUNT(ARR_QTY) AS qty_filled, COUNT(QUALIFIED_QTY) AS qual_filled, COUNT(*) AS total FROM THBI.DWD_ARRIVAL_ORDER_DTL
+  qty_filled=81754 | qual_filled=81754 | total=81754
+
+--- 不良行数 · 到货 > 合格（= A9 分子） ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_ARRIVAL_ORDER_DTL WHERE QUALIFIED_QTY < ARR_QTY
+  n=1300
+
+--- 到货检验：总行数 vs 去重 PO 行键（判「多次检验」= 返工可能） ---
+SQL: SELECT COUNT(*) AS rows_total, COUNT(DISTINCT A.PO_NO || '#' || A.PO_LINE_NO) AS distinct_keys FROM THBI.DWD_ARRIVAL_ORDER_DTL A
+  rows_total=81754 | distinct_keys=33840
+
+--- 到货检验：单据状态值域 ---
+SQL: SELECT A.DOC_STATUS_CODE AS st, COUNT(*) AS n FROM THBI.DWD_ARRIVAL_ORDER_DTL A GROUP BY A.DOC_STATUS_CODE ORDER BY n DESC
+  st=3 | n=81487
+  st=1 | n=228
+  st=2 | n=39
+
+--- 行数 · 发票行 ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_PURCHASE_INVOICE_LINE
+  n=2486311
+
+--- 填充率 · 发票行收货单键（三单匹配的接缝） ---
+SQL: SELECT COUNT(RECEIPT_NO) AS with_receipt, COUNT(*) AS total FROM THBI.DWD_PURCHASE_INVOICE_LINE
+  with_receipt=2474258 | total=2486311
+
+--- 行数 · 供应商付款 ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_SUPPLIER_PAYMENT
+  n=33576
+
+--- 付款：日期列填充率（到期日/付款日/单据日/创建日） ---
+SQL: SELECT COUNT(DUE_DATE) AS due_f, COUNT(VALUE_DATE) AS val_f, COUNT(BILL_DATE) AS bill_f, COUNT(CREATION_DATE) AS cdate_f, COUNT(*) AS total FROM THBI.DWD_SUPPLIER_PAYMENT
+  due_f=33576 | val_f=33576 | bill_f=33576 | cdate_f=33576 | total=33576
+
+--- 付款：到期日 − 单据日 的间隔区间（A8.2「收货后固定天数」核验） ---
+SQL: SELECT MIN(TRUNC(DUE_DATE)-TRUNC(BILL_DATE)) AS min_gap, MAX(TRUNC(DUE_DATE)-TRUNC(BILL_DATE)) AS max_gap FROM THBI.DWD_SUPPLIER_PAYMENT
+  min_gap=-146 | max_gap=7
+
+--- 付款：付款日晚于单据日的笔数（A8.1「付款申请日」是否独立存在） ---
+SQL: SELECT COUNT(*) AS total, SUM(CASE WHEN TRUNC(VALUE_DATE) > TRUNC(BILL_DATE) THEN 1 ELSE 0 END) AS paid_after_bill FROM THBI.DWD_SUPPLIER_PAYMENT
+  total=33576 | paid_after_bill=6
+
+--- 行数 · 请购行 ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_PURCHASE_REQUISITION_LINE
+  n=181201
+
+--- 行数 · 价目表 ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_SUPPLIER_PRICE_LIST
+  n=126508
+
+--- 价目表：有效期覆盖 2025 起的比例（A5.1「历史均价」可算性） ---
+SQL: SELECT COUNT(*) AS total, SUM(CASE WHEN P.VALID_FROM >= DATE '2025-01-01' THEN 1 ELSE 0 END) AS valid_from_2025 FROM THBI.DWD_SUPPLIER_PRICE_LIST P
+  total=126508 | valid_from_2025=47127
+
+--- 行数 · 供应商主数据 ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DIM_SUPPLIER
+  n=3500
+
+--- 行数 · 报价行 ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_QUOTATION_LINE
+  n=0
+
+--- 行数 · 采购合同（A6 归因里治理层引用的表） ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_PURCHASE_CONTRACT
+[ERROR] DatabaseError: ORA-00942: 表或视图不存在
+Help: https://docs.oracle.com/error-help/db/ora-00942/
+
+--- 付款：银行日期（BANK_DATE）填充率 —— A8.1「付款申请日」的第三个候选 ---
+SQL: SELECT COUNT(BANK_DATE) AS bank_f, COUNT(*) AS total FROM THBI.DWD_SUPPLIER_PAYMENT
+  bank_f=0 | total=33576
+
+--- 付款：银行日期 − 单据日 的间隔区间（判断 BANK_DATE 是不是「申请日」） ---
+SQL: SELECT MIN(TRUNC(BANK_DATE)-TRUNC(BILL_DATE)) AS min_gap, MAX(TRUNC(BANK_DATE)-TRUNC(BILL_DATE)) AS max_gap, SUM(CASE WHEN TRUNC(BANK_DATE) <> TRUNC(VALUE_DATE) THEN 1 ELSE 0 END) AS diff_from_value FROM THBI.DWD_SUPPLIER_PAYMENT
+  min_gap=None | max_gap=None | diff_from_value=0
+
+--- 付款：到期日 − 银行日期 的间隔区间（A8.2「收货后固定天数」再核） ---
+SQL: SELECT MIN(TRUNC(DUE_DATE)-TRUNC(BANK_DATE)) AS min_gap, MAX(TRUNC(DUE_DATE)-TRUNC(BANK_DATE)) AS max_gap FROM THBI.DWD_SUPPLIER_PAYMENT
+  min_gap=None | max_gap=None
+
+--- 收货行：拒收 / 退货数量填充率与合计（A9 不良数量的备选源） ---
+SQL: SELECT COUNT(*) AS total, COUNT(REJECTED_QTY) AS rejected_f, COUNT(RETURNED_QTY) AS returned_f, SUM(NVL(REJECTED_QTY,0)) AS rejected_sum, SUM(NVL(RETURNED_QTY,0)) AS returned_sum FROM THBI.DWD_GOODS_RECEIPT_LINE WHERE RECEIPT_DATE >= DATE '2025-01-01'
+  total=1189303 | rejected_f=1189303 | returned_f=1189303 | rejected_sum=0 | returned_sum=5458549.792
+
+--- 到货检验：检验日期 / 到货日期 填充率（2025 起） ---
+SQL: SELECT COUNT(*) AS total, COUNT(A.INSPECT_DATE) AS inspect_f, COUNT(A.ARR_DATE) AS arr_f FROM THBI.DWD_ARRIVAL_ORDER_DTL A WHERE A.ARR_DATE >= DATE '2025-01-01'
+  total=18342 | inspect_f=18342 | arr_f=18342
+
+--- 到货检验：2025 起去重 PO 行键（判「首次检验」是否可判定） ---
+SQL: SELECT COUNT(*) AS rows_total, COUNT(DISTINCT A.PO_NO || '#' || A.PO_LINE_NO) AS distinct_keys FROM THBI.DWD_ARRIVAL_ORDER_DTL A WHERE A.ARR_DATE >= DATE '2025-01-01'
+  rows_total=18342 | distinct_keys=7848
+
+--- 价目表：近 1 年有价物料数 vs 订单行涉及物料数（A5.2「过去 1 年历史均价」可算性） ---
+SQL: SELECT (SELECT COUNT(DISTINCT P.MATERIAL_CODE) FROM THBI.DWD_SUPPLIER_PRICE_LIST P         WHERE P.VALID_FROM >= DATE '2025-01-01') AS priced_materials, (SELECT COUNT(DISTINCT O.MATERIAL_CODE) FROM THBI.DWD_PURCHASE_ORDER_LINE O         WHERE O.ORDER_DATE >= DATE '2025-01-01') AS ordered_materials FROM DUAL
+  priced_materials=0 | ordered_materials=61442
+
+--- 订单行：单价 / 不含税金额填充率（A3.3「订单金额加权」可算性） ---
+SQL: SELECT COUNT(*) AS total, COUNT(O.UNIT_PRICE) AS price_f, COUNT(O.LINE_AMOUNT_EXCL_TAX) AS amt_f FROM THBI.DWD_PURCHASE_ORDER_LINE O WHERE O.ORDER_DATE >= DATE '2025-01-01'
+  total=196753 | price_f=196753 | amt_f=196753
+
+--- 请购行：创建日期 / 金额填充率（A3.1「起点=采购申请」可算性） ---
+SQL: SELECT COUNT(*) AS total, COUNT(L.CREATION_DATE) AS cdate_f, COUNT(L.LINE_AMOUNT_EXCL_TAX) AS amt_f FROM THBI.DWD_PURCHASE_REQUISITION_LINE L
+  total=181201 | cdate_f=181201 | amt_f=181201
+
+--- 收货行 → 请购行 能否接上（A3 周期起点需要 PO→请购 的映射） ---
+SQL: SELECT COUNT(*) AS total, COUNT(O.PO_NO) AS with_po FROM THBI.DWD_PURCHASE_ORDER_LINE O WHERE O.ORDER_DATE >= DATE '2025-01-01'
+  total=196753 | with_po=196753
+
+--- 价目表：关键列填充率（A5.1/A5.2「基准价 = 过去 1 年历史均价」可算性） ---
+SQL: SELECT COUNT(*) AS total, COUNT(P.MATERIAL_CODE) AS mat_f, COUNT(P.UNIT_PRICE) AS price_f, COUNT(P.VALID_FROM) AS vfrom_f, COUNT(P.VALID_TO) AS vto_f, COUNT(DISTINCT P.PRICE_LIST_CODE) AS lists FROM THBI.DWD_SUPPLIER_PRICE_LIST P
+  total=126508 | mat_f=0 | price_f=126508 | vfrom_f=126508 | vto_f=126508 | lists=5
+
+--- 价目表：VALID_FROM ≥ 2025 的行的物料编码 / 单价填充率（上一问 distinct=0 的成因） ---
+SQL: SELECT COUNT(*) AS total, COUNT(P.MATERIAL_CODE) AS mat_f, COUNT(P.UNIT_PRICE) AS price_f, COUNT(DISTINCT P.MATERIAL_CODE) AS distinct_mat FROM THBI.DWD_SUPPLIER_PRICE_LIST P WHERE P.VALID_FROM >= DATE '2025-01-01'
+  total=47127 | mat_f=0 | price_f=47127 | distinct_mat=0
+
+--- 价目表：按物料的价目条数分布（多版本 vs 单版本） ---
+SQL: SELECT MIN(c) AS min_per_material, MAX(c) AS max_per_material, AVG(c) AS avg_per_material FROM (SELECT COUNT(*) AS c FROM THBI.DWD_SUPPLIER_PRICE_LIST GROUP BY MATERIAL_CODE)
+  min_per_material=126508 | max_per_material=126508 | avg_per_material=126508
+
+--- 年度报价明细：行数 / 物料数 / 供应商数 / 价目表数（A5.1 基准价的真正候选源） ---
+SQL: SELECT COUNT(*) AS n, COUNT(DISTINCT Q.ITEM_CODE) AS items, COUNT(DISTINCT Q.SUPPLIER_CODE) AS sups, COUNT(DISTINCT Q.PRICE_LIST_CODE) AS lists FROM THBI.DWD_PURCHASE_QUOTATION_YEARLY_DTL Q
+  n=167909 | items=21679 | sups=570 | lists=4
+
+--- 年度报价明细：按年度分布 ---
+SQL: SELECT Q.SEG_YEAR AS y, COUNT(*) AS n FROM THBI.DWD_PURCHASE_QUOTATION_YEARLY_DTL Q GROUP BY Q.SEG_YEAR ORDER BY 1
+  y=2015 | n=29
+  y=2016 | n=873
+  y=2017 | n=9583
+  y=2018 | n=9292
+  y=2019 | n=10717
+  y=2020 | n=11731
+  y=2021 | n=11949
+  y=2022 | n=11199
+  y=2023 | n=13062
+  y=2024 | n=15696
+  y=2025 | n=22592
+  y=2026 | n=50599
+  y=2027 | n=587
+
+--- 年度报价明细：2025/2026 的不含税单价与生效区间填充率 ---
+SQL: SELECT COUNT(*) AS total, COUNT(Q.UNIT_PRICE_EX_TAX) AS net_f, COUNT(Q.SEG_START_DATE) AS seg_f, COUNT(Q.SEG_END_DATE) AS segend_f FROM THBI.DWD_PURCHASE_QUOTATION_YEARLY_DTL Q WHERE Q.SEG_YEAR IN (2025,2026)
+  total=73191 | net_f=73191 | seg_f=73191 | segend_f=73191
+
+--- 基准价覆盖率（订单行级，供应商+物料 联合命中 2025+ 年度报价） ---
+SQL: SELECT COUNT(*) AS order_lines, SUM(CASE WHEN Q.SUPPLIER_CODE IS NOT NULL THEN 1 ELSE 0 END) AS hit_lines FROM THBI.DWD_PURCHASE_ORDER_LINE O LEFT JOIN (SELECT DISTINCT SUPPLIER_CODE, ITEM_CODE FROM THBI.DWD_PURCHASE_QUOTATION_YEARLY_DTL WHERE SEG_YEAR >= 2025) Q ON Q.SUPPLIER_CODE=O.SUPPLIER_CODE AND Q.ITEM_CODE=O.MATERIAL_CODE WHERE O.ORDER_DATE >= DATE '2025-01-01'
+  order_lines=196753 | hit_lines=81020
+
+--- 基准价覆盖率（订单行级，仅物料命中） ---
+SQL: SELECT COUNT(*) AS order_lines, SUM(CASE WHEN Q.ITEM_CODE IS NOT NULL THEN 1 ELSE 0 END) AS hit_lines FROM THBI.DWD_PURCHASE_ORDER_LINE O LEFT JOIN (SELECT DISTINCT ITEM_CODE FROM THBI.DWD_PURCHASE_QUOTATION_YEARLY_DTL WHERE SEG_YEAR >= 2025) Q ON Q.ITEM_CODE=O.MATERIAL_CODE WHERE O.ORDER_DATE >= DATE '2025-01-01'
+  order_lines=196753 | hit_lines=91485
+
+--- 报价单头 / 报价行 行数（A3 周期起点经报价单中转的可能性） ---
+SQL: SELECT (SELECT COUNT(*) FROM THBI.DWD_QUOTATION) AS q_hdr, (SELECT COUNT(*) FROM THBI.DWD_QUOTATION_LINE) AS q_line FROM DUAL
+  q_hdr=0 | q_line=0
+
+--- 对账明细行数（D1.6「不做对账」的范围外对象） ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_RECONCILIATION_BILL_DTL
+  n=24868
+
+--- 对照行数 · DWD_PURCHASE_ORDER_DTL（34 候选变体） ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_PURCHASE_ORDER_DTL
+  n=1023442
+
+--- 对照行数 · DWD_GOODS_RECEIPT_DTL（34 候选变体） ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_GOODS_RECEIPT_DTL
+  n=3977714
+
+--- 对照行数 · DWD_AP_INVOICE_DTL（34 候选变体） ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_AP_INVOICE_DTL
+  n=46
+
+--- 对照行数 · DWD_ARRIVAL_ORDER_DTL（34 候选变体，与前同表） ---
+SQL: SELECT COUNT(*) AS n, COUNT(ARR_QTY) AS arr_qty, COUNT(QUALIFIED_QTY) AS qualified_qty FROM THBI.DWD_ARRIVAL_ORDER_DTL
+  n=81754 | arr_qty=81754 | qualified_qty=81754
+
+--- 对照行数 · DWD_SUPPLIER_PRICE_LIST_HEADER ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_SUPPLIER_PRICE_LIST_HEADER
+  n=17749
+
+--- 对照行数 · DWD_SUPPLIER_PRICE_LIST_CONFIG ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_SUPPLIER_PRICE_LIST_CONFIG
+  n=6
+
+--- 对照行数 · ODS_PORDER ---
+SQL: SELECT COUNT(*) AS n FROM THBI.ODS_PORDER
+  n=200562
+
+--- 对照行数 · ODS_YPRECEIPTD ---
+SQL: SELECT COUNT(*) AS n FROM THBI.ODS_YPRECEIPTD
+  n=76352
+
+--- 对照行数 · ODS_PINVOICED ---
+SQL: SELECT COUNT(*) AS n FROM THBI.ODS_PINVOICED
+  n=2486311
+
+--- 对照行数 · ODS_PAYMENTD ---
+SQL: SELECT COUNT(*) AS n FROM THBI.ODS_PAYMENTD
+  n=68750
+
+--- 对照行数 · ODS_PAYMENTH ---
+SQL: SELECT COUNT(*) AS n FROM THBI.ODS_PAYMENTH
+  n=45891
+
+--- 对照行数 · ODS_PORDERQ ---
+SQL: SELECT COUNT(*) AS n FROM THBI.ODS_PORDERQ
+  n=927648
+
+--- 对照行数 · ODS_PQUOTAT ---
+SQL: SELECT COUNT(*) AS n FROM THBI.ODS_PQUOTAT
+  n=0
+
+--- 对照行数 · ODS_ITMMASTER ---
+SQL: SELECT COUNT(*) AS n FROM THBI.ODS_ITMMASTER
+  n=350922
+
+--- 对照 · 两套命名的关键列存在性（_DTL 候选 vs 墓碑类物理表） ---
+SQL: SELECT table_name, COUNT(*) AS col_cnt, MAX(CASE WHEN column_name='ORDER_DATE' THEN 1 ELSE 0 END) AS c_order_date, MAX(CASE WHEN column_name='PROMISED_RECEIPT_DATE' THEN 1 ELSE 0 END) AS c_promised, MAX(CASE WHEN column_name='ORDER_QTY' THEN 1 ELSE 0 END) AS c_order_qty, MAX(CASE WHEN column_name='LINE_AMOUNT_EXCL_TAX' THEN 1 ELSE 0 END) AS c_line_amount, MAX(CASE WHEN column_name='MATERIAL_CODE' THEN 1 ELSE 0 END) AS c_material, MAX(CASE WHEN column_name='SUPPLIER_CODE' THEN 1 ELSE 0 END) AS c_supplier, MAX(CASE WHEN column_name='PO_NO' THEN 1 ELSE 0 END) AS c_po_no, MAX(CASE WHEN column_name='PO_LINE_NO' THEN 1 ELSE 0 END) AS c_po_line, MAX(CASE WHEN column_name='RECEIPT_DATE' THEN 1 ELSE 0 END) AS c_receipt_date, MAX(CASE WHEN column_name='REJECTED_QTY' THEN 1 ELSE 0 END) AS c_rejected, MAX(CASE WHEN column_name='RECEIPT_NO' THEN 1 ELSE 0 END) AS c_receipt_no, MAX(CASE WHEN column_name='INVOICE_DATE' THEN 1 ELSE 0 END) AS c_invoice_date, MAX(CASE WHEN column_name='BILL_DATE' THEN 1 ELSE 0 END) AS c_bill_date, MAX(CASE WHEN column_name='VALUE_DATE' THEN 1 ELSE 0 END) AS c_value_date, MAX(CASE WHEN column_name='DUE_DATE' THEN 1 ELSE 0 END) AS c_due_date, MAX(CASE WHEN column_name='BANK_DATE' THEN 1 ELSE 0 END) AS c_bank_date, MAX(CASE WHEN column_name='ARR_QTY' THEN 1 ELSE 0 END) AS c_arr_qty, MAX(CASE WHEN column_name='QUALIFIED_QTY' THEN 1 ELSE 0 END) AS c_qualified, MAX(CASE WHEN column_name='ARR_DATE' THEN 1 ELSE 0 END) AS c_arr_date, MAX(CASE WHEN column_name='INSPECT_DATE' THEN 1 ELSE 0 END) AS c_inspect_date FROM ALL_TAB_COLUMNS WHERE owner='THBI' AND table_name IN ('DWD_PURCHASE_ORDER_DTL','DWD_PURCHASE_ORDER_LINE','DWD_GOODS_RECEIPT_DTL','DWD_GOODS_RECEIPT_LINE','DWD_AP_INVOICE_DTL','DWD_PURCHASE_INVOICE','DWD_PURCHASE_INVOICE_LINE','DWD_ARRIVAL_ORDER_DTL','DWD_SUPPLIER_PAYMENT','ODS_PORDERQ','ODS_PINVOICED','ODS_YPRECEIPTD','ODS_PAYMENTD') GROUP BY table_name ORDER BY table_name
+  table_name=DWD_AP_INVOICE_DTL | col_cnt=20 | c_order_date=0 | c_promised=0 | c_order_qty=0 | c_line_amount=0 | c_material=0 | c_supplier=1 | c_po_no=0 | c_po_line=0 | c_receipt_date=0 | c_rejected=0 | c_receipt_no=0 | c_invoice_date=0 | c_bill_date=0 | c_value_date=0 | c_due_date=0 | c_bank_date=0 | c_arr_qty=0 | c_qualified=0 | c_arr_date=0 | c_inspect_date=0
+  table_name=DWD_ARRIVAL_ORDER_DTL | col_cnt=21 | c_order_date=0 | c_promised=0 | c_order_qty=0 | c_line_amount=0 | c_material=0 | c_supplier=1 | c_po_no=1 | c_po_line=1 | c_receipt_date=0 | c_rejected=0 | c_receipt_no=0 | c_invoice_date=0 | c_bill_date=0 | c_value_date=0 | c_due_date=0 | c_bank_date=0 | c_arr_qty=1 | c_qualified=1 | c_arr_date=1 | c_inspect_date=1
+  table_name=DWD_GOODS_RECEIPT_DTL | col_cnt=46 | c_order_date=0 | c_promised=0 | c_order_qty=0 | c_line_amount=0 | c_material=0 | c_supplier=1 | c_po_no=1 | c_po_line=1 | c_receipt_date=0 | c_rejected=0 | c_receipt_no=0 | c_invoice_date=0 | c_bill_date=0 | c_value_date=0 | c_due_date=0 | c_bank_date=0 | c_arr_qty=0 | c_qualified=0 | c_arr_date=0 | c_inspect_date=0
+  table_name=DWD_GOODS_RECEIPT_LINE | col_cnt=26 | c_order_date=0 | c_promised=0 | c_order_qty=0 | c_line_amount=1 | c_material=1 | c_supplier=1 | c_po_no=1 | c_po_line=1 | c_receipt_date=1 | c_rejected=1 | c_receipt_no=1 | c_invoice_date=0 | c_bill_date=0 | c_value_date=0 | c_due_date=0 | c_bank_date=0 | c_arr_qty=0 | c_qualified=0 | c_arr_date=0 | c_inspect_date=0
+  table_name=DWD_PURCHASE_INVOICE | col_cnt=17 | c_order_date=0 | c_promised=0 | c_order_qty=0 | c_line_amount=0 | c_material=0 | c_supplier=1 | c_po_no=0 | c_po_line=0 | c_receipt_date=0 | c_rejected=0 | c_receipt_no=0 | c_invoice_date=1 | c_bill_date=0 | c_value_date=0 | c_due_date=0 | c_bank_date=0 | c_arr_qty=0 | c_qualified=0 | c_arr_date=0 | c_inspect_date=0
+  table_name=DWD_PURCHASE_INVOICE_LINE | col_cnt=23 | c_order_date=0 | c_promised=0 | c_order_qty=0 | c_line_amount=1 | c_material=1 | c_supplier=1 | c_po_no=1 | c_po_line=1 | c_receipt_date=1 | c_rejected=0 | c_receipt_no=1 | c_invoice_date=0 | c_bill_date=0 | c_value_date=0 | c_due_date=0 | c_bank_date=0 | c_arr_qty=0 | c_qualified=0 | c_arr_date=0 | c_inspect_date=0
+  table_name=DWD_PURCHASE_ORDER_DTL | col_cnt=35 | c_order_date=1 | c_promised=0 | c_order_qty=0 | c_line_amount=0 | c_material=0 | c_supplier=1 | c_po_no=1 | c_po_line=1 | c_receipt_date=0 | c_rejected=0 | c_receipt_no=0 | c_invoice_date=0 | c_bill_date=0 | c_value_date=0 | c_due_date=0 | c_bank_date=0 | c_arr_qty=0 | c_qualified=0 | c_arr_date=0 | c_inspect_date=0
+  table_name=DWD_PURCHASE_ORDER_LINE | col_cnt=29 | c_order_date=1 | c_promised=1 | c_order_qty=1 | c_line_amount=1 | c_material=1 | c_supplier=1 | c_po_no=1 | c_po_line=1 | c_receipt_date=0 | c_rejected=0 | c_receipt_no=0 | c_invoice_date=0 | c_bill_date=0 | c_value_date=0 | c_due_date=0 | c_bank_date=0 | c_arr_qty=0 | c_qualified=0 | c_arr_date=0 | c_inspect_date=0
+  table_name=DWD_SUPPLIER_PAYMENT | col_cnt=17 | c_order_date=0 | c_promised=0 | c_order_qty=0 | c_line_amount=0 | c_material=0 | c_supplier=1 | c_po_no=0 | c_po_line=0 | c_receipt_date=0 | c_rejected=0 | c_receipt_no=0 | c_invoice_date=0 | c_bill_date=1 | c_value_date=1 | c_due_date=1 | c_bank_date=1 | c_arr_qty=0 | c_qualified=0 | c_arr_date=0 | c_inspect_date=0
+  table_name=ODS_PAYMENTD | col_cnt=68 | c_order_date=0 | c_promised=0 | c_order_qty=0 | c_line_amount=0 | c_material=0 | c_supplier=0 | c_po_no=0 | c_po_line=0 | c_receipt_date=0 | c_rejected=0 | c_receipt_no=0 | c_invoice_date=0 | c_bill_date=0 | c_value_date=0 | c_due_date=0 | c_bank_date=0 | c_arr_qty=0 | c_qualified=0 | c_arr_date=0 | c_inspect_date=0
+  table_name=ODS_PINVOICED | col_cnt=166 | c_order_date=0 | c_promised=0 | c_order_qty=0 | c_line_amount=0 | c_material=0 | c_supplier=0 | c_po_no=0 | c_po_line=0 | c_receipt_date=0 | c_rejected=0 | c_receipt_no=0 | c_invoice_date=0 | c_bill_date=0 | c_value_date=0 | c_due_date=0 | c_bank_date=0 | c_arr_qty=0 | c_qualified=0 | c_arr_date=0 | c_inspect_date=0
+  table_name=ODS_PORDERQ | col_cnt=151 | c_order_date=0 | c_promised=0 | c_order_qty=0 | c_line_amount=0 | c_material=0 | c_supplier=0 | c_po_no=0 | c_po_line=0 | c_receipt_date=0 | c_rejected=0 | c_receipt_no=0 | c_invoice_date=0 | c_bill_date=0 | c_value_date=0 | c_due_date=0 | c_bank_date=0 | c_arr_qty=0 | c_qualified=0 | c_arr_date=0 | c_inspect_date=0
+  table_name=ODS_YPRECEIPTD | col_cnt=47 | c_order_date=0 | c_promised=0 | c_order_qty=0 | c_line_amount=0 | c_material=0 | c_supplier=0 | c_po_no=0 | c_po_line=0 | c_receipt_date=0 | c_rejected=0 | c_receipt_no=0 | c_invoice_date=0 | c_bill_date=0 | c_value_date=0 | c_due_date=0 | c_bank_date=0 | c_arr_qty=0 | c_qualified=0 | c_arr_date=0 | c_inspect_date=0
+
+--- 复活墓碑类 · DWD_REQUISITION_ORDER_LINK 行数与键覆盖（PO↔请购 关联表） ---
+SQL: SELECT COUNT(*) AS n, COUNT(DISTINCT PO_NO) AS pos, COUNT(DISTINCT PO_LINE_NO) AS po_lines, COUNT(DISTINCT REQUISITION_NO) AS reqs FROM THBI.DWD_REQUISITION_ORDER_LINK
+  n=138118 | pos=42350 | po_lines=185 | reqs=23184
+
+--- 复活墓碑类 · DWD_PURCHASE_REQUISITION_LINE 行数与关键列 ---
+SQL: SELECT COUNT(*) AS n, COUNT(REQUISITION_NO) AS req_no, COUNT(QUOTATION_NO) AS quo_no, COUNT(CREATION_DATE) AS creation_date, COUNT(ORDERED_FLAG) AS ordered_flag, COUNT(LINE_AMOUNT_EXCL_TAX) AS amount FROM THBI.DWD_PURCHASE_REQUISITION_LINE
+  n=181201 | req_no=181201 | quo_no=0 | creation_date=181201 | ordered_flag=181201 | amount=181201
+
+--- 复活墓碑类 · 请购行的引号单号能否接上订单行（A3 周期起点的第二条路径） ---
+SQL: SELECT COUNT(*) AS order_lines, SUM(CASE WHEN R.QUOTATION_NO IS NOT NULL THEN 1 ELSE 0 END) AS matched_by_quotation FROM THBI.DWD_PURCHASE_ORDER_LINE O LEFT JOIN (SELECT DISTINCT QUOTATION_NO FROM THBI.DWD_PURCHASE_REQUISITION_LINE WHERE QUOTATION_NO IS NOT NULL) R ON R.QUOTATION_NO = O.QUOTATION_NO WHERE O.ORDER_DATE >= DATE '2025-01-01'
+  order_lines=196753 | matched_by_quotation=0
+
+--- 复活墓碑类 · 请购行属性列是否都存在（DWD_PURCHASE_REQUISITION_LINE，23 属性） ---
+SQL: SELECT COUNT(*) AS missing FROM (SELECT 'APPROVED_FLAG' c FROM DUAL UNION ALL SELECT 'BUYER_CODE' FROM DUAL UNION ALL SELECT 'CLOSED_FLAG' FROM DUAL UNION ALL SELECT 'COMPANY_CODE' FROM DUAL UNION ALL SELECT 'CREATION_DATE' FROM DUAL UNION ALL SELECT 'CURRENCY_CODE' FROM DUAL UNION ALL SELECT 'ETL_LOAD_TS' FROM DUAL UNION ALL SELECT 'EXPECTED_ORDER_DATE' FROM DUAL UNION ALL SELECT 'EXPECTED_RECEIPT_DATE' FROM DUAL UNION ALL SELECT 'FACILITY_CODE' FROM DUAL UNION ALL SELECT 'LINE_AMOUNT_EXCL_TAX' FROM DUAL UNION ALL SELECT 'MATERIAL_CODE' FROM DUAL UNION ALL SELECT 'MATERIAL_DESC' FROM DUAL UNION ALL SELECT 'ORDERED_FLAG' FROM DUAL UNION ALL SELECT 'ORDERED_QTY' FROM DUAL UNION ALL SELECT 'QUANTITY' FROM DUAL UNION ALL SELECT 'QUOTATION_NO' FROM DUAL UNION ALL SELECT 'REQUISITION_LINE_NO' FROM DUAL UNION ALL SELECT 'REQUISITION_NO' FROM DUAL UNION ALL SELECT 'SUGGESTED_SUPPLIER_CODE' FROM DUAL UNION ALL SELECT 'UNIT_PRICE_GROSS' FROM DUAL UNION ALL SELECT 'UNIT_PRICE_NET' FROM DUAL UNION ALL SELECT 'UPDATE_DATE' FROM DUAL) P WHERE P.c NOT IN (SELECT column_name FROM ALL_TAB_COLUMNS WHERE owner='THBI' AND table_name='DWD_PURCHASE_REQUISITION_LINE')
+  missing=0
+
+--- 复活墓碑类 · 关联表属性列是否都存在（DWD_REQUISITION_ORDER_LINK，6 属性） ---
+SQL: SELECT COUNT(*) AS missing FROM (SELECT 'ETL_LOAD_TS' c FROM DUAL UNION ALL SELECT 'PO_LINE_NO' FROM DUAL UNION ALL SELECT 'PO_NO' FROM DUAL UNION ALL SELECT 'QUANTITY' FROM DUAL UNION ALL SELECT 'REQUISITION_LINE_NO' FROM DUAL UNION ALL SELECT 'REQUISITION_NO' FROM DUAL) P WHERE P.c NOT IN (SELECT column_name FROM ALL_TAB_COLUMNS WHERE owner='THBI' AND table_name='DWD_REQUISITION_ORDER_LINK')
+  missing=0
+
+--- 复活墓碑类 · DWD_PURCHASE_INVOICE 头表行数 ---
+SQL: SELECT COUNT(*) AS n FROM THBI.DWD_PURCHASE_INVOICE
+  n=38323
+
+--- 复活墓碑类 · 关联表键列填充率（PO_NO / PO_LINE_NO / REQUISITION_NO / REQUISITION_LINE_NO） ---
+SQL: SELECT COUNT(*) AS n, COUNT(PO_NO) AS po_no, COUNT(PO_LINE_NO) AS po_line, COUNT(REQUISITION_NO) AS req_no, COUNT(REQUISITION_LINE_NO) AS req_line, COUNT(QUANTITY) AS qty FROM THBI.DWD_REQUISITION_ORDER_LINK
+  n=138118 | po_no=138118 | po_line=138118 | req_no=138118 | req_line=138118 | qty=138118
+
+--- 复活墓碑类 · 订单行能否经关联表接上请购单（A3 周期起点精确匹配覆盖率，按订单行去重） ---
+SQL: SELECT COUNT(DISTINCT O.PO_NO || '#' || O.PO_LINE_NO) AS order_lines, COUNT(DISTINCT CASE WHEN L.REQUISITION_NO IS NOT NULL THEN O.PO_NO || '#' || O.PO_LINE_NO END) AS matched_by_po, COUNT(DISTINCT O.PO_NO) AS pos, COUNT(DISTINCT L.PO_NO) AS pos_with_requisition FROM THBI.DWD_PURCHASE_ORDER_LINE O LEFT JOIN (SELECT PO_NO, MIN(REQUISITION_NO) AS REQUISITION_NO FROM THBI.DWD_REQUISITION_ORDER_LINK WHERE REQUISITION_NO IS NOT NULL GROUP BY PO_NO) L ON L.PO_NO = O.PO_NO WHERE O.ORDER_DATE >= DATE '2025-01-01'
+  order_lines=196753 | matched_by_po=27159 | pos=54554 | pos_with_requisition=8096
+
+--- 复活墓碑类 · 关联表覆盖的时间范围（按请购行创建日回看） ---
+SQL: SELECT COUNT(*) AS link_rows, COUNT(R.REQUISITION_NO) AS joined_requisition, MIN(R.CREATION_DATE) AS min_req_creation, MAX(R.CREATION_DATE) AS max_req_creation FROM THBI.DWD_REQUISITION_ORDER_LINK L LEFT JOIN THBI.DWD_PURCHASE_REQUISITION_LINE R ON R.REQUISITION_NO = L.REQUISITION_NO
+  link_rows=6848931 | joined_requisition=6848931 | min_req_creation=2016-08-29 00:00:00 | max_req_creation=2026-07-18 00:00:00
+=== datasource 10 = SRM-TH-01 / mysql / db=srm_company_taihong ===
+
+--- 行数 · 供应商准入 ---
+SQL: SELECT COUNT(*) AS n FROM supply_access
+  n=436
+
+--- 行数 · 资质 ---
+SQL: SELECT COUNT(*) AS n FROM supply_access_qualification
+  n=6
+
+--- 行数 · 银行信息 ---
+SQL: SELECT COUNT(*) AS n FROM supply_access_bank
+  n=437
+
+--- 行数 · 品类准入 ---
+SQL: SELECT COUNT(*) AS n FROM supply_access_class
+  n=0
+
+--- 行数 · 供应商主数据 ---
+SQL: SELECT COUNT(*) AS n FROM main_data_supplier
+  n=470
+
+--- 行数 · 来料检验 ---
+SQL: SELECT COUNT(*) AS n FROM supply_inspection
+  n=0
+
+--- 行数 · 检验项 ---
+SQL: SELECT COUNT(*) AS n FROM supply_inspection_factors
+  n=0
+
+--- 行数 · 采购订单行 ---
+SQL: SELECT COUNT(*) AS n FROM order_purchase_order_info
+  n=261194
+
+--- 行数 · 报价明细 ---
+SQL: SELECT COUNT(*) AS n FROM pricing_quote_form_info
+  n=1352
+
+--- 行数 · 入库单行 ---
+SQL: SELECT COUNT(*) AS n FROM order_warehousing_order_info
+  n=33419
+
+--- 行数 · 合同 ---
+SQL: SELECT COUNT(*) AS n FROM order_contract
+  n=0
+
+--- 行数 · 绩效评估 ---
+SQL: SELECT COUNT(*) AS n FROM performance_assessment
+  n=1131
+
+--- 行数 · 退货单 ---
+SQL: SELECT COUNT(*) AS n FROM supply_return_order
+  n=0
+
+--- 值域 · 准入状态 access_state（A12「黑名单」判定字段） ---
+SQL: SELECT access_state, COUNT(*) AS n FROM supply_access GROUP BY access_state ORDER BY n DESC
+  access_state=51004 | n=394
+  access_state=51003 | n=18
+  access_state=51001 | n=15
+  access_state=51002 | n=9
+
+--- 值域 · 供货状态 supply_state ---
+SQL: SELECT supply_state, COUNT(*) AS n FROM supply_access GROUP BY supply_state ORDER BY n DESC
+  supply_state=55002 | n=417
+  supply_state=55001 | n=19
+
+--- 值域 · 供应商状态 state（A12.5「未停用」判定字段） ---
+SQL: SELECT state, COUNT(*) AS n FROM main_data_supplier GROUP BY state ORDER BY n DESC
+  state=100001 | n=470
+
+--- 过期资质（effective_end_date < 今天） ---
+SQL: SELECT COUNT(*) AS n FROM supply_access_qualification WHERE effective_end_date < CURDATE()
+  n=1
+
+--- 30 天内到期资质（A12.4） ---
+SQL: SELECT COUNT(*) AS n FROM supply_access_qualification WHERE effective_end_date >= CURDATE() AND effective_end_date < DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+  n=0
+
+--- 银行信息缺失（bank_name 为空） ---
+SQL: SELECT COUNT(*) AS n FROM supply_access_bank WHERE bank_name IS NULL OR bank_name = ''
+  n=323
+
+--- 采购订单行含承诺交货日期（A2.1「承诺交货日期为空」核验） ---
+SQL: SELECT COUNT(*) AS total, SUM(CASE WHEN required_delivery_date IS NOT NULL THEN 1 ELSE 0 END) AS with_due FROM order_purchase_order_info
+  total=261194 | with_due=1688
+
+--- 报价明细含单价（A5.1「历史均价」备选源核验） ---
+SQL: SELECT COUNT(*) AS total, SUM(CASE WHEN unit_price IS NOT NULL THEN 1 ELSE 0 END) AS with_price FROM pricing_quote_form_info
+  total=1352 | with_price=1
+
+--- 入库单行含来料数量（A9.2「来料数量」源核验） ---
+SQL: SELECT COUNT(*) AS total, SUM(CASE WHEN plan_qty IS NOT NULL THEN 1 ELSE 0 END) AS with_qty FROM order_warehousing_order_info
+  total=33419 | with_qty=33419

@@ -63,6 +63,11 @@
 - [feat-agent-orchestration](../changes/feat-agent-orchestration/summary.md) - 通用多工具 Agent 编排（Phase 6.6；第三条执行路径 + 迁移 0135 + 默认关闭 + 灰度手册）
 - **近 30 天热点（按 SSOT 性质）**：
   - [2026-11-16-fix-ontology-bg-vector-sync](../changes/2026-11-16-fix-ontology-bg-vector-sync/summary.md) - 本体向量后台同步请求回滚存活（`MissingGreenlet` 生产事故；`ownSession()` + 锁内重读 + 同实体串行化；含旧写法对照实验）
+  - [2026-11-16-local-deploy-0148](../changes/2026-11-16-local-deploy-0148/summary.md) - 本地部署拉平到 main（迁移链 0143 → **0148**；探针全绿 + 容器代码 md5 一致；含 0144 重复列事故与 `stamp` 教训；**生产未部署**）
+  - [2026-11-16-p5-workflow-command](../changes/2026-11-16-p5-workflow-command/summary.md) - P5 Workflow/Command/Approval（**已实现**；后端 PR #148 → `a217fef0` + 前端两批 PR #150 → `1e04b46e`；迁移 `0149`–`0152`；**生产未部署**，`ENABLE_WORKFLOW` 默认关）
+  - [2026-11-16-ontology-discovery-ai](../changes/2026-11-16-ontology-discovery-ai/summary.md) - WP-ONT-AI 发现底座（A1 ✅ + A2a ✅；A2/A3/A4 卡在 Q3/Q4/Q5 业务答复，**征集暂缓**；迁移 `0146`–`0148`；A2/A3/A4 占号 `0153`+）
+  - [2026-11-14-prod-release-1114](../changes/2026-11-14-prod-release-1114/deploy-prod-1114.md) - 1114 生产发布方案（`0140 → 0143`；演练 + `pg_dump` + compose v1 片段）+ [KPI 回答修复逐条方案](../changes/2026-11-14-prod-release-1114/fix-kpi-answer-prod.md)
+  - [2026-11-14-fix-import-tombstone-name-guard](../changes/2026-11-14-fix-import-tombstone-name-guard/summary.md) - 类墓碑占名守卫（`MSG_CLASS_NAME_OCCUPIED_BY_TOMBSTONE`；删除后同名不可再占）+ [1115 生产部署 runbook](../changes/2026-11-14-fix-import-tombstone-name-guard/deploy-prod-1115.md)（零 DDL / 零业务写）
   - [2026-10-28-kpi-metric-technical-form](../changes/2026-10-28-kpi-metric-technical-form/summary.md) - 指标技术形态治理 → NL2SQL 动态消费（**draft，设计已批准未实施**；方案A 权威链 + 双轨制 + Tier A/B/C + 三层对账；P1+P1-数据 范围；分支处置=选项3）
   - [2026-09-30-chat-session-restore](../changes/2026-09-30-chat-session-restore/summary.md) - 刷新恢复上次会话（分渠道指针 + 挂载回放）+ 会话归属守卫铺到 6 个端点（守卫归属查询改按渠道并集）
   - [chore-magic-number-governance](../changes/chore-magic-number-governance/summary.md) - 魔数治理 Phase 2 15/15（0087 easy + 0088 medium + 0089 hard）

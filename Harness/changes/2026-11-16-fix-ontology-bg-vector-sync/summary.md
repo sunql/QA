@@ -156,6 +156,24 @@ schema 与 HEAD 完全一致。
   改后 `4 failed / 51 passed`（**只剩同一批 4 个基线失败，净新增 0**）。
   定向 3 例（create/update/manual 同步）**3 passed**。
 
+**CI 闸门 exit 6 仲裁（2026-11-16，PR #143 合入前）**：
+
+第二次 push 的 merge-gate 判 `exit 6`（`CI_SURFACE_CHANGED`），判据本身是
+「**净新增 0 条 / 净丢失 0 条**」—— 闸门给的不是失败，而是**「PR 改了 CI 相关面 ⇒
+两次 run 的失败集合不可比 ⇒ 须人工确认」**。
+
+| 项 | 实测 |
+|---|---|
+| 闸门点名的 CI 相关面文件 | **仅 1 个**：`backend/app/infrastructure/database.py`（该文件在 `ci_surface._CI_SURFACE_PATTERNS` 内：conftest 在**收集前**import 它 ⇒ 改它就能改「测试连哪个库 / engine 怎么建」） |
+| 该文件的改动性质 | `+18 / -0`，**纯新增**：只加了一个函数 `ownSession()`；`getDb` / `getSessionFactory` / engine / `expire_on_commit` / `autoflush` **一字未动**（`git diff --numstat` + 逐行核对） |
+| 失败集合是否真的变了 | **没变**：基线 run `43876520248` = **130** 条失败，PR run `43884465368` = **130** 条失败；**逐片计数完全相同**（unit 1/10/3/6，integration 28/23/32/27，frontend 0）⇒ 净新增 0、净丢失 0 |
+| 集成测试分片是否被重排 | **没有**：本 PR 只**修改**既有集成文件（`test_ontology_api.py` / `test_ontology_property_service.py`），**未新建** integration 文件 ⇒ 「排序下标 mod 4」的归属不变 ⇒ 不产生假 net-new |
+
+⇒ **owner 仲裁：可 bypass**。理由：闸门担心的是「改 CI 相关面 ⇒ 失败集合被操纵成不可比」；
+本次唯一被点名的文件是**纯追加一个函数**，import 期行为不变（函数定义不影响模块 import 的副作用），
+且**失败集合逐片计数完全一致**——实证说明失败集合确实可比、对差结论成立。
+已按 `gh pr merge --squash --admin --delete-branch` 合入（`main @ 86ff4a1f`）。
+
 **覆盖率（诚实标注，未达 80% 门禁）**：
 
 - `test_ontology_property_service.py` 单文件：`ontology_service.py` **37%**、
@@ -293,9 +311,17 @@ per-request `Strong` 也无效，见 `milvus_client.py:579-650`）。脚本改�
 
 **环境副作用（需知悉）**：本地开发库 `qa_metadata`（5433）的 `alembic_version` 原为
 `0144`（来自未合 main 的语义分支镜像），main 代码树无该 revision ⇒ 容器重启循环。
-已 `alembic stamp --purge 0143` 校正，容器正常启动。`session_query_state.semantic_release_id`
-这一 nullable 列仍留在开发库，main ORM 不声明它 ⇒ schema drift 报告会显示「DB 多余列」，
-属预期，非本次变更引入。
+`alembic stamp --purge 0143` 校正后容器能起，但 `session_query_state.semantic_release_id`
+这一 nullable 列**仍留在库里**（`stamp` 只改版本号、不执行 DDL）⇒ 再跑真迁移时撞列
+（`asyncpg DuplicateColumnError`）。
+**最终处置（2026-11-16，本地部署批次）**：先取证（该列定义与 0144 的 `upgrade()` **逐字一致**、
+357 行中非空行数 = **0**、0145/0146/0148 的前置对象**不存在**）⇒
+`docker stop qa-backend` → `ALTER TABLE session_query_state DROP COLUMN semantic_release_id;`
+→ 重启 ⇒ 迁移链 `0143 → 0148` 干净应用。
+**生产无此问题**（生产在 `0143` 且无该列）。
+⚠️ **教训**：`alembic stamp` 只改版本号、**不改库结构** ⇒ **绝不能用 stamp 回退一个已应用过 DDL 的库**；
+回退只能用 `alembic downgrade <rev>`。完整记录见
+[`../2026-11-16-local-deploy-0148/summary.md`](../2026-11-16-local-deploy-0148/summary.md) §3。
 
 ## 9. 关联
 

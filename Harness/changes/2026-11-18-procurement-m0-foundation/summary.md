@@ -7,7 +7,7 @@
 - **关联变更**：[m0-id-mapping-a1](../m0-id-mapping-a1/summary.md)（同族的 A1 前置线）、[fix-schema-ssot-alignment](../fix-schema-ssot-alignment/summary.md)（schema SSOT 对齐，判据 1 的前置）
 - **迁移版本**：`0153_reconcile_procurement_class_source_tables`（**纯数据迁移，无 DDL**）
 - **MEMORY**：[../../../../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-procurement-v03-landing-program.md](../../../../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-procurement-v03-landing-program.md)
-- **验收包**：[docs/update/1118/M0/A1-本地栈同构核对表.md](../../../../docs/update/1118/M0/A1-本地栈同构核对表.md)
+- **验收包**：[docs/update/1118/M0/A1-本地栈同构核对表.md](../../../docs/update/1118/M0/A1-本地栈同构核对表.md)
 
 > 用户已拍板的三条前提（2026-11-18）：**生产暂不部署**；**功能需要全部完成**；
 > **本地全绿后统一部署**。本变更只做**本地**侧，不碰生产。
@@ -145,7 +145,7 @@
 `procurement_class_source_table_realdata.py` 与 AST 守卫 —— 两者均被**端到端实跑**
 （前者 exit 0，后者全量扫 `app/tests/**` 并对每条规则做正向/反向样本验证）。
 仓库级覆盖率门禁（`--cov-fail-under=80`）在**全量绿跑**时产出，本批未跑全量
-（后端全量 unit 单文件可能 27 分钟且含既有红基线，见 [判据书 §1.3](../../../../docs/update/1118/M0/本地全绿判据书.md)）。
+（后端全量 unit 单文件可能 27 分钟且含既有红基线，见 [判据书 §1.3](../../../docs/update/1118/M0/本地全绿判据书.md)）。
 
 ---
 
@@ -209,8 +209,8 @@
 
 ## 9. 关联
 
-- **设计稿 / 计划**：[docs/update/1118/M0/业务问卷/A-采购部-指标口径与制度规则.md](../../../../docs/update/1118/M0/业务问卷/A-采购部-指标口径与制度规则.md)（问卷与回收登记）、[docs/update/1118/M0/本地全绿判据书.md](../../../../docs/update/1118/M0/本地全绿判据书.md)（七条判据）
-- **验收包**：[docs/update/1118/M0/A1-本地栈同构核对表.md](../../../../docs/update/1118/M0/A1-本地栈同构核对表.md)
+- **设计稿 / 计划**：[docs/update/1118/M0/业务问卷/A-采购部-指标口径与制度规则.md](../../../docs/update/1118/M0/业务问卷/A-采购部-指标口径与制度规则.md)（问卷与回收登记）、[docs/update/1118/M0/本地全绿判据书.md](../../../docs/update/1118/M0/本地全绿判据书.md)（七条判据）
+- **验收包**：[docs/update/1118/M0/A1-本地栈同构核对表.md](../../../docs/update/1118/M0/A1-本地栈同构核对表.md)
 - **Wiki**：[Harness/wiki/operations-runbook.md](../../wiki/operations-runbook.md)（测试栈 5434 端口契约）、[Harness/wiki/data-model.md](../../wiki/data-model.md)（`ontology_class.source_table` 绑定词表）
 - **Rules**：[Harness/rules/数据库环境使用规范.md](../../rules/数据库环境使用规范.md)（测试栈 5434）、[Harness/rules/开发流程规范.md](../../rules/开发流程规范.md)（端口契约）、[Harness/rules/测试规范.md](../../rules/测试规范.md)（示例 DSN）
 - **Memory**：`~/.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-procurement-v03-landing-program.md`（主）、`.../qa-system-a1-local-stack-isomorphism.md`（本批）

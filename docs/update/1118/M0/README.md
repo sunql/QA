@@ -2,7 +2,7 @@
 
 > 归属：`docs/update/1118/智能采购平台_V0.3落地实施计划_M0-M7_1118.md` §4 M0（8–12 人日）
 > 建立日期：2026-11-18
-> 状态：🟢 0.1 / 0.2 / 0.3 已完成 · 0.4 **已完成（A4 渲染顺序 + A5 答案级评估首跑）** · 0.5 未开工 · 0.6 已下发回收中
+> 状态：🟢 0.1 / 0.2 / 0.3 已完成 · 0.4 **已完成（A4 渲染顺序 + A5 答案级评估首跑）** · 0.5 **进行中（A6 ✅ 归因 + alias dry-run；A7 待做）** · 0.6 已下发回收中
 
 ---
 
@@ -14,7 +14,7 @@
 | 0.2 | 开关策略落地（**6** 个 `ENABLE_*` 本地全开 + 开/关两态用例 + **backend/worker 两侧一致**） | 1–1.5 | ✅ **已完成 2026-11-18** | [`evidence/switch-matrix.md`](./evidence/switch-matrix.md) |
 | 0.3 | **《本地全绿判据书》** + 验收包目录规范 | 1–1.5 | ✅ **v1.0 定稿 2026-11-18**（待三方签署） | [`本地全绿判据书.md`](./本地全绿判据书.md) + [`evidence/`](./evidence/) / [`report/`](./report/) / [`q/`](./q/) 骨架 |
 | 0.4 | **G3 遗留闭环**（渲染顺序统一 + 答案级评估） | 2–3 | ✅ **已完成 2026-11-18**：A4 V1–V5 过；A5 自检 33/33、单测 41 passed、首跑 4/4 题 exit 0 且 J = 0（**L2–L5 未判**，见证据 §7） | [`M0.4-G3修复方案与答案级评估口径.md`](./M0.4-G3修复方案与答案级评估口径.md) + [`evidence/render-order.md`](./evidence/render-order.md) + [`evidence/answer-parity.md`](./evidence/answer-parity.md) |
-| 0.5 | KPI 口径 P0 数据归一（12 条逐条归因） | 3–5 | ⬜ 未开工 | — |
+| 0.5 | KPI 口径 P0 数据归一（12 条逐条归因） | 3–5 | 🟡 **A6 ✅ 2026-11-18**（12 条四分类 = 1/9/0/2；alias 45 列映射 dry-run）；A7 槽位模板待做 | [`M0.5-KPI归因清单.md`](./M0.5-KPI归因清单.md) + [`kpi-attribution.json`](./kpi-attribution.json) + [`property-alias-mapping.json`](./property-alias-mapping.json) + [`evidence/kpi-attribution-probe.txt`](./evidence/kpi-attribution-probe.txt) |
 | 0.6 | **发出 4 份业务问卷** | 0.5–1 | 🟢 **已下发 2026-11-18，回收中** | [`业务问卷/`](./业务问卷/) |
 
 ---

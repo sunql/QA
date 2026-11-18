@@ -1,0 +1,219 @@
+{
+  "version": "v1",
+  "scope": "采购域 12 条 KPI 实际引用到的 45 个 (类, 物理列)；回填其中 32 个，13 个（join 键副本）刻意留空",
+  "generatedFrom": "backend/scripts/kpi_metric_attribution_probe.py 的引用列抽取结果（2026-11-18 实测）",
+  "rules": [
+    "只回填空 alias，绝不覆盖已有人工 alias（ASSET 域 8 条）",
+    "同一 KPI 源类作用域内，一个 alias 不得指向两个物理列（否则 resolver 返回 unknown）",
+    "join 键在子表中的副本不建 alias：与主表同值、且会与主表 alias 冲突，回填只增加歧义"
+  ],
+  "excluded": [
+    { "className": "DWD_REQUISITION_ORDER_LINK", "sourceColumn": "PO_NO", "reason": "关联表 join 键，与 DWD_PURCHASE_ORDER_LINE 同值" },
+    { "className": "DWD_REQUISITION_ORDER_LINK", "sourceColumn": "PO_LINE_NO", "reason": "同上" },
+    { "className": "DWD_REQUISITION_ORDER_LINK", "sourceColumn": "REQUISITION_NO", "reason": "同上，与 DWD_PURCHASE_REQUISITION_LINE 同值" },
+    { "className": "DWD_REQUISITION_ORDER_LINK", "sourceColumn": "REQUISITION_LINE_NO", "reason": "同上" },
+    { "className": "DWD_GOODS_RECEIPT_LINE", "sourceColumn": "PO_NO", "reason": "join 键副本" },
+    { "className": "DWD_GOODS_RECEIPT_LINE", "sourceColumn": "PO_LINE_NO", "reason": "join 键副本" },
+    { "className": "DWD_GOODS_RECEIPT_LINE", "sourceColumn": "SUPPLIER_CODE", "reason": "join 键副本（与订单行同值）" },
+    { "className": "DWD_GOODS_RECEIPT_LINE", "sourceColumn": "FACILITY_CODE", "reason": "join 键副本" },
+    { "className": "DWD_PURCHASE_INVOICE_LINE", "sourceColumn": "INVOICE_NO", "reason": "join 键副本（与发票头同值）" },
+    { "className": "DWD_PURCHASE_INVOICE_LINE", "sourceColumn": "INVOICE_TYPE", "reason": "join 键副本" },
+    { "className": "DWD_PURCHASE_INVOICE_LINE", "sourceColumn": "PO_NO", "reason": "join 键副本" },
+    { "className": "DWD_PURCHASE_INVOICE_LINE", "sourceColumn": "PO_LINE_NO", "reason": "join 键副本" },
+    { "className": "DWD_PURCHASE_INVOICE_LINE", "sourceColumn": "SUPPLIER_CODE", "reason": "join 键副本（与发票头同值）" }
+  ],
+  "entries": [
+    {
+      "className": "DWD_PURCHASE_ORDER_LINE",
+      "sourceColumn": "MATERIAL_CODE",
+      "alias": "物料编码",
+      "rationale": "订单行物料主编码（价目表按 SUPPLIER_MATERIAL_CODE 关联）"
+    },
+    {
+      "className": "DWD_PURCHASE_ORDER_LINE",
+      "sourceColumn": "SUPPLIER_MATERIAL_CODE",
+      "alias": "供应商物料编码",
+      "rationale": "供应商侧物料编码，价目表关联键"
+    },
+    {
+      "className": "DWD_PURCHASE_ORDER_LINE",
+      "sourceColumn": "ORDER_DATE",
+      "alias": "订单日期",
+      "rationale": "价目表有效期比较基准"
+    },
+    {
+      "className": "DWD_PURCHASE_ORDER_LINE",
+      "sourceColumn": "ORDER_QTY",
+      "alias": "订单数量",
+      "rationale": "成本节约 = 单价差 × 数量"
+    },
+    {
+      "className": "DWD_PURCHASE_ORDER_LINE",
+      "sourceColumn": "UNIT_PRICE",
+      "alias": "采购订单单价",
+      "rationale": "与价目表单价区分（同作用域两个物理列）"
+    },
+    {
+      "className": "DWD_PURCHASE_ORDER_LINE",
+      "sourceColumn": "LINE_AMOUNT_EXCL_TAX",
+      "alias": "订单行金额（不含税）",
+      "rationale": "三单匹配的订单侧金额"
+    },
+    {
+      "className": "DWD_PURCHASE_ORDER_LINE",
+      "sourceColumn": "PO_NO",
+      "alias": "采购订单号",
+      "rationale": "主表侧 join 键，作为规范名"
+    },
+    {
+      "className": "DWD_PURCHASE_ORDER_LINE",
+      "sourceColumn": "PO_LINE_NO",
+      "alias": "采购订单行号",
+      "rationale": "同上"
+    },
+    {
+      "className": "DWD_PURCHASE_ORDER_LINE",
+      "sourceColumn": "SUPPLIER_CODE",
+      "alias": "供应商编码",
+      "rationale": "主表侧规范名"
+    },
+    {
+      "className": "DWD_PURCHASE_ORDER_LINE",
+      "sourceColumn": "FACILITY_CODE",
+      "alias": "工厂编码",
+      "rationale": "粒度键"
+    },
+    {
+      "className": "DWD_PURCHASE_ORDER_LINE",
+      "sourceColumn": "PROMISED_RECEIPT_DATE",
+      "alias": "承诺交货日期",
+      "rationale": "OTD / 逾期 / 延误天数的基准日"
+    },
+    {
+      "className": "DWD_SUPPLIER_PRICE_LIST_DEL",
+      "sourceColumn": "MATERIAL_CODE",
+      "alias": "价目表物料编码",
+      "rationale": "价目表侧按 SUPPLIER_MATERIAL_CODE 关联订单；与订单行 MATERIAL_CODE 是不同列"
+    },
+    {
+      "className": "DWD_SUPPLIER_PRICE_LIST_DEL",
+      "sourceColumn": "UNIT_PRICE",
+      "alias": "价目表单价",
+      "rationale": "成本节约 / 价格偏差的基准价"
+    },
+    {
+      "className": "DWD_SUPPLIER_PRICE_LIST_DEL",
+      "sourceColumn": "VALID_FROM",
+      "alias": "价目表生效日期",
+      "rationale": "价目表有效期窗口下界"
+    },
+    {
+      "className": "DWD_SUPPLIER_PRICE_LIST_DEL",
+      "sourceColumn": "VALID_TO",
+      "alias": "价目表失效日期",
+      "rationale": "价目表有效期窗口上界（NULL = 长期有效）"
+    },
+    {
+      "className": "DWD_PURCHASE_INVOICE",
+      "sourceColumn": "AMOUNT_EXCL_TAX",
+      "alias": "发票金额（不含税）",
+      "rationale": "三单匹配率分母"
+    },
+    {
+      "className": "DWD_PURCHASE_INVOICE",
+      "sourceColumn": "INVOICE_DATE",
+      "alias": "发票日期",
+      "rationale": "三单匹配率的 time_column"
+    },
+    {
+      "className": "DWD_PURCHASE_INVOICE",
+      "sourceColumn": "INVOICE_NO",
+      "alias": "发票号",
+      "rationale": "主表侧 join 键，作为规范名"
+    },
+    {
+      "className": "DWD_PURCHASE_INVOICE",
+      "sourceColumn": "INVOICE_TYPE",
+      "alias": "发票类型",
+      "rationale": "发票头与行的联合键之一"
+    },
+    {
+      "className": "DWD_PURCHASE_INVOICE",
+      "sourceColumn": "SUPPLIER_CODE",
+      "alias": "发票供应商编码",
+      "rationale": "与订单行供应商区分（同作用域两个物理列）"
+    },
+    {
+      "className": "DWD_PURCHASE_INVOICE_LINE",
+      "sourceColumn": "LINE_AMOUNT_EXCL_TAX",
+      "alias": "发票行金额（不含税）",
+      "rationale": "三单匹配率的分子（匹配行金额）"
+    },
+    {
+      "className": "DWD_PURCHASE_INVOICE_LINE",
+      "sourceColumn": "QUANTITY",
+      "alias": "发票数量",
+      "rationale": "三单匹配的数量条件"
+    },
+    {
+      "className": "DWD_PURCHASE_INVOICE_LINE",
+      "sourceColumn": "UNIT_PRICE_NET",
+      "alias": "发票不含税单价",
+      "rationale": "三单匹配的单价条件"
+    },
+    {
+      "className": "DWD_SUPPLIER_PAYMENT",
+      "sourceColumn": "VALUE_DATE",
+      "alias": "付款日期",
+      "rationale": "治理定义里的 PAYMENT_DATE（物理列名不同，仅此一处是纯命名差异）"
+    },
+    {
+      "className": "DWD_SUPPLIER_PAYMENT",
+      "sourceColumn": "DUE_DATE",
+      "alias": "应付日期",
+      "rationale": "约定账期到期日"
+    },
+    {
+      "className": "DWD_SUPPLIER_PAYMENT",
+      "sourceColumn": "SUPPLIER_CODE",
+      "alias": "供应商编码",
+      "rationale": "独立源类，作用域内无冲突"
+    },
+    {
+      "className": "DWD_GOODS_RECEIPT_LINE",
+      "sourceColumn": "RECEIPT_DATE",
+      "alias": "收货日期",
+      "rationale": "OTD / 逾期 / 延误天数 / 采购周期的实际完成日"
+    },
+    {
+      "className": "DWD_GOODS_RECEIPT_LINE",
+      "sourceColumn": "CREATION_DATE",
+      "alias": "收货单创建日期",
+      "rationale": "与请购单创建日期区分（同一 KPI 作用域两个物理列）"
+    },
+    {
+      "className": "DWD_PURCHASE_REQUISITION_LINE",
+      "sourceColumn": "CREATION_DATE",
+      "alias": "请购单创建日期",
+      "rationale": "采购周期起点"
+    },
+    {
+      "className": "DWD_PURCHASE_REQUISITION_LINE",
+      "sourceColumn": "REQUISITION_NO",
+      "alias": "请购单号",
+      "rationale": "主表侧 join 键，作为规范名"
+    },
+    {
+      "className": "DWD_PURCHASE_REQUISITION_LINE",
+      "sourceColumn": "REQUISITION_LINE_NO",
+      "alias": "请购行号",
+      "rationale": "同上"
+    },
+    {
+      "className": "DWD_PURCHASE_REQUISITION_LINE",
+      "sourceColumn": "FACILITY_CODE",
+      "alias": "工厂编码",
+      "rationale": "采购周期粒度键"
+    }
+  ]
+}

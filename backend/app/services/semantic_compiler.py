@@ -56,6 +56,8 @@ from app.services.semantic_compiler_sections import (
 )
 from app.services.semantic_manifest_common import (
     asList,
+    joinKeySortKey,
+    propertyNameSortKey,
     requireClass,
     resolveActiveName,
     sortBy,
@@ -214,7 +216,8 @@ def _groupActiveProperties(
         grouped.setdefault(row.class_id, []).append(_compileProperty(row, allClassById))
 
     return {
-        classId: sortBy(items, key=lambda item: item["propertyName"])
+        # 排序键与渲染侧共享（`propertyNameSortKey`）⇒ 快照顺序 = 直读渲染顺序。
+        classId: sortBy(items, key=lambda item: propertyNameSortKey(item["propertyName"]))
         for classId, items in grouped.items()
     }
 
@@ -284,4 +287,5 @@ def _compileJoins(
                 "description": row.description,
             }
         )
-    return sortBy(compiled, key=lambda item: item["joinKey"])
+    # 同上：与渲染侧共享 `joinKeySortKey`。
+    return sortBy(compiled, key=lambda item: joinKeySortKey(item["joinKey"]))

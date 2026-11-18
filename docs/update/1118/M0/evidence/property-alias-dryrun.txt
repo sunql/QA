@@ -1,0 +1,47 @@
+target: postgresql+asyncpg://qa_user:***@localhost:5433/qa_metadata database=qa_metadata
+计划：fill=32 keep（已有人工 alias）=0 alias 冲突=0（存量 0）
+  [+] DWD_PURCHASE_ORDER_LINE.MATERIAL_CODE → 物料编码
+  [+] DWD_PURCHASE_ORDER_LINE.SUPPLIER_MATERIAL_CODE → 供应商物料编码
+  [+] DWD_PURCHASE_ORDER_LINE.ORDER_DATE → 订单日期
+  [+] DWD_PURCHASE_ORDER_LINE.ORDER_QTY → 订单数量
+  [+] DWD_PURCHASE_ORDER_LINE.UNIT_PRICE → 采购订单单价
+  [+] DWD_PURCHASE_ORDER_LINE.LINE_AMOUNT_EXCL_TAX → 订单行金额（不含税）
+  [+] DWD_PURCHASE_ORDER_LINE.PO_NO → 采购订单号
+  [+] DWD_PURCHASE_ORDER_LINE.PO_LINE_NO → 采购订单行号
+  [+] DWD_PURCHASE_ORDER_LINE.SUPPLIER_CODE → 供应商编码
+  [+] DWD_PURCHASE_ORDER_LINE.FACILITY_CODE → 工厂编码
+  [+] DWD_PURCHASE_ORDER_LINE.PROMISED_RECEIPT_DATE → 承诺交货日期
+  [+] DWD_SUPPLIER_PRICE_LIST_DEL.MATERIAL_CODE → 价目表物料编码
+  [+] DWD_SUPPLIER_PRICE_LIST_DEL.UNIT_PRICE → 价目表单价
+  [+] DWD_SUPPLIER_PRICE_LIST_DEL.VALID_FROM → 价目表生效日期
+  [+] DWD_SUPPLIER_PRICE_LIST_DEL.VALID_TO → 价目表失效日期
+  [+] DWD_PURCHASE_INVOICE.AMOUNT_EXCL_TAX → 发票金额（不含税）
+  [+] DWD_PURCHASE_INVOICE.INVOICE_DATE → 发票日期
+  [+] DWD_PURCHASE_INVOICE.INVOICE_NO → 发票号
+  [+] DWD_PURCHASE_INVOICE.INVOICE_TYPE → 发票类型
+  [+] DWD_PURCHASE_INVOICE.SUPPLIER_CODE → 发票供应商编码
+  [+] DWD_PURCHASE_INVOICE_LINE.LINE_AMOUNT_EXCL_TAX → 发票行金额（不含税）
+  [+] DWD_PURCHASE_INVOICE_LINE.QUANTITY → 发票数量
+  [+] DWD_PURCHASE_INVOICE_LINE.UNIT_PRICE_NET → 发票不含税单价
+  [+] DWD_SUPPLIER_PAYMENT.VALUE_DATE → 付款日期
+  [+] DWD_SUPPLIER_PAYMENT.DUE_DATE → 应付日期
+  [+] DWD_SUPPLIER_PAYMENT.SUPPLIER_CODE → 供应商编码
+  [+] DWD_GOODS_RECEIPT_LINE.RECEIPT_DATE → 收货日期
+  [+] DWD_GOODS_RECEIPT_LINE.CREATION_DATE → 收货单创建日期
+  [+] DWD_PURCHASE_REQUISITION_LINE.CREATION_DATE → 请购单创建日期
+  [+] DWD_PURCHASE_REQUISITION_LINE.REQUISITION_NO → 请购单号
+  [+] DWD_PURCHASE_REQUISITION_LINE.REQUISITION_LINE_NO → 请购行号
+  [+] DWD_PURCHASE_REQUISITION_LINE.FACILITY_CODE → 工厂编码
+
+模拟对账（回填前 → 回填后）
+  KPI_COST_SAVING: verdict pass → pass；unknown 0→0；missing 0→0
+  KPI_INVOICE_MATCH_RATE: verdict pass → pass；unknown 0→0；missing 0→0
+  KPI_PAYMENT_ON_TIME: verdict pass → pass；unknown 0→0；missing 0→0
+  KPI_PURCHASE_CYCLE_TIME: verdict pass → pass；unknown 0→0；missing 0→0
+  KPI_PURCHASE_PRICE_VARIANCE: verdict pass → pass；unknown 0→0；missing 0→0
+  KPI_SUPPLIER_DELAY_DAYS: verdict pass → pass；unknown 0→0；missing 0→0
+  KPI_SUPPLIER_MAINTENANCE_RATIO: verdict unknown → unknown；unknown 0→0；missing 0→0
+  KPI_SUPPLIER_OTD: verdict pass → pass；unknown 0→0；missing 0→0
+  KPI_SUPPLIER_OVERDUE_RATIO: verdict pass → pass；unknown 0→0；missing 0→0
+结论：9 条参与模拟，解析/对账变化 0 条
+dry-run：未写库（加 --apply 落库；按批次决定，须与 A9 发布同批）

@@ -2,7 +2,7 @@
 
 > 归属：`docs/update/1118/智能采购平台_V0.3落地实施计划_M0-M7_1118.md` §4 M0（8–12 人日）
 > 建立日期：2026-11-18
-> 状态：🟢 0.1 / 0.2 / 0.3 已完成 · 0.4 **已完成（A4 渲染顺序 + A5 答案级评估首跑）** · 0.5 **进行中（A6 ✅ 归因 + alias dry-run；A7 待做）** · 0.6 已下发回收中
+> 状态：🟢 0.1 / 0.2 / 0.3 已完成 · 0.4 **已完成（A4 渲染顺序 + A5 答案级评估首跑）** · 0.5 **A6 ✅ 归因 + A7 ✅ 槽位模板**（A8 源绑定候选待做）· 0.6 已下发回收中
 
 ---
 
@@ -14,7 +14,7 @@
 | 0.2 | 开关策略落地（**6** 个 `ENABLE_*` 本地全开 + 开/关两态用例 + **backend/worker 两侧一致**） | 1–1.5 | ✅ **已完成 2026-11-18** | [`evidence/switch-matrix.md`](./evidence/switch-matrix.md) |
 | 0.3 | **《本地全绿判据书》** + 验收包目录规范 | 1–1.5 | ✅ **v1.0 定稿 2026-11-18**（待三方签署） | [`本地全绿判据书.md`](./本地全绿判据书.md) + [`evidence/`](./evidence/) / [`report/`](./report/) / [`q/`](./q/) 骨架 |
 | 0.4 | **G3 遗留闭环**（渲染顺序统一 + 答案级评估） | 2–3 | ✅ **已完成 2026-11-18**：A4 V1–V5 过；A5 自检 33/33、单测 41 passed、首跑 4/4 题 exit 0 且 J = 0（**L2–L5 未判**，见证据 §7） | [`M0.4-G3修复方案与答案级评估口径.md`](./M0.4-G3修复方案与答案级评估口径.md) + [`evidence/render-order.md`](./evidence/render-order.md) + [`evidence/answer-parity.md`](./evidence/answer-parity.md) |
-| 0.5 | KPI 口径 P0 数据归一（12 条逐条归因） | 3–5 | 🟡 **A6 ✅ 2026-11-18**（12 条四分类 = 1/9/0/2；alias 45 列映射 dry-run）；A7 槽位模板待做 | [`M0.5-KPI归因清单.md`](./M0.5-KPI归因清单.md) + [`kpi-attribution.json`](./kpi-attribution.json) + [`property-alias-mapping.json`](./property-alias-mapping.json) + [`evidence/kpi-attribution-probe.txt`](./evidence/kpi-attribution-probe.txt) |
+| 0.5 | KPI 口径 P0 数据归一（12 条逐条归因 + 落库槽位） | 3–5 | 🟡 **A6 ✅ 2026-11-18**（12 条四分类 = 1/9/0/2；alias 45 列映射 dry-run）· **A7 ✅ 2026-11-18**（13 槽位定义 + 12×13 空槽矩阵 + 题号↔字段映射 + 5 类装不下的能力边界）；A8 源绑定候选待做 | [`M0.5-KPI归因清单.md`](./M0.5-KPI归因清单.md) + [`M0.5-KPI口径槽位模板.md`](./M0.5-KPI口径槽位模板.md) + [`kpi-attribution.json`](./kpi-attribution.json) + [`property-alias-mapping.json`](./property-alias-mapping.json) + [`evidence/kpi-attribution-probe.txt`](./evidence/kpi-attribution-probe.txt) + [`evidence/kpi-slot-snapshot.txt`](./evidence/kpi-slot-snapshot.txt) + [`evidence/kpi-time-column-candidates.txt`](./evidence/kpi-time-column-candidates.txt) |
 | 0.6 | **发出 4 份业务问卷** | 0.5–1 | 🟢 **已下发 2026-11-18，回收中** | [`业务问卷/`](./业务问卷/) |
 
 ---
@@ -58,7 +58,7 @@
 
 1. 本地 **6** 个开关全开，冒烟全过；**任一开关关闭时，对应能力的行为差异有明确用例**（双向断言）。
 2. G3 从「3 过 1 不过」变 **4/4 过**（分层判据见 M0.4 §4.5）。
-3. 12 条 KPI 归因清单产出：**0 条「口径未定义」**。
+3. 12 条 KPI 归因清单产出：**0 条「口径未定义」**（A6 ✅ 每条都有归属方；A7 ✅ 每个答案都有落点或显式登记为能力边界 —— 剩余「未定义」= 3 条治理层需改 + 2 处待回问，均已指名到人/到题）。
 4. 4 份问卷发出且回收 **≥3 份**；回收内容落 `M0/业务问卷/E-回收登记.md`。
 5. `alembic check` 绿；upgrade→downgrade→upgrade 往返绿。
 
@@ -89,11 +89,16 @@ M0/
 ├── README.md                      # 本文件（M0 索引 + 判据勾选表）
 ├── 本地全绿判据书.md                # 0.3（v1.0 定稿）
 ├── M0.4-G3修复方案与答案级评估口径.md  # 0.4
+├── M0.5-KPI归因清单.md              # 0.5 · A6（12 条四分类 + alias 映射）
+├── M0.5-KPI口径槽位模板.md           # 0.5 · A7（13 槽位定义 + 题号映射）
 ├── A1-本地栈同构核对表.md            # 0.1
 ├── evidence/                      # 各判据的可归档证据（原始输出）
 │   ├── switch-matrix.md           # 0.2 · 判据 3（6×2 两态矩阵）
 │   ├── render-order.md            # 0.4 · A4（V1–V5 渲染顺序统一）
-│   └── answer-parity.md           # 0.4 · A5（答案级评估器 + 首跑）
+│   ├── answer-parity.md           # 0.4 · A5（答案级评估器 + 首跑）
+│   ├── kpi-attribution-probe.txt  # 0.5 · A6（12 条事实 + 对账）
+│   ├── kpi-slot-snapshot.txt      # 0.5 · A7（12×13 槽位现状）
+│   └── kpi-time-column-candidates.txt  # 0.5 · A7（time_column 候选）
 ├── report/                        # 汇总报告（e2e / coverage / performance）
 │   └── README.md                  # 约定与纪律
 ├── q/                             # 逐问证据 Q01–Q07 / P-01…P-14（到里程碑才建）

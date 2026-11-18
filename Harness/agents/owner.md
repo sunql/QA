@@ -62,7 +62,7 @@
 - [_template/summary.md](../changes/_template/summary.md) - 变更 SSOT 模板
 - [feat-agent-orchestration](../changes/feat-agent-orchestration/summary.md) - 通用多工具 Agent 编排（Phase 6.6；第三条执行路径 + 迁移 0135 + 默认关闭 + 灰度手册）
 - **近 30 天热点（按 SSOT 性质）**：
-  - 采购平台 V0.3 · **M0 底座**（A1–A8 已完成，轨 A 收尾；分支 `feat/procurement-m0`，**未合并/未部署**；下一步 M1-1.1 建表迁移 `0155`/`0156` + A4-0 `0154`）—— 索引见 [docs/update/1118/M0/README.md](../../docs/update/1118/M0/README.md)，各批 SSOT 见 `changes/2026-11-18-procurement-m0-*`
+  - 采购平台 V0.3 · **M0 底座 + M1-1.1 结构层**（A1–A8 完成；两张源绑定表已建，迁移 `0154`；分支 `feat/procurement-m0`，**未合并/未部署**；下一步 M1-1.1 service + CRUD API）—— 索引见 [docs/update/1118/M0/README.md](../../docs/update/1118/M0/README.md)，各批 SSOT 见 `changes/2026-11-18-procurement-m0-*` 与 `changes/2026-11-18-m1-procurement-binding-tables`
   - [2026-11-16-fix-ontology-bg-vector-sync](../changes/2026-11-16-fix-ontology-bg-vector-sync/summary.md) - 本体向量后台同步请求回滚存活（`MissingGreenlet` 生产事故；`ownSession()` + 锁内重读 + 同实体串行化；含旧写法对照实验）
   - [2026-11-16-local-deploy-0148](../changes/2026-11-16-local-deploy-0148/summary.md) - 本地部署拉平到 main（迁移链 0143 → **0148**；探针全绿 + 容器代码 md5 一致；含 0144 重复列事故与 `stamp` 教训；**生产未部署**）
   - [2026-11-16-p5-workflow-command](../changes/2026-11-16-p5-workflow-command/summary.md) - P5 Workflow/Command/Approval（**已实现**；后端 PR #148 → `a217fef0` + 前端两批 PR #150 → `1e04b46e`；迁移 `0149`–`0152`；**生产未部署**，`ENABLE_WORKFLOW` 默认关）

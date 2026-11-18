@@ -5,7 +5,8 @@
 - **Phase**：M0 底座 / W2 轨 A（A8，轨 A 末项）
 - **状态**：in-review（分支 `feat/procurement-m0`，**未合并、未部署**）
 - **关联变更**：[2026-11-18-procurement-m0-slot-template](../2026-11-18-procurement-m0-slot-template/summary.md)（A7）、[2026-11-18-procurement-m0-kpi-attribution](../2026-11-18-procurement-m0-kpi-attribution/summary.md)（A6）
-- **迁移版本**：**无 DDL**（head 仍 `0153`；`0154` 归 A4-0；M1 两张表顺延 **`0155` / `0156`**）
+- **迁移版本**：A8 本批**无 DDL**（head 当时 `0153`）；后续 **M1-1.1 已按本批 §4 建表** =
+  **`0154_procurement_bindings`**（两张表同一迁移；A4-0 顺延到下一个空号）
 - **验收包**：[docs/update/1118/M0/A8-采购源绑定候选与表结构设计.md](../../../docs/update/1118/M0/A8-采购源绑定候选与表结构设计.md)
 - **候选数据**：[docs/update/1118/M0/procurement-source-binding-candidates.json](../../../docs/update/1118/M0/procurement-source-binding-candidates.json)
 - **证据**：[evidence/procurement-binding-resolve.txt](../../../docs/update/1118/M0/evidence/procurement-binding-resolve.txt)
@@ -155,4 +156,4 @@ classId 唯一性      34 条 → 34 个不同 classId（无重复绑定）
 
 - A8 验收包：[A8-采购源绑定候选与表结构设计.md](../../../docs/update/1118/M0/A8-采购源绑定候选与表结构设计.md)
 - 上游：A6 归因 / A7 槽位模板
-- 下一页：**M1-1.1 建表**（迁移 `0155` / `0156`）+ **A4-0**（`0154`）+ **A9** 首次发布（复活 7 个墓碑类与 alias `--apply` 同批）
+- 下一页：**M1-1.1 建表**（迁移 `0154`，已落地）+ **A4-0**（下一个空号）+ **A9** 首次发布（复活 7 个墓碑类与 alias `--apply` 同批）

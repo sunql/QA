@@ -159,7 +159,22 @@ class TestGovernanceSeedBackfill:
         valid = {m.value for m in ObjectType}
         seedByTable = {c["source_table"]: c for c in CLASSES}
 
-        assert len(rows) == len(CLASSES)
+        # 库里的行数 = len(CLASSES) + 1：多出来的是 conftest 补种的
+        # IncomingInspection（不在 seed_ontology.CLASSES 里，但 seed_business_objects
+        # 要用它解析 IQC 的 header_class_id ⇒ 必须补种）。
+        # ⇒ 不能拿「总行数 == len(CLASSES)」当判据（2026-11-18 实测 28 != 27）；
+        # 判据是「CLASSES 的每个 source_table 恰好一行、无重复」，并把
+        # 「额外行只允许是补种 header 类」钉死（不是放宽断言）。
+        classRows = [r for r in rows if r.source_table in seedByTable]
+        assert len(classRows) == len(CLASSES), "CLASSES 的类应恰好各一行"
+        assert len({r.source_table for r in classRows}) == len(CLASSES), "CLASSES 的类不应重复"
+
+        extraRows = [r for r in rows if r.source_table not in seedByTable]
+        assert {r.class_name for r in extraRows} <= {"IncomingInspection"}, (
+            f"CLASSES 之外只允许 conftest 补种的 IncomingInspection，实得 "
+            f"{ {r.class_name for r in extraRows} }"
+        )
+
         for table, seed in seedByTable.items():
             row = byTable[table]
             assert row.object_type == seed["object_type"], table

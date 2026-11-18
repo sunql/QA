@@ -9,7 +9,7 @@
 page_id 与改造后算出的不一致，重复项照样入库，而测试全绿。
 
 运行：
-    TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test \
+    TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test \
         .venv/bin/pytest app/tests/unit/test_wiki_page_id.py -q
 """
 

@@ -29,6 +29,22 @@ import dotenv
 _backend_dotenv = Path(__file__).resolve().parents[2] / ".env"
 dotenv.load_dotenv(_backend_dotenv, override=True)
 
+# 本地 ⇄ CI 同构（2026-11-18）：CI 里 `DATABASE_URL` 与 `TEST_DATABASE_URL` **同一个库**
+# （5434/qa_metadata_test）；本地 `backend/.env` 的 `DATABASE_URL` 却指向**开发库**
+# （5433/qa_metadata）⇒ 同一份代码在两处 `settings.databaseUrl` 指向不同的库 ⇒
+# 「本地绿 / CI 红」这类**verdict 分叉**（假绿）。
+# ⇒ 只要显式给了 TEST_DATABASE_URL，就让 DATABASE_URL 跟它对齐。
+# 守卫：`app/tests/unit/test_test_db_url_guard.py` 的 R3 禁止测试直接读
+# `.databaseUrl`（那才是分叉的根源）；这里是让「万一有人读了」时两边仍然一致。
+if os.environ.get("TEST_DATABASE_URL"):
+    # 覆盖前先过测试库双白名单（库名 + 回环主机）：这行是**进程级**环境改写，
+    # 一旦 TEST_DATABASE_URL 被误配成远端/生产，所有非 `_newEngine()` 路径
+    # （`settings.databaseUrl`、后台 `getEngine()`）都会跟着指向它。
+    from app.tests._pg_support import assertTestDatabase as _assertTestDatabase
+
+    _assertTestDatabase(os.environ["TEST_DATABASE_URL"])
+    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
+
 # 在导入 app 之前设定测试环境变量
 _TEST_FERNET = Fernet.generate_key().decode()
 os.environ.setdefault("APP_ENV", "test")

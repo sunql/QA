@@ -494,11 +494,38 @@ pass KPI 暂失 Tier A（degraded 注入，不阻断，但口径不完整）。
 # 元数据库（开发）
 DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata
 
-# 测试库
-TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test
+# 测试库（⚠️ 见下方「测试栈：5434，不是 5433」—— 2026-11-18 起测试走 5434）
+TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test
 ```
 
 连 5432 = ConnectionRefused；连 5433 = 正常。
+
+### 测试栈：5434，不是 5433（2026-11-18 A1 定）
+
+> **开发库 = 5433 `qa_metadata`；测试库 = 5434 `qa_metadata_test`（容器 `qa-pg-a1`）。**
+> 两者**物理隔离**，测试库与 **CI 同款**。
+
+**为什么必须隔离**：不设 `TEST_DATABASE_URL` 时，`resolveTestDatabaseUrl()` 只改
+`DATABASE_URL` 的**库名**、**端口原样保留** ⇒ 本地会落到 `5433/qa_metadata_test`
+（实测停在 0139，schema 缺列）⇒ `alembic upgrade head` 抛 `DuplicateColumnError`
+⇒ **整套测试跑不起来**；且读到 `settings.databaseUrl` 的测试会读**开发库**
+⇒ 同一份代码在本地/CI 给**两个不同 verdict**（假绿）。
+
+**唯一入口**（别手拼环境变量）：
+
+```bash
+./scripts/run_local_tests.sh                    # 全部
+./scripts/run_local_tests.sh app/tests/unit     # 指定路径
+./scripts/run_local_tests.sh -k "workflow"      # 透传 pytest 参数
+```
+
+脚本一次性接线三个测试依赖：**PG 5434 / Neo4j 7688（`qa-neo4j-test`）/ Milvus 19530（库 `qa_test`）**，
+并做端口可达性前置检查。Neo4j **必须**指 7688（7687 是开发实例）——
+集成夹具对未设 `TEST_NEO4J_URI` 的情况 **fail-fast**（2026-10-03 生产图谱被清空事故后的守卫，**不要关**）。
+
+**防回退**：`backend/app/tests/unit/test_test_db_url_guard.py`（AST 守卫 R1–R4）
+禁止测试代码自带硬编码 DSN、禁止读 `.databaseUrl`、禁止出现「5433 + qa_metadata_test」组合。
+完整核对表见 `docs/update/1118/M0/A1-本地栈同构核对表.md`。
 
 ### SSOT 端口契约（2026-08-31 加固）
 

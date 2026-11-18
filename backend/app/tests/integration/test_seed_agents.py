@@ -3,7 +3,7 @@
 T11 验证 _policiesFor 从 DB-backed registry 读取 data_layers，
 生成显式分层策略（与运行时分层校验对齐）。
 
-强制规则（Harness/rules/测试规范.md）：真实 PostgreSQL（5433/qa_metadata_test），
+强制规则（Harness/rules/测试规范.md）：真实 PostgreSQL（5434/qa_metadata_test），
 pgSession fixture 每测试 TRUNCATE 隔离；TOOL_SEEDS seed + warmUp 前置。
 """
 

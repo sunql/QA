@@ -97,8 +97,77 @@ SUPPLEMENTARY_SLOT_SHAPES: dict[str, str] = {
     "restoreCondition": "str",
 }
 
-#: 期望的补充注记槽条目总数（JSON `slotCounts.scope` 里写的「另有 6 项」）。
-EXPECTED_SUPPLEMENTARY_ENTRIES = 6
+# --- `summary.slotCounts.scope` 的口径说明 ---
+#
+#: 为什么必须**解析**而不是写死常量（v5 修 MEDIUM-3）：`scope` 是产物自己声明的口径，
+#: 写死 `6` 等于「只跟脚本常量比」⇒ 产物把「另有 6 项」改成「另有 99 项」时，
+#: 实际条目数（仍是 6）跟写死的 6 相等 ⇒ **检查器照样全绿**（假绿）。
+#: ⇒ 口径数字一律从 `scope` 解析，再与**实际重算值**对账。
+
+_SCOPE_SLOTS_PATTERN = re.compile(r"(\d+)\s*个模型槽位")
+_SCOPE_KPI_PATTERN = re.compile(r"×\s*(\d+)\s*KPI")
+_SCOPE_SUPPLEMENTARY_PATTERN = re.compile(r"另有\s*(\d+)\s*项")
+_SCOPE_TOTAL_PATTERN = re.compile(r"合计槽位条目\s*(\d+)")
+_SCOPE_NAMES_PATTERN = re.compile(r"（([^）]*?)\s*，\s*另有")
+
+#: KPI 码（`KPI_SUPPLIER_OTD`）—— 允许后接中文注解（`KPI_X（分母侧）`）。
+KPI_CODE_PATTERN = re.compile(r"KPI_[A-Z0-9_]+")
+
+
+@dataclass(frozen=True)
+class ScopeCounts:
+    """`summary.slotCounts.scope` 里声明的口径数字（解析不出来的字段为 `None`）。"""
+
+    modelSlots: int | None = None
+    kpiCount: int | None = None
+    supplementaryEntries: int | None = None
+    totalEntries: int | None = None
+    supplementaryNames: tuple[str, ...] = ()
+
+    def missingFields(self) -> tuple[str, ...]:
+        """没能解析出来的字段名（任一为空 ⇒ 口径说明不可信）。"""
+        names = ("modelSlots", "kpiCount", "supplementaryEntries", "totalEntries")
+        return tuple(name for name in names if getattr(self, name) is None)
+
+
+def parseScopeCounts(scope: object) -> ScopeCounts:
+    """解析 `slotCounts.scope` 的口径说明。
+
+    形如：「口径 = 13 个模型槽位 × 12 KPI；不含补充注记槽（coverageWarning /
+    derivedMetrics / dueDateNote / restoreCondition，另有 6 项，合计槽位条目 162）」。
+    解析不出来 ⇒ 对应字段为 `None`（**不是**默认值 —— 默认值会把「口径说明被删了」
+    这类缺陷当成「口径就是 13」而蒙混过关）。
+    """
+    if not isinstance(scope, str):
+        return ScopeCounts()
+
+    def _firstInt(pattern: re.Pattern[str]) -> int | None:
+        match = pattern.search(scope)
+        return int(match.group(1)) if match else None
+
+    names: tuple[str, ...] = ()
+    namesMatch = _SCOPE_NAMES_PATTERN.search(scope)
+    if namesMatch:
+        names = tuple(
+            name.strip()
+            for name in namesMatch.group(1).split("/")
+            if name.strip()
+        )
+    return ScopeCounts(
+        modelSlots=_firstInt(_SCOPE_SLOTS_PATTERN),
+        kpiCount=_firstInt(_SCOPE_KPI_PATTERN),
+        supplementaryEntries=_firstInt(_SCOPE_SUPPLEMENTARY_PATTERN),
+        totalEntries=_firstInt(_SCOPE_TOTAL_PATTERN),
+        supplementaryNames=names,
+    )
+
+
+def kpiCodeOf(text: object) -> str:
+    """从 `KPI_X（注解）` 里抽出 KPI 码；抽不出返回空串。"""
+    if not isinstance(text, str):
+        return ""
+    match = KPI_CODE_PATTERN.search(text)
+    return match.group(0) if match else ""
 
 # --- 期望计数 ---
 

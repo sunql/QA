@@ -123,8 +123,8 @@
 | `kpi-slots-filled.json` | 12 KPI × 13 槽位（取值 + 依据 + 状态） | 156 槽位 = confirmed 77 / conditional 20 / open 33 / blocked 9 / n/a 17（另有 6 项补充注记槽，不计入） |
 | `source-capability.md` | SRM + THBI 实测能力 + 12 KPI 可算性裁决 | 5 节 |
 | `conflicts-and-degradations.md` | C-01…C-22 / G-01…G-05 / R-01…R-17 / Q1…Q18 | 5 节 |
-| `backend/scripts/check_procurement_answer_package.py` + `_lib` + `_checks_a` + `_checks_b` | **包内一致性检查器 v4**（16 项断言：槽位计数 / 槽位取值·§2 值域·业务不变式 / §9.1 表逐格+取值+行序 / §9.1 表头列序 / §9.1 统计行 / 图例映射对 / metricId↔快照对账 / answers 回指 / 绑定类集合 / 登记逐行 / 回问分级 / 编号连续 / 处置↔落点 / README 摘要 / README 逐 KPI 状态 / 证据与文件清单） | 无依赖（纯标准库），秒级 |
-| `backend/scripts/check_procurement_answer_package_mutations.py` | **检查器的变异反证**（注入 36 种已知缺陷 + 预期关键词断言，证明检查器不是「永远绿」） | 无依赖，秒级 |
+| `backend/scripts/check_procurement_answer_package.py` + `_lib` + `_schema` + `_checks_a` + `_checks_b` | **包内一致性检查器 v5**（16 项断言：槽位计数 / 槽位取值·§2 值域·业务不变式 / §9.1 表逐格+取值+行序 / §9.1 表头列序 / §9.1 统计行 / 图例映射对 / metricId↔快照对账 / answers 回指 / 绑定类集合 / 登记逐行 / 回问分级 / 编号连续 / 处置↔落点 / README 摘要 / README 逐 KPI 状态 / 证据与文件清单）+ **结构前检层**（结构缺陷 ⇒ 退出码 1，不是 2） | 无依赖（纯标准库），秒级 |
+| `backend/scripts/check_procurement_answer_package_mutations.py` | **检查器的变异反证**（注入 43 种已知缺陷 + 预期关键词断言 + **三态判定** `caught`/`escaped`/`tool-error`，证明检查器不是「永远绿」） | 无依赖，秒级 |
 
 ### 5.2 探针脚本 `backend/scripts/probe_procurement_source_capability.py`
 
@@ -160,8 +160,8 @@ A 卷与 B 卷都用 `B2.x`–`B6.x` 编号但内容不同 ⇒ 登记一律用**
 | 槽位 JSON 合法性 | `python3 -m json.tool` | ✅ 可解析 |
 | 绑定清单计数 | `counts.totalBindingScope = 34 + 7 = 41` 与 `len(bindings)` / `len(revivedTombstones)` 对账 | ✅ 一致 |
 | 问卷一致性 | 172 题登记 vs 原始问卷逐题比对 | ✅ 唯一题 172（A 76 + B 27 + C 40 + D 29），已答 152 / 空白 20 |
-| **包内一致性** | `python3 backend/scripts/check_procurement_answer_package.py` | ✅ 8 项全过（槽位计数 / §9.1 表↔JSON 逐格+取值（**等值**）/ §9.1 统计行 / 绑定类集合 34+7=41 / 登记逐行（题号·分卷·分节·处置）/ 回问 P0·P1 拆分 / C·G·R·Q 编号连续 / README 摘要数字） |
-| **检查器反证** | `python3 backend/scripts/check_procurement_answer_package_mutations.py` | ✅ 18 个变异全部被捕获（5 个 HIGH + 10 个 MEDIUM + 2 个崩溃场景 + 1 个基线断言），每个都 exit 1 且报的是**产物层面**的问题（**崩溃不算抓到缺陷**） |
+| **包内一致性** | `python3 backend/scripts/check_procurement_answer_package.py` | ✅ **16 项全过**（槽位计数 + scope 口径 / 槽位取值·§2 值域·业务不变式 / §9.1 表逐格+取值（**等值**）/ §9.1 表头列序 / §9.1 统计行 / 图例映射对 / metricId↔快照对账 / answers 回指 / 绑定类集合 34+7=41 / 登记逐行（题号·分卷·分节·处置）/ 回问 P0·P1 拆分 / C·G·R·Q 编号连续 / 处置↔落点 / README 摘要数字 / README 逐 KPI 状态 / 证据与文件清单） |
+| **检查器反证** | `python3 backend/scripts/check_procurement_answer_package_mutations.py` | ✅ **43 个变异全部被捕获**，每个都 exit 1 且报的是**产物层面**的问题（**崩溃 / 退出码 ≠ 1 不算抓到缺陷**）；三态判定 `caught`/`escaped`/`tool-error` |
 
 **覆盖率**：不适用（无代码变更）。
 
@@ -324,3 +324,78 @@ v2 再经 `code-reviewer` 复审，又出 **3 个 HIGH + 5 个 MEDIUM + 5 个 LO
 
 ⇒ v4 校验结果：**16/16 全绿**，**36/36 变异全部捕获**。
 
+
+---
+
+## 附五：检查器第四轮重写（v4 → v5）：退出码契约归因 + 三处「假绿」堵漏
+
+v4 的检查器经 `code-reviewer` 评审出 **6 个 MEDIUM / 7 个 LOW**（0 CRITICAL / 0 HIGH）。
+本轮处置 **3 个 MEDIUM**（都在「检查器自己的失败模式」上）+ 配套 LOW，
+新增结构前检层 `_schema.py`，变异集 **36 → 43**。
+
+### 5.1 MEDIUM-1：退出码契约**双向破裂**（产物缺陷被说成工具故障）
+
+| 情形 | v4 | v5 | 后果 |
+|---|---|---|---|
+| 产物缺文件 / 坏 JSON | 1 ✅ | 1 ✅ | — |
+| 产物**结构缺陷**（某条 KPI 少一个槽位键） | **2** ❌ | **1** ✅ | v4 把「产物坏了」说成「工具坏了」⇒ 反证脚本按「崩溃 ≠ 抓到缺陷」判罚 ⇒ **归因反了** |
+| 前检自身抛异常 | **traceback + 1** ❌ | **2** ✅ | v4 把「工具坏了」说成「产物坏了」 |
+
+**处置**：
+1. **结构前检独立成层**（`check_procurement_answer_package_schema.py`）——
+   把断言层依赖的结构契约显式化（顶层键 / `meta` 必需键 / `summary.slotCounts` 必需键 /
+   每条 KPI 的必需键 / **13 个模型槽位齐全** / 每个槽位含 `status` / 候选文件 `bindings`+`counts`）。
+   结构已坏 ⇒ 后续断言的结论只会是噪声 ⇒ 入口**不再执行**后续断言。
+   **结构缺陷 = 产物层问题 ⇒ 退出码 1**。
+2. 前检与结构前检**各自包 try/except** ⇒ 工具侧故障一律退出码 **2**。
+3. **模块 docstring 的契约表同步改正**（v4 的 docstring 仍写着「缺文件 / 坏 JSON ⇒ 2」，
+   与实际行为相反 ⇒ 契约写在文档上却双向破裂）。
+
+### 5.2 MEDIUM-2：`meta.evidence` 缺失/为空 ⇒ **空转即通过**
+
+v4：`references = list(model.meta.get("evidence", []))` ⇒ 清单为空 ⇒ 循环体一次都不执行
+⇒ 「没有任何问题」被当成「检查通过」⇒ **假绿**。
+
+**处置**：`meta.evidence` 必须**显式存在且非空**；`meta.slotModel` 必须存在；
+每条引用都必须落在**前检清单**（`REQUIRED_ARTIFACTS`）里 —— 引用一个「没人校验的文件」等于没引用。
+
+### 5.3 MEDIUM-3：`slotCounts.scope` 的口径数字**没人读**
+
+v4：补充注记槽条目数只跟**脚本里写死的 `6`** 比 ⇒ 产物把 scope 改成「另有 99 项」时，
+实际条目（仍是 6）跟写死的 6 相等 ⇒ **全绿**（假绿）。`scope` 里的
+「13 个模型槽位 × 12 KPI」「合计槽位条目 162」**完全没人解析**。
+
+**处置**：新增 `lib.parseScopeCounts()` 从产物解析 scope 的四个数字
+（模型槽位数 / KPI 数 / 补充注记条目数 / 合计条目数）+ 点名的补充注记槽名，
+再与**实际重算值**对账（`156 + 补充条目数 == 合计条目数`）；并断言
+`meta.metricCount == 实际 KPI 数`、`summary.fullyConfirmed/conditional/blocked`
+三桶的 KPI 码合法且**覆盖全部 12 条**。写死常量 `EXPECTED_SUPPLEMENTARY_ENTRIES` 已删除。
+
+### 5.4 反证脚本升到**三态**（`caught` / `escaped` / `tool-error`）
+
+v4 把「工具故障」与「检查器漏网」都记成「没抓到」⇒ 两者都只报退出码 1
+⇒ 「检查器崩了」会被误读成「检查器有假绿」，**处置方向完全相反**。
+
+| 状态 | 含义 | 退出码 |
+|---|---|---|
+| `caught` | 报出产物层问题且命中预期关键词 | 0 |
+| `escaped` | 仍然全绿 / 报的不是这条 ⇒ **假绿** | 1 |
+| `tool-error` | 变异没落地 / 检查器退出码 **≠ 1** / 检查器 traceback ⇒ 本轮结论不可用 | 2 |
+
+⚠️ 关键点：**Python 未捕获异常本身就以退出码 1 结束** —— 与「产物层问题」**同码**！
+⇒ 只看退出码会把「检查器的 traceback」误判成「抓到了缺陷」。
+⇒ `_toolCrashed()` 必须额外识别 `Traceback (most recent call last)`。
+
+### 5.5 新增 7 条变异（v5 专项）—— 修复效果**可被证明**
+
+| 变异 | v4 表现 | v5 表现 |
+|---|---|---|
+| V5-1 少一个模型槽位键 | **exit 2**（归因反了） | exit 1「缺少模型槽位」 |
+| V5-2 `meta.evidence` 清空 | **exit 0 全绿** | exit 1「meta.evidence 是空列表」 |
+| V5-3 `meta.evidence` 悬空引用 | **exit 0 全绿** | exit 1「不在产物清单里」 |
+| V5-4 `meta.slotModel` 被删 | **exit 0 全绿** | exit 1「缺少键：slotModel」 |
+| V5-5 `meta.metricCount` 不符 | **exit 0 全绿** | exit 1「meta.metricCount=99 ≠ 12」 |
+| V5-6 scope「另有 6 项」被改 | **exit 0 全绿** | exit 1「补充注记槽条目 6 ≠ scope 声明的 99」 |
+| V5-7 scope「合计槽位条目」被改 | **exit 0 全绿** | exit 1「合计槽位条目 999 ≠ 156 + 6 = 162」 |
+
+⇒ v5 校验结果：**16/16 全绿**（exit 0），**43/43 变异全部捕获**（exit 0）。

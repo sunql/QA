@@ -29,11 +29,12 @@
 | [`source-capability.md`](./source-capability.md) | SRM + THBI 源侧实测能力 + 12 KPI 可算性裁决 | 5 节 |
 | [`conflicts-and-degradations.md`](./conflicts-and-degradations.md) | C-01…C-22 冲突 / G-01…G-05 缺口 / R-01…R-17 降级 / Q1…Q18 回问 | 5 节 |
 | [`../evidence/source-capability-scan.txt`](../evidence/source-capability-scan.txt) | 只读探针原始输出（405 行） | 证据文件 |
-| [`../../../../../backend/scripts/check_procurement_answer_package.py`](../../../../../backend/scripts/check_procurement_answer_package.py) | **包内一致性检查器**（入口：汇总 + 退出码契约） | v4 |
+| [`../../../../../backend/scripts/check_procurement_answer_package.py`](../../../../../backend/scripts/check_procurement_answer_package.py) | **包内一致性检查器**（入口：汇总 + 退出码契约） | v5 |
 | [`../../../../../backend/scripts/check_procurement_answer_package_lib.py`](../../../../../backend/scripts/check_procurement_answer_package_lib.py) | 检查器**解析层**（口径常量 + Markdown/JSON 解析，只依赖标准库） | 解析层 |
+| [`../../../../../backend/scripts/check_procurement_answer_package_schema.py`](../../../../../backend/scripts/check_procurement_answer_package_schema.py) | 检查器**结构前检层**（产物结构缺陷 ⇒ 退出码 1，不是「工具崩了」的 2） | 前检层 |
 | [`../../../../../backend/scripts/check_procurement_answer_package_checks_a.py`](../../../../../backend/scripts/check_procurement_answer_package_checks_a.py) | 检查器**断言层 A**（槽位模型 ↔ §9.1 表格 ↔ DB 快照） | 8 项断言 |
 | [`../../../../../backend/scripts/check_procurement_answer_package_checks_b.py`](../../../../../backend/scripts/check_procurement_answer_package_checks_b.py) | 检查器**断言层 B**（登记表 ↔ 对外文档） | 8 项断言 |
-| [`../../../../../backend/scripts/check_procurement_answer_package_mutations.py`](../../../../../backend/scripts/check_procurement_answer_package_mutations.py) | **检查器的变异反证**（注入 36 种已知缺陷，证明检查器不是「永远绿」） | 36 个变异 |
+| [`../../../../../backend/scripts/check_procurement_answer_package_mutations.py`](../../../../../backend/scripts/check_procurement_answer_package_mutations.py) | **检查器的变异反证**（注入 43 种已知缺陷，证明检查器不是「永远绿」） | 43 个变异 |
 
 ### 复跑
 

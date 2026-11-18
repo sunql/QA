@@ -53,12 +53,20 @@
 - CRASH-1 产物文件缺失（检查器要报「产物缺失」，不能崩也不能绿）
 - CRASH-2 产物 JSON 损坏（检查器要报「产物损坏」，不能崩也不能绿）
 - CRASH-3 DB 快照缺失（检查器要报「产物缺失」）
+- V5-1   某条 KPI 少一个模型槽位键（**结构缺陷 ⇒ 退出码 1，不是 2**）
+- V5-2   meta.evidence 被清空（**空清单 ⇒ 不能算「无问题」**）
+- V5-3   meta.evidence 指向不在产物清单里的文件（悬空引用）
+- V5-4   meta.slotModel 被删（槽位模板出处丢失）
+- V5-5   meta.metricCount 与实际 KPI 条数不符
+- V5-6   scope 里「另有 6 项」被改（口径数字必须从产物解析，不能写死）
+- V5-7   scope 里「合计槽位条目 162」被改（口径说明自相矛盾）
 
 用法::
 
     python3 backend/scripts/check_procurement_answer_package_mutations.py
 
-退出码：0 = 全部变异都被捕获；1 = 有变异漏网（说明检查器有假绿）；2 = 反证脚本自身出错。
+退出码：0 = 全部变异都被捕获；1 = 有变异漏网（说明检查器有假绿）；2 = **工具侧故障**
+（变异没落地 / 检查器退出码不是 1 / 检查器崩了）⇒ 本轮结论不可用。
 """
 
 from __future__ import annotations
@@ -96,6 +104,7 @@ lib = _loadLib()
 ARTIFACTS = tuple(lib.REQUIRED_ARTIFACTS) + (
     "backend/scripts/check_procurement_answer_package.py",
     "backend/scripts/check_procurement_answer_package_lib.py",
+    "backend/scripts/check_procurement_answer_package_schema.py",
     "backend/scripts/check_procurement_answer_package_checks_a.py",
     "backend/scripts/check_procurement_answer_package_checks_b.py",
     "backend/scripts/check_procurement_answer_package_mutations.py",
@@ -553,6 +562,93 @@ def _mutateMissingSnapshot(stack: Path) -> bool:
     return True
 
 
+# --- v5：三条 MEDIUM 修复的对应变异（此前无覆盖 ⇒ 修复效果无法被证明） ---
+
+
+def _mutateMissingSlotKey(stack: Path) -> bool:
+    """某条 KPI 少了一个模型槽位键（结构缺陷）。
+
+    v4 的表现：断言层取值时抛 `KeyError` ⇒ 退出码 **2**（被说成「检查器崩了」）。
+    v5 的表现：结构前检拦下 ⇒ 退出码 **1**（产物层问题），关键词「缺少模型槽位」。
+    """
+    def mutate(data: dict) -> bool:
+        for kpi in data["kpis"]:
+            if kpi["kpiCode"] == "KPI_SUPPLIER_OTD":
+                del kpi["slots"]["time_column"]
+                return True
+        return False
+
+    return _editJson(_slotsPath(stack), mutate)
+
+
+def _mutateEmptyEvidence(stack: Path) -> bool:
+    """`meta.evidence` 被清空（空清单 ⇒ v4 什么都不检查 ⇒ 假绿）。"""
+    def mutate(data: dict) -> bool:
+        data["meta"]["evidence"] = []
+        return True
+
+    return _editJson(_slotsPath(stack), mutate)
+
+
+def _mutateDanglingEvidence(stack: Path) -> bool:
+    """`meta.evidence` 指向一个**存在但不在产物清单里**的文件（悬空引用）。"""
+    def mutate(data: dict) -> bool:
+        data["meta"]["evidence"].append(
+            "backend/scripts/check_procurement_answer_package.py"
+        )
+        return True
+
+    return _editJson(_slotsPath(stack), mutate)
+
+
+def _mutateMissingSlotModel(stack: Path) -> bool:
+    """`meta.slotModel` 被删（槽位模板出处丢失）。"""
+    def mutate(data: dict) -> bool:
+        del data["meta"]["slotModel"]
+        return True
+
+    return _editJson(_slotsPath(stack), mutate)
+
+
+def _mutateMetaMetricCount(stack: Path) -> bool:
+    """`meta.metricCount` 与实际 KPI 条数不符。"""
+    def mutate(data: dict) -> bool:
+        data["meta"]["metricCount"] = 99
+        return True
+
+    return _editJson(_slotsPath(stack), mutate)
+
+
+def _mutateScopeSupplementaryCount(stack: Path) -> bool:
+    """`slotCounts.scope` 里的「另有 6 项」被改成「另有 99 项」。
+
+    v4 的表现：实际条目仍是 6，跟**写死**的 6 相等 ⇒ 全绿（假绿）。
+    v5 的表现：scope 从产物里解析 ⇒ 6 ≠ 99 ⇒ 报出「补充注记槽条目 … ≠ scope 声明的 …」。
+    """
+    def mutate(data: dict) -> bool:
+        scope = data["summary"]["slotCounts"]["scope"]
+        if "另有 6 项" not in scope:
+            return False
+        data["summary"]["slotCounts"]["scope"] = scope.replace("另有 6 项", "另有 99 项")
+        return True
+
+    return _editJson(_slotsPath(stack), mutate)
+
+
+def _mutateScopeTotal(stack: Path) -> bool:
+    """`slotCounts.scope` 里的「合计槽位条目 162」被改（口径说明自相矛盾）。"""
+    def mutate(data: dict) -> bool:
+        scope = data["summary"]["slotCounts"]["scope"]
+        if "合计槽位条目 162" not in scope:
+            return False
+        data["summary"]["slotCounts"]["scope"] = scope.replace(
+            "合计槽位条目 162", "合计槽位条目 999"
+        )
+        return True
+
+    return _editJson(_slotsPath(stack), mutate)
+
+
 def line_cells(line: str) -> list[str]:
     """表格行 → 单元格（与解析层同一套切分规则）。"""
     stripped = line.strip()
@@ -601,6 +697,13 @@ MUTATIONS = (
     ("CRASH-1 产物文件缺失", _mutateMissingFile, ("产物缺失",)),
     ("CRASH-2 产物 JSON 损坏", _mutateBrokenJson, ("产物损坏",)),
     ("CRASH-3 DB 快照缺失", _mutateMissingSnapshot, ("产物缺失",)),
+    ("V5-1 少一个模型槽位键", _mutateMissingSlotKey, ("缺少模型槽位",)),
+    ("V5-2 meta.evidence 被清空", _mutateEmptyEvidence, ("meta.evidence",)),
+    ("V5-3 meta.evidence 悬空引用", _mutateDanglingEvidence, ("不在产物清单",)),
+    ("V5-4 meta.slotModel 被删", _mutateMissingSlotModel, ("缺少键：slotModel",)),
+    ("V5-5 meta.metricCount 不符", _mutateMetaMetricCount, ("meta.metricCount",)),
+    ("V5-6 scope「另有 6 项」被改", _mutateScopeSupplementaryCount, ("补充注记槽条目",)),
+    ("V5-7 scope「合计槽位条目」被改", _mutateScopeTotal, ("合计槽位条目",)),
 )
 
 
@@ -615,7 +718,15 @@ def _runChecker(stack: Path) -> tuple[int, str]:
 
 
 def _toolCrashed(output: str) -> bool:
-    return any(line.strip().startswith("- 检查器异常") for line in output.split("\n"))
+    """检查器是不是**自己崩了**（而不是报出了产物层问题）。
+
+    ⚠️ Python 未捕获异常以 **退出码 1** 结束 —— 与「产物层问题」的退出码**相同**！
+    ⇒ 只看退出码会把「检查器的 traceback」误判成「抓到了缺陷」（假绿）。
+    ⇒ 这里必须额外识别 traceback 文本（v5 修 MEDIUM-1 的另一半）。
+    """
+    if any(line.strip().startswith("- 检查器异常") for line in output.split("\n")):
+        return True
+    return "Traceback (most recent call last)" in output
 
 
 def _problemText(output: str) -> str:
@@ -642,26 +753,45 @@ def _baseline() -> int:
     return 1
 
 
-def _runMutation(name: str, mutate, keywords: tuple[str, ...]) -> tuple[bool, str]:
-    """跑一个变异；返回（是否算抓到, 首个失败信息）。"""
+#: 变异判定的**三态**（v5 修 MEDIUM-5）。
+#:
+#: - `caught` —— 检查器报出了产物层问题，且命中预期关键词；
+#: - `escaped` —— 检查器**没抓到**（仍然全绿 / 报的不是这条）⇒ 假绿；
+#: - `tool-error` —— **工具侧故障**（变异没落地 / 检查器退出码不是 1 / 检查器崩了）
+#:   ⇒ 既不是「抓到」也不是「漏网」，本轮结论**不可用**，必须先修工具。
+#:
+#: 为什么必须分三态：v4 把「工具故障」与「漏网」都记成「没抓到」⇒ 两者都只报退出码 1
+#: ⇒ 「检查器崩了」会被误读成「检查器有假绿」，处置方向完全相反。
+CAUGHT = "caught"
+ESCAPED = "escaped"
+TOOL_ERROR = "tool-error"
+
+
+def _runMutation(name: str, mutate, keywords: tuple[str, ...]) -> tuple[str, str]:
+    """跑一个变异；返回（状态, 详情）。状态见 `CAUGHT` / `ESCAPED` / `TOOL_ERROR`。"""
     with tempfile.TemporaryDirectory() as tmp:
         stack = _sandbox(Path(tmp))
         before = _digest(stack)
-        applied = mutate(stack)
+        try:
+            applied = mutate(stack)
+        except Exception as error:  # noqa: BLE001 —— 变异脚本自身出错 = 工具侧故障
+            return TOOL_ERROR, f"变异脚本自身异常：{type(error).__name__}: {error}"
         if applied is False:
-            return False, "变异没有落地（脚本自身出错，不是检查器漏网）"
+            return TOOL_ERROR, "变异没有落地（脚本自身出错，不是检查器漏网）"
         if _digest(stack) == before:
-            return False, "变异没有改变任何产物（脚本自身出错）"
+            return TOOL_ERROR, "变异没有改变任何产物（脚本自身出错）"
         code, output = _runChecker(stack)
     if code == 0:
-        return False, "检查器仍然全绿 ⇒ 存在假绿"
+        return ESCAPED, "检查器仍然全绿 ⇒ 存在假绿"
+    if code != 1:
+        return TOOL_ERROR, f"检查器退出码 {code} ≠ 1（工具故障，不算抓到缺陷）"
     if _toolCrashed(output):
-        return False, "检查器自身异常（崩溃不算抓到缺陷）"
+        return TOOL_ERROR, "检查器自身异常（崩溃不算抓到缺陷）"
     problems = _problemText(output)
     missing = [keyword for keyword in keywords if keyword not in problems]
     if missing:
-        return False, f"变红了但报的不是这条（缺关键词 {missing}）⇒ 靠别的检查项蒙混过关"
-    return True, _firstProblem(output)
+        return ESCAPED, f"变红了但报的不是这条（缺关键词 {missing}）⇒ 靠别的检查项蒙混过关"
+    return CAUGHT, _firstProblem(output)
 
 
 def main() -> int:
@@ -669,16 +799,27 @@ def main() -> int:
         return 2
 
     escaped: list[str] = []
+    toolErrors: list[str] = []
     for name, mutate, keywords in MUTATIONS:
-        caught, detail = _runMutation(name, mutate, keywords)
-        print(f"{'✅' if caught else '❌'} {name} → {detail[:150]}")
-        if not caught:
+        status, detail = _runMutation(name, mutate, keywords)
+        mark = {"caught": "✅", "escaped": "❌", "tool-error": "⚠️"}[status]
+        print(f"{mark} {name} → {detail[:150]}")
+        if status == ESCAPED:
             escaped.append(f"{name}（{detail}）")
+        elif status == TOOL_ERROR:
+            toolErrors.append(f"{name}（{detail}）")
 
+    if toolErrors:
+        print(f"\n{len(toolErrors)} 个变异**工具侧故障** ⇒ 本轮结论不可用：")
+        for item in toolErrors:
+            print(f"   - {item}")
     if escaped:
         print(f"\n{len(escaped)} 个变异漏网 ⇒ 检查器存在假绿：")
         for item in escaped:
             print(f"   - {item}")
+    if toolErrors:
+        return 2
+    if escaped:
         return 1
     print(f"\n全部 {len(MUTATIONS)} 个变异都被捕获，检查器不是「永远绿」。")
     return 0

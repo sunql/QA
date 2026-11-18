@@ -354,13 +354,29 @@ def checkReadmeKpiStatus(repoRoot: Path, pkg: Path) -> list[str]:
 
 
 def checkMetaEvidence(repoRoot: Path, pkg: Path) -> list[str]:
-    """JSON `meta.evidence` / `meta.slotModel` 与 README §1 文件清单里的路径必须真实存在。"""
+    """JSON `meta.evidence` / `meta.slotModel` 与 README §1 文件清单里的路径必须真实存在。
+
+    v5 修 MEDIUM-2（**空转即通过**）：此前 `meta.evidence` 缺失或为空 ⇒ 引用列表为空
+    ⇒ 循环体一次都不执行 ⇒ **「没有任何问题」被当成「检查通过」**（假绿）。
+    ⇒ 现在：清单必须**显式存在且非空**；每条引用都必须落在前检清单
+    （`REQUIRED_ARTIFACTS`）里 —— 引用一个「没人校验的文件」等于没引用。
+    """
     model = lib.parseSlotModel(lib.loadJson(pkg / "kpi-slots-filled.json"))
     readme = lib.readText(pkg / "README.md")
     problems: list[str] = []
 
-    references = list(model.meta.get("evidence", []))
+    evidence = model.meta.get("evidence")
+    if not isinstance(evidence, list):
+        problems.append("meta.evidence 缺失或不是数组（证据清单必须显式声明）")
+        evidence = []
+    elif not evidence:
+        problems.append("meta.evidence 是空列表（证据清单必须显式声明，不能靠缺省蒙混过关）")
+
     slotModel = model.meta.get("slotModel")
+    if not slotModel:
+        problems.append("meta.slotModel 缺失（必须声明槽位模板的出处）")
+
+    references = list(evidence)
     if slotModel:
         # 形如 `…/M0.5-KPI口径槽位模板.md §2（13 槽位）` ⇒ 只取路径部分。
         references.append(slotModel.split("§")[0].split("（")[0].strip())
@@ -370,6 +386,8 @@ def checkMetaEvidence(repoRoot: Path, pkg: Path) -> list[str]:
         target = repoRoot / reference
         if not target.exists():
             problems.append(f"meta 引用的文件不存在：{reference}")
+        if reference not in lib.REQUIRED_ARTIFACTS:
+            problems.append(f"meta 引用了不在产物清单里的文件：{reference}")
 
     for target in lib.readmeFileList(readme):
         resolved = (pkg / target).resolve()

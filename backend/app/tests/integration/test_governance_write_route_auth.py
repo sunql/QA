@@ -42,6 +42,13 @@ _WRITE_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/ontology-discovery/sources"),
         ("PATCH", "/api/v1/ontology-discovery/sources/{sourceId}"),
         ("POST", "/api/v1/ontology-discovery/snapshots"),
+        # 采购源绑定（M1-1.1）：绑定是治理事实，确认权必须收口。
+        ("POST", "/api/v1/procurement-bindings"),
+        ("POST", "/api/v1/procurement-bindings/{id}/properties"),
+        ("POST", "/api/v1/procurement-bindings/{id}/confirm"),
+        ("POST", "/api/v1/procurement-bindings/{id}/expire"),
+        ("POST", "/api/v1/procurement-bindings/{id}/properties/{propertyBindingId}/confirm"),
+        ("POST", "/api/v1/procurement-bindings/{id}/properties/{propertyBindingId}/expire"),
     }
 )
 
@@ -56,12 +63,24 @@ _READ_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/ontology-discovery/snapshots"),
         ("GET", "/api/v1/ontology-discovery/snapshots/{snapshotId}"),
         ("GET", "/api/v1/ontology-discovery/diff"),
+        # 采购源绑定（M1-1.1）：**生效视图**对所有登录用户开放。
+        ("GET", "/api/v1/procurement-bindings/effective"),
+        ("GET", "/api/v1/procurement-bindings/effective/properties"),
+    }
+)
+
+# (method, 完整路径)：读入口但**限 admin**（内容含未确认候选，不得让普通用户当结论）。
+_ADMIN_ONLY_READ_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/v1/procurement-bindings"),
+        ("GET", "/api/v1/procurement-bindings/{id}"),
     }
 )
 
 _TERM_PREFIX = "/api/v1/term-dictionary"
 _METRIC_PREFIX = "/api/v1/ontology/metrics"
 _DISCOVERY_PREFIX = "/api/v1/ontology-discovery"
+_BINDING_PREFIX = "/api/v1/procurement-bindings"
 
 
 def _productionRoutes() -> list[tuple[str, APIRoute, tuple[Any, ...]]]:
@@ -74,7 +93,9 @@ def _routeIndex() -> dict[tuple[str, str], tuple[APIRoute, tuple[Any, ...]]]:
     """(method, path) → (route, include 依赖)。只保留本守卫关心的前缀。"""
     index: dict[tuple[str, str], tuple[APIRoute, tuple[Any, ...]]] = {}
     for path, route, inherited in _productionRoutes():
-        if not path.startswith((_TERM_PREFIX, _METRIC_PREFIX, _DISCOVERY_PREFIX)):
+        if not path.startswith(
+            (_TERM_PREFIX, _METRIC_PREFIX, _DISCOVERY_PREFIX, _BINDING_PREFIX)
+        ):
             continue
         for method in route.methods:
             index[(method, path)] = (route, inherited)
@@ -92,7 +113,9 @@ def test_governance_routes_are_registered(
 ) -> None:
     """枚举非空 + 写/读路由一条不少（空集 ⇒ 后续断言全部空转）。"""
     index = routeIndex
-    missing = sorted((_WRITE_ROUTES | _READ_ROUTES) - set(index))
+    missing = sorted(
+        (_WRITE_ROUTES | _READ_ROUTES | _ADMIN_ONLY_READ_ROUTES) - set(index)
+    )
 
     assert index, "治理路由枚举为空——路由树结构变化会让本守卫空集通过"
     assert missing == [], f"生产 app 缺少以下治理路由：{missing}"
@@ -126,6 +149,23 @@ def test_read_route_does_not_require_admin(
 
     assert not declaresDependency(route, requireAdmin, inherited), (
         f"{method} {path} 意外要求 admin（普通用户读请求会 403）"
+    )
+    assert declaresDependency(route, getCurrentUser, inherited), (
+        f"{method} {path} 缺少 getCurrentUser（读入口对匿名开放）"
+    )
+
+
+@pytest.mark.parametrize(("method", "path"), sorted(_ADMIN_ONLY_READ_ROUTES))
+def test_admin_only_read_route_declares_admin_guard(
+    routeIndex: dict[tuple[str, str], tuple[APIRoute, tuple[Any, ...]]],
+    method: str,
+    path: str,
+) -> None:
+    """含候选的读视图必须限 admin —— 普通用户看到候选会当成结论。"""
+    route, inherited = routeIndex[(method, path)]
+
+    assert declaresDependency(route, requireAdmin, inherited), (
+        f"{method} {path} 未限 admin（普通用户可读到未确认候选）"
     )
     assert declaresDependency(route, getCurrentUser, inherited), (
         f"{method} {path} 缺少 getCurrentUser（读入口对匿名开放）"

@@ -46,6 +46,7 @@ from app.api.v1 import (
     model_config,
     ontology,
     organizations,
+    procurement_bindings,
     research,
     roles,
     reports,
@@ -155,6 +156,12 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(ontology.router, prefix="/api/v1", tags=["ontology"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(
         term_dictionary.router, prefix="/api/v1", tags=["term-dictionary"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
+    )
+    testApp.include_router(
+        procurement_bindings.router,
+        prefix="/api/v1",
+        tags=["procurement-bindings"],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
     testApp.include_router(datasource.router, prefix="/api/v1/datasources", tags=["datasources"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(local_import.router, prefix="/api/v1/datasources", tags=["datasources"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])

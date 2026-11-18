@@ -606,3 +606,95 @@ request_time    TIMESTAMPTZ NOT NULL
 
 > 事实源：`backend/app/domain/discovery_models.py`、
 > `backend/app/services/discovery_snapshot_service.py`。
+
+## M1 增量：采购源绑定域（类 → 源表 / 属性 → 列）
+
+**日期**：2026-11-18 · **变更**：[2026-11-18-m1-procurement-binding-tables](../changes/2026-11-18-m1-procurement-binding-tables/summary.md)（结构层）·
+[2026-11-18-m1-procurement-binding-service](../changes/2026-11-18-m1-procurement-binding-service/summary.md)（行为层）· **迁移 `0154`**
+
+设计来源 `docs/update/1118/M0/A8-采购源绑定候选与表结构设计.md` §4；决策 **D2（两张表）** ·
+**D-3（候选 ≠ 结论）**。绑定范围 **41 类**（G1 汇合实测：34 候选 + 7 复活墓碑类）。
+
+本域**只写元数据库**，不写业务库；物理表的读取仍走既有 NL2SQL 通道。
+
+### procurement_source_binding（一个本体类落到哪张物理表）
+
+| 列 | 类型 | 约束 / 默认 | 说明 |
+|---|---|---|---|
+| `id` | BIGINT PK | | |
+| `class_id` | BIGINT | NOT NULL，FK → `ontology_class.id` **RESTRICT** | **唯一键必须含 `class_id`** —— 实测 `DWD_SUPPLIER_PRICE_LIST` 与 `DWD_SUPPLIER_PRICE_LIST_DEL` 指向同一张表（同表双类） |
+| `datasource_id` | BIGINT | NOT NULL，FK → `data_source.id` **RESTRICT** | |
+| `schema_name` | VARCHAR(100) | NOT NULL | Oracle owner / PG schema / MySQL database |
+| `source_table` | VARCHAR(100) | NOT NULL | 物理表名（**可 ≠ `class_name`**） |
+| `binding_role` | VARCHAR(20) | NOT NULL，CHECK ∈ `BASE/NUMERATOR/DENOMINATOR/FILTER` | 复用 `MetricSourceRole` |
+| `filter_expression` | TEXT | 可空 | 源表行级谓词（指标级 `filter_expression` 之外）。⚠️ 必须是**依赖行**的谓词：至少含一处「**裸列 ↔ 常量**」的直接比较，顶层只有 AND / NOT（`OR` / `CASE` 禁）⇒ 恒真谓词（`A = A` / `ABS(A) >= 0` / `CASE…ELSE 1 END = 1`）从语法上不可达 |
+| `filter_allowlist` | VARCHAR(100)[] | 可空 | 过滤表达式允许引用的**列名白名单**（D2：独立列，**不进 JSON**）。⚠️ 只授权**列**；**函数**走系统内置的 `SAFE_SCALAR_FUNCTIONS`（**不可自报**），**结构词**（`SELECT`/`FROM`/`UNION`/**`TABLE`**/`LATERAL` …）一律禁。⚠️ **元素超长是静默截断**（PG `VARCHAR(100)[]`）⇒ 长度闸门必须住在校验层（共享常量 `MAX_ALLOWLIST_ITEM_LENGTH`），只卡 DTO 层不够 |
+| `is_candidate` | BOOLEAN | NOT NULL，默认 `true` | TRUE = **未经确认**，不得进入任何读路径 / manifest |
+| `confirmed_by` | VARCHAR(64) | 可空 | 确认人（**候选行为空**） |
+| `confirmed_time` | TIMESTAMPTZ | 可空 | 确认时刻 |
+| `valid_from` | TIMESTAMPTZ | NOT NULL，默认 `now()` | 生效起始 |
+| `valid_to` | TIMESTAMPTZ | 可空，CHECK `valid_to IS NULL OR valid_to > valid_from` | **NULL = 当前生效**；失效是**软失效**（不删行 ⇒ 历史证据不丢） |
+| `created_by` | VARCHAR(64) | 可空 | |
+
+索引：`uq_procurement_source_binding_active(class_id, datasource_id, schema_name, source_table, binding_role)`
+**部分唯一**（`WHERE valid_to IS NULL`）—— 同一键位只允许**一条生效**绑定，
+失效后可再新建 ⇒ 软版本化。另有 `ix_procurement_source_binding_table(datasource_id, schema_name, source_table)`、
+`ix_procurement_source_binding_class(class_id)`。
+
+### procurement_property_binding（一个属性落到哪一列 + 复合键位）
+
+| 列 | 类型 | 约束 / 默认 | 说明 |
+|---|---|---|---|
+| `id` | BIGINT PK | | |
+| `source_binding_id` | BIGINT | NOT NULL，FK → `procurement_source_binding.id` **CASCADE** | 生命周期**从属**（源绑定删 ⇒ 子绑定删） |
+| `property_id` | BIGINT | NOT NULL，FK → `ontology_property.id` **RESTRICT** | 证据不悬空 |
+| `source_column` | VARCHAR(100) | NOT NULL | 物理列名（**允许 ≠ `ontology_property.source_column`**） |
+| `key_ordinal` | SMALLINT | 可空，CHECK `>= 1` | 复合主键的**键位**（1..n）；**NULL = 非键列** |
+| `transform_expression` | TEXT | 可空 | 列级变换（TRUNC / UPPER / 单位换算）；**为空 = 直读** |
+| `is_candidate` / `confirmed_by` / `confirmed_time` / `valid_from` / `valid_to` | | 同上表 | 候选与有效期语义完全一致 |
+
+索引：`uq_procurement_property_binding_active(source_binding_id, property_id)`（部分唯一）·
+`uq_procurement_property_binding_key_ordinal(source_binding_id, key_ordinal)`（部分唯一，`key_ordinal IS NOT NULL`）。
+
+### 状态机（行为层，M1-1.1）
+
+```
+        创建（写入口）              确认（人显式触发）        失效（软失效）
+   ────────────────────▶  候选  ────────────────────▶  已确认  ────────────────────▶  已失效
+   is_candidate = TRUE                                   valid_to = <now>
+```
+
+- **新建一律落候选**（D-3）；确认必须由人显式触发，**确认人取当前登录用户**（不接受客户端传入）。
+- **候选 ⇔ 无确认人**由库层 CHECK 钉死（`ck_*_candidate` / `ck_*_confirmed`），不靠文档措辞。
+- **确认前置**：源绑定至少有一条属性绑定（`FILTER` 角色例外 —— 过滤源不承载列映射）；
+  且复合键序号必须 **1..n 连续**（库层只保证不重复，**连续性由服务层补**）。
+- **软失效级联**：源绑定失效 ⇒ 其属性绑定**一并失效** ⇒ 不会出现「父已过期、子还生效」的孤儿映射。
+  ⚠️ 失效时刻取 `max(now, valid_from + 1s)` —— `now()` 是事务开始时刻，与同事务新建行的
+  `valid_from` **完全相同**，直接写会撞 `valid_to > valid_from` 的 CHECK。
+- **过期后可同键位再建**（部分唯一索引只约束生效行）⇒ 这是「改绑定」而非「改行」的机制。
+
+### 读视图（HTTP 层，两档鉴权）
+
+| 视图 | 过滤条件 | 鉴权 |
+|---|---|---|
+| `GET /api/v1/procurement-bindings` | 全量（含候选、含已失效） | **admin** |
+| `GET /api/v1/procurement-bindings/{id}` | 单条详情（含属性绑定） | **admin** |
+| `GET /api/v1/procurement-bindings/effective` | `is_candidate = FALSE AND valid_to IS NULL` | **登录即可** |
+| `GET /api/v1/procurement-bindings/effective/properties` | 自身已确认且生效 **且父已确认且生效** | **登录即可** |
+
+⇒ **D-3 在 HTTP 面的落法**：候选是未经确认的治理草案，普通用户看到会当成结论 ⇒ 全量视图限 admin；
+只有「已确认且当前生效」的行对所有登录用户可见。
+
+**状态机（确认 = 版本冻结点）**：`候选态（父未确认）──▶ 确认态（父已确认，子集合冻结）──▶ 失效态（只读）`。
+⇒ 父已确认时追加 / 确认 / 失效子绑定一律 **409**；父已失效时改子绑定 **422**。
+要改绑必须走「失效现役行 → 建新候选 → 重新确认」。
+**锁序固定为 父 → 子**（`SELECT ... FOR UPDATE` + `populate_existing`）⇒ 不死锁、不 TOCTOU。
+
+**生效属性映射的两条父状态谓词可观测性不同**（变异反证实测）：
+「父必须已确认」✅ 可观测（子可先于父被确认）；「父必须未失效」⚪ **冗余防御**
+（父失效时子由级联失效一并作废 ⇒ 删掉该谓词行为不变）。
+
+> 事实源：`backend/app/domain/procurement_binding_models.py`（ORM）、
+> `backend/app/services/procurement_binding_validation.py`（纯校验）、
+> `backend/app/services/procurement_binding_service.py`（编排）、
+> `backend/app/api/v1/procurement_bindings.py`（10 条路由）。

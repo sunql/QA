@@ -3,7 +3,7 @@ import type { MessageInstance } from "antd/es/message/interface";
 import { API_BASE_URL, REQUEST_TIMEOUT_MS, DEFAULT_TENANT_ID } from "../config";
 import type { ApiResponse } from "../types/common";
 import { i18n } from "../i18n";
-import { useAuthStore } from "../stores/authStore";
+import { useAuthStore, clearPersistedAuth } from "../stores/authStore";
 import { clearLastSessionIds } from "../stores/persistChatUiState";
 import { notifyUserSwitch } from "../stores/userSwitch";
 
@@ -156,13 +156,21 @@ export function createHttpClient(): AxiosInstance {
       // 2026-11-18：原先这里还有一行 `localStorage.removeItem("token")`，但全仓
       // 从来没有代码写过 `localStorage["token"]`（唯一写 token 的是 zustand persist），
       // 那行删的是不存在的键 = 死代码，已删除；持久层清理由上面那次 setState 负责。
+      // 2026-11-18（评审补强）：setState 的落盘一步可能抛错（配额满 / 隐私模式）
+      // —— 内存已清但磁盘仍是旧 token ⇒ 降级为直接删掉 persist 键（不依赖写盘能力）。
+      // 兜底逻辑放在 authStore（持久层的所有者）里，本文件不直接碰 localStorage。
       // 守卫：src/tests/authTokenCleanupGuard.test.ts
       if (status === 401 && !isCredentialCheckRequest(error.config?.url)) {
-        useAuthStore.setState({
-          token: null,
-          user: null,
-          mustChangePassword: false,
-        });
+        try {
+          useAuthStore.setState({
+            token: null,
+            user: null,
+            mustChangePassword: false,
+          });
+        } catch (persistError) {
+          console.warn("[auth] 401 清理持久化登录态失败，已降级为删除 persist 键", persistError);
+          clearPersistedAuth();
+        }
         // 掉线也算换人：内存里的对话与恢复指针都属于那个已失效的登录会话。
         // 与 logout() 同口径，避免「此路径少清一处」的纵深缺口。
         clearLastSessionIds();

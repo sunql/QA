@@ -18,7 +18,7 @@
  *   ⇒ 改成从 store 自身取 persist 键名，断言**真实的持久层**。
  */
 
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { AxiosError } from "axios";
 import type { InternalAxiosRequestConfig } from "axios";
 import { createHttpClient } from "../client";
@@ -127,6 +127,33 @@ describe("client.ts response interceptor 401 vs 403（真链路）", () => {
         status: 401,
         code: "AUTH_INVALID",
       });
+    });
+
+    // 2026-11-18（评审补强）：zustand persist 的落盘一步可能抛错（配额满 / 隐私模式）。
+    // 此时 setState 已把内存态清掉，但磁盘上的 persist 键仍是旧 token ⇒ 过期令牌会留在
+    // 浏览器可读存储里，刷新页面即复活。降级路径必须把 persist 键整个删掉，
+    // 且异常不得穿出拦截器（否则调用方拿到的是 DOMException 而不是 AppError）。
+    it("persist 写盘失败时降级为删除 persist 键（过期 token 不留在可读存储）", async () => {
+      // 前置：持久层里确实存着过期 token —— 否则下面的断言恒真（防空扫描假绿）。
+      expect(readPersistedToken()).toBe(EXPIRED_TOKEN);
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      // 模拟写盘失败：localStorage.setItem 抛 QuotaExceededError。
+      const setItemSpy = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+        throw new DOMException("quota exceeded", "QuotaExceededError");
+      });
+      try {
+        client.defaults.adapter = makeRejectingAdapter(401, { detail: { code: "AUTH_INVALID" } });
+        // 异常不得穿出：调用方仍须拿到带 status 的 AppError。
+        await expect(client.get("/anything")).rejects.toMatchObject({ status: 401 });
+      } finally {
+        setItemSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+
+      // 降级生效：persist 键被整个删掉 ⇒ 过期 token 不再留在浏览器可读存储。
+      expect(localStorage.getItem(PERSIST_KEY)).toBeNull();
+      expect(readPersistedToken()).toBeNull();
     });
   });
 

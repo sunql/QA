@@ -698,3 +698,91 @@ request_time    TIMESTAMPTZ NOT NULL
 > `backend/app/services/procurement_binding_validation.py`（纯校验）、
 > `backend/app/services/procurement_binding_service.py`（编排）、
 > `backend/app/api/v1/procurement_bindings.py`（10 条路由）。
+
+## M1 增量：发布校验结论表（`semantic_release_check`）
+
+**日期**：2026-11-18 · **变更**：[2026-11-18-m1-semantic-release-check](../changes/2026-11-18-m1-semantic-release-check/summary.md)· **迁移 `0155`**
+
+回答一个问题：**「这次发布到底查了什么、每项结论如何」**。
+闸门结论原先只以 `blockers` / `warnings` 两个字符串数组出现在写接口的响应体里 ——
+**响应一关就没了** ⇒ 无法回答「上周那次被拦下的发布，拦在哪一条、后来怎么处理的」。
+
+### semantic_release_check（一个发布版本的逐项校验结论）
+
+| 列 | 类型 | 约束 / 默认 | 说明 |
+|---|---|---|---|
+| `id` | BIGINT PK | | |
+| `release_id` | BIGINT | NOT NULL，FK → `semantic_release.id` **CASCADE** | 发布被删 ⇒ 校验证据一并消失（不留孤儿证据） |
+| `check_code` | VARCHAR(64) | NOT NULL，CHECK 非空 | 校验项编码（机器可读，如 `METRIC_SOURCE_PRESENT`） |
+| `check_item` | VARCHAR(200) | NOT NULL，CHECK 非空 | 校验项名称（中文，展示用） |
+| `severity` | VARCHAR(10) | NOT NULL，CHECK ∈ `ERROR/WARNING` | **该校验项失败时的**严重级别：`ERROR` = 阻断发布；`WARNING` = 治理债 |
+| `result` | VARCHAR(10) | NOT NULL，CHECK ∈ `PASS/FAIL` | **本次**的结论 |
+| `target_type` | VARCHAR(32) | 可空 | 被校验对象类型（`RELEASE` / `METRIC` / …） |
+| `target_key` | VARCHAR(200) | 可空 | 被校验对象标识（指标名等；**NULL = 发布级校验项**） |
+| `detail` | TEXT | NOT NULL | 结论详情（人类可读） |
+| `checked_time` | TIMESTAMPTZ | NOT NULL，默认 `now()` | 校验发生时刻（**覆盖写 ⇒ 每次评估刷新**） |
+| `checked_by` | VARCHAR(64) | 可空 | 触发本次校验的操作人 |
+| `created_time` / `updated_time` | TIMESTAMPTZ | NOT NULL，默认 `now()` | `TimestampMixin` |
+
+索引：`ix_semantic_release_check_release(release_id)` ·
+`uq_semantic_release_check_unique(release_id, check_code, COALESCE(target_key, ''))` **唯一**。
+⚠️ **`COALESCE` 不可省**：PostgreSQL 的 NULL 互不相等，直接建唯一索引会让
+`target_key IS NULL` 的**发布级**校验项（快照完整性 / Manifest 契约）无限重复落库。
+
+### 两个字段为什么正交（而不是合成一列枚举）
+
+- `severity` 回答「**若这条失败会有多严重**」；
+- `result` 回答「**这次结论如何**」。
+
+合成一列（`PASS/WARN/ERROR/FAIL`）后就无法表达「本次通过、但若失败就是 ERROR」的风险面；
+分两列则「全 PASS 的报告」也能直接告诉读者每项的风险面。
+
+### 落表口径（行为层，M1-1.2）
+
+- **逐项落表，`PASS` 也落**：只落失败项会让「通过」与「没跑」不可区分 ⇒ 评审看到空表。
+- **覆盖写（replace-all）**：一个 release 的「当前校验结论」只有一份；历史由 `audit_log` 承担。
+- **失败也要落表**：校验失败 ⇒ **先提交 check 行再抛原异常**（`getDb` 在异常时 rollback，
+  否则证据随事务消失）⇒ 「不得激活」才可证（M1-a DoD 第 3 条）。
+- **闸门口径零漂移**：`checksToGateResult(evaluatePublishChecks(m)) == evaluatePublishGate(m)`。
+- **闸门与落表同源**：校验项集合**只算一次**，闸门结论与落表行都从它派生
+  （否则「闸门算一遍、落表再算一遍」会静默错位）。
+- **失败尝试也留痕（`audit_log`）**：check 表是覆盖写的 ⇒ 上一轮的 FAIL 行会被下一轮删掉。
+  唯一写 `audit_log` 的地方是**成功**的状态迁移 ⇒ 被闸门拦下的那次尝试在两边都没痕迹，
+  「那次被哪一条拦下的」就再也查不到 —— **而这正是这张表要回答的问题**。
+  ⇒ 失败路径补一条审计：`action="UPDATE"`（审计动作是**封闭词表**，扩词要改 ORM CHECK + 占迁移号），
+  `after` 里带 `blocked=true` / `phase` / `blockerCount` / `blockers` / `errorCount` / `checkCount`。
+- **上限从契约推导，截断必须显式标记**：上限 = `2 + 3 × MAX_MANIFEST_METRICS`
+  （`MAX_MANIFEST_METRICS` = Manifest 契约 `metrics` 数组的 `maxItems`，从
+  `semantic_manifest_schema` 导出）。⚠️ 写死一个「看起来更宽」的数会出事：
+  契约允许的**合法** manifest 也会被截断，而截断丢的是**尾部**校验项 ——
+  尾部往往正是最后一条指标的 ERROR 结论行。
+  ⇒ 超限时保留上限-1 条 + 追加一条 `CHECKS_TRUNCATED`（`severity=ERROR` / `result=FAIL`）合成行：
+  表里查得到「报告被截断」，闸门把它当**阻断项**（fail-closed），且闸门与落表用**同一个集合**。
+
+### 读接口分页口径
+
+`GET /api/v1/semantic/releases/{releaseId}/checks` 支持 `limit`（1~200，默认 50）/ `offset`（≥0）。
+⚠️ `rows` 是**当前页**，而 `total` 与 `summary` 覆盖**全部行** ——
+否则读者翻到第二页、看到「这一页没有 ERROR」就会误判「整体通过」。
+
+校验项目录（新增校验项只加常量，不改表结构）：
+
+| code | 目标类型 | severity | 判据 |
+|---|---|---|---|
+| `SNAPSHOT_INTEGRITY` | RELEASE | ERROR | 快照规范化 / 体量 / 哈希一致 |
+| `MANIFEST_SCHEMA` | RELEASE | ERROR | Manifest 满足 v1 契约 |
+| `METRIC_SOURCE_PRESENT` | METRIC | WARNING | 指标有源类引用 |
+| `METRIC_NUMERATOR_LANDING` | METRIC | WARNING/ERROR | 指标分子度量有落点类 |
+| `METRIC_DENOMINATOR_LANDING` | METRIC | WARNING/ERROR | 指标分母度量有落点类（仅 RATIO/DIFFERENCE） |
+| `CHECKS_TRUNCATED` | RELEASE | ERROR | 结论条数超上限（报告不完整 ⇒ 阻断） |
+
+（M1-1.3 会把「采购源绑定缺 JOIN」等采购域校验项接进**同一张表** —— 机制先立，判据后加。）
+
+> 事实源：`backend/app/domain/semantic_release_check_models.py`（ORM）、
+> `backend/app/services/semantic_release_checks.py`（纯评估）、
+> `backend/app/services/semantic_release_check_service.py`（落表 / 回读）。
+> 真机验证：`backend/scripts/semantic_release_check_realdata.py`。
+
+> 事实源：`backend/app/domain/semantic_release_check_models.py`（ORM）、
+> `backend/app/services/semantic_release_checks.py`（纯评估）、
+> `backend/app/services/semantic_release_check_service.py`（落表 / 回读）。

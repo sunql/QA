@@ -37,6 +37,12 @@ from app.services.semantic_registry_service import (
     SemanticReleaseIntegrityError,
     semanticRegistry,
 )
+from app.services.semantic_release_checks import (
+    RESULT_FAIL,
+    RESULT_PASS,
+    SEVERITY_ERROR,
+    PublishCheck,
+)
 from app.services.semantic_release_service import semanticReleaseService
 
 _MINIMAL_MANIFEST: dict[str, Any] = {
@@ -565,3 +571,228 @@ async def test_resolve_manifest_entities_reports_missing_entities(
         },
     )
     assert "MIRROR_CLASS_MISSING" not in resolution.classIds
+
+
+async def test_replace_checks_truncates_beyond_the_cap(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """纵深防御：绕过契约的 manifest 也不得把一次写入撑到不可控。
+
+    但截断**不是静默的** ⇒ 必须落一条 `CHECKS_TRUNCATED`（ERROR/FAIL）合成行：
+    表里查得到「这份报告被截断」，且闸门把它当阻断项（fail-closed）。
+    静默截断 = 假绿：读者看到「有结论」却不知道结论不完整。
+
+    ⚠️ monkeypatch 打在 **checks 模块**（`capChecks` 在那里读常量），
+    不是 check_service 模块 —— 打在错模块上会得到「没截断」的假绿。
+    """
+    from app.services import semantic_release_check_service as checkServiceModule
+    from app.services import semantic_release_checks as checksModule
+
+    release = await _insertRelease(session, version="2026.11.18-cap")
+    monkeypatch.setattr(checksModule, "MAX_CHECKS_PER_RELEASE", 3)
+
+    checks = tuple(
+        PublishCheck(
+            code=f"CODE_{index}",
+            item=f"校验项 {index}",
+            severity=SEVERITY_ERROR,
+            result=RESULT_PASS,
+            targetType="METRIC",
+            targetKey=f"M_{index}",
+            detail=f"第 {index} 项",
+        )
+        for index in range(5)
+    )
+    written = await checkServiceModule.semanticReleaseCheckService.replaceChecks(
+        session, release.id, checks, actor="tester"
+    )
+    await session.commit()
+
+    # 上限 3 ⇒ 保留前 2 条 + 1 条截断合成行 = 3 行。
+    assert written == 3
+    stored = await checkServiceModule.semanticReleaseCheckService.listChecks(
+        session, release.id
+    )
+    assert [row.check_code for row in stored] == [
+        "CODE_0",
+        "CODE_1",
+        "CHECKS_TRUNCATED",
+    ]
+    truncated = stored[-1]
+    assert truncated.severity == checksModule.SEVERITY_ERROR
+    assert truncated.result == checksModule.RESULT_FAIL
+    assert all(row.checked_by == "tester" for row in stored)
+
+    # 截断行必须**阻断**闸门（报告不完整 ⇒ 不得据此放行）。
+    gate = checksModule.checksToGateResult(stored and tuple(
+        checksModule.PublishCheck(
+            code=row.check_code,
+            item=row.check_item,
+            severity=row.severity,
+            result=row.result,
+            targetType=row.target_type,
+            targetKey=row.target_key,
+            detail=row.detail,
+        )
+        for row in stored
+    ))
+    assert gate.canPublish is False
+
+
+async def test_replace_checks_overwrites_previous_rows(session: AsyncSession) -> None:
+    """覆盖写：第二次评估只保留新结论（旧行被删），行数不随评估轮次增长。"""
+    from app.services import semantic_release_check_service as checkServiceModule
+
+    release = await _insertRelease(session, version="2026.11.18-overwrite")
+    service = checkServiceModule.semanticReleaseCheckService
+
+    await service.replaceChecks(
+        session,
+        release.id,
+        (
+            PublishCheck(
+                code="CODE_OLD",
+                item="旧校验项",
+                severity=SEVERITY_ERROR,
+                result=RESULT_FAIL,
+                detail="旧结论",
+            ),
+        ),
+        actor="tester",
+    )
+    await service.replaceChecks(
+        session,
+        release.id,
+        (
+            PublishCheck(
+                code="CODE_NEW",
+                item="新校验项",
+                severity=SEVERITY_ERROR,
+                result=RESULT_PASS,
+                detail="新结论",
+            ),
+        ),
+        actor="tester",
+    )
+    await session.commit()
+
+    stored = await service.listChecks(session, release.id)
+    assert [row.check_code for row in stored] == ["CODE_NEW"]
+
+
+# ---------------------------------------------------------------------------
+# 失败路径留痕（证据先行）
+# ---------------------------------------------------------------------------
+
+
+async def test_blocked_validation_leaves_an_audit_trace(
+    session: AsyncSession,
+) -> None:
+    """**失败尝试也留痕**（评审 HIGH）：check 表是覆盖写的。
+
+    唯一写 audit_log 的地方是「成功」的状态迁移 ⇒ 被闸门拦下的那次尝试
+    在 check 表与 audit_log 两边都没有痕迹：下一轮重评估把上一轮的 FAIL 行删掉后，
+    「那次被哪一条拦下的」就再也查不到了 —— 而这正是这张表要回答的问题。
+
+    ⇒ 失败路径必须补一条审计（action 复用封闭词表里的 `UPDATE`）。
+    """
+    row = await _insertRelease(
+        session, version="2026.11.18-blocked-audit", manifest=dict(_BLOCKED_MANIFEST)
+    )
+
+    with pytest.raises(ConflictError):
+        await semanticReleaseService.markValidated(session, row.id, actor="tester")
+
+    auditRows = (
+        (
+            await session.execute(
+                select(AuditLog)
+                .where(
+                    AuditLog.entity_type == "semantic_release",
+                    AuditLog.entity_id == row.id,
+                )
+                .order_by(AuditLog.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    assert len(auditRows) == 1, "失败尝试必须留下恰好一条审计"
+    audit = auditRows[0]
+    assert audit.action == "UPDATE"
+    after = audit.after_json or {}
+    assert after["blocked"] is True
+    assert after["phase"] == "validate"
+    assert after["status"] == "DRAFT", "状态没变（失败不改状态）"
+    assert after["blockerCount"] >= 1
+    assert after["blockers"], "必须记下是被哪一条拦下的"
+    assert after["errorCount"] >= 1
+    assert after["checkCount"] >= 1
+
+
+async def test_blocked_activation_leaves_an_audit_trace(session: AsyncSession) -> None:
+    """activate 被拦 ⇒ 同样留痕，且 `phase` 能区分是哪一步被拦的。"""
+    row = await _insertRelease(
+        session,
+        version="2026.11.18-blocked-activate",
+        status="VALIDATED",
+        manifest=dict(_BLOCKED_MANIFEST),
+    )
+
+    with pytest.raises(ConflictError):
+        await semanticReleaseService.activate(session, row.id, actor="tester")
+
+    auditRows = (
+        (
+            await session.execute(
+                select(AuditLog)
+                .where(
+                    AuditLog.entity_type == "semantic_release",
+                    AuditLog.entity_id == row.id,
+                )
+                .order_by(AuditLog.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    assert len(auditRows) == 1
+    after = auditRows[0].after_json or {}
+    assert after["blocked"] is True
+    assert after["phase"] == "activate"
+    assert after["status"] == "VALIDATED"
+
+    await session.refresh(row)
+    assert row.status == "VALIDATED", "被拦下的激活不得改状态"
+
+
+async def test_successful_validation_leaves_no_blocked_audit(
+    session: AsyncSession,
+) -> None:
+    """正常路径**不得**多写一条 blocked 审计（否则审计里全是噪音）。"""
+    draft = (
+        await semanticReleaseService.createDraft(
+            session, version="2026.11.18-clean-audit", actor="tester"
+        )
+    ).release
+    await semanticReleaseService.markValidated(session, draft.id, actor="tester")
+
+    auditRows = (
+        (
+            await session.execute(
+                select(AuditLog)
+                .where(
+                    AuditLog.entity_type == "semantic_release",
+                    AuditLog.entity_id == draft.id,
+                )
+                .order_by(AuditLog.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    assert [row.action for row in auditRows] == ["CREATE", "UPDATE"]
+    assert all((row.after_json or {}).get("blocked") is not True for row in auditRows)

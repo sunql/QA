@@ -65,3 +65,41 @@ class SemanticReleaseOperationRead(CamelModel):
     release: SemanticReleaseSummaryRead
     blockers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class SemanticReleaseCheckRead(CamelModel):
+    """一条发布校验结论（`semantic_release_check` 的一行）。
+
+    `severity` 是「若失败会有多严重」，`result` 是「这次结论」——
+    两者正交，见 `semantic_release_check_models` 的模块文档串。
+    """
+
+    id: int
+    release_id: int
+    check_code: str
+    check_item: str
+    severity: str
+    result: str
+    target_type: str | None
+    target_key: str | None
+    detail: str
+    checked_time: datetime
+    checked_by: str | None
+
+
+class SemanticReleaseCheckSummary(CamelModel):
+    """校验结论汇总：前端据此判断「能不能发」。"""
+
+    total: int
+    passed: int
+    failed: int
+    error_count: int
+    warning_count: int
+
+
+class SemanticReleaseCheckPage(CamelModel):
+    """某次发布的全部校验结论 + 汇总。"""
+
+    rows: list[SemanticReleaseCheckRead]
+    total: int
+    summary: SemanticReleaseCheckSummary

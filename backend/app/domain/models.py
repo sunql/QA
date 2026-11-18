@@ -2886,3 +2886,8 @@ from app.domain import workflow_models as _workflow_models  # noqa: E402,F401
 # 都靠 Base.metadata 看见这些表**，漏 import ⇒ 被误报成 `extra_table`（drift）
 # 或被 autogenerate 提议 DROP。
 from app.domain import procurement_binding_models as _procurement_binding_models  # noqa: E402,F401
+
+# 发布校验结论（M1-1.2，0155）：`semantic_release_check`。同理由——
+# **Schema drift 校验与 alembic autogenerate 都靠 Base.metadata 看见这些表**，
+# 漏 import ⇒ 被误报成 `extra_table`（drift）或被 autogenerate 提议 DROP。
+from app.domain import semantic_release_check_models as _semantic_release_check_models  # noqa: E402,F401

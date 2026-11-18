@@ -106,7 +106,9 @@ def checkSlotCounts(repoRoot: Path, pkg: Path) -> list[str]:
         problems.append(f"slotCounts 出现未定义的状态项 {sorted(extra)}")
 
     problems.extend(_checkPublishSplit(model))
+    problems.extend(_checkScopeCounts(model))
     problems.extend(_checkSupplementarySlots(model))
+    problems.extend(_checkSummaryBuckets(model))
     return problems
 
 
@@ -133,14 +135,63 @@ def _checkPublishSplit(model: lib.SlotModel) -> list[str]:
     return problems
 
 
+def _checkScopeCounts(model: lib.SlotModel) -> list[str]:
+    """`slotCounts.scope` 声明的口径数字必须与**实际重算值**对得上。
+
+    v5 修 MEDIUM-3：`scope` 里的「13 个模型槽位 × 12 KPI」「另有 N 项」
+    「合计槽位条目 M」此前**没人读** ⇒ 产物把这几个数字改错，检查器照样全绿。
+    """
+    scope = lib.parseScopeCounts(model.summary.get("slotCounts", {}).get("scope"))
+    problems: list[str] = []
+    missing = scope.missingFields()
+    if missing:
+        problems.append(f"slotCounts.scope 解析不出口径数字：{list(missing)}")
+        return problems
+
+    if scope.modelSlots != len(lib.MODEL_SLOTS):
+        problems.append(
+            f"scope 声明 {scope.modelSlots} 个模型槽位 ≠ 实际 {len(lib.MODEL_SLOTS)}"
+        )
+    if scope.kpiCount != len(model.order):
+        problems.append(f"scope 声明 {scope.kpiCount} 条 KPI ≠ 实际 {len(model.order)}")
+
+    supplementary = len(lib.supplementaryEntries(model))
+    expectedTotal = lib.EXPECTED_SLOT_TOTAL + supplementary
+    if scope.totalEntries != expectedTotal:
+        problems.append(
+            f"scope 的合计槽位条目 {scope.totalEntries} ≠ "
+            f"{lib.EXPECTED_SLOT_TOTAL} + {supplementary} = {expectedTotal}"
+        )
+
+    metricCount = model.meta.get("metricCount")
+    if metricCount != len(model.order):
+        problems.append(f"meta.metricCount={metricCount} ≠ 实际 KPI 数 {len(model.order)}")
+    return problems
+
+
 def _checkSupplementarySlots(model: lib.SlotModel) -> list[str]:
-    """补充注记槽：形态与 `slotCounts.scope` 声明的「另有 6 项」都要对得上。"""
+    """补充注记槽：条目数与形态都要与 `slotCounts.scope` 的声明对得上。
+
+    条目数**从 scope 解析**（不写死常量）⇒ 产物改 `scope` 的数字也能被抓到。
+    """
     problems: list[str] = []
     entries = lib.supplementaryEntries(model)
-    if len(entries) != lib.EXPECTED_SUPPLEMENTARY_ENTRIES:
-        problems.append(
-            f"补充注记槽条目 {len(entries)} ≠ 声明的 {lib.EXPECTED_SUPPLEMENTARY_ENTRIES}"
-        )
+    scope = lib.parseScopeCounts(model.summary.get("slotCounts", {}).get("scope"))
+
+    declared = scope.supplementaryEntries
+    if declared is None:
+        problems.append("slotCounts.scope 解析不出「另有 N 项」⇒ 补充注记槽条目数无法对账")
+    elif len(entries) != declared:
+        problems.append(f"补充注记槽条目 {len(entries)} ≠ scope 声明的 {declared}")
+
+    if scope.supplementaryNames:
+        unknown = sorted(set(scope.supplementaryNames) - set(lib.SUPPLEMENTARY_SLOT_SHAPES))
+        if unknown:
+            problems.append(f"scope 点名的补充注记槽没有登记形态：{unknown}")
+        unnamed = sorted(set(lib.SUPPLEMENTARY_SLOT_SHAPES) - set(scope.supplementaryNames))
+        if unnamed:
+            problems.append(f"scope 没有点名已登记的补充注记槽：{unnamed}")
+
     for code, name, value in entries:
         expected = lib.SUPPLEMENTARY_SLOT_SHAPES.get(name)
         if expected is None:
@@ -148,6 +199,34 @@ def _checkSupplementarySlots(model: lib.SlotModel) -> list[str]:
             continue
         if _kindOf(value) != expected:
             problems.append(f"{code}.{name}：形态是 {_kindOf(value)}，应为 {expected}")
+    return problems
+
+
+def _checkSummaryBuckets(model: lib.SlotModel) -> list[str]:
+    """`summary.fullyConfirmed` / `conditional` / `blocked` 三个桶的 KPI 码必须合法且覆盖全部。
+
+    这三个桶此前**完全没人断言** ⇒ 桶里写错 KPI 码、或漏掉某条 KPI，检查器照样全绿。
+    """
+    problems: list[str] = []
+    codes = set(model.order)
+    covered: set[str] = set()
+    for name in ("fullyConfirmed", "conditional", "blocked"):
+        items = model.summary.get(name, [])
+        if not isinstance(items, list):
+            problems.append(f"summary.{name} 不是数组")
+            continue
+        for item in items:
+            code = lib.kpiCodeOf(item)
+            if not code:
+                problems.append(f"summary.{name} 含无法解析的 KPI 码：{item!r}")
+                continue
+            if code not in codes:
+                problems.append(f"summary.{name} 含未知 KPI：{code}")
+                continue
+            covered.add(code)
+    missing = sorted(codes - covered)
+    if missing:
+        problems.append(f"fullyConfirmed/conditional/blocked 三桶漏掉的 KPI：{missing}")
     return problems
 
 

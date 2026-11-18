@@ -1,0 +1,83 @@
+{
+  "manifestVersion": "1.0",
+  "release": {
+    "releaseId": 42,
+    "releaseCode": "PROCUREMENT_2026_11_R1",
+    "compilerVersion": "0.1.0",
+    "hash": "sha256:..."
+  },
+  "domains": [
+    "PROCUREMENT"
+  ],
+  "entities": [
+    {
+      "code": "SUPPLIER",
+      "className": "Supplier",
+      "businessObjectCode": "SUPPLIER",
+      "graph": {
+        "label": "Supplier",
+        "keyProperty": "key"
+      },
+      "identity": {
+        "strategy": "ENTITY_MAPPING",
+        "entityType": "SUPPLIER"
+      },
+      "properties": [
+        {
+          "code": "supplierCode",
+          "source": {
+            "bindingId": 10,
+            "column": "BPSNUM_0"
+          }
+        },
+        {
+          "code": "supplierName",
+          "source": {
+            "bindingId": 10,
+            "column": "BPSNAM_0"
+          }
+        }
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "code": "SUPPLIES",
+      "source": "SUPPLIER",
+      "target": "MATERIAL",
+      "graphRelation": "SUPPLIES",
+      "sqlJoinPathRef": null
+    }
+  ],
+  "sql": {
+    "datasources": [
+      {
+        "id": 3,
+        "dialect": "oracle",
+        "readOnly": true
+      }
+    ],
+    "joins": [],
+    "metrics": []
+  },
+  "retrieval": {
+    "documentCollection": "document_embeddings",
+    "securityFilterRequired": true,
+    "effectiveDateFilterRequired": true
+  },
+  "agents": [
+    {
+      "agentCode": "PROCUREMENT_SOURCING",
+      "allowedTools": [
+        "supplier_search",
+        "supplier_360",
+        "supplier_risk",
+        "graph_traverse"
+      ],
+      "dataDomains": [
+        "PROCUREMENT"
+      ],
+      "readOnly": true
+    }
+  ]
+}

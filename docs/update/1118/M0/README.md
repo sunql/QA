@@ -2,7 +2,7 @@
 
 > 归属：`docs/update/1118/智能采购平台_V0.3落地实施计划_M0-M7_1118.md` §4 M0（8–12 人日）
 > 建立日期：2026-11-18
-> 状态：🟢 0.1 / 0.2 / 0.3 已完成 · 0.4 **已完成（A4 渲染顺序 + A5 答案级评估首跑）** · 0.5 **A6 ✅ 归因 + A7 ✅ 槽位模板**（A8 源绑定候选待做）· 0.6 已下发回收中
+> 状态：🟢 0.1 / 0.2 / 0.3 已完成 · 0.4 **已完成（A4 渲染顺序 + A5 答案级评估首跑）** · 0.5 **A6 ✅ 归因 + A7 ✅ 槽位模板 + A8 ✅ 源绑定候选与表结构设计**（**M0 轨 A 全部完成**）· 0.6 已下发回收中
 
 ---
 
@@ -14,7 +14,7 @@
 | 0.2 | 开关策略落地（**6** 个 `ENABLE_*` 本地全开 + 开/关两态用例 + **backend/worker 两侧一致**） | 1–1.5 | ✅ **已完成 2026-11-18** | [`evidence/switch-matrix.md`](./evidence/switch-matrix.md) |
 | 0.3 | **《本地全绿判据书》** + 验收包目录规范 | 1–1.5 | ✅ **v1.0 定稿 2026-11-18**（待三方签署） | [`本地全绿判据书.md`](./本地全绿判据书.md) + [`evidence/`](./evidence/) / [`report/`](./report/) / [`q/`](./q/) 骨架 |
 | 0.4 | **G3 遗留闭环**（渲染顺序统一 + 答案级评估） | 2–3 | ✅ **已完成 2026-11-18**：A4 V1–V5 过；A5 自检 33/33、单测 41 passed、首跑 4/4 题 exit 0 且 J = 0（**L2–L5 未判**，见证据 §7） | [`M0.4-G3修复方案与答案级评估口径.md`](./M0.4-G3修复方案与答案级评估口径.md) + [`evidence/render-order.md`](./evidence/render-order.md) + [`evidence/answer-parity.md`](./evidence/answer-parity.md) |
-| 0.5 | KPI 口径 P0 数据归一（12 条逐条归因 + 落库槽位） | 3–5 | 🟡 **A6 ✅ 2026-11-18**（12 条四分类 = 1/9/0/2；alias 45 列映射 dry-run）· **A7 ✅ 2026-11-18**（13 槽位定义 + 12×13 空槽矩阵 + 题号↔字段映射 + 5 类装不下的能力边界）；A8 源绑定候选待做 | [`M0.5-KPI归因清单.md`](./M0.5-KPI归因清单.md) + [`M0.5-KPI口径槽位模板.md`](./M0.5-KPI口径槽位模板.md) + [`kpi-attribution.json`](./kpi-attribution.json) + [`property-alias-mapping.json`](./property-alias-mapping.json) + [`evidence/kpi-attribution-probe.txt`](./evidence/kpi-attribution-probe.txt) + [`evidence/kpi-slot-snapshot.txt`](./evidence/kpi-slot-snapshot.txt) + [`evidence/kpi-time-column-candidates.txt`](./evidence/kpi-time-column-candidates.txt) |
+| 0.5 | KPI 口径 P0 数据归一（12 条逐条归因 + 落库槽位） | 3–5 | ✅ **A6 ✅ 2026-11-18**（12 条四分类 = 1/9/0/2；alias 45 列映射 dry-run）· **A7 ✅ 2026-11-18**（13 槽位定义 + 12×13 空槽矩阵 + 题号↔字段映射 + 5 类装不下的能力边界）· **A8 ✅ 2026-11-18**（34 条候选绑定 = 28 unique + 6 schema-ambiguous + 0 not-found；两张表列级设计；**建表留 M1-1.1**） | [`M0.5-KPI归因清单.md`](./M0.5-KPI归因清单.md) + [`M0.5-KPI口径槽位模板.md`](./M0.5-KPI口径槽位模板.md) + [`A8-采购源绑定候选与表结构设计.md`](./A8-采购源绑定候选与表结构设计.md) + [`kpi-attribution.json`](./kpi-attribution.json) + [`property-alias-mapping.json`](./property-alias-mapping.json) + [`procurement-source-binding-candidates.json`](./procurement-source-binding-candidates.json) + [`evidence/kpi-attribution-probe.txt`](./evidence/kpi-attribution-probe.txt) + [`evidence/kpi-slot-snapshot.txt`](./evidence/kpi-slot-snapshot.txt) + [`evidence/kpi-time-column-candidates.txt`](./evidence/kpi-time-column-candidates.txt) + [`evidence/procurement-binding-resolve.txt`](./evidence/procurement-binding-resolve.txt) |
 | 0.6 | **发出 4 份业务问卷** | 0.5–1 | 🟢 **已下发 2026-11-18，回收中** | [`业务问卷/`](./业务问卷/) |
 
 ---
@@ -91,6 +91,8 @@ M0/
 ├── M0.4-G3修复方案与答案级评估口径.md  # 0.4
 ├── M0.5-KPI归因清单.md              # 0.5 · A6（12 条四分类 + alias 映射）
 ├── M0.5-KPI口径槽位模板.md           # 0.5 · A7（13 槽位定义 + 题号映射）
+├── A8-采购源绑定候选与表结构设计.md  # 0.5 · A8（34 条候选 + 两张表列级设计）
+├── procurement-source-binding-candidates.json  # 0.5 · A8（机器可校验的候选绑定）
 ├── A1-本地栈同构核对表.md            # 0.1
 ├── evidence/                      # 各判据的可归档证据（原始输出）
 │   ├── switch-matrix.md           # 0.2 · 判据 3（6×2 两态矩阵）
@@ -98,7 +100,8 @@ M0/
 │   ├── answer-parity.md           # 0.4 · A5（答案级评估器 + 首跑）
 │   ├── kpi-attribution-probe.txt  # 0.5 · A6（12 条事实 + 对账）
 │   ├── kpi-slot-snapshot.txt      # 0.5 · A7（12×13 槽位现状）
-│   └── kpi-time-column-candidates.txt  # 0.5 · A7（time_column 候选）
+│   ├── kpi-time-column-candidates.txt  # 0.5 · A7（time_column 候选）
+│   └── procurement-binding-resolve.txt # 0.5 · A8（34 类解析 / 列缺口 / 墓碑引用 / THBI vs ZJTH）
 ├── report/                        # 汇总报告（e2e / coverage / performance）
 │   └── README.md                  # 约定与纪律
 ├── q/                             # 逐问证据 Q01–Q07 / P-01…P-14（到里程碑才建）
@@ -128,7 +131,8 @@ M0/
 | **汇合点 G1** | 逐题登记 → 答案填槽 → 候选确认 → 口径注入 → 未答降级 → 按实际回收质量重排 |
 | **三条硬纪律** | ① 口径**不写死**（只做槽位）② **候选 ≠ 结论**（不进生产）③ **禁伪并行**（没有验收包不算进行中） |
 
-> **产能对照**：回收窗口 1 周 ≈ 12–15 人日 ≈ 轨 A 的 A1–A7（10.5–16.5 人日）⇒ **M0 恰好在回收回来之前做完**，两条线在窗口末尾汇合。
+> **产能对照（2026-11-18 修正）**：回收窗口 1.5 周 ≈ 12–15 人日；轨 A 的 A1–A7 估工 10.5–16.5 人日，**追加 A8（3–5）后合计 13.5–21.5 人日 ⇒ 上界溢出窗口**。
+> 实际执行：A8 只交付「34 条候选 + 两张表列级设计」，**DDL 属 M1-1.1**（8–12 人日，已在 §8 的排期里），故不重复计入；按 §8，M1 建表 W1–W3 启动、W4–W5 完成，溢出部分由此吸收。
 
 ---
 

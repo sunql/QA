@@ -3,7 +3,7 @@
 - **日期**：2026-10-18
 - **作者**：Claude
 - **Phase**：Phase 1 多步 NL2SQL（L1 线性计划）
-- **状态**：in-review
+- **状态**：**已合并**（PR #59 → squash `3c3c85ad`；分支原始 commit `e492b68b` 未入主线，勿再以它判定合并状态）
 - **关联变更**：[chore-chart-service-deadcode](../chore-chart-service-deadcode/summary.md)（同为死代码清理批次）、[chore-l3-deadcode-and-prior-cte-contract](../chore-l3-deadcode-and-prior-cte-contract/summary.md)
 - **迁移版本**：无
 - **MEMORY**：[../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-multistep-dep-scaffold-removed.md](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-multistep-dep-scaffold-removed.md)

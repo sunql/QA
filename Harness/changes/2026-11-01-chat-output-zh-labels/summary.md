@@ -2,7 +2,7 @@
 
 - **日期**：2026-11-01
 - **分支**：`feat/chat-output-zh-labels`（base `main` @ `b368b016`（#95 之后）；rebase 前曾基于 `af0ccc9a`）
-- **状态**：已实施，定向回归全绿，待合并
+- **状态**：已实施，定向回归全绿，**已合并并部署**（PR #94 squash → `0e248bca`；随 1101 批次部署，生产 alembic `0140`）
 - **关联**：[2026-10-31-chat-output-sync](../2026-10-31-chat-output-sync/summary.md)（同一批图表/表格渲染链的下一批）
 
 ---

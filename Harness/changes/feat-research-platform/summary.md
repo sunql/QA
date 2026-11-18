@@ -3,7 +3,7 @@
 - **日期**：2026-10-13
 - **作者**：Claude / 启琳
 - **Phase**：**环节二** 研究平台级增强（Task 10–16）
-- **状态**：in-review（13 个提交在分支 `feat/multi-step-persist`，HEAD `09173fd35b6322df705f278d8cfd8a604416272`；**未合并 main**）
+- **状态**：**已合并**（随分支 `feat/multi-step-persist` 经 PR #8 → merge commit `b3889ef2` 于 2026-10-14 入 main；本文记录的 HEAD `09173fd3` 亦在 main 历史中）
 - **关联变更**：
   - predecessor：环节一 [feat-research-evidence-contract](../feat-research-evidence-contract/summary.md)（Task 1–9，已合入本分支 `0eef8f4`）
   - 邻近变更（同分支、不同域）：`feat-multi-step-persist`（chat 侧多步落库/续跑）

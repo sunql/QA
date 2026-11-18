@@ -3,7 +3,7 @@
 - **日期**：2026-11-06
 - **作者**：Claude
 - **Phase**：Phase 5 工程保障（CI 合并判据工具化）
-- **状态**：in-review（待合并；本批落地**依赖 owner 越权口** `enforce_admins: false`）
+- **状态**：**已合并**（PR #108 → `88599b19`；落地依赖 owner 越权口 `enforce_admins: false`，该口仅剩此项待收口）
 - **关联变更**：[2026-11-05-defect-priority-plan](../2026-11-05-defect-priority-plan/summary.md)（上一批；§10.6 记录了 PR #107 的闸门实操与越权口安装缺口 N7）
 - **迁移版本**：无（本批**零 DDL、零生产写、零生产读**）
 - **计划**：[plan.md](./plan.md)（本批实施计划：方案对比 + TDD 任务清单 T1–T6）

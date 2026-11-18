@@ -3,7 +3,7 @@
 - **日期**：2026-10-18
 - **作者**：Claude / phase3-reconciler
 - **Phase**：Phase 3 P2 收尾（errorType 端到端）
-- **状态**：in-review
+- **状态**：**已合并**（PR #63 → `dc4d854a`，SSE errorType 端到端透传 + 白名单提示）；纯前端、零迁移，前端重建后生效
 - **关联变更**：[2026-10-15-phase3-reconciled-main](../2026-10-15-phase3-reconciled-main/summary.md)（P2-1 分类器）、[chore-p2-residual-cleanup](../chore-p2-residual-cleanup/summary.md)（同批 P2 收尾）
 - **迁移版本**：无
 - **MEMORY**：[qa-system-errortype-end-to-end.md](../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-errortype-end-to-end.md)

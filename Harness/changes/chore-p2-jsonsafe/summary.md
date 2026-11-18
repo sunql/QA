@@ -3,7 +3,7 @@
 - **日期**：2026-10-18
 - **作者**：Claude / phase3-reconciler
 - **Phase**：Phase 3 P2 收尾（JSONB 归一 SSOT 收敛）
-- **状态**：in-review
+- **状态**：**已合并**（PR #64 → `1c7e2f95`，`_jsonSafe` 收敛进 `utils.json_safe` SSOT）；零迁移、无生产写
 - **关联变更**：[chore-p2-residual-cleanup](../chore-p2-residual-cleanup/summary.md)、[chore-p2-cost-source](../chore-p2-cost-source/summary.md)、[chore-p2-errortype](../chore-p2-errortype/summary.md)（同批 P2 收尾）
 - **迁移版本**：无
 

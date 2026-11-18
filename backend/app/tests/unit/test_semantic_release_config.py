@@ -58,13 +58,46 @@ def test_flag_off_never_warns() -> None:
     assert semanticReleaseAuthMisconfiguration(settings) is None
 
 
-def test_real_auth_with_stub_headers_still_warns() -> None:
-    """AUTH_MODE=real 但放行 stub 头，门禁同样可伪造。"""
+def test_real_auth_with_stub_enabled_but_headers_denied_is_clean() -> None:
+    """AUTH_MODE=real 且 ALLOW_STUB_WHEN_REAL=false ⇒ stub 头在解析前就被拒。
+
+    `AUTH_STUB_ENABLED=true` 只在落到 stub 分支后才被检查 ⇒ 不构成暴露面，
+    不该告警（否则本地栈全开开关时会刷 5 条假 ERROR，真告警失去信号价值）。
+    """
     settings = Settings(
         _env_file=None,
         ENABLE_SEMANTIC_RELEASE="true",
         AUTH_MODE="real",
         AUTH_STUB_ENABLED="true",
+        ALLOW_STUB_WHEN_REAL="false",
+        JWT_SECRET="test-secret-at-least-32-chars-long-000",
+    )
+
+    assert semanticReleaseAuthMisconfiguration(settings) is None
+
+
+def test_real_auth_allowing_stub_headers_but_stub_disabled_is_clean() -> None:
+    """real + ALLOW_STUB_WHEN_REAL=true 但 AUTH_STUB_ENABLED=false ⇒ 仍走不到 stub 分支。"""
+    settings = Settings(
+        _env_file=None,
+        ENABLE_SEMANTIC_RELEASE="true",
+        AUTH_MODE="real",
+        AUTH_STUB_ENABLED="false",
+        ALLOW_STUB_WHEN_REAL="true",
+        JWT_SECRET="test-secret-at-least-32-chars-long-000",
+    )
+
+    assert semanticReleaseAuthMisconfiguration(settings) is None
+
+
+def test_real_auth_allowing_stub_headers_still_warns() -> None:
+    """AUTH_MODE=real 但 ALLOW_STUB_WHEN_REAL=true ⇒ stub 头可伪造，必须告警。"""
+    settings = Settings(
+        _env_file=None,
+        ENABLE_SEMANTIC_RELEASE="true",
+        AUTH_MODE="real",
+        AUTH_STUB_ENABLED="true",
+        ALLOW_STUB_WHEN_REAL="true",
         JWT_SECRET="test-secret-at-least-32-chars-long-000",
     )
 

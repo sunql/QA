@@ -120,9 +120,20 @@ info "预检"
 req "$BASE_URL/api/v1/health"
 check "后端可访问" "200" "$CODE"
 
-# 开关关闭时整组路由不注册 ⇒ GET /instances 是 404；开启后是 405（该路径只允许 POST）。
-req "$BASE_URL/api/v1/workflow/instances"
-check "ENABLE_WORKFLOW 已开启（路由已注册）" "405" "$CODE"
+# 开关关闭时整组路由不注册 ⇒ /openapi.json 里没有该路径；开启后才有。
+# 不用状态码判定：`/instances` 同时注册了 GET（列表）与 POST，未鉴权 GET 在
+# AUTH_MODE=stub 下返回 200、real 下返回 403，只有方法不符才是 405 ⇒ 状态码
+# 判据天然不稳。OpenAPI 成员判定与鉴权模式无关，直接对应「路由是否注册」。
+# 正向对照：未知路径必须 404，否则「路径缺失 ⇒ 已关闭」失去区分力。
+req "$BASE_URL/api/v1/definitely-not-a-route"
+check "未知路径返回 404（探测器有区分力）" "404" "$CODE"
+
+req "$BASE_URL/openapi.json"
+if [[ "$CODE" == "200" ]] && jq -e '.paths | has("/api/v1/workflow/instances")' <<<"$BODY" >/dev/null 2>&1; then
+  pass "ENABLE_WORKFLOW 已开启（openapi 含 /api/v1/workflow/instances）"
+else
+  fail "ENABLE_WORKFLOW 已开启（openapi 缺 /api/v1/workflow/instances，HTTP ${CODE}）"
+fi
 
 if docker inspect -f '{{.State.Running}}' "$WORKER_CONTAINER" 2>/dev/null | grep -qx true; then
   pass "worker 容器 $WORKER_CONTAINER 在运行"

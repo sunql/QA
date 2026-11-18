@@ -105,8 +105,8 @@ def _dataset(*, extraSupplierProp: bool = False):
     那一版快照与直读治理表**事实不一致** ⇒ 守卫必须拒绝它（降级直读）。
     """
     supplierProps = [
-        # 物理行序刻意不按名字排：快照侧按 propertyName 排序 ⇒ 两侧列序不同、
-        # 内容相同（与生产同形）。
+        # 物理行序刻意不按名字排（与生产同形）。A4 起渲染器按共享排序键重排，
+        # 两侧列序一致 ⇒ 本文件只关心「读哪一版」，不关心行序。
         _prop(101, SUPPLIER_ID, "SUPPLIER_NAME"),
         _prop(102, SUPPLIER_ID, "SUPPLIER_CODE", isPk=True),
     ]
@@ -280,11 +280,13 @@ class Test钉住语义发布:
 
         assert replay.text == first.text
         assert replay.semanticReleaseId == _RELEASE_A
-        # 对照组：真去用 B ⇒ 守卫拒绝 ⇒ 文本回到直读口径（与钉住 A 不同）
+        # 对照组：真去用 B ⇒ 守卫拒绝 ⇒ 降级直读。A4 起直读与快照**逐字节相同**
+        # ⇒ 文本不再是「走了哪条路径」的判据（这正是方案 B 的目的），
+        # **发布 id 才是**：钉住 A 回报 A，被拒的 B 回报 None。
         withB = await gate.renderSchemaWithRelease(
             classes, joins=joins, session=object()
         )
-        assert withB.text != first.text
+        assert withB.text == first.text
         assert withB.semanticReleaseId is None
 
     async def test_钉住的发布已被删除时降级直读不炸问答(

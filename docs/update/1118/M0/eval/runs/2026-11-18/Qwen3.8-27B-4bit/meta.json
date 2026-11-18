@@ -1,0 +1,160 @@
+{
+  "commit": "596ed123d74d5069a7a35c0fa75f14e27b1d91d9",
+  "conclusion": {
+    "exitCode": 0,
+    "perQuestion": {
+      "Q01": {
+        "exitCode": 0,
+        "layers": [
+          {
+            "detail": "",
+            "layer": "L1",
+            "status": "PASS"
+          },
+          {
+            "detail": "口径元素 9 条，差异 0",
+            "layer": "L3",
+            "status": "PASS"
+          },
+          {
+            "detail": "未要求",
+            "layer": "L2",
+            "status": "SKIP"
+          },
+          {
+            "detail": "未要求",
+            "layer": "L4",
+            "status": "SKIP"
+          },
+          {
+            "detail": "未要求",
+            "layer": "L5",
+            "status": "SKIP"
+          }
+        ],
+        "reason": "全部要求的层通过"
+      },
+      "Q02": {
+        "exitCode": 0,
+        "layers": [
+          {
+            "detail": "",
+            "layer": "L1",
+            "status": "PASS"
+          },
+          {
+            "detail": "口径元素 65 条，差异 0",
+            "layer": "L3",
+            "status": "PASS"
+          },
+          {
+            "detail": "未要求",
+            "layer": "L2",
+            "status": "SKIP"
+          },
+          {
+            "detail": "未要求",
+            "layer": "L4",
+            "status": "SKIP"
+          },
+          {
+            "detail": "未要求",
+            "layer": "L5",
+            "status": "SKIP"
+          }
+        ],
+        "reason": "全部要求的层通过"
+      },
+      "Q03": {
+        "exitCode": 0,
+        "layers": [
+          {
+            "detail": "",
+            "layer": "L1",
+            "status": "PASS"
+          },
+          {
+            "detail": "口径元素 3 条，差异 0",
+            "layer": "L3",
+            "status": "PASS"
+          },
+          {
+            "detail": "未要求",
+            "layer": "L2",
+            "status": "SKIP"
+          },
+          {
+            "detail": "未要求",
+            "layer": "L4",
+            "status": "SKIP"
+          },
+          {
+            "detail": "未要求",
+            "layer": "L5",
+            "status": "SKIP"
+          }
+        ],
+        "reason": "全部要求的层通过"
+      },
+      "Q05": {
+        "exitCode": 0,
+        "layers": [
+          {
+            "detail": "",
+            "layer": "L1",
+            "status": "PASS"
+          },
+          {
+            "detail": "口径元素 14 条，差异 0",
+            "layer": "L3",
+            "status": "PASS"
+          },
+          {
+            "detail": "未要求",
+            "layer": "L2",
+            "status": "SKIP"
+          },
+          {
+            "detail": "未要求",
+            "layer": "L4",
+            "status": "SKIP"
+          },
+          {
+            "detail": "未要求",
+            "layer": "L5",
+            "status": "SKIP"
+          }
+        ],
+        "reason": "全部要求的层通过"
+      }
+    },
+    "requiredLayers": [
+      "L1",
+      "L3"
+    ]
+  },
+  "database": "postgresql+asyncpg://qa_user:***@localhost:5433/qa_metadata",
+  "finishedAt": "2026-11-18T08:31:28.546585+00:00",
+  "mode": "live",
+  "release": {
+    "active": 1,
+    "activeVersion": "v-p2-d12",
+    "off": null,
+    "on": 1
+  },
+  "schema": {
+    "contentDiffBlocks": 0,
+    "contentDiffSample": [],
+    "offLines": 630,
+    "onLines": 630,
+    "orderDiffLines": 0
+  },
+  "startedAt": "2026-11-18T16:16:20.562104",
+  "status": "finished",
+  "tier": {
+    "endpoint": "http://127.0.0.1:8888/v1",
+    "model": "Qwen3.8-27B-4bit",
+    "temperature": 0.0
+  },
+  "tool": "eval_semantic_answer_parity"
+}

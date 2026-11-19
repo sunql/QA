@@ -384,3 +384,42 @@ async def test_recall_skips_filter_without_datasource(dbSession) -> None:
 
     assert [c.class_name for c in result.classes] == ["MAIN_DATA_SUPPLIER"]
     assert result.recallInfo.datasourceFilterSkipped == "no_datasource"
+
+
+@pytest.mark.asyncio
+async def test_single_step_query_schema_excludes_cross_source_class(dbSession) -> None:
+    # Arrange：单步 QUERY 链（plan/schema 第二调用点）——schema_cache 只登记
+    # PRECEIPT 真表；本体另有跨源幽灵类 MAIN_DATA_SUPPLIER，不得进 plan prompt。
+    dbSession.add(_datasource())
+    dbSession.add(SchemaCache(
+        datasource_id=1, schema_name="ZJTH",
+        schema_data=[{"table_name": "PRECEIPT", "owner": "ZJTH", "columns": []}],
+        schema_version="t1",
+    ))
+    await dbSession.flush()
+    # _fallbackRecall 会丢弃 id=None 的类 ⇒ 必须给 id。用瞬态对象 + 显式大 id
+    # （测试库有本体种子，小 id 撞 pkey；瞬态避免落库后 buildSchemaText 同步
+    # 访问 cls.properties 触发 MissingGreenlet）。
+    real = _class(900001, "PRECEIPT")
+    ghost = OntologyClass(
+        id=900002, class_name="MAIN_DATA_SUPPLIER",
+        source_table="main_data_supplier")
+    llm = _PipelineLlm()
+    # hits=[] 触发 _fallbackRecall：候选池全量保留进 plan/schema（生产事故路径）。
+    # 若 hits=[real]，检索阶段已把幽灵类裁掉，第二调用点泄漏被假绿掩盖。
+    service = _buildService(
+        llm=llm,
+        ontology=_FakeOntology(hits=[], allClasses=[ghost, real]),
+    )
+
+    # Act：同一 service.run/saveState 入口发起单步 QUERY
+    await service.processMessage(_dto("公司目前有多少供应商"), dbSession)
+
+    # Assert：plan 阶段 LLM 收到的 schema 文本不含幽灵表、含真表。
+    # 注意：类清单经 buildSchemaText 注入 plan 调用的 **system prompt**
+    # （schemaPart），不在 user 消息里——断言覆盖整条 plan 调用的全部消息。
+    planCalls = [c for c in llm.calls if "解析为查询计划" in c[0][1]]
+    assert len(planCalls) == 1, f"计划阶段调用次数={len(planCalls)}，期望 1"
+    planText = "\n".join(content for _, content in planCalls[0])
+    assert "MAIN_DATA_SUPPLIER" not in planText.upper()
+    assert "PRECEIPT" in planText.upper()

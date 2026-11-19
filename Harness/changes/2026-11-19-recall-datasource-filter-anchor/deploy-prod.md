@@ -210,12 +210,24 @@ docker run --rm --entrypoint sh qa-system-frontend:amd64-1119-recall -c '
 #       两个新文案 grep = 1；泰鸿智脑 = 1（1119 改名已含）
 ```
 
-**交付物表（构建后回填）**：
+**交付物（2026-11-19 已构建并自证）**：
 
 | 文件 | 镜像 | sha256 | 大小 |
 |---|---|---|---|
-| `/tmp/qa-backend-amd64-1119-recall.tar.gz` | `qa-system-backend:amd64-1119-recall`（→ tag `qa-backend:offline`） | | |
-| `/tmp/qa-frontend-amd64-1119-recall.tar.gz` | `qa-system-frontend:amd64-1119-recall`（→ tag `qa-system_frontend`） | | |
+| `/tmp/qa-backend-amd64-1119-recall.tar.gz` | `qa-system-backend:amd64-1119-recall`（→ tag `qa-backend:offline`） | `56347484b2ea64d24c2b93ced1d56789fb6fac6dffb87652c20c78ce76842502` | 219M |
+| `/tmp/qa-frontend-amd64-1119-recall.tar.gz` | `qa-system-frontend:amd64-1119-recall`（→ tag `qa-system_frontend`） | `6d4fc6a13582cf580c888a57623b7af0452de67540918fe98ace7051f17f882a` | 26M |
+
+- 构建源 = **干净 detached worktree** @ `d2e04806`（PR #157 分支头），**不是**合并后的 main。
+  等价性证明：合并时 main 未推进 ⇒ 合并 commit 的树与分支头**逐字节相同** ⇒ 镜像内容等价
+  （Dockerfile 只 `COPY backend/` / `frontend/` / `docker/nginx.conf`，不烤 `.git` ⇒ 镜像内无 SHA 痕迹）。
+  **合并后必须复核**：`git diff <merge-commit> d2e04806` 输出为空；非空 ⇒ main 期间有推进 ⇒ **必须重建**。
+- 自证结果（开发机实测）：
+  - 后端：`alembic heads` = **`0152 (head)`**（单一 head，无 0153+、无采购 0154–0158）；
+    `recall_datasource_filter.py` / `recall_keyword_anchor.py` 均在镜像内；
+    `grep -c applyDatasourceRecallFilter` = chat_recall **2** / chat_service **2** / chat_multistep **2** / research_agent_execution **3**（均 ≥1）。
+  - 前端：新 bundle **`index-DizP7VQ_.js`**（≠ 现役 `index-rBu8Smfz.js`，≠ 1119 那次 `index-BVutQwOS.js`）；
+    `已按当前数据源过滤` = 1、`已按关键词锚定` = 1、`泰鸿智脑` = 1、`resolver 127.0.0.11` = 1。
+  - ⚠️ `docker run` 报 `platform (linux/amd64) does not match host (linux/arm64/v8)` 是**预期**（交叉构建），不是错误。
 
 ---
 

@@ -19,8 +19,14 @@ from app.domain.enums import IntentType
 from app.domain.schemas import ChatRequest, ClassRecallInfo
 from app.services.chat_helpers import _clipText
 from app.services.intent_service import IntentResult
-from app.services.recall_datasource_filter import applyDatasourceRecallFilter
-from app.services.recall_keyword_anchor import selectAnchoredClasses
+from app.services.recall_datasource_filter import (
+    applyDatasourceRecallFilter,
+    isRecallDatasourceScoped,
+)
+from app.services.recall_keyword_anchor import (
+    AnchoredMatch,
+    selectAnchoredMatches,
+)
 from app.services.semantic_recall_gate import RecallOntology, loadRecallOntology
 
 if TYPE_CHECKING:
@@ -87,6 +93,59 @@ def _isOdsBusinessTable(cls: Any) -> bool:
     if src.startswith("ODS_DIM"):
         return False
     return True
+
+
+def _anchoredMatches(
+    question: str, allClasses: list[Any], *, maxAnchored: int
+) -> list[AnchoredMatch]:
+    """关键词锚定候选 + 命中明细（ODS 闸门后），返回新列表，不改动入参。
+
+    ODS 闸门与向量命中路径同口径：锚定是「向量之外的另一条入候选路径」，
+    若不拦 ODS 业务表就绕过了 2026-09-19 ODS_BPARTNER 事故闸门——把没有
+    SUPPLIER_CODE 等业务列的贴源备份表捞回 schema 让 LLM 幻觉属性名。
+    显式点名 ODS 表时（explicit_ods_recall）保留，与向量路径一致。
+
+    2026-11-19 Gap B：降级路径（向量命中解析不出类）也复用本函数做救援
+    —— 锚定是「向量措辞敏感」的底，不能只在向量路径成功时才生效。
+    """
+    explicit_ods_recall = _isExplicitOdsRequest(question)
+    anchorCandidates = [
+        cls for cls in allClasses
+        if not _isOdsBusinessTable(cls) or explicit_ods_recall
+    ]
+    return selectAnchoredMatches(
+        question, anchorCandidates, maxAnchored=maxAnchored
+    )
+
+
+def _anchoredClasses(
+    question: str, allClasses: list[Any], *, maxAnchored: int
+) -> list[Any]:
+    """关键词锚定候选（问句片段字面包含匹配），返回新列表，不改动入参。"""
+    return [
+        match.cls
+        for match in _anchoredMatches(question, allClasses, maxAnchored=maxAnchored)
+    ]
+
+
+# 锚定证据强度闸门：唯一命中 + 非精确等值 + 命中片段 < 3 字 ⇒ 证据不足。
+# 「公司」「数量」这类 2 字常用词极易误命中；一旦这类弱命中独占整个窗口
+# （救援路径不再有向量命中兜底），窗口可能只剩一张无关表 ⇒ 必然答不出，
+# 比宽窗更糟。用户口径「宁可宽不可答不出」⇒ 证据不足时保留宽窗。
+_ANCHOR_STRONG_MIN_CHARS = 3
+
+
+def _isWeakAnchorEvidence(matches: list[AnchoredMatch]) -> bool:
+    """锚定证据是否不足（弱）⇒ 不许用锚定收窄窗口。
+
+    判定：唯一命中 且 非精确等值 且 命中片段 < ``_ANCHOR_STRONG_MIN_CHARS``。
+    多个命中（哪怕其中一个弱）⇒ 证据不弱（窗口里至少有多张表，且每张都是
+    字面命中）；精确等值命中 ⇒ 证据强（别名就是问句里的那个词）。
+    """
+    if len(matches) != 1:
+        return False
+    match = matches[0]
+    return (not match.isExact) and match.fragmentLength < _ANCHOR_STRONG_MIN_CHARS
 
 
 # feat-layer-priority: 按 source_table 前缀识别层 + 显式 ODS 请求判定 + 维度词触发。
@@ -254,7 +313,8 @@ class RecallMixin:
             datasourceId=datasourceId,
         )
         classes, recallInfo = await self._selectRelevantClasses(
-            session, question, allClasses, view=view
+            session, question, allClasses, view=view,
+            isDatasourceScoped=isRecallDatasourceScoped(dsDisclosure),
         )
         recallInfo = recallInfo.model_copy(update=dsDisclosure)
         return ClassifyAndRecallResult(
@@ -566,6 +626,7 @@ class RecallMixin:
         allClasses: list[Any],
         *,
         view: RecallOntology | None = None,
+        isDatasourceScoped: bool = False,
     ) -> list[Any]:
         """从全部本体类中筛出与当前问题相关的子集（1-1，根因修复）。
 
@@ -584,7 +645,13 @@ class RecallMixin:
         比例低于阈值时同样告警，避免检索漂移让裁剪在生产上悄悄失效。
 
         返回 (类列表, ClassRecallInfo 诊断)：诊断随 ChatResponse.classRecall 透出，
-        前端在 truncated/fallback 时向用户提示（避免"看起来正常但 schema 缺表"）。
+        前端在 truncated/fallback/rescue 时向用户提示（避免"看起来正常但 schema 缺表"）。
+
+        ``isDatasourceScoped``：入参 ``allClasses`` 是否**已按当前数据源收窄**
+        （跨源过滤生效）。默认 False = 假定没收窄。收窄窗口的降级路径（锚定救援）
+        必须靠它把关：候选集没按数据源收窄时，锚定命中可能全是别源的类，
+        窄窗一旦只含别源表就是必然的 ORA-00942（比宽窗更糟）⇒ 不接管。
+        调用方用 ``recall_datasource_filter.isRecallDatasourceScoped(披露)`` 判定。
         """
         total = len(allClasses)
         if total == 0:
@@ -672,12 +739,19 @@ class RecallMixin:
                 return await self._fallbackRecall(
                     session, question, allClasses, reason="no_match_ods_filtered", view=view
                 )
-            return await self._fallbackRecall(
-                session, question, allClasses, reason="ods_only_hits", view=view
+            # 2026-11-19 Gap B：命中全是 ODS 业务表 ⇒ 向量路径给不出可用类
+            # ⇒ 锚定救援优先（锚定没命中才回退全量）。
+            return await self._anchorRescueRecall(
+                session, question, allClasses, reason="ods_only_hits", view=view,
+                isDatasourceScoped=isDatasourceScoped,
             )
         if not relevant:
-            return await self._fallbackRecall(
-                session, question, allClasses, reason="no_match", hitCount=len(hits), view=view
+            # 2026-11-19 Gap B：命中解析不出本地类（生产实证：向量 top20 全落在
+            # 跨源/墓碑类上）⇒ 走锚定救援，别把全量本地类塞进 schema。
+            return await self._anchorRescueRecall(
+                session, question, allClasses, reason="no_match",
+                hitCount=len(hits), view=view,
+                isDatasourceScoped=isDatasourceScoped,
             )
         matchedRatio = len(relevant) / len(hits)
         hitMatchMin = await self._getClassFilterHitMatchMin(session)
@@ -717,12 +791,8 @@ class RecallMixin:
         # 披露的 anchoredCount 会大于实际留在窗口里的锚定类数（说多）；
         # 夹住后锚定数 ≤ 窗口 ⇒ 锚定类全部留在窗口内，披露即真实。
         anchorMax = min(await self._getAnchorMaxClasses(session), max_classes)
-        anchorCandidates = [
-            cls for cls in allClasses
-            if not _isOdsBusinessTable(cls) or explicit_ods_recall
-        ]
-        anchored = selectAnchoredClasses(
-            question, anchorCandidates, maxAnchored=anchorMax
+        anchored = _anchoredClasses(
+            question, allClasses, maxAnchored=anchorMax
         )
         rankedIds = {cls.id for cls in relevant}
         newAnchored = [cls for cls in anchored if cls.id not in rankedIds]
@@ -821,6 +891,121 @@ class RecallMixin:
             hitCount=0,
             classCount=len(selected),
             truncated=truncated,
+        )
+
+    async def _anchorRescueRecall(
+        self,
+        session: AsyncSession,
+        question: str,
+        allClasses: list[Any],
+        *,
+        reason: str,
+        hitCount: int | None = None,
+        view: RecallOntology | None = None,
+        isDatasourceScoped: bool = False,
+    ) -> tuple[list[Any], ClassRecallInfo]:
+        """向量路径失效时的关键词锚定救援（2026-11-19 Gap B）。
+
+        背景：锚定块原先位于 ``no_match`` 早退**之后** ⇒ 向量命中给不出可用类时
+        锚定一次都没跑过。2026-11-19 生产实证：跨源过滤后 94 个本地类，向量
+        top20 全落在跨源/墓碑类上 ⇒ 0 命中解析 ⇒ 兜底把 43 个本地类全塞进
+        schema（召回裁剪被架空，为「问法敏感漏选」设计的锚定机制形同虚设）。
+
+        语义：**锚定命中 ⇒ 锚定窄窗口（准）；锚定也没命中 ⇒ 原全量回退**
+        （宁可宽不可答不出）。检索基础设施故障（search_error / no_hits）
+        不走本路径——那不是「措辞敏感」，向量侧不可信时宽窗更稳。
+
+        两道闸门（任一不过 ⇒ 回落原全量回退，行为逐字不变）：
+        1. **数据源口径**（``isDatasourceScoped``）：候选集没按数据源收窄时，
+           锚定命中可能全是别源的类，窄窗一旦只含别源表就是必然的
+           ORA-00942（比宽窗更糟）⇒ 不接管。
+        2. **证据强度**（``_isWeakAnchorEvidence``）：唯一命中且是 2 字弱匹配
+           （如「公司」「数量」）⇒ 误锚定会独占窗口 ⇒ 不接管。
+
+        窗口构成：锚定类（置顶）+ 层优先排序的维度词 DIM 补拉（与正常路径
+        同口径；``allowedClasses`` = 已按数据源过滤的候选集 ⇒ DIM 补拉不越
+        数据源）+ 锚定类的 1-hop JOIN 邻居（扩边失败 ⇒ 退化为锚定窗口）。
+
+        披露：mode="rescue"（独立取值——"recall" 在 schema 里定义为「纯向量
+        召回」、"fallback" 的前端文案是「已按数仓分层顺序选取数据表」，两者都
+        与锚定窄窗不符 ⇒ 谎报）。前端据此出 warning 级提示。
+
+        日志：沿用「每个降级事件恰好一行含 reason=」铁律（回退率按行聚合，
+        多打一行就翻倍）⇒ 本函数**不**再调用 ``_fallbackRecall``，自己打那一行，
+        末尾追加 ``anchored=N`` 字段区分「锚定救援」与「普通全量回退」。
+        闸门跳过时走 ``_fallbackRecall``（那一行 reason= 由它打），本函数只补
+        一行 scene= 的 info 痕迹（scene= 不是 reason=，不污染回退率聚合）。
+        """
+        max_classes = await self._getClassFilterMaxClasses(session)
+        anchorMax = min(await self._getAnchorMaxClasses(session), max_classes)
+        matches = _anchoredMatches(question, allClasses, maxAnchored=anchorMax)
+        if not isDatasourceScoped:
+            logger.info(
+                "本体类锚定救援跳过：候选集未按数据源收窄 scene=anchor_rescue_unscoped"
+            )
+            return await self._fallbackRecall(
+                session, question, allClasses, reason=reason,
+                hitCount=hitCount, view=view,
+            )
+        if not matches:
+            # 锚定没命中 ⇒ 保持原全量回退（行为逐字不变，既有断言不破）。
+            return await self._fallbackRecall(
+                session, question, allClasses, reason=reason,
+                hitCount=hitCount, view=view,
+            )
+        if _isWeakAnchorEvidence(matches):
+            logger.info(
+                "本体类锚定救援跳过：锚定证据不足 scene=anchor_rescue_weak"
+            )
+            return await self._fallbackRecall(
+                session, question, allClasses, reason=reason,
+                hitCount=hitCount, view=view,
+            )
+        anchored = [match.cls for match in matches]
+        # 层优先 + 维度词 DIM 全量拉取（与正常路径同口径）：救援路径不再有向量
+        # 命中兜底，维度词（如「分类」「编号」）触发的 DIM 补拉若整条丢掉，
+        # 含维度词的问句会漏掉维度表。allowedClasses = 已过滤候选集 ⇒ 不越数据源。
+        ranked = await self._rankByLayer(
+            anchored, dimension_hint=_isDimensionHint(question), session=session,
+            view=view, allowedClasses=allClasses,
+        )
+        anchoredIds = {cls.id for cls in anchored}
+        candidates = anchored + [cls for cls in ranked if cls.id not in anchoredIds]
+        selected = candidates[:max_classes]
+        try:
+            expanded, truncated_from_expand = await self._expandByJoinNeighbors(
+                session, selected, allClasses, view=view
+            )
+        except Exception:
+            # 扩边是增强而非硬依赖（与 JOIN 目录加载失败同口径）：失败时退化为
+            # 未扩边的锚定窗口，不让整问失败。
+            logger.warning("类召回扩边失败，救援窗口退化为锚定窗口", exc_info=True)
+            expanded, truncated_from_expand = list(selected), False
+        truncated = len(candidates) > max_classes or truncated_from_expand
+        # 锚定类没有向量召回分数（与 fallback 路径同口径：score=0.0）。
+        for cls in expanded:
+            cls._recall_score = 0.0  # type: ignore[attr-defined]
+        # odsFiltered 与回退路径同口径（total - 非 ODS 候选数）：两条降级行的
+        # kept=/odsFiltered= 可直接对比（口径微差会让运维对不上账）。
+        explicit_ods = _isExplicitOdsRequest(question)
+        nonOdsCandidates = [
+            cls for cls in allClasses
+            if cls.id is not None
+            and (not _isOdsBusinessTable(cls) or explicit_ods)
+        ]
+        odsFiltered = len(allClasses) - len(nonOdsCandidates)
+        hitDetail = "" if hitCount is None else f" hits={hitCount}"
+        logger.warning(
+            "本体类回退降级 reason=%s%s total=%d kept=%d odsFiltered=%d truncated=%s anchored=%d",
+            reason, hitDetail, len(allClasses), len(expanded), odsFiltered,
+            truncated, len(anchored),
+        )
+        return expanded, ClassRecallInfo(
+            mode="rescue",
+            hitCount=len(candidates),
+            classCount=len(expanded),
+            truncated=truncated,
+            anchoredCount=len(anchored),
         )
 
     async def _expandByJoinNeighbors(

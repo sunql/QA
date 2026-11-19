@@ -61,7 +61,10 @@ from app.services.messages_zh import (
 from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
 from app.services.multi_step_retry import ERROR_KIND_PERMANENT
 from app.services.nl2sql_service import _readFloatConfig
-from app.services.recall_datasource_filter import applyDatasourceRecallFilter
+from app.services.recall_datasource_filter import (
+    applyDatasourceRecallFilter,
+    isRecallDatasourceScoped,
+)
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.think_block import applyThinkPolicy
 from app.services.visual_rationale import summaryTextOnlyRationale
@@ -530,11 +533,12 @@ class MultiStepMixin:
             # 已过滤，此处重新全局取类若不过滤，别源登记的物理表会随步骤召回混进
             # schema（生产事故 main_data_supplier → ORA-00942）；关键词锚定让这条
             # 路径按问句字面确定性命中，比向量路径更易复现 ⇒ 必须同口径过滤。
-            all_classes, _ = await applyDatasourceRecallFilter(
+            all_classes, ds_disclosure = await applyDatasourceRecallFilter(
                 session, all_classes, datasourceId=getattr(pc.ds, "id", None),
             )
             step_classes, _ = await self._selectRelevantClasses(
-                session, step_plan.sub_question, all_classes
+                session, step_plan.sub_question, all_classes,
+                isDatasourceScoped=isRecallDatasourceScoped(ds_disclosure),
             )
         except Exception:
             logger.warning(

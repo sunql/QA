@@ -428,6 +428,8 @@ export const zhCN = {
     affinityLocked: "🔒 锁定 {model} · 剩 {turns} 轮",
     classRecallTruncated: "本次命中的数据表已达上限（{total} 张），部分相关表可能未被纳入查询，可尝试更具体的表述或联系管理员调整召回窗口。",
     classRecallFallback: "数据表智能召回暂不可用，本次已按数仓分层顺序选取数据表（张数受召回窗口上限约束），回答准确性可能受影响。",
+    // 锚定救援降级（2026-11-19 Gap B）：向量命中给不出可用类，改由关键词锚定选表。
+    classRecallRescue: "数据表智能召回已降级：本次按关键词锚定选取了 {total} 张数据表（向量检索未命中相关表），回答准确性可能受影响。",
     // 类召回披露（2026-11-19 召回数据源过滤+关键词锚定批次）
     classRecallDatasourceFiltered: "已按当前数据源过滤 {total} 张跨源数据表。",
     classRecallDatasourceSkipped: "未选择数据源或数据源目录缺失，跨源过滤本次未生效。",

@@ -158,7 +158,10 @@ function MessageItem({
         ) : (
           <div>
             {/* 类召回诊断（2026-09-16）：截断/降级时提示，避免"看起来正常但 schema 缺表"的静默失败 */}
-            {message.classRecall && (message.classRecall.truncated || message.classRecall.mode === "fallback") ? (
+            {message.classRecall &&
+            (message.classRecall.truncated ||
+              message.classRecall.mode === "fallback" ||
+              message.classRecall.mode === "rescue") ? (
               <Alert
                 type="warning"
                 showIcon
@@ -166,10 +169,14 @@ function MessageItem({
                 message={
                   message.classRecall.mode === "fallback"
                     ? t("messageItem.classRecallFallback")
-                    : t("messageItem.classRecallTruncated", {
-                        // 避开 i18next 保留变量 count（会触发复数 key 解析）
-                        total: message.classRecall.classCount,
-                      })
+                    : message.classRecall.mode === "rescue"
+                      ? t("messageItem.classRecallRescue", {
+                          // 避开 i18next 保留变量 count（会触发复数 key 解析）
+                          total: message.classRecall.anchoredCount ?? 0,
+                        })
+                      : t("messageItem.classRecallTruncated", {
+                          total: message.classRecall.classCount,
+                        })
                 }
               />
             ) : null}

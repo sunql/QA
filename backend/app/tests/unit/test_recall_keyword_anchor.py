@@ -6,7 +6,10 @@
 
 from types import SimpleNamespace
 
-from app.services.recall_keyword_anchor import selectAnchoredClasses
+from app.services.recall_keyword_anchor import (
+    selectAnchoredClasses,
+    selectAnchoredMatches,
+)
 
 
 def _cls(cid: int, name: str, alias: str | None) -> SimpleNamespace:
@@ -45,3 +48,48 @@ def test_zero_cap_or_blank_question_is_noop() -> None:
     dim = _cls(12, "DIM_SUPPLIER", "供应商主数据")
     assert selectAnchoredClasses("供应商", [dim], maxAnchored=0) == []
     assert selectAnchoredClasses("   ", [dim], maxAnchored=5) == []
+
+
+# ── 命中强度明细（供降级救援路径做证据闸门）────────────────────────
+
+
+def test_matches_expose_fragment_length_and_exactness() -> None:
+    """包含匹配：非精确 + 片段长度；精确等值：isExact=True。"""
+    partial = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+    exact = _cls(2, "SUPPLIER", "供应商")
+
+    matches = selectAnchoredMatches("供应商", [partial, exact], maxAnchored=5)
+
+    byId = {m.cls.id: m for m in matches}
+    assert byId[1].isExact is False
+    assert byId[1].fragmentLength == 3  # 「供应商」
+    assert byId[2].isExact is True
+    assert byId[2].fragmentLength == 3
+
+
+def test_matches_report_short_fragment_for_common_word() -> None:
+    """常用词只命中 2 字片段 ⇒ 证据弱（下游据此不收窄窗口）。"""
+    company = _cls(1, "DIM_COMPANY", "公司主数据")
+
+    matches = selectAnchoredMatches("公司信息有哪些", [company], maxAnchored=5)
+
+    assert len(matches) == 1
+    assert matches[0].isExact is False
+    assert matches[0].fragmentLength == 2  # 「公司」
+
+
+def test_matches_keep_same_order_and_cap_as_classes_api() -> None:
+    """两个入口顺序/上限一致（兼容层不是另一套实现）。"""
+    classes = [_cls(i, f"T{i}", f"供应商{i}号档案") for i in range(1, 6)]
+
+    matches = selectAnchoredMatches("供应商", classes, maxAnchored=3)
+    plain = selectAnchoredClasses("供应商", classes, maxAnchored=3)
+
+    assert [m.cls.id for m in matches] == [c.id for c in plain]
+    assert len(matches) == 3
+
+
+def test_matches_noop_on_empty_input() -> None:
+    assert selectAnchoredMatches("供应商", [], maxAnchored=5) == []
+    assert selectAnchoredMatches("  ", [_cls(1, "A", "供应商")], maxAnchored=5) == []
+    assert selectAnchoredMatches("供应商", [_cls(1, "A", "供应商")], maxAnchored=0) == []

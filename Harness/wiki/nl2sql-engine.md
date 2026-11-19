@@ -793,7 +793,33 @@ reason=… total=… kept=… odsFiltered=… truncated=…`。此前降级是 `
 锚定池 = **已被数据源过滤后的幸存类**（再过 ODS 闸门），零命中不做任何事。
 
 **执行顺序（不可颠倒）**：**数据源过滤（淘汰跨源）→ 锚定（在幸存类里取锚）→ 向量命中交集**
-⇒ **锚定永不捞回幽灵类**。降级路径 `_fallbackRecall` 不接锚定（另批再议）。
+⇒ **数据源过滤生效时**锚定永不捞回幽灵类（过滤未生效时见下方 Gap B 闸门 1）。
+
+**降级路径也接锚定（Gap B，2026-11-19）**：锚定块原先位于 `no_match` 早退**之后**
+⇒ 向量命中给不出可用类时锚定一次都没跑过（生产实证：跨源过滤后 94 个本地类，
+向量 top20 全落在跨源/墓碑类上 ⇒ 0 命中解析 ⇒ 兜底把 43 个本地类全塞进 schema，
+召回裁剪被架空）。现语义：**向量路径失效（`no_match` / `ods_only_hits`）时锚定命中且过闸门 ⇒
+用锚定窄窗口（准）；否则 ⇒ 保留原全量回退（宁可宽不可答不出）**；
+检索基础设施故障（`search_error` / `no_hits`）**不接管**（那不是「措辞敏感」，宽窗更稳）。
+
+**两道闸门**（任一不过 ⇒ 回落原全量回退，行为与改造前逐字一致）：
+1. **数据源口径**：候选集未按数据源收窄（`no_datasource` 未选数据源 / `no_cache` 目录缺失）
+   ⇒ 不接管（锚定命中可能全是别源的类，窄窗一旦只含别源表就是必然的 ORA-00942）。
+   判定口径 = `recall_datasource_filter.isRecallDatasourceScoped(披露)`，
+   经 `_selectRelevantClasses(..., isDatasourceScoped=)` 传入（**默认 False** = 假定没收窄）。
+2. **证据强度**：唯一锚定命中且是 2 字弱匹配（非精确等值、片段 < 3 字，如「公司」「数量」）
+   ⇒ 不接管（误锚定会独占整个窗口 ⇒ 比宽窗更糟）。精确等值命中即使只有 2 字也算强证据。
+
+救援窗口 = 锚定类（置顶）+ 维度词 DIM 补拉（层优先，`allowedClasses` = 已过滤候选集 ⇒ 不越数据源）
++ 锚定类的 JOIN 目录 1-hop 扩边（扩边异常 ⇒ 退化为未扩边窗口）。
+`mode="rescue"`（**新增取值**：`"recall"` 在 schema 里是「纯向量召回」、`"fallback"` 的前端文案是
+「已按数仓分层顺序选取数据表」，两者都与锚定窄窗不符 ⇒ 谎报）⇒ 前端出 **warning 级**降级提示
+（`messageItem.classRecallRescue`，含锚定张数）。
+⚠️ 既有 info 提示（过滤/跳过/锚定三态互斥）在生产场景会被 `datasourceFiltered>0` 优先占位
+⇒ 锚定披露渲染不出来 ⇒ 降级信号必须另走 warning 位。
+日志**恰好一行**含 `reason=`，尾部加 `anchored=N` 字段区分「锚定救援」与「普通全量回退」；
+闸门跳过时走原回退行，本路径只补 info 级 `scene=anchor_rescue_unscoped|anchor_rescue_weak`。
+设计与取舍见 `Harness/changes/2026-11-19-recall-anchor-fallback-rescue/design.md`。
 
 **披露字段**（`ClassRecallInfo`，可选字段、默认值 ⇒ wire format 向后兼容）：
 `datasourceFiltered`（被滤掉的跨源类数）、`datasourceFilterSkipped`（`null` / `"no_datasource"` / `"no_cache"`）、

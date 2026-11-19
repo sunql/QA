@@ -542,6 +542,25 @@ describe("MessageItem 类召回诊断提示", () => {
     expect(screen.queryByText(/已达上限/)).not.toBeInTheDocument();
     expect(screen.queryByText(/智能召回暂不可用/)).not.toBeInTheDocument();
   });
+
+  it("classRecall.mode=rescue 渲染降级提示（锚定救援，非 fallback 文案）", () => {
+    // Gap B：向量命中给不出可用类时由关键词锚定接管选表 —— 用户必须看到降级信号，
+    // 否则「被静默收窄的窗口 + 一句过滤披露」看起来像正常召回。
+    renderItem({
+      content: "查询完成。",
+      classRecall: {
+        mode: "rescue",
+        hitCount: 2,
+        classCount: 2,
+        truncated: false,
+        anchoredCount: 2,
+      },
+    });
+    expect(screen.getByText(/智能召回已降级/)).toBeInTheDocument();
+    // 锚定数同时出现在降级告警与锚定披露两处（warning + info 并存）
+    expect(screen.getAllByText(/2 张数据表/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/智能召回暂不可用/)).not.toBeInTheDocument();
+  });
 });
 
 describe("MessageItem 类召回披露（跨源过滤 / 关键词锚定）", () => {

@@ -43,6 +43,7 @@ from app.infrastructure.business_db_pool import get_adapter
 from app.services.datasource_service import DataSourceService
 from app.services.nl2sql_dialects import checkSqlDialect
 from app.services.nl2sql_service import Nl2SqlService, _safeSchemaPrefix
+from app.services.recall_datasource_filter import applyDatasourceRecallFilter
 from app.services.research_agent_ports import (
     EVENT_ERROR,
     EVENT_STEP_CHART,
@@ -66,7 +67,6 @@ from app.services.research_agent_ports import (
     stepResult,
 )
 from app.services.research_agent_stages import eslClasses, meteringModelName
-from app.services.recall_datasource_filter import applyDatasourceRecallFilter
 from app.services.research_evidence_summary import trySummarizeEvidence
 
 logger = logging.getLogger(__name__)

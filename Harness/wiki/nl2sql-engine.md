@@ -722,6 +722,15 @@ plan 与 sql 两个阶段共用 `_renderStatePart(priorState)` 模块级函数�
 - 注入数据库 ER 图描述（从 Ontology Service 动态拉取）。
 - 初期限单表查询（SELECT...WHERE...GROUP BY），NL2SQL 通过测试后再放开 JOIN。
 
+## 术语词典 = 业务口径（目录化，M1-1.5）
+
+术语词典全文注入**每次计划 prompt**（`renderDictionaryText`，无分页无截断）⇒ 词条就是系统的业务口径，不能手抄录入（「供货量」词条漂移过一次，已由写入校验收口）。采购术语改为**目录化**：
+
+- **决策 SSOT**：`app/domain/procurement_term_catalog.py`（纯数据 + 纯函数），每条带 `hasSourceData` 与 `evidence`（问卷题号/数据标准/本体实测）。
+- **落库**：`scripts/apply_procurement_terms.py` —— 默认 dry-run、`--apply` 经 `TermDictionaryService.createTerm`（映射存活校验不被绕过）、幂等；**漂移报 exit 2 不静默覆盖**（term_dictionary 无 update 端点）。
+- **硬规则**：无源数据的词条（问卷 C4.2 等）**不挂 `mappedClassName`** —— 挂了类等于让 LLM 去查没有数据的表 ⇒「0 行 = 真的是 0」假答案；业务未确认口径（权威价 C3.3）显式写「未确认」。
+- 到货 ≠ 收货：指标口径以收货日期/数量为准（问卷 A1.2/A3.2）；零库存供应商 = `DIM_SUPPLIER.YPTHFLGM_0 = 2`（1=非零库存，易记反），指标必须按该标志分组。
+
 ## 类召回窗口与规模化风险（已知限制，待优化）
 
 > 记录于 2026-09-16。背景：ReceiptDetail 召回落榜事件（详见 memory `qa-system-milvus-ontology-vector-drift`）暴露的机制性限制，当前规模（96 类）实测够用，**类库增长到数百个后需要升级**。

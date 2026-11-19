@@ -38,6 +38,13 @@ from app.domain.models import (
     OntologyClass,
     OntologyProperty,
 )
+from app.domain.procurement_term_catalog import (
+    PROCUREMENT_TERMS,
+    sourceBackedTerms,
+    termNames,
+    termSpec,
+    unsourcedTerms,
+)
 from app.infrastructure.security.crypto import encryptApiKey
 
 pytestmark = pytest.mark.asyncio
@@ -648,3 +655,170 @@ class TestExternalTradeExplicitSupplierException:
         # 各自过滤条件都必须在 prompt
         assert "TCLCOD_0 IN" in prompt
         assert "INTER_COM_CODE = &#39;1&#39;" in prompt
+
+
+# ---------------------------------------------------------------------------
+# M1-1.5 采购术语目录（app/domain/procurement_term_catalog.py）走真实写入口
+# ---------------------------------------------------------------------------
+
+
+def _priceListHeaderProperties() -> list[OntologyProperty]:
+    """DWD_SUPPLIER_PRICE_LIST_HEADER 子集（报价词条的头类，目录只挂类不挂属性）。"""
+    return [
+        OntologyProperty(
+            property_name="报价单号", data_type="STRING", source_column="PRICE_LIST_NO"
+        ),
+        OntologyProperty(
+            property_name="供应商代码", data_type="STRING", source_column="SUPPLIER_CODE"
+        ),
+    ]
+
+
+def _arrivalOrderProperties() -> list[OntologyProperty]:
+    """DWD_ARRIVAL_ORDER_DTL 子集（到货词条的头类；目录只挂类）。"""
+    return [
+        OntologyProperty(
+            property_name="到货单号", data_type="STRING", source_column="ARRIVAL_NO"
+        ),
+        OntologyProperty(
+            property_name="到货状态", data_type="STRING", source_column="YPTHFLG_0"
+        ),
+    ]
+
+
+def _supplierWithReceiptModeProperties() -> list[OntologyProperty]:
+    """DIM_SUPPLIER 子集：含零库存标志 YPTHFLGM_0（零库存供应商词条挂这个属性）。"""
+    return [
+        OntologyProperty(
+            property_name="供应商代码", data_type="STRING", source_column="BPSNUM_0"
+        ),
+        OntologyProperty(
+            property_name="收货模式", data_type="STRING", source_column="YPTHFLGM_0"
+        ),
+    ]
+
+
+async def _seedCatalogClasses(session, *, withReceiptMode: bool = True) -> None:
+    """种出目录全部映射类（Lineage B 词表）。
+
+    写入口会校验「映射类存活 + 映射属性命中」⇒ 不种类直接 POST 必 422。
+    ``withReceiptMode=False`` 时不给 DIM_SUPPLIER 种 YPTHFLGM_0 —— 用于
+    反证属性校验真的在跑（不是空集假绿）。
+    """
+    supplierProps = (
+        _supplierWithReceiptModeProperties() if withReceiptMode else _supplierProperties()
+    )
+    classes = [
+        OntologyClass(
+            class_name="DWD_GOODS_RECEIPT_DTL",
+            class_alias="收货明细",
+            source_table="ZJTH.DWD_GOODS_RECEIPT_DTL",
+            properties=_receiptDtlProperties(),
+        ),
+        OntologyClass(
+            class_name="DIM_SUPPLIER",
+            class_alias="供应商主数据",
+            source_table="ZJTH.DIM_SUPPLIER",
+            properties=supplierProps,
+        ),
+        OntologyClass(
+            class_name="DWD_SUPPLIER_PRICE_LIST_HEADER",
+            class_alias="报价清单头",
+            source_table="ZJTH.DWD_SUPPLIER_PRICE_LIST_HEADER",
+            properties=_priceListHeaderProperties(),
+        ),
+        OntologyClass(
+            class_name="DWD_ARRIVAL_ORDER_DTL",
+            class_alias="到货单明细",
+            source_table="ZJTH.DWD_ARRIVAL_ORDER_DTL",
+            properties=_arrivalOrderProperties(),
+        ),
+    ]
+    session.add_all(classes)
+    await session.commit()
+
+
+def _catalogTermJson(spec) -> dict:
+    """目录词条 → POST /api/v1/term-dictionary 的 JSON（evidence 不落库，剔除）。"""
+    return {
+        "term": spec.term,
+        "definition": spec.definition,
+        "mappedClassName": spec.mappedClassName,
+        "mappedPropertyName": spec.mappedPropertyName,
+        "formulaHint": spec.formulaHint,
+    }
+
+
+class TestProcurementTermCatalogApply:
+    """M1-1.5：采购术语目录逐条过**真实写入口**。
+
+    目录是纯数据，单测已钉住不变量；这里钉的是它与**应用**的契约：
+    每一条都能被 POST /api/v1/term-dictionary 接受（映射存活校验通过），
+    且读回来的口径与目录逐字段一致（apply 脚本的幂等比对依赖这一致性）。
+    """
+
+    async def test_all_catalog_terms_pass_the_write_gate(
+        self, client, dbSession
+    ) -> None:
+        """目录 10 条全部 201；无源词条落库后映射为空（硬规则 1 端到端）。"""
+        await _seedCatalogClasses(dbSession)
+        await _clearTerms(client)
+
+        for spec in PROCUREMENT_TERMS:
+            resp = await client.post(
+                "/api/v1/term-dictionary",
+                json=_catalogTermJson(spec),
+                headers=ADMIN_HEADERS,
+            )
+            assert resp.status_code == 201, f"「{spec.term}」被写入口拒绝：{resp.text}"
+
+        listed = (await client.get("/api/v1/term-dictionary")).json()
+        byTerm = {row["term"]: row for row in listed}
+        assert set(byTerm) == set(termNames())
+        for spec in PROCUREMENT_TERMS:
+            row = byTerm[spec.term]
+            assert row["definition"] == spec.definition
+            assert row["mappedClassName"] == spec.mappedClassName
+            assert row["mappedPropertyName"] == spec.mappedPropertyName
+            assert row["formulaHint"] == spec.formulaHint
+
+    async def test_unsourced_terms_landing_without_mapping_and_source_backed_with(
+        self, client, dbSession
+    ) -> None:
+        """分类断言：无源词条（寻源/询价/定标/来料检验/不合格品处理/呆滞料）
+        映射必须为空；有源词条必须带 Lineage B 类名。
+        """
+        await _seedCatalogClasses(dbSession)
+        await _clearTerms(client)
+        await _seedTerms(client, [_catalogTermJson(spec) for spec in PROCUREMENT_TERMS])
+
+        listed = (await client.get("/api/v1/term-dictionary")).json()
+        byTerm = {row["term"]: row for row in listed}
+        for spec in unsourcedTerms():
+            row = byTerm[spec.term]
+            assert row["mappedClassName"] is None, (
+                f"无源词条「{spec.term}」落库后带了类 {row['mappedClassName']}"
+            )
+        for spec in sourceBackedTerms():
+            assert byTerm[spec.term]["mappedClassName"] is not None
+
+    async def test_mapped_property_gate_rejects_missing_column(
+        self, client, dbSession
+    ) -> None:
+        """反证：DIM_SUPPLIER 没有 YPTHFLGM_0 时，「零库存供应商」必须 422。
+
+        证明写入口的属性校验真的在跑 —— 否则「全部 201」只是因为
+        目录恰好与种子对齐（空集假绿）。
+        """
+        await _seedCatalogClasses(dbSession, withReceiptMode=False)
+        await _clearTerms(client)
+
+        zeroStock = termSpec("零库存供应商")
+        assert zeroStock is not None
+        resp = await client.post(
+            "/api/v1/term-dictionary",
+            json=_catalogTermJson(zeroStock),
+            headers=ADMIN_HEADERS,
+        )
+        assert resp.status_code == 422, resp.text
+        assert "YPTHFLGM_0" in resp.text

@@ -132,6 +132,7 @@ from app.services.graph_traversal_service import (
     resolveChatMaxHops,
 )
 from app.services.messages_zh import (
+    MSG_CHAT_UNANSWERABLE_ANCHOR_RESCUE as _UNANSWERABLE_ANSWER_ANCHOR_RESCUE,
     MSG_CHAT_UNANSWERABLE_MISSING_VECTOR as _UNANSWERABLE_ANSWER_MISSING_VECTOR,
     MSG_CHAT_UNANSWERABLE_NO_DATA as _UNANSWERABLE_ANSWER,
     MSG_GRAPH_TRAVERSAL_UNAVAILABLE,
@@ -152,7 +153,10 @@ from app.services.llm_retry_policy import (
     retryGenTokens as _retryGenTokens,
 )
 from app.services.nl2sql_service import Nl2SqlService, SqlResult, _readFloatConfig, _safeSchemaPrefix, _sanitizeContext
-from app.services.recall_datasource_filter import applyDatasourceRecallFilter
+from app.services.recall_datasource_filter import (
+    applyDatasourceRecallFilter,
+    isRecallDatasourceScoped,
+)
 from app.security.prompt_sanitizer import (
     UntrustedLabel,
     renderSecurityPreamble,
@@ -737,9 +741,18 @@ class ChatService(
                     # replace 保持不可变风格）
                     result = replace(result, intent=IntentType.FOLLOW_UP)
         except Nl2SqlError:
-            # 向量召回降级（mode=fallback）导致的不可回答：给出专项提示，
-            # 不走通用错误冒泡（前端 toast 无法区分根因）。
-            if pc.recall is not None and pc.recall.mode == "fallback":
+            # 向量召回降级导致的不可回答：给出专项提示，不走通用错误冒泡
+            # （前端 toast 无法区分根因）。
+            #   mode=fallback：向量检索不可用/无命中 ⇒ 指向量同步缺失；
+            #   mode=rescue ：锚定救援接管了选表但仍未生成出 SQL ⇒ 如实说明
+            #                 「已按关键词锚定选表但查询未成功」（文案不同，
+            #                 复用 MISSING_VECTOR 会谎报根因）。
+            if pc.recall is not None and pc.recall.mode in ("fallback", "rescue"):
+                unanswerableAnswer = (
+                    _UNANSWERABLE_ANSWER_MISSING_VECTOR
+                    if pc.recall.mode == "fallback"
+                    else _UNANSWERABLE_ANSWER_ANCHOR_RESCUE
+                )
                 return await self._unanswerableResponse(
                     session, dto, pc, result.intent,
                     _SqlOutcome(
@@ -747,7 +760,7 @@ class ChatService(
                         promptTokens=0, completionTokens=0, wasted=(0, 0), cachedTokens=None,
                     ),
                     _t0=_t0,
-                    _overrideAnswer=_UNANSWERABLE_ANSWER_MISSING_VECTOR,
+                    _overrideAnswer=unanswerableAnswer,
                 )
             raise
         if outcome.sql is None:
@@ -1009,7 +1022,8 @@ class ChatService(
             if first_plan.plan and first_plan.plan.steps and first_plan.plan.steps[0].sub_question:
                 recall_question = first_plan.plan.steps[0].sub_question
         classes, recallInfo = await self._selectRelevantClasses(
-            session, recall_question, allClasses
+            session, recall_question, allClasses,
+            isDatasourceScoped=isRecallDatasourceScoped(dsDisclosure),
         )
         recallInfo = recallInfo.model_copy(update=dsDisclosure)
         joins = await self._ontology.listJoins(session)

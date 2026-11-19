@@ -8,6 +8,7 @@ MAX_CLASSES 截断之前，把问句片段字面匹配的类强制纳入候选�
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -236,6 +237,292 @@ class TestMultistepAnchorDatasourceGuard:
         newPc = await service._recallForStep(session, pc, stepPlan)
 
         assert [c.id for c in newPc.classes] == [2]  # 跨源幽灵类既不命中也不被锚定
+
+
+class TestAnchorFallbackRescue:
+    """Gap B：降级路径也执行锚定（向量路径失效时的锚定救援）。
+
+    生产事故（2026-11-19）：跨源过滤后 94 个本地类，向量 top20 全落在跨源/墓碑类上
+    ⇒ 0 命中解析 ⇒ `no_match` 早退 ⇒ 锚定块（位于早退之后）从未执行
+    ⇒ 兜底把 43 个本地类全塞进 schema，召回裁剪被架空。
+
+    语义：向量路径失效时**锚定命中 ⇒ 窄窗口（锚定类）**；锚定也没命中才保留原全量回退
+    （宁可宽不可答不出）。检索基础设施故障（search_error / no_hits）不接管。
+
+    两道闸门（任一不过 ⇒ 回落全量回退）：
+    - 数据源口径（``isDatasourceScoped``）：候选集没按数据源收窄时不接管；
+    - 证据强度：唯一 2 字弱匹配（误锚定会独占窗口）时不接管。
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_match_rescued_by_anchor_narrows_window(self) -> None:
+        """向量命中解析不出本地类 + 问句字面命中本地类 ⇒ 窗口收敛到锚定类。
+
+        999 不在类集里 ⇒ hits 解析不出类 ⇒ 走 no_match 分支（既有早退点）。
+        """
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        receipt = _cls(2, "RECEIPT", "收货单")
+        service = _service([supplier, receipt], hits=[999])
+
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [supplier, receipt],
+            isDatasourceScoped=True,
+        )
+
+        assert [c.id for c in result] == [1]  # 只剩锚定类（不是 43 类宽窗）
+        assert recall.mode == "rescue"  # 独立 mode ⇒ 前端能出降级告警
+        assert recall.anchoredCount == 1
+        assert recall.hitCount == 1  # 纯向量命中数 = hitCount - anchoredCount = 0
+
+    @pytest.mark.asyncio
+    async def test_no_match_without_anchor_keeps_wide_fallback(self) -> None:
+        """锚定也没命中 ⇒ 保留原全量回退（行为逐字不变）。"""
+        classes = [_cls(1, "C1"), _cls(2, "C2")]
+        service = _service(classes, hits=[999])
+
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "收货数量", classes, isDatasourceScoped=True,
+        )
+
+        assert [c.id for c in result] == [1, 2]
+        assert recall.mode == "fallback"
+        assert recall.anchoredCount == 0
+
+    @pytest.mark.asyncio
+    async def test_ods_only_hits_rescued_by_anchor(self) -> None:
+        """命中全是 ODS 业务表 ⇒ 锚定救援（ODS 业务表本身不进锚定池）。"""
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        ods = _cls(2, "ODS_BPARTNER", "供应商伙伴表", src="ODS_BPARTNER")
+        service = _service([supplier, ods], hits=[2])
+
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [supplier, ods],
+            isDatasourceScoped=True,
+        )
+
+        assert [c.id for c in result] == [1]  # ODS 类既不命中也不被锚定
+        assert recall.mode == "rescue"
+        assert recall.anchoredCount == 1
+
+    @pytest.mark.asyncio
+    async def test_ods_only_hits_branch_logged_with_its_own_reason(self, caplog) -> None:
+        """ods_only_hits 与 no_match 是两条分支 ⇒ 日志里的 reason 必须能区分。"""
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        ods = _cls(2, "ODS_BPARTNER", "供应商伙伴表", src="ODS_BPARTNER")
+        service = _service([supplier, ods], hits=[2])
+
+        with caplog.at_level(logging.WARNING, logger="app.services.chat_recall"):
+            await service._selectRelevantClasses(
+                _FakeSession(), "公司目前有多少供应商", [supplier, ods],
+                isDatasourceScoped=True,
+            )
+
+        assert "reason=ods_only_hits" in caplog.text
+        assert "reason=no_match" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_search_error_keeps_wide_fallback(self) -> None:
+        """检索基础设施故障 ⇒ 不接管（宽窗更稳），行为不变。"""
+
+        class _BoomSearchOntology(_FakeOntologyService):
+            async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+                raise RuntimeError("Milvus 不可用")
+
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        service = _buildService(ontology=_BoomSearchOntology([supplier]))[0]
+
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [supplier],
+            isDatasourceScoped=True,
+        )
+
+        assert [c.id for c in result] == [1]
+        assert recall.mode == "fallback"
+        assert recall.anchoredCount == 0
+
+    @pytest.mark.asyncio
+    async def test_no_hits_keeps_wide_fallback(self) -> None:
+        """检索 0 命中 ⇒ 不接管（更像索引/嵌入异常），行为不变。"""
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        service = _service([supplier], hits=[])
+
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [supplier],
+            isDatasourceScoped=True,
+        )
+
+        assert [c.id for c in result] == [1]
+        assert recall.mode == "fallback"
+        assert recall.anchoredCount == 0
+
+    @pytest.mark.asyncio
+    async def test_rescue_respects_anchor_cap(self) -> None:
+        """救援窗口同样受 ANCHOR_MAX_CLASSES 上限约束。"""
+        classes = [_cls(i, f"TBL_{i}", "供应商维度") for i in range(1, 4)]
+        service = _service(classes, hits=[999])
+
+        result, recall = await service._selectRelevantClasses(
+            _RoutingSession(anchorCap="1"), "公司目前有多少供应商", classes,
+            isDatasourceScoped=True,
+        )
+
+        assert recall.anchoredCount == 1
+        assert [c.id for c in result] == [1]
+
+    @pytest.mark.asyncio
+    async def test_rescue_logs_exactly_one_reason_line(self, caplog) -> None:
+        """回退率按「含 reason= 的行」聚合 ⇒ 救援路径也恰好一行 reason=。"""
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        receipt = _cls(2, "RECEIPT", "收货单")
+        service = _service([supplier, receipt], hits=[999])
+
+        with caplog.at_level(logging.WARNING, logger="app.services.chat_recall"):
+            await service._selectRelevantClasses(
+                _FakeSession(), "公司目前有多少供应商", [supplier, receipt],
+                isDatasourceScoped=True,
+            )
+
+        assert caplog.text.count("reason=no_match") == 1
+        assert "anchored=1" in caplog.text  # 救援与普通回退可区分
+
+    @pytest.mark.asyncio
+    async def test_rescue_never_returns_empty_window(self) -> None:
+        """救援窗口恒非空（空 schema 会让整问失败）。"""
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        service = _service([supplier], hits=[999])
+
+        result, _ = await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [supplier],
+            isDatasourceScoped=True,
+        )
+
+        assert len(result) >= 1
+
+    @pytest.mark.asyncio
+    async def test_unscoped_candidates_keep_wide_fallback(self) -> None:
+        """闸门 1：候选集未按数据源收窄 ⇒ 不接管（窄窗可能全是别源表）。
+
+        未选数据源（no_datasource）或数据源目录缺失（no_cache）时，候选集仍含
+        别源类；此时锚定命中可能命中别源表，窄窗一旦只含别源表就是必然的
+        ORA-00942 ⇒ 保留宽窗。
+        """
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        receipt = _cls(2, "RECEIPT", "收货单")
+        service = _service([supplier, receipt], hits=[999])
+
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [supplier, receipt],
+        )
+
+        assert [c.id for c in result] == [1, 2]  # 宽窗，未收窄
+        assert recall.mode == "fallback"
+        assert recall.anchoredCount == 0
+
+    @pytest.mark.asyncio
+    async def test_weak_single_anchor_keeps_wide_fallback(self) -> None:
+        """闸门 2：唯一 2 字弱匹配 ⇒ 证据不足 ⇒ 保留宽窗。
+
+        「公司」这类常用词极易误命中；弱命中独占窗口（救援路径没有向量命中
+        兜底）比宽窗更糟 ⇒ 宁可宽不可答不出。
+        """
+        company = _cls(1, "DIM_COMPANY", "公司主数据")
+        supplier = _cls(2, "DIM_SUPPLIER", "供应商主数据")
+        service = _service([company, supplier], hits=[999])
+
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "公司信息有哪些", [company, supplier],
+            isDatasourceScoped=True,
+        )
+
+        # 问句里只有「公司」(2 字) 能命中 DIM_COMPANY（「供应商」不在问句里）
+        assert [c.id for c in result] == [1, 2]  # 宽窗
+        assert recall.mode == "fallback"
+        assert recall.anchoredCount == 0
+
+    @pytest.mark.asyncio
+    async def test_exact_short_anchor_still_narrows(self) -> None:
+        """精确等值命中即使只有 2 字也是强证据 ⇒ 允许收窄。"""
+        stock = _cls(1, "STOCK", "库存")
+        other = _cls(2, "RECEIPT", "收货单")
+        service = _service([stock, other], hits=[999])
+
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "库存", [stock, other], isDatasourceScoped=True,
+        )
+
+        assert [c.id for c in result] == [1]
+        assert recall.mode == "rescue"
+
+    @pytest.mark.asyncio
+    async def test_dimension_hint_pulls_dim_classes_into_rescue(self) -> None:
+        """维度词（分类/编号…）触发的 DIM 补拉在救援路径同样生效。
+
+        救援路径没有向量命中兜底，若整条丢掉维度词 DIM 补拉，含维度词的问句
+        会漏掉维度表 ⇒ 窗口与正常路径不一致。
+        """
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        material = _cls(3, "DIM_MATERIAL", "物料维度")
+        service = _service([supplier, material], hits=[999])
+
+        async def _fakeDimClasses(session):
+            return [material]
+
+        service._fetchAllDimClasses = _fakeDimClasses  # type: ignore[method-assign]
+
+        # 「分类」是维度词 ⇒ 触发 DIM 补拉；「物料」不在问句里 ⇒ material 不被锚定
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "供应商有多少种分类", [supplier, material],
+            isDatasourceScoped=True,
+        )
+
+        assert [c.id for c in result] == [1, 3]  # 锚定类 + 维度词 DIM 补拉
+        assert recall.mode == "rescue"
+        assert recall.anchoredCount == 1  # material 靠 DIM 补拉进来，不算锚定
+
+    @pytest.mark.asyncio
+    async def test_rescue_window_survives_expand_failure(self) -> None:
+        """扩边异常 ⇒ 退化为未扩边的锚定窗口（不让整问失败）。"""
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        service = _service([supplier], hits=[999])
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("JOIN 目录炸了")
+
+        service._expandByJoinNeighbors = _boom  # type: ignore[method-assign]
+
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [supplier],
+            isDatasourceScoped=True,
+        )
+
+        assert [c.id for c in result] == [1]
+        assert recall.mode == "rescue"
+
+
+class TestMultistepAnchorRescue:
+    """步骤级召回同样会走救援路径（多步的第二步也可能命中解析不出类）。"""
+
+    @pytest.mark.asyncio
+    async def test_step_recall_rescues_narrows_window(self) -> None:
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        receipt = _cls(2, "RECEIPT", "收货单")
+        service = _service([supplier, receipt], hits=[999])
+        session = _RoutingSession(
+            schemaData=[{"table_name": "DIM_SUPPLIER", "owner": "ZJTH"},
+                        {"table_name": "RECEIPT", "owner": "ZJTH"}],
+        )
+        pc = _PipelineContext(
+            ds=SimpleNamespace(id=7), classes=[], configs=[],
+            selected=None, client=None, contextPrompt="",
+        )
+        stepPlan = StepPlan(
+            index=0, description="查供应商", sub_question="公司目前有多少供应商",
+        )
+
+        newPc = await service._recallForStep(session, pc, stepPlan)
+
+        assert [c.id for c in newPc.classes] == [1]  # 锚定窄窗（非宽窗全量）
+
 
 
 class TestAnchorMaxClassesConfig:

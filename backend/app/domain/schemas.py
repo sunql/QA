@@ -2186,10 +2186,14 @@ class ClassRecallInfo(CamelModel):
       - expanded: 召回 + JOIN 目录 1-hop 扩边
       - fallback: 检索不可用/无命中，回退到「ODS 过滤 + 层优先排序 + 上限截断」后的类集
                   （H5 起降级路径同样受裁剪约束，故 truncated 在 fallback 下同样有意义）
+      - rescue:   向量命中给不出可用类时，由关键词锚定接管选表（锚定窄窗，
+                  2026-11-19 Gap B）；锚定证据不足或候选集未按数据源收窄时
+                  仍回落 fallback，不会误收窄
     truncated: 类集达到 system_config.CLASS_FILTER_MAX_CLASSES 上限被截断，
     可能存在相关表未进入本次 schema。
-    hitCount: 候选类数（向量命中 + 关键词锚定新增，截断前口径）⇒ 纯向量命中数
-    = hitCount - anchoredCount。
+    hitCount: 候选类数（截断前口径：向量命中 + 关键词锚定新增 + 维度词 DIM
+    补拉）⇒ 纯向量命中数 ≈ hitCount - anchoredCount（维度词 DIM 补拉时该差值
+    会偏大，纯向量命中数恒 ≤ 该差值）。
     datasourceFiltered/datasourceFilterSkipped/anchoredCount：见
     Harness/changes/2026-11-19-recall-datasource-filter-anchor/design.md。
     详见 Harness/wiki/nl2sql-engine.md「类召回窗口与规模化风险」。

@@ -6,14 +6,34 @@
 连续片段（n-gram，无分词器）与类名/别名做包含匹配，命中类强制纳入候选集、
 排在向量命中之前（不被 MAX_CLASSES 截断挤掉）。上限 ANCHOR_MAX_CLASSES 由
 调用方从 system_config 读后经 maxAnchored 传入。纯增量：不淘汰任何类。
+
+对外两个入口：
+- ``selectAnchoredClasses``：只要类（调用方只关心「捞回哪些类」）；
+- ``selectAnchoredMatches``：类 + 命中强度（精确等值 / 片段长度）——
+  降级救援路径用它判断「锚定证据够不够强」（唯一 2 字弱匹配 ⇒ 证据不足）。
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 _QUESTION_NGRAM_MIN = 2
 _QUESTION_NGRAM_MAX = 6
+
+
+@dataclass(frozen=True)
+class AnchoredMatch:
+    """锚定命中明细：命中类 + 命中强度（供下游做质量闸门）。
+
+    isExact：命中片段与类名/别名**完全等值**（最强证据）。
+    fragmentLength：命中片段的字数（2–6）；片段越长证据越强。
+    两者共同决定「这次锚定值不值得把召回窗口收窄」。
+    """
+
+    cls: Any
+    isExact: bool
+    fragmentLength: int
 
 
 def _questionFragments(question: str) -> list[str]:
@@ -34,10 +54,10 @@ def _questionFragments(question: str) -> list[str]:
     return fragments
 
 
-def selectAnchoredClasses(
+def selectAnchoredMatches(
     question: str, classes: list[Any], *, maxAnchored: int
-) -> list[Any]:
-    """问句片段与类名/别名包含匹配，返回锚定类（新列表，不改动入参）。
+) -> list[AnchoredMatch]:
+    """问句片段与类名/别名包含匹配，返回命中明细（新列表，不改动入参）。
 
     排序：精确等值（片段 == 类名/别名）优先 > 匹配片段更长优先 > 类 id 升序
     （确定性兜底）。同一类多片段命中取最高档计分。
@@ -67,4 +87,20 @@ def selectAnchoredClasses(
         if best is not None:
             scored.append((best[0], best[1], cls.id, cls))
     scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
-    return [item[3] for item in scored[:maxAnchored]]
+    return [
+        AnchoredMatch(cls=item[3], isExact=item[0] == 1, fragmentLength=item[1])
+        for item in scored[:maxAnchored]
+    ]
+
+
+def selectAnchoredClasses(
+    question: str, classes: list[Any], *, maxAnchored: int
+) -> list[Any]:
+    """问句片段与类名/别名包含匹配，返回锚定类（新列表，不改动入参）。
+
+    兼容层：只要类、不要命中明细（顺序与 ``selectAnchoredMatches`` 一致）。
+    """
+    return [
+        match.cls
+        for match in selectAnchoredMatches(question, classes, maxAnchored=maxAnchored)
+    ]

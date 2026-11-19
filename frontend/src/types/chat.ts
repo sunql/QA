@@ -280,7 +280,8 @@ export interface DataQualityBadge {
 // truncated/fallback 时前端向用户提示（避免"看起来正常但 schema 缺表"）。
 // 语义见 Harness/wiki/nl2sql-engine.md「类召回窗口与规模化风险」。
 export interface ClassRecallInfo {
-  mode: "recall" | "expanded" | "fallback";
+  // rescue：向量命中给不出可用类时由关键词锚定接管选表（2026-11-19 Gap B）。
+  mode: "recall" | "expanded" | "fallback" | "rescue";
   hitCount: number;
   classCount: number;
   truncated: boolean;

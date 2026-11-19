@@ -132,3 +132,15 @@ async def applyDatasourceRecallFilter(
         )
     disclosure["datasourceFiltered"] = len(dropped)
     return kept, disclosure
+
+
+def isRecallDatasourceScoped(disclosure: dict[str, Any]) -> bool:
+    """披露里「跨源过滤已生效」⇒ 候选集已按当前数据源收窄。
+
+    False = 未选数据源（no_datasource）或数据源目录缺失（no_cache）⇒ 候选集
+    仍含别源类。**收窄窗口的路径（锚定救援）必须先过这一关**：候选集没按
+    数据源收窄时，锚定命中可能全是别源的类，窄窗一旦只含别源表就是必然的
+    ORA-00942（比宽窗更糟）。调用方直接传 ``applyDatasourceRecallFilter``
+    返回的披露 dict，避免各调用点各写一遍判定。
+    """
+    return disclosure.get("datasourceFilterSkipped") is None

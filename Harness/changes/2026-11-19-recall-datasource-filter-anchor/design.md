@@ -47,8 +47,8 @@
 
 - `chat_recall.py` `classifyAndRecall`：`allClasses`（钉版快照与治理表两条路）取完即过滤；
   钉版快照同样过滤（SQL 终究在当前源执行）。
-- `chat_service.py:996`：plan/schema 构建链的全量类。
-- `chat_multistep.py:524` `_recallForStep`：步骤级召回的候选集（Task 6 后补的第三处）——
+- `chat_service.py:1000`：plan/schema 构建链的全量类。
+- `chat_multistep.py:533` `_recallForStep`：步骤级召回的候选集（Task 6 后补的第三处）——
   步骤召回排在共享召回之前且锚定按字面确定性命中，不过滤会重新捞回跨源幽灵类。
 - 过滤在候选集源头 ⇒ 向量交集 / JOIN 扩边 / ODS 过滤等下游零改动；JOIN 扩边只见本源邻居。
 
@@ -61,6 +61,9 @@
   过滤点在类候选集源头 ⇒ 兜底 `matched or list(classes)`（全量类进 prompt）也只吐已过滤的类。
 - `api/v1/research.py` BO 臂 `_searchBusinessObjects`：Milvus 全局检索**无 valid_to 过滤**
   ⇒ 手工墓碑的类向量仍在库里；PG 回填补 `valid_to IS NULL` ⇒ 只捞活类，墓碑真正生效。
+  实现比「只清空 sourceTable」更强：**墓碑行与悬空向量一并剔出 BO 臂**——因为
+  `research_schema_reflection.buildHypothesisSchemaHint` 按 BO 臂 classId 反查本体做值域采样，
+  只清空表名挡不住「按 classId 反查到墓碑类 → 仍采样」。
 - 数据源 id 在**相位边界**固化（`ExecutionDeps.datasourceId`）：循环内读 ORM 属性会触发
   MissingGreenlet（失败步 rollback 会 expire 实例）。
 

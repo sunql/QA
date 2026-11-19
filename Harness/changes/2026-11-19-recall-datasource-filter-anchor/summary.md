@@ -17,7 +17,7 @@
 
 **执行顺序（不可颠倒）**：数据源过滤（淘汰跨源）→ 锚定（在幸存类里取锚）→ 向量命中交集 ⇒ **锚定永不捞回幽灵类**。
 
-## 二、提交清单（8 任务）
+## 二、提交清单（9 任务）
 
 | 任务 | 提交 | 内容 |
 |---|---|---|
@@ -31,7 +31,10 @@
 | Task 8 | `a46b5c17` | 定向回归 + 文档回填（wiki 类召回窗口节 + 本 summary + design.md 落本分支） |
 | Task 9 | `28eb1657` … `5878315f` | **终审修复**（4 Important + 2「必须合并前修」一次修完，见下节） |
 
-代码改动规模：`16 files changed, 994 insertions(+), 6 deletions(-)`（后端 6 源文件 + 5 测试文件，前端 5 文件）。
+代码改动规模（`git diff origin/main..HEAD`）：`23 files changed, 1828 insertions(+), 14 deletions(-)`
+—— 后端 8 源文件（`chat_recall` / `chat_service` / `chat_multistep` / `research_agent_execution` / `api/v1/research`
+/ `recall_datasource_filter` / `recall_keyword_anchor` / `domain/schemas`）+ 7 测试文件 + 前端 5 文件 + 文档 3 份。
+**零迁移、零表结构变更**。
 
 ## 三、测试证据（Task 8 定向回归）
 
@@ -143,6 +146,8 @@ ORDER BY class_cnt DESC;
 - A2 非空 ⇒ 这些表名是「本体登记了但本源没 introspect」⇒ 会被**硬过滤静默剔除** ⇒
   须先补该 owner 的 introspect（或人工确认这些类确实不该出现），再上线。
 - A2 结果里**不含**跨源表名 ⇒ 覆盖度正常。
+- ⚠️ **爆炸半径已扩大（Task 9 起）**：硬过滤现覆盖 **chat 三调用点 + 维度词 DIM 全量拉取路径
+  + 研究执行面**，故「被静默剔除」的影响面比初版更广。A2 探针同时覆盖这三处。
 
 **前置条件 B —— 跨源 `DIM_*` 存在性探针**（验证 I1 修法在生产的实际覆盖面）：
 
@@ -163,6 +168,30 @@ WHERE oc.valid_to IS NULL
 - B1 > 0 ⇒ 维度词（「名称」「属性」「分类」…）在本源会话曾能把这些**跨源 DIM 类**拉进 schema
   （I1 修复前的事故形态）⇒ 上线后**必须**用含维度词的问句回归一次，确认跨源 DIM 类不再进候选集。
 - 探针只读、不改数据；结论写入发版记录后再执行 §4.3 的墓碑复活。
+
+**前置条件 C —— 跨源活类是否进了研究 BO 臂**（研究反射路径残余，见 §6 第 6 条）：
+
+BO 臂仍是 **Milvus 全局检索（无数据源维度）**。Task 9 靠「墓碑类/悬空向量不进 BO 臂」堵住了墓碑那条路，
+但**跨源且未墓碑的活类**若进了 BO 臂，`research_schema_reflection.buildHypothesisSchemaHint` 仍会按
+classId 反查本体做**值域采样** —— 与事故「值域采样同表空转 6 次」同形。探针：
+
+```sql
+-- C1：BO 臂可能捞到的「跨源活类」——即 source_table 不在本源 schema_cache 清单内、且未墓碑的类
+SELECT count(*) AS cross_source_alive_classes
+FROM ontology_class oc
+WHERE oc.valid_to IS NULL
+  AND coalesce(oc.source_table, '') <> ''
+  AND upper(oc.source_table) NOT IN (
+      SELECT upper(t ->> 'table_name')
+      FROM schema_cache sc,
+           jsonb_array_elements(sc.schema_data) AS t
+      WHERE sc.datasource_id = :datasource_id
+  );
+```
+
+- C1 > 0 ⇒ 这些活类在研究 BO 臂**仍可能被捞到**并触发跨源值域采样 ⇒ 上线后**必须**用研究入口
+  重问一次「公司目前有多少供应商」，确认无跨源值域采样空转。
+- 根治未做：需把「BO 臂 ⇒ 数据源维度」收窄下沉到 ESL 层，或在反射处复用同一过滤口径（**另批**）。
 
 ### 4.3 墓碑 id 270 复活裁决项（**待上线验证后执行**）
 
@@ -192,7 +221,7 @@ WHERE oc.valid_to IS NULL
 
 | # | 来源 | 等级 | 内容 | 建议处置 |
 |---|---|---|---|---|
-| M1 | Task 6 | MEDIUM | 文件超行数红线：`chat_recall.py` **901 行**（改前 831，已超 800）、`chat_multistep.py` **1057 行**（改前 1046）、`chat_service.py` **2445 行** | 后续批次切出 `recall_anchor_wiring.py`（召回配置读取 + 锚定接线） |
+| M1 | Task 6 | MEDIUM | 文件超行数红线：`chat_recall.py` **934 行**（改前 831，已超 800）、`chat_multistep.py` **1057 行**（改前 1046）、`chat_service.py` **2445 行** | 后续批次切出 `recall_anchor_wiring.py`（召回配置读取 + 锚定接线） |
 | M2 | Task 6 | MEDIUM | 极端配置：`ANCHOR_MAX_CLASSES ≥ MAX_CLASSES` 时锚定可占满窗口、挤掉向量命中 | 补配置约束说明（`ANCHOR_MAX_CLASSES` 应 < `MAX_CLASSES`），或代码侧再夹取 |
 | M3 | Task 6 | MEDIUM | 步骤级 `datasourceFiltered` 披露被丢弃：`_recallForStep` 把召回信息整体丢弃（既有模式，非本批引入） | 后续批次决定是否透传步骤级披露 |
 | M4 | Task 6 | MEDIUM | 锚定同分兜底用 **id 升序**，与 design.md「同分按向量 score」不符（Task 3 已合实现差异，design.md 未同步） | ✅ **Task 9 已修**（design.md 订正为 id 升序，代码不动） |
@@ -201,6 +230,9 @@ WHERE oc.valid_to IS NULL
 | — | Task 7 | LOW | 三态 `skipped`（`no_datasource` / `no_cache`）在前端合并成一条文案，两态**运维含义不可区分** | 新增 2 个 i18n 键并按值分支 |
 | — | Task 7 | LOW | worktree 内 `frontend/node_modules` 软链（指向主检出） | **收尾删除**（不影响入库，`.gitignore` 覆盖） |
 | — | Task 4/5 | LOW | 多 owner 并集 / 空 `table_name` 两态**无集成夹具**（纯函数层已覆盖） | ✅ **Task 9 已修**（1 单测 `_tableKeys` + 1 集成用例「同源两 owner 不误杀」） |
+| — | Task 9 复审 | LOW | 研究执行面 `generateStepSql` **每步多一次** `schema_cache` 查询（SQL Guard 重试时同 turn 查 2 次，多步线性放大；只读、命中主键索引） | 后续可做 turn 级缓存 |
+| — | Task 9 复审 | LOW | 研究入口**丢弃过滤披露**（`allClasses, _ =`）⇒ 研究链路响应里看不到 `datasourceFiltered`/`datasourceFilterSkipped` | 运维靠服务端日志（`no_cache` 已有 warning）；后续可透传 |
+| — | Task 9 复审 | LOW | I1 的**快照分支**（`view.classes`）无独立回归用例（直读分支有）；靠「汇合后单点收口」保证 | 后续可补一条钉版快照用例，或在收口点加注释指向守卫用例 |
 
 ## 六、偏离与已知边界（供接手人）
 
@@ -213,3 +245,12 @@ WHERE oc.valid_to IS NULL
 3. **前端 i18n 占位符**：仓内 i18n 显式用单花括号 `{total}`（非 brief 的 `{{total}}`）⇒ 照仓内既有写法。
 4. **`_fallbackRecall` 不接锚定**（降级是纯增量缺失场景，另批再议）。
 5. **`ontology_class` 不加 `datasource_id` 列**（回填难题与运行时校验同构 ⇒ 本批用运行时校验绕开）。
+6. **研究反射路径残余（未根治）**：`research_schema_reflection.buildHypothesisSchemaHint` 按 BO 臂
+   classId 反查本体做**值域采样**，而 BO 臂仍是 **Milvus 全局检索（无数据源维度）**。Task 9 堵住了
+   墓碑那条路（墓碑类/悬空向量不进 BO 臂），但**跨源且未墓碑的活类**若进 BO 臂，反射路径仍会采样 ⇒
+   与事故「值域采样同表空转 6 次」同形。**根治需另批**：把「BO 臂 ⇒ 数据源维度」收窄下沉到 ESL 层，
+   或在反射处复用同一过滤口径。上线前探针见 §4.2 前置条件 C。
+7. **BO 臂可能整臂变空**：Task 9 把悬空向量条目整条剔出 BO 臂（原先它们以 `sourceTable=""` 留在臂内）。
+   若 topK 命中全是墓碑/悬空、且 metric/knowledge 两臂也空 ⇒ `EmptyResearchScopeError`（400「三臂检索全空」），
+   而原先会带着一个无表名的 BO 继续走。方向更正确（无表名的 BO 本就无上下文），但属**行为变化**，
+   接手人须知。

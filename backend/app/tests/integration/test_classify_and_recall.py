@@ -74,11 +74,16 @@ class _FakeOntology:
     def __init__(self, hits: list, allClasses: list[OntologyClass]) -> None:
         self._hits = hits
         self._classes = allClasses
+        # 记录收到的本体类 id 作用域（Gap A：作用域只收窄向量检索窗口）
+        self._scopeCalls: list[list[int] | None] = []
 
     async def listClasses(self, session) -> list[OntologyClass]:  # noqa: ANN001
         return self._classes
 
-    async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:  # noqa: ANN001
+    async def searchByKeyword(  # noqa: ANN001
+        self, query, *, topK=5, typeFilter=None, classOntologyIds=None
+    ) -> list:
+        self._scopeCalls.append(classOntologyIds)
         return self._hits
 
     async def listJoins(self, session) -> list:  # noqa: ANN001
@@ -672,4 +677,90 @@ async def test_multi_owner_schema_cache_union_keeps_each_owner_class(dbSession) 
     assert "DIM_SUPPLIER" in names, "THBI owner 的类被误杀"
     assert "MAIN_DATA_FOO" in names, "ZJTH owner 的类被误杀（多行未取并集）"
     assert "MAIN_DATA_SUPPLIER" not in names, "跨源幽灵类未被过滤"
+    assert result.recallInfo.datasourceFiltered == 1
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-20 Gap A 根因修复（Harness/changes/2026-11-19-recall-milvus-local-scope）：
+# 向量检索窗口收敛到本地类 id（作用域推进 Milvus expr）。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_class_id_scope_narrows_vector_window_to_local_classes(
+    dbSession,
+) -> None:
+    """Gap A 集成守卫：作用域生效 ⇒ 向量窗口只含本地类（跨源类不再挤掉 topK 名额）。
+
+    生产实证（2026-11-19）：候选集已按数据源收窄到 94 个本地类，但向量 top20
+    全落在跨源/墓碑类上 ⇒ 能解析到本地类的命中为 **0** ⇒ ``no_match`` 早退
+    ⇒ 召回裁剪被架空（Gap B 的锚定救援只是止血）。
+
+    根因：数据源过滤只在**应用侧候选集**生效，向量检索打的是 Milvus **全局**
+    集合 ⇒ 窗口与候选集不同口径。
+
+    本用例用「窗口模拟」替身复现该症状（替身按作用域重新取窗口，模拟
+    Milvus ``expr`` 过滤后的行为）：
+    - 无作用域 ⇒ 返回被跨源类占满的窗口（本地类挤不进）⇒ 命中解析不出本地类；
+    - 有作用域 ⇒ 窗口内只剩本地类 ⇒ 命中解析得出 ⇒ 走正常裁剪路径。
+    """
+    ds = _datasource()
+    ds.id = 880004
+    ds.name = "SCOPE_SRC"
+    dbSession.add(ds)
+    dbSession.add(SchemaCache(
+        datasource_id=880004, schema_name="SCOPE_SRC",
+        schema_data=[{"table_name": "DIM_SUPPLIER", "owner": "SCOPE_SRC", "columns": []}],
+        schema_version="t1",
+    ))
+    await dbSession.flush()
+    local = OntologyClass(
+        class_name="DIM_SUPPLIER", class_alias="供应商主数据",
+        source_table="DIM_SUPPLIER")
+    ghost = OntologyClass(
+        class_name="MAIN_DATA_SUPPLIER", class_alias="供应商主数据",
+        source_table="main_data_supplier")
+    for c in (local, ghost):
+        dbSession.add(c)
+    await dbSession.flush()
+
+    class _WindowOntology(_FakeOntology):
+        """模拟 Milvus 窗口：作用域内重新取 topK（作用域为空集 ⇒ 恒空）。"""
+
+        def __init__(self, *, crossHits, localHits, allClasses) -> None:  # noqa: ANN001, ANN003
+            super().__init__(hits=[], allClasses=allClasses)
+            self._crossHits = list(crossHits)
+            self._localHits = list(localHits)
+
+        async def searchByKeyword(  # noqa: ANN001
+            self, query, *, topK=5, typeFilter=None, classOntologyIds=None
+        ) -> list:
+            self._scopeCalls.append(classOntologyIds)
+            if classOntologyIds is None:
+                # 全局窗口：跨源类占满 ⇒ 本地类挤不进（今天的症状）
+                return list(self._crossHits)
+            allowed = set(classOntologyIds)
+            pool = [
+                hit for hit in self._crossHits + self._localHits
+                if hit.id in allowed
+            ]
+            return pool[:topK]
+
+    fakeOntology = _WindowOntology(
+        crossHits=[_hit(ghost)],
+        localHits=[_hit(local)],
+        allClasses=[local, ghost],
+    )
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None,
+        needRecall=True, datasourceId=880004,
+    )
+
+    # 作用域 = 本地类 id 集（跨源类已被数据源过滤剔除，不进作用域）
+    assert fakeOntology._scopeCalls == [[local.id]]
+    # 窗口内只有本地类 ⇒ 命中解析得出 ⇒ 走正常裁剪（不是 no_match 早退/救援）
+    assert [c.class_name for c in result.classes] == ["DIM_SUPPLIER"]
+    assert result.recallInfo.mode == "recall"
     assert result.recallInfo.datasourceFiltered == 1

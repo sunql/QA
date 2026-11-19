@@ -42,6 +42,11 @@ _CLASS_FILTER_HIT_MATCH_MIN_DEFAULT = 0.5  # 1-1：命中中可解析为真实�
 _CLASS_FILTER_MAX_CLASSES_DEFAULT = 30  # 召回扩边后的 schema 类总量上限；运行期从 system_config.CLASS_FILTER_MAX_CLASSES 读，缺席用此值
 _ANCHOR_MAX_CLASSES_DEFAULT = 5  # 关键词锚定强纳入类的上限；运行期从 system_config.ANCHOR_MAX_CLASSES 读，缺席用此值
 _ADS_RECALL_WEIGHT_DEFAULT = 1.5  # feat-ontology-recall-pruning step D：ADS 层类 score 加权系数
+# Gap A：本体类 id 作用域（Milvus expr）的规模上限。作用域 id 集 = 本数据源的
+# 候选类 id（生产实证 94 个 ⇒ expr 约 0.4KB）。上限远超生产量级，只防「某数据源
+# 拥有绝大多数类」时 expr 长到 Milvus 解析失败 ⇒ 异常被吞成 search_error ⇒
+# 静默退回本批要修的行为。超限 ⇒ 显式降级为「不限」+ 告警（宽窗更稳）。
+_CLASS_SCOPE_MAX_IDS = 2000
 # 运行期从 system_config.ADS_RECALL_WEIGHT 读；缺席/格式错返此值。提高此值让
 # ADS 黄金路径在向量召回 top15 中更靠前；降低/设为 1.0 关闭加权。
 
@@ -659,10 +664,87 @@ class RecallMixin:
                 mode="recall", hitCount=0, classCount=0,
             )
         topK = await self._getClassFilterTopK(session)
-        try:
-            hits = await self._ontology.searchByKeyword(
-                question, topK=topK, typeFilter="class"
+        # Gap A（2026-11-20 根因修复）：把「本地类 id 集」推进 Milvus 的 expr
+        # ⇒ 向量检索窗口与候选集口径一致。
+        #
+        # 为什么必须：数据源过滤只在**应用侧**（Python）生效，向量检索打的是
+        # Milvus **全局**集合 ⇒ topK 名额被跨源类/墓碑类吃光。生产实证
+        # （2026-11-19）：候选集已收窄到 94 个本地类，但向量命中 20 个里能解析到
+        # 本地类的为 **0** ⇒ reason=no_match 早退 ⇒ 召回裁剪被架空。
+        #
+        # 作用域只在**候选集已按数据源收窄**时施加（isDatasourceScoped）：
+        # 未收窄（no_datasource / no_cache）时候选集本来就是全局的 ⇒ 作用域=None
+        # ⇒ 与今天逐字节一致。
+        #
+        # ⚠️ 还要求**候选 id 是真实主键**（view is None）：会话钉住语义发布时
+        # 候选类来自发布快照，其 id 是**按类名排序合成的 1..N**
+        # （semantic_schema_adapter._synthesizeIds），与 Milvus 的
+        # ``ontology_id``（= ``ontology_class.id`` 自增主键）**不是同一 id 空间**。
+        # 拿合成 id 去过滤真实主键会同时踩三个坑：
+        # (a) 真本地类的向量被挡在窗口外 ⇒ 作用域检索恒空；
+        # (b) 合成 id 恰好撞上别的真实主键 ⇒ 跨源/墓碑类的向量又进窗口
+        #     （正是本批要消灭的症状）；
+        # (c) 命中 id（真实主键）与快照类 id（合成）错映射 ⇒ 错类归因，
+        #     无关类的属性被喂给 planner。
+        # ⇒ 钉住路径**不施加作用域**（与今天逐字节一致）。该路径的 id 空间
+        # 错配是**既有缺陷**（直读路径之外的另一条线），另批根治（见 summary
+        # 遗留挂账）。
+        scopeIds: list[int] | None = None
+        if isDatasourceScoped:
+            if view is not None:
+                logger.warning(
+                    "钉住语义发布路径不施加本体类 id 作用域（快照 id 为合成 id，"
+                    "与 Milvus 主键不同空间） scene=pinned_scope_skipped"
+                )
+            else:
+                scopeIds = sorted(
+                    {cls.id for cls in allClasses if cls.id is not None}
+                )
+        if scopeIds is not None and len(scopeIds) > _CLASS_SCOPE_MAX_IDS:
+            # 作用域过大 ⇒ expr 会长到 Milvus 解析吃力（抛异常 ⇒ 被下面的
+            # except 吞成 search_error ⇒ 宽窗回退 ⇒ 恰好退回本批要修的行为，
+            # 且只有一行 warning）。宁可显式降级为「不限」+ 告警（宽窗更稳，
+            # 与全仓「宁可宽不可答不出」一致），也不要静默失效。
+            logger.warning(
+                "本体类作用域过大，降级为不限 scope=%d limit=%d scene=class_scope_too_large",
+                len(scopeIds), _CLASS_SCOPE_MAX_IDS,
             )
+            scopeIds = None
+        try:
+            if scopeIds is None:
+                # 无作用域 ⇒ 调用形态逐字不变（不多传 kwarg）：既有替身只认
+                # ``(query, *, topK, typeFilter)``，多传 kwarg 会让它们整体抛
+                # TypeError ⇒ 被下面的 except 吞成 search_error ⇒ 测试静默
+                # 失去向量路径的覆盖。
+                hits = await self._ontology.searchByKeyword(
+                    question, topK=topK, typeFilter="class"
+                )
+            else:
+                hits = await self._ontology.searchByKeyword(
+                    question, topK=topK, typeFilter="class",
+                    classOntologyIds=scopeIds,
+                )
+                if not hits:
+                    # 作用域窗口为空 ⇒ 两种可能：(a) 本地类在 Milvus 里**没有向量**
+                    # （embedding 缺口）；(b) expr 过滤过严（自愈）。两者都**不能**
+                    # 直接回落宽窗：宽窗把 43 个本地类全塞进 schema（召回裁剪被
+                    # 架空，正是本批要消灭的症状）。
+                    # ⇒ 用**同一问题**做一次**无作用域**检索（调用形态与今天逐字
+                    #    一致，不多传 kwarg）：
+                    #    - 无作用域命中能解析出本地类 ⇒ 走正常裁剪（自愈）；
+                    #    - 命中解析不出本地类 ⇒ no_match ⇒ 锚定救援窄窗
+                    #      （与今天同一状态下的表现一致）；
+                    #    - 连无作用域都 0 命中 ⇒ no_hits ⇒ 宽窗回退（行为不变）。
+                    #
+                    # 这是一次**有意的作用域绕过** ⇒ 记 WARNING（不用 reason=：
+                    # 回退率按「含 reason= 的行」聚合，这里不是召回回退），
+                    # 否则运维看不到「作用域被绕过」。
+                    logger.warning(
+                        "本体类作用域窗口为空，改用无作用域检索 scene=class_scope_bypass"
+                    )
+                    hits = await self._ontology.searchByKeyword(
+                        question, topK=topK, typeFilter="class"
+                    )
         except Exception:
             # 只留堆栈：reason=/计数由 _fallbackRecall 单点透出，避免回退率翻倍
             logger.warning("本体类裁剪检索失败，进入降级路径", exc_info=True)

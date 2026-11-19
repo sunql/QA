@@ -108,13 +108,16 @@ class _RecordingOntology:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
-    async def searchByKeyword(self, query, *, topK=5, typeFilter=None):
+    async def searchByKeyword(self, query, *, topK=5, typeFilter=None, classOntologyIds=None):
         self.calls.append(typeFilter)
         if typeFilter in self.raiseOn:
             raise RuntimeError("recall boom")
         if typeFilter in self.hits:
             return list(self.hits[typeFilter])
-        return await self._inner.searchByKeyword(query, topK=topK, typeFilter=typeFilter)
+        return await self._inner.searchByKeyword(
+            query, topK=topK, typeFilter=typeFilter,
+            classOntologyIds=classOntologyIds,
+        )
 
 
 # ---------------------------------------------------------------------------

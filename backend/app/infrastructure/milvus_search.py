@@ -8,7 +8,7 @@ Provides:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
 from pymilvus import Collection
 
@@ -16,6 +16,7 @@ from app.infrastructure.milvus_client import (
     VALID_EMBEDDING_TYPES,
     _connAlias,
     _connect,
+    buildClassIdScopeExpr,
     hasEmbeddingCollection,
     hnswSearchParams,
 )
@@ -56,6 +57,7 @@ def searchEmbeddingsByTypeRouted(
     queryEmbedding: list[float],
     topK: int = 5,
     typeFilter: str | None = None,
+    classOntologyIds: Sequence[int] | None = None,
 ) -> list[dict[str, Any]]:
     """向量相似度搜索（type-routed；走 4 个 type-specific collection）。
 
@@ -63,6 +65,10 @@ def searchEmbeddingsByTypeRouted(
         queryEmbedding: 查询向量
         topK: 返回条数
         typeFilter: 可选，限定类型（class/property/metric/kpi）
+        classOntologyIds: 可选，**本体类 id 作用域**（Gap A）：只保留这些本体类的
+            向量。``None`` = 不限（与今天逐字节一致）；空集 = deny-all（恒空）。
+            **只作用于 class 集合**——Milvus 的 ``ontology_id`` 在类/属性之间
+            共用 id 序列，套到 property 集合上会误伤。
 
     Returns:
         匹配的记录列表（含 ontology_id / type / name / alias / description / distance），
@@ -92,8 +98,13 @@ def searchEmbeddingsByTypeRouted(
     # 仍须经 _connect() 的失效重连路径。
     _connect()
 
+    # 本体类 id 作用域 → Milvus expr（None = 不限；空集 = deny-all）。
+    classScopeExpr = buildClassIdScopeExpr(classOntologyIds)
+
     if typeFilter == "class":
-        return _searchCollection(_CLASS_COLLECTION_NAME, queryEmbedding, topK)
+        return _searchCollection(
+            _CLASS_COLLECTION_NAME, queryEmbedding, topK, expr=classScopeExpr
+        )
     if typeFilter == "property":
         return _searchCollection(_PROPERTY_COLLECTION_NAME, queryEmbedding, topK)
     if typeFilter == "metric":
@@ -107,17 +118,21 @@ def searchEmbeddingsByTypeRouted(
     # typeFilter is None: search all collections, merge, sort by distance, take topK
     perCollectionTopK = topK
     perHits: list[dict[str, Any]] = []
-    collectionNames = [
-        _CLASS_COLLECTION_NAME,
-        _PROPERTY_COLLECTION_NAME,
-        _METRIC_COLLECTION_NAME,
+    # (集合名, 类型)：作用域只落 class 集合（id 序列按类型共享，见类注释）
+    collectionTypes: list[tuple[str, str]] = [
+        (_CLASS_COLLECTION_NAME, "class"),
+        (_PROPERTY_COLLECTION_NAME, "property"),
+        (_METRIC_COLLECTION_NAME, "metric"),
     ]
     # KPI 是可选集合：不存在就跳过（其余三集合缺失仍照旧抛，语义不变）
     if hasEmbeddingCollection(_KPI_COLLECTION_NAME):
-        collectionNames.append(_KPI_COLLECTION_NAME)
+        collectionTypes.append((_KPI_COLLECTION_NAME, "kpi"))
 
-    for collectionName in collectionNames:
-        perHits.extend(_searchCollection(collectionName, queryEmbedding, perCollectionTopK))
+    for collectionName, type_ in collectionTypes:
+        perHits.extend(_searchCollection(
+            collectionName, queryEmbedding, perCollectionTopK,
+            expr=classScopeExpr if type_ == "class" else None,
+        ))
 
     perHits.sort(key=lambda h: h["distance"])
     return perHits[:topK]
@@ -127,8 +142,11 @@ def _searchCollection(
     collectionName: str,
     queryEmbedding: list[float],
     topK: int,
+    expr: str | None = None,
 ) -> list[dict[str, Any]]:
     """Search one specific collection; returns hits with keys ontology_id/type/name/alias/description/distance.
+
+    ``expr``：可选的服务端过滤表达式（Gap A 的本体类 id 作用域）。``None`` = 不过滤。
 
     结果按距离升序、按 ``ontology_id`` 去重（保留最近的一份），最后截断到 topK
     —— Milvus 的 ``limit`` 数的是实体，重复实体不该占调用方的 topK 名额
@@ -142,6 +160,7 @@ def _searchCollection(
         param=hnswSearchParams(topK * _DEDUP_OVERFETCH),
         limit=topK * _DEDUP_OVERFETCH,
         output_fields=["ontology_id", "type", "name", "alias", "description"],
+        expr=expr,
     )
     hits: list[dict[str, Any]] = []
     seenIds: set[Any] = set()

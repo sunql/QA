@@ -119,7 +119,9 @@ class _FakeOntologyService:
     async def listClasses(self, session) -> list[OntologyClass]:
         return self._classes
 
-    async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+    async def searchByKeyword(
+        self, query, *, topK=5, typeFilter=None, classOntologyIds=None
+    ) -> list:
         # 1-1：默认为空召回（触发回退全量）；测试可注入 searchHits 验证裁剪
         return self.searchHits
 

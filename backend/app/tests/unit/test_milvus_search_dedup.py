@@ -60,7 +60,7 @@ class _FakeCollection:
     def load(self) -> None:
         pass
 
-    def search(self, *, data, anns_field, param, limit, output_fields):
+    def search(self, *, data, anns_field, param, limit, output_fields, expr=None):
         self.receivedLimit = limit
         self.receivedParam = param
         scored = [

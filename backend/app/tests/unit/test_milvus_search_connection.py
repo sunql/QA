@@ -70,7 +70,7 @@ class _FakeCollection:
     def load(self) -> None:
         self.loadCount += 1
 
-    def search(self, *, data, anns_field, param, limit, output_fields):
+    def search(self, *, data, anns_field, param, limit, output_fields, expr=None):
         return [[_FakeHit(_row(), 0.25)]]
 
 

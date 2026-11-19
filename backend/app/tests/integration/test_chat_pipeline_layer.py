@@ -49,7 +49,9 @@ class _FakeOntology:
     def __init__(self, classes: list[OntologyClass]) -> None:
         self._classes = list(classes)
 
-    async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+    async def searchByKeyword(
+        self, query, *, topK=5, typeFilter=None, classOntologyIds=None
+    ) -> list:
         return [
             SimpleNamespace(id=c.id, score=1.0)
             for c in self._classes

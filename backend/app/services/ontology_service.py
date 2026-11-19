@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Sequence
 
 from neo4j.exceptions import AuthError, ServiceUnavailable
 from pymilvus.exceptions import MilvusException
@@ -363,6 +363,25 @@ def _isoUtc(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.isoformat()
+
+
+def _searchRegistryEmbeddings(
+    queryEmbedding: list[float],
+    topK: int,
+    typeFilter: str | None,
+    registryFilter: RegistryFilter | None,
+    classOntologyIds: Sequence[int] | None,
+) -> Any:
+    """调语义注册表闸门；**无作用域时调用形态逐字不变**（不多传 kwarg）。
+
+    与闸门层的 ``_routedSearch`` 同一口径：作用域缺失 ⇒ 不往下游多传参数，
+    于是「无作用域 = 与今天逐字节一致」这条不变量在**每一层调用形态**上都成立。
+    """
+    if classOntologyIds is None:
+        return searchRegistryEmbeddings(queryEmbedding, topK, typeFilter, registryFilter)
+    return searchRegistryEmbeddings(
+        queryEmbedding, topK, typeFilter, registryFilter, classOntologyIds
+    )
 
 
 def _classNameConflictError(
@@ -1803,6 +1822,7 @@ class OntologyService:
         topK: int = 5,
         typeFilter: str | None = None,
         registryFilter: RegistryFilter | None = None,
+        classOntologyIds: Sequence[int] | None = None,
     ) -> list[OntologySearchResult]:
         """端到端语义检索：文本 -> embedding -> Milvus 近邻搜索。
 
@@ -1818,13 +1838,17 @@ class OntologyService:
             topK: 返回条数。
             typeFilter: 可选，限定类型（class/property/metric）。
             registryFilter: 可选，治理维度过滤（``None`` = 不收窄）。
+            classOntologyIds: 可选，**本体类 id 作用域**（Gap A）：只保留这些
+                本体类的向量。``None`` = 不限；空集 = deny-all（恒空）。
+                **只作用于 class 集合**。
         """
         embedding = await self._ensureEmbedding().generateEmbedding(query)
         try:
             result = await asyncio.to_thread(
-                searchRegistryEmbeddings, embedding, topK, typeFilter, registryFilter
+                _searchRegistryEmbeddings, embedding, topK, typeFilter, registryFilter,
+                classOntologyIds,
             )
-        except (MilvusException, OSError) as exc:
+        except (MilvusException, OSError, ValueError, TypeError) as exc:
             raise MilvusError(MSG_VECTOR_SEARCH_FAILED, detail=str(exc)) from exc
         hits = result.hits
 

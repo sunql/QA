@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.domain.exceptions import NotFoundError, ValidationError
-from app.domain.semantic_manifest_schema import manifestHash
+from app.domain.semantic_manifest_schema import SCHEMA_VERSION, manifestHash
 from app.services import semantic_registry_service
 from app.services.semantic_registry_service import (
     SemanticRegistry,
@@ -32,7 +32,7 @@ from app.services.semantic_registry_service import (
     semanticRegistry,
 )
 
-_DEFAULT_MANIFEST: dict[str, Any] = {"schemaVersion": "v1"}
+_DEFAULT_MANIFEST: dict[str, Any] = {"schemaVersion": SCHEMA_VERSION}
 
 
 def _snapshotRow(
@@ -40,7 +40,7 @@ def _snapshotRow(
     rowId: int = 1,
     version: str = "2026.11.10-1",
     domainCode: str | None = None,
-    schemaVersion: str = "v1",
+    schemaVersion: str = SCHEMA_VERSION,
     manifest: dict[str, Any] | None = None,
     manifestHash: str | None = None,
     activatedTime: datetime | None = None,
@@ -218,7 +218,7 @@ async def test_each_call_gets_a_private_manifest_copy() -> None:
     任何一个消费方原地改一下，全体请求 + ORM 实体都会看到被篡改的语义。
     """
     registry = SemanticRegistry()
-    session = _firstSession(_snapshotRow(manifest={"schemaVersion": "v1", "classes": []}))
+    session = _firstSession(_snapshotRow(manifest={"schemaVersion": SCHEMA_VERSION, "classes": []}))
 
     first = await registry.getActive(session)
     assert first is not None
@@ -385,7 +385,7 @@ async def test_count_releases_rejects_malformed_domain_code() -> None:
 def test_snapshot_size_cap_is_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
     """异常大快照不得被下发：读路径有字节上限（纵深防御的 API 层）。"""
     monkeypatch.setattr(semantic_registry_service, "MAX_MANIFEST_BYTES", 16)
-    body = {"schemaVersion": "v1", "padding": "x" * 100}
+    body = {"schemaVersion": SCHEMA_VERSION, "padding": "x" * 100}
 
     with pytest.raises(SemanticReleaseIntegrityError):
         semantic_registry_service._toSnapshot(_snapshotRow(manifest=body))
@@ -393,7 +393,7 @@ def test_snapshot_size_cap_is_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_non_canonicalizable_snapshot_is_reported_as_integrity_error() -> None:
     """孤立代理项：`json.loads` 读得进，但规范化后无法 UTF-8 编码。"""
-    body = {"schemaVersion": "v1", "bad": "\ud800"}
+    body = {"schemaVersion": SCHEMA_VERSION, "bad": "\ud800"}
     # 真哈希算不出来（同样会炸）；这里只验「规范化失败被转成完整性错误」，
     # 所以直接给一个占位哈希 —— 规范化先于哈希比对发生。
     row = _snapshotRow(manifest=body, manifestHash="b" * 64)

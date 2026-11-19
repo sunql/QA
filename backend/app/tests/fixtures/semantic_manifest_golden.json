@@ -351,5 +351,32 @@
       "targetClassName": "PurchaseOrder"
     }
   ],
-  "schemaVersion": "v1"
+  "schemaVersion": "v2",
+  "sourceBindings": [
+    {
+      "bindingRole": "BASE",
+      "className": "Supplier",
+      "datasourceName": "THBI",
+      "filterAllowlist": [
+        "STATUS"
+      ],
+      "filterExpression": "STATUS = 'A'",
+      "properties": [
+        {
+          "keyOrdinal": 1,
+          "propertyName": "supplierCode",
+          "sourceColumn": "SUPPLIER_CODE",
+          "transformExpression": null
+        },
+        {
+          "keyOrdinal": null,
+          "propertyName": "supplierName",
+          "sourceColumn": "SUPPLIER_NAME",
+          "transformExpression": null
+        }
+      ],
+      "schemaName": "ERP",
+      "sourceTable": "SUPPLIER"
+    }
+  ]
 }

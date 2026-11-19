@@ -15,6 +15,7 @@ import copy
 
 import pytest
 
+from app.domain.semantic_manifest_schema import SCHEMA_VERSION
 from app.services.semantic_diff_service import (
     SemanticChange,
     diffManifests,
@@ -76,7 +77,7 @@ def _join(key: str, **overrides) -> dict:
 
 def _manifest(classes: list[dict] | None = None, joins: list[dict] | None = None) -> dict:
     return {
-        "schemaVersion": "v1",
+        "schemaVersion": SCHEMA_VERSION,
         "domains": [],
         "classes": classes or [],
         "joins": joins or [],
@@ -495,14 +496,24 @@ def test_正则变更按收紧处理():
 
 def test_差异披露覆盖与未覆盖分区():
     """M-3：未覆盖 metrics/kpis/domains/businessObjects ⇒ 必须披露，别让
-    「部分比较」被误读成「没有破坏性变更」。"""
+    「部分比较」被误读成「没有破坏性变更」。
+
+    v2 新增的 `sourceBindings` 同样在本引擎的未覆盖清单里（M1-1.3 / D-9）：
+    「发布后绑定变了」目前不可见 —— 已知缺口，但**必须被披露**而不是静默。
+    """
 
     diff = diffManifests(_manifest(), _manifest())
 
     assert "classes" in diff.coveredSections
     assert "properties" in diff.coveredSections
     assert "joins" in diff.coveredSections
-    assert set(diff.uncoveredSections) == {"domains", "metrics", "kpis", "businessObjects"}
+    assert set(diff.uncoveredSections) == {
+        "domains",
+        "metrics",
+        "kpis",
+        "businessObjects",
+        "sourceBindings",
+    }
     assert diff.isPartial is True
 
 

@@ -20,7 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
 from app.domain.models import DataDomain
-from app.domain.semantic_manifest_schema import ManifestSchemaError, manifestHash
+from app.domain.semantic_manifest_schema import (
+    SCHEMA_VERSION,
+    ManifestSchemaError,
+    manifestHash,
+)
 from app.domain.semantic_release_check_models import SemanticReleaseCheck
 from app.domain.semantic_release_models import SemanticRelease
 from app.infrastructure.llm.embedding_provider_factory import resetEmbeddingClientCache
@@ -37,13 +41,14 @@ _ADMIN_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
 _USER_HEADERS = {"X-User-Id": "test-user", "X-User-Roles": "user"}
 
 _MINIMAL_MANIFEST: dict[str, Any] = {
-    "schemaVersion": "v1",
+    "schemaVersion": SCHEMA_VERSION,
     "domains": [],
     "classes": [],
     "joins": [],
     "metrics": [],
     "kpis": [],
     "businessObjects": [],
+    "sourceBindings": [],
 }
 
 
@@ -76,6 +81,8 @@ async def _insertRelease(
         domain_code=domainCode,
         manifest_json=body,
         manifest_hash=manifestHash(body),
+        # 与生产写路径同一口径：行版本跟着正文走（不替正文盖当前版本）。
+        schema_version=body.get("schemaVersion") or SCHEMA_VERSION,
     )
     session.add(row)
     await session.commit()
@@ -147,7 +154,7 @@ async def test_list_returns_summaries_and_total(client: AsyncClient, dbSession: 
     # 列表不带 ~1MB 快照正文；字段走 camelCase。
     assert "manifest" not in payload["rows"][0]
     assert payload["rows"][0]["manifestHash"] == second.manifest_hash
-    assert payload["rows"][0]["schemaVersion"] == "v1"
+    assert payload["rows"][0]["schemaVersion"] == SCHEMA_VERSION
 
 
 async def test_list_filters_by_status_and_domain(client: AsyncClient, dbSession: AsyncSession) -> None:
@@ -1333,7 +1340,10 @@ async def test_broken_manifest_persists_schema_fail_row(
     row = await _insertRelease(
         dbSession,
         version="2026.11.18-check-badschema",
-        manifest={"schemaVersion": "v1", "metrics": [{"metricName": "M"}]},
+        manifest={
+            "schemaVersion": SCHEMA_VERSION,
+            "metrics": [{"metricName": "M"}],
+        },
     )
 
     with pytest.raises(ManifestSchemaError):

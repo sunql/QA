@@ -49,7 +49,10 @@ SECTION_JOINS = "joins"
 
 _SECTION_ORDER = {SECTION_CLASSES: 0, SECTION_PROPERTIES: 1, SECTION_JOINS: 2}
 
-# Manifest v1 的顶层分区全集（`semantic_manifest_schema.MANIFEST_SCHEMA`）。
+# Manifest 的顶层分区全集（`semantic_manifest_schema.MANIFEST_SCHEMAS`）。
+# ⚠️ v2 追加了 `sourceBindings`（M1-1.3 / D-9）—— 本引擎**未覆盖**它，
+# ⇒ 它自动落进 `UNCOVERED_SECTIONS`，在 API 契约里被显式披露
+# （「发布后绑定变了」目前不可见 —— 已知缺口，本批不修）。
 MANIFEST_SECTIONS = (
     "domains",
     "classes",
@@ -57,6 +60,7 @@ MANIFEST_SECTIONS = (
     "metrics",
     "kpis",
     "businessObjects",
+    "sourceBindings",
 )
 
 # 本引擎**已覆盖**的分区：类、类内属性、JOIN。

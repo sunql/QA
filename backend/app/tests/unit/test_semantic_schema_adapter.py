@@ -18,6 +18,7 @@ import dataclasses
 
 import pytest
 
+from app.domain.semantic_manifest_schema import SCHEMA_VERSION
 from app.services.semantic_registry_service import SemanticReleaseIntegrityError
 from app.services.semantic_schema_adapter import (
     SemanticSnapshotMalformedError,
@@ -86,7 +87,7 @@ def _prop(
 def _manifest() -> dict:
     """三个类：Supplier（被继承）、PurchaseOrder（继承 Supplier）、Material。"""
     return {
-        "schemaVersion": "v1",  # 与 SCHEMA_VERSION 一致
+        "schemaVersion": SCHEMA_VERSION,  # 与代码当前版本一致
         "domains": [],
         "classes": [
             {

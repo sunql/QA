@@ -18,7 +18,9 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.exceptions import ValidationError
 from app.services.semantic_compiler import compileManifest
+from app.services.semantic_compiler_bindings import SourceBindingCompileError
 from app.services.semantic_diff_service import SemanticDiff, diffManifests
 from app.services.semantic_registry_service import semanticRegistry
 
@@ -50,7 +52,13 @@ async def computeOntologyDiff(
     """
 
     baseline = await semanticRegistry.getActive(session, domainCode=domainCode)
-    candidate = await compileManifest(session)
+    try:
+        candidate = await compileManifest(session)
+    except SourceBindingCompileError as exc:
+        # 源绑定数据不满足发布不变量（表达式不安全 / 归属错配）——
+        # 这是**治理数据问题**，调用方能修 ⇒ 给一条说得清「哪条绑定」的 422，
+        # 而不是让未处理异常变成 500（丢掉诊断信息）。
+        raise ValidationError(f"源绑定数据不满足发布约束：{exc}") from exc
     baseManifest: dict[str, Any] = baseline.manifest if baseline is not None else {}
     diff = diffManifests(baseManifest, candidate)
     return OntologyDiffResult(

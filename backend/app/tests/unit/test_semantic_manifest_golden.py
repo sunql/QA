@@ -23,6 +23,7 @@ from typing import Any
 from app.domain.models import BusinessObjectDomain
 from app.services.semantic_compiler import compileFromRows
 from app.tests.unit._semantic_rows import (
+    FORBIDDEN_MANIFEST_KEYS,
     canonicalJson,
     makeBusinessObject,
     makeClass,
@@ -33,6 +34,8 @@ from app.tests.unit._semantic_rows import (
     makeMetric,
     makeMetricSource,
     makeProperty,
+    makePropertyBinding,
+    makeSourceBinding,
 )
 
 _GOLDEN_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "semantic_manifest_golden.json"
@@ -122,6 +125,22 @@ _BUSINESS_OBJECT_KEYS = {
     "description",
 }
 _DOMAIN_KEYS = {"code", "name", "description", "enabled"}
+_SOURCE_BINDING_KEYS = {
+    "className",
+    "datasourceName",
+    "schemaName",
+    "sourceTable",
+    "bindingRole",
+    "filterExpression",
+    "filterAllowlist",
+    "properties",
+}
+_SOURCE_BINDING_PROPERTY_KEYS = {
+    "propertyName",
+    "sourceColumn",
+    "keyOrdinal",
+    "transformExpression",
+}
 
 
 def buildGoldenRows() -> dict[str, Any]:
@@ -144,6 +163,7 @@ def buildGoldenRows() -> dict[str, Any]:
         makeProperty(
             1,
             "supplierCode",
+            propertyId=101,
             alias="供应商编码",
             businessAliases=["供应商代码", "供应商编号"],
             dataType="STRING",
@@ -155,6 +175,7 @@ def buildGoldenRows() -> dict[str, Any]:
         makeProperty(
             1,
             "supplierName",
+            propertyId=102,
             alias="供应商名称",
             businessAliases=["供应商名"],
             dataType="STRING",
@@ -163,6 +184,7 @@ def buildGoldenRows() -> dict[str, Any]:
         makeProperty(
             1,
             "creditLimit",
+            propertyId=103,
             dataType="DECIMAL",
             unit="元",
             allowedValues=["0", "1000000"],
@@ -175,16 +197,24 @@ def buildGoldenRows() -> dict[str, Any]:
         makeProperty(
             3,
             "supplierCode",
+            propertyId=104,
             dataType="STRING",
             isForeignKey=True,
             refClassId=1,
             sourceColumn="SUPPLIER_CODE",
         ),
         makeProperty(
-            3, "onTimeQty", dataType="DECIMAL", sourceColumn="ON_TIME_QTY", unit="件"
+            3,
+            "onTimeQty",
+            propertyId=105,
+            dataType="DECIMAL",
+            sourceColumn="ON_TIME_QTY",
+            unit="件",
         ),
-        makeProperty(3, "qty", dataType="DECIMAL", sourceColumn="QTY", unit="件"),
-        makeProperty(4, "legacyCode", dataType="STRING"),
+        makeProperty(
+            3, "qty", propertyId=106, dataType="DECIMAL", sourceColumn="QTY", unit="件"
+        ),
+        makeProperty(4, "legacyCode", propertyId=107, dataType="STRING"),
     ]
     joins = [
         makeJoin(
@@ -295,6 +325,55 @@ def buildGoldenRows() -> dict[str, Any]:
         makeDomain("LOGISTICS", "物流域"),
     ]
     datasources = [makeDataSource(3, "THBI")]
+    # 源绑定（v2 / M1-1.3）：四条源绑定覆盖四种排除口径 ——
+    # ① 已确认且生效 ⇒ 进快照；② 候选（D-3）⇒ 排除；
+    # ③ 指向墓碑类 ⇒ 排除；④ 已失效（valid_to 非空）⇒ 排除。
+    sourceBindings = [
+        makeSourceBinding(
+            1,
+            class_id=1,
+            datasource_id=3,
+            schema_name="ERP",
+            source_table="SUPPLIER",
+            binding_role="BASE",
+            filter_expression="STATUS = 'A'",
+            filter_allowlist=["STATUS"],
+        ),
+        makeSourceBinding(
+            2,
+            class_id=1,
+            datasource_id=3,
+            schema_name="ERP",
+            source_table="SUPPLIER_DRAFT",
+            binding_role="FILTER",
+            is_candidate=True,
+        ),
+        makeSourceBinding(
+            3,
+            class_id=4,
+            datasource_id=3,
+            schema_name="ERP",
+            source_table="LEGACY_SUPPLIER",
+        ),
+        makeSourceBinding(
+            4,
+            class_id=3,
+            datasource_id=3,
+            schema_name="ERP",
+            source_table="PORDER",
+            valid_to=datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+    ]
+    sourceBindingProperties = [
+        makePropertyBinding(1, 1, 101, "SUPPLIER_CODE", key_ordinal=1),
+        makePropertyBinding(2, 1, 102, "SUPPLIER_NAME"),
+        # 属性属于墓碑类 ⇒ 丢弃。
+        makePropertyBinding(3, 1, 107, "LEGACY_CODE"),
+        # 候选绑定的属性 ⇒ 丢弃。
+        makePropertyBinding(4, 2, 101, "SUPPLIER_CODE"),
+        # 失效绑定的属性 ⇒ 丢弃。
+        makePropertyBinding(5, 4, 104, "SUPPLIER_CODE"),
+    ]
     return {
         "classes": classes,
         "properties": properties,
@@ -306,6 +385,8 @@ def buildGoldenRows() -> dict[str, Any]:
         "businessObjectDomains": businessObjectDomains,
         "domains": domains,
         "datasources": datasources,
+        "sourceBindings": sourceBindings,
+        "sourceBindingProperties": sourceBindingProperties,
     }
 
 
@@ -339,8 +420,17 @@ def test_every_section_and_key_is_pinned() -> None:
         "metrics",
         "kpis",
         "businessObjects",
+        "sourceBindings",
     }
-    for section in ("domains", "classes", "joins", "metrics", "kpis", "businessObjects"):
+    for section in (
+        "domains",
+        "classes",
+        "joins",
+        "metrics",
+        "kpis",
+        "businessObjects",
+        "sourceBindings",
+    ):
         assert manifest[section], f"{section} 不能为空，否则 golden 覆盖不到该分区"
 
     assert {c["className"] for c in manifest["classes"]} == {
@@ -355,6 +445,10 @@ def test_every_section_and_key_is_pinned() -> None:
     assert {k for kpi in manifest["kpis"] for k in kpi} == _KPI_KEYS
     assert {k for b in manifest["businessObjects"] for k in b} == _BUSINESS_OBJECT_KEYS
     assert {k for d in manifest["domains"] for k in d} == _DOMAIN_KEYS
+    assert {k for b in manifest["sourceBindings"] for k in b} == _SOURCE_BINDING_KEYS
+    assert {
+        k for b in manifest["sourceBindings"] for p in b["properties"] for k in p
+    } == _SOURCE_BINDING_PROPERTY_KEYS
 
 
 def test_property_nullability_is_three_state() -> None:
@@ -383,3 +477,42 @@ def test_golden_filters_tombstones_and_resolves_references() -> None:
         {"className": "PurchaseOrder", "role": "NUMERATOR"},
     ]
     assert metric["kpiCodes"] == ["KPI-001"]
+
+
+def test_golden_source_bindings_exclude_candidates_and_inactive() -> None:
+    """绑定分区只收「已确认 + 当前生效 + 类仍在活跃模型」的绑定。
+
+    三条排除口径各有一条样本（见 `buildGoldenRows`）：候选（D-3）、墓碑类、已失效。
+    """
+    bindings = compileGolden()["sourceBindings"]
+
+    assert len(bindings) == 1
+    binding = bindings[0]
+    assert binding["className"] == "Supplier"
+    assert binding["datasourceName"] == "THBI"
+    assert binding["schemaName"] == "ERP"
+    assert binding["sourceTable"] == "SUPPLIER"
+    assert binding["bindingRole"] == "BASE"
+    assert binding["filterExpression"] == "STATUS = 'A'"
+    assert binding["filterAllowlist"] == ["STATUS"]
+    assert [p["propertyName"] for p in binding["properties"]] == [
+        "supplierCode",
+        "supplierName",
+    ]
+    assert binding["properties"][0]["keyOrdinal"] == 1
+    assert binding["properties"][1]["keyOrdinal"] is None
+
+
+def test_golden_snapshot_carries_no_instance_columns() -> None:
+    """快照里不得出现自增 id / 时间戳 / 实例相关列（字节确定性铁律）。
+
+    时间戳与自增 id 一旦进快照，同一治理内容两次编译的字节就不同 ⇒
+    M1-a DoD 第 2 条（同输入两次编译字节一致）直接被破坏。
+
+    禁词清单与 `test_semantic_manifest_schema.py` 的键名级守卫**共用同一份**
+    （`FORBIDDEN_MANIFEST_KEYS`）⇒ 两处守卫不会各漏各的。
+    """
+    text = canonicalJson(compileGolden())
+
+    for forbidden in sorted(FORBIDDEN_MANIFEST_KEYS):
+        assert forbidden not in text, f"快照出现实例相关字段 {forbidden!r}"

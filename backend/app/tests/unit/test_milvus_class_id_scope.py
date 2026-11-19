@@ -49,7 +49,11 @@ class _FakeHit:
 
 
 class _FakeCollection:
-    """最小 Collection 替身：记录收到的 expr，按距离排序 + 截断 limit。"""
+    """最小 Collection 替身：记录收到的 expr，**按 expr 过滤后**按距离排序 + 截断。
+
+    替身必须**真的执行 expr 过滤**：本批要复现的生产症状正是「跨源类占满 topK
+    名额」——若替身无视 expr，这条症状就复现不出来，测试会假绿。
+    """
 
     def __init__(self, rows: list[dict], queryVector: list[float]) -> None:
         self._rows = rows
@@ -63,9 +67,34 @@ class _FakeCollection:
     def search(self, *, data, anns_field, param, limit, output_fields, expr=None):
         self.receivedLimit = limit
         self.receivedExpr = expr
-        scored = [(math.dist(self._query, r["embedding"]), r) for r in self._rows]
+        kept = [row for row in self._rows if _matchesExpr(row, expr)]
+        scored = [(math.dist(self._query, r["embedding"]), r) for r in kept]
         scored.sort(key=lambda x: x[0])
         return [[_FakeHit(r, d) for d, r in scored[:limit]]]
+
+
+def _matchesExpr(row: dict, expr: str | None) -> bool:
+    """替身的 expr 求值：只认作用域两种形态，治理维度 expr 一律放行。
+
+    治理 expr（``domain_codes like [...]`` 等）本批不测 ⇒ 放行即可；
+    作用域 expr（``ontology_id in [...]`` / ``ontology_id < 0``）必须真判。
+    """
+    if not expr:
+        return True
+    for part in expr.split(" and "):
+        clause = part.strip().strip("()").strip()
+        if clause.startswith("ontology_id in ["):
+            ids = {
+                int(token)
+                for token in clause[len("ontology_id in ["):-1].split(",")
+                if token.strip()
+            }
+            if row["ontology_id"] not in ids:
+                return False
+        elif clause == "ontology_id < 0":
+            if not row["ontology_id"] < 0:
+                return False
+    return True
 
 
 @pytest.fixture()
@@ -258,7 +287,77 @@ class TestRegistryV2Scope:
 
 
 # ---------------------------------------------------------------------------
-# 5. 闸门：作用域透传到 v1 / v2
+# 5. 生产症状复现：跨源类占满 topK ⇒ 命中解析不出本地类
+# ---------------------------------------------------------------------------
+
+
+class TestProductionSymptom:
+    """复现 2026-11-19 生产日志 ``hits=20 total=94`` 的成因。
+
+    场景：304 个类里，前 20 个最像问句的**全是跨源类/墓碑类**（向量检索窗口
+    是全局的）⇒ 候选集虽已按数据源收窄到 94 个本地类，但向量命中里能解析到
+    本地类的为 0 ⇒ ``reason=no_match`` 早退 ⇒ 走 Gap B 救援/兜底。
+
+    施加作用域后：向量窗口只含本地类 ⇒ 命中解析得出类 ⇒ 走正常裁剪路径。
+    """
+
+    @staticmethod
+    def _productionRows() -> list[dict]:
+        """20 个跨源类（向量上最像）+ 2 个本地类（向量上较远）。"""
+        rows: list[dict] = []
+        for index in range(20):
+            rows.append({
+                "ontology_id": 1000 + index, "type": "class",
+                "name": f"跨源类{index}", "alias": "", "description": "",
+                "embedding": _vec(0),
+            })
+        rows.append({
+            "ontology_id": 11, "type": "class", "name": "本地类A",
+            "alias": "", "description": "", "embedding": _vec(1),
+        })
+        rows.append({
+            "ontology_id": 12, "type": "class", "name": "本地类B",
+            "alias": "", "description": "", "embedding": _vec(2),
+        })
+        return rows
+
+    def test_无作用域时跨源类占满窗口本地类一个都进不来(self, fakeSearch) -> None:
+        """今天的症状：不施加作用域 ⇒ topK 全是跨源类 ⇒ 本地类 0 命中。"""
+        fakeSearch(self._productionRows(), _vec(0))
+
+        hits = milvus_search.searchEmbeddingsByTypeRouted(
+            _vec(0), topK=20, typeFilter="class",
+        )
+
+        assert len(hits) == 20
+        assert not [h for h in hits if h["ontology_id"] in (11, 12)]
+
+    def test_施加作用域后窗口只含本地类(self, fakeSearch) -> None:
+        """施加作用域 ⇒ 跨源类出局，本地类进得来（根因修复点）。"""
+        fakeSearch(self._productionRows(), _vec(0))
+
+        hits = milvus_search.searchEmbeddingsByTypeRouted(
+            _vec(0), topK=20, typeFilter="class", classOntologyIds=[11, 12],
+        )
+
+        assert [h["ontology_id"] for h in hits] == [11, 12]
+
+    def test_空作用域恒空而不是回落全量(self, fakeSearch) -> None:
+        """作用域为空集 ⇒ 恒空（**不**回落成「不限」）。
+
+        回落成「不限」= 把「本数据源没有类」误读成「全局都能看」⇒ 跨源类又回来了。
+        """
+        fakeSearch(self._productionRows(), _vec(0))
+
+        hits = milvus_search.searchEmbeddingsByTypeRouted(
+            _vec(0), topK=20, typeFilter="class", classOntologyIds=[],
+        )
+
+        assert hits == []
+
+
+# ---------------------------------------------------------------------------
+# 6. 闸门：作用域透传到 v1 / v2
 # ---------------------------------------------------------------------------
 
 

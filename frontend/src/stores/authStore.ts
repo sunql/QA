@@ -92,3 +92,27 @@ export const useAuthStore = create<AuthState>()(
     },
   ),
 );
+
+/**
+ * 删除持久层里的登录态 —— persist 写盘失败时的**兜底**。
+ *
+ * 场景：浏览器存储配额满 / 隐私模式 ⇒ zustand persist 的 `setItem` 抛错。
+ * 此时内存态已清（`setState` 先落内存、后落盘），但磁盘上仍是旧 token
+ * ⇒ 过期令牌会留在浏览器可读存储里，刷新页面即复活。
+ * 直接删掉 persist 自己的键，是不依赖写盘能力的最后手段。
+ *
+ * 键名从 store 自身取（不复写字面量）⇒ 与 persist 的 name 永远一致。
+ * 持久层的所有权归本模块：`api/client.ts` 不直接碰 localStorage（守卫见
+ * `src/tests/authTokenCleanupGuard.test.ts`）。
+ */
+export function clearPersistedAuth(): void {
+  if (typeof window === "undefined") return;
+  const key = useAuthStore.persist.getOptions().name;
+  if (!key) return;
+  try {
+    window.localStorage.removeItem(key);
+  } catch (err) {
+    // 浏览器完全不可写存储：无处可清。刷新页面后的 /auth/me 401 仍会兜底。
+    console.warn("[auth] 持久层登录态删除失败（浏览器存储不可写）：", err);
+  }
+}

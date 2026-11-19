@@ -17,7 +17,7 @@ export const enUS = {
   },
   auth: {
     login: {
-      title: "Sign in to qa-system",
+      title: "Sign in to Taihong ZhiNao",
       username: "Username",
       password: "Password",
       rememberMe: "Remember me",
@@ -85,7 +85,7 @@ export const enUS = {
   },
 
   appLayout: {
-    brand: "AI Service Platform",
+    brand: "Taihong ZhiNao",
     menu: {
       models: "Model Config",
       embeddings: "Embedding",

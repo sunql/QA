@@ -23,7 +23,7 @@ export const zhCN = {
   },
   auth: {
     login: {
-      title: "登录 qa-system",
+      title: "登录 · 泰鸿智脑",
       username: "用户名",
       password: "密码",
       rememberMe: "记住我",
@@ -91,7 +91,7 @@ export const zhCN = {
   },
 
   appLayout: {
-    brand: "AI服务平台",
+    brand: "泰鸿智脑",
     menu: {
       models: "模型配置",
       embeddings: "Embedding 服务",

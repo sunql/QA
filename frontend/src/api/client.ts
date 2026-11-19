@@ -3,7 +3,7 @@ import type { MessageInstance } from "antd/es/message/interface";
 import { API_BASE_URL, REQUEST_TIMEOUT_MS, DEFAULT_TENANT_ID } from "../config";
 import type { ApiResponse } from "../types/common";
 import { i18n } from "../i18n";
-import { useAuthStore } from "../stores/authStore";
+import { useAuthStore, clearPersistedAuth } from "../stores/authStore";
 import { clearLastSessionIds } from "../stores/persistChatUiState";
 import { notifyUserSwitch } from "../stores/userSwitch";
 
@@ -25,7 +25,7 @@ export interface AppError extends Error {
  * definitions) so downstream consumers (e.g. LoginPage) can branch on the code
  * rather than parsing raw message strings.
  *
- * 纯归一化：401 的登录态清理（localStorage + authStore）由响应拦截器负责，
+ * 纯归一化：401 的登录态清理（authStore → zustand persist 落盘）由响应拦截器负责，
  * 掉线重定向由 RequireAuth 软跳转负责，登录失败提示由 LoginPage toast 负责。
  * （fix/login-401-white-screen：旧实现在此处 window.location.href 硬跳
  * "/auth/login"——不存在的路由白屏，且页面卸载吃掉 LoginPage 的错误提示。）
@@ -150,14 +150,27 @@ export function createHttpClient(): AxiosInstance {
       // 例外：凭证校验接口（改密）的 401 = 旧密码错，token 仍有效，不清登录态
       // 不弹 toast（避免每次跳转都弹"登录已失效"，已经准备重定向了）
       // 直接 setState 而非 logout()：拦截器是同步路径，不需要异步调 API
-      // audit-fx-2.1：同时清理 localStorage（持久层），防止过期 token 被 persist 恢复
+      // audit-fx-2.1：持久层也一并清了 —— zustand persist 会把 setState 的结果
+      // 同步写回它自己的键（authStore.ts 的 persist name = "qa-system-auth"），
+      // 那里面的 token 字段因此被置空 ⇒ 刷新页面不会把过期 token 恢复回来。
+      // 2026-11-18：原先这里还有一行 `localStorage.removeItem("token")`，但全仓
+      // 从来没有代码写过 `localStorage["token"]`（唯一写 token 的是 zustand persist），
+      // 那行删的是不存在的键 = 死代码，已删除；持久层清理由上面那次 setState 负责。
+      // 2026-11-18（评审补强）：setState 的落盘一步可能抛错（配额满 / 隐私模式）
+      // —— 内存已清但磁盘仍是旧 token ⇒ 降级为直接删掉 persist 键（不依赖写盘能力）。
+      // 兜底逻辑放在 authStore（持久层的所有者）里，本文件不直接碰 localStorage。
+      // 守卫：src/tests/authTokenCleanupGuard.test.ts
       if (status === 401 && !isCredentialCheckRequest(error.config?.url)) {
-        localStorage.removeItem("token");
-        useAuthStore.setState({
-          token: null,
-          user: null,
-          mustChangePassword: false,
-        });
+        try {
+          useAuthStore.setState({
+            token: null,
+            user: null,
+            mustChangePassword: false,
+          });
+        } catch (persistError) {
+          console.warn("[auth] 401 清理持久化登录态失败，已降级为删除 persist 键", persistError);
+          clearPersistedAuth();
+        }
         // 掉线也算换人：内存里的对话与恢复指针都属于那个已失效的登录会话。
         // 与 logout() 同口径，避免「此路径少清一处」的纵深缺口。
         clearLastSessionIds();

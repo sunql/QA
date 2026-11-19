@@ -496,6 +496,92 @@ async def test_cross_source_class_is_not_anchored(dbSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_anchor_rescues_when_vector_hits_resolve_to_nothing(dbSession) -> None:
+    """Gap B 集成守卫（已按数据源收窄口径）：向量命中解析不出本地类 ⇒ 锚定接管。
+
+    生产实证路径（2026-11-19）：跨源过滤后 94 个本地类，向量 top20 全落在
+    跨源/墓碑类上 ⇒ 0 命中解析 ⇒ `no_match` 早退 ⇒ 兜底把 43 个本地类全塞进
+    schema（召回裁剪被架空）。锚定块原先位于早退之后 ⇒ 从未执行。
+
+    本用例：**带数据源 + schema_cache**（候选集已按数据源收窄 ⇒ 救援闸门放行），
+    跨源幽灵类 MAIN_DATA_SUPPLIER 的别名同样含「供应商」：
+    - 向量命中一个**解析不出的类 id**（模拟跨源/墓碑类）⇒ 走 no_match 分支；
+    - 问句「供应商」字面命中 DIM_SUPPLIER ⇒ 窗口应收敛到它一个；
+    - 幽灵类不得进窗口（锚定跑在**过滤后**的候选集上）。
+    """
+    ds = _datasource()
+    ds.id = 880002
+    ds.name = "RESCUE_SRC"
+    dbSession.add(ds)
+    dbSession.add(SchemaCache(
+        datasource_id=880002, schema_name="RESCUE_SRC",
+        schema_data=[
+            {"table_name": "DIM_SUPPLIER", "owner": "RESCUE_SRC", "columns": []},
+            {"table_name": "RECEIPT", "owner": "RESCUE_SRC", "columns": []},
+        ],
+        schema_version="t1",
+    ))
+    await dbSession.flush()
+    supplier = OntologyClass(
+        class_name="DIM_SUPPLIER", class_alias="供应商主数据",
+        source_table="DIM_SUPPLIER")
+    receipt = OntologyClass(
+        class_name="RECEIPT", class_alias="收货单", source_table="RECEIPT")
+    ghost = OntologyClass(
+        class_name="MAIN_DATA_SUPPLIER", class_alias="供应商主数据",
+        source_table="main_data_supplier")
+    for c in (supplier, receipt, ghost):
+        dbSession.add(c)
+    await dbSession.flush()
+    ghostHit = SimpleNamespace(id=supplier.id + 1000000, score=0.9)
+    fakeOntology = _FakeOntology(
+        hits=[ghostHit], allClasses=[supplier, receipt, ghost])
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None,
+        needRecall=True, datasourceId=880002,
+    )
+
+    names = [c.class_name for c in result.classes]
+    assert names == ["DIM_SUPPLIER"]  # 收敛到锚定类（不是全量本地类宽窗）
+    assert "MAIN_DATA_SUPPLIER" not in names  # 跨源幽灵类不因锚定回魂
+    assert result.recallInfo.mode == "rescue"
+    assert result.recallInfo.anchoredCount == 1
+    assert result.recallInfo.datasourceFilterSkipped is None
+
+
+@pytest.mark.asyncio
+async def test_anchor_rescue_blocked_when_candidates_not_datasource_scoped(
+    dbSession,
+) -> None:
+    """闸门 1 集成守卫：候选集未按数据源收窄（未选数据源）⇒ 救援不接管。
+
+    未选数据源时锚定命中可能全是别源的类，窄窗一旦只含别源表就是必然的
+    ORA-00942 ⇒ 保留原宽窗（mode=fallback），不做收窄。
+    """
+    supplier = OntologyClass(
+        class_name="DIM_SUPPLIER", class_alias="供应商主数据",
+        source_table="DIM_SUPPLIER")
+    receipt = OntologyClass(
+        class_name="RECEIPT", class_alias="收货单", source_table="RECEIPT")
+    for c in (supplier, receipt):
+        dbSession.add(c)
+    await dbSession.flush()
+    ghostHit = SimpleNamespace(id=supplier.id + 1000000, score=0.9)
+    fakeOntology = _FakeOntology(hits=[ghostHit], allClasses=[supplier, receipt])
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None, needRecall=True,
+    )
+
+    assert result.recallInfo.datasourceFilterSkipped == "no_datasource"
+    assert result.recallInfo.mode == "fallback"  # 未收窄 ⇒ 不接管
+    assert result.recallInfo.anchoredCount == 0
+
+
+@pytest.mark.asyncio
 async def test_dimension_hint_dim_pull_stays_within_datasource(dbSession) -> None:
     """I1 守卫：维度词触发的 DIM 全量拉取必须与**已过滤**候选集取 id 交集。
 

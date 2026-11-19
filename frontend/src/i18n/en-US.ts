@@ -423,6 +423,9 @@ export const enUS = {
     affinityLocked: "🔒 Locked to {model} · {turns} turns remaining",
     classRecallTruncated: "This query hit the recall window limit ({total} tables); some related tables may be excluded. Try a more specific question or ask an admin to adjust the recall window.",
     classRecallFallback: "Table recall is temporarily unavailable; tables were picked by warehouse layer order (bounded by the recall window limit), which may affect answer accuracy.",
+    // 锚定救援降级（2026-11-19 Gap B）：向量命中给不出可用类，改由关键词锚定选表。
+    classRecallRescue:
+      "Table recall degraded: {total} tables were selected by keyword anchoring (vector search returned no usable table); answer accuracy may be affected.",
     // 类召回披露（2026-11-19 召回数据源过滤+关键词锚定批次）
     classRecallDatasourceFiltered: "Filtered {total} cross-source tables for the current datasource.",
     classRecallDatasourceSkipped:

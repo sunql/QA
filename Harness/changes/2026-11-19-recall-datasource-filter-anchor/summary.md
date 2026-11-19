@@ -31,7 +31,7 @@
 | Task 8 | `a46b5c17` | 定向回归 + 文档回填（wiki 类召回窗口节 + 本 summary + design.md 落本分支） |
 | Task 9 | `28eb1657` … `5878315f` | **终审修复**（4 Important + 2「必须合并前修」一次修完，见下节） |
 
-代码改动规模（`git diff origin/main..HEAD`）：`23 files changed, 1828 insertions(+), 14 deletions(-)`
+代码改动规模（`git diff origin/main..HEAD`）：`23 files changed, 1872 insertions(+), 14 deletions(-)`
 —— 后端 8 源文件（`chat_recall` / `chat_service` / `chat_multistep` / `research_agent_execution` / `api/v1/research`
 / `recall_datasource_filter` / `recall_keyword_anchor` / `domain/schemas`）+ 7 测试文件 + 前端 5 文件 + 文档 3 份。
 **零迁移、零表结构变更**。

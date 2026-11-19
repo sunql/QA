@@ -18,7 +18,8 @@
 `test_release_orm_default_schema_version_matches` 钉住。
 
 迁移号说明：head 0155（发布校验结论表）→ 本批 0156。
-A4-0（审批面放开 `instance_id`）按「串行占号、不许插队」规则取下一个空号 **0157**。
+A4-0（审批面放开 `instance_id`）按「串行占号、不许插队」规则取当时的下一个空号；
+本批 0157（域发布版本号唯一索引）先占 ⇒ A4-0 落地时取 **0158**。
 """
 
 from __future__ import annotations

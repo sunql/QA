@@ -1,6 +1,6 @@
 # 变更：2026-11-19-m1-procurement-domain-release（M1-1.3 采购域发布编排）
 
-> 状态：进行中（分两批提交：**A = manifest v2（本次，已完成）**；B = 域编排 + 回滚 + 采购域校验项）
+> 状态：进行中（分两批提交：**A = manifest v2（已完成）**；**B = 域编排 + 回滚 + 采购域校验项（已完成，见 §6.6）**）
 > 分支：`feat/procurement-m0`　**未合并 / 未部署**（生产暂不部署，待 M1 全完成 + 本地全绿统一发版）
 > 承接：[[M1-1.2 发布校验落表]]（`bc0cac0e`）、[[M1-1.1 采购源绑定行为层]]（`79a2a9da`）
 
@@ -47,7 +47,7 @@
 | 库中既有 v1 ACTIVE 快照 | `semantic_schema_adapter.schemaVersionMismatch` 会判「版本漂移」⇒ **降级直读治理表** | **既有设计**（宁可慢一点也不能少给事实），已告警；本批不部署 ⇒ 生产无感 |
 | `validateManifest` | 单一 Schema 变成多版本 | 引入 `MANIFEST_SCHEMAS` 注册表 + **按 `manifest.schemaVersion` 分发**；未知版本 ⇒ `ManifestSchemaError`（不是放行） |
 | 校验项条数上限 | 绑定级校验项多出 ⇒ 上限公式要**重新从契约推导** | 见 §5.2（`6 + 3×指标上限 + 2×绑定上限`） |
-| `semantic_diff_service` | 只比 classes/properties/joins ⇒ 新分区**不参与** diff | 记为已知缺口（「发布后绑定变了」不可见），不在本批范围 |
+| `semantic_diff_service` | 只比 classes/properties/joins ⇒ 新分区**不参与** diff | **批次 B 已处置**：`sourceBindings` 纳入 diff（`COVERED_SECTIONS`），字段级覆盖过滤表达式 / 白名单 / 属性源列 / 变换 / 键序号 |
 
 ### 2.3 关键取舍 2：什么进 manifest，什么不进
 
@@ -146,6 +146,11 @@ ALTER TABLE semantic_release ALTER COLUMN schema_version SET DEFAULT 'v2';
 响应体沿用 `SemanticReleaseOperationRead`（`release` + `blockers` + `warnings`），
 校验结论仍从 `GET /{releaseId}/checks` 取（分页 + 全量 summary）。
 
+**连带的一处契约扩大（不是本特性路由，但是批次 B 的直接后果）**：
+`GET /api/v1/ontology-discovery/diff` 的 `coveredFields` 响应**多出 `sourceBindings` 分区**
+（diff 引擎把绑定分区纳入覆盖）⇒ 消费方若对「披露分区集合」做了相等断言，需要同步。
+方向是**扩大披露**（多披露安全：让消费方能自己判断「比了哪些字段」）。
+
 ---
 
 ## 5. 实现要点
@@ -168,8 +173,13 @@ ALTER TABLE semantic_release ALTER COLUMN schema_version SET DEFAULT 'v2';
 
 - **「孤岛」判据取全本体口径，不取切片口径**：否则「只连跨域边」的类会被误判成孤岛
   ⇒ 误阻断合法发布。切片内的跨域边差异另由 `DOMAIN_SLICE_CROSS_DOMAIN` 提示。
-- `targetKey` 用 `类名@schema.表` 复合键 ⇒ 同一发布同一校验项同一绑定只留一行
+- `targetKey` 用 `类名@数据源.schema.表#角色` 复合键 ⇒ 同一发布同一校验项同一绑定只留一行
   （对上 `uq_semantic_release_check_unique`）。
+  ⚠️ **必须带角色与数据源**（批次 B 实施期自查发现）：一个类可以绑到同一张表的多个角色
+  （BASE / NUMERATOR …），也可以在**两个数据源**里各绑一次；少一个维度 ⇒ 两行撞唯一索引
+  ⇒ 整次发布 500。
+  ⚠️ 列宽是 `String(200)`：超宽时改用「类名摘要(64) + 完整身份 sha256[:16]」，
+  **不截断**（截断会让两个不同的绑定撞成同一个键）。
 
 ### 5.2 上限必须从契约推导（v2）
 
@@ -265,9 +275,11 @@ MAX_CHECKS_PER_RELEASE    = 6
   只认当前版本 ⇒ 库里还挂着的 v1 ACTIVE 快照会**降级直读治理表**
   （既有设计：宁可慢一点也不能少给事实）。⇒ **发版顺序见 §9**（原先写的
   「先产 v2 快照再切代码」**不可执行**，见 §6.5 的 F3）。
-- **`semantic_diff_service` 未覆盖 `sourceBindings`**：已进 `UNCOVERED_SECTIONS`
-  并在 API 契约里披露 ⇒ 「发布后绑定变了」在 diff 视图里不可见（本批范围外）。
-- **校验项仍只有 6 条**（2 发布级 + 3 指标级）：采购域校验项与上限重推属批次 B。
+- ~~**`semantic_diff_service` 未覆盖 `sourceBindings`**~~：**批次 B 已处置**
+  ⇒ `sourceBindings` 进入 `COVERED_SECTIONS`（字段级：过滤表达式 / 白名单 /
+  属性源列 / 变换表达式 / 键序号），「发布后绑定变了」在 diff 视图里可见。
+- ~~**校验项仍只有 6 条**（2 发布级 + 3 指标级）~~：**批次 B 已处置**
+  ⇒ 校验项目录扩到 **11 条**（§5.1），上限重推为 `10006`（§5.2）。
 - **同一类可有多条 BASE 绑定**（多落点是合法设计）⇒ 契约**不收紧**，
   但**读路径必须消歧**（拿到多条 BASE 时按什么取）—— 读路径接线时必须显式定口径，
   否则「这条类指哪张表」是未定义行为。登记在此，避免接线时漏掉。
@@ -311,6 +323,119 @@ MAX_CHECKS_PER_RELEASE    = 6
   （本批的编译期异常是 fail-closed 抛错，会阻断整次发布 —— 能定位到绑定 id，
   但没有落表成 check 行）。
 
+### 6.6 批次 B 实施记录（域编排 + 回滚）
+
+#### 落点
+
+| 文件 | 性质 | 职责 |
+|---|---|---|
+| `app/services/semantic_release_check_types.py` | **新增**（叶子） | `PublishCheck` / `PublishGateResult` 与 severity / result / target 常量；**零业务依赖**；另含**公共绑定键渲染器** `bindingTargetKey()`（校验侧与差异侧共用，见 §6.7 LOW-1） |
+| `app/services/semantic_release_domain_checks.py` | **新增** | 域级（切片为空 / 跨域补齐）+ 绑定级（孤岛 / 属性未绑列）+ 候选汇总行；纯函数 |
+| `app/services/procurement_binding_candidates.py` | **新增** | 活库里**仍然开放**的候选绑定计数与类名（候选不进快照 ⇒ 只能实时查） |
+| `app/services/semantic_domain_slice.py` | **新增** | 发布切片（`sliceManifestForRelease` / `sliceToManifest`）；`app/services/knowledge/domain_slice.py` 改为**转发层**（保持旧 import 路径可用） |
+| `app/services/semantic_release_checks.py` | 改造 | 新增 5 个 code / 5 个 item / `TARGET_BINDING`；上限重推 `10006`；`evaluateManifestChecks(..., context=)` |
+| `app/services/semantic_release_support.py` | **新增**（支撑层） | 输入校验 / 状态迁移判定之外的落库辅助（校验项评估、审计留痕、撞库翻译）；从 `semantic_release_service` **整块搬出**（纯搬移，无逻辑改动） |
+| `app/services/semantic_release_service.py` | 改造 | 域切片接线（`createDraft` 存切片）+ `context` 传递 + **`rollback()`** |
+| `app/services/semantic_diff_service.py` | 改造 | `sourceBindings` 纳入 diff（F9）；绑定身份补 `datasourceName` 维度 |
+| `app/domain/semantic_release_schemas.py` / `app/api/v1/semantic_releases.py` / `app/services/messages_zh.py` | 改造 | 回滚请求体 / 路由 / 中文文案 |
+| `alembic/versions/0157_semantic_release_domain_version.py` | **新增**（迁移） | `uq_semantic_release_domain_version (version, domain_code) WHERE domain_code IS NOT NULL` —— 域作用域版本号唯一（§6.7 MEDIUM-3） |
+
+#### 四个关键设计
+
+1. **三层模块拆分（避免 import 环）**
+   域级模块要 import `PublishCheck`，而 checks 模块又要 import 域级模块
+   ⇒ 类型必须住**叶子模块**（`semantic_release_check_types`），否则形成结构上的环
+   （批次 A 的 LOW-4 同类问题）。
+
+2. **JOIN 邻居闭包取不动点 ⇒ 切片幂等 ⇒ 校验项可复算**
+   发布快照存的是**切片**，而「跨域补齐了什么」**不在**切片里 ⇒ 若只在编译那一刻算一次，
+   validate / activate 阶段就复算不出来（证据不可复算）。
+   解法：**闭合是幂等的** —— 对切片再切一次得到同一份 ⇒ 校验项只依赖**已存快照**。
+   不动点保证「类在、边不在」的自相矛盾类不会出现（邻居若自己也有绑定，它的邻居同样要补）。
+
+3. **候选数用 `None` 语义**
+   `ReleaseCheckContext.candidateBindingCount: int | None`：
+   `None` = **没查过** ⇒ **不出这一行**（不写一句没依据的「没有候选绑定」）；
+   `0` = 查过且为 0 ⇒ 出 PASS 行。
+
+4. **孤岛判据取全本体口径**
+   切片阶段把**有绑定类的一跳 JOIN 邻居**也拉进来 ⇒ 「切片里有没有边」与
+   「本体里有没有边」**完全等价** ⇒ 不会误阻断「只连跨域边」的合法发布。
+
+5. **编排层与支撑层分开（文件体量）**
+   批次 B 落地后 `semantic_release_service.py` 涨到 **851 行** ⇒ 超过项目上限（800）。
+   拆分口径：**编排层**（`semantic_release_service`：编译 → 切片 → 落库 → 状态迁移 → 审计）
+   与**支撑层**（`semantic_release_support`：输入校验 / 校验项评估 / 审计留痕 / 撞库翻译）分开。
+   ⚠️ 分层方向的坑：编排层 import 支撑层 ⇒ **`ReleaseEvaluation` 必须住支撑层**
+   （否则支撑层要反向 import 编排层 ⇒ 环）；而状态机判定 `isTransitionAllowed`
+   相反 —— 它**留在编排层**（支撑层不需要它）。
+   拆分后（实测 `wc -l`）：编排层 **480** 行 / 支撑层 **619** 行（代码行 398 / 514）——
+   两个文件都**未超 800 行上限**；拆分的**主体**是纯搬移，审查后补进了
+   `blockedVersion` / `_buildRollbackCopy` / `_validateNote` 三个纯函数与
+   域作用域版本号查重（见 §6.7）。
+
+#### 实施期自查发现并修正的三处缺陷
+
+| # | 缺陷 | 后果 | 处置 |
+|---|---|---|---|
+| **B-1** | 绑定级校验项的 `targetKey` 缺**数据源**维度 | 同一类同表在两个数据源各绑一次 ⇒ 两行撞 `uq_semantic_release_check_unique` ⇒ **整次发布 500** | `targetKey` 改成 `类名@数据源.schema.表#角色`（五元组）；diff 侧 `_bindingKey` 同步补 `datasourceName` |
+| **B-2** | `context=None` 时也输出「没有候选绑定」PASS 行 | 写了一句**没依据的结论**（比缺一行更坏） | 改成 `candidateBindingCount: int | None`，`None` 时**不出行** |
+| **B-3** | 超宽 `targetKey` 打算直接截断 | 截断会让两个不同的绑定撞成同一个键 | 改成「类名摘要(64) + 完整身份 sha256[:16]」，**不截断** |
+
+#### 与批次 A 审查提醒的对应
+
+- 「`DomainSlice` 必须扩展（带 `domains` / `sourceBindings`）」⇒ 已扩展
+  （`app/services/semantic_domain_slice.py`，`domains` / `sourceBindings` / `closureClassNames` 三个新字段）。
+- 「校验项上限重推为 `10006`」⇒ 已重推，并改由**契约常量推导**（单测钉死公式）。
+- 「绑定纳入 diff 引擎（F9）」⇒ 已纳入：`sourceBindings` 从 `UNCOVERED_SECTIONS`
+  移到 `COVERED_SECTIONS`，字段级覆盖 `filterExpression` / `filterAllowlist` /
+  `properties[].sourceColumn` / `transformExpression` / `keyOrdinal`。
+- 「属性归属错配 / 表达式不合规应定位到具体绑定」⇒ **部分处置**：属性**未绑列**
+  已落表成 `SOURCE_BINDING_PROPERTY_UNBOUND`（WARNING，带绑定 `targetKey`）；
+  「属性归属错配 / 表达式不合规」仍是**编译期 fail-closed 抛错**（批次 A 的 F1 / LOW-1），
+  未落表成 check 行 —— 登记为后续缺口，不在本批扩。
+
+---
+
+### 6.7 批次 B 的两轮审查与处置（code-reviewer + security-reviewer）
+
+批次 B 落地后请了 `code-reviewer` 与 `security-reviewer` 各一轮。结论：
+**无 CRITICAL**；HIGH 与可修的 MEDIUM/LOW **全部处置完毕**，只有 4 条**明确
+登记为设计决策 / 后续缺口**（不修，但写明理由）。
+
+#### 处置表
+
+| 级别 | 结论 | 处置 | 证据 |
+|---|---|---|---|
+| **HIGH** | **JOIN 邻居闭包与父类闭包不是联合不动点** ⇒ 带绑定的父类被判成**孤岛** ⇒ 合法发布被 ERROR 阻断 | 四条闭包来源（度量引用 / 属性引用 `refClassName` / 有绑定类的一跳 JOIN 邻居 / 父类闭包）合成**一个联合不动点**（`semantic_domain_slice._closure` 迭代到稳定 ⇒ 父类若自己也有绑定，它的 JOIN 邻居同样进来） | `test_semantic_domain_slice.py` 不动点 + 幂等用例；切片单测 **20 条**全绿 |
+| **HIGH** | **属性引用没闭**（`properties[].refClassName`）⇒ v2 引用契约判「不存在」⇒ **该域永远发不出去** | `_propertyRefClassNames` 进闭包（表引用型字典是**常见建模**，不是假想场景） | 单测（属性引用闭包）+ 集成用例 |
+| **HIGH** | `ManifestSchemaError` 是 `ValueError` 而非 `DomainError` ⇒ `main.py` 只注册 `DomainError` ⇒ 裸抛 ⇒ **500**（该 422 的地方 500） | 服务层把契约错误翻译成 `ValidationError`（**422**） | 集成用例（契约违例 ⇒ 422 而非 500） |
+| **HIGH** | **diff 两侧不同口径**（基线 = 域 ACTIVE 行（切片），候选 = 全域编译结果）⇒ 两侧**不可比**，差异报告在说谎 | 候选侧按**同一个域**切一次（`sliceManifestToDomain`）；`scope` 如实披露 `DOMAIN` / `GLOBAL` | `test_diff_compares_the_domain_slice_on_both_sides` + `test_diff_of_a_global_release_reports_the_global_scope`；**变异反证**：把候选侧裁剪改成 `if False and ...` ⇒ 该用例红 ⇒ 非空转 |
+| **MEDIUM-3** | **域作用域不做版本号查重** ⇒ 同域可存在重复版本号（ORM 注释原写「按域发布上线时再补索引」，那个时点到了） | ① 服务层 `_requireVersionFree` 在域作用域也查重；② 迁移 **0157** 建库侧唯一索引 `uq_semantic_release_domain_version (version, domain_code) WHERE domain_code IS NOT NULL`（查重是「先查后写」，并发下会同时通过 ⇒ 库侧索引才是兜底） | 集成用例「同域同版本 ⇒ 409；**跨域同版本 ⇒ 允许**」；0157 建索引前先探测存量重复（重复 ⇒ **报错不自动修**，重复版本号必须人工裁决） |
+| **LOW-1** | 绑定 `targetKey` 的渲染器**校验侧与差异侧各写一份** ⇒ 迟早漂移 ⇒ 差异报告里的一个绑定名**查不到 check 表里对应的行** | 抽出**公共渲染器** `bindingTargetKey()` 住叶子模块 `semantic_release_check_types`；两侧都委托它 | 单测（超宽 ⇒ `类名摘要(64) + sha256[:16]`，**不截断**）；集成用例（差异侧与 check 表同一键） |
+| **LOW-2** | `semantic_release_checks.py` 转出了 10 个**域级**常量 ⇒ 两处都能 import ⇒ 「迟早有一处改了另一处没改」 | 删除转出：域级常量**只在域级模块**定义；消费方（测试 / 报告渲染）直接 import 域级模块 | `ruff check` 全绿；域级单测的 import 改到叶子模块 |
+| **LOW-5** | 回滚**允许以 ACTIVE 为来源** | ⛔ **不改**（设计决策）：回滚的语义是「以历史版本为源新建副本」（D-11）⇒ 源的**状态**不参与合法性判定，只参与「源不得为 DRAFT」这一条；以 ACTIVE 为源 = 复制当前线上版本再发一遍，是合法的「重发」动作 | 见 §2.5（D-11 副本式回滚） |
+
+#### 本轮**自查**发现并修掉的一处真实不一致（非 reviewer 提出）
+
+`markValidated` / `activate` 的**候选统计**此前**未按快照里的类收窄**（只有草稿阶段收窄了）
+⇒ 同一份快照在草稿阶段说「0 个候选」、validate 阶段说「3 个候选」
+⇒ **证据不可复算**（同一份快照两个口径）。
+现两处都改为按 `_manifestClassNames(row.manifest_json)` 收窄 ⇒ 与草稿阶段**同一口径**。
+证据：集成用例 `test_candidate_count_is_scoped_to_the_snapshot_classes`
+（别域的候选 ⇒ 草稿行 PASS **且** validate 行仍 PASS）。
+
+#### 登记为「不修」的四条（设计决策 / 后续缺口）
+
+| 编号 | 内容 | 不修的理由 |
+|---|---|---|
+| **M-1** | 跨域补齐（`DOMAIN_SLICE_CROSS_DOMAIN`）只报 **WARNING**，不阻断 | 跨域依赖是**事实**（本体里就是这么连的），阻断会让合法发布发不出去；改为**显式暴露**（WARNING + 类名清单）⇒ 评审可见、可追责。⚠️ 代价：跨域依赖可以无声地扩大一个域的发布面 ⇒ 后续若要收紧，先在**治理侧**确认依赖是否可接受 |
+| **L-3** | 属性**归属错配** / 表达式**不合规**没有落表成 check 行 | 两者都是**编译期 fail-closed 抛错**（批次 A 的 F1 / LOW-1）⇒ 根本到不了「校验项评估」这一步 ⇒ 落表无对象。要落表得先把「抛错」改成「收集」，那是**闸门口径改造**（超出本批范围，且会牵动 M1-1.2 的「闸门与落表零漂移」判据） |
+| **L-4 / L-5** | 回滚副本的**版本号**在失败路径上用**合成版本号**（`请求版本#b<副本id>`）释放用户请求的版本号 | 副本已落库（证据先行：先提交 check 行 + blocked 审计，再抛原异常）⇒ 它占着用户请求的版本号 ⇒ 用户拿同一个版本号重试只会收到误导性的「版本已存在」。合成版本号受 `semantic_release.version` 列宽（32）约束 ⇒ 必须截断**前缀**而保留副本 id（`#b<id>`），否则两个副本会撞。`blockedVersion()` 是纯函数 ⇒ 单测覆盖（长度 / 保留 id / 区分不同 id） |
+| **L-6** | `semantic_diff_service.py` 涨到 **794 行**（项目上限 800，只剩 6 行余量；HEAD 时 642） | 本批把 `sourceBindings` 纳入 diff（+152 行）⇒ 已逼近上限但**未越限**。拆分为 `semantic_diff_bindings.py`（绑定分区 diff）属于**纯搬移** ⇒ 与批次 B 的支撑层拆分同一手法；本批不再扩 ⇒ 登记为下一轮的第一件事。⚠️ 再往这个文件加一行就要先拆 |
+
+---
+
 ---
 
 ## 7. 测试
@@ -348,14 +473,69 @@ MAX_CHECKS_PER_RELEASE    = 6
 - **迁移**：0156 已在 **5433 与 5434 双库**应用（`column_default = 'v2'::character varying`）；
   `DATABASE_URL=...5434/qa_metadata_test uv run alembic check` ⇒ **No new upgrade operations detected**。
 
-### 7.2 批次 B（待做）
+### 7.2 批次 B（已落地）
 
-- **unit**：域切片 + 引用闭合；绑定级校验项；上限公式（`10006`）；回滚副本逻辑（hash 逐字相同）。
-- **integration**：采购域编辑→编译→validate→activate→回滚→再 activate，往返 hash 一致；
-  构造缺 JOIN 的绑定 ⇒ validate 409 + check 表可查到该条 + activate 被拒；
-  同一输入两次编译字节一致。
-  ⚠️ 新集成用例必须**并进既有 integration 文件**（CI 按「`find | sort` 后下标 mod 4」分片）。
-- **§67 真机**：在开发库 5433 走一遍采购域全流程 + 缺陷场景，输出进本文件附录。
+- **unit**（新增三个文件 + 三个既有文件补断言）：
+  - `test_semantic_domain_slice.py`（**新增**，**20** 条）：域内类 / 指标引用闭合补齐 /
+    **属性引用闭合**（`properties[].refClassName`）/ JOIN 两端在内 / 有绑定类的邻居拉入 /
+    **联合不动点**（A(绑定)—B—C(绑定) ⇒ C 必须进切片；**带绑定的父类 ⇒ 父类的邻居也要进**）/
+    绑定分区过滤 / `domains` 分区 / 未知域空切片 / **幂等**（对切片再切一次同一份）/
+    `sliceToManifest` 过契约 / 分区顺序稳定 / 可省略 `sourceBindings`。
+  - `test_semantic_release_domain_checks.py`（**新增**，**16** 条）：空切片 ERROR /
+    跨域补齐 WARNING / 无补齐 PASS / 全局发布无域行 / 候选 WARNING / 候选 0 ⇒ PASS /
+    **没查过候选数 ⇒ 不出行** / 孤岛 ERROR / 有边 PASS / `targetKey` 含数据源与角色 /
+    同表两数据源两键 / 属性未绑列 WARNING / 全绑 PASS / 无绑定无行 /
+    **同一类多条绑定分摊映射 ⇒ 不算债**（假阳性防护）。
+  - `test_semantic_release_support.py`（**新增**，**10** 条 —— 支撑层**纯函数**）：
+    `blockedVersion()`（后缀 `#b<副本id>` / 落在列宽 32 内 / **保留 id** / 区分不同 id）/
+    `_buildRollbackCopy()`（正文**逐字复制** / **深拷贝不共享对象** / 新版本号与 note）/
+    `_validateNote()`（2001 拒绝 / 2000 接受 / None 接受）。
+    ⚠️ 支撑层此前**零单测**（纯搬移）⇒ 本批补上 ⇒ 阻断回滚路径（当前设计下几乎不可达）
+    以**纯函数**覆盖，而不是硬造一条集成路径。
+  - `test_semantic_diff_service.py`（+14 条）：绑定新增（ADDITIVE）/ 删除（BREAKING）/
+    过滤表达式变更（BREAKING）/ 白名单变更（BREAKING）/ 属性源列变更（BREAKING）/
+    变换表达式变更（BREAKING）/ 键序号变更（COSMETIC）/ 属性新增（ADDITIVE）/
+    属性删除（BREAKING）/ 同表两数据源不挤成一条 / 同表两角色不挤成一条 / 入参不被就地修改。
+  - `test_semantic_release_checks.py`：上限断言改为**从契约推导**（`6 + 3×指标 + 2×绑定`）。
+  - `test_ontology_discovery_api.py`（**契约面连带**）：`sourceBindings` 进入
+    `COVERED_SECTIONS` ⇒ 发现接口的 `coveredFields` 披露**多一个分区** ⇒
+    原断言 `== {classes, properties, joins}` 必然红 ⇒ 断言改成**含 `sourceBindings`**，
+    并补一条「`sourceBindings` 分区必须披露比了哪些字段」。
+    ⚠️ 这是**对外契约的扩大**（披露面），不是测试放宽：多披露比少披露安全
+    （「比了哪些字段」披露得越全，消费方越能自己判断能不能当「无破坏性变更」看）。
+- **integration**（**并进既有文件**，不新建 integration 文件 ——
+  CI 按「`find | sort` 后下标 mod 4」分片，新文件会重排分片 ⇒ 假 net-new；
+  ⚠️ **新建 unit 文件是安全的**：unit 侧已改「路径 sha256 哈希」分片）：
+  - `test_semantic_release_service.py`（+8 ⇒ **37** 条）：域草稿只存该域切片 / 域无锚点 ⇒ 阻断 /
+    绑定类零 JOIN 边 ⇒ validate 409 且 check 表可查到该条 / 候选绑定 ⇒ WARNING 不阻断
+    且候选不进快照 / 回滚副本 hash 逐字相同 / 回滚源不得为 DRAFT /
+    回滚归档旧 ACTIVE 且源保持 ARCHIVED / 回滚撞全局版本号 ⇒ 409。
+    **审查后补 6 条**：note 超长 ⇒ 422 / **同域同版本 ⇒ 409 且跨域同版本 ⇒ 允许** /
+    回滚源 `schema_version` 过期 ⇒ 409 / 回滚源**不是该域的有效切片** ⇒ 409 /
+    **候选统计按快照类收窄**（别域的候选 ⇒ 草稿行 PASS **且** validate 行仍 PASS）/
+    域级版本号查重。
+  - `test_semantic_release_api.py`（+3 ⇒ **79** 条）：回滚走完整 HTTP 链路
+    （副本 hash 与源逐字相同、`no-store`）/ 回滚草稿 ⇒ 409 / 回滚不存在 ⇒ 404 /
+    回滚路由对非 admin ⇒ 403。
+    **审查后补 3 条**：回滚副本落 **CREATE 审计**（`after_json.rolledFromReleaseId` == 源 id、
+    `requestedVersion`、`status == "DRAFT"`）/ **diff 两侧同口径**（`scope == "DOMAIN"`、
+    `baselineDomainCode` / `baselineReleaseId`、**别域的类不出现在 changes**）/
+    **全局发布的 diff 披露 GLOBAL 作用域**（`baselineDomainCode is None`）。
+  - `test_semantic_release_route_auth.py`：期望路由集合 8 ⇒ **9** 条
+    （新增 `("POST", "{prefix}/{releaseId}/rollback")`），测试名同步改 `..._expected_nine`。
+- **支撑层拆分（纯搬移）**：`semantic_release_support.py` 抽出后**未新增业务用例** ——
+  搬移的正确性由「既有集成用例全绿」保证（`rollback` / `createDraft` / 撞库翻译
+  三条路径都跑在既有 integration 用例里）；审查后**补了 10 条纯函数单测**
+  （`blockedVersion` / `_buildRollbackCopy` / `_validateNote`）。
+  ⚠️ 单测里 `releaseServiceModule._mapCreateIntegrityError` 的调用路径**保持可用**
+  （支撑层函数在编排层命名空间里再导出）。
+- **实测**（`./scripts/run_local_tests.sh`）：
+  批次 B 定向 **14 个文件（11 unit + 3 integration）⇒ 354 passed**（unit 232 / integration 122），
+  退出码 0。逐文件：unit 新文件 20 / 16 / 10 / 8；
+  integration `test_semantic_release_service.py` **37**、
+  `test_semantic_release_api.py` **79**、`test_semantic_release_route_auth.py` **6**。
+- **覆盖率**（同一次运行加 `--cov`）：本批 8 个模块合计 **95.16%**（逐模块见 §7.4.1）。
+- **§67 真机**：**未做**（待 §11 的本地全绿闸门一起清；本批只跑本地测试栈）。
 
 ### 7.3 批次 A 回归扫描与失败归因（2026-11-19）
 
@@ -392,11 +572,69 @@ MAX_CHECKS_PER_RELEASE    = 6
 **遗留（本批不修，归 §11）**：第 2、3 类失败会让 M1 收尾时的「本地全绿」闸门
 过不去；它们不是回归，而是**环境欠账 + 用例对种子数据的错误假设**。
 
+### 7.4 批次 B 回归扫描与失败归因（2026-11-19）
+
+扫描口径：`./scripts/run_local_tests.sh app/tests/unit app/tests/integration -k "semantic or manifest or diff or release"`
+⇒ **1197 passed / 3 failed**（耗时 10 分 38 秒）。
+
+**3 个失败逐个归因**：
+
+| # | 用例 | 归因 | 处置 |
+|---|---|---|---|
+| 1 | `unit/test_ontology_discovery_api.py::test_diff响应披露字段级覆盖范围` | **批次 B 引入（真缺陷，已修）**：`sourceBindings` 进 `COVERED_SECTIONS` ⇒ `coveredFields` 披露多一个分区，而断言钉的是**集合相等** `== {classes, properties, joins}` ⇒ 必然红 | 断言改成含 `sourceBindings`，并补「`sourceBindings` 分区必须披露比了哪些字段」（§7.2） |
+| 2 | `integration/test_chat_agent_run.py::test_chat_semantic_routing_stream_done_carries_card` | **环境**（§11 第 2 类）：本地 embedding 服务不在线 ⇒ `LlmClientError: Embedding 调用失败: Connection error.` ⇒ 召回走降级路径 | 与批次 B 无关（批次 B 未触及 chat / embedding / 召回）；归 §11 |
+| 3 | `integration/test_knowledge_compiler_reconcile.py::test_reconcile_real_pg_empty_diff_zero_writes_audit` | **环境**（§11 第 3 类）：用例假定 `ontology_class` 为空（期望 `class == 0`），测试库已 seed **5 类** ⇒ 实得 5 | 与批次 B 无关；归 §11 |
+
+**批次 B 自身面全绿**：定向复跑 9 个文件（6 unit + 3 integration）⇒ **263 passed**，退出码 0。
+
+#### 7.4.1 审查处置后的复扫（2026-11-19，本批最终口径）
+
+处置完 §6.7 的全部 HIGH / MEDIUM / LOW 之后**重新扫了一遍**（同一口径，另加 `--cov`）：
+
+```
+./scripts/run_local_tests.sh app/tests/unit app/tests/integration \
+  -k "semantic or manifest or diff or release" \
+  --cov=<批次 B 的 8 个模块> --cov-report=term-missing
+```
+
+⇒ **1225 passed / 2 failed**（10598 deselected，耗时 10 分 08 秒）。
+
+| # | 用例 | 归因 | 与上轮对比 |
+|---|---|---|---|
+| 1 | `integration/test_chat_agent_run.py::test_chat_semantic_routing_stream_done_carries_card` | **环境**（§11 第 2 类）：本地 embedding 服务不在线 | **与上轮同一个**（不是本批引入） |
+| 2 | `integration/test_knowledge_compiler_reconcile.py::test_reconcile_real_pg_empty_diff_zero_writes_audit` | **环境**（§11 第 3 类）：用例假定 `ontology_class` 为空，测试库已 seed 5 类 | **与上轮同一个** |
+
+⇒ **净新增失败 = 0**（上轮的 3 个失败里，唯一由批次 B 引入的那个已修 ⇒ 从 3 降到 2，
+少的两个都是环境欠账）；**净新增通过 = +28**（1197 → 1225：本轮补的用例 + 新增
+`test_semantic_release_check_types.py` 8 条）。
+
+**批次 B 自身面全绿**：定向复跑 **14 个文件（11 unit + 3 integration）⇒ 354 passed**，
+退出码 0（unit 232 / integration 122）。
+
+**覆盖率**（同一次运行加 `--cov`）：批次 B 的 **8 个模块合计 95.16%**（≥ 80% 闸门）：
+
+| 模块 | 覆盖率 | 未覆盖行 |
+|---|---|---|
+| `semantic_release_checks` | **100%** | — |
+| `semantic_release_check_types` | **100%**（补了 `test_semantic_release_check_types.py` 8 条后） | — |
+| `semantic_domain_slice` | 97% | 96, 162, 165, 198-199, 454 |
+| `semantic_release_support` | 97% | 141-142, 174-175, 272 |
+| `semantic_release_domain_checks` | 97% | 212, 234, 352, 386 |
+| `procurement_binding_candidates` | 95% | 71, 80 |
+| `semantic_diff_service` | 93% | 420, 469, 477-480, 487, 491-492, 497, 500-501, 510, 512, 514, 519, 528, 534-535, 605 |
+| `semantic_release_service` | 90% | 219-221, 339-342, 442-456, 464-466 |
+
+⚠️ `semantic_release_check_types` 在本轮复扫里是 **95%**（第 69-70 行 = **超宽键**的
+摘要分支**没有测试**）⇒ 补了 `test_semantic_release_check_types.py`（8 条：五元组完整性 /
+角色与数据源可区分 / **超宽不截断** / 渲染稳定 / 闸门结论 `canPublish`）⇒ 回到 **100%**。
+（这正是「文档里写了『超宽不截断』但没有用例钉住」的典型：口径写在注释里 ≠ 被验证。）
+
 ---
 
 ## 8. 安全审查
 
-两轮审查已出结论，**批次 A 可合并**；逐条处置见 §6.5。
+两轮审查已出结论，**批次 A 可合并**；逐条处置见 §6.5。**批次 B 的两轮审查结论与逐条处置见 §6.7**，
+批次 B 新增攻击面的复核见 §8.1。
 
 - **code-reviewer**：0 CRITICAL / 1 HIGH / 2 MEDIUM / 4 LOW。
   HIGH（版本常量未冻结）已修；MEDIUM-2（未来版本 500）已修；
@@ -413,14 +651,37 @@ MAX_CHECKS_PER_RELEASE    = 6
 `/api/v1/semantic/releases` 整组仍挂 `requireAdmin`、
 迁移 0156 up/down 对称且**只改默认值不动存量数据**。
 
+### 8.1 批次 B 的安全面
+
+批次 B 的两轮审查（`code-reviewer` + `security-reviewer`）结论与**逐条处置**见 §6.7。
+批次 B 新增的**攻击面**只有三处，逐处复核过：
+
+| 面 | 复核结论 |
+|---|---|
+| **回滚接口**（`POST /{releaseId}/rollback`） | 与既有发布路由**同挂 `requireAdmin`**（路由守卫期望集合 9 条里含它）；body 只有 `version` / `note` 两个字段，**不接受** manifest 正文 ⇒ 客户端无法借回滚注入任意快照；`note` 有长度闸（2000，Text 列无库侧兜底 ⇒ 服务层 422）；源不得为 DRAFT（409）；源 `schema_version` 必须等于当前 `SCHEMA_VERSION`（否则契约已漂移 ⇒ 409）；源必须是**该域的有效切片**（可复算判据：重切一次类集合相同）⇒ 409。审计留痕（`action="CREATE"`，`after_json.rolledFromReleaseId`） |
+| **域切片** | 切片是**子集**（fail-closed：归不了属的一律排除）⇒ 发布出去的快照**不会**多带别的域的东西；唯一会多带的是**引用闭合补齐**（度量 / 属性 / JOIN 邻居 / 父类）⇒ 补齐集合**显式落表**（`DOMAIN_SLICE_CROSS_DOMAIN`，WARNING，带类名清单）⇒ 不是暗带 |
+| **绑定纳入快照**（v2） | 绑定区只带**已确认**的绑定；**候选不进快照**（D-3）⇒ 未确认的绑定不会被生产读路径消费；候选数**实时查**且「没查过就不出结论」；绑定正文里的 `filterExpression` / `filterAllowlist` 仍受批次 A 的**编译期表达式安全复核**（F1）约束 |
+
+⚠️ **0157 迁移是纯加法 DDL**（只建一个部分唯一索引）⇒ 不动存量数据；
+但建索引前会**探测存量重复**，重复 ⇒ **报错不自动修**（重复版本号必须人工裁决）。
+
 ---
 
 ## 9. 部署验证
 
-- 开发库 5433：已应用 0154 / 0155 / **0156**（`column_default = 'v2'::character varying`）。
-- 测试库 5434：已应用 0156；`alembic check` 全绿。
+- 开发库 5433：已应用 0154 / 0155 / **0156** / **0157**（`column_default = 'v2'::character varying`；
+  `semantic_release` 上已有 `uq_semantic_release_domain_version`）。
+- 测试库 5434：已应用 0156 / **0157**；`alembic check` 全绿（`No new upgrade operations detected`）。
   ⚠️ `alembic/env.py` 用 `getSettings().databaseUrl` ⇒ **`TEST_DATABASE_URL` 对 alembic 无效**，
   查测试库必须 `DATABASE_URL=... uv run alembic check`。
+  ⚠️ **0157 建索引前会探测存量重复**：两个库实测「同域同版本号」重复 **0 条** ⇒ 建索引成功。
+- ⚠️ **开发库 5433 的 `alembic check` 不是绿的**（**既有欠账，非本批引入**）：
+  差异项全部是**历史备份表**（`wiki_page_20260930` / `session_message_bak_20260930` /
+  `knowledge_claim_20260930` / `evidence_20260930` / `session_query_state_20260930` /
+  `ontology_class_pre_pruning_20260918` / `PORDER` / `PORDERQ` / `BPSUPPLIER`）
+  与两个索引/外键的表达式差异（`ix_wiki_compile_task_created` /
+  `fk_wiki_token_usage_compile_task`）⇒ **没有一项属于 `semantic_release`** ⇒ 与本批无关。
+  测试库（5434）**无**这些备份表 ⇒ 全绿 ⇒ 闸门口径**以测试库为准**。
 - **生产未部署**（用户决策：功能全完成 + 本地全绿后统一发版）。
 
 ### 9.1 发版顺序（**已更正**，code-review MEDIUM-3）
@@ -496,9 +757,35 @@ v2 快照只能由已经产出 `SCHEMA_VERSION="v2"` 的代码编译出来，
 - [x] **补上 M1-1.2 遗留的路由守卫漂移**：期望集合 7 ⇒ **8** 条（新增
       `GET /{releaseId}/checks`），守卫重新有牙
 
-批次 B（后续提交）：
+批次 B（本次提交）：
 
-- [ ] 校验项上限从契约推导（单测钉死公式 `10006`）
-- [ ] 缺 JOIN 绑定 ⇒ validate 409 + check 表可查 + 不得激活
-- [ ] 回滚往返后 `manifest_hash` 逐字一致
-- [ ] 覆盖率 ≥ 80%（本批新增代码）
+- [x] 校验项上限从契约推导（单测钉死公式 `10006`）
+- [x] 缺 JOIN 绑定 ⇒ validate 409 + check 表可查 + 不得激活
+- [x] 回滚往返后 `manifest_hash` 逐字一致
+- [x] 覆盖率 ≥ 80%（本批新增代码）：定向 8 模块实测 **95.16%**（§7.4.1 逐模块表）
+      （`semantic_release_checks` 100% / `semantic_release_check_types` 100% /
+      `semantic_domain_slice` 97% / `semantic_release_support` 97% /
+      `semantic_release_domain_checks` 97% / `procurement_binding_candidates` 95% /
+      `semantic_diff_service` 93% / `semantic_release_service` 90%）
+- [x] **编排层 / 支撑层切分**：`semantic_release_service.py` 851 ⇒ **480** 行
+      （拆出 `semantic_release_support.py` **619** 行），两个文件都未超 800 行上限
+- [x] **回归扫描归因**：批次 B 扫描 3 个失败（净新增 1 + 环境 2），
+      净新增（披露面扩大 ⇒ 集合相等断言红）**已修**，其余 2 个为 §11 既有欠账（§7.4）；
+      **处置后复扫 ⇒ 1225 passed / 2 failed，净新增失败 = 0**（§7.4.1）
+- [x] **单元拆分不引入新用例**：支撑层为纯搬移，靠既有集成用例兜底
+      （`rollback` / `createDraft` / 撞库翻译三条路径）
+- [x] **两轮审查的 HIGH 全部处置**（§6.7）：
+      ① 四条闭包取**一个联合不动点**（属性引用 / JOIN 邻居 / 父类交替迭代）
+      ⇒ 带绑定的父类不再被判孤岛、合法发布不再被误阻断；
+      ② 属性引用（`refClassName`）也闭 ⇒ 该域不再「永远发不出去」；
+      ③ `ManifestSchemaError` ⇒ `ValidationError`（**422 而非 500**）；
+      ④ diff 两侧**同口径**（候选侧按同一个域切片）⇒ 差异报告不再在说谎
+- [x] **域作用域版本号唯一**（迁移 **0157** + 服务层查重双保险）：
+      同域同版本 ⇒ 409；**跨域同版本 ⇒ 允许**（版本号标识「哪一次发布」）
+- [x] **绑定键渲染器只有一份**（`semantic_release_check_types.bindingTargetKey`）：
+      校验侧与差异侧共用 ⇒ 差异报告里的绑定名**查得到** check 表里对应的那行
+- [x] **候选统计按「已存快照里的类」收窄**（草稿 / validate / activate 三处同口径）
+      ⇒ 同一份快照在三个阶段给出**同一个**候选数（证据可复算）
+- [x] **支撑层补单测**（10 条纯函数）：`blockedVersion` / `_buildRollbackCopy` / `_validateNote`
+- [x] **文件体量复核**：`semantic_diff_service.py` 642 ⇒ **794** 行（上限 800，只剩 6 行余量）
+      ⇒ 登记为 L-6（下一轮先拆 `semantic_diff_bindings.py`），本批不再往它加行

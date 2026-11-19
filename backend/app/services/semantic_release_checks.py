@@ -36,17 +36,38 @@ M1-a DoD：「每条 check 落表可查」。只落失败项 ⇒ 评审看到的
 | `METRIC_NUMERATOR_LANDING` | METRIC | WARNING/ERROR | 指标分子度量有落点类 |
 | `METRIC_DENOMINATOR_LANDING` | METRIC | WARNING/ERROR | 指标分母度量有落点类 |
 | `CHECKS_TRUNCATED` | RELEASE | ERROR | 结论条数超上限（报告不完整 ⇒ 阻断） |
+| `DOMAIN_SLICE_EMPTY` | RELEASE | ERROR | 域切片为空（不能发布空采购快照） |
+| `DOMAIN_SLICE_CROSS_DOMAIN` | RELEASE | WARNING | 为满足引用契约补齐了跨域依赖类 |
+| `SOURCE_BINDING_CANDIDATE` | RELEASE | WARNING | 仍有未确认（候选）绑定（D-3 治理债） |
+| `SOURCE_BINDING_JOIN_MISSING` | BINDING | **ERROR** | 绑定所属类在整个本体里零 JOIN 边（孤岛） |
+| `SOURCE_BINDING_PROPERTY_UNBOUND` | BINDING | WARNING | 类已绑源表，但有属性没绑 `sourceColumn` |
 
-（M1-1.3 会把「采购源绑定缺 JOIN」等采购域校验项接进同一张表 —— 机制先立，判据后加。）
+（M1-1.3 批次 B 把采购域校验项接进同一张表 —— 机制先立，判据后加。）
+
+## 模块分层（批次 B 拆分）
+
+| 模块 | 职责 |
+|---|---|
+| `semantic_release_check_types` | 类型与常量（叶子模块，零业务依赖） |
+| `semantic_release_domain_checks` | 域级 + 绑定级校验项（切片 / 候选 / 孤岛 / 未绑列） |
+| `semantic_release_checks`（本模块） | 契约 + 指标级校验项 + 闸门聚合 + 上限封顶 |
+
+类型住在叶子模块的原因：域级模块要 import `PublishCheck`，本模块又要 import
+域级模块 ⇒ 类型若只在本模块，两边只能靠参数注入绕环或直接成环。
+
+⚠️ 域级校验项的**编码常量**（`CHECK_DOMAIN_SLICE_*` / `CHECK_SOURCE_BINDING_*`
+及其 `ITEM_*` 名称）**只在域级模块里定义**，本模块**不再转出**：转出即产生
+「两处都能 import ⇒ 迟早有一处改了另一处没改」的假象（代码审查 LOW-2）。
+需要这些常量的消费方（测试、报告渲染）直接 import 域级模块。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from app.domain.semantic_manifest_schema import (
     MAX_MANIFEST_METRICS,
+    MAX_MANIFEST_SOURCE_BINDINGS,
     ManifestSchemaError,
     validateManifest,
 )
@@ -54,6 +75,20 @@ from app.services.messages_zh import (
     MSG_SEMANTIC_RELEASE_CHECKS_TRUNCATED,
     MSG_SEMANTIC_RELEASE_GATE_NO_LANDING,
     MSG_SEMANTIC_RELEASE_GATE_NO_SOURCE,
+)
+from app.services.semantic_release_check_types import (
+    RESULT_FAIL,
+    RESULT_PASS,
+    SEVERITY_ERROR,
+    SEVERITY_WARNING,
+    TARGET_METRIC,
+    TARGET_RELEASE,
+    PublishCheck,
+    PublishGateResult,
+)
+from app.services.semantic_release_domain_checks import (
+    ReleaseCheckContext,
+    evaluateDomainChecks,
 )
 
 # ---- 校验项编码（机器可读）----
@@ -72,65 +107,43 @@ ITEM_METRIC_NUMERATOR_LANDING = "指标分子落点类"
 ITEM_METRIC_DENOMINATOR_LANDING = "指标分母落点类"
 ITEM_CHECKS_TRUNCATED = "校验结论被截断"
 
-# ---- 严重级别 / 结论 / 目标类型 ----
-SEVERITY_ERROR = "ERROR"
-SEVERITY_WARNING = "WARNING"
-RESULT_PASS = "PASS"
-RESULT_FAIL = "FAIL"
-TARGET_RELEASE = "RELEASE"
-TARGET_METRIC = "METRIC"
-
 # 闸门报告封顶：体量失控的数据不该把响应撑爆（与既有闸门口径同值）。
 MAX_GATE_MESSAGES = 20
 
 # 单个发布的校验项条数上限 —— **从契约推导，不写死**：
-#   2 条发布级（快照完整性 + Manifest 契约）+ 每条指标最多 3 条
-#   （源类引用 / 分子落点 / 分母落点）= 2 + 3 × MAX_MANIFEST_METRICS。
+#   6 条发布级（快照完整性 / Manifest 契约 / 结论截断 / 域切片为空 /
+#   跨域依赖补齐 / 候选绑定治理债）
+#   + 每条指标最多 3 条（源类引用 / 分子落点 / 分母落点）
+#   + 每条绑定最多 2 条（无 JOIN 边 / 属性未绑列）
+#   = 6 + 3 × MAX_MANIFEST_METRICS + 2 × MAX_MANIFEST_SOURCE_BINDINGS。
 # ⚠️ 写死一个「看起来更宽」的数会出事：契约允许的合法 manifest 也会被截断，
 # 而截断丢的是**尾部**校验项 —— 尾部往往正是最后一条指标的 ERROR 结论行
 # （安全评审 HIGH-1）。⇒ 上限必须 ≥ 契约上限，截断只应作用于**绕过契约**的 manifest。
-MAX_CHECKS_PER_RELEASE = 2 + 3 * MAX_MANIFEST_METRICS
+# ⚠️ 绑定级校验项**不**按候选数计（候选不进快照 ⇒ 数量无契约上限）⇒
+# 候选只出**一条发布级汇总行**（见域级模块的 `CHECK_SOURCE_BINDING_CANDIDATE`）。
+MAX_CHECKS_PER_RELEASE = (
+    6 + 3 * MAX_MANIFEST_METRICS + 2 * MAX_MANIFEST_SOURCE_BINDINGS
+)
 
 # 「没有落点的比率不可执行」——D07 发布闸门要求只对这两类指标硬拒绝。
 _RATIO_METRIC_TYPES = frozenset({"RATIO", "DIFFERENCE"})
 
 
-@dataclass(frozen=True, slots=True)
-class PublishCheck:
-    """一条发布校验结论（落表的一行）。
-
-    `severity` 恒定非空（即便 `result=PASS`）；`targetType`/`targetKey` 定位被校验对象。
-    """
-
-    code: str
-    item: str
-    severity: str
-    result: str
-    targetType: str | None = None
-    targetKey: str | None = None
-    detail: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class PublishGateResult:
-    """发布闸门结论。`blockers` 非空 = 拒绝进入 VALIDATED / ACTIVE。"""
-
-    blockers: tuple[str, ...] = ()
-    warnings: tuple[str, ...] = ()
-
-    @property
-    def canPublish(self) -> bool:
-        return not self.blockers
-
-
-def evaluateManifestChecks(manifest: dict[str, Any]) -> tuple[PublishCheck, ...]:
-    """Manifest 契约 + 指标层校验项（纯函数）。
+def evaluateManifestChecks(
+    manifest: dict[str, Any], *, context: ReleaseCheckContext | None = None
+) -> tuple[PublishCheck, ...]:
+    """Manifest 契约 + 指标层 + 域级/绑定层校验项（纯函数）。
 
     快照完整性**不在这里**：它取决于库里那一行的 `manifest_hash`，
     属于「行」的属性而不是 manifest 自身的属性（见 `semantic_release_check_service`）。
+
+    `context` 携带纯函数够不到的事实（域编码、活库里的候选绑定数）；
+    不传 ⇒ 不做域切片校验（全局发布没有域），但绑定级校验照做
+    （绑定分区在 manifest 里，自足）。
     """
     checks: list[PublishCheck] = [_schemaCheck(manifest)]
     checks.extend(evaluatePublishChecks(manifest))
+    checks.extend(evaluateDomainChecks(manifest, context=context or ReleaseCheckContext()))
     return _dedupe(checks)
 
 

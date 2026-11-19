@@ -97,6 +97,10 @@ def _find(diff, kind: str) -> SemanticChange:
     return matched[0]
 
 
+def _find_list(diff, kind: str) -> list[SemanticChange]:
+    return [change for change in diff.changes if change.kind == kind]
+
+
 # ---------------------------------------------------------------- 基础形状
 
 
@@ -498,8 +502,9 @@ def test_差异披露覆盖与未覆盖分区():
     """M-3：未覆盖 metrics/kpis/domains/businessObjects ⇒ 必须披露，别让
     「部分比较」被误读成「没有破坏性变更」。
 
-    v2 新增的 `sourceBindings` 同样在本引擎的未覆盖清单里（M1-1.3 / D-9）：
-    「发布后绑定变了」目前不可见 —— 已知缺口，但**必须被披露**而不是静默。
+    v2 的 `sourceBindings` 已在 M1-1.3 批次 B **纳入覆盖**（此前是已知缺口），
+    但它不在「未覆盖」清单里这件事本身也要被钉住 —— 悄悄回退成未覆盖
+    ⇒ 「发布后绑定变了」又不可见了。
     """
 
     diff = diffManifests(_manifest(), _manifest())
@@ -507,12 +512,12 @@ def test_差异披露覆盖与未覆盖分区():
     assert "classes" in diff.coveredSections
     assert "properties" in diff.coveredSections
     assert "joins" in diff.coveredSections
+    assert "sourceBindings" in diff.coveredSections
     assert set(diff.uncoveredSections) == {
         "domains",
         "metrics",
         "kpis",
         "businessObjects",
-        "sourceBindings",
     }
     assert diff.isPartial is True
 
@@ -653,10 +658,18 @@ def test_差异披露字段级覆盖():
 
     diff = diffManifests(_manifest(), _manifest())
 
-    assert set(diff.coveredFields) == {"classes", "properties", "joins"}
+    assert set(diff.coveredFields) == {
+        "classes",
+        "properties",
+        "joins",
+        "sourceBindings",
+    }
     assert "dataType" in diff.coveredFields["properties"]
     assert "sourceTable" in diff.coveredFields["classes"]
     assert "joinKey" not in diff.coveredFields["joins"]
+    # 绑定分区（M1-1.3 批次 B）：过滤表达式与逐属性映射都要披露
+    assert "filterExpression" in diff.coveredFields["sourceBindings"]
+    assert "properties[].sourceColumn" in diff.coveredFields["sourceBindings"]
 
 
 # ---------------------------------------------------------------- 响应选取
@@ -719,3 +732,182 @@ class TestSelectChangesForResponse:
         assert len(selected) == 2
         assert dropped == 0
         assert {change.target for change in selected} == {"A1", "B1"}
+
+
+# ---------------------------------------------------------------- 源绑定层（v2 / M1-1.3 批次 B）
+
+
+def _bindingProp(name: str, **overrides) -> dict:
+    prop = {
+        "propertyName": name,
+        "sourceColumn": name.lower(),
+        "keyOrdinal": None,
+        "transformExpression": None,
+    }
+    prop.update(overrides)
+    return prop
+
+
+def _binding(className: str = "A", **overrides) -> dict:
+    binding = {
+        "className": className,
+        "datasourceName": "THBI",
+        "schemaName": "ERP",
+        "sourceTable": "T_A",
+        "bindingRole": "BASE",
+        "filterExpression": None,
+        "filterAllowlist": [],
+        "properties": [],
+    }
+    binding.update(overrides)
+    return binding
+
+
+def _manifestWithBindings(bindings: list[dict]) -> dict:
+    manifest = _manifest()
+    manifest["sourceBindings"] = bindings
+    return manifest
+
+
+def test_新增源绑定判为增量():
+    diff = diffManifests(_manifest(), _manifestWithBindings([_binding()]))
+
+    change = _find(diff, "BINDING_ADDED")
+    assert change.severity == "ADDITIVE"
+    assert change.section == "sourceBindings"
+
+
+def test_删除源绑定判为破坏性():
+    diff = diffManifests(
+        _manifestWithBindings([_binding()]), _manifest()
+    )
+
+    change = _find(diff, "BINDING_REMOVED")
+    assert change.severity == "BREAKING"
+
+
+def test_改过滤表达式判为破坏性():
+    diff = diffManifests(
+        _manifestWithBindings([_binding()]),
+        _manifestWithBindings([_binding(filterExpression="STATUS = 'A'")]),
+    )
+
+    change = _find(diff, "BINDING_FILTER_EXPRESSION_CHANGED")
+    assert change.severity == "BREAKING"
+
+
+def test_改过滤白名单判为破坏性():
+    diff = diffManifests(
+        _manifestWithBindings([_binding()]),
+        _manifestWithBindings([_binding(filterAllowlist=["STATUS"])]),
+    )
+
+    change = _find(diff, "BINDING_FILTER_ALLOWLIST_CHANGED")
+    assert change.severity == "BREAKING"
+
+
+def test_改属性源列判为破坏性():
+    diff = diffManifests(
+        _manifestWithBindings([_binding(properties=[_bindingProp("po_no")])]),
+        _manifestWithBindings(
+            [_binding(properties=[_bindingProp("po_no", sourceColumn="PO_NUMBER")])]
+        ),
+    )
+
+    change = _find(diff, "BINDING_PROPERTY_SOURCE_COLUMN_CHANGED")
+    assert change.severity == "BREAKING"
+
+
+def test_改属性变换表达式判为破坏性():
+    diff = diffManifests(
+        _manifestWithBindings([_binding(properties=[_bindingProp("po_no")])]),
+        _manifestWithBindings(
+            [
+                _binding(
+                    properties=[
+                        _bindingProp("po_no", transformExpression="UPPER(PO_NO)")
+                    ]
+                )
+            ]
+        ),
+    )
+
+    change = _find(diff, "BINDING_PROPERTY_TRANSFORM_CHANGED")
+    assert change.severity == "BREAKING"
+
+
+def test_改键序号判为外观性():
+    diff = diffManifests(
+        _manifestWithBindings(
+            [_binding(properties=[_bindingProp("po_no", keyOrdinal=1)])]
+        ),
+        _manifestWithBindings(
+            [_binding(properties=[_bindingProp("po_no", keyOrdinal=2)])]
+        ),
+    )
+
+    change = _find(diff, "BINDING_PROPERTY_KEY_ORDINAL_CHANGED")
+    assert change.severity == "COSMETIC"
+
+
+def test_新增属性映射判为增量():
+    diff = diffManifests(
+        _manifestWithBindings([_binding(properties=[])]),
+        _manifestWithBindings([_binding(properties=[_bindingProp("po_no")])]),
+    )
+
+    change = _find(diff, "BINDING_PROPERTY_ADDED")
+    assert change.severity == "ADDITIVE"
+
+
+def test_删除属性映射判为破坏性():
+    diff = diffManifests(
+        _manifestWithBindings([_binding(properties=[_bindingProp("po_no")])]),
+        _manifestWithBindings([_binding(properties=[])]),
+    )
+
+    change = _find(diff, "BINDING_PROPERTY_REMOVED")
+    assert change.severity == "BREAKING"
+
+
+def test_同表不同数据源是两条独立绑定():
+    """身份是五元组 ⇒ 同表两个数据源不能被挤成一条（否则变更被吞）。"""
+    base = _manifestWithBindings([_binding(datasourceName="THBI")])
+    candidate = _manifestWithBindings(
+        [
+            _binding(datasourceName="THBI"),
+            _binding(datasourceName="ERP2"),
+        ]
+    )
+
+    diff = diffManifests(base, candidate)
+
+    assert len(_find_list(diff, "BINDING_ADDED")) == 1
+
+
+def test_同表不同角色是两条独立绑定():
+    base = _manifestWithBindings([_binding(bindingRole="BASE")])
+    candidate = _manifestWithBindings(
+        [
+            _binding(bindingRole="BASE"),
+            _binding(bindingRole="NUMERATOR"),
+        ]
+    )
+
+    diff = diffManifests(base, candidate)
+
+    assert len(_find_list(diff, "BINDING_ADDED")) == 1
+
+
+def test_绑定差异不修改入参():
+    base = _manifestWithBindings([_binding(properties=[_bindingProp("po_no")])])
+    candidate = _manifestWithBindings(
+        [_binding(properties=[_bindingProp("po_no", sourceColumn="X")])]
+    )
+    baseBefore = copy.deepcopy(base)
+    candidateBefore = copy.deepcopy(candidate)
+
+    diffManifests(base, candidate)
+
+    assert base == baseBefore
+    assert candidate == candidateBefore

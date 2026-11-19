@@ -54,6 +54,17 @@ class SemanticReleaseCreateRequest(CamelModel):
     note: str | None = Field(default=None, max_length=2000)
 
 
+class SemanticReleaseRollbackRequest(CamelModel):
+    """回滚到某个历史版本（D-11：副本式）。
+
+    `version` 是**新副本**的版本号（不复用旧版本号：域内版本号本来就不唯一，
+    复用会让「这份是回滚来的」这件事在版本号上看不出来）。
+    """
+
+    version: str = Field(min_length=1, max_length=32)
+    note: str | None = Field(default=None, max_length=2000)
+
+
 class SemanticReleaseOperationRead(CamelModel):
     """写操作结果：落库后的汇总 + 本次发布闸门报告。
 

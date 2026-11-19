@@ -147,9 +147,15 @@ class SemanticDiffRead(CamelModel):
     baseline_release_id: int | None = None
     baseline_version: str | None = None
     baseline_hash: str | None = None
-    scope: str = Field(..., description="比较范围：GLOBAL（全域清单）")
+    scope: str = Field(
+        ..., description="比较范围：GLOBAL（全域清单）/ DOMAIN（该域切片，基线与候选同口径）"
+    )
     baseline_domain_code: str | None = Field(
-        default=None, description="基线所属数据域（仅用于定位基线，不裁剪候选侧）"
+        default=None,
+        description=(
+            "基线所属数据域（DOMAIN 作用域下，**候选侧也按同一个域切片** ⇒ "
+            "两侧同口径；GLOBAL 作用域下为 None）"
+        ),
     )
     change_count: int
     total_change_count: int = Field(..., description="变更总数（未截断）")

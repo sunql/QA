@@ -57,9 +57,10 @@ class SemanticRelease(Base, TimestampMixin):
         ),
         nullable=True,
     )
-    # 发布版本号（如 2026.11.09-1）。首期只有全局作用域，版本号唯一性由下方
-    # `uq_semantic_release_global_version`（WHERE domain_code IS NULL）保证；
-    # 按域发布上线时须补同域版唯一索引（届时再随迁移一起做，不提前建）。
+    # 发布版本号（如 2026.11.09-1）。版本号在**同一作用域内**唯一：
+    # 全局作用域由 `uq_semantic_release_global_version`（WHERE domain_code IS NULL）
+    # 保证；域作用域由 `uq_semantic_release_domain_version`（version + domain_code，
+    # WHERE domain_code IS NOT NULL）保证 ⇒ 不同域可以复用同一个版本号。
     version: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(
         String(20),
@@ -92,6 +93,15 @@ class SemanticRelease(Base, TimestampMixin):
             "version",
             unique=True,
             postgresql_where=sa_text("domain_code IS NULL"),
+        ),
+        # 同域内版本号唯一。⚠️ 键必须含 domain_code：版本号标识的是「哪一次
+        # 发布」，不同域**可以**复用同一个版本号（全局作用域同理：跨域不冲突）。
+        Index(
+            "uq_semantic_release_domain_version",
+            "version",
+            "domain_code",
+            unique=True,
+            postgresql_where=sa_text("domain_code IS NOT NULL"),
         ),
         # 同域最多一条 ACTIVE。COALESCE 把 NULL 归一，否则全局快照漏防。
         Index(

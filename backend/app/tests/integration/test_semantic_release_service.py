@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -23,13 +24,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import (
     AuditLog,
+    BusinessObject,
+    DataDomain,
+    DataSource,
     IdMapping,
     KpiCatalog,
     OntologyClass,
     OntologyMetric,
     OntologyProperty,
 )
+from app.domain.procurement_binding_models import ProcurementSourceBinding
 from app.domain.semantic_manifest_schema import SCHEMA_VERSION, manifestHash
+from app.domain.semantic_release_check_models import SemanticReleaseCheck
 from app.domain.semantic_release_models import SemanticRelease
 from app.services import semantic_release_service as releaseServiceModule
 from app.services.semantic_graph_mirror_resolution import resolveManifestEntities
@@ -801,3 +807,475 @@ async def test_successful_validation_leaves_no_blocked_audit(
 
     assert [row.action for row in auditRows] == ["CREATE", "UPDATE"]
     assert all((row.after_json or {}).get("blocked") is not True for row in auditRows)
+
+
+# ---------------------------------------------------------------------------
+# 采购域发布编排（M1-1.3 批次 B）：域切片 / 源绑定 / 回滚
+#
+# 为什么并进本文件而不是新建 integration 文件：
+# CI 的 integration 分片按「排序后下标 mod 4」轮转 ⇒ **新建 integration 文件
+# 会移动分片归属** ⇒ 原本绿的用例落到别的机器上失败（净新增失败 > 0 ⇒ 闸门转红）。
+# ⇒ 新集成用例一律并进**已存在的** integration 文件。
+# ---------------------------------------------------------------------------
+
+
+async def _seedDomainClass(
+    session: AsyncSession,
+    *,
+    domainCode: str,
+    className: str,
+    boCode: str,
+) -> int:
+    """种「一个域 + 一个本体类 + 一个业务对象」，返回 classId。"""
+    if await session.get(DataDomain, domainCode) is None:
+        session.add(DataDomain(code=domainCode, name=domainCode, enabled=True))
+    cls = OntologyClass(class_name=className, source_table=f"T_{className}")
+    session.add(cls)
+    await session.flush()
+    session.add(
+        BusinessObject(
+            code=boCode,
+            name=boCode,
+            header_class_id=cls.id,
+            primary_domain_id=domainCode,
+        )
+    )
+    await session.commit()
+    return cls.id
+
+
+async def _seedDatasource(session: AsyncSession, name: str = "采购源") -> int:
+    datasource = DataSource(
+        name=name,
+        type="oracle",
+        host="db.example.internal",
+        port=1521,
+        database_name="ZJTH",
+        username="qa_readonly",
+        password_encrypted="encrypted",
+        is_active=True,
+    )
+    session.add(datasource)
+    await session.commit()
+    await session.refresh(datasource)
+    return datasource.id
+
+
+async def _seedBinding(
+    session: AsyncSession,
+    *,
+    classId: int,
+    datasourceId: int,
+    sourceTable: str,
+    isCandidate: bool,
+) -> None:
+    """种一条源绑定（候选 or 已确认）。"""
+    row = ProcurementSourceBinding(
+        class_id=classId,
+        datasource_id=datasourceId,
+        schema_name="ZJTH",
+        source_table=sourceTable,
+        binding_role="BASE",
+        is_candidate=isCandidate,
+        confirmed_by=None if isCandidate else "tester",
+        confirmed_time=None if isCandidate else datetime.now(UTC),
+    )
+    session.add(row)
+    await session.commit()
+
+
+async def _checksOf(
+    session: AsyncSession, releaseId: int
+) -> list[SemanticReleaseCheck]:
+    return list(
+        (
+            await session.execute(
+                select(SemanticReleaseCheck)
+                .where(SemanticReleaseCheck.release_id == releaseId)
+                .order_by(SemanticReleaseCheck.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+# --- 域切片 ----------------------------------------------------------------
+
+
+async def test_domain_draft_stores_only_the_domain_slice(session: AsyncSession) -> None:
+    """域发布存的是**切片**，不是全量（否则换个 domain 参数结果不变）。"""
+    await _seedDomainClass(
+        session, domainCode="PROCB1", className="采购订单B1", boCode="PUR_ORDER_B1"
+    )
+    await _seedDomainClass(
+        session, domainCode="QUALB1", className="质检记录B1", boCode="QA_RECORD_B1"
+    )
+
+    draft = (
+        await semanticReleaseService.createDraft(
+            session,
+            version="2026.11.19-proc",
+            actor="tester",
+            domainCode="PROCB1",
+        )
+    ).release
+
+    assert {cls["className"] for cls in draft.manifest_json["classes"]} == {"采购订单B1"}
+    assert [entry["code"] for entry in draft.manifest_json["domains"]] == ["PROCB1"]
+    assert [bo["code"] for bo in draft.manifest_json["businessObjects"]] == ["PUR_ORDER_B1"]
+
+
+async def test_domain_release_without_anchor_is_blocked(session: AsyncSession) -> None:
+    """域存在但没有业务对象挂靠 ⇒ 切片为空 ⇒ 不能发布一份空快照。"""
+    session.add(DataDomain(code="PROCB2", name="采购域B2", enabled=True))
+    await session.commit()
+
+    draft = (
+        await semanticReleaseService.createDraft(
+            session,
+            version="2026.11.19-empty",
+            actor="tester",
+            domainCode="PROCB2",
+        )
+    ).release
+
+    with pytest.raises(ConflictError) as caught:
+        await semanticReleaseService.markValidated(session, draft.id, actor="tester")
+
+    assert "发布闸门" in str(caught.value)
+
+
+# --- 源绑定 ----------------------------------------------------------------
+
+
+async def test_binding_class_without_join_edge_blocks_validation(
+    session: AsyncSession,
+) -> None:
+    """绑定类在整个本体里零 JOIN 边（孤岛）⇒ ERROR ⇒ 不得发出去。"""
+    classId = await _seedDomainClass(
+        session, domainCode="PROCB1", className="采购订单B1", boCode="PUR_ORDER_B1"
+    )
+    datasourceId = await _seedDatasource(session)
+    await _seedBinding(
+        session,
+        classId=classId,
+        datasourceId=datasourceId,
+        sourceTable="DWD_PO",
+        isCandidate=False,
+    )
+
+    draft = (
+        await semanticReleaseService.createDraft(
+            session,
+            version="2026.11.19-island",
+            actor="tester",
+            domainCode="PROCB1",
+        )
+    ).release
+
+    with pytest.raises(ConflictError) as caught:
+        await semanticReleaseService.markValidated(session, draft.id, actor="tester")
+
+    assert "发布闸门" in str(caught.value)
+    joinRows = [
+        row
+        for row in await _checksOf(session, draft.id)
+        if row.check_code == "SOURCE_BINDING_JOIN_MISSING"
+    ]
+    assert len(joinRows) == 1
+    assert joinRows[0].result == "FAIL"
+    assert joinRows[0].severity == "ERROR"
+
+
+async def test_candidate_binding_is_a_warning_not_a_blocker(
+    session: AsyncSession,
+) -> None:
+    """候选绑定是治理债：显式暴露（WARNING）但不阻断发布。"""
+    classId = await _seedDomainClass(
+        session, domainCode="PROCB1", className="采购订单B1", boCode="PUR_ORDER_B1"
+    )
+    datasourceId = await _seedDatasource(session)
+    await _seedBinding(
+        session,
+        classId=classId,
+        datasourceId=datasourceId,
+        sourceTable="DWD_PO",
+        isCandidate=True,
+    )
+
+    draft = (
+        await semanticReleaseService.createDraft(
+            session,
+            version="2026.11.19-candidate",
+            actor="tester",
+            domainCode="PROCB1",
+        )
+    ).release
+    await semanticReleaseService.markValidated(session, draft.id, actor="tester")
+
+    candidateRows = [
+        row
+        for row in await _checksOf(session, draft.id)
+        if row.check_code == "SOURCE_BINDING_CANDIDATE"
+    ]
+    assert len(candidateRows) == 1
+    assert candidateRows[0].result == "FAIL"
+    assert candidateRows[0].severity == "WARNING"
+    # 候选不进快照（D-3）。
+    assert draft.manifest_json["sourceBindings"] == []
+
+
+# --- 回滚（副本式，D-11）----------------------------------------------------
+
+
+async def test_rollback_copies_the_snapshot_verbatim(session: AsyncSession) -> None:
+    """回滚 = 回到那个内容，不是重新编译一次 ⇒ 哈希逐字相同。"""
+    source = (
+        await semanticReleaseService.createDraft(
+            session, version="2026.11.19-rb-src", actor="tester"
+        )
+    ).release
+    await semanticReleaseService.markValidated(session, source.id, actor="tester")
+    await semanticReleaseService.activate(session, source.id, actor="tester")
+
+    copied = (
+        await semanticReleaseService.rollback(
+            session, source.id, version="2026.11.19-rb-copy", actor="tester"
+        )
+    ).release
+
+    assert copied.id != source.id
+    assert copied.manifest_hash == source.manifest_hash
+    assert copied.manifest_json == source.manifest_json
+    assert copied.status == "ACTIVE"
+
+
+async def test_rollback_rejects_a_draft_source(session: AsyncSession) -> None:
+    """草稿从未发布过 ⇒ 不能作为回滚来源（回滚是「回到已发布的内容」）。"""
+    draft = (
+        await semanticReleaseService.createDraft(
+            session, version="2026.11.19-rb-draft", actor="tester"
+        )
+    ).release
+
+    with pytest.raises(ConflictError) as caught:
+        await semanticReleaseService.rollback(
+            session, draft.id, version="2026.11.19-rb-draft-2", actor="tester"
+        )
+
+    assert "回滚来源" in str(caught.value)
+
+
+async def test_rollback_archives_the_previous_active(session: AsyncSession) -> None:
+    """回滚后：旧 ACTIVE 被归档、源保持 ARCHIVED（历史行不复活）。"""
+    source = (
+        await semanticReleaseService.createDraft(
+            session, version="2026.11.19-rb-a", actor="tester"
+        )
+    ).release
+    await semanticReleaseService.markValidated(session, source.id, actor="tester")
+    await semanticReleaseService.activate(session, source.id, actor="tester")
+    newer = (
+        await semanticReleaseService.createDraft(
+            session, version="2026.11.19-rb-b", actor="tester"
+        )
+    ).release
+    await semanticReleaseService.markValidated(session, newer.id, actor="tester")
+    await semanticReleaseService.activate(session, newer.id, actor="tester")
+
+    copied = (
+        await semanticReleaseService.rollback(
+            session, source.id, version="2026.11.19-rb-c", actor="tester"
+        )
+    ).release
+
+    assert copied.status == "ACTIVE"
+    await session.refresh(newer)
+    assert newer.status == "ARCHIVED"
+    await session.refresh(source)
+    assert source.status == "ARCHIVED"
+
+
+async def test_rollback_rejects_a_duplicate_global_version(session: AsyncSession) -> None:
+    """全局版本号唯一 ⇒ 回滚也不能撞（库侧唯一索引只对全局作用域生效）。"""
+    source = (
+        await semanticReleaseService.createDraft(
+            session, version="2026.11.19-rb-dup", actor="tester"
+        )
+    ).release
+    await semanticReleaseService.markValidated(session, source.id, actor="tester")
+    await semanticReleaseService.activate(session, source.id, actor="tester")
+
+    with pytest.raises(ConflictError):
+        await semanticReleaseService.rollback(
+            session, source.id, version="2026.11.19-rb-dup", actor="tester"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 批次 B 的边界（代码审查 HIGH / MEDIUM 的处置面）
+#
+# 为什么并进本文件而不是新建 integration 文件：CI 的 integration 分片按
+# 「排序后下标 mod 4」轮转 ⇒ 新增文件会让其后所有文件的分片归属轮转一位
+# ⇒ 依赖「同分片邻居副作用」的既有用例会突然红（见 `Harness/rules/测试规范.md`）。
+# ---------------------------------------------------------------------------
+
+
+async def test_note_longer_than_the_limit_is_rejected(session: AsyncSession) -> None:
+    """备注长度闸在服务层（`note` 是 `Text` ⇒ 库里没有列宽兜底）。
+
+    **不截断**：截断会静默改写审计里的人类可读说明 ⇒ 宁可 422 拒绝一次写。
+    """
+    with pytest.raises(ValidationError):
+        await semanticReleaseService.createDraft(
+            session,
+            version="2026.11.19-note",
+            actor="tester",
+            note="x" * 2001,
+        )
+
+
+async def test_version_is_unique_inside_a_scope_but_reusable_across_domains(
+    session: AsyncSession,
+) -> None:
+    """版本号在**作用域内**唯一（域作用域 = 同一域内）。
+
+    - 同域同版本号 ⇒ 409（版本号要能标识「哪一次发布」）；
+    - 不同域同版本号 ⇒ 允许（版本号标识的是「哪一次发布」，不是「哪套治理内容」）。
+    """
+    session.add(DataDomain(code="PROCV1", name="采购域V1", enabled=True))
+    session.add(DataDomain(code="PROCV2", name="采购域V2", enabled=True))
+    await session.commit()
+
+    first = await semanticReleaseService.createDraft(
+        session, version="2026.11.19-scope", actor="tester", domainCode="PROCV1"
+    )
+    other = await semanticReleaseService.createDraft(
+        session, version="2026.11.19-scope", actor="tester", domainCode="PROCV2"
+    )
+    assert first.release.id != other.release.id
+
+    with pytest.raises(ConflictError):
+        await semanticReleaseService.createDraft(
+            session, version="2026.11.19-scope", actor="tester", domainCode="PROCV1"
+        )
+
+
+async def test_rollback_rejects_a_source_with_a_stale_schema_version(
+    session: AsyncSession,
+) -> None:
+    """源快照的 manifest 版本落后 ⇒ 409（不是「先回滚上去再说」）。
+
+    v1 没有 `sourceBindings` 分区 ⇒ 跨版本回滚会让读路径拿到一份
+    **采购绑定凭空消失**的快照。
+    """
+    source = (
+        await semanticReleaseService.createDraft(
+            session, version="2026.11.19-rb-v1", actor="tester"
+        )
+    ).release
+    await semanticReleaseService.markValidated(session, source.id, actor="tester")
+    await semanticReleaseService.activate(session, source.id, actor="tester")
+    source.schema_version = "v1"
+    await session.commit()
+
+    with pytest.raises(ConflictError) as caught:
+        await semanticReleaseService.rollback(
+            session, source.id, version="2026.11.19-rb-v1-copy", actor="tester"
+        )
+
+    assert "版本" in str(caught.value)
+
+
+async def test_rollback_rejects_a_source_that_is_not_a_domain_slice(
+    session: AsyncSession,
+) -> None:
+    """域发布的源必须是**该域的有效切片** ⇒ 否则 409。
+
+    判据是**可复算**的：对已存正文再切一次，类集合必须相同（切片幂等）。
+    这里模拟「正文是更早的算法写的」（多带了一个别的域的类）。
+    """
+    await _seedDomainClass(
+        session, domainCode="PROCR1", className="采购订单R1", boCode="PUR_ORDER_R1"
+    )
+    source = (
+        await semanticReleaseService.createDraft(
+            session, version="2026.11.19-rb-slice", actor="tester", domainCode="PROCR1"
+        )
+    ).release
+    await semanticReleaseService.markValidated(session, source.id, actor="tester")
+    await semanticReleaseService.activate(session, source.id, actor="tester")
+    tampered = dict(source.manifest_json)
+    tampered["classes"] = [
+        *tampered["classes"],
+        {
+            "className": "外域类R1",
+            "classAlias": "外域类R1",
+            "description": None,
+            "sourceTable": "T_OTHER_R1",
+            "objectType": "Master",
+            "objectOwner": None,
+            "parentClassName": None,
+            "properties": [],
+        },
+    ]
+    source.manifest_json = tampered
+    await session.commit()
+
+    with pytest.raises(ConflictError) as caught:
+        await semanticReleaseService.rollback(
+            session, source.id, version="2026.11.19-rb-slice-copy", actor="tester"
+        )
+
+    assert "切片" in str(caught.value)
+
+
+async def test_candidate_count_is_scoped_to_the_snapshot_classes(
+    session: AsyncSession,
+) -> None:
+    """候选统计按**快照里的类**收窄 ⇒ 报告与快照同一宇宙。
+
+    别的域上的候选债不该算进本域的报告（否则采购域发布会显示质检域的候选数
+    ⇒ 报告与快照两个宇宙）。
+    """
+    otherClassId = await _seedDomainClass(
+        session, domainCode="PROCC1", className="质检记录C1", boCode="QA_RECORD_C1"
+    )
+    await _seedDomainClass(
+        session, domainCode="PROCC2", className="采购订单C2", boCode="PUR_ORDER_C2"
+    )
+    datasourceId = await _seedDatasource(session)
+    await _seedBinding(
+        session,
+        classId=otherClassId,
+        datasourceId=datasourceId,
+        sourceTable="DWD_IQC",
+        isCandidate=True,
+    )
+
+    draft = (
+        await semanticReleaseService.createDraft(
+            session, version="2026.11.19-scope-cand", actor="tester", domainCode="PROCC2"
+        )
+    ).release
+
+    candidateRows = [
+        row
+        for row in await _checksOf(session, draft.id)
+        if row.check_code == "SOURCE_BINDING_CANDIDATE"
+    ]
+    assert len(candidateRows) == 1
+    # 别的域的候选不在本域快照里 ⇒ 计数为 0 ⇒ 这一行是 PASS。
+    assert candidateRows[0].result == "PASS"
+
+    # validate 阶段**同一口径**（否则草稿说 0 个候选、validate 说 3 个候选
+    # ⇒ 同一份快照两个阶段的报告不一致 ⇒ 证据不可复算）。
+    await semanticReleaseService.markValidated(session, draft.id, actor="tester")
+    validatedRows = [
+        row
+        for row in await _checksOf(session, draft.id)
+        if row.check_code == "SOURCE_BINDING_CANDIDATE"
+    ]
+    assert len(validatedRows) == 1
+    assert validatedRows[0].result == "PASS"

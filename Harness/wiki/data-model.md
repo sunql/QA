@@ -773,9 +773,10 @@ request_time    TIMESTAMPTZ NOT NULL
   尾部往往正是最后一条指标的 ERROR 结论行。
   ⇒ 超限时保留上限-1 条 + 追加一条 `CHECKS_TRUNCATED`（`severity=ERROR` / `result=FAIL`）合成行：
   表里查得到「报告被截断」，闸门把它当**阻断项**（fail-closed），且闸门与落表用**同一个集合**。
-  ⚠️ M1-1.3 批次 B 加采购域校验项时**必须重推**为
-  `6 + 3 × MAX_MANIFEST_METRICS + 2 × MAX_MANIFEST_SOURCE_BINDINGS`（= 10006）——
+  ✅ **M1-1.3 批次 B 已重推**为
+  `6 + 3 × MAX_MANIFEST_METRICS + 2 × MAX_MANIFEST_SOURCE_BINDINGS`（= **10006**）——
   契约上限变了而公式没变 ⇒ 合法 manifest 被静默截断（同一类缺陷，第三犯的机会）。
+  ⇒ 上限**从契约常量推导**（代码里不再写死数字），单测钉死公式本身。
 
 ### 读接口分页口径
 
@@ -793,13 +794,24 @@ request_time    TIMESTAMPTZ NOT NULL
 | `METRIC_NUMERATOR_LANDING` | METRIC | WARNING/ERROR | 指标分子度量有落点类 |
 | `METRIC_DENOMINATOR_LANDING` | METRIC | WARNING/ERROR | 指标分母度量有落点类（仅 RATIO/DIFFERENCE） |
 | `CHECKS_TRUNCATED` | RELEASE | ERROR | 结论条数超上限（报告不完整 ⇒ 阻断） |
+| `DOMAIN_SLICE_EMPTY` | RELEASE | ERROR | 域切片为空（不能发布空采购快照） |
+| `DOMAIN_SLICE_CROSS_DOMAIN` | RELEASE | WARNING | 为满足引用契约补齐了跨域依赖类 |
+| `SOURCE_BINDING_CANDIDATE` | RELEASE | WARNING | 仍有未确认（候选）绑定（D-3 治理债） |
+| `SOURCE_BINDING_JOIN_MISSING` | BINDING | **ERROR** | 绑定所属类在**整个本体**里零 JOIN 边（孤岛） |
+| `SOURCE_BINDING_PROPERTY_UNBOUND` | BINDING | WARNING | 类已绑源表，但有属性没有 `sourceColumn` 绑定 |
 
-（M1-1.3 会把「采购源绑定缺 JOIN」等采购域校验项接进**同一张表** —— 机制先立，判据后加。）
+（M1-1.3 批次 B 已把「采购源绑定缺 JOIN」等采购域校验项接进**同一张表**。）
 
 > 事实源：`backend/app/domain/semantic_release_check_models.py`（ORM）、
-> `backend/app/services/semantic_release_checks.py`（纯评估）、
+> `backend/app/services/semantic_release_check_types.py`（类型与常量 · **叶子模块**）、
+> `backend/app/services/semantic_release_checks.py`（发布级 + 指标级纯评估）、
+> `backend/app/services/semantic_release_domain_checks.py`（域级 + 绑定级纯评估）、
 > `backend/app/services/semantic_release_check_service.py`（落表 / 回读）。
 > 真机验证：`backend/scripts/semantic_release_check_realdata.py`。
+>
+> ⚠️ **为什么拆三个模块**：域级模块要 import `PublishCheck`，而 checks 模块又要 import
+> 域级模块 ⇒ 类型必须住**零业务依赖的叶子模块**，否则形成结构上的 import 环
+> （与 `semantic_manifest_version` 同一类问题，见下文）。
 
 ## M1 增量：Manifest 契约 v2（采购源绑定入档）
 
@@ -916,3 +928,134 @@ M1-1.1 把绑定做成了两张治理表（类 → 物理表 / 属性 → 列）
 > `backend/app/services/semantic_compiler_bindings.py`（绑定分区编译 + 发布不变量）、
 > `backend/app/services/semantic_compiler.py`（接线）、
 > `backend/alembic/versions/0156_semantic_manifest_v2.py`（迁移）。
+
+## M1 增量：采购域发布编排（域切片 + 回滚）
+
+**日期**：2026-11-19 · **变更**：[2026-11-19-m1-procurement-domain-release](../changes/2026-11-19-m1-procurement-domain-release/summary.md)（批次 B）· **无新表**（复用 `semantic_release` / `semantic_release_check`）
+
+回答两个问题：**「采购域发布出去的那份快照里到底有什么」** 与
+**「发错了怎么退回去」**。
+
+### 域发布 = 存**切片**，不是全量
+
+`domain_code` 非空时，`POST /api/v1/semantic/releases` 编译全量后**按域切片**再落库：
+
+```
+业务对象挂域 → 类（+父类闭包）→ JOIN → 指标 → KPI
+      ↓ 引用闭合补齐（四条来源取**联合不动点**）
+本域指标引用到的类
+  + 选中类的 properties[].refClassName（**属性引用**）
+  + 有绑定类的一跳 JOIN 邻居
+  + 以上补进来的类的父类闭包
+```
+
+⚠️ **补齐是幂等的**：对切片再切一次得到**同一份** ⇒ 发布校验项可以只依赖
+**已存快照**复算（否则「跨域补齐了什么」在 validate 阶段就复算不出来 ⇒ 证据不可复算）。
+
+⚠️ **四条来源必须取一个「联合不动点」**（代码评审 HIGH）：它们互相喂新类 ——
+新类又有自己的属性引用、自己的绑定、自己的父类。**只做 JOIN 邻居闭包 + 父类闭包
+两个独立闭包是不够的**：带绑定的**父类**会被判成孤岛 ⇒ 合法发布被 ERROR 阻断。
+⇒ 实现成一个迭代到稳定的 `_closure`（度量引用 / 属性引用 / JOIN 邻居 / 父类闭包
+交替迭代）。
+
+⚠️ **属性引用（`properties[].refClassName`）也必须闭**：v2 引用契约要求属性的
+`refClassName` 必须存在于切片里 ⇒ 不闭 ⇒ **该域永远发不出去**（表引用型字典是
+常见建模，不是假想场景）。
+
+⚠️ **孤岛判据取全本体口径**：切片阶段把有绑定类的一跳 JOIN 邻居拉进来 ⇒ 两个口径等价 ⇒
+「只连跨域边」的类不会被误判成孤岛。
+
+### 回滚 = **新建副本式**（D-11）
+
+`POST /api/v1/semantic/releases/{releaseId}/rollback`，body `{version, note?}`。
+
+| 形态 | 结论 |
+|---|---|
+| **A. 新建副本式**（采纳） | 以历史版本为源新建 DRAFT → VALIDATED → ACTIVE；同作用域旧 ACTIVE 在**同一事务**里归档；副本 `manifest_hash` 与源**逐字相同** |
+| B. 状态回退式（ARCHIVED → ACTIVE） | 历史行被「复活」；与 `ck_semantic_release_status` / 状态机冲突 |
+
+⇒ 副本直接**复制源行的正文与哈希** ⇒ 回滚的语义是「回到那个内容」，
+不是「重新编译一次」（重编译会带上治理表的最新变化）。
+
+⚠️ **回滚源不得为 DRAFT**（草稿从未发布过 ⇒ 没有「回到」的对象）⇒ 409。
+
+### 候选绑定：只出**一条**发布级汇总行
+
+候选绑定**不进快照**（D-3）⇒ 数量**没有契约上限** ⇒ 若按候选逐条出校验项，
+条数上界就无从推导 ⇒ 候选只出**一条发布级汇总行**（WARNING，detail 带总数 + 前 5 个类名）。
+
+⚠️ **没查过候选数就不出这一行**（`candidateBindingCount: int | None`）：
+写一句「没有候选绑定」是**没依据的结论**（比缺一行更坏）。
+
+### 绑定级校验项的定位键
+
+`target_key` = `类名@数据源.schema.表#角色`（**五元组**）。
+
+⚠️ **必须带角色与数据源**：一个类可以绑到同一张表的多个角色（BASE / NUMERATOR …），
+也可以在**两个数据源**里各绑一次；少一个维度 ⇒ 两行撞
+`uq_semantic_release_check_unique` ⇒ **整次发布 500**。
+⚠️ 列宽 `String(200)`：超宽时改用「类名摘要(64) + 完整身份 sha256[:16]」，**不截断**
+（截断会让两个不同的绑定撞成同一个键）。
+
+### diff 视图纳入绑定分区（批次 B）
+
+`sourceBindings` 从 `UNCOVERED_SECTIONS` 移到 `COVERED_SECTIONS`，字段级覆盖：
+`filterExpression`（BREAKING）/ `filterAllowlist`（BREAKING）/
+`properties[].sourceColumn`（BREAKING）/ `properties[].transformExpression`（BREAKING）/
+`properties[].keyOrdinal`（COSMETIC）。
+
+⚠️ diff 侧的绑定身份同样必须带 `datasourceName`（少一个维度 ⇒ 两行被挤成一条 ⇒ **变更被吞**）。
+
+⚠️ **披露面随之扩大**：`GET /api/v1/ontology-discovery/diff` 的 `coveredFields`
+多出 `sourceBindings` 分区（字段级：绑定自身字段 + `properties[].*`）。
+这是**对外契约的扩大**（多披露比少披露安全）⇒ 断言「披露分区集合相等」的用例必须同步。
+
+⚠️ **diff 两侧必须同口径**（代码评审 HIGH）：基线 = 该域的 ACTIVE 行（**切片**），
+候选 = 全域编译结果 ⇒ **两侧不可比**（差异报告在说谎）。⇒ 候选侧按**同一个域**
+切一次；`scope` 如实披露 `DOMAIN`（域作用域）/ `GLOBAL`（全局作用域）。
+
+⚠️ **绑定键的渲染器只有一份**：校验侧与差异侧共用
+`semantic_release_check_types.bindingTargetKey()` ⇒ 差异报告里的一个绑定名，
+能在 check 表里查到**同一行**（各写一份 ⇒ 迟早漂移 ⇒ 查不到）。
+
+### 版本号在**作用域内**唯一（迁移 0157）
+
+| 作用域 | 唯一索引 | 键 |
+|---|---|---|
+| 全局（`domain_code IS NULL`） | `uq_semantic_release_global_version` | `(version)` |
+| 域（`domain_code IS NOT NULL`） | `uq_semantic_release_domain_version`（**迁移 0157**） | `(version, domain_code)` |
+
+⇒ **不同域可以复用同一个版本号**（版本号标识「哪一次发布」，不是「哪一套治理内容」）；
+**同一域内不行**。
+
+⚠️ **服务层查重不够**：查重是「先查后写」⇒ 两个并发请求可以同时查到「没有重复」
+然后同时写入 ⇒ **库侧唯一索引**才是兜底（全局作用域早就是「查重 + 索引」双保险，
+域作用域本批补齐成同款）。
+
+⚠️ **建索引前先探测存量重复**（迁移 0157 里的 `_assertNoDuplicateDomainVersions`）：
+同域重复版本号意味着「哪一次发布」无法标识 ⇒ **报错、不自动修**（不删行、不改版本号）
+⇒ 必须人工裁决。静默挑一条留下 = 伪造发布历史。
+
+> 迁移号：**0156**（manifest v2 默认值）→ **0157**（域作用域版本号唯一索引）。
+> A4-0（审批面放开 `instance_id`）按「串行占号、不许插队」规则取下一个空号 **0158**。
+
+### 编排层 / 支撑层的文件切分
+
+`semantic_release_service.py`（编排层）与 `semantic_release_support.py`（支撑层）分开：
+
+| 层 | 职责 | 住哪 |
+|---|---|---|
+| 编排层 | 编译 → 切片 → 落库 → 状态迁移 → 审计 | `semantic_release_service.py` |
+| 支撑层 | 输入校验 / 校验项评估 / 审计留痕 / 撞库翻译 | `semantic_release_support.py` |
+
+⚠️ **分层方向决定谁住哪**：编排层 import 支撑层 ⇒ 支撑层**不能**反向 import 编排层 ⇒
+`ReleaseEvaluation` 必须住支撑层；而状态机判定 `isTransitionAllowed` **留在编排层**
+（支撑层不需要它）⇒ 依赖单向成立。
+
+> 事实源：`backend/app/services/semantic_domain_slice.py`（发布切片）、
+> `backend/app/services/knowledge/domain_slice.py`（转发层，保持旧 import 路径）、
+> `backend/app/services/semantic_release_domain_checks.py`（域级 + 绑定级校验项）、
+> `backend/app/services/procurement_binding_candidates.py`（活库候选汇总）、
+> `backend/app/services/semantic_release_service.py`（编排层：切片接线 + `rollback()`）、
+> `backend/app/services/semantic_release_support.py`（支撑层）、
+> `backend/app/services/semantic_diff_service.py`（绑定分区 diff）。

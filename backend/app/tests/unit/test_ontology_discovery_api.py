@@ -311,9 +311,16 @@ async def test_diff响应披露字段级覆盖范围(apiClient, monkeypatch):
     assert response.status_code == 200, response.text
     payload = response.json()
     coveredFields = payload["coveredFields"]
-    assert set(coveredFields) == {"classes", "properties", "joins"}, coveredFields
+    assert set(coveredFields) == {
+        "classes",
+        "properties",
+        "joins",
+        "sourceBindings",
+    }, coveredFields
     assert coveredFields["classes"], "classes 分区必须披露比了哪些字段"
-    # 引擎只比 classes/properties/joins ⇒ 未覆盖分区非空 ⇒ partial 恒为 true
+    assert coveredFields["sourceBindings"], "sourceBindings 分区必须披露比了哪些字段"
+    # 引擎只比 classes/properties/joins/sourceBindings ⇒ 未覆盖分区非空
+    # ⇒ partial 恒为 true
     # ⇒「无破坏性变更」只在已覆盖分区内成立（必须随结果披露）。
     assert payload["partial"] is True
     assert payload["uncoveredSections"], "未覆盖分区必须一并披露"

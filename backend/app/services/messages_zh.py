@@ -756,7 +756,7 @@ MSG_SEMANTIC_RELEASE_SCOPE_CONFLICT = "globalOnly=true 与 domainCode 不能同�
 MSG_SEMANTIC_RELEASE_VERSION_INVALID = (
     "发布版本号必须为 1~{max} 个字符的非空字符串（收到 {version!r}）"
 )
-MSG_SEMANTIC_RELEASE_VERSION_CONFLICT = "发布版本号「{version}」已存在（全局快照版本号唯一）"
+MSG_SEMANTIC_RELEASE_VERSION_CONFLICT = "发布版本号「{version}」已存在（同一作用域内版本号唯一）"
 MSG_SEMANTIC_RELEASE_DOMAIN_NOT_FOUND = "数据域「{code}」不存在，不能按该域发布"
 MSG_SEMANTIC_RELEASE_MANIFEST_TOO_LARGE = (
     "语义快照体量 {size} 字节超过上限 {max} 字节，拒绝落库"
@@ -778,6 +778,19 @@ MSG_SEMANTIC_RELEASE_CHECKS_TRUNCATED = (
 MSG_SEMANTIC_RELEASE_CHECK_CONSTRAINT = (
     "发布校验结论表写入被约束拒绝（{constraint}）"
 )
+# M1-1.3 批次 B / D-11：回滚（副本式）
+MSG_SEMANTIC_RELEASE_ROLLBACK_SOURCE_INVALID = (
+    "语义发布 {releaseId} 当前状态为 {current}，不能作为回滚来源（草稿尚未发布过）"
+)
+MSG_SEMANTIC_RELEASE_ROLLBACK_SCHEMA_MISMATCH = (
+    "语义发布 {releaseId} 的 manifest 版本为 {source}，当前为 {current}"
+    " ⇒ 跨版本回滚会让读路径拿到旧契约的快照，拒绝"
+)
+MSG_SEMANTIC_RELEASE_ROLLBACK_NOT_SLICE = (
+    "语义发布 {releaseId} 的正文不是该域的有效切片（重切结果与已存正文不一致）"
+    " ⇒ 回滚源不合法，拒绝"
+)
+MSG_SEMANTIC_RELEASE_NOTE_TOO_LONG = "发布备注超过 {max} 个字符，拒绝写入"
 
 # =============================================================================
 # 数据质量规则自动生成（dq-rule-auto-generation Task 4）

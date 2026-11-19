@@ -19,7 +19,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
-from app.domain.models import DataDomain
+from app.domain.models import (
+    AuditLog,
+    BusinessObject,
+    DataDomain,
+    OntologyClass,
+)
 from app.domain.semantic_manifest_schema import (
     SCHEMA_VERSION,
     ManifestSchemaError,
@@ -417,12 +422,74 @@ async def test_http_illegal_transition_is_409(
         f"{SEMANTIC_RELEASES_PATH}/1/validate",
         f"{SEMANTIC_RELEASES_PATH}/1/activate",
         f"{SEMANTIC_RELEASES_PATH}/1/archive",
+        f"{SEMANTIC_RELEASES_PATH}/1/rollback",
     ],
 )
 async def test_write_routes_are_forbidden_for_non_admin(client: AsyncClient, path: str) -> None:
     response = await client.post(path, headers=_USER_HEADERS, json={"version": "x"})
 
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 回滚（副本式，D-11）：HTTP 层契约
+# ---------------------------------------------------------------------------
+
+
+async def test_rollback_over_http_creates_a_copy(client: AsyncClient) -> None:
+    """回滚走完整 HTTP 链路：副本的 manifest_hash 与源**逐字相同**。"""
+    created = await client.post(
+        SEMANTIC_RELEASES_PATH, headers=_ADMIN_HEADERS, json={"version": "2026.11.19-rb-http"}
+    )
+    releaseId = created.json()["release"]["id"]
+    sourceHash = created.json()["release"]["manifestHash"]
+    await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{releaseId}/validate", headers=_ADMIN_HEADERS
+    )
+    await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{releaseId}/activate", headers=_ADMIN_HEADERS
+    )
+
+    response = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{releaseId}/rollback",
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-rb-http-copy", "note": "回滚到上一版"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["release"]["status"] == "ACTIVE"
+    assert body["release"]["version"] == "2026.11.19-rb-http-copy"
+    assert body["release"]["manifestHash"] == sourceHash
+    assert body["release"]["id"] != releaseId
+    assert response.headers["cache-control"] == "no-store"
+
+
+async def test_rollback_of_a_draft_is_409(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """草稿从未发布过 ⇒ 409（不是 404 / 500）。"""
+    row = await _insertRelease(dbSession, version="2026.11.19-rb-draft-http", status="DRAFT")
+
+    response = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/rollback",
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-rb-draft-http-2"},
+    )
+
+    assert response.status_code == 409
+    assert "error" in response.json()
+
+
+async def test_rollback_of_a_missing_release_is_404(client: AsyncClient) -> None:
+    response = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/999999/rollback",
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-rb-missing"},
+    )
+
+    assert response.status_code == 404
+    assert "error" in response.json()
 
 
 # ---------------------------------------------------------------------------
@@ -1472,3 +1539,147 @@ async def test_response_blockers_match_the_failed_rows_in_the_table(
     ]
     assert blockerCount == len(errorRows)
     assert body["summary"]["errorCount"] == len(errorRows)
+
+
+# ---------------------------------------------------------------------------
+# 批次 B（域发布）：回滚留痕 + diff 同口径
+#
+# 为什么并进本文件而不是新建 integration 文件：
+# CI 的 integration 分片是「`find | sort` 后下标 mod 4」⇒ **新增 integration 文件
+# 会让其后所有文件的下标整体 +1、分片归属轮转一位** ⇒ 依赖「同分片邻居副作用」的
+# 既有用例会突然红（见 `Harness/rules/测试规范.md` §目录分片稳定性）。
+# ---------------------------------------------------------------------------
+
+DISCOVERY_DIFF_PATH = "/api/v1/ontology-discovery/diff"
+
+
+async def _seedDomainClass(
+    session: AsyncSession,
+    *,
+    domainCode: str,
+    className: str,
+    boCode: str,
+) -> None:
+    """种「一个域 + 一个本体类 + 一个业务对象」。"""
+    if await session.get(DataDomain, domainCode) is None:
+        session.add(DataDomain(code=domainCode, name=domainCode, enabled=True))
+    cls = OntologyClass(class_name=className, source_table=f"T_{className}")
+    session.add(cls)
+    await session.flush()
+    session.add(
+        BusinessObject(
+            code=boCode,
+            name=boCode,
+            header_class_id=cls.id,
+            primary_domain_id=domainCode,
+        )
+    )
+    await session.commit()
+
+
+async def test_rollback_copy_records_a_create_audit(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """回滚副本是一次**创建** ⇒ 审计里必须有 CREATE 行（含回滚来源）。
+
+    没有这条 ⇒ 审计里只有一堆 UPDATE，查不到「谁创建了这条发布」。
+    """
+    created = await client.post(
+        SEMANTIC_RELEASES_PATH,
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-audit-src"},
+    )
+    releaseId = created.json()["release"]["id"]
+    await client.post(f"{SEMANTIC_RELEASES_PATH}/{releaseId}/validate", headers=_ADMIN_HEADERS)
+    await client.post(f"{SEMANTIC_RELEASES_PATH}/{releaseId}/activate", headers=_ADMIN_HEADERS)
+
+    rolled = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{releaseId}/rollback",
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-audit-copy"},
+    )
+    assert rolled.status_code == 200
+    copyId = rolled.json()["release"]["id"]
+
+    rows = (
+        await dbSession.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.entity_type == "semantic_release",
+                AuditLog.entity_id == copyId,
+            )
+            .order_by(AuditLog.id)
+        )
+    ).scalars().all()
+    actions = [row.action for row in rows]
+    assert actions[0] == "CREATE", actions
+    after = rows[0].after_json or {}
+    assert after.get("rolledFromReleaseId") == releaseId
+    assert after.get("requestedVersion") == "2026.11.19-audit-copy"
+    assert after.get("status") == "DRAFT"
+
+
+async def test_diff_compares_the_domain_slice_on_both_sides(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """域发布的 diff：**基线与候选同口径**（两侧都是该域的切片）。
+
+    不裁剪候选侧的话，「切片 vs 全量」会把别的域的类全报成 `ADDITIVE`
+    （评审看到「新增 1 个类」其实是另一个域的东西），而且**他域的破坏性删除
+    在两边都不存在 ⇒ 彻底不可见**。
+    """
+    await _seedDomainClass(
+        dbSession, domainCode="PROCD1", className="采购订单D1", boCode="PUR_ORDER_D1"
+    )
+    await _seedDomainClass(
+        dbSession, domainCode="PROCD2", className="质检记录D2", boCode="QA_RECORD_D2"
+    )
+    created = await client.post(
+        SEMANTIC_RELEASES_PATH,
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-diff-base", "domainCode": "PROCD1"},
+    )
+    assert created.status_code == 201
+    releaseId = created.json()["release"]["id"]
+    assert (await client.post(f"{SEMANTIC_RELEASES_PATH}/{releaseId}/validate", headers=_ADMIN_HEADERS)).status_code == 200
+    assert (await client.post(f"{SEMANTIC_RELEASES_PATH}/{releaseId}/activate", headers=_ADMIN_HEADERS)).status_code == 200
+
+    response = await client.get(
+        f"{DISCOVERY_DIFF_PATH}", headers=_ADMIN_HEADERS, params={"domainCode": "PROCD1"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # 比较范围如实披露。
+    assert body["scope"] == "DOMAIN"
+    assert body["baselineDomainCode"] == "PROCD1"
+    assert body["baselineReleaseId"] == releaseId
+    # 候选侧也切了域 ⇒ 另一个域的类不进入比较范围。
+    targets = {change["target"] for change in body["changes"]}
+    assert "质检记录D2" not in targets
+    assert body["changeCount"] == 0
+
+
+async def test_diff_of_a_global_release_reports_the_global_scope(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """不带 `domainCode` ⇒ 比较范围是 GLOBAL（如实披露，不假装是域内比较）。"""
+    await _seedDomainClass(
+        dbSession, domainCode="PROCE1", className="采购订单E1", boCode="PUR_ORDER_E1"
+    )
+    created = await client.post(
+        SEMANTIC_RELEASES_PATH,
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-diff-global"},
+    )
+    assert created.status_code == 201
+    releaseId = created.json()["release"]["id"]
+    await client.post(f"{SEMANTIC_RELEASES_PATH}/{releaseId}/validate", headers=_ADMIN_HEADERS)
+    await client.post(f"{SEMANTIC_RELEASES_PATH}/{releaseId}/activate", headers=_ADMIN_HEADERS)
+
+    response = await client.get(f"{DISCOVERY_DIFF_PATH}", headers=_ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == "GLOBAL"
+    assert body["baselineDomainCode"] is None

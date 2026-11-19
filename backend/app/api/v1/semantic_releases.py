@@ -26,6 +26,7 @@ from app.domain.semantic_release_schemas import (
     SemanticReleaseCreateRequest,
     SemanticReleaseOperationRead,
     SemanticReleasePage,
+    SemanticReleaseRollbackRequest,
     SemanticReleaseSnapshotRead,
     SemanticReleaseSummaryRead,
 )
@@ -244,5 +245,33 @@ async def archiveSemanticRelease(
     _noStore(response)
     operation = await semanticReleaseService.archive(
         session, releaseId, actor=user.userId, departments=user.departments
+    )
+    return _toOperationRead(operation)
+
+
+@router.post("/{releaseId}/rollback", response_model=SemanticReleaseOperationRead)
+async def rollbackSemanticRelease(
+    response: Response,
+    payload: SemanticReleaseRollbackRequest,
+    releaseId: int = Path(..., ge=1, le=MAX_RELEASE_ID),
+    user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> SemanticReleaseOperationRead:
+    """回滚到某个历史版本 —— **副本式**（D-11）。
+
+    以目标历史版本为源**新建**一份 DRAFT → VALIDATED → ACTIVE，同作用域原有的
+    ACTIVE 在同一事务里归档；新副本的 `manifest_hash` 与源**逐字相同**
+    ⇒ 回滚的语义是「回到那个内容」，不是「重新编译一次」。
+
+    ARCHIVED 保持终态：历史行不会被「复活」，审计里「曾经下线」的事实不被抹掉。
+    """
+    _noStore(response)
+    operation = await semanticReleaseService.rollback(
+        session,
+        releaseId,
+        version=payload.version,
+        actor=user.userId,
+        departments=user.departments,
+        note=payload.note,
     )
     return _toOperationRead(operation)

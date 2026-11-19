@@ -125,7 +125,7 @@ def test_delete_rejects_unknown_type() -> None:
 def test_search_kpi_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 
-    def fakeSearch(collectionName, q, topK):
+    def fakeSearch(collectionName, q, topK, expr=None):
         seen.append(collectionName)
         return []
 
@@ -139,7 +139,7 @@ def test_search_kpi_branch(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_search_none_sweep_covers_4_collections(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
     monkeypatch.setattr(
-        search, "_searchCollection", lambda name, q, k: seen.append(name) or []
+        search, "_searchCollection", lambda name, q, k, expr=None: seen.append(name) or []
     )
     monkeypatch.setattr(search, "_connect", lambda: None)
     monkeypatch.setattr(search, "hasEmbeddingCollection", lambda name: True)

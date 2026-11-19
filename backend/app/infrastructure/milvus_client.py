@@ -11,7 +11,7 @@ M0-P0.4 Phase 2 (Task 15): Split into milvus_client.py + milvus_dual_write.py
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Sequence
 from urllib.parse import urlparse
 
 from pymilvus import (
@@ -77,6 +77,38 @@ def hnswSearchParams(limit: int) -> dict[str, Any]:
 def getEmbeddingDimension() -> int:
     """返回当前 Milvus 集合的向量维度（供 embedding 服务维度守卫校验）。"""
     return _DIM
+
+
+# 本体类 id 作用域的 deny-all 表达式。本体类 id 恒为正（DB 自增主键）⇒
+# ``ontology_id < 0`` 命中不了任何行。**不能**用空 IN 列表（``ontology_id in []``）
+# 表达「空作用域」：那不是合法表达式，会让整次检索报错。
+_CLASS_ID_SCOPE_DENY_ALL = "ontology_id < 0"
+
+
+def buildClassIdScopeExpr(ontologyIds: Sequence[int] | None) -> str | None:
+    """本体类 id 作用域 → Milvus ``expr``（``None`` = 不限）。
+
+    用途（Gap A，2026-11-19）：数据源过滤只作用在**应用侧候选集**，
+    向量检索窗口仍是全局的 ⇒ 跨源类/墓碑类吃掉 topK 名额 ⇒ 命中解析不出本地类。
+    把「本地类 id 集」推进 Milvus 的 ``expr`` ⇒ 两侧口径一致。
+
+    三态（**空集 ≠ 不限**）：
+
+    - ``None`` ⇒ 不施加过滤（返回 ``None``）⇒ 与不传作用域逐字节一致。
+    - 空集 ⇒ **deny-all**（``ontology_id < 0``）：作用域里一个类都没有 ⇒ 恒空。
+      把它误当成「不限」= 把「本数据源没有类」误读成「全局都能看」。
+    - 非空 ⇒ ``ontology_id in [...]``（去重 + 升序 ⇒ 表达式可复现）。
+
+    作用域**只适用于本体类集合**：Milvus 的 ``ontology_id`` 在类/属性之间
+    **共用 id 序列**（见 ``VALID_EMBEDDING_TYPES`` 上方注释）⇒ 把 class 的 id 集
+    套到 property 集合上会误伤。
+    """
+    if ontologyIds is None:
+        return None
+    ids = sorted({int(ontologyId) for ontologyId in ontologyIds})
+    if not ids:
+        return _CLASS_ID_SCOPE_DENY_ALL
+    return "ontology_id in [" + ",".join(str(ontologyId) for ontologyId in ids) + "]"
 
 
 def checkHealth() -> None:

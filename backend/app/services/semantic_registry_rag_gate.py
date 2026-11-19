@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from app.config import getSettings
 from app.domain.registry_filter import RegistryFilter
@@ -138,6 +138,7 @@ def searchRegistryEmbeddings(
     topK: int = 5,
     typeFilter: str | None = None,
     registryFilter: RegistryFilter | None = None,
+    classOntologyIds: Sequence[int] | None = None,
 ) -> RegistrySearchResult:
     """向量召回的唯一出口（带治理维度过滤）。
 
@@ -147,14 +148,17 @@ def searchRegistryEmbeddings(
         typeFilter: 限定类型（class/property/metric/kpi；``None`` = 全部）。
         registryFilter: 过滤维度。``None`` = **本轮无作用域**（不收窄）；
             传了对象 = **已声明作用域**（各维度取值为空 ⇒ deny-all）。
+        classOntologyIds: **本体类 id 作用域**（Gap A）：只保留这些本体类的向量。
+            ``None`` = 不限（与今天逐字节一致）；空集 = deny-all（恒空）。
+            **只作用于 class 集合**。
 
     Returns:
         ``RegistrySearchResult``；**永不抛异常**（向量检索失败降级成空结果
         或 v1 回落），降级痕迹落在 ``degradedReason`` 上。
     """
     if not registryRagEnabled():
-        return _searchV1(queryEmbedding, topK, typeFilter, registryFilter)
-    return _searchV2(queryEmbedding, topK, typeFilter, registryFilter)
+        return _searchV1(queryEmbedding, topK, typeFilter, registryFilter, classOntologyIds)
+    return _searchV2(queryEmbedding, topK, typeFilter, registryFilter, classOntologyIds)
 
 
 # ---------------------------------------------------------------------------
@@ -167,12 +171,17 @@ def _searchV1(
     topK: int,
     typeFilter: str | None,
     registryFilter: RegistryFilter | None,
+    classOntologyIds: Sequence[int] | None = None,
 ) -> RegistrySearchResult:
     """读 v1 集合（不过滤）。
 
     开关关却带了作用域 ⇒ **fail-closed（空结果）**：这条路径没有能力施加
     调用方声明的收窄，回落成「不过滤的 v1」= 把调用方本来不想看到的行
     全部放进来 = 泄漏。降级痕迹落在 ``degradedReason`` 上（可观测）。
+
+    **本体类 id 作用域不走这条 fail-closed 规则**：那条规则针对**治理维度**
+    （域/组织/实体/发布/有效期，越权 = 泄漏）；作用域是**数据源相关性**
+    （不收窄只是窗口偏宽，不是越权）⇒ v1 照常按作用域过滤检索。
     """
     if registryFilter is not None:
         logger.warning(
@@ -188,10 +197,30 @@ def _searchV1(
         return RegistrySearchResult(
             hits=[], usedRegistryV2=False, degradedReason="switch_off_denied"
         )
-    hits = milvus.searchEmbeddingsByTypeRouted(
-        queryEmbedding, topK=topK, typeFilter=typeFilter
-    )
+    hits = _routedSearch(queryEmbedding, topK, typeFilter, classOntologyIds)
     return RegistrySearchResult(hits=hits, usedRegistryV2=False, degradedReason=None)
+
+
+def _routedSearch(
+    queryEmbedding: list[float],
+    topK: int,
+    typeFilter: str | None,
+    classOntologyIds: Sequence[int] | None,
+) -> list[dict[str, Any]]:
+    """调 v1 检索；**没有作用域时调用形态逐字不变**（不多传 kwarg）。
+
+    这样「无作用域 = 与今天完全一致」这条不变量在**调用形态**上也成立：
+    既有替身（只认 ``(queryEmbedding, topK, typeFilter)``）不必改，
+    下游任何按位置/关键字解包的实现也不会被多出来的参数打断。
+    """
+    if classOntologyIds is None:
+        return milvus.searchEmbeddingsByTypeRouted(
+            queryEmbedding, topK=topK, typeFilter=typeFilter
+        )
+    return milvus.searchEmbeddingsByTypeRouted(
+        queryEmbedding, topK=topK, typeFilter=typeFilter,
+        classOntologyIds=classOntologyIds,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +233,7 @@ def _searchV2(
     topK: int,
     typeFilter: str | None,
     registryFilter: RegistryFilter | None,
+    classOntologyIds: Sequence[int] | None = None,
 ) -> RegistrySearchResult:
     """读 v2 集合（可带过滤表达式）。"""
     # 「有作用域」= 调用方给了过滤器（**存在即声明**）；``None`` = 无作用域。
@@ -216,7 +246,7 @@ def _searchV2(
         logger.error("语义注册表 RAG 过滤表达式构造失败：%s", exc, exc_info=True)
         if hasScope:
             return RegistrySearchResult(hits=[], usedRegistryV2=False, degradedReason="filter_invalid")
-        return _fallbackToV1(queryEmbedding, topK, typeFilter, "filter_invalid")
+        return _fallbackToV1(queryEmbedding, topK, typeFilter, "filter_invalid", classOntologyIds)
 
     if hasScope and expr is None:
         # 「有作用域但构造不出表达式」= 调用方声明了作用域却没给任何取值
@@ -237,17 +267,24 @@ def _searchV2(
             # 有作用域却读不到 v2 ⇒ fail-closed：绝不用「不过滤的 v1」冒充
             # 「按维度过滤的答案」（那等于把越权行放进来）。
             return RegistrySearchResult(hits=[], usedRegistryV2=False, degradedReason="v2_missing")
-        return _fallbackToV1(queryEmbedding, topK, typeFilter, "v2_missing")
+        return _fallbackToV1(queryEmbedding, topK, typeFilter, "v2_missing", classOntologyIds)
 
     try:
-        hits = searchRegistryV2(
-            queryEmbedding, topK=topK, typeFilter=typeFilter, expr=expr
-        )
+        if classOntologyIds is None:
+            # 无作用域时调用形态逐字不变（不多传 kwarg）。
+            hits = searchRegistryV2(
+                queryEmbedding, topK=topK, typeFilter=typeFilter, expr=expr
+            )
+        else:
+            hits = searchRegistryV2(
+                queryEmbedding, topK=topK, typeFilter=typeFilter, expr=expr,
+                classOntologyIds=classOntologyIds,
+            )
     except Exception as exc:  # noqa: BLE001 —— Milvus 异常降级，不炸上层
         logger.error("语义注册表 RAG：v2 检索失败：%s", exc, exc_info=True)
         if hasScope:
             return RegistrySearchResult(hits=[], usedRegistryV2=False, degradedReason="v2_error")
-        return _fallbackToV1(queryEmbedding, topK, typeFilter, "v2_error")
+        return _fallbackToV1(queryEmbedding, topK, typeFilter, "v2_error", classOntologyIds)
 
     return RegistrySearchResult(hits=hits, usedRegistryV2=True, degradedReason=None)
 
@@ -266,9 +303,8 @@ def _fallbackToV1(
     topK: int,
     typeFilter: str | None,
     reason: str,
+    classOntologyIds: Sequence[int] | None = None,
 ) -> RegistrySearchResult:
     """无作用域时的 v1 回落（此时 v1/v2 语义等价，回落不改变可见性）。"""
-    hits = milvus.searchEmbeddingsByTypeRouted(
-        queryEmbedding, topK=topK, typeFilter=typeFilter
-    )
+    hits = _routedSearch(queryEmbedding, topK, typeFilter, classOntologyIds)
     return RegistrySearchResult(hits=hits, usedRegistryV2=False, degradedReason=reason)

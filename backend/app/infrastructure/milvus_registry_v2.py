@@ -32,7 +32,7 @@ Milvus 2.4.6 的 ``add_collection_field`` 不可靠（``p0/数据基线.md`` §4
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Sequence
 
 from pymilvus import Collection, DataType, FieldSchema
 
@@ -42,6 +42,7 @@ from app.infrastructure.milvus_client import (
     _connAlias,
     _ensureCollection,
     _ontologyFields,
+    buildClassIdScopeExpr,
     hasEmbeddingCollection,
     hnswSearchParams,
 )
@@ -463,13 +464,35 @@ def _codeList(values: Any) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _andExprs(*exprs: str | None) -> str | None:
+    """合并多个 Milvus 过滤表达式（``and`` 关系）。
+
+    全空 ⇒ ``None``（不过滤）；只有一个 ⇒ 原样返回；多个 ⇒ ``(a) and (b)``。
+    加括号是必要的：``a and b or c`` 的优先级不是我们想要的。
+    """
+    present = [expr for expr in exprs if expr]
+    if not present:
+        return None
+    if len(present) == 1:
+        return present[0]
+    return " and ".join(f"({expr})" for expr in present)
+
+
 def searchRegistryV2(
     queryEmbedding: list[float],
     topK: int = 5,
     typeFilter: str | None = None,
     expr: str | None = None,
+    classOntologyIds: Sequence[int] | None = None,
 ) -> list[dict[str, Any]]:
     """在 v2 集合上检索（可带 ``expr`` 过滤）。
+
+    Args:
+        expr: **治理维度**过滤表达式（域/组织/实体/发布/有效期）。与本体类 id
+            作用域（``classOntologyIds``）**并存**：两者用 ``and`` 合并，不互相覆盖。
+        classOntologyIds: **本体类 id 作用域**（Gap A）。``None`` = 不限；
+            空集 = deny-all。**只作用于 class 集合**（``ontology_id`` 在类/属性
+            之间共用 id 序列）。
 
     返回结构与 v1 一致（``ontology_id`` / ``type`` / ``name`` / ``alias`` /
     ``description`` / ``distance``）⇒ 上层调用方不需要区分读的是 v1 还是 v2。
@@ -477,12 +500,20 @@ def searchRegistryV2(
     if typeFilter is not None and typeFilter not in VALID_EMBEDDING_TYPES:
         raise ValueError(f"unknown embedding type filter: {typeFilter!r}")
 
+    classScopeExpr = buildClassIdScopeExpr(classOntologyIds)
+
     if typeFilter is not None:
-        return _searchV2Collection(typeFilter, queryEmbedding, topK, expr)
+        return _searchV2Collection(
+            typeFilter, queryEmbedding, topK, expr,
+            classScopeExpr=classScopeExpr if typeFilter == "class" else None,
+        )
 
     hits: list[dict[str, Any]] = []
     for type_ in ("class", "property", "metric", "kpi"):
-        hits.extend(_searchV2Collection(type_, queryEmbedding, topK, expr))
+        hits.extend(_searchV2Collection(
+            type_, queryEmbedding, topK, expr,
+            classScopeExpr=classScopeExpr if type_ == "class" else None,
+        ))
     hits.sort(key=lambda h: h["distance"])
     return hits[:topK]
 
@@ -492,11 +523,18 @@ def _searchV2Collection(
     queryEmbedding: list[float],
     topK: int,
     expr: str | None,
+    classScopeExpr: str | None = None,
 ) -> list[dict[str, Any]]:
-    """单个 v2 集合检索；集合不存在 ⇒ 返回空（可选集合语义）。"""
+    """单个 v2 集合检索；集合不存在 ⇒ 返回空（可选集合语义）。
+
+    ``expr``（治理维度）与 ``classScopeExpr``（本体类 id 作用域）用 ``and`` 合并：
+    两个口径是**交集**关系，任一为 ``None`` 时只剩另一个。
+    """
     name = REGISTRY_V2_COLLECTION_NAMES[type_]
     if not hasEmbeddingCollection(name):
         return []
+
+    combinedExpr = _andExprs(expr, classScopeExpr)
 
     collection = Collection(name, using=_connAlias())
     collection.load()
@@ -506,7 +544,7 @@ def _searchV2Collection(
         param=hnswSearchParams(topK * _DEDUP_OVERFETCH),
         limit=topK * _DEDUP_OVERFETCH,
         output_fields=["ontology_id", "type", "name", "alias", "description"],
-        expr=expr,
+        expr=combinedExpr,
     )
     hits: list[dict[str, Any]] = []
     seenIds: set[Any] = set()

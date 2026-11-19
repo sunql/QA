@@ -53,7 +53,7 @@ class _FakeCollection:
     def load(self) -> None:
         pass
 
-    def search(self, *, data, anns_field, param, limit, output_fields):
+    def search(self, *, data, anns_field, param, limit, output_fields, expr=None):
         row = {
             "ontology_id": 1000 + len(self.name),
             "type": self.name,

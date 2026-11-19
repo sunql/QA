@@ -83,10 +83,12 @@ docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'backend|fron
 # ② 现役前端 bundle（必须是 index-rBu8Smfz.js；不是 ⇒ 基线变了，停下发我）
 docker exec qa-frontend sh -c 'ls /usr/share/nginx/html/assets/index-*.js'
 
-# ③ 现役库的 alembic 版本（预期 0148；容器名/库名以 qa_compose config 或 docker ps 实际为准）
+# ③ 现役库的 alembic 版本（预期 0148）
+#    用户/库名从 postgres 容器自己的环境变量取（不显示密码；如报错先看：
+#    docker exec qa-postgres sh -c 'env | grep ^POSTGRES | grep -v PASSWORD'）
 docker ps --format '{{.Names}}' | grep -i postgres
-docker exec <postgres容器> psql -U <POSTGRES_USER> -d <POSTGRES_DB> \
-  -c 'select version_num from alembic_version'
+docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "select version_num from alembic_version"'
 # 不是 0148 ⇒ 停下发我（说明有人跑过别的迁移，本方案迁移链对不上）
 
 # ④ 健康检查
@@ -110,16 +112,17 @@ docker tag qa-system_frontend qa-system_frontend:pre-1119-main
 docker images | grep -E 'qa-system_(backend|frontend)'
 
 # 数据库锚点（本次有 DDL，必须备份）
-docker exec <postgres容器> pg_dump -U <POSTGRES_USER> <POSTGRES_DB> \
+docker exec qa-postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' \
   > /opt/qa-system/backups/pg_pre_1119_main_$(date +%Y%m%d_%H%M).sql
 ls -lh /opt/qa-system/backups/ | tail -3
+# 备份非空校验：tail -3 看文件大小，应是几百 KB～数百 MB；0 字节 ⇒ 重跑并检查上面报错
 ```
 
 > 0149–0152 全是加法迁移 ⇒ 即使后续回滚到旧镜像，新表留在库里也只是
 > `extra_table` warning（schema drift 的 `extra_table` 是 warning 级不 blocking，已核实
 > `backend/app/infrastructure/schema_drift.py:116`）。
 > 但旧镜像的 CMD `alembic upgrade head` 会在库=0152 时报「Can't locate revision」**起不来**
-> ⇒ 回滚前必须先降级（见 §8）。
+> ⇒ 回滚前必须先降级（见 §7）。
 
 ---
 
@@ -167,8 +170,8 @@ docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'backend|fron
 ```bash
 # ① 启动 + 迁移
 docker logs qa-backend --since 10m 2>&1 | grep -E "Application startup complete|INFO  \[alembic" | tail -10
-docker exec <postgres容器> psql -U <POSTGRES_USER> -d <POSTGRES_DB> \
-  -c 'select version_num from alembic_version'      # 期望 0152
+docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "select version_num from alembic_version"'      # 期望 0152
 curl -s -o /dev/null -w "backend_health=%{http_code}\n" http://localhost:8000/api/v1/health   # 200
 
 # ② ef 修复落地（代码探针）
@@ -182,8 +185,8 @@ docker logs qa-backend --since 10m 2>&1 | grep -c "should be larger than k"    #
 docker logs qa-backend --since 10m 2>&1 | grep -c "65535"                      # 期望 0
 
 # ④ P5 表已在
-docker exec <postgres容器> psql -U <POSTGRES_USER> -d <POSTGRES_DB> -c \
-  "\dt" | grep -E "workflow_definition|workflow_instance|workflow_step|workflow_command|approval_task|workflow_outbox"   # 6 张
+docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dt"' \
+  | grep -E "workflow_definition|workflow_instance|workflow_step|workflow_command|approval_task|workflow_outbox"   # 6 张
 ```
 
 ### 6.2 前端（代码探针，仿 1119 runbook 双向验证）
@@ -229,8 +232,8 @@ docker run --rm --network qa-system_default \
   alembic downgrade 0148
 # （网络名以 docker network ls 实测为准；alembic 需要能连库。容器内 DATABASE_URL
 #   读 .env，与 qa_compose 同一文件。）
-docker exec <postgres容器> psql -U <POSTGRES_USER> -d <POSTGRES_DB> \
-  -c 'select version_num from alembic_version'    # 期望回到 0148
+docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "select version_num from alembic_version"'    # 期望回到 0148
 
 # ② 换回旧镜像
 docker tag qa-system_backend:pre-1119-main  qa-system_backend
@@ -240,7 +243,7 @@ qa_compose up -d --no-build --no-deps --force-recreate backend frontend
 
 > - 0149–0152 的 downgrade 会 drop 6 张 P5 表 ⇒ 部署窗口内产生的审批/工作流数据会丢
 >   （部署前有 pg_dump 兜底，见 §3）。audit_log 的既有数据不受影响（0152 只动 CHECK）。
-> - **前端可单独回滚**（不跑 ①②①，只换 frontend tag + recreate）。
+> - **前端可单独回滚**（不跑 §7 的 ①②，只换 frontend tag + recreate）。
 > - 不想动库的替代方案：保持库=0152、只回滚前端（前端回滚无任何 DB 依赖）。
 
 ---

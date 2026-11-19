@@ -66,7 +66,18 @@ async def loadDatasourceTableSet(
     keys: set[str] = set()
     for row in rows:
         keys |= _tableKeys(row.schema_data or [])
-    return keys or None
+    if not keys:
+        # 空/缺两条分支都 fail-open（不过滤），但**必须留服务端痕迹**：
+        # 否则「数据源目录缺失」只体现在用户可见的 no_cache 披露里，服务端零日志
+        # ⇒ 运维看不到 fail-open 正在生效（无声降级）。
+        # ⚠️ 日志只带 datasourceId，**不得**带口令/DSN。
+        logger.warning(
+            "schema_cache 无可用表清单，跨源过滤 fail-open "
+            "rows=%d datasourceId=%s",
+            len(rows), datasourceId,
+        )
+        return None
+    return keys
 
 
 def filterClassesByDatasource(

@@ -20,6 +20,12 @@ from types import SimpleNamespace
 
 import pytest
 
+# 先导 milvus_client 再导 milvus_search：milvus_client 末尾反向 import 了
+# milvus_search（见其文件尾说明），先导 milvus_search 会在收集期撞循环导入。
+from app.infrastructure.milvus_client import (
+    _HNSW_EF_FLOOR,
+    hnswSearchParams,
+)
 import app.infrastructure.milvus_search as milvus_search
 from app.infrastructure.milvus_search import (
     _DEDUP_OVERFETCH,
@@ -49,12 +55,14 @@ class _FakeCollection:
         self._rows = rows
         self._query = queryVector
         self.receivedLimit: int | None = None
+        self.receivedParam: dict | None = None
 
     def load(self) -> None:
         pass
 
     def search(self, *, data, anns_field, param, limit, output_fields):
         self.receivedLimit = limit
+        self.receivedParam = param
         scored = [
             (math.dist(self._query, r["embedding"]), r) for r in self._rows
         ]
@@ -129,3 +137,50 @@ class TestSearchCollectionDedup:
         assert [h["ontology_id"] for h in hits] == [0, 1, 2]
         distances = [h["distance"] for h in hits]
         assert distances == sorted(distances)
+
+
+class TestSearchParamEfInvariant:
+    """HNSW 服务端校验 ef >= limit；ef 写死 64 而 limit = topK×8 ⇒ topK>8 必炸。
+
+    线上（2026-11-19）：wiki 注入 property 召回 topK=10 → limit=80 > ef=64 →
+    MilvusException(code=65535, ef(64) should be larger than k(80))，每轮 chat
+    必现，被 chat_service 吞成 warning——property/metric 注入静默失效。
+    类召回能活是因为生产 CLASS_FILTER_TOP_K ≤ 8 恰好压线，不是设计使然。
+    """
+
+    def test_ef_tracks_limit_when_overfetch_pushes_past_floor(self, fakeSearch) -> None:
+        """topK=10（线上默认）：limit=80，ef 必须 ≥ 80 而非写死 64。"""
+        fake = fakeSearch(_dupRows(), _vec(0))
+
+        _searchCollection("ontology_property_embeddings", _vec(0), topK=10)
+
+        assert fake.receivedLimit == 10 * _DEDUP_OVERFETCH
+        assert fake.receivedParam["params"]["ef"] >= fake.receivedLimit, (
+            f"ef={fake.receivedParam['params']['ef']} < limit={fake.receivedLimit}，"
+            "Milvus 服务端必拒（ef should be larger than k）"
+        )
+
+    def test_ef_keeps_floor_for_small_topK(self, fakeSearch) -> None:
+        """小 topK：ef ≥ 下限保持，不变量同样成立。"""
+        fake = fakeSearch(_dupRows(), _vec(0))
+
+        _searchCollection("ontology_class_embeddings", _vec(0), topK=2)
+
+        assert fake.receivedLimit == 2 * _DEDUP_OVERFETCH
+        assert fake.receivedParam["params"]["ef"] >= max(
+            _HNSW_EF_FLOOR, fake.receivedLimit
+        )
+
+
+class TestHnswSearchParamsHelper:
+    """helper 直接单测：未来任何调用点重新写死 {"ef": 64} 时，
+    此处钉住的语义（ef 随 limit 收敛、不低于下限）仍可作为对照基准。"""
+
+    def test_ef_tracks_large_limit(self) -> None:
+        assert hnswSearchParams(80)["params"]["ef"] >= 80
+
+    def test_ef_floors_small_limit(self) -> None:
+        assert hnswSearchParams(5)["params"]["ef"] == _HNSW_EF_FLOOR
+
+    def test_metric_type_is_l2(self) -> None:
+        assert hnswSearchParams(10)["metric_type"] == "L2"

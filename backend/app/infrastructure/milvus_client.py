@@ -62,6 +62,18 @@ VALID_EMBEDDING_TYPES = frozenset(("class", "property", "metric", "kpi"))
 # Common helpers
 # ---------------------------------------------------------------------------
 
+# HNSW 服务端硬校验 ef >= k（即 search 的 limit）。ef 写死而 limit 超过它时，
+# Milvus 直接拒搜（code=65535, "ef(64) should be larger than k(80)"）——2026-11-19
+# 线上 wiki 注入 property 召回（limit=topK×8=80）每轮必现。ef 大于 k 只是多探
+# 一些候选，命中口径不变，故取 max(下限, limit)。
+_HNSW_EF_FLOOR = 64
+
+
+def hnswSearchParams(limit: int) -> dict[str, Any]:
+    """构造 HNSW search 参数，保证 ef >= limit（Milvus 服务端硬校验）。"""
+    return {"metric_type": "L2", "params": {"ef": max(_HNSW_EF_FLOOR, limit)}}
+
+
 def getEmbeddingDimension() -> int:
     """返回当前 Milvus 集合的向量维度（供 embedding 服务维度守卫校验）。"""
     return _DIM
@@ -255,7 +267,7 @@ def searchQueryEmbedding(
     results = collection.search(
         data=[queryEmbedding],
         anns_field="embedding",
-        param={"metric_type": "L2", "params": {"ef": 64}},
+        param=hnswSearchParams(topK),
         limit=topK,
         output_fields=["session_id", "question", "sql"],
         expr=expr,
@@ -375,7 +387,7 @@ def searchDocumentChunks(
     searchKwargs: dict[str, Any] = {
         "data": [queryEmbedding],
         "anns_field": "embedding",
-        "param": {"metric_type": "L2", "params": {"ef": 64}},
+        "param": hnswSearchParams(topK),
         "limit": topK,
         "output_fields": [
             "document_id",
@@ -544,7 +556,7 @@ def searchWikiPageChunks(
     results = collection.search(
         data=[queryEmbedding],
         anns_field="embedding",
-        param={"metric_type": "L2", "params": {"ef": 64}},
+        param=hnswSearchParams(topK),
         limit=topK,
         output_fields=[
             "page_id",

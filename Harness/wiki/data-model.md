@@ -1021,8 +1021,55 @@ M1-1.1 把绑定做成了两张治理表（类 → 物理表 / 属性 → 列）
 同域重复版本号意味着「哪一次发布」无法标识 ⇒ **报错、不自动修**（不删行、不改版本号）
 ⇒ 必须人工裁决。静默挑一条留下 = 伪造发布历史。
 
-> 迁移号：**0156**（manifest v2 默认值）→ **0157**（域作用域版本号唯一索引）。
-> A4-0（审批面放开 `instance_id`）按「串行占号、不许插队」规则取下一个空号 **0158**。
+> 迁移号：**0156**（manifest v2 默认值）→ **0157**（域作用域版本号唯一索引）
+> → **0158**（M1-1.4 采购本体对象核对与补齐，见下节）。
+> A4-0（审批面放开 `instance_id`）按「串行占号、不许插队」规则取下一个空号 **0159**。
+
+### 采购本体对象：墓碑类必须**原地复活**（迁移 0158，M1-1.4）
+
+V0.3 §3.2 的 10 个采购本体对象逐条核对后，补齐动作落 **0158**（数据迁移 + 一张**迁移专用日志表**）：
+
+| 动作 | 对象 | 内容 |
+|---|---|---|
+| 复活 7 个墓碑类（清 `valid_to`） | PR / PO / GR / INVOICE / PAY | `DWD_PURCHASE_REQUISITION_LINE`、`DWD_REQUISITION_ORDER_LINK`、`DWD_PURCHASE_ORDER_LINE`、`DWD_GOODS_RECEIPT_LINE`、`DWD_PURCHASE_INVOICE`、`DWD_PURCHASE_INVOICE_LINE`、`DWD_SUPPLIER_PAYMENT` |
+| 新增 4 个 BO | PR / QUOT / POL / PAY | `business_object` 4 行，`primary_domain_id='PROCUREMENT'` |
+| 改指 1 个 BO 的头类 | INVOICE | `DWD_AP_INVOICE_DTL`（46 行文件抽取旁表）→ `DWD_PURCHASE_INVOICE`（38,323 行） |
+| 明确不建 | CONTRACT / SUPPLIER_PERFORMANCE / RFQ | 见核对表 §4（CONTRACT 承载面 = 文档目录，**实测 0 份**） |
+
+⚠️ **为什么必须复活而不是新建 v2 行**：`ontology_metric_source` 用 **`class_id`** 引用类；
+编译器遇到**墓碑类**的源引用会**整条丢弃**（`semantic_compiler_sections.groupMetricSources`）
+⇒ 指标只剩一半口径 ⇒ **静默口径漂移**（OTD 只剩分母、三单匹配只剩 FILTER），
+且指标归不了属 ⇒ 被域切片 **fail-closed 排除**。
+新建 v2 行会**换 `class_id`** ⇒ 指标源仍指向旧 id ⇒ 换汤不换药。**原地复活保持 `class_id`**。
+
+**实测（开发库 5433）**：
+
+| 项 | 补齐前 | 补齐后 |
+|---|---|---|
+| 编译后保留的指标源 | **3 / 18**（丢 15） | **18 / 18**（丢 0） |
+| 采购域切片 类 / 指标 / KPI | **6 / 1 / 1** | **10 / 9 / 9** |
+
+⚠️ **迁移是自包含的**（不 import `app.*`）⇒ 与决策目录
+`app/domain/procurement_object_catalog.py` 的一致性由**单测里的漂移守卫**钉住
+（`app/tests/unit/test_procurement_object_catalog.py`，含变异反证）。
+⚠️ **在 Lineage A 环境（测试库 5434）整批 no-op**：所有锚点是 Lineage B 类名（`DWD_*` / `DIM_*`）⇒
+找不到类 ⇒ 什么都不改（不报错、不产生半截状态）。
+⚠️ **变更日志表 `procurement_object_reconciliation_journal`**：升级时逐条记录
+「实际复活了哪个 class id / 原墓碑时间戳」「插了哪几个 BO code」「改指前的头类 id 与 graph_label」。
+没有它，降级只能按「类名 + 当前状态」反推 ⇒ 会把**升级前就活跃**的同名类一并墓碑化
+（误改不属于本迁移的数据），且原 `graph_label` / 时间戳只能硬编码猜回去。
+降级末尾删表 ⇒ 降级后库形状与本迁移无关（实测 `downgrade 0157` 后原时间戳 / 原 graph_label 全部精确还原）。
+⚠️ **降级删 BO 用 `pg_constraint` 动态枚举**所有引用 `business_object` 的外键
+（不写死表名；当前 4 张：`business_object_domain` / `document_entity_relation` /
+`entity_mapping` / `feature_definition`）⇒ 任一引用存在就保留该行，不让降级撞 RESTRICT。
+⚠️ **`business_object` 的主键是 `code`，没有 `id` 列** —— 迁移里写 `RETURNING id` 会直接报
+`UndefinedColumnError`（评审后改写时踩到）。
+⚠️ **复活不按 `version` 过滤**：墓碑行可能不是 v1；按版本锚定会静默 0 行 = 类仍是墓碑。
+
+> 事实源：`backend/app/domain/procurement_object_catalog.py`、
+> `backend/alembic/versions/0158_procurement_object_reconciliation.py`、
+> 核对表 `docs/update/1118/M1/M1-1.4-采购本体对象核对表.md`、
+> 证据 `docs/update/1118/M1/evidence/procurement-domain-slice-{before,after}.txt`。
 
 ### 编排层 / 支撑层的文件切分
 

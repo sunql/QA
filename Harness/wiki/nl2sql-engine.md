@@ -804,6 +804,12 @@ reason=… total=… kept=… odsFiltered=… truncated=…`。此前降级是 `
 `ANCHOR_MAX_CLASSES ≥ MAX_CLASSES` 的极端配置会让锚定占满窗口、挤掉向量命中（配置约束待补说明）；
 步骤级召回（`chat_multistep._recallForStep`）的 `datasourceFiltered` 披露随既有模式整体丢弃。
 
+⚠️ **与 2-4 漂移告警的交互（2026-11-19）**：对话链路的类清单经数据源过滤后，
+「表不在本数据源」的类（**缺表漂移**与**跨源表**两类）不再进 schema 文本 ⇒
+漂移告警在**对话链路**只剩**列漂移**分支（表在、列没了）；
+缺表漂移的运维可见性不变（`GET /datasources/{id}/ontology-drift` 端点扫全量本体、不过滤）。
+取舍与代价见 `Harness/changes/2026-11-19-recall-datasource-filter-anchor/summary.md` §三之三。
+
 ## 相对时间窗口契约（近 N 个月 / 近 N 天）
 
 方言日期算术规则（`app/services/nl2sql_dialects.py` 的 `dateArithmeticRule`）是 LLM 照抄的模板：

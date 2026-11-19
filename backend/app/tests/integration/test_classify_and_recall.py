@@ -493,3 +493,47 @@ async def test_cross_source_class_is_not_anchored(dbSession) -> None:
     assert "MAIN_DATA_SUPPLIER" not in names  # 跨源幽灵类既不命中也不被锚定
     assert result.recallInfo.datasourceFiltered == 1
     assert result.recallInfo.anchoredCount == 0
+
+
+@pytest.mark.asyncio
+async def test_dimension_hint_dim_pull_stays_within_datasource(dbSession) -> None:
+    """I1 守卫：维度词触发的 DIM 全量拉取必须与**已过滤**候选集取 id 交集。
+
+    事故同路径：问句含 `_DIMENSION_HINTS` 任一词（「名称」极常见）⇒
+    dimension_hint=True ⇒ `_fetchAllDimClasses` 直查 `source_table LIKE 'DIM_%'`
+    （不过数据源、不受已过滤 allClasses 约束）⇒ 跨源 DIM 类进 schema ⇒
+    planner 可选中 ⇒ ORA-00942 同形。
+
+    修法：dim_classes 与过滤后的 allClasses 取 id 交集（保留「DIM 全拉」语义，
+    只限定在本源）。去掉交集即红。
+    """
+    ds = _datasource()
+    ds.id = 880002
+    ds.name = "DIM_SRC"
+    dbSession.add(ds)
+    dbSession.add(SchemaCache(
+        datasource_id=880002, schema_name="DIM_SRC",
+        schema_data=[{"table_name": "DIM_SUPPLIER", "owner": "DIM_SRC", "columns": []}],
+        schema_version="t1",
+    ))
+    await dbSession.flush()
+    # 本源真 DIM 类 + 跨源幽灵 DIM 类，两者都落库 ⇒ _fetchAllDimClasses 会把两者都捞到
+    real = OntologyClass(
+        class_name="DIM_SUPPLIER", source_table="DIM_SUPPLIER")
+    ghostDim = OntologyClass(
+        class_name="DIM_OTHER_SRC", source_table="DIM_OTHER_SRC")
+    for c in (real, ghostDim):
+        dbSession.add(c)
+    await dbSession.flush()
+    # 候选集含幽灵类 ⇒ 跨源过滤会把它剔掉（allClasses 过滤后只剩 real）
+    fakeOntology = _FakeOntology(hits=[_hit(real)], allClasses=[real, ghostDim])
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "供应商名称有哪些", sessionId=None,
+        needRecall=True, datasourceId=880002,
+    )
+
+    names = [c.class_name for c in result.classes]
+    assert "DIM_SUPPLIER" in names, "本源 DIM 类应被维度词拉进候选"
+    assert "DIM_OTHER_SRC" not in names, "跨源 DIM 类被维度词全量拉取绕过了数据源过滤"

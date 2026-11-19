@@ -164,6 +164,29 @@ def _isDimensionHint(question: str) -> bool:
     return any(kw in (question or "") for kw in _DIMENSION_HINTS)
 
 
+def _restrictToAllowedIds(
+    classes: list, allowedClasses: list | None
+) -> list:
+    """把 `classes` 收窄到 `allowedClasses` 的 id 集合内（返回新 list）。
+
+    用途：维度词触发的 DIM 全量拉取（`_fetchAllDimClasses` 直查治理表 /
+    快照分支读原始快照）**不过数据源**，必须与**已按数据源过滤**的候选集取
+    id 交集，否则跨源 DIM 类会绕过过滤进 schema ⇒ planner 可选中 ⇒ ORA-00942
+    （2026-11-19 生产事故同形）。
+
+    `allowedClasses=None` ⇒ 不加约束（调用方未接线时的兼容口径）。
+    id 为 None 的类一律剔除（无法判定归属，不进窗口）。
+    """
+    if allowedClasses is None:
+        return list(classes)
+    allowedIds = {
+        cls.id for cls in allowedClasses
+        if getattr(cls, "id", None) is not None
+    }
+    return [
+        cls for cls in classes
+        if getattr(cls, "id", None) is not None and cls.id in allowedIds
+    ]
 
 
 class RecallMixin:
@@ -488,8 +511,15 @@ class RecallMixin:
         dimension_hint: bool,
         session: AsyncSession,
         view: RecallOntology | None = None,
+        allowedClasses: list | None = None,
     ) -> list:
         """按层优先排序：DIM 拉满（DIM 层按 dimension_hint 决定是否全拉）。
+
+        `allowedClasses` = **已按数据源过滤**的候选集（`allClasses`）。维度词触发的
+        DIM 全量拉取（快照分支读原始快照 / 直读分支查 `source_table LIKE 'DIM_%'`）
+        本身**不过数据源**，必须与该集合取 id 交集才不越权 —— 否则跨源 DIM 类
+        进 schema ⇒ planner 可选中 ⇒ ORA-00942（2026-11-19 生产事故同形）。
+        传 None = 不加约束（仅供未接线调用方；主链路一律传已过滤集合）。
 
         Returns: 排序后的新 list（不修改输入）。
         """
@@ -500,6 +530,7 @@ class RecallMixin:
                 dim_classes = [c for c in view.classes if (c.source_table or "").upper().startswith("DIM_")]
             else:
                 dim_classes = await self._fetchAllDimClasses(session)
+            dim_classes = _restrictToAllowedIds(dim_classes, allowedClasses)
             # 去重（按 id）
             seen = {c.id for c in merged if c.id is not None}
             for c in dim_classes:
@@ -666,7 +697,8 @@ class RecallMixin:
 
         # 按层排序
         relevant = await self._rankByLayer(
-            relevant, dimension_hint=dimension_hint, session=session, view=view
+            relevant, dimension_hint=dimension_hint, session=session, view=view,
+            allowedClasses=allClasses,
         )
 
         # 窗口上限先读：锚定上限必须夹到窗口内（见下），两者同源现读。
@@ -768,7 +800,8 @@ class RecallMixin:
         # dimension_hint=False：入参本就是全量类，DIM 已在其中（_rankByLayer 的 DIM
         # 补拉是给召回子集用的），降级路径也不再引入一次 DB 读取。
         ranked = await self._rankByLayer(
-            candidates, dimension_hint=False, session=session, view=view
+            candidates, dimension_hint=False, session=session, view=view,
+            allowedClasses=allClasses,
         )
         max_classes = await self._getClassFilterMaxClasses(session)
         selected = ranked[:max_classes]

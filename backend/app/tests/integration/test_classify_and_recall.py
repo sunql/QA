@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
 from app.domain.enums import ChartType, DataSourceType, IntentType
 from app.domain.exceptions import NotFoundError
 from app.domain.models import DataSource, LlmConfig, OntologyClass, SessionQueryState
@@ -289,3 +290,97 @@ class TestSingleStepQueryLlmBaseline:
         # 完整流水线（参考既有 unit/test_chat_service.py:test_full_pipeline_returns_complete_response
         # 的 len(llm.calls)==4）保持 4 次总调用。
         assert len(llm.calls) == 4, f"单步 QUERY 流水线总调用={len(llm.calls)}，期望 4"
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-19 数据源过滤（Harness/changes/2026-11-19-recall-datasource-filter-anchor）：
+# 跨源幽灵类不得进候选集；三态披露合并进 recallInfo。
+# ---------------------------------------------------------------------------
+from types import SimpleNamespace  # noqa: E402
+
+from app.domain.models import SchemaCache  # noqa: E402
+from app.services.recall_datasource_filter import (  # noqa: E402, F401（下批接线用）
+    applyDatasourceRecallFilter,
+)
+
+
+def _recallService(ontology: _FakeOntology) -> ChatService:
+    """三用例共用：构造走 classifyAndRecall 通道 1 的 ChatService（LLM 零调用）。"""
+    return _buildService(llm=_PipelineLlm(), ontology=ontology)
+
+
+def _hit(cls: OntologyClass) -> SimpleNamespace:
+    return SimpleNamespace(id=cls.id, score=0.9)
+
+
+@pytest.mark.asyncio
+async def test_recall_filters_cross_source_class_and_discloses(dbSession) -> None:
+    # Arrange：schema_cache 只登记 DIM_SUPPLIER；本体里另有跨源幽灵类
+    ds = _datasource()
+    ds.id = 7
+    ds.name = "THBI"
+    dbSession.add(ds)
+    dbSession.add(SchemaCache(
+        datasource_id=7, schema_name="THBI",
+        schema_data=[{"table_name": "DIM_SUPPLIER", "owner": "THBI", "columns": []}],
+        schema_version="t1",
+    ))
+    await dbSession.flush()
+    ghost = OntologyClass(
+        class_name="MAIN_DATA_SUPPLIER", source_table="main_data_supplier")
+    real = OntologyClass(
+        class_name="DIM_SUPPLIER", class_alias="供应商主数据", source_table="DIM_SUPPLIER")
+    for c in (ghost, real):
+        dbSession.add(c)
+    await dbSession.flush()
+    fakeOntology = _FakeOntology(hits=[_hit(real)], allClasses=[ghost, real])
+    service = _recallService(fakeOntology)
+
+    # Act
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None,
+        needRecall=True, datasourceId=7,
+    )
+
+    # Assert：幽灵类被滤、真类保留、披露计数正确（执行态：skipped=None + filtered=N）
+    assert [c.class_name for c in result.classes] == ["DIM_SUPPLIER"]
+    assert result.recallInfo.datasourceFiltered == 1
+    assert result.recallInfo.datasourceFilterSkipped is None
+
+
+@pytest.mark.asyncio
+async def test_recall_fail_open_when_schema_cache_missing(dbSession) -> None:
+    # Arrange：datasourceId 有值但无任何 schema_cache 行 ⇒ fail-open 不过滤
+    ds = _datasource()
+    ds.id = 9
+    ds.name = "NO_CACHE"
+    dbSession.add(ds)
+    await dbSession.flush()
+    ghost = OntologyClass(
+        class_name="MAIN_DATA_SUPPLIER", source_table="main_data_supplier")
+    fakeOntology = _FakeOntology(hits=[], allClasses=[ghost])
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None,
+        needRecall=True, datasourceId=9,
+    )
+
+    assert [c.class_name for c in result.classes] == ["MAIN_DATA_SUPPLIER"]
+    assert result.recallInfo.datasourceFiltered == 0
+    assert result.recallInfo.datasourceFilterSkipped == "no_cache"
+
+
+@pytest.mark.asyncio
+async def test_recall_skips_filter_without_datasource(dbSession) -> None:
+    ghost = OntologyClass(
+        class_name="MAIN_DATA_SUPPLIER", source_table="main_data_supplier")
+    fakeOntology = _FakeOntology(hits=[], allClasses=[ghost])
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None, needRecall=True,
+    )
+
+    assert [c.class_name for c in result.classes] == ["MAIN_DATA_SUPPLIER"]
+    assert result.recallInfo.datasourceFilterSkipped == "no_datasource"

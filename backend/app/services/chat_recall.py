@@ -19,6 +19,7 @@ from app.domain.enums import IntentType
 from app.domain.schemas import ChatRequest, ClassRecallInfo
 from app.services.chat_helpers import _clipText
 from app.services.intent_service import IntentResult
+from app.services.recall_datasource_filter import applyDatasourceRecallFilter
 from app.services.semantic_recall_gate import RecallOntology, loadRecallOntology
 
 if TYPE_CHECKING:
@@ -181,7 +182,8 @@ class RecallMixin:
 
         P0-3：加载状态时按 (userId, datasourceId, sessionId) 三元过滤，
         避免跨用户/跨数据源窜 state。userId/datasourceId 任一 None 时退化为
-        按 sessionId 唯一过滤（兼容既有调用）。
+        按 sessionId 唯一过滤（兼容既有调用）。datasourceId 自 2026-11-19 起
+        同时用于候选集跨源过滤，三态见 recall_datasource_filter 模块注释。
 
         两种调用模式：
         - 生产（sessionId 提供）：完整两阶段语义；hasPriorState 形参被忽略
@@ -220,12 +222,16 @@ class RecallMixin:
         view: RecallOntology | None = await loadRecallOntology(
             session, pinnedReleaseId=pinnedReleaseId
         )
-        allClasses: list[Any] = (
-            list(view.classes) if view is not None else await self._ontology.listClasses(session)
+        allClasses, dsDisclosure = await applyDatasourceRecallFilter(
+            session,
+            list(view.classes) if view is not None
+            else await self._ontology.listClasses(session),
+            datasourceId=datasourceId,
         )
         classes, recallInfo = await self._selectRelevantClasses(
             session, question, allClasses, view=view
         )
+        recallInfo = recallInfo.model_copy(update=dsDisclosure)
         return ClassifyAndRecallResult(
             intentResult=result, classes=classes, recallInfo=recallInfo, state=state
         )

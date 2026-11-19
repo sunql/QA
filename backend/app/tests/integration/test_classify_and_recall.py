@@ -537,3 +537,53 @@ async def test_dimension_hint_dim_pull_stays_within_datasource(dbSession) -> Non
     names = [c.class_name for c in result.classes]
     assert "DIM_SUPPLIER" in names, "本源 DIM 类应被维度词拉进候选"
     assert "DIM_OTHER_SRC" not in names, "跨源 DIM 类被维度词全量拉取绕过了数据源过滤"
+
+
+@pytest.mark.asyncio
+async def test_multi_owner_schema_cache_union_keeps_each_owner_class(dbSession) -> None:
+    """M5 集成：同一 datasource 下**两条** schema_cache 行（不同 owner）⇒
+    两个 owner 的类都不被误杀。
+
+    生产是 Oracle 多 owner（`schema_cache` 按 (datasource_id, schema_name) 一行一
+    owner）⇒ 「多行取并集」是「不误杀」的核心：只认第一行会把另一个 owner 的
+    全部类硬过滤掉（静默剔除 ⇒ planner 看不到真实表）。
+    """
+    ds = _datasource()
+    ds.id = 880003
+    ds.name = "MULTI_OWNER"
+    dbSession.add(ds)
+    dbSession.add(SchemaCache(
+        datasource_id=880003, schema_name="THBI",
+        schema_data=[{"table_name": "DIM_SUPPLIER", "owner": "THBI", "columns": []}],
+        schema_version="t1",
+    ))
+    dbSession.add(SchemaCache(
+        datasource_id=880003, schema_name="ZJTH",
+        schema_data=[{"table_name": "MAIN_DATA_FOO", "owner": "ZJTH", "columns": []}],
+        schema_version="t2",
+    ))
+    await dbSession.flush()
+    # 本源两个 owner 的类：裸名写法 + owner 限定名写法各一（两种写法都该命中）
+    supplier = OntologyClass(class_name="DIM_SUPPLIER", source_table="DIM_SUPPLIER")
+    foo = OntologyClass(class_name="MAIN_DATA_FOO", source_table="ZJTH.MAIN_DATA_FOO")
+    # 跨源幽灵类：两个 owner 的清单里都没有
+    ghost = OntologyClass(class_name="MAIN_DATA_SUPPLIER", source_table="main_data_supplier")
+    for c in (supplier, foo, ghost):
+        dbSession.add(c)
+    await dbSession.flush()
+    fakeOntology = _FakeOntology(
+        hits=[_hit(supplier), _hit(foo), _hit(ghost)],
+        allClasses=[supplier, foo, ghost],
+    )
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None,
+        needRecall=True, datasourceId=880003,
+    )
+
+    names = [c.class_name for c in result.classes]
+    assert "DIM_SUPPLIER" in names, "THBI owner 的类被误杀"
+    assert "MAIN_DATA_FOO" in names, "ZJTH owner 的类被误杀（多行未取并集）"
+    assert "MAIN_DATA_SUPPLIER" not in names, "跨源幽灵类未被过滤"
+    assert result.recallInfo.datasourceFiltered == 1

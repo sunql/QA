@@ -95,7 +95,7 @@ describe("App 路由", () => {
     );
 
     // AppLayout 标题存在（setup.ts 修复后 useTranslation 走真实 i18next，返回中文）
-    expect(screen.getByText("AI服务平台")).toBeInTheDocument();
+    expect(screen.getByText("泰鸿智脑")).toBeInTheDocument();
     // 默认导航跳到了 /chat（不再是 /models）
     const probe = await screen.findByTestId("probe-path");
     expect(probe.textContent).toBe("/chat");

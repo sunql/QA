@@ -127,7 +127,7 @@ describe("AppLayout 导航", () => {
 
   it("默认显示侧边栏与首页占位", () => {
     renderWithRouter();
-    expect(screen.getByText("AI服务平台")).toBeInTheDocument();
+    expect(screen.getByText("泰鸿智脑")).toBeInTheDocument();
     expect(screen.getByTestId("home")).toBeInTheDocument();
   });
 

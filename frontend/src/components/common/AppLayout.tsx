@@ -132,7 +132,7 @@ export default function AppLayout() {
             whiteSpace: "nowrap",
           }}
         >
-          {collapsed ? "QA" : t("appLayout.brand")}
+          {collapsed ? "TH" : t("appLayout.brand")}
         </div>
         {isLoading ? (
           <div style={{ padding: 16, color: "#fff", textAlign: "center" }}>

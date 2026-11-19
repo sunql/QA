@@ -90,6 +90,45 @@
 mode 判定基准；锚定同分 id 兜底（代码侧）；前端三态拆 2 个 i18n 键；步骤级披露丢弃；
 `datasourceFiltered` 计数与前端「张表」文案的轻微口径差。
 
+## 三之三、漂移告警 × 数据源过滤的交互（merge-gate 净新增修复，2026-11-19）
+
+merge-gate 判 **不可合并（NEW_FAILURES，净新增 1 / 净丢失 0）**：
+`app/tests/integration/test_ontology_drift_api.py::TestChatDriftWarning::test_drift_warning_injected_into_nl2sql_schema_prompt`。
+
+**根因（本批与既有 2-4 漂移告警功能的语义冲突，不是代码写错）**：
+
+- 既有 2-4 的设计是「**schema 文本仍渲染本体全部类（含已漂移对象）**，靠告警文本告诉模型
+  不得引用」（`nl2sql_schema.buildSchemaText` 注释原文）⇒ 对话链路的类清单 = **全量本体**。
+- 本批把对话链路的类清单改成「**当前数据源目录内**的类」（`recall_datasource_filter`）
+  ⇒ 「表不在本数据源」的类（缺表漂移 **和** 跨源表**两类**）**不再渲染** ⇒
+  漂移告警扫描的类集合里已无缺表类 ⇒ 缺表分支**空转** ⇒ 旧断言
+  「prompt 里必须出现缺表名 `ZJTH.OLD_PRECEIPT`」失败。
+
+**裁决：对话链路的缺表漂移告警被本批的**结构性过滤**取代（更强的保证，不是能力回退）**：
+
+| 维度 | 过滤前（既有 2-4） | 过滤后（本批） |
+|---|---|---|
+| 缺表/跨源类是否进 schema 文本 | **进**（靠告警劝模型别引用） | **不进**（模型无从引用 ⇒ 结构上不会 ORA-00942） |
+| 缺表漂移告警（对话链路） | 有（点名缺表） | **无**（无对象可告警） |
+| **列漂移**告警（表在、列没了） | 有 | **有**（不变） |
+| 缺表漂移的**运维可见性** | 端点 `GET /datasources/{id}/ontology-drift`（扫全量本体，**不经过滤**） | **同前，端点未改** |
+
+⇒ 唯一受影响的是「对话链路 prompt 里不再点名缺表」；同一事实仍由运维端点报告，
+过滤器的服务端日志也逐轮打印被剔除的表名（`droppedTables=[...]`）。
+
+**已知代价（如实记录）**：若 few-shot 历史 SQL 里**引用了本数据源没有的表**，
+模型可能仍照抄（该表不在 schema 文本里，但被 few-shot 示例带进来）⇒ 对话链路
+不再有「点名劝阻」。这属**已立项挂账的缺口 2**（few-shot 未受窗口约束，见
+`2026-11-19-prod-incident-recall-window-miss/prod-incident-analysis.md` §四），
+本批不动其语义。
+
+**改动清单**（**生产代码零行为变更**）：
+1. `backend/app/tests/integration/test_ontology_drift_api.py`：该用例的断言从
+   「缺表名必须出现在 prompt」改为「**列漂移仍告警** + **缺表类不得出现在 prompt**」
+   （并加注释说明口径变更与运维端点的替代位置）；
+2. `backend/app/services/nl2sql_schema.py`：**仅注释**订正（旧注释「schema 文本仍渲染
+   本体全部类」已不成立）⇒ 无行为变更、无迁移、无新配置。
+
 ## 四、生产部署与裁决项
 
 ### 4.1 生产仍需后端镜像发版

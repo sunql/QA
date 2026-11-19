@@ -250,7 +250,17 @@ class TestChatDriftWarning:
     async def test_drift_warning_injected_into_nl2sql_schema_prompt(
         self, client, dbSession, monkeypatch,
     ) -> None:
-        """2-4：对话链路把漂移告警注入计划/SQL system prompt（表漂移能告警）。"""
+        """2-4：对话链路把漂移告警注入计划/SQL system prompt。
+
+        口径（2026-11-19 数据源过滤上线后）：对话链路的类清单已按**当前数据源
+        目录**（`schema_cache`）过滤过 —— 「表不在本数据源」的类**不再渲染进
+        schema 文本**（结构性杜绝 ORA-00942，比「渲染 + 告警」更强）⇒
+        计划/SQL prompt 里既没有这类表，也**不需要**对它告警；
+        漂移告警在对话链路实际覆盖的是**列漂移**（表在、列没了）。
+
+        缺表漂移仍在运维面可见：`GET /datasources/{id}/ontology-drift` 扫**全量**
+        本体（不经数据源过滤），见本文件 `TestOntologyDriftApi`。
+        """
         dsId = await _seedDriftDataset(dbSession)
         config = LlmConfig(
             model_name="test-model",
@@ -274,11 +284,13 @@ class TestChatDriftWarning:
         )
         assert resp.status_code == 200, resp.text
 
-        # 计划阶段 system prompt 含 schema 文本与漂移告警（缺表 + 缺列）
+        # 计划阶段 system prompt 含 schema 文本与漂移告警（列漂移仍能告警）
         planSystem = llm.calls[0][0][1]
         assert "漂移" in planSystem
-        assert "ZJTH.OLD_PRECEIPT" in planSystem
         assert "ZJTH.PRECEIPTD.GONE_COL" in planSystem
+        # 「表不在当前数据源目录」的类（缺表/跨源）被**数据源过滤结构性剔除**
+        # ⇒ prompt 里既没有该表，也不再对它告警（更强的保证：模型无从引用）。
+        assert "ZJTH.OLD_PRECEIPT" not in planSystem
 
         # SQL 阶段 system prompt 同样携带告警
         sqlSystem = llm.calls[1][0][1]

@@ -810,6 +810,34 @@ reason=… total=… kept=… odsFiltered=… truncated=…`。此前降级是 `
 缺表漂移的运维可见性不变（`GET /datasources/{id}/ontology-drift` 端点扫全量本体、不过滤）。
 取舍与代价见 `Harness/changes/2026-11-19-recall-datasource-filter-anchor/summary.md` §三之三。
 
+### 第 3 级·向量检索窗口收敛到本地类 id（2026-11-20，Gap A 根因修复）
+
+前两级都是**应用侧**处理：过滤在 Python 侧、锚定也在 Python 侧，而**向量检索打的是 Milvus 全局集合**
+⇒ topK 名额被跨源类/墓碑类吃光。生产实证：`hits=20 total=94` —— 20 个向量命中里能解析到本地 94 类的为 **0**
+⇒ 走 `reason=no_match` 早退 ⇒ 召回裁剪被架空（兜底把 43 个本地类全塞进 schema）。
+
+本级把「本地类 id 集」推进 **Milvus 服务端过滤**（`collection.search(expr=...)`）⇒ 两侧口径一致。
+
+| 环节 | 口径 |
+|---|---|
+| 作用域来源 | `chat_recall._selectRelevantClasses` 的候选集（**已按数据源收窄**）的 `ontology_class.id` 集 |
+| 何时不收窄 | 数据源过滤未生效（`datasourceFilterSkipped` = `no_datasource` / `no_cache`）⇒ 作用域 = `None` ⇒ **与今天逐字节一致** |
+| 表达式形态 | 非空 ⇒ `ontology_id in [...]`（去重 + 升序）；空集 ⇒ **deny-all**（`ontology_id < 0`，本体类 id 恒为正） |
+| 落点 | **只落 class 集合**：Milvus 的 `ontology_id` 在类/属性之间**共用 id 序列** ⇒ 套到 property/metric/kpi 上会误伤 |
+| 与治理维度 expr | v2 路径用 `and` 合并（治理 expr 优先，不被覆盖） |
+
+**空集 ≠ 不限**：「作用域里 0 个类」与「没有作用域」是两件事 —— 后者要放行全部，前者必须恒空。
+
+⚠️ **v1 路径不走 fail-closed**：闸门的 fail-closed 规则针对**治理维度**（域/组织/实体/发布/有效期，越权 = 泄漏）；
+本体类 id 作用域是**数据源相关性**（不收窄只是窗口偏宽，不是越权）⇒ v1 照常按作用域过滤检索。
+
+**顺带修掉（只在 class 集合内）**：墓碑类的向量（停用类不在 `listClasses` 里 ⇒ 被 expr 排除）；
+跨源类的向量（不在本地 id 集 ⇒ 排除）。写路径的墓碑向量未删、2.47× 重复向量仍是独立挂账。
+
+⚠️ **实测边界**：Milvus 2.4.6 上「过滤不欠返回」已用只读探针实测（见
+`Harness/changes/2026-11-19-recall-milvus-local-scope/design.md` §2.1）—— 本仓 v1 集合**没有** `ontology_id` 标量索引，
+过滤检索在该量级下仍完备；但若类库增长到需要标量索引的规模，须复核该结论。
+
 ## 相对时间窗口契约（近 N 个月 / 近 N 天）
 
 方言日期算术规则（`app/services/nl2sql_dialects.py` 的 `dateArithmeticRule`）是 LLM 照抄的模板：

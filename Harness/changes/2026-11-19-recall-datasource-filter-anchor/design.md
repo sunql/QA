@@ -41,14 +41,36 @@
 |---|---|---|
 | 有缓存 + 有 datasourceId | 硬过滤，跨源类不进候选集 | `datasourceFiltered = N` |
 | datasourceId=None | 不过滤（同现状） | `datasourceFilterSkipped = "no_datasource"` |
-| schema_cache 缺失/空/读失败 | 不过滤（fail-open） | `datasourceFilterSkipped = "no_cache"` |
+| schema_cache 缺失/空/读失败 | 不过滤（fail-open） | `datasourceFilterSkipped = "no_cache"` + 服务端 warning（空/缺分支必须有日志，禁止无声 fail-open） |
 
-### 调用点（两处共用，先过滤后进召回链）
+### 调用点（三处共用，先过滤后进召回链）
 
 - `chat_recall.py` `classifyAndRecall`：`allClasses`（钉版快照与治理表两条路）取完即过滤；
   钉版快照同样过滤（SQL 终究在当前源执行）。
 - `chat_service.py:996`：plan/schema 构建链的全量类。
+- `chat_multistep.py:524` `_recallForStep`：步骤级召回的候选集（Task 6 后补的第三处）——
+  步骤召回排在共享召回之前且锚定按字面确定性命中，不过滤会重新捞回跨源幽灵类。
 - 过滤在候选集源头 ⇒ 向量交集 / JOIN 扩边 / ODS 过滤等下游零改动；JOIN 扩边只见本源邻居。
+
+### 研究入口（2026-11-19 终审补录）
+
+研究链路是**另一个漏斗**，已一并纳入（口径同源，复用 `applyDatasourceRecallFilter`）：
+
+- `research_agent_execution.generateStepSql`：类候选集全局 `listClasses` 未过滤 ⇒
+  跨源类进 NL2SQL 的 schema 小节，而 SQL 跑在会话绑定的源上 ⇒ ORA-00942。
+  过滤点在类候选集源头 ⇒ 兜底 `matched or list(classes)`（全量类进 prompt）也只吐已过滤的类。
+- `api/v1/research.py` BO 臂 `_searchBusinessObjects`：Milvus 全局检索**无 valid_to 过滤**
+  ⇒ 手工墓碑的类向量仍在库里；PG 回填补 `valid_to IS NULL` ⇒ 只捞活类，墓碑真正生效。
+- 数据源 id 在**相位边界**固化（`ExecutionDeps.datasourceId`）：循环内读 ORM 属性会触发
+  MissingGreenlet（失败步 rollback 会 expire 实例）。
+
+### 维度词触发的 DIM 全量拉取（2026-11-19 终审补录）
+
+维度词（`_DIMENSION_HINTS`，含「名称」等常用词）触发 `dimension_hint=True` ⇒ DIM 类被
+**全量**拉取（快照分支读原始快照 / 直读分支查 `source_table LIKE 'DIM_%'`）⇒ 该路径
+本身**不过数据源**，会绕过上述过滤把跨源 DIM 类带进 schema（事故同形）。
+故 `dim_classes` 必须与**已过滤**的 `allClasses` 取 id 交集后再并入候选 ——
+保留「DIM 全拉」语义，只把范围限定在本源。
 
 ### 披露面
 
@@ -63,7 +85,9 @@
 
 1. **取锚**：问句切 2–6 字连续片段（n-gram，无分词器），与每个活类 `class_alias` / `class_name`
    做「片段 ⊆ 别名/类名」包含匹配（大小写归一）；
-2. **排序**：精确等值 > 匹配片段更长 > 更短；同分按向量 score；
+2. **排序**：精确等值 > 匹配片段更长 > 更短；同分按 **id 升序**兜底
+   （锚定类按定义就是向量没捞到的类，本就没有向量分可用 —— 实现口径以 id 升序为准，
+   原「同分按向量 score」的表述与实现不符，已订正）；
 3. **强制纳入**：锚定类无条件进候选集、排在向量命中之前（不被 `MAX_CLASSES` 截断挤掉），与向量命中去重；
 4. **上限**：`system_config.ANCHOR_MAX_CLASSES`（默认 5），防止宽泛词灌满窗口；剩余名额仍归向量命中。
 

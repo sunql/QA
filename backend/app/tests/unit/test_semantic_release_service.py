@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.domain.exceptions import ConflictError, ValidationError
+from app.domain.semantic_manifest_schema import SCHEMA_VERSION
 from app.services import semantic_release_service as releaseServiceModule
 from app.services import semantic_release_checks as checksModule
 from app.services.semantic_release_service import (
@@ -57,7 +58,8 @@ def _metric(
 
 
 def _manifest(metrics: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"schemaVersion": "v1", "metrics": metrics}
+    """残缺 manifest（只有 metrics 段）—— 版本取当前契约。"""
+    return {"schemaVersion": SCHEMA_VERSION, "metrics": metrics}
 
 
 # ---------------------------------------------------------------------------

@@ -31,7 +31,7 @@ M1-a DoD：「每条 check 落表可查」。只落失败项 ⇒ 评审看到的
 | code | 目标类型 | severity | 判据 |
 |---|---|---|---|
 | `SNAPSHOT_INTEGRITY` | RELEASE | ERROR | 快照规范化 / 体量 / 哈希一致 |
-| `MANIFEST_SCHEMA` | RELEASE | ERROR | Manifest 满足 v1 契约 |
+| `MANIFEST_SCHEMA` | RELEASE | ERROR | Manifest 满足其 `schemaVersion` 对应的契约（v1 / v2） |
 | `METRIC_SOURCE_PRESENT` | METRIC | WARNING | 指标有源类引用 |
 | `METRIC_NUMERATOR_LANDING` | METRIC | WARNING/ERROR | 指标分子度量有落点类 |
 | `METRIC_DENOMINATOR_LANDING` | METRIC | WARNING/ERROR | 指标分母度量有落点类 |
@@ -205,7 +205,11 @@ def capChecks(checks: tuple[PublishCheck, ...]) -> tuple[PublishCheck, ...]:
 
 
 def _schemaCheck(manifest: dict[str, Any]) -> PublishCheck:
-    """Manifest 契约校验（结构 + 引用 + 可规范化）。"""
+    """Manifest 契约校验（结构 + 引用 + 可规范化）。
+
+    契约按 `manifest.schemaVersion` 分发（v1 / v2）⇒ 结论文字必须写**实际版本**，
+    否则读者会以为「过了 v1 契约」而快照其实是 v2。
+    """
     try:
         validateManifest(manifest)
     except ManifestSchemaError as exc:
@@ -217,13 +221,14 @@ def _schemaCheck(manifest: dict[str, Any]) -> PublishCheck:
             targetType=TARGET_RELEASE,
             detail=str(exc),
         )
+    version = manifest.get("schemaVersion") if isinstance(manifest, dict) else None
     return PublishCheck(
         code=CHECK_MANIFEST_SCHEMA,
         item=ITEM_MANIFEST_SCHEMA,
         severity=SEVERITY_ERROR,
         result=RESULT_PASS,
         targetType=TARGET_RELEASE,
-        detail="Manifest 满足 v1 契约",
+        detail=f"Manifest 满足 {version} 契约",
     )
 
 

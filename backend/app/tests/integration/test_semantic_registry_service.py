@@ -14,11 +14,16 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import NotFoundError
 from app.domain.models import OntologyClass
-from app.domain.semantic_manifest_schema import manifestHash
+from app.domain.semantic_manifest_schema import (
+    SCHEMA_VERSION,
+    SCHEMA_VERSION_V1,
+    manifestHash,
+)
 from app.domain.semantic_release_models import SemanticRelease
 from app.services.nl2sql_schema import buildSchemaText
 from app.services.ontology_service import OntologyService
@@ -35,7 +40,20 @@ from app.tests.unit._semantic_rows import makeClass, makeProperty
 from scripts.semantic_schema_shadow_diff import _blockContentMismatches
 
 _MINIMAL_MANIFEST: dict[str, Any] = {
-    "schemaVersion": "v1",
+    "schemaVersion": SCHEMA_VERSION,
+    "domains": [],
+    "classes": [],
+    "joins": [],
+    "metrics": [],
+    "kpis": [],
+    "businessObjects": [],
+    "sourceBindings": [],
+}
+
+# v1 形状的**旧版本**快照（没有 `sourceBindings` 段）——
+# 用来说明「Registry 原样回传正文版本，不替它盖当前版本」。
+_V1_MINIMAL_MANIFEST: dict[str, Any] = {
+    "schemaVersion": SCHEMA_VERSION_V1,
     "domains": [],
     "classes": [],
     "joins": [],
@@ -68,6 +86,11 @@ async def _insertRelease(
         domain_code=domainCode,
         manifest_json=body,
         manifest_hash=manifestHash(body),
+        # 与生产写路径同一口径（`semantic_release_service`）：
+        # 行版本**跟着正文走**，不替它盖当前版本 ——
+        # 盖版本号会让「正文说 v1、行上写 v2」⇒ 复原层判漂移 ⇒ 降级直读，
+        # 而版本漂移的根因恰恰是有人绕过发布路径改过库 ⇒ 必须暴露而不是抹平。
+        schema_version=body.get("schemaVersion") or SCHEMA_VERSION,
     )
     session.add(row)
     await session.commit()
@@ -94,7 +117,12 @@ async def test_get_active_ignores_non_active_statuses(dbSession: AsyncSession) -
 
 
 async def test_get_active_returns_published_snapshot(dbSession: AsyncSession) -> None:
-    manifest = dict(_MINIMAL_MANIFEST, schemaVersion="v1")
+    """旧版本（v1）快照原样回传：Registry **不替它盖当前版本**。
+
+    盖版本号会让「快照正文说 v1、行上写 v2」⇒ 复原层判版本漂移 ⇒ 降级直读；
+    而版本漂移的根因恰恰是有人绕过发布路径改过库 ⇒ 必须暴露而不是抹平。
+    """
+    manifest = dict(_V1_MINIMAL_MANIFEST)
     await _insertRelease(dbSession, status="ACTIVE", manifest=manifest)
 
     snapshot = await semanticRegistry.getActive(dbSession)
@@ -119,6 +147,32 @@ async def test_returned_manifest_is_a_private_copy_on_real_pg(
     second = await semanticRegistry.getActive(dbSession)
     assert second is not None
     assert second.manifest["classes"] == []
+
+
+async def test_release_table_default_matches_current_schema_version(
+    dbSession: AsyncSession,
+) -> None:
+    """**库侧**默认值必须等于当前契约版本（迁移 0156 把 `'v1'` 改成 `'v2'`）。
+
+    为什么钉在真实库上：ORM 的 `server_default` 与迁移里的字面量是**两处**，
+    单测断言 ORM 那一处变绿时，迁移可能还写着 `'v1'` ⇒ 真实入库的行会带上
+    旧版本号 ⇒ 复原层判「版本漂移」⇒ 降级直读（功能正确、性能回退，且每次
+    请求打 WARNING，排查时极容易误判）。
+
+    ⚠️ 这里断言的是**迁移的结果**（`information_schema` 里的真实默认值），
+    不是迁移脚本里的字面量 —— 迁移必须冻结（改它要写新迁移），不能被测试
+    「顺手改成当前值」而失去意义。
+    """
+    raw = await dbSession.scalar(
+        text(
+            "select column_default from information_schema.columns "
+            "where table_name = 'semantic_release' and column_name = 'schema_version'"
+        )
+    )
+
+    assert raw is not None, "semantic_release.schema_version 缺少库侧默认值"
+    # PG 把默认值渲染成 `'v2'::character varying` ⇒ 取字面量部分。
+    assert raw.split("::")[0].strip("'") == SCHEMA_VERSION
 
 
 async def test_tampered_snapshot_is_rejected(dbSession: AsyncSession) -> None:

@@ -32,6 +32,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.domain.enums import SemanticReleaseStatus
 from app.domain.models import Base, BigIntPk, TimestampMixin
 
+# ⚠️ 只 import **叶子模块**的版本字面量，不 import 契约模块本身：
+# `app.domain.semantic_manifest_schema` → `app.domain.schemas` → services
+# → `app.domain.models` ⇒ 在 ORM 聚合模块里形成一条**回到自身的 import 环**，
+# 今天只靠导入顺序侥幸成立（code-review LOW-4）。
+from app.domain.semantic_manifest_version import SCHEMA_VERSION
+
 _JSONB = JSON().with_variant(postgresql.JSONB(), "postgresql")
 
 
@@ -62,8 +68,11 @@ class SemanticRelease(Base, TimestampMixin):
         server_default=SemanticReleaseStatus.DRAFT.value,
     )
     # Manifest 自身的 Schema 版本（与发布 version 解耦，便于 Schema 演进时回放旧快照）。
+    # ⚠️ 默认值必须与 `app.domain.semantic_manifest_schema.SCHEMA_VERSION` 一致
+    # （drift 守卫只比名不比值 ⇒ 单测 `test_release_orm_default_schema_version_matches`
+    # 负责钉住两者相等）。
     schema_version: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default="v1"
+        String(20), nullable=False, server_default=SCHEMA_VERSION
     )
     # 自包含快照：类 / 属性 / JOIN / 指标 / BO / 域，全部在这一次编译里固化。
     manifest_json: Mapped[dict] = mapped_column(_JSONB, nullable=False)

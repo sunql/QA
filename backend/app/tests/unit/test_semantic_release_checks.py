@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from app.domain.semantic_manifest_schema import SCHEMA_VERSION
 from app.services import semantic_release_checks as checksModule
 from app.services.semantic_release_checks import (
     CHECK_MANIFEST_SCHEMA,
@@ -72,7 +73,12 @@ def _metric(
 
 
 def _manifest(metrics: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"schemaVersion": "v1", "metrics": metrics}
+    """残缺 manifest（只有 metrics 段）—— 版本取当前契约。
+
+    刻意不给全部分区：契约闸的结论由它单独产出（见 `evaluateManifestChecks`），
+    这里只测**指标层**校验项。
+    """
+    return {"schemaVersion": SCHEMA_VERSION, "metrics": metrics}
 
 
 def _byCode(checks: tuple[PublishCheck, ...], code: str) -> list[PublishCheck]:
@@ -287,7 +293,7 @@ def test_duplicate_metric_names_are_deduplicated() -> None:
 
 def test_manifest_without_metrics_yields_no_checks() -> None:
     """残缺 manifest（无 metrics 段）不得抛异常 —— 交给契约闸去报错。"""
-    assert evaluatePublishChecks({"schemaVersion": "v1"}) == ()
+    assert evaluatePublishChecks({"schemaVersion": SCHEMA_VERSION}) == ()
 
 
 def test_non_dict_manifest_is_tolerated() -> None:

@@ -29,7 +29,7 @@ from app.domain.models import (
     OntologyMetric,
     OntologyProperty,
 )
-from app.domain.semantic_manifest_schema import manifestHash
+from app.domain.semantic_manifest_schema import SCHEMA_VERSION, manifestHash
 from app.domain.semantic_release_models import SemanticRelease
 from app.services import semantic_release_service as releaseServiceModule
 from app.services.semantic_graph_mirror_resolution import resolveManifestEntities
@@ -46,13 +46,14 @@ from app.services.semantic_release_checks import (
 from app.services.semantic_release_service import semanticReleaseService
 
 _MINIMAL_MANIFEST: dict[str, Any] = {
-    "schemaVersion": "v1",
+    "schemaVersion": SCHEMA_VERSION,
     "domains": [],
     "classes": [],
     "joins": [],
     "metrics": [],
     "kpis": [],
     "businessObjects": [],
+    "sourceBindings": [],
 }
 
 # 一条「已发布但无落点」的 RATIO 指标：Schema 合法，发布闸门必须阻断。
@@ -109,6 +110,8 @@ async def _insertRelease(
         domain_code=domainCode,
         manifest_json=body,
         manifest_hash=manifestHash(body),
+        # 与生产写路径同一口径：行版本跟着正文走（不替正文盖当前版本）。
+        schema_version=body.get("schemaVersion") or SCHEMA_VERSION,
     )
     session.add(row)
     await session.commit()
@@ -149,7 +152,9 @@ async def test_create_draft_compiles_the_current_governance_tables(
     assert row.created_by == "tester"
     # 落库的哈希必须能由落库内容复算（评审要能独立验证）。
     assert row.manifest_hash == manifestHash(row.manifest_json)
-    assert row.schema_version == "v1"
+    # 落库行的 schema 版本 = 编译产物的版本（当前代码的 SCHEMA_VERSION）。
+    assert row.schema_version == SCHEMA_VERSION
+    assert row.manifest_json["schemaVersion"] == SCHEMA_VERSION
     assert isinstance(operation.blockers, tuple)
     assert await _auditActions(session, row.id) == ["CREATE"]
 

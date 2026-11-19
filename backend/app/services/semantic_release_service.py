@@ -59,6 +59,7 @@ from app.services.messages_zh import (
     MSG_SEMANTIC_RELEASE_VERSION_INVALID,
 )
 from app.services.semantic_compiler import compileManifest
+from app.services.semantic_compiler_bindings import SourceBindingCompileError
 from app.services.semantic_registry_service import (
     MAX_MANIFEST_BYTES,
     MAX_RELEASE_ID,
@@ -182,7 +183,7 @@ class SemanticReleaseService:
                     MSG_SEMANTIC_RELEASE_VERSION_CONFLICT.format(version=normalizedVersion)
                 )
 
-        manifest = await compileManifest(session)
+        manifest = await _compileOrReject(session)
         validateManifest(manifest)
         canonical = canonicalManifestJson(manifest)
         sizeBytes = len(canonical.encode("utf-8"))
@@ -398,6 +399,20 @@ async def _requireDomainExists(session: AsyncSession, domainCode: str) -> None:
     exists = await session.scalar(select(DataDomain.code).where(DataDomain.code == domainCode))
     if exists is None:
         raise ValidationError(MSG_SEMANTIC_RELEASE_DOMAIN_NOT_FOUND.format(code=domainCode))
+
+
+async def _compileOrReject(session: AsyncSession) -> dict[str, Any]:
+    """编译治理表；源绑定数据不满足发布不变量 ⇒ 422 而不是 500。
+
+    为什么单独一层：编译器对「数据被写坏」抛 `ValueError` 系异常
+    （`SourceBindingCompileError`），直接冒到 API 层会变成 500 ——
+    而这是**治理数据问题**，调用方能修（去改绑定），必须给一条说得清
+    「哪条绑定、为什么」的 422。
+    """
+    try:
+        return await compileManifest(session)
+    except SourceBindingCompileError as exc:
+        raise ValidationError(f"源绑定数据不满足发布约束：{exc}") from exc
 
 
 def _validateActor(actor: str, departments: tuple[str, ...] | None) -> None:

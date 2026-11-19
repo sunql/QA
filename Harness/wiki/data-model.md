@@ -773,6 +773,9 @@ request_time    TIMESTAMPTZ NOT NULL
   尾部往往正是最后一条指标的 ERROR 结论行。
   ⇒ 超限时保留上限-1 条 + 追加一条 `CHECKS_TRUNCATED`（`severity=ERROR` / `result=FAIL`）合成行：
   表里查得到「报告被截断」，闸门把它当**阻断项**（fail-closed），且闸门与落表用**同一个集合**。
+  ⚠️ M1-1.3 批次 B 加采购域校验项时**必须重推**为
+  `6 + 3 × MAX_MANIFEST_METRICS + 2 × MAX_MANIFEST_SOURCE_BINDINGS`（= 10006）——
+  契约上限变了而公式没变 ⇒ 合法 manifest 被静默截断（同一类缺陷，第三犯的机会）。
 
 ### 读接口分页口径
 
@@ -785,7 +788,7 @@ request_time    TIMESTAMPTZ NOT NULL
 | code | 目标类型 | severity | 判据 |
 |---|---|---|---|
 | `SNAPSHOT_INTEGRITY` | RELEASE | ERROR | 快照规范化 / 体量 / 哈希一致 |
-| `MANIFEST_SCHEMA` | RELEASE | ERROR | Manifest 满足 v1 契约 |
+| `MANIFEST_SCHEMA` | RELEASE | ERROR | Manifest 满足其 `schemaVersion` 对应的契约（v1 / v2） |
 | `METRIC_SOURCE_PRESENT` | METRIC | WARNING | 指标有源类引用 |
 | `METRIC_NUMERATOR_LANDING` | METRIC | WARNING/ERROR | 指标分子度量有落点类 |
 | `METRIC_DENOMINATOR_LANDING` | METRIC | WARNING/ERROR | 指标分母度量有落点类（仅 RATIO/DIFFERENCE） |
@@ -798,6 +801,118 @@ request_time    TIMESTAMPTZ NOT NULL
 > `backend/app/services/semantic_release_check_service.py`（落表 / 回读）。
 > 真机验证：`backend/scripts/semantic_release_check_realdata.py`。
 
-> 事实源：`backend/app/domain/semantic_release_check_models.py`（ORM）、
-> `backend/app/services/semantic_release_checks.py`（纯评估）、
-> `backend/app/services/semantic_release_check_service.py`（落表 / 回读）。
+## M1 增量：Manifest 契约 v2（采购源绑定入档）
+
+**日期**：2026-11-19 · **变更**：[2026-11-19-m1-procurement-domain-release](../changes/2026-11-19-m1-procurement-domain-release/summary.md)（批次 A）· **迁移 `0156`**
+
+回答一个问题：**「发布的快照里，采购源绑定到底是怎么落的」**。
+M1-1.1 把绑定做成了两张治理表（类 → 物理表 / 属性 → 列），
+但发布快照是**运行期唯一真相** —— 绑定不入档 ⇒ 快照不自包含、
+「已发布的采购语义」无法离线复算。
+
+### v2 契约：新增 `sourceBindings` 分区
+
+```jsonc
+"sourceBindings": [{
+  "className": "DWD_PURCHASE_ORDER_DTL",   // 必填（按**名字**，不按 id）
+  "datasourceName": "THBI",                  // 可空
+  "schemaName": "ERP",                       // 可空
+  "sourceTable": "PORDER",                   // 必填
+  "bindingRole": "BASE",                     // BASE/NUMERATOR/DENOMINATOR/FILTER
+  "filterExpression": null,
+  "filterAllowlist": [],
+  "properties": [{
+    "propertyName": "PO_NO",
+    "sourceColumn": "PO_NO",
+    "keyOrdinal": 1,                          // 可空（复合键序号）
+    "transformExpression": null
+  }]
+}]
+```
+
+**为什么单独分区而不是折进 `classes[].sourceTable`**：绑定是「类 →（数据源, schema, 表）」的
+**一对多**映射，还带过滤/变换表达式、键序号与逐属性映射 ⇒ 折进 v1 字段会**丢掉真信息**，
+而失真的快照比没有快照更危险。
+
+### 版本分发（升版的连锁面）
+
+`MANIFEST_SCHEMAS = {v1, v2}`；`MANIFEST_SCHEMA_V2` 由 `_deriveV2(v1)` **派生**
+（复制粘贴 ⇒ 两版契约悄悄漂移）。`validateManifest` **按 `manifest.schemaVersion` 取 Schema**：
+
+- **未知版本直接拒绝**（不放行、不猜）；
+- **v1 快照继续按 v1 校验**（历史快照不许被新契约判死）；
+- v2 追加**引用闸**：绑定 `className` 必须存在；绑定 `propertyName` 必须属于**该类**
+  （空属性类也必须校验 ⇒ 用 `allowed is not None` 判定，不能用 `and allowed` ——
+  后者让「空属性集合」被当成「不检查」）；同一绑定 `keyOrdinal` 不重复；
+  同一 `(className, datasourceName, schemaName, sourceTable, bindingRole)` 不重复；
+  同一绑定内 `propertyName` 不重复（库里属性名无唯一约束 ⇒ 自己挡）。
+
+⚠️ **版本字面量必须冻结**（`app/domain/semantic_manifest_version.py`，零 import 的叶子模块）：
+
+- 注册表的**键**与每版 Schema 的 `schemaVersion` const 都用**版本字面量**
+  （`SCHEMA_VERSION_V1` / `SCHEMA_VERSION_V2`），**不得**用「当前版本」——
+  否则升到 v3 时 v2 会从注册表里消失、v2 契约被改写成 v3 ⇒ 已发布的 v2 快照
+  当场变成「未知版本」⇒ 无法校验 / 激活 / 回放；
+- `_assertCurrentVersionRegistered()` 在 **import 期**就炸（升版漏登记不必等到发版才发现）；
+- 单测钉死「注册表里每一版都自述自己的版本」；
+- 该叶子模块同时**断开 ORM 的 import 环**：`app/domain/models.py` → 子模型 →
+  `semantic_manifest_schema` → `app.domain.schemas` → services → `app.domain.models`
+  （今天只靠导入顺序侥幸成立）。实测 `import app.domain.models` 不再连带加载
+  `app.domain.schemas` / `jsonschema` / 三个 service registry。
+
+⚠️ **「哪一版含绑定分区」是版本配置**（`MANIFEST_SCHEMA_SOURCE_BINDING_VERSIONS`），
+不是版本字符串比较：用「版本 ≠ v1」判断 ⇒ 未来任何不带该分区的版本会走进绑定引用闸 ⇒
+读一个不存在的键 ⇒ KeyError ⇒ 500（而不是一条可读的契约错误）。
+
+⚠️ **升版是连锁面，不是改一行常量**，五处必须一起处置：
+
+| 面 | 处置 |
+|---|---|
+| `semantic_release.schema_version` 的 `server_default` + DB 默认值 | 迁移 **0156** 改 `'v2'`；ORM 改用 `server_default=SCHEMA_VERSION`（drift 守卫靠单测钉住，`alembic check` 只比名不比式） |
+| 库里既有 v1 ACTIVE 快照 | `semantic_schema_adapter.schemaVersionMismatch` 只认当前版本 ⇒ **降级直读治理表**（既有设计：宁可慢一点也不能少给事实）⇒ **发版顺序见 SSOT §9.1**：先切代码 → 建一份 v2 发布并 activate；中间窗口期是**降级直读**（功能正确、性能回退） |
+| 发布校验项文案 | PASS detail 写**实际版本**（`Manifest 满足 {version} 契约`） |
+| `semantic_diff_service.MANIFEST_SECTIONS` | 增 `sourceBindings` ⇒ 自动落进 `UNCOVERED_SECTIONS`（API 契约显式披露「未覆盖」） |
+| 夹具 | 版本取 `SCHEMA_VERSION` 动态值；夹具的版本必须与行 `schema_version` 一致（不一致 ⇒ 被判漂移） |
+
+### 什么进快照、什么不进（字节确定性铁律）
+
+| 进 | 不进 | 理由 |
+|---|---|---|
+| `className` / `datasourceName` / `schemaName` / `sourceTable` / `bindingRole` | 自增 `id` | 同一治理内容必须编译出同样字节（`measure.class_id` / `kpis.datasourceId` 已各犯过一次） |
+| `filterExpression` / `filterAllowlist` | `validFrom` / `validTo` | 时间戳进快照 ⇒ 两次编译字节不同 ⇒ M1-a DoD 第 2 条被破坏 |
+| 每个属性绑定的 `propertyName` / `sourceColumn` / `keyOrdinal` / `transformExpression` | `is_candidate = TRUE` 的**候选**绑定 | **D-3**：候选不是结论，不得被读路径消费；manifest 就是读路径的数据源 |
+| — | `createdBy` / `confirmedBy` / `confirmedTime` | 实例相关残留列，与「换环境必须得到同样字节」冲突 |
+
+⇒ 编译口径：**只收 `is_candidate = FALSE` 且 `valid_to IS NULL` 的绑定**；
+墓碑类（`valid_to` 非空）及其属性整体**丢弃**（丢弃不是报错 —— 墓碑类上的绑定是「历史」，
+报错会把一次正常发布挡死）。
+
+### 编译期发布不变量（不只是「写入时校验过」）
+
+| 不变量 | 判据 | 失败形态 |
+|---|---|---|
+| **候选 fail-closed** | `is_candidate` 必须**显式为假**（`is False`，不是 `not row.is_candidate` —— 后者在 `None` 时 fail-open） | 未知候选态 ⇒ 不进快照 |
+| **生效时刻** | `valid_from` 不得晚于此刻（未来才生效的绑定**还没生效**） | 不进快照 |
+| **表达式安全** | 过滤表达式复用 `validateFilterExpression(expr, allowlist)`、列级变换复用 `validateTransformExpression(expr, sourceColumn)`（都是纯函数） | 抛 `SourceBindingCompileError` ⇒ **422**（不是 500） |
+| **属性归属** | 属性必须属于**绑定所属的类**（库侧无此约束，只有写路径在挡） | 抛错并**定位到绑定 id** |
+
+⇒ 表达式安全从「入口校验」升级为**发布不变量**：绕过写路径入库的行
+（运维脚本 / 数据修复 / 未来的批量导入）不会把越权表达式带进快照。
+
+⚠️ **抛错而不是悄悄丢弃**：这类行一旦进快照，读路径就会拿着越权表达式去查库；
+而「悄悄跳过」会让问题不可见（没有校验行可指认是哪一条绑定）。
+批次 B 补绑定级校验项后，失败会**落表成 check 行**并定位到具体绑定。
+
+⚠️ **同一类可有多条 BASE 绑定**（多落点是合法设计）⇒ 契约不收紧，
+但**读路径接线时必须显式消歧**（否则「这条类指哪张表」是未定义行为）。
+
+### 契约上限（从契约导出，不写死）
+
+`MAX_MANIFEST_SOURCE_BINDINGS = 2000`、`MAX_MANIFEST_BINDING_PROPERTIES = 500`
+（v2 Schema 的 `maxItems`）⇒ 发布校验项条数上限要**从它们推导**（批次 B 重推为 10006）。
+
+> 事实源：`backend/app/domain/semantic_manifest_schema.py`（契约 + 版本分发）、
+> `backend/app/domain/semantic_manifest_version.py`（版本字面量 · 叶子模块）、
+> `backend/app/services/semantic_compiler_bindings.py`（绑定分区编译 + 发布不变量）、
+> `backend/app/services/semantic_compiler.py`（接线）、
+> `backend/alembic/versions/0156_semantic_manifest_v2.py`（迁移）。

@@ -23,6 +23,7 @@
 模块划分（D6 拆分，保持每个文件一屏可读）：
 - 本文件：入口（`compileFromRows` / `compileManifest`）+ 本体核心（类 / 属性 / JOIN）；
 - `semantic_compiler_sections.py`：指标两层（`metrics` + `kpis`）与业务对象 / 数据域；
+- `semantic_compiler_bindings.py`：采购源绑定分区（v2 / M1-1.3，候选 ≠ 结论）；
 - `semantic_manifest_common.py`：类引用解析与稳定排序等共享原语。
 """
 
@@ -46,7 +47,12 @@ from app.domain.models import (
     OntologyMetricSource,
     OntologyProperty,
 )
+from app.domain.procurement_binding_models import (
+    ProcurementPropertyBinding,
+    ProcurementSourceBinding,
+)
 from app.domain.semantic_manifest_schema import SCHEMA_VERSION
+from app.services.semantic_compiler_bindings import compileSourceBindings
 from app.services.semantic_compiler_sections import (
     compileBusinessObjects,
     compileDomains,
@@ -76,11 +82,13 @@ def compileFromRows(
     businessObjectDomains: Iterable[BusinessObjectDomain] = (),
     domains: Iterable[DataDomain] = (),
     datasources: Iterable[DataSource] = (),
+    sourceBindings: Iterable[ProcurementSourceBinding] = (),
+    sourceBindingProperties: Iterable[ProcurementPropertyBinding] = (),
 ) -> dict[str, Any]:
     """把治理表行编译成 Manifest 字典（纯函数，无 IO）。
 
     参数默认 `()` 只是为了让只关心本体的用例免于重复传参；**真实发布必须走
-    `compileManifest`** —— 它显式传全 10 张表，漏传会让快照悄悄缺一整个分区。
+    `compileManifest`** —— 它显式传全 12 张表，漏传会让快照悄悄缺一整个分区。
     """
     indexes = _buildIndexes(classes, properties, metrics, kpis, datasources)
     allClassById = indexes.allClassById
@@ -111,6 +119,15 @@ def compileFromRows(
             activeNameById,
             {row.code for row in domains},
         ),
+        "sourceBindings": compileSourceBindings(
+            sourceBindings,
+            sourceBindingProperties,
+            allClassById,
+            activeNameById,
+            indexes.propertyNameById,
+            indexes.propertyClassIdById,
+            indexes.datasourceNameById,
+        ),
     }
 
 
@@ -125,6 +142,13 @@ class _Indexes(NamedTuple):
     allKpis: list[KpiCatalog]
     metricNameById: dict[int, str]
     datasourceNameById: dict[int, str]
+    propertyNameById: dict[int, str]
+    """**只含活跃类的属性**（墓碑类的属性不在其中）⇒ 绑定分区引用闸天然成立。"""
+    propertyClassIdById: dict[int, int]
+    """属性 id → 所属类 id（**只含活跃类的属性**）。
+
+    用来在编译期校验「绑定的属性确实属于该绑定所属的类」—— 库侧没有这个约束。
+    """
 
 
 def _buildIndexes(
@@ -142,15 +166,27 @@ def _buildIndexes(
     )
     _rejectDuplicateNames(activeClasses)
     allMetrics = list(metrics)
+    activeNameById = {row.id: row.class_name for row in activeClasses}
+    allProperties = list(properties)
     return _Indexes(
         allClassById=allClassById,
         activeClasses=activeClasses,
-        activeNameById={row.id: row.class_name for row in activeClasses},
-        propsByClassId=_groupActiveProperties(properties, allClassById),
+        activeNameById=activeNameById,
+        propsByClassId=_groupActiveProperties(allProperties, allClassById),
         allMetrics=allMetrics,
         allKpis=list(kpis),
         metricNameById={row.id: row.metric_name for row in allMetrics},
         datasourceNameById={row.id: row.name for row in datasources},
+        propertyNameById={
+            row.id: row.property_name
+            for row in allProperties
+            if row.class_id in activeNameById
+        },
+        propertyClassIdById={
+            row.id: row.class_id
+            for row in allProperties
+            if row.class_id in activeNameById
+        },
     )
 
 
@@ -170,6 +206,12 @@ async def compileManifest(session: AsyncSession) -> dict[str, Any]:
     ).scalars().all()
     domains = (await session.execute(select(DataDomain))).scalars().all()
     datasources = (await session.execute(select(DataSource))).scalars().all()
+    sourceBindings = (
+        await session.execute(select(ProcurementSourceBinding))
+    ).scalars().all()
+    sourceBindingProperties = (
+        await session.execute(select(ProcurementPropertyBinding))
+    ).scalars().all()
     return compileFromRows(
         classes=classes,
         properties=properties,
@@ -181,6 +223,8 @@ async def compileManifest(session: AsyncSession) -> dict[str, Any]:
         businessObjectDomains=businessObjectDomains,
         domains=domains,
         datasources=datasources,
+        sourceBindings=sourceBindings,
+        sourceBindingProperties=sourceBindingProperties,
     )
 
 

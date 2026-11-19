@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
+from app.domain.semantic_manifest_schema import SCHEMA_VERSION
 from app.services import semantic_schema_adapter as adapterModule
 from app.services import semantic_schema_gate as gate
 from app.services.nl2sql_schema import buildSchemaText
@@ -380,7 +381,7 @@ class Test不许炸问答:
         """
         classes, properties, joins = _dataset()
         _installSnapshot(
-            monkeypatch, _FakeSnapshot({"schemaVersion": "v1", "classes": [123]})
+            monkeypatch, _FakeSnapshot({"schemaVersion": SCHEMA_VERSION, "classes": [123]})
         )
 
         text = await gate.renderSchemaText(classes, joins=joins, session=_FakeSession())

@@ -6,7 +6,9 @@
 - **设计**：[design.md](./design.md)（同目录）
 - **状态**：**代码已实施并回归通过（含 2026-11-19 终审修复 Task 9：4 Important + 2 必须合并前修）**；
   **已 squash 合入 main = `d58bb1ad`**（merge-gate `merge-gate / failure-set-diff` = success ⇒ 净新增 0 / 净丢失 0）；
-  **生产生效仍需一次镜像发版**（未部署）—— runbook 见同目录 [deploy-prod.md](./deploy-prod.md)
+  **生产生效仍需一次镜像发版**（本批未单独部署）—— 三件套（#157 + #158 + #159）已于 2026-11-20
+  合并为**一次**部署交付，runbook 见 `Harness/changes/2026-11-20-recall-fix-release/deploy-prod.md`
+  （本目录 [deploy-prod.md](./deploy-prod.md) 的构建/交付段已过期，仅探针段与墓碑复活段仍有效）
 
 ## 一、问题与解法（回顾）
 

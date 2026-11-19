@@ -146,8 +146,8 @@ ls -lh /opt/qa-system/backups/ | tail -3
 开发机 → 生产（scp / U 盘均可），**传完先比对 sha256**（§1 表）。
 
 ```bash
-docker load -i /tmp/qa-backend-amd64-1119-main.tar.gz
-docker load -i /tmp/qa-frontend-amd64-1119-main.tar.gz
+docker load -i qa-backend-amd64-1119-main.tar.gz
+docker load -i qa-frontend-amd64-1119-main.tar.gz
 # ⚠️ tag 成**现役容器引用的名字**：backend → qa-backend:offline（生产 compose 引用名），
 #    frontend → qa-system_frontend。不是给 compose 引入新名字。
 docker tag qa-system-backend:amd64-1119-main  qa-backend:offline

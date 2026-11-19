@@ -1848,7 +1848,7 @@ class OntologyService:
                 _searchRegistryEmbeddings, embedding, topK, typeFilter, registryFilter,
                 classOntologyIds,
             )
-        except (MilvusException, OSError) as exc:
+        except (MilvusException, OSError, ValueError, TypeError) as exc:
             raise MilvusError(MSG_VECTOR_SEARCH_FAILED, detail=str(exc)) from exc
         hits = result.hits
 

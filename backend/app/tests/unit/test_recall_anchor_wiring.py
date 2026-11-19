@@ -19,6 +19,7 @@ from app.services.chat_helpers import _PipelineContext
 from app.services.chat_recall import (
     _ANCHOR_MAX_CLASSES_DEFAULT,
     _CLASS_FILTER_MAX_CLASSES_DEFAULT,
+    _CLASS_SCOPE_MAX_IDS,
 )
 from app.services.chat_service import ChatService
 from app.tests.unit.test_chat_service import (
@@ -631,6 +632,179 @@ class TestClassIdScopeWiring:
 
         assert ontology.searchCalls[0]["classOntologyIds"] == [1]
         assert 2 not in ontology.searchCalls[0]["classOntologyIds"]
+
+    @pytest.mark.asyncio
+    async def test_scope_ids_are_sorted_and_deduped(self) -> None:
+        """作用域 id 集 = 候选集 id 集（**去重 + 升序** ⇒ 顺序稳定可复现）。
+
+        不去重会让 expr 变长；不升序会让同一候选集在不同查询顺序下生成不同
+        expr ⇒ 里程碑/缓存键不可复现。
+        """
+        seven = _cls(7, "C7")
+        three = _cls(3, "C3")
+        sevenAgain = _cls(7, "C7_ALT")
+        ontology = _FakeOntologyService(
+            [seven, three, sevenAgain], searchHits=[SimpleNamespace(id=3)],
+        )
+        service = _buildService(ontology=ontology)[0]
+
+        await service._selectRelevantClasses(
+            _FakeSession(), "查询", [seven, three, sevenAgain],
+            isDatasourceScoped=True,
+        )
+
+        assert ontology.searchCalls[0]["classOntologyIds"] == [3, 7]
+
+    @pytest.mark.asyncio
+    async def test_scope_too_large_degrades_to_unlimited(self, caplog) -> None:
+        """作用域超过上限 ⇒ **显式降级为不限** + 告警（而不是让 expr 炸掉）。
+
+        expr 过长 ⇒ Milvus 解析异常 ⇒ 被 ``except Exception`` 吞成
+        ``search_error`` ⇒ 静默退回宽窗（且只有一行 warning，没人看见）。
+        ⇒ 超限时主动降级 + 显式告警，行为与今天一致但**可见**。
+        """
+        classes = [_cls(i, f"C{i}") for i in range(1, _CLASS_SCOPE_MAX_IDS + 2)]
+
+        class _StrictOntology(_FakeOntologyService):
+            """只认三个参数：降级后若仍多传 kwarg ⇒ TypeError ⇒ 宽窗回退。"""
+
+            async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+                return [SimpleNamespace(id=1)]
+
+        service = _buildService(ontology=_StrictOntology(classes))[0]
+
+        with caplog.at_level(logging.WARNING, logger="app.services.chat_recall"):
+            result, recall = await service._selectRelevantClasses(
+                _FakeSession(), "查询", classes, isDatasourceScoped=True,
+            )
+
+        assert recall.mode == "recall"  # 没被吞成 search_error
+        assert [c.id for c in result] == [1]
+        assert "作用域过大" in caplog.text
+        # 降级本身不是召回回退 ⇒ 不许污染回退率（reason= 行）聚合
+        assert "本体类回退降级" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_scoped_empty_window_retries_unscoped_search(self) -> None:
+        """作用域窗口为空 ⇒ 再做一次**无作用域**检索（自愈 + 与今天同口径）。
+
+        作用域窗口空有两种成因：(a) 本地类在 Milvus 里没有向量（embedding
+        缺口）；(b) expr 过滤过严。无作用域重试把这两种都兜住：
+
+        - 重试命中能解析出本地类 ⇒ 走正常裁剪（自愈）；
+        - 重试命中解析不出本地类 ⇒ ``no_match`` ⇒ 锚定救援窄窗（与今天同一
+          状态下的表现一致）；
+        - 重试仍 0 命中 ⇒ ``no_hits`` ⇒ 宽窗回退（行为逐字不变）。
+
+        ⚠️ 关键：**不能**直接回落宽窗 —— 宽窗把 43 个本地类全塞进 schema
+        （召回裁剪被架空，正是本批要消灭的症状）。
+        """
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+
+        class _EmptyScopedOntology(_FakeOntologyService):
+            """作用域检索恒空；无作用域检索也恒空（索引/嵌入异常）。"""
+
+            async def searchByKeyword(
+                self, query, *, topK=5, typeFilter=None, classOntologyIds=None
+            ) -> list:
+                self.searchCalls.append({
+                    "query": query, "topK": topK, "typeFilter": typeFilter,
+                    "classOntologyIds": classOntologyIds,
+                })
+                return []
+
+        ontology = _EmptyScopedOntology([supplier])
+        service = _buildService(ontology=ontology)[0]
+
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [supplier],
+            isDatasourceScoped=True,
+        )
+
+        assert len(ontology.searchCalls) == 2  # 作用域一次 + 无作用域一次
+        assert ontology.searchCalls[0]["classOntologyIds"] == [1]
+        assert ontology.searchCalls[1]["classOntologyIds"] is None
+        # 连无作用域都 0 命中 ⇒ no_hits ⇒ 宽窗回退（Gap B 语义逐字不变）
+        assert recall.mode == "fallback"
+        assert [c.id for c in result] == [1]
+
+    @pytest.mark.asyncio
+    async def test_scoped_empty_window_rescues_by_anchor_after_retry(self) -> None:
+        """作用域窗口空 + 无作用域重试只命中跨源类 ⇒ 锚定救援窄窗（同今天）。
+
+        今天（无作用域）在这个状态下：全局命中跨源类 ⇒ no_match ⇒ 锚定救援
+        ⇒ 窄窗。若作用域路径直接回落宽窗，就会**比今天更宽** ⇒ 行为回退。
+        """
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+
+        class _CrossSourceOnlyOntology(_FakeOntologyService):
+            """作用域检索恒空；无作用域检索只命中跨源类（999 不在候选集里）。"""
+
+            async def searchByKeyword(
+                self, query, *, topK=5, typeFilter=None, classOntologyIds=None
+            ) -> list:
+                self.searchCalls.append({
+                    "query": query, "topK": topK, "typeFilter": typeFilter,
+                    "classOntologyIds": classOntologyIds,
+                })
+                if classOntologyIds is not None:
+                    return []
+                return [SimpleNamespace(id=999)]
+
+        ontology = _CrossSourceOnlyOntology([supplier])
+        service = _buildService(ontology=ontology)[0]
+
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [supplier],
+            isDatasourceScoped=True,
+        )
+
+        assert len(ontology.searchCalls) == 2
+        assert recall.mode == "rescue"
+        assert [c.id for c in result] == [1]  # 窄窗（锚定类），不是宽窗
+
+    @pytest.mark.asyncio
+    async def test_pinned_release_view_skips_class_id_scope(self) -> None:
+        """钉住语义发布路径**不施加** id 作用域（快照 id 是合成 id，不是主键）。
+
+        快照类的 id 由 ``semantic_schema_adapter._synthesizeIds`` 按类名排序
+        合成（1..N），与 Milvus 的 ``ontology_id``（``ontology_class.id`` 自增
+        主键）**不是同一 id 空间**。拿合成 id 去过滤真实主键会同时踩三个坑：
+
+        (a) 真本地类的向量被挡在窗口外 ⇒ 作用域检索恒空；
+        (b) 合成 id 恰好撞上别的真实主键 ⇒ 跨源/墓碑类的向量又进窗口
+            （正是本批要消灭的症状）；
+        (c) 命中 id（真实主键）与快照类 id（合成）错映射 ⇒ 错类归因。
+
+        ⇒ 钉住路径传 ``None``（作用域不限）：与今天逐字节一致。该路径的 id
+        空间错配是**既有缺陷**，另批根治（见 summary 遗留挂账）。
+        """
+        from app.services.semantic_recall_gate import (
+            RecallClass,
+            RecallOntology,
+        )
+
+        snapshotClass = RecallClass(
+            id=1,  # 合成 id（按类名排序分配的 1..N）
+            class_name="DIM_SUPPLIER", class_alias="供应商主数据",
+            description=None, source_table="DIM_SUPPLIER",
+            object_type=None, object_owner=None, parent_class_id=None,
+        )
+        view = RecallOntology(
+            releaseId=7, version="v1", classes=[snapshotClass], joins=[],
+        )
+        ontology = _FakeOntologyService(
+            [snapshotClass], searchHits=[SimpleNamespace(id=1)],
+        )
+        service = _buildService(ontology=ontology)[0]
+
+        await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [snapshotClass],
+            view=view, isDatasourceScoped=True,
+        )
+
+        assert len(ontology.searchCalls) == 1
+        assert ontology.searchCalls[0]["classOntologyIds"] is None  # 不施加作用域
 
 
 class TestAnchorMaxClassesConfig:

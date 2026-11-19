@@ -79,10 +79,35 @@ def getEmbeddingDimension() -> int:
     return _DIM
 
 
-# 本体类 id 作用域的 deny-all 表达式。本体类 id 恒为正（DB 自增主键）⇒
-# ``ontology_id < 0`` 命中不了任何行。**不能**用空 IN 列表（``ontology_id in []``）
-# 表达「空作用域」：那不是合法表达式，会让整次检索报错。
-_CLASS_ID_SCOPE_DENY_ALL = "ontology_id < 0"
+# 本体类 id 作用域的 deny-all 表达式。**逻辑恒假**（两个互斥条件）而不是
+# 「靠数据假设恒空」：本体类 id 恒为正（DB 自增主键）这只是**当前数据**的性质，
+# 一旦出现负 id（其它写入/导入路径）``ontology_id < 0`` 就不再空 ⇒ 恒假式
+# ``< 0 and >= 0`` 与数据无关。
+# **不能**用空 IN 列表（``ontology_id in []``）表达「空作用域」：那不是合法
+# 表达式，会让整次检索报错。
+_CLASS_ID_SCOPE_DENY_ALL = "ontology_id < 0 and ontology_id >= 0"
+
+
+def _validatedScopeIds(ontologyIds: Sequence[int]) -> list[int]:
+    """校验并归一化本体类 id 作用域（去重 + 升序）。
+
+    校验（越界即炸，不静默改写）：
+
+    - 必须是 ``int``；``bool`` 是 ``int`` 的子类 ⇒ 显式排除（``int(True) == 1``
+      会把一个非法标志悄悄变成类 id 1）。
+    - 必须 ``>= 0``（本体类 id 是 DB 自增主键）。
+
+    非法输入抛 ``ValueError``：``int("12")`` 这类强转会把非法值悄悄改成另一个
+    **合法** id ⇒ 作用域指向别的类 ⇒ 比报错更糟。
+    """
+    ids: set[int] = set()
+    for raw in ontologyIds:
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise ValueError(f"本体类 id 作用域含非法元素：{raw!r}")
+        if raw < 0:
+            raise ValueError(f"本体类 id 作用域含负 id：{raw!r}")
+        ids.add(raw)
+    return sorted(ids)
 
 
 def buildClassIdScopeExpr(ontologyIds: Sequence[int] | None) -> str | None:
@@ -95,17 +120,20 @@ def buildClassIdScopeExpr(ontologyIds: Sequence[int] | None) -> str | None:
     三态（**空集 ≠ 不限**）：
 
     - ``None`` ⇒ 不施加过滤（返回 ``None``）⇒ 与不传作用域逐字节一致。
-    - 空集 ⇒ **deny-all**（``ontology_id < 0``）：作用域里一个类都没有 ⇒ 恒空。
+    - 空集 ⇒ **deny-all**（逻辑恒假式）：作用域里一个类都没有 ⇒ 恒空。
       把它误当成「不限」= 把「本数据源没有类」误读成「全局都能看」。
     - 非空 ⇒ ``ontology_id in [...]``（去重 + 升序 ⇒ 表达式可复现）。
 
     作用域**只适用于本体类集合**：Milvus 的 ``ontology_id`` 在类/属性之间
     **共用 id 序列**（见 ``VALID_EMBEDDING_TYPES`` 上方注释）⇒ 把 class 的 id 集
     套到 property 集合上会误伤。
+
+    Raises:
+        ValueError: 作用域含非法元素（非 int / 负 id）⇒ 边界处显式失败。
     """
     if ontologyIds is None:
         return None
-    ids = sorted({int(ontologyId) for ontologyId in ontologyIds})
+    ids = _validatedScopeIds(ontologyIds)
     if not ids:
         return _CLASS_ID_SCOPE_DENY_ALL
     return "ontology_id in [" + ",".join(str(ontologyId) for ontologyId in ids) + "]"

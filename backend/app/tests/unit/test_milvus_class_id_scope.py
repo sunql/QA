@@ -77,7 +77,8 @@ def _matchesExpr(row: dict, expr: str | None) -> bool:
     """替身的 expr 求值：只认作用域两种形态，治理维度 expr 一律放行。
 
     治理 expr（``domain_codes like [...]`` 等）本批不测 ⇒ 放行即可；
-    作用域 expr（``ontology_id in [...]`` / ``ontology_id < 0``）必须真判。
+    作用域 expr（``ontology_id in [...]`` / ``ontology_id < 0 and ontology_id >= 0``）
+    必须真判（含 deny-all 的逻辑恒假式）。
     """
     if not expr:
         return True
@@ -91,8 +92,13 @@ def _matchesExpr(row: dict, expr: str | None) -> bool:
             }
             if row["ontology_id"] not in ids:
                 return False
-        elif clause == "ontology_id < 0":
-            if not row["ontology_id"] < 0:
+        elif clause.startswith("ontology_id <"):
+            bound = int(clause[len("ontology_id <"):].strip())
+            if not row["ontology_id"] < bound:
+                return False
+        elif clause.startswith("ontology_id >="):
+            bound = int(clause[len("ontology_id >="):].strip())
+            if not row["ontology_id"] >= bound:
                 return False
     return True
 
@@ -151,8 +157,32 @@ class TestBuildClassIdScopeExpr:
         expr = buildClassIdScopeExpr([])
         assert expr is not None
         assert expr != buildClassIdScopeExpr(None)
-        # deny-all 形态：本体类 id 恒为正 ⇒ 该表达式命中不了任何行
-        assert "<" in expr
+        # deny-all 形态：**逻辑恒假**（两个互斥条件），不依赖「id 恒为正」这个
+        # 数据假设 —— 一旦出现负 id，它依然恒空。
+        assert expr == "ontology_id < 0 and ontology_id >= 0"
+
+    def test_deny_all对任意id都恒空(self) -> None:
+        """deny-all 表达式对正 id / 负 id / 0 一律不命中（逻辑恒假，不是数据恒假）。"""
+        expr = buildClassIdScopeExpr([])
+        assert expr is not None
+        for oid in (-7, -1, 0, 1, 999):
+            row = {"ontology_id": oid}
+            assert _matchesExpr(row, expr) is False, f"id={oid} 不该命中 deny-all"
+
+    def test_非法id显式抛错不静默改写(self) -> None:
+        """非法元素 ⇒ ValueError（**不**静默 ``int()`` 强转）。
+
+        ``int("12")`` / ``int(True)`` 会把非法值悄悄变成**另一个合法 id** ⇒
+        作用域指向别的类 ⇒ 比报错更糟。
+        """
+        for bad in (True, False, "12", 1.5, None):
+            with pytest.raises(ValueError):
+                buildClassIdScopeExpr([bad])
+
+    def test_负id显式抛错(self) -> None:
+        """本体类 id 是 DB 自增主键（恒正）⇒ 负 id 是越界输入，显式失败。"""
+        with pytest.raises(ValueError):
+            buildClassIdScopeExpr([-1])
 
     def test_非空集拼成in列表(self) -> None:
         assert buildClassIdScopeExpr([3, 1, 2]) == "ontology_id in [1,2,3]"

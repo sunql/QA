@@ -66,6 +66,7 @@ from app.services.research_agent_ports import (
     stepResult,
 )
 from app.services.research_agent_stages import eslClasses, meteringModelName
+from app.services.recall_datasource_filter import applyDatasourceRecallFilter
 from app.services.research_evidence_summary import trySummarizeEvidence
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,11 @@ class ExecutionDeps:
     # 相位边界算好的业务库绑定（`depsForSession` 一次性写入，二者同生共死）
     adapter: Any | None = None
     dialectArgs: dict[str, Any] | None = None
+    # 数据源 id（相位边界固化，2026-11-19）：跨源召回过滤按它判定类候选集是否
+    # 属于本会话源。**必须**在相位边界取（`depsForSession`）—— 循环内读
+    # `deps.datasource.id` 会触发 MissingGreenlet（失败步的 rollback 会 expire
+    # ORM 实例），把步失败升级成整 turn 死（同 adapter/dialectArgs 的约定）。
+    datasourceId: int | None = None
 
 
 def buildExecutionDeps(
@@ -158,6 +164,7 @@ async def depsForSession(
     return replace(
         base,
         datasource=ds,
+        datasourceId=ds.id,
         adapter=adapterFor(ds),
         dialectArgs=dialectArgsFor(ds),
     )
@@ -370,9 +377,18 @@ async def generateStepSql(
     else:
         question = baseQuestion
     try:
-        classes = selectClassesForTables(
-            await deps.ontology.listClasses(session), eslClasses(state)
+        # 跨源过滤（2026-11-19）：研究入口的类候选集与 chat 主链路**同一口径**
+        # （`applyDatasourceRecallFilter`，三态 fail-open）—— 全局取类会把别的
+        # 数据源登记的类带进 schema（生产事故 main_data_supplier → ORA-00942），
+        # 而本链路的 SQL 跑在会话绑定的源上 ⇒ 跨源类必炸。
+        # 过滤点在**类候选集源头** ⇒ 兜底 `matched or list(classes)`（全量类进
+        # prompt）吐出的也只是已过滤的类。
+        allClasses, _ = await applyDatasourceRecallFilter(
+            session,
+            await deps.ontology.listClasses(session),
+            datasourceId=deps.datasourceId,
         )
+        classes = selectClassesForTables(allClasses, eslClasses(state))
         result = await deps.nl2sql.generateSql(
             question, classes, client, config, session=session, **dialectArgs
         )

@@ -17,6 +17,7 @@ per-arm `except` 吞成空臂，静默降级为空 scope 或空检索，测试�
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 import pytest
@@ -177,3 +178,60 @@ async def test_real_adapters_feed_esl_without_empty_arm(seededAdapters) -> None:
     assert extraction.knowledge[0].title == PAGE_TITLE
     assert extraction.confidenceByArm["business_object"] == 1.0
     assert extraction.confidenceByArm["knowledge"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# I2（2026-11-19 终审 Important-2）BO 臂不得捞已墓碑类
+# ---------------------------------------------------------------------------
+
+_TOMBSTONE_ID = 987002
+_TOMBSTONED_AT = datetime(2026, 11, 19, 10, 0, 0)
+
+
+async def test_bo_arm_excludes_tombstoned_class(dbSession, monkeypatch) -> None:
+    """I2(b) 守卫：BO 臂的 PG 回填必须过滤墓碑行（``valid_to IS NULL``）。
+
+    Milvus 全局检索**无 valid_to 过滤** ⇒ 手工止血的墓碑类（生产 id 270
+    `main_data_supplier`）向量仍在库里；PG 回填若不补 `valid_to IS NULL`，
+    墓碑行仍被回填出 sourceTable ⇒ 墓碑挡不住，同问句从研究入口仍复现
+    ORA-00942（与 2026-11-19 生产事故同形）。
+
+    断言：墓碑类**不进** BO 臂（既不回填 sourceTable，也不留在臂内）。
+    """
+    import app.services.ontology_service as ontologyModule
+
+    dbSession.add(
+        OntologyClass(
+            id=_TOMBSTONE_ID,
+            class_name="供应商主数据",
+            class_alias="supplier",
+            source_table="main_data_supplier",
+            version=1,
+            valid_from=datetime(2026, 1, 1),
+            valid_to=_TOMBSTONED_AT,
+        )
+    )
+    await dbSession.commit()
+
+    # Milvus 命中墓碑类（向量仍在库里 —— 墓碑只打 PG 行，不清向量）
+    monkeypatch.setattr(
+        ontologyModule.EmbeddingService, "generateEmbedding", _fakeGenerateEmbedding
+    )
+    monkeypatch.setattr(
+        ontologyModule.milvus,
+        "searchEmbeddingsByTypeRouted",
+        lambda *args, **kwargs: [
+            {
+                "ontology_id": _TOMBSTONE_ID,
+                "type": "class",
+                "name": "供应商主数据",
+                "alias": "supplier",
+                "description": "供应商主数据",
+                "distance": 0.0,
+            }
+        ],
+    )
+
+    bos = await researchModule._searchBusinessObjects(QUESTION, topK=5)
+
+    assert bos == [], f"墓碑类仍进了 BO 臂：{bos}"

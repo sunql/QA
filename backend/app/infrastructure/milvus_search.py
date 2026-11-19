@@ -17,8 +17,8 @@ from app.infrastructure.milvus_client import (
     _connAlias,
     _connect,
     hasEmbeddingCollection,
+    hnswSearchParams,
 )
-
 
 # ---------------------------------------------------------------------------
 # Collection name constants — 唯一来源 = milvus_collections.py（SSOT）。
@@ -138,7 +138,7 @@ def _searchCollection(
     results = collection.search(
         data=[queryEmbedding],
         anns_field="embedding",
-        param={"metric_type": "L2", "params": {"ef": 64}},
+        param=hnswSearchParams(topK * _DEDUP_OVERFETCH),
         limit=topK * _DEDUP_OVERFETCH,
         output_fields=["ontology_id", "type", "name", "alias", "description"],
     )

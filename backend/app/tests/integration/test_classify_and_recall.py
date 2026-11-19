@@ -423,3 +423,73 @@ async def test_single_step_query_schema_excludes_cross_source_class(dbSession) -
     planText = "\n".join(content for _, content in planCalls[0])
     assert "MAIN_DATA_SUPPLIER" not in planText.upper()
     assert "PRECEIPT" in planText.upper()
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-19 关键词锚定（Task 6）：向量漏选的类经问句片段字面匹配强制纳入候选，
+# 排在向量命中之前（MAX_CLASSES 截断保锚）；anchoredCount 只计「新增」锚定。
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_anchor_forces_missed_class_into_candidates(dbSession) -> None:
+    # Arrange：向量只命中 SUPPLY_ACCESS，DIM_SUPPLIER 漏选；问句含「供应商」
+    # ⇒ 两个类的别名都包含该片段，但 DIM_SUPPLIER 未在向量命中里 ⇒ 必须被
+    # 锚定强制纳入且排在命中之前。落库 flush 拿真实 id（锚定跳过 id=None，
+    # 命中解析同样靠 id——brief 原型的瞬态对象走不到正常命中路径）。
+    real = OntologyClass(
+        class_name="DIM_SUPPLIER", class_alias="供应商主数据",
+        source_table="DIM_SUPPLIER")
+    other = OntologyClass(
+        class_name="SUPPLY_ACCESS", class_alias="供应商准入",
+        source_table="SUPPLY_ACCESS")
+    for c in (real, other):
+        dbSession.add(c)
+    await dbSession.flush()
+    fakeOntology = _FakeOntology(hits=[_hit(other)], allClasses=[real, other])
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None, needRecall=True,
+    )
+
+    names = [c.class_name for c in result.classes]
+    assert "DIM_SUPPLIER" in names  # 漏选类被锚定捞回
+    assert names.index("DIM_SUPPLIER") < names.index("SUPPLY_ACCESS")  # 锚定在前
+    assert result.recallInfo.anchoredCount == 1  # 只计「向量没捞到、靠锚定新增」
+
+
+@pytest.mark.asyncio
+async def test_cross_source_class_is_not_anchored(dbSession) -> None:
+    # Arrange：跨源幽灵类的**别名同样匹配问句**（「供应商」）⇒ 若跨源过滤失效，
+    # 锚定会把它捞回候选并置顶，比向量路径更确定性地复现生产事故
+    # （main_data_supplier → ORA-00942）。schema_cache 只登记本源的 SUPPLY_ACCESS。
+    ds = _datasource()
+    ds.id = 880001
+    ds.name = "GHOST_SRC"
+    dbSession.add(ds)
+    dbSession.add(SchemaCache(
+        datasource_id=880001, schema_name="GHOST_SRC",
+        schema_data=[{"table_name": "SUPPLY_ACCESS", "owner": "GHOST_SRC", "columns": []}],
+        schema_version="t1",
+    ))
+    await dbSession.flush()
+    ghost = OntologyClass(
+        class_name="MAIN_DATA_SUPPLIER", class_alias="供应商主数据",
+        source_table="main_data_supplier")
+    real = OntologyClass(
+        class_name="SUPPLY_ACCESS", class_alias="供应商准入",
+        source_table="SUPPLY_ACCESS")
+    for c in (ghost, real):
+        dbSession.add(c)
+    await dbSession.flush()
+    fakeOntology = _FakeOntology(hits=[_hit(real)], allClasses=[ghost, real])
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None,
+        needRecall=True, datasourceId=880001,
+    )
+
+    names = [c.class_name for c in result.classes]
+    assert "MAIN_DATA_SUPPLIER" not in names  # 跨源幽灵类既不命中也不被锚定
+    assert result.recallInfo.datasourceFiltered == 1
+    assert result.recallInfo.anchoredCount == 0

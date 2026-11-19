@@ -61,6 +61,7 @@ from app.services.messages_zh import (
 from app.services.multi_step_persist_hooks import _maxInputTokens, runStatusFor
 from app.services.multi_step_retry import ERROR_KIND_PERMANENT
 from app.services.nl2sql_service import _readFloatConfig
+from app.services.recall_datasource_filter import applyDatasourceRecallFilter
 from app.services.step_query_planner import StepPlanResult, StepQueryPlanner
 from app.services.think_block import applyThinkPolicy
 from app.services.visual_rationale import summaryTextOnlyRationale
@@ -520,9 +521,18 @@ class MultiStepMixin:
         问"物料"但共享召回只命中供应商表）。步骤召回 ∪ 共享召回：步骤召回在前
         （相关性更高），共享召回殿后（保跨步骤 JOIN 连通所需的中间类）。
         召回失败时降级沿用共享 pc.classes，不阻断步骤执行。
+
+        步骤召回的候选集先按数据源过滤（2026-11-19），与共享召回同口径。
         """
         try:
             all_classes = await self._ontology.listClasses(session)
+            # 步骤级召回也要跨源过滤（2026-11-19 第三调用点）：共享召回的候选集
+            # 已过滤，此处重新全局取类若不过滤，别源登记的物理表会随步骤召回混进
+            # schema（生产事故 main_data_supplier → ORA-00942）；关键词锚定让这条
+            # 路径按问句字面确定性命中，比向量路径更易复现 ⇒ 必须同口径过滤。
+            all_classes, _ = await applyDatasourceRecallFilter(
+                session, all_classes, datasourceId=getattr(pc.ds, "id", None),
+            )
             step_classes, _ = await self._selectRelevantClasses(
                 session, step_plan.sub_question, all_classes
             )

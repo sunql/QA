@@ -17,7 +17,11 @@ _QUESTION_NGRAM_MAX = 6
 
 
 def _questionFragments(question: str) -> list[str]:
-    """问句 2–6 字连续片段（去空白；长片段先入列，供「更长优先」语义）。"""
+    """问句 2–6 字连续片段（去空白；全量枚举，不引入分词器）。
+
+    片段集合与枚举顺序无关：同一类的匹配取**最长命中片段**计分（精确等值优先），
+    跨类排序再用类 id 升序兜底 ⇒ 确定性由打分与 id 保证，不由枚举顺序保证。
+    """
     compact = "".join(question.split())
     fragments: list[str] = []
     seen: set[str] = set()

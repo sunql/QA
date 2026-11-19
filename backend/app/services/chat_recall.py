@@ -20,6 +20,7 @@ from app.domain.schemas import ChatRequest, ClassRecallInfo
 from app.services.chat_helpers import _clipText
 from app.services.intent_service import IntentResult
 from app.services.recall_datasource_filter import applyDatasourceRecallFilter
+from app.services.recall_keyword_anchor import selectAnchoredClasses
 from app.services.semantic_recall_gate import RecallOntology, loadRecallOntology
 
 if TYPE_CHECKING:
@@ -33,6 +34,7 @@ _FEW_SHOT_EXAMPLE_LIMIT_DEFAULT = 400  # 1-2：单条示例的 question/sql 字�
 _CLASS_FILTER_TOP_K_DEFAULT = 15  # 1-1：类裁剪的向量检索 topK；运行期从 system_config.CLASS_FILTER_TOP_K 读，缺席用此值
 _CLASS_FILTER_HIT_MATCH_MIN_DEFAULT = 0.5  # 1-1：命中中可解析为真实类的比例低于该值时告警；运行期从 system_config.CLASS_FILTER_HIT_MATCH_MIN 读
 _CLASS_FILTER_MAX_CLASSES_DEFAULT = 30  # 召回扩边后的 schema 类总量上限；运行期从 system_config.CLASS_FILTER_MAX_CLASSES 读，缺席用此值
+_ANCHOR_MAX_CLASSES_DEFAULT = 5  # 关键词锚定强纳入类的上限；运行期从 system_config.ANCHOR_MAX_CLASSES 读，缺席用此值
 _ADS_RECALL_WEIGHT_DEFAULT = 1.5  # feat-ontology-recall-pruning step D：ADS 层类 score 加权系数
 # 运行期从 system_config.ADS_RECALL_WEIGHT 读；缺席/格式错返此值。提高此值让
 # ADS 黄金路径在向量召回 top15 中更靠前；降低/设为 1.0 关闭加权。
@@ -273,6 +275,44 @@ class RecallMixin:
                 _CLASS_FILTER_MAX_CLASSES_DEFAULT, exc_info=True,
             )
             return _CLASS_FILTER_MAX_CLASSES_DEFAULT
+
+    async def _getAnchorMaxClasses(self, session: AsyncSession) -> int:
+        """读 system_config.ANCHOR_MAX_CLASSES；缺席/格式错/非正返 _DEFAULT。
+
+        与 ``_getClassFilterMaxClasses`` 同口径：读失败不阻断主链路，返硬编码默认。
+        admin 改值后立即对新问句生效（每次召回都现读，无缓存）。
+
+        非正值视同非法而非「不锚定」：上限是锚定强纳入的唯一闸门，0/负数
+        若按字面生效等于锚定静默失效（问法敏感漏选缺陷原样回来），故返默认。
+        """
+        raw: str | None = None  # 预置：except 分支引用 raw 时不得抛 NameError
+        try:
+            row = await session.execute(
+                text("SELECT value FROM system_config WHERE key = 'ANCHOR_MAX_CLASSES'")
+            )
+            raw = row.scalar_one_or_none()
+            if raw is None or raw == "":
+                return _ANCHOR_MAX_CLASSES_DEFAULT
+            value = int(raw)
+            if value <= 0:
+                logger.warning(
+                    "ANCHOR_MAX_CLASSES 非正值 %r，返默认值 %d",
+                    raw, _ANCHOR_MAX_CLASSES_DEFAULT,
+                )
+                return _ANCHOR_MAX_CLASSES_DEFAULT
+            return value
+        except (TypeError, ValueError):
+            logger.warning(
+                "ANCHOR_MAX_CLASSES 值非法 %r，返默认值 %d",
+                raw, _ANCHOR_MAX_CLASSES_DEFAULT,
+            )
+            return _ANCHOR_MAX_CLASSES_DEFAULT
+        except Exception:
+            logger.warning(
+                "读取 ANCHOR_MAX_CLASSES 失败，返默认值 %d",
+                _ANCHOR_MAX_CLASSES_DEFAULT, exc_info=True,
+            )
+            return _ANCHOR_MAX_CLASSES_DEFAULT
 
     async def _getAdsRecallWeight(self, session: AsyncSession) -> float:
         """读 system_config.ADS_RECALL_WEIGHT；缺席/格式错返 _DEFAULT（feat-D）。
@@ -629,8 +669,35 @@ class RecallMixin:
             relevant, dimension_hint=dimension_hint, session=session, view=view
         )
 
-        # 截取 top K
+        # 窗口上限先读：锚定上限必须夹到窗口内（见下），两者同源现读。
         max_classes = await self._getClassFilterMaxClasses(session)
+
+        # 关键词锚定（2026-11-19）：字面包含匹配兜向量措辞敏感性底。
+        # 锚定类排在向量命中之前 ⇒ MAX_CLASSES 截断保锚；与命中去重，
+        # anchoredCount 只计「向量没捞到、靠锚定新增」的类。
+        #
+        # ODS 闸门（与向量命中路径同口径）：锚定是「向量之外的另一条入候选路径」，
+        # 若不拦 ODS 业务表就绕过了 2026-09-19 ODS_BPARTNER 事故闸门——把没有
+        # SUPPLIER_CODE 等业务列的贴源备份表捞回 schema 让 LLM 幻觉属性名。
+        # 显式点名 ODS 表时（explicit_ods_recall）保留，与向量路径一致。
+        #
+        # 上限夹到窗口内：锚定数若超过 MAX_CLASSES，超出部分会被截断丢掉，
+        # 披露的 anchoredCount 会大于实际留在窗口里的锚定类数（说多）；
+        # 夹住后锚定数 ≤ 窗口 ⇒ 锚定类全部留在窗口内，披露即真实。
+        anchorMax = min(await self._getAnchorMaxClasses(session), max_classes)
+        anchorCandidates = [
+            cls for cls in allClasses
+            if not _isOdsBusinessTable(cls) or explicit_ods_recall
+        ]
+        anchored = selectAnchoredClasses(
+            question, anchorCandidates, maxAnchored=anchorMax
+        )
+        rankedIds = {cls.id for cls in relevant}
+        newAnchored = [cls for cls in anchored if cls.id not in rankedIds]
+        anchoredCount = len(newAnchored)
+        relevant = newAnchored + relevant
+
+        # 截取 top K
         selected = relevant[:max_classes]
         pre_expand_truncated = len(relevant) > max_classes
         expanded, truncated_from_expand = await self._expandByJoinNeighbors(
@@ -645,9 +712,12 @@ class RecallMixin:
 
         recall = ClassRecallInfo(
             mode="expanded" if len(expanded) > len(relevant) else "recall",
+            # hitCount = 候选类数（向量命中 + 锚定新增，截断前口径）。锚定类并入
+            # relevant 后此处一并计入 ⇒ 纯向量命中数 = hitCount - anchoredCount。
             hitCount=len(relevant),
             classCount=len(expanded),
             truncated=truncated,
+            anchoredCount=anchoredCount,
         )
         return expanded, recall
 

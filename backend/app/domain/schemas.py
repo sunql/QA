@@ -2188,6 +2188,8 @@ class ClassRecallInfo(CamelModel):
                   （H5 起降级路径同样受裁剪约束，故 truncated 在 fallback 下同样有意义）
     truncated: 类集达到 system_config.CLASS_FILTER_MAX_CLASSES 上限被截断，
     可能存在相关表未进入本次 schema。
+    hitCount: 候选类数（向量命中 + 关键词锚定新增，截断前口径）⇒ 纯向量命中数
+    = hitCount - anchoredCount。
     datasourceFiltered/datasourceFilterSkipped/anchoredCount：见
     Harness/changes/2026-11-19-recall-datasource-filter-anchor/design.md。
     详见 Harness/wiki/nl2sql-engine.md「类召回窗口与规模化风险」。
@@ -2308,7 +2310,10 @@ class ChatResponse(CamelModel):
     # 类召回诊断（2026-09-16）：仅 QUERY/NEW_QUERY/multi_step 填充；其余意图为 None
     classRecall: ClassRecallInfo | None = Field(
         default=None,
-        description="类召回诊断：mode(recall|expanded|fallback)/hitCount/classCount/truncated",
+        description=(
+            "类召回诊断：mode(recall|expanded|fallback)/hitCount/classCount/truncated"
+            "/datasourceFiltered/datasourceFilterSkipped/anchoredCount"
+        ),
     )
     # Phase 7 G4：未指名 Agent 语义路由建议卡片（仅中置信命中时随 QUERY/NEW_QUERY
     # 附带；高置信直接 intent=agent_run，低置信无此字段；前端按字段存在性渲染）

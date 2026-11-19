@@ -69,7 +69,7 @@
 ⚠️ worktree 内 `frontend/node_modules` 是指向主检出的**软链**（Task 7 建，`.gitignore` 覆盖未入库），
 **收尾需删**；本 worktree 内**未执行** `npm install` / `npm ci`（避免穿透写主检出）。
 
-## 三·补、终审修复（Task 9，2026-11-19）
+## 三之二、终审修复（Task 9，2026-11-19）
 
 全分支终审（8 commits，opus）判 **Approve-with-conditions**，查出 4 个 Important + 2 项
 「必须合并前修」。Task 9 一次修完（每个问题先写测试跑 RED → 实现跑 GREEN）。
@@ -79,7 +79,7 @@
 | **I1** | **维度词触发的 DIM 全量拉取绕过过滤**（事故同路径）：`_DIMENSION_HINTS` 含「名称」等常用词 ⇒ `dimension_hint=True` ⇒ `_fetchAllDimClasses` 直查 `source_table LIKE 'DIM_%'`（不过数据源、不受已过滤 `allClasses` 约束）⇒ 跨源 DIM 类进 schema ⇒ ORA-00942 同形 | `chat_recall._rankByLayer` 新增 `allowedClasses` 入参（= 已过滤 `allClasses`），`dim_classes` 与其取 **id 交集**后再并入候选（保留「DIM 全拉」语义，只限定在本源）；快照分支天然同口径 | `28eb1657` |
 | **I2** | **研究入口未纳入**（终审判定属本批必须闭环）：`research_agent_execution.generateStepSql` 全局 `listClasses` 未过滤；BO 臂 Milvus 全局检索无 valid_to 过滤、PG 回填缺 `valid_to IS NULL`（墓碑挡不住）；兜底 `matched or list(classes)` 全量类进 prompt | (a) 执行面复用 `applyDatasourceRecallFilter`（同三态 fail-open，**不另写口径**），过滤点在类候选集源头 ⇒ 兜底也只吐已过滤的类；数据源 id 在**相位边界**固化（`ExecutionDeps.datasourceId`，避免循环内 MissingGreenlet）；(b) BO 臂 PG 回填补 `valid_to IS NULL` ⇒ **只捞活类**（墓碑行与悬空向量一律不进 BO 臂） | `d1a4762b` |
 | **I3** | **no_cache 服务端零日志**：空/缺分支静默返 None ⇒ 披露了 no_cache 但过滤 fail-open 空转**无声** | `loadDatasourceTableSet` 空/缺分支补 `logger.warning`（带 datasourceId，**不带**口令/DSN）；正常路径不打日志 | `1232841f` |
-| **M4** | design.md「同分按向量 score」与实现不符（实现是 **id 升序**兜底）；「调用点（两处共用）」实为三处；研究入口未记 | **只改文档不改代码**：订正排序表述、补第三调用点（`chat_multistep._recallForStep`）、补研究入口与 DIM 交集两节 | `见下提交` |
+| **M4** | design.md「同分按向量 score」与实现不符（实现是 **id 升序**兜底）；「调用点（两处共用）」实为三处；研究入口未记 | **只改文档不改代码**：订正排序表述、补第三调用点（`chat_multistep._recallForStep`）、补研究入口与 DIM 交集两节 | `ab8acb1f` |
 | **M5** | 多 owner「不误杀」的核心口径零覆盖（生产是 Oracle 多 owner） | 补 1 条单测（`_tableKeys` 裸名 ∪ owner 限定名）+ 1 条集成用例（同 datasource 两条 schema_cache 行、不同 owner ⇒ 两个 owner 的类都不被误杀） | `5878315f` |
 
 **明确不在本次范围（终审已判定可挂账，未动）**：`chat_domain.py:698`（MAP 治理写入，不构造 SQL）；

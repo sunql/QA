@@ -1,6 +1,8 @@
 # 生产发版 runbook — 召回数据源过滤 + 关键词锚定（PR #157）
 
-- **代码版本**：`main @ <合并 PR #157 后的 main SHA>`（本批分支 head = `c20fe990`，生产只跑 main ⇒ **镜像必须从合并后的 main 构建**）
+- **代码版本**：`main @ d58bb1ad`（PR #157 已 squash 合并，父 = `c959b77f`）
+  - 本批分支 head = `970fc39f`；合并 commit 与分支头的**镜像相关三路径**（`backend/ frontend/ docker/`）**逐字节相同** ⇒ 已构建的镜像即合并后 main 的镜像（复核命令见 §3）。
+  - ⚠️ 生产只跑 main ⇒ 镜像**不得**用未合并的分支 SHA 出包。
 - **本次动**：**前端 + 后端两个容器** + 数据库**加法迁移 9 个**（0144–0152，见下「★关键依赖」）
 - **不动**：postgres / neo4j / milvus / ollama 容器一律不动；不改 `/opt/qa-system/docker/.env`
 - **执行者**：生产命令全部由用户在宿主机执行（开发机无法直连生产）
@@ -23,7 +25,7 @@
 
 | 形态 | 做法 | 窗口 | 回滚锚点 |
 |---|---|---|---|
-| **A（推荐）** | PR #157 合 main → 从**新 main SHA** 构建一套镜像 → **一次部署**同时完成 0143→0152 迁移 + 召回根治 | **1 次** | **1 套** |
+| **A（推荐）** | PR #157 合 main（✅ 已合 `d58bb1ad`）→ 用已构建的镜像（构建源 `970fc39f`，与合并 commit 镜像路径逐字节等价，§3 复核通过）→ **一次部署**同时完成 0143→0152 迁移 + 召回根治 | **1 次** | **1 套** |
 | B | 先发已产出的 1119 一揽子（`/tmp/qa-*-amd64-1119-main.tar.gz` 仍在）→ 再发本批 | 2 次 | 2 套 |
 
 > 形态 A 更省一个停机窗口与一套锚点；1119 镜像虽已产出，但**它不含本批修复**，走 B 会多一次变更。
@@ -160,7 +162,12 @@ WHERE oc.valid_to IS NULL
 
 ## 3. Phase 1 开发机构建 + 自证 + 交付物
 
-**镜像必须从「合并 PR #157 后的 main」构建**（生产只跑 main；用分支 SHA 构建的镜像不入生产）。
+**镜像必须与「合并 PR #157 后的 main」等价**（生产只跑 main；用未合并的分支 SHA 构建且未复核等价性的镜像不入生产）。
+
+> ✅ **本批已按此口径出包**：构建源 = 分支头 `970fc39f`（工作区 `git status` 干净），
+> 合并 commit = `d58bb1ad`；复核命令 `git diff d58bb1ad 970fc39f -- backend/ frontend/ docker/`
+> **输出为空** ⇒ 两者的镜像内容**逐字节相同** ⇒ 交付的镜像即合并后 main 的镜像。
+> 若复核非空 ⇒ main 期间有推进 ⇒ **必须重建**（命令见下）。
 
 ```bash
 # 开发机（macOS arm64 → linux/amd64 交叉构建）
@@ -214,17 +221,35 @@ docker run --rm --entrypoint sh qa-system-frontend:amd64-1119-recall -c '
 
 | 文件 | 镜像 | sha256 | 大小 |
 |---|---|---|---|
-| `/tmp/qa-backend-amd64-1119-recall.tar.gz` | `qa-system-backend:amd64-1119-recall`（→ tag `qa-backend:offline`） | `56347484b2ea64d24c2b93ced1d56789fb6fac6dffb87652c20c78ce76842502` | 219M |
+| `/tmp/qa-backend-amd64-1119-recall.tar.gz` | `qa-system-backend:amd64-1119-recall`（→ tag `qa-backend:offline`） | `ee9f3ebf6197074cd39de418ff19316c5b2d7acf0636afa1bc21407392f4d703` | 219M |
 | `/tmp/qa-frontend-amd64-1119-recall.tar.gz` | `qa-system-frontend:amd64-1119-recall`（→ tag `qa-system_frontend`） | `6d4fc6a13582cf580c888a57623b7af0452de67540918fe98ace7051f17f882a` | 26M |
 
-- 构建源 = **干净 detached worktree** @ `d2e04806`（PR #157 分支头），**不是**合并后的 main。
-  等价性证明：合并时 main 未推进 ⇒ 合并 commit 的树与分支头**逐字节相同** ⇒ 镜像内容等价
+- 构建源 = **工作区 `.claude/worktrees/fix-recall-anchor` @ `970fc39f`**（`git status` 干净、无未跟踪文件进入构建上下文），
+  **不是**合并后的 main（`d58bb1ad`）。
+  等价性证明：合并时 main 未推进 ⇒ 合并 commit 与分支头在**镜像相关三路径**上**逐字节相同** ⇒ 镜像内容等价
   （Dockerfile 只 `COPY backend/` / `frontend/` / `docker/nginx.conf`，不烤 `.git` ⇒ 镜像内无 SHA 痕迹）。
-  **合并后必须复核**：`git diff <merge-commit> d2e04806` 输出为空；非空 ⇒ main 期间有推进 ⇒ **必须重建**。
-- 自证结果（开发机实测）：
+  **合并后必须复核（已执行，输出为空 ⇒ 通过）**：
+
+  ```bash
+  git diff d58bb1ad 970fc39f -- backend/ frontend/ docker/     # 空 ⇒ 等价；非空 ⇒ 必须重建
+  ```
+
+  > ⚠️ **只比对 `backend/ frontend/ docker/` 三个路径**：合并 commit 与分支头在 `Harness/`、`docs/` 上
+  > 必然可能有差异（同行文档提交、事故分析等），而这些路径**不进镜像**
+  > （`.dockerignore` 排除 `Harness/`、`docs/`、`*.md`）⇒ 整树 diff 会出现「非空但无害」的**假警**。
+  > 反之 `backend/app/tests/` **不**被 `.dockerignore` 排除 ⇒ 后端测试文件一改，后端镜像字节即变。
+
+- ⚠️ **后端镜像曾重建一次**：merge-gate 净新增修复改了
+  `backend/app/tests/integration/test_ontology_drift_api.py`（断言口径）与
+  `backend/app/services/nl2sql_schema.py`（注释订正）⇒ 后端镜像字节改变 ⇒ 已从 `970fc39f` 重建
+  （sha256 由 `56347484…` 变为 `ee9f3ebf…`）。
+  **前端镜像未重建**：`frontend/` 相对上一版构建源 `d2e04806` **逐字节未变** ⇒ sha256 保持 `6d4fc6a1…`。
+- 自证结果（开发机实测，**重建后**）：
   - 后端：`alembic heads` = **`0152 (head)`**（单一 head，无 0153+、无采购 0154–0158）；
     `recall_datasource_filter.py` / `recall_keyword_anchor.py` 均在镜像内；
-    `grep -c applyDatasourceRecallFilter` = chat_recall **2** / chat_service **2** / chat_multistep **2** / research_agent_execution **3**（均 ≥1）。
+    `grep -c applyDatasourceRecallFilter` = chat_recall **2** / chat_service **2** / chat_multistep **2** / research_agent_execution **3**（均 ≥1）；
+    重建内容自证：`grep -c "召回数据源过滤上线" nl2sql_schema.py` = **1**、
+    `grep -c "ZJTH.OLD_PRECEIPT" test_ontology_drift_api.py` = **3** ⇒ 镜像内确为重建后的版本。
   - 前端：新 bundle **`index-DizP7VQ_.js`**（≠ 现役 `index-rBu8Smfz.js`，≠ 1119 那次 `index-BVutQwOS.js`）；
     `已按当前数据源过滤` = 1、`已按关键词锚定` = 1、`泰鸿智脑` = 1、`resolver 127.0.0.11` = 1。
   - ⚠️ `docker run` 报 `platform (linux/amd64) does not match host (linux/arm64/v8)` 是**预期**（交叉构建），不是错误。

@@ -4,7 +4,9 @@
 - **批次**：`2026-11-19-recall-datasource-filter-anchor`（8 任务 TDD 分步）
 - **分支**：`fix/recall-datasource-anchor`（基线 `origin/main` = `c959b77f`）
 - **设计**：[design.md](./design.md)（同目录）
-- **状态**：**代码已实施并回归通过（含 2026-11-19 终审修复 Task 9：4 Important + 2 必须合并前修）；生产生效仍需一次后端镜像发版**（本分支未部署）
+- **状态**：**代码已实施并回归通过（含 2026-11-19 终审修复 Task 9：4 Important + 2 必须合并前修）**；
+  **已 squash 合入 main = `d58bb1ad`**（merge-gate `merge-gate / failure-set-diff` = success ⇒ 净新增 0 / 净丢失 0）；
+  **生产生效仍需一次镜像发版**（未部署）—— runbook 见同目录 [deploy-prod.md](./deploy-prod.md)
 
 ## 一、问题与解法（回顾）
 

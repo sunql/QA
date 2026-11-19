@@ -19,16 +19,27 @@
 | #155 | 品牌改名「AI服务平台」→「泰鸿智脑」 | 前端 5 处（title/favicon/侧边栏/折叠缩写/登录页） |
 | **#156** | **Milvus HNSW ef>=limit 修复** | **后端 4 文件**（本次部署的两个 bug 修复之一；线上每轮 chat 的 wiki 注入 property 召回静默失效的根因） |
 
-**数据库**：`alembic upgrade head` 会把生产库从 **0148** 升到 **0152**，共 4 个**纯加法**迁移：
+**数据库**：`alembic upgrade head` 会把生产库从 **0143** 升到 **0152**，共 **9 个纯加法**迁移：
 
 | 迁移 | 内容 | downgrade |
 |---|---|---|
+| 0144 | `session_query_state` 加可空列 `semantic_release_id` | 删列 |
+| 0145 | `agent_orchestration_run` 加 3 个可空列 | 删列 |
+| 0146 | CREATE discovery_source / metadata_snapshot | drop 两表 |
+| 0147 | metadata_snapshot 库级不可变触发器 | drop 触发器 |
+| 0148 | 放宽 audit_log.action CHECK（+REUSE） | 恢复旧 CHECK |
 | 0149 | CREATE workflow_definition / workflow_instance | drop 两表 |
 | 0150 | CREATE workflow_step / workflow_command | drop 两表 |
 | 0151 | CREATE approval_task / workflow_outbox | drop 两表 |
 | 0152 | 放宽 audit_log.action CHECK（新增 7 个工作流动作白名单） | 恢复旧 CHECK |
 
-全部可逆、不加列、不写业务数据。**采购线（0154–0158）不在 main，不会上生产。**
+全部可逆、不加列、不写业务数据。
+> ⚠️ **2026-11-19 生产预检实测**：生产库 `alembic_version` = **0143**（不是预期的 0148）——
+> 0144–0148（WP-ONT-AI A1 线）当时标「不部署」，1116 热修未跑迁移。本次必须升过它们：
+> 新 backend ORM 已声明这些表，schema drift 的 `missing_table` 是 blocking 级，不升库起不来。
+> 五个迁移已逐个核过内容：加法/可逆/零数据写入，风险评估见上表。
+
+**采购线（0154–0158）不在 main，不会上生产。**
 
 **验收标准**：
 1. 浏览器标签页/侧边栏 = **泰鸿智脑**（favicon T、折叠缩写 TH）；
@@ -83,13 +94,13 @@ docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'backend|fron
 # ② 现役前端 bundle（必须是 index-rBu8Smfz.js；不是 ⇒ 基线变了，停下发我）
 docker exec qa-frontend sh -c 'ls /usr/share/nginx/html/assets/index-*.js'
 
-# ③ 现役库的 alembic 版本（预期 0148）
+# ③ 现役库的 alembic 版本（预期 **0143**，2026-11-19 实测值）
 #    用户/库名从 postgres 容器自己的环境变量取（不显示密码；如报错先看：
 #    docker exec qa-postgres sh -c 'env | grep ^POSTGRES | grep -v PASSWORD'）
 docker ps --format '{{.Names}}' | grep -i postgres
 docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -c "select version_num from alembic_version"'
-# 不是 0148 ⇒ 停下发我（说明有人跑过别的迁移，本方案迁移链对不上）
+# 不是 0143 ⇒ 停下发我（说明有人跑过别的迁移，本方案迁移链对不上）
 
 # ④ 健康检查
 curl -s -o /dev/null -w "backend_health=%{http_code}\n" http://localhost:8000/api/v1/health
@@ -99,7 +110,7 @@ curl -s -o /dev/null -w "frontend_health=%{http_code}\n" http://localhost:5173/
 df -h /var/lib/docker
 ```
 
-**停下条件**：② 的 bundle 不是 `index-rBu8Smfz.js`；③ 的 alembic 版本不是 `0148`；④ 任一非 200。
+**停下条件**：② 的 bundle 不是 `index-rBu8Smfz.js`；③ 的 alembic 版本不是 `0143`；④ 任一非 200。
 
 ---
 
@@ -118,11 +129,11 @@ ls -lh /opt/qa-system/backups/ | tail -3
 # 备份非空校验：tail -3 看文件大小，应是几百 KB～数百 MB；0 字节 ⇒ 重跑并检查上面报错
 ```
 
-> 0149–0152 全是加法迁移 ⇒ 即使后续回滚到旧镜像，新表留在库里也只是
+> 0144–0152 全是加法迁移 ⇒ 即使后续回滚到旧镜像，新表留在库里也只是
 > `extra_table` warning（schema drift 的 `extra_table` 是 warning 级不 blocking，已核实
 > `backend/app/infrastructure/schema_drift.py:116`）。
 > 但旧镜像的 CMD `alembic upgrade head` 会在库=0152 时报「Can't locate revision」**起不来**
-> ⇒ 回滚前必须先降级（见 §7）。
+> ⇒ 回滚前必须先降级到 **0143**（见 §7）。
 
 ---
 
@@ -146,8 +157,8 @@ qa_compose config | grep image    # 确认两个服务都解析到新 tag
 # ① 先后端（会跑 alembic upgrade head → 0152，然后再起 uvicorn）
 qa_compose up -d --no-build --no-deps --force-recreate backend
 
-# 盯启动日志：迁移 4 条 + "Application startup complete." 必须出现
-docker logs -f qa-backend 2>&1 | grep -E "0149|0150|0151|0152|Application startup complete|ERROR|blocking" | head -30
+# 盯启动日志：迁移 9 条（0144–0152）+ "Application startup complete." 必须出现
+docker logs -f qa-backend 2>&1 | grep -E "Running upgrade|014[4-9]|015[0-2]|Application startup complete|ERROR|blocking" | head -40
 
 # ② 再前端
 qa_compose up -d --no-build --no-deps --force-recreate frontend
@@ -224,16 +235,16 @@ curl -s -o /dev/null -w "api_via_frontend=%{http_code}\n" http://localhost:5173/
 ## 7. 回滚（后端回滚必须先降级 DB）
 
 ```bash
-# ① 停新后端，用新镜像一次性跑 downgrade（新迁移有 down 路径，0149–0152 都是 drop/恢复 CHECK）
+# ① 停新后端，用新镜像一次性跑 downgrade（0143→0152 全链 9 个迁移都有 down 路径）
 qa_compose stop backend
 docker run --rm --network qa-system_default \
   -v /opt/qa-system/docker/.env:/app/.env:ro \
   qa-system-backend:amd64-1119-main \
-  alembic downgrade 0148
+  alembic downgrade 0143
 # （网络名以 docker network ls 实测为准；alembic 需要能连库。容器内 DATABASE_URL
 #   读 .env，与 qa_compose 同一文件。）
 docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-  -c "select version_num from alembic_version"'    # 期望回到 0148
+  -c "select version_num from alembic_version"'    # 期望回到 0143
 
 # ② 换回旧镜像
 docker tag qa-system_backend:pre-1119-main  qa-system_backend
@@ -241,8 +252,9 @@ docker tag qa-system_frontend:pre-1119-main qa-system_frontend
 qa_compose up -d --no-build --no-deps --force-recreate backend frontend
 ```
 
-> - 0149–0152 的 downgrade 会 drop 6 张 P5 表 ⇒ 部署窗口内产生的审批/工作流数据会丢
->   （部署前有 pg_dump 兜底，见 §3）。audit_log 的既有数据不受影响（0152 只动 CHECK）。
+> - downgrade 0143 会 drop 本次新建的 8 张表（workflow 6 张 + discovery 2 张）并删 4 个
+>   可空列 ⇒ 部署窗口内产生的审批/工作流数据会丢（部署前有 pg_dump 兜底，见 §3）。
+>   audit_log 的既有数据不受影响（0148/0152 只动 CHECK）。
 > - **前端可单独回滚**（不跑 §7 的 ①②，只换 frontend tag + recreate）。
 > - 不想动库的替代方案：保持库=0152、只回滚前端（前端回滚无任何 DB 依赖）。
 

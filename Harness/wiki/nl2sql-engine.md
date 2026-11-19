@@ -766,6 +766,44 @@ reason=… total=… kept=… odsFiltered=… truncated=…`。此前降级是 `
 
 配套可观测性：`/chat` 响应已带 `classRecall` 诊断字段（mode/hitCount/classCount/truncated），前端在截断/降级时向用户展示提示（2026-09-16 落地）。
 
+### 召回链前置过滤 + 关键词锚定（2026-11-19 落地）
+
+针对两个生产缺陷补的两级处理：**跨源幽灵表**（类登记在 A 源、SQL 在 B 源执行 ⇒ `ORA-00942`）与
+**问法敏感漏选**（改一个措辞就把正确类挤出 topK ⇒ validator 报「不在本体 schema 中」）。
+设计与裁决见 `Harness/changes/2026-11-19-recall-datasource-filter-anchor/design.md`
+（实施结果见同目录 `summary.md`）。
+
+**第 1 级·数据源过滤（前置，硬过滤）**：候选类集在进召回链**之前**按当前会话数据源过滤。
+`ontology_class` 没有「类→数据源」绑定列 ⇒ 用 `schema_cache`（每数据源物理表清单，多 owner 行取并集）
+做**运行时校验**：类的 `source_table`（裸名 / `owner.表名` 两种写法、大小写不敏感）不在当前源清单 ⇒ 剔除。
+`source_table` 为空的类**保留**（无法判定不误杀），仅计数。
+
+三态行为（fail-open 裁决，缺目录不把真实表查询打死）：
+
+| 场景 | 行为 | 披露 `datasourceFilterSkipped` |
+|---|---|---|
+| 有缓存 + 有 `datasourceId` | 硬过滤，跨源类不进候选集 | `null`（已过滤），`datasourceFiltered = N` |
+| `datasourceId = None` | 不过滤（同现状） | `"no_datasource"` |
+| `schema_cache` 缺失/空/读失败 | 不过滤（fail-open，只 warning 不阻断主链路） | `"no_cache"` |
+
+**第 2 级·关键词锚定（兜底，纯增量不淘汰）**：问句切 **2–6 字连续片段**（n-gram，无分词器），
+与类的 `class_alias` / `class_name` 做**包含匹配**（大小写归一）。命中类**无条件纳入**候选集并
+**排在向量命中之前** ⇒ `MAX_CLASSES` 截断挤不掉锚定类。排序 = 精确等值 > 匹配片段更长 > 类 id 升序（确定性兜底）。
+上限 `system_config.ANCHOR_MAX_CLASSES`（**默认 5**），并夹到 `MAX_CLASSES` ⇒ 披露数与实际留窗数一致。
+锚定池 = **已被数据源过滤后的幸存类**（再过 ODS 闸门），零命中不做任何事。
+
+**执行顺序（不可颠倒）**：**数据源过滤（淘汰跨源）→ 锚定（在幸存类里取锚）→ 向量命中交集**
+⇒ **锚定永不捞回幽灵类**。降级路径 `_fallbackRecall` 不接锚定（另批再议）。
+
+**披露字段**（`ClassRecallInfo`，可选字段、默认值 ⇒ wire format 向后兼容）：
+`datasourceFiltered`（被滤掉的跨源类数）、`datasourceFilterSkipped`（`null` / `"no_datasource"` / `"no_cache"`）、
+`anchoredCount`（靠锚定新增的类数，不含向量已命中的类）。前端 `MessageItem.tsx` 在既有 classRecall
+提示位之后追加 info 级 Alert，三态互斥择一展示（过滤 > 跳过 > 锚定），文案走 i18n（zh/en）。
+
+⚠️ 已知挂账（后续批次）：锚定类 `_recall_score = 0.0`（wiki 注入打分口径待定权重）；
+`ANCHOR_MAX_CLASSES ≥ MAX_CLASSES` 的极端配置会让锚定占满窗口、挤掉向量命中（配置约束待补说明）；
+步骤级召回（`chat_multistep._recallForStep`）的 `datasourceFiltered` 披露随既有模式整体丢弃。
+
 ## 相对时间窗口契约（近 N 个月 / 近 N 天）
 
 方言日期算术规则（`app/services/nl2sql_dialects.py` 的 `dateArithmeticRule`）是 LLM 照抄的模板：

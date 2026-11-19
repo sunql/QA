@@ -42,3 +42,15 @@
 
 - 开发机侧：**完成**（镜像 + runbook 已产出，等用户在生产宿主机执行）。
 - 生产侧：待用户执行 Phase 0–6；执行结果回填本目录。
+
+## 2026-11-19 生产预检实测
+
+- ✅ 前端现役 bundle = `index-rBu8Smfz.js`（基线未漂移）——用户已确认预检通过到 ③。
+- ⚠️ **生产库 `alembic_version` = 0143，不是预期的 0148**：0144–0148（WP-ONT-AI A1 线）
+  当时标「不部署」，1116 热修未跑迁移。**裁决：放行升级**——9 个迁移（0144–0152）逐个
+  核过内容，全部加法/可逆/零数据写入；且新 ORM 已声明这些表，`missing_table` blocking，
+  不升库新镜像起不来。runbook 预期值已全量改写（0148→0143，迁移表扩为 9 行，
+  回滚目标 0143，downgrade 会 drop 8 张表 + 删 4 个可空列）。
+- runbook 占位符坑：`<POSTGRES_USER>` 被用户原样执行撞 bash 重定向 ⇒ 已全部改为
+  `docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" ...'`（容器内展开环境变量，
+  不占宿主 shell、不碰 .env）。

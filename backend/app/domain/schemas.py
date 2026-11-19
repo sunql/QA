@@ -2188,6 +2188,8 @@ class ClassRecallInfo(CamelModel):
                   （H5 起降级路径同样受裁剪约束，故 truncated 在 fallback 下同样有意义）
     truncated: 类集达到 system_config.CLASS_FILTER_MAX_CLASSES 上限被截断，
     可能存在相关表未进入本次 schema。
+    datasourceFiltered/datasourceFilterSkipped/anchoredCount：见
+    Harness/changes/2026-11-19-recall-datasource-filter-anchor/design.md。
     详见 Harness/wiki/nl2sql-engine.md「类召回窗口与规模化风险」。
     """
 
@@ -2195,6 +2197,11 @@ class ClassRecallInfo(CamelModel):
     hitCount: int = 0
     classCount: int = 0
     truncated: bool = False
+    # 2026-11-19 数据源过滤+锚定披露：跨源类被滤数量 / 跳过原因(no_datasource|no_cache)
+    # / 锚定纳入数量。默认值 = 未启用，wire 向后兼容。
+    datasourceFiltered: int = 0
+    datasourceFilterSkipped: str | None = None
+    anchoredCount: int = 0
 
 
 class HypothesisRead(CamelModel):

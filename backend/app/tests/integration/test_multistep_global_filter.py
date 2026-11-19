@@ -136,7 +136,7 @@ class _FakeOntologyService:
     async def listClasses(self, session):
         return self._classes
 
-    async def searchByKeyword(self, query, *, topK=5, typeFilter=None):
+    async def searchByKeyword(self, query, *, topK=5, typeFilter=None, classOntologyIds=None):
         return []
 
     async def listMetrics(self, session):

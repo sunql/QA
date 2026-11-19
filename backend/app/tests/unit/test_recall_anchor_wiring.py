@@ -325,7 +325,9 @@ class TestAnchorFallbackRescue:
         """检索基础设施故障 ⇒ 不接管（宽窗更稳），行为不变。"""
 
         class _BoomSearchOntology(_FakeOntologyService):
-            async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+            async def searchByKeyword(
+                self, query, *, topK=5, typeFilter=None, classOntologyIds=None
+            ) -> list:
                 raise RuntimeError("Milvus 不可用")
 
         supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
@@ -523,6 +525,112 @@ class TestMultistepAnchorRescue:
 
         assert [c.id for c in newPc.classes] == [1]  # 锚定窄窗（非宽窗全量）
 
+
+
+class TestClassIdScopeWiring:
+    """Gap A：本体类 id 作用域推进向量检索窗口（接线层）。
+
+    根因（生产实证 2026-11-19）：数据源过滤只在**应用侧候选集**生效，而向量
+    检索窗口是**全局**的 ⇒ topK 名额被跨源类/墓碑类吃光 ⇒
+    ``hits=20 total=94`` 里能解析到本地类的为 0。
+
+    接线层的两条不可让步的口径：
+    1. **作用域 = 候选集的 id 集**（与候选集同口径 ⇒ 窗口与候选集一致）；
+    2. **无作用域时调用形态逐字不变**（不向下游多传 kwarg）——既有替身只认
+       ``(query, *, topK, typeFilter)``，多传 kwarg 会让它们整体抛 TypeError
+       ⇒ 被 ``except Exception`` 吞成 ``search_error`` ⇒ 测试静默失去向量
+       路径的覆盖（假绿）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_scoped_call_carries_local_class_ids(self) -> None:
+        """候选集已按数据源收窄 ⇒ 作用域 = 候选集的 id 集。"""
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        receipt = _cls(2, "RECEIPT", "收货单")
+        ontology = _FakeOntologyService(
+            [supplier, receipt], searchHits=[SimpleNamespace(id=2)],
+        )
+        service = _buildService(ontology=ontology)[0]
+
+        await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [supplier, receipt],
+            isDatasourceScoped=True,
+        )
+
+        assert len(ontology.searchCalls) == 1
+        assert ontology.searchCalls[0]["classOntologyIds"] == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_unscoped_call_shape_is_unchanged(self) -> None:
+        """候选集未按数据源收窄 ⇒ **不多传 kwarg**（调用形态与今天逐字一致）。
+
+        用一个**只认** ``(query, *, topK, typeFilter)`` 的严格替身证明：真多传了
+        ``classOntologyIds`` ⇒ TypeError ⇒ 会被 ``except Exception`` 吞成
+        ``search_error`` ⇒ 表现为「宽窗回退」而不是报错。
+
+        断言用「没有降级」而不是「没报错」：降级是静默的，报错反而不是。
+        """
+        supplier = _cls(1, "DIM_SUPPLIER", "供应商主数据")
+        receipt = _cls(2, "RECEIPT", "收货单")
+
+        class _StrictOntology(_FakeOntologyService):
+            """故意**不**接受 classOntologyIds：多传 kwarg 必然 TypeError。"""
+
+            async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+                return [SimpleNamespace(id=1)]
+
+        service = _buildService(
+            ontology=_StrictOntology([supplier, receipt])
+        )[0]
+
+        result, recall = await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [supplier, receipt],
+        )
+
+        # 若多传了 kwarg ⇒ TypeError ⇒ search_error ⇒ mode="fallback" 且全量回退
+        assert recall.mode == "recall"
+        assert [c.id for c in result] == [1]
+
+    @pytest.mark.asyncio
+    async def test_empty_scope_is_deny_all_not_unlimited(self) -> None:
+        """候选集里没有任何带 id 的类 ⇒ 作用域 = 空集（deny-all），**不是**不限。
+
+        回落成「不限」= 把「本数据源没有类」误读成「全局都能看」⇒ 跨源类又回来。
+        """
+        noId = OntologyClass(
+            id=None, class_name="X", class_alias=None, description=None,
+            source_table="X", properties=[],
+        )
+        ontology = _FakeOntologyService([noId], searchHits=[])
+        service = _buildService(ontology=ontology)[0]
+
+        await service._selectRelevantClasses(
+            _FakeSession(), "公司目前有多少供应商", [noId],
+            isDatasourceScoped=True,
+        )
+
+        assert ontology.searchCalls[0]["classOntologyIds"] == []
+
+    @pytest.mark.asyncio
+    async def test_scope_excludes_cross_source_classes(self) -> None:
+        """作用域只含**本地**类 id（跨源类已被数据源过滤剔除，不进作用域）。
+
+        若跨源类 id 混进作用域 ⇒ Milvus 窗口里仍有跨源类 ⇒ 根因没修掉。
+        """
+        local = _cls(1, "SUPPLY_ACCESS", "供应商准入")
+        ghost = _cls(2, "MAIN_DATA_SUPPLIER", "供应商主数据", src="main_data_supplier")
+        ontology = _FakeOntologyService(
+            [local], searchHits=[SimpleNamespace(id=1)],
+        )
+        service = _buildService(ontology=ontology)[0]
+
+        await service._selectRelevantClasses(
+            _FakeSession(), "供应商准入有哪些", [local],
+            isDatasourceScoped=True,
+        )
+
+        assert ontology.searchCalls[0]["classOntologyIds"] == [1]
+        assert 2 not in ontology.searchCalls[0]["classOntologyIds"]
 
 
 class TestAnchorMaxClassesConfig:

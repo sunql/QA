@@ -212,12 +212,22 @@ class _FakeOntologyService:
         self.createdMetricActors: list[str] = []
         self.createdClassActors: list[str] = []
         self.updatedPropertyActors: list[str] = []
+        # 记录 searchByKeyword 的每次调用（Gap A 作用域断言用）
+        self.searchCalls: list[dict] = []
 
     async def listClasses(self, session) -> list[OntologyClass]:
         return self._classes
 
-    async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+    async def searchByKeyword(
+        self, query, *, topK=5, typeFilter=None, classOntologyIds=None
+    ) -> list:
         # 1-1：默认为空召回（触发回退全量）；测试可注入 searchHits 验证裁剪
+        # classOntologyIds：Gap A 的本体类 id 作用域（None=不限/[]=deny-all）。
+        # 记录收到的作用域，供接线断言用。
+        self.searchCalls.append({
+            "query": query, "topK": topK, "typeFilter": typeFilter,
+            "classOntologyIds": classOntologyIds,
+        })
         return self.searchHits
 
     async def listMetrics(self, session) -> list[OntologyMetric]:
@@ -988,7 +998,9 @@ class TestChatService:
         )
 
         class _BoomSearchOntology(_FakeOntologyService):
-            async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+            async def searchByKeyword(
+                self, query, *, topK=5, typeFilter=None, classOntologyIds=None
+            ) -> list:
                 raise RuntimeError("Milvus 不可用")
 
         service, llm, _, _ = _buildService(ontology=_BoomSearchOntology([supplier, receipt]))
@@ -1008,7 +1020,9 @@ class TestChatService:
     async def test_class_filter_logs_search_error_fallback(self, caplog) -> None:
         """1-1：检索抛错时回退全量并记 reason=search_error（供回退率聚合）。"""
         class _BoomSearchOntology(_FakeOntologyService):
-            async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+            async def searchByKeyword(
+                self, query, *, topK=5, typeFilter=None, classOntologyIds=None
+            ) -> list:
                 raise RuntimeError("Milvus 不可用")
 
         service, _, _, _ = _buildService(ontology=_BoomSearchOntology(self._classes(1)))
@@ -2357,7 +2371,9 @@ class TestClassRecallDiagnostics:
     async def test_fallback_on_search_error(self) -> None:
         """检索抛错回退全量：mode=fallback，hitCount=0，classCount=全量。"""
         class _BoomSearchOntology(_FakeOntologyService):
-            async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+            async def searchByKeyword(
+                self, query, *, topK=5, typeFilter=None, classOntologyIds=None
+            ) -> list:
                 raise RuntimeError("Milvus 不可用")
 
         classes = self._classes(1, 2)
@@ -2681,7 +2697,9 @@ class TestClassRecallFallbackAppliesPruning:
     def _service(self, classes, *, boom=False, hits=None, joins=None):
         if boom:
             class _BoomSearchOntology(_FakeOntologyService):
-                async def searchByKeyword(self, query, *, topK=5, typeFilter=None) -> list:
+                async def searchByKeyword(
+                    self, query, *, topK=5, typeFilter=None, classOntologyIds=None
+                ) -> list:
                     raise RuntimeError("Milvus 不可用")
 
             ontology = _BoomSearchOntology(classes)

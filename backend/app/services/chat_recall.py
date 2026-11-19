@@ -659,10 +659,35 @@ class RecallMixin:
                 mode="recall", hitCount=0, classCount=0,
             )
         topK = await self._getClassFilterTopK(session)
+        # Gap A（2026-11-20 根因修复）：把「本地类 id 集」推进 Milvus 的 expr
+        # ⇒ 向量检索窗口与候选集口径一致。
+        #
+        # 为什么必须：数据源过滤只在**应用侧**（Python）生效，向量检索打的是
+        # Milvus **全局**集合 ⇒ topK 名额被跨源类/墓碑类吃光。生产实证
+        # （2026-11-19）：候选集已收窄到 94 个本地类，但向量命中 20 个里能解析到
+        # 本地类的为 **0** ⇒ reason=no_match 早退 ⇒ 召回裁剪被架空。
+        #
+        # 作用域只在**候选集已按数据源收窄**时施加（isDatasourceScoped）：
+        # 未收窄（no_datasource / no_cache）时候选集本来就是全局的 ⇒ 作用域=None
+        # ⇒ 与今天逐字节一致。
+        scopeIds = (
+            [cls.id for cls in allClasses if cls.id is not None]
+            if isDatasourceScoped else None
+        )
         try:
-            hits = await self._ontology.searchByKeyword(
-                question, topK=topK, typeFilter="class"
-            )
+            if scopeIds is None:
+                # 无作用域 ⇒ 调用形态逐字不变（不多传 kwarg）：既有替身只认
+                # ``(query, *, topK, typeFilter)``，多传 kwarg 会让它们整体抛
+                # TypeError ⇒ 被下面的 except 吞成 search_error ⇒ 测试静默
+                # 失去向量路径的覆盖。
+                hits = await self._ontology.searchByKeyword(
+                    question, topK=topK, typeFilter="class"
+                )
+            else:
+                hits = await self._ontology.searchByKeyword(
+                    question, topK=topK, typeFilter="class",
+                    classOntologyIds=scopeIds,
+                )
         except Exception:
             # 只留堆栈：reason=/计数由 _fallbackRecall 单点透出，避免回退率翻倍
             logger.warning("本体类裁剪检索失败，进入降级路径", exc_info=True)

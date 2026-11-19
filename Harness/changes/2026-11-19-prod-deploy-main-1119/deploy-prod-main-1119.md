@@ -117,10 +117,14 @@ df -h /var/lib/docker
 ## 3. Phase 1 回滚锚点（镜像 tag + **pg_dump**）
 
 ```bash
-# 镜像锚点
-docker tag qa-system_backend  qa-system_backend:pre-1119-main
-docker tag qa-system_frontend qa-system_frontend:pre-1119-main
-docker images | grep -E 'qa-system_(backend|frontend)'
+# 镜像锚点（⚠️ 2026-11-19 生产实测：backend 现役镜像名是 qa-backend:offline，
+# 不是 qa-system_backend —— 生产 compose 的 backend service 引用 qa-backend:offline；
+# tag 打错名会报 No such image。前端现役 = qa-system_frontend（= 改名镜像 e4751315a9a0））
+docker tag qa-backend:offline  qa-backend:pre-1119-main
+docker tag qa-system_frontend  qa-system_frontend:pre-1119-main
+docker images | grep -E 'qa-backend:pre|qa-system_frontend:pre'
+# 后端锚点核对：两行应同 Image ID（都是现役 qa-backend:offline 的 ID）
+# 前端锚点核对：pre-1119-main 应 = e4751315a9a0（改名镜像）
 
 # 数据库锚点（本次有 DDL，必须备份）
 docker exec qa-postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' \
@@ -144,9 +148,12 @@ ls -lh /opt/qa-system/backups/ | tail -3
 ```bash
 docker load -i /tmp/qa-backend-amd64-1119-main.tar.gz
 docker load -i /tmp/qa-frontend-amd64-1119-main.tar.gz
-docker tag qa-system-backend:amd64-1119-main  qa-system_backend
+# ⚠️ tag 成**现役容器引用的名字**：backend → qa-backend:offline（生产 compose 引用名），
+#    frontend → qa-system_frontend。不是给 compose 引入新名字。
+docker tag qa-system-backend:amd64-1119-main  qa-backend:offline
 docker tag qa-system-frontend:amd64-1119-main qa-system_frontend
-qa_compose config | grep image    # 确认两个服务都解析到新 tag
+docker images | grep -E 'qa-backend:offline|qa-system_frontend:latest'
+# qa-backend:offline 的 Image ID 应变为新镜像（原 ID 已被 pre-1119-main 锚点保留）
 ```
 
 ---
@@ -246,8 +253,8 @@ docker run --rm --network qa-system_default \
 docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -c "select version_num from alembic_version"'    # 期望回到 0143
 
-# ② 换回旧镜像
-docker tag qa-system_backend:pre-1119-main  qa-system_backend
+# ② 换回旧镜像（注意 backend 的现役引用名是 qa-backend:offline）
+docker tag qa-backend:pre-1119-main  qa-backend:offline
 docker tag qa-system_frontend:pre-1119-main qa-system_frontend
 qa_compose up -d --no-build --no-deps --force-recreate backend frontend
 ```

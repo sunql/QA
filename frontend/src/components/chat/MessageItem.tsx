@@ -173,6 +173,29 @@ function MessageItem({
                 }
               />
             ) : null}
+            {/* 类召回披露（2026-11-19 召回数据源过滤+关键词锚定批次）：
+                跨源过滤 / 过滤跳过 / 关键词锚定——info 级，与上方 warning 级诊断并存。 */}
+            {message.classRecall &&
+            ((message.classRecall.datasourceFiltered ?? 0) > 0 ||
+              Boolean(message.classRecall.datasourceFilterSkipped) ||
+              (message.classRecall.anchoredCount ?? 0) > 0) ? (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 8 }}
+                message={
+                  (message.classRecall.datasourceFiltered ?? 0) > 0
+                    ? t("messageItem.classRecallDatasourceFiltered", {
+                        total: message.classRecall.datasourceFiltered ?? 0,
+                      })
+                    : message.classRecall.datasourceFilterSkipped
+                      ? t("messageItem.classRecallDatasourceSkipped")
+                      : t("messageItem.classRecallAnchored", {
+                          total: message.classRecall.anchoredCount ?? 0,
+                        })
+                }
+              />
+            ) : null}
             {/* F2：KPI 数据源不一致警告——KPI 答案本身有效，仅提示用户注意。
                 白名单制：code 不在映射表里则不渲染（不冒泡裸 key，不 fallback）。 */}
             {message.kpiDatasourceCode && message.kpiDatasourceCode in KPI_WARNING_I18N_KEYS ? (

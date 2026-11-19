@@ -423,6 +423,11 @@ export const enUS = {
     affinityLocked: "🔒 Locked to {model} · {turns} turns remaining",
     classRecallTruncated: "This query hit the recall window limit ({total} tables); some related tables may be excluded. Try a more specific question or ask an admin to adjust the recall window.",
     classRecallFallback: "Table recall is temporarily unavailable; tables were picked by warehouse layer order (bounded by the recall window limit), which may affect answer accuracy.",
+    // 类召回披露（2026-11-19 召回数据源过滤+关键词锚定批次）
+    classRecallDatasourceFiltered: "Filtered {total} cross-source tables for the current datasource.",
+    classRecallDatasourceSkipped:
+      "No datasource selected or datasource catalog missing; cross-source filtering was not applied this turn.",
+    classRecallAnchored: "Anchored {total} tables by keywords.",
     interrupted: "This answer was interrupted: the content generated before the connection dropped is incomplete. Please ask again for a complete answer.",
     errorHints: {
       permission: "Your account is not allowed to perform this action. Ask an administrator for access and retry.",

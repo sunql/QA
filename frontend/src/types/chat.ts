@@ -284,6 +284,14 @@ export interface ClassRecallInfo {
   hitCount: number;
   classCount: number;
   truncated: boolean;
+  // 跨源过滤披露（2026-11-19 召回数据源过滤批次）：
+  // datasourceFiltered = 本次因数据源不匹配而过滤掉的跨源表数。
+  datasourceFiltered?: number;
+  // 三态：null/undefined = 已过滤；"no_datasource" = 未选数据源跳过；
+  // "no_cache" = 数据源目录缺失 fail-open。
+  datasourceFilterSkipped?: string | null;
+  // 关键词锚定补进来的类数。
+  anchoredCount?: number;
 }
 
 // v3.1 B6（M7 Hypothesis Hook）：「可能原因」假设（后端 HypothesisRead 对齐）

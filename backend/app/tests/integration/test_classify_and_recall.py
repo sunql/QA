@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
 from app.domain.enums import ChartType, DataSourceType, IntentType
 from app.domain.exceptions import NotFoundError
 from app.domain.models import DataSource, LlmConfig, OntologyClass, SessionQueryState
@@ -289,3 +290,300 @@ class TestSingleStepQueryLlmBaseline:
         # 完整流水线（参考既有 unit/test_chat_service.py:test_full_pipeline_returns_complete_response
         # 的 len(llm.calls)==4）保持 4 次总调用。
         assert len(llm.calls) == 4, f"单步 QUERY 流水线总调用={len(llm.calls)}，期望 4"
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-19 数据源过滤（Harness/changes/2026-11-19-recall-datasource-filter-anchor）：
+# 跨源幽灵类不得进候选集；三态披露合并进 recallInfo。
+# ---------------------------------------------------------------------------
+from types import SimpleNamespace  # noqa: E402
+
+from app.domain.models import SchemaCache  # noqa: E402
+from app.services.recall_datasource_filter import (  # noqa: E402, F401（下批接线用）
+    applyDatasourceRecallFilter,
+)
+
+
+def _recallService(ontology: _FakeOntology) -> ChatService:
+    """三用例共用：构造走 classifyAndRecall 通道 1 的 ChatService（LLM 零调用）。"""
+    return _buildService(llm=_PipelineLlm(), ontology=ontology)
+
+
+def _hit(cls: OntologyClass) -> SimpleNamespace:
+    return SimpleNamespace(id=cls.id, score=0.9)
+
+
+@pytest.mark.asyncio
+async def test_recall_filters_cross_source_class_and_discloses(dbSession) -> None:
+    # Arrange：schema_cache 只登记 DIM_SUPPLIER；本体里另有跨源幽灵类
+    ds = _datasource()
+    ds.id = 7
+    ds.name = "THBI"
+    dbSession.add(ds)
+    dbSession.add(SchemaCache(
+        datasource_id=7, schema_name="THBI",
+        schema_data=[{"table_name": "DIM_SUPPLIER", "owner": "THBI", "columns": []}],
+        schema_version="t1",
+    ))
+    await dbSession.flush()
+    ghost = OntologyClass(
+        class_name="MAIN_DATA_SUPPLIER", source_table="main_data_supplier")
+    real = OntologyClass(
+        class_name="DIM_SUPPLIER", class_alias="供应商主数据", source_table="DIM_SUPPLIER")
+    for c in (ghost, real):
+        dbSession.add(c)
+    await dbSession.flush()
+    fakeOntology = _FakeOntology(hits=[_hit(real)], allClasses=[ghost, real])
+    service = _recallService(fakeOntology)
+
+    # Act
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None,
+        needRecall=True, datasourceId=7,
+    )
+
+    # Assert：幽灵类被滤、真类保留、披露计数正确（执行态：skipped=None + filtered=N）
+    assert [c.class_name for c in result.classes] == ["DIM_SUPPLIER"]
+    assert result.recallInfo.datasourceFiltered == 1
+    assert result.recallInfo.datasourceFilterSkipped is None
+
+
+@pytest.mark.asyncio
+async def test_recall_fail_open_when_schema_cache_missing(dbSession) -> None:
+    # Arrange：datasourceId 有值但无任何 schema_cache 行 ⇒ fail-open 不过滤
+    ds = _datasource()
+    ds.id = 9
+    ds.name = "NO_CACHE"
+    dbSession.add(ds)
+    await dbSession.flush()
+    ghost = OntologyClass(
+        class_name="MAIN_DATA_SUPPLIER", source_table="main_data_supplier")
+    fakeOntology = _FakeOntology(hits=[], allClasses=[ghost])
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None,
+        needRecall=True, datasourceId=9,
+    )
+
+    assert [c.class_name for c in result.classes] == ["MAIN_DATA_SUPPLIER"]
+    assert result.recallInfo.datasourceFiltered == 0
+    assert result.recallInfo.datasourceFilterSkipped == "no_cache"
+
+
+@pytest.mark.asyncio
+async def test_recall_skips_filter_without_datasource(dbSession) -> None:
+    ghost = OntologyClass(
+        class_name="MAIN_DATA_SUPPLIER", source_table="main_data_supplier")
+    fakeOntology = _FakeOntology(hits=[], allClasses=[ghost])
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None, needRecall=True,
+    )
+
+    assert [c.class_name for c in result.classes] == ["MAIN_DATA_SUPPLIER"]
+    assert result.recallInfo.datasourceFilterSkipped == "no_datasource"
+
+
+@pytest.mark.asyncio
+async def test_single_step_query_schema_excludes_cross_source_class(dbSession) -> None:
+    # Arrange：单步 QUERY 链（plan/schema 第二调用点）——schema_cache 只登记
+    # PRECEIPT 真表；本体另有跨源幽灵类 MAIN_DATA_SUPPLIER，不得进 plan prompt。
+    dbSession.add(_datasource())
+    dbSession.add(SchemaCache(
+        datasource_id=1, schema_name="ZJTH",
+        schema_data=[{"table_name": "PRECEIPT", "owner": "ZJTH", "columns": []}],
+        schema_version="t1",
+    ))
+    await dbSession.flush()
+    # _fallbackRecall 会丢弃 id=None 的类 ⇒ 必须给 id。用瞬态对象 + 显式大 id
+    # （测试库有本体种子，小 id 撞 pkey；瞬态避免落库后 buildSchemaText 同步
+    # 访问 cls.properties 触发 MissingGreenlet）。
+    real = _class(900001, "PRECEIPT")
+    ghost = OntologyClass(
+        id=900002, class_name="MAIN_DATA_SUPPLIER",
+        source_table="main_data_supplier")
+    llm = _PipelineLlm()
+    # hits=[] 触发 _fallbackRecall：候选池全量保留进 plan/schema（生产事故路径）。
+    # 若 hits=[real]，检索阶段已把幽灵类裁掉，第二调用点泄漏被假绿掩盖。
+    service = _buildService(
+        llm=llm,
+        ontology=_FakeOntology(hits=[], allClasses=[ghost, real]),
+    )
+
+    # Act：同一 service.run/saveState 入口发起单步 QUERY
+    await service.processMessage(_dto("公司目前有多少供应商"), dbSession)
+
+    # Assert：plan 阶段 LLM 收到的 schema 文本不含幽灵表、含真表。
+    # 注意：类清单经 buildSchemaText 注入 plan 调用的 **system prompt**
+    # （schemaPart），不在 user 消息里——断言覆盖整条 plan 调用的全部消息。
+    planCalls = [c for c in llm.calls if "解析为查询计划" in c[0][1]]
+    assert len(planCalls) == 1, f"计划阶段调用次数={len(planCalls)}，期望 1"
+    planText = "\n".join(content for _, content in planCalls[0])
+    assert "MAIN_DATA_SUPPLIER" not in planText.upper()
+    assert "PRECEIPT" in planText.upper()
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-19 关键词锚定（Task 6）：向量漏选的类经问句片段字面匹配强制纳入候选，
+# 排在向量命中之前（MAX_CLASSES 截断保锚）；anchoredCount 只计「新增」锚定。
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_anchor_forces_missed_class_into_candidates(dbSession) -> None:
+    # Arrange：向量只命中 SUPPLY_ACCESS，DIM_SUPPLIER 漏选；问句含「供应商」
+    # ⇒ 两个类的别名都包含该片段，但 DIM_SUPPLIER 未在向量命中里 ⇒ 必须被
+    # 锚定强制纳入且排在命中之前。落库 flush 拿真实 id（锚定跳过 id=None，
+    # 命中解析同样靠 id——brief 原型的瞬态对象走不到正常命中路径）。
+    real = OntologyClass(
+        class_name="DIM_SUPPLIER", class_alias="供应商主数据",
+        source_table="DIM_SUPPLIER")
+    other = OntologyClass(
+        class_name="SUPPLY_ACCESS", class_alias="供应商准入",
+        source_table="SUPPLY_ACCESS")
+    for c in (real, other):
+        dbSession.add(c)
+    await dbSession.flush()
+    fakeOntology = _FakeOntology(hits=[_hit(other)], allClasses=[real, other])
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None, needRecall=True,
+    )
+
+    names = [c.class_name for c in result.classes]
+    assert "DIM_SUPPLIER" in names  # 漏选类被锚定捞回
+    assert names.index("DIM_SUPPLIER") < names.index("SUPPLY_ACCESS")  # 锚定在前
+    assert result.recallInfo.anchoredCount == 1  # 只计「向量没捞到、靠锚定新增」
+
+
+@pytest.mark.asyncio
+async def test_cross_source_class_is_not_anchored(dbSession) -> None:
+    # Arrange：跨源幽灵类的**别名同样匹配问句**（「供应商」）⇒ 若跨源过滤失效，
+    # 锚定会把它捞回候选并置顶，比向量路径更确定性地复现生产事故
+    # （main_data_supplier → ORA-00942）。schema_cache 只登记本源的 SUPPLY_ACCESS。
+    ds = _datasource()
+    ds.id = 880001
+    ds.name = "GHOST_SRC"
+    dbSession.add(ds)
+    dbSession.add(SchemaCache(
+        datasource_id=880001, schema_name="GHOST_SRC",
+        schema_data=[{"table_name": "SUPPLY_ACCESS", "owner": "GHOST_SRC", "columns": []}],
+        schema_version="t1",
+    ))
+    await dbSession.flush()
+    ghost = OntologyClass(
+        class_name="MAIN_DATA_SUPPLIER", class_alias="供应商主数据",
+        source_table="main_data_supplier")
+    real = OntologyClass(
+        class_name="SUPPLY_ACCESS", class_alias="供应商准入",
+        source_table="SUPPLY_ACCESS")
+    for c in (ghost, real):
+        dbSession.add(c)
+    await dbSession.flush()
+    fakeOntology = _FakeOntology(hits=[_hit(real)], allClasses=[ghost, real])
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None,
+        needRecall=True, datasourceId=880001,
+    )
+
+    names = [c.class_name for c in result.classes]
+    assert "MAIN_DATA_SUPPLIER" not in names  # 跨源幽灵类既不命中也不被锚定
+    assert result.recallInfo.datasourceFiltered == 1
+    assert result.recallInfo.anchoredCount == 0
+
+
+@pytest.mark.asyncio
+async def test_dimension_hint_dim_pull_stays_within_datasource(dbSession) -> None:
+    """I1 守卫：维度词触发的 DIM 全量拉取必须与**已过滤**候选集取 id 交集。
+
+    事故同路径：问句含 `_DIMENSION_HINTS` 任一词（「名称」极常见）⇒
+    dimension_hint=True ⇒ `_fetchAllDimClasses` 直查 `source_table LIKE 'DIM_%'`
+    （不过数据源、不受已过滤 allClasses 约束）⇒ 跨源 DIM 类进 schema ⇒
+    planner 可选中 ⇒ ORA-00942 同形。
+
+    修法：dim_classes 与过滤后的 allClasses 取 id 交集（保留「DIM 全拉」语义，
+    只限定在本源）。去掉交集即红。
+    """
+    ds = _datasource()
+    ds.id = 880002
+    ds.name = "DIM_SRC"
+    dbSession.add(ds)
+    dbSession.add(SchemaCache(
+        datasource_id=880002, schema_name="DIM_SRC",
+        schema_data=[{"table_name": "DIM_SUPPLIER", "owner": "DIM_SRC", "columns": []}],
+        schema_version="t1",
+    ))
+    await dbSession.flush()
+    # 本源真 DIM 类 + 跨源幽灵 DIM 类，两者都落库 ⇒ _fetchAllDimClasses 会把两者都捞到
+    real = OntologyClass(
+        class_name="DIM_SUPPLIER", source_table="DIM_SUPPLIER")
+    ghostDim = OntologyClass(
+        class_name="DIM_OTHER_SRC", source_table="DIM_OTHER_SRC")
+    for c in (real, ghostDim):
+        dbSession.add(c)
+    await dbSession.flush()
+    # 候选集含幽灵类 ⇒ 跨源过滤会把它剔掉（allClasses 过滤后只剩 real）
+    fakeOntology = _FakeOntology(hits=[_hit(real)], allClasses=[real, ghostDim])
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "供应商名称有哪些", sessionId=None,
+        needRecall=True, datasourceId=880002,
+    )
+
+    names = [c.class_name for c in result.classes]
+    assert "DIM_SUPPLIER" in names, "本源 DIM 类应被维度词拉进候选"
+    assert "DIM_OTHER_SRC" not in names, "跨源 DIM 类被维度词全量拉取绕过了数据源过滤"
+
+
+@pytest.mark.asyncio
+async def test_multi_owner_schema_cache_union_keeps_each_owner_class(dbSession) -> None:
+    """M5 集成：同一 datasource 下**两条** schema_cache 行（不同 owner）⇒
+    两个 owner 的类都不被误杀。
+
+    生产是 Oracle 多 owner（`schema_cache` 按 (datasource_id, schema_name) 一行一
+    owner）⇒ 「多行取并集」是「不误杀」的核心：只认第一行会把另一个 owner 的
+    全部类硬过滤掉（静默剔除 ⇒ planner 看不到真实表）。
+    """
+    ds = _datasource()
+    ds.id = 880003
+    ds.name = "MULTI_OWNER"
+    dbSession.add(ds)
+    dbSession.add(SchemaCache(
+        datasource_id=880003, schema_name="THBI",
+        schema_data=[{"table_name": "DIM_SUPPLIER", "owner": "THBI", "columns": []}],
+        schema_version="t1",
+    ))
+    dbSession.add(SchemaCache(
+        datasource_id=880003, schema_name="ZJTH",
+        schema_data=[{"table_name": "MAIN_DATA_FOO", "owner": "ZJTH", "columns": []}],
+        schema_version="t2",
+    ))
+    await dbSession.flush()
+    # 本源两个 owner 的类：裸名写法 + owner 限定名写法各一（两种写法都该命中）
+    supplier = OntologyClass(class_name="DIM_SUPPLIER", source_table="DIM_SUPPLIER")
+    foo = OntologyClass(class_name="MAIN_DATA_FOO", source_table="ZJTH.MAIN_DATA_FOO")
+    # 跨源幽灵类：两个 owner 的清单里都没有
+    ghost = OntologyClass(class_name="MAIN_DATA_SUPPLIER", source_table="main_data_supplier")
+    for c in (supplier, foo, ghost):
+        dbSession.add(c)
+    await dbSession.flush()
+    fakeOntology = _FakeOntology(
+        hits=[_hit(supplier), _hit(foo), _hit(ghost)],
+        allClasses=[supplier, foo, ghost],
+    )
+    service = _recallService(fakeOntology)
+
+    result = await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None,
+        needRecall=True, datasourceId=880003,
+    )
+
+    names = [c.class_name for c in result.classes]
+    assert "DIM_SUPPLIER" in names, "THBI owner 的类被误杀"
+    assert "MAIN_DATA_FOO" in names, "ZJTH owner 的类被误杀（多行未取并集）"
+    assert "MAIN_DATA_SUPPLIER" not in names, "跨源幽灵类未被过滤"
+    assert result.recallInfo.datasourceFiltered == 1

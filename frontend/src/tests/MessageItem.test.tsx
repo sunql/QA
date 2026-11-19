@@ -544,6 +544,65 @@ describe("MessageItem 类召回诊断提示", () => {
   });
 });
 
+describe("MessageItem 类召回披露（跨源过滤 / 关键词锚定）", () => {
+  // 后端 wire 字段：datasourceFiltered / datasourceFilterSkipped / anchoredCount
+  // （召回数据源过滤+关键词锚定批次）。披露走 info 级 Alert，与既有 warning 级
+  // 类召回诊断区并存，不替换原有提示。
+  it("渲染跨源过滤披露（本次过滤掉的跨源表数）", () => {
+    renderItem({
+      content: "查询完成。",
+      classRecall: {
+        mode: "recall",
+        hitCount: 1,
+        classCount: 1,
+        truncated: false,
+        datasourceFiltered: 3,
+      },
+    });
+    expect(screen.getByText("已按当前数据源过滤 3 张跨源数据表。")).toBeInTheDocument();
+  });
+
+  it("渲染过滤跳过披露（未选数据源或数据源目录缺失）", () => {
+    renderItem({
+      content: "查询完成。",
+      classRecall: {
+        mode: "recall",
+        hitCount: 1,
+        classCount: 1,
+        truncated: false,
+        datasourceFilterSkipped: "no_cache",
+      },
+    });
+    expect(
+      screen.getByText("未选择数据源或数据源目录缺失，跨源过滤本次未生效。")
+    ).toBeInTheDocument();
+  });
+
+  it("渲染关键词锚定披露（锚定补进来的类数）", () => {
+    renderItem({
+      content: "查询完成。",
+      classRecall: {
+        mode: "recall",
+        hitCount: 1,
+        classCount: 1,
+        truncated: false,
+        anchoredCount: 2,
+      },
+    });
+    expect(screen.getByText("已按关键词锚定 2 张数据表。")).toBeInTheDocument();
+  });
+
+  it("无过滤/跳过/锚定信息时不渲染披露提示", () => {
+    renderItem({
+      content: "查询完成。",
+      classRecall: { mode: "recall", hitCount: 1, classCount: 1, truncated: false },
+    });
+    expect(screen.queryByText(/已按当前数据源过滤/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/跨源过滤本次未生效/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/已按关键词锚定/)).not.toBeInTheDocument();
+  });
+});
+
 describe("MessageItem 中断回答提示（H4 断连兜底）", () => {
   it("interrupted=true 渲染中断提示（内容可能是半截）", () => {
     renderItem({ content: "查询完成，", interrupted: true });

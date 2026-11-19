@@ -24,13 +24,19 @@ from sqlalchemy import select, text
 
 from app.domain.enums import DataSourceType
 from app.domain.exceptions import Nl2SqlError
-from app.domain.models import DataSource, LlmConfig
+from app.domain.models import DataSource, LlmConfig, OntologyClass, SchemaCache
 from app.domain.multi_step_plan import MultiStepPlan
 from app.domain.research_models import ResearchSession
 from app.infrastructure.security.crypto import encryptApiKey
 from app.services.nl2sql_service import SqlResult
 from app.services.report_planner import ReportPlanner
-from app.services.research_agent_execution import ExecutionDeps, runStep
+from app.services.research_agent_execution import (
+    ExecutionDeps,
+    buildExecutionDeps,
+    depsForSession,
+    generateStepSql,
+    runStep,
+)
 from app.services.research_agent_model_resolution import resolveModelConfig
 from app.services.research_agent_phases import isDegraded
 from app.services.research_agent_ports import (
@@ -2338,3 +2344,114 @@ async def test_stageVerify_falls_back_to_original_claim_when_no_dimensions(
     # stats 仍落库（distribution 等统计有意义）
     assert "stats" in finding.supporting_data
     assert finding.supporting_data["stats"]["distribution"]["cnt"]["max"] == 100.0
+
+
+# ---------------------------------------------------------------------------
+# I2（2026-11-19 终审 Important-2）研究入口纳入跨源过滤
+# ---------------------------------------------------------------------------
+
+
+class _CaptureNl2sql:
+    """捕获 NL2SQL 生成面收到的类清单（研究入口的 schema 上下文）。"""
+
+    def __init__(self) -> None:
+        self.seenClasses: list = []
+
+    async def generateSql(self, question, classes, client, config, *, session=None, **kwargs):
+        self.seenClasses = list(classes)
+        return SqlResult(sql="SELECT 1 FROM DUAL", promptTokens=1, completionTokens=1)
+
+
+class _FakeOntologyClasses:
+    """研究入口的本体类来源（全局取类，可注入跨源幽灵类）。"""
+
+    def __init__(self, classes: list) -> None:
+        self._classes = classes
+
+    async def listClasses(self, session) -> list:  # noqa: ANN001, ANN202
+        return list(self._classes)
+
+
+class _StubAdapter:
+    """业务库适配器替身：不建连（研究执行面的真实连接不在本用例范围）。"""
+
+    async def execute_read_only(self, sql: str) -> list[dict]:  # noqa: ANN201
+        return []
+
+
+async def _resolveClientOk(session, *, state, emit, sessionId):  # noqa: ANN001, ANN202
+    return object(), object()
+
+
+async def _noopRecordUsage(session, **kwargs) -> None:  # noqa: ANN001, ANN003
+    return None
+
+
+@pytest.mark.asyncio
+async def test_research_entry_excludes_cross_source_classes(dbSession, monkeypatch) -> None:
+    """I2(a) 守卫：研究入口的本体类候选集必须按会话数据源过滤。
+
+    终审判定（Important-2）：研究入口是**另一个漏斗** —— `generateStepSql`
+    全局 `listClasses` 未过滤 ⇒ 跨源幽灵类进 NL2SQL 的 schema 小节 ⇒ SQL 跑在
+    会话源 ⇒ ORA-00942（与 2026-11-19 生产事故同形）。研究链路还有兜底
+    `matched or list(classes)`（全量类进 prompt），故过滤点必须在类候选集源头。
+
+    复用 Task 2 的 `applyDatasourceRecallFilter`（同三态 fail-open），口径唯一。
+    """
+    # Arrange：会话绑定的数据源只登记 DIM_SUPPLIER；本体里另有跨源幽灵类
+    ds = DataSource(
+        id=880010, name="RESEARCH_SRC", type=DataSourceType.POSTGRESQL,
+        host="h", port=5432, database_name="svc", username="u",
+        password_encrypted=encryptApiKey("test-password"),
+    )
+    dbSession.add(ds)
+    dbSession.add(SchemaCache(
+        datasource_id=ds.id, schema_name="RESEARCH_SRC",
+        schema_data=[{"table_name": "DIM_SUPPLIER", "owner": "RESEARCH_SRC", "columns": []}],
+        schema_version="t1",
+    ))
+    ghost = OntologyClass(class_name="MAIN_DATA_SUPPLIER", source_table="main_data_supplier")
+    real = OntologyClass(class_name="DIM_SUPPLIER", source_table="DIM_SUPPLIER")
+    dbSession.add_all([ghost, real])
+    await dbSession.flush()
+    sessionSvc = ResearchSessionService()
+    sessionRow = await sessionSvc.createSession(
+        dbSession, userId=1, question=QUESTION, datasourceId=ds.id
+    )
+    await dbSession.commit()
+
+    # 依赖边界替身：业务库适配器不建连
+    monkeypatch.setattr(
+        "app.services.research_agent_execution.get_adapter",
+        lambda datasourceId, ds: _StubAdapter(),
+    )
+    nl2sql = _CaptureNl2sql()
+    base = buildExecutionDeps(
+        runner=None,
+        chart=None,
+        ontology=_FakeOntologyClasses([ghost, real]),
+        nl2sql=nl2sql,
+        resolveClient=_resolveClientOk,
+        recordUsage=_noopRecordUsage,
+    )
+    # 相位边界解析（真实 depsForSession）：数据源 id 必须随 deps 一起送达
+    deps = await depsForSession(dbSession, sessionRow.id, base)
+    assert deps.datasourceId == ds.id
+
+    # Act：走真实 generateStepSql（ESL 臂为空 ⇒ 命中「全量类」兜底路径，
+    #     该兜底同样只能吐出**已过滤**的类）
+    sql = await generateStepSql(
+        dbSession,
+        {"index": 0, "sub_question": QUESTION},
+        sessionId=sessionRow.id,
+        state={"question": QUESTION, "esl": {"businessObjects": []}},
+        emit=None,
+        deps=deps,
+        dialectArgs=deps.dialectArgs or {},
+    )
+
+    # Assert：跨源幽灵类不得进 NL2SQL 的类清单
+    assert sql == "SELECT 1 FROM DUAL"
+    names = [c.class_name for c in nl2sql.seenClasses]
+    assert "DIM_SUPPLIER" in names, "本源类应留在候选集"
+    assert "MAIN_DATA_SUPPLIER" not in names, "跨源幽灵类进了研究入口的 schema 上下文"

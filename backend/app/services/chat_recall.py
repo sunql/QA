@@ -19,6 +19,8 @@ from app.domain.enums import IntentType
 from app.domain.schemas import ChatRequest, ClassRecallInfo
 from app.services.chat_helpers import _clipText
 from app.services.intent_service import IntentResult
+from app.services.recall_datasource_filter import applyDatasourceRecallFilter
+from app.services.recall_keyword_anchor import selectAnchoredClasses
 from app.services.semantic_recall_gate import RecallOntology, loadRecallOntology
 
 if TYPE_CHECKING:
@@ -32,6 +34,7 @@ _FEW_SHOT_EXAMPLE_LIMIT_DEFAULT = 400  # 1-2：单条示例的 question/sql 字�
 _CLASS_FILTER_TOP_K_DEFAULT = 15  # 1-1：类裁剪的向量检索 topK；运行期从 system_config.CLASS_FILTER_TOP_K 读，缺席用此值
 _CLASS_FILTER_HIT_MATCH_MIN_DEFAULT = 0.5  # 1-1：命中中可解析为真实类的比例低于该值时告警；运行期从 system_config.CLASS_FILTER_HIT_MATCH_MIN 读
 _CLASS_FILTER_MAX_CLASSES_DEFAULT = 30  # 召回扩边后的 schema 类总量上限；运行期从 system_config.CLASS_FILTER_MAX_CLASSES 读，缺席用此值
+_ANCHOR_MAX_CLASSES_DEFAULT = 5  # 关键词锚定强纳入类的上限；运行期从 system_config.ANCHOR_MAX_CLASSES 读，缺席用此值
 _ADS_RECALL_WEIGHT_DEFAULT = 1.5  # feat-ontology-recall-pruning step D：ADS 层类 score 加权系数
 # 运行期从 system_config.ADS_RECALL_WEIGHT 读；缺席/格式错返此值。提高此值让
 # ADS 黄金路径在向量召回 top15 中更靠前；降低/设为 1.0 关闭加权。
@@ -161,6 +164,29 @@ def _isDimensionHint(question: str) -> bool:
     return any(kw in (question or "") for kw in _DIMENSION_HINTS)
 
 
+def _restrictToAllowedIds(
+    classes: list, allowedClasses: list | None
+) -> list:
+    """把 `classes` 收窄到 `allowedClasses` 的 id 集合内（返回新 list）。
+
+    用途：维度词触发的 DIM 全量拉取（`_fetchAllDimClasses` 直查治理表 /
+    快照分支读原始快照）**不过数据源**，必须与**已按数据源过滤**的候选集取
+    id 交集，否则跨源 DIM 类会绕过过滤进 schema ⇒ planner 可选中 ⇒ ORA-00942
+    （2026-11-19 生产事故同形）。
+
+    `allowedClasses=None` ⇒ 不加约束（调用方未接线时的兼容口径）。
+    id 为 None 的类一律剔除（无法判定归属，不进窗口）。
+    """
+    if allowedClasses is None:
+        return list(classes)
+    allowedIds = {
+        cls.id for cls in allowedClasses
+        if getattr(cls, "id", None) is not None
+    }
+    return [
+        cls for cls in classes
+        if getattr(cls, "id", None) is not None and cls.id in allowedIds
+    ]
 
 
 class RecallMixin:
@@ -181,7 +207,8 @@ class RecallMixin:
 
         P0-3：加载状态时按 (userId, datasourceId, sessionId) 三元过滤，
         避免跨用户/跨数据源窜 state。userId/datasourceId 任一 None 时退化为
-        按 sessionId 唯一过滤（兼容既有调用）。
+        按 sessionId 唯一过滤（兼容既有调用）。datasourceId 自 2026-11-19 起
+        同时用于候选集跨源过滤，三态见 recall_datasource_filter 模块注释。
 
         两种调用模式：
         - 生产（sessionId 提供）：完整两阶段语义；hasPriorState 形参被忽略
@@ -220,12 +247,16 @@ class RecallMixin:
         view: RecallOntology | None = await loadRecallOntology(
             session, pinnedReleaseId=pinnedReleaseId
         )
-        allClasses: list[Any] = (
-            list(view.classes) if view is not None else await self._ontology.listClasses(session)
+        allClasses, dsDisclosure = await applyDatasourceRecallFilter(
+            session,
+            list(view.classes) if view is not None
+            else await self._ontology.listClasses(session),
+            datasourceId=datasourceId,
         )
         classes, recallInfo = await self._selectRelevantClasses(
             session, question, allClasses, view=view
         )
+        recallInfo = recallInfo.model_copy(update=dsDisclosure)
         return ClassifyAndRecallResult(
             intentResult=result, classes=classes, recallInfo=recallInfo, state=state
         )
@@ -267,6 +298,44 @@ class RecallMixin:
                 _CLASS_FILTER_MAX_CLASSES_DEFAULT, exc_info=True,
             )
             return _CLASS_FILTER_MAX_CLASSES_DEFAULT
+
+    async def _getAnchorMaxClasses(self, session: AsyncSession) -> int:
+        """读 system_config.ANCHOR_MAX_CLASSES；缺席/格式错/非正返 _DEFAULT。
+
+        与 ``_getClassFilterMaxClasses`` 同口径：读失败不阻断主链路，返硬编码默认。
+        admin 改值后立即对新问句生效（每次召回都现读，无缓存）。
+
+        非正值视同非法而非「不锚定」：上限是锚定强纳入的唯一闸门，0/负数
+        若按字面生效等于锚定静默失效（问法敏感漏选缺陷原样回来），故返默认。
+        """
+        raw: str | None = None  # 预置：except 分支引用 raw 时不得抛 NameError
+        try:
+            row = await session.execute(
+                text("SELECT value FROM system_config WHERE key = 'ANCHOR_MAX_CLASSES'")
+            )
+            raw = row.scalar_one_or_none()
+            if raw is None or raw == "":
+                return _ANCHOR_MAX_CLASSES_DEFAULT
+            value = int(raw)
+            if value <= 0:
+                logger.warning(
+                    "ANCHOR_MAX_CLASSES 非正值 %r，返默认值 %d",
+                    raw, _ANCHOR_MAX_CLASSES_DEFAULT,
+                )
+                return _ANCHOR_MAX_CLASSES_DEFAULT
+            return value
+        except (TypeError, ValueError):
+            logger.warning(
+                "ANCHOR_MAX_CLASSES 值非法 %r，返默认值 %d",
+                raw, _ANCHOR_MAX_CLASSES_DEFAULT,
+            )
+            return _ANCHOR_MAX_CLASSES_DEFAULT
+        except Exception:
+            logger.warning(
+                "读取 ANCHOR_MAX_CLASSES 失败，返默认值 %d",
+                _ANCHOR_MAX_CLASSES_DEFAULT, exc_info=True,
+            )
+            return _ANCHOR_MAX_CLASSES_DEFAULT
 
     async def _getAdsRecallWeight(self, session: AsyncSession) -> float:
         """读 system_config.ADS_RECALL_WEIGHT；缺席/格式错返 _DEFAULT（feat-D）。
@@ -442,8 +511,15 @@ class RecallMixin:
         dimension_hint: bool,
         session: AsyncSession,
         view: RecallOntology | None = None,
+        allowedClasses: list | None = None,
     ) -> list:
         """按层优先排序：DIM 拉满（DIM 层按 dimension_hint 决定是否全拉）。
+
+        `allowedClasses` = **已按数据源过滤**的候选集（`allClasses`）。维度词触发的
+        DIM 全量拉取（快照分支读原始快照 / 直读分支查 `source_table LIKE 'DIM_%'`）
+        本身**不过数据源**，必须与该集合取 id 交集才不越权 —— 否则跨源 DIM 类
+        进 schema ⇒ planner 可选中 ⇒ ORA-00942（2026-11-19 生产事故同形）。
+        传 None = 不加约束（仅供未接线调用方；主链路一律传已过滤集合）。
 
         Returns: 排序后的新 list（不修改输入）。
         """
@@ -454,6 +530,7 @@ class RecallMixin:
                 dim_classes = [c for c in view.classes if (c.source_table or "").upper().startswith("DIM_")]
             else:
                 dim_classes = await self._fetchAllDimClasses(session)
+            dim_classes = _restrictToAllowedIds(dim_classes, allowedClasses)
             # 去重（按 id）
             seen = {c.id for c in merged if c.id is not None}
             for c in dim_classes:
@@ -620,11 +697,39 @@ class RecallMixin:
 
         # 按层排序
         relevant = await self._rankByLayer(
-            relevant, dimension_hint=dimension_hint, session=session, view=view
+            relevant, dimension_hint=dimension_hint, session=session, view=view,
+            allowedClasses=allClasses,
         )
 
-        # 截取 top K
+        # 窗口上限先读：锚定上限必须夹到窗口内（见下），两者同源现读。
         max_classes = await self._getClassFilterMaxClasses(session)
+
+        # 关键词锚定（2026-11-19）：字面包含匹配兜向量措辞敏感性底。
+        # 锚定类排在向量命中之前 ⇒ MAX_CLASSES 截断保锚；与命中去重，
+        # anchoredCount 只计「向量没捞到、靠锚定新增」的类。
+        #
+        # ODS 闸门（与向量命中路径同口径）：锚定是「向量之外的另一条入候选路径」，
+        # 若不拦 ODS 业务表就绕过了 2026-09-19 ODS_BPARTNER 事故闸门——把没有
+        # SUPPLIER_CODE 等业务列的贴源备份表捞回 schema 让 LLM 幻觉属性名。
+        # 显式点名 ODS 表时（explicit_ods_recall）保留，与向量路径一致。
+        #
+        # 上限夹到窗口内：锚定数若超过 MAX_CLASSES，超出部分会被截断丢掉，
+        # 披露的 anchoredCount 会大于实际留在窗口里的锚定类数（说多）；
+        # 夹住后锚定数 ≤ 窗口 ⇒ 锚定类全部留在窗口内，披露即真实。
+        anchorMax = min(await self._getAnchorMaxClasses(session), max_classes)
+        anchorCandidates = [
+            cls for cls in allClasses
+            if not _isOdsBusinessTable(cls) or explicit_ods_recall
+        ]
+        anchored = selectAnchoredClasses(
+            question, anchorCandidates, maxAnchored=anchorMax
+        )
+        rankedIds = {cls.id for cls in relevant}
+        newAnchored = [cls for cls in anchored if cls.id not in rankedIds]
+        anchoredCount = len(newAnchored)
+        relevant = newAnchored + relevant
+
+        # 截取 top K
         selected = relevant[:max_classes]
         pre_expand_truncated = len(relevant) > max_classes
         expanded, truncated_from_expand = await self._expandByJoinNeighbors(
@@ -639,9 +744,12 @@ class RecallMixin:
 
         recall = ClassRecallInfo(
             mode="expanded" if len(expanded) > len(relevant) else "recall",
+            # hitCount = 候选类数（向量命中 + 锚定新增，截断前口径）。锚定类并入
+            # relevant 后此处一并计入 ⇒ 纯向量命中数 = hitCount - anchoredCount。
             hitCount=len(relevant),
             classCount=len(expanded),
             truncated=truncated,
+            anchoredCount=anchoredCount,
         )
         return expanded, recall
 
@@ -692,7 +800,8 @@ class RecallMixin:
         # dimension_hint=False：入参本就是全量类，DIM 已在其中（_rankByLayer 的 DIM
         # 补拉是给召回子集用的），降级路径也不再引入一次 DB 读取。
         ranked = await self._rankByLayer(
-            candidates, dimension_hint=False, session=session, view=view
+            candidates, dimension_hint=False, session=session, view=view,
+            allowedClasses=allClasses,
         )
         max_classes = await self._getClassFilterMaxClasses(session)
         selected = ranked[:max_classes]

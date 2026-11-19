@@ -252,17 +252,32 @@ def buildEnterpriseSemanticLayer() -> EnterpriseSemanticLayer:
 
 
 async def _searchBusinessObjects(question: str, *, topK: int = _ESL_TOP_K) -> list[dict[str, Any]]:
-    """BO 臂：本体类语义检索 + `source_table` 回填。
+    """BO 臂：本体类语义检索 + `source_table` 回填（**只捞活类**）。
 
     回填是必需的：ESL 下游 `eslClasses` 用物理表名给 planner / NL2SQL 做本体提示，
     只给 classId 等于没给上下文。回填用独立短会话（检索器无 session 入参）。
+
+    **墓碑过滤（2026-11-19）**：Milvus 全局检索**无 valid_to 过滤** ⇒ 手工止血的
+    墓碑类（生产 id 270 `main_data_supplier`）向量仍在库里。若 PG 回填不补
+    `valid_to IS NULL`，墓碑行仍被回填出 sourceTable ⇒ 墓碑挡不住，同问句从
+    研究入口仍复现 ORA-00942（2026-11-19 生产事故同形）。
+    故回填**只取活类**：墓碑行与悬空向量（PG 已无对应行）一律不进 BO 臂。
+
+    注：本臂是**全局**检索（无数据源维度）；数据源维度的收窄在执行面
+    （`research_agent_execution.generateStepSql` 的 `applyDatasourceRecallFilter`），
+    口径与 chat 主链路同源（见 recall_datasource_filter 模块注释）。
     """
     hits = await OntologyService().searchByKeyword(question, topK=topK, typeFilter="class")
     if not hits:
         return []
     ids = [hit.id for hit in hits]
     async with getSessionFactory()() as session:
-        rows = await session.scalars(select(OntologyClass).where(OntologyClass.id.in_(ids)))
+        rows = await session.scalars(
+            select(OntologyClass).where(
+                OntologyClass.id.in_(ids),
+                OntologyClass.valid_to.is_(None),
+            )
+        )
         tableById = {row.id: row.source_table for row in rows}
     return [
         {
@@ -273,6 +288,7 @@ async def _searchBusinessObjects(question: str, *, topK: int = _ESL_TOP_K) -> li
             "confidence": float(hit.score or 0.0),
         }
         for hit in hits
+        if hit.id in tableById  # 墓碑类 / 悬空向量：PG 无活行 ⇒ 不进 BO 臂
     ]
 
 

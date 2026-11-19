@@ -428,6 +428,10 @@ export const zhCN = {
     affinityLocked: "🔒 锁定 {model} · 剩 {turns} 轮",
     classRecallTruncated: "本次命中的数据表已达上限（{total} 张），部分相关表可能未被纳入查询，可尝试更具体的表述或联系管理员调整召回窗口。",
     classRecallFallback: "数据表智能召回暂不可用，本次已按数仓分层顺序选取数据表（张数受召回窗口上限约束），回答准确性可能受影响。",
+    // 类召回披露（2026-11-19 召回数据源过滤+关键词锚定批次）
+    classRecallDatasourceFiltered: "已按当前数据源过滤 {total} 张跨源数据表。",
+    classRecallDatasourceSkipped: "未选择数据源或数据源目录缺失，跨源过滤本次未生效。",
+    classRecallAnchored: "已按关键词锚定 {total} 张数据表。",
     interrupted: "本次回答已中断：连接断开前生成的内容不完整，请重新提问以获取完整回答。",
     // 错误细分类型的差异化提示（P2-1 errorType）。只有白名单内的类型才渲染；
     // domain / llm / internal 的正文本身已面向用户，不再追加提示。

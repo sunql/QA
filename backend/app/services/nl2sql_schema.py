@@ -373,8 +373,11 @@ def buildSchemaText(
     if hints:
         blocks.append(hints)
     # 2-4：漂移告警追加在末尾（来自 buildDriftWarning，非空时注入）。
-    # schema 文本仍渲染本体全部类（含已漂移对象），告警明确告知模型不得引用，
-    # 避免生成引用数据库中已不存在表/列的 SQL（ORA-00942）。
+    # ⚠️ 口径变更（2026-11-19 召回数据源过滤上线）：对话链路的类清单已按**当前
+    # 数据源目录**过滤（recall_datasource_filter）——「表不在本数据源」的类
+    # **不再渲染**（结构性杜绝 ORA-00942，比「渲染 + 告警」更强）⇒ 此处漂移
+    # 告警在对话链路实际覆盖的是**列漂移**（表在、列没了）。
+    # 缺表漂移仍在运维面可见：GET /datasources/{id}/ontology-drift 扫全量本体。
     if driftWarning:
         blocks.append(driftWarning)
     return "\n".join(blocks)

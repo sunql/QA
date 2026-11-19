@@ -152,6 +152,7 @@ from app.services.llm_retry_policy import (
     retryGenTokens as _retryGenTokens,
 )
 from app.services.nl2sql_service import Nl2SqlService, SqlResult, _readFloatConfig, _safeSchemaPrefix, _sanitizeContext
+from app.services.recall_datasource_filter import applyDatasourceRecallFilter
 from app.security.prompt_sanitizer import (
     UntrustedLabel,
     renderSecurityPreamble,
@@ -993,7 +994,13 @@ class ChatService(
         # 方言生成 SQL，执行必错。API DTO 的枚举校验只挡创建/更新入口，这里是
         # 消费边界的最后关口 —— 在任何 LLM 调用之前拒绝。
         coerceDatasourceType(ds.type, name=ds.name)
-        allClasses = await self._ontology.listClasses(session)
+        # 候选集跨源过滤（2026-11-19 第二调用点，对齐 classifyAndRecall 主链路）：
+        # 全局取类会把别的数据源登记的类带进 plan/schema（生产事故
+        # main_data_supplier → ORA-00942）；三态披露合并进 recallInfo。
+        allClasses, dsDisclosure = await applyDatasourceRecallFilter(
+            session, await self._ontology.listClasses(session),
+            datasourceId=dto.datasourceId,
+        )
         # 显式多步时（带"第一步/第二步"标号）：用第一步子问题做召回，
         # 避免完整多步问法传给 Milvus 匹配到错误的表（如报价单而非收货单）。
         recall_question = dto.question
@@ -1004,6 +1011,7 @@ class ChatService(
         classes, recallInfo = await self._selectRelevantClasses(
             session, recall_question, allClasses
         )
+        recallInfo = recallInfo.model_copy(update=dsDisclosure)
         joins = await self._ontology.listJoins(session)
         ctx = await self._buildRoutingContext(session, dto.sessionId)
         configs = await self._listModelConfigs(session)

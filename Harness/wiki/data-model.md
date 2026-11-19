@@ -12,6 +12,21 @@
 
 ### 后续表（Phase 2-3）
 - `ontology_class`：本体类，`source_table` 映射物理表，支持 `parent_class_id` 继承，`version` + `valid_from/to` 版本。
+  **实际列清单（2026-11-19 生产实测核对，与 ORM `models.py:236` 一致）**：
+  `id, class_name, class_alias, description, source_table, parent_class_id, created_by,
+  created_time, updated_time, version, valid_from, valid_to, object_type, object_owner`。
+  ⚠️ **该表没有 `is_active` / `is_stub` / `datasource_id` 列**——写 SQL 前别想当然（2026-11-19 一次猜列翻车实录）。
+  - **停用/恢复只能走软删除墓碑**：置 `valid_to = now()` 即从召回消失
+    （`ontology_service.listClasses` 只返回 `valid_to IS NULL` 的行）；复活必须**原地**把
+    `valid_to` 置回 NULL（id 不变 ⇒ Milvus 向量仍指向同一个 id，换行=换 class_id=白干）。
+  - 🔴 **本体层无「类→数据源」绑定 ⇒ 召回不按会话数据源过滤**：`chat_recall.py:224` /
+    `chat_service.py:996` 的 `listClasses` 全局取类，SQL 却在会话选定数据源上执行、
+    值域采样也打在当前源上 ⇒ **登记在 A 源的物理表、在 B 源会话里被召回**，planner 一选就
+    ORA-00942（每问还附赠 6 次值域采样空往返）。事故实例：2026-11-19 生产
+    「公司目前有多少供应商」——`DIM_SUPPLIER`（THBI 真表）因向量排序洗牌掉出 topK，
+    planner 被校验器引导到跨源幽灵类 `main_data_supplier` ⇒ 全链失败。
+    **根治 = 召回入口按 `datasourceId` 过滤候选类**（批次待立）；止血 = 对 THBI 查不到的
+    跨源类置 `valid_to` 墓碑。V0.3 计划已立案的「本体无类→源绑定」真空洞在现有多源问答的实例。
   **采购域 5 个类的物理表绑定（2026-11-18 校准，迁移 `0153`）**：`Supplier`→`BPSUPPLIER`、`ItemMaster`→`ITMMASTER`、`PurchaseOrder`→`PORDER`、`Receipt`→`PRECEIPT`（**ERP 业务表词表**）、`IncomingInspection`→**NULL**（来料检验无物理表）。
   ⚠️ 迁移 `0039`/`0040` 当年写的是 **DWD_\* 词表**（`DWD_SUPPLIER` 等）—— 那张表在系统的查询目标里**不存在**，且与本体 SSOT（`backend/seed_ontology.py` 的 `CLASSES`）**分叉** ⇒ NL2SQL 指向不存在的表 + 干净库上 `seed_ontology.seed()` 撞 `uq_ontology_class_name_version` 唯一约束。`0153` 已校准（**纯数据迁移，无 DDL** ⇒ `alembic check` / drift 不受影响）。
   **绑定词表的 SSOT = `seed_ontology.CLASSES`**；`seed_ontology._seedClasses` 按 **`source_table`** 查重复用 ⇒ 两个种子的 `source_table` 必须同款，否则干净库上 seed 直接崩。门禁：`backend/scripts/procurement_class_source_table_realdata.py`（干净库真跑迁移链 + 断言无 `DWD_*` 残留 + 断言 seed 复用不崩）。

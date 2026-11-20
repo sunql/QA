@@ -639,6 +639,84 @@ async def test_chat_pipeline_context_rejects_inactive_datasource(dbSession) -> N
             dbSession, dto, needFewShot=False, needSamples=False, needDrift=False,
         )
 
+async def test_anchor_rescue_skip_scene_lines_log_at_warning(
+    dbSession, caplog,
+) -> None:
+    """scene=anchor_rescue_* 两条观测痕迹必须是 **warning 级**。
+
+    生产 `LOG_LEVEL=WARNING`：这两行若停在 info 级则永远看不见 ⇒
+    「锚定救援是否跳过」成为观测盲区（2026-11-20 验收挂账 ⑧）。
+    升 warning 不破坏回退率聚合——聚合按含 ``reason=`` 的行取键，
+    本行是 ``scene=`` 不是 ``reason=``，不会被重复计数。
+
+    覆盖两条跳过路径：
+    - ``anchor_rescue_unscoped``：候选集未按数据源收窄（未选数据源）；
+    - ``anchor_rescue_weak``：唯一 2 字弱命中 ⇒ 证据不足不收窄。
+    """
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="app.services.chat_recall")
+
+    # ── 路径 1：unscoped（未选数据源 ⇒ 候选集未收窄）──
+    supplier = OntologyClass(
+        class_name="DIM_SUPPLIER", class_alias="供应商主数据",
+        source_table="DIM_SUPPLIER")
+    receipt = OntologyClass(
+        class_name="RECEIPT", class_alias="收货单", source_table="RECEIPT")
+    for c in (supplier, receipt):
+        dbSession.add(c)
+    await dbSession.flush()
+    ghostHit = SimpleNamespace(id=supplier.id + 1000000, score=0.9)
+    service = _recallService(_FakeOntology(hits=[ghostHit], allClasses=[supplier, receipt]))
+
+    await service.classifyAndRecall(
+        dbSession, "公司目前有多少供应商", sessionId=None, needRecall=True,
+    )
+
+    unscoped = [
+        r for r in caplog.records
+        if "scene=anchor_rescue_unscoped" in r.getMessage()
+    ]
+    assert len(unscoped) == 1, "unscoped 跳过必须恰好打一行 scene= 痕迹"
+    assert unscoped[0].levelno == logging.WARNING, (
+        "scene=anchor_rescue_unscoped 必须是 warning 级（生产 LOG_LEVEL=WARNING 可见）"
+    )
+
+    # ── 路径 2：weak（已收窄，但唯一命中是 2 字弱匹配）──
+    ds = _datasource()
+    ds.id = 880002
+    ds.name = "WEAK_SRC"
+    dbSession.add(ds)
+    dbSession.add(SchemaCache(
+        datasource_id=880002, schema_name="WEAK_SRC",
+        schema_data=[{"table_name": "DIM_COMPANY", "owner": "WEAK_SRC", "columns": []}],
+        schema_version="t1",
+    ))
+    await dbSession.flush()
+    company = OntologyClass(
+        class_name="DIM_COMPANY", class_alias="集团公司",
+        source_table="DIM_COMPANY")
+    dbSession.add(company)
+    await dbSession.flush()
+    ghostHit2 = SimpleNamespace(id=company.id + 1000000, score=0.9)
+    service2 = _recallService(_FakeOntology(hits=[ghostHit2], allClasses=[company]))
+
+    result = await service2.classifyAndRecall(
+        dbSession, "公司有多少", sessionId=None,
+        needRecall=True, datasourceId=880002,
+    )
+
+    # 「公司」2 字弱命中 ⇒ 救援不接管 ⇒ 保留宽窗 fallback
+    assert result.recallInfo.mode == "fallback"
+    weak = [
+        r for r in caplog.records
+        if "scene=anchor_rescue_weak" in r.getMessage()
+    ]
+    assert len(weak) == 1, "weak 跳过必须恰好打一行 scene= 痕迹"
+    assert weak[0].levelno == logging.WARNING, (
+        "scene=anchor_rescue_weak 必须是 warning 级（生产 LOG_LEVEL=WARNING 可见）"
+    )
+
 
 @pytest.mark.asyncio
 async def test_dimension_hint_dim_pull_stays_within_datasource(dbSession) -> None:

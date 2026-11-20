@@ -1016,13 +1016,15 @@ class RecallMixin:
         多打一行就翻倍）⇒ 本函数**不**再调用 ``_fallbackRecall``，自己打那一行，
         末尾追加 ``anchored=N`` 字段区分「锚定救援」与「普通全量回退」。
         闸门跳过时走 ``_fallbackRecall``（那一行 reason= 由它打），本函数只补
-        一行 scene= 的 info 痕迹（scene= 不是 reason=，不污染回退率聚合）。
+        一行 scene= 的 warning 痕迹（scene= 不是 reason=，不污染回退率聚合；
+        2026-11-20 由 info 升 warning：生产 LOG_LEVEL=WARNING ⇒ info 级观测
+        盲区，验收挂账 ⑧）。
         """
         max_classes = await self._getClassFilterMaxClasses(session)
         anchorMax = min(await self._getAnchorMaxClasses(session), max_classes)
         matches = _anchoredMatches(question, allClasses, maxAnchored=anchorMax)
         if not isDatasourceScoped:
-            logger.info(
+            logger.warning(
                 "本体类锚定救援跳过：候选集未按数据源收窄 scene=anchor_rescue_unscoped"
             )
             return await self._fallbackRecall(
@@ -1036,7 +1038,7 @@ class RecallMixin:
                 hitCount=hitCount, view=view,
             )
         if _isWeakAnchorEvidence(matches):
-            logger.info(
+            logger.warning(
                 "本体类锚定救援跳过：锚定证据不足 scene=anchor_rescue_weak"
             )
             return await self._fallbackRecall(

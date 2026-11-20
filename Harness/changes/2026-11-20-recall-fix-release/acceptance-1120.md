@@ -320,11 +320,13 @@ schema_cache -> 0               session_query_state -> 0
 - **B 的边界**（必须记挂账）：B **只挡 UI 选择**，不挡显式 API 请求 ⇒ 要彻底关死才需要 **C（代码 fail-closed）**。
   C 是代码改动，**本轮不做**，单独评审。
 
-#### 4.2.4 仍需一条探针（确认 KPI 目录在生产的真实状态）
+#### 4.2.4 探针**已在生产执行**（2026-11-20，用户执行）⇒ 命中第三支 ⇒ **B 零影响**
 
-探针显示 `kpi_catalog` 里 `datasource_id=2` 的行数为 0，但 `seed_kpi_catalog.py:280` 是
-`{**kpi, "datasource_id": ds_id}` 绑定的 ⇒ **生产要么没跑过这个种子，要么跑的是绑定前的旧版本**。
-执行下面这条确认（只读）：
+原假设：「生产要么没跑过这个种子，要么跑的是绑定前的旧版本」。
+**⚠️ 该假设已订正** —— 实测是**种子跑过（KPI 目录有 16 行），但绑定落在 ds1 上**，
+既不是「没跑」也不是「旧版绑定逻辑」。
+
+生产实测输出（只读）：
 
 ```sql
 SELECT count(*) AS total, count(datasource_id) AS with_ds FROM kpi_catalog;
@@ -332,11 +334,39 @@ SELECT datasource_id, count(*) FROM kpi_catalog GROUP BY 1 ORDER BY 1;
 SELECT id, name, type, is_active, is_default FROM data_source ORDER BY id;
 ```
 
-- 若 `total=0` ⇒ 生产**根本没有 KPI 目录** ⇒ B 零影响，可直接执行；
-- 若有行但 `datasource_id` 全为 NULL ⇒ 同样是「无引用」⇒ B 零影响；
-- 若有行的 `datasource_id` 指向别的源 ⇒ 说明 ds2 连 KPI 目录都没在用 ⇒ B 依然零影响。
+```
+ total | with_ds                          datasource_id | count         id |        name         |  type    | is_active | is_default
+--------+---------                        ---------------+-------         ----+---------------------+----------+-----------+------------
+   16  |      16                                     1 |    16            1 | THBI Oracle         | oracle   | t         | t
+                                                                  2 | SEED_DS_KPI_CATALOG | postgresql | t      | f
+                                                                  3 | SRM-TH              | mysql    | t         | f
+```
 
-⇒ **三种情况都指向 B**，但**先跑这条探针再改**（改的是生产数据，属于写操作）。
+**判读**：命中原三分支里的**第三支**（「有行的 `datasource_id` 指向别的源」）
+⇒ **ds2 对 KPI 目录零引用**（16 行全部绑 ds1）⇒ **B 零影响**。
+
+⇒ **B（`UPDATE data_source SET is_active=false WHERE id=2`）现在是一步零影响的操作**，
+但它仍是**生产数据写** ⇒ 须**用户明示批准后由用户在生产执行**，本轮不代执行。
+
+**★ `is_active=false` 对 ds2 的完整影响面（开发机核 `origin/main` 的全部 `is_active` 消费点）**：
+
+| 消费点 | ds2 停用后的行为 | 影响 |
+|---|---|---|
+| `datasource_service.list(activeOnly=True)`（:105） | ds2 从 active 列表消失 | ✅ **B 的目的本身**（聊天下拉不再出现 ds2） |
+| `datasource_service.list(activeOnly=False)` | ds2 **仍在**管理页可见 | ✅ **可逆**（随时改回 `is_active=true`） |
+| `_promoteNextDefault`（:348） | 仅在**删除默认源**时提升下一个 active | 本次不动 ds1（仍是默认）⇒ **不触发** |
+| `data_quality_service.py:123` | ds2 移出 DQ 规则的数据源候选集 | 无影响（ds2 引用面全 0） |
+| `kpi_datasource_suggestion_service.py:275` | ds2 不再被推荐为 KPI 数据源 | 无影响（ds2 从未在用） |
+| `ontology_join_health_service.py:166` | ds2 不参与 JOIN 健康度 | 无影响 |
+| `discovery_snapshot_service.py:479` | ds2 不再做 discovery snapshot | 无影响（ds2 无 `schema_cache` ⇒ 本来也不做） |
+| `kpi_catalog_service.py:228` | **ds2 被停用后不能再把 KPI 绑到 ds2** | 无影响（现有 16 行全绑 ds1）＋语义上正是期望约束 |
+| `datasource_service.get()` | **不校验 `is_active`** ⇒ 显式 API 传 `datasourceId=2` 仍走得通 | ⚠️ **B 的已知边界**（要彻底关死需 **C 代码 fail-closed**，另批） |
+
+**★ 顺带修正一处口径**：生产只有 **3** 个数据源（id 1/2/3），
+本地探针出现的 ds4/ds5/ds9 **生产不存在** ⇒ 不影响任何判据（口径按 `data_source` 实际行取，不写死 id）。
+
+**ds2 现状**：`is_active = t` ⇒ **仍挂在聊天下拉里** ⇒ **仍是「用户误选 ds2 ⇒ 1119 故障原样复现」的入口**
+⇒ **B 依然是正确的堵法**，只是「是否现在执行」是用户决策。
 
 
 ---
@@ -513,7 +543,7 @@ UPDATE ontology_class SET valid_to = NULL WHERE id = 270;   -- ★ 未执行
 | 端到端出数 | ✔ 用户实测无问题 |
 | **§2 前置门禁** | ⚠️ **上线后才执行**；A2 非空但**经复核属合法反例**（3 个 0 行占位类，§3.2）⇒ **不构成「该数据源不得上线」**；真正的门禁缺口是 **ds2 的 A1 为空**（§四） |
 | **三个 0 行占位类** | ✔ **被剔除是正确行为**（§3.2）⇒ **无需任何处置**；⚠️ **理由链已订正**（不是「0 行不被 introspect 收录」，而是「表不在被 introspect 的 owner 命名空间内 / 表不存在」—— introspect 按**列**枚举，0 行的表也会被收录；**定性不变**，待 §7.2 第 2 项的目标库存在性探针定案）；遗留：采购域 M1 衔接（§3.4）+ ds3 下「供应商」锚定无腿（§3.5） |
-| ds2 路径 | ✘ **fail-open 未根治**（§四）—— 1119 故障在 ds2 会话原样复现 ⇒ **已收敛为选项 B（`is_active=false`）**：引用面 10 张表全 0 + 代码零硬编码 ⇒ 待跑 §4.2.4 那条只读探针后执行 |
+| ds2 路径 | ✘ **fail-open 未根治**（§四）—— 1119 故障在 ds2 会话原样复现 ⇒ **已收敛为选项 B（`is_active=false`）**：引用面 10 张表全 0 + 代码零硬编码 + **§4.2.4 探针已在生产执行（命中第三支 ⇒ B 零影响）** ⇒ **只剩「执行」这一步，属生产数据写，待用户明示批准** |
 | §7 墓碑 270 | ⛔ 未执行，判定保留（§六） |
 | **是否需要回滚** | ❌ **不需要** —— 零 ORA-00942、零崩溃、零数据损坏；剩余缺口是 ds2 路径与采购域衔接，**都不需要动镜像** |
 
@@ -523,7 +553,7 @@ UPDATE ontology_class SET valid_to = NULL WHERE id = 270;   -- ★ 未执行
 |---|---|---|---|
 | 1 | 3 个 0 行占位类的**引用面**探针（`ontology_metric.target_class_id` / `ontology_metric_source.class_id` / `kpi_catalog.metric_id`） | 只读 | 影响面评估（确认无指标挂靠 ⇒ 剔除无业务后果） |
 | 2 | **★ 决定性探针**：Oracle 侧 `all_tables` 查 `DWD_SUPPLIER` / `DWD_MATERIAL` / `DWD_INCOMING_INSPECTION` 是否存在 ⇒ ① 决定 §3.2 定性理由链（**表不存在 ⇒ 剔除正确**；**表存在却不在 schema_cache ⇒ introspection 过期 ⇒ 真缺陷，须重跑 introspect**，判据见 §5.5）；② 事实登记到**采购域 M1**（**不再定分支、不改本体**） | 只读 | §3.2 定性 / M1 衔接（§3.4） |
-| 3 | **ds2 处置：执行 `UPDATE data_source SET is_active=false WHERE id=2`**（**生产数据写**）—— 先跑 §4.2.4 的只读探针；B 只挡 UI，显式 API 仍可打 ds2 ⇒ C（代码 fail-closed）另批 | 生产数据写 | ds2 路径根治 |
+| 3 | **ds2 处置：执行 `UPDATE data_source SET is_active=false WHERE id=2`**（**生产数据写**）—— ✅ **前置只读探针已执行并闭环（§4.2.4，命中第三支 ⇒ B 零影响）** ⇒ **只剩执行本身**，须用户明示批准后由用户在生产执行；B 只挡 UI，显式 API 仍可打 ds2 ⇒ C（代码 fail-closed）另批 | 生产数据写 | ds2 路径根治 |
 | 4 | 补 ds1 / ds3 各一次的**披露提示原文与 N 值** | 只读 | §6.3 闭环 |
 | 5 | 研究入口回归（C1 ≈ 200+ > 0 ⇒ runbook 明写必做） | 只读 | §6.3 闭环 |
 | 6 | 泛化问句回归（不含维度词，验证窗口未收得过窄） | 只读 | §6.3 闭环 |

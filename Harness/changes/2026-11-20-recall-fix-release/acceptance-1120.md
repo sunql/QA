@@ -4,7 +4,9 @@
 - **批次**：`2026-11-20-recall-fix-release`
 - **Runbook**：[deploy-prod.md](./deploy-prod.md)（部署 SSOT）· **交付汇总**：[summary.md](./summary.md)
 - **验收人**：Claude（只读复核）+ 用户（生产命令执行）
-- **结论**：**✅ 已上线，根治在运行时实证生效；不需要回滚**。遗留 1 个「死类」问题 + 1 条未根治路径（ds2），均**不影响回滚决策**，需单独处置。
+- **结论**：**✅ 已上线，根治在运行时实证生效；不需要回滚**。剩余遗留只有 **1 条未根治路径（ds2 fail-open）**；
+> 另有一处**已知属正确行为**的现象（3 个 0 行结构性占位类被过滤剔除，§三）与一处**语义衔接待办**（采购域 M1），
+> 均**不影响回滚决策**。
 
 > 本文件是**事后验收**记录。runbook §2 的前置探针（`A1`/`A2`/`B1`/`C1`）**在上线后**才执行
 > （用户按 runbook 执行了部署动作但未先跑 §2）⇒ 结论中单独标注了这一偏差，见 §五。
@@ -118,54 +120,90 @@ ds1 被剔的前 10 个正是 ds3 的表（`abarbeitung_order` / `ai_chat_*` / `
 
 ---
 
-## 三、★★ 新发现：三个「所有源下都召不回」的死类
+## 三、★★ 三个「所有源下都召不回」的类 —— 复核后定性：**0 行结构性占位类，被剔除是正确行为**
 
-```
-DWD_SUPPLIER
-DWD_MATERIAL
-DWD_INCOMING_INSPECTION
-```
+> ⚠️ **本节结论在 2026-11-20 复核过程中被修正过一次**：最初按 runbook §2 的 A2 判据判为
+> 「死类 / 疑似漏 introspect」，**随后拿到这三条类的本体行后，判定推翻**（见下）。
 
-**事实**：这三个是 `valid_to IS NULL` 的**活**类，其 `source_table` **不在任何数据源的 `schema_cache` 里**
-⇒ 按 `filterClassesByDatasource`（`source_table` 非空且不在 `tableSet` ⇒ 无条件剔除）
-⇒ **选中 ds1 被剔、选中 ds3 也被剔** ⇒ **在生产没有任何数据源能召回到它们**。
+### 3.1 实测：三个类的本体行
 
-**直接实证**：ds1 会话的 `droppedTables` **前 3 位就是它们**（§2.1 原文）。
+| id | class_name | source_table | object_type | class_alias | valid_to | description |
+|---|---|---|---|---|---|---|
+| 1 | `IncomingInspection` | `DWD_INCOMING_INSPECTION` | Transaction | **null** | null | 「**来料检验（结构性建模，0 行；详见 docs/data-knowledge/采购域.md）**」 |
+| 2 | `Supplier` | `DWD_SUPPLIER` | Master | **null** | null | 「**供应商主数据（结构性建模，0 行；详见 docs/data-knowledge/采购域.md）**」 |
+| 3 | `ItemMaster` | `DWD_MATERIAL` | Master | **null** | null | 「**物料主数据（结构性建模，0 行；详见 docs/data-knowledge/采购域.md）**」 |
 
-**危害**：不是报错，是**静默不可达**。用户无论切哪个源，问到这 3 张表的问句都答不出，且没有任何提示。
-若这 3 张表**真实存在于 Oracle**（只是没 introspect），则 `DWD_SUPPLIER` 这条「供应商台账」路径在**所有源下都是断的**。
+三者 `created_by=seed`、`created_time=2026-10-23T06:35:44.891589+00:00`（同一次种子导入）、
+`version=1`、`valid_to IS NULL`（活类）、`parent_class_id IS NULL`、`object_owner IS NULL`。
 
-**根因判定**：runbook §2 已预警「类已登记、owner 未 introspect」这个**代码不可解**风险；
-这 3 个名字的 `DWD_` 命名风格与 ds1 已 introspect 的同层表（`DWD_BOM` / `DWD_AP_INVOICE_DTL` /
-`DWD_SUPPLIER_PAYMENT` / `DWD_BUSINESS_PARTNER` …）一致 ⇒ **极可能是 Oracle 侧真实存在、只是该 owner 没 introspect**。
+### 3.2 定性：**不是缺陷，是正确行为**
 
-**处置分支（只差一条 Oracle 侧事实；本次**未做任何改动**）**：
+`description` 明写「**结构性建模，0 行**」⇒ 这三个类是**采购域的语义占位**（表达"供应商主数据 / 物料主数据 /
+来料检验"这三个业务对象的结构），其指向的物理表 **DWD_SUPPLIER / DWD_MATERIAL / DWD_INCOMING_INSPECTION
+没有数据行**（0 行）⇒ 因此不在任何数据源的 `schema_cache` 覆盖范围内（无数据的表不会被 introspect 收录）。
+
+⇒ **被硬过滤剔除 = 正确**：
+- 它们本来就答不出任何东西（0 行）；
+- 若留在候选集里，LLM 反而可能选中 `DWD_SUPPLIER` 去查 ⇒ 得到空结果 / 「有表但没数」的误导性回答；
+- runbook §2 A2 判读表说「这些类会被**静默剔除** ⇒ 该数据源不得上线」—— **该判据对「有数据的类被误剔」成立，
+  对「0 行占位类被剔除」不成立** ⇒ **A2 探针需要按「该表是否有数据」二次分层**，否则会持续误报。
+
+### 3.3 运行时直接实证
+
+ds1 会话的 `droppedTables` **前 3 位就是它们**（§2.1 原文）⇒ 剔除行为在生产确实发生，行为符合预期。
+
+### 3.4 唯一需要挂账的衔接点（属采购域 M1，不属本批）
+
+这 3 个类是**采购域 V0.3 的语义锚点**（指向 `docs/data-knowledge/采购域.md`）。
+⇒ 若 M1 采购域语义发布/召回需要它们出现在候选集里 ⇒ 需要它们在某个源有缓存，
+或引入「类→源绑定」机制（本体层至今**无 `datasource_id` 列**）。
+⇒ **登记到采购域 M1 的待办，不在本批处置范围。**
+
+### 3.5 ⚠️ 顺带发现的语义后果（影响 ds3 会话的问法）
+
+`class_alias` **三条全为 null**、`class_name` 是英文（`Supplier` / `ItemMaster` / `IncomingInspection`）
+⇒ **关键词锚定（2–6 字 n-gram ⊆ `class_alias` / `class_name`）对它们一律不生效**
+（中文「供应商」字面不匹配英文 `Supplier`）。
+
+而 ds3 会话下 `DIM_SUPPLIER`（ds1 的 Oracle 表）**被硬过滤剔除** ⇒
+
+> **ds3 会话里「供应商」的语义锚定没有腿**：竞争集内不含任何带中文「供应商」字样的类
+> （`id=2` 是英文 `Supplier` 且无别名，不参与竞争）。
+> ⇒ ds3 下问「供应商」**只能靠向量召回命中 `MAIN_DATA_SUPPLIER`**，锚定救援不接管。
+> ⇒ 这与 §2.3 实测「ds3 会话零降级」**不矛盾**（没降级说明向量路径直接命中了），但意味着
+> **ds3 会话对「供应商」类问句的鲁棒性弱于 ds1**（ds1 下 `DIM_SUPPLIER` 保留 ⇒ 锚定有腿）。
+
+**待验证**（只读）：全库哪些活类带中文「供应商」字样，以及它们在 ds1 / ds3 下分别是否被保留。
 
 ```sql
--- 在 Oracle 侧用只读账号执行（不涉及本系统）
-SELECT owner, table_name FROM all_tables
-WHERE table_name IN ('DWD_SUPPLIER','DWD_MATERIAL','DWD_INCOMING_INSPECTION');
+SELECT id, class_name, class_alias, source_table
+FROM ontology_class
+WHERE valid_to IS NULL
+  AND (class_name ILIKE '%供应商%' OR coalesce(class_alias, '') ILIKE '%供应商%')
+ORDER BY id;
 ```
 
-| 分支 | 事实 | 处置 | 性质 |
-|---|---|---|---|
-| **A** | 查得到 | 补 ds1 对应 owner 的 introspect（把表写进 `schema_cache`） | **生产数据写操作 ⇒ 需单独评审 + 逐条 SQL 过目** |
-| **B** | 查不到 | 这 3 个类打墓碑（`valid_to` 落时间），让"静默不可达"变成"明确作废" | 生产 DML ⇒ 需单独评审 |
-| **C** | 表其实在 ds3、`source_table` 登记错 | 走 M1 绑定语义改绑 | **禁止裸改 `source_table`** |
+### 3.6 引用面（列名已确认，探针待跑）
 
-**待补的影响面**：这三个类被哪些 `ontology_metric` / `kpi_catalog` 引用（若被引用，影响不止"答不出"，
-还可能是"口径错乱"）。只读探针（未执行）：
+`ontology_metric.target_class_id` / `ontology_metric_source.class_id` / `kpi_catalog.metric_id`
+⇒ 精确引用查询：
 
 ```sql
-SELECT jsonb_pretty(to_jsonb(oc)) AS row FROM ontology_class oc
-WHERE upper(coalesce(oc.source_table, ''))
-  IN ('DWD_SUPPLIER','DWD_MATERIAL','DWD_INCOMING_INSPECTION') ORDER BY oc.id;
+SELECT id, metric_name, target_class_id, execution_source, status
+FROM ontology_metric WHERE target_class_id IN (1, 2, 3);
 
-SELECT table_name, string_agg(column_name, ', ' ORDER BY ordinal_position) AS cols
-FROM information_schema.columns
-WHERE table_name IN ('ontology_class','ontology_metric','ontology_metric_source','kpi_catalog')
-GROUP BY table_name ORDER BY table_name;
+SELECT ms.metric_id, ms.class_id, ms.role, m.metric_name
+FROM ontology_metric_source ms JOIN ontology_metric m ON m.id = ms.metric_id
+WHERE ms.class_id IN (1, 2, 3);
+
+SELECT id, kpi_code, kpi_name, metric_id, datasource_id, status
+FROM kpi_catalog
+WHERE metric_id IN (SELECT id FROM ontology_metric WHERE target_class_id IN (1, 2, 3));
 ```
+
+**参考事实**：M1-1.4 采购本体对象核对记录「**7 个墓碑类仍被 8 条 KPI 引用**」⇒ 采购域存在
+「类被墓碑 ⇒ 指标仍引用它」的历史模式 ⇒ 这三个 0 行占位类**若也被引用**，
+引用它们的 KPI 在召回时拿不到类 ⇒ 该形态属 M1 采购域的既有挂账，不是 1120 引入的。
 
 ---
 
@@ -180,9 +218,72 @@ GROUP BY table_name ORDER BY table_name;
 - 近 30 分钟 `schema_cache 无可用表清单` = 0 ⇒ **暂未有人用它**，无即时影响。
 - **这不是本次发版引入的回归**（filter 上线前也无过滤），但"根治"声明对 ds2 不成立 ⇒ **需有人拍板策略**。
 
+### 4.1 三个数据源的缓存覆盖度（实测）
+
+```sql
+SELECT id, name, type, is_active, is_default,
+       (SELECT count(*) FROM schema_cache sc WHERE sc.datasource_id = ds.id) AS cache_rows,
+       (SELECT coalesce(sum(jsonb_array_length(sc.schema_data)),0)
+          FROM schema_cache sc WHERE sc.datasource_id = ds.id) AS cached_tables
+FROM data_source ds ORDER BY id;
+```
+
+| id | 源 | 类型 | 默认 | cache_rows（owner 数） | cached_tables | 类归属 | 运行时保留 | 过滤态 |
+|---|---|---|---|---|---|---|---|---|
+| 1 | THBI Oracle | oracle | ✔ | 2 | **1817** | ~99 张表 | 94 / 304 | **硬过滤生效** |
+| 2 | SEED_DS_KPI_CATALOG | postgresql | — | **0** | **0** | — | — | ⚠️ **fail-open ⇒ 完全不过滤** |
+| 3 | SRM-TH | mysql | — | 1 | **220** | ~200 张表 | 207 / 304 | **硬过滤生效** |
+
+**判读**：
+- **ds1**：缓存 1817 张物理表 ⇒ 是超集（类只挑了一小部分登记）⇒ 正常。类保留率 31%（94/304），
+  剔掉的 210 个是 ds3 的表 ⇒ **方向正确**。
+- **ds3**：缓存 220 张、类占 ~200 张 ⇒ **91% 覆盖**，很紧。类保留率 68%（207/304），
+  剔掉的 97 个是 ds1 的 Oracle 表（**含 `DIM_SUPPLIER` / `DIM_FACILITY` / `DIM_IMATERIAL`**）
+  ⇒ **维度表全在 ds1、业务表全在 ds3** ⇒ ds3 下问「按等级/分类统计供应商」这类需维度表的问句**答不出**
+  （数据隔离的设计代价，非 bug，但要有业务预期）。
+- **ds2**：缓存 0 行 ⇒ 选中即 fail-open ⇒ 候选集 = 全部 302 个类，而 SQL 打在 ds2 的 PostgreSQL 上
+  ⇒ `DWD_*` / `MAIN_DATA_*` 在 PG 库里不存在 ⇒ **1119 的故障（PG 侧等价物
+  `relation "main_data_supplier" does not exist`）在 ds2 会话里原样复现**。
+
+### 4.2 ds2 的三个处置选项（**需拍板；本批未做任何改动**）
+
+⚠️ **ds2 不能简单「补 introspect」** —— 那只会换个方式坏：若给 ds2 补上 introspection（只含 KPI 目录相关 PG 表），
+它会变成硬过滤 ⇒ 那 302 个业务类**全部被剔**（都不在 ds2 的表清单里）⇒ ds2 彻底答不了任何业务问句。
+
+| 选项 | 效果 | 代价 | 性质 |
+|---|---|---|---|
+| **A. 补 introspect** | ds2 只剩 KPI 目录类可用 | 业务问句在 ds2 全废（本来也不该在 ds2 问业务） | 生产数据写 |
+| **B. ds2 `is_active=false`** | 下拉里不出现 ds2 ⇒ 等价于移除 | 可能打断别的引用 ds2 的功能（KPI 种子、feature 绑定…） | 生产数据写 |
+| **C. 该源 fail-closed**（代码改） | API 直接传 `datasourceId=2` 也拦得住 | 改代码 | **代码** |
+
+**建议**：先查 ds2 的引用面，再在 A / B 之间选。若 ds2 只是 KPI 目录的种子源、无任何业务依赖
+⇒ **B（`is_active=false`）最省事、零代码、零误伤**；若 KPI 流程硬依赖 ds2 处于 active
+⇒ 走 A，并在文案上说明 ds2 只答 KPI 口径。
+
+**ds2 引用面探针**（只读，未执行）：
+
+```sql
+SELECT id, kpi_code, kpi_name, datasource_id, status
+FROM kpi_catalog WHERE datasource_id = 2;
+
+-- 全仓引用 datasource_id=2 的表与行数
+DO $$
+DECLARE r record; c bigint;
+BEGIN
+  FOR r IN SELECT table_name FROM information_schema.columns
+           WHERE column_name = 'datasource_id' AND table_schema = 'public' ORDER BY table_name
+  LOOP
+    EXECUTE format('SELECT count(*) FROM %I WHERE datasource_id = 2', r.table_name) INTO c;
+    RAISE NOTICE '% -> %', r.table_name, c;
+  END LOOP;
+END $$;
+```
+
+⇒ 全部为 0 ⇒ ds2 是纯摆设 ⇒ 直接走 **B**。
+
 ---
 
-## 五、★ 与 runbook 的偏差（两处，都会误导下次执行）
+## 五、★ 与 runbook 的偏差（两处 runbook 偏差 + 一处运维坑，都会误导下次执行）
 
 ### 5.1 runbook §2 的三条 SQL **本身是坏的**（实测报错）
 
@@ -195,11 +296,17 @@ GROUP BY table_name ORDER BY table_name;
 **额外坑（不在 runbook 里）**：`docker exec X sh -c 'psql -c "...SQL..."'` 的**外层单引号会吃掉 SQL 里所有单引号**
 （不只 `''`）⇒ 必用 heredoc 走 stdin：`docker exec -i X sh -c 'psql …' <<'SQL' … SQL`（或 `psql -f`）。
 
-### 5.2 runbook §2 的 A2 判据**只查单源**，会漏掉「跨源死类」
+### 5.2 runbook §2 的 A2 判据**只查单源**，且**不区分「0 行占位类」与「真被误剔的类」**
 
 A2 的口径是「本源的活类在本源缓存里找不到」⇒ 只能发现「本源覆盖度不足」，
-**发现不了「在所有源下都找不到」的死类**（本次的 3 个就是被跨源口径的探针发现的）。
-⇒ **建议补一条全源孤儿探针**（本次实际使用的口径）：
+**发现不了「在所有源下都找不到」的类**（本次的 3 个就是被跨源口径的探针发现的）。
+
+⚠️ **更重要的**：A2 的判读表把「A2 非空 ⇒ 该数据源不得上线」写成**无条件**规则，
+但本次实测证明**存在合法反例** —— 3 个类是 **0 行结构性占位类**（§3.2）⇒ 被剔除是**正确行为**。
+⇒ **建议 A2 判据加一层过滤**：只对「该 `source_table` 在目标库里**确实有数据**」的类报警，
+否则 0 行占位类会持续误报「该数据源不得上线」。
+
+**建议补一条全源孤儿探针**（本次实际使用的口径）：
 
 ```sql
 WITH cls AS (
@@ -261,25 +368,28 @@ UPDATE ontology_class SET valid_to = NULL WHERE id = 270;   -- ★ 未执行
 | **Gap A 未打死召回** | ✔ 零降级 / 零 bypass / 零 too_large；命中解析率 80–90% |
 | 硬红线 `ORA-00942` | ✔ 0 |
 | 端到端出数 | ✔ 用户实测无问题 |
-| **§2 前置门禁** | ✘ **上线后才执行，且 A2 非空** ⇒ runbook 口径「该数据源不得上线」**未通过**；实际后果是**漏召而非崩溃** |
-| **三个死类** | ★ **新发现**（§三）—— 待 Oracle 侧事实定分支 |
-| ds2 路径 | ✘ fail-open 未根治（§四）—— 待拍板策略 |
+| **§2 前置门禁** | ⚠️ **上线后才执行**；A2 非空但**经复核属合法反例**（3 个 0 行占位类，§3.2）⇒ **不构成「该数据源不得上线」**；真正的门禁缺口是 **ds2 的 A1 为空**（§四） |
+| **三个 0 行占位类** | ✔ **被剔除是正确行为**（§3.2）⇒ **无需任何处置**；遗留：采购域 M1 衔接（§3.4）+ ds3 下「供应商」锚定无腿（§3.5） |
+| ds2 路径 | ✘ **fail-open 未根治**（§四）—— 1119 故障在 ds2 会话原样复现 ⇒ **待拍板**（A 补 introspect / B `is_active=false` / C fail-closed） |
 | §7 墓碑 270 | ⛔ 未执行，判定保留（§六） |
-| **是否需要回滚** | ❌ **不需要** —— 零 ORA-00942、零崩溃、零数据损坏；缺口是"漏召"，用补 introspect / 打墓碑 / 改 ds2 策略补，**不需要动镜像** |
+| **是否需要回滚** | ❌ **不需要** —— 零 ORA-00942、零崩溃、零数据损坏；剩余缺口是 ds2 路径与采购域衔接，**都不需要动镜像** |
 
 ### 7.2 待办清单（按优先级）
 
 | # | 事项 | 性质 | 阻塞 |
 |---|---|---|---|
-| 1 | Oracle 侧 `all_tables` 查 3 张表是否存在 → 定分支 A/B/C | 只读 | 死类处置 |
-| 2 | 查 3 个类被哪些 `ontology_metric` / `kpi_catalog` 引用 | 只读 | 影响面评估 |
-| 3 | ds2 策略拍板（补 introspect / 移出可选源 / fail-closed） | 决策 | ds2 路径根治 |
+| 1 | 3 个 0 行占位类的**引用面**探针（`ontology_metric.target_class_id` / `ontology_metric_source.class_id` / `kpi_catalog.metric_id`） | 只读 | 影响面评估（确认无指标挂靠 ⇒ 剔除无业务后果） |
+| 2 | Oracle 侧 `all_tables` 查 `DWD_SUPPLIER` / `DWD_MATERIAL` / `DWD_INCOMING_INSPECTION` 是否存在 ⇒ 事实登记到**采购域 M1**（**不再定分支、不改本体**） | 只读 | M1 衔接（§3.4） |
+| 3 | ds2 策略拍板（补 introspect / `is_active=false` / 改代码 fail-closed） | 决策 | ds2 路径根治 |
 | 4 | 补 ds1 / ds3 各一次的**披露提示原文与 N 值** | 只读 | §6.3 闭环 |
 | 5 | 研究入口回归（C1 ≈ 200+ > 0 ⇒ runbook 明写必做） | 只读 | §6.3 闭环 |
 | 6 | 泛化问句回归（不含维度词，验证窗口未收得过窄） | 只读 | §6.3 闭环 |
-| 7 | runbook §2 三条 SQL 修正 + 补全源孤儿探针 | 文档 | 下次发版 |
+| 7 | runbook §2 三条 SQL 修正 + A2 判据加「该表是否有数据」二次分层 + 补全源孤儿探针 | 文档 | 下次发版 |
 | 8 | `anchor_rescue_*` 的日志级别（info → warning） | **代码** | 观测盲区（本批不阻塞） |
-| 9 | §7 墓碑 270 原地复活 | **生产 DML** | 待 1/4/5/6 全绿 |
+| 9 | ds3 会话「供应商」锚定无腿（id=2 `class_alias=null` + `DIM_SUPPLIER` 被剔）⇒ 定语义补法 | 决策 | 问法敏感（§3.5） |
+| 10 | §7 墓碑 270 原地复活 | **生产 DML** | 待 4/5/6 全绿 |
 
 > ⚠️ **本次全程只读复核，未做任何代码改动、未做任何生产数据写入。**
-> 第 8 项是代码改动，第 9 项是生产 DML ⇒ 都需要单独评审；第 1–7 项除必要的 DML 外均可只读完成。
+> 第 8 项是代码改动，第 10 项是生产 DML ⇒ 都需要单独评审；第 1–7、9 项均可只读完成。
+> **原「Oracle 侧 `all_tables` 定死类处置分支 A/B/C」一项已作废** —— 三个类是 0 行结构性占位类，
+> 被剔除是正确行为，不需要补 introspect、不需要打墓碑；Oracle 侧事实只用于**采购域 M1 的语义衔接**。

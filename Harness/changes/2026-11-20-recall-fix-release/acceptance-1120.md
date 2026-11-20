@@ -479,6 +479,42 @@ peer 线挂的缺口「研究入口召回未收窄到数据源」**属实，但�
 | **有此表**，但不在 `schema_cache` | ❌ **真缺陷（漏召回：类有数据却看不见）** —— 根因是 **introspection 过期/漏刷**，**不是**过滤逻辑 | **重跑 introspect**；**不要改过滤** |
 | **有此表**且在 `schema_cache` | ⚠️ 匹配口径有 bug（owner / 大小写 / 裸名） | 代码缺陷，单独提 issue |
 
+#### ★★ 5.5.1 Oracle 侧必须按 **(owner, table_name)** 精确比对（否则会把「跨 owner 同名」误判成漏召回）
+
+> 这条是跨会话评审（采购线）提出的方法论订正，我复核了实现，**成立且必须写进判据**。
+
+**实现事实（已核 `origin/main`）**：
+
+- `schema_introspection_service.py:73-77` `_oracleOwner(username)` ⇒ **owner = `UPPER(ds.username)`**，
+  可显式覆盖；**一个连接可以看到并缓存多个 owner 的表**
+  （代码注释自陈：「ZJTH 连接可同时见 ZJTH 与 THBI」）⇒ **一个源可有多行 `schema_cache` = 多个 owner**；
+- `recall_datasource_filter._tableKeys` ⇒ 键集合 = **裸名 ∪ `OWNER.TABLE` 限定名**（全大写），
+  且**裸名不区分 owner** ⇒ 各 owner 的同名表在裸名维度上**互相放行**。
+
+**⇒ 判据必须细化为三态**（判读时先取「该源的 owner 集合」，
+即 `schema_cache.schema_data` 里出现过的 `owner` 去重，见探针 P3b）：
+
+| 目标库 `all_tables` 的结果 | 定性 | 处置 |
+|---|---|---|
+| **任何 owner 下都查无此表** | ✅ **剔除正确**（类指向一张不存在的物理表） | 无需处置；登记「类→源绑定」缺口 |
+| 此表存在于**该源的 owner 集合内**（本源的 schema），但不在该源的缓存表名清单里 | ❌ **真缺陷候选**（introspection 过期/漏刷）⇒ 漏召回 | **重跑 introspect**；不要改过滤 |
+| 此表**只**存在于该源 owner 集合**之外**的 owner（别的 schema / 别的用户下的同名表） | ✅ **剔除正确**（那不是本源的表） | 无需处置 |
+| 此表在缓存里却仍被判「剔除」 | ⚠️ 匹配口径 bug | 代码缺陷，单独提 issue |
+
+**⚠️ 第 2 行只能判「真缺陷候选」，不能直接定案**：`ontology_class` **没有 `owner` / `datasource_id` 列**
+⇒ 从本体侧**无法确定某个类指的是哪个 owner** ⇒ 「类语义上指的本源 owner 下的那张表存在，但缓存里没有」
+与「类其实指的是别的 owner」在现有数据下**不可区分** ⇒ 定案还需要「类→源/owner」绑定信息
+（这正是 §3.4 / 采购域 M1 挂的那个语义缺口）。
+
+**★ 本地实测佐证（`qa_metadata`，探针 P3b 实跑）**：ds1 的 `schema_cache` 覆盖 **3 个 owner**
+= `OUTLN`(3 表) / `THBI`(110 表) / `ZJTH`(1680 表) ⇒ **单源多 owner 是实证事实，不是理论**
+⇒ 不带 owner 查 `all_tables` 必然有误判风险。
+
+**⚠️ 反向误判（这就是「不带 owner 查 `all_tables`」的坑）**：
+若查 `all_tables` 时**不按 owner 过滤**，则「别的 owner 下的同名表」会让 [2] 返回「有此表」
+⇒ 会把**剔除正确**误判成**漏召回（真缺陷）** ⇒ 可能触发一次**不必要的 introspect 重跑**，
+甚至误改过滤逻辑。**这就是本条判据必须带 owner 的原因。**
+
 **★ 为什么「存不存在」就是决定性的**：introspect 是按**列**枚举的
 （Oracle 走 `ALL_TAB_COLUMNS WHERE owner = '{owner}'`，`schema_introspection_service.py:570-578`），
 **不看行数** ⇒ 一张**存在但 0 行**的表**照样会被写进 `schema_cache`**
@@ -492,6 +528,8 @@ peer 线挂的缺口「研究入口召回未收窄到数据源」**属实，但�
 2. **Oracle introspection 按 owner 分片**（owner = `UPPER(data_source.username)`，可显式覆盖；
    一个源可有多行 `schema_cache` = 多个 owner）⇒ 「某表不在本源清单」也可能只是**owner 选错**，
    P3 查 `all_tables` 时**要带 owner 一起比对**。
+   ★ **已细化为三态判据 + 精确比对口径，见 §5.5.1**（不按 owner 过滤 ⇒ 跨 owner 同名表
+   会把「剔除正确」误判成「漏召回」⇒ 可能触发不必要的 introspect 重跑）。
 3. **无 `source_table` 的类永远保留**（代码不误杀）⇒ 这类计在 kept，
    既不算「漏过滤」也不算「漏召回」。
 

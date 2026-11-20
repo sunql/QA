@@ -170,37 +170,75 @@ ORDER BY ds_id, kept NULLS LAST, class_id;
 --      —— 这一步只说明「缓存里没有这张表」，**不能直接定性**。
 --
 --  [2] 目标库侧（**决定性**）：查该表在目标库里到底存不存在。
---      Oracle 模板（在**目标 Oracle 库**上跑，owner 取 data_source.username 的大写）：
+--      ★★★ Oracle 必须按 (owner, table_name) 精确比对 ★★★
+--      理由：introspection 按 owner 分片（owner = UPPER(ds.username)，一个连接可同时
+--      看到并缓存**多个 owner** 的表）⇒ 若查 all_tables 时**不按 owner 过滤**，
+--      **别的 owner 下的同名表**会让结论从「剔除正确」误判成「漏召回（真缺陷）」
+--      ⇒ 可能触发不必要的 introspect 重跑，甚至误改过滤逻辑。
+--
+--      [2a] 先看这张表名落在哪些 owner 下（**全 owner 视图**）：
 --
 --        SELECT owner, table_name, num_rows FROM all_tables
---        WHERE upper(table_name) IN ('DWD_SUPPLIER','DWD_MATERIAL','DWD_INCOMING_INSPECTION');
+--        WHERE upper(table_name) IN ('DWD_SUPPLIER','DWD_MATERIAL','DWD_INCOMING_INSPECTION')
+--        ORDER BY table_name, owner;
+--
+--      [2b] 再与 P3b 给出的「本源 owner 集合」交叉，逐 owner 精确比对：
+--
+--        SELECT owner, table_name, num_rows FROM all_tables
+--        WHERE owner = '<OWNER>'          -- ← 换成 P3b 给出的 owner
+--          AND upper(table_name) IN ('DWD_SUPPLIER','DWD_MATERIAL','DWD_INCOMING_INSPECTION');
 --
 --      ★ 为什么「存不存在」就是决定性的：introspect 是按**列**枚举的
 --        （all_tab_columns / information_schema.columns），**不看行数**
 --        ⇒ 一张**存在但 0 行**的表**照样会被写进 schema_cache**。
---        ⇒ 「表存在却不在 schema_cache」= **introspection 过期/漏刷** ⇒ 真缺陷。
 --
---  [3] 定性表：
+--  [3] 定性表（**owner 感知的三态**）：
 --
---      目标库里【查无此表】
+--      [a] 目标库里【任何 owner 下都查无此表】
 --        ⇒ 剔除是**正确行为**。类指向一张不存在的物理表；留着它 LLM 会选中它
 --          ⇒ ORA-00942（1119 事故形态）。**无需任何处置**，只登记「类→源绑定」语义缺口。
 --
---      目标库里【有此表】但不在 schema_cache
---        ⇒ **真缺陷（漏召回：类有数据却看不见）**。根因是 introspection 过期，
+--      [b] 目标库里【此表存在于本源 owner 集合内】（见 P3b）但不在 schema_cache 表名清单
+--        ⇒ **真缺陷候选（漏召回：类有数据却看不见）**。根因是 introspection 过期，
 --          **不是**过滤逻辑 ⇒ 处置 = 重跑 introspect，**不要改过滤**。
---          （此路还需排除「owner 口径不匹配」：见文末口径注记 ③）
+--        ⚠️ 只能判「候选」，**不能直接定案**：ontology_class **没有 owner / datasource_id 列**
+--          ⇒ 无法确定某个类指的是哪个 owner ⇒ 「类指的是本源另一个 owner 下的同名表」
+--          与「introspection 过期」在现有数据下**不可区分**
+--          ⇒ 定案还需「类→源/owner」绑定信息（挂采购域 M1 的语义缺口）。
 --
---      目标库里【有此表】且在 schema_cache 里
---        ⇒ 该类不该被剔；若 P2 显示它被剔，说明**匹配口径有问题**（owner/大小写/裸名）
---          ⇒ 属代码缺陷，单独提 issue。
+--      [c] 目标库里【此表只存在于本源 owner 集合之外】的 owner（别的 schema 的同名表）
+--        ⇒ 剔除是**正确行为**（那不是本源的表）⇒ **无需任何处置**。
 --
---  [4]（可选，仅当 [2] 得到「有此表」）确认真有数据：
+--      [d] 目标库里【此表在 schema_cache 里】但 P2 显示它仍被剔
+--        ⇒ 匹配口径有问题（owner / 大小写 / 裸名）⇒ 代码缺陷，单独提 issue。
+--
+--  [4]（可选，仅当 [2b] 得到「本源 owner 下确有此表」）确认真有数据：
 --        SELECT count(*) FROM <OWNER>.<TABLE>;
 --        = 0   ⇒ 表存在但空 ⇒ 严格说「不是漏召回」（本来也答不出数），
 --                但仍需修 introspection（否则表一旦有数据就静默漏召回）；
 --        > 0   ⇒ 确证漏召回。
+
 -- =============================================================================
+
+
+-- =============================================================================
+-- P3b｜该数据源覆盖的 owner 集合（PG 侧）——**P3 精确比对的前提**
+--
+-- introspection 按 owner 分片 ⇒ 一个源可能有多行 schema_cache（多个 owner）
+-- ⇒ 判读 P3 时必须先知道「本源的 owner 集合」，
+--    否则会把「跨 owner 同名表」误判成「漏召回（真缺陷）」。
+--
+-- 用法：把 `datasource_id = 1` 换成要查的源。
+-- =============================================================================
+SELECT sc.datasource_id,
+       upper(t ->> 'owner')                   AS owner,
+       count(*)                               AS tables_in_owner
+FROM schema_cache sc,
+     LATERAL jsonb_array_elements(sc.schema_data) t
+WHERE coalesce(btrim(t ->> 'owner'), '') <> ''
+  AND sc.datasource_id = 1                    -- ← 改成目标源
+GROUP BY sc.datasource_id, upper(t ->> 'owner')
+ORDER BY sc.datasource_id, owner;
 
 
 -- =============================================================================
@@ -242,7 +280,11 @@ ORDER BY 1;
 -- ③ Oracle introspection 按 **owner** 命名空间分片（owner = UPPER(data_source.username)，
 --    可显式覆盖）；一个源可有多行 schema_cache（多个 owner）⇒
 --    「某表不在本源清单」也可能只是**owner 选错**，不是表不存在。
---    P3 查 all_tables 时请带 owner 一起比对。
+--    P3 查 all_tables 时请带 owner 一起比对（先跑 P3b 取本源的 owner 集合）。
+--    ★ 实测佐证（qa_metadata）：ds1 覆盖 **3 个 owner** = OUTLN(3) / THBI(110) / ZJTH(1680)
+--      ⇒ 单源多 owner 是**实证事实** ⇒ 不带 owner 查 all_tables 必然有误判风险：
+--      「别的 owner 下的同名表」会把「剔除正确」误判成「漏召回（真缺陷）」。
+--    ★ P3 的定性已按 owner 感知细化为三态 [a]/[b]/[c]（见 P3 段正文）。
 --
 -- ④ 无 source_table 的类**永远保留**（代码不误杀）⇒ 判读时这类计在 kept，
 --    不算「漏过滤」，也不算「漏召回」。

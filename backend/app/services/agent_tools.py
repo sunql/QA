@@ -38,7 +38,15 @@ from app.services.agent_tools_procurement import (
     materialSearchHandler as _materialSearchHandler,
 )
 from app.services.agent_tools_procurement import (
+    procurementPolicySearchHandler as _procurementPolicySearchHandler,
+)
+from app.services.agent_tools_procurement import (
     purchaseHistoryHandler as _purchaseHistoryHandler,
+)
+from app.services.agent_tools_procurement import (
+    quotationQueryHandler as _quotationQueryHandler,
+)
+from app.services.agent_tools_procurement import (
     supplierSearchHandler as _supplierSearchHandler,
 )
 from app.services.agent_tools_wiki import (
@@ -231,6 +239,8 @@ BUILTIN_HANDLERS: dict[str, AgentHandler] = {
     "material_search": _materialSearchHandler,
     "supplier_search": _supplierSearchHandler,
     "purchase_history_query": _purchaseHistoryHandler,
+    "quotation_query": _quotationQueryHandler,
+    "procurement_policy_search": _procurementPolicySearchHandler,
     # feat-wiki-knowledge M8：知识工具的实现集中在 agent_tools_wiki，
     # 这里只做登记（handler 引擎在代码、元数据在 DB 的既有分工）。
     **WIKI_HANDLERS,
@@ -251,6 +261,13 @@ ARG_EXTRACTORS: dict[str, ArgExtractor] = {
     # 采购历史：chat 前奏只抽 supplier key（materialKey/monthsBack 走结构化 args）。
     "purchase_history_query": lambda raw: (
         {"supplierKey": k} if (k := _supplierKeyArgs(raw, extractSupplierAnyKey)) else None
+    ),
+    "quotation_query": lambda raw: (
+        {"supplierKey": k} if (k := _supplierKeyArgs(raw, extractSupplierAnyKey)) else None
+    ),
+    # 制度检索：整条输入即问题（对齐 wiki_text）。
+    "procurement_policy_search": lambda raw: (
+        {"question": raw.strip()} if isinstance(raw, str) and raw.strip() else None
     ),
     **WIKI_ARG_EXTRACTORS,
 }

@@ -79,6 +79,10 @@ _AGENT_DEFAULT_BINDINGS: dict[str, str] = {
     "SUPPLIER_360_AGENT": "supplier_360",
     "SUPPLIER_RISK_AGENT": "supplier_risk",
     "GRAPH_REASONING_AGENT": "graph_traverse",
+    # M3-1/M3-2：采购检索/历史工具的运行 Agent（设计稿 §5.2 场景目录的第一批可运行项）。
+    "PROCUREMENT_MATERIAL_SEARCH_AGENT": "material_search",
+    "PROCUREMENT_SUPPLIER_SEARCH_AGENT": "supplier_search",
+    "PROCUREMENT_PURCHASE_HISTORY_AGENT": "purchase_history_query",
     # feat-wiki-knowledge M8：一个 Agent 绑一个工具（agent_definition.tool_name
     # 是单值列），故知识工具各配一个可运行 Agent。
     "WIKI_SEARCH_AGENT": "wiki_search",
@@ -199,6 +203,24 @@ AGENT_SEEDS: list[dict[str, Any]] = [
         "供应链图推理 Agent",
         "供应链链路推理：从供应商出发的多跳可达业务实体（物料/订单/收货/问题），Neo4j 图遍历（graph_traverse 工具）。",
         layers=("DIM", "DWD"),
+    ),
+    _agent(
+        "PROCUREMENT_MATERIAL_SEARCH_AGENT",
+        "采购物料检索 Agent",
+        "按编码/名称/统一键检索标准物料与跨系统映射（material_search 工具，只读无 LLM）。",
+        layers=("DIM",),
+    ),
+    _agent(
+        "PROCUREMENT_SUPPLIER_SEARCH_AGENT",
+        "采购供应商检索 Agent",
+        "按物料反查在册供应商（供应关系图）或按名称/编码检索供应商主数据（supplier_search 工具，只读无 LLM）。",
+        layers=("DIM",),
+    ),
+    _agent(
+        "PROCUREMENT_PURCHASE_HISTORY_AGENT",
+        "采购历史查询 Agent",
+        "供应商(+物料)近 N 月采购订单行汇总与明细（业务库只读，purchase_history_query 工具，SQL Guard 闸门）。",
+        layers=("DWD",),
     ),
     _agent(
         "SUPPLIER_OTD_REPORT",

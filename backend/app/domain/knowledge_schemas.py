@@ -367,3 +367,25 @@ class KnowledgeQueryResponse(CamelModel):
     evidence: tuple[KnowledgeEvidenceRead, ...] = ()
     route_results: tuple[KnowledgeRouteResultRead, ...] = ()
     warnings: tuple[str, ...] = ()
+
+# --- M3-3 采购 Agent 场景目录（§8.4 GET /procurement/agents/catalog） --------
+
+
+class ProcurementAgentToolRead(CamelModel):
+    """目录条目里的工具能力摘要——**不暴露 handlerRef**（能力面非实现面）。"""
+
+    name: str
+    description: str | None = None
+    data_object: str | None = None
+    data_layers: tuple[str, ...] = ()
+
+
+class ProcurementAgentCatalogEntryRead(CamelModel):
+    """一个采购场景 Agent 的目录条目。"""
+
+    agent_code: str
+    agent_name: str
+    description: str | None = None
+    status: str
+    runnable: bool = False
+    tool: ProcurementAgentToolRead | None = None

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
@@ -147,3 +148,114 @@ async def test_supplier_search_requires_some_selector(dbSession) -> None:
     result = await supplierSearchHandler(dbSession, {}, SimpleNamespace())
     assert result.data["suppliers"] == []
     assert result.answer, "空选择器 ⇒ 友好提示而非异常"
+
+
+# ── M3-2：purchase_history_query（业务库只读管线）─────────────────────────
+
+
+def test_purchase_history_registered() -> None:
+    assert "purchase_history_query" in BUILTIN_HANDLERS
+    from app.services.agent_tools import ARG_EXTRACTORS
+
+    assert "purchase_history_query" in ARG_EXTRACTORS
+
+
+def test_build_purchase_history_sql_shape_and_limits() -> None:
+    from app.services.agent_tools_procurement import buildPurchaseHistorySql
+
+    sql = buildPurchaseHistorySql(
+        supplierKey="SUP001", materialKey=None, monthsBack=12, limit=20,
+        today=date(2026, 11, 20),
+    )
+    assert sql.strip().upper().startswith("SELECT")
+    assert "DWD_PURCHASE_ORDER_LINE" in sql
+    assert "SUPPLIER_CODE = 'SUP001'" in sql, "字面量内联（adapter 无参数通道，单引号转义）"
+    assert "FETCH FIRST 20 ROWS ONLY" in sql.upper()
+    assert ";" not in sql, "单语句纪律（禁多语句）"
+    # 时间窗：monthsBack=12 ⇒ 起点为 2025-11-20（DATE 字面量 Oracle/PG 通吃）
+    assert "DATE '2025-11-20'" in sql
+    # materialKey 缺省 ⇒ 无物料条件
+    assert "MATERIAL_CODE = " not in sql
+
+    sql2 = buildPurchaseHistorySql(
+        supplierKey="SUP001", materialKey="ITM-1", monthsBack=3, limit=5,
+        today=date(2026, 11, 20),
+    )
+    assert "MATERIAL_CODE = 'ITM-1'" in sql2
+    assert "FETCH FIRST 5 ROWS ONLY" in sql2.upper()
+    assert "2026-08-20" in sql2
+
+
+@pytest.mark.asyncio
+async def test_purchase_history_handler_executes_readonly(monkeypatch) -> None:
+    """handler：adapter 只读执行两段 SQL（汇总+明细），数据 camelCase。"""
+    from app.services import agent_tools_procurement
+
+    captured: list[str] = []
+
+    class _FakeAdapter:
+        async def execute_read_only(self, sql: str):
+            captured.append(sql)
+            if "COUNT" in sql.upper():
+                return [{
+                    "ORDER_COUNT": 3, "TOTAL_QTY": 100.0,
+                    "MIN_PRICE": 10.0, "MAX_PRICE": 12.0, "AVG_PRICE": 11.0,
+                }]
+            return [
+                {"PO_NO": "PO-1", "MATERIAL_CODE": "ITM-1",
+                 "ORDER_QTY": 30.0, "UNIT_PRICE": 10.0,
+                 "CREATION_DATE": __import__("datetime").date(2026, 10, 1)},
+                {"PO_NO": "PO-2", "MATERIAL_CODE": "ITM-1",
+                 "ORDER_QTY": 70.0, "UNIT_PRICE": 12.0,
+                 "CREATION_DATE": __import__("datetime").date(2026, 11, 1)},
+            ]
+
+    ds = SimpleNamespace(id=1, name="THBI", is_active=True)
+    async def _fakeResolve(session, ctx):
+        return ds
+
+    monkeypatch.setattr(agent_tools_procurement, "_resolveBusinessDatasource", _fakeResolve)
+    monkeypatch.setattr(
+        agent_tools_procurement, "get_adapter", lambda dsId, ds: _FakeAdapter()
+    )
+
+    result = await agent_tools_procurement.purchaseHistoryHandler(
+        SimpleNamespace(),
+        {"supplierKey": "SUP001", "monthsBack": 12, "limit": 20},
+        SimpleNamespace(),
+    )
+    assert len(captured) == 2, "汇总 + 明细两段只读 SQL"
+    assert result.data["via"] == "business_db"
+    assert result.data["summary"]["orderCount"] == 3
+    assert result.data["summary"]["maxPrice"] == 12.0
+    assert len(result.data["rows"]) == 2
+    assert result.data["rows"][0]["poNo"] == "PO-1"
+    assert result.tokens_used == 0
+
+
+@pytest.mark.asyncio
+async def test_purchase_history_rejects_inactive_datasource(monkeypatch) -> None:
+    """C 方案复用：停用源进入业务查询 ⇒ DataSourceInactiveError（fail-closed）。"""
+    from app.domain.exceptions import ConflictError
+    from app.services import agent_tools_procurement
+
+    ds = SimpleNamespace(id=2, name="test-ds", is_active=False)
+    async def _fakeResolve(session, ctx):
+        return ds
+
+    monkeypatch.setattr(agent_tools_procurement, "_resolveBusinessDatasource", _fakeResolve)
+    with pytest.raises(ConflictError):
+        await agent_tools_procurement.purchaseHistoryHandler(
+            SimpleNamespace(),
+            {"supplierKey": "SUP001"},
+            SimpleNamespace(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_purchase_history_requires_supplier_key(dbSession) -> None:
+    from app.services.agent_tools_procurement import purchaseHistoryHandler
+
+    result = await purchaseHistoryHandler(dbSession, {}, SimpleNamespace())
+    assert result.data["rows"] == [] and result.data["summary"] == {}
+    assert result.answer, "缺 supplierKey ⇒ 友好提示"

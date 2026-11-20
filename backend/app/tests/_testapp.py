@@ -326,7 +326,7 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     # 知识服务 Facade（P4 D32）：与 main.py 同一开关、同一前缀、同一依赖。
     # 漏掉这里 ⇒ 集成测试打过去 404（两套 wiring 是手工平行维护的）。
     if settings.enableKnowledgeFacade:
-        from app.api.v1 import knowledge_facade, procurement_knowledge
+        from app.api.v1 import knowledge_facade, procurement_knowledge, procurement_knowledge_entities, procurement_knowledge_graph
 
         testApp.include_router(
             knowledge_facade.router,
@@ -336,6 +336,18 @@ def buildTestApp(testFactory: Any) -> FastAPI:
         )
         testApp.include_router(
             procurement_knowledge.router,
+            prefix="/api/v1/procurement/knowledge",
+            tags=["procurement-knowledge"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
+        testApp.include_router(
+            procurement_knowledge_entities.router,
+            prefix="/api/v1/procurement/knowledge",
+            tags=["procurement-knowledge"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
+        testApp.include_router(
+            procurement_knowledge_graph.router,
             prefix="/api/v1/procurement/knowledge",
             tags=["procurement-knowledge"],
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],

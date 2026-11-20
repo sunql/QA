@@ -225,3 +225,33 @@ async def test_ragRouteRespectsTopK(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert len(outcome.evidence) == 2
+
+
+@pytest.mark.asyncio
+async def test_ragEvidenceCarriesM21ContractFields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M2-1 契约补全：证据带 evidenceId（全协唯一）+ confidence（距离→相似度）。
+
+    - evidenceId 每条独立（default_factory）⇒ 调用方可逐条引用；
+    - confidence = 1 - distance（夹到 [0,1]）——RAG 路唯一有分数的通道；
+    - 旧字段（releaseId/releaseVersion/source）原样保留（旧调用方兼容）。
+    """
+    monkeypatch.setattr(rag_route, "registryRagEnabled", lambda: True)
+    searcher = _Recorder(RegistrySearchResult(hits=_hits(3), usedRegistryV2=True))
+
+    outcome = await runRagRoute(_input(), embeddingGenerator=_embedding, searcher=searcher)
+
+    ids = [item.evidence_id for item in outcome.evidence]
+    assert len(ids) == 3 and len(set(ids)) == 3, "evidenceId 必须逐条唯一"
+    assert all(ids)
+    confidences = [item.confidence for item in outcome.evidence]
+    assert confidences == [0.9, 0.89, 0.88], (
+        f"confidence = 1 - distance（distance 0.1/0.11/0.12），实际 {confidences}"
+    )
+    # 旧调用方兼容：既有字段原样
+    assert outcome.evidence[0].release_id == 7
+    assert outcome.evidence[0].source == KNOWLEDGE_SOURCE_RELEASE
+    # camelCase 线格式
+    dumped = outcome.evidence[0].model_dump(by_alias=True)
+    assert "evidenceId" in dumped and "confidence" in dumped

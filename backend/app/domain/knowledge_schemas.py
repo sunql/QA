@@ -21,7 +21,11 @@
 
 from __future__ import annotations
 
-from pydantic import Field, field_validator
+import hashlib
+import json
+from datetime import date, datetime
+
+from pydantic import Field, field_validator, model_validator
 
 from app.domain.schemas import CamelModel
 
@@ -208,11 +212,43 @@ class KnowledgeEntityRead(CamelModel):
     name: str | None = None
 
 
+class KnowledgeEvidenceSourceRef(CamelModel):
+    """证据的**物理来源**定位（M2-1 契约补全；字段按通道可得性回填，None=无此信息）。
+
+    命名偏差（已登记）：跨板块设计稿的证据里嵌套对象叫 `source{...}`，但本仓
+    `KnowledgeEvidenceRead.source: str` 是「发布面出处」（RELEASE/LIVE），二者
+    并存 ⇒ 物理来源定位改叫 `sourceRef`，`source` 原样保留（旧调用方零破坏）。
+    """
+
+    system: str | None = None
+    object: str | None = None
+    record_key: str | None = None
+    document_id: int | None = None
+    query_id: str | None = None
+
+
+class KnowledgeEvidenceSecurity(CamelModel):
+    """证据的密级与授权范围（DOCUMENT 通道回填；M2-4 文档检索消费）。"""
+
+    level: str | None = None
+    scope: tuple[str, ...] = ()
+
+
 class KnowledgeEvidenceRead(CamelModel):
     """一条引用（证据）。
 
     `release_id` / `release_version` 为空 ⇒ 这条引用不是出自发布面
     （本批知识路径**不产生**这种引用 ⇒ `source` 恒为 `RELEASE`）。
+
+    **M2-1 契约补全（加性可选字段，旧调用方零破坏）**：
+    - `evidenceId`：**内容确定**（对除自身外的全部字段做 canonical JSON SHA-256，
+      未显式提供时自动生成）⇒ 同一证据跨响应 id 相同（可逐条引用、可对账），
+      不同证据 id 不同。⚠️ 不能用随机 uuid：ACL 守卫用「两次调用 evidence
+      全等」断言访问面不变（entity hints 不得扩权），随机 id 会让这类断言
+      永假（CI 净新增 1 条实证，2026-11-20）；
+    - `confidence`：[0,1]（RAG 路 = 1 - distance；无分数的通道为 None）；
+    - `sourceRef` / `security` / `observedAt` / `validAt` / `ruleVersion`：
+      契约字段本批就位，按通道能力**渐进回填**（DOCUMENT 相关随 M2-4）。
     """
 
     channel: str
@@ -223,6 +259,87 @@ class KnowledgeEvidenceRead(CamelModel):
     release_id: int | None = None
     release_version: str | None = None
     source: str = KNOWLEDGE_SOURCE_RELEASE
+    evidence_id: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    observed_at: datetime | None = None
+    valid_at: datetime | None = None
+    rule_version: str | None = None
+    security: KnowledgeEvidenceSecurity | None = None
+    source_ref: KnowledgeEvidenceSourceRef | None = None
+
+    @model_validator(mode="after")
+    def _deriveEvidenceId(self) -> "KnowledgeEvidenceRead":
+        """内容确定 id：canonical（字段名排序）JSON → SHA-256 → `ev-<hex16>`。"""
+        if self.evidence_id:
+            return self
+        payload = json.dumps(
+            self.model_dump(exclude={"evidence_id"}, by_alias=True),
+            ensure_ascii=False, sort_keys=True, default=str,
+        )
+        self.evidence_id = "ev-" + hashlib.sha256(payload.encode()).hexdigest()[:16]
+        return self
+
+
+class ProcurementEntitySourceMappingRead(CamelModel):
+    """实体的一条源系统映射（M2-2 `entities/search` 契约，设计稿 §8.3）。"""
+
+    source_system: str
+    source_key: str
+    source_code: str
+    match_rule: str
+    effective_date: date | None = None
+    expiry_date: date | None = None
+
+
+class ProcurementEntityMatchRead(CamelModel):
+    """一个统一实体（enterprise_key）的解析结果：源映射 + 命中强度。"""
+
+    entity_type: str
+    enterprise_key: int
+    enterprise_code: str
+    name: str | None = None
+    match_score: float = Field(ge=0.0, le=1.0)
+    source_mappings: list[ProcurementEntitySourceMappingRead] = Field(default_factory=list)
+
+
+class ProcurementGraphNodeRead(CamelModel):
+    """受控邻接视图中的节点（M2-2b，设计稿 §8.3）。"""
+
+    entity_type: str
+    key: str
+    code: str | None = None
+    name: str | None = None
+
+
+class ProcurementGraphEdgeRead(CamelModel):
+    """受控邻接视图中的一条真实边（来自 `GraphTraversalHop`）。"""
+
+    depth: int
+    from_type: str
+    from_key: str
+    from_code: str | None = None
+    from_name: str | None = None
+    rel_type: str
+    to_type: str
+    to_key: str
+    to_code: str | None = None
+    to_name: str | None = None
+
+
+class ProcurementGraphNeighborsRead(CamelModel):
+    """受控邻接响应：nodes[] + edges[] + truncated（自证截断）。
+
+    `effectiveRelationTypes` = 请求 relationTypes ∩ `BUSINESS_RELATION_TYPES`
+    （白名单外交互被丢弃时调用方可自证，不会误以为跑了一条被丢弃的路）。
+    """
+
+    entity_type: str
+    entity_key: str
+    max_hops: int
+    effective_relation_types: tuple[str, ...] = ()
+    nodes: list[ProcurementGraphNodeRead] = Field(default_factory=list)
+    edges: list[ProcurementGraphEdgeRead] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class KnowledgeRouteResultRead(CamelModel):

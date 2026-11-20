@@ -163,7 +163,66 @@ def test_responseSerializesToCamelCase() -> None:
     assert payload["release"]["degraded"] is False
     assert payload["evidence"][0]["releaseVersion"] == "v1.2"
     assert payload["evidence"][0]["source"] == "RELEASE"
+    assert payload["evidence"][0]["evidenceId"], "M2-1：evidenceId 必须自动生成（调用方逐条引用）"
     assert "item_count" not in payload["routeResults"][0], "snake_case 键不许出现在 JSON 里"
+
+
+def test_evidenceContractAdditiveFieldsSerializeCamelCase() -> None:
+    """M2-1 契约补全（加性可选字段）：sourceRef / security 嵌套模型 camelCase 线格式。
+
+    - 旧字段（channel/kind/ref/title/source）原样 —— 旧调用方零破坏；
+    - 新字段全部可选（缺省 None/空）⇒ 既有构造点不必改动；
+    - 命名偏差登记：设计稿的嵌套 `source{...}` 改名 `sourceRef`（现仓
+      `source: str` 是发布面出处，二者并存）。
+    """
+    from datetime import UTC, datetime
+
+    from app.domain.knowledge_schemas import (
+        KnowledgeEvidenceSecurity,
+        KnowledgeEvidenceSourceRef,
+    )
+
+    evidence = KnowledgeEvidenceRead(
+        channel="SQL",
+        kind="QUERY",
+        ref="q_01",
+        title="供应商收货量",
+        evidence_id="ev-1",
+        confidence=0.87,
+        observed_at=datetime(2026, 11, 20, tzinfo=UTC),
+        valid_at=datetime(2026, 11, 20, tzinfo=UTC),
+        rule_version="v3",
+        security=KnowledgeEvidenceSecurity(level="L2", scope=("PROCUREMENT",)),
+        source_ref=KnowledgeEvidenceSourceRef(
+            system="THBI",
+            object="PRECEIPT",
+            record_key="SUP001",
+            document_id=None,
+            query_id="q_01",
+        ),
+    )
+
+    payload = evidence.model_dump(by_alias=True)
+    assert payload["channel"] == "SQL" and payload["source"] == "RELEASE", "旧字段原样"
+    assert payload["evidenceId"] == "ev-1"
+    assert payload["confidence"] == 0.87
+    assert payload["ruleVersion"] == "v3"
+    assert payload["security"] == {"level": "L2", "scope": ("PROCUREMENT",)}
+    assert payload["sourceRef"] == {
+        "system": "THBI",
+        "object": "PRECEIPT",
+        "recordKey": "SUP001",
+        "documentId": None,
+        "queryId": "q_01",
+    }
+    # 缺省构造（既有调用点形态）：新字段全空 ⇒ 不破坏
+    minimal = KnowledgeEvidenceRead(
+        channel="GRAPH", kind="CLASS", ref="Supplier", title="供应商"
+    )
+    minimalDump = minimal.model_dump(by_alias=True)
+    assert minimalDump["sourceRef"] is None and minimalDump["security"] is None
+    assert minimalDump["evidenceId"], "evidenceId 缺省也自动生成"
+    assert minimalDump["confidence"] is None
 
 
 def test_degradedReleaseCarriesNoVersion() -> None:

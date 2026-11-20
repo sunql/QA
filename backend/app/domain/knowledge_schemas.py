@@ -21,7 +21,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from uuid import uuid4
 
 from pydantic import Field, field_validator
@@ -261,6 +261,28 @@ class KnowledgeEvidenceRead(CamelModel):
     rule_version: str | None = None
     security: KnowledgeEvidenceSecurity | None = None
     source_ref: KnowledgeEvidenceSourceRef | None = None
+
+
+class ProcurementEntitySourceMappingRead(CamelModel):
+    """实体的一条源系统映射（M2-2 `entities/search` 契约，设计稿 §8.3）。"""
+
+    source_system: str
+    source_key: str
+    source_code: str
+    match_rule: str
+    effective_date: date | None = None
+    expiry_date: date | None = None
+
+
+class ProcurementEntityMatchRead(CamelModel):
+    """一个统一实体（enterprise_key）的解析结果：源映射 + 命中强度。"""
+
+    entity_type: str
+    enterprise_key: int
+    enterprise_code: str
+    name: str | None = None
+    match_score: float = Field(ge=0.0, le=1.0)
+    source_mappings: list[ProcurementEntitySourceMappingRead] = Field(default_factory=list)
 
 
 class KnowledgeRouteResultRead(CamelModel):

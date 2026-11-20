@@ -136,17 +136,26 @@ ds1 被剔的前 10 个正是 ds3 的表（`abarbeitung_order` / `ai_chat_*` / `
 三者 `created_by=seed`、`created_time=2026-10-23T06:35:44.891589+00:00`（同一次种子导入）、
 `version=1`、`valid_to IS NULL`（活类）、`parent_class_id IS NULL`、`object_owner IS NULL`。
 
-### 3.2 定性：**不是缺陷，是正确行为**
+### 3.2 定性：**不是缺陷，是正确行为**（★ 2026-11-20 订正理由链，结论不变）
 
 `description` 明写「**结构性建模，0 行**」⇒ 这三个类是**采购域的语义占位**（表达"供应商主数据 / 物料主数据 /
 来料检验"这三个业务对象的结构），其指向的物理表 **DWD_SUPPLIER / DWD_MATERIAL / DWD_INCOMING_INSPECTION
-没有数据行**（0 行）⇒ 因此不在任何数据源的 `schema_cache` 覆盖范围内（无数据的表不会被 introspect 收录）。
+不在任何数据源的 `schema_cache` 覆盖范围内**。
+
+> **⚠️ 订正（本日复核）**：本文初版把原因写成「**无数据的表不会被 introspect 收录**」——
+> **这是错的**。introspect 是按**列**枚举的（Oracle 走 `ALL_TAB_COLUMNS WHERE owner = '{owner}'`，
+> `schema_introspection_service.py:570-578`），**不看行数** ⇒ 一张**存在但 0 行**的表**照样会被写进 `schema_cache`**。
+> ⇒ 它们之所以收录不到，只能是「**表在该 owner 下根本不存在**」或「**不在被 introspect 的 owner 命名空间内**」
+> 或「**introspection 没刷到**」三者之一。
+> ⇒ **定性结论不变（剔除是正确行为），但理由链要按 §5.5 的判别链走**，
+> **生产上尚未跑目标库存在性确认**（§7.2 第 2 项）⇒ **严格说当前定性依据是 `description` 自陈 + 上述推断**。
 
 ⇒ **被硬过滤剔除 = 正确**：
-- 它们本来就答不出任何东西（0 行）；
-- 若留在候选集里，LLM 反而可能选中 `DWD_SUPPLIER` 去查 ⇒ 得到空结果 / 「有表但没数」的误导性回答；
+- 它们指向的表在目标库里**不存在** ⇒ 本来就答不出任何东西；
+- 若留在候选集里，LLM 反而可能选中 `DWD_SUPPLIER` 去查 ⇒ **ORA-00942**（1119 事故形态）；
 - runbook §2 A2 判读表说「这些类会被**静默剔除** ⇒ 该数据源不得上线」—— **该判据对「有数据的类被误剔」成立，
-  对「0 行占位类被剔除」不成立** ⇒ **A2 探针需要按「该表是否有数据」二次分层**，否则会持续误报。
+  对「表不存在的占位类被剔除」不成立** ⇒ **A2 探针需要按「该表在目标库里是否存在」二次分层**，否则会持续误报。
+  （分层判据 = §5.5 的判别链。）
 
 ### 3.3 运行时直接实证
 
@@ -326,7 +335,7 @@ SELECT id, name, type, is_active, is_default FROM data_source ORDER BY id;
 
 ---
 
-## 五、★ 与 runbook 的偏差（两处 runbook 偏差 + 一处运维坑，都会误导下次执行）
+## 五、★ 与 runbook 的偏差 + 口径矩阵（runbook 偏差 + 入口口径 + 判别判据 + 运维坑）
 
 ### 5.1 runbook §2 的三条 SQL **本身是坏的**（实测报错）
 
@@ -346,10 +355,11 @@ A2 的口径是「本源的活类在本源缓存里找不到」⇒ 只能发现�
 
 ⚠️ **更重要的**：A2 的判读表把「A2 非空 ⇒ 该数据源不得上线」写成**无条件**规则，
 但本次实测证明**存在合法反例** —— 3 个类是 **0 行结构性占位类**（§3.2）⇒ 被剔除是**正确行为**。
-⇒ **建议 A2 判据加一层过滤**：只对「该 `source_table` 在目标库里**确实有数据**」的类报警，
-否则 0 行占位类会持续误报「该数据源不得上线」。
+⇒ **建议 A2 判据加一层过滤**：只对「该 `source_table` 在目标库里**确实存在且有数据**」的类报警，
+否则占位类会持续误报「该数据源不得上线」。
+**★ 完整判别链（PG 侧 + 目标库侧 + 定性表）见 §5.5；可复用探针见 `/tmp/qa_recall_probe_v2.sql`。**
 
-**建议补一条全源孤儿探针**（本次实际使用的口径）：
+**建议补一条全源孤儿探针**（本次实际使用的口径；= 探针文件 P4）：
 
 ```sql
 WITH cls AS (
@@ -369,7 +379,91 @@ WHERE NOT EXISTS (SELECT 1 FROM cache cc
 ORDER BY 1;
 ```
 
-### 5.3 其他运维坑（本次踩到）
+### 5.3 四条入口的过滤口径矩阵（★ chat / 多步 / 研究 / 显式 API 是否同口径）
+
+> 本节为**跨会话共用口径**（采购线 b4 验收直接复用，不要另写一套）。
+
+**过滤调用点共 4 处，全部调用同一个 `applyDatasourceRecallFilter`**（`recall_datasource_filter.py:108`），
+三态语义完全一致 ⇒ **过滤层口径统一**：
+
+| # | 入口 | 调用点 | `datasourceId` 来源 | 可能为 `None`？ | 运行时语义 |
+|---|---|---|---|---|---|
+| 1 | chat 主链路（类召回） | `chat_recall.py:314` | `ChatRequest.datasourceId`（`domain/schemas.py:2079`，**必填 `int`**） | **否** | 有缓存 ⇒ 硬过滤；无缓存 ⇒ fail-open `no_cache` |
+| 2 | chat NL2SQL（生成 SQL） | `chat_service.py:1013` | 同上 `dto.datasourceId` | 否 | 同上 |
+| 3 | 多步 · 步骤级召回 | `chat_multistep.py:536` | `getattr(pc.ds, "id", None)`；`pc.ds` 由**同一个** `dto.datasourceId` 取来 | 否 | 同上 |
+| 4 | 研究 · 执行面（步 SQL 生成） | `research_agent_execution.py:386` | `deps.datasourceId` ← `research_session.datasource_id`（空则 `RuntimeError`，**不静默回落**，`research_agent_execution.py:159-162`） | 否 | 同上 |
+| — | **研究 · BO 臂（规划层）** | **无过滤**（`_searchBusinessObjects`，`api/v1/research.py:254`） | — | — | **全局检索，无数据源维度** ⇒ 见 §5.4 |
+
+**三条结论：**
+
+1. **口径一致**：4 个过滤调用点共用同一函数、同一三态语义 ⇒ chat / 多步 / 研究执行面**不存在**「各写一套过滤」的问题。
+2. **`no_datasource` 分支在这 4 条入口上不可达**：三个 `datasourceId` 来源（必填 int / 同一 dto / 会话绑定非空）
+   **都强制非空** ⇒ `datasourceId=None ⇒ 不过滤且服务端零日志` 这个**观测盲区**在这几条链路上**不会出现**。
+   ⇒ 现实里能触发的 fail-open **只有 `no_cache`**（缓存缺失/空/读失败）⇒ 当前只有 ds2 命中。
+3. **显式 API 传 `datasourceId=2`** ⇒ 走入口 1/2 ⇒ `loadDatasourceTableSet(2)` 返回 `None`
+   ⇒ **fail-open ⇒ 完全不过滤** ⇒ 1119 故障原样复现。⇒ 这就是 §4.2.3 里 **B 方案的边界**
+   （B 只挡 UI 选择，不挡显式 API），要彻底关死需 **C（代码 fail-closed）**。
+
+### 5.4 研究入口的口径缺口：**只存在于规划层，不在执行层**（收口方案要按这个分层）
+
+peer 线挂的缺口「研究入口召回未收窄到数据源」**属实，但分层要分清**：
+
+| 层 | 有无数据源维度 | 依据 |
+|---|---|---|
+| **规划层（BO 臂）** | ❌ **无** —— `_searchBusinessObjects` 是**全局**本体类检索 | `api/v1/research.py:254`；代码注释自陈：「本臂是**全局**检索（无数据源维度）；数据源维度的收窄在执行面」（`:266-268`） |
+| **执行层（步 SQL 生成）** | ✔ **有** —— 类候选集先按数据源硬过滤 | `research_agent_execution.py:386` + `selectClassesForTables`（`research_agent_ports.py:643`） |
+
+**为什么执行层是安全的**（关键在 `selectClassesForTables` 的取交集语义）：
+
+- 传给 `selectClassesForTables` 的 `classes` = **已按数据源过滤后**的集合（不是全局集合）；
+- 它取「过滤后集合 ∩ ESL 给出的表名」⇒ 别源的类**不在过滤后集合里** ⇒ 交集里没有它；
+- 交集为空时**退回的是「过滤后的全量」**（`return matched or list(classes)`，`research_agent_ports.py:657`），
+  **不是全局全量** ⇒ **别源的表不会被塞进 LLM 的 schema 上下文**。
+
+⇒ **残余风险是「规划层选错 BO」**（步骤问句围绕别源的业务对象编排 ⇒ 执行时大概率查空 / `STEP_MISSING_SQL`），
+**不是 ORA-00942**。⇒ 收口方案：BO 臂加数据源维度（需要 BO→源绑定，本体层至今无 `datasource_id` 列）
+**与**过滤层加固是**两件事**，不要混做。
+
+### 5.5 ★ 判定「剔除是正确行为（结构性 0 行）vs 漏召回（类有数据却看不见）」的**判别判据**
+
+> 可复用探针全文见 `/tmp/qa_recall_probe_v2.sql`（P1 总览 / P2 逐类明细 / P3 判别链 / P4 全源孤儿）。
+> 四段均已在本地 `qa_metadata` 实跑通过（**别照抄 runbook 那三条坏 SQL**）。
+
+**判别链（三步，务必按序走）：**
+
+| 步 | 在哪查 | 查什么 | 结论 |
+|---|---|---|---|
+| **[1] PG 侧** | `qa_metadata` | 类被剔除 ⇔ `upper(source_table)` 不在该源 `schema_cache` 的表名集合（裸名 ∪ owner 限定名，`.upper()`） | 只说明「缓存里没这张表」，**不能定性** |
+| **[2] 目标库侧（决定性）** | **目标 Oracle 库**：`SELECT owner, table_name FROM all_tables WHERE upper(table_name) = '<表名>'` | 该表**存不存在** | 见下表 |
+| **[3] 定性** | — | 组合 [1]+[2] | 见下表 |
+
+| [2] 的结果 | 定性 | 处置 |
+|---|---|---|
+| **查无此表** | ✅ **剔除是正确行为**（结构性占位类）—— 类指向一张**不存在的物理表**；留着它 LLM 会选中它 ⇒ ORA-00942（1119 事故形态） | **无需任何处置**；只登记「类→源绑定」语义缺口（挂采购域 M1） |
+| **有此表**，但不在 `schema_cache` | ❌ **真缺陷（漏召回：类有数据却看不见）** —— 根因是 **introspection 过期/漏刷**，**不是**过滤逻辑 | **重跑 introspect**；**不要改过滤** |
+| **有此表**且在 `schema_cache` | ⚠️ 匹配口径有 bug（owner / 大小写 / 裸名） | 代码缺陷，单独提 issue |
+
+**★ 为什么「存不存在」就是决定性的**：introspect 是按**列**枚举的
+（Oracle 走 `ALL_TAB_COLUMNS WHERE owner = '{owner}'`，`schema_introspection_service.py:570-578`），
+**不看行数** ⇒ 一张**存在但 0 行**的表**照样会被写进 `schema_cache`**
+⇒ 「表存在却不在 `schema_cache`」= **introspection 没刷到**（真缺陷），
+而不是「表是空的所以不算」。
+
+**⚠️ 三条口径注记（写判据前必读）：**
+
+1. **裸名匹配不区分 owner**：`_tableKeys` 把每个 owner 行的 `table_name` 都加进裸名键
+   ⇒ 跨 owner 同名表会互相放行 ⇒ 判读结果时若表名跨 owner 重名，先排除这一条。
+2. **Oracle introspection 按 owner 分片**（owner = `UPPER(data_source.username)`，可显式覆盖；
+   一个源可有多行 `schema_cache` = 多个 owner）⇒ 「某表不在本源清单」也可能只是**owner 选错**，
+   P3 查 `all_tables` 时**要带 owner 一起比对**。
+3. **无 `source_table` 的类永远保留**（代码不误杀）⇒ 这类计在 kept，
+   既不算「漏过滤」也不算「漏召回」。
+
+**启发式只用于快速分流（不是判据）**：`description` 含「0 行 / 结构性」字样 ⇒ 大概率是占位类
+⇒ 本次三个类即属此类（`acceptance-1120.md` §三）。
+
+### 5.6 其他运维坑（本次踩到）
+
 
 | 坑 | 现象 | 正确做法 |
 |---|---|---|
@@ -412,7 +506,7 @@ UPDATE ontology_class SET valid_to = NULL WHERE id = 270;   -- ★ 未执行
 | 硬红线 `ORA-00942` | ✔ 0 |
 | 端到端出数 | ✔ 用户实测无问题 |
 | **§2 前置门禁** | ⚠️ **上线后才执行**；A2 非空但**经复核属合法反例**（3 个 0 行占位类，§3.2）⇒ **不构成「该数据源不得上线」**；真正的门禁缺口是 **ds2 的 A1 为空**（§四） |
-| **三个 0 行占位类** | ✔ **被剔除是正确行为**（§3.2）⇒ **无需任何处置**；遗留：采购域 M1 衔接（§3.4）+ ds3 下「供应商」锚定无腿（§3.5） |
+| **三个 0 行占位类** | ✔ **被剔除是正确行为**（§3.2）⇒ **无需任何处置**；⚠️ **理由链已订正**（不是「0 行不被 introspect 收录」，而是「表不在被 introspect 的 owner 命名空间内 / 表不存在」—— introspect 按**列**枚举，0 行的表也会被收录；**定性不变**，待 §7.2 第 2 项的目标库存在性探针定案）；遗留：采购域 M1 衔接（§3.4）+ ds3 下「供应商」锚定无腿（§3.5） |
 | ds2 路径 | ✘ **fail-open 未根治**（§四）—— 1119 故障在 ds2 会话原样复现 ⇒ **已收敛为选项 B（`is_active=false`）**：引用面 10 张表全 0 + 代码零硬编码 ⇒ 待跑 §4.2.4 那条只读探针后执行 |
 | §7 墓碑 270 | ⛔ 未执行，判定保留（§六） |
 | **是否需要回滚** | ❌ **不需要** —— 零 ORA-00942、零崩溃、零数据损坏；剩余缺口是 ds2 路径与采购域衔接，**都不需要动镜像** |
@@ -422,17 +516,18 @@ UPDATE ontology_class SET valid_to = NULL WHERE id = 270;   -- ★ 未执行
 | # | 事项 | 性质 | 阻塞 |
 |---|---|---|---|
 | 1 | 3 个 0 行占位类的**引用面**探针（`ontology_metric.target_class_id` / `ontology_metric_source.class_id` / `kpi_catalog.metric_id`） | 只读 | 影响面评估（确认无指标挂靠 ⇒ 剔除无业务后果） |
-| 2 | Oracle 侧 `all_tables` 查 `DWD_SUPPLIER` / `DWD_MATERIAL` / `DWD_INCOMING_INSPECTION` 是否存在 ⇒ 事实登记到**采购域 M1**（**不再定分支、不改本体**） | 只读 | M1 衔接（§3.4） |
+| 2 | **★ 决定性探针**：Oracle 侧 `all_tables` 查 `DWD_SUPPLIER` / `DWD_MATERIAL` / `DWD_INCOMING_INSPECTION` 是否存在 ⇒ ① 决定 §3.2 定性理由链（**表不存在 ⇒ 剔除正确**；**表存在却不在 schema_cache ⇒ introspection 过期 ⇒ 真缺陷，须重跑 introspect**，判据见 §5.5）；② 事实登记到**采购域 M1**（**不再定分支、不改本体**） | 只读 | §3.2 定性 / M1 衔接（§3.4） |
 | 3 | **ds2 处置：执行 `UPDATE data_source SET is_active=false WHERE id=2`**（**生产数据写**）—— 先跑 §4.2.4 的只读探针；B 只挡 UI，显式 API 仍可打 ds2 ⇒ C（代码 fail-closed）另批 | 生产数据写 | ds2 路径根治 |
 | 4 | 补 ds1 / ds3 各一次的**披露提示原文与 N 值** | 只读 | §6.3 闭环 |
 | 5 | 研究入口回归（C1 ≈ 200+ > 0 ⇒ runbook 明写必做） | 只读 | §6.3 闭环 |
 | 6 | 泛化问句回归（不含维度词，验证窗口未收得过窄） | 只读 | §6.3 闭环 |
-| 7 | runbook §2 三条 SQL 修正 + A2 判据加「该表是否有数据」二次分层 + 补全源孤儿探针 | 文档 | 下次发版 |
+| 7 | runbook §2 三条 SQL 修正 + A2 判据加「该表是否存在/有数据」二次分层 + 补全源孤儿探针（**探针文件已备好**：`/tmp/qa_recall_probe_v2.sql` P1/P2/P4，已本地实跑通过） | 文档 | 下次发版 |
 | 8 | `anchor_rescue_*` 的日志级别（info → warning） | **代码** | 观测盲区（本批不阻塞） |
 | 9 | ds3 会话「供应商」锚定无腿（id=2 `class_alias=null` + `DIM_SUPPLIER` 被剔）⇒ 定语义补法 | 决策 | 问法敏感（§3.5） |
 | 10 | §7 墓碑 270 原地复活 | **生产 DML** | 待 4/5/6 全绿 |
+| 11 | **研究 BO 臂（规划层）加数据源维度**（`api/v1/research.py:254` `_searchBusinessObjects` 是全局检索）⇒ 需「BO→源绑定」（本体层无 `datasource_id` 列）；**执行层已过滤，不必动**（§5.4） | 决策 + **代码** | 研究入口问法准度（非本批） |
 
 > ⚠️ **本次全程只读复核，未做任何代码改动、未做任何生产数据写入。**
-> 第 8 项是代码改动，第 3 项与第 10 项是生产写 ⇒ 都需要单独评审；第 1、2、4、5、6、7、9 项均可只读完成。
+> 第 8、11 项是代码改动，第 3 项与第 10 项是生产写 ⇒ 都需要单独评审；第 1、2、4、5、6、7、9 项均可只读完成。
 > **原「Oracle 侧 `all_tables` 定死类处置分支 A/B/C」一项已作废** —— 三个类是 0 行结构性占位类，
 > 被剔除是正确行为，不需要补 introspect、不需要打墓碑；Oracle 侧事实只用于**采购域 M1 的语义衔接**。

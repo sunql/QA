@@ -78,7 +78,7 @@ git diff d1c20de9 origin/main -- backend/ frontend/ docker/     # 空 ⇒ 等价
 > `LIKE '\_%'` 被 psql 当元命令）—— 正确写法与「全源孤儿探针」见
 > [acceptance-1120.md §五](./acceptance-1120.md)。
 > ★ **可复用探针 + 判别判据（跨会话共用，勿各写一套）**：
-> 探针文件 `/tmp/qa_recall_probe_v2.sql`（P1 每源保留/剔除总览 / P2 逐类明细 / P3 判别链 / P4 全源孤儿，
+> 探针文件 [`probe-recall-datasource.sql`](./probe-recall-datasource.sql)（P1 每源保留/剔除总览 / P2 逐类明细 / P3 判别链 / P4 全源孤儿，
 > **四段均已本地实跑通过**）＋ 判别判据 [acceptance-1120.md §5.5](./acceptance-1120.md)。
 > ★ **入口口径矩阵**（chat / 多步 / 研究执行面 / 显式 API 是否同口径）：[acceptance-1120.md §5.3](./acceptance-1120.md) ——
 > **4 个过滤调用点共用同一 `applyDatasourceRecallFilter`，口径一致**；能触发的 fail-open **只有 `no_cache`**。

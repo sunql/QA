@@ -216,7 +216,7 @@ async def test_purchase_history_handler_executes_readonly(monkeypatch) -> None:
 
     monkeypatch.setattr(agent_tools_procurement, "_resolveBusinessDatasource", _fakeResolve)
     monkeypatch.setattr(
-        agent_tools_procurement, "get_adapter", lambda dsId, ds: _FakeAdapter()
+        agent_tools_procurement, "_adapterFor", lambda dsId, ds: _FakeAdapter()
     )
 
     result = await agent_tools_procurement.purchaseHistoryHandler(

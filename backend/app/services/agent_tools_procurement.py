@@ -19,7 +19,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.exceptions import ConflictError
 from app.domain.models import DataSource
 from app.infrastructure import neo4j_client
-from app.infrastructure.business_db_pool import get_adapter
 from app.services.agent_tool_types import AgentToolContext, ToolResult
 from app.services.entity_mapping_service import EntityMappingService
 from app.services.research_sql_runner import assertReadonlySql
@@ -195,6 +194,18 @@ async def _resolveBusinessDatasource(
     return ds
 
 
+def _adapterFor(dsId: int, ds: DataSource):
+    """业务库 adapter 获取——**惰性导入** business_db_pool。
+
+    保持模块级 import 图不把 business_db_pool 拉进 CI 收集前闭包
+    （其模块级 re.compile 会被 import 期钩子守卫 fail-closed，见
+    test_ci_conftest_chain 守卫的判定语义）。
+    """
+    from app.infrastructure.business_db_pool import get_adapter
+
+    return get_adapter(dsId, ds)
+
+
 def _ensureActive(ds: DataSource) -> None:
     """停用源 fail-closed（C 方案同语义；#164 合并后切共享 ensureDatasourceActive）。
 
@@ -234,7 +245,7 @@ async def purchaseHistoryHandler(
 
     ds = await _resolveBusinessDatasource(session, ctx)
     _ensureActive(ds)  # 纵深：旁路注入的停用源也拦（测试 stub 路径覆盖）
-    adapter = get_adapter(ds.id, ds)
+    adapter = _adapterFor(ds.id, ds)
     detailSql = buildPurchaseHistorySql(
         supplierKey=supplierKey, materialKey=materialKey,
         monthsBack=monthsBack, limit=limit, today=today,

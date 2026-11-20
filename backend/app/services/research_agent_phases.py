@@ -34,6 +34,7 @@ from app.services.research_finding_aggregator import (
     buildEnhancedClaim,
 )
 from app.services.learning.prompt_fence import neutralizeFence
+from app.services.recall_datasource_filter import loadDatasourceTableSet
 from app.services.research_agent_execution import (
     adapterFor,
     depsForSession,
@@ -111,6 +112,47 @@ from app.services.research_agent_stages import (
 logger = logging.getLogger(__name__)
 
 
+async def filterBusinessObjectsByDatasource(
+    session: AsyncSession, bos: list[dict[str, Any]], *, datasourceId: int | None
+) -> list[dict[str, Any]]:
+    """BO 臂数据源收窄（2026-11-20 验收交接项 ②，规划层收口）。
+
+    BO 臂（``_searchBusinessObjects``）是**全局**语义检索 ⇒ 规划层可能选到
+    别源的 BO。执行面虽有过滤（``selectClassesForTables``），但计划步已按
+    别源表生成 ⇒ 查空 / STEP_MISSING_SQL（1120 验收：残余风险是「选错 BO」，
+    不是 ORA-00942）。本助手按当前数据源 ``schema_cache`` 在**喂给 planner
+    之前**收窄 BO 列表：
+
+    - 命中口径与召回过滤同源：``source_table`` 全文 ``.upper()`` ∈
+      裸名 ∪ owner 限定名（``loadDatasourceTableSet``）；
+    - 空 / 缺 ``sourceTable`` 保留（无法判定，不误杀——对齐召回过滤）；
+    - ds 无缓存行 / 清单为空 / 读失败 ⇒ fail-open 保留全量
+      （``loadDatasourceTableSet`` 已留 warning 痕迹）；
+    - ``datasourceId`` 为空 ⇒ 不过滤（现状）。
+
+    返回新列表，不改动入参。
+    """
+    if datasourceId is None or not bos:
+        return list(bos)
+    tableSet = await loadDatasourceTableSet(session, datasourceId)
+    if tableSet is None:
+        return list(bos)
+    kept: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    for bo in bos:
+        table = bo.get("sourceTable") or ""
+        if not table or table.upper() in tableSet:
+            kept.append(bo)
+        else:
+            dropped.append(table)
+    if dropped:
+        logger.warning(
+            "研究 BO 臂数据源收窄 dropped=%d total=%d droppedTables=%s datasourceId=%s",
+            len(dropped), len(bos), dropped[:10], datasourceId,
+        )
+    return kept
+
+
 class ResearchAgentPhasesMixin:
     """7 个相位执行体（各 < 50 行；返回 Pause 表示暂停，None 表示继续）。"""
 
@@ -146,6 +188,26 @@ class ResearchAgentPhasesMixin:
                 "三臂检索全空：请改写问题后继续",
             )
         arms = asdict(extraction)
+        # BO 臂数据源收窄（2026-11-20 交接项 ②）：规划层不把别源 BO 喂给
+        # planner / 范围确认（残余风险「选错 BO」的收口，见助手 docstring）。
+        arms["businessObjects"] = await filterBusinessObjectsByDatasource(
+            session, arms["businessObjects"], datasourceId=state.get("datasourceId")
+        )
+        if not (arms["businessObjects"] or arms["metrics"] or arms["knowledge"]):
+            # BO 全被收窄剔掉 + 其余两臂本来就空 ⇒ 与「三臂全空」同一出口
+            # （不喂空范围给 planner；用户改写问题后重走 ESL）。
+            logger.warning(
+                "ESL BO 臂被数据源收窄清空且其余两臂为空，转范围确认强制改写: session=%s",
+                sessionId,
+            )
+            emptyArms = {"businessObjects": [], "metrics": [], "knowledge": [], "conflicts": []}
+            return (
+                CHECKPOINT_INTENT,
+                buildOptions(
+                    signal=SIGNAL_EMPTY_SCOPE, arms=emptyArms, resumePhase=PHASE_ESL
+                ),
+                "三臂检索全空：请改写问题后继续",
+            )
         state["esl"] = arms
         await emitEvent(emit, EVENT_ESL, arms)
         if self._autoConfirm:

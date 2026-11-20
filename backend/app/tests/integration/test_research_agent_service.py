@@ -2455,3 +2455,140 @@ async def test_research_entry_excludes_cross_source_classes(dbSession, monkeypat
     names = [c.class_name for c in nl2sql.seenClasses]
     assert "DIM_SUPPLIER" in names, "本源类应留在候选集"
     assert "MAIN_DATA_SUPPLIER" not in names, "跨源幽灵类进了研究入口的 schema 上下文"
+
+
+# ---------------------------------------------------------------------------
+# 研究 BO 臂数据源收窄（2026-11-20 验收交接项 ②）：规划层不把别源 BO 喂给 planner
+# ---------------------------------------------------------------------------
+
+
+class _BoArmEsl:
+    """可配置 BO 臂产出的 ESL fake（只为本组用例服务，不动共享 FakeEsl）。"""
+
+    def __init__(self, bos: list[tuple[int, str, str]]) -> None:
+        # bos 元素 = (classId, className, sourceTable)；metrics/knowledge 恒空
+        self._bos = bos
+
+    async def extract(self, question, *, intent=None):
+        from app.services.enterprise_semantic_layer import (
+            BusinessObjectRef,
+            ESLExtraction,
+        )
+
+        return ESLExtraction(
+            businessObjects=[
+                BusinessObjectRef(cid, name, table, name, 0.9)
+                for cid, name, table in self._bos
+            ],
+            metrics=[],
+            knowledge=[],
+            confidenceByArm={"business_object": 0.9, "metric": 0.0, "knowledge": 0.0},
+            conflicts=[],
+        )
+
+
+def _bo(classId: int, name: str, table: str) -> dict:
+    return {
+        "classId": classId, "className": name, "sourceTable": table,
+        "matchedAlias": name, "confidence": 0.9,
+    }
+
+
+async def _dsWithCache(dbSession, dsId: int, tables: list[str]):
+    """独立数据源 + schema_cache（表名清单），与既有用例的 ds 隔离。"""
+    ds = DataSource(
+        id=dsId, name=f"BO-ARM-SRC-{dsId}", type=DataSourceType.POSTGRESQL,
+        host="h", port=5432, database_name="svc", username="u",
+        password_encrypted=encryptApiKey("test-password"),
+        is_active=True,
+    )
+    dbSession.add(ds)
+    if tables:
+        dbSession.add(SchemaCache(
+            datasource_id=dsId, schema_name=f"BO_ARM_{dsId}",
+            schema_data=[
+                {"table_name": t, "owner": f"BO_ARM_{dsId}", "columns": []}
+                for t in tables
+            ],
+            schema_version="t1",
+        ))
+    await dbSession.flush()
+    return ds
+
+
+@pytest.mark.asyncio
+async def test_filter_business_objects_by_datasource_keeps_local_drops_ghost(dbSession):
+    """助手直测：本源表保留 / 幽灵表剔除 / 空 sourceTable 保留（对齐召回口径）。"""
+    from app.services.research_agent_phases import filterBusinessObjectsByDatasource
+
+    ds = await _dsWithCache(dbSession, 880011, ["DIM_SUPPLIER", "RECEIPT"])
+    bos = [_bo(1, "供应商", "DIM_SUPPLIER"), _bo(2, "幽灵", "MAIN_DATA_FOO"), _bo(3, "无表", "")]
+    kept = await filterBusinessObjectsByDatasource(
+        dbSession, bos, datasourceId=ds.id
+    )
+    assert [b["className"] for b in kept] == ["供应商", "无表"]
+    assert len(bos) == 3, "入参不得被改动（返回新列表）"
+
+
+@pytest.mark.asyncio
+async def test_filter_business_objects_fail_open_without_cache(dbSession):
+    """助手直测：ds 无 schema_cache ⇒ fail-open 保留全量（不把规划打死）。"""
+    from app.services.research_agent_phases import filterBusinessObjectsByDatasource
+
+    ds = await _dsWithCache(dbSession, 880012, [])
+    bos = [_bo(1, "供应商", "DIM_SUPPLIER"), _bo(2, "幽灵", "MAIN_DATA_FOO")]
+    kept = await filterBusinessObjectsByDatasource(dbSession, bos, datasourceId=ds.id)
+    assert [b["className"] for b in kept] == ["供应商", "幽灵"]
+
+
+@pytest.mark.asyncio
+async def test_bo_arm_wiring_filters_ghost_before_scope_checkpoint(
+    dbSession, makeService, caplog,
+):
+    """接线守卫：范围确认 checkpoint 里的 BO 臂已按会话数据源收窄（幽灵剔除）。
+
+    反向守卫：删掉 _stageEsl 的 filterBusinessObjectsByDatasource 调用 ⇒ 本用例
+    必失败（幽灵 MAIN_DATA_FOO 回到 options.arms）。
+    """
+    import logging
+
+    from app.services.research_agent_phases import filterBusinessObjectsByDatasource  # noqa: F401
+
+    ds = await _dsWithCache(dbSession, 880013, ["DIM_SUPPLIER"])
+    svc = makeService(esl=_BoArmEsl([(1, "供应商", "DIM_SUPPLIER"), (2, "幽灵", "MAIN_DATA_FOO")]))
+    s = await svc.sessionService.createSession(
+        dbSession, userId=1, question=QUESTION, datasourceId=ds.id
+    )
+    await dbSession.commit()
+
+    caplog.set_level(logging.WARNING, logger="app.services.research_agent_phases")
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    assert status == "awaiting_user"
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    arms = cp.options["arms"]
+    bos = arms["businessObjects"]
+    assert [b["className"] for b in bos] == ["供应商"], (
+        f"幽灵 BO 必须在范围确认前被剔掉，实际 {bos}"
+    )
+    warnings = [
+        r for r in caplog.records
+        if "研究 BO 臂数据源收窄" in r.getMessage()
+    ]
+    assert warnings and warnings[0].levelno == logging.WARNING, "剔除必须 warning 留痕"
+
+
+@pytest.mark.asyncio
+async def test_bo_arm_all_filtered_lands_empty_scope_checkpoint(dbSession, makeService):
+    """接线守卫：BO 全被剔 + 其余两臂空 ⇒ 落 empty_scope checkpoint（不喂空范围给 planner）。"""
+    ds = await _dsWithCache(dbSession, 880014, ["DIM_SUPPLIER"])
+    svc = makeService(esl=_BoArmEsl([(2, "幽灵", "MAIN_DATA_FOO")]))
+    s = await svc.sessionService.createSession(
+        dbSession, userId=1, question=QUESTION, datasourceId=ds.id
+    )
+    await dbSession.commit()
+
+    status = await svc.startTurn(dbSession, sessionId=s.id, question=QUESTION, userId=1)
+    assert status == "awaiting_user"
+    cp = await svc.sessionService.getPendingCheckpoint(dbSession, s.id)
+    assert cp.options["signal"] == "empty_scope"
+    assert cp.options["resumePhase"] == "esl"

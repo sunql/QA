@@ -2,7 +2,8 @@
 
 > 设计：[design.md](./design.md)
 > 承接：PR #157（数据源过滤 + 关键词锚定，已合 main `d58bb1ad`）
-> 分支：`fix/recall-anchor-rescue`（从 `origin/main` `7dc9d874` 切出）
+> 分支：`fix/recall-anchor-rescue`（从 `origin/main` `7dc9d874` 切出）—— **已 squash 合入 main = `f07ae867`**；
+> 发版 runbook：`Harness/changes/2026-11-20-recall-fix-release/deploy-prod.md`
 
 ## 一句话
 

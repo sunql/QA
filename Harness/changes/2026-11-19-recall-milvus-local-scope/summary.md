@@ -4,7 +4,9 @@
 - **批次**：`2026-11-19-recall-milvus-local-scope`
 - **分支**：`fix/recall-milvus-local-scope`
 - **设计**：[design.md](./design.md)（同目录）
-- **状态**：**代码已实施**（检索层 + 接线层 + 测试 + 评审修复）；**未发版**（生产生效需一次后端镜像发版）
+- **状态**：**已 squash 合入 main = `d1c20de9`**（PR #159；`merge-gate / failure-set-diff` = success ⇒ 净新增 0）；
+  **镜像已构建并自证**（构建源 = 合并后 main `d1c20de9`，前后端两个 tar.gz + sha256 见
+  `Harness/changes/2026-11-20-recall-fix-release/summary.md`）⇒ **待用户在生产执行部署**
 
 ## 一、问题与解法（回顾）
 

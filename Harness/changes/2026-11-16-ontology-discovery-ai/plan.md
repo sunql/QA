@@ -409,6 +409,16 @@ PII 掩码只收**形状几乎不会误伤业务数据**的三类：邮箱、大
 
 **目标**：候选 → 提案 → 审核 → 校验 → **经既有 Compiler/Registry 发布** ⇒ 与 P1a/P1b 的发布面**同一条出口**。
 
+- [x] **A4-0** **放开 P5 审批面**（A4-3 的前置；迁移 `0159`）：`approval_task.instance_id`
+      由 NOT NULL 放宽为**可空**（审批**不一定**挂在工作流实例上）⇒ 提案路径能落审批任务；
+      **幂等键同步换成 `(subject_type, subject_id, matrix_code)`** ——
+      ⚠️ 幂等键**不能含可空列**：PG 里 NULL 互不相等 ⇒ 旧键 `(instance_id, matrix_code)`
+      在提案路径上**静默失效** ⇒ 同一提案的同一矩阵条目能落两行 ⇒ **四眼失效**。
+      工作流路径恒有 `subject_id = str(instance.id)` ⇒ 新旧键一一对应 ⇒ 语义**逐字不变**。
+      **A4-0 刻意不做**（留给 A4-1 / A4-3）：① 提案的审批**矩阵来源**（没有实例 ⇒
+      `requestApproval` 取不到定义体 ⇒ 选不出矩阵条目）；② 无实例任务的**超时清扫**
+      （`listTasksWithContext` 是 INNER JOIN ⇒ 扫不到 `instance_id IS NULL` 的行）；
+      ③ 提案侧的 service / API。⇒ A4-0 只是**存储契约**的放开，不是第二条审批栈。
 - [ ] **A4-1** 迁移：`ontology_change_proposal`（`base_version` / `diff_json` / `impact_json` / `proposer` /
       `status`）+ `ontology_review`（`proposal_id` / `reviewer` / `decision` / `comment` / `reviewed_at`）+ ORM。
       状态机照设计稿 §113：`DISCOVERED → CANDIDATE → PROPOSED → IN_REVIEW → APPROVED → VALIDATED → PUBLISHED`，

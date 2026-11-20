@@ -282,6 +282,12 @@ uv run alembic upgrade head
 ### 7.3 遗留
 
 - 本批**未部署**；部署时 journal 表会随迁移创建（首期 12 行），降级末尾自动清除。
+- ⚠️ **`alembic check` 在已应用 0158 的环境里必然报一条 drift（`remove_table
+  procurement_object_reconciliation_journal`）** —— 这是**设计使然**，不是缺陷：
+  journal 表**只服务于本迁移**（升级写、降级删、**没有 ORM 模型**）⇒ 应用元数据里
+  本就不该有它 ⇒ autogenerate 看到「库里有、元数据里没有」就报 `remove_table`。
+  ⇒ 判据口径：**该 drift 之外无其它差异**才算绿；CI 不跑 `alembic check`
+  （见 `.github/workflows/ci.yml`）⇒ 不构成合并闸门。
 
 ---
 

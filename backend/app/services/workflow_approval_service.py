@@ -138,8 +138,11 @@ class WorkflowApprovalService:
     ) -> list[ApprovalTask]:
         """为实例发起一轮审批（**失败关闭**：矩阵未覆盖 ⇒ 拒绝，不落任何行）。
 
-        幂等：同一 ``(instance_id, matrix_code)`` 只落一条任务
-        （``uq_approval_task_matrix``）⇒ 重复发起不产生第二份审批。
+        幂等：同一被审对象同一矩阵条目只落一条任务
+        （⚠️ **A4-0（0159）**：幂等键 = ``(subject_type, subject_id, matrix_code)``
+        = ``uq_approval_task_subject`` ⇒ 重复发起不产生第二份审批。
+        工作流路径恒有 ``subject_id = str(instance.id)`` ⇒ 与旧键
+        ``(instance_id, matrix_code)`` **一一对应**，语义逐字不变）。
 
         **风险级别不由调用方传入** —— 由定义体顶层 ``riskLevel`` 决定
         （服务端绑定 ⇒ 客户端不能挑低风险绕过高层审批）。

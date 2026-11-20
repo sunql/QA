@@ -326,6 +326,12 @@ def test_downgrade与upgrade对称():
     assert createdIndexes == droppedIndexes, "索引 up/down 不对称"
 
     # 只撤自己：不得 drop 任何既有表 / 既有索引
+    # ⚠️ 审批任务的幂等键在 A4-0（0159）里换过名 ⇒ 两个名字都要挡住
     assert droppedIndexes.isdisjoint(
-        {"ix_ontology_class_name", "uq_approval_task_matrix", "ix_semantic_release_status"}
+        {
+            "ix_ontology_class_name",
+            "uq_approval_task_matrix",
+            "uq_approval_task_subject",
+            "ix_semantic_release_status",
+        }
     )

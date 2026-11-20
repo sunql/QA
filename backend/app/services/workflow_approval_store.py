@@ -49,13 +49,49 @@ class WorkflowApprovalStore(WorkflowStoreBase):
         ).scalar_one_or_none()
 
     async def listApprovalTasks(self, session: AsyncSession, *, instanceId: int) -> list[ApprovalTask]:
-        """列出实例的审批任务（按 id 升序）。"""
+        """列出实例的审批任务（按 id 升序）。
+
+        ⚠️ **A4-0（0159）**：这是**实例口径** —— ``instance_id IS NULL`` 的
+        审批任务（提案路径）**不在**本口径内 ⇒ 那条路径用
+        ``listApprovalTasksBySubject``。
+        """
 
         rows = (
             (
                 await session.execute(
                     select(ApprovalTask)
                     .where(ApprovalTask.instance_id == instanceId)
+                    .order_by(ApprovalTask.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return list(rows)
+
+    async def listApprovalTasksBySubject(
+        self,
+        session: AsyncSession,
+        *,
+        subjectType: str,
+        subjectId: str,
+    ) -> list[ApprovalTask]:
+        """按**被审对象**列出审批任务（按 id 升序）。
+
+        ⚠️ **A4-0（0159）新增的查询面**：审批任务**不一定**挂在工作流实例上
+        （提案路径 ``instance_id IS NULL``）⇒ 实例口径查不到 ⇒ 需要一条按
+        ``subject_type`` + ``subject_id`` 的口径。两条口径**互斥**：
+        实例口径只命中 ``instance_id`` 命中的行，subject 口径按被审对象命中。
+        """
+
+        rows = (
+            (
+                await session.execute(
+                    select(ApprovalTask)
+                    .where(
+                        ApprovalTask.subject_type == subjectType,
+                        ApprovalTask.subject_id == subjectId,
+                    )
                     .order_by(ApprovalTask.id)
                 )
             )
@@ -77,6 +113,10 @@ class WorkflowApprovalStore(WorkflowStoreBase):
         （``approver_user`` 列只在决策那一刻写签署人 ⇒ 待审批时为空），
         SQL 无法只看任务行判定 ⇒ 由服务层用 ``_matchesHolder`` 过滤。
         调用方必须给 ``limit`` 上界（扫描上限），不能拉全表。
+
+        ⚠️ **A4-0（0159）**：这里是 ``INNER JOIN workflow_instance`` ⇒
+        ``instance_id IS NULL`` 的审批任务（提案路径）**不在**本口径内 ⇒
+        超时清扫**扫不到**它们。那条路径的超时策略是 A4-1 的事（不在 A4-0 范围）。
         """
 
         stmt = (
@@ -98,7 +138,7 @@ class WorkflowApprovalStore(WorkflowStoreBase):
         self,
         session: AsyncSession,
         *,
-        instanceId: int,
+        instanceId: int | None,
         subjectType: str,
         subjectId: str,
         matrixCode: str,
@@ -109,8 +149,12 @@ class WorkflowApprovalStore(WorkflowStoreBase):
     ) -> tuple[ApprovalTask, bool]:
         """幂等创建审批任务。返回 ``(任务, 是否本次新建)``。
 
-        幂等键 = ``(instance_id, matrix_code)``（库层唯一约束 ``uq_approval_task_matrix``）
-        ⇒ 同一实例同一矩阵条目只落一条任务。
+        幂等键 = ``(subject_type, subject_id, matrix_code)``（库层唯一约束
+        ``uq_approval_task_subject``）⇒ 同一被审对象同一矩阵条目只落一条任务。
+
+        ⚠️ **A4-0（0159）**：``instanceId`` 可为 ``None`` —— 审批**不一定**挂在
+        工作流实例上（提案路径只填 subject 三元组）。工作流路径恒有
+        ``subjectId == str(instanceId)`` ⇒ 幂等语义与旧键**逐字相同**。
         """
 
         insertedId = await self._insertApprovalTask(
@@ -125,8 +169,11 @@ class WorkflowApprovalStore(WorkflowStoreBase):
             createdBy=createdBy,
         )
 
-        existing = await self._loadApprovalTaskByMatrix(
-            session, instanceId=instanceId, matrixCode=matrixCode
+        existing = await self._loadApprovalTaskBySubject(
+            session,
+            subjectType=subjectType,
+            subjectId=subjectId,
+            matrixCode=matrixCode,
         )
 
         if insertedId is not None:
@@ -145,7 +192,7 @@ class WorkflowApprovalStore(WorkflowStoreBase):
         self,
         session: AsyncSession,
         *,
-        instanceId: int,
+        instanceId: int | None,
         subjectType: str,
         subjectId: str,
         matrixCode: str,
@@ -170,21 +217,29 @@ class WorkflowApprovalStore(WorkflowStoreBase):
                     due_at=dueAt,
                     created_by=createdBy,
                 )
-                .on_conflict_do_nothing(index_elements=["instance_id", "matrix_code"])
+                .on_conflict_do_nothing(
+                    index_elements=["subject_type", "subject_id", "matrix_code"]
+                )
                 .returning(ApprovalTask.id)
             )
         ).scalar_one_or_none()
 
-    async def _loadApprovalTaskByMatrix(
-        self, session: AsyncSession, *, instanceId: int, matrixCode: str
+    async def _loadApprovalTaskBySubject(
+        self,
+        session: AsyncSession,
+        *,
+        subjectType: str,
+        subjectId: str,
+        matrixCode: str,
     ) -> ApprovalTask:
-        """按（实例, 矩阵条目）读回审批任务行。"""
+        """按（被审对象, 矩阵条目）读回审批任务行。"""
 
         return (
             await session.execute(
                 select(ApprovalTask)
                 .where(
-                    ApprovalTask.instance_id == instanceId,
+                    ApprovalTask.subject_type == subjectType,
+                    ApprovalTask.subject_id == subjectId,
                     ApprovalTask.matrix_code == matrixCode,
                 )
                 .execution_options(populate_existing=True)
@@ -195,7 +250,7 @@ class WorkflowApprovalStore(WorkflowStoreBase):
         self,
         session: AsyncSession,
         *,
-        instanceId: int,
+        instanceId: int | None,
         task: ApprovalTask,
         subjectType: str,
         subjectId: str,

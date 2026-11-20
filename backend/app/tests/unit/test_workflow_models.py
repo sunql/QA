@@ -43,6 +43,12 @@ _MIGRATION_STEMS = (
     "0151_approval_outbox",
 )
 
+# 「只改既有表约束」的迁移（**不建表**）：A4-0（0159）放开 ``approval_task`` 的
+# ``instance_id`` 并把幂等键换成 subject 三元组。
+# ⚠️ **不在** ``_MIGRATION_STEMS`` 里 —— 那组受「纯加法 DDL」纪律约束
+# （禁 alter / drop 任何既有表），而 0159 正是改既有表的约束。
+_CONSTRAINT_MIGRATION_STEMS = ("0159_approval_task_subject",)
+
 _EXPECTED_TABLES_BY_MIGRATION = {
     "0149_workflow_definition": ["workflow_definition", "workflow_instance"],
     "0150_workflow_step_command": ["workflow_step", "business_command"],
@@ -79,6 +85,17 @@ def _recordedOps(module, funcName: str) -> list[tuple]:
 
         def create_index(self, name, tableName, *columns, **kwargs):
             calls.append(("create_index", name, tableName, kwargs))
+
+        # 约束改写类 DDL（0159 用）—— 必须连 kwargs 一起记，否则「可空」与
+        # 「约束类型」这类**关键字参数**会被吞掉（假绿）。
+        def create_unique_constraint(self, name, tableName, columns, **kwargs):
+            calls.append(("create_unique_constraint", name, tableName, tuple(columns), kwargs))
+
+        def drop_constraint(self, name, tableName, **kwargs):
+            calls.append(("drop_constraint", name, tableName, kwargs))
+
+        def alter_column(self, tableName, columnName, **kwargs):
+            calls.append(("alter_column", tableName, columnName, kwargs))
 
         def __getattr__(self, name):
             def _unexpected(*args, **kwargs):
@@ -139,7 +156,7 @@ def _indexNames(table) -> set[str]:
 
 
 def _migrationTablesByStem(stem: str) -> dict[str, dict]:
-    """返回 {表名: {'columns': {...}, 'checks': {...}, 'uniques': {...}}}。"""
+    """返回 {表名: {'columns': {...}, 'checks': {...}, 'uniques': {...}, 'nullable': {...}}}。"""
 
     module = _loadMigration(stem)
     result: dict[str, dict] = {}
@@ -157,14 +174,43 @@ def _migrationTablesByStem(stem: str) -> dict[str, dict]:
                 checks[item.name] = str(item.sqltext)
             elif isinstance(item, sa.UniqueConstraint):
                 uniques[item.name] = _constraintColumnNames(item)
-        result[tableName] = {"columns": columns, "checks": checks, "uniques": uniques}
+        result[tableName] = {
+            "columns": columns,
+            "checks": checks,
+            "uniques": uniques,
+            "nullable": {name: column.nullable for name, column in columns.items()},
+        }
     return result
+
+
+def _applyConstraintMigration(tables: dict[str, dict], stem: str) -> None:
+    """把「只改既有表约束」的迁移应用到**状态**上（原地演进 tables）。
+
+    ⚠️ 0159 不建表 ⇒ 只靠 ``create_table`` 扫不到它的效果 ⇒
+    ``drop_constraint`` / ``create_unique_constraint`` / ``alter_column``
+    必须也纳入状态机 ⇒ 语料反映的是**迁移链跑完后的有效结构**。
+    """
+
+    module = _loadMigration(stem)
+    for call in _recordedOps(module, "upgrade"):
+        if call[0] == "create_unique_constraint":
+            _, name, tableName, columns, _kwargs = call
+            tables[tableName]["uniques"][name] = columns
+        elif call[0] == "drop_constraint":
+            _, name, tableName, _kwargs = call
+            tables[tableName]["uniques"].pop(name, None)
+        elif call[0] == "alter_column":
+            _, tableName, columnName, kwargs = call
+            if "nullable" in kwargs:
+                tables[tableName]["nullable"][columnName] = kwargs["nullable"]
 
 
 def _allMigrationTables() -> dict[str, dict]:
     merged: dict[str, dict] = {}
     for stem in _MIGRATION_STEMS:
         merged.update(_migrationTablesByStem(stem))
+    for stem in _CONSTRAINT_MIGRATION_STEMS:
+        _applyConstraintMigration(merged, stem)
     return merged
 
 
@@ -376,9 +422,29 @@ def test_定义版本在同一域能力下唯一():
     )
 
 
-def test_审批任务在同一实例同一矩阵条目唯一():
+def test_审批任务在同一被审对象同一矩阵条目唯一():
+    """A4-0（0159）：幂等键 = subject 三元组（**三列全 NOT NULL**）。
+
+    ⚠️ 为什么不能留在 ``(instance_id, matrix_code)``：PG 里 NULL 互不相等 ⇒
+    提案路径（``instance_id IS NULL``）的幂等会**静默失效** ⇒ 同一提案的同一
+    矩阵条目能落两行 ⇒ 四眼失效。
+    """
+
     uniques = _uniqueConstraints(ApprovalTask.__table__)
-    assert uniques["uq_approval_task_matrix"] == ("instance_id", "matrix_code")
+    assert uniques["uq_approval_task_subject"] == (
+        "subject_type",
+        "subject_id",
+        "matrix_code",
+    )
+    assert "uq_approval_task_matrix" not in uniques, "旧幂等键必须已被换掉"
+
+
+def test_审批任务实例列可空与迁移一致():
+    """A4-0（0159）：``instance_id`` 可空（审批不一定挂在工作流实例上）。"""
+
+    payload = _allMigrationTables()["approval_task"]
+    assert payload["nullable"]["instance_id"] is True
+    assert ApprovalTask.__table__.columns["instance_id"].nullable is True
 
 
 def test_所有外键删除受限():
@@ -517,11 +583,57 @@ def test_迁移revision链正确且串行():
     assert [module.down_revision for module in modules] == ["0148", "0149", "0150"]
 
 
+def test_约束改写迁移串在审批域之后():
+    """A4-0（0159）接在**当前链尾**（0158）之后 ⇒ 迁移号串行、不留空号。"""
+
+    module = _loadMigration(_CONSTRAINT_MIGRATION_STEMS[0])
+    assert module.revision == "0159"
+    assert module.down_revision == "0158"
+    assert (_MIGRATIONS_DIR / "0158_procurement_object_reconciliation.py").exists()
+
+
 def test_迁移文件名不超过32字符():
     """仓库约定：迁移文件名 ≤ 32 字符（``alembic_version.version_num`` 是 varchar(32)）。"""
 
-    for stem in _MIGRATION_STEMS:
+    for stem in _MIGRATION_STEMS + _CONSTRAINT_MIGRATION_STEMS:
         assert len(f"{stem}.py") <= 32, f"{stem}.py 超过 32 字符"
+
+
+def test_约束改写迁移只动一张表的约束():
+    """0159 是**改既有表**的迁移 ⇒ 纪律：不建表、不删表、不执行裸 SQL。"""
+
+    module = _loadMigration(_CONSTRAINT_MIGRATION_STEMS[0])
+    calls = _recordedOps(module, "upgrade")
+    assert [call[0] for call in calls] == [
+        "alter_column",
+        "drop_constraint",
+        "create_unique_constraint",
+    ], calls
+    assert not [call for call in calls if call[0] in {"create_table", "drop_table", "execute"}]
+
+
+def test_约束改写迁移升级与降级对称():
+    """升级换键 ⇒ 降级换回 ⇒ 两次的键与列集必须**互换**。"""
+
+    module = _loadMigration(_CONSTRAINT_MIGRATION_STEMS[0])
+    up = _recordedOps(module, "upgrade")
+    down = _recordedOps(module, "downgrade")
+
+    upDrop = [call for call in up if call[0] == "drop_constraint"][0]
+    upCreate = [call for call in up if call[0] == "create_unique_constraint"][0]
+    downDrop = [call for call in down if call[0] == "drop_constraint"][0]
+    downCreate = [call for call in down if call[0] == "create_unique_constraint"][0]
+
+    assert upDrop[1] == downCreate[1], "升级删的键 = 降级建的键"
+    assert upCreate[1] == downDrop[1], "升级建的键 = 降级删的键"
+    assert upCreate[3] == ("subject_type", "subject_id", "matrix_code")
+    assert downCreate[3] == ("instance_id", "matrix_code"), "降级换回旧键的旧列集"
+
+    upAlter = [call for call in up if call[0] == "alter_column"][0]
+    downAlter = [call for call in down if call[0] == "alter_column"][0]
+    assert upAlter[1:3] == downAlter[1:3], "改的列必须一致"
+    assert upAlter[3]["nullable"] is True
+    assert downAlter[3]["nullable"] is False
 
 
 def test_每个迁移只建自己的新表不触碰既有表():

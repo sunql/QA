@@ -379,19 +379,26 @@ class ApprovalTask(Base, TimestampMixin):
     **开放对象模型**（D-1）：被审对象用 ``subject_type`` + ``subject_id`` 引用，
     不写死成工作流实例 ⇒ WP-ONT-AI A4 的「四眼审核」可直接复用这张表。
     ``matrix_code`` 指向定义体 ``approvalMatrix`` 里的条目 key。
+
+    ⚠️ **A4-0（0159）**：`instance_id` 已放开为**可空** —— 审批**不一定**挂在工作流
+    实例上（WP-ONT-AI A4 的本体提案没有实例可挂）。幂等键因此改为
+    ``(subject_type, subject_id, matrix_code)`` 三元组（三列全 NOT NULL ⇒ 两条路径上
+    幂等都成立；工作流路径恒有 ``subject_id = str(instance.id)`` ⇒ 语义逐字不变）。
     """
 
     __tablename__ = "approval_task"
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
-    instance_id: Mapped[int] = mapped_column(
+    instance_id: Mapped[int | None] = mapped_column(
         BigIntFk,
         ForeignKey(
             "workflow_instance.id",
             ondelete="RESTRICT",
             name="fk_approval_task_instance",
         ),
-        nullable=False,
+        # A4-0（0159）：可空 —— 审批**不一定**挂在工作流实例上
+        # （WP-ONT-AI A4 的本体提案没有实例可挂 ⇒ 只填 subject 三元组）。
+        nullable=True,
         comment=_APPROVAL_INSTANCE_COMMENT,
     )
     step_id: Mapped[int | None] = mapped_column(
@@ -432,7 +439,11 @@ class ApprovalTask(Base, TimestampMixin):
     created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("instance_id", "matrix_code", name="uq_approval_task_matrix"),
+        # A4-0（0159）：幂等键 = 被审对象三元组。**不能含可空列**
+        # （PG 里 NULL 互不相等 ⇒ 含 instance_id 的幂等键在提案路径上会静默失效）。
+        UniqueConstraint(
+            "subject_type", "subject_id", "matrix_code", name="uq_approval_task_subject"
+        ),
         CheckConstraint(
             "status IN ('PENDING','APPROVED','REJECTED','CANCELLED','TIMEOUT')",
             name="ck_approval_task_status",

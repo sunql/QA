@@ -40,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.research_models import ResearchSession
 from app.infrastructure.business_db_pool import get_adapter
-from app.services.datasource_service import DataSourceService
+from app.services.datasource_service import DataSourceService, ensureDatasourceActive
 from app.services.nl2sql_dialects import checkSqlDialect
 from app.services.nl2sql_service import Nl2SqlService, _safeSchemaPrefix
 from app.services.recall_datasource_filter import applyDatasourceRecallFilter
@@ -160,6 +160,7 @@ async def depsForSession(
         logger.error("研究会话未绑定业务数据源: session=%s", sessionId)
         raise RuntimeError(f"研究会话未绑定业务数据源（datasource_id 为空）: {sessionId}")
     ds = await DataSourceService().get(session, row.datasource_id)
+    ensureDatasourceActive(ds)  # C 方案：停用源在执行相位前拒绝（409）
     # 两个 resolver 紧贴取源处调用：此刻 `ds` 必是新鲜的（尚未经历任何 rollback）
     return replace(
         base,

@@ -25,6 +25,7 @@ from app.services.chat_constants import (
     ROUTING_LAYER_L4,
     USAGE_PURPOSE_L4_AGENT_LOOP,
 )
+from app.services.datasource_service import ensureDatasourceActive
 from app.services.step_query_planner import StepQueryPlanner
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,9 @@ class L4Mixin:
         llm_client, llm_config = resolved
         try:
             ds = await self._datasource.get(session, dto.datasourceId)
+            # C 方案：停用源在此拒绝；下方 except 会落回 L2/L3 主链并再次抛出
+            # ⇒ 409 最终对用户可见（L4 降级路径不吞停用源错误）。
+            ensureDatasourceActive(ds)
             result = await self._callAgentLoop(session, dto, user, llm_client, llm_config, ds)
         except Exception:
             # L4 异常不阻断：log warning + 降级 L2/L3（与 L1 同模式）

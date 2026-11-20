@@ -477,3 +477,33 @@ async def test_reaper_does_not_reap_pending_task(
     afterStatus, afterRun = await _sessionStatusAndRun(dbSession, sid)
     assert afterStatus == "awaiting_user", f"会话状态不得被动: {afterStatus}"
     assert afterRun == beforeRun, f"active_run_id 不得被清: {afterRun}"
+
+
+# ---------------------------------------------------------------------------
+# C 方案（数据源入口 fail-closed）：研究入口对停用源 fail-closed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_datasource_rejects_inactive(dbSession: AsyncSession) -> None:
+    """L1 入口守卫（C 方案）：研究入口对停用源抛 ``DataSourceInactiveError``（409）。
+
+    活跃源恒等透传；停用源（is_active=false）显式引用被拒 —— 此前只有 UI
+    下拉挡它，显式 API 仍走得通。反向守卫：删掉 _resolveDatasource 的
+    ensureDatasourceActive 调用 ⇒ 本用例必失败。
+    """
+    from app.domain.exceptions import DataSourceInactiveError
+
+    ds = await _seedDatasource(dbSession)
+
+    # 活跃源：恒等透传
+    resolved = await researchModule._resolveDatasource(dbSession, ds.id)
+    assert resolved.id == ds.id
+
+    # 停用源：拒绝
+    ds.is_active = False
+    dbSession.add(ds)
+    await dbSession.commit()
+
+    with pytest.raises(DataSourceInactiveError):
+        await researchModule._resolveDatasource(dbSession, ds.id)

@@ -113,6 +113,29 @@ class TestDataSourceCrud:
         assert resp.status_code == 200, resp.text
         assert "password" not in resp.json()
 
+    async def test_inactive_datasource_still_manageable(self, client) -> None:
+        """C 方案防误伤守卫：停用源对**管理面**完全可见、可改回。
+
+        getActive/fail-closed 只切**消费入口**（chat/research）；管理路由
+        继续用裸 get() ⇒ 停用源仍可查看、仍可重新启用（设计 §2.2 非目标 2）。
+        """
+        create = await client.post(
+            "/api/v1/datasources",
+            json=_make_payload("ds-inactive-guard", isActive=False),
+        )
+        assert create.status_code == 201, create.text
+        dsId = create.json()["id"]
+
+        got = await client.get(f"/api/v1/datasources/{dsId}")
+        assert got.status_code == 200, got.text
+        assert got.json()["isActive"] is False
+
+        reactivate = await client.put(
+            f"/api/v1/datasources/{dsId}", json={"isActive": True},
+        )
+        assert reactivate.status_code == 200, reactivate.text
+        assert reactivate.json()["isActive"] is True
+
     async def test_delete_returns_204_then_404(self, client) -> None:
         create = await client.post("/api/v1/datasources", json=CREATE_PAYLOAD)
         dsId = create.json()["id"]

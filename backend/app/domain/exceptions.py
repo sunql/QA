@@ -167,6 +167,10 @@ class BusinessObjectGraphLabelMismatchError(ValidationError):
 # ---------------------------------------------------------------------------
 
 
+class DataSourceInactiveError(ConflictError):
+    """数据源已停用（is_active=false）仍被消费链路显式引用（C 方案 fail-closed）。"""
+
+
 class FeatureRuleNotFoundError(NotFoundError):
     """Feature rule 不存在（spec §9.2）。"""
 

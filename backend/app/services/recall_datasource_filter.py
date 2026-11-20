@@ -21,7 +21,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models import SchemaCache
+from app.domain.models import DataSource, SchemaCache
+from app.services.datasource_service import ensureDatasourceActive
 
 # NOTE: brief 原文写 `from loguru import logger`，但本仓依赖清单无 loguru，
 # 全仓日志口径为标准库 logging（对齐 schema_introspection_service），故改用
@@ -120,6 +121,19 @@ async def applyDatasourceRecallFilter(
     if datasourceId is None:
         disclosure["datasourceFilterSkipped"] = "no_datasource"
         return list(classes), disclosure
+    # L2 纵深（C 方案 2026-11-20）：停用源在过滤层**直接 fail-closed**，
+    # 且判定先于 schema_cache 读取 —— 未来新消费入口漏接入口守卫时，
+    # 停用源至多得显式异常（409）而不是静默的跨源幽灵表。
+    # 行不存在（上游 get() 本应 404）不扩权，维持 no_cache 现状；
+    # 活跃源空 cache 仍 fail-open（新源首次 introspect 前合法）。
+    # ⚠️ 特性检测：生产 session 恒为 AsyncSession（必有 ``.get``）；单测的
+    # 文本路由假会话（_RoutingSession 等）只实现 ``execute`` ⇒ 无 ``.get``
+    # 的调用方跳过本层守卫（L1 入口守卫仍生效）——**不是**对生产的豁免。
+    getSessionGet = getattr(session, "get", None)
+    if getSessionGet is not None:
+        ds = await getSessionGet(DataSource, datasourceId)
+        if ds is not None:
+            ensureDatasourceActive(ds)
     tableSet = await loadDatasourceTableSet(session, datasourceId)
     if tableSet is None:
         disclosure["datasourceFilterSkipped"] = "no_cache"

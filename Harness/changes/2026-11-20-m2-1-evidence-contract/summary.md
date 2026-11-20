@@ -23,3 +23,10 @@
   旧字段原样）。
 - 既有 facade contract 断言（releaseVersion/source）不动 ⇒ 兼容性被既有测试直接守护。
 - 知识面回归 **107 passed**；ruff 净新增 0。
+
+## 设计订正（2026-11-20，merge-gate 拦截实证）
+`evidenceId` 从 **uuid4 随机**改为**内容确定**（除自身外全部字段的 canonical JSON
+SHA-256 → `ev-<hex16>`；显式传入仍被尊重）。触发：merge-gate 净新增 1 条
+`test_entity_hints_do_not_widen_access`——ACL 守卫用「两次调用 evidence 全等」
+断言 entity hints 不得扩权，随机 id 让这类断言永假。随机 id 还有第二个缺陷：
+跨响应不可引用（响应即失效）。内容确定 id 同时修复两者。（#166 归属。）

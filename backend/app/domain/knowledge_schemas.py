@@ -285,6 +285,46 @@ class ProcurementEntityMatchRead(CamelModel):
     source_mappings: list[ProcurementEntitySourceMappingRead] = Field(default_factory=list)
 
 
+class ProcurementGraphNodeRead(CamelModel):
+    """受控邻接视图中的节点（M2-2b，设计稿 §8.3）。"""
+
+    entity_type: str
+    key: str
+    code: str | None = None
+    name: str | None = None
+
+
+class ProcurementGraphEdgeRead(CamelModel):
+    """受控邻接视图中的一条真实边（来自 `GraphTraversalHop`）。"""
+
+    depth: int
+    from_type: str
+    from_key: str
+    from_code: str | None = None
+    from_name: str | None = None
+    rel_type: str
+    to_type: str
+    to_key: str
+    to_code: str | None = None
+    to_name: str | None = None
+
+
+class ProcurementGraphNeighborsRead(CamelModel):
+    """受控邻接响应：nodes[] + edges[] + truncated（自证截断）。
+
+    `effectiveRelationTypes` = 请求 relationTypes ∩ `BUSINESS_RELATION_TYPES`
+    （白名单外交互被丢弃时调用方可自证，不会误以为跑了一条被丢弃的路）。
+    """
+
+    entity_type: str
+    entity_key: str
+    max_hops: int
+    effective_relation_types: tuple[str, ...] = ()
+    nodes: list[ProcurementGraphNodeRead] = Field(default_factory=list)
+    edges: list[ProcurementGraphEdgeRead] = Field(default_factory=list)
+    truncated: bool = False
+
+
 class KnowledgeRouteResultRead(CamelModel):
     """单路的执行结果 + 降级痕迹。
 

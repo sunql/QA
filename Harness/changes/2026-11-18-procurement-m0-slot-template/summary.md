@@ -3,7 +3,7 @@
 - **日期**：2026-11-18
 - **作者**：Claude
 - **Phase**：M0 底座 / W2 轨 A（A7）
-- **状态**：in-review（分支 `feat/procurement-m0`，**未合并、未部署**）
+- **状态**：done（**已合入 main**，分批合入 1/4；**生产未部署**）
 - **关联变更**：[2026-11-18-procurement-m0-kpi-attribution](../2026-11-18-procurement-m0-kpi-attribution/summary.md)（A6，本批的输入）
 - **迁移版本**：**无 DDL / 无数据迁移 / 无代码改动**（head 仍 `0153`，`0154` 留给 A4-0）
 - **验收包**：[docs/update/1118/M0/M0.5-KPI口径槽位模板.md](../../../docs/update/1118/M0/M0.5-KPI口径槽位模板.md)

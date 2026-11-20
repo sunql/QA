@@ -3,7 +3,7 @@
 - **日期**：2026-11-18
 - **作者**：Claude
 - **Phase**：M0 底座 / W2 轨 A（A8，轨 A 末项）
-- **状态**：in-review（分支 `feat/procurement-m0`，**未合并、未部署**）
+- **状态**：done（**已合入 main**，分批合入 1/4；**生产未部署**）
 - **关联变更**：[2026-11-18-procurement-m0-slot-template](../2026-11-18-procurement-m0-slot-template/summary.md)（A7）、[2026-11-18-procurement-m0-kpi-attribution](../2026-11-18-procurement-m0-kpi-attribution/summary.md)（A6）
 - **迁移版本**：A8 本批**无 DDL**（head 当时 `0153`）；后续 **M1-1.1 已按本批 §4 建表** =
   **`0154_procurement_bindings`**（两张表同一迁移；A4-0 顺延到下一个空号）

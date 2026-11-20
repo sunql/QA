@@ -3,7 +3,7 @@
 - **日期**：2026-11-18
 - **作者**：Claude
 - **Phase**：M0 底座 / W2 轨 A（A6）
-- **状态**：in-review（分支 `feat/procurement-m0`，**未合并、未部署**；alias `--apply` **未执行**，与 A9 同批）
+- **状态**：done（**已合入 main**，分批合入 1/4；**生产未部署**；alias `--apply` **未执行**，与 A9 同批）
 - **关联变更**：[2026-11-11-kpi-definition-consumption](../2026-11-11-kpi-definition-consumption/summary.md)（P0 normalizer，本批的**前提**）；[2026-11-18-procurement-m0-answer-parity](../2026-11-18-procurement-m0-answer-parity/summary.md)（A5）
 - **迁移版本**：无 DDL / 无数据迁移（head 仍 `0153`，`0154` 留给 A4-0）
 - **验收包**：[docs/update/1118/M0/M0.5-KPI归因清单.md](../../../docs/update/1118/M0/M0.5-KPI归因清单.md)

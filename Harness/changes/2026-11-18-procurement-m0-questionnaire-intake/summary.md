@@ -3,7 +3,7 @@
 - **日期**：2026-11-18
 - **作者**：Claude
 - **Phase**：M0 采购语义可发布 / M0.6 问卷回收 → M0.7 摄入汇合
-- **状态**：done（分支 `feat/procurement-m0`，**未合并、未部署**；纯文档 + 只读探针批）
+- **状态**：done（**已合入 main**，分批合入 1/4；**生产未部署**；纯文档 + 只读探针批）
 - **关联变更**：[2026-11-18-m1-procurement-binding-tables](../2026-11-18-m1-procurement-binding-tables/summary.md)（M1-1.1 结构层，迁移 `0154`）· [2026-11-18-procurement-m0-source-binding](../2026-11-18-procurement-m0-source-binding/summary.md)（A8，本批修订其绑定范围）
 - **迁移版本**：无（本批不含 DDL；迁移 `0154` 已由 M1-1.1 结构层占用，**`0155` 留给 M1-1.2 / A4-0 串行排号**）
 - **产物**：`docs/update/1118/M0/answers/`（4 份）＋ `docs/update/1118/M0/evidence/source-capability-scan.txt`（405 行）

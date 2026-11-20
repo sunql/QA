@@ -3,7 +3,7 @@
 - **日期**：2026-11-18
 - **作者**：Claude
 - **Phase**：M0 底座 / W0 前置（A 线：本地栈同构）
-- **状态**：in-review（分支 `feat/procurement-m0`，**未合并、未部署**）
+- **状态**：done（**已合入 main**，分批合入 1/4；**生产未部署**）
 - **关联变更**：[m0-id-mapping-a1](../m0-id-mapping-a1/summary.md)（同族的 A1 前置线）、[fix-schema-ssot-alignment](../fix-schema-ssot-alignment/summary.md)（schema SSOT 对齐，判据 1 的前置）
 - **迁移版本**：`0153_reconcile_procurement_class_source_tables`（**纯数据迁移，无 DDL**）
 - **MEMORY**：[../../../../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-procurement-v03-landing-program.md](../../../../../../../../.claude/projects/-Users-sunql-Prejectcode-th-MyWiki-wiki-aicode-qa-system/memory/qa-system-procurement-v03-landing-program.md)

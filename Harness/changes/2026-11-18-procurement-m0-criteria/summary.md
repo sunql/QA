@@ -3,7 +3,7 @@
 - **日期**：2026-11-18
 - **作者**：Claude
 - **Phase**：M0 底座 / 轨 A（A3）
-- **状态**：done（文档批次，分支 `feat/procurement-m0`，**未合并、未部署**）
+- **状态**：done（文档批次，**已合入 main**，分批合入 1/4；**生产未部署**）
 - **关联变更**：[A1 同构](../2026-11-18-procurement-m0-foundation/summary.md)（判据 1）、
   [A2 开关](../2026-11-18-procurement-m0-flags/summary.md)（判据 3）
 - **迁移版本**：无

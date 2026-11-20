@@ -3,7 +3,7 @@
 - **日期**：2026-11-18
 - **作者**：Claude
 - **Phase**：M0 底座 / W1 轨 A（A5：M0.4 方案 B 的验证侧）
-- **状态**：in-review（分支 `feat/procurement-m0`，**未合并、未部署**）
+- **状态**：done（**已合入 main**，分批合入 1/4；**生产未部署**）
 - **关联变更**：[2026-11-18-procurement-m0-render-order](../2026-11-18-procurement-m0-render-order/summary.md)（A4，被本批验证）；[2026-11-18-procurement-m0-flags](../2026-11-18-procurement-m0-flags/summary.md)（A2）
 - **迁移版本**：无（本批无 DDL / 无数据迁移；head 仍 `0153`，下一个可用号 `0154` 留给 A4-0）
 - **验收包**：[docs/update/1118/M0/evidence/answer-parity.md](../../../docs/update/1118/M0/evidence/answer-parity.md)

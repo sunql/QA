@@ -3,7 +3,7 @@
 - **日期**：2026-11-18
 - **作者**：Claude
 - **Phase**：M1 采购语义可发布 / M1-a 结构闸（不卡问卷）
-- **状态**：in-review（分支 `feat/procurement-m0`，**未合并、未部署**）
+- **状态**：done（**已合入 main**，分批合入 1/4；**生产未部署**）
 - **关联变更**：[2026-11-18-procurement-m0-source-binding](../2026-11-18-procurement-m0-source-binding/summary.md)（A8，本批的设计来源）
 - **迁移版本**：**`0154_procurement_bindings`**（head `0153` → `0154`；两张表同一迁移）
 - **验收包**：[A8-采购源绑定候选与表结构设计.md](../../../docs/update/1118/M0/A8-采购源绑定候选与表结构设计.md) §4

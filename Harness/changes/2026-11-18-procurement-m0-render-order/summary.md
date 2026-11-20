@@ -3,7 +3,7 @@
 - **日期**：2026-11-18
 - **作者**：Claude
 - **Phase**：M0 底座 / W1 轨 A（A4：M0.4 方案 B）
-- **状态**：in-review（分支 `feat/procurement-m0`，**未合并、未部署**）
+- **状态**：done（**已合入 main**，分批合入 1/4；**生产未部署**）
 - **关联变更**：[2026-11-18-procurement-m0-flags](../2026-11-18-procurement-m0-flags/summary.md)（A2）；[2026-11-18-procurement-m0-criteria](../2026-11-18-procurement-m0-criteria/summary.md)（A3）
 - **迁移版本**：无（本批无 DDL / 无数据迁移）
 - **验收包**：[docs/update/1118/M0/evidence/render-order.md](../../../docs/update/1118/M0/evidence/render-order.md)

@@ -21,10 +21,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date, datetime
-from uuid import uuid4
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from app.domain.schemas import CamelModel
 
@@ -240,7 +241,11 @@ class KnowledgeEvidenceRead(CamelModel):
     （本批知识路径**不产生**这种引用 ⇒ `source` 恒为 `RELEASE`）。
 
     **M2-1 契约补全（加性可选字段，旧调用方零破坏）**：
-    - `evidenceId`：响应期自动生成（逐条唯一）⇒ 调用方可逐条引用；
+    - `evidenceId`：**内容确定**（对除自身外的全部字段做 canonical JSON SHA-256，
+      未显式提供时自动生成）⇒ 同一证据跨响应 id 相同（可逐条引用、可对账），
+      不同证据 id 不同。⚠️ 不能用随机 uuid：ACL 守卫用「两次调用 evidence
+      全等」断言访问面不变（entity hints 不得扩权），随机 id 会让这类断言
+      永假（CI 净新增 1 条实证，2026-11-20）；
     - `confidence`：[0,1]（RAG 路 = 1 - distance；无分数的通道为 None）；
     - `sourceRef` / `security` / `observedAt` / `validAt` / `ruleVersion`：
       契约字段本批就位，按通道能力**渐进回填**（DOCUMENT 相关随 M2-4）。
@@ -254,13 +259,25 @@ class KnowledgeEvidenceRead(CamelModel):
     release_id: int | None = None
     release_version: str | None = None
     source: str = KNOWLEDGE_SOURCE_RELEASE
-    evidence_id: str = Field(default_factory=lambda: uuid4().hex)
+    evidence_id: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     observed_at: datetime | None = None
     valid_at: datetime | None = None
     rule_version: str | None = None
     security: KnowledgeEvidenceSecurity | None = None
     source_ref: KnowledgeEvidenceSourceRef | None = None
+
+    @model_validator(mode="after")
+    def _deriveEvidenceId(self) -> "KnowledgeEvidenceRead":
+        """内容确定 id：canonical（字段名排序）JSON → SHA-256 → `ev-<hex16>`。"""
+        if self.evidence_id:
+            return self
+        payload = json.dumps(
+            self.model_dump(exclude={"evidence_id"}, by_alias=True),
+            ensure_ascii=False, sort_keys=True, default=str,
+        )
+        self.evidence_id = "ev-" + hashlib.sha256(payload.encode()).hexdigest()[:16]
+        return self
 
 
 class ProcurementEntitySourceMappingRead(CamelModel):

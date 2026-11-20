@@ -21,6 +21,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from uuid import uuid4
+
 from pydantic import Field, field_validator
 
 from app.domain.schemas import CamelModel
@@ -208,11 +211,39 @@ class KnowledgeEntityRead(CamelModel):
     name: str | None = None
 
 
+class KnowledgeEvidenceSourceRef(CamelModel):
+    """证据的**物理来源**定位（M2-1 契约补全；字段按通道可得性回填，None=无此信息）。
+
+    命名偏差（已登记）：跨板块设计稿的证据里嵌套对象叫 `source{...}`，但本仓
+    `KnowledgeEvidenceRead.source: str` 是「发布面出处」（RELEASE/LIVE），二者
+    并存 ⇒ 物理来源定位改叫 `sourceRef`，`source` 原样保留（旧调用方零破坏）。
+    """
+
+    system: str | None = None
+    object: str | None = None
+    record_key: str | None = None
+    document_id: int | None = None
+    query_id: str | None = None
+
+
+class KnowledgeEvidenceSecurity(CamelModel):
+    """证据的密级与授权范围（DOCUMENT 通道回填；M2-4 文档检索消费）。"""
+
+    level: str | None = None
+    scope: tuple[str, ...] = ()
+
+
 class KnowledgeEvidenceRead(CamelModel):
     """一条引用（证据）。
 
     `release_id` / `release_version` 为空 ⇒ 这条引用不是出自发布面
     （本批知识路径**不产生**这种引用 ⇒ `source` 恒为 `RELEASE`）。
+
+    **M2-1 契约补全（加性可选字段，旧调用方零破坏）**：
+    - `evidenceId`：响应期自动生成（逐条唯一）⇒ 调用方可逐条引用；
+    - `confidence`：[0,1]（RAG 路 = 1 - distance；无分数的通道为 None）；
+    - `sourceRef` / `security` / `observedAt` / `validAt` / `ruleVersion`：
+      契约字段本批就位，按通道能力**渐进回填**（DOCUMENT 相关随 M2-4）。
     """
 
     channel: str
@@ -223,6 +254,13 @@ class KnowledgeEvidenceRead(CamelModel):
     release_id: int | None = None
     release_version: str | None = None
     source: str = KNOWLEDGE_SOURCE_RELEASE
+    evidence_id: str = Field(default_factory=lambda: uuid4().hex)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    observed_at: datetime | None = None
+    valid_at: datetime | None = None
+    rule_version: str | None = None
+    security: KnowledgeEvidenceSecurity | None = None
+    source_ref: KnowledgeEvidenceSourceRef | None = None
 
 
 class KnowledgeRouteResultRead(CamelModel):

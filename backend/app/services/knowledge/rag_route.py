@@ -121,6 +121,12 @@ def _evidenceOf(
     snippet = description or alias or name
     if distanceText:
         snippet = f"{snippet}（相似度距离 {distanceText}）" if snippet else distanceText
+    # M2-1：RAG 是四路中唯一有分数的通道 ⇒ confidence = 1 - distance（夹到 [0,1]）。
+    confidence = (
+        round(max(0.0, min(1.0, 1.0 - float(distance))), 4)
+        if isinstance(distance, (int, float))
+        else None
+    )
     return KnowledgeEvidenceRead(
         channel=KNOWLEDGE_CHANNEL_RAG,
         kind=_EVIDENCE_KIND_BY_TYPE.get(type_, type_.upper()),
@@ -130,6 +136,7 @@ def _evidenceOf(
         release_id=release.release_id,
         release_version=release.version,
         source=KNOWLEDGE_SOURCE_RELEASE,
+        confidence=confidence,
     )
 
 

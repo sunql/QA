@@ -76,7 +76,9 @@ class TestL4ColdStartAdapter:
     @pytest.mark.asyncio
     async def test_adapter_provider_receives_fetched_ds_not_none(self) -> None:
         """adapter 池冷缓存场景：必须把取到的 ds 传给 _adapterProvider（而非 None）。"""
-        ds = type("_FakeDs", (), {"id": 1, "name": "THBI"})()
+        # is_active=True：C 方案后 _runL4AgentLoop 会对取到的 ds 做
+        # ensureDatasourceActive（is_active=False ⇒ 409）；桩须带上该字段。
+        ds = type("_FakeDs", (), {"id": 1, "name": "THBI", "is_active": True})()
         svc, calls = _makeService(ds=ds)
 
         await svc._runL4AgentLoop(session=None, dto=_dto(), user=None)

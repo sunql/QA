@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.research_models import ResearchSession
 from app.infrastructure.business_db_pool import get_adapter
-from app.services.datasource_service import DataSourceService
+from app.services.datasource_service import DataSourceService, ensureDatasourceActive
 from app.services.nl2sql_service import Nl2SqlService, _safeSchemaPrefix
 from app.services.ontology_service import OntologyService
 from app.services.value_sampler import ValueSampler
@@ -105,6 +105,7 @@ async def buildHypothesisSchemaHint(
     if ds is None:
         logger.warning("研究侧 schema 反射：数据源缺失 dsId=%s", dsId)
         return _NO_SCHEMA_PLACEHOLDER
+    ensureDatasourceActive(ds)  # C 方案：停用源拒绝进反射（409）
 
     # 2. 反射每个 BO 的真表 + 真列
     onto = OntologyService()

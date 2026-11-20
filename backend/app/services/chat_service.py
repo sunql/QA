@@ -110,7 +110,7 @@ from app.services.time_scope_renderer import (
     prepareTimeParameterizedFormula,
 )
 from app.services.data_summary import summarize_data
-from app.services.datasource_service import DataSourceService
+from app.services.datasource_service import DataSourceService, ensureDatasourceActive
 from app.services.kpi_contract_builder import buildKpiContractBlock
 from app.services.kpi_semantic_match_service import KpiMatchResult, KpiSemanticMatchService
 from app.services.embedding_service import EmbeddingService
@@ -1007,6 +1007,10 @@ class ChatService(
         # 方言生成 SQL，执行必错。API DTO 的枚举校验只挡创建/更新入口，这里是
         # 消费边界的最后关口 —— 在任何 LLM 调用之前拒绝。
         coerceDatasourceType(ds.type, name=ds.name)
+        # C 方案（2026-11-20）：停用源（is_active=false）禁止进入消费链路。
+        # B 方案只挡 UI 下拉，显式传 id 的 API 仍走得通 ⇒ 在任何 LLM 调用之前
+        # 拒绝（409）。多步链路的 pc.ds 取自同一 dto ⇒ 本处一并覆盖。
+        ensureDatasourceActive(ds)
         # 候选集跨源过滤（2026-11-19 第二调用点，对齐 classifyAndRecall 主链路）：
         # 全局取类会把别的数据源登记的类带进 plan/schema（生产事故
         # main_data_supplier → ORA-00942）；三态披露合并进 recallInfo。

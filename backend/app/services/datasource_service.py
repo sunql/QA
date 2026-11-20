@@ -17,7 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
 from app.dependencies import CurrentUser
-from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
+from app.domain.exceptions import (
+    ConflictError,
+    DataSourceInactiveError,
+    NotFoundError,
+    ValidationError,
+)
 from app.domain.models import DataSource, KpiCatalog
 from app.domain.schemas import (
     DataSourceCreate,
@@ -33,6 +38,7 @@ from app.services.messages_zh import (
     MSG_DATASOURCE_HAS_KPI_BINDINGS,
     MSG_DATASOURCE_HOST_ALLOWLIST_DETAIL,
     MSG_DATASOURCE_HOST_NOT_ALLOWED,
+    MSG_DATASOURCE_INACTIVE,
     MSG_DATASOURCE_NAME_EXISTS,
     MSG_DATASOURCE_NOT_FOUND,
 )
@@ -40,6 +46,20 @@ from app.services.messages_zh import (
 logger = logging.getLogger(__name__)
 
 _audit = AuditService()
+
+
+def ensureDatasourceActive(ds: DataSource) -> None:
+    """停用源（is_active=false）禁止进入消费链路（C 方案 fail-closed）。
+
+    消费入口（chat / research / L4 / 反射 / 召回过滤）在拿到数据源后调用本
+    校验：停用 ⇒ ``DataSourceInactiveError``（``ConflictError`` 子类 ⇒ 409）。
+    **管理面不得调用**（停用源必须仍可查看/启用，设计 §2.2）。
+    """
+    if ds.is_active is False:
+        raise DataSourceInactiveError(MSG_DATASOURCE_INACTIVE.format(id=ds.id))
+    # ⚠️ 只拦**显式 False**：DB 列 nullable=False default=True ⇒ 生产行不可能是
+    # None；is_active=None 只出现在内存构造对象（测试桩/种子）⇒ 拦它会把
+    # 「未落库」误判成「已停用」⇒ 整条 QUERY 管线测试假数据全炸。
 
 
 class DataSourceService:

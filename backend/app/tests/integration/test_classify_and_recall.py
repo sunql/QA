@@ -17,7 +17,7 @@ from decimal import Decimal
 
 import pytest
 from app.domain.enums import ChartType, DataSourceType, IntentType
-from app.domain.exceptions import NotFoundError
+from app.domain.exceptions import DataSourceInactiveError, NotFoundError
 from app.domain.models import DataSource, LlmConfig, OntologyClass, SessionQueryState
 from app.domain.schemas import ChatRequest
 from app.services.chat_service import ChatService
@@ -587,6 +587,58 @@ async def test_anchor_rescue_blocked_when_candidates_not_datasource_scoped(
 
 
 @pytest.mark.asyncio
+async def test_chat_recall_rejects_inactive_datasource(dbSession) -> None:
+    """L2 纵深经召回入口（C 方案）：停用源显式传入 ⇒ DataSourceInactiveError（409）。
+
+    ds2 形态：is_active=false 的源此前只被 UI 下拉挡住（B 方案），
+    显式传 id 的 API 仍走得通 ⇒ 1119 跨源幽灵表复现入口。classifyAndRecall
+    不经 _buildPipelineContext 的 get()，数据源直接进过滤层 ⇒ 本用例锁的是
+    **过滤层 L2**：ds 行落库（session.get 命中）⇒ raise 先于 schema_cache 读取。
+    反向守卫：删掉 recall_datasource_filter 的 ensureDatasourceActive ⇒ 本用例必失败。
+    """
+    ds = _datasource()
+    ds.id = 880003
+    ds.is_active = False
+    dbSession.add(ds)
+    await dbSession.flush()
+    service = _recallService(_FakeOntology(hits=[], allClasses=[]))
+
+    with pytest.raises(DataSourceInactiveError):
+        await service.classifyAndRecall(
+            dbSession, "公司目前有多少供应商", sessionId=None,
+            needRecall=True, datasourceId=880003,
+        )
+
+
+@pytest.mark.asyncio
+async def test_chat_pipeline_context_rejects_inactive_datasource(dbSession) -> None:
+    """L1 入口守卫（C 方案）：QUERY 管线对停用源在任何 LLM 调用前拒绝（409）。
+
+    _buildPipelineContext 经 ``self._datasource.get`` 拿源（生产=真实服务；
+    本用例用 _FakeDatasource 直返停用源）⇒ ensureDatasourceActive 必须紧跟。
+    多步链路的 pc.ds 取自同一 ctx ⇒ 本处一并覆盖。
+    反向守卫：删掉 chat_service 的 ensureDatasourceActive 调用 ⇒ 本用例必失败。
+    """
+    ds = _datasource()
+    ds.id = 880004
+    ds.is_active = False
+    service = _buildService(
+        llm=_PipelineLlm(),
+        ontology=_FakeOntology(hits=[], allClasses=[]),
+    )
+    # _buildService 的 _FakeDatasource 只认 _datasource()（id=1）⇒ 用不匹配 id
+    # 走不到守卫；直接构造指向停用源的假数据源服务。
+    service._datasource = _FakeDatasource(ds)  # noqa: SLF001（集成测试注入桩）
+
+    dto = ChatRequest(
+        sessionId="c-inactive-guard", question="供应商收货数量",
+        datasourceId=880004,
+    )
+    with pytest.raises(DataSourceInactiveError):
+        await service._buildPipelineContext(
+            dbSession, dto, needFewShot=False, needSamples=False, needDrift=False,
+        )
+
 async def test_anchor_rescue_skip_scene_lines_log_at_warning(
     dbSession, caplog,
 ) -> None:

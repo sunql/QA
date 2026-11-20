@@ -82,7 +82,7 @@ from app.domain.research_schemas import (
 from app.infrastructure.database import getSessionFactory
 from app.infrastructure.llm.factory import createClient
 from app.services.chart_service import ChartService
-from app.services.datasource_service import DataSourceService
+from app.services.datasource_service import DataSourceService, ensureDatasourceActive
 from app.services.enterprise_semantic_layer import EnterpriseSemanticLayer
 from app.services.kpi_match_cache import get_kpi_match_cache
 from app.services.kpi_semantic_match_service import KpiSemanticMatchService
@@ -363,7 +363,9 @@ async def _resolveDatasource(db: AsyncSession, datasourceId: int | None) -> Data
     """
     service = DataSourceService()
     if datasourceId is not None:
-        return await service.get(db, datasourceId)
+        ds = await service.get(db, datasourceId)
+        ensureDatasourceActive(ds)  # C 方案：停用源在会话创建前拒绝（409）
+        return ds
     sources = await service.list(db, activeOnly=True)
     if not sources:
         raise ValidationError(MSG_DATASOURCE_NONE_AVAILABLE)

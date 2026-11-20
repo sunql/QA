@@ -19,7 +19,7 @@ MVP 注册 3 个工具，包装既有领域服务：
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +33,12 @@ from app.services.agent_tool_types import (
     ArgExtractor,
     LlmFactory,
     ToolResult,
+)
+from app.services.agent_tools_procurement import (
+    materialSearchHandler as _materialSearchHandler,
+)
+from app.services.agent_tools_procurement import (
+    supplierSearchHandler as _supplierSearchHandler,
 )
 from app.services.agent_tools_wiki import (
     WIKI_ARG_EXTRACTORS,
@@ -220,6 +226,9 @@ BUILTIN_HANDLERS: dict[str, AgentHandler] = {
     "supplier_360": _supplier360Handler,
     "supplier_risk": _supplierRiskHandler,
     "graph_traverse": _graphTraverseHandler,
+    # M3-1 采购检索工具：实现集中在 agent_tools_procurement（同 wiki 分工）。
+    "material_search": _materialSearchHandler,
+    "supplier_search": _supplierSearchHandler,
     # feat-wiki-knowledge M8：知识工具的实现集中在 agent_tools_wiki，
     # 这里只做登记（handler 引擎在代码、元数据在 DB 的既有分工）。
     **WIKI_HANDLERS,
@@ -233,6 +242,10 @@ ARG_EXTRACTORS: dict[str, ArgExtractor] = {
     "supplier_key": lambda raw: _supplierKeyArgs(raw, extractSupplierKey),
     "supplier_risk_key": lambda raw: _supplierKeyArgs(raw, extractSupplierRiskKey),
     "supplier_graph_key": lambda raw: _supplierKeyArgs(raw, extractSupplierGraphKey),
+    # M3-1：检索类工具对齐 wiki_text 模式——整条输入即检索词（chat 前奏语义）；
+    # 结构化 args（编排路）不走 extractor（handler 直接读 args dict）。
+    "material_search": lambda raw: ({"q": raw.strip()} if isinstance(raw, str) and raw.strip() else None),
+    "supplier_search": lambda raw: ({"q": raw.strip()} if isinstance(raw, str) and raw.strip() else None),
     **WIKI_ARG_EXTRACTORS,
 }
 
@@ -250,7 +263,6 @@ class AgentToolAssembly:
 
     @staticmethod
     def assemble(config_row) -> AgentTool:
-        from app.domain.models import AgentToolConfig
         from app.domain.schemas import _normalizeDataObject
 
         kind = config_row.handler_kind

@@ -614,6 +614,17 @@ UPDATE ontology_class SET valid_to = NULL WHERE id = 270;   -- ★ 未执行
 | **版本** | **PR #162 合并执行** | 用户可随时改判 |
 | **版本** | **镜像/版本等价性复核** —— `git diff <构建基线> origin/main -- backend/ frontend/ docker/` ⇒ 文档提交不改镜像字节 ⇒ 无需重建镜像 | ⚠️ 只比这三个路径；`Harness/`、`docs/` 被 `.dockerignore` 排除 ⇒ 整树 diff 是假警 |
 
+> **★ 交接澄清（peer 回执核对后追加）**：采购线 peer 在回执里把「仓内有过『关闭 logger.warning 降噪』的既有决策」列为第 3 项（`anchor_rescue_*` 日志级别）的前置检查。
+> **该前提经复核不成立**：`Harness/wiki/chat-service-assessment.md:1226` 的 §15 残差**第 8 条**原文是
+> 「**`logger.warning(…, exc)` 截断评估**（2026-09-28 评估，**关闭**）… 三类形态全部合法 … **截断隐患不存在**」
+> ⇒ **关闭的是「消息截断」这个待评估项，不是「关掉 logger.warning」**；仓内**无**任何「warning 降级/降噪」决策，
+> 相反口径占主流：**降级点必须 `logger.warning` 留痕，不静默吞** ⇒ 第 3 项**无冲突，可直接做**。
+> ⚠️ 实现口径（供接手方，省一轮 recon）：两行在 `chat_recall.py` **:1025-1027** / **:1039-1041**（核对源 = 1120 构建基线 `d1c20de9`），均为 `logger.info`；
+> **info 是刻意选的**（docstring `:1018-1020`：「scene= 不是 reason=，不污染回退率聚合」）⇒ 升 warning **不破坏**该聚合（聚合按 `reason=` 取键），
+> 但须确认 `reason=` 那行**仍是 warning 级**、直方图口径不变；并补一条断言该两行级别的单测（否则「改了但没人看得见」）。
+> ⚠️ **C 方案覆盖面提醒**：`ontology_class` 侧**无 `is_active`/`datasource_id` 列** ⇒ C 只覆盖**数据源入口**，
+> 不覆盖「类→源」语义（后者是采购域 M1 的挂账，**不要在 C 里顺手扩**）。
+
 **明确不在交接范围（仍在用户手上）**：
 
 - **B 的生产写**：`UPDATE data_source SET is_active=false WHERE id=2` —— 探针已证零影响（§4.2.4），但**须用户明示批准后由用户在生产执行**，任何会话不代执行；

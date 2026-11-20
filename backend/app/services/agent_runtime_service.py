@@ -114,6 +114,7 @@ class AgentRuntimeService:
         llm_factory: LlmFactory | None = None,
         llm_config: Any | None = None,
         actor: str = "runtime",
+        datasource: Any | None = None,
     ) -> AgentRunRead:
         """执行一次 Agent 运行（见模块 docstring 完整链路）。"""
         entity = await self._agents.getAgent(session, agent_code)  # NotFoundError(404)
@@ -154,7 +155,8 @@ class AgentRuntimeService:
             )
 
         ctx = AgentToolContext(
-            llm_factory=llm_factory, llm_config=llm_config, actor=actor
+            llm_factory=llm_factory, llm_config=llm_config, actor=actor,
+            datasource=datasource,
         )
         result = await tool.handler(session, args, ctx)
         return AgentRunRead(

@@ -10,13 +10,19 @@ input_schema / handler_ref）在 DB ``agent_tool_config``（admin 维护）。
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.exceptions import ConflictError
+from app.domain.models import DataSource
 from app.infrastructure import neo4j_client
+from app.infrastructure.business_db_pool import get_adapter
 from app.services.agent_tool_types import AgentToolContext, ToolResult
 from app.services.entity_mapping_service import EntityMappingService
+from app.services.research_sql_runner import assertReadonlySql
 
 _MAX_LIMIT = 50
 
@@ -108,3 +114,161 @@ async def supplierSearchHandler(
 async def findSuppliersOfMaterial(materialKey: str, limit: int = 20) -> list[dict]:
     """neo4j_client 同名 helper 的薄转发（测试 monkeypatch 点 + 调用侧统一入口）。"""
     return await neo4j_client.findSuppliersOfMaterialAsync(materialKey, limit)
+
+
+# ---------------------------------------------------------------------------
+# M3-2：业务库只读查询工具（purchase_history_query）
+# ---------------------------------------------------------------------------
+
+_HISTORY_TABLE = "DWD_PURCHASE_ORDER_LINE"
+_MONTHS_BACK_MIN, _MONTHS_BACK_MAX = 1, 36
+
+
+def buildPurchaseHistorySql(
+    *,
+    supplierKey: str,
+    materialKey: str | None,
+    monthsBack: int,
+    limit: int,
+    today: date,
+) -> str:
+    """采购历史明细 SQL 模板（确定性，非 LLM 生成；单语句只读 + 行数上限）。
+
+    列名来自本体映射（class 20 `DWD_PURCHASE_ORDER_LINE`：SUPPLIER_CODE /
+    MATERIAL_CODE / PO_NO / ORDER_QTY / UNIT_PRICE / CREATION_DATE）。
+    时间窗 = `CREATION_DATE >= today - monthsBack 月`（DATE 字面量，Oracle/PG 通吃）；
+    行数上限 `FETCH FIRST`（Oracle 12c+ / PG 通用）。
+    """
+    monthsBack = max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX))
+    limit = max(1, min(limit, _MAX_LIMIT))
+    since = _minusMonths(today, monthsBack)
+    conds = [f"SUPPLIER_CODE = '{_esc(supplierKey)}'"]
+    if materialKey:
+        conds.append(f"MATERIAL_CODE = '{_esc(materialKey)}'")
+    conds.append(f"CREATION_DATE >= DATE '{since.isoformat()}'")
+    where = " AND ".join(conds)
+    return (
+        f"SELECT SUPPLIER_CODE, PO_NO, MATERIAL_CODE, ORDER_QTY, UNIT_PRICE, "
+        f"CREATION_DATE FROM {_HISTORY_TABLE} WHERE {where} "
+        f"ORDER BY CREATION_DATE DESC FETCH FIRST {limit} ROWS ONLY"
+    )
+
+
+def _esc(value: str) -> str:
+    """字面量转义（单引号翻倍；模板参数只接受标识符级输入）。"""
+    return value.replace("'", "''")
+
+
+def _minusMonths(base: date, months: int) -> date:
+    """date - N 月（无 dateutil 依赖；月末夹齐：11-30 减 3 月 = 08-31）。"""
+    import calendar
+
+    year = base.year
+    month = base.month - months
+    while month <= 0:
+        month += 12
+        year -= 1
+    day = min(base.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+async def _resolveBusinessDatasource(
+    session: AsyncSession, ctx: AgentToolContext
+) -> DataSource:
+    """业务数据源解析：ctx 优先（编排/调用方绑定）⇒ 回退默认活跃业务源。
+
+    **C 方案复用**：`ensureDatasourceActive`（停用源 ⇒ 409，fail-closed）。
+    """
+    ds = getattr(ctx, "datasource", None)
+    if ds is None:
+        ds = (
+            await session.execute(
+                select(DataSource)
+                .where(DataSource.is_default.is_(True))
+                .where(DataSource.is_active.is_(True))
+                .limit(1)
+            )
+        ).scalars().first()
+    if ds is None:
+        raise ConflictError("无可用业务数据源（默认活跃源缺失）")
+    _ensureActive(ds)
+    return ds
+
+
+def _ensureActive(ds: DataSource) -> None:
+    """停用源 fail-closed（C 方案同语义；#164 合并后切共享 ensureDatasourceActive）。
+
+    handler 侧在 resolve 之后再显式调一次（纵深）：monkeypatch/旁路注入的 ds
+    也要过这道闸。
+    """
+    if ds.is_active is False:
+        raise ConflictError(f"数据源 {ds.id} 已停用，不可用于业务查询")
+
+
+def _camelHistoryRow(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "supplierCode": row.get("SUPPLIER_CODE"),
+        "poNo": row.get("PO_NO"),
+        "materialCode": row.get("MATERIAL_CODE"),
+        "orderQty": row.get("ORDER_QTY"),
+        "unitPrice": row.get("UNIT_PRICE"),
+        "creationDate": str(row.get("CREATION_DATE")) if row.get("CREATION_DATE") else None,
+    }
+
+
+async def purchaseHistoryHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """采购历史查询（业务库只读）：supplierKey 必填；汇总（COUNT/SUM/MIN/MAX/AVG
+    价格区间）+ 明细两段确定性 SQL——经 SQL Guard + 业务 adapter，零 LLM。"""
+    supplierKey = str(args.get("supplierKey") or "").strip()
+    if not supplierKey:
+        return ToolResult(
+            data={"rows": [], "summary": {}},
+            answer="请提供 supplierKey（供应商编码）。",
+        )
+    materialKey = str(args.get("materialKey") or "").strip() or None
+    monthsBack = int(args.get("monthsBack") or 12)
+    limit = int(args.get("limit") or 20)
+    today = date.today()
+
+    ds = await _resolveBusinessDatasource(session, ctx)
+    _ensureActive(ds)  # 纵深：旁路注入的停用源也拦（测试 stub 路径覆盖）
+    adapter = get_adapter(ds.id, ds)
+    detailSql = buildPurchaseHistorySql(
+        supplierKey=supplierKey, materialKey=materialKey,
+        monthsBack=monthsBack, limit=limit, today=today,
+    )
+    since = _minusMonths(today, monthsBack)
+    conds = [f"SUPPLIER_CODE = '{_esc(supplierKey)}'"]
+    if materialKey:
+        conds.append(f"MATERIAL_CODE = '{_esc(materialKey)}'")
+    conds.append(f"CREATION_DATE >= DATE '{since.isoformat()}'")
+    summarySql = (
+        f"SELECT COUNT(*) AS ORDER_COUNT, SUM(ORDER_QTY) AS TOTAL_QTY, "
+        f"MIN(UNIT_PRICE) AS MIN_PRICE, MAX(UNIT_PRICE) AS MAX_PRICE, "
+        f"AVG(UNIT_PRICE) AS AVG_PRICE FROM {_HISTORY_TABLE} "
+        f"WHERE {' AND '.join(conds)}"
+    )
+    for sql in (summarySql, detailSql):
+        assertReadonlySql(sql)
+    summaryRows = await adapter.execute_read_only(summarySql)
+    detailRows = await adapter.execute_read_only(detailSql)
+    summary = summaryRows[0] if summaryRows else {}
+    rows = [_camelHistoryRow(r) for r in detailRows]
+    camelSummary = {
+        "orderCount": summary.get("ORDER_COUNT"),
+        "totalQty": summary.get("TOTAL_QTY"),
+        "minPrice": summary.get("MIN_PRICE"),
+        "maxPrice": summary.get("MAX_PRICE"),
+        "avgPrice": summary.get("AVG_PRICE"),
+    }
+    return ToolResult(
+        data={"via": "business_db", "datasourceId": ds.id, "summary": camelSummary, "rows": rows},
+        answer=(
+            f"供应商 {supplierKey} 近 {monthsBack} 个月："
+            f"{camelSummary['orderCount']} 张订单行、总量 {camelSummary['totalQty']}、"
+            f"价格区间 {camelSummary['minPrice']}–{camelSummary['maxPrice']}；"
+            f"明细返回 {len(rows)} 行。"
+        ),
+    )

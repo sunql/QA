@@ -35,6 +35,9 @@ class AgentToolContext:
     # 只能降级（见 SupplierRiskService._generateRiskPoints）。
     llm_config: Any | None = None
     actor: str = "runtime"
+    # M3-2：业务库工具（purchase_history_query 等）的业务数据源绑定。
+    # None ⇒ 工具回退默认活跃业务源（DataSourceService 语义，停用源 fail-closed）。
+    datasource: Any | None = None
 
 
 @dataclass(frozen=True)

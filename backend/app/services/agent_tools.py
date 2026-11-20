@@ -38,6 +38,7 @@ from app.services.agent_tools_procurement import (
     materialSearchHandler as _materialSearchHandler,
 )
 from app.services.agent_tools_procurement import (
+    purchaseHistoryHandler as _purchaseHistoryHandler,
     supplierSearchHandler as _supplierSearchHandler,
 )
 from app.services.agent_tools_wiki import (
@@ -229,6 +230,7 @@ BUILTIN_HANDLERS: dict[str, AgentHandler] = {
     # M3-1 采购检索工具：实现集中在 agent_tools_procurement（同 wiki 分工）。
     "material_search": _materialSearchHandler,
     "supplier_search": _supplierSearchHandler,
+    "purchase_history_query": _purchaseHistoryHandler,
     # feat-wiki-knowledge M8：知识工具的实现集中在 agent_tools_wiki，
     # 这里只做登记（handler 引擎在代码、元数据在 DB 的既有分工）。
     **WIKI_HANDLERS,
@@ -246,6 +248,10 @@ ARG_EXTRACTORS: dict[str, ArgExtractor] = {
     # 结构化 args（编排路）不走 extractor（handler 直接读 args dict）。
     "material_search": lambda raw: ({"q": raw.strip()} if isinstance(raw, str) and raw.strip() else None),
     "supplier_search": lambda raw: ({"q": raw.strip()} if isinstance(raw, str) and raw.strip() else None),
+    # 采购历史：chat 前奏只抽 supplier key（materialKey/monthsBack 走结构化 args）。
+    "purchase_history_query": lambda raw: (
+        {"supplierKey": k} if (k := _supplierKeyArgs(raw, extractSupplierAnyKey)) else None
+    ),
     **WIKI_ARG_EXTRACTORS,
 }
 

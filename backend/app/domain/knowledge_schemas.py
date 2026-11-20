@@ -223,7 +223,7 @@ class KnowledgeEvidenceSourceRef(CamelModel):
     system: str | None = None
     object: str | None = None
     record_key: str | None = None
-    document_id: int | None = None
+    document_id: str | None = None
     query_id: str | None = None
 
 

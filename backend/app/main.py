@@ -705,7 +705,7 @@ def createApp() -> FastAPI:
     # 开关关闭时整组不注册（404）⇒ 未部署时对外完全不存在。
     # 读侧只要求登录（域级可见性由服务层的权限口径判定 ⇒ 不可见 = 查不到，不是 403）。
     if settings.enableKnowledgeFacade:
-        from app.api.v1 import knowledge_facade, procurement_knowledge, procurement_knowledge_entities, procurement_knowledge_graph
+        from app.api.v1 import knowledge_facade, procurement_agents, procurement_knowledge, procurement_knowledge_documents, procurement_knowledge_entities, procurement_knowledge_graph
 
         app.include_router(
             knowledge_facade.router,
@@ -729,6 +729,18 @@ def createApp() -> FastAPI:
             procurement_knowledge_graph.router,
             prefix="/api/v1/procurement/knowledge",
             tags=["procurement-knowledge"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
+        app.include_router(
+            procurement_knowledge_documents.router,
+            prefix="/api/v1/procurement/knowledge",
+            tags=["procurement-knowledge"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
+        app.include_router(
+            procurement_agents.router,
+            prefix="/api/v1/procurement",
+            tags=["procurement-agents"],
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
         )
     # P5 工作流 / 审批（L 级独立立项）：开关关闭时整组不注册（404）⇒

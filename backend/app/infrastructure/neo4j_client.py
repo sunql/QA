@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -1008,6 +1009,33 @@ def traverseBusinessGraph(
             }
             for r in session.run(cql, key=startKey, pathLimit=_MAX_TRAVERSAL_PATHS)
         ]
+
+
+async def findSuppliersOfMaterialAsync(
+    materialKey: str, limit: int = 20
+) -> list[dict[str, Any]]:
+    """``findSuppliersOfMaterial`` 的异步包装（对齐模块 asyncio.to_thread 模式）。"""
+    return await asyncio.to_thread(findSuppliersOfMaterial, materialKey, limit)
+
+
+def findSuppliersOfMaterial(materialKey: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Material → SUPPLIES → Supplier 反查（M3-1 supplier_search 工具的图路）。
+
+    方向：Supplier-SUPPLIES->Material（BUSINESS_RELATION_TYPES 白名单内）。
+    只读；materialKey 不存在 ⇒ 空列表（调用方自行区分「无此物料」与「无供应商」）。
+    """
+    _assertBusinessLabel("Supplier")
+    _assertBusinessLabel("Material")
+    driver = getDriver()
+    cql = """
+        MATCH (s:BusinessEntity:Supplier)-[:SUPPLIES]->(m:BusinessEntity:Material {key: $key})
+        RETURN s.key AS key, s.code AS code, s.name AS name
+        ORDER BY s.key
+        LIMIT $limit
+    """
+    with driver.session() as session:
+        records = list(session.run(cql, key=materialKey, limit=limit))
+        return [dict(r) for r in records]
 
 
 def getBusinessNode(label: str, key: str) -> dict[str, Any] | None:

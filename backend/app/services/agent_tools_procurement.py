@@ -10,7 +10,7 @@ input_schema / handler_ref）在 DB ``agent_tool_config``（admin 维护）。
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 from sqlalchemy import select
@@ -21,6 +21,7 @@ from app.domain.models import DataSource
 from app.infrastructure import neo4j_client
 from app.services.agent_tool_types import AgentToolContext, ToolResult
 from app.services.entity_mapping_service import EntityMappingService
+from app.services.knowledge.document_search import searchProcurementDocuments
 from app.services.research_sql_runner import assertReadonlySql
 
 _MAX_LIMIT = 50
@@ -207,13 +208,14 @@ def _adapterFor(dsId: int, ds: DataSource):
 
 
 def _ensureActive(ds: DataSource) -> None:
-    """停用源 fail-closed（C 方案同语义；#164 合并后切共享 ensureDatasourceActive）。
+    """停用源 fail-closed——**C 方案已进 main ⇒ 切共享 helper**（纵深二次过闸保留）。
 
     handler 侧在 resolve 之后再显式调一次（纵深）：monkeypatch/旁路注入的 ds
     也要过这道闸。
     """
-    if ds.is_active is False:
-        raise ConflictError(f"数据源 {ds.id} 已停用，不可用于业务查询")
+    from app.services.datasource_service import ensureDatasourceActive
+
+    ensureDatasourceActive(ds)
 
 
 def _camelHistoryRow(row: dict[str, Any]) -> dict[str, Any]:
@@ -225,6 +227,116 @@ def _camelHistoryRow(row: dict[str, Any]) -> dict[str, Any]:
         "unitPrice": row.get("UNIT_PRICE"),
         "creationDate": str(row.get("CREATION_DATE")) if row.get("CREATION_DATE") else None,
     }
+
+
+def buildQuotationSql(
+    *,
+    supplierKey: str | None,
+    materialKey: str | None,
+    segmentYear: int | None,
+    limit: int,
+) -> str:
+    """年度报价明细 SQL 模板（确定性）。
+
+    落点 = `DWD_PURCHASE_QUOTATION_YEARLY_DTL`（源侧实测 167,909 行，
+    ITEM_CODE/SUPPLIER_CODE/SEG_YEAR/UNIT_PRICE_EX_TAX 100% 填充）；
+    `DWD_SUPPLIER_PRICE_LIST` 的 MATERIAL_CODE 全 NULL（source-capability.md:35）
+    ⇒ 不可用——换表依据。
+    """
+    limit = max(1, min(limit, _MAX_LIMIT))
+    conds: list[str] = []
+    if supplierKey:
+        conds.append(f"SUPPLIER_CODE = '{_esc(supplierKey)}'")
+    if materialKey:
+        conds.append(f"ITEM_CODE = '{_esc(materialKey)}'")
+    if segmentYear:
+        conds.append(f"SEG_YEAR = {int(segmentYear)}")
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    return (
+        f"SELECT SUPPLIER_CODE, ITEM_CODE, SEG_YEAR, UNIT_PRICE_EX_TAX, "
+        f"SEG_START_DATE, SEG_END_DATE FROM DWD_PURCHASE_QUOTATION_YEARLY_DTL"
+        f"{where} ORDER BY SEG_YEAR DESC, ITEM_CODE "
+        f"FETCH FIRST {limit} ROWS ONLY"
+    )
+
+
+def _camelQuotationRow(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "supplierCode": row.get("SUPPLIER_CODE"),
+        "itemCode": row.get("ITEM_CODE"),
+        "segmentYear": row.get("SEG_YEAR"),
+        "unitPriceExTax": row.get("UNIT_PRICE_EX_TAX"),
+        "segmentStart": str(row.get("SEG_START_DATE")) if row.get("SEG_START_DATE") else None,
+        "segmentEnd": str(row.get("SEG_END_DATE")) if row.get("SEG_END_DATE") else None,
+    }
+
+
+async def quotationQueryHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """报价查询（业务库只读）：supplierKey / materialKey / segmentYear 任一必填。"""
+    supplierKey = str(args.get("supplierKey") or "").strip() or None
+    materialKey = str(args.get("materialKey") or "").strip() or None
+    segmentYear = args.get("segmentYear")
+    limit = int(args.get("limit") or 20)
+    if not (supplierKey or materialKey or segmentYear):
+        return ToolResult(
+            data={"rows": []},
+            answer="请提供 supplierKey / materialKey / segmentYear 任一。",
+        )
+    ds = await _resolveBusinessDatasource(session, ctx)
+    _ensureActive(ds)
+    adapter = _adapterFor(ds.id, ds)
+    sql = buildQuotationSql(
+        supplierKey=supplierKey, materialKey=materialKey,
+        segmentYear=segmentYear, limit=limit,
+    )
+    assertReadonlySql(sql)
+    rows = [_camelQuotationRow(r) for r in await adapter.execute_read_only(sql)]
+    if not rows:
+        return ToolResult(
+            data={"via": "business_db", "rows": []},
+            answer="未命中报价明细（检查供应商/物料编码或年度）。",
+        )
+    head = "、".join(f"{r['itemCode']}@{r['segmentYear']}={r['unitPriceExTax']}" for r in rows[:3])
+    return ToolResult(
+        data={"via": "business_db", "datasourceId": ds.id, "rows": rows, "total": len(rows)},
+        answer=f"命中 {len(rows)} 条报价段：{head}" + ("…" if len(rows) > 3 else ""),
+    )
+
+
+async def procurementPolicySearchHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """采购制度检索（M2-3 文档检索接工具）。
+
+    **密级闸 fail-closed**：ctx.user 缺失 ⇒ 不检索（文档检索无密级核验 = 越权面）。
+    """
+    question = str(args.get("question") or "").strip()
+    if not question:
+        return ToolResult(data={"evidence": []}, answer="请提供要检索的制度问题。")
+    user = getattr(ctx, "user", None)
+    if user is None:
+        return ToolResult(
+            data={"evidence": []},
+            answer="无法核验文档密级（缺少用户身份）⇒ 不执行制度检索；请经带身份的入口使用。",
+        )
+    limit = int(args.get("limit") or 5)
+    evidence = await searchProcurementDocuments(
+        session, user, query=question, topK=max(1, min(limit, 20))
+    )
+    if not evidence:
+        return ToolResult(
+            data={"evidence": []},
+            answer=f"未命中与「{question}」相关的制度文档。",
+        )
+    return ToolResult(
+        data={
+            "evidence": [e.model_dump(mode="json", by_alias=True) for e in evidence],
+            "total": len(evidence),
+        },
+        answer=f"命中 {len(evidence)} 条制度证据（含密级与生效期溯源）。",
+    )
 
 
 async def purchaseHistoryHandler(

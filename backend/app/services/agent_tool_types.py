@@ -13,8 +13,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +39,9 @@ class AgentToolContext:
     # M3-2：业务库工具（purchase_history_query 等）的业务数据源绑定。
     # None ⇒ 工具回退默认活跃业务源（DataSourceService 语义，停用源 fail-closed）。
     datasource: Any | None = None
+    # M3-4：文档类工具（procurement_policy_search）的密级闸数据源。
+    # None ⇒ 该类工具 fail-closed（不检索——无密级核验 = 越权面）。
+    user: Any | None = None
 
 
 @dataclass(frozen=True)

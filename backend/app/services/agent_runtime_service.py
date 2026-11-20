@@ -29,6 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -115,6 +116,7 @@ class AgentRuntimeService:
         llm_config: Any | None = None,
         actor: str = "runtime",
         datasource: Any | None = None,
+        user: Any | None = None,
     ) -> AgentRunRead:
         """执行一次 Agent 运行（见模块 docstring 完整链路）。"""
         entity = await self._agents.getAgent(session, agent_code)  # NotFoundError(404)
@@ -156,7 +158,7 @@ class AgentRuntimeService:
 
         ctx = AgentToolContext(
             llm_factory=llm_factory, llm_config=llm_config, actor=actor,
-            datasource=datasource,
+            datasource=datasource, user=user,
         )
         result = await tool.handler(session, args, ctx)
         return AgentRunRead(

@@ -235,8 +235,8 @@ async def test_purchase_history_handler_executes_readonly(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_purchase_history_rejects_inactive_datasource(monkeypatch) -> None:
-    """C 方案复用：停用源进入业务查询 ⇒ DataSourceInactiveError（fail-closed）。"""
-    from app.domain.exceptions import ConflictError
+    """C 方案共享 helper：停用源进入业务查询 ⇒ DataSourceInactiveError（fail-closed）。"""
+    from app.domain.exceptions import DataSourceInactiveError
     from app.services import agent_tools_procurement
 
     ds = SimpleNamespace(id=2, name="test-ds", is_active=False)
@@ -244,7 +244,7 @@ async def test_purchase_history_rejects_inactive_datasource(monkeypatch) -> None
         return ds
 
     monkeypatch.setattr(agent_tools_procurement, "_resolveBusinessDatasource", _fakeResolve)
-    with pytest.raises(ConflictError):
+    with pytest.raises(DataSourceInactiveError):
         await agent_tools_procurement.purchaseHistoryHandler(
             SimpleNamespace(),
             {"supplierKey": "SUP001"},

@@ -601,6 +601,26 @@ UPDATE ontology_class SET valid_to = NULL WHERE id = 270;   -- ★ 未执行
 | 10 | §7 墓碑 270 原地复活 | **生产 DML** | 待 4/5/6 全绿 |
 | 11 | **研究 BO 臂（规划层）加数据源维度**（`api/v1/research.py:254` `_searchBusinessObjects` 是全局检索）⇒ 需「BO→源绑定」（本体层无 `datasource_id` 列）；**执行层已过滤，不必动**（§5.4） | 决策 + **代码** | 研究入口问法准度（非本批） |
 
+### 7.3 ★ 交接（2026-11-20，本只读复核会话收尾）
+
+本会话（**只读复核**）到此结束。下列事项**移交采购线会话 `qa-system-9e`** 作为其待办：
+
+| 类别 | 事项 | 备注 |
+|---|---|---|
+| **代码** | **C 方案：代码级 fail-closed** —— `DataSourceService.get()` **不校验 `is_active`** ⇒ 显式传 `datasourceId=2` 的 API 仍可打 ds2 ⇒ B 的已知边界 | 采购线已声明「单列一批，不与 B 混做」 |
+| **代码** | **研究 BO 臂（规划层）加数据源维度** —— `api/v1/research.py:254` `_searchBusinessObjects` 是全局检索（§5.4） | 需「BO→源绑定」（本体层无 `datasource_id` 列） |
+| **代码** | `anchor_rescue_*` 日志级别 **info → warning** —— 现为 info 级 ⇒ 生产 `LOG_LEVEL=WARNING` 时永远看不见（观测盲区） | §5.6 |
+| **版本** | **PR #162 的 CI 结论判定**（doc-only ⇒ 按「净新增失败 0」判据，不按 run 结论） | PR OPEN / MERGEABLE / BLOCKED |
+| **版本** | **PR #162 合并执行** | 用户可随时改判 |
+| **版本** | **镜像/版本等价性复核** —— `git diff <构建基线> origin/main -- backend/ frontend/ docker/` ⇒ 文档提交不改镜像字节 ⇒ 无需重建镜像 | ⚠️ 只比这三个路径；`Harness/`、`docs/` 被 `.dockerignore` 排除 ⇒ 整树 diff 是假警 |
+
+**明确不在交接范围（仍在用户手上）**：
+
+- **B 的生产写**：`UPDATE data_source SET is_active=false WHERE id=2` —— 探针已证零影响（§4.2.4），但**须用户明示批准后由用户在生产执行**，任何会话不代执行；
+- **§7 墓碑 270** —— ⛔ **不得执行**（§六的三条前置未满足）；
+- **PR #162 是否合并的最终决定权**在用户；
+- 其余 **5 条只读探针**（§7.2 第 1、2、4、5、6 项）。
+
 > ⚠️ **本次全程只读复核，未做任何代码改动、未做任何生产数据写入。**
 > 第 8、11 项是代码改动，第 3 项与第 10 项是生产写 ⇒ 都需要单独评审；第 1、2、4、5、6、7、9 项均可只读完成。
 > **原「Oracle 侧 `all_tables` 定死类处置分支 A/B/C」一项已作废** —— 三个类是 0 行结构性占位类，

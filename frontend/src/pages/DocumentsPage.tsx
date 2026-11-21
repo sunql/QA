@@ -6,7 +6,7 @@
  * 3. 语义检索 — 输入问题，从已上传文档中检索相关内容片段
  */
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   Table,
   Button,
@@ -42,6 +42,8 @@ import {
   fetchDocumentSource,
   fetchDocumentPreview,
   vectorizeDocument,
+  listRelationTargets,
+  type RelationTarget,
   deleteDocument,
   uploadDocument,
   listRelations,
@@ -67,6 +69,7 @@ import FilterBar from "../components/ontology/FilterBar";
 import type { FilterField } from "../components/ontology/FilterBar";
 import { contains, matchSelect } from "../utils/ontologyFilter";
 import { useTablePagination } from "../utils/useTablePagination";
+import { listBusinessObjects } from "../api/businessObject";
 import {
   DOCUMENT_UPLOAD_ACCEPT,
   DOCUMENT_UPLOAD_HINT,
@@ -92,6 +95,20 @@ const STATUS_COLOR: Record<string, string> = {
 // ---------------------------------------------------------------------------
 // Document form
 // ---------------------------------------------------------------------------
+
+/** 关联对象类型 → 输入提示（告诉用户「该填什么」而不是让他猜）。 */
+function targetHintFor(entityType: string): string {
+  switch (entityType) {
+    case "ONTOLOGY_CLASS":
+      return "选择本体类（如 DIM_SUPPLIER）；制度/规范类文档通常关联到类";
+    case "ONTOLOGY_METRIC":
+      return "选择指标；指标口径类文档通常关联到指标";
+    case "ONTOLOGY_PROPERTY":
+      return "选择属性（类名.属性名）；字段说明类文档通常关联到属性";
+    default:
+      return "选择具体业务对象实例（编码/名称可搜）";
+  }
+}
 
 interface DocFormValues {
   documentId: string;
@@ -407,6 +424,13 @@ export default function DocumentsPage() {
   const [docs, setDocs] = useState<DocumentRead[]>([]);
   const [docLoading, setDocLoading] = useState(false);
   const [vectorizingId, setVectorizingId] = useState<number | null>(null);
+  // —— 新建关联：可搜索下拉所需状态 ——
+  const [businessObjects, setBusinessObjects] = useState<
+    { code: string; name: string }[]
+  >([]);
+  const [relEntityType, setRelEntityType] = useState<string | undefined>();
+  const [targets, setTargets] = useState<RelationTarget[]>([]);
+  const [targetLoading, setTargetLoading] = useState(false);
   const [docModal, setDocModal] = useState(false);
   const [editingDoc, setEditingDoc] = useState<DocumentRead | null>(null);
   const [docForm] = Form.useForm<DocFormValues>();
@@ -439,6 +463,18 @@ export default function DocumentsPage() {
   useEffect(() => {
     void loadDocs();
   }, [loadDocs]);
+
+  // 业务对象码（关联对象类型下拉的「业务对象」分组）
+  useEffect(() => {
+    void (async () => {
+      try {
+        const rows = await listBusinessObjects();
+        setBusinessObjects(rows.map((row) => ({ code: row.code, name: row.name })));
+      } catch {
+        // 拦截器已提示；类型下拉退化为只有知识对象分组
+      }
+    })();
+  }, []);
 
   // Load relations
   const loadRels = useCallback(async () => {
@@ -606,8 +642,41 @@ export default function DocumentsPage() {
   // Relation handlers
   const openCreateRel = () => {
     void relForm.resetFields();
+    setRelEntityType(undefined);
+    setTargets([]);
     setRelModal(true);
   };
+
+  /** 拉候选：类型必传（避免依赖还没更新的 state），关键词可空 ⇒ 可浏览。 */
+  const loadTargets = useCallback((entityType: string, keyword: string) => {
+    setTargetLoading(true);
+    void listRelationTargets({ entityType, q: keyword })
+      .then(setTargets)
+      .catch(() => setTargets([]))
+      .finally(() => setTargetLoading(false));
+  }, []);
+
+  /** 搜索框输入：当前类型 + 关键词（**不做防抖定时器**——antd Select 每次输入都会
+   *  触发；这里用 requestId 丢弃过期响应，避免慢请求覆盖新结果）。 */
+  const targetsRequestId = useRef(0);
+  const searchTargets = useCallback(
+    (keyword: string) => {
+      if (!relEntityType) return;
+      const requestId = ++targetsRequestId.current;
+      setTargetLoading(true);
+      void listRelationTargets({ entityType: relEntityType, q: keyword })
+        .then((rows) => {
+          if (requestId === targetsRequestId.current) setTargets(rows);
+        })
+        .catch(() => {
+          if (requestId === targetsRequestId.current) setTargets([]);
+        })
+        .finally(() => {
+          if (requestId === targetsRequestId.current) setTargetLoading(false);
+        });
+    },
+    [relEntityType],
+  );
 
   const handleCreateRel = async () => {
     const values = await relForm.validateFields();
@@ -867,40 +936,96 @@ export default function DocumentsPage() {
         onCancel={() => setRelModal(false)}
         okText={t("common.confirm")}
         cancelText={t("common.cancel")}
-        width={480}
+        width={560}
         destroyOnHidden
       >
-        <Form form={relForm} layout="vertical">
+        <Form
+          form={relForm}
+          layout="vertical"
+          onValuesChange={(changed: Record<string, unknown>) => {
+            if ("entityType" in changed) {
+              const nextType = changed.entityType as string | undefined;
+              setRelEntityType(nextType);
+              // 换类型 ⇒ 旧的目标键一定无效（不同命名空间）
+              relForm.setFieldValue("entityKey", undefined);
+              setTargets([]);
+              if (nextType) loadTargets(nextType, "");
+            }
+          }}
+        >
+          {/* 文档：可搜下拉（按编号或名称），不再让用户手打编号 */}
           <Form.Item
             name="documentId"
-            label="文档编号"
-            rules={[{ required: true, message: "必填" }]}
-          >
-            <Input placeholder="如 DOC-2026-001" />
-          </Form.Item>
-          <Form.Item
-            name="entityType"
-            label="实体类型"
-            rules={[{ required: true, message: "必填" }]}
+            label="文档"
+            rules={[{ required: true, message: "请选择文档" }]}
+            extra="可输入文档编号或名称过滤"
           >
             <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="搜索并选择文档"
+              options={docs.map((doc) => ({
+                value: doc.documentId,
+                label: `${doc.documentId} · ${doc.documentName}`,
+              }))}
+            />
+          </Form.Item>
+
+          {/* 关联对象类型：业务对象码（动态）+ 三类知识对象 */}
+          <Form.Item
+            name="entityType"
+            label="关联对象类型"
+            rules={[{ required: true, message: "请选择类型" }]}
+            extra="一份制度/合同通常关联「本体类 / 指标 / 属性」，而不是某个具体业务单据"
+          >
+            <Select
+              placeholder="选择关联对象类型"
               options={[
-                { value: "SUPPLIER", label: "供应商" },
-                { value: "MATERIAL", label: "物料" },
-                { value: "PO", label: "采购订单" },
-                { value: "GR", label: "收货单" },
-                { value: "IQC", label: "来料检验" },
-                { value: "NCR", label: "不合格处理" },
+                {
+                  label: "本体类（知识）",
+                  options: [
+                    { value: "ONTOLOGY_CLASS", label: "本体类" },
+                    { value: "ONTOLOGY_METRIC", label: "指标" },
+                    { value: "ONTOLOGY_PROPERTY", label: "属性" },
+                  ],
+                },
+                {
+                  label: "业务对象",
+                  options: businessObjects.map((item) => ({
+                    value: item.code,
+                    label: item.name ? `${item.name}（${item.code}）` : item.code,
+                  })),
+                },
               ]}
             />
           </Form.Item>
+
+          {/* 目标键：按类型给可搜索候选（不再让用户猜 enterprise_key） */}
           <Form.Item
             name="entityKey"
-            label="实体键（enterprise_key）"
-            rules={[{ required: true, message: "必填" }]}
+            label="关联对象"
+            rules={[{ required: true, message: "请选择关联对象" }]}
+            extra={
+              relEntityType
+                ? targetHintFor(relEntityType)
+                : "先选类型，再从这里搜索选择"
+            }
           >
-            <Input type="number" placeholder="如 100001" />
+            <Select
+              showSearch
+              filterOption={false}
+              onSearch={(value) => void searchTargets(value)}
+              placeholder={relEntityType ? "输入关键词搜索，或留空浏览前 20 项" : "先选择关联对象类型"}
+              disabled={!relEntityType}
+              loading={targetLoading}
+              options={targets.map((target) => ({
+                value: target.key,
+                label: `${target.label}${target.hint && target.hint !== target.label ? `（${target.hint}）` : ""}`,
+              }))}
+              notFoundContent={targetLoading ? "搜索中…" : "没有匹配项"}
+            />
           </Form.Item>
+
           <Form.Item name="relationType" label="关联类型">
             <Select
               options={DOC_RELATION_TYPE_OPTIONS}

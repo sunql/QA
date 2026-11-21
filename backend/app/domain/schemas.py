@@ -79,6 +79,23 @@ def _validateBusinessObjectCode(code: str) -> str:
 
 
 BusinessObjectCodeType = Annotated[str, BeforeValidator(_validateBusinessObjectCode)]
+
+
+def _validateRelationEntityType(code: str) -> str:
+    """文档关联的实体类型：业务对象码（注册表校验）**或**三类知识对象。
+
+    知识对象（本体类/指标/属性）不在 ``business_object`` 注册表里——它们是
+    治理元数据而非业务单据。一份制度/合同往往关联的是这类对象，而不是某个
+    具体实体键（2026-11-22 用户反馈）。
+    """
+    from app.services.document_relation_targets import KNOWLEDGE_ENTITY_TYPES
+
+    if code in KNOWLEDGE_ENTITY_TYPES:
+        return code
+    return _validateBusinessObjectCode(code)
+
+
+RelationEntityType = Annotated[str, BeforeValidator(_validateRelationEntityType)]
 """Pydantic annotated type for dynamic BusinessObjectCode validation.
 
 Replaces the hardcoded Literal. Validation is runtime against the business_object
@@ -3157,7 +3174,7 @@ class DocumentRead(CamelModel):
 class DocEntityRelationCreate(CamelModel):
     """创建文档-实体关联的请求体（Phase 5.1 + entity_key VARCHAR）。"""
     document_id: str = Field(..., min_length=1, max_length=50)
-    entity_type: BusinessObjectCodeType = Field(...)
+    entity_type: RelationEntityType = Field(...)
     entity_key: str = Field(..., min_length=1, max_length=100)
     relation_type: DocEntityRelationType = Field(default=DocEntityRelationType.CONTRACT)
 
@@ -3166,7 +3183,7 @@ class DocEntityRelationRead(CamelModel):
     """文档-实体关联响应（Phase 5.1 + entity_key VARCHAR）。"""
     id: int
     document_id: str
-    entity_type: BusinessObjectCodeType
+    entity_type: RelationEntityType
     entity_key: str
     relation_type: DocEntityRelationType
 

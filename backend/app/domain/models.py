@@ -709,11 +709,10 @@ class FeatureDefinition(Base, TimestampMixin):
     feature_name: Mapped[str] = mapped_column(String(100), nullable=False)
     feature_alias: Mapped[str | None] = mapped_column(String(200), nullable=True)
     feature_definition: Mapped[str | None] = mapped_column(Text, nullable=True)
-    entity_type: Mapped[str] = mapped_column(
-        String(20),
-        ForeignKey("business_object.code", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # 0164：**去掉外键** —— 关联目标不只有业务对象码，还包括知识对象
+    # （ONTOLOGY_CLASS / ONTOLOGY_METRIC / ONTOLOGY_PROPERTY）。
+    # 合法性由应用层校验（schemas._validateRelationEntityType）。
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False)
     calculation_logic: Mapped[str] = mapped_column(Text, nullable=False)
     window_size: Mapped[str | None] = mapped_column(String(20), nullable=True)
     refresh_frequency: Mapped[FeatureRefreshFrequency] = mapped_column(
@@ -1572,11 +1571,10 @@ class EntityMapping(Base, TimestampMixin):
     __tablename__ = "entity_mapping"
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
-    entity_type: Mapped[str] = mapped_column(
-        String(20),
-        ForeignKey("business_object.code", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # 0164：**去掉外键** —— 关联目标不只有业务对象码，还包括知识对象
+    # （ONTOLOGY_CLASS / ONTOLOGY_METRIC / ONTOLOGY_PROPERTY）。
+    # 合法性由应用层校验（schemas._validateRelationEntityType）。
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False)
     enterprise_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
     enterprise_code: Mapped[str] = mapped_column(String(100), nullable=False)
     source_system: Mapped[SourceSystem] = mapped_column(String(20), nullable=False)
@@ -1861,11 +1859,10 @@ class DocumentEntityRelation(Base):
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     document_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    entity_type: Mapped[str] = mapped_column(
-        String(20),
-        ForeignKey("business_object.code", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # 0164：**去掉外键** —— 关联目标不只有业务对象码，还包括知识对象
+    # （ONTOLOGY_CLASS / ONTOLOGY_METRIC / ONTOLOGY_PROPERTY）。
+    # 合法性由应用层校验（schemas._validateRelationEntityType）。
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False)
     entity_key: Mapped[str] = mapped_column(String(100), nullable=False)
     relation_type: Mapped[DocEntityRelationType] = mapped_column(
         String(30), nullable=False
@@ -1875,11 +1872,16 @@ class DocumentEntityRelation(Base):
     )
 
     __table_args__ = (
-        # 注：DB 上**没有** uq_doc_entity_rel。0030 建表时创建过，但 0042
-        # `DROP COLUMN entity_key` 把它级联删除、重建列后未重建 ⇒ 全新库与
-        # 5433 实测都不存在。ORM 曾一直声明它，导致 alembic 提议 ADD。
-        # 这里按 DB 实际情况移除声明；若要真正恢复唯一性，必须先评估重复行并
-        # 写专用迁移（见 Harness/changes/fix-alembic-residual-36/summary.md）。
+        # 0164：补回唯一性（0030 建过、0042 重建列时丢掉了）。没有它，
+        # service 的「SELECT 查重」在并发下挡不住重复关联。
+        Index(
+            "uq_doc_rel_document_entity",
+            "document_id",
+            "entity_type",
+            "entity_key",
+            "relation_type",
+            unique=True,
+        ),
         Index("ix_doc_rel_entity", "entity_type", "entity_key"),
         Index("ix_doc_rel_document", "document_id"),
         CheckConstraint(

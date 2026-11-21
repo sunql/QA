@@ -184,6 +184,25 @@ export async function listRelations(filters: {
   return res.data;
 }
 
+/** 关联目标候选（业务对象 / 本体类 / 指标 / 属性）——新建关联的可搜索下拉。 */
+export interface RelationTarget {
+  key: string;
+  label: string;
+  hint: string;
+}
+
+export async function listRelationTargets(params: {
+  entityType: string;
+  q?: string;
+  limit?: number;
+}): Promise<RelationTarget[]> {
+  const res = await httpClient.get<RelationTarget[]>(
+    `${BASE}/relations/targets`,
+    { params: { entityType: params.entityType, q: params.q ?? "", limit: params.limit ?? 20 } },
+  );
+  return res.data;
+}
+
 export async function createRelation(
   payload: DocEntityRelationCreate,
 ): Promise<DocEntityRelationRead> {

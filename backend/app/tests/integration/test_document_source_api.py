@@ -543,3 +543,121 @@ async def test_officePreviewRespectsDisabledFlag(
 
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
+
+
+# ---------------------------------------------------------------------------
+# 文档关联目标（新建关联的可搜索下拉，2026-11-22 用户反馈）
+# ---------------------------------------------------------------------------
+
+
+async def test_relationTargets_ontologyClass(client: AsyncClient, dbSession: Any) -> None:
+    """本体类候选：按类名/别名搜索，key 存**类名**（可读、可引用）。"""
+    from app.domain.models import OntologyClass
+
+    dbSession.add(
+        OntologyClass(class_name="DIM_SUPPLIER", class_alias="供应商主数据")
+    )
+    await dbSession.commit()
+
+    resp = await client.get(
+        "/api/v1/documents/relations/targets",
+        params={"entityType": "ONTOLOGY_CLASS", "q": "供应商"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    assert rows and rows[0]["key"] == "DIM_SUPPLIER"
+    assert "供应商" in rows[0]["label"]
+
+
+async def test_relationTargets_metric(client: AsyncClient, dbSession: Any) -> None:
+    from app.domain.models import OntologyMetric
+
+    dbSession.add(OntologyMetric(metric_name="到货及时率", formula="1"))
+    await dbSession.commit()
+
+    resp = await client.get(
+        "/api/v1/documents/relations/targets",
+        params={"entityType": "ONTOLOGY_METRIC", "q": "及时"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    assert rows[0]["key"] == "到货及时率"
+
+
+async def test_relationTargets_propertyUsesClassDotName(
+    client: AsyncClient, dbSession: Any
+) -> None:
+    """属性 key = 类名.属性名（脱离类名的属性名无法唯一定位）。"""
+    from app.domain.models import OntologyClass, OntologyProperty
+
+    klass = OntologyClass(class_name="DIM_SUPPLIER", class_alias="供应商")
+    dbSession.add(klass)
+    await dbSession.commit()
+    await dbSession.refresh(klass)
+    dbSession.add(
+        OntologyProperty(
+            class_id=klass.id,
+            property_name="SUPPLIER_NAME",
+            property_alias="供应商名称",
+            data_type="string",  # NOT NULL
+        )
+    )
+    await dbSession.commit()
+
+    resp = await client.get(
+        "/api/v1/documents/relations/targets",
+        params={"entityType": "ONTOLOGY_PROPERTY", "q": "SUPPLIER_NAME"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    assert rows[0]["key"] == "DIM_SUPPLIER.SUPPLIER_NAME"
+
+
+async def test_relationTargets_emptyQueryBrowses(client: AsyncClient, dbSession: Any) -> None:
+    """空关键词也要能取到候选（让用户先浏览，不必先想关键词）。"""
+    from app.domain.models import OntologyClass
+
+    dbSession.add(OntologyClass(class_name="DIM_SUPPLIER"))
+    await dbSession.commit()
+
+    resp = await client.get(
+        "/api/v1/documents/relations/targets",
+        params={"entityType": "ONTOLOGY_CLASS"},
+    )
+
+    assert resp.status_code == 200
+    assert len(resp.json()) >= 1
+
+
+async def test_relationTargets_rejectsUnknownType(client: AsyncClient) -> None:
+    resp = await client.get(
+        "/api/v1/documents/relations/targets",
+        params={"entityType": "NOT_A_CODE"},
+    )
+
+    assert resp.status_code == 422, resp.text
+
+
+async def test_createRelation_acceptsKnowledgeEntityType(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    """关联到本体类（不是业务对象码）必须能建——这是用户的核心诉求。"""
+    created = await _createDocument(client, dbSession, fakeMinio)
+
+    resp = await client.post(
+        "/api/v1/documents/relations",
+        json={
+            "documentId": created["documentId"],
+            "entityType": "ONTOLOGY_CLASS",
+            "entityKey": "DIM_SUPPLIER",
+            "relationType": "SPEC",
+        },
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["entityType"] == "ONTOLOGY_CLASS"
+    assert body["entityKey"] == "DIM_SUPPLIER"

@@ -404,6 +404,37 @@ async def getRelation(
     return DocEntityRelationRead.model_validate(rel)
 
 
+@router.get(
+    "/relations/targets",
+    summary="文档关联的目标候选（新建关联时的可搜索下拉）",
+)
+async def listRelationTargets(
+    entityType: str = Query(..., max_length=32, description="业务对象码或 ONTOLOGY_*"),
+    q: str = Query(default="", max_length=100, description="关键词（可空 ⇒ 返回前 N 个）"),
+    limit: int = Query(default=20, ge=1, le=50),
+    _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> list[dict]:
+    """按关联类型返回候选：业务对象（编码/名称）、本体类、指标、属性。
+
+    ``q`` 为空时返回该类型前 N 个 —— 用户可以先浏览再选，不必先想关键词。
+    """
+    from app.services.document_relation_targets import (
+        KNOWLEDGE_ENTITY_TYPES,
+        searchRelationTargets,
+    )
+    from app.services.business_object_registry import businessObjectRegistry
+
+    if entityType not in KNOWLEDGE_ENTITY_TYPES and not businessObjectRegistry.isValid(
+        entityType
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"不支持的关联类型：{entityType}",
+        )
+    return await searchRelationTargets(session, entityType, q, limit)
+
+
 @router.post("/relations", response_model=DocEntityRelationRead, status_code=status.HTTP_201_CREATED)
 async def createRelation(
     payload: DocEntityRelationCreate,

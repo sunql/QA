@@ -299,3 +299,32 @@ describe("api/document blob 编码（乱码修复）", () => {
     expect(createObjectURL).toHaveBeenCalled();
   });
 });
+
+describe("api/document 关联目标（可搜索下拉）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("listRelationTargets 带 entityType + 关键词", async () => {
+    httpMock.get.mockResolvedValue({
+      data: [{ key: "DIM_SUPPLIER", label: "供应商主数据", hint: "DIM_SUPPLIER" }],
+    });
+
+    const { listRelationTargets } = await import("../api/document");
+    const rows = await listRelationTargets({ entityType: "ONTOLOGY_CLASS", q: "供应" });
+
+    expect(httpMock.get).toHaveBeenCalledWith("/documents/relations/targets", {
+      params: { entityType: "ONTOLOGY_CLASS", q: "供应", limit: 20 },
+    });
+    expect(rows[0].key).toBe("DIM_SUPPLIER");
+  });
+
+  it("q 缺省时传空串（后端据此返回可浏览的前 N 项）", async () => {
+    httpMock.get.mockResolvedValue({ data: [] });
+
+    const { listRelationTargets } = await import("../api/document");
+    await listRelationTargets({ entityType: "ONTOLOGY_METRIC" });
+
+    expect(httpMock.get.mock.calls[0][1].params.q).toBe("");
+  });
+});

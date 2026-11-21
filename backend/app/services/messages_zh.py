@@ -958,3 +958,9 @@ MSG_DOCUMENT_VECTORIZE_FORBIDDEN = (
     "只有文档归属部门的成员或管理员可以执行向量化（该操作会消耗模型额度）"
 )
 MSG_DOCUMENT_VECTORIZE_NO_SOURCE = "该文档没有源文件，无法向量化（请重新上传）"
+
+# --- 文档关联（0164：目标可以是业务对象或知识对象）----------------------------
+MSG_DOCUMENT_REL_INVALID_TARGET = (
+    "关联目标不合法：实体类型必须是业务对象码，或本体类/指标/属性"
+    "（ONTOLOGY_CLASS / ONTOLOGY_METRIC / ONTOLOGY_PROPERTY）"
+)

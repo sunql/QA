@@ -6,6 +6,8 @@ document_id 业务唯一；storage_url / content_hash 可选（文件上传后�
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -29,8 +31,11 @@ from app.services.messages_zh import (
     MSG_DOCUMENT_DUPLICATE,
     MSG_DOCUMENT_NOT_FOUND,
     MSG_DOCUMENT_REL_EXISTS,
+    MSG_DOCUMENT_REL_INVALID_TARGET,
     MSG_DOCUMENT_REL_NOT_FOUND,
 )
+
+logger = logging.getLogger(__name__)
 
 _audit = AuditService()
 
@@ -50,6 +55,12 @@ def _duplicateError(document_id: str) -> ConflictError:
 
 def _contentHashDuplicateError() -> ConflictError:
     return ConflictError(MSG_DOCUMENT_CONTENT_DUPLICATE)
+
+
+def _isUniqueViolation(error: IntegrityError) -> bool:
+    """Postgres 唯一冲突判定（23505 / UniqueViolation）。"""
+    text = str(getattr(error, "orig", error))
+    return "23505" in text or "duplicate key value" in text.lower()
 
 
 def _entity_to_dict(entity: DocumentCatalog) -> dict:
@@ -362,13 +373,24 @@ class DocumentService:
             await session.commit()
         except IntegrityError as exc:
             await session.rollback()
-            raise ConflictError(
-                MSG_DOCUMENT_REL_EXISTS.format(
-                    documentId=dto.document_id,
-                    entityType=dto.entity_type,
-                    entityKey=dto.entity_key,
-                )
-            ) from exc
+            # **只有唯一冲突**才是「已存在」。其他约束（外键/CHECK）若也报
+            # 「已存在」，会把真实原因藏起来（2026-11-22 实测：entity_type
+            # 外键拦住 ONTOLOGY_CLASS，用户看到的是「关联已存在」）
+            if _isUniqueViolation(exc):
+                raise ConflictError(
+                    MSG_DOCUMENT_REL_EXISTS.format(
+                        documentId=dto.document_id,
+                        entityType=dto.entity_type,
+                        entityKey=dto.entity_key,
+                    )
+                ) from exc
+            logger.exception(
+                "创建文档关联失败（非唯一冲突）: doc=%s type=%s key=%s",
+                dto.document_id,
+                dto.entity_type,
+                dto.entity_key,
+            )
+            raise ValidationError(MSG_DOCUMENT_REL_INVALID_TARGET) from exc
         await session.refresh(entity)
         return entity
 

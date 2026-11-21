@@ -58,11 +58,12 @@ def test_toDecimal_rejects_invalid_without_guessing() -> None:
 
 
 def test_quotesFromRows_drops_rows_without_price_or_code() -> None:
+    # 用**小写**列名：与真实链路一致（business_db_pool 统一小写化 Oracle 列名）
     rows = [
-        {"SUPPLIER_CODE": "S1", "ITEM_CODE": "I1", "SEG_YEAR": 2026, "UNIT_PRICE_EX_TAX": "10"},
-        {"SUPPLIER_CODE": "S2", "ITEM_CODE": "I1", "SEG_YEAR": 2026, "UNIT_PRICE_EX_TAX": None},
-        {"SUPPLIER_CODE": "", "ITEM_CODE": "I1", "SEG_YEAR": 2026, "UNIT_PRICE_EX_TAX": "9"},
-        {"SUPPLIER_CODE": "S3", "ITEM_CODE": "I1", "SEG_YEAR": "2026", "UNIT_PRICE_EX_TAX": "bad"},
+        {"supplier_code": "S1", "item_code": "I1", "seg_year": 2026, "unit_price_ex_tax": "10"},
+        {"supplier_code": "S2", "item_code": "I1", "seg_year": 2026, "unit_price_ex_tax": None},
+        {"supplier_code": "", "item_code": "I1", "seg_year": 2026, "unit_price_ex_tax": "9"},
+        {"supplier_code": "S3", "item_code": "I1", "seg_year": "2026", "unit_price_ex_tax": "bad"},
     ]
 
     quotes = quotesFromRows(rows)
@@ -159,8 +160,11 @@ async def test_quotation_compare_handler_returns_groups(monkeypatch) -> None:
     class _Adapter:
         async def execute_read_only(self, sql: str):
             return [
-                {"SUPPLIER_CODE": "S1", "ITEM_CODE": "ITM-1", "SEG_YEAR": 2026, "UNIT_PRICE_EX_TAX": "80"},
-                {"SUPPLIER_CODE": "S2", "ITEM_CODE": "ITM-1", "SEG_YEAR": 2026, "UNIT_PRICE_EX_TAX": "120"},
+                # 小写列名（真实链路：business_db_pool 统一小写化）
+                {"supplier_code": "S1", "item_code": "ITM-1", "seg_year": 2026,
+                 "unit_price_ex_tax": "80", "price_list_code": "T21", "uom": "KG"},
+                {"supplier_code": "S2", "item_code": "ITM-1", "seg_year": 2026,
+                 "unit_price_ex_tax": "120", "price_list_code": "T21", "uom": "KG"},
             ]
 
     async def _fakeResolve(session, ctx):
@@ -275,3 +279,16 @@ def test_quotesFromRows_readsRealOracleColumns() -> None:
 
 def test_exTaxPriceListCodesCoverBothRealPriceLists() -> None:
     assert EX_TAX_PRICE_LIST_CODES == frozenset({"T21", "T11"})
+
+
+def test_col_accessor_isCaseInsensitive() -> None:
+    """大写/小写 key 都要能取——**真实链路是小写**，但不同 adapter 可能给大写。
+
+    这条不是为了迁就大写的实现，而是防止有人把 ``_col`` 改回 ``row.get``。
+    """
+    from app.services.procurement_quotation_compare import _col
+
+    assert _col({"seg_year": 2026}, "SEG_YEAR") == 2026
+    assert _col({"SEG_YEAR": 2026}, "SEG_YEAR") == 2026
+    assert _col({"Seg_Year": 2026}, "SEG_YEAR") == 2026
+    assert _col({"other": 1}, "SEG_YEAR") is None

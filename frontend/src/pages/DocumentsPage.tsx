@@ -67,6 +67,10 @@ import FilterBar from "../components/ontology/FilterBar";
 import type { FilterField } from "../components/ontology/FilterBar";
 import { contains, matchSelect } from "../utils/ontologyFilter";
 import { useTablePagination } from "../utils/useTablePagination";
+import {
+  DOCUMENT_UPLOAD_ACCEPT,
+  DOCUMENT_UPLOAD_HINT,
+} from "../utils/uploadAccept";
 import { toIsoDateParam } from "../utils/dateParam";
 import type { FilterValues } from "../utils/ontologyFilter";
 import type { EntityType } from "../types/entityMapping";
@@ -810,7 +814,7 @@ export default function DocumentsPage() {
             rules={[{ required: true, message: "请选择文件" }]}
           >
             <Upload.Dragger
-              accept=".pdf,.docx,.doc,.txt,.md"
+              accept={DOCUMENT_UPLOAD_ACCEPT}
               maxCount={1}
               fileList={uploadFile ? [uploadFile] : []}
               beforeUpload={(file) => {
@@ -827,7 +831,7 @@ export default function DocumentsPage() {
               <p>
                 <UploadOutlined />
               </p>
-              <p>点击或拖拽上传 PDF / DOCX / TXT / MD 文件</p>
+              <p>点击或拖拽上传 {DOCUMENT_UPLOAD_HINT} 文件</p>
             </Upload.Dragger>
           </Form.Item>
           <Space.Compact style={{ width: "100%" }}>

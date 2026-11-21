@@ -31,6 +31,7 @@ from app.domain.knowledge_schemas import (
     KNOWLEDGE_ROUTE_OK,
     KNOWLEDGE_SOURCE_RELEASE,
     KnowledgeEvidenceRead,
+    KnowledgeEvidenceSourceRef,
 )
 from app.services.knowledge.domain_slice import sliceManifestByDomain
 from app.services.knowledge.matching import (
@@ -112,6 +113,8 @@ def _evidence(
         release_id=release.release_id,
         release_version=release.version,
         source=KNOWLEDGE_SOURCE_RELEASE,
+        # I2-B：指标路溯源（对象 = 指标/KPI 的 ref）
+        source_ref=KnowledgeEvidenceSourceRef(object=ref),
     )
 
 

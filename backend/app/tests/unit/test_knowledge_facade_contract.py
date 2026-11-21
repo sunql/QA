@@ -208,13 +208,19 @@ def test_evidenceContractAdditiveFieldsSerializeCamelCase() -> None:
     assert payload["confidence"] == 0.87
     assert payload["ruleVersion"] == "v3"
     assert payload["security"] == {"level": "L2", "scope": ("PROCUREMENT",)}
-    assert payload["sourceRef"] == {
+    # I2-B 扩了 8 个 sourceRef 字段（默认 None）⇒ 断言「包含」而非全等
+    sourceRef = payload["sourceRef"]
+    assert {
+        key: sourceRef[key]
+        for key in ("system", "object", "recordKey", "documentId", "queryId")
+    } == {
         "system": "THBI",
         "object": "PRECEIPT",
         "recordKey": "SUP001",
         "documentId": None,
         "queryId": "q_01",
     }
+    assert sourceRef["page"] is None and sourceRef["syncBatch"] is None
     # 缺省构造（既有调用点形态）：新字段全空 ⇒ 不破坏
     minimal = KnowledgeEvidenceRead(
         channel="GRAPH", kind="CLASS", ref="Supplier", title="供应商"
@@ -242,3 +248,45 @@ def test_degradedReleaseCarriesNoVersion() -> None:
     assert payload["release"]["id"] is None
     assert payload["release"]["version"] is None
     assert payload["release"]["degraded"] is True
+
+
+def test_evidenceContractI2BFieldsSerializeCamelCase() -> None:
+    """I2-B：`summary` + sourceRef 八字段（page/chunkId/syncBatch/sqlHash/
+    paramsSummary/executedAt/period/grain）按 camelCase 序列化，缺省全空不破旧调用方。"""
+    from datetime import UTC, datetime
+
+    from app.domain.knowledge_schemas import (
+        KnowledgeEvidenceRead,
+        KnowledgeEvidenceSourceRef,
+    )
+
+    evidence = KnowledgeEvidenceRead(
+        channel="SQL",
+        kind="CLASS",
+        ref="DIM_SUPPLIER",
+        title="供应商主数据",
+        summary="类 DIM_SUPPLIER 的物理 schema（240 列）",
+        source_ref=KnowledgeEvidenceSourceRef(
+            object="DIM_SUPPLIER",
+            page=3,
+            chunk_id="DOC-1#2",
+            sync_batch="batch-7",
+            sql_hash="ab" * 32,
+            params_summary="supplier=D135",
+            executed_at=datetime(2026, 11, 21, tzinfo=UTC),
+            period="2026-10",
+            grain="month",
+        ),
+    )
+    dumped = evidence.model_dump(mode="json", by_alias=True)
+    assert dumped["summary"] == "类 DIM_SUPPLIER 的物理 schema（240 列）"
+    ref = dumped["sourceRef"]
+    assert ref["page"] == 3 and ref["chunkId"] == "DOC-1#2"
+    assert ref["syncBatch"] == "batch-7" and ref["sqlHash"] == "ab" * 32
+    assert ref["paramsSummary"] == "supplier=D135" and ref["period"] == "2026-10"
+    assert ref["grain"] == "month" and ref["executedAt"].startswith("2026-11-21")
+
+    minimal = KnowledgeEvidenceRead(
+        channel="GRAPH", kind="CLASS", ref="X", title="X",
+    ).model_dump(mode="json", by_alias=True)
+    assert minimal["summary"] is None and minimal["sourceRef"] is None

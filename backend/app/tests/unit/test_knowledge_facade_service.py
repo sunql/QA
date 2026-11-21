@@ -472,3 +472,70 @@ async def test_maxSecurityLevelIsReportedAsIgnored() -> None:
     response = await facade.query(request, user=_USER, session=_FAKE_SESSION)
 
     assert MSG_SCOPE_SECURITY_LEVEL_IGNORED in response.warnings
+
+
+# ---------------------------------------------------------------------------
+# I2-B：跨通道证据冲突（§4.3）——不替模型选值
+# ---------------------------------------------------------------------------
+
+
+def _conflictRunners() -> dict[str, Any]:
+    """GRAPH 与 SQL 两路对同一类给出不同内容 ⇒ 必出 conflict。"""
+    from app.domain.knowledge_schemas import (
+        KNOWLEDGE_CHANNEL_GRAPH,
+        KNOWLEDGE_CHANNEL_SQL,
+        KnowledgeEvidenceRead,
+    )
+
+    async def _graph(inp: Any) -> RouteOutcome:
+        return RouteOutcome(
+            channel=KNOWLEDGE_CHANNEL_GRAPH,
+            status=KNOWLEDGE_ROUTE_OK,
+            evidence=(
+                KnowledgeEvidenceRead(
+                    channel=KNOWLEDGE_CHANNEL_GRAPH, kind="CLASS",
+                    ref="DIM_SUPPLIER", title="供应商主数据",
+                    snippet="248 个属性", release_version="v1",
+                ),
+            ),
+        )
+
+    async def _sql(inp: Any) -> RouteOutcome:
+        return RouteOutcome(
+            channel=KNOWLEDGE_CHANNEL_SQL,
+            status=KNOWLEDGE_ROUTE_OK,
+            evidence=(
+                KnowledgeEvidenceRead(
+                    channel=KNOWLEDGE_CHANNEL_SQL, kind="CLASS",
+                    ref="DIM_SUPPLIER", title="供应商主数据",
+                    snippet="240 列", release_version="v1",
+                ),
+            ),
+        )
+
+    return {KNOWLEDGE_CHANNEL_GRAPH: _graph, KNOWLEDGE_CHANNEL_SQL: _sql}
+
+
+@pytest.mark.asyncio
+async def test_facadeReportsCrossChannelConflicts() -> None:
+    """两路内容不一致 ⇒ 响应带 conflicts + warning（不替模型选值）。"""
+    facade, _calls = _facade(routeRunners=_conflictRunners())
+    response = await facade.query(
+        KnowledgeQueryRequest(
+            domain="PROCUREMENT",
+            question="供应商主数据",
+            channels=("GRAPH", "SQL"),
+            top_k=5,
+        ),
+        user=_USER,
+        session=_FAKE_SESSION,
+    )
+
+    assert len(response.conflicts) == 1
+    conflict = response.conflicts[0]
+    assert conflict.key == "CLASS:DIM_SUPPLIER"
+    assert conflict.channels == ("GRAPH", "SQL")
+    assert any("不同内容" in w for w in response.warnings), "冲突必须进 warnings"
+    dumped = conflict.model_dump(by_alias=True)
+    assert dumped["channels"] == ("GRAPH", "SQL")
+    assert dumped["entries"][0]["channel"] == "GRAPH"

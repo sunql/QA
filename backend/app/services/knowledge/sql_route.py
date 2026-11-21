@@ -45,6 +45,7 @@ from app.domain.knowledge_schemas import (
     KNOWLEDGE_ROUTE_OK,
     KNOWLEDGE_SOURCE_RELEASE,
     KnowledgeEvidenceRead,
+    KnowledgeEvidenceSourceRef,
 )
 from app.services.knowledge.domain_slice import sliceManifestByDomain
 from app.services.knowledge.matching import classTerms, clipText, matchTerms, sortScored
@@ -111,6 +112,8 @@ def _evidence(
         release_id=release.release_id,
         release_version=release.version,
         source=KNOWLEDGE_SOURCE_RELEASE,
+        # I2-B：SQL 路溯源（对象 = 证据 ref；执行类字段待真跑查询后回填）
+        source_ref=KnowledgeEvidenceSourceRef(object=ref),
     )
 
 

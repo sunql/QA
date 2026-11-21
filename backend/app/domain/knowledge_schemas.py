@@ -218,6 +218,12 @@ class KnowledgeEvidenceSourceRef(CamelModel):
     命名偏差（已登记）：跨板块设计稿的证据里嵌套对象叫 `source{...}`，但本仓
     `KnowledgeEvidenceRead.source: str` 是「发布面出处」（RELEASE/LIVE），二者
     并存 ⇒ 物理来源定位改叫 `sourceRef`，`source` 原样保留（旧调用方零破坏）。
+
+    **I2-B 扩字段**（对齐设计稿 §4.2 各 kind 的「必需溯源字段」）：
+    GRAPH 需要节点键/关系类型（`object`/`recordKey`）、`syncBatch`；
+    SQL 需要 `datasourceId`/`queryId`/`sqlHash`/`paramsSummary`/`executedAt`；
+    DOCUMENT 需要 `documentId`/`chunkId`/`page`/`validAt`；
+    METRIC 需要 `period`/`grain`。**按通道可得性回填**（拿不到就是 None，不编）。
     """
 
     system: str | None = None
@@ -225,6 +231,15 @@ class KnowledgeEvidenceSourceRef(CamelModel):
     record_key: str | None = None
     document_id: str | None = None
     query_id: str | None = None
+    # —— I2-B ——
+    page: int | None = None
+    chunk_id: str | None = None
+    sync_batch: str | None = None
+    sql_hash: str | None = None
+    params_summary: str | None = None
+    executed_at: datetime | None = None
+    period: str | None = None
+    grain: str | None = None
 
 
 class KnowledgeEvidenceSecurity(CamelModel):
@@ -255,6 +270,8 @@ class KnowledgeEvidenceRead(CamelModel):
     kind: str
     ref: str
     title: str
+    #: 一句话结论（§4.2 `summary`）：有可执行结果时含数值；无则 None（不编）
+    summary: str | None = None
     snippet: str | None = None
     release_id: int | None = None
     release_version: str | None = None
@@ -268,7 +285,7 @@ class KnowledgeEvidenceRead(CamelModel):
     source_ref: KnowledgeEvidenceSourceRef | None = None
 
     @model_validator(mode="after")
-    def _deriveEvidenceId(self) -> "KnowledgeEvidenceRead":
+    def _deriveEvidenceId(self) -> KnowledgeEvidenceRead:
         """内容确定 id：canonical（字段名排序）JSON → SHA-256 → `ev-<hex16>`。"""
         if self.evidence_id:
             return self
@@ -342,6 +359,24 @@ class ProcurementGraphNeighborsRead(CamelModel):
     truncated: bool = False
 
 
+class KnowledgeConflictEntryRead(CamelModel):
+    """冲突中的一个来源（通道 + 版本 + 观测时间 + 原文片段）——供人工裁决。"""
+
+    channel: str
+    snippet: str | None = None
+    release_version: str | None = None
+    observed_at: datetime | None = None
+
+
+class KnowledgeConflictRead(CamelModel):
+    """一条证据冲突（设计稿 §4.3：**输出冲突提示与来源时间，不让模型自选**）。"""
+
+    key: str
+    reason: str
+    channels: tuple[str, ...] = ()
+    entries: tuple[KnowledgeConflictEntryRead, ...] = ()
+
+
 class KnowledgeRouteResultRead(CamelModel):
     """单路的执行结果 + 降级痕迹。
 
@@ -366,6 +401,8 @@ class KnowledgeQueryResponse(CamelModel):
     entities: tuple[KnowledgeEntityRead, ...] = ()
     evidence: tuple[KnowledgeEvidenceRead, ...] = ()
     route_results: tuple[KnowledgeRouteResultRead, ...] = ()
+    #: I2-B：跨通道证据冲突（空 = 无冲突）
+    conflicts: tuple[KnowledgeConflictRead, ...] = ()
     warnings: tuple[str, ...] = ()
 
 # --- M3-3 采购 Agent 场景目录（§8.4 GET /procurement/agents/catalog） --------

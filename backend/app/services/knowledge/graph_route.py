@@ -28,6 +28,7 @@ from app.domain.knowledge_schemas import (
     KNOWLEDGE_ROUTE_OK,
     KNOWLEDGE_SOURCE_RELEASE,
     KnowledgeEvidenceRead,
+    KnowledgeEvidenceSourceRef,
 )
 from app.services.knowledge.domain_slice import DomainSlice, sliceManifestByDomain
 from app.services.knowledge.matching import (
@@ -76,6 +77,7 @@ def _evidence(
     title: str,
     snippet: str,
     release: ResolvedRelease,
+    objectName: str | None = None,
 ) -> KnowledgeEvidenceRead:
     return KnowledgeEvidenceRead(
         channel=KNOWLEDGE_CHANNEL_GRAPH,
@@ -86,6 +88,11 @@ def _evidence(
         release_id=release.release_id,
         release_version=release.version,
         source=KNOWLEDGE_SOURCE_RELEASE,
+        # I2-B：GRAPH 路溯源（对象 = 类名；记录键 = 证据 ref）
+        source_ref=KnowledgeEvidenceSourceRef(
+            object=objectName,
+            record_key=ref,
+        ),
     )
 
 
@@ -136,6 +143,7 @@ async def runGraphRoute(inp: RouteInput) -> RouteOutcome:
                 title=textOrNone(cls.get("classAlias")) or className,
                 snippet=summary or "命中：" + "、".join(item.text for item in matched),
                 release=release,
+                objectName=className,
             )
         )
         for prop in cls.get("properties") or []:
@@ -157,6 +165,7 @@ async def runGraphRoute(inp: RouteInput) -> RouteOutcome:
                     snippet=textOrNone(prop.get("description"))
                     or "命中：" + "、".join(item.text for item in propertyMatched),
                     release=release,
+                    objectName=className,
                 )
             )
 

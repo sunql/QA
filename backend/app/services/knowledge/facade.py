@@ -45,6 +45,7 @@ from app.domain.knowledge_schemas import (
     KnowledgeReleaseRef,
     KnowledgeRouteResultRead,
 )
+from app.services.knowledge.conflicts import detectConflicts
 from app.services.knowledge.graph_route import runGraphRoute
 from app.services.knowledge.messages import (
     MSG_CHANNEL_PENDING,
@@ -180,9 +181,12 @@ class KnowledgeFacade:
             )
             for outcome in outcomes
         )
+        # I2-B：跨通道证据冲突（§4.3——输出冲突提示与来源时间，不替模型选值）
+        conflicts = detectConflicts(evidence)
         warnings = tuple(
             dict.fromkeys(
                 [
+                    *(conflict.reason for conflict in conflicts),
                     *scopeWarnings,
                     *(
                         reason
@@ -207,6 +211,7 @@ class KnowledgeFacade:
             evidence=tuple(evidence),
             route_results=routeResults,
             warnings=warnings,
+            conflicts=conflicts,
         )
 
     async def _runChannel(self, channel: str, inp: RouteInput) -> RouteOutcome:

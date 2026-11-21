@@ -374,12 +374,18 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     # P5 工作流 / 审批：与 main.py 同一开关、同一前缀、同一依赖。
     # 漏掉这里 ⇒ 集成测试打过去 404（两套 wiring 是手工平行维护的）。
     if settings.enableWorkflow:
-        from app.api.v1 import workflow
+        from app.api.v1 import procurement_rfqs, workflow
 
         testApp.include_router(
             workflow.router,
             prefix="/api/v1/workflow",
             tags=["workflow"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
+        testApp.include_router(
+            procurement_rfqs.router,
+            prefix="/api/v1/procurement/rfqs",
+            tags=["procurement-rfqs"],
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
         )
 

@@ -661,6 +661,8 @@ describe("WikiLinksPage 可用性修复", () => {
     await waitFor(() => {
       expect((note as HTMLTextAreaElement).value).toBe("旧备注");
     });
+    // 权重也必须预填（否则用户一提交就把原权重改成默认值）
+    expect(screen.getByRole("slider")).toHaveAttribute("aria-valuenow", "0.8");
   });
 
   it("提交编辑调用 PATCH 并刷新列表", async () => {
@@ -727,5 +729,30 @@ describe("WikiLinksPage 可用性修复", () => {
         note: "",
       });
     });
+  });
+
+  it("关闭并重开添加弹窗后，遗留防抖请求不覆盖默认列表", async () => {
+    renderPage();
+    await clickTreeNode("供应商准入流程");
+    const addBtn = screen.getByRole("button", { name: /\+\s*添加绑定/ });
+    await userEvent.click(addBtn);
+    await waitFor(() => {
+      expect(api.listLinkableTargets).toHaveBeenCalledWith("class");
+    });
+
+    // 输入后 300ms 内关闭再打开：旧定时器必须被清掉
+    const combo = screen.getByRole("combobox", { name: "本体对象" });
+    fireEvent.change(combo, { target: { value: "AB" } });
+    // 用同步 fireEvent 完成「关闭→重开」：userEvent 的异步等待可能超过 300ms
+    // 防抖窗口，让定时器在关闭前就自然触发，测不到竞态。
+    fireEvent.click(screen.getByRole("button", { name: /取\s*消/ }));
+    fireEvent.click(addBtn);
+
+    // 等过一个完整防抖窗口
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const calls = api.listLinkableTargets.mock.calls;
+    expect(calls[calls.length - 1]).toEqual(["class"]);
+    expect(calls.filter((c) => c[1] === "AB")).toHaveLength(0);
   });
 });

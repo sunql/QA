@@ -32,8 +32,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
-from app.utils.like_escape import LIKE_ESCAPE as _LIKE_ESCAPE
-from app.utils.like_escape import escapeLike as _escapeLike
 from app.domain.schemas import _UnsetType
 from app.domain.wiki_learning_models import (
     ProcessWorkflow,
@@ -48,6 +46,8 @@ from app.domain.wiki_models import (
     KnowledgeRelation,
     WikiPage,
 )
+from app.utils.like_escape import LIKE_ESCAPE as _LIKE_ESCAPE
+from app.utils.like_escape import escapeLike as _escapeLike
 from app.domain.wiki_schemas import WikiPageCreate, WikiPageUpdate
 from app.infrastructure.object_storage import hashContent
 from app.services.audit_service import AuditService
@@ -188,8 +188,6 @@ def _dedupePreservingOrder(values: list[str]) -> list[str]:
     去重会打乱顺序，而 ``notFound`` 是要原样回复给用户的清单。
     """
     return list(dict.fromkeys(values))
-
-
 
 
 def sanitizePageId(raw: str) -> str:

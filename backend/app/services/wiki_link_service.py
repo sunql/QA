@@ -226,7 +226,14 @@ class WikiLinkService:
         - property / metric 是硬删,没有 valid_to 列,不需要也不应该加过滤。
         """
         if type == "class":
-            stmt = select(OntologyClass).where(OntologyClass.valid_to.is_(None))
+            # 只投影需要的列：select(OntologyClass) 会触发 lazy="selectin" 的
+            # properties/metrics/children 级联加载，而这里只用 name/alias/desc。
+            stmt = select(
+                OntologyClass.id,
+                OntologyClass.class_name,
+                OntologyClass.class_alias,
+                OntologyClass.description,
+            ).where(OntologyClass.valid_to.is_(None))
             if query:
                 pattern = f"%{escapeLike(query.upper())}%"
                 stmt = stmt.where(
@@ -238,7 +245,7 @@ class WikiLinkService:
             stmt = stmt.order_by(
                 OntologyClass.class_name.asc(), OntologyClass.id.asc()
             ).limit(limit)
-            rows = (await session.execute(stmt)).scalars().all()
+            rows = (await session.execute(stmt)).all()
             return [
                 LinkableTarget(
                     id=r.id,
@@ -250,7 +257,12 @@ class WikiLinkService:
                 for r in rows
             ]
         if type == "property":
-            stmt = select(OntologyProperty)
+            stmt = select(
+                OntologyProperty.id,
+                OntologyProperty.property_name,
+                OntologyProperty.property_alias,
+                OntologyProperty.description,
+            )
             if query:
                 pattern = f"%{escapeLike(query.upper())}%"
                 stmt = stmt.where(
@@ -262,7 +274,7 @@ class WikiLinkService:
             stmt = stmt.order_by(
                 OntologyProperty.property_name.asc(), OntologyProperty.id.asc()
             ).limit(limit)
-            rows = (await session.execute(stmt)).scalars().all()
+            rows = (await session.execute(stmt)).all()
             return [
                 LinkableTarget(
                     id=r.id,
@@ -274,7 +286,11 @@ class WikiLinkService:
                 for r in rows
             ]
         if type == "metric":
-            stmt = select(OntologyMetric)
+            stmt = select(
+                OntologyMetric.id,
+                OntologyMetric.metric_name,
+                OntologyMetric.metric_alias,
+            )
             if query:
                 pattern = f"%{escapeLike(query.upper())}%"
                 stmt = stmt.where(
@@ -286,7 +302,7 @@ class WikiLinkService:
             stmt = stmt.order_by(
                 OntologyMetric.metric_name.asc(), OntologyMetric.id.asc()
             ).limit(limit)
-            rows = (await session.execute(stmt)).scalars().all()
+            rows = (await session.execute(stmt)).all()
             return [
                 LinkableTarget(
                     id=r.id,

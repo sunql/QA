@@ -213,14 +213,23 @@ export function WikiLinksPage() {
 
   const categoryNames = useMemo(() => categoryNameMap(tree), [tree]);
 
+  // 记住最新选中页：refresh 的迟到响应不得覆盖新页的列表
+  const selectedPageIdRef = useRef<string | null>(selectedPageId);
+  useEffect(() => {
+    selectedPageIdRef.current = selectedPageId;
+  }, [selectedPageId]);
+
   // Fetch links when page or type changes
   const refresh = useCallback(async () => {
     if (!selectedPageId) {
       setLinks([]);
       return;
     }
+    const requestedPageId = selectedPageId;
     try {
-      const rows = await listWikiLinks({ page_id: selectedPageId });
+      const rows = await listWikiLinks({ page_id: requestedPageId });
+      // 用户已切到别的页 ⇒ 丢弃旧页的迟到响应
+      if (selectedPageIdRef.current !== requestedPageId) return;
       setLinks(rows);
     } catch {
       message.error(t("wikiLinks.loadFailed"));
@@ -264,7 +273,8 @@ export function WikiLinksPage() {
   );
 
   const handleLinkableSearch = (raw: string) => {
-    const q = raw.trim();
+    // 后端 q 上限 100；超长会让请求 422 并弹无关错误
+    const q = raw.trim().slice(0, 100);
     if (linkableTimerRef.current) clearTimeout(linkableTimerRef.current);
     if (!q) {
       // 清空搜索 ⇒ 立即回到默认 50 条（不要发空串 q）
@@ -293,16 +303,16 @@ export function WikiLinksPage() {
 
   // Open add modal — fetch linkable targets (默认 50 条)
   const openAddModal = async () => {
-    try {
-      setSelectedTarget(null);
-      await loadLinkables();
-      setModalOpen(true);
-    } catch {
-      message.error(t("wikiLinks.loadTargetsFailed"));
-    }
+    // 关掉上一个会话遗留的防抖请求，否则它会在新会话里覆盖默认列表
+    if (linkableTimerRef.current) clearTimeout(linkableTimerRef.current);
+    setSelectedTarget(null);
+    await loadLinkables();
+    setModalOpen(true);
   };
 
   const closeAddModal = () => {
+    // 关闭时同样作废在途防抖：重新打开必须从干净状态开始
+    if (linkableTimerRef.current) clearTimeout(linkableTimerRef.current);
     setModalOpen(false);
     setSelectedTarget(null);
     form.resetFields();
@@ -348,7 +358,13 @@ export function WikiLinksPage() {
   // Edit weight / note（PATCH；note 传空串表示清空）
   const submitEdit = async () => {
     if (!editingLink) return;
-    const values = await editForm.validateFields();
+    let values: Record<string, unknown>;
+    try {
+      values = await editForm.validateFields();
+    } catch {
+      // 校验失败：antd 已在字段上给出提示，这里不再弹全局错误
+      return;
+    }
     setEditSubmitting(true);
     try {
       await updateWikiLink(editingLink.id, {
@@ -438,8 +454,14 @@ export function WikiLinksPage() {
                     role="button"
                     tabIndex={0}
                     onClick={() => setSelectedPageId(p.pageId)}
+                    aria-current={
+                      p.pageId === selectedPageId ? "true" : undefined
+                    }
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") setSelectedPageId(p.pageId);
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setSelectedPageId(p.pageId);
+                      }
                     }}
                     style={{
                       cursor: "pointer",
@@ -495,9 +517,10 @@ export function WikiLinksPage() {
             activeKey={linkType}
             onChange={(k) => {
               setLinkType(k as WikiLinkType);
-              // 切类型时清掉上一类型的选中项，避免跨类型 id 残留
+              // 切类型时清掉上一类型的选中项，避免跨类型 id 残留。
+              // 不在这里 setFieldValue：添加弹窗未打开时 Form 尚未挂载，
+              // 对该 useForm 实例写值会触发 antd "not connected" 警告。
               setSelectedTarget(null);
-              form.setFieldValue("ontology_id", undefined);
             }}
             items={[
               { key: "class", label: t("wikiLinks.tabs.class") },

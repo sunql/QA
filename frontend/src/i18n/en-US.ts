@@ -2802,7 +2802,7 @@ export const enUS = {
   updateFailed: "Update failed",
   pageSearchPlaceholder: "Search all pages (title/content)",
   treeLimitHint: "Showing {shown}/{total} pages; use the search above to reach the rest",
-  searchResultCount: "{total} matches",
+  searchResultCount: "Matches: {total}",
   searchFailed: "Page search failed",
   noSearchResults: "No matching pages",
   uncategorized: "Uncategorized"

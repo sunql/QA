@@ -18,6 +18,7 @@ import pytest
 from httpx import AsyncClient
 
 from app.domain.enums import DocumentSecurityLevel
+from app.services.document_preview_kinds import kindFor
 
 _CLIENT = "app.infrastructure.object_storage._getClient"
 _SOURCE_PATH = "/api/v1/documents/{id}/source"
@@ -110,7 +111,8 @@ async def _createDocument(
         content_hash=contentHash,
         mime_type=mime,
         file_size=len(content),
-        preview_kind="MARKDOWN",
+        # 预览类别按**真实规则**推断（不写死）⇒ 与生产入库路径一致
+        preview_kind=kindFor(mime, filename),
     )
     dbSession.add(row)
     await dbSession.commit()
@@ -233,3 +235,80 @@ async def test_uploaded_document_has_preview_metadata(
     assert data["preview_kind"] == "MARKDOWN"
     # 上传路径本身会向量化 ⇒ vectorized_at 有值（目录页据此显示「已向量化」）
     assert data["vectorized_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# 通用预览（需求 4）
+# ---------------------------------------------------------------------------
+
+
+async def test_preview_renders_markdown_as_html(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    """Markdown ⇒ 自包含 HTML（渲染 + 消毒）。"""
+    created = await _createDocument(
+        client, dbSession, fakeMinio, content=b"# Title\n\nbody"
+    )
+
+    resp = await client.get(f"/api/v1/documents/{created['id']}/preview")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/html")
+    assert "<h1>Title</h1>" in resp.text
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert "Content-Security-Policy" in resp.headers
+
+
+async def test_preview_strips_scripts_from_user_html(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    """用户 HTML ⇒ 脚本不得出现在预览页里。"""
+    created = await _createDocument(
+        client,
+        dbSession,
+        fakeMinio,
+        content=b"<p>ok</p><script>alert(1)</script>",
+        filename="x.html",
+        mime="text/html",
+    )
+
+    resp = await client.get(f"/api/v1/documents/{created['id']}/preview")
+
+    assert resp.status_code == 200
+    assert "<script" not in resp.text
+    assert "alert(1)" not in resp.text
+    assert "sandbox=" in resp.text
+
+
+async def test_preview_redirects_pdf_to_source(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    """PDF 不转（保真）⇒ 302 指到原件（浏览器原生查看器）。"""
+    created = await _createDocument(
+        client,
+        dbSession,
+        fakeMinio,
+        content=b"%PDF-1.4 x",
+        filename="a.pdf",
+        mime="application/pdf",
+    )
+
+    resp = await client.get(
+        f"/api/v1/documents/{created['id']}/preview", follow_redirects=False
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers["location"].endswith(f"/source")
+
+
+async def test_preview_denied_for_l3_document(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    """密级不够 ⇒ 403（预览与下载同一套闸）。"""
+    created = await _createDocument(
+        client, dbSession, fakeMinio, securityLevel="L3"
+    )
+
+    resp = await client.get(f"/api/v1/documents/{created['id']}/preview")
+
+    assert resp.status_code == 403, resp.text

@@ -20,7 +20,7 @@ import logging
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import getCurrentUser, getDb
@@ -149,6 +149,73 @@ async def downloadDocumentSource(
             ),
             "Content-Length": str(source.size),
             # 文档不是用户自己的站外资源 ⇒ 禁止被当成可执行内容
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+@router.get(
+    "/{documentId:int}/preview",
+    summary="文档通用预览（统一 HTML，涵盖 excel/word/ppt/pdf/md/html…）",
+    response_class=Response,
+)
+async def previewDocument(
+    documentId: int,
+    _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: DocumentService = Depends(getDocumentService),
+) -> Response:
+    """把文档渲染成**一段自包含 HTML**（前端 iframe 直接打开）。
+
+    分派规则见 ``services/document_preview_renderer``：TEXT / MARKDOWN /
+    HTML / OFFICE 服务端渲染；**PDF 与图片走原件直出**（浏览器原生查看器，
+    保真 100%、零服务端成本）—— 故这两种返回 302 指到 ``/source``。
+
+    安全：ACL 先行（复用 getDocument 的密级闸）；用户 HTML 经消毒 +
+    iframe sandbox；响应带 CSP + nosniff。
+    """
+    from app.infrastructure.object_storage import ObjectStorageError
+    from app.services.document_preview_kinds import KIND_IMAGE, KIND_PDF
+    from app.services.document_preview_renderer import renderPreview
+    from app.services.document_source_service import loadSourceFile
+
+    catalog = await service.getDocument(session, documentId, user=_user)
+    try:
+        source = await loadSourceFile(session, catalog)
+    except ObjectStorageError as exc:
+        logger.exception("文档预览读取失败: document_id=%s", documentId)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=MSG_DOCUMENT_SOURCE_UNAVAILABLE,
+        ) from exc
+    if source is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=MSG_DOCUMENT_SOURCE_NOT_FOUND.format(id=documentId),
+        )
+
+    if source.previewKind in (KIND_PDF, KIND_IMAGE):
+        # 原件直出：浏览器原生 PDF 查看器 / 图片查看器（保真最好）
+        return RedirectResponse(
+            url=f"/api/v1/documents/{documentId}/source",
+            status_code=status.HTTP_302_FOUND,
+        )
+
+    rendered = renderPreview(
+        source.content,
+        previewKind=source.previewKind,
+        filename=source.filename,
+    )
+    return Response(
+        content=rendered.html,
+        media_type="text/html; charset=utf-8",
+        headers={
+            # 用户内容渲染成的页面：**禁脚本、禁外部资源**（预览页不需要联网）
+            "Content-Security-Policy": (
+                "default-src 'none'; img-src data:; style-src 'unsafe-inline'; "
+                "frame-src 'self' data:; sandbox allow-popups"
+            ),
             "X-Content-Type-Options": "nosniff",
             "Cache-Control": "private, no-store",
         },

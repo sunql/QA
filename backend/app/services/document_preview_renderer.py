@@ -53,8 +53,30 @@ table{border-collapse:collapse;margin:12px 0;width:100%;font-size:13px}
 th,td{border:1px solid #e5e6eb;padding:6px 10px;text-align:left;
  vertical-align:top}
 th{background:#f7f8fa;font-weight:600}
-.sheet{margin:20px 0}
+.sheet{margin:20px 0;scroll-margin-top:56px}
 .sheet-name{font-weight:600;margin:12px 0 6px;font-size:15px}
+/* —— 多 sheet 导航（纯 CSS：预览页 CSP 禁用脚本）—— */
+.sheet-nav{position:sticky;top:0;z-index:2;background:#fff;
+ border-bottom:1px solid #e5e6eb;padding:8px 0;margin:0 0 12px;
+ display:flex;flex-wrap:wrap;gap:6px}
+.sheet-nav a{display:inline-block;padding:4px 10px;border:1px solid #e5e6eb;
+ border-radius:4px;font-size:13px;color:#1f2329;text-decoration:none;
+ background:#fafafa;white-space:nowrap}
+.sheet-nav a:hover{background:#f2f3f5;border-color:#c9cdd4}
+.sheet-nav .sheet-meta{font-size:12px;color:#8f959e;align-self:center;
+ margin-left:4px}
+/* 浏览器支持 :has 时升级为「一次只看一个 sheet」；否则退化为长文档（全部可见） */
+@supports selector(:has(*)){
+ .sheets:has(.sheet:target) .sheet{display:none}
+ .sheets:has(.sheet:target) .sheet:target{display:block}
+ .sheet:not(:first-of-type){display:none}
+ .sheets:has(.sheet:target) .sheet:not(:first-of-type){display:none}
+ .sheets:has(.sheet:target) .sheet:target{display:block}
+}
+.sheet:target .sheet-name{color:#165dff}
+.truncated{color:#8f959e;font-size:12px;margin:6px 0}
+.unsupported{padding:16px;background:#fff7e6;border:1px solid #ffd591;
+ border-radius:6px}
 .slide{border:1px solid #e5e6eb;border-radius:6px;padding:14px;margin:12px 0}
 .slide-title{font-weight:600;margin-bottom:8px}
 .slide-text{margin:4px 0;white-space:pre-wrap}
@@ -180,39 +202,99 @@ def _renderTable(table: Any) -> str:
     return "<table>" + "".join(rows) + "</table>"
 
 
-def _renderXlsx(content: bytes) -> PreviewResult:
-    """xlsx → 每个 sheet 一张表。"""
-    import io
-
-    from openpyxl import load_workbook
-
-    workbook = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
-    parts: list[str] = []
-    for sheet in workbook.worksheets:
-        parts.append(f"<div class=\"sheet-name\">{escapeHtml(sheet.title)}</div>")
-        rows: list[str] = []
-        truncated = False
-        for index, row in enumerate(sheet.iter_rows(values_only=True)):
-            if index >= MAX_PREVIEW_ROWS:
-                truncated = True
-                break
-            cells = "".join(
-                f"<td>{escapeHtml('' if value is None else str(value))}</td>"
-                for value in row[:MAX_PREVIEW_COLS]
-            )
-            rows.append(f"<tr>{cells}</tr>")
-        if rows:
-            parts.append("<table>" + "".join(rows) + "</table>")
-        if truncated:
-            parts.append(_truncatedNote())
-    return PreviewResult(html=_shell("文档预览", "".join(parts)))
-
-
 def _truncatedNote() -> str:
     return (
         f"<p class=\"truncated\">仅预览前 {MAX_PREVIEW_ROWS} 行；"
         "完整内容请下载原文。</p>"
     )
+
+
+@dataclass(frozen=True)
+class _Sheet:
+    """一个待渲染的工作表。"""
+
+    index: int
+    name: str
+    tableHtml: str
+    rows: int
+    cols: int
+    truncated: bool
+
+
+def _sheetSection(sheet: _Sheet) -> str:
+    """单个 sheet → ``<section id="sheet-N">``（:target 锚点）。"""
+    truncated = _truncatedNote() if sheet.truncated else ""
+    return (
+        f"<section class=\"sheet\" id=\"sheet-{sheet.index}\">"
+        f"<div class=\"sheet-name\">{escapeHtml(sheet.name)}</div>"
+        f"{truncated}{sheet.tableHtml}</section>"
+    )
+
+
+def _sheetsDocument(sheets: list[_Sheet]) -> str:
+    """多个 sheet → **带目录导航**的文档。
+
+    为什么用纯 CSS（``:target`` + ``:has``）而不是 JS：预览页的 CSP 是
+    ``default-src 'none'``（**禁脚本**）—— 把用户内容渲染出的页面开脚本，
+    等于把 XSS 面重新打开。``:target`` 锚点切换零脚本即可用：
+    - 支持 ``:has`` 的浏览器：点目录 = 只看那一个 sheet（tab 效果）
+    - 不支持：退化为长文档（全部可见 + 目录可跳转），功能不丢
+    """
+    if not sheets:
+        return "<p>（工作簿无内容）</p>"
+    anyTruncated = any(sheet.truncated for sheet in sheets)
+    headerNote = (
+        f"<span class=\"sheet-meta\">{len(sheets)} 个工作表"
+        + ("（内容较长，已截断）" if anyTruncated else "")
+        + "</span>"
+    )
+    navLinks = "".join(
+        f"<a href=\"#sheet-{sheet.index}\" title=\"{sheet.rows} 行 × {sheet.cols} 列\">"
+        f"{escapeHtml(sheet.name)}</a>"
+        for sheet in sheets
+    )
+    sections = "".join(_sheetSection(sheet) for sheet in sheets)
+    return (
+        f"<div class=\"sheets\"><div class=\"sheet-nav\">{headerNote}{navLinks}</div>"
+        f"{sections}</div>"
+    )
+
+
+def _renderXlsx(content: bytes) -> PreviewResult:
+    """xlsx → 每个 sheet 一张表（带目录导航，见 ``_sheetsDocument``）。"""
+    import io
+
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    sheets: list[_Sheet] = []
+    for index, sheet in enumerate(workbook.worksheets, start=1):
+        rows: list[str] = []
+        truncated = False
+        rowCount = 0
+        colCount = 0
+        for rowIndex, row in enumerate(sheet.iter_rows(values_only=True)):
+            if rowIndex >= MAX_PREVIEW_ROWS:
+                truncated = True
+                break
+            rowCount += 1
+            colCount = max(colCount, len(row))
+            cells = "".join(
+                f"<td>{escapeHtml('' if value is None else str(value))}</td>"
+                for value in row[:MAX_PREVIEW_COLS]
+            )
+            rows.append(f"<tr>{cells}</tr>")
+        sheets.append(
+            _Sheet(
+                index=index,
+                name=sheet.title,
+                tableHtml=("<table>" + "".join(rows) + "</table>") if rows else "",
+                rows=rowCount,
+                cols=colCount,
+                truncated=truncated,
+            )
+        )
+    return PreviewResult(html=_shell("文档预览", _sheetsDocument(sheets)))
 
 
 def _renderXls(content: bytes) -> PreviewResult:
@@ -222,29 +304,30 @@ def _renderXls(content: bytes) -> PreviewResult:
     文本兜底，字节会被当 UTF-8 解码 ⇒ **页面上全是乱码**（2026-11-22 实测：
     用户上传 19MB 的 .xls，预览乱码）。
     """
-    import io
-
     import xlrd
 
     workbook = xlrd.open_workbook(file_contents=content)
-    parts: list[str] = []
-    for sheet in workbook.sheets():
-        parts.append(f"<div class=\"sheet-name\">{escapeHtml(sheet.name)}</div>")
+    sheets: list[_Sheet] = []
+    for index, sheet in enumerate(workbook.sheets(), start=1):
         rows: list[str] = []
-        truncated = False
-        for rowIndex in range(min(sheet.nrows, MAX_PREVIEW_ROWS)):
+        visibleRows = min(sheet.nrows, MAX_PREVIEW_ROWS)
+        for rowIndex in range(visibleRows):
             cells = "".join(
                 f"<td>{escapeHtml(_xlsCellText(sheet.cell_value(rowIndex, colIndex)))}</td>"
                 for colIndex in range(min(sheet.ncols, MAX_PREVIEW_COLS))
             )
             rows.append(f"<tr>{cells}</tr>")
-        if sheet.nrows > MAX_PREVIEW_ROWS:
-            truncated = True
-        if rows:
-            parts.append("<table>" + "".join(rows) + "</table>")
-        if truncated:
-            parts.append(_truncatedNote())
-    return PreviewResult(html=_shell("文档预览", "".join(parts)))
+        sheets.append(
+            _Sheet(
+                index=index,
+                name=sheet.name,
+                tableHtml=("<table>" + "".join(rows) + "</table>") if rows else "",
+                rows=sheet.nrows,
+                cols=sheet.ncols,
+                truncated=sheet.nrows > MAX_PREVIEW_ROWS,
+            )
+        )
+    return PreviewResult(html=_shell("文档预览", _sheetsDocument(sheets)))
 
 
 def _xlsCellText(value: Any) -> str:

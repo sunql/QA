@@ -151,3 +151,73 @@ def test_renderPreviewDispatchesByKind() -> None:
 
     unknown = renderPreview(b"plain", previewKind="WEIRD", filename="a.bin")
     assert "<pre>" in unknown.html
+
+
+# ---------------------------------------------------------------------------
+# 多 sheet 导航（2026-11-22 用户反馈「怎么看多个 sheet」）
+# ---------------------------------------------------------------------------
+
+
+def test_multipleSheetsGetNavigationAndAnchors() -> None:
+    """多个 sheet ⇒ 目录导航 + 每个 sheet 一个 ``<section id="sheet-N">``。
+
+    ⚠️ 必须**纯 CSS**（预览页 CSP 禁脚本）：把用户内容渲染出的页面开脚本，
+    等于把 XSS 面重新打开。
+    """
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    first = workbook.active
+    first.title = "报价"
+    first.append(["供应商", "单价"])
+    second = workbook.create_sheet("历史价")
+    second.append(["2025", "10.5"])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+
+    result = renderOffice(buffer.getvalue(), "a.xlsx")
+
+    # 目录：两个 sheet 各一个锚点链接
+    assert 'class="sheet-nav"' in result.html
+    assert 'href="#sheet-1"' in result.html
+    assert 'href="#sheet-2"' in result.html
+    # 每个 sheet 一个 section
+    assert 'id="sheet-1"' in result.html
+    assert 'id="sheet-2"' in result.html
+    # 两个 sheet 的内容都在（切换靠 CSS，不是砍掉）
+    assert "供应商" in result.html
+    assert "2025" in result.html
+    # 标题里带 sheet 数
+    assert "2 个工作表" in result.html
+
+
+def test_singleSheetStillHasNavigation() -> None:
+    """单 sheet 也给目录（行为一致，且用户知道只有 1 个）。"""
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    workbook.active.title = "唯一表"
+    workbook.active.append(["x"])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+
+    result = renderOffice(buffer.getvalue(), "a.xlsx")
+
+    assert "1 个工作表" in result.html
+    assert 'href="#sheet-1"' in result.html
+
+
+def test_sheetNavigationIsCssOnlyNoScript() -> None:
+    """导航必须是 CSS 实现（`:target`），页面里**不能有 script**。"""
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    workbook.active.append(["x"])
+    workbook.create_sheet("二")
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+
+    result = renderOffice(buffer.getvalue(), "a.xlsx")
+
+    assert ":target" in result.html
+    assert "<script" not in result.html

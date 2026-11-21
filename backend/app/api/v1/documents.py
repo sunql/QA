@@ -222,6 +222,41 @@ async def previewDocument(
     )
 
 
+@router.post(
+    "/{documentId:int}/vectorize",
+    summary="把已入库文档向量化（进 document_embeddings，采购知识检索可见）",
+    status_code=status.HTTP_200_OK,
+)
+@limiter.limit(rateLimitValue)
+async def vectorizeDocument(
+    request: Request,
+    documentId: int,
+    _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: DocumentService = Depends(getDocumentService),
+) -> dict:
+    """读回**已存的源文件** → 切块 → embedding → 写 document_embeddings。
+
+    不重新上传、不重新解析用户文件；幂等（先删旧向量再写）。
+    写 ACL：只有 owner 部门成员 / admin 能触发（**消耗 embedding 额度**）。
+    """
+    from app.services.document_vectorize_service import vectorizeDocument as _run
+
+    catalog = await service.getDocument(session, documentId, user=_user)
+    result = await _run(
+        session,
+        catalog,
+        actor=_user,
+        isAdmin="admin" in (_user.roles or ()),
+    )
+    return {
+        "documentId": result.documentId,
+        "chunks": result.chunks,
+        "replaced": result.replaced,
+        "status": "vectorized",
+    }
+
+
 @router.post("", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
 async def createDocument(
     payload: DocumentCreate,

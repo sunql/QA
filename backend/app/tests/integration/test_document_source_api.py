@@ -312,3 +312,123 @@ async def test_preview_denied_for_l3_document(
     resp = await client.get(f"/api/v1/documents/{created['id']}/preview")
 
     assert resp.status_code == 403, resp.text
+
+
+# ---------------------------------------------------------------------------
+# 向量化（需求 3：wiki 导入的文件也能进 document_embeddings）
+# ---------------------------------------------------------------------------
+
+
+async def test_vectorize_readsStoredSourceAndWritesVectors(
+    client: AsyncClient,
+    dbSession: Any,
+    fakeMinio: _FakeMinio,
+    mockEmbeddingService: Any,
+) -> None:
+    """读回**已存的源文件** → 切块 → 写向量 ⇒ 不必重新上传。"""
+    from sqlalchemy import select
+
+    from app.domain.models import DocumentCatalog
+
+    created = await _createDocument(
+        client,
+        dbSession,
+        fakeMinio,
+        content="## 制度\n\n第一条 注册资本 1000 万。\n\n第二条 交付延迟 30 天。".encode("utf-8"),
+    )
+
+    with patch(
+        "app.services.rag_service._getEmbeddingService",
+        return_value=mockEmbeddingService,
+    ):
+        resp = await client.post(f"/api/v1/documents/{created['id']}/vectorize")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["documentId"] == created["documentId"]
+    assert body["chunks"] >= 1
+    assert body["status"] == "vectorized"
+
+    # catalog 的向量化时间已记（目录页据此显示「已向量化」）
+    row = (
+        await dbSession.execute(
+            select(DocumentCatalog).where(DocumentCatalog.id == created["id"])
+        )
+    ).scalars().first()
+    assert row.vectorized_at is not None
+
+
+async def test_vectorize_is_idempotent(
+    client: AsyncClient,
+    dbSession: Any,
+    fakeMinio: _FakeMinio,
+    mockEmbeddingService: Any,
+) -> None:
+    """重复调用不产生重复 chunk（先删旧向量再写）。"""
+    with patch(
+        "app.services.rag_service._getEmbeddingService",
+        return_value=mockEmbeddingService,
+    ):
+        created = await _createDocument(
+            client,
+            dbSession,
+            fakeMinio,
+            content="## 制度\n\n一条内容。".encode("utf-8"),
+        )
+        first = await client.post(f"/api/v1/documents/{created['id']}/vectorize")
+        second = await client.post(f"/api/v1/documents/{created['id']}/vectorize")
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["chunks"] == second.json()["chunks"]
+    assert second.json()["replaced"] is True
+
+
+async def test_vectorize_denied_for_non_owner(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    """非 owner 部门 ⇒ 403（向量化消耗额度，不能任意用户触发）。"""
+    from sqlalchemy import update
+
+    from app.domain.models import DocumentCatalog
+
+    created = await _createDocument(client, dbSession, fakeMinio)
+    await dbSession.execute(
+        update(DocumentCatalog)
+        .where(DocumentCatalog.id == created["id"])
+        .values(owner="finance-dept")
+    )
+    await dbSession.commit()
+
+    resp = await client.post(
+        f"/api/v1/documents/{created['id']}/vectorize",
+        # header 只能是 ASCII（httpx 不编码非 ASCII header 值）
+        headers={
+            "X-User-Id": "someone",
+            "X-User-Roles": "analyst",
+            "X-User-Departments": "sales-dept",
+        },
+    )
+
+    assert resp.status_code == 403, resp.text
+
+
+async def test_vectorize_404_when_no_source(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    """没有源文件 ⇒ 422（不是 500）。"""
+    from sqlalchemy import update
+
+    from app.domain.models import DocumentCatalog
+
+    created = await _createDocument(client, dbSession, fakeMinio)
+    await dbSession.execute(
+        update(DocumentCatalog)
+        .where(DocumentCatalog.id == created["id"])
+        .values(storage_url=None)
+    )
+    await dbSession.commit()
+
+    resp = await client.post(f"/api/v1/documents/{created['id']}/vectorize")
+
+    assert resp.status_code == 422, resp.text

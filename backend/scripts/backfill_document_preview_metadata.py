@@ -24,6 +24,8 @@ from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from datetime import UTC, datetime, timezone  # noqa: E402
+
 from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
@@ -51,6 +53,16 @@ def filenameFromStorageUrl(storageUrl: str) -> str:
     return name.rsplit("/", 1)[-1]
 
 
+async def _existingChunkCount(documentId: str) -> int:
+    """Milvus 里该文档的 chunk 数（读不到 ⇒ 0，不猜）。"""
+    try:
+        from app.infrastructure.milvus_client import queryDocumentChunks
+
+        return len(queryDocumentChunks(documentId))
+    except Exception:  # noqa: BLE001 —— Milvus 不可达时按「无向量」处理
+        return 0
+
+
 async def _objectSize(objectName: str) -> int | None:
     """读对象大小；读不到 ⇒ None（不猜）。"""
     from app.infrastructure.object_storage import _getClient, DEFAULT_BUCKET
@@ -73,10 +85,17 @@ async def backfill(session: AsyncSession) -> dict[str, int]:
             select(DocumentCatalog).where(
                 DocumentCatalog.preview_kind.is_(None)
                 | DocumentCatalog.file_size.is_(None)
+                | DocumentCatalog.vectorized_at.is_(None)
             )
         )
     ).scalars().all()
-    stats = {"scanned": len(rows), "updated": 0, "sizeResolved": 0, "skipped": 0}
+    stats = {
+        "scanned": len(rows),
+        "updated": 0,
+        "sizeResolved": 0,
+        "vectorized": 0,
+        "skipped": 0,
+    }
     for row in rows:
         if not row.storage_url:
             stats["skipped"] += 1
@@ -93,6 +112,12 @@ async def backfill(session: AsyncSession) -> dict[str, int]:
         if size is not None:
             row.file_size = size
             stats["sizeResolved"] += 1
+        if row.vectorized_at is None:
+            # 向量化状态：查 Milvus 里**实际有没有 chunk**（真实证据，不是猜）
+            chunkCount = await _existingChunkCount(row.document_id)
+            if chunkCount > 0:
+                row.vectorized_at = datetime.now(timezone.utc)
+                stats["vectorized"] += 1
         stats["updated"] += 1
     await session.commit()
     return stats
@@ -105,7 +130,8 @@ async def main() -> None:
     print(
         "[backfill_document_preview_metadata] "
         f"扫描 {stats['scanned']} 行 / 更新 {stats['updated']} 行 / "
-        f"取到体积 {stats['sizeResolved']} / 跳过 {stats['skipped']}"
+        f"取到体积 {stats['sizeResolved']} / 标记已向量化 {stats['vectorized']} / "
+        f"跳过 {stats['skipped']}"
     )
 
 

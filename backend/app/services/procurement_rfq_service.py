@@ -11,7 +11,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 from datetime import datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +32,16 @@ def computePayloadHash(payload: dict) -> str:
     """payload 的 canonical SHA-256（字段名排序，语义等价判定）。"""
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _asUuid(value: Any) -> Any:
+    """草稿 id 归一（UUID 对象 ↔ 字符串）；非法值原样抛（⇒ 400）。"""
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValidationError(f"非法草稿 id：{value!r}") from exc
 
 
 def _now() -> datetime:
@@ -133,15 +143,20 @@ class ProcurementRfqService:
         )
         session.add(draft)
         await session.flush()
+        await session.commit()
         return draft, True
 
     async def getDraft(
         self, session: AsyncSession, rfqDraftId
     ) -> ProcurementRfqDraft:
+        """按草稿 id 取草稿（**入参兼容 UUID 对象与字符串**）。
+
+        列类型是 UUID（asyncpg 严格类型 ⇒ 传字符串会报类型错）⇒ 统一转 UUID。
+        """
         draft = (
             await session.execute(
                 select(ProcurementRfqDraft).where(
-                    ProcurementRfqDraft.rfq_draft_id == rfqDraftId
+                    ProcurementRfqDraft.rfq_draft_id == _asUuid(rfqDraftId)
                 )
             )
         ).scalars().first()
@@ -182,6 +197,7 @@ class ProcurementRfqService:
             # 校验通过 ⇒ 驻留 VALIDATING（版本仍推进：校验动作可追溯）
             draft.version += 1
         await session.flush()
+        await session.commit()
         await session.refresh(draft)
         return draft
 
@@ -206,6 +222,7 @@ class ProcurementRfqService:
             session, rfqDraftId=draft.rfq_draft_id, decision="CANCEL", actor=actor
         )
         await session.flush()
+        await session.commit()
         await session.refresh(draft)
         return draft
 
@@ -241,6 +258,7 @@ class ProcurementRfqService:
             session, rfqDraftId=draft.rfq_draft_id, decision="SUBMIT", actor=actor
         )
         await session.flush()
+        await session.commit()
         await session.refresh(draft)
         return draft
 
@@ -283,6 +301,7 @@ class ProcurementRfqService:
             session, rfqDraftId=draft.rfq_draft_id, decision=decision, actor=actor
         )
         await session.flush()
+        await session.commit()
         await session.refresh(draft)
         return draft
 
@@ -294,7 +313,7 @@ class ProcurementRfqService:
             (
                 await session.execute(
                     select(ProcurementRfqDecision)
-                    .where(ProcurementRfqDecision.rfq_draft_id == rfqDraftId)
+                    .where(ProcurementRfqDecision.rfq_draft_id == _asUuid(rfqDraftId))
                     .order_by(ProcurementRfqDecision.id)
                 )
             ).scalars().all()

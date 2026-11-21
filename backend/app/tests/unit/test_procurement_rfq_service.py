@@ -121,14 +121,16 @@ async def test_same_key_different_payload_conflicts(dbSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_validate_pass_keeps_draft_state(dbSession) -> None:
+async def test_validate_pass_stays_validating(dbSession) -> None:
     await _seedSupplier(dbSession)
     svc = ProcurementRfqService()
     d = await svc.createDraft(
         dbSession, **_createArgs(), idempotencyKey="idem-4", actor="a"
     )
     result = await svc.validateDraft(dbSession, d.rfq_draft_id, actor="a")
-    assert result.status == "DRAFT", "校验通过 ⇒ 留 DRAFT（提交审批在 M5-2）"
+    assert result.status == "VALIDATING", (
+        "校验通过 ⇒ 驻留 VALIDATING（「已通过、待提交」，M5-2 submit 从此态进）"
+    )
     assert result.version == 2, "validate 落版本推进（可追溯）"
 
 
@@ -180,4 +182,115 @@ async def test_transition_with_stale_version_conflicts(dbSession) -> None:
     with pytest.raises(ConflictError):
         await svc.validateDraft(
             dbSession, d.rfq_draft_id, actor="a", expectedVersion=99
+        )
+
+
+# ── M5-2：审批闭环（submit/approve/reject + 决策留痕）──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_submit_approval_requires_validated_draft(dbSession) -> None:
+    """未 validate 的 DRAFT 直接 submit ⇒ 409（先校验再审批）。"""
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m5-2a", actor="creator"
+    )
+    with pytest.raises(ConflictError):
+        await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+    assert d.status == "DRAFT"
+
+
+@pytest.mark.asyncio
+async def test_submit_after_validate_enters_pending_approval(dbSession) -> None:
+    await _seedSupplier(dbSession)
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m5-2b", actor="creator"
+    )
+    await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
+    result = await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+    assert result.status == "PENDING_APPROVAL"
+    decisions = await svc.listDecisions(dbSession, d.rfq_draft_id)
+    assert [x.decision for x in decisions] == ["SUBMIT"]
+    assert decisions[0].actor == "creator", "DoD 4：审批链留痕（谁/何时/动作）"
+
+
+@pytest.mark.asyncio
+async def test_submit_is_idempotent_in_pending_state(dbSession) -> None:
+    await _seedSupplier(dbSession)
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m5-2c", actor="creator"
+    )
+    await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
+    r1 = await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+    r2 = await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+    assert r1.rfq_draft_id == r2.rfq_draft_id and r1.status == "PENDING_APPROVAL"
+
+
+@pytest.mark.asyncio
+async def test_approve_moves_to_ready_to_send_and_records(dbSession) -> None:
+    await _seedSupplier(dbSession)
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m5-2d", actor="creator"
+    )
+    await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+
+    result = await svc.decideApproval(
+        dbSession, d.rfq_draft_id, decision="APPROVE",
+        actor="approver-1", note="供应商已核验",
+    )
+    assert result.status == "READY_TO_SEND"
+    decisions = await svc.listDecisions(dbSession, d.rfq_draft_id)
+    assert [x.decision for x in decisions] == ["SUBMIT", "APPROVE"]
+    assert decisions[-1].note == "供应商已核验"
+
+
+@pytest.mark.asyncio
+async def test_reject_moves_to_rejected(dbSession) -> None:
+    await _seedSupplier(dbSession)
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m5-2e", actor="creator"
+    )
+    await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+    result = await svc.decideApproval(
+        dbSession, d.rfq_draft_id, decision="REJECT", actor="approver-1"
+    )
+    assert result.status == "REJECTED"
+
+
+@pytest.mark.asyncio
+async def test_self_approval_forbidden(dbSession) -> None:
+    """自批禁止：决策人 = 提交人 ⇒ 409。"""
+    await _seedSupplier(dbSession)
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m5-2f", actor="creator"
+    )
+    await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+    with pytest.raises(ConflictError):
+        await svc.decideApproval(
+            dbSession, d.rfq_draft_id, decision="APPROVE", actor="creator"
+        )
+
+
+@pytest.mark.asyncio
+async def test_double_decision_conflicts(dbSession) -> None:
+    """已终态（REJECTED）⇒ 再决策 409（状态机 fail-closed）。"""
+    await _seedSupplier(dbSession)
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m5-2g", actor="creator"
+    )
+    await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.decideApproval(dbSession, d.rfq_draft_id, decision="REJECT", actor="ap")
+    with pytest.raises(ConflictError):
+        await svc.decideApproval(
+            dbSession, d.rfq_draft_id, decision="APPROVE", actor="ap2"
         )

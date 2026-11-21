@@ -17,10 +17,10 @@ from types import MappingProxyType
 RFQ_DRAFT_STATUS = "rfq"
 
 _RFQ_TRANSITIONS: Mapping[str, frozenset[str]] = MappingProxyType({
-    # VALIDATING→DRAFT：校验通过回落（M5-1 不进审批）；VALIDATING→PENDING_APPROVAL：
-    # M5-2 submit-approval（对**已通过校验**的 VALIDATING 态草稿）。
-    "DRAFT": frozenset({"VALIDATING", "PENDING_APPROVAL", "CANCELLED"}),
-    "VALIDATING": frozenset({"DRAFT", "NEEDS_CORRECTION", "PENDING_APPROVAL"}),
+    # VALIDATING = 「校验已通过、待提交」的驻留态（M5-2 submit 从这里进审批）；
+    # VALIDATING→NEEDS_CORRECTION：校验不通过打回。
+    "DRAFT": frozenset({"VALIDATING", "CANCELLED"}),
+    "VALIDATING": frozenset({"NEEDS_CORRECTION", "PENDING_APPROVAL"}),
     "NEEDS_CORRECTION": frozenset({"VALIDATING", "CANCELLED"}),
     "PENDING_APPROVAL": frozenset({"READY_TO_SEND", "REJECTED"}),
     "READY_TO_SEND": frozenset({"CANCELLED"}),  # D-4：SENDING 在 M5 不可达

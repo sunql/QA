@@ -67,9 +67,47 @@ def upgrade() -> None:
         "business_command",
         sa.Column("payload_hash", sa.String(64), nullable=True),
     )
+    op.create_table(
+        "procurement_rfq_decision",
+        sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
+        sa.Column(
+            "rfq_draft_id",
+            sa.dialects.postgresql.UUID(),
+            sa.ForeignKey("procurement_rfq_draft.rfq_draft_id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column(
+            "decision",
+            sa.String(24),
+            nullable=False,
+        ),
+        sa.Column("actor", sa.String(64), nullable=False),
+        sa.Column("note", sa.Text(), nullable=True),
+        sa.Column(
+            "decided_time", sa.DateTime(timezone=True), nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.Column(
+            "created_time", sa.DateTime(timezone=True), nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.Column(
+            "updated_time", sa.DateTime(timezone=True), nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.CheckConstraint(
+            "decision IN ('SUBMIT','APPROVE','REJECT','CANCEL')",
+            name="ck_rfq_decision_kind",
+        ),
+    )
+    op.create_index(
+        "ix_rfq_decision_draft", "procurement_rfq_decision", ["rfq_draft_id"]
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("ix_rfq_decision_draft", table_name="procurement_rfq_decision")
+    op.drop_table("procurement_rfq_decision")
     op.drop_column("business_command", "payload_hash")
     op.drop_index("ix_rfq_draft_request", table_name="procurement_rfq_draft")
     op.drop_index("uq_rfq_draft_id", table_name="procurement_rfq_draft")

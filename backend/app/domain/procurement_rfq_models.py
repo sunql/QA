@@ -45,3 +45,27 @@ class ProcurementRfqDraft(Base, TimestampMixin):
     payload_hash: Mapped[str] = mapped_column(sa.String(64), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(sa.String(128), nullable=False, unique=True)
     created_by: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+
+
+class ProcurementRfqDecision(Base, TimestampMixin):
+    """RFQ 决策留痕（M5-2，DoD 4：谁/何时/动作/意见；不覆盖历史）。"""
+
+    __tablename__ = "procurement_rfq_decision"
+    __table_args__ = (
+        sa.CheckConstraint(
+            "decision IN ('SUBMIT','APPROVE','REJECT','CANCEL')",
+            name="ck_rfq_decision_kind",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    rfq_draft_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=False, index=True
+    )
+    decision: Mapped[str] = mapped_column(sa.String(24), nullable=False)
+    actor: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    note: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    decided_time: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), nullable=False,
+        server_default=sa.text("now()"),
+    )

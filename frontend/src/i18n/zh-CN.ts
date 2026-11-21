@@ -1,3665 +1,3663 @@
-// M4-1/M4-3 重建：从干净 JSON 重新生成（保留全部既有 section + 新增 procurement.knowledge/catalog）。
-
 export const zhCN = {
   userMenu: {
-  "profile": "个人信息",
-  "changePassword": "修改密码",
-  "logout": "登出",
-  "changePasswordHint": "首次登录请修改密码",
-  "displayName": "{displayName} ({username})"
+  profile: "个人信息",
+  changePassword: "修改密码",
+  logout: "登出",
+  changePasswordHint: "首次登录请修改密码",
+  displayName: "{displayName} ({username})"
 },
   auth: {
-  "login": {
-    "title": "登录 · 泰鸿智脑",
-    "username": "用户名",
-    "password": "密码",
-    "rememberMe": "记住我",
-    "submit": "登录",
-    "forgot": "忘记密码？请联系管理员",
-    "invalidCredentials": "用户名或密码错误",
-    "accountDisabled": "账号已停用，请联系管理员",
-    "rateLimited": "尝试次数过多，请稍后再试",
-    "networkError": "网络异常，请稍后重试"
+  login: {
+    title: "登录 · 泰鸿智脑",
+    username: "用户名",
+    password: "密码",
+    rememberMe: "记住我",
+    submit: "登录",
+    forgot: "忘记密码？请联系管理员",
+    invalidCredentials: "用户名或密码错误",
+    accountDisabled: "账号已停用，请联系管理员",
+    rateLimited: "尝试次数过多，请稍后再试",
+    networkError: "网络异常，请稍后重试"
   },
-  "changePassword": {
-    "title": "修改密码",
-    "oldPassword": "当前密码",
-    "newPassword": "新密码",
-    "confirmPassword": "确认新密码",
-    "policyHint": "≥8 位，含字母和数字",
-    "weak": "密码至少 8 位且必须包含字母和数字",
-    "mismatch": "两次输入不一致",
-    "oldWrong": "当前密码不正确",
-    "success": "密码已修改，请重新登录"
+  changePassword: {
+    title: "修改密码",
+    oldPassword: "当前密码",
+    newPassword: "新密码",
+    confirmPassword: "确认新密码",
+    policyHint: "≥8 位，含字母和数字",
+    weak: "密码至少 8 位且必须包含字母和数字",
+    mismatch: "两次输入不一致",
+    oldWrong: "当前密码不正确",
+    success: "密码已修改，请重新登录"
   },
-  "profile": {
-    "title": "个人信息",
-    "username": "用户名",
-    "displayName": "显示名",
-    "email": "邮箱",
-    "roles": "角色",
-    "organizations": "所属组织",
-    "lastLogin": "上次登录",
-    "tenant": "租户",
-    "editPassword": "修改密码"
+  profile: {
+    title: "个人信息",
+    username: "用户名",
+    displayName: "显示名",
+    email: "邮箱",
+    roles: "角色",
+    organizations: "所属组织",
+    lastLogin: "上次登录",
+    tenant: "租户",
+    editPassword: "修改密码"
   }
 },
   common: {
-  "refresh": "刷新",
-  "retry": "重试",
-  "edit": "编辑",
-  "delete": "删除",
-  "save": "保存",
-  "actions": "操作",
-  "more": "更多",
-  "version": "版本",
-  "close": "关闭",
-  "cancel": "取消",
-  "confirm": "确定",
-  "send": "发送",
-  "copy": "复制",
-  "copied": "已复制",
-  "totalItems": "共 {total} 条",
-  "reset": "重置",
-  "enabled": "启用",
-  "disabled": "停用",
-  "active": "当前",
-  "none": "（无）",
-  "dash": "-",
-  "emDash": "—",
-  "next": "下一步",
-  "prev": "上一步",
-  "parse": "解析",
-  "reasoning": "推理过程",
-  "rationale": "理由",
-  "aiAssistApply": "应用建议",
-  "suggestedThresholds": "建议阈值"
+  refresh: "刷新",
+  retry: "重试",
+  edit: "编辑",
+  delete: "删除",
+  save: "保存",
+  actions: "操作",
+  more: "更多",
+  version: "版本",
+  close: "关闭",
+  cancel: "取消",
+  confirm: "确定",
+  send: "发送",
+  copy: "复制",
+  copied: "已复制",
+  totalItems: "共 {total} 条",
+  reset: "重置",
+  enabled: "启用",
+  disabled: "停用",
+  active: "当前",
+  none: "（无）",
+  dash: "-",
+  emDash: "—",
+  next: "下一步",
+  prev: "上一步",
+  parse: "解析",
+  reasoning: "推理过程",
+  rationale: "理由",
+  aiAssistApply: "应用建议",
+  suggestedThresholds: "建议阈值"
 },
   appLayout: {
-  "brand": "泰鸿智脑",
-  "menu": {
-    "models": "模型配置",
-    "embeddings": "Embedding 服务",
-    "chat": "AIChatService",
-    "ontology": "本体管理",
-    "datasource": "数据源",
-    "dataQuality": "数据质量",
-    "dataQualityGenerate": "规则生成向导",
-    "dataQualityReport": "评估报告",
-    "lineage": "数据血缘",
-    "entityMapping": "编码映射",
-    "kpiCatalog": "KPI 目录",
-    "kpiGovernance": "KPI 治理",
-    "features": "特征目录",
-    "usage": "用量看板",
-    "status": "服务状态",
-    "graph": "Neo4j 图库",
-    "vectors": "Milvus 向量库",
-    "supplier360": "供应商 360°",
-    "supplierRisk": "供应商风险",
-    "agentRuntime": "Agent 运行时",
-    "agentOrchestration": "编排配置",
-    "agentTasks": "Agent 任务",
-    "agents": "Agent Registry",
-    "businessObjects": "业务对象",
-    "documents": "文档中心",
-    "adminAudit": "审计日志",
-    "ontologyProperties": "本体属性管理"
+  brand: "泰鸿智脑",
+  menu: {
+    models: "模型配置",
+    embeddings: "Embedding 服务",
+    chat: "AIChatService",
+    ontology: "本体管理",
+    datasource: "数据源",
+    dataQuality: "数据质量",
+    dataQualityGenerate: "规则生成向导",
+    dataQualityReport: "评估报告",
+    lineage: "数据血缘",
+    entityMapping: "编码映射",
+    kpiCatalog: "KPI 目录",
+    kpiGovernance: "KPI 治理",
+    features: "特征目录",
+    usage: "用量看板",
+    status: "服务状态",
+    graph: "Neo4j 图库",
+    vectors: "Milvus 向量库",
+    supplier360: "供应商 360°",
+    supplierRisk: "供应商风险",
+    agentRuntime: "Agent 运行时",
+    agentOrchestration: "编排配置",
+    agentTasks: "Agent 任务",
+    agents: "Agent Registry",
+    businessObjects: "业务对象",
+    documents: "文档中心",
+    adminAudit: "审计日志",
+    ontologyProperties: "本体属性管理"
   },
-  "themeToggle": "切换暗色模式",
-  "themeDark": "暗",
-  "themeLight": "亮",
-  "languageSwitch": "切换语言",
-  "menuLoadFailed": "菜单加载失败",
-  "menuEmpty": "暂无授权菜单"
+  themeToggle: "切换暗色模式",
+  themeDark: "暗",
+  themeLight: "亮",
+  languageSwitch: "切换语言",
+  menuLoadFailed: "菜单加载失败",
+  menuEmpty: "暂无授权菜单"
 },
   menu: {
-  "section": {
-    "aiAgent": "AI Agent",
-    "analytics": "智能分析",
-    "enterpriseWiki": "企业 Wiki",
-    "bizConfig": "业务配置",
-    "foundation": "业务基础信息",
-    "systemConfig": "系统信息配置",
-    "auditSecurity": "审计安全",
-    "research": "研究分析"
+  section: {
+    aiAgent: "AI Agent",
+    analytics: "智能分析",
+    enterpriseWiki: "企业 Wiki",
+    bizConfig: "业务配置",
+    foundation: "业务基础信息",
+    systemConfig: "系统信息配置",
+    auditSecurity: "审计安全",
+    research: "研究分析"
   },
-  "item": {
-    "chat": "AIChatService",
-    "agentRuntime": "Agent 运行时",
-    "agentOrchestration": "编排配置",
-    "agentTasks": "Agent 任务",
-    "agents": "Agent Registry",
-    "supplier360": "供应商 360°",
-    "supplierRisk": "供应商风险",
-    "reports": "我的报告",
-    "ontology": "本体管理",
-    "dataQuality": "数据质量",
-    "dataQualityGenerate": "规则生成向导",
-    "dataQualityReport": "评估报告",
-    "lineage": "数据血缘",
-    "entityMapping": "编码映射",
-    "kpiCatalog": "KPI 目录",
-    "kpiGovernance": "KPI 治理",
-    "features": "特征目录",
-    "businessObjects": "业务对象",
-    "dataDomains": "数据域",
-    "ontologyProperties": "本体属性管理",
-    "datasource": "数据源",
-    "localImport": "本地数据初始化",
-    "documents": "文档中心",
-    "usage": "用量看板",
-    "graph": "Neo4j 图库",
-    "vectors": "Milvus 向量库",
-    "models": "模型配置",
-    "embeddings": "Embedding 服务",
-    "status": "服务状态",
-    "adminAudit": "审计日志",
-    "adminFeatureRules": "Feature 规则",
-    "adminUsers": "用户管理",
-    "adminRoles": "角色管理",
-    "adminOrganizations": "组织管理",
-    "adminMenus": "菜单管理",
-    "adminSystemConfig": "系统参数",
-    "adminTools": "工具管理",
-    "wikiPages": "知识条目",
-    "wikiImport": "知识导入",
-    "wikiConflicts": "冲突检测",
-    "wikiSuggestions": "结构化建议",
-    "wikiCoverage": "覆盖度看板",
-    "wikiGraph": "知识图谱",
-    "wikiChat": "Wiki Chat",
-    "wikiLinks": "Wiki 链接管理",
-    "wikiCategories": "Wiki 分类管理",
-    "dataQualityRuleParams": "数据质量 / 规则配置(结构化)",
-    "profile": "个人信息",
-    "changePassword": "修改密码",
-    "researchSession": "研究会话",
-    "researchCompare": "研究对比",
-    "workflowInstances": "工作流实例",
-    "workflowApprovals": "待办审批",
-    "workflowDefinitions": "工作流定义"
+  item: {
+    chat: "AIChatService",
+    agentRuntime: "Agent 运行时",
+    agentOrchestration: "编排配置",
+    agentTasks: "Agent 任务",
+    agents: "Agent Registry",
+    supplier360: "供应商 360°",
+    supplierRisk: "供应商风险",
+    reports: "我的报告",
+    ontology: "本体管理",
+    dataQuality: "数据质量",
+    dataQualityGenerate: "规则生成向导",
+    dataQualityReport: "评估报告",
+    lineage: "数据血缘",
+    entityMapping: "编码映射",
+    kpiCatalog: "KPI 目录",
+    kpiGovernance: "KPI 治理",
+    features: "特征目录",
+    businessObjects: "业务对象",
+    dataDomains: "数据域",
+    ontologyProperties: "本体属性管理",
+    datasource: "数据源",
+    localImport: "本地数据初始化",
+    documents: "文档中心",
+    usage: "用量看板",
+    graph: "Neo4j 图库",
+    vectors: "Milvus 向量库",
+    models: "模型配置",
+    embeddings: "Embedding 服务",
+    status: "服务状态",
+    adminAudit: "审计日志",
+    adminFeatureRules: "Feature 规则",
+    adminUsers: "用户管理",
+    adminRoles: "角色管理",
+    adminOrganizations: "组织管理",
+    adminMenus: "菜单管理",
+    adminSystemConfig: "系统参数",
+    adminTools: "工具管理",
+    wikiPages: "知识条目",
+    wikiImport: "知识导入",
+    wikiConflicts: "冲突检测",
+    wikiSuggestions: "结构化建议",
+    wikiCoverage: "覆盖度看板",
+    wikiGraph: "知识图谱",
+    wikiChat: "Wiki Chat",
+    wikiLinks: "Wiki 链接管理",
+    wikiCategories: "Wiki 分类管理",
+    dataQualityRuleParams: "数据质量 / 规则配置(结构化)",
+    profile: "个人信息",
+    changePassword: "修改密码",
+    researchSession: "研究会话",
+    researchCompare: "研究对比",
+    workflowInstances: "工作流实例",
+    workflowApprovals: "待办审批",
+    workflowDefinitions: "工作流定义"
   }
 },
   rbac: {
-  "common": {
-    "create": "新建",
-    "edit": "编辑",
-    "delete": "删除",
-    "refresh": "刷新",
-    "save": "保存",
-    "cancel": "取消",
-    "actions": "操作",
-    "confirmDelete": "确定删除",
-    "grant": "授权",
-    "view": "查看权限",
-    "enabled": "启用",
-    "disabled": "停用",
-    "selectPlaceholder": "请选择",
-    "none": "（无）"
+  common: {
+    create: "新建",
+    edit: "编辑",
+    delete: "删除",
+    refresh: "刷新",
+    save: "保存",
+    cancel: "取消",
+    actions: "操作",
+    confirmDelete: "确定删除",
+    grant: "授权",
+    view: "查看权限",
+    enabled: "启用",
+    disabled: "停用",
+    selectPlaceholder: "请选择",
+    none: "（无）"
   },
-  "errors": {
-    "failed": "操作失败",
-    "loadFailed": "加载失败",
-    "partialCreated": "用户已创建，但角色/组织设置失败，请重新编辑该用户补设"
+  errors: {
+    failed: "操作失败",
+    loadFailed: "加载失败",
+    partialCreated: "用户已创建，但角色/组织设置失败，请重新编辑该用户补设"
   },
-  "messages": {
-    "created": "创建成功",
-    "updated": "更新成功",
-    "deleted": "删除成功",
-    "granted": "授权已保存"
+  messages: {
+    created: "创建成功",
+    updated: "更新成功",
+    deleted: "删除成功",
+    granted: "授权已保存"
   },
-  "menu": {
-    "noMenus": "暂无菜单可授权"
+  menu: {
+    noMenus: "暂无菜单可授权"
   },
-  "user": {
-    "title": "用户管理",
-    "username": "用户名",
-    "displayName": "显示名",
-    "email": "邮箱",
-    "enabled": "启用状态",
-    "roles": "角色",
-    "organizations": "组织",
-    "create": "新建用户",
-    "edit": "编辑用户",
-    "selectRoles": "授予角色",
-    "selectOrgs": "分配组织",
-    "grantMenu": "直接菜单授权",
-    "effectiveTitle": "有效权限",
-    "superuserHint": "该用户持有 admin 超管角色，可访问全部菜单（不受菜单授权限制）。",
-    "effectiveMenu": "有效菜单（三来源合集）",
-    "directGrant": "直接授权（用户维度）",
-    "roleGrant": "角色来源",
-    "orgGrant": "组织来源",
-    "password": "密码",
-    "passwordPlaceholder": "编辑时留空表示不修改密码",
-    "passwordStrengthHint": "至少 8 位，须含字母与数字",
-    "passwordTooLong": "密码 UTF-8 字节数超过 72"
+  user: {
+    title: "用户管理",
+    username: "用户名",
+    displayName: "显示名",
+    email: "邮箱",
+    enabled: "启用状态",
+    roles: "角色",
+    organizations: "组织",
+    create: "新建用户",
+    edit: "编辑用户",
+    selectRoles: "授予角色",
+    selectOrgs: "分配组织",
+    grantMenu: "直接菜单授权",
+    effectiveTitle: "有效权限",
+    superuserHint: "该用户持有 admin 超管角色，可访问全部菜单（不受菜单授权限制）。",
+    effectiveMenu: "有效菜单（三来源合集）",
+    directGrant: "直接授权（用户维度）",
+    roleGrant: "角色来源",
+    orgGrant: "组织来源",
+    password: "密码",
+    passwordPlaceholder: "编辑时留空表示不修改密码",
+    passwordStrengthHint: "至少 8 位，须含字母与数字",
+    passwordTooLong: "密码 UTF-8 字节数超过 72"
   },
-  "role": {
-    "code": "角色代码",
-    "name": "角色名称",
-    "description": "描述",
-    "builtin": "内置",
-    "isBuiltin": "内置超管",
-    "notBuiltin": "自定义",
-    "create": "新建角色",
-    "edit": "编辑角色",
-    "grantMenu": "菜单授权",
-    "viewPerm": "查看权限"
+  role: {
+    code: "角色代码",
+    name: "角色名称",
+    description: "描述",
+    builtin: "内置",
+    isBuiltin: "内置超管",
+    notBuiltin: "自定义",
+    create: "新建角色",
+    edit: "编辑角色",
+    grantMenu: "菜单授权",
+    viewPerm: "查看权限"
   },
-  "organization": {
-    "code": "组织代码",
-    "name": "组织名称",
-    "parent": "上级组织",
-    "sortOrder": "同级排序",
-    "description": "描述",
-    "create": "新建组织",
-    "edit": "编辑组织",
-    "grantMenu": "菜单授权",
-    "viewPerm": "查看权限",
-    "treeView": "树形视图",
-    "listView": "列表视图",
-    "selectParent": "选择上级组织（留空=根组织）",
-    "rootOrg": "（根组织）",
-    "dragHint": "提示：拖拽节点可调整归属",
-    "cycleError": "不能将组织移动到自身下级（会导致循环引用）",
-    "empty": "暂无组织数据",
-    "moved": "已调整归属",
-    "moveFailed": "调整失败"
+  organization: {
+    code: "组织代码",
+    name: "组织名称",
+    parent: "上级组织",
+    sortOrder: "同级排序",
+    description: "描述",
+    create: "新建组织",
+    edit: "编辑组织",
+    grantMenu: "菜单授权",
+    viewPerm: "查看权限",
+    treeView: "树形视图",
+    listView: "列表视图",
+    selectParent: "选择上级组织（留空=根组织）",
+    rootOrg: "（根组织）",
+    dragHint: "提示：拖拽节点可调整归属",
+    cycleError: "不能将组织移动到自身下级（会导致循环引用）",
+    empty: "暂无组织数据",
+    moved: "已调整归属",
+    moveFailed: "调整失败"
   },
-  "menuPage": {
-    "code": "代码",
-    "label": "显示",
-    "labelKey": "显示文案 (labelKey)",
-    "labelKeyHint": "填 i18n key（如 menu.item.xxx），或直接填中文标题（缺失 key 按原文显示）",
-    "icon": "图标",
-    "parent": "所属一级类",
-    "path": "前端路由 path",
-    "sortOrder": "排序",
-    "visible": "可见",
-    "hasChildren": "含子项",
-    "nodeType": "节点类型",
-    "section": "一级类",
-    "item": "叶子项",
-    "create": "新建菜单",
-    "edit": "编辑菜单",
-    "pathRequired": "叶子项必须填写 path",
-    "parentRequired": "叶子项必须选择所属一级类",
-    "permissionCode": "权限码（预留）",
-    "treeView": "树形视图",
-    "listView": "列表视图",
-    "moveSameLevelHint": "同级拖拽暂未启用，请在 Modal 中改 parentCode",
-    "cycleError": "不能将节点移动到自身下级（会导致循环引用）",
-    "sectionNoNest": "一级类不能挂到另一个一级类下",
-    "moved": "已调整归属",
-    "moveFailed": "调整失败",
-    "empty": "暂无菜单数据"
+  menuPage: {
+    code: "代码",
+    label: "显示",
+    labelKey: "显示文案 (labelKey)",
+    labelKeyHint: "填 i18n key（如 menu.item.xxx），或直接填中文标题（缺失 key 按原文显示）",
+    icon: "图标",
+    parent: "所属一级类",
+    path: "前端路由 path",
+    sortOrder: "排序",
+    visible: "可见",
+    hasChildren: "含子项",
+    nodeType: "节点类型",
+    section: "一级类",
+    item: "叶子项",
+    create: "新建菜单",
+    edit: "编辑菜单",
+    pathRequired: "叶子项必须填写 path",
+    parentRequired: "叶子项必须选择所属一级类",
+    permissionCode: "权限码（预留）",
+    treeView: "树形视图",
+    listView: "列表视图",
+    moveSameLevelHint: "同级拖拽暂未启用，请在 Modal 中改 parentCode",
+    cycleError: "不能将节点移动到自身下级（会导致循环引用）",
+    sectionNoNest: "一级类不能挂到另一个一级类下",
+    moved: "已调整归属",
+    moveFailed: "调整失败",
+    empty: "暂无菜单数据"
   }
 },
   semanticSearchButton: "语义搜索",
   errors: {
-  "requestFailed": "请求失败",
-  "requestFailedHttp": "请求失败 (HTTP {status})",
-  "networkError": "网络异常，请稍后重试",
-  "unknownError": "未知错误",
-  "noStreamSupport": "当前浏览器不支持流式响应"
+  requestFailed: "请求失败",
+  requestFailedHttp: "请求失败 (HTTP {status})",
+  networkError: "网络异常，请稍后重试",
+  unknownError: "未知错误",
+  noStreamSupport: "当前浏览器不支持流式响应"
 },
   pages: {
-  "chat": "AIChatService",
-  "ontology": "本体管理",
-  "datasource": "数据源管理",
-  "dataQuality": "数据质量管理",
-  "entityMapping": "跨系统编码映射",
-  "modelConfig": "模型配置管理",
-  "embeddings": "Embedding 服务管理",
-  "usage": "用量看板",
-  "status": "服务状态",
-  "searchEmpty": "未匹配到相关本体。请确认已通过编辑表单或 /embeddings/sync 写入向量。"
+  chat: "AIChatService",
+  ontology: "本体管理",
+  datasource: "数据源管理",
+  dataQuality: "数据质量管理",
+  entityMapping: "跨系统编码映射",
+  modelConfig: "模型配置管理",
+  embeddings: "Embedding 服务管理",
+  usage: "用量看板",
+  status: "服务状态",
+  searchEmpty: "未匹配到相关本体。请确认已通过编辑表单或 /embeddings/sync 写入向量。"
 },
   toast: {
-  "created": "创建成功",
-  "updated": "更新成功",
-  "deleted": "已删除",
-  "enabled": "已启用",
-  "disabled": "已停用",
-  "connectSuccess": "连接成功：{message}",
-  "connectFailed": "连接失败：{message}",
-  "networkError": "网络异常",
-  "pleaseSelectDatasource": "请先选择数据源",
-  "pleaseFillPassword": "请先填写密码再测试连接",
-  "sqlCopied": "SQL 已复制",
-  "copyFailed": "复制失败：{message}",
-  "versionUpdated": "更新成功（新版本已创建）",
-  "previewFailed": "生成导入预览失败，请稍后重试",
-  "importFailed": "导入失败，请查看错误详情",
-  "schemaLoadFailed": "Schema 加载失败，请检查数据源后重试",
-  "schemaCached": "Schema 缓存成功（{count} 张表）"
+  created: "创建成功",
+  updated: "更新成功",
+  deleted: "已删除",
+  enabled: "已启用",
+  disabled: "已停用",
+  connectSuccess: "连接成功：{message}",
+  connectFailed: "连接失败：{message}",
+  networkError: "网络异常",
+  pleaseSelectDatasource: "请先选择数据源",
+  pleaseFillPassword: "请先填写密码再测试连接",
+  sqlCopied: "SQL 已复制",
+  copyFailed: "复制失败：{message}",
+  versionUpdated: "更新成功（新版本已创建）",
+  previewFailed: "生成导入预览失败，请稍后重试",
+  importFailed: "导入失败，请查看错误详情",
+  schemaLoadFailed: "Schema 加载失败，请检查数据源后重试",
+  schemaCached: "Schema 缓存成功（{count} 张表）"
 },
   queryPlan: {
-  "panelLabel": "查看查询计划",
-  "interpretation": "理解",
-  "target": "查询目标",
-  "tables": "涉及表",
-  "selectedFields": "选用字段",
-  "aggregation": "聚合",
-  "groupBy": "分组",
-  "filters": "筛选条件",
-  "sort": "排序",
-  "joins": "JOIN 关系",
-  "rowLimit": "行数限制",
-  "viewSql": "查看 SQL",
-  "dataQuality": {
-    "unevaluated": "DQ: 未评估",
-    "tooltip": {
-      "unevaluated": "该表尚未评估数据质量，可去数据质量页触发评估",
-      "view": "点击查看明细"
+  panelLabel: "查看查询计划",
+  interpretation: "理解",
+  target: "查询目标",
+  tables: "涉及表",
+  selectedFields: "选用字段",
+  aggregation: "聚合",
+  groupBy: "分组",
+  filters: "筛选条件",
+  sort: "排序",
+  joins: "JOIN 关系",
+  rowLimit: "行数限制",
+  viewSql: "查看 SQL",
+  dataQuality: {
+    unevaluated: "DQ: 未评估",
+    tooltip: {
+      unevaluated: "该表尚未评估数据质量，可去数据质量页触发评估",
+      view: "点击查看明细"
     }
   }
 },
   multiStep: {
-  "summaryTotal": "{total} 步",
-  "summarySuccess": "成功 {success}",
-  "summaryFailed": "失败 {failed}",
-  "summaryRunning": "执行中 ({current}/{total})",
-  "summaryPending": "{total} 步 · 待执行",
-  "elapsed": "{seconds}秒",
-  "statusPending": "待执行",
-  "statusRunning": "执行中",
-  "statusDone": "已完成",
-  "statusCompressed": "已压缩",
-  "statusError": "失败",
-  "summaryStep": "汇总",
-  "resume": "续跑",
-  "resumeChooseModel": "选择续跑模型",
-  "resumeSameModelHint": "（该模型刚失败，可选重试或换其他模型）",
-  "resumeWithSelected": "用所选模型续跑",
-  "resumeWithOriginal": "原模型续跑",
-  "resumeFailed": "续跑失败：{message}（原有回答已保留，可再次续跑）",
-  "compressedRows": "数据已压缩（{from} → {to} 行）",
-  "KPI_DATASOURCE_MISMATCH": "KPI 指标绑定的数据源与你当前选择的数据源不一致"
+  summaryTotal: "{total} 步",
+  summarySuccess: "成功 {success}",
+  summaryFailed: "失败 {failed}",
+  summaryRunning: "执行中 ({current}/{total})",
+  summaryPending: "{total} 步 · 待执行",
+  elapsed: "{seconds}秒",
+  statusPending: "待执行",
+  statusRunning: "执行中",
+  statusDone: "已完成",
+  statusCompressed: "已压缩",
+  statusError: "失败",
+  summaryStep: "汇总",
+  resume: "续跑",
+  resumeChooseModel: "选择续跑模型",
+  resumeSameModelHint: "（该模型刚失败，可选重试或换其他模型）",
+  resumeWithSelected: "用所选模型续跑",
+  resumeWithOriginal: "原模型续跑",
+  resumeFailed: "续跑失败：{message}（原有回答已保留，可再次续跑）",
+  compressedRows: "数据已压缩（{from} → {to} 行）",
+  KPI_DATASOURCE_MISMATCH: "KPI 指标绑定的数据源与你当前选择的数据源不一致"
 },
   agentTrace: {
-  "panelLabel": "查看执行轨迹",
-  "summary": "{steps} 步 · {iterations} 轮 · {duration}",
-  "statusAnswered": "已完成",
-  "statusMaxIterations": "达到轮次上限",
-  "iterationLabel": "第 {n} 轮",
-  "stepFailed": "失败",
-  "truncated": "轨迹过长，仅显示前 50 步"
+  panelLabel: "查看执行轨迹",
+  summary: "{steps} 步 · {iterations} 轮 · {duration}",
+  statusAnswered: "已完成",
+  statusMaxIterations: "达到轮次上限",
+  iterationLabel: "第 {n} 轮",
+  stepFailed: "失败",
+  truncated: "轨迹过长，仅显示前 50 步"
 },
   messageItem: {
-  "cost": "成本: ${amount}",
-  "model": "模型: {name}",
-  "typing": "正在输入",
-  "validationDetail": "校验失败详情",
-  "affinityLocked": "🔒 锁定 {model} · 剩 {turns} 轮",
-  "classRecallTruncated": "本次命中的数据表已达上限（{total} 张），部分相关表可能未被纳入查询，可尝试更具体的表述或联系管理员调整召回窗口。",
-  "classRecallFallback": "数据表智能召回暂不可用，本次已按数仓分层顺序选取数据表（张数受召回窗口上限约束），回答准确性可能受影响。",
-  "classRecallRescue": "数据表智能召回已降级：本次按关键词锚定选取了 {total} 张数据表（向量检索未命中相关表），回答准确性可能受影响。",
-  "classRecallDatasourceFiltered": "已按当前数据源过滤 {total} 张跨源数据表。",
-  "classRecallDatasourceSkipped": "未选择数据源或数据源目录缺失，跨源过滤本次未生效。",
-  "classRecallAnchored": "已按关键词锚定 {total} 张数据表。",
-  "interrupted": "本次回答已中断：连接断开前生成的内容不完整，请重新提问以获取完整回答。",
-  "errorHints": {
-    "permission": "当前账号没有执行该操作的权限，请联系管理员开通后重试。",
-    "providerTransient": "模型服务暂时不可用，稍后重试通常可恢复。",
-    "providerProtocol": "模型返回了无法解析的结果，可尝试换一种问法。",
-    "queryTimeout": "查询超时，可缩小时间范围或减少维度后重试。",
-    "dbConnectivity": "数据源连接失败，请确认数据库可用后重试。",
-    "sqlSyntax": "生成的 SQL 未通过安全校验，请调整问题描述后重试。",
-    "schemaReference": "问题涉及的表或字段无法识别，请检查术语或补充业务对象后重试。"
+  cost: "成本: ${amount}",
+  model: "模型: {name}",
+  typing: "正在输入",
+  validationDetail: "校验失败详情",
+  affinityLocked: "🔒 锁定 {model} · 剩 {turns} 轮",
+  classRecallTruncated: "本次命中的数据表已达上限（{total} 张），部分相关表可能未被纳入查询，可尝试更具体的表述或联系管理员调整召回窗口。",
+  classRecallFallback: "数据表智能召回暂不可用，本次已按数仓分层顺序选取数据表（张数受召回窗口上限约束），回答准确性可能受影响。",
+  classRecallRescue: "数据表智能召回已降级：本次按关键词锚定选取了 {total} 张数据表（向量检索未命中相关表），回答准确性可能受影响。",
+  classRecallDatasourceFiltered: "已按当前数据源过滤 {total} 张跨源数据表。",
+  classRecallDatasourceSkipped: "未选择数据源或数据源目录缺失，跨源过滤本次未生效。",
+  classRecallAnchored: "已按关键词锚定 {total} 张数据表。",
+  interrupted: "本次回答已中断：连接断开前生成的内容不完整，请重新提问以获取完整回答。",
+  errorHints: {
+    permission: "当前账号没有执行该操作的权限，请联系管理员开通后重试。",
+    providerTransient: "模型服务暂时不可用，稍后重试通常可恢复。",
+    providerProtocol: "模型返回了无法解析的结果，可尝试换一种问法。",
+    queryTimeout: "查询超时，可缩小时间范围或减少维度后重试。",
+    dbConnectivity: "数据源连接失败，请确认数据库可用后重试。",
+    sqlSyntax: "生成的 SQL 未通过安全校验，请调整问题描述后重试。",
+    schemaReference: "问题涉及的表或字段无法识别，请检查术语或补充业务对象后重试。"
   }
 },
   suggestedAgent: {
-  "title": "建议使用 Agent",
-  "confidence": "置信度: {percent}",
-  "hint": "可直接输入「用 SUPPLIER_XXX_AGENT …」执行该 Agent"
+  title: "建议使用 Agent",
+  confidence: "置信度: {percent}",
+  hint: "可直接输入「用 SUPPLIER_XXX_AGENT …」执行该 Agent"
 },
   supplier360: {
-  "cardTitle": "供应商 360° 视图",
-  "fetchedAt": "获取时间：{time}",
-  "field": {
-    "enterpriseKey": "企业代理键",
-    "owner": "归属部门",
-    "matchRule": "匹配规则",
-    "effective": "生效期"
+  cardTitle: "供应商 360° 视图",
+  fetchedAt: "获取时间：{time}",
+  field: {
+    enterpriseKey: "企业代理键",
+    owner: "归属部门",
+    matchRule: "匹配规则",
+    effective: "生效期"
   },
-  "section": {
-    "entityCodes": "跨系统编码",
-    "kpis": "关键指标（Feature）"
+  section: {
+    entityCodes: "跨系统编码",
+    kpis: "关键指标（Feature）"
   },
-  "empty": {
-    "entityCodes": "该供应商尚未在 entity_mapping 注册跨系统编码",
-    "kpis": "暂无启用的 Feature 定义"
+  empty: {
+    entityCodes: "该供应商尚未在 entity_mapping 注册跨系统编码",
+    kpis: "暂无启用的 Feature 定义"
   },
-  "kpi": {
-    "name": "指标",
-    "value": "当前值",
-    "window": "窗口",
-    "validAt": "生效日期",
-    "placeholder": "暂无数据"
+  kpi: {
+    name: "指标",
+    value: "当前值",
+    window: "窗口",
+    validAt: "生效日期",
+    placeholder: "暂无数据"
   }
 },
   reportsPage: {
-  "title": "我的报告",
-  "hint": "选择模板并填写参数，同步生成模板化报告。生成后进入 PENDING_REVIEW 待审状态，审批通过（APPROVED）后对全员可见。",
-  "templates": {
-    "loadFailed": "模板列表加载失败"
+  title: "我的报告",
+  hint: "选择模板并填写参数，同步生成模板化报告。生成后进入 PENDING_REVIEW 待审状态，审批通过（APPROVED）后对全员可见。",
+  templates: {
+    loadFailed: "模板列表加载失败"
   },
-  "generate": {
-    "template": "报告模板",
-    "submit": "生成报告",
-    "success": "报告 #{id} 已生成，等待审批",
-    "failed": "报告生成失败",
-    "missingParams": "请填写必填参数：{fields}"
+  generate: {
+    template: "报告模板",
+    submit: "生成报告",
+    success: "报告 #{id} 已生成，等待审批",
+    failed: "报告生成失败",
+    missingParams: "请填写必填参数：{fields}"
   },
-  "list": {
-    "colId": "ID",
-    "colTitle": "标题",
-    "colStatus": "状态",
-    "colCreatedBy": "创建人",
-    "colCreatedTime": "创建时间",
-    "colActions": "操作",
-    "view": "查看",
-    "review": "审批",
-    "total": "共 {n} 条",
-    "loadFailed": "报告列表加载失败"
+  list: {
+    colId: "ID",
+    colTitle: "标题",
+    colStatus: "状态",
+    colCreatedBy: "创建人",
+    colCreatedTime: "创建时间",
+    colActions: "操作",
+    view: "查看",
+    review: "审批",
+    total: "共 {n} 条",
+    loadFailed: "报告列表加载失败"
   },
-  "detail": {
-    "title": "报告详情",
-    "summary": "总结",
-    "meta": "模板 {template} · 创建人 {creator} · {time}",
-    "reviewNote": "审批意见（{by}）：{note}",
-    "loadFailed": "报告详情加载失败"
+  detail: {
+    title: "报告详情",
+    summary: "总结",
+    meta: "模板 {template} · 创建人 {creator} · {time}",
+    reviewNote: "审批意见（{by}）：{note}",
+    loadFailed: "报告详情加载失败"
   },
-  "section": {
-    "empty": "暂无数据",
-    "notFound": "（目录中未找到该指标）",
-    "renderError": "该分节数据绑定失败"
+  section: {
+    empty: "暂无数据",
+    notFound: "（目录中未找到该指标）",
+    renderError: "该分节数据绑定失败"
   },
-  "review": {
-    "title": "审批报告 #{id}",
-    "approve": "通过",
-    "reject": "驳回",
-    "submit": "提交审批",
-    "notePlaceholder": "审批意见（可选）",
-    "success": "审批完成",
-    "failed": "审批失败"
+  review: {
+    title: "审批报告 #{id}",
+    approve: "通过",
+    reject: "驳回",
+    submit: "提交审批",
+    notePlaceholder: "审批意见（可选）",
+    success: "审批完成",
+    failed: "审批失败"
   },
-  "status": {
-    "pending": "待审批",
-    "approved": "已通过",
-    "rejected": "已驳回"
+  status: {
+    pending: "待审批",
+    approved: "已通过",
+    rejected: "已驳回"
   }
 },
   supplier360Page: {
-  "title": "供应商 360° 直接查询",
-  "hint": "输入 enterprise_key（5-9 位 BIGINT）直接拉取该供应商的主数据 + 跨系统编码 + 关键 Feature。也可在 AIChatService 中问「供应商 X 的 360° 视图」自动触发。",
-  "placeholder": "请输入 enterprise_key",
-  "query": "查询",
-  "invalidKey": "请输入合法的 enterprise_key（5-9 位数字）",
-  "notFound": "供应商 enterprise_key={key} 不存在或尚未在 entity_mapping 建档",
-  "requestFailed": "查询失败：{message}"
+  title: "供应商 360° 直接查询",
+  hint: "输入 enterprise_key（5-9 位 BIGINT）直接拉取该供应商的主数据 + 跨系统编码 + 关键 Feature。也可在 AIChatService 中问「供应商 X 的 360° 视图」自动触发。",
+  placeholder: "请输入 enterprise_key",
+  query: "查询",
+  invalidKey: "请输入合法的 enterprise_key（5-9 位数字）",
+  notFound: "供应商 enterprise_key={key} 不存在或尚未在 entity_mapping 建档",
+  requestFailed: "查询失败：{message}"
 },
   supplierRisk: {
-  "cardTitle": "供应商风险评估",
-  "fetchedAt": "评估时间：{time}",
-  "levelSource": "评估路径：{source}",
-  "riskPointsLabel": "主要风险点",
-  "sourceLlm": "LLM 生成",
-  "sourceFallback": "模板生成",
-  "cost": "成本：{amount} 元",
-  "empty": {
-    "riskPoints": "暂无风险点描述"
+  cardTitle: "供应商风险评估",
+  fetchedAt: "评估时间：{time}",
+  levelSource: "评估路径：{source}",
+  riskPointsLabel: "主要风险点",
+  sourceLlm: "LLM 生成",
+  sourceFallback: "模板生成",
+  cost: "成本：{amount} 元",
+  empty: {
+    riskPoints: "暂无风险点描述"
   },
-  "section": {
-    "actions": "建议动作",
-    "contributions": "特征贡献明细"
+  section: {
+    actions: "建议动作",
+    contributions: "特征贡献明细"
   },
-  "contribution": {
-    "feature": "特征",
-    "value": "当前值",
-    "threshold": "阈值",
-    "passed": "合规",
-    "passedOk": "正常",
-    "passedFail": "违规",
-    "note": "说明",
-    "placeholder": "暂无数据"
+  contribution: {
+    feature: "特征",
+    value: "当前值",
+    threshold: "阈值",
+    passed: "合规",
+    passedOk: "正常",
+    passedFail: "违规",
+    note: "说明",
+    placeholder: "暂无数据"
   }
 },
   supplierRiskPage: {
-  "title": "供应商风险 Agent 直接查询",
-  "hint": "输入 enterprise_key（5-9 位 BIGINT）直接评估风险等级 + 主要风险点 + 建议动作。也可在 AIChatService 中问「供应商 X 的风险」自动触发。",
-  "placeholder": "请输入 enterprise_key",
-  "query": "查询",
-  "invalidKey": "请输入合法的 enterprise_key（5-9 位数字）",
-  "notFound": "供应商 enterprise_key={key} 不存在或尚未在 entity_mapping 建档",
-  "requestFailed": "查询失败：{message}"
+  title: "供应商风险 Agent 直接查询",
+  hint: "输入 enterprise_key（5-9 位 BIGINT）直接评估风险等级 + 主要风险点 + 建议动作。也可在 AIChatService 中问「供应商 X 的风险」自动触发。",
+  placeholder: "请输入 enterprise_key",
+  query: "查询",
+  invalidKey: "请输入合法的 enterprise_key（5-9 位数字）",
+  notFound: "供应商 enterprise_key={key} 不存在或尚未在 entity_mapping 建档",
+  requestFailed: "查询失败：{message}"
 },
   graphTraversal: {
-  "cardTitle": "知识图谱推理",
-  "maxHops": "遍历 {hops} 跳",
-  "fetchedAt": "执行时间：{time}",
-  "reachable": "可达实体类型：",
-  "table": {
-    "depth": "跳数",
-    "relation": "关系",
-    "from": "上一跳",
-    "to": "终点"
+  cardTitle: "知识图谱推理",
+  maxHops: "遍历 {hops} 跳",
+  fetchedAt: "执行时间：{time}",
+  reachable: "可达实体类型：",
+  table: {
+    depth: "跳数",
+    relation: "关系",
+    from: "上一跳",
+    to: "终点"
   },
-  "empty": {
-    "hops": "该实体 {maxHops} 跳内无关联业务实体",
-    "types": "无"
+  empty: {
+    hops: "该实体 {maxHops} 跳内无关联业务实体",
+    types: "无"
   }
 },
   graphTraversalPage: {
-  "title": "业务知识图谱 · 多跳遍历",
-  "hint": "从业务实体（供应商 / 物料 / 采购订单 / 收货 / 来料检验 / NCR / 合同）出发做多跳推理，查看供应链链路上的可达实体。也可在 AIChatService 中问「供应商 X 涉及哪些物料」自动触发。",
-  "startType": "起点类型",
-  "startKey": "实体键（enterprise_key / document_id）",
-  "startKeyPlaceholder": "如 10105",
-  "maxHops": "最大跳数",
-  "query": "遍历",
-  "invalidKey": "请输入实体键",
-  "requestFailed": "遍历失败：{message}",
-  "empty": "暂无数据"
+  title: "业务知识图谱 · 多跳遍历",
+  hint: "从业务实体（供应商 / 物料 / 采购订单 / 收货 / 来料检验 / NCR / 合同）出发做多跳推理，查看供应链链路上的可达实体。也可在 AIChatService 中问「供应商 X 涉及哪些物料」自动触发。",
+  startType: "起点类型",
+  startKey: "实体键（enterprise_key / document_id）",
+  startKeyPlaceholder: "如 10105",
+  maxHops: "最大跳数",
+  query: "遍历",
+  invalidKey: "请输入实体键",
+  requestFailed: "遍历失败：{message}",
+  empty: "暂无数据"
 },
   agentRuntime: {
-  "owner": "负责人：{owner}",
-  "executedAt": "执行时间：{time}",
-  "rawDetail": "工具原始结果",
-  "cost": "成本: ${amount}"
+  owner: "负责人：{owner}",
+  executedAt: "执行时间：{time}",
+  rawDetail: "工具原始结果",
+  cost: "成本: ${amount}"
 },
   agentRuntimePage: {
-  "title": "Agent 运行时 · 直接调用",
-  "hint": "选择已绑定工具的 Agent（仅展示 runnable=true 的），输入自然语言（含供应商 enterprise_code 或名称）直接触发工具执行。也可在 AIChatService 中指名 Agent（如「用 supplier_risk_agent 评估供应商 10105」）自动触发。元数据占位 Agent（未绑定工具，如 SUPPLIER_OTD_REPORT）请前往「Agent Registry」查阅排期。",
-  "selectPlaceholder": "选择 Agent",
-  "inputPlaceholder": "如：评估供应商 10105 的风险",
-  "run": "运行",
-  "loadFailed": "Agent 列表加载失败",
-  "selectAgent": "请先选择一个 Agent",
-  "emptyInput": "请输入执行指令",
-  "error404": "Agent {code} 未注册",
-  "error409": "Agent {code} 当前不可运行（状态非 ACTIVE 或未绑定工具）",
-  "error403": "Agent {code} 缺少数据对象读取策略（deny-by-default 拦截）",
-  "error422": "输入无法解析出执行参数（请提供供应商 enterprise_code，如「供应商 10105」）",
-  "requestFailed": "运行失败：{message}"
+  title: "Agent 运行时 · 直接调用",
+  hint: "选择已绑定工具的 Agent（仅展示 runnable=true 的），输入自然语言（含供应商 enterprise_code 或名称）直接触发工具执行。也可在 AIChatService 中指名 Agent（如「用 supplier_risk_agent 评估供应商 10105」）自动触发。元数据占位 Agent（未绑定工具，如 SUPPLIER_OTD_REPORT）请前往「Agent Registry」查阅排期。",
+  selectPlaceholder: "选择 Agent",
+  inputPlaceholder: "如：评估供应商 10105 的风险",
+  run: "运行",
+  loadFailed: "Agent 列表加载失败",
+  selectAgent: "请先选择一个 Agent",
+  emptyInput: "请输入执行指令",
+  error404: "Agent {code} 未注册",
+  error409: "Agent {code} 当前不可运行（状态非 ACTIVE 或未绑定工具）",
+  error403: "Agent {code} 缺少数据对象读取策略（deny-by-default 拦截）",
+  error422: "输入无法解析出执行参数（请提供供应商 enterprise_code，如「供应商 10105」）",
+  requestFailed: "运行失败：{message}"
 },
   agentOrchestration: {
-  "title": "Agent 编排配置",
-  "subtitle": "为 Agent 配置编排指令、可绑定的只读工具与默认预算上限。新建配置默认停用，需显式切换后才会生效。",
-  "createButton": "新建配置",
-  "editButton": "编辑",
-  "cancelButton": "取消",
-  "refreshButton": "刷新",
-  "createTitle": "新建编排配置",
-  "editTitle": "编辑编排配置",
-  "createSubmit": "创建",
-  "editSubmit": "保存",
-  "columns": {
-    "agentCode": "Agent 编码",
-    "tools": "绑定工具",
-    "enabled": "启用",
-    "revision": "版本",
-    "actions": "操作"
+  title: "Agent 编排配置",
+  subtitle: "为 Agent 配置编排指令、可绑定的只读工具与默认预算上限。新建配置默认停用，需显式切换后才会生效。",
+  createButton: "新建配置",
+  editButton: "编辑",
+  cancelButton: "取消",
+  refreshButton: "刷新",
+  createTitle: "新建编排配置",
+  editTitle: "编辑编排配置",
+  createSubmit: "创建",
+  editSubmit: "保存",
+  columns: {
+    agentCode: "Agent 编码",
+    tools: "绑定工具",
+    enabled: "启用",
+    revision: "版本",
+    actions: "操作"
   },
-  "status": {
-    "enabled": "已启用",
-    "disabled": "未启用"
+  status: {
+    enabled: "已启用",
+    disabled: "未启用"
   },
-  "form": {
-    "agentCode": "Agent 编码",
-    "agentCodePlaceholder": "选择 Agent",
-    "instructions": "编排指令",
-    "instructionsPlaceholder": "描述该 Agent 的编排策略与约束",
-    "toolNames": "绑定工具",
-    "toolNamesPlaceholder": "选择该 Agent 可调用的只读工具",
-    "defaultMaxIterations": "默认最大迭代次数",
-    "defaultMaxToolCalls": "默认最大工具调用次数",
-    "defaultMaxCostUsd": "默认最大成本（美元）",
-    "defaultTimeoutSeconds": "默认超时时间（秒）",
-    "maxObservationChars": "最大观测字符数"
+  form: {
+    agentCode: "Agent 编码",
+    agentCodePlaceholder: "选择 Agent",
+    instructions: "编排指令",
+    instructionsPlaceholder: "描述该 Agent 的编排策略与约束",
+    toolNames: "绑定工具",
+    toolNamesPlaceholder: "选择该 Agent 可调用的只读工具",
+    defaultMaxIterations: "默认最大迭代次数",
+    defaultMaxToolCalls: "默认最大工具调用次数",
+    defaultMaxCostUsd: "默认最大成本（美元）",
+    defaultTimeoutSeconds: "默认超时时间（秒）",
+    maxObservationChars: "最大观测字符数"
   },
-  "messages": {
-    "created": "编排配置已创建，当前为停用状态",
-    "updated": "编排配置已更新",
-    "toggled": "启用状态已更新",
-    "loadAgentsFailed": "Agent 列表加载失败",
-    "loadToolsFailed": "可用工具列表加载失败",
-    "loadProfilesFailed": "编排配置列表加载失败",
-    "createFailed": "创建编排配置失败",
-    "updateFailed": "更新编排配置失败",
-    "toggleFailed": "切换启用状态失败",
-    "conflict": "配置已被他人修改，请刷新后重试",
-    "duplicate": "该 Agent 已存在编排配置",
-    "forbidden": "没有权限修改该 Agent 的编排配置",
-    "agentNotFound": "找不到对应的 Agent 或编排配置",
-    "validationFailed": "参数校验未通过：{detail}",
-    "validationFailedGeneric": "参数校验未通过，请检查输入值",
-    "agentRequired": "请选择 Agent",
-    "instructionsRequired": "请输入编排指令"
+  messages: {
+    created: "编排配置已创建，当前为停用状态",
+    updated: "编排配置已更新",
+    toggled: "启用状态已更新",
+    loadAgentsFailed: "Agent 列表加载失败",
+    loadToolsFailed: "可用工具列表加载失败",
+    loadProfilesFailed: "编排配置列表加载失败",
+    createFailed: "创建编排配置失败",
+    updateFailed: "更新编排配置失败",
+    toggleFailed: "切换启用状态失败",
+    conflict: "配置已被他人修改，请刷新后重试",
+    duplicate: "该 Agent 已存在编排配置",
+    forbidden: "没有权限修改该 Agent 的编排配置",
+    agentNotFound: "找不到对应的 Agent 或编排配置",
+    validationFailed: "参数校验未通过：{detail}",
+    validationFailedGeneric: "参数校验未通过，请检查输入值",
+    agentRequired: "请选择 Agent",
+    instructionsRequired: "请输入编排指令"
   },
-  "empty": {
-    "profiles": "暂无编排配置",
-    "tools": "暂无可用的只读工具"
+  empty: {
+    profiles: "暂无编排配置",
+    tools: "暂无可用的只读工具"
   },
-  "toolCount": "已绑定 {count} 个工具"
+  toolCount: "已绑定 {count} 个工具"
 },
   agentTask: {
-  "title": "Agent 任务",
-  "subtitle": "创建一次 Agent 编排运行，逐步查看执行轨迹；运行暂停时可补充输入或预算后恢复。",
-  "form": {
-    "profileLabel": "编排配置",
-    "profilePlaceholder": "选择已启用的编排配置",
-    "modelLabel": "模型",
-    "modelPlaceholder": "选择已启用状态的模型",
-    "inputLabel": "任务输入",
-    "inputPlaceholder": "描述需要 Agent 执行的任务",
-    "createButton": "创建运行"
+  title: "Agent 任务",
+  subtitle: "创建一次 Agent 编排运行，逐步查看执行轨迹；运行暂停时可补充输入或预算后恢复。",
+  form: {
+    profileLabel: "编排配置",
+    profilePlaceholder: "选择已启用的编排配置",
+    modelLabel: "模型",
+    modelPlaceholder: "选择已启用状态的模型",
+    inputLabel: "任务输入",
+    inputPlaceholder: "描述需要 Agent 执行的任务",
+    createButton: "创建运行"
   },
-  "run": {
-    "id": "运行 ID：{runId}",
-    "status": "运行状态",
-    "pauseReason": "暂停原因",
-    "cancelButton": "取消运行",
-    "cancelRequested": "已请求取消，运行仍在进行中，等待下一次轮询确认。",
-    "runError": "运行失败：{message}",
-    "runErrorCode": "错误码：{code}",
-    "resumeTitle": "恢复运行",
-    "resumeButton": "恢复运行",
-    "supplementaryInputLabel": "补充输入",
-    "supplementaryInputPlaceholder": "回答 Agent 的提问以继续执行",
-    "budgetTitle": "预算已耗尽，请追加对应预算后恢复。",
-    "increment": {
-      "iteration": "追加迭代次数",
-      "tool": "追加工具调用次数",
-      "cost": "追加成本上限（美元）",
-      "time": "追加超时时间（秒）"
+  run: {
+    id: "运行 ID：{runId}",
+    status: "运行状态",
+    pauseReason: "暂停原因",
+    cancelButton: "取消运行",
+    cancelRequested: "已请求取消，运行仍在进行中，等待下一次轮询确认。",
+    runError: "运行失败：{message}",
+    runErrorCode: "错误码：{code}",
+    resumeTitle: "恢复运行",
+    resumeButton: "恢复运行",
+    supplementaryInputLabel: "补充输入",
+    supplementaryInputPlaceholder: "回答 Agent 的提问以继续执行",
+    budgetTitle: "预算已耗尽，请追加对应预算后恢复。",
+    increment: {
+      iteration: "追加迭代次数",
+      tool: "追加工具调用次数",
+      cost: "追加成本上限（美元）",
+      time: "追加超时时间（秒）"
     }
   },
-  "status": {
-    "QUEUED": "排队中",
-    "RUNNING": "运行中",
-    "PAUSED": "已暂停",
-    "SUCCEEDED": "已成功",
-    "FAILED": "已失败",
-    "CANCELLED": "已取消"
+  status: {
+    QUEUED: "排队中",
+    RUNNING: "运行中",
+    PAUSED: "已暂停",
+    SUCCEEDED: "已成功",
+    FAILED: "已失败",
+    CANCELLED: "已取消"
   },
-  "pause": {
-    "NEEDS_INPUT": "需要补充输入",
-    "AMBIGUOUS": "存在歧义，需澄清",
-    "PERMISSION_DENIED": "工具权限被拒绝",
-    "BUDGET_EXHAUSTED": "预算已耗尽",
-    "TOOL_FAILED": "工具执行失败",
-    "PLANNER_OUTPUT_INVALID": "规划器输出不合法",
-    "AGENT_UNAVAILABLE": "Agent 不可用",
-    "INFRASTRUCTURE_ERROR": "基础设施错误"
+  pause: {
+    NEEDS_INPUT: "需要补充输入",
+    AMBIGUOUS: "存在歧义，需澄清",
+    PERMISSION_DENIED: "工具权限被拒绝",
+    BUDGET_EXHAUSTED: "预算已耗尽",
+    TOOL_FAILED: "工具执行失败",
+    PLANNER_OUTPUT_INVALID: "规划器输出不合法",
+    AGENT_UNAVAILABLE: "Agent 不可用",
+    INFRASTRUCTURE_ERROR: "基础设施错误"
   },
-  "messages": {
-    "loadProfilesFailed": "编排配置列表加载失败",
-    "loadModelsFailed": "模型列表加载失败",
-    "profileRequired": "请选择已启用的编排配置",
-    "modelRequired": "请选择模型",
-    "inputRequired": "请输入任务内容",
-    "createFailed": "创建运行失败",
-    "resumeFailed": "恢复运行失败",
-    "cancelFailed": "取消运行失败",
-    "resumeInputRequired": "请先填写补充输入",
-    "resumeIncrementRequired": "请先填写预算增量",
-    "budgetDetailMissing": "后端未返回预算明细，无法自动匹配预算增量",
-    "runNotFound": "找不到该运行，可能已被删除或当前无权访问",
-    "conflict": "工具绑定已变更导致冲突，请重新创建运行",
-    "forbidden": "没有权限操作该运行",
-    "validationFailed": "请求被拒绝：{detail}",
-    "validationFailedGeneric": "请求参数校验未通过",
-    "networkError": "网络异常，请稍后重试",
-    "requestFailed": "操作失败：{message}"
+  messages: {
+    loadProfilesFailed: "编排配置列表加载失败",
+    loadModelsFailed: "模型列表加载失败",
+    profileRequired: "请选择已启用的编排配置",
+    modelRequired: "请选择模型",
+    inputRequired: "请输入任务内容",
+    createFailed: "创建运行失败",
+    resumeFailed: "恢复运行失败",
+    cancelFailed: "取消运行失败",
+    resumeInputRequired: "请先填写补充输入",
+    resumeIncrementRequired: "请先填写预算增量",
+    budgetDetailMissing: "后端未返回预算明细，无法自动匹配预算增量",
+    runNotFound: "找不到该运行，可能已被删除或当前无权访问",
+    conflict: "工具绑定已变更导致冲突，请重新创建运行",
+    forbidden: "没有权限操作该运行",
+    validationFailed: "请求被拒绝：{detail}",
+    validationFailedGeneric: "请求参数校验未通过",
+    networkError: "网络异常，请稍后重试",
+    requestFailed: "操作失败：{message}"
   },
-  "empty": {
-    "steps": "暂无执行轨迹"
+  empty: {
+    steps: "暂无执行轨迹"
   },
-  "timeline": {
-    "planLabel": "规划",
-    "toolLabel": "工具调用",
-    "stepNo": "步骤 {no}",
-    "iterationNo": "第 {no} 轮",
-    "status": {
-      "RUNNING": "执行中",
-      "SUCCEEDED": "成功",
-      "FAILED": "失败",
-      "SKIPPED": "已跳过"
+  timeline: {
+    planLabel: "规划",
+    toolLabel: "工具调用",
+    stepNo: "步骤 {no}",
+    iterationNo: "第 {no} 轮",
+    status: {
+      RUNNING: "执行中",
+      SUCCEEDED: "成功",
+      FAILED: "失败",
+      SKIPPED: "已跳过"
     },
-    "action": {
-      "CALL_TOOL": "调用工具",
-      "ASK_USER": "询问用户",
-      "FINISH": "给出结论"
+    action: {
+      CALL_TOOL: "调用工具",
+      ASK_USER: "询问用户",
+      FINISH: "给出结论"
     },
-    "planSummary": "规划说明",
-    "toolName": "工具名称",
-    "toolArgs": "调用参数",
-    "observation": "工具输出",
-    "showOutput": "查看输出",
-    "hideOutput": "隐藏输出",
-    "truncated": "输出已截断（原始长度 {chars} 字符）",
-    "stepError": "步骤失败：{message}",
-    "question": "Agent 提问",
-    "planAnswer": "规划结论",
-    "finalAnswer": "最终结论",
-    "cost": {
-      "MEASURED": "成本已测量",
-      "ESTIMATED": "成本为估算值",
-      "UNKNOWN": "成本来源未知",
-      "MIXED": "成本部分测量"
+    planSummary: "规划说明",
+    toolName: "工具名称",
+    toolArgs: "调用参数",
+    observation: "工具输出",
+    showOutput: "查看输出",
+    hideOutput: "隐藏输出",
+    truncated: "输出已截断（原始长度 {chars} 字符）",
+    stepError: "步骤失败：{message}",
+    question: "Agent 提问",
+    planAnswer: "规划结论",
+    finalAnswer: "最终结论",
+    cost: {
+      MEASURED: "成本已测量",
+      ESTIMATED: "成本为估算值",
+      UNKNOWN: "成本来源未知",
+      MIXED: "成本部分测量"
     },
-    "costIncomplete": "成本未测量（不完整）"
+    costIncomplete: "成本未测量（不完整）"
   }
 },
   messageList: {
-  "empty": "输入问题开始对话"
+  empty: "输入问题开始对话"
 },
   agentOptions: {
-  "title": "Agent 选项",
-  "fetchFailed": "获取 Agent 词表失败：{message}"
+  title: "Agent 选项",
+  fetchFailed: "获取 Agent 词表失败：{message}"
 },
   agentRegistry: {
-  "pageTitle": "Agent Registry",
-  "pageHint": "注册与维护 AI Agent 及其数据访问策略。读操作对所有登录用户开放；写操作仅 owner 部门成员或 admin 角色可执行（ACL 详见后端 assertCanModify）。",
-  "columns": {
-    "code": "Agent 编码",
-    "name": "名称",
-    "status": "状态",
-    "triggerType": "触发类型",
-    "responseLatency": "响应延迟",
-    "dataDomains": "数据域",
-    "dataLayers": "数据层",
-    "owner": "责任部门",
-    "version": "版本",
-    "actions": "操作"
+  pageTitle: "Agent Registry",
+  pageHint: "注册与维护 AI Agent 及其数据访问策略。读操作对所有登录用户开放；写操作仅 owner 部门成员或 admin 角色可执行（ACL 详见后端 assertCanModify）。",
+  columns: {
+    code: "Agent 编码",
+    name: "名称",
+    status: "状态",
+    triggerType: "触发类型",
+    responseLatency: "响应延迟",
+    dataDomains: "数据域",
+    dataLayers: "数据层",
+    owner: "责任部门",
+    version: "版本",
+    actions: "操作"
   },
-  "filter": {
-    "statusPlaceholder": "按状态过滤",
-    "domainPlaceholder": "按域过滤（多选）",
-    "layerPlaceholder": "按层过滤（单选）"
+  filter: {
+    statusPlaceholder: "按状态过滤",
+    domainPlaceholder: "按域过滤（多选）",
+    layerPlaceholder: "按层过滤（单选）"
   },
-  "actions": {
-    "create": "新建 Agent",
-    "refresh": "刷新",
-    "edit": "编辑",
-    "deprecate": "停用",
-    "delete": "删除"
+  actions: {
+    create: "新建 Agent",
+    refresh: "刷新",
+    edit: "编辑",
+    deprecate: "停用",
+    delete: "删除"
   },
-  "confirmDeprecate": "确认将该 Agent 标记为 deprecated？",
-  "confirmDeletePolicy": "确认删除该策略？",
-  "createModal": {
-    "title": "新建 Agent",
-    "ok": "创建",
-    "cancel": "取消"
+  confirmDeprecate: "确认将该 Agent 标记为 deprecated？",
+  confirmDeletePolicy: "确认删除该策略？",
+  createModal: {
+    title: "新建 Agent",
+    ok: "创建",
+    cancel: "取消"
   },
-  "editModal": {
-    "title": "编辑 Agent：{code}",
-    "ok": "保存",
-    "cancel": "取消"
+  editModal: {
+    title: "编辑 Agent：{code}",
+    ok: "保存",
+    cancel: "取消"
   },
-  "fields": {
-    "agentCode": "Agent 编码",
-    "agentCodeRule": "编码必须以大写字母开头，仅含大写字母/数字/下划线",
-    "agentName": "Agent 名称",
-    "description": "描述",
-    "triggerType": "触发类型",
-    "responseLatency": "响应延迟",
-    "status": "状态",
-    "dataDomains": "数据域（多选）",
-    "dataLayers": "数据层（多选）",
-    "version": "版本",
-    "dataDomainRule": "请从下拉选择（PROCUREMENT/QUALITY/LOGISTICS）",
-    "dataLayerRule": "请从下拉选择（DIM/DWD/FEATURE）",
-    "toolName": "绑定工具",
-    "toolNamePlaceholder": "选择工具（可空，留空为元数据 Agent）"
+  fields: {
+    agentCode: "Agent 编码",
+    agentCodeRule: "编码必须以大写字母开头，仅含大写字母/数字/下划线",
+    agentName: "Agent 名称",
+    description: "描述",
+    triggerType: "触发类型",
+    responseLatency: "响应延迟",
+    status: "状态",
+    dataDomains: "数据域（多选）",
+    dataLayers: "数据层（多选）",
+    version: "版本",
+    dataDomainRule: "请从下拉选择（PROCUREMENT/QUALITY/LOGISTICS）",
+    dataLayerRule: "请从下拉选择（DIM/DWD/FEATURE）",
+    toolName: "绑定工具",
+    toolNamePlaceholder: "选择工具（可空，留空为元数据 Agent）"
   },
-  "errors": {
-    "toolUnknown": "未知工具，请刷新页面重试",
-    "toolLayerMismatch": "工具 {tool} 要求 data_layers 含 {missing}，请先在数据层字段补齐"
+  errors: {
+    toolUnknown: "未知工具，请刷新页面重试",
+    toolLayerMismatch: "工具 {tool} 要求 data_layers 含 {missing}，请先在数据层字段补齐"
   },
-  "detail": {
-    "code": "编码",
-    "description": "描述",
-    "triggerType": "触发类型",
-    "responseLatency": "响应延迟",
-    "dataDomains": "数据域",
-    "dataLayers": "数据层",
-    "owner": "责任部门"
+  detail: {
+    code: "编码",
+    description: "描述",
+    triggerType: "触发类型",
+    responseLatency: "响应延迟",
+    dataDomains: "数据域",
+    dataLayers: "数据层",
+    owner: "责任部门"
   },
-  "policies": {
-    "title": "数据访问策略",
-    "add": "新增策略",
-    "saveEdit": "保存修改",
-    "cancelEdit": "取消",
-    "dataObject": "数据对象",
-    "permission": "权限",
-    "dataLayer": "数据层",
-    "notes": "备注",
-    "dataObjectPlaceholder": "如 SUPPLIER",
-    "dataLayerPlaceholder": "如 DWS（可空）",
-    "notesPlaceholder": "如 特征值敏感字段脱敏"
+  policies: {
+    title: "数据访问策略",
+    add: "新增策略",
+    saveEdit: "保存修改",
+    cancelEdit: "取消",
+    dataObject: "数据对象",
+    permission: "权限",
+    dataLayer: "数据层",
+    notes: "备注",
+    dataObjectPlaceholder: "如 SUPPLIER",
+    dataLayerPlaceholder: "如 DWS（可空）",
+    notesPlaceholder: "如 特征值敏感字段脱敏"
   },
-  "messages": {
-    "created": "Agent 创建成功",
-    "updated": "Agent 更新成功",
-    "deprecated": "Agent 已停用",
-    "policyAdded": "策略已添加",
-    "policyUpdated": "策略已更新",
-    "policyDeleted": "策略已删除",
-    "listFailed": "加载 Agent 列表失败",
-    "detailFailed": "加载 Agent 详情失败",
-    "createFailed": "创建失败",
-    "updateFailed": "更新失败",
-    "deprecateFailed": "停用失败",
-    "policyAddFailed": "添加策略失败",
-    "policyUpdateFailed": "更新策略失败",
-    "policyDeleteFailed": "删除策略失败"
+  messages: {
+    created: "Agent 创建成功",
+    updated: "Agent 更新成功",
+    deprecated: "Agent 已停用",
+    policyAdded: "策略已添加",
+    policyUpdated: "策略已更新",
+    policyDeleted: "策略已删除",
+    listFailed: "加载 Agent 列表失败",
+    detailFailed: "加载 Agent 详情失败",
+    createFailed: "创建失败",
+    updateFailed: "更新失败",
+    deprecateFailed: "停用失败",
+    policyAddFailed: "添加策略失败",
+    policyUpdateFailed: "更新策略失败",
+    policyDeleteFailed: "删除策略失败"
   },
-  "aclBanner": "权限说明：写操作受 owner-based ACL 控制。stub 模式下默认带 admin 角色；如需切换非 admin 路径，请显式设置 X-User-Roles。"
+  aclBanner: "权限说明：写操作受 owner-based ACL 控制。stub 模式下默认带 admin 角色；如需切换非 admin 路径，请显式设置 X-User-Roles。"
 },
   sqlPreview: {
-  "viewSql": "查看 SQL",
-  "copy": "复制",
-  "copied": "已复制",
-  "copiedToast": "SQL 已复制",
-  "copyFailedToast": "复制失败：{message}",
-  "unknownError": "未知错误"
+  viewSql: "查看 SQL",
+  copy: "复制",
+  copied: "已复制",
+  copiedToast: "SQL 已复制",
+  copyFailedToast: "复制失败：{message}",
+  unknownError: "未知错误"
 },
   chartExport: {
-  "csv": "导出 CSV",
-  "png": "导出 PNG",
-  "success": "已导出",
-  "failed": "导出失败：{message}",
-  "truncated": "表格仅显示前 {count} 行（原始结果更长）",
-  "showAll": "显示全部 {total} 项",
-  "showTopN": "只看前 {limit} 项"
+  csv: "导出 CSV",
+  png: "导出 PNG",
+  success: "已导出",
+  failed: "导出失败：{message}",
+  truncated: "表格仅显示前 {count} 行（原始结果更长）",
+  showAll: "显示全部 {total} 项",
+  showTopN: "只看前 {limit} 项"
 },
   chatPanel: {
-  "chartTypes": {
-    "auto": "自动",
-    "table": "表格",
-    "bar": "柱状图",
-    "hbar": "横向柱状图",
-    "pie": "饼图",
-    "donut": "环形图",
-    "line": "折线图",
-    "scatter": "散点图",
-    "heatmap": "热力图",
-    "kpi": "指标卡",
-    "combo": "柱线组合",
-    "waterfall": "瀑布图"
+  chartTypes: {
+    auto: "自动",
+    table: "表格",
+    bar: "柱状图",
+    hbar: "横向柱状图",
+    pie: "饼图",
+    donut: "环形图",
+    line: "折线图",
+    scatter: "散点图",
+    heatmap: "热力图",
+    kpi: "指标卡",
+    combo: "柱线组合",
+    waterfall: "瀑布图"
   },
-  "chartTypePlaceholder": "图表类型",
-  "chartTypeAriaLabel": "图表类型",
-  "modelAutoRoute": "自动路由",
-  "modelPlaceholder": "选择模型",
-  "datasourcePlaceholder": "选择数据源",
-  "suggesting": "正在检索相似问题…",
-  "suggestTitle": "点击回填该问法",
-  "inputPlaceholder": "输入自然语言问题，或斜杠指令：/metric 销售额 = SUM(order.amount) · /define 类名 · /map 属性 -> 类",
-  "sendButton": "发送",
-  "pleaseSelectDatasource": "请先选择数据源"
+  chartTypePlaceholder: "图表类型",
+  chartTypeAriaLabel: "图表类型",
+  modelAutoRoute: "自动路由",
+  modelPlaceholder: "选择模型",
+  datasourcePlaceholder: "选择数据源",
+  suggesting: "正在检索相似问题…",
+  suggestTitle: "点击回填该问法",
+  inputPlaceholder: "输入自然语言问题，或斜杠指令：/metric 销售额 = SUM(order.amount) · /define 类名 · /map 属性 -> 类",
+  sendButton: "发送",
+  pleaseSelectDatasource: "请先选择数据源"
 },
   chat: {
-  "history": {
-    "title": "历史问答",
-    "newChat": "新对话",
-    "deleteConfirm": "确定删除该会话吗？",
-    "empty": "暂无历史对话",
-    "loadError": "加载历史失败",
-    "deleteError": "删除失败",
-    "collapse": "收起历史",
-    "expand": "展开历史",
-    "messageCount": "{count} 条消息",
-    "currentBadge": "当前",
-    "untitledQuestion": "（无标题）",
-    "deleteAriaLabel": "删除该会话"
+  history: {
+    title: "历史问答",
+    newChat: "新对话",
+    deleteConfirm: "确定删除该会话吗？",
+    empty: "暂无历史对话",
+    loadError: "加载历史失败",
+    deleteError: "删除失败",
+    collapse: "收起历史",
+    expand: "展开历史",
+    messageCount: "{count} 条消息",
+    currentBadge: "当前",
+    untitledQuestion: "（无标题）",
+    deleteAriaLabel: "删除该会话"
   },
-  "exportPdf": {
-    "fullButton": "导出 PDF",
-    "singleButton": "导出此条",
-    "fullAriaLabel": "导出当前会话为 PDF",
-    "singleAriaLabel": "导出该条问答为 PDF",
-    "downloading": "正在生成 PDF…",
-    "failed": "PDF 导出失败：{message}",
-    "emptySession": "当前会话暂无消息可导出"
+  exportPdf: {
+    fullButton: "导出 PDF",
+    singleButton: "导出此条",
+    fullAriaLabel: "导出当前会话为 PDF",
+    singleAriaLabel: "导出该条问答为 PDF",
+    downloading: "正在生成 PDF…",
+    failed: "PDF 导出失败：{message}",
+    emptySession: "当前会话暂无消息可导出"
   },
-  "hypothesis": {
-    "title": "可能原因",
-    "verify": "验证",
-    "driverTooltip": "来自数据模型的关联字段",
-    "sqlDetail": "查看验证 SQL",
-    "disclaimer": "以上为基于当前数据与数据模型的可能解释（非因果结论），可发送验证 SQL 进一步核实。",
-    "status": {
-      "pending": "待验证",
-      "supported": "支持",
-      "contradicted": "相反",
-      "inconclusive": "无法判定",
-      "execution_failed": "执行失败"
+  hypothesis: {
+    title: "可能原因",
+    verify: "验证",
+    driverTooltip: "来自数据模型的关联字段",
+    sqlDetail: "查看验证 SQL",
+    disclaimer: "以上为基于当前数据与数据模型的可能解释（非因果结论），可发送验证 SQL 进一步核实。",
+    status: {
+      pending: "待验证",
+      supported: "支持",
+      contradicted: "相反",
+      inconclusive: "无法判定",
+      execution_failed: "执行失败"
     }
   },
-  "visual": {
-    "dataTable": "数据表",
-    "chartLoading": "图表生成中…",
-    "R00_EMPTY_TABLE": "查询无结果，不生成图表",
-    "R01_SINGLE_VALUE_KPI": "单一聚合值，以指标卡呈现",
-    "R01S_SINGLE_ROW_TABLE": "仅单行结果，以表格呈现（单点数据不构成图形）",
-    "R02_SHARE_DONUT": "占比数据（{rows} 项），以环形图呈现，附数据表",
-    "R03_SHARE_OVERFLOW_HBAR": "占比项数较多（{rows} 项），以横向柱状图呈现，附数据表",
-    "R04_TOPN_HBAR": "TOP {rows} 排名，以横向柱状图呈现，附数据表",
-    "R05_WATERFALL": "构成拆解，以瀑布图呈现，附数据表",
-    "R06_COMBO": "同比/环比对比，以柱线组合图呈现，附数据表",
-    "R07_TREND_LINE": "含时间维度，以折线图呈现趋势，附数据表",
-    "R08_RELATION_SCATTER": "双指标关系，以散点图呈现，附数据表",
-    "R09_MULTIDIM_HEATMAP": "双维度交叉，以热力图呈现，附数据表",
-    "R10_MULTIDIM_BAR": "双维度对比，以分组柱状图呈现，附数据表",
-    "R11_HBAR_MANY_ROWS": "类目较多（{rows} 项），以横向柱状图呈现，附数据表",
-    "R12S_QUESTION_SHARE_DONUT": "问句指向占比，以环形图呈现，附数据表",
-    "R12S_QUESTION_SHARE_HBAR": "问句指向占比且项数较多，以横向柱状图呈现，附数据表",
-    "R12_CATEGORY_BAR": "单维度对比，以柱状图呈现，附数据表",
-    "R13_RAW_DETAIL_TABLE": "明细清单（无聚合），以表格呈现，不生成图表",
-    "R14_DEFAULT_TABLE": "数据形态不适合图形，以表格呈现",
-    "R_FORCED_CLIENT": "按指定图型（{kind}）呈现，附数据表",
-    "DEGRADE_SPEC_INVALID": "数据结构不满足{kind}的绘图要求，降级为表格",
-    "SUMMARY_TEXT_ONLY": "汇总为文字结论，各步骤图表见上方"
+  visual: {
+    dataTable: "数据表",
+    chartLoading: "图表生成中…",
+    R00_EMPTY_TABLE: "查询无结果，不生成图表",
+    R01_SINGLE_VALUE_KPI: "单一聚合值，以指标卡呈现",
+    R01S_SINGLE_ROW_TABLE: "仅单行结果，以表格呈现（单点数据不构成图形）",
+    R02_SHARE_DONUT: "占比数据（{rows} 项），以环形图呈现，附数据表",
+    R03_SHARE_OVERFLOW_HBAR: "占比项数较多（{rows} 项），以横向柱状图呈现，附数据表",
+    R04_TOPN_HBAR: "TOP {rows} 排名，以横向柱状图呈现，附数据表",
+    R05_WATERFALL: "构成拆解，以瀑布图呈现，附数据表",
+    R06_COMBO: "同比/环比对比，以柱线组合图呈现，附数据表",
+    R07_TREND_LINE: "含时间维度，以折线图呈现趋势，附数据表",
+    R08_RELATION_SCATTER: "双指标关系，以散点图呈现，附数据表",
+    R09_MULTIDIM_HEATMAP: "双维度交叉，以热力图呈现，附数据表",
+    R10_MULTIDIM_BAR: "双维度对比，以分组柱状图呈现，附数据表",
+    R11_HBAR_MANY_ROWS: "类目较多（{rows} 项），以横向柱状图呈现，附数据表",
+    R12S_QUESTION_SHARE_DONUT: "问句指向占比，以环形图呈现，附数据表",
+    R12S_QUESTION_SHARE_HBAR: "问句指向占比且项数较多，以横向柱状图呈现，附数据表",
+    R12_CATEGORY_BAR: "单维度对比，以柱状图呈现，附数据表",
+    R13_RAW_DETAIL_TABLE: "明细清单（无聚合），以表格呈现，不生成图表",
+    R14_DEFAULT_TABLE: "数据形态不适合图形，以表格呈现",
+    R_FORCED_CLIENT: "按指定图型（{kind}）呈现，附数据表",
+    DEGRADE_SPEC_INVALID: "数据结构不满足{kind}的绘图要求，降级为表格",
+    SUMMARY_TEXT_ONLY: "汇总为文字结论，各步骤图表见上方"
   }
 },
   termDictionary: {
-  "addButton": "添加到术语词典",
-  "add": "新增",
-  "openManager": "术语词典",
-  "managerTitle": "术语词典",
-  "createTitle": "添加术语",
-  "empty": "暂无术语",
-  "created": "已添加到术语词典",
-  "deleteConfirm": "确认删除该术语？",
-  "labels": {
-    "term": "术语",
-    "definition": "含义解释",
-    "mappedClassName": "映射类（英文）",
-    "mappedPropertyName": "映射属性（英文）",
-    "formulaHint": "公式 / 结构提示"
+  addButton: "添加到术语词典",
+  add: "新增",
+  openManager: "术语词典",
+  managerTitle: "术语词典",
+  createTitle: "添加术语",
+  empty: "暂无术语",
+  created: "已添加到术语词典",
+  deleteConfirm: "确认删除该术语？",
+  labels: {
+    term: "术语",
+    definition: "含义解释",
+    mappedClassName: "映射类（英文）",
+    mappedPropertyName: "映射属性（英文）",
+    formulaHint: "公式 / 结构提示"
   },
-  "placeholders": {
-    "term": "如 占比 / 实际到货 / 订的数量",
-    "definition": "如 某值占总量的比例",
-    "mappedClassName": "如 PRECEIPTD",
-    "mappedPropertyName": "如 收货数量",
-    "formulaHint": "如 SUM(数量) / SUM(SUM(数量)) OVER ()"
+  placeholders: {
+    term: "如 占比 / 实际到货 / 订的数量",
+    definition: "如 某值占总量的比例",
+    mappedClassName: "如 PRECEIPTD",
+    mappedPropertyName: "如 收货数量",
+    formulaHint: "如 SUM(数量) / SUM(SUM(数量)) OVER ()"
   }
 },
   dataQuality: {
-  "createRule": "新建规则",
-  "editRule": "编辑规则",
-  "ruleCode": "规则编码",
-  "ruleCodeAutoHint": "已根据所选类自动建议编码：{code}（可手动修改）",
-  "ruleName": "规则名称",
-  "sourceClass": "所属类",
-  "sourceClassPlaceholder": "可选：选类后自动建议规则编码",
-  "datasource": "数据源",
-  "datasourcePlaceholder": "请选择数据源",
-  "targetTable": "目标表",
-  "targetTablePlaceholder": "请先选数据源",
-  "targetColumn": "目标列",
-  "targetColumnPlaceholder": "请先选表",
-  "ruleType": "规则类型",
-  "ruleExpression": "规则表达式",
-  "threshold": "阈值（%）",
-  "severity": "严重级别",
-  "enabled": "启用",
-  "owner": "责任方",
-  "description": "说明",
-  "filterType": "按规则类型过滤",
-  "ruleTypeLabels": {
-    "COMPLETENESS": "完整性",
-    "VALIDITY": "有效性",
-    "UNIQUENESS": "唯一性",
-    "CONSISTENCY": "一致性",
-    "REFERENTIAL": "引用性",
-    "TIMELINESS": "时效性"
+  createRule: "新建规则",
+  editRule: "编辑规则",
+  ruleCode: "规则编码",
+  ruleCodeAutoHint: "已根据所选类自动建议编码：{code}（可手动修改）",
+  ruleName: "规则名称",
+  sourceClass: "所属类",
+  sourceClassPlaceholder: "可选：选类后自动建议规则编码",
+  datasource: "数据源",
+  datasourcePlaceholder: "请选择数据源",
+  targetTable: "目标表",
+  targetTablePlaceholder: "请先选数据源",
+  targetColumn: "目标列",
+  targetColumnPlaceholder: "请先选表",
+  ruleType: "规则类型",
+  ruleExpression: "规则表达式",
+  threshold: "阈值（%）",
+  severity: "严重级别",
+  enabled: "启用",
+  owner: "责任方",
+  description: "说明",
+  filterType: "按规则类型过滤",
+  ruleTypeLabels: {
+    COMPLETENESS: "完整性",
+    VALIDITY: "有效性",
+    UNIQUENESS: "唯一性",
+    CONSISTENCY: "一致性",
+    REFERENTIAL: "引用性",
+    TIMELINESS: "时效性"
   },
-  "severityLabels": {
-    "HIGH": "高",
-    "MEDIUM": "中",
-    "LOW": "低",
-    "INFO": "提示"
+  severityLabels: {
+    HIGH: "高",
+    MEDIUM: "中",
+    LOW: "低",
+    INFO: "提示"
   },
-  "filterRuleName": "按规则名称过滤",
-  "filterDatasource": "按数据源过滤",
-  "filterClassName": "按类名过滤",
-  "filterTargetTable": "按目标表过滤",
-  "filterTargetTableDisabled": "请先选数据源",
-  "filterSeverity": "按严重程度过滤",
-  "filterEnabled": "按启用状态过滤",
-  "filterEnabledOptions": {
-    "all": "全部",
-    "enabled": "已启用",
-    "disabled": "未启用"
+  filterRuleName: "按规则名称过滤",
+  filterDatasource: "按数据源过滤",
+  filterClassName: "按类名过滤",
+  filterTargetTable: "按目标表过滤",
+  filterTargetTableDisabled: "请先选数据源",
+  filterSeverity: "按严重程度过滤",
+  filterEnabled: "按启用状态过滤",
+  filterEnabledOptions: {
+    all: "全部",
+    enabled: "已启用",
+    disabled: "未启用"
   },
-  "ruleCodePattern": "编码必须以大写字母开头，仅含大写字母/数字/下划线",
-  "createSuccess": "规则已创建",
-  "updateSuccess": "规则已更新",
-  "disableSuccess": "规则已停用",
-  "tabs": {
-    "rules": "规则",
-    "scores": "质量评分"
+  ruleCodePattern: "编码必须以大写字母开头，仅含大写字母/数字/下划线",
+  createSuccess: "规则已创建",
+  updateSuccess: "规则已更新",
+  disableSuccess: "规则已停用",
+  tabs: {
+    rules: "规则",
+    scores: "质量评分"
   },
-  "evaluate": "评估",
-  "evaluateBatch": "批量评估",
-  "evaluateBatchSelected": "批量评估（已选 {count}）",
-  "computeScore": "计算评分",
-  "evaluateSuccess": "评估完成",
-  "evaluateBatchSuccess": "已评估 {total} 条规则，通过 {passed} 条",
-  "evaluateBatchNoEnabled": "当前列表没有已启用的规则，无需批量评估",
-  "evaluateBatchNoSelection": "请先勾选要批量评估的规则",
-  "evaluateBatchHasDisabled": "已忽略 {count} 条未启用规则",
-  "computeScoreSuccess": "已计算 {count} 条评分",
-  "evalResult": {
-    "title": "评估结果",
-    "ruleCode": "规则编码",
-    "ruleType": "规则类型",
-    "totalCount": "总记录数",
-    "passedCount": "通过数",
-    "passRate": "通过率（%）",
-    "status": "状态",
-    "duration": "耗时（ms）",
-    "message": "详情",
-    "pass": "通过",
-    "fail": "未通过"
+  evaluate: "评估",
+  evaluateBatch: "批量评估",
+  evaluateBatchSelected: "批量评估（已选 {count}）",
+  computeScore: "计算评分",
+  evaluateSuccess: "评估完成",
+  evaluateBatchSuccess: "已评估 {total} 条规则，通过 {passed} 条",
+  evaluateBatchNoEnabled: "当前列表没有已启用的规则，无需批量评估",
+  evaluateBatchNoSelection: "请先勾选要批量评估的规则",
+  evaluateBatchHasDisabled: "已忽略 {count} 条未启用规则",
+  computeScoreSuccess: "已计算 {count} 条评分",
+  evalResult: {
+    title: "评估结果",
+    ruleCode: "规则编码",
+    ruleType: "规则类型",
+    totalCount: "总记录数",
+    passedCount: "通过数",
+    passRate: "通过率（%）",
+    status: "状态",
+    duration: "耗时（ms）",
+    message: "详情",
+    pass: "通过",
+    fail: "未通过"
   },
-  "batchResult": {
-    "title": "批量评估结果",
-    "exportCsv": "导出 CSV",
-    "saveToHistory": "保存到历史",
-    "savedToHistory": "已保存到历史",
-    "saveFailed": "保存失败（localStorage 不可用）",
-    "summary": {
-      "total": "总数",
-      "passed": "通过",
-      "failed": "未通过",
-      "errored": "错误"
+  batchResult: {
+    title: "批量评估结果",
+    exportCsv: "导出 CSV",
+    saveToHistory: "保存到历史",
+    savedToHistory: "已保存到历史",
+    saveFailed: "保存失败（localStorage 不可用）",
+    summary: {
+      total: "总数",
+      passed: "通过",
+      failed: "未通过",
+      errored: "错误"
     },
-    "columns": {
-      "ruleCode": "规则编码",
-      "ruleType": "规则类型",
-      "status": "状态",
-      "passRate": "通过率",
-      "total": "总记录",
-      "passed": "通过数",
-      "duration": "耗时",
-      "message": "失败原因"
+    columns: {
+      ruleCode: "规则编码",
+      ruleType: "规则类型",
+      status: "状态",
+      passRate: "通过率",
+      total: "总记录",
+      passed: "通过数",
+      duration: "耗时",
+      message: "失败原因"
     },
-    "history": {
-      "button": "历史",
-      "title": "批量评估历史",
-      "countTitle": "已保存的批量评估次数",
-      "empty": "暂无历史记录",
-      "open": "查看"
+    history: {
+      button: "历史",
+      title: "批量评估历史",
+      countTitle: "已保存的批量评估次数",
+      empty: "暂无历史记录",
+      open: "查看"
     }
   },
-  "scores": {
-    "title": "质量评分",
-    "targetTable": "目标表",
-    "scoreType": "评分类型",
-    "overallScore": "综合评分",
-    "dimensions": {
-      "completeness": "完整性",
-      "validity": "有效性",
-      "uniqueness": "唯一性",
-      "consistency": "一致性",
-      "timeliness": "时效性",
-      "referential": "引用性"
+  scores: {
+    title: "质量评分",
+    targetTable: "目标表",
+    scoreType: "评分类型",
+    overallScore: "综合评分",
+    dimensions: {
+      completeness: "完整性",
+      validity: "有效性",
+      uniqueness: "唯一性",
+      consistency: "一致性",
+      timeliness: "时效性",
+      referential: "引用性"
     },
-    "rulesCount": "规则数",
-    "evaluatedAt": "评估时间",
-    "duration": "耗时",
-    "table": "TABLE",
-    "global": "GLOBAL"
+    rulesCount: "规则数",
+    evaluatedAt: "评估时间",
+    duration: "耗时",
+    table: "TABLE",
+    global: "GLOBAL"
   },
-  "scoresFilter": {
-    "table": "按表名筛选",
-    "scoreType": "按评分类型筛选",
-    "latestOnly": "仅最新",
-    "scopeDatasource": "评分范围：数据源",
-    "scopeTargetTable": "评分范围：目标表",
-    "scopeRuleType": "评分范围：规则类型",
-    "scopeHint": "留空 = 全量计算；三条件 AND 组合；命中 0 条规则时不落库"
+  scoresFilter: {
+    table: "按表名筛选",
+    scoreType: "按评分类型筛选",
+    latestOnly: "仅最新",
+    scopeDatasource: "评分范围：数据源",
+    scopeTargetTable: "评分范围：目标表",
+    scopeRuleType: "评分范围：规则类型",
+    scopeHint: "留空 = 全量计算；三条件 AND 组合；命中 0 条规则时不落库"
   },
-  "reports": {
-    "title": "评估报告",
-    "newReport": "新建报告",
-    "empty": "暂无报告",
-    "columns": {
-      "name": "名称",
-      "classCount": "对象数",
-      "ruleCount": "规则数",
-      "status": "状态",
-      "createdBy": "创建人",
-      "timeWindow": "评估时间窗口",
-      "createdTime": "创建时间",
-      "actions": "操作"
+  reports: {
+    title: "评估报告",
+    newReport: "新建报告",
+    empty: "暂无报告",
+    columns: {
+      name: "名称",
+      classCount: "对象数",
+      ruleCount: "规则数",
+      status: "状态",
+      createdBy: "创建人",
+      timeWindow: "评估时间窗口",
+      createdTime: "创建时间",
+      actions: "操作"
     },
-    "filter": {
-      "name": "按名称过滤",
-      "classId": "按对象过滤",
-      "ruleId": "按规则过滤",
-      "createdBy": "按创建人过滤",
-      "dateRange": "按创建时间过滤"
+    filter: {
+      name: "按名称过滤",
+      classId: "按对象过滤",
+      ruleId: "按规则过滤",
+      createdBy: "按创建人过滤",
+      dateRange: "按创建时间过滤"
     },
-    "actions": {
-      "view": "查看",
-      "regenerate": "重新生成",
-      "delete": "删除",
-      "confirmDelete": "确认删除报告 {name}？",
-      "deleteSuccess": "报告已删除",
-      "regenerateSuccess": "报告快照已重新计算",
-      "loadFailed": "加载报告失败"
+    actions: {
+      view: "查看",
+      regenerate: "重新生成",
+      delete: "删除",
+      confirmDelete: "确认删除报告 {name}？",
+      deleteSuccess: "报告已删除",
+      regenerateSuccess: "报告快照已重新计算",
+      loadFailed: "加载报告失败"
     },
-    "statusLabels": {
-      "DRAFT": "草稿",
-      "PUBLISHED": "已发布",
-      "PENDING": "排队中",
-      "RUNNING": "评估中",
-      "COMPLETED": "已完成",
-      "FAILED": "评估失败"
+    statusLabels: {
+      DRAFT: "草稿",
+      PUBLISHED: "已发布",
+      PENDING: "排队中",
+      RUNNING: "评估中",
+      COMPLETED: "已完成",
+      FAILED: "评估失败"
     },
-    "create": {
-      "title": "新建评估报告",
-      "name": "报告名称",
-      "nameRequired": "请输入报告名称",
-      "description": "说明",
-      "classes": "评估对象",
-      "classesRequired": "请至少选择一个对象",
-      "rules": "评估规则",
-      "rulesRequired": "请至少选择一条规则",
-      "timeWindow": "评估时间窗口",
-      "tags": "标签",
-      "status": "状态",
-      "submit": "创建",
-      "success": "报告已创建",
-      "failed": "创建报告失败"
+    create: {
+      title: "新建评估报告",
+      name: "报告名称",
+      nameRequired: "请输入报告名称",
+      description: "说明",
+      classes: "评估对象",
+      classesRequired: "请至少选择一个对象",
+      rules: "评估规则",
+      rulesRequired: "请至少选择一条规则",
+      timeWindow: "评估时间窗口",
+      tags: "标签",
+      status: "状态",
+      submit: "创建",
+      success: "报告已创建",
+      failed: "创建报告失败"
     },
-    "detail": {
-      "title": "报告详情",
-      "backToList": "返回列表",
-      "sections": {
-        "basic": "基本信息",
-        "summary": "评估摘要",
-        "rules": "规则明细",
-        "samples": "违规样本"
+    detail: {
+      title: "报告详情",
+      backToList: "返回列表",
+      sections: {
+        basic: "基本信息",
+        summary: "评估摘要",
+        rules: "规则明细",
+        samples: "违规样本"
       },
-      "fields": {
-        "id": "报告 ID",
-        "name": "名称",
-        "description": "说明",
-        "status": "状态",
-        "classes": "评估对象",
-        "rules": "评估规则",
-        "timeWindow": "评估时间窗口",
-        "createdBy": "创建人",
-        "createdTime": "创建时间",
-        "owner": "责任方",
-        "tags": "标签",
-        "evaluatedAt": "评估时间",
-        "overallScore": "综合评分"
+      fields: {
+        id: "报告 ID",
+        name: "名称",
+        description: "说明",
+        status: "状态",
+        classes: "评估对象",
+        rules: "评估规则",
+        timeWindow: "评估时间窗口",
+        createdBy: "创建人",
+        createdTime: "创建时间",
+        owner: "责任方",
+        tags: "标签",
+        evaluatedAt: "评估时间",
+        overallScore: "综合评分"
       },
-      "overallStatusLabels": {
-        "PASS": "通过",
-        "FAIL": "未通过",
-        "PENDING": "待计算"
+      overallStatusLabels: {
+        PASS: "通过",
+        FAIL: "未通过",
+        PENDING: "待计算"
       },
-      "kpi": {
-        "overallScore": "综合评分",
-        "ruleCount": "规则数",
-        "passCount": "通过数",
-        "failCount": "未通过数",
-        "dataItemCount": "评估数据条目数"
+      kpi: {
+        overallScore: "综合评分",
+        ruleCount: "规则数",
+        passCount: "通过数",
+        failCount: "未通过数",
+        dataItemCount: "评估数据条目数"
       },
-      "samplesTable": {
-        "ruleId": "规则 ID",
-        "targetTable": "目标表",
-        "targetColumn": "目标列",
-        "totalViolations": "违规总数",
-        "sampleSize": "样本数",
-        "samplePkValues": "违规样例 PK",
-        "samplingFailed": "采样失败",
-        "moreSamples": "+{count} 更多",
-        "capturedAt": "采集时间",
-        "empty": "暂无违规样本"
+      samplesTable: {
+        ruleId: "规则 ID",
+        targetTable: "目标表",
+        targetColumn: "目标列",
+        totalViolations: "违规总数",
+        sampleSize: "样本数",
+        samplePkValues: "违规样例 PK",
+        samplingFailed: "采样失败",
+        moreSamples: "+{count} 更多",
+        capturedAt: "采集时间",
+        empty: "暂无违规样本"
       },
-      "ruleTable": {
-        "rule": "规则",
-        "type": "类型",
-        "target": "目标",
-        "severity": "严重级别",
-        "passRate": "通过率",
-        "status": "状态",
-        "ruleFallbackBadge": "系统编码",
-        "ruleFallbackTooltip": "未读取到规则名称（老 snapshot 不含 rule_name 字段），请重新生成报告或刷新数据。"
+      ruleTable: {
+        rule: "规则",
+        type: "类型",
+        target: "目标",
+        severity: "严重级别",
+        passRate: "通过率",
+        status: "状态",
+        ruleFallbackBadge: "系统编码",
+        ruleFallbackTooltip: "未读取到规则名称（老 snapshot 不含 rule_name 字段），请重新生成报告或刷新数据。"
       },
-      "charts": {
-        "dimensionBar": "六维度得分",
-        "passFailPie": "规则通过情况",
-        "trendLine": "综合评分趋势",
-        "empty": "暂无数据",
-        "trendUnavailable": "暂无历史趋势"
+      charts: {
+        dimensionBar: "六维度得分",
+        passFailPie: "规则通过情况",
+        trendLine: "综合评分趋势",
+        empty: "暂无数据",
+        trendUnavailable: "暂无历史趋势"
       }
     }
   },
-  "batchCreate": {
-    "pageTitle": "批量新建规则",
-    "pageSubtitle": "为某个类的若干列批量配置规则，自动生成编码 / 名称 / 简单表达式",
-    "enterButton": "批量新建",
-    "step1": "基础配置",
-    "step2": "列与规则",
-    "step3": "预览确认",
-    "datasourcePlaceholder": "请选择数据源",
-    "classPlaceholder": "请选择本体类",
-    "tablePlaceholder": "请选择目标表（支持模糊搜索）",
-    "loadingSchema": "加载数据源 schema 中…",
-    "loadedSchema": "已加载 N 张表",
-    "selectColumns": "本表共 N 列，已勾选 M 列",
-    "noColumns": "该表暂无列信息，请检查数据源连接",
-    "noTemplateHint": "无自动模板，请人工填写",
-    "customBadge": "自定义",
-    "autoBadge": "自动",
-    "previewTitle": "预览 N 条规则",
-    "globalEnabled": "全部启用",
-    "globalThreshold": "阈值（%）",
-    "globalSeverity": "严重级别",
-    "globalOwner": "责任方",
-    "globalDescription": "描述",
-    "ownerRequired": "请填写责任方",
-    "back": "上一步",
-    "next": "下一步",
-    "cancel": "取消",
-    "save": "保存 N 条",
-    "saving": "保存中…",
-    "saveSuccess": "已创建 N 条规则",
-    "savePartial": "已创建 N 条，失败 M 条（见预览中标红行）",
-    "saveFailed": "保存失败",
-    "duplicateName": "规则名重复",
-    "duplicateCode": "规则编码已存在，请重新生成",
-    "invalidExpression": "规则表达式校验失败",
-    "goStep2": "继续：选列与规则",
-    "goStep3": "继续：预览确认"
+  batchCreate: {
+    pageTitle: "批量新建规则",
+    pageSubtitle: "为某个类的若干列批量配置规则，自动生成编码 / 名称 / 简单表达式",
+    enterButton: "批量新建",
+    step1: "基础配置",
+    step2: "列与规则",
+    step3: "预览确认",
+    datasourcePlaceholder: "请选择数据源",
+    classPlaceholder: "请选择本体类",
+    tablePlaceholder: "请选择目标表（支持模糊搜索）",
+    loadingSchema: "加载数据源 schema 中…",
+    loadedSchema: "已加载 N 张表",
+    selectColumns: "本表共 N 列，已勾选 M 列",
+    noColumns: "该表暂无列信息，请检查数据源连接",
+    noTemplateHint: "无自动模板，请人工填写",
+    customBadge: "自定义",
+    autoBadge: "自动",
+    previewTitle: "预览 N 条规则",
+    globalEnabled: "全部启用",
+    globalThreshold: "阈值（%）",
+    globalSeverity: "严重级别",
+    globalOwner: "责任方",
+    globalDescription: "描述",
+    ownerRequired: "请填写责任方",
+    back: "上一步",
+    next: "下一步",
+    cancel: "取消",
+    save: "保存 N 条",
+    saving: "保存中…",
+    saveSuccess: "已创建 N 条规则",
+    savePartial: "已创建 N 条，失败 M 条（见预览中标红行）",
+    saveFailed: "保存失败",
+    duplicateName: "规则名重复",
+    duplicateCode: "规则编码已存在，请重新生成",
+    invalidExpression: "规则表达式校验失败",
+    goStep2: "继续：选列与规则",
+    goStep3: "继续：预览确认"
   }
 },
   lineage: {
-  "page": {
-    "title": "数据血缘",
-    "tabs": {
-      "graph": "可视化",
-      "manage": "管理"
+  page: {
+    title: "数据血缘",
+    tabs: {
+      graph: "可视化",
+      manage: "管理"
     }
   },
-  "filter": {
-    "layers": "层级筛选",
-    "objects": "对象筛选",
-    "objectPlaceholder": "按对象筛选（如 PORDER）",
-    "summary": "已选 {selected}/{total} 层、{objects} 个对象，当前显示 {edges} 条边（共 {allEdges} 条）"
+  filter: {
+    layers: "层级筛选",
+    objects: "对象筛选",
+    objectPlaceholder: "按对象筛选（如 PORDER）",
+    summary: "已选 {selected}/{total} 层、{objects} 个对象，当前显示 {edges} 条边（共 {allEdges} 条）"
   },
-  "empty": {
-    "noData": "暂无血缘数据，请先在本体管理或调用 /api/v1/lineage/edges 创建",
-    "filteredOut": "当前筛选条件下无血缘边，请调整层级或对象筛选"
+  empty: {
+    noData: "暂无血缘数据，请先在本体管理或调用 /api/v1/lineage/edges 创建",
+    filteredOut: "当前筛选条件下无血缘边，请调整层级或对象筛选"
   },
-  "extract": {
-    "button": "自动抽取血缘",
-    "created": "自动抽取完成：新增 {count} 条血缘边",
-    "noNew": "血缘已是最新，本次无新增边"
+  extract: {
+    button: "自动抽取血缘",
+    created: "自动抽取完成：新增 {count} 条血缘边",
+    noNew: "血缘已是最新，本次无新增边"
   },
-  "manage": {
-    "newButton": "新建血缘边",
-    "editTitle": "编辑血缘边",
-    "createTitle": "新建血缘边",
-    "deleteConfirm": "确认删除该血缘边？",
-    "createSuccess": "血缘边已创建",
-    "updateSuccess": "血缘边已更新",
-    "deleteSuccess": "血缘边已删除",
-    "listFailed": "加载血缘边列表失败",
-    "columns": {
-      "id": "ID",
-      "sourceLayer": "源层级",
-      "sourceSystem": "源系统",
-      "sourceObject": "源对象",
-      "sourceField": "源字段",
-      "targetLayer": "目标层级",
-      "targetSystem": "目标系统",
-      "targetObject": "目标对象",
-      "targetField": "目标字段",
-      "transformationRule": "变换规则",
-      "refreshFrequency": "刷新频率",
-      "owner": "责任部门",
-      "description": "描述",
-      "isActive": "状态",
-      "createdTime": "创建时间",
-      "actions": "操作"
+  manage: {
+    newButton: "新建血缘边",
+    editTitle: "编辑血缘边",
+    createTitle: "新建血缘边",
+    deleteConfirm: "确认删除该血缘边？",
+    createSuccess: "血缘边已创建",
+    updateSuccess: "血缘边已更新",
+    deleteSuccess: "血缘边已删除",
+    listFailed: "加载血缘边列表失败",
+    columns: {
+      id: "ID",
+      sourceLayer: "源层级",
+      sourceSystem: "源系统",
+      sourceObject: "源对象",
+      sourceField: "源字段",
+      targetLayer: "目标层级",
+      targetSystem: "目标系统",
+      targetObject: "目标对象",
+      targetField: "目标字段",
+      transformationRule: "变换规则",
+      refreshFrequency: "刷新频率",
+      owner: "责任部门",
+      description: "描述",
+      isActive: "状态",
+      createdTime: "创建时间",
+      actions: "操作"
     },
-    "form": {
-      "sourceLayer": "源层级",
-      "sourceSystem": "源系统",
-      "sourceObject": "源对象",
-      "sourceField": "源字段（可选）",
-      "targetLayer": "目标层级",
-      "targetSystem": "目标系统",
-      "targetObject": "目标对象",
-      "targetField": "目标字段（可选）",
-      "transformationRule": "变换规则（可选）",
-      "refreshFrequency": "刷新频率",
-      "owner": "责任部门（可选）",
-      "description": "描述（可选）"
+    form: {
+      sourceLayer: "源层级",
+      sourceSystem: "源系统",
+      sourceObject: "源对象",
+      sourceField: "源字段（可选）",
+      targetLayer: "目标层级",
+      targetSystem: "目标系统",
+      targetObject: "目标对象",
+      targetField: "目标字段（可选）",
+      transformationRule: "变换规则（可选）",
+      refreshFrequency: "刷新频率",
+      owner: "责任部门（可选）",
+      description: "描述（可选）"
     },
-    "placeholders": {
-      "sourceSystem": "如 THBI",
-      "sourceObject": "如 DWD_SUPPLIER",
-      "sourceField": "表级血缘可留空",
-      "targetSystem": "如 THBI",
-      "targetObject": "如 ADS_SUPPLIER_360",
-      "targetField": "表级血缘可留空",
-      "transformationRule": "如 SUM / JOIN / FILTER",
-      "owner": "如 procurement",
-      "description": "血缘边的业务含义或说明"
+    placeholders: {
+      sourceSystem: "如 THBI",
+      sourceObject: "如 DWD_SUPPLIER",
+      sourceField: "表级血缘可留空",
+      targetSystem: "如 THBI",
+      targetObject: "如 ADS_SUPPLIER_360",
+      targetField: "表级血缘可留空",
+      transformationRule: "如 SUM / JOIN / FILTER",
+      owner: "如 procurement",
+      description: "血缘边的业务含义或说明"
     }
   }
 },
   entityMapping: {
-  "id": "ID",
-  "entityType": "实体类型",
-  "enterpriseKey": "企业代理键",
-  "enterpriseCode": "企业编码",
-  "sourceSystem": "源系统",
-  "sourceKey": "源系统 Key",
-  "sourceCode": "源系统编码",
-  "matchRule": "匹配规则",
-  "effectiveDate": "生效日期",
-  "expiryDate": "失效日期",
-  "filterType": "按实体类型过滤",
-  "createMapping": "新建映射",
-  "editMapping": "编辑映射",
-  "createSuccess": "映射已创建",
-  "updateSuccess": "映射已更新",
-  "deleteConfirm": "确认删除该编码映射？",
-  "datePattern": "日期格式必须为 YYYY-MM-DD",
-  "datePlaceholder": "YYYY-MM-DD",
-  "owner": "责任部门",
-  "ownerTooltip": "空表示仅 admin 可改；填部门后该部门成员可改",
-  "ownerPlaceholder": "例如：procurement",
-  "bulkImport": "批量导入",
-  "bulkImportTitle": "批量导入编码映射",
-  "bulkImportEmpty": "没有可导入的有效行",
-  "bulkImportTooLarge": "单批最多 1000 行",
-  "bulkImportSample": "加载示例",
-  "bulkImportClear": "清空",
-  "bulkImportSubmit": "导入",
-  "bulkImportImporting": "导入中"
+  id: "ID",
+  entityType: "实体类型",
+  enterpriseKey: "企业代理键",
+  enterpriseCode: "企业编码",
+  sourceSystem: "源系统",
+  sourceKey: "源系统 Key",
+  sourceCode: "源系统编码",
+  matchRule: "匹配规则",
+  effectiveDate: "生效日期",
+  expiryDate: "失效日期",
+  filterType: "按实体类型过滤",
+  createMapping: "新建映射",
+  editMapping: "编辑映射",
+  createSuccess: "映射已创建",
+  updateSuccess: "映射已更新",
+  deleteConfirm: "确认删除该编码映射？",
+  datePattern: "日期格式必须为 YYYY-MM-DD",
+  datePlaceholder: "YYYY-MM-DD",
+  owner: "责任部门",
+  ownerTooltip: "空表示仅 admin 可改；填部门后该部门成员可改",
+  ownerPlaceholder: "例如：procurement",
+  bulkImport: "批量导入",
+  bulkImportTitle: "批量导入编码映射",
+  bulkImportEmpty: "没有可导入的有效行",
+  bulkImportTooLarge: "单批最多 1000 行",
+  bulkImportSample: "加载示例",
+  bulkImportClear: "清空",
+  bulkImportSubmit: "导入",
+  bulkImportImporting: "导入中"
 },
   forms: {
-  "required": "必填项",
-  "embeddingProviders": {
-    "columns": {
-      "id": "ID",
-      "name": "名称",
-      "type": "类型",
-      "baseUrl": "接入地址",
-      "modelName": "模型名",
-      "dimension": "维度",
-      "status": "状态",
-      "actions": "操作"
+  required: "必填项",
+  embeddingProviders: {
+    columns: {
+      id: "ID",
+      name: "名称",
+      type: "类型",
+      baseUrl: "接入地址",
+      modelName: "模型名",
+      dimension: "维度",
+      status: "状态",
+      actions: "操作"
     },
-    "addButton": "新增服务",
-    "deactivateConfirm": "确认停用该服务？",
-    "addModalTitle": "新增服务",
-    "editModalTitle": "编辑服务",
-    "labels": {
-      "name": "名称",
-      "providerType": "类型",
-      "baseUrl": "接入地址",
-      "modelName": "模型名",
-      "dimension": "输出维度",
-      "dimensionHint": "须与 Milvus 集合维度一致（当前 1024）",
-      "apiKey": "API Key",
-      "apiKeyKeep": "API Key（留空表示不修改）"
+    addButton: "新增服务",
+    deactivateConfirm: "确认停用该服务？",
+    addModalTitle: "新增服务",
+    editModalTitle: "编辑服务",
+    labels: {
+      name: "名称",
+      providerType: "类型",
+      baseUrl: "接入地址",
+      modelName: "模型名",
+      dimension: "输出维度",
+      dimensionHint: "须与 Milvus 集合维度一致（当前 1024）",
+      apiKey: "API Key",
+      apiKeyKeep: "API Key（留空表示不修改）"
     },
-    "placeholders": {
-      "name": "如 Ollama bge-m3",
-      "baseUrl": "如 http://localhost:11434/v1",
-      "modelName": "如 bge-m3:latest",
-      "apiKey": "本地免鉴权服务可留空"
+    placeholders: {
+      name: "如 Ollama bge-m3",
+      baseUrl: "如 http://localhost:11434/v1",
+      modelName: "如 bge-m3:latest",
+      apiKey: "本地免鉴权服务可留空"
     }
   },
-  "modelConfig": {
-    "columns": {
-      "id": "ID",
-      "modelName": "模型名称",
-      "provider": "供应商",
-      "apiEndpoint": "接入地址",
-      "inputCost": "输入成本/1k",
-      "outputCost": "输出成本/1k",
-      "weight": "权重",
-      "costThreshold": "成本阈值",
-      "status": "状态",
-      "actions": "操作"
+  modelConfig: {
+    columns: {
+      id: "ID",
+      modelName: "模型名称",
+      provider: "供应商",
+      apiEndpoint: "接入地址",
+      inputCost: "输入成本/1k",
+      outputCost: "输出成本/1k",
+      weight: "权重",
+      costThreshold: "成本阈值",
+      status: "状态",
+      actions: "操作"
     },
-    "addButton": "新增模型",
-    "deactivateConfirm": "确认停用该模型？",
-    "addModalTitle": "新增模型",
-    "editModalTitle": "编辑模型",
-    "labels": {
-      "modelName": "模型名称",
-      "provider": "供应商",
-      "apiEndpoint": "接入地址",
-      "apiKey": "API Key",
-      "apiKeyKeep": "API Key（留空表示不修改）",
-      "costPer1KInput": "输入成本/1k ($)",
-      "costPer1KOutput": "输出成本/1k ($)",
-      "maxInputTokens": "最大输入 Token",
-      "weight": "路由权重",
-      "costThreshold": "成本阈值 ($)",
-      "temperature": "Temperature",
-      "disableThinking": "关闭推理模型思维链"
+    addButton: "新增模型",
+    deactivateConfirm: "确认停用该模型？",
+    addModalTitle: "新增模型",
+    editModalTitle: "编辑模型",
+    labels: {
+      modelName: "模型名称",
+      provider: "供应商",
+      apiEndpoint: "接入地址",
+      apiKey: "API Key",
+      apiKeyKeep: "API Key（留空表示不修改）",
+      costPer1KInput: "输入成本/1k ($)",
+      costPer1KOutput: "输出成本/1k ($)",
+      maxInputTokens: "最大输入 Token",
+      weight: "路由权重",
+      costThreshold: "成本阈值 ($)",
+      temperature: "Temperature",
+      disableThinking: "关闭推理模型思维链"
     },
-    "placeholders": {
-      "modelName": "如 gpt-4o-mini / deepseek-chat / qwen2.5:7b",
-      "apiEndpoint": "https://api.openai.com/v1 或 http://localhost:11434",
-      "apiKey": "sk-...",
-      "temperature": "留空使用默认值 0.0"
+    placeholders: {
+      modelName: "如 gpt-4o-mini / deepseek-chat / qwen2.5:7b",
+      apiEndpoint: "https://api.openai.com/v1 或 http://localhost:11434",
+      apiKey: "sk-...",
+      temperature: "留空使用默认值 0.0"
     }
   },
-  "datasource": {
-    "columns": {
-      "id": "ID",
-      "name": "名称",
-      "type": "类型",
-      "host": "主机",
-      "port": "端口",
-      "databaseName": "数据库/Service",
-      "username": "用户名",
-      "isDefault": "默认",
-      "status": "状态",
-      "actions": "操作",
-      "default": "默认"
+  datasource: {
+    columns: {
+      id: "ID",
+      name: "名称",
+      type: "类型",
+      host: "主机",
+      port: "端口",
+      databaseName: "数据库/Service",
+      username: "用户名",
+      isDefault: "默认",
+      status: "状态",
+      actions: "操作",
+      default: "默认"
     },
-    "addButton": "新增数据源",
-    "addModalTitle": "新增数据源",
-    "editModalTitle": "编辑数据源",
-    "testConnection": "测试连接",
-    "setAsDefault": "设为默认",
-    "deleteConfirm": "确认删除该数据源？",
-    "labels": {
-      "name": "名称",
-      "type": "类型",
-      "host": "主机",
-      "port": "端口",
-      "databaseName": "数据库 / Service",
-      "oracleVersion": "Oracle 版本",
-      "username": "用户名",
-      "password": "密码",
-      "passwordKeep": "密码（留空表示不修改）",
-      "description": "描述"
+    addButton: "新增数据源",
+    addModalTitle: "新增数据源",
+    editModalTitle: "编辑数据源",
+    testConnection: "测试连接",
+    setAsDefault: "设为默认",
+    deleteConfirm: "确认删除该数据源？",
+    labels: {
+      name: "名称",
+      type: "类型",
+      host: "主机",
+      port: "端口",
+      databaseName: "数据库 / Service",
+      oracleVersion: "Oracle 版本",
+      username: "用户名",
+      password: "密码",
+      passwordKeep: "密码（留空表示不修改）",
+      description: "描述"
     },
-    "placeholders": {
-      "name": "如 ZJTH-Oracle / RuoYi-MySQL",
-      "host": "IP 或域名",
-      "databaseName": "PG/MySQL 填数据库名，Oracle 填 service_name",
-      "oracleVersion": "不选默认 12c+（FETCH FIRST）",
-      "password": "连接密码",
-      "passwordKeep": "留空表示不修改",
-      "description": "可选"
+    placeholders: {
+      name: "如 ZJTH-Oracle / RuoYi-MySQL",
+      host: "IP 或域名",
+      databaseName: "PG/MySQL 填数据库名，Oracle 填 service_name",
+      oracleVersion: "不选默认 12c+（FETCH FIRST）",
+      password: "连接密码",
+      passwordKeep: "留空表示不修改",
+      description: "可选"
     },
-    "tooltips": {
-      "oracleVersion": "决定分页语法：11g 及以下用 ROWNUM，12c 及以上用 FETCH FIRST。不选默认按 12c+ 处理。"
+    tooltips: {
+      oracleVersion: "决定分页语法：11g 及以下用 ROWNUM，12c 及以上用 FETCH FIRST。不选默认按 12c+ 处理。"
     },
-    "validation": {
-      "portRange": "端口范围 1-65535"
+    validation: {
+      portRange: "端口范围 1-65535"
     }
   },
-  "ontology": {
-    "tabs": {
-      "classes": "类",
-      "properties": "属性",
-      "metrics": "指标",
-      "joins": "关联",
-      "semanticRelations": "语义关系"
+  ontology: {
+    tabs: {
+      classes: "类",
+      properties: "属性",
+      metrics: "指标",
+      joins: "关联",
+      semanticRelations: "语义关系"
     },
-    "addClassButton": "新增类",
-    "addClassModalTitle": "新增类",
-    "editClassModalTitle": "编辑类",
-    "addPropertyButton": "新增属性",
-    "addPropertyModalTitle": "新增属性",
-    "editPropertyModalTitle": "编辑属性",
-    "addMetricButton": "新增指标",
-    "addMetricModalTitle": "新增指标",
-    "editMetricModalTitle": "编辑指标",
-    "addJoinButton": "新增关联",
-    "addJoinModalTitle": "新增关联",
-    "joinOnlyForeignKeys": "仅显示外来键关联（自动推断）",
-    "joinOnlyForeignKeysHint": "本地导入按「声明外键 / Sage X3 列名约定」自动推断的关联会标记为外来键，可在此核查、删除或补建。",
-    "versionsModalTitle": "版本历史：{name}",
-    "semanticSearchTab": "语义搜索",
-    "semanticResultsCardTitle": "语义检索结果",
-    "semanticSearchPlaceholder": "语义搜索：如 客户销售额",
-    "deleteConfirm": "确认删除？",
-    "syncEmbedding": "同步向量",
-    "syncMissingEmbeddings": "补同步缺失向量",
-    "syncEmbeddingSuccess": "类「{name}」向量已同步",
-    "syncMissingNone": "类与属性向量已齐全（{total} 类 / {propTotal} 属性），无需补同步",
-    "syncMissingSuccess": "补同步完成：类 {classSynced} 条、属性 {propSynced} 条",
-    "syncMissingPartial": "补同步完成：成功 {synced} 条，失败 {failed} 条（详情见后端日志）",
-    "syncGraphButton": "补图信息",
-    "syncGraphNone": "图谱与本体数据已一致，无需补充",
-    "syncGraphSuccess": "图谱补充完成：类 {classes} 个、属性 {properties} 个、边 {edges} 条",
-    "syncGraphPartial": "图谱补充完成：成功 {synced} 项，失败 {failed} 项（详情见后端日志）",
-    "showDeleted": "显示已删除",
-    "restore": "恢复",
-    "restoreConfirm": "确认恢复该类？恢复后会重新进入列表并可编辑。",
-    "restored": "类已恢复",
-    "statusActive": "有效",
-    "statusDeleted": "已删除",
-    "classColumns": {
-      "id": "ID",
-      "className": "类名",
-      "classAlias": "别名",
-      "version": "版本",
-      "validFrom": "生效时间",
-      "parentClassId": "父类",
-      "sourceTable": "数据表",
-      "objectType": "对象类型",
-      "objectOwner": "责任部门/人",
-      "description": "描述",
-      "actions": "操作",
-      "status": "状态",
-      "versionTag": "v{version}",
-      "versionCurrentTag": "v{version} 当前"
+    addClassButton: "新增类",
+    addClassModalTitle: "新增类",
+    editClassModalTitle: "编辑类",
+    addPropertyButton: "新增属性",
+    addPropertyModalTitle: "新增属性",
+    editPropertyModalTitle: "编辑属性",
+    addMetricButton: "新增指标",
+    addMetricModalTitle: "新增指标",
+    editMetricModalTitle: "编辑指标",
+    addJoinButton: "新增关联",
+    addJoinModalTitle: "新增关联",
+    joinOnlyForeignKeys: "仅显示外来键关联（自动推断）",
+    joinOnlyForeignKeysHint: "本地导入按「声明外键 / Sage X3 列名约定」自动推断的关联会标记为外来键，可在此核查、删除或补建。",
+    versionsModalTitle: "版本历史：{name}",
+    semanticSearchTab: "语义搜索",
+    semanticResultsCardTitle: "语义检索结果",
+    semanticSearchPlaceholder: "语义搜索：如 客户销售额",
+    deleteConfirm: "确认删除？",
+    syncEmbedding: "同步向量",
+    syncMissingEmbeddings: "补同步缺失向量",
+    syncEmbeddingSuccess: "类「{name}」向量已同步",
+    syncMissingNone: "类与属性向量已齐全（{total} 类 / {propTotal} 属性），无需补同步",
+    syncMissingSuccess: "补同步完成：类 {classSynced} 条、属性 {propSynced} 条",
+    syncMissingPartial: "补同步完成：成功 {synced} 条，失败 {failed} 条（详情见后端日志）",
+    syncGraphButton: "补图信息",
+    syncGraphNone: "图谱与本体数据已一致，无需补充",
+    syncGraphSuccess: "图谱补充完成：类 {classes} 个、属性 {properties} 个、边 {edges} 条",
+    syncGraphPartial: "图谱补充完成：成功 {synced} 项，失败 {failed} 项（详情见后端日志）",
+    showDeleted: "显示已删除",
+    restore: "恢复",
+    restoreConfirm: "确认恢复该类？恢复后会重新进入列表并可编辑。",
+    restored: "类已恢复",
+    statusActive: "有效",
+    statusDeleted: "已删除",
+    classColumns: {
+      id: "ID",
+      className: "类名",
+      classAlias: "别名",
+      version: "版本",
+      validFrom: "生效时间",
+      parentClassId: "父类",
+      sourceTable: "数据表",
+      objectType: "对象类型",
+      objectOwner: "责任部门/人",
+      description: "描述",
+      actions: "操作",
+      status: "状态",
+      versionTag: "v{version}",
+      versionCurrentTag: "v{version} 当前"
     },
-    "propertyColumns": {
-      "id": "ID",
-      "classId": "所属类",
-      "propertyName": "属性名",
-      "propertyAlias": "别名",
-      "dataType": "数据类型",
-      "sourceColumn": "源字段",
-      "unit": "单位",
-      "flags": "标签",
-      "actions": "操作"
+    propertyColumns: {
+      id: "ID",
+      classId: "所属类",
+      propertyName: "属性名",
+      propertyAlias: "别名",
+      dataType: "数据类型",
+      sourceColumn: "源字段",
+      unit: "单位",
+      flags: "标签",
+      actions: "操作"
     },
-    "propertyEmptyHint": "提示：请先在「类」标签页中创建本体类，再添加属性。",
-    "metricColumns": {
-      "id": "ID",
-      "metricName": "指标名",
-      "metricAlias": "别名",
-      "formula": "公式",
-      "aggFunction": "聚合函数",
-      "targetClassId": "目标类",
-      "dimensionDefaults": "默认维度",
-      "actions": "操作",
-      "metricTypeColumn": "指标类型",
-      "aggregationOrderColumn": "聚合阶",
-      "executionSourceColumn": "执行来源"
+    propertyEmptyHint: "提示：请先在「类」标签页中创建本体类，再添加属性。",
+    metricColumns: {
+      id: "ID",
+      metricName: "指标名",
+      metricAlias: "别名",
+      formula: "公式",
+      aggFunction: "聚合函数",
+      targetClassId: "目标类",
+      dimensionDefaults: "默认维度",
+      actions: "操作",
+      metricTypeColumn: "指标类型",
+      aggregationOrderColumn: "聚合阶",
+      executionSourceColumn: "执行来源"
     },
-    "joinColumns": {
-      "id": "ID",
-      "source": "源类 → 目标类",
-      "sourceColumns": "源列",
-      "targetColumns": "目标列",
-      "joinType": "连接类型",
-      "relationType": "来源",
-      "description": "描述",
-      "actions": "操作"
+    joinColumns: {
+      id: "ID",
+      source: "源类 → 目标类",
+      sourceColumns: "源列",
+      targetColumns: "目标列",
+      joinType: "连接类型",
+      relationType: "来源",
+      description: "描述",
+      actions: "操作"
     },
-    "joinLabels": {
-      "sourceClassId": "源类",
-      "sourceColumns": "源列（逗号分隔）",
-      "targetClassId": "目标类",
-      "targetColumns": "目标列（逗号分隔）",
-      "joinType": "连接类型",
-      "relationType": "来源",
-      "description": "描述"
+    joinLabels: {
+      sourceClassId: "源类",
+      sourceColumns: "源列（逗号分隔）",
+      targetClassId: "目标类",
+      targetColumns: "目标列（逗号分隔）",
+      joinType: "连接类型",
+      relationType: "来源",
+      description: "描述"
     },
-    "joinPlaceholders": {
-      "sourceClassId": "请选择源类",
-      "targetClassId": "请选择目标类",
-      "sourceColumns": "如 BPTNUM_0",
-      "targetColumns": "如 BPRNUM_0",
-      "description": "如 收货单供应商号关联供应商主数据"
+    joinPlaceholders: {
+      sourceClassId: "请选择源类",
+      targetClassId: "请选择目标类",
+      sourceColumns: "如 BPTNUM_0",
+      targetColumns: "如 BPRNUM_0",
+      description: "如 收货单供应商号关联供应商主数据"
     },
-    "addSemanticRelationButton": "新增语义关系",
-    "addSemanticRelationModalTitle": "新增语义关系",
-    "backfillRelationsButton": "一键补关系",
-    "backfillRelationsHint": "把本地导入生成的 JOIN 关联全量同步为图中的边；并按 Sage X3 引用列名约定，为「已标外来键但未设目标类」的属性补全 ref_class_id。重复执行幂等。注：本页手动声明的语义关系不在此修复范围内——如新建时 Neo4j 不可达导致边缺失，恢复后删除并重新声明即可补建。",
-    "backfillRelationsConfirm": "将已有 JOIN 全量入图并补全外来键目标类，是否继续？",
-    "backfillRelationsSuccess": "已同步 {syncedJoins} 条 JOIN，补全 {backfilledReferences} 个引用",
-    "batchRelations": {
-      "button": "批量关系",
-      "modalTitle": "批量关系引擎",
-      "subtitle": "批量建立三种关系，可任选其一或多个；对已存在的关系可选「跳过」或「覆盖」。本页操作只改动 JOIN / 语义关系目录与图，不改动类与属性定义。",
-      "syncGraph": "本体入图",
-      "syncGraphHint": "把 PG 中全部未删除的类/属性 upsert 为 Neo4j 节点 + HAS_PROPERTY / REFERENCES 边（幂等，用于补图/对账）",
-      "inferJoins": "按共享列推断物理关联",
-      "inferJoinsHint": "按 X3 引用列命名约定 + 通用共享列（至少一方为主键）推断 JOIN 候选，跳过样板列黑名单；可先「预览」再执行",
-      "applyManifest": "应用关系清单",
-      "applyManifestHint": "按清单新增/更新 JOIN 与语义关系；重复关系按下方冲突策略处理",
-      "onConflictLabel": "冲突策略（已存在的关系）",
-      "conflictSkip": "跳过（保留原样）",
-      "conflictOverwrite": "覆盖（更新差异字段）",
-      "sourceLabel": "清单来源",
-      "jsonLabel": "JSON",
-      "csvLabel": "CSV",
-      "csvKindLabel": "CSV 清单类型",
-      "jsonPlaceholder": "粘贴清单 JSON，形如 {\"joins\":[{\"sourceClassId\":1,\"sourceColumns\":[\"A_0\"],\"targetClassId\":2,\"targetColumns\":[\"A_0\"]}],\"relations\":[{\"sourceClassId\":1,\"targetClassId\":2,\"relationType\":\"SUPPLIES\",\"description\":\"…\"}]}",
-      "uploadHint": "点击或拖拽 CSV 文件到此处",
-      "uploadExtra": "文件须含表头：sourceClassName,targetClassName,relationType,description（或 sourceColumns/targetColumns）",
-      "templateJoins": "下载 JOIN 模板",
-      "templateRelations": "下载语义关系模板",
-      "csvParsed": "已解析 {n} 行清单，类名已反解为 ID",
-      "csvHasErrors": "CSV 有 {n} 处行错误（未知类名等），已跳过对应行",
-      "preview": "预览",
-      "execute": "执行",
-      "selectActionFirst": "请至少勾选一个动作",
-      "manifestRequired": "「应用清单」需先填写 JSON 或上传 CSV",
-      "jsonInvalid": "JSON 解析失败：{detail}",
-      "previewTitle": "预览结果（不落库）",
-      "resultTitle": "执行结果",
-      "inferredTitle": "推断 JOIN 候选",
-      "inferredBy": "推断方式",
-      "inferredByConvention": "X3 命名约定",
-      "inferredBySharedColumn": "共享列（一方主键）",
-      "colSource": "源类",
-      "colTarget": "目标类",
-      "colColumns": "关联列",
-      "emptyInferred": "无符合推断条件的共享列关联",
-      "graphCountsTitle": "本体入图计数",
-      "syncGraphCounts": "类 {classes} · 属性 {properties} · HAS_PROPERTY 边 {hasPropertyEdges} · REFERENCES 边 {referenceEdges}",
-      "joinsLabel": "物理关联 JOIN",
-      "relationsLabel": "语义关系",
-      "countCreated": "新建 {n}",
-      "countSkipped": "跳过 {n}",
-      "countOverwritten": "覆盖 {n}",
-      "emptyCounts": "无待处理关系（全部命中跳过或清单为空）",
-      "errorsTitle": "错误（{n}）",
-      "successToast": "批量执行完成",
-      "noChangeToast": "执行完成：无任何变更（全部被跳过）"
+    addSemanticRelationButton: "新增语义关系",
+    addSemanticRelationModalTitle: "新增语义关系",
+    backfillRelationsButton: "一键补关系",
+    backfillRelationsHint: "把本地导入生成的 JOIN 关联全量同步为图中的边；并按 Sage X3 引用列名约定，为「已标外来键但未设目标类」的属性补全 ref_class_id。重复执行幂等。注：本页手动声明的语义关系不在此修复范围内——如新建时 Neo4j 不可达导致边缺失，恢复后删除并重新声明即可补建。",
+    backfillRelationsConfirm: "将已有 JOIN 全量入图并补全外来键目标类，是否继续？",
+    backfillRelationsSuccess: "已同步 {syncedJoins} 条 JOIN，补全 {backfilledReferences} 个引用",
+    batchRelations: {
+      button: "批量关系",
+      modalTitle: "批量关系引擎",
+      subtitle: "批量建立三种关系，可任选其一或多个；对已存在的关系可选「跳过」或「覆盖」。本页操作只改动 JOIN / 语义关系目录与图，不改动类与属性定义。",
+      syncGraph: "本体入图",
+      syncGraphHint: "把 PG 中全部未删除的类/属性 upsert 为 Neo4j 节点 + HAS_PROPERTY / REFERENCES 边（幂等，用于补图/对账）",
+      inferJoins: "按共享列推断物理关联",
+      inferJoinsHint: "按 X3 引用列命名约定 + 通用共享列（至少一方为主键）推断 JOIN 候选，跳过样板列黑名单；可先「预览」再执行",
+      applyManifest: "应用关系清单",
+      applyManifestHint: "按清单新增/更新 JOIN 与语义关系；重复关系按下方冲突策略处理",
+      onConflictLabel: "冲突策略（已存在的关系）",
+      conflictSkip: "跳过（保留原样）",
+      conflictOverwrite: "覆盖（更新差异字段）",
+      sourceLabel: "清单来源",
+      jsonLabel: "JSON",
+      csvLabel: "CSV",
+      csvKindLabel: "CSV 清单类型",
+      jsonPlaceholder: "粘贴清单 JSON，形如 {\"joins\":[{\"sourceClassId\":1,\"sourceColumns\":[\"A_0\"],\"targetClassId\":2,\"targetColumns\":[\"A_0\"]}],\"relations\":[{\"sourceClassId\":1,\"targetClassId\":2,\"relationType\":\"SUPPLIES\",\"description\":\"…\"}]}",
+      uploadHint: "点击或拖拽 CSV 文件到此处",
+      uploadExtra: "文件须含表头：sourceClassName,targetClassName,relationType,description（或 sourceColumns/targetColumns）",
+      templateJoins: "下载 JOIN 模板",
+      templateRelations: "下载语义关系模板",
+      csvParsed: "已解析 {n} 行清单，类名已反解为 ID",
+      csvHasErrors: "CSV 有 {n} 处行错误（未知类名等），已跳过对应行",
+      preview: "预览",
+      execute: "执行",
+      selectActionFirst: "请至少勾选一个动作",
+      manifestRequired: "「应用清单」需先填写 JSON 或上传 CSV",
+      jsonInvalid: "JSON 解析失败：{detail}",
+      previewTitle: "预览结果（不落库）",
+      resultTitle: "执行结果",
+      inferredTitle: "推断 JOIN 候选",
+      inferredBy: "推断方式",
+      inferredByConvention: "X3 命名约定",
+      inferredBySharedColumn: "共享列（一方主键）",
+      colSource: "源类",
+      colTarget: "目标类",
+      colColumns: "关联列",
+      emptyInferred: "无符合推断条件的共享列关联",
+      graphCountsTitle: "本体入图计数",
+      syncGraphCounts: "类 {classes} · 属性 {properties} · HAS_PROPERTY 边 {hasPropertyEdges} · REFERENCES 边 {referenceEdges}",
+      joinsLabel: "物理关联 JOIN",
+      relationsLabel: "语义关系",
+      countCreated: "新建 {n}",
+      countSkipped: "跳过 {n}",
+      countOverwritten: "覆盖 {n}",
+      emptyCounts: "无待处理关系（全部命中跳过或清单为空）",
+      errorsTitle: "错误（{n}）",
+      successToast: "批量执行完成",
+      noChangeToast: "执行完成：无任何变更（全部被跳过）"
     },
-    "semanticRelationColumns": {
-      "id": "ID",
-      "source": "源类 → 目标类",
-      "relationType": "关系类型",
-      "description": "描述",
-      "actions": "操作"
+    semanticRelationColumns: {
+      id: "ID",
+      source: "源类 → 目标类",
+      relationType: "关系类型",
+      description: "描述",
+      actions: "操作"
     },
-    "semanticRelationLabels": {
-      "sourceClassId": "源类",
-      "targetClassId": "目标类",
-      "relationType": "关系类型",
-      "description": "描述"
+    semanticRelationLabels: {
+      sourceClassId: "源类",
+      targetClassId: "目标类",
+      relationType: "关系类型",
+      description: "描述"
     },
-    "semanticRelationPlaceholders": {
-      "sourceClassId": "请选择源类",
-      "targetClassId": "请选择目标类",
-      "description": "如 供应商为收货单供应的货物主数据"
+    semanticRelationPlaceholders: {
+      sourceClassId: "请选择源类",
+      targetClassId: "请选择目标类",
+      description: "如 供应商为收货单供应的货物主数据"
     },
-    "versionColumns": {
-      "version": "版本",
-      "validFrom": "生效",
-      "validTo": "失效",
-      "description": "描述"
+    versionColumns: {
+      version: "版本",
+      validFrom: "生效",
+      validTo: "失效",
+      description: "描述"
     },
-    "searchColumns": {
-      "type": "类型",
-      "name": "名称",
-      "alias": "别名",
-      "description": "描述",
-      "score": "相似度"
+    searchColumns: {
+      type: "类型",
+      name: "名称",
+      alias: "别名",
+      description: "描述",
+      score: "相似度"
     },
-    "classLabels": {
-      "className": "类名",
-      "classAlias": "别名",
-      "sourceTable": "数据表",
-      "parentClassId": "父类（继承）",
-      "objectType": "对象类型",
-      "objectOwner": "责任部门/人",
-      "description": "描述"
+    classLabels: {
+      className: "类名",
+      classAlias: "别名",
+      sourceTable: "数据表",
+      parentClassId: "父类（继承）",
+      objectType: "对象类型",
+      objectOwner: "责任部门/人",
+      description: "描述"
     },
-    "classPlaceholders": {
-      "className": "如 Customer / Order / Product",
-      "classAlias": "如 客户 / 订单 / 商品",
-      "sourceTable": "如 t_customer / t_order",
-      "parentClassId": "可选，选择父类以继承语义",
-      "objectType": "Master 主数据 / Transaction 交易单据 / Reference 参考配置",
-      "objectOwner": "如 采购部 / 主数据管理组",
-      "description": "类用途说明"
+    classPlaceholders: {
+      className: "如 Customer / Order / Product",
+      classAlias: "如 客户 / 订单 / 商品",
+      sourceTable: "如 t_customer / t_order",
+      parentClassId: "可选，选择父类以继承语义",
+      objectType: "Master 主数据 / Transaction 交易单据 / Reference 参考配置",
+      objectOwner: "如 采购部 / 主数据管理组",
+      description: "类用途说明"
     },
-    "propertyLabels": {
-      "classId": "所属类",
-      "propertyName": "属性名",
-      "propertyAlias": "别名",
-      "dataType": "数据类型",
-      "sourceColumn": "源字段",
-      "unit": "单位",
-      "unitHint": "数值字段的计量单位（如 件 / 吨 / 元）。留空表示未定义，聊天输出会提示补充。",
-      "isPrimaryKey": "主键",
-      "isForeignKey": "外键",
-      "refClassId": "引用类",
-      "refClassIdHint": "外键指向的本体类。schema 文本会据此渲染 [FK → 目标类]，LLM 才能知道这一列可以关联到哪张表。",
-      "refClassIdWarning": "设置外键不会自动创建 JOIN 边，两者需分别维护，否则连通性校验会失败。",
-      "refClassRequired": "勾选外键后必须选择引用类",
-      "refClassPlaceholder": "选择外键指向的本体类"
+    propertyLabels: {
+      classId: "所属类",
+      propertyName: "属性名",
+      propertyAlias: "别名",
+      dataType: "数据类型",
+      sourceColumn: "源字段",
+      unit: "单位",
+      unitHint: "数值字段的计量单位（如 件 / 吨 / 元）。留空表示未定义，聊天输出会提示补充。",
+      isPrimaryKey: "主键",
+      isForeignKey: "外键",
+      refClassId: "引用类",
+      refClassIdHint: "外键指向的本体类。schema 文本会据此渲染 [FK → 目标类]，LLM 才能知道这一列可以关联到哪张表。",
+      refClassIdWarning: "设置外键不会自动创建 JOIN 边，两者需分别维护，否则连通性校验会失败。",
+      refClassRequired: "勾选外键后必须选择引用类",
+      refClassPlaceholder: "选择外键指向的本体类"
     },
-    "propertyPlaceholders": {
-      "classId": "请选择本体类",
-      "propertyName": "如 customer_name / order_id",
-      "propertyAlias": "如 客户名称 / 订单ID",
-      "sourceColumn": "数据库列名",
-      "unit": "如 件 / 吨 / 元"
+    propertyPlaceholders: {
+      classId: "请选择本体类",
+      propertyName: "如 customer_name / order_id",
+      propertyAlias: "如 客户名称 / 订单ID",
+      sourceColumn: "数据库列名",
+      unit: "如 件 / 吨 / 元"
     },
-    "metricLabels": {
-      "metricName": "指标名",
-      "metricAlias": "别名",
-      "aggFunction": "聚合函数",
-      "targetClassId": "目标类",
-      "formula": "公式",
-      "dimensionDefaults": "默认维度（可选）",
-      "metricType": "指标类型",
-      "aggregationOrder": "聚合阶",
-      "executionSource": "执行来源",
-      "numeratorAgg": "分子聚合",
-      "numeratorExpr": "分子表达式",
-      "numeratorFilter": "分子过滤",
-      "denominatorAgg": "分母聚合",
-      "denominatorExpr": "分母表达式",
-      "denominatorFilter": "分母过滤",
-      "grainKeys": "粒度键",
-      "filterExpression": "全局过滤",
-      "timeGrain": "时间粒度",
-      "timeColumn": "时间列",
-      "owner": "技术口径负责人",
-      "status": "指标状态"
+    metricLabels: {
+      metricName: "指标名",
+      metricAlias: "别名",
+      aggFunction: "聚合函数",
+      targetClassId: "目标类",
+      formula: "公式",
+      dimensionDefaults: "默认维度（可选）",
+      metricType: "指标类型",
+      aggregationOrder: "聚合阶",
+      executionSource: "执行来源",
+      numeratorAgg: "分子聚合",
+      numeratorExpr: "分子表达式",
+      numeratorFilter: "分子过滤",
+      denominatorAgg: "分母聚合",
+      denominatorExpr: "分母表达式",
+      denominatorFilter: "分母过滤",
+      grainKeys: "粒度键",
+      filterExpression: "全局过滤",
+      timeGrain: "时间粒度",
+      timeColumn: "时间列",
+      owner: "技术口径负责人",
+      status: "指标状态"
     },
-    "metricPlaceholders": {
-      "targetClassId": "可选",
-      "metricName": "如 sales_amount / order_count",
-      "metricAlias": "如 销售额 / 订单量",
-      "formula": "如 SUM(order_amount) / COUNT(DISTINCT customer_id)",
-      "dimensionDefaults": "格式: region:华东,product:手机",
-      "numeratorExpr": "如：QTY",
-      "numeratorFilter": "如：STATUS = 'OK'",
-      "denominatorExpr": "如：AMOUNT",
-      "denominatorFilter": "如：STATUS = 'OK'",
-      "grainKeys": "回车新增，如：plant_code",
-      "filterExpression": "全局过滤谓词",
-      "timeGrain": "选择时间粒度（可留空）",
-      "timeColumn": "如：ORDER_DATE",
-      "owner": "技术口径负责人"
+    metricPlaceholders: {
+      targetClassId: "可选",
+      metricName: "如 sales_amount / order_count",
+      metricAlias: "如 销售额 / 订单量",
+      formula: "如 SUM(order_amount) / COUNT(DISTINCT customer_id)",
+      dimensionDefaults: "格式: region:华东,product:手机",
+      numeratorExpr: "如：QTY",
+      numeratorFilter: "如：STATUS = 'OK'",
+      denominatorExpr: "如：AMOUNT",
+      denominatorFilter: "如：STATUS = 'OK'",
+      grainKeys: "回车新增，如：plant_code",
+      filterExpression: "全局过滤谓词",
+      timeGrain: "选择时间粒度（可留空）",
+      timeColumn: "如：ORDER_DATE",
+      owner: "技术口径负责人"
     },
-    "metricHints": {
-      "publishGateNotice": "发布将走闸门：指标结构化口径未齐或与关联 KPI 不一致时会被拒绝，并列出缺项。"
+    metricHints: {
+      publishGateNotice: "发布将走闸门：指标结构化口径未齐或与关联 KPI 不一致时会被拒绝，并列出缺项。"
     },
-    "classOptionLabel": "{name}（{alias}）",
-    "classOptionLabelNoAlias": "{name}",
-    "filter": {
-      "reset": "重置"
+    classOptionLabel: "{name}（{alias}）",
+    classOptionLabelNoAlias: "{name}",
+    filter: {
+      reset: "重置"
     }
   },
-  "usage": {
-    "columns": {
-      "lastQuestion": "最近提问",
-      "sessionId": "会话 ID",
-      "totalRequests": "调用次数",
-      "totalTokens": "Token",
-      "totalCost": "成本($)",
-      "lastRequestTime": "最近活动",
-      "requestTime": "时间",
-      "purpose": "用途",
-      "modelName": "模型",
-      "promptTokens": "Prompt",
-      "completionTokens": "Completion",
-      "costSource": "成本口径",
-      "actions": "合计"
+  usage: {
+    columns: {
+      lastQuestion: "最近提问",
+      sessionId: "会话 ID",
+      totalRequests: "调用次数",
+      totalTokens: "Token",
+      totalCost: "成本($)",
+      lastRequestTime: "最近活动",
+      requestTime: "时间",
+      purpose: "用途",
+      modelName: "模型",
+      promptTokens: "Prompt",
+      completionTokens: "Completion",
+      costSource: "成本口径",
+      actions: "合计"
     },
-    "costSource": {
-      "measured": "实测",
-      "estimated": "估算",
-      "unknown": "未知"
+    costSource: {
+      measured: "实测",
+      estimated: "估算",
+      unknown: "未知"
     },
-    "globalCards": {
-      "sessions": "会话数",
-      "requests": "请求数",
-      "totalTokens": "总 Token",
-      "totalCost": "总成本($)"
+    globalCards: {
+      sessions: "会话数",
+      requests: "请求数",
+      totalTokens: "总 Token",
+      totalCost: "总成本($)"
     },
-    "detailCards": {
-      "requests": "调用次数",
-      "totalTokens": "累计 Token",
-      "totalCost": "累计成本($)"
+    detailCards: {
+      requests: "调用次数",
+      totalTokens: "累计 Token",
+      totalCost: "累计成本($)"
     },
-    "trendCards": {
-      "tokenTrend": "近 30 天 Token 趋势",
-      "modelDistribution": "模型用量分布"
+    trendCards: {
+      tokenTrend: "近 30 天 Token 趋势",
+      modelDistribution: "模型用量分布"
     },
-    "detailCardTitle": "会话用量明细：{sessionId}",
-    "byModelSummary": "按模型汇总",
-    "byModelRow": "{requests} 次 · {totalTokens} tokens · ${cost}",
-    "chartLegendTokens": "Tokens"
+    detailCardTitle: "会话用量明细：{sessionId}",
+    byModelSummary: "按模型汇总",
+    byModelRow: "{requests} 次 · {totalTokens} tokens · ${cost}",
+    chartLegendTokens: "Tokens"
   },
-  "serviceStatus": {
-    "services": {
-      "postgresql": "PostgreSQL 元数据库",
-      "neo4j": "Neo4j 图库",
-      "milvus": "Milvus 向量库",
-      "embedding": "Embedding 服务"
+  serviceStatus: {
+    services: {
+      postgresql: "PostgreSQL 元数据库",
+      neo4j: "Neo4j 图库",
+      milvus: "Milvus 向量库",
+      embedding: "Embedding 服务"
     },
-    "status": {
-      "up": "正常",
-      "down": "异常",
-      "notConfigured": "未配置"
+    status: {
+      up: "正常",
+      down: "异常",
+      notConfigured: "未配置"
     },
-    "latency": "延迟 {ms} ms",
-    "checkedAt": "探测时间：{time}"
+    latency: "延迟 {ms} ms",
+    checkedAt: "探测时间：{time}"
   }
 },
   localImport: {
-  "steps": {
-    "schema": "选择 Schema",
-    "rule": "规则配置",
-    "preview": "预览确认",
-    "confirm": "导入完成"
+  steps: {
+    schema: "选择 Schema",
+    rule: "规则配置",
+    preview: "预览确认",
+    confirm: "导入完成"
   },
-  "confirmImport": "确认导入",
-  "schema": {
-    "loading": "正在加载 Schema 列表…",
-    "loadFailed": "Schema 列表加载失败，请检查数据源后重试。",
-    "selectLabel": "Schema（Oracle owner）",
-    "placeholder": "请选择要浏览表的 Schema",
-    "ownerCount": "共 {count} 个 Schema",
-    "hint": "仅展示所选 Schema（Oracle owner）下的表；未选择时不可进入下一步。"
+  confirmImport: "确认导入",
+  schema: {
+    loading: "正在加载 Schema 列表…",
+    loadFailed: "Schema 列表加载失败，请检查数据源后重试。",
+    selectLabel: "Schema（Oracle owner）",
+    placeholder: "请选择要浏览表的 Schema",
+    ownerCount: "共 {count} 个 Schema",
+    hint: "仅展示所选 Schema（Oracle owner）下的表；未选择时不可进入下一步。"
   },
-  "initPage": {
-    "title": "本地数据初始化",
-    "datasourceLabel": "数据源",
-    "startButton": "开始导入",
-    "noDatasource": "暂无可用数据源，请先到「数据源」页创建并测试连通性。",
-    "loadFailed": "数据源列表加载失败，请稍后重试。"
+  initPage: {
+    title: "本地数据初始化",
+    datasourceLabel: "数据源",
+    startButton: "开始导入",
+    noDatasource: "暂无可用数据源，请先到「数据源」页创建并测试连通性。",
+    loadFailed: "数据源列表加载失败，请稍后重试。"
   },
-  "confirm": {
-    "errorTitle": "导入未完全成功",
-    "errorSummary": "已创建 {createdClasses} 个类、{createdProperties} 个属性、{createdJoins} 个关联，失败 {errorCount} 项",
-    "errorType": "类型",
-    "errorName": "名称",
-    "errorMessage": "错误信息"
+  confirm: {
+    errorTitle: "导入未完全成功",
+    errorSummary: "已创建 {createdClasses} 个类、{createdProperties} 个属性、{createdJoins} 个关联，失败 {errorCount} 项",
+    errorType: "类型",
+    errorName: "名称",
+    errorMessage: "错误信息"
   },
-  "config": {
-    "selectTablesTitle": "选择要导入的表",
-    "tableName": "表名",
-    "columnCount": "列数",
-    "searchPlaceholder": "搜索表名",
-    "selectFiltered": "全选当前筛选",
-    "selectedCount": "已选 {count} / 共 {total} 张表",
-    "noTableHint": "尚未选择表：请先在上方勾选要导入的表（可搜索），单表时下方会出现列级选择。",
-    "multiModeHint": "已选多张表：将导入各表的全部列。如需「只导入部分列」，请只勾选一张表。",
-    "singleModeTitle": "选择 {table} 要导入的列",
-    "columnChosenCount": "已选 {chosen} / 共 {total} 列",
-    "joinInferenceTitle": "自动推断关联关系",
-    "inferDeclaredFk": "数据字典声明外键",
-    "inferNameConvention": "Sage X3 列名约定",
-    "schemaLoadWarn": "Schema 加载失败，请检查数据源连通性后重试。"
+  config: {
+    selectTablesTitle: "选择要导入的表",
+    tableName: "表名",
+    columnCount: "列数",
+    searchPlaceholder: "搜索表名",
+    selectFiltered: "全选当前筛选",
+    selectedCount: "已选 {count} / 共 {total} 张表",
+    noTableHint: "尚未选择表：请先在上方勾选要导入的表（可搜索），单表时下方会出现列级选择。",
+    multiModeHint: "已选多张表：将导入各表的全部列。如需「只导入部分列」，请只勾选一张表。",
+    singleModeTitle: "选择 {table} 要导入的列",
+    columnChosenCount: "已选 {chosen} / 共 {total} 列",
+    joinInferenceTitle: "自动推断关联关系",
+    inferDeclaredFk: "数据字典声明外键",
+    inferNameConvention: "Sage X3 列名约定",
+    schemaLoadWarn: "Schema 加载失败，请检查数据源连通性后重试。"
   },
-  "preview": {
-    "sourceTable": "源表",
-    "className": "类名",
-    "propertyCount": "属性数",
-    "searchPlaceholder": "搜索表名/类名",
-    "selectFiltered": "全选当前筛选",
-    "selectedCount": "已选 {count} / 共 {total} 张表",
-    "joinsTitle": "关联关系",
-    "joinCount": "已选 {count} 条",
-    "joinSource": "来源表.列",
-    "joinTarget": "目标表.列",
-    "joinType": "Join",
-    "relationType": "关系类型",
-    "inferredBy": "推断方式",
-    "inferredByDeclaredFk": "声明外键",
-    "inferredByNameConvention": "列名约定",
-    "tombstonedAlert": "以下表与已软删除的类冲突",
-    "tombstonedAlertItem": "已于 {when} 软删除",
-    "tombstonedAlertOccupiedBy": "占用类名 {name}（id={id}）",
-    "tombstonedAlertTableOnly": "（仅源表相同，类名未被占用 ⇒ 可正常导入）",
-    "tombstonedAlertUnknown": "（后端未提供占名判定 ⇒ 需在执行期确认）",
-    "status": "状态",
-    "tombstoneTag": "已被软删除类占用",
-    "tombstoneRowHint": "墓碑 id={id} · 删除于 {when}",
-    "tombstoneTooltip": "类名 {name} 已被一个已删除的类占用（id={id}，删除于 {when}）：请到「本体管理」页开启「显示已删除」，恢复该类（需 owner 部门成员或管理员）后将其改名以释放该类名（改名需本体管理员权限）；或改用其他类名",
-    "tombstoneCheckboxDisabled": "类名 {name} 已被软删除的类占用（id={id}），无法勾选：请到「本体管理」页开启「显示已删除」，恢复该类（需 owner 部门成员或管理员）后改名以释放类名（改名需本体管理员权限）；或改用其他类名",
-    "tombstoneTableOnlyTag": "同源表有软删除类",
-    "tombstoneTableOnlyHint": "墓碑 id={id} · 删除于 {when}",
-    "tombstoneTableOnlyTooltip": "已删除的类 {name}（id={id}，删除于 {when}）用的是同一张源表，但类名不同 ⇒ 不影响本次导入",
-    "tombstoneUnknownTooltip": "已删除的类 {name}（id={id}，删除于 {when}）与本表同源；后端未提供占名判定 ⇒ 需在执行期确认",
-    "nameTakenAlert": "以下表的类名已被现有类占用",
-    "nameTakenAlertItem": "被现有类 {name}（id={id}）占用",
-    "nameTakenTag": "类名已被现有类占用",
-    "nameTakenRowHint": "占用类 id={id}",
-    "nameTakenTooltip": "类名 {name} 已被现有类占用（id={id}）：请到「本体管理」页将该类改名或删除（改名/删除需本体管理员权限）；或改用其他类名",
-    "nameTakenCheckboxDisabled": "类名 {name} 已被现有类占用（id={id}），无法勾选：请到「本体管理」页将该类改名或删除（改名/删除需本体管理员权限）；或改用其他类名",
-    "nameTakenUnknownTag": "与现有类同名，待确认",
-    "nameTakenUnknownTooltip": "现有类 {name}（id={id}）与本表同名；后端未提供占名判定 ⇒ 需在执行期确认"
+  preview: {
+    sourceTable: "源表",
+    className: "类名",
+    propertyCount: "属性数",
+    searchPlaceholder: "搜索表名/类名",
+    selectFiltered: "全选当前筛选",
+    selectedCount: "已选 {count} / 共 {total} 张表",
+    joinsTitle: "关联关系",
+    joinCount: "已选 {count} 条",
+    joinSource: "来源表.列",
+    joinTarget: "目标表.列",
+    joinType: "Join",
+    relationType: "关系类型",
+    inferredBy: "推断方式",
+    inferredByDeclaredFk: "声明外键",
+    inferredByNameConvention: "列名约定",
+    tombstonedAlert: "以下表与已软删除的类冲突",
+    tombstonedAlertItem: "已于 {when} 软删除",
+    tombstonedAlertOccupiedBy: "占用类名 {name}（id={id}）",
+    tombstonedAlertTableOnly: "（仅源表相同，类名未被占用 ⇒ 可正常导入）",
+    tombstonedAlertUnknown: "（后端未提供占名判定 ⇒ 需在执行期确认）",
+    status: "状态",
+    tombstoneTag: "已被软删除类占用",
+    tombstoneRowHint: "墓碑 id={id} · 删除于 {when}",
+    tombstoneTooltip: "类名 {name} 已被一个已删除的类占用（id={id}，删除于 {when}）：请到「本体管理」页开启「显示已删除」，恢复该类（需 owner 部门成员或管理员）后将其改名以释放该类名（改名需本体管理员权限）；或改用其他类名",
+    tombstoneCheckboxDisabled: "类名 {name} 已被软删除的类占用（id={id}），无法勾选：请到「本体管理」页开启「显示已删除」，恢复该类（需 owner 部门成员或管理员）后改名以释放类名（改名需本体管理员权限）；或改用其他类名",
+    tombstoneTableOnlyTag: "同源表有软删除类",
+    tombstoneTableOnlyHint: "墓碑 id={id} · 删除于 {when}",
+    tombstoneTableOnlyTooltip: "已删除的类 {name}（id={id}，删除于 {when}）用的是同一张源表，但类名不同 ⇒ 不影响本次导入",
+    tombstoneUnknownTooltip: "已删除的类 {name}（id={id}，删除于 {when}）与本表同源；后端未提供占名判定 ⇒ 需在执行期确认",
+    nameTakenAlert: "以下表的类名已被现有类占用",
+    nameTakenAlertItem: "被现有类 {name}（id={id}）占用",
+    nameTakenTag: "类名已被现有类占用",
+    nameTakenRowHint: "占用类 id={id}",
+    nameTakenTooltip: "类名 {name} 已被现有类占用（id={id}）：请到「本体管理」页将该类改名或删除（改名/删除需本体管理员权限）；或改用其他类名",
+    nameTakenCheckboxDisabled: "类名 {name} 已被现有类占用（id={id}），无法勾选：请到「本体管理」页将该类改名或删除（改名/删除需本体管理员权限）；或改用其他类名",
+    nameTakenUnknownTag: "与现有类同名，待确认",
+    nameTakenUnknownTooltip: "现有类 {name}（id={id}）与本表同名；后端未提供占名判定 ⇒ 需在执行期确认"
   }
 },
   kpiCatalog: {
-  "title": "KPI 业务目录",
-  "newButton": "新建 KPI",
-  "createTitle": "新建 KPI",
-  "editTitle": "编辑 KPI",
-  "deleteConfirm": "确定删除该 KPI？",
-  "syncAllButton": "向量/图同步",
-  "resyncButton": "重新同步",
-  "syncAllNone": "无缺失：向量与图均已是最新",
-  "syncAllDone": "同步完成：补向量 {vector} 条、补图 {graph} 条",
-  "syncAllPartial": "同步完成但有 {failed} 条失败，详见后端日志",
-  "syncAllFailed": "同步失败，请稍后重试",
-  "resyncDone": "{code} 已重新同步",
-  "resyncFailed": "重新同步失败，请稍后重试",
-  "resyncNotPublished": "仅 PUBLISHED 状态的 KPI 建向量",
-  "columns": {
-    "kpiCode": "KPI 编码",
-    "kpiName": "KPI 名称",
-    "businessDefinition": "业务定义",
-    "formula": "公式",
-    "numerator": "分子",
-    "denominator": "分母",
-    "grain": "粒度",
-    "unit": "单位",
-    "dataSource": "数据来源",
-    "datasourceId": "绑定数据源",
-    "owner": "责任部门",
-    "metricId": "技术形态挂靠",
-    "version": "版本",
-    "status": "状态",
-    "actions": "操作"
+  title: "KPI 业务目录",
+  newButton: "新建 KPI",
+  createTitle: "新建 KPI",
+  editTitle: "编辑 KPI",
+  deleteConfirm: "确定删除该 KPI？",
+  syncAllButton: "向量/图同步",
+  resyncButton: "重新同步",
+  syncAllNone: "无缺失：向量与图均已是最新",
+  syncAllDone: "同步完成：补向量 {vector} 条、补图 {graph} 条",
+  syncAllPartial: "同步完成但有 {failed} 条失败，详见后端日志",
+  syncAllFailed: "同步失败，请稍后重试",
+  resyncDone: "{code} 已重新同步",
+  resyncFailed: "重新同步失败，请稍后重试",
+  resyncNotPublished: "仅 PUBLISHED 状态的 KPI 建向量",
+  columns: {
+    kpiCode: "KPI 编码",
+    kpiName: "KPI 名称",
+    businessDefinition: "业务定义",
+    formula: "公式",
+    numerator: "分子",
+    denominator: "分母",
+    grain: "粒度",
+    unit: "单位",
+    dataSource: "数据来源",
+    datasourceId: "绑定数据源",
+    owner: "责任部门",
+    metricId: "技术形态挂靠",
+    version: "版本",
+    status: "状态",
+    actions: "操作"
   },
-  "labels": {
-    "kpiCode": "KPI 编码",
-    "kpiName": "KPI 名称",
-    "businessDefinition": "业务定义",
-    "formula": "公式",
-    "numerator": "分子",
-    "denominator": "分母",
-    "grain": "粒度",
-    "timeGrain": "时间粒度",
-    "unit": "单位",
-    "dataSource": "数据来源",
-    "datasourceId": "绑定数据源",
-    "metricId": "挂靠本体指标",
-    "semanticKeywords": "语义关键词",
-    "matchThreshold": "匹配阈值",
-    "grainKeys": "结构化粒度键",
-    "numeratorColumns": "分子列",
-    "denominatorColumns": "分母列",
-    "owner": "责任部门",
-    "version": "版本",
-    "status": "状态"
+  labels: {
+    kpiCode: "KPI 编码",
+    kpiName: "KPI 名称",
+    businessDefinition: "业务定义",
+    formula: "公式",
+    numerator: "分子",
+    denominator: "分母",
+    grain: "粒度",
+    timeGrain: "时间粒度",
+    unit: "单位",
+    dataSource: "数据来源",
+    datasourceId: "绑定数据源",
+    metricId: "挂靠本体指标",
+    semanticKeywords: "语义关键词",
+    matchThreshold: "匹配阈值",
+    grainKeys: "结构化粒度键",
+    numeratorColumns: "分子列",
+    denominatorColumns: "分母列",
+    owner: "责任部门",
+    version: "版本",
+    status: "状态"
   },
-  "placeholders": {
-    "kpiName": "如：供应商准时交付率",
-    "businessDefinition": "业务定义（治理视角）",
-    "formula": "如：COUNT(received<=order)/COUNT(*)",
-    "numerator": "分子描述",
-    "denominator": "分母描述",
-    "grain": "如：供应商+月",
-    "timeGrain": "选择时间粒度（可留空）",
-    "unit": "如：%、天、元",
-    "dataSource": "如：DWS_SUPPLIER_MONTHLY",
-    "datasourceId": "选择该 KPI 计算所依据的数据源",
-    "metricId": "选择该 KPI 挂靠的本体指标",
-    "semanticKeywords": "回车新增，如：准时交付",
-    "matchThreshold": "0 到 1 之间，默认 0.75",
-    "grainKeys": "回车新增，如：supplier_code",
-    "numeratorColumns": "回车新增，如：QTY",
-    "denominatorColumns": "回车新增，如：AMOUNT",
-    "owner": "责任部门/人"
+  placeholders: {
+    kpiName: "如：供应商准时交付率",
+    businessDefinition: "业务定义（治理视角）",
+    formula: "如：COUNT(received<=order)/COUNT(*)",
+    numerator: "分子描述",
+    denominator: "分母描述",
+    grain: "如：供应商+月",
+    timeGrain: "选择时间粒度（可留空）",
+    unit: "如：%、天、元",
+    dataSource: "如：DWS_SUPPLIER_MONTHLY",
+    datasourceId: "选择该 KPI 计算所依据的数据源",
+    metricId: "选择该 KPI 挂靠的本体指标",
+    semanticKeywords: "回车新增，如：准时交付",
+    matchThreshold: "0 到 1 之间，默认 0.75",
+    grainKeys: "回车新增，如：supplier_code",
+    numeratorColumns: "回车新增，如：QTY",
+    denominatorColumns: "回车新增，如：AMOUNT",
+    owner: "责任部门/人"
   },
-  "validation": {
-    "matchThresholdRange": "请输入 0 到 1 之间的数值"
+  validation: {
+    matchThresholdRange: "请输入 0 到 1 之间的数值"
   },
-  "unbound": "未绑定",
-  "suggestions": {
-    "hint": "建议绑定数据源：{name}",
-    "apply": "采用",
-    "reasons": {
-      "legacy_name_exact": "依据：历史「数据来源」文本与数据源名称完全一致",
-      "legacy_name_fuzzy": "依据：历史「数据来源」文本与数据源名称部分匹配",
-      "legacy_table_exact": "依据：历史「数据来源」文本中的表名存在于该数据源",
-      "ontology_table": "依据：关联本体指标所属类的主表存在于该数据源"
+  unbound: "未绑定",
+  suggestions: {
+    hint: "建议绑定数据源：{name}",
+    apply: "采用",
+    reasons: {
+      legacy_name_exact: "依据：历史「数据来源」文本与数据源名称完全一致",
+      legacy_name_fuzzy: "依据：历史「数据来源」文本与数据源名称部分匹配",
+      legacy_table_exact: "依据：历史「数据来源」文本中的表名存在于该数据源",
+      ontology_table: "依据：关联本体指标所属类的主表存在于该数据源"
     }
   },
-  "technical": {
-    "unlinked": "未挂靠指标"
+  technical: {
+    unlinked: "未挂靠指标"
   }
 },
   kpiGovernance: {
-  "title": "KPI 治理看板",
-  "adminOnly": "仅管理员可见",
-  "adminOnlyHint": "治理看板包含发布闸门与三库同步状态，仅 admin 可查看。",
-  "loadFailed": "治理看板加载失败，请重试",
-  "kpiStatusTitle": "KPI 状态分布",
-  "kpiTotal": "KPI 总数",
-  "metricsTitle": "指标分布",
-  "metricsTotal": "指标总数",
-  "reconcileTitle": "口径对账（近 {days} 天）",
-  "mismatchCount": "不一致",
-  "unknownCount": "未知",
-  "passCount": "Pass 记录数",
-  "passCountHint": "Pass 记录数只含落库的 degraded pass（干净 pass 不落审计），不是通过率。",
-  "lastMismatchAt": "最近不一致时间（UTC）",
-  "reconcileError": "对账查询失败：{error}",
-  "runtimeTitle": "运行时路由（近 {days} 天）",
-  "runtimeTotal": "KPI 路由事件",
-  "runtimeHitRate": "事件/回答（近似）",
-  "runtimeChatAnswers": "Chat 回答数",
-  "runtimeHitRateHint": "近似命中率 = 窗口内 KPI 路由事件 ÷ chat 助手回答数（事件/回答）；精确匹配命中率以 50 题语料评测为准。",
-  "runtimeDegradedReasons": "降级原因（Top 5）",
-  "runtimeNoDegraded": "无降级记录",
-  "runtimeNoEvents": "窗口内无路由事件",
-  "runtimeError": "运行时统计查询失败：{error}",
-  "syncHealthTitle": "三库同步健康",
-  "publishedKpiCount": "PG 已发布 KPI",
-  "milvusKpiCount": "Milvus 向量数",
-  "neo4jKpiCount": "Neo4j 图节点数",
-  "syncKpiTotal": "KPI 总数",
-  "syncHealthError": "同步健康查询失败：{error}",
-  "gatesTitle": "治理闸门",
-  "publishGate": "发布闸门",
-  "tierA": "Tier A 编译",
-  "syncGate": "向量/图同步",
-  "enabled": "开启",
-  "disabled": "关闭",
-  "generatedAt": "生成时间（UTC）：{time}"
+  title: "KPI 治理看板",
+  adminOnly: "仅管理员可见",
+  adminOnlyHint: "治理看板包含发布闸门与三库同步状态，仅 admin 可查看。",
+  loadFailed: "治理看板加载失败，请重试",
+  kpiStatusTitle: "KPI 状态分布",
+  kpiTotal: "KPI 总数",
+  metricsTitle: "指标分布",
+  metricsTotal: "指标总数",
+  reconcileTitle: "口径对账（近 {days} 天）",
+  mismatchCount: "不一致",
+  unknownCount: "未知",
+  passCount: "Pass 记录数",
+  passCountHint: "Pass 记录数只含落库的 degraded pass（干净 pass 不落审计），不是通过率。",
+  lastMismatchAt: "最近不一致时间（UTC）",
+  reconcileError: "对账查询失败：{error}",
+  runtimeTitle: "运行时路由（近 {days} 天）",
+  runtimeTotal: "KPI 路由事件",
+  runtimeHitRate: "事件/回答（近似）",
+  runtimeChatAnswers: "Chat 回答数",
+  runtimeHitRateHint: "近似命中率 = 窗口内 KPI 路由事件 ÷ chat 助手回答数（事件/回答）；精确匹配命中率以 50 题语料评测为准。",
+  runtimeDegradedReasons: "降级原因（Top 5）",
+  runtimeNoDegraded: "无降级记录",
+  runtimeNoEvents: "窗口内无路由事件",
+  runtimeError: "运行时统计查询失败：{error}",
+  syncHealthTitle: "三库同步健康",
+  publishedKpiCount: "PG 已发布 KPI",
+  milvusKpiCount: "Milvus 向量数",
+  neo4jKpiCount: "Neo4j 图节点数",
+  syncKpiTotal: "KPI 总数",
+  syncHealthError: "同步健康查询失败：{error}",
+  gatesTitle: "治理闸门",
+  publishGate: "发布闸门",
+  tierA: "Tier A 编译",
+  syncGate: "向量/图同步",
+  enabled: "开启",
+  disabled: "关闭",
+  generatedAt: "生成时间（UTC）：{time}"
 },
   feature: {
-  "newButton": "新建特征",
-  "createTitle": "新建特征",
-  "editTitle": "编辑特征",
-  "deleteConfirm": "确定删除该特征？",
-  "compute": "计算",
-  "computeAll": "批量计算",
-  "computeDone": "计算完成，写入 {rows} 行",
-  "computeAllDone": "批量计算完成：{count} 个特征，共 {rows} 行",
-  "values": "特征值",
-  "valuesTitle": "特征值 - {name}",
-  "aclBanner": "权限说明：本页 PUT/DELETE 受 owner-based ACL 控制（详见「责任部门」列）。stub 模式下默认带 admin 角色可改全部条目；如需切换非 admin 路径，可在请求头显式设置 X-User-Roles。",
-  "aclForbiddenTitle": "权限不足，无法修改",
-  "aclForbiddenBody": "后端 ACL 拒绝：仅「责任部门」成员或 admin 角色可修改该条目。如需继续，请联系 owner 部门或将 X-User-Roles 设为 admin（仅 dev 环境）。",
-  "aclForbiddenDetailLabel": "后端返回：",
-  "columns": {
-    "featureName": "特征名",
-    "featureAlias": "别名",
-    "entityType": "实体类型",
-    "refreshFrequency": "刷新频率",
-    "unit": "单位",
-    "owner": "责任部门",
-    "version": "版本",
-    "status": "状态",
-    "isEnabled": "启用",
-    "actions": "操作"
+  newButton: "新建特征",
+  createTitle: "新建特征",
+  editTitle: "编辑特征",
+  deleteConfirm: "确定删除该特征？",
+  compute: "计算",
+  computeAll: "批量计算",
+  computeDone: "计算完成，写入 {rows} 行",
+  computeAllDone: "批量计算完成：{count} 个特征，共 {rows} 行",
+  values: "特征值",
+  valuesTitle: "特征值 - {name}",
+  aclBanner: "权限说明：本页 PUT/DELETE 受 owner-based ACL 控制（详见「责任部门」列）。stub 模式下默认带 admin 角色可改全部条目；如需切换非 admin 路径，可在请求头显式设置 X-User-Roles。",
+  aclForbiddenTitle: "权限不足，无法修改",
+  aclForbiddenBody: "后端 ACL 拒绝：仅「责任部门」成员或 admin 角色可修改该条目。如需继续，请联系 owner 部门或将 X-User-Roles 设为 admin（仅 dev 环境）。",
+  aclForbiddenDetailLabel: "后端返回：",
+  columns: {
+    featureName: "特征名",
+    featureAlias: "别名",
+    entityType: "实体类型",
+    refreshFrequency: "刷新频率",
+    unit: "单位",
+    owner: "责任部门",
+    version: "版本",
+    status: "状态",
+    isEnabled: "启用",
+    actions: "操作"
   },
-  "labels": {
-    "featureName": "特征名",
-    "featureAlias": "别名",
-    "featureDefinition": "特征定义",
-    "entityType": "实体类型",
-    "calculationLogic": "计算逻辑（只读 SELECT）",
-    "windowSize": "窗口",
-    "refreshFrequency": "刷新频率",
-    "unit": "单位",
-    "version": "版本",
-    "status": "状态",
-    "isEnabled": "启用",
-    "datasourceId": "数据源"
+  labels: {
+    featureName: "特征名",
+    featureAlias: "别名",
+    featureDefinition: "特征定义",
+    entityType: "实体类型",
+    calculationLogic: "计算逻辑（只读 SELECT）",
+    windowSize: "窗口",
+    refreshFrequency: "刷新频率",
+    unit: "单位",
+    version: "版本",
+    status: "状态",
+    isEnabled: "启用",
+    datasourceId: "数据源"
   },
-  "placeholders": {
-    "featureName": "如：SUPPLIER_OTD_3M",
-    "featureAlias": "如：供应商3月准时交付率",
-    "featureDefinition": "特征的业务含义描述",
-    "calculationLogic": "SELECT supplier_code AS entity_key, AVG(otd_rate) AS value FROM DWS GROUP BY supplier_code",
-    "windowSize": "如：3M / YTD / 12M",
-    "unit": "如：%、天、score",
-    "datasourceId": "选择业务数据源（默认 THBI）"
+  placeholders: {
+    featureName: "如：SUPPLIER_OTD_3M",
+    featureAlias: "如：供应商3月准时交付率",
+    featureDefinition: "特征的业务含义描述",
+    calculationLogic: "SELECT supplier_code AS entity_key, AVG(otd_rate) AS value FROM DWS GROUP BY supplier_code",
+    windowSize: "如：3M / YTD / 12M",
+    unit: "如：%、天、score",
+    datasourceId: "选择业务数据源（默认 THBI）"
   },
-  "valueColumns": {
-    "entityKey": "实体键",
-    "value": "数值",
-    "valueText": "文本值",
-    "validAt": "有效期",
-    "computedAt": "计算时间"
+  valueColumns: {
+    entityKey: "实体键",
+    value: "数值",
+    valueText: "文本值",
+    validAt: "有效期",
+    computedAt: "计算时间"
   }
 },
   datasource: {
-  "importToOntology": "智能导入到本体",
-  "cacheSchema": "缓存 Schema",
-  "layers": {
-    "action": "数据层分布",
-    "title": "数据层分布 — {{name}}",
-    "notCached": "该数据源尚未缓存 Schema，以下为空结果；请先执行「缓存 Schema」。",
-    "totalTables": "缓存表总数：{{count}}",
-    "noLayerData": "无已分类的表",
-    "layer": "数据层",
-    "tableCount": "表数量",
-    "unknownTables": "未识别前缀的表：{{count}}"
+  importToOntology: "智能导入到本体",
+  cacheSchema: "缓存 Schema",
+  layers: {
+    action: "数据层分布",
+    title: "数据层分布 — {{name}}",
+    notCached: "该数据源尚未缓存 Schema，以下为空结果；请先执行「缓存 Schema」。",
+    totalTables: "缓存表总数：{{count}}",
+    noLayerData: "无已分类的表",
+    layer: "数据层",
+    tableCount: "表数量",
+    unknownTables: "未识别前缀的表：{{count}}"
   }
 },
   featureRules: {
-  "title": "Feature 规则",
-  "columns": {
-    "code": "规则编码",
-    "data_object": "数据对象",
-    "data_layer": "数据层",
-    "target_level": "目标层级",
-    "feature_name": "特征名",
-    "enabled": "启用",
-    "priority": "优先级",
-    "policy_description": "策略描述",
-    "version": "版本",
-    "thresholds": "阈值",
-    "created_time": "创建时间",
-    "updated_time": "更新时间",
-    "actions": "操作"
+  title: "Feature 规则",
+  columns: {
+    code: "规则编码",
+    data_object: "数据对象",
+    data_layer: "数据层",
+    target_level: "目标层级",
+    feature_name: "特征名",
+    enabled: "启用",
+    priority: "优先级",
+    policy_description: "策略描述",
+    version: "版本",
+    thresholds: "阈值",
+    created_time: "创建时间",
+    updated_time: "更新时间",
+    actions: "操作"
   },
-  "actions": {
-    "create": "新建",
-    "edit": "编辑",
-    "delete": "删除",
-    "toggle": "启用/禁用",
-    "aiAssist": "AI 辅助填写",
-    "refresh": "刷新"
+  actions: {
+    create: "新建",
+    edit: "编辑",
+    delete: "删除",
+    toggle: "启用/禁用",
+    aiAssist: "AI 辅助填写",
+    refresh: "刷新"
   },
-  "form": {
-    "code": "规则编码",
-    "codePlaceholder": "如 SUPPLIER_OTD_RULE",
-    "data_object": "数据对象",
-    "data_layer": "数据层",
-    "target_level": "目标层级",
-    "feature_name": "特征名",
-    "enabled": "启用",
-    "priority": "优先级",
-    "policy_description": "策略描述",
-    "policyDescriptionPlaceholder": "自然语言描述该规则的业务含义",
-    "thresholds": "阈值配置",
-    "addThreshold": "添加阈值",
-    "version": "版本（乐观锁）"
+  form: {
+    code: "规则编码",
+    codePlaceholder: "如 SUPPLIER_OTD_RULE",
+    data_object: "数据对象",
+    data_layer: "数据层",
+    target_level: "目标层级",
+    feature_name: "特征名",
+    enabled: "启用",
+    priority: "优先级",
+    policy_description: "策略描述",
+    policyDescriptionPlaceholder: "自然语言描述该规则的业务含义",
+    thresholds: "阈值配置",
+    addThreshold: "添加阈值",
+    version: "版本（乐观锁）"
   },
-  "messages": {
-    "created": "规则创建成功",
-    "updated": "规则更新成功",
-    "deleted": "规则已删除",
-    "toggled": "状态已切换",
-    "failed": "操作失败"
+  messages: {
+    created: "规则创建成功",
+    updated: "规则更新成功",
+    deleted: "规则已删除",
+    toggled: "状态已切换",
+    failed: "操作失败"
   },
-  "errors": {
-    "versionConflict": "版本冲突，请刷新后重试",
-    "referencing": "规则被引用，无法删除",
-    "llmUnavailable": "AI 辅助不可用"
+  errors: {
+    versionConflict: "版本冲突，请刷新后重试",
+    referencing: "规则被引用，无法删除",
+    llmUnavailable: "AI 辅助不可用"
   }
 },
   enums: {
-  "metricType": {
-    "MEASURE": "度量",
-    "RATIO": "比率",
-    "DIFFERENCE": "差值",
-    "DERIVED": "派生"
+  metricType: {
+    MEASURE: "度量",
+    RATIO: "比率",
+    DIFFERENCE: "差值",
+    DERIVED: "派生"
   },
-  "metricAggregationOrder": {
-    "WEIGHTED_RATIO": "加权比率（SUM(分子)/SUM(分母)）",
-    "AVG_OF_RATIOS": "比率均值（AVG(分子/分母)）",
-    "NONE": "无"
+  metricAggregationOrder: {
+    WEIGHTED_RATIO: "加权比率（SUM(分子)/SUM(分母)）",
+    AVG_OF_RATIOS: "比率均值（AVG(分子/分母)）",
+    NONE: "无"
   },
-  "metricExecutionSource": {
-    "COMPILED": "结构化编译",
-    "ESCAPE_HATCH": "手写公式",
-    "NONE": "无可执行口径"
+  metricExecutionSource: {
+    COMPILED: "结构化编译",
+    ESCAPE_HATCH: "手写公式",
+    NONE: "无可执行口径"
   },
-  "metricStatus": {
-    "DRAFT": "草稿",
-    "PUBLISHED": "已发布"
+  metricStatus: {
+    DRAFT: "草稿",
+    PUBLISHED: "已发布"
   },
-  "timeGrain": {
-    "day": "日",
-    "week": "周",
-    "month": "月",
-    "quarter": "季度",
-    "year": "年"
+  timeGrain: {
+    day: "日",
+    week: "周",
+    month: "月",
+    quarter: "季度",
+    year: "年"
   },
-  "kpiStatus": {
-    "DRAFT": "草稿",
-    "PUBLISHED": "已发布",
-    "DEPRECATED": "已停用"
+  kpiStatus: {
+    DRAFT: "草稿",
+    PUBLISHED: "已发布",
+    DEPRECATED: "已停用"
   },
-  "featureStatus": {
-    "DRAFT": "草稿",
-    "ACTIVE": "已启用",
-    "DEPRECATED": "已停用"
+  featureStatus: {
+    DRAFT: "草稿",
+    ACTIVE: "已启用",
+    DEPRECATED: "已停用"
   },
-  "featureRefreshFrequency": {
-    "DAILY": "每日",
-    "WEEKLY": "每周",
-    "MONTHLY": "每月"
+  featureRefreshFrequency: {
+    DAILY: "每日",
+    WEEKLY: "每周",
+    MONTHLY: "每月"
   },
-  "datasourceType": {
-    "oracle": "Oracle",
-    "postgresql": "PostgreSQL",
-    "mysql": "MySQL"
+  datasourceType: {
+    oracle: "Oracle",
+    postgresql: "PostgreSQL",
+    mysql: "MySQL"
   },
-  "oracleVersion": {
-    "modern": "12c 及以上（FETCH FIRST）",
-    "legacy": "11g 及以下（ROWNUM）"
+  oracleVersion: {
+    modern: "12c 及以上（FETCH FIRST）",
+    legacy: "11g 及以下（ROWNUM）"
   },
-  "provider": {
-    "openai": "OpenAI",
-    "azure_openai": "Azure OpenAI",
-    "moonshot": "Moonshot (Kimi)",
-    "openai_compatible_proxy": "兼容代理 (DeepSeek/通义/Qwen)",
-    "ollama": "本地 Ollama"
+  provider: {
+    openai: "OpenAI",
+    azure_openai: "Azure OpenAI",
+    moonshot: "Moonshot (Kimi)",
+    openai_compatible_proxy: "兼容代理 (DeepSeek/通义/Qwen)",
+    ollama: "本地 Ollama"
   },
-  "dataType": {
-    "STRING": "字符串 STRING",
-    "INT": "整数 INT",
-    "DECIMAL": "小数 DECIMAL",
-    "DATETIME": "日期 DATETIME",
-    "BOOLEAN": "布尔 BOOLEAN"
+  dataType: {
+    STRING: "字符串 STRING",
+    INT: "整数 INT",
+    DECIMAL: "小数 DECIMAL",
+    DATETIME: "日期 DATETIME",
+    BOOLEAN: "布尔 BOOLEAN"
   },
-  "aggFunction": {
-    "SUM": "求和 SUM",
-    "AVG": "均值 AVG",
-    "COUNT": "计数 COUNT",
-    "MAX": "最大值 MAX",
-    "MIN": "最小值 MIN"
+  aggFunction: {
+    SUM: "求和 SUM",
+    AVG: "均值 AVG",
+    COUNT: "计数 COUNT",
+    MAX: "最大值 MAX",
+    MIN: "最小值 MIN"
   },
-  "objectType": {
-    "Master": "主数据 Master",
-    "Transaction": "交易单据 Transaction",
-    "Reference": "参考配置 Reference",
-    "Event": "事件 Event"
+  objectType: {
+    Master: "主数据 Master",
+    Transaction: "交易单据 Transaction",
+    Reference: "参考配置 Reference",
+    Event: "事件 Event"
   },
-  "semanticRelationType": {
-    "SUPPLIES": "供货 SUPPLIES",
-    "CONTAINS": "包含 CONTAINS",
-    "GENERATES": "产生 GENERATES",
-    "INSPECTED_BY": "受检于 INSPECTED_BY",
-    "GENERATED": "被产生 GENERATED",
-    "RELATED_TO": "相关 RELATED_TO"
+  semanticRelationType: {
+    SUPPLIES: "供货 SUPPLIES",
+    CONTAINS: "包含 CONTAINS",
+    GENERATES: "产生 GENERATES",
+    INSPECTED_BY: "受检于 INSPECTED_BY",
+    GENERATED: "被产生 GENERATED",
+    RELATED_TO: "相关 RELATED_TO"
   },
-  "entityType": {
-    "class": "类",
-    "property": "属性",
-    "metric": "指标"
+  entityType: {
+    class: "类",
+    property: "属性",
+    metric: "指标"
   },
-  "agentTriggerType": {
-    "user_question": "用户提问",
-    "scheduled": "定时任务",
-    "event": "事件触发"
+  agentTriggerType: {
+    user_question: "用户提问",
+    scheduled: "定时任务",
+    event: "事件触发"
   },
-  "agentResponseLatency": {
-    "realtime": "实时",
-    "batch": "批处理"
+  agentResponseLatency: {
+    realtime: "实时",
+    batch: "批处理"
   },
-  "agentStatus": {
-    "active": "已启用",
-    "draft": "草稿",
-    "deprecated": "已停用"
+  agentStatus: {
+    active: "已启用",
+    draft: "草稿",
+    deprecated: "已停用"
   },
-  "agentPermission": {
-    "read": "读",
-    "masked_read": "脱敏读",
-    "forbidden": "禁止",
-    "forbidden_write": "禁写"
+  agentPermission: {
+    read: "读",
+    masked_read: "脱敏读",
+    forbidden: "禁止",
+    forbidden_write: "禁写"
   }
 },
   audit: {
-  "filters": {
-    "entityType": "实体类型",
-    "allEntityTypes": "全部",
-    "entityId": "实体 ID",
-    "actor": "操作人",
-    "actorDepartments": "部门",
-    "action": "操作",
-    "since": "开始日期",
-    "until": "结束日期"
+  filters: {
+    entityType: "实体类型",
+    allEntityTypes: "全部",
+    entityId: "实体 ID",
+    actor: "操作人",
+    actorDepartments: "部门",
+    action: "操作",
+    since: "开始日期",
+    until: "结束日期"
   },
-  "columns": {
-    "id": "ID",
-    "entityType": "实体类型",
-    "entityId": "实体 ID",
-    "action": "操作",
-    "actor": "操作人",
-    "actorDepartments": "部门",
-    "createdAt": "操作时间",
-    "beforeJson": "变更前",
-    "afterJson": "变更后"
+  columns: {
+    id: "ID",
+    entityType: "实体类型",
+    entityId: "实体 ID",
+    action: "操作",
+    actor: "操作人",
+    actorDepartments: "部门",
+    createdAt: "操作时间",
+    beforeJson: "变更前",
+    afterJson: "变更后"
   },
-  "expandChanges": "变更详情",
-  "noChanges": "无变更数据",
-  "total": "共 {total} 条",
-  "export": {
-    "button": "导出",
-    "csv": "导出 CSV",
-    "json": "导出 JSON Lines",
-    "loading": "导出中..."
+  expandChanges: "变更详情",
+  noChanges: "无变更数据",
+  total: "共 {total} 条",
+  export: {
+    button: "导出",
+    csv: "导出 CSV",
+    json: "导出 JSON Lines",
+    loading: "导出中..."
   }
 },
   wikiImport: {
-  "title": "知识导入",
-  "steps": {
-    "source": "粘贴原文",
-    "model": "选择模型",
-    "preview": "预览草稿",
-    "confirm": "导入结果"
+  title: "知识导入",
+  steps: {
+    source: "粘贴原文",
+    model: "选择模型",
+    preview: "预览草稿",
+    confirm: "导入结果"
   },
-  "uploadButton": "上传文件",
-  "uploadButtonUploading": "正在解析…",
-  "uploadProgress": "正在解析文件（PDF 扫描件会自动 OCR 识别，请稍候）",
-  "uploadHint": "支持 PDF / Word(.docx) / PPT(.pptx) / Excel(.xlsx/.xls) / Markdown / 纯文本，解析结果会填入下方文本框，可先核对再切分",
-  "sourceLabel": "原始内容（Markdown，按最浅标题层级切分）",
-  "sourcePlaceholder": "粘贴或输入待导入的知识原文，例如：\n\n## 供应商准入规则\n\n注册资本 >= 1000 万。\n\n## 供应商分级规则\n\n按年度采购额分 A/B/C 级。",
-  "sourceTypeLabel": "来源类型",
-  "sourceRefLabel": "来源出处",
-  "sourceRefPlaceholder": "可填文件名、文档编号或链接，便于溯源",
-  "autoClassifyLabel": "自动分类",
-  "autoClassifyHint": "开启后对每条知识调用模型判断知识维度（可稍后人工调整）",
-  "useTwoStepLabel": "深度分析模式",
-  "useTwoStepHint": "开启后先分析实体/概念/本体关联，再导入（质量更高，成本翻倍）",
-  "modelLabel": "处理模型",
-  "modelPlaceholder": "请选择一个可用的模型",
-  "noModels": "暂无可选模型，请先在「模型配置」中添加",
-  "modelUnusable": "不可用",
-  "fallbackModelLabel": "备用模型（可选）",
-  "fallbackModelPlaceholder": "主模型调用失败时自动降级到它",
-  "previewSummary": "已切分出 {count} 条知识草稿（上限 {max} 条），可编辑标题与正文后再入库。",
-  "draftIndex": "第 {index} 条",
-  "columns": {
-    "title": "标题",
-    "content": "正文",
-    "status": "状态",
-    "total": "总条数",
-    "success": "成功",
-    "skipped": "跳过",
-    "failed": "失败",
-    "errorMessage": "备注",
-    "actions": "操作"
+  uploadButton: "上传文件",
+  uploadButtonUploading: "正在解析…",
+  uploadProgress: "正在解析文件（PDF 扫描件会自动 OCR 识别，请稍候）",
+  uploadHint: "支持 PDF / Word(.docx) / PPT(.pptx) / Excel(.xlsx/.xls) / Markdown / 纯文本，解析结果会填入下方文本框，可先核对再切分",
+  sourceLabel: "原始内容（Markdown，按最浅标题层级切分）",
+  sourcePlaceholder: "粘贴或输入待导入的知识原文，例如：\n\n## 供应商准入规则\n\n注册资本 >= 1000 万。\n\n## 供应商分级规则\n\n按年度采购额分 A/B/C 级。",
+  sourceTypeLabel: "来源类型",
+  sourceRefLabel: "来源出处",
+  sourceRefPlaceholder: "可填文件名、文档编号或链接，便于溯源",
+  autoClassifyLabel: "自动分类",
+  autoClassifyHint: "开启后对每条知识调用模型判断知识维度（可稍后人工调整）",
+  useTwoStepLabel: "深度分析模式",
+  useTwoStepHint: "开启后先分析实体/概念/本体关联，再导入（质量更高，成本翻倍）",
+  modelLabel: "处理模型",
+  modelPlaceholder: "请选择一个可用的模型",
+  noModels: "暂无可选模型，请先在「模型配置」中添加",
+  modelUnusable: "不可用",
+  fallbackModelLabel: "备用模型（可选）",
+  fallbackModelPlaceholder: "主模型调用失败时自动降级到它",
+  previewSummary: "已切分出 {count} 条知识草稿（上限 {max} 条），可编辑标题与正文后再入库。",
+  draftIndex: "第 {index} 条",
+  columns: {
+    title: "标题",
+    content: "正文",
+    status: "状态",
+    total: "总条数",
+    success: "成功",
+    skipped: "跳过",
+    failed: "失败",
+    errorMessage: "备注",
+    actions: "操作"
   },
-  "actions": {
-    "removeDraft": "移除",
-    "repreview": "重新切分",
-    "execute": "确认入库",
-    "importAnother": "再导入一批",
-    "reloadModels": "重新加载",
-    "retry": "重试",
-    "retryTooltip": "基于同一份草稿再跑一次，未变更的条目会被自动跳过"
+  actions: {
+    removeDraft: "移除",
+    repreview: "重新切分",
+    execute: "确认入库",
+    importAnother: "再导入一批",
+    reloadModels: "重新加载",
+    retry: "重试",
+    retryTooltip: "基于同一份草稿再跑一次，未变更的条目会被自动跳过"
   },
-  "resultMessage": "导入任务已完成，状态：{status}",
-  "resultCounts": "共 {total} 条，成功 {success} 条，跳过 {skipped} 条，失败 {failed} 条，花费 ${cost}",
-  "tasksTitle": "最近导入任务",
-  "noTasks": "暂无导入任务",
-  "errors": {
-    "previewFailed": "切分失败，请检查原文内容",
-    "parseFileFailed": "文件解析失败。请确认格式为 PDF / Word(.docx) / PPT(.pptx) / Excel(.xlsx/.xls) / Markdown / 纯文本；老式 .doc/.ppt 需先另存为 .docx/.pptx。",
-    "fileTooLarge": "文件过大（单次上限 10 MB）。请拆分或压缩后重试。",
-    "modelUnusable": "所选模型不可用，请重新选择（可在「模型配置」中补齐凭据）",
-    "modelsLoadFailed": "模型列表加载失败，选模下拉为空时无法继续",
-    "tooManyDrafts": "本次切分出 {count} 条，超过单次上限 {max} 条。请先删除多余草稿，或分批导入。"
+  resultMessage: "导入任务已完成，状态：{status}",
+  resultCounts: "共 {total} 条，成功 {success} 条，跳过 {skipped} 条，失败 {failed} 条，花费 ${cost}",
+  tasksTitle: "最近导入任务",
+  noTasks: "暂无导入任务",
+  errors: {
+    previewFailed: "切分失败，请检查原文内容",
+    parseFileFailed: "文件解析失败。请确认格式为 PDF / Word(.docx) / PPT(.pptx) / Excel(.xlsx/.xls) / Markdown / 纯文本；老式 .doc/.ppt 需先另存为 .docx/.pptx。",
+    fileTooLarge: "文件过大（单次上限 10 MB）。请拆分或压缩后重试。",
+    modelUnusable: "所选模型不可用，请重新选择（可在「模型配置」中补齐凭据）",
+    modelsLoadFailed: "模型列表加载失败，选模下拉为空时无法继续",
+    tooManyDrafts: "本次切分出 {count} 条，超过单次上限 {max} 条。请先删除多余草稿，或分批导入。"
   }
 },
   wikiPages: {
-  "title": "知识条目",
-  "empty": "暂无知识条目，先点「新建」或到「知识导入」批量入库",
-  "undetermined": "未判定",
-  "filters": {
-    "search": "搜索标题 / 正文",
-    "dimension": "按知识维度过滤",
-    "status": "按状态过滤"
+  title: "知识条目",
+  empty: "暂无知识条目，先点「新建」或到「知识导入」批量入库",
+  undetermined: "未判定",
+  filters: {
+    search: "搜索标题 / 正文",
+    dimension: "按知识维度过滤",
+    status: "按状态过滤"
   },
-  "search": {
-    "semantic": "语义",
-    "keyword": "关键词",
-    "score": "相似度",
-    "snippet": "命中片段",
-    "noHits": "没有语义命中的知识条目",
-    "fallbackNotice": "向量检索暂不可用，已降级为关键词检索"
+  search: {
+    semantic: "语义",
+    keyword: "关键词",
+    score: "相似度",
+    snippet: "命中片段",
+    noHits: "没有语义命中的知识条目",
+    fallbackNotice: "向量检索暂不可用，已降级为关键词检索"
   },
-  "columns": {
-    "title": "标题",
-    "dimension": "知识维度",
-    "status": "状态",
-    "structureStage": "结构阶段",
-    "version": "版本",
-    "pageId": "条目号",
-    "createdAt": "创建时间"
+  columns: {
+    title: "标题",
+    dimension: "知识维度",
+    status: "状态",
+    structureStage: "结构阶段",
+    version: "版本",
+    pageId: "条目号",
+    createdAt: "创建时间"
   },
-  "dimensions": {
-    "OBJECT": "业务对象",
-    "RULE": "业务规则",
-    "PROCESS": "业务流程",
-    "CONCEPT": "业务定义",
-    "METRIC": "业务指标",
-    "POLICY": "政策制度",
-    "DOCUMENT": "文档资料",
-    "FAQ": "常见问题"
+  dimensions: {
+    OBJECT: "业务对象",
+    RULE: "业务规则",
+    PROCESS: "业务流程",
+    CONCEPT: "业务定义",
+    METRIC: "业务指标",
+    POLICY: "政策制度",
+    DOCUMENT: "文档资料",
+    FAQ: "常见问题"
   },
-  "statuses": {
-    "DRAFT": "草稿",
-    "REVIEW": "待审",
-    "APPROVED": "已审",
-    "EFFECTIVE": "生效",
-    "EXPIRED": "失效"
+  statuses: {
+    DRAFT: "草稿",
+    REVIEW: "待审",
+    APPROVED: "已审",
+    EFFECTIVE: "生效",
+    EXPIRED: "失效"
   },
-  "actions": {
-    "create": "新建条目",
-    "saveDimension": "确认分类",
-    "rejectDimension": "打回分类"
+  actions: {
+    create: "新建条目",
+    saveDimension: "确认分类",
+    rejectDimension: "打回分类"
   },
-  "deleteConfirm": "确认删除「{title}」？该条目关联的事实、关系与产物会一并删除。",
-  "batchDelete": {
-    "action": "批量删除",
-    "title": "批量删除知识条目",
-    "count": "将删除 {count} 条知识条目。",
-    "cascadeHint": "每条知识关联的事实原子、证据、知识关系、结构化建议与可执行规则会一并删除；其他条目指向这些条目的关系会变成悬空引用，可在「冲突检测」中处置。",
-    "confirm": "确认删除",
-    "selected": "已选 {count} 条",
-    "idSeparator": "、",
-    "result": "已删除 {deleted} 条，连带清理事实 {claims} 条、关系 {relations} 条、建议 {suggestions} 条、规则 {rules} 条、流程 {workflows} 条。",
-    "partialNotFound": "有 {count} 条未删除（条目不存在或已被删除）：{ids}"
+  deleteConfirm: "确认删除「{title}」？该条目关联的事实、关系与产物会一并删除。",
+  batchDelete: {
+    action: "批量删除",
+    title: "批量删除知识条目",
+    count: "将删除 {count} 条知识条目。",
+    cascadeHint: "每条知识关联的事实原子、证据、知识关系、结构化建议与可执行规则会一并删除；其他条目指向这些条目的关系会变成悬空引用，可在「冲突检测」中处置。",
+    confirm: "确认删除",
+    selected: "已选 {count} 条",
+    idSeparator: "、",
+    result: "已删除 {deleted} 条，连带清理事实 {claims} 条、关系 {relations} 条、建议 {suggestions} 条、规则 {rules} 条、流程 {workflows} 条。",
+    partialNotFound: "有 {count} 条未删除（条目不存在或已被删除）：{ids}"
   },
-  "form": {
-    "content": "正文（Markdown）",
-    "dimension": "知识维度",
-    "authorityLevel": "权威等级",
-    "authorityLevelPlaceholder": "选择 L0-L5",
-    "category": "归属分类",
-    "categoryPlaceholder": "选择分类（feat-wiki-category）"
+  form: {
+    content: "正文（Markdown）",
+    dimension: "知识维度",
+    authorityLevel: "权威等级",
+    authorityLevelPlaceholder: "选择 L0-L5",
+    category: "归属分类",
+    categoryPlaceholder: "选择分类（feat-wiki-category）"
   },
-  "detail": {
-    "meta": "条目号 {pageId}｜版本 {version}｜结构阶段 {stage}",
-    "dimension": "知识维度",
-    "noSuggestion": "该条目没有自动分类结论（导入时未开启分类，或模型未返回结果）。",
-    "suggestion": "机器建议：{dimension}（置信度 {confidence}）",
-    "rejectHint": "「打回分类」表示该条知识不属于任何维度，会记入学习反馈用于修正分类器。",
-    "statusTitle": "生命周期状态",
-    "content": "正文",
-    "authorityLevel": "权威等级",
-    "saveSuccess": "保存成功",
-    "tabs": {
-      "basic": "基本信息",
-      "claims": "事实原子",
-      "relations": "知识关系",
-      "conflicts": "冲突检测"
+  detail: {
+    meta: "条目号 {pageId}｜版本 {version}｜结构阶段 {stage}",
+    dimension: "知识维度",
+    noSuggestion: "该条目没有自动分类结论（导入时未开启分类，或模型未返回结果）。",
+    suggestion: "机器建议：{dimension}（置信度 {confidence}）",
+    rejectHint: "「打回分类」表示该条知识不属于任何维度，会记入学习反馈用于修正分类器。",
+    statusTitle: "生命周期状态",
+    content: "正文",
+    authorityLevel: "权威等级",
+    saveSuccess: "保存成功",
+    tabs: {
+      basic: "基本信息",
+      claims: "事实原子",
+      relations: "知识关系",
+      conflicts: "冲突检测"
     },
-    "transitions": {
-      "toReview": "提交审核",
-      "toApproved": "审批通过",
-      "toEffective": "生效",
-      "toExpired": "失效",
-      "backToDraft": "退回草稿",
-      "backToReview": "退回待审"
+    transitions: {
+      toReview: "提交审核",
+      toApproved: "审批通过",
+      toEffective: "生效",
+      toExpired: "失效",
+      backToDraft: "退回草稿",
+      backToReview: "退回待审"
     },
-    "noMoreTransitions": "已是终态，无可用水卡",
-    "statusHint": "可任意切换当前状态（DRAFT / REVIEW / APPROVED / EFFECTIVE / EXPIRED）；变更时间自动记录。",
-    "confirm": "确认将状态从「{from}」变更为「{to}」？",
-    "confirmIrreversible": "确认将状态从「{from}」变更为「{to}」？失效后条目不再生效，但保留行供历史溯源。",
-    "ok": "确认",
-    "cancel": "取消",
-    "currentStatus": "当前：{status}"
+    noMoreTransitions: "已是终态，无可用水卡",
+    statusHint: "可任意切换当前状态（DRAFT / REVIEW / APPROVED / EFFECTIVE / EXPIRED）；变更时间自动记录。",
+    confirm: "确认将状态从「{from}」变更为「{to}」？",
+    confirmIrreversible: "确认将状态从「{from}」变更为「{to}」？失效后条目不再生效，但保留行供历史溯源。",
+    ok: "确认",
+    cancel: "取消",
+    currentStatus: "当前：{status}"
   },
-  "errors": {
-    "titleRequired": "请输入标题",
-    "contentRequired": "请输入正文",
-    "reclassifyFailed": "分类处置失败，请重试",
-    "deleteFailed": "删除失败，请重试",
-    "batchDeleteFailed": "批量删除失败，请重试",
-    "statusUpdateFailed": "状态更新失败，请重试",
-    "categoryUpdateFailed": "分类更新失败（可能是已被删除）"
+  errors: {
+    titleRequired: "请输入标题",
+    contentRequired: "请输入正文",
+    reclassifyFailed: "分类处置失败，请重试",
+    deleteFailed: "删除失败，请重试",
+    batchDeleteFailed: "批量删除失败，请重试",
+    statusUpdateFailed: "状态更新失败，请重试",
+    categoryUpdateFailed: "分类更新失败（可能是已被删除）"
   },
-  "claims": {
-    "empty": "暂无事实原子",
-    "claimText": "事实内容",
-    "claimType": "类型",
-    "evidenceCount": "证据",
-    "sourceType": "来源类型",
-    "sourceId": "来源编号",
-    "section": "章节",
-    "paragraph": "段落",
-    "content": "原文内容",
-    "noEvidence": "无证据",
-    "evidences": "条证据",
-    "reExtract": "重新抽取",
-    "forceReExtractTitle": "强制重新抽取？",
-    "forceReExtractDesc": "将删除当前 {count} 条事实原子及其证据，并用所选模型重新抽取。",
-    "forceReExtractOk": "删除并重抽",
-    "extractDone": "已抽取 {count} 条事实原子",
-    "extractAlreadyDone": "该条目已抽过事实原子",
-    "extractFailed": "抽取失败（{status}），请稍后重试",
-    "extractStatus": "抽取状态：{status}",
-    "confidence": "置信度",
-    "confidenceShort": {
-      "HIGH": "高",
-      "MEDIUM": "中",
-      "LOW": "低",
-      "REFUSE": "无法判定"
+  claims: {
+    empty: "暂无事实原子",
+    claimText: "事实内容",
+    claimType: "类型",
+    evidenceCount: "证据",
+    sourceType: "来源类型",
+    sourceId: "来源编号",
+    section: "章节",
+    paragraph: "段落",
+    content: "原文内容",
+    noEvidence: "无证据",
+    evidences: "条证据",
+    reExtract: "重新抽取",
+    forceReExtractTitle: "强制重新抽取？",
+    forceReExtractDesc: "将删除当前 {count} 条事实原子及其证据，并用所选模型重新抽取。",
+    forceReExtractOk: "删除并重抽",
+    extractDone: "已抽取 {count} 条事实原子",
+    extractAlreadyDone: "该条目已抽过事实原子",
+    extractFailed: "抽取失败（{status}），请稍后重试",
+    extractStatus: "抽取状态：{status}",
+    confidence: "置信度",
+    confidenceShort: {
+      HIGH: "高",
+      MEDIUM: "中",
+      LOW: "低",
+      REFUSE: "无法判定"
     },
-    "confidenceLevels": {
-      "HIGH": "高置信度，可作为决策依据",
-      "MEDIUM": "中等置信度，建议复核",
-      "LOW": "低置信度，仅供参考"
+    confidenceLevels: {
+      HIGH: "高置信度，可作为决策依据",
+      MEDIUM: "中等置信度，建议复核",
+      LOW: "低置信度，仅供参考"
     },
-    "refuseTooltip": "无法判定，原因：{reason}",
-    "authorityDepartment": "权威部门",
-    "authorityLevel": "权威等级"
+    refuseTooltip: "无法判定，原因：{reason}",
+    authorityDepartment: "权威部门",
+    authorityLevel: "权威等级"
   },
-  "relations": {
-    "empty": "暂无知识关系",
-    "pending": "待审核",
-    "confirmed": "已确认",
-    "discover": "发现关系",
-    "discoverTitle": "发现候选关系",
-    "confirm": "确认",
-    "reject": "打回",
-    "confirmSuccess": "关系已确认",
-    "rejectSuccess": "关系已打回",
-    "discovered": "发现 {count} 个候选关系",
-    "relationType": "关系类型",
-    "downstreamType": "下游类型",
-    "downstreamId": "下游ID",
-    "confidence": "置信度"
+  relations: {
+    empty: "暂无知识关系",
+    pending: "待审核",
+    confirmed: "已确认",
+    discover: "发现关系",
+    discoverTitle: "发现候选关系",
+    confirm: "确认",
+    reject: "打回",
+    confirmSuccess: "关系已确认",
+    rejectSuccess: "关系已打回",
+    discovered: "发现 {count} 个候选关系",
+    relationType: "关系类型",
+    downstreamType: "下游类型",
+    downstreamId: "下游ID",
+    confidence: "置信度"
   },
-  "conflicts": {
-    "detect": "检测冲突",
-    "noneFound": "未发现冲突",
-    "found": "发现 {count} 个冲突",
-    "resolve": "处置",
-    "resolved": "冲突已处置",
-    "type": "类型",
-    "severity": "严重度",
-    "description": "说明",
-    "actions": "操作"
+  conflicts: {
+    detect: "检测冲突",
+    noneFound: "未发现冲突",
+    found: "发现 {count} 个冲突",
+    resolve: "处置",
+    resolved: "冲突已处置",
+    type: "类型",
+    severity: "严重度",
+    description: "说明",
+    actions: "操作"
   }
 },
   wikiConflicts: {
-  "title": "冲突检测",
-  "empty": "没有符合条件的冲突",
-  "idSeparator": "、",
-  "filters": {
-    "status": "按处理状态过滤",
-    "severity": "按严重度过滤",
-    "type": "按冲突类型过滤"
+  title: "冲突检测",
+  empty: "没有符合条件的冲突",
+  idSeparator: "、",
+  filters: {
+    status: "按处理状态过滤",
+    severity: "按严重度过滤",
+    type: "按冲突类型过滤"
   },
-  "columns": {
-    "type": "类型",
-    "severity": "严重度",
-    "pageIds": "涉及条目",
-    "description": "说明",
-    "detectedBy": "发现方式"
+  columns: {
+    type: "类型",
+    severity: "严重度",
+    pageIds: "涉及条目",
+    description: "说明",
+    detectedBy: "发现方式"
   },
-  "types": {
-    "CONTRADICTION": "相互矛盾",
-    "STALENESS": "内容过时",
-    "GAP": "知识缺口",
-    "OVERLAP": "内容重复"
+  types: {
+    CONTRADICTION: "相互矛盾",
+    STALENESS: "内容过时",
+    GAP: "知识缺口",
+    OVERLAP: "内容重复"
   },
-  "severities": {
-    "CRITICAL": "严重",
-    "HIGH": "高",
-    "MEDIUM": "中",
-    "LOW": "低"
+  severities: {
+    CRITICAL: "严重",
+    HIGH: "高",
+    MEDIUM: "中",
+    LOW: "低"
   },
-  "statuses": {
-    "OPEN": "待处理",
-    "RESOLVED": "已处理"
+  statuses: {
+    OPEN: "待处理",
+    RESOLVED: "已处理"
   },
-  "detectors": {
-    "RULE": "规则",
-    "LLM": "模型"
+  detectors: {
+    RULE: "规则",
+    LLM: "模型"
   },
-  "actions": {
-    "resolve": "处置",
-    "RESOLVED": "已修正",
-    "MERGED": "已合并",
-    "IGNORED": "误报"
+  actions: {
+    resolve: "处置",
+    RESOLVED: "已修正",
+    MERGED: "已合并",
+    IGNORED: "误报"
   },
-  "resolvePlaceholder": "选择处置结果",
-  "resolveHint": "只有「误报」表示系统判错了。它会记入机制 3 的准确率统计（误报率），所以别随手点。",
-  "errors": {
-    "alreadyResolved": "这条冲突已被处置（终态不可逆），已为你刷新列表。",
-    "resolveFailed": "处置失败，请重试"
+  resolvePlaceholder: "选择处置结果",
+  resolveHint: "只有「误报」表示系统判错了。它会记入机制 3 的准确率统计（误报率），所以别随手点。",
+  errors: {
+    alreadyResolved: "这条冲突已被处置（终态不可逆），已为你刷新列表。",
+    resolveFailed: "处置失败，请重试"
   }
 },
   wikiSuggestions: {
-  "title": "结构化建议",
-  "empty": "没有符合条件的建议",
-  "orphan": "（条目已不存在：{pageId}）",
-  "confirmAccept": "接受后会物化出可执行规则/流程草稿，且不可撤销。确定接受？",
-  "confirmReject": "拒绝后该建议进入终态。确定拒绝？",
-  "filters": {
-    "status": "按状态过滤"
+  title: "结构化建议",
+  empty: "没有符合条件的建议",
+  orphan: "（条目已不存在：{pageId}）",
+  confirmAccept: "接受后会物化出可执行规则/流程草稿，且不可撤销。确定接受？",
+  confirmReject: "拒绝后该建议进入终态。确定拒绝？",
+  filters: {
+    status: "按状态过滤"
   },
-  "columns": {
-    "pageTitle": "知识条目",
-    "dimension": "建议维度",
-    "structure": "抽取结构",
-    "confidence": "置信度",
-    "status": "状态"
+  columns: {
+    pageTitle: "知识条目",
+    dimension: "建议维度",
+    structure: "抽取结构",
+    confidence: "置信度",
+    status: "状态"
   },
-  "statuses": {
-    "PENDING": "待处置",
-    "ACCEPTED": "已接受",
-    "REJECTED": "已拒绝"
+  statuses: {
+    PENDING: "待处置",
+    ACCEPTED: "已接受",
+    REJECTED: "已拒绝"
   },
-  "actions": {
-    "generate": "生成建议",
-    "accept": "接受",
-    "reject": "拒绝"
+  actions: {
+    generate: "生成建议",
+    accept: "接受",
+    reject: "拒绝"
   },
-  "generatePageLabel": "选择知识条目",
-  "generatePagePlaceholder": "搜索条目标题",
-  "generateModelLabel": "抽取模型（可选）",
-  "generateModelPlaceholder": "不选则只做确定性预筛，不调用模型",
-  "generateHint": "不选模型也能跑：确定性预筛会先判断这条知识像哪一类结构化知识，再决定要不要配模型精抽。",
-  "generated": "已生成 {count} 条建议（{kind}）",
-  "generatedNone": "未生成新建议",
-  "errors": {
-    "generateFailed": "生成建议失败，请重试",
-    "alreadyResolved": "这条建议已被处置（终态不可逆），已为你刷新列表。",
-    "resolveFailed": "处置失败，请重试"
+  generatePageLabel: "选择知识条目",
+  generatePagePlaceholder: "搜索条目标题",
+  generateModelLabel: "抽取模型（可选）",
+  generateModelPlaceholder: "不选则只做确定性预筛，不调用模型",
+  generateHint: "不选模型也能跑：确定性预筛会先判断这条知识像哪一类结构化知识，再决定要不要配模型精抽。",
+  generated: "已生成 {count} 条建议（{kind}）",
+  generatedNone: "未生成新建议",
+  errors: {
+    generateFailed: "生成建议失败，请重试",
+    alreadyResolved: "这条建议已被处置（终态不可逆），已为你刷新列表。",
+    resolveFailed: "处置失败，请重试"
   }
 },
   wikiChat: {
-  "title": "Wiki Chat",
-  "suggestionsTitle": "试试这样问：",
-  "send": "发送",
-  "inputPlaceholder": "输入问题，基于企业 Wiki 语义检索并合成答案...",
-  "noHits": "未在企业 Wiki 中找到相关知识，无法回答该问题。"
+  title: "Wiki Chat",
+  suggestionsTitle: "试试这样问：",
+  send: "发送",
+  inputPlaceholder: "输入问题，基于企业 Wiki 语义检索并合成答案...",
+  noHits: "未在企业 Wiki 中找到相关知识，无法回答该问题。"
 },
   wikiGraph: {
-  "title": "知识图谱",
-  "recompute": "重算社区",
-  "recomputeDone": "已检测出 {communities} 个社区，覆盖 {pages} 条知识",
-  "includeIsolated": "显示孤立条目",
-  "truncatedHint": "图规模超出上限，已按连接数截断显示前 500 个节点",
-  "empty": "暂无知识关系 —— 先在知识条目页确认一些关系候选",
-  "communities": "知识社区",
-  "noCommunities": "尚未检测出社区，点击「重算社区」",
-  "communityMeta": "{pages} 条知识 · 内聚度 {cohesion}",
-  "edgeTooltip": "相关性得分：{score}",
-  "insights": {
-    "title": "图洞察",
-    "rescan": "重算洞察",
-    "rescanning": "正在扫描…",
-    "rescanDone": "扫描完成：意外连接 {surprising} · 缺口 {gaps} · 桥接 {bridges}（{failures} 条解读失败）",
-    "never": "尚未扫描过 —— 点击「重算洞察」分析知识网络",
-    "tabSurprising": "意外连接",
-    "tabGaps": "知识缺口",
-    "tabBridges": "桥接节点",
-    "noExplanation": "（尚未生成 LLM 解读）",
-    "gapIsolated": "孤立条目",
-    "gapMissingDimension": "无维度",
-    "gapSparse": "稀疏社区",
-    "surprisingSource": "{comm} · {dim}",
-    "actionReclassify": "重分类",
-    "actionFindRelations": "查找关联",
-    "actionSuggestTopic": "建议主题",
-    "previewTitleClassify": "建议维度",
-    "previewTitleRelations": "候选关系",
-    "previewTitleTopic": "建议主题",
-    "primarySuggestion": "模型建议：{primary}",
-    "confidence": "置信度：{value}",
-    "alternatives": "备选：{list}",
-    "basedOnTitles": "基于以下 {count} 个条目标题：",
-    "noSuggestion": "模型未能给出建议",
-    "confirm": "确认",
-    "cancel": "取消",
-    "successReclassify": "已写入维度：{dimension}",
-    "successRelations": "已写入 {count} 条关系候选",
-    "successTopic": "已写入社区主题：{topic}",
-    "emptyCandidates": "没有可确认的候选"
+  title: "知识图谱",
+  recompute: "重算社区",
+  recomputeDone: "已检测出 {communities} 个社区，覆盖 {pages} 条知识",
+  includeIsolated: "显示孤立条目",
+  truncatedHint: "图规模超出上限，已按连接数截断显示前 500 个节点",
+  empty: "暂无知识关系 —— 先在知识条目页确认一些关系候选",
+  communities: "知识社区",
+  noCommunities: "尚未检测出社区，点击「重算社区」",
+  communityMeta: "{pages} 条知识 · 内聚度 {cohesion}",
+  edgeTooltip: "相关性得分：{score}",
+  insights: {
+    title: "图洞察",
+    rescan: "重算洞察",
+    rescanning: "正在扫描…",
+    rescanDone: "扫描完成：意外连接 {surprising} · 缺口 {gaps} · 桥接 {bridges}（{failures} 条解读失败）",
+    never: "尚未扫描过 —— 点击「重算洞察」分析知识网络",
+    tabSurprising: "意外连接",
+    tabGaps: "知识缺口",
+    tabBridges: "桥接节点",
+    noExplanation: "（尚未生成 LLM 解读）",
+    gapIsolated: "孤立条目",
+    gapMissingDimension: "无维度",
+    gapSparse: "稀疏社区",
+    surprisingSource: "{comm} · {dim}",
+    actionReclassify: "重分类",
+    actionFindRelations: "查找关联",
+    actionSuggestTopic: "建议主题",
+    previewTitleClassify: "建议维度",
+    previewTitleRelations: "候选关系",
+    previewTitleTopic: "建议主题",
+    primarySuggestion: "模型建议：{primary}",
+    confidence: "置信度：{value}",
+    alternatives: "备选：{list}",
+    basedOnTitles: "基于以下 {count} 个条目标题：",
+    noSuggestion: "模型未能给出建议",
+    confirm: "确认",
+    cancel: "取消",
+    successReclassify: "已写入维度：{dimension}",
+    successRelations: "已写入 {count} 条关系候选",
+    successTopic: "已写入社区主题：{topic}",
+    emptyCandidates: "没有可确认的候选"
   }
 },
   wikiCoverage: {
-  "title": "覆盖度看板",
-  "unassigned": "未标业务域",
-  "gapsTitle": "知识缺口",
-  "noGaps": "没有缺口 —— 每个已标域的本体类都有可用知识",
-  "mappingsTitle": "业务域标注",
-  "noMappings": "还没有给任何本体类标注业务域",
-  "unlinkedTitle": "有 {count} 条知识没有挂到任何已确认的业务对象",
-  "unlinkedHint": "这批知识在覆盖度矩阵里看不见（矩阵每格都挂了类），但 Agent 按业务对象检索时也找不到它们。建议补齐关系或调整维度。",
-  "pageCounts": "{total} 条 / 已审 {approved} 条",
-  "confirmRemove": "摘掉这条域标注后，相关格子会回到「未标业务域」。确定？",
-  "classPlaceholder": "搜索本体类",
-  "domainPlaceholder": "输入或选择业务域",
-  "domainHint": "业务域是分类轴而非固定词表：积累到新领域时直接输入新域即可，不会被锁死。",
-  "refreshDone": "已刷新：{cells} 个格子，覆盖 {mapped}/{classes} 个已标域的本体类，清理 {removed} 个失效格。",
-  "actions": {
-    "refresh": "刷新覆盖度",
-    "addMapping": "标注业务域"
+  title: "覆盖度看板",
+  unassigned: "未标业务域",
+  gapsTitle: "知识缺口",
+  noGaps: "没有缺口 —— 每个已标域的本体类都有可用知识",
+  mappingsTitle: "业务域标注",
+  noMappings: "还没有给任何本体类标注业务域",
+  unlinkedTitle: "有 {count} 条知识没有挂到任何已确认的业务对象",
+  unlinkedHint: "这批知识在覆盖度矩阵里看不见（矩阵每格都挂了类），但 Agent 按业务对象检索时也找不到它们。建议补齐关系或调整维度。",
+  pageCounts: "{total} 条 / 已审 {approved} 条",
+  confirmRemove: "摘掉这条域标注后，相关格子会回到「未标业务域」。确定？",
+  classPlaceholder: "搜索本体类",
+  domainPlaceholder: "输入或选择业务域",
+  domainHint: "业务域是分类轴而非固定词表：积累到新领域时直接输入新域即可，不会被锁死。",
+  refreshDone: "已刷新：{cells} 个格子，覆盖 {mapped}/{classes} 个已标域的本体类，清理 {removed} 个失效格。",
+  actions: {
+    refresh: "刷新覆盖度",
+    addMapping: "标注业务域"
   },
-  "summary": {
-    "totalCells": "矩阵格数",
-    "missing": "完全缺失",
-    "complete": "已覆盖格数",
-    "unassigned": "未标域格数"
+  summary: {
+    totalCells: "矩阵格数",
+    missing: "完全缺失",
+    complete: "已覆盖格数",
+    unassigned: "未标域格数"
   },
-  "statuses": {
-    "COMPLETE": "已覆盖",
-    "PARTIAL": "部分覆盖",
-    "OUTDATED": "待更新",
-    "MISSING": "缺失"
+  statuses: {
+    COMPLETE: "已覆盖",
+    PARTIAL: "部分覆盖",
+    OUTDATED: "待更新",
+    MISSING: "缺失"
   },
-  "columns": {
-    "dimension": "知识维度",
-    "className": "本体类",
-    "domain": "业务域",
-    "status": "覆盖状态",
-    "pages": "条目数"
+  columns: {
+    dimension: "知识维度",
+    className: "本体类",
+    domain: "业务域",
+    status: "覆盖状态",
+    pages: "条目数"
   },
-  "errors": {
-    "refreshFailed": "刷新失败，请重试",
-    "removeFailed": "摘除失败，请重试",
-    "mappingGone": "这条标注已经不在了（可能刚被他人摘除），已为你刷新。"
+  errors: {
+    refreshFailed: "刷新失败，请重试",
+    removeFailed: "摘除失败，请重试",
+    mappingGone: "这条标注已经不在了（可能刚被他人摘除），已为你刷新。"
   }
 },
   wikiLinks: {
-  "title": "Wiki ↔ Ontology 链接管理",
-  "tabs": {
-    "class": "类",
-    "property": "属性",
-    "metric": "指标"
+  title: "Wiki ↔ Ontology 链接管理",
+  tabs: {
+    class: "类",
+    property: "属性",
+    metric: "指标"
   },
-  "addBinding": "添加绑定",
-  "scopePage": "覆盖全页",
-  "scopeChunk": "仅限此段落",
-  "scopeLabel": "作用范围",
-  "chunkIdLabel": "段落 ID",
-  "chunkIdPlaceholder": "请输入 chunk_id",
-  "chunkIdRequired": "请输入段落 ID",
-  "ontologyObject": "本体对象",
-  "ontologyPlaceholder": "搜索或选择本体对象",
-  "ontologyRequired": "请选择本体对象",
-  "weight": "权重",
-  "note": "备注",
-  "revoke": "撤销",
-  "submit": "提交",
-  "cancel": "取消",
-  "addSuccess": "添加成功",
-  "addFailed": "添加失败",
-  "revokeSuccess": "已撤销",
-  "revokeFailed": "撤销失败",
-  "loadFailed": "加载链接失败",
-  "loadTargetsFailed": "加载可链接目标失败",
-  "noLinks": "暂无链接",
-  "selectPageHint": "请先选择左侧 Wiki 页面",
-  "pageTreeLabel": "请选择 Wiki 页面",
-  "treeLoadFailed": "加载分类树失败"
+  addBinding: "添加绑定",
+  scopePage: "覆盖全页",
+  scopeChunk: "仅限此段落",
+  scopeLabel: "作用范围",
+  chunkIdLabel: "段落 ID",
+  chunkIdPlaceholder: "请输入 chunk_id",
+  chunkIdRequired: "请输入段落 ID",
+  ontologyObject: "本体对象",
+  ontologyPlaceholder: "搜索或选择本体对象",
+  ontologyRequired: "请选择本体对象",
+  weight: "权重",
+  note: "备注",
+  revoke: "撤销",
+  submit: "提交",
+  cancel: "取消",
+  addSuccess: "添加成功",
+  addFailed: "添加失败",
+  revokeSuccess: "已撤销",
+  revokeFailed: "撤销失败",
+  loadFailed: "加载链接失败",
+  loadTargetsFailed: "加载可链接目标失败",
+  noLinks: "暂无链接",
+  selectPageHint: "请先选择左侧 Wiki 页面",
+  pageTreeLabel: "请选择 Wiki 页面",
+  treeLoadFailed: "加载分类树失败"
 },
   wikiCategories: {
-  "title": "Wiki 分类管理",
-  "description": "管理 Wiki 页面的分类目录（树形结构）。新建分类后可挂 wiki_page 作为概览页。",
-  "columns": {
-    "name": "名称",
-    "parent": "父分类",
-    "sortOrder": "排序",
-    "page": "概览页",
-    "description": "描述"
+  title: "Wiki 分类管理",
+  description: "管理 Wiki 页面的分类目录（树形结构）。新建分类后可挂 wiki_page 作为概览页。",
+  columns: {
+    name: "名称",
+    parent: "父分类",
+    sortOrder: "排序",
+    page: "概览页",
+    description: "描述"
   },
-  "actions": {
-    "create": "新建分类",
-    "edit": "编辑",
-    "delete": "删除",
-    "refresh": "刷新"
+  actions: {
+    create: "新建分类",
+    edit: "编辑",
+    delete: "删除",
+    refresh: "刷新"
   },
-  "form": {
-    "name": "分类名称",
-    "namePlaceholder": "如：采购管理",
-    "parent": "父分类",
-    "parentPlaceholder": "顶级分类（不选）",
-    "sortOrder": "同级排序（数字越小越靠前）",
-    "description": "描述",
-    "pageId": "概览页（可选）",
-    "pageIdPlaceholder": "选择 wiki_page 作为概览"
+  form: {
+    name: "分类名称",
+    namePlaceholder: "如：采购管理",
+    parent: "父分类",
+    parentPlaceholder: "顶级分类（不选）",
+    sortOrder: "同级排序（数字越小越靠前）",
+    description: "描述",
+    pageId: "概览页（可选）",
+    pageIdPlaceholder: "选择 wiki_page 作为概览"
   },
-  "messages": {
-    "created": "分类已创建",
-    "updated": "分类已更新",
-    "deleted": "分类已删除",
-    "createFailed": "创建失败（可能是名称冲突或父分类已删除）",
-    "updateFailed": "更新失败（可能形成环：分类不能挂到自己的后代）",
-    "deleteFailed": "删除失败",
-    "confirmDelete": "确认删除分类「{name}」？其下的子分类会自动升级为顶级分类。"
+  messages: {
+    created: "分类已创建",
+    updated: "分类已更新",
+    deleted: "分类已删除",
+    createFailed: "创建失败（可能是名称冲突或父分类已删除）",
+    updateFailed: "更新失败（可能形成环：分类不能挂到自己的后代）",
+    deleteFailed: "删除失败",
+    confirmDelete: "确认删除分类「{name}」？其下的子分类会自动升级为顶级分类。"
   },
-  "empty": "暂无分类，点右上角「新建分类」开始。"
+  empty: "暂无分类，点右上角「新建分类」开始。"
 },
   agentTools: {
-  "title": "工具配置管理",
-  "columns": {
-    "name": "工具名",
-    "description": "描述",
-    "dataObject": "数据对象",
-    "dataLayers": "数据层",
-    "handlerKind": "Handler 类型",
-    "handlerRef": "Handler 引用",
-    "enabled": "启用",
-    "updatedTime": "更新时间"
+  title: "工具配置管理",
+  columns: {
+    name: "工具名",
+    description: "描述",
+    dataObject: "数据对象",
+    dataLayers: "数据层",
+    handlerKind: "Handler 类型",
+    handlerRef: "Handler 引用",
+    enabled: "启用",
+    updatedTime: "更新时间"
   },
-  "actions": {
-    "create": "新建",
-    "edit": "编辑",
-    "delete": "删除",
-    "toggle": "切换",
-    "refresh": "刷新"
+  actions: {
+    create: "新建",
+    edit: "编辑",
+    delete: "删除",
+    toggle: "切换",
+    refresh: "刷新"
   },
-  "form": {
-    "name": "工具名（创建后不可改）",
-    "description": "描述（最多 2000 字符）",
-    "dataObject": "数据对象（写入时自动转大写）",
-    "dataLayers": "数据层（可多选）",
-    "inputSchema": "输入 Schema（JSON）",
-    "handlerKind": "Handler 类型",
-    "handlerRef": "Handler 引用",
-    "argExtractorKind": "参数提取器"
+  form: {
+    name: "工具名（创建后不可改）",
+    description: "描述（最多 2000 字符）",
+    dataObject: "数据对象（写入时自动转大写）",
+    dataLayers: "数据层（可多选）",
+    inputSchema: "输入 Schema（JSON）",
+    handlerKind: "Handler 类型",
+    handlerRef: "Handler 引用",
+    argExtractorKind: "参数提取器"
   },
-  "messages": {
-    "created": "创建成功",
-    "updated": "更新成功",
-    "deleted": "删除成功",
-    "toggled": "状态已切换",
-    "failed": "操作失败"
+  messages: {
+    created: "创建成功",
+    updated: "更新成功",
+    deleted: "删除成功",
+    toggled: "状态已切换",
+    failed: "操作失败"
   },
-  "errors": {
-    "versionConflict": "版本冲突，请刷新后重试",
-    "inUseByAgent": "该工具被 Agent {agentCodes} 引用，无法删除",
-    "nameImmutable": "工具名创建后不可修改"
+  errors: {
+    versionConflict: "版本冲突，请刷新后重试",
+    inUseByAgent: "该工具被 Agent {agentCodes} 引用，无法删除",
+    nameImmutable: "工具名创建后不可修改"
   }
 },
   systemConfig: {
-  "title": "系统参数",
-  "columns": {
-    "key": "参数名",
-    "value": "值",
-    "description": "说明",
-    "updatedTime": "更新时间",
-    "actions": "操作"
+  title: "系统参数",
+  columns: {
+    key: "参数名",
+    value: "值",
+    description: "说明",
+    updatedTime: "更新时间",
+    actions: "操作"
   },
-  "actions": {
-    "edit": "编辑",
-    "refresh": "刷新",
-    "save": "保存",
-    "cancel": "取消"
+  actions: {
+    edit: "编辑",
+    refresh: "刷新",
+    save: "保存",
+    cancel: "取消"
   },
-  "modal": {
-    "editTitle": "编辑系统参数",
-    "keyReadonlyHelp": "key 为不可变主键，需新增请走 alembic 迁移 + 种子脚本",
-    "valuePlaceholder": "支持空串（清空）、布尔字符串、JSON-like 文本"
+  modal: {
+    editTitle: "编辑系统参数",
+    keyReadonlyHelp: "key 为不可变主键，需新增请走 alembic 迁移 + 种子脚本",
+    valuePlaceholder: "支持空串（清空）、布尔字符串、JSON-like 文本"
   },
-  "messages": {
-    "updated": "更新成功"
+  messages: {
+    updated: "更新成功"
   },
-  "errors": {
-    "loadFailed": "加载失败",
-    "updateFailed": "更新失败",
-    "valueTooLong": "value 最长 4096 字符"
+  errors: {
+    loadFailed: "加载失败",
+    updateFailed: "更新失败",
+    valueTooLong: "value 最长 4096 字符"
   },
-  "empty": "空"
+  empty: "空"
 },
   dataQualityGenerate: {
-  "title": "规则生成向导",
-  "stepClass": "选择本体类",
-  "stepDatasource": "选择数据源",
-  "stepPreview": "预览规则",
-  "stepConfirm": "确认落库",
-  "className": "本体类",
-  "datasource": "数据源",
-  "mappingStatus": "映射状态",
-  "suggestions": "建议规则",
-  "blocked": "未生成（被阻断）",
-  "llmPanel": "AI 建议（来自属性描述）",
-  "llmModelSelect": "模型",
-  "llmModelSelectPlaceholder": "选择 LLM 模型",
-  "llmModelsLoadFailed": "模型列表加载失败，请稍后重试",
-  "adopt": "采纳并沉淀",
-  "adopted": "已采纳",
-  "adoptedHint": "已沉淀到本体属性",
-  "confirmBtn": "确认落库",
-  "created": "已创建",
-  "skipped": "已跳过",
-  "noProperties": "该类暂无属性，请先维护本体",
-  "previewEmpty": "请先完成前两步",
-  "confirmSuccess": "规则生成完成",
-  "columns": {
-    "select": "选择",
-    "ruleCode": "规则编码",
-    "ruleType": "规则类型",
-    "targetColumn": "目标列",
-    "threshold": "阈值",
-    "severity": "严重级别",
-    "status": "状态",
-    "reason": "原因",
-    "propertyName": "属性名"
+  title: "规则生成向导",
+  stepClass: "选择本体类",
+  stepDatasource: "选择数据源",
+  stepPreview: "预览规则",
+  stepConfirm: "确认落库",
+  className: "本体类",
+  datasource: "数据源",
+  mappingStatus: "映射状态",
+  suggestions: "建议规则",
+  blocked: "未生成（被阻断）",
+  llmPanel: "AI 建议（来自属性描述）",
+  llmModelSelect: "模型",
+  llmModelSelectPlaceholder: "选择 LLM 模型",
+  llmModelsLoadFailed: "模型列表加载失败，请稍后重试",
+  adopt: "采纳并沉淀",
+  adopted: "已采纳",
+  adoptedHint: "已沉淀到本体属性",
+  confirmBtn: "确认落库",
+  created: "已创建",
+  skipped: "已跳过",
+  noProperties: "该类暂无属性，请先维护本体",
+  previewEmpty: "请先完成前两步",
+  confirmSuccess: "规则生成完成",
+  columns: {
+    select: "选择",
+    ruleCode: "规则编码",
+    ruleType: "规则类型",
+    targetColumn: "目标列",
+    threshold: "阈值",
+    severity: "严重级别",
+    status: "状态",
+    reason: "原因",
+    propertyName: "属性名"
   },
-  "selectClassPlaceholder": "请选择本体类",
-  "selectDatasourcePlaceholder": "请选择数据源",
-  "selectAll": "全选新增",
-  "deselectAll": "取消全选",
-  "noSuggestions": "暂无 AI 建议",
-  "suggestedValues": "建议值",
-  "confidence": "置信度",
-  "rationale": "理由",
-  "skippedList": "已跳过编码",
-  "startOver": "重新生成",
-  "messages": {
-    "loadClassesFailed": "加载本体类失败",
-    "loadDatasourcesFailed": "加载数据源失败",
-    "previewFailed": "预览规则失败",
-    "confirmFailed": "确认落库失败",
-    "confirmNothingSelected": "请至少勾选一条「新增」状态的规则（已存在的规则无需重复落库）",
-    "parseFailed": "AI 解析失败",
-    "applyFailed": "采纳建议失败",
-    "applied": "已采纳建议",
-    "adoptNotApplicable": "not_null 等非值域约束暂无自动沉淀入口。请联系管理员扩展 ontology_property 字段，或在本体管理页手工配置。",
-    "alreadyAdopted": "此属性已采纳，无需重复操作"
+  selectClassPlaceholder: "请选择本体类",
+  selectDatasourcePlaceholder: "请选择数据源",
+  selectAll: "全选新增",
+  deselectAll: "取消全选",
+  noSuggestions: "暂无 AI 建议",
+  suggestedValues: "建议值",
+  confidence: "置信度",
+  rationale: "理由",
+  skippedList: "已跳过编码",
+  startOver: "重新生成",
+  messages: {
+    loadClassesFailed: "加载本体类失败",
+    loadDatasourcesFailed: "加载数据源失败",
+    previewFailed: "预览规则失败",
+    confirmFailed: "确认落库失败",
+    confirmNothingSelected: "请至少勾选一条「新增」状态的规则（已存在的规则无需重复落库）",
+    parseFailed: "AI 解析失败",
+    applyFailed: "采纳建议失败",
+    applied: "已采纳建议",
+    adoptNotApplicable: "not_null 等非值域约束暂无自动沉淀入口。请联系管理员扩展 ontology_property 字段，或在本体管理页手工配置。",
+    alreadyAdopted: "此属性已采纳，无需重复操作"
   }
 },
   ontologyPropertyAdmin: {
-  "title": "本体属性管理",
-  "subtitle": "查看与编辑 LLM 采纳的 allowed_values（值域），跨类一次性列出所有本体属性。",
-  "filter": {
-    "all": "全部类",
-    "keywordPlaceholder": "搜索属性名 / 别名 / 物理列 / 描述（不区分大小写）"
+  title: "本体属性管理",
+  subtitle: "查看与编辑 LLM 采纳的 allowed_values（值域），跨类一次性列出所有本体属性。",
+  filter: {
+    all: "全部类",
+    keywordPlaceholder: "搜索属性名 / 别名 / 物理列 / 描述（不区分大小写）"
   },
-  "values": {
-    "none": "未约束"
+  values: {
+    none: "未约束"
   },
-  "columns": {
-    "className": "所属类",
-    "propertyName": "属性名",
-    "dataType": "数据类型",
-    "allowedValues": "值域 (allowed_values)",
-    "actions": "操作"
+  columns: {
+    className: "所属类",
+    propertyName: "属性名",
+    dataType: "数据类型",
+    allowedValues: "值域 (allowed_values)",
+    actions: "操作"
   },
-  "modal": {
-    "editTitle": "编辑属性：{name}"
+  modal: {
+    editTitle: "编辑属性：{name}"
   },
-  "form": {
-    "description": "描述",
-    "descriptionHint": "供 LLM 推断约束时读取的文本说明",
-    "descriptionPlaceholder": "例如：业务状态码，取值参见下方值域",
-    "allowedValues": "值域",
-    "allowedValuesHint": "手动调整 LLM 采纳的值；空数组=清空，null=不修改",
-    "allowedValuesPlaceholder": "输入值后按回车或逗号添加",
-    "allowedValuesHelp1": "• 每个值不能包含单引号（SQL 注入防护）",
-    "allowedValuesHelp2": "• 与 apply-suggestion 行为一致：null 不修改、空数组清空",
-    "isNotNull": "必填（is_not_null）",
-    "isNotNullHint": "勾选后该列不能为空，规则引擎据此推导 COMPLETENESS 规则",
-    "minValue": "最小值（min_value）",
-    "minValueHint": "区间下界；与 max_value 配套；非数字（日期/字典序）请改用后端 API",
-    "minValuePlaceholder": "例如：0",
-    "maxValue": "最大值（max_value）",
-    "maxValueHint": "区间上界；与 min_value 配套",
-    "maxValuePlaceholder": "例如：100",
-    "regexPattern": "正则（regex_pattern）",
-    "regexPatternHint": "正则表达式；规则引擎据此推导 PATTERN 规则；必须能 compile",
-    "regexPatternPlaceholder": "例如：^[A-Z]{2}-\\d+$"
+  form: {
+    description: "描述",
+    descriptionHint: "供 LLM 推断约束时读取的文本说明",
+    descriptionPlaceholder: "例如：业务状态码，取值参见下方值域",
+    allowedValues: "值域",
+    allowedValuesHint: "手动调整 LLM 采纳的值；空数组=清空，null=不修改",
+    allowedValuesPlaceholder: "输入值后按回车或逗号添加",
+    allowedValuesHelp1: "• 每个值不能包含单引号（SQL 注入防护）",
+    allowedValuesHelp2: "• 与 apply-suggestion 行为一致：null 不修改、空数组清空",
+    isNotNull: "必填（is_not_null）",
+    isNotNullHint: "勾选后该列不能为空，规则引擎据此推导 COMPLETENESS 规则",
+    minValue: "最小值（min_value）",
+    minValueHint: "区间下界；与 max_value 配套；非数字（日期/字典序）请改用后端 API",
+    minValuePlaceholder: "例如：0",
+    maxValue: "最大值（max_value）",
+    maxValueHint: "区间上界；与 min_value 配套",
+    maxValuePlaceholder: "例如：100",
+    regexPattern: "正则（regex_pattern）",
+    regexPatternHint: "正则表达式；规则引擎据此推导 PATTERN 规则；必须能 compile",
+    regexPatternPlaceholder: "例如：^[A-Z]{2}-\\d+$"
   },
-  "messages": {
-    "loadFailed": "加载本体属性失败",
-    "updated": "已保存",
-    "updateFailed": "保存失败",
-    "badValue": "值不合法（含单引号或为空）"
+  messages: {
+    loadFailed: "加载本体属性失败",
+    updated: "已保存",
+    updateFailed: "保存失败",
+    badValue: "值不合法（含单引号或为空）"
   }
 },
   businessObject: {
-  "title": "业务对象",
-  "newButton": "新建业务对象",
-  "columns": {
-    "code": "代码",
-    "name": "名称",
-    "headerClassId": "头表类",
-    "primaryDomain": "主数据域",
-    "attachedDomains": "附加数据域",
-    "graphLabel": "图标签",
-    "description": "描述",
-    "updatedTime": "更新时间"
+  title: "业务对象",
+  newButton: "新建业务对象",
+  columns: {
+    code: "代码",
+    name: "名称",
+    headerClassId: "头表类",
+    primaryDomain: "主数据域",
+    attachedDomains: "附加数据域",
+    graphLabel: "图标签",
+    description: "描述",
+    updatedTime: "更新时间"
   },
-  "filters": {
-    "code": "代码",
-    "name": "名称"
+  filters: {
+    code: "代码",
+    name: "名称"
   },
-  "modal": {
-    "createTitle": "新建业务对象",
-    "editTitle": "编辑业务对象",
-    "confirmDelete": "确定删除业务对象「{code}」？"
+  modal: {
+    createTitle: "新建业务对象",
+    editTitle: "编辑业务对象",
+    confirmDelete: "确定删除业务对象「{code}」？"
   },
-  "messages": {
-    "loadFailed": "加载业务对象失败",
-    "createSuccess": "创建成功",
-    "updateSuccess": "更新成功",
-    "deleteSuccess": "删除成功",
-    "submitFailed": "提交失败：{detail}"
+  messages: {
+    loadFailed: "加载业务对象失败",
+    createSuccess: "创建成功",
+    updateSuccess: "更新成功",
+    deleteSuccess: "删除成功",
+    submitFailed: "提交失败：{detail}"
   },
-  "tooltips": {
-    "headerClassId": "关联到本体类；图标签将按其 className 自动派生",
-    "primaryDomain": "业务对象有且只有一个主数据域；本体类经头表类继承该域归属",
-    "attachedDomains": "附加数据域（可多个，不能与主域重复）；Agent 按域授权时两者皆生效",
-    "graphLabelAuto": "由头表类自动派生，编辑时切换头表类即可同步"
+  tooltips: {
+    headerClassId: "关联到本体类；图标签将按其 className 自动派生",
+    primaryDomain: "业务对象有且只有一个主数据域；本体类经头表类继承该域归属",
+    attachedDomains: "附加数据域（可多个，不能与主域重复）；Agent 按域授权时两者皆生效",
+    graphLabelAuto: "由头表类自动派生，编辑时切换头表类即可同步"
   },
-  "placeholders": {
-    "selectHeaderClass": "搜索类名 / 别名以选择本体类",
-    "selectPrimaryDomain": "选择主数据域",
-    "selectAttachedDomains": "选择附加数据域（可多选）",
-    "noDomain": "暂无启用中的数据域",
-    "graphLabelAuto": "（选本体类后自动填充）",
-    "noClass": "暂无本体类",
-    "codeNew": "例如 INVOICE（仅大写字母、数字、下划线，1-20 字符）"
+  placeholders: {
+    selectHeaderClass: "搜索类名 / 别名以选择本体类",
+    selectPrimaryDomain: "选择主数据域",
+    selectAttachedDomains: "选择附加数据域（可多选）",
+    noDomain: "暂无启用中的数据域",
+    graphLabelAuto: "（选本体类后自动填充）",
+    noClass: "暂无本体类",
+    codeNew: "例如 INVOICE（仅大写字母、数字、下划线，1-20 字符）"
   },
-  "validation": {
-    "codeFormat": "代码必须为大写字母 / 数字 / 下划线，1-20 字符",
-    "attachedEqualsPrimary": "附加数据域不能与主数据域相同"
+  validation: {
+    codeFormat: "代码必须为大写字母 / 数字 / 下划线，1-20 字符",
+    attachedEqualsPrimary: "附加数据域不能与主数据域相同"
   }
 },
   dataDomain: {
-  "title": "数据域",
-  "newButton": "新建数据域",
-  "columns": {
-    "code": "代码",
-    "name": "名称",
-    "primaryOrg": "主管理组织",
-    "description": "描述",
-    "enabled": "启用"
+  title: "数据域",
+  newButton: "新建数据域",
+  columns: {
+    code: "代码",
+    name: "名称",
+    primaryOrg: "主管理组织",
+    description: "描述",
+    enabled: "启用"
   },
-  "modal": {
-    "createTitle": "新建数据域",
-    "editTitle": "编辑数据域",
-    "confirmDelete": "确定删除数据域「{code}」？"
+  modal: {
+    createTitle: "新建数据域",
+    editTitle: "编辑数据域",
+    confirmDelete: "确定删除数据域「{code}」？"
   },
-  "messages": {
-    "submitFailed": "提交失败：{detail}",
-    "deleteFailed": "删除失败：{detail}"
+  messages: {
+    submitFailed: "提交失败：{detail}",
+    deleteFailed: "删除失败：{detail}"
   },
-  "tooltips": {
-    "primaryOrg": "该数据域的主管理组织（可选）",
-    "enabled": "禁用后不可再关联到新的业务对象 / Agent"
+  tooltips: {
+    primaryOrg: "该数据域的主管理组织（可选）",
+    enabled: "禁用后不可再关联到新的业务对象 / Agent"
   },
-  "placeholders": {
-    "codeNew": "例如 PROCUREMENT（仅大写字母、数字、下划线，1-20 字符）",
-    "selectOrg": "选择主管理组织"
+  placeholders: {
+    codeNew: "例如 PROCUREMENT（仅大写字母、数字、下划线，1-20 字符）",
+    selectOrg: "选择主管理组织"
   },
-  "validation": {
-    "codeFormat": "代码必须为大写字母 / 数字 / 下划线，1-20 字符"
+  validation: {
+    codeFormat: "代码必须为大写字母 / 数字 / 下划线，1-20 字符"
   }
 },
   routingMetrics: {
-  "title": "路由分层指标",
-  "subtitle": "L1/L1C/L2/L4 各层命中率、延迟与 Token 成本（L3 已废弃，多步记 L2；L1C = KPI 歧义澄清）",
-  "layer": {
-    "L1": "L1 语义匹配",
-    "L1C": "L1C KPI 歧义澄清",
-    "L2": "L2 LLM NL2SQL（含多步拆解）",
-    "L4": "L4 Agent Loop"
+  title: "路由分层指标",
+  subtitle: "L1/L1C/L2/L4 各层命中率、延迟与 Token 成本（L3 已废弃，多步记 L2；L1C = KPI 歧义澄清）",
+  layer: {
+    L1: "L1 语义匹配",
+    L1C: "L1C KPI 歧义澄清",
+    L2: "L2 LLM NL2SQL（含多步拆解）",
+    L4: "L4 Agent Loop"
   },
-  "metric": {
-    "hitCount": "命中次数",
-    "avgDuration": "平均延迟",
-    "avgTokenCost": "平均 Token 成本"
+  metric: {
+    hitCount: "命中次数",
+    avgDuration: "平均延迟",
+    avgTokenCost: "平均 Token 成本"
   },
-  "chart": {
-    "pieTitle": "各层命中率占比",
-    "lineTitle": "近 7 天各层趋势",
-    "yAxisLabel": "命中次数"
+  chart: {
+    pieTitle: "各层命中率占比",
+    lineTitle: "近 7 天各层趋势",
+    yAxisLabel: "命中次数"
   },
-  "timeWindow": {
+  timeWindow: {
     "1d": "最近 1 天",
     "7d": "最近 7 天",
     "30d": "最近 30 天"
   },
-  "empty": "暂无数据",
-  "error": "加载失败",
-  "todo": {
-    "apiEndpoint": "TODO: 待后端实现 /api/v1/routing-metrics/snapshot endpoint"
+  empty: "暂无数据",
+  error: "加载失败",
+  todo: {
+    apiEndpoint: "TODO: 待后端实现 /api/v1/routing-metrics/snapshot endpoint"
   }
 },
   dqRuleParams: {
-  "title": "规则配置(结构化)",
-  "create": "新建结构化规则",
-  "mode": {
-    "structured": "结构化",
-    "custom": "自定义 SQL"
+  title: "规则配置(结构化)",
+  create: "新建结构化规则",
+  mode: {
+    structured: "结构化",
+    custom: "自定义 SQL"
   },
-  "fields": {
-    "kind": "约束类型",
-    "min": "最小值",
-    "max": "最大值",
-    "values": "允许值",
-    "pattern": "正则",
-    "op": "运算符",
-    "value": "值",
-    "left": "左列",
-    "right": "右列",
-    "factor": "系数",
-    "refTable": "引用表",
-    "refColumn": "引用列"
+  fields: {
+    kind: "约束类型",
+    min: "最小值",
+    max: "最大值",
+    values: "允许值",
+    pattern: "正则",
+    op: "运算符",
+    value: "值",
+    left: "左列",
+    right: "右列",
+    factor: "系数",
+    refTable: "引用表",
+    refColumn: "引用列"
   },
-  "table": {
-    "code": "编码",
-    "name": "名称",
-    "type": "规则类型",
-    "mode": "配置模式",
-    "params": "规则参数",
-    "modeStructured": "结构化",
-    "modeCustom": "自定义",
-    "yes": "是",
-    "no": "否",
-    "editTitle": "编辑规则"
+  table: {
+    code: "编码",
+    name: "名称",
+    type: "规则类型",
+    mode: "配置模式",
+    params: "规则参数",
+    modeStructured: "结构化",
+    modeCustom: "自定义",
+    yes: "是",
+    no: "否",
+    editTitle: "编辑规则"
   },
-  "form": {
-    "datasource": "数据源",
-    "datasourcePlaceholder": "请选择数据源（先选类名可自动定位）",
-    "className": "类名",
-    "classPlaceholder": "请选择本体类（可直接反查数据源与表）",
-    "targetTable": "目标表",
-    "tablePlaceholder": "请选择目标表",
-    "loadingSchema": "正在加载表结构…",
-    "ruleType": "规则类型",
-    "targetColumn": "目标列",
-    "threshold": "阈值（通过率 %）",
-    "severity": "严重级别",
-    "ruleExpression": "规则表达式",
-    "code": "编码",
-    "codeAutoHint": "自动生成，格式：DQ-Rule-年月日-10位流水",
-    "name": "名称",
-    "nameAutoHint": "自动生成：数据源名称-类名-规则名（英文）"
+  form: {
+    datasource: "数据源",
+    datasourcePlaceholder: "请选择数据源（先选类名可自动定位）",
+    className: "类名",
+    classPlaceholder: "请选择本体类（可直接反查数据源与表）",
+    targetTable: "目标表",
+    tablePlaceholder: "请选择目标表",
+    loadingSchema: "正在加载表结构…",
+    ruleType: "规则类型",
+    targetColumn: "目标列",
+    threshold: "阈值（通过率 %）",
+    severity: "严重级别",
+    ruleExpression: "规则表达式",
+    code: "编码",
+    codeAutoHint: "自动生成，格式：DQ-Rule-年月日-10位流水",
+    name: "名称",
+    nameAutoHint: "自动生成：数据源名称-类名-规则名（英文）"
   }
 },
   research: {
-  "checkpoint": {
-    "title": "待决策检查点",
-    "targetLabel": "本次针对",
-    "targetUnknown": "确认本次决策",
-    "target": {
-      "intent": "确认研究范围",
-      "planning": "确认研究计划",
-      "hypothesis": "选择要验证的假设",
-      "runtime_dynamic": "确认语义歧义的处理方式",
-      "low_confidence_step": "处理执行失败的步骤"
+  checkpoint: {
+    title: "待决策检查点",
+    targetLabel: "本次针对",
+    targetUnknown: "确认本次决策",
+    target: {
+      intent: "确认研究范围",
+      planning: "确认研究计划",
+      hypothesis: "选择要验证的假设",
+      runtime_dynamic: "确认语义歧义的处理方式",
+      low_confidence_step: "处理执行失败的步骤"
     },
-    "conflicts": "待确认的歧义",
-    "conflictKind": {
-      "metric_ambiguous": "指标歧义",
-      "wiki_disagree": "知识冲突"
+    conflicts: "待确认的歧义",
+    conflictKind: {
+      metric_ambiguous: "指标歧义",
+      wiki_disagree: "知识冲突"
     },
-    "conflictKindFallback": "待确认项",
-    "confidence": "置信",
-    "emptyConflicts": "本次未返回歧义明细，可直接点「修改」补充说明。",
-    "promptByKind": {
-      "wiki_disagree": "检测到 {count} 处知识冲突，请确认以此为背景继续？",
-      "metric_ambiguous": "检测到 {count} 处指标歧义，请选择用于本次分析"
+    conflictKindFallback: "待确认项",
+    confidence: "置信",
+    emptyConflicts: "本次未返回歧义明细，可直接点「修改」补充说明。",
+    promptByKind: {
+      wiki_disagree: "检测到 {count} 处知识冲突，请确认以此为背景继续？",
+      metric_ambiguous: "检测到 {count} 处指标歧义，请选择用于本次分析"
     },
-    "openInNewTabHint": "新标签页打开",
-    "snippetFallback": "（无摘要）",
-    "planSteps": "研究计划步骤",
-    "emptyPlanSteps": "本次未返回计划步骤，可直接点「修改」补充研究方向。",
-    "candidates": "候选假设（可多选）",
-    "hypothesisSelectHint": "默认验证全部，勾选可缩小范围",
-    "unnamedItem": "（未提供描述）",
-    "emptyCandidates": "本轮未生成候选假设（模型不可用或解析失败），可直接点「修改」补充研究方向。",
-    "confirm": "确认",
-    "modify": "修改",
-    "reject": "拒绝",
-    "modifyPlaceholder": "输入修改后的要求…",
-    "submitModify": "提交修改",
-    "confirmHint": "按当前计划继续",
-    "modifyHint": "补充说明，系统将基于反馈重新生成",
-    "rejectHint": "放弃当前检查点，按原计划继续",
-    "modifyPlanningHint": "将基于您的反馈重跑 planner 重新生成步骤",
-    "rejectAbortHint": "拒绝后本轮将直接出报告，不再继续",
-    "hypothesisConfirmHint": "不勾选 = 验证全部假设",
-    "processing": "处理中…"
+    openInNewTabHint: "新标签页打开",
+    snippetFallback: "（无摘要）",
+    planSteps: "研究计划步骤",
+    emptyPlanSteps: "本次未返回计划步骤，可直接点「修改」补充研究方向。",
+    candidates: "候选假设（可多选）",
+    hypothesisSelectHint: "默认验证全部，勾选可缩小范围",
+    unnamedItem: "（未提供描述）",
+    emptyCandidates: "本轮未生成候选假设（模型不可用或解析失败），可直接点「修改」补充研究方向。",
+    confirm: "确认",
+    modify: "修改",
+    reject: "拒绝",
+    modifyPlaceholder: "输入修改后的要求…",
+    submitModify: "提交修改",
+    confirmHint: "按当前计划继续",
+    modifyHint: "补充说明，系统将基于反馈重新生成",
+    rejectHint: "放弃当前检查点，按原计划继续",
+    modifyPlanningHint: "将基于您的反馈重跑 planner 重新生成步骤",
+    rejectAbortHint: "拒绝后本轮将直接出报告，不再继续",
+    hypothesisConfirmHint: "不勾选 = 验证全部假设",
+    processing: "处理中…"
   },
-  "progress": {
-    "empty": "暂无进度",
-    "intent": "解析意图",
-    "esl": "生成执行步骤",
-    "plan": "制定研究计划",
-    "stepStart": "开始步骤",
-    "stepSql": "执行查询",
-    "stepData": "处理数据",
-    "stepChart": "生成图表",
-    "stepDone": "完成步骤",
-    "hypothesis": "形成假设",
-    "finding": "得出结论",
-    "report": "生成报告",
-    "degraded": "预算计量降级，本轮闸门放行"
+  progress: {
+    empty: "暂无进度",
+    intent: "解析意图",
+    esl: "生成执行步骤",
+    plan: "制定研究计划",
+    stepStart: "开始步骤",
+    stepSql: "执行查询",
+    stepData: "处理数据",
+    stepChart: "生成图表",
+    stepDone: "完成步骤",
+    hypothesis: "形成假设",
+    finding: "得出结论",
+    report: "生成报告",
+    degraded: "预算计量降级，本轮闸门放行"
   },
-  "timeline": {
-    "detail": "查看",
-    "detailTitle": "轮次详情",
-    "role": {
-      "user": "你",
-      "agent": "AI",
-      "checkpoint": "检查点"
+  timeline: {
+    detail: "查看",
+    detailTitle: "轮次详情",
+    role: {
+      user: "你",
+      agent: "AI",
+      checkpoint: "检查点"
     },
-    "status": {
-      "pending": "待决策",
-      "confirmed": "已确认",
-      "modified": "已修改",
-      "rejected": "已拒绝"
+    status: {
+      pending: "待决策",
+      confirmed: "已确认",
+      modified: "已修改",
+      rejected: "已拒绝"
     }
   },
-  "report": {
-    "title": "研究报告",
-    "empty": "暂无报告内容",
-    "versions": "版本",
-    "back": "返回会话"
+  report: {
+    title: "研究报告",
+    empty: "暂无报告内容",
+    versions: "版本",
+    back: "返回会话"
   },
-  "evidence": {
-    "title": "执行证据",
-    "step": "步骤 {index}",
-    "topNReplay": "Top-N（结果行按度量排名，非原图）",
-    "timeRange": "时间范围 {start} – {end}",
-    "status": {
-      "success": "成功",
-      "failed": "失败",
-      "empty": "无数据"
+  evidence: {
+    title: "执行证据",
+    step: "步骤 {index}",
+    topNReplay: "Top-N（结果行按度量排名，非原图）",
+    timeRange: "时间范围 {start} – {end}",
+    status: {
+      success: "成功",
+      failed: "失败",
+      empty: "无数据"
     }
   },
-  "list": {
-    "title": "研究分析",
-    "newQuestion": "发起新研究",
-    "questionPlaceholder": "输入你的研究问题…",
-    "datasourcePlaceholder": "选择数据源",
-    "modelPlaceholder": "选择模型",
-    "modelAuto": "自动（智能路由）",
-    "start": "开始研究",
-    "empty": "暂无研究会话",
-    "open": "打开",
-    "report": "报告",
-    "compare": "对比",
-    "deleteConfirm": "删除该研究会话？其轮次、检查点与报告将一并清除，不可恢复。",
-    "deleteAriaLabel": "删除研究会话：{name}",
-    "deleteError": "删除失败",
-    "mode": {
-      "research": "研究",
-      "attribution": "归因",
-      "compare": "对比"
+  list: {
+    title: "研究分析",
+    newQuestion: "发起新研究",
+    questionPlaceholder: "输入你的研究问题…",
+    datasourcePlaceholder: "选择数据源",
+    modelPlaceholder: "选择模型",
+    modelAuto: "自动（智能路由）",
+    start: "开始研究",
+    empty: "暂无研究会话",
+    open: "打开",
+    report: "报告",
+    compare: "对比",
+    deleteConfirm: "删除该研究会话？其轮次、检查点与报告将一并清除，不可恢复。",
+    deleteAriaLabel: "删除研究会话：{name}",
+    deleteError: "删除失败",
+    mode: {
+      research: "研究",
+      attribution: "归因",
+      compare: "对比"
     },
-    "modeHint": "三者共用同一条研究流水线，仅改变报告的章节组织，不改变分析行为。",
-    "modeDesc": {
-      "research": "执行摘要 → 数据 → 引用知识 → 方法学",
-      "attribution": "结论 → 假设验证表 → 数据 → 备选假设",
-      "compare": "对比维度表 → 数据 → 差异分析"
+    modeHint: "三者共用同一条研究流水线，仅改变报告的章节组织，不改变分析行为。",
+    modeDesc: {
+      research: "执行摘要 → 数据 → 引用知识 → 方法学",
+      attribution: "结论 → 假设验证表 → 数据 → 备选假设",
+      compare: "对比维度表 → 数据 → 差异分析"
     },
-    "history": "历史会话"
+    history: "历史会话"
   },
-  "history": {
-    "title": "历史会话",
-    "back": "返回"
+  history: {
+    title: "历史会话",
+    back: "返回"
   },
-  "session": {
-    "title": "研究会话",
-    "inputPlaceholder": "继续提问…",
-    "send": "发送",
-    "streaming": "研究中…",
-    "error": {
-      "default": "出错了",
-      "checkpoint_conflict": "并发检查点冲突：另一请求已先一步决/过期，请刷新后重试"
+  session: {
+    title: "研究会话",
+    inputPlaceholder: "继续提问…",
+    send: "发送",
+    streaming: "研究中…",
+    error: {
+      default: "出错了",
+      checkpoint_conflict: "并发检查点冲突：另一请求已先一步决/过期，请刷新后重试"
     },
-    "report": "查看报告",
-    "back": "返回列表",
-    "compare": "对比",
-    "complete_with_report": "分析已完成",
-    "view_report": "查看报告",
-    "sessionInfo": "会话信息",
-    "sessionInfoTitle": "会话详情",
-    "question": "原始问题",
-    "mode": "模式",
-    "datasource": "数据源",
-    "createdAt": "创建于",
-    "updatedAt": "更新于",
-    "close": "关闭",
-    "timeline": "时间线",
-    "timelineTitle": "研究时间线",
-    "stepCount": "{n} 步",
-    "history": "历史问答",
-    "historyTitle": "历史问答",
-    "historyEmpty": "还没有历史问答",
-    "current": "当前"
+    report: "查看报告",
+    back: "返回列表",
+    compare: "对比",
+    complete_with_report: "分析已完成",
+    view_report: "查看报告",
+    sessionInfo: "会话信息",
+    sessionInfoTitle: "会话详情",
+    question: "原始问题",
+    mode: "模式",
+    datasource: "数据源",
+    createdAt: "创建于",
+    updatedAt: "更新于",
+    close: "关闭",
+    timeline: "时间线",
+    timelineTitle: "研究时间线",
+    stepCount: "{n} 步",
+    history: "历史问答",
+    historyTitle: "历史问答",
+    historyEmpty: "还没有历史问答",
+    current: "当前"
   },
-  "compare": {
-    "title": "对比分析",
-    "empty": "暂无可对比的报告",
-    "back": "返回",
-    "row": {
-      "title": "标题",
-      "executiveSummary": "执行摘要",
-      "findings": "关键发现",
-      "methodology": "方法学"
+  compare: {
+    title: "对比分析",
+    empty: "暂无可对比的报告",
+    back: "返回",
+    row: {
+      title: "标题",
+      executiveSummary: "执行摘要",
+      findings: "关键发现",
+      methodology: "方法学"
     },
-    "noReport": "未生成报告",
-    "confidence": "置信度"
+    noReport: "未生成报告",
+    confidence: "置信度"
   }
 },
   workflow: {
-  "title": "工作流实例",
-  "approvalsTitle": "我的待办审批",
-  "submitButton": "提交工作流",
-  "refresh": "刷新",
-  "cancelReason": "用户在页面上取消",
-  "status": {
-    "PENDING": "待处理",
-    "RUNNING": "执行中",
-    "WAITING_APPROVAL": "待审批",
-    "APPROVED": "已通过",
-    "REJECTED": "已驳回",
-    "COMPLETED": "已完成",
-    "FAILED": "失败",
-    "CANCELLED": "已取消",
-    "COMPENSATED": "已补偿",
-    "SUCCEEDED": "成功",
-    "SKIPPED": "已跳过",
-    "TIMEOUT": "已超时"
+  title: "工作流实例",
+  approvalsTitle: "我的待办审批",
+  submitButton: "提交工作流",
+  refresh: "刷新",
+  cancelReason: "用户在页面上取消",
+  status: {
+    PENDING: "待处理",
+    RUNNING: "执行中",
+    WAITING_APPROVAL: "待审批",
+    APPROVED: "已通过",
+    REJECTED: "已驳回",
+    COMPLETED: "已完成",
+    FAILED: "失败",
+    CANCELLED: "已取消",
+    COMPENSATED: "已补偿",
+    SUCCEEDED: "成功",
+    SKIPPED: "已跳过",
+    TIMEOUT: "已超时"
   },
-  "columns": {
-    "id": "ID",
-    "instance": "实例",
-    "capability": "能力",
-    "version": "版本",
-    "status": "状态",
-    "createdBy": "提交人",
-    "createdTime": "创建时间",
-    "updatedTime": "更新时间",
-    "actions": "操作",
-    "matrix": "审批矩阵",
-    "subject": "审批对象",
-    "instanceStatus": "实例状态",
-    "approver": "签署人",
-    "dueAt": "应审批时间",
-    "decisionNote": "审批意见"
+  columns: {
+    id: "ID",
+    instance: "实例",
+    capability: "能力",
+    version: "版本",
+    status: "状态",
+    createdBy: "提交人",
+    createdTime: "创建时间",
+    updatedTime: "更新时间",
+    actions: "操作",
+    matrix: "审批矩阵",
+    subject: "审批对象",
+    instanceStatus: "实例状态",
+    approver: "签署人",
+    dueAt: "应审批时间",
+    decisionNote: "审批意见"
   },
-  "actions": {
-    "view": "详情",
-    "cancel": "取消",
-    "cancelConfirm": "确定取消实例 #{id}？已发出到外部系统的副作用不会自动回收。",
-    "approve": "通过",
-    "reject": "驳回"
+  actions: {
+    view: "详情",
+    cancel: "取消",
+    cancelConfirm: "确定取消实例 #{id}？已发出到外部系统的副作用不会自动回收。",
+    approve: "通过",
+    reject: "驳回"
   },
-  "detail": {
-    "title": "实例详情",
-    "idempotencyKey": "幂等键",
-    "errorMessage": "错误信息",
-    "steps": "步骤时间线",
-    "noSteps": "尚无步骤记录",
-    "approvals": "审批记录"
+  detail: {
+    title: "实例详情",
+    idempotencyKey: "幂等键",
+    errorMessage: "错误信息",
+    steps: "步骤时间线",
+    noSteps: "尚无步骤记录",
+    approvals: "审批记录"
   },
-  "submit": {
-    "title": "提交工作流",
-    "definition": "工作流定义",
-    "definitionPlaceholder": "选择已发布的工作流定义",
-    "idempotencyKey": "幂等键",
-    "requestJson": "请求参数（JSON）",
-    "requestJsonInvalid": "不是合法的 JSON"
+  submit: {
+    title: "提交工作流",
+    definition: "工作流定义",
+    definitionPlaceholder: "选择已发布的工作流定义",
+    idempotencyKey: "幂等键",
+    requestJson: "请求参数（JSON）",
+    requestJsonInvalid: "不是合法的 JSON"
   },
-  "decision": {
-    "approveTitle": "通过审批",
-    "rejectTitle": "驳回审批",
-    "noteLabel": "审批意见",
-    "notePlaceholder": "可选，驳回时必填",
-    "rejectNoteRequired": "驳回必须填写意见"
+  decision: {
+    approveTitle: "通过审批",
+    rejectTitle: "驳回审批",
+    noteLabel: "审批意见",
+    notePlaceholder: "可选，驳回时必填",
+    rejectNoteRequired: "驳回必须填写意见"
   },
-  "approvals": {
-    "authRequiredLabel": "无法加载待办"
+  approvals: {
+    authRequiredLabel: "无法加载待办"
   },
-  "filters": {
-    "status": "按状态过滤"
+  filters: {
+    status: "按状态过滤"
   },
-  "messages": {
-    "loadFailed": "加载失败：{detail}",
-    "submitOk": "已提交",
-    "submitFailed": "提交失败：{detail}",
-    "cancelOk": "已取消",
-    "cancelFailed": "取消失败：{detail}",
-    "decisionOk": "审批已提交",
-    "decisionFailed": "审批失败：{detail}",
-    "realAuthRequired": "待办审批要求真实登录身份：桩身份（X-User-Id 请求头）可被任意客户端伪造，不能用于审批。请通过登录页登录后重试。"
+  messages: {
+    loadFailed: "加载失败：{detail}",
+    submitOk: "已提交",
+    submitFailed: "提交失败：{detail}",
+    cancelOk: "已取消",
+    cancelFailed: "取消失败：{detail}",
+    decisionOk: "审批已提交",
+    decisionFailed: "审批失败：{detail}",
+    realAuthRequired: "待办审批要求真实登录身份：桩身份（X-User-Id 请求头）可被任意客户端伪造，不能用于审批。请通过登录页登录后重试。"
   }
 },
   workflowDefinition: {
-  "title": "工作流定义",
-  "hint": "定义（模板）决定实例的步骤与审批层级；只有「已发布」的定义会出现在提交候选集里。",
-  "status": {
-    "DRAFT": "草稿",
-    "PUBLISHED": "已发布",
-    "DISABLED": "已停用"
+  title: "工作流定义",
+  hint: "定义（模板）决定实例的步骤与审批层级；只有「已发布」的定义会出现在提交候选集里。",
+  status: {
+    DRAFT: "草稿",
+    PUBLISHED: "已发布",
+    DISABLED: "已停用"
   },
-  "columns": {
-    "id": "ID",
-    "capability": "能力",
-    "version": "版本",
-    "status": "状态",
-    "createdBy": "创建人",
-    "updatedTime": "更新时间",
-    "actions": "操作"
+  columns: {
+    id: "ID",
+    capability: "能力",
+    version: "版本",
+    status: "状态",
+    createdBy: "创建人",
+    updatedTime: "更新时间",
+    actions: "操作"
   },
-  "actions": {
-    "create": "新建定义",
-    "edit": "编辑",
-    "publish": "发布",
-    "disable": "停用",
-    "disabledHint": "需新建版本",
-    "addStep": "加一步",
-    "removeStep": "删步骤",
-    "addMatrix": "加审批行",
-    "removeMatrix": "删审批行"
+  actions: {
+    create: "新建定义",
+    edit: "编辑",
+    publish: "发布",
+    disable: "停用",
+    disabledHint: "需新建版本",
+    addStep: "加一步",
+    removeStep: "删步骤",
+    addMatrix: "加审批行",
+    removeMatrix: "删审批行"
   },
-  "editor": {
-    "createTitle": "新建工作流定义",
-    "editTitle": "编辑工作流定义",
-    "domainCode": "域代码",
-    "capabilityCode": "能力代码",
-    "version": "版本",
-    "riskLevel": "风险级别",
-    "stepCode": "步骤编码",
-    "commandType": "命令类型",
-    "requiresApproval": "需要审批",
-    "matrixCode": "矩阵编码",
-    "approverRole": "审批角色",
-    "approverUser": "审批用户",
-    "timeoutHours": "超时小时",
-    "matrixScope": "匹配键",
-    "matrixScopeHint": "审批矩阵按「对象类型 / 能力代码 / 风险级别」精确匹配，提交时自动套用上面的能力代码与风险级别。"
+  editor: {
+    createTitle: "新建工作流定义",
+    editTitle: "编辑工作流定义",
+    domainCode: "域代码",
+    capabilityCode: "能力代码",
+    version: "版本",
+    riskLevel: "风险级别",
+    stepCode: "步骤编码",
+    commandType: "命令类型",
+    requiresApproval: "需要审批",
+    matrixCode: "矩阵编码",
+    approverRole: "审批角色",
+    approverUser: "审批用户",
+    timeoutHours: "超时小时",
+    matrixScope: "匹配键",
+    matrixScopeHint: "审批矩阵按「对象类型 / 能力代码 / 风险级别」精确匹配，提交时自动套用上面的能力代码与风险级别。"
   },
-  "filters": {
-    "status": "按状态过滤"
+  filters: {
+    status: "按状态过滤"
   },
-  "validation": {
-    "matrixCodeRequired": "填了审批角色 / 审批用户就必须填矩阵编码"
+  validation: {
+    matrixCodeRequired: "填了审批角色 / 审批用户就必须填矩阵编码"
   },
-  "messages": {
-    "loadFailed": "加载失败：{detail}",
-    "saveOk": "已保存",
-    "saveFailed": "保存失败：{detail}",
-    "publishOk": "已发布",
-    "publishFailed": "发布失败：{detail}",
-    "disableOk": "已停用",
-    "disableFailed": "停用失败：{detail}"
+  messages: {
+    loadFailed: "加载失败：{detail}",
+    saveOk: "已保存",
+    saveFailed: "保存失败：{detail}",
+    publishOk: "已发布",
+    publishFailed: "发布失败：{detail}",
+    disableOk: "已停用",
+    disableFailed: "停用失败：{detail}"
   }
 },
   profile: {
-  "title": "个人中心",
-  "authModeStubNotice": "当前系统使用桩认证（X-User-Id 请求头），未接入真实登录；以下身份由请求头与数据库用户匹配解析。",
-  "fields": {
-    "userId": "用户标识",
-    "displayName": "显示名称",
-    "email": "邮箱",
-    "roles": "角色",
-    "departments": "所属组织",
-    "identitySource": "身份来源"
+  title: "个人中心",
+  authModeStubNotice: "当前系统使用桩认证（X-User-Id 请求头），未接入真实登录；以下身份由请求头与数据库用户匹配解析。",
+  fields: {
+    userId: "用户标识",
+    displayName: "显示名称",
+    email: "邮箱",
+    roles: "角色",
+    departments: "所属组织",
+    identitySource: "身份来源"
   },
-  "identityDb": "数据库用户",
-  "identityStub": "桩回退（未命中数据库用户）"
+  identityDb: "数据库用户",
+  identityStub: "桩回退（未命中数据库用户）"
 },
   procurement: {
-  "rfq": {
-    "title": "询价草稿",
-    "create": "新建询价草稿",
-    "submitCreate": "创建",
-    "loadFailed": "询价草稿加载失败",
-    "actionFailed": "操作失败",
-    "createSuccess": "草稿已创建",
-    "openDetail": "详情",
-    "col": {
-      "requestId": "请购单号",
-      "status": "状态",
-      "deadline": "报价截止",
-      "createdBy": "创建人"
+  rfq: {
+    title: "询价草稿",
+    create: "新建询价草稿",
+    submitCreate: "创建",
+    loadFailed: "询价草稿加载失败",
+    actionFailed: "操作失败",
+    createSuccess: "草稿已创建",
+    openDetail: "详情",
+    col: {
+      requestId: "请购单号",
+      status: "状态",
+      deadline: "报价截止",
+      createdBy: "创建人"
     },
-    "detail": {
-      "status": "状态",
-      "version": "版本",
-      "suppliers": "邀请供应商",
-      "deadline": "报价截止",
-      "notes": "备注"
+    detail: {
+      status: "状态",
+      version: "版本",
+      suppliers: "邀请供应商",
+      deadline: "报价截止",
+      notes: "备注"
     },
-    "form": {
-      "requestId": "请购单号",
-      "deadline": "报价截止时间",
-      "supplierKeys": "供应商统一键（逗号分隔）",
-      "materialKey": "物料键",
-      "quantity": "数量",
-      "unit": "单位",
-      "deliveryDate": "交期（YYYY-MM-DD）",
-      "notes": "备注"
+    form: {
+      requestId: "请购单号",
+      deadline: "报价截止时间",
+      supplierKeys: "供应商统一键（逗号分隔）",
+      materialKey: "物料键",
+      quantity: "数量",
+      unit: "单位",
+      deliveryDate: "交期（YYYY-MM-DD）",
+      notes: "备注"
     },
-    "action": {
-      "validate": "校验",
-      "cancel": "取消草稿",
-      "submit": "提交审批",
-      "approve": "通过",
-      "reject": "驳回"
+    action: {
+      validate: "校验",
+      cancel: "取消草稿",
+      submit: "提交审批",
+      approve: "通过",
+      reject: "驳回"
     },
-    "done": {
-      "validate": "校验完成",
-      "cancel": "草稿已取消",
-      "submit": "已提交审批",
-      "approve": "已通过",
-      "reject": "已驳回"
+    done: {
+      validate: "校验完成",
+      cancel: "草稿已取消",
+      submit: "已提交审批",
+      approve: "已通过",
+      reject: "已驳回"
     },
-    "confirm": {
-      "validate": "执行校验？（不通过将转待更正）",
-      "cancel": "确认取消该草稿？",
-      "submit": "确认提交审批？（提交后进入审批人待办）",
-      "approve": "确认通过？",
-      "reject": "确认驳回？"
+    confirm: {
+      validate: "执行校验？（不通过将转待更正）",
+      cancel: "确认取消该草稿？",
+      submit: "确认提交审批？（提交后进入审批人待办）",
+      approve: "确认通过？",
+      reject: "确认驳回？"
     },
-    "decisionsTitle": "决策链",
-    "decision": {
-      "decision": "动作",
-      "actor": "操作人",
-      "time": "时间",
-      "note": "意见"
+    decisionsTitle: "决策链",
+    decision: {
+      decision: "动作",
+      actor: "操作人",
+      time: "时间",
+      note: "意见"
     }
   },
-  "bindings": {
-    "title": "采购源绑定（管理台）",
-    "openDetail": "详情",
-    "loadFailed": "绑定加载失败",
-    "actionFailed": "操作失败",
-    "col": {
-      "className": "本体类",
-      "table": "源表",
-      "role": "角色",
-      "state": "状态",
-      "properties": "属性绑定数"
+  bindings: {
+    title: "采购源绑定（管理台）",
+    openDetail: "详情",
+    loadFailed: "绑定加载失败",
+    actionFailed: "操作失败",
+    col: {
+      className: "本体类",
+      table: "源表",
+      role: "角色",
+      state: "状态",
+      properties: "属性绑定数"
     },
-    "state": {
-      "candidate": "候选",
-      "confirmed": "已确认",
-      "expired": "已失效"
+    state: {
+      candidate: "候选",
+      confirmed: "已确认",
+      expired: "已失效"
     },
-    "prop": {
-      "property": "本体属性",
-      "column": "源列",
-      "keyOrdinal": "业务键序号",
-      "state": "状态"
+    prop: {
+      property: "本体属性",
+      column: "源列",
+      keyOrdinal: "业务键序号",
+      state: "状态"
     },
-    "action": {
-      "confirm": "确认绑定",
-      "confirmProp": "确认",
-      "expire": "失效"
+    action: {
+      confirm: "确认绑定",
+      confirmProp: "确认",
+      expire: "失效"
     },
-    "done": {
-      "confirm": "绑定已确认（版本冻结点：属性集合已冻结，改绑须先失效再建新版本）",
-      "confirmProp": "属性绑定已确认",
-      "expire": "绑定已失效"
+    done: {
+      confirm: "绑定已确认（版本冻结点：属性集合已冻结，改绑须先失效再建新版本）",
+      confirmProp: "属性绑定已确认",
+      expire: "绑定已失效"
     },
-    "warn": {
-      "confirmPropsFirst": "尚有未确认的属性绑定——源绑定确认前必须全部确认"
+    warn: {
+      confirmPropsFirst: "尚有未确认的属性绑定——源绑定确认前必须全部确认"
     },
-    "confirm": {
-      "title": "确认该源绑定？",
-      "description": "确认 = 版本冻结点：属性集合冻结，后续改绑须先失效再建新版本（历史保留）。",
-      "propTitle": "确认该属性绑定？",
-      "expireTitle": "失效该绑定？（生效视图立即排除该行；历史保留）"
+    confirm: {
+      title: "确认该源绑定？",
+      description: "确认 = 版本冻结点：属性集合冻结，后续改绑须先失效再建新版本（历史保留）。",
+      propTitle: "确认该属性绑定？",
+      expireTitle: "失效该绑定？（生效视图立即排除该行；历史保留）"
     },
-    "wizard": {
-      "open": "新建绑定",
-      "title": "绑定向导",
-      "cancel": "取消",
-      "next": "下一步：属性映射",
-      "createBinding": "创建绑定（候选态）",
-      "toConfirm": "去确认",
-      "step1": "类与源",
-      "step2": "属性映射",
-      "step3": "完成",
-      "class": "本体类",
-      "datasource": "数据源",
-      "schema": "Schema",
-      "table": "源表",
-      "role": "绑定角色",
-      "filter": "过滤表达式（可选，白名单校验）",
-      "filterPlaceholder": "如 STATUS = 'ACTIVE'",
-      "mappingHint": "为本体属性填物理列（留空 = 该属性暂不绑定，登记为已知限制）；业务键列勾选 keyOrdinal 由确认后批量维护。",
-      "created": "绑定已创建（候选态）",
-      "createdHint": "候选绑定不被读路径消费——请在详情里确认属性映射后执行「确认绑定」（版本冻结点）。"
+    wizard: {
+      open: "新建绑定",
+      title: "绑定向导",
+      cancel: "取消",
+      next: "下一步：属性映射",
+      createBinding: "创建绑定（候选态）",
+      toConfirm: "去确认",
+      step1: "类与源",
+      step2: "属性映射",
+      step3: "完成",
+      class: "本体类",
+      datasource: "数据源",
+      schema: "Schema",
+      table: "源表",
+      role: "绑定角色",
+      filter: "过滤表达式（可选，白名单校验）",
+      filterPlaceholder: "如 STATUS = 'ACTIVE'",
+      mappingHint: "为本体属性填物理列（留空 = 该属性暂不绑定，登记为已知限制）；业务键列勾选 keyOrdinal 由确认后批量维护。",
+      created: "绑定已创建（候选态）",
+      createdHint: "候选绑定不被读路径消费——请在详情里确认属性映射后执行「确认绑定」（版本冻结点）。"
     }
   },
-  "knowledge": {
-    "title": "采购知识检索",
-    "queryFailed": "检索失败",
-    "noEvidence": "未命中证据（换个问法或检查数据源）",
-    "queryPlaceholder": "例如：找出可供应不锈钢板、近 12 个月交付表现较好的供应商",
-    "search": "检索",
-    "tab": {
-      "query": "统一查询",
-      "entities": "实体解析",
-      "graph": "受控邻接",
-      "documents": "文档检索"
+  knowledge: {
+    title: "采购知识检索",
+    queryFailed: "检索失败",
+    noEvidence: "未命中证据（换个问法或检查数据源）",
+    queryPlaceholder: "例如：找出可供应不锈钢板、近 12 个月交付表现较好的供应商",
+    search: "检索",
+    tab: {
+      query: "统一查询",
+      entities: "实体解析",
+      graph: "受控邻接",
+      documents: "文档检索"
     },
-    "entity": {
-      "code": "统一编码",
-      "name": "名称",
-      "score": "命中强度",
-      "sources": "源系统",
-      "placeholder": "编码 / 名称关键词"
+    entity: {
+      code: "统一编码",
+      name: "名称",
+      score: "命中强度",
+      sources: "源系统",
+      placeholder: "编码 / 名称关键词"
     },
-    "graph": {
-      "keyPlaceholder": "实体键（enterprise_key）",
-      "truncated": "结果已截断（超过边数上限）"
+    graph: {
+      keyPlaceholder: "实体键（enterprise_key）",
+      truncated: "结果已截断（超过边数上限）"
     },
-    "doc": {
-      "placeholder": "制度/合同问题关键词"
+    doc: {
+      placeholder: "制度/合同问题关键词"
     },
-    "noDocuments": "未命中文档（检查密级权限或关键词）"
+    noDocuments: "未命中文档（检查密级权限或关键词）"
   },
-  "catalog": {
-    "title": "采购 Agent 场景目录",
-    "runnable": "可运行",
-    "notRunnable": "未启用",
-    "loadFailed": "场景目录加载失败",
-    "empty": "目录为空（场景 Agent 未注册）"
+  catalog: {
+    title: "采购 Agent 场景目录",
+    runnable: "可运行",
+    notRunnable: "未启用",
+    loadFailed: "场景目录加载失败",
+    empty: "目录为空（场景 Agent 未注册）"
   }
 },
 } as const;

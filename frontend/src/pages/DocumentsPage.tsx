@@ -25,7 +25,9 @@ import {
   Descriptions,
   List,
   Alert,
+  DatePicker,
 } from "antd";
+import dayjs, { type Dayjs } from "dayjs";
 import {
   PlusOutlined,
   ReloadOutlined,
@@ -61,6 +63,7 @@ import { useTranslation } from "../i18n";
 import FilterBar from "../components/ontology/FilterBar";
 import type { FilterField } from "../components/ontology/FilterBar";
 import { contains, matchSelect } from "../utils/ontologyFilter";
+import { toIsoDateParam } from "../utils/dateParam";
 import type { FilterValues } from "../utils/ontologyFilter";
 import type { EntityType } from "../types/entityMapping";
 import { DocumentQaPanel } from "../components/documents/DocumentQaPanel";
@@ -88,7 +91,8 @@ interface DocFormValues {
   documentType: string;
   version: string;
   owner: string;
-  effectiveDate: string;
+  /** DatePicker 选中值是 Dayjs；服务端回填值是 ISO 字符串 */
+  effectiveDate: Dayjs | string | undefined;
   securityLevel: string;
 }
 
@@ -98,7 +102,7 @@ const EMPTY_DOC_FORM: DocFormValues = {
   documentType: "CONTRACT",
   version: "v1.0",
   owner: "",
-  effectiveDate: "",
+  effectiveDate: undefined,
   securityLevel: "L1",
 };
 
@@ -422,7 +426,7 @@ export default function DocumentsPage() {
       documentType: record.documentType,
       version: record.version,
       owner: record.owner ?? "",
-      effectiveDate: record.effectiveDate ?? "",
+      effectiveDate: record.effectiveDate ? dayjs(record.effectiveDate) : undefined,
       securityLevel: record.securityLevel,
     });
     setDocModal(true);
@@ -447,7 +451,8 @@ export default function DocumentsPage() {
           documentType: values.documentType as DocumentRead["documentType"],
           version: values.version,
           owner: values.owner || undefined,
-          effectiveDate: values.effectiveDate || undefined,
+          // DatePicker 给 Dayjs ⇒ 后端 date 只收 YYYY-MM-DD（2026-11-21 实测 422 根因）
+          effectiveDate: toIsoDateParam(values.effectiveDate),
           securityLevel: values.securityLevel,
         };
         await updateDocument(editingDoc.id, payload);
@@ -459,7 +464,7 @@ export default function DocumentsPage() {
           documentType: values.documentType as DocumentRead["documentType"],
           version: values.version,
           owner: values.owner || undefined,
-          effectiveDate: values.effectiveDate || undefined,
+          effectiveDate: toIsoDateParam(values.effectiveDate),
           securityLevel: (values.securityLevel as DocumentRead["securityLevel"]) as DocumentRead["securityLevel"],
         };
         await createDocument(payload);
@@ -681,7 +686,7 @@ export default function DocumentsPage() {
               label="生效日期"
               style={{ width: "50%" }}
             >
-              <Input placeholder="YYYY-MM-DD" />
+              <DatePicker style={{ width: "100%" }} format="YYYY-MM-DD" />
             </Form.Item>
           </Space.Compact>
         </Form>

@@ -95,3 +95,12 @@ orchestration acceptance / config-api / seed_agents / copilot API / 工具与白
 - `test_seed_menu_config` 的计数与路径清单一度停在 53 行 / 45 项（实际已 64 项）⇒
   改为**从 `SECTIONS`/`ITEMS` 推导**并补齐 11 个早就在 seed 里却没登记的路径。
 
+### 7.5 反馈修复：supplier_search 支持**物料名**（2026-11-21）
+- 实测反馈：用户问「FE-5顶丝M8×1×15有哪些供应商」⇒ 工具按 SUPPLIER 检索 0 命中
+  ⇒ 把缺口甩回用户（要物料编码），而该物料名可解析到编码 `504014710001`、
+  图里有 4 家在册供应商。
+- 修法：`q` 按供应商检索为空时，把关键词当**物料名**解析（MATERIAL）+ 走
+  `SUPPLIES` 反查；`via=material_name`，并在数据里带 `materials[]`。
+- 三种结论**互不混淆**：有供应商 / 物料在但无在册供应商 / 物料也搜不到。
+- 测试：3 例（含用户原始问法）；后端+worker 重建后真机复现该问题已通。
+

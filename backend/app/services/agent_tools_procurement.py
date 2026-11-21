@@ -92,9 +92,52 @@ async def supplierSearchHandler(
         )
         suppliers = [_camelRow(r) for r in rows]
         if not suppliers:
+            # 名称问法兜底：用户问的是「哪个供应商能供 <物料名>」时，关键词是**物料名**，
+            # 按 SUPPLIER 检索必然 0 命中。旧行为把缺口甩回给用户（"请提供物料编码"），
+            # 2026-11-21 实测「FE-5顶丝M8×1×15」即为此类：物料名可解析到编码，
+            # 图里也有 4 家在册供应商 ⇒ 名称→编码→供应关系是工具该自己走的一步。
+            resolved, materialMatches = await _suppliersByMaterialName(
+                session, q, limit
+            )
+            if resolved:
+                head = "、".join(
+                    f"{s['code']}（{s['name'] or s['code']}）" for s in resolved[:3]
+                )
+                materialText = "、".join(
+                    f"{m['code']}（{m['name']}）" for m in materialMatches[:3]
+                )
+                return ToolResult(
+                    data={
+                        "suppliers": resolved,
+                        "via": "material_name",
+                        "total": len(resolved),
+                        "materials": materialMatches,
+                    },
+                    answer=(
+                        f"关键词「{q}」解析到物料 {materialText}；"
+                        f"这些物料在供应关系图中的在册供应商 {len(resolved)} 家：{head}"
+                        + ("…" if len(resolved) > 3 else "")
+                    ),
+                )
+            if materialMatches:
+                materialText = "、".join(
+                    f"{m['code']}（{m['name']}）" for m in materialMatches[:3]
+                )
+                return ToolResult(
+                    data={
+                        "suppliers": [],
+                        "via": "material_name",
+                        "materials": materialMatches,
+                    },
+                    answer=(
+                        f"关键词「{q}」解析到物料 {materialText}，"
+                        "但供应关系图里没有登记这些物料的供应商（可换用物料编码再查，"
+                        "或该物料确实尚无合格供应商）。"
+                    ),
+                )
             return ToolResult(
                 data={"suppliers": [], "via": "entity_mapping"},
-                answer=f"未命中关键词「{q}」的供应商。",
+                answer=f"未命中关键词「{q}」的供应商或物料。",
             )
         head = "、".join(
             f"{s['enterpriseCode']}（{s['name'] or s['enterpriseCode']}）"
@@ -109,6 +152,45 @@ async def supplierSearchHandler(
         data={"suppliers": [], "via": "none"},
         answer="请提供 materialKey（按供应关系查）或 q（按名称/编码查）。",
     )
+
+
+#: 物料名解析上限：一个名称关键词可能命中多个规格/料号。
+_MATERIAL_NAME_RESOLVE_LIMIT = 5
+
+
+async def _suppliersByMaterialName(
+    session: AsyncSession, q: str, limit: int
+) -> tuple[list[dict], list[dict]]:
+    """物料名关键词 → 物料编码 → 供应关系图反查。
+
+    返回 ``(去重后的供应商, 命中的物料摘要)``。物料摘要即使无供应商也返回
+    ——「物料存在但没有在册供应商」和「物料都搜不到」是两种不同的结论。
+    """
+    rows = await EntityMappingService().searchMappings(
+        session, q=q, entityType="MATERIAL", limit=_MATERIAL_NAME_RESOLVE_LIMIT
+    )
+    materials: list[dict] = []
+    suppliersByKey: dict[str, dict] = {}
+    for row in rows:
+        key = str(
+            getattr(row, "source_key", None)
+            or getattr(row, "enterprise_code", None)
+            or getattr(row, "enterprise_key", "")
+        )
+        if not key:
+            continue
+        found = await findSuppliersOfMaterial(key, limit)
+        materials.append(
+            {
+                "key": key,
+                "code": getattr(row, "enterprise_code", None) or key,
+                "name": getattr(row, "name", None) or "",
+                "supplierCount": len(found),
+            }
+        )
+        for supplier in found:
+            suppliersByKey.setdefault(str(supplier.get("key")), supplier)
+    return list(suppliersByKey.values()), materials
 
 
 async def findSuppliersOfMaterial(materialKey: str, limit: int = 20) -> list[dict]:

@@ -357,3 +357,101 @@ async def test_document_tool_resolves_user_from_actor(monkeypatch) -> None:
 
     assert captured["resolvedFor"] == "admin"
     assert captured["user"] is not None
+
+
+# ── 名称问法兜底：物料名 → 物料编码 → 供应关系图 ───────────────────────────
+
+
+def test_describe_material_name_fallback_registered() -> None:
+    """``_suppliersByMaterialName`` 是 supplier_search 的名称兜底入口。"""
+    from app.services import agent_tools_procurement as mod
+
+    assert hasattr(mod, "_suppliersByMaterialName")
+
+
+@pytest.mark.asyncio
+async def test_supplier_search_falls_back_to_material_name(monkeypatch) -> None:
+    """按 SUPPLIER 检索 0 命中时，把关键词当**物料名**解析再走图。
+
+    2026-11-21 实测：「FE-5顶丝M8×1×15」这类问法的关键词是物料名，
+    旧行为直接甩「请提供物料编码」给用户，而物料名本可解析到编码。
+    """
+    from types import SimpleNamespace
+
+    from app.services import agent_tools_procurement as mod
+
+    searchedTypes: list[str | None] = []
+
+    class _Service:
+        async def searchMappings(self, session, *, q, entityType=None, limit=20):
+            searchedTypes.append(entityType)
+            if entityType == "MATERIAL":
+                return [
+                    SimpleNamespace(
+                        source_key="504014710001",
+                        enterprise_code="504014710001",
+                        enterprise_key=302928064950908,
+                        name="FE-5顶丝M8×1×15 T00147100",
+                    )
+                ]
+            return []  # 按供应商检索：0 命中
+
+    async def _fakeSuppliers(materialKey: str, limit: int = 20):
+        assert materialKey == "504014710001"
+        return [
+            {"key": "Q189", "code": "Q189", "name": "威德车业部件有限公司"},
+            {"key": "C200", "code": "C200", "name": "宁波伯豪汽配有限公司"},
+        ]
+
+    monkeypatch.setattr(mod, "EntityMappingService", lambda: _Service())
+    monkeypatch.setattr(mod, "findSuppliersOfMaterial", _fakeSuppliers)
+
+    result = await mod.supplierSearchHandler(None, {"q": "FE-5顶丝M8×1×15"}, SimpleNamespace())
+
+    assert searchedTypes == ["SUPPLIER", "MATERIAL"]
+    assert result.data["via"] == "material_name"
+    assert [s["key"] for s in result.data["suppliers"]] == ["Q189", "C200"]
+    assert result.data["materials"][0]["code"] == "504014710001"
+    assert "504014710001" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_supplier_search_material_without_suppliers_is_distinct_from_not_found(
+    monkeypatch,
+) -> None:
+    """「物料存在但无在册供应商」必须与「连物料都没搜到」给出不同结论。"""
+    from types import SimpleNamespace
+
+    from app.services import agent_tools_procurement as mod
+
+    class _Service:
+        async def searchMappings(self, session, *, q, entityType=None, limit=20):
+            if entityType == "MATERIAL":
+                return [
+                    SimpleNamespace(
+                        source_key="AJX0000001",
+                        enterprise_code="AJX0000001",
+                        enterprise_key=1,
+                        name="某物料",
+                    )
+                ]
+            return []
+
+    async def _noSuppliers(materialKey: str, limit: int = 20):
+        return []
+
+    monkeypatch.setattr(mod, "EntityMappingService", lambda: _Service())
+    monkeypatch.setattr(mod, "findSuppliersOfMaterial", _noSuppliers)
+
+    found = await mod.supplierSearchHandler(None, {"q": "某物料"}, SimpleNamespace())
+    assert found.data["materials"] and found.data["suppliers"] == []
+    assert "没有登记" in found.answer
+
+    class _EmptyService:
+        async def searchMappings(self, session, *, q, entityType=None, limit=20):
+            return []
+
+    monkeypatch.setattr(mod, "EntityMappingService", lambda: _EmptyService())
+    missing = await mod.supplierSearchHandler(None, {"q": "不存在"}, SimpleNamespace())
+    assert "未命中" in missing.answer
+    assert missing.data["via"] == "entity_mapping"

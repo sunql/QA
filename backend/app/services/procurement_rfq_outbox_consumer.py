@@ -14,12 +14,11 @@ P5 `workflow_outbox` 此前**无消费者**（Worker 只轮询 `business_command
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.workflow_models import WorkflowOutbox
+from app.services.workflow_store import WorkflowStore
 
 logger = logging.getLogger(__name__)
 
@@ -31,49 +30,27 @@ async def pollRfqOutboxOnce(
     session: AsyncSession, *, workerId: str, batchSize: int = _BATCH_SIZE
 ) -> int:
     """领取并处理 `rfq.%` outbox 事件，返回**本轮处理条数**（幂等：已处理跳过）。"""
-    now = datetime.now(UTC)
-    rows = (
-        await session.execute(
-            text(
-                "SELECT id FROM workflow_outbox "
-                "WHERE event_type LIKE 'rfq.%' AND status IN ('PENDING','FAILED') "
-                "AND processed_at IS NULL "
-                "AND (lease_expires_at IS NULL OR lease_expires_at < :now) "
-                "ORDER BY id LIMIT :limit "
-                "FOR UPDATE SKIP LOCKED"
-            ),
-            {"now": now, "limit": batchSize},
-        )
-    ).scalars().all()
-    if not rows:
+    store = WorkflowStore()
+    events = await store.claimOutboxEvents(
+        session, eventTypePrefix="rfq.", limit=batchSize
+    )
+    if not events:
         return 0
     processed = 0
-    for eventId in rows:
+    for event in events:
         try:
-            event = await session.get(WorkflowOutbox, eventId)
-            if event is None or event.processed_at is not None:
+            if event.processed_at is not None:
                 continue  # 已被并发 worker 处理 ⇒ 幂等跳过
             await _dispatch(event)
-            event.status = "PROCESSED"
-            event.processed_at = _now()
-            await session.flush()
+            await store.markOutboxEventProcessed(session, event)
             processed += 1
         except Exception as exc:
-            event = await session.get(WorkflowOutbox, eventId)
-            if event is not None:
-                event.attempts = (event.attempts or 0) + 1
-                event.last_error = str(exc)[:500]
-                event.status = "FAILED"
-                await session.flush()
+            await store.markOutboxEventFailed(session, event, str(exc))
             logger.warning(
-                "outbox 事件 %s 处理失败（attempts 递增，下轮重试）", eventId
+                "outbox 事件 %s 处理失败（attempts 递增，下轮重试）", event.id
             )
     await session.commit()
     return processed
-
-
-def _now() -> datetime:
-    return datetime.now(UTC)
 
 
 async def _dispatch(event: WorkflowOutbox) -> None:

@@ -147,7 +147,8 @@ async def submitRfqApproval(
     """提交审批（DoD 2 前置：必须已 validate；自批禁止在决策层）。"""
     response.headers["Cache-Control"] = "no-store"
     draft = await ProcurementRfqService().submitForApproval(
-        session, rfqDraftId, actor=currentUser.userId
+        session, rfqDraftId, actor=currentUser.userId,
+        roles=currentUser.roles,
     )
     decisions = await ProcurementRfqService().listDecisions(session, draft.rfq_draft_id)
     return _toRead(draft, decisions)
@@ -166,6 +167,7 @@ async def approveRfqDraft(
         session, rfqDraftId, decision="APPROVE",
         actor=currentUser.userId,
         note=body.note if body else None,
+        roles=currentUser.roles,
     )
     decisions = await ProcurementRfqService().listDecisions(session, draft.rfq_draft_id)
     return _toRead(draft, decisions)
@@ -184,6 +186,7 @@ async def rejectRfqDraft(
         session, rfqDraftId, decision="REJECT",
         actor=currentUser.userId,
         note=body.note if body else None,
+        roles=currentUser.roles,
     )
     decisions = await ProcurementRfqService().listDecisions(session, draft.rfq_draft_id)
     return _toRead(draft, decisions)
@@ -201,6 +204,7 @@ async def cancelRfqDraft(
     draft = await ProcurementRfqService().cancelDraft(
         session, rfqDraftId, actor=currentUser.userId,
         expectedVersion=body.expectedVersion if body else None,
+        roles=currentUser.roles,
     )
     decisions = await ProcurementRfqService().listDecisions(session, draft.rfq_draft_id)
     return _toRead(draft, decisions)

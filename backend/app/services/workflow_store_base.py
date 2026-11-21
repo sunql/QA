@@ -26,7 +26,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ConflictError
@@ -120,6 +120,64 @@ class WorkflowStoreBase:
         session.add(row)
         return row
 
+
+    async def claimOutboxEvents(
+        self,
+        session: AsyncSession,
+        *,
+        eventTypePrefix: str,
+        limit: int = 20,
+        now: datetime | None = None,
+    ) -> list[WorkflowOutbox]:
+        """领取待消费的 outbox 事件（**FOR UPDATE SKIP LOCKED** + lease）。
+
+        P5 自有 outbox 此前**只有写、没有消费者**（M5-4 补）：多 worker 轮询
+        同一批事件会重复处理 ⇒ 领取必须加锁 + lease（lease_owner /
+        lease_expires_at 列 0150 已建好）。
+
+        返回**未处理**（``processed_at IS NULL``）且 lease 已过期/未占的事件。
+        """
+        moment = now or datetime.now(UTC)
+        rows = (
+            await session.execute(
+                select(WorkflowOutbox)
+                .where(
+                    WorkflowOutbox.event_type.like(f"{eventTypePrefix}%"),
+                    WorkflowOutbox.status.in_(["PENDING", "FAILED"]),
+                    WorkflowOutbox.processed_at.is_(None),
+                    or_(
+                        WorkflowOutbox.lease_expires_at.is_(None),
+                        WorkflowOutbox.lease_expires_at < moment,
+                    ),
+                )
+                .order_by(WorkflowOutbox.id)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        ).scalars().all()
+        return list(rows)
+
+    async def markOutboxEventProcessed(
+        self,
+        session: AsyncSession,
+        event: WorkflowOutbox,
+    ) -> None:
+        """标记事件已处理（幂等锚点：``processed_at`` 非空 ⇒ 不得重复处理）。"""
+        event.status = "PROCESSED"
+        event.processed_at = datetime.now(UTC)
+        await session.flush()
+
+    async def markOutboxEventFailed(
+        self,
+        session: AsyncSession,
+        event: WorkflowOutbox,
+        error: str,
+    ) -> None:
+        """标记事件处理失败（attempts 递增 + 留痕；不阻塞其余事件）。"""
+        event.attempts = (event.attempts or 0) + 1
+        event.last_error = (error or "")[:500]
+        event.status = "FAILED"
+        await session.flush()
 
     @staticmethod
     async def _writeStatus(

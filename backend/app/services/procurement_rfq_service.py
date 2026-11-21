@@ -22,10 +22,10 @@ from app.domain.procurement_rfq_models import (
     ProcurementRfqDecision,
     ProcurementRfqDraft,
 )
-from app.domain.workflow_models import WorkflowOutbox
 from app.services.procurement_rfq_state_machine import (
     assertRfqTransition,
 )
+from app.services.workflow_store import WorkflowStore
 
 
 def computePayloadHash(payload: dict) -> str:
@@ -54,20 +54,19 @@ def _assertApproverRoles(roles: Sequence[str] | None) -> None:
         )
 
 
-def _appendRfqOutbox(
+async def _appendRfqOutbox(
     session: AsyncSession, *, rfqDraftId, decision: str, actor: str
 ) -> None:
-    """决策事件写 P5 outbox（同事务；instance_id=None——RFQ 聚合外置）。"""
-    session.add(
-        WorkflowOutbox(
-            instance_id=None,
-            event_type="rfq.decision",
-            payload={
-                "rfqDraftId": str(rfqDraftId),
-                "decision": decision,
-                "actor": actor,
-            },
-        )
+    """决策事件写 P5 outbox（**经存储层**，同事务；instance_id=None——RFQ 聚合外置）。"""
+    await WorkflowStore().enqueueEvent(
+        session,
+        instanceId=None,
+        eventType="rfq.decision",
+        payload={
+            "rfqDraftId": str(rfqDraftId),
+            "decision": decision,
+            "actor": actor,
+        },
     )
 
 
@@ -203,7 +202,7 @@ class ProcurementRfqService:
         assertRfqTransition(draft.status, "CANCELLED")
         draft.version += 1
         draft.status = "CANCELLED"
-        _appendRfqOutbox(
+        await _appendRfqOutbox(
             session, rfqDraftId=draft.rfq_draft_id, decision="CANCEL", actor=actor
         )
         await session.flush()
@@ -238,7 +237,7 @@ class ProcurementRfqService:
                 actor=actor, decided_time=_now(),
             )
         )
-        _appendRfqOutbox(
+        await _appendRfqOutbox(
             session, rfqDraftId=draft.rfq_draft_id, decision="SUBMIT", actor=actor
         )
         await session.flush()
@@ -280,7 +279,7 @@ class ProcurementRfqService:
                 actor=actor, note=note, decided_time=_now(),
             )
         )
-        _appendRfqOutbox(
+        await _appendRfqOutbox(
             session, rfqDraftId=draft.rfq_draft_id, decision=decision, actor=actor
         )
         await session.flush()

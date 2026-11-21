@@ -324,6 +324,8 @@ class BusinessCommand(Base, TimestampMixin):
         comment=_COMMAND_STEP_COMMENT,
     )
     command_type: Mapped[str] = mapped_column(String(64), nullable=False, comment=_COMMAND_TYPE_COMMENT)
+    # M5-1：幂等语义 payload hash（同 key 异 payload ⇒ 409）
+    payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(
         String(128), nullable=False, comment=_COMMAND_IDEMPOTENCY_COMMENT
     )

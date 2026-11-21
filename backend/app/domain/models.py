@@ -2891,3 +2891,6 @@ from app.domain import procurement_binding_models as _procurement_binding_models
 # **Schema drift 校验与 alembic autogenerate 都靠 Base.metadata 看见这些表**，
 # 漏 import ⇒ 被误报成 `extra_table`（drift）或被 autogenerate 提议 DROP。
 from app.domain import semantic_release_check_models as _semantic_release_check_models  # noqa: E402,F401
+
+# M5-1：询价草稿 ORM（0160）——导入让 alembic autogenerate 可见
+from app.domain.procurement_rfq_models import ProcurementRfqDecision, ProcurementRfqDraft  # noqa: F401,E402

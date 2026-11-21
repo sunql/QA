@@ -28,11 +28,13 @@ class ProcurementRfqDraft(Base, TimestampMixin):
             "'READY_TO_SEND','REJECTED','CANCELLED','SENDING','SENT','CLOSED')",
             name="ck_rfq_draft_status",
         ),
+        sa.Index("uq_rfq_draft_id", "rfq_draft_id", unique=True),
+        sa.Index("ix_rfq_draft_request", "request_id"),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     rfq_draft_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), nullable=False, unique=True
+        PG_UUID(as_uuid=True), nullable=False
     )
     version: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(sa.String(24), nullable=False, default="DRAFT")
@@ -56,11 +58,18 @@ class ProcurementRfqDecision(Base, TimestampMixin):
             "decision IN ('SUBMIT','APPROVE','REJECT','CANCEL')",
             name="ck_rfq_decision_kind",
         ),
+        sa.Index("ix_rfq_decision_draft", "rfq_draft_id"),
+        sa.ForeignKeyConstraint(
+            ["rfq_draft_id"],
+            ["procurement_rfq_draft.rfq_draft_id"],
+            ondelete="CASCADE",
+            name="procurement_rfq_decision_rfq_draft_id_fkey",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     rfq_draft_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), nullable=False, index=True
+        PG_UUID(as_uuid=True), nullable=False
     )
     decision: Mapped[str] = mapped_column(sa.String(24), nullable=False)
     actor: Mapped[str] = mapped_column(sa.String(64), nullable=False)

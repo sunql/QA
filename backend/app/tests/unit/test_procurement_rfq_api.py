@@ -26,8 +26,11 @@ from app.services.entity_mapping_service import EntityMappingService
 from app.services.procurement_rfq_service import ProcurementRfqService
 
 
-def _user(userId: str = "creator-1") -> SimpleNamespace:
-    return SimpleNamespace(userId=userId, departments=(), roles=("procurement",))
+def _user(
+    userId: str = "creator-1",
+    roles: tuple[str, ...] = ("procurement",),
+) -> SimpleNamespace:
+    return SimpleNamespace(userId=userId, departments=(), roles=roles)
 
 
 def _body(suppliers: list[int] | None = None) -> RfqDraftCreate:
@@ -100,7 +103,7 @@ async def test_full_flow_via_api_to_ready_to_send(dbSession) -> None:
 
     await _seedSupplier(dbSession)
     svc = ProcurementRfqService()
-    creator, approver = _user("creator-1"), _user("approver-1")
+    creator, approver = _user("creator-1"), _user("approver-1", ("procurement", "procurement-approver"))
     draftId = str(uuid4())  # 占位（真实 id 由 create 返回）
 
     resp = SimpleNamespace(headers={})
@@ -142,7 +145,7 @@ async def test_self_approval_conflict_via_api(dbSession) -> None:
 
     await _seedSupplier(dbSession)
     svc = ProcurementRfqService()
-    creator = _user("creator-1")
+    creator = _user("creator-1", ("procurement", "procurement-approver"))
     resp = SimpleNamespace(headers={})
     created = await createRfqDraft(
         resp, _body(), idempotencyKey="api-self-1",

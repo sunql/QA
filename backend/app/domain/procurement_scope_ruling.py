@@ -116,6 +116,25 @@ APPROVED_TABLES: tuple[TableRuling, ...] = (
         replacement="0154",
         reason="属性级绑定独立建模；source_column 单字符串表达不了多源/表达式/单位",
     ),
+    TableRuling(
+        tableName="procurement_rfq_draft",
+        replacement="0160",
+        reason=(
+            "询价草稿（M5-1，设计稿 §6.4 的 RFQ 半边）：草稿与业务流状态机分离——"
+            "草稿是**候选对象**（DRAFT/VALIDATING/PENDING_APPROVAL…），审批通过也只到 "
+            "READY_TO_SEND（D-4 DRAFT-only，不触发外部发送）⇒ 不与 workflow_instance "
+            "重复语义（后者是通用流程实例，承载不了 RFQ 的 payload/幂等/行项）"
+        ),
+    ),
+    TableRuling(
+        tableName="procurement_rfq_decision",
+        replacement="0160",
+        reason=(
+            "询价决策留痕（M5-2，DoD 4：谁/何时/批驳/意见，不覆盖历史）："
+            "approval_task 是 P5 通用审批矩阵（需已发布 definition + matrix），"
+            "RFQ 首期没有矩阵化审批 ⇒ 决策事实自带留痕表，避免第二套审批语义"
+        ),
+    ),
 )
 
 # 延后（D3：M6 决策）。**M6 前不许建**；若 M6 裁决要建，先改本目录再动表。

@@ -9,18 +9,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
+from app.domain.exceptions import ConflictError, NotFoundError, PermissionDeniedError, ValidationError
 from app.domain.models import EntityMapping
 from app.domain.procurement_rfq_models import (
     ProcurementRfqDecision,
     ProcurementRfqDraft,
 )
+from app.domain.workflow_models import WorkflowOutbox
 from app.services.procurement_rfq_state_machine import (
     assertRfqTransition,
 )
@@ -36,6 +38,37 @@ def _now() -> datetime:
     from datetime import UTC
 
     return datetime.now(UTC)
+
+
+#: 审批决策的**角色白名单**（计划 5.3 权限闭环；角色码对齐 RBAC seed——
+#: admin 为内置超管；procurement-approver = 采购审批角色，seed 另批落）。
+_APPROVER_ROLES = frozenset({"admin", "procurement-approver"})
+
+
+def _assertApproverRoles(roles: Sequence[str] | None) -> None:
+    """角色闸（fail-closed）：无白名单角色 ⇒ PermissionDeniedError。"""
+    granted = set(roles or ())
+    if not (granted & _APPROVER_ROLES):
+        raise PermissionDeniedError(
+            "审批决策需要 admin / procurement-approver 角色"
+        )
+
+
+def _appendRfqOutbox(
+    session: AsyncSession, *, rfqDraftId, decision: str, actor: str
+) -> None:
+    """决策事件写 P5 outbox（同事务；instance_id=None——RFQ 聚合外置）。"""
+    session.add(
+        WorkflowOutbox(
+            instance_id=None,
+            event_type="rfq.decision",
+            payload={
+                "rfqDraftId": str(rfqDraftId),
+                "decision": decision,
+                "actor": actor,
+            },
+        )
+    )
 
 
 class ProcurementRfqService:
@@ -160,6 +193,7 @@ class ProcurementRfqService:
         *,
         actor: str,
         expectedVersion: int | None = None,
+        roles: Sequence[str] | None = None,
     ) -> ProcurementRfqDraft:
         draft = await self.getDraft(session, rfqDraftId)
         if expectedVersion is not None and draft.version != expectedVersion:
@@ -169,6 +203,9 @@ class ProcurementRfqService:
         assertRfqTransition(draft.status, "CANCELLED")
         draft.version += 1
         draft.status = "CANCELLED"
+        _appendRfqOutbox(
+            session, rfqDraftId=draft.rfq_draft_id, decision="CANCEL", actor=actor
+        )
         await session.flush()
         await session.refresh(draft)
         return draft
@@ -179,6 +216,7 @@ class ProcurementRfqService:
         rfqDraftId,
         *,
         actor: str,
+        roles: Sequence[str] | None = None,
     ) -> ProcurementRfqDraft:
         """提交审批：**必须已通过校验**（VALIDATING 态）⇒ PENDING_APPROVAL。
 
@@ -200,6 +238,9 @@ class ProcurementRfqService:
                 actor=actor, decided_time=_now(),
             )
         )
+        _appendRfqOutbox(
+            session, rfqDraftId=draft.rfq_draft_id, decision="SUBMIT", actor=actor
+        )
         await session.flush()
         await session.refresh(draft)
         return draft
@@ -212,11 +253,13 @@ class ProcurementRfqService:
         decision: str,
         actor: str,
         note: str | None = None,
+        roles: Sequence[str] | None = None,
     ) -> ProcurementRfqDraft:
         """审批决策：APPROVE ⇒ READY_TO_SEND；REJECT ⇒ REJECTED。
 
         **自批禁止**（决策人 = 提交人 ⇒ 409）；终态再决策 ⇒ 409（状态机）。
         """
+        _assertApproverRoles(roles)
         if decision not in ("APPROVE", "REJECT"):
             raise ValidationError(f"非法决策：{decision}（仅 APPROVE/REJECT）")
         draft = await self.getDraft(session, rfqDraftId)
@@ -236,6 +279,9 @@ class ProcurementRfqService:
                 rfq_draft_id=draft.rfq_draft_id, decision=decision,
                 actor=actor, note=note, decided_time=_now(),
             )
+        )
+        _appendRfqOutbox(
+            session, rfqDraftId=draft.rfq_draft_id, decision=decision, actor=actor
         )
         await session.flush()
         await session.refresh(draft)

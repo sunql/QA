@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import select
 
 from app.domain.enums import MatchRule, SourceSystem
 from app.domain.exceptions import ConflictError
@@ -240,7 +241,7 @@ async def test_approve_moves_to_ready_to_send_and_records(dbSession) -> None:
 
     result = await svc.decideApproval(
         dbSession, d.rfq_draft_id, decision="APPROVE",
-        actor="approver-1", note="供应商已核验",
+        actor="approver-1", note="供应商已核验", roles=("admin",),
     )
     assert result.status == "READY_TO_SEND"
     decisions = await svc.listDecisions(dbSession, d.rfq_draft_id)
@@ -258,7 +259,8 @@ async def test_reject_moves_to_rejected(dbSession) -> None:
     await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
     await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
     result = await svc.decideApproval(
-        dbSession, d.rfq_draft_id, decision="REJECT", actor="approver-1"
+        dbSession, d.rfq_draft_id, decision="REJECT",
+        actor="approver-1", roles=("procurement-approver",),
     )
     assert result.status == "REJECTED"
 
@@ -275,7 +277,8 @@ async def test_self_approval_forbidden(dbSession) -> None:
     await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
     with pytest.raises(ConflictError):
         await svc.decideApproval(
-            dbSession, d.rfq_draft_id, decision="APPROVE", actor="creator"
+            dbSession, d.rfq_draft_id, decision="APPROVE",
+            actor="creator", roles=("admin",),
         )
 
 
@@ -289,8 +292,87 @@ async def test_double_decision_conflicts(dbSession) -> None:
     )
     await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
     await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
-    await svc.decideApproval(dbSession, d.rfq_draft_id, decision="REJECT", actor="ap")
+    await svc.decideApproval(dbSession, d.rfq_draft_id, decision="REJECT", actor="ap", roles=("admin",))
     with pytest.raises(ConflictError):
         await svc.decideApproval(
-            dbSession, d.rfq_draft_id, decision="APPROVE", actor="ap2"
+            dbSession, d.rfq_draft_id, decision="APPROVE",
+            actor="ap2", roles=("admin",),
         )
+
+
+# ── M5-4：outbox 事件 + 消费者 + 角色闭环（DoD 6）─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_approval_decision_writes_outbox_event(dbSession) -> None:
+    from app.domain.workflow_models import WorkflowOutbox
+
+    await _seedSupplier(dbSession)
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m5-4a", actor="creator"
+    )
+    await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.decideApproval(
+        dbSession, d.rfq_draft_id, decision="APPROVE",
+        actor="ap", roles=("admin",),
+    )
+    events = (
+        await dbSession.execute(
+            select(WorkflowOutbox).where(
+                WorkflowOutbox.event_type == "rfq.decision"
+            )
+        )
+    ).scalars().all()
+    assert len(events) == 2, "SUBMIT + APPROVE 各写一条（决策事件全量入 outbox）"
+
+    payload = events[-1].payload
+    assert payload["decision"] == "APPROVE"
+    assert payload["rfqDraftId"] == str(d.rfq_draft_id)
+
+
+@pytest.mark.asyncio
+async def test_outbox_consumer_processes_and_is_idempotent(dbSession) -> None:
+    """DoD 6：消费者按事件标识幂等——重复轮询不产生二次效果。"""
+    from app.services.procurement_rfq_outbox_consumer import pollRfqOutboxOnce
+
+    await _seedSupplier(dbSession)
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m5-4b", actor="creator"
+    )
+    await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+
+    processed1 = await pollRfqOutboxOnce(dbSession, workerId="w1")
+    assert processed1 >= 1, "首轮：SUBMIT 事件被消费"
+    processed2 = await pollRfqOutboxOnce(dbSession, workerId="w2")
+    assert processed2 == 0, "第二轮：已处理事件不得重复消费（event 幂等）"
+
+
+@pytest.mark.asyncio
+async def test_decide_approval_requires_role(dbSession) -> None:
+    """角色闭环：无 admin/procurement-approver 角色 ⇒ PermissionDeniedError。"""
+    from app.domain.exceptions import PermissionDeniedError
+
+    await _seedSupplier(dbSession)
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m5-4c", actor="creator"
+    )
+    await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.submitForApproval(
+        dbSession, d.rfq_draft_id, actor="creator", roles=("procurement",)
+    )
+    with pytest.raises(PermissionDeniedError):
+        await svc.decideApproval(
+            dbSession, d.rfq_draft_id, decision="APPROVE",
+            actor="ap", roles=("procurement",),
+        )
+    # admin 角色 ⇒ 放行
+    result = await svc.decideApproval(
+        dbSession, d.rfq_draft_id, decision="APPROVE",
+        actor="ap", roles=("admin",),
+    )
+    assert result.status == "READY_TO_SEND"

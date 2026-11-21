@@ -31,7 +31,7 @@ def test_read_only_whitelist_is_exactly_the_reviewed_set():
         "wiki_read", "rule_evaluate", "coverage_status",
         "material_search", "supplier_search", "purchase_history_query",
         "quotation_query", "procurement_policy_search",
-        "contract_document_search",
+        "contract_document_search", "quotation_compare",
     }) == READ_ONLY_HANDLER_REFS
     # 非只读 / LLM 直跑 SQL 的 handler 永不放行
     assert "nl2sql_default" not in READ_ONLY_HANDLER_REFS

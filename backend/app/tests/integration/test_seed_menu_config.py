@@ -13,7 +13,7 @@ from app.infrastructure import database as dbModule
 from app.models.menu_config import MenuConfig
 from app.services.menu_config_service import MenuConfigService
 import scripts.seed_menu_config as seed_module
-from scripts.seed_menu_config import seed_menu_config
+from scripts.seed_menu_config import ITEMS, SECTIONS, seed_menu_config
 
 pytestmark = pytest.mark.integration
 
@@ -42,14 +42,16 @@ async def test_seed_inserts_eight_sections_and_forty_five_items(
     # + 2026-10-23 补 feat-user-onboarding 漏播的 item.profile/item.changePassword
     #   —— 不补的话新装库 menu_config 无 item.profile，新建用户 500
     #   （permission_grant FK fk_permission_grant_menu 违反））
-    assert count == 53
+    # 计数从种子常量推导：写死数字会随着新功能加菜单持续失修
+    # （2026-11-21 实测：硬编码 53 时实际已是 64，加了 Copilot 后 65）。
+    assert count == len(SECTIONS) + len(ITEMS)
 
     svc = MenuConfigService(dbSession)
     result = await svc.list_sections()
-    assert len(result.sections) == 8
+    assert len(result.sections) == len(SECTIONS)
     total_items = sum(len(s.children) for s in result.sections)
-    # 45 项里 item.changePassword visible=false，list_sections 只列可见项 ⇒ 44
-    assert total_items == 44
+    hidden = len([item for item in ITEMS if not item.get("visible", True)])
+    assert total_items == len(ITEMS) - hidden
 
 
 async def test_seed_is_idempotent(
@@ -62,8 +64,9 @@ async def test_seed_is_idempotent(
     await seed_menu_config(factory)
 
     rows = (await dbSession.execute(select(MenuConfig))).scalars().all()
-    assert len(rows) == 53
-    assert len({r.code for r in rows}) == 53
+    expected = len(SECTIONS) + len(ITEMS)
+    assert len(rows) == expected
+    assert len({r.code for r in rows}) == expected
 
 
 async def test_seed_does_not_overwrite_ui_edited_parent_id(
@@ -211,6 +214,13 @@ async def test_seed_paths_aligned_with_frontend_routes(
         "/profile",
         # feat-research-entry：研究会话 + 研究对比（App.tsx 真实路由）
         "/research", "/research/compare",
+        # 2026-11-21 补齐：以下 11 项早在 seed 里，清单一直没同步（本用例红基线）
+        "/admin/tools", "/kpi-governance", "/data-domains",
+        "/procurement/rfq", "/procurement/bindings", "/procurement/knowledge",
+        "/procurement/agents",
+        "/workflow", "/workflow/approvals", "/workflow/definitions",
+        # I3：采购 Copilot 对话入口（M4-2 前端面）
+        "/procurement/copilot",
     }
 
     svc = MenuConfigService(dbSession)
@@ -271,5 +281,6 @@ async def test_main_runs_end_to_end_and_disposes_engine(
     await created_engines[0].dispose()
     # 验证种子落库（独立引擎与全局工厂指向同一 URL）
     rows = (await dbSession.execute(select(MenuConfig))).scalars().all()
-    assert len(rows) == 53
-    assert len({r.code for r in rows}) == 53
+    expected = len(SECTIONS) + len(ITEMS)
+    assert len(rows) == expected
+    assert len({r.code for r in rows}) == expected

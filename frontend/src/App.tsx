@@ -66,6 +66,7 @@ import ProcurementRfqPage from "./pages/ProcurementRfqPage";
 import ProcurementBindingsPage from "./pages/ProcurementBindingsPage";
 import ProcurementKnowledgePage from "./pages/ProcurementKnowledgePage";
 import ProcurementAgentCatalogPage from "./pages/ProcurementAgentCatalogPage";
+import ProcurementCopilotPage from "./pages/ProcurementCopilotPage";
 import WorkflowApprovalsPage from "./pages/WorkflowApprovalsPage";
 import WorkflowDefinitionsPage from "./pages/WorkflowDefinitionsPage";
 import DocumentsPage from "./pages/DocumentsPage";
@@ -151,6 +152,7 @@ export default function App() {
         <Route path="procurement/bindings" element={<ProcurementBindingsPage />} />
         <Route path="procurement/knowledge" element={<ProcurementKnowledgePage />} />
         <Route path="procurement/agents" element={<ProcurementAgentCatalogPage />} />
+        <Route path="procurement/copilot" element={<ProcurementCopilotPage />} />
         <Route path="workflow" element={<WorkflowInstancesPage />} />
         <Route path="workflow/approvals" element={<WorkflowApprovalsPage />} />
         <Route path="workflow/definitions" element={<WorkflowDefinitionsPage />} />

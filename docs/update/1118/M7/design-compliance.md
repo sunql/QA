@@ -10,7 +10,7 @@
 | **I0** 基线与接口冻结 | 冻结 commit/head/compose、OpenAPI 快照 | ✅ **100%** | 生产 `c959b77f`+runbook；A1 本地栈同构；301 路由冒烟 |
 | **I1** 本体语义发布 | source binding、release/check/manifest、registry | ✅ **100%**（⤳ D1/D2） | 2 张绑定表(0154) + check 落表(0155) + manifest v2(0156) + 域编排/回滚(0157) + 对象核对(0158)；9 绑定已确认、域首发布 ACTIVE |
 | **I2** 知识服务 | 统一 Evidence、图谱、RAG、SQL 只读 | ◐ **90%** | 四端点全做（query/entities/graph/documents）+ Evidence 契约补全；缺：Q04 制度文档 0 份（内容侧） |
-| **I3** Copilot/只读 Agent | 场景目录、采购工具、profile、轨迹 | ◐ **90%**（2026-11-21 更新） | 目录 API ✅、工具 **6/7**、**4 个场景 Agent 可运行**（含专业 profile）、`copilot/messages` ✅（task 引用 / SSE）、`contract_document_search` ✅、轨迹复用 agent_runs ✅；缺：`quotation_compare`（待业务归一规则 + Oracle）、§5.2 其余场景模板、前端 Copilot 页对接 |
+| **I3** Copilot/只读 Agent | 场景目录、采购工具、profile、轨迹 | ◐ **95%**（2026-11-21 更新） | 目录 API ✅、工具 **7/7**、**6 个场景 Agent 可运行**（SOURCING / QUOTATION_ANALYST / CONTRACT_SEARCH / MATERIAL / SUPPLIER / PURCHASE_HISTORY）、`copilot/messages` ✅（task + SSE）、前端 Copilot 页 ✅（场景/模型/轨迹/追问）；**缺**：`quotation_compare` 真数据验收（待 Oracle）、FULFILLMENT_MONITOR（需 4 个新工具）、CONTRACT_REVIEW 的条款抽取工具 |
 | **I4** 询价草稿/工作流 | 命令、状态机、任务、审批、Outbox、ERP 适配 | ◐ **70%**（⤳ D-4） | 状态机 10 态 ✅、审批 ✅、幂等 ✅、Outbox+消费者 ✅、端口+模拟器 ✅；缺：RFQ 走 business_command/workflow_instance（现为 RFQ 原生决策表）、真实适配器、待办页 |
 | **I5** 扩展场景 | 比价、合同审查、履约监控 | ✗ **~10%** | 比价：quotation_query 工具在（无评分规则）；合同审查/履约监控未做（依赖 D3 规则版本化 M6） |
 

@@ -322,6 +322,98 @@ async def _resolveToolUser(session: AsyncSession, ctx: AgentToolContext) -> Any 
     return await buildCurrentUserForUserId(session, actor)
 
 
+#: 比价一次最多几个物料（IN 列表有上限，避免把整个年度报价拉回来）。
+_COMPARE_MAX_ITEMS = 20
+
+
+def buildQuotationCompareSql(itemCodes: list[str], segmentYear: int) -> str:
+    """多物料年度报价 SQL（确定性）：一次取齐同年度、指定物料的全部供应商报价。"""
+    items = [code for code in dict.fromkeys(itemCodes) if code][:_COMPARE_MAX_ITEMS]
+    quoted = ", ".join(f"'{_esc(code)}'" for code in items)
+    return (
+        f"SELECT SUPPLIER_CODE, ITEM_CODE, SEG_YEAR, UNIT_PRICE_EX_TAX "
+        f"FROM DWD_PURCHASE_QUOTATION_YEARLY_DTL "
+        f"WHERE SEG_YEAR = {int(segmentYear)} AND ITEM_CODE IN ({quoted}) "
+        f"ORDER BY ITEM_CODE, SUPPLIER_CODE"
+    )
+
+
+async def quotationCompareHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """`quotation_compare`：年度报价的确定性比价矩阵（零 LLM）。
+
+    口径见 `services/procurement_quotation_compare` 模块文档：
+    CNY / 未税 / 同物料同年度横向比价 / 相对中位价 20%·30% 阈值。
+    """
+    from app.services.procurement_quotation_compare import (
+        DEFAULT_HIGH_THRESHOLD,
+        DEFAULT_LOW_THRESHOLD,
+        buildComparison,
+        quotesFromRows,
+        toDecimal,
+    )
+
+    rawItems = args.get("itemKeys") or []
+    if isinstance(rawItems, str):
+        rawItems = [rawItems]
+    items = [str(code).strip() for code in rawItems if str(code).strip()]
+    if not items:
+        return ToolResult(data={"groups": []}, answer="请提供 itemKeys（物料编码列表）。")
+    segmentYear = args.get("segmentYear")
+    if segmentYear is None:
+        return ToolResult(
+            data={"groups": []},
+            answer="请提供 segmentYear（报价年度，例如 2026）。",
+        )
+    low = toDecimal(args.get("lowThresholdPct")) or DEFAULT_LOW_THRESHOLD
+    high = toDecimal(args.get("highThresholdPct")) or DEFAULT_HIGH_THRESHOLD
+
+    ds = await _resolveBusinessDatasource(session, ctx)
+    _ensureActive(ds)
+    adapter = _adapterFor(ds.id, ds)
+    sql = buildQuotationCompareSql(items, int(segmentYear))
+    assertReadonlySql(sql)
+    rows = await adapter.execute_read_only(sql)
+
+    groups = buildComparison(
+        quotesFromRows(rows), lowThreshold=low, highThreshold=high
+    )
+    if not groups:
+        return ToolResult(
+            data={"groups": [], "currency": "CNY", "priceBasis": "EX_TAX"},
+            answer=f"{segmentYear} 年度没有这些物料的报价记录：{'、'.join(items[:5])}…",
+        )
+    payload = [
+        {
+            "itemCode": group.itemCode,
+            "segmentYear": group.segmentYear,
+            "currency": group.currency,
+            "priceBasis": group.priceBasis,
+            "lowestPrice": str(group.lowestPrice),
+            "medianPrice": str(group.medianPrice),
+            "spreadPct": str(group.spreadPct),
+            "bestSupplierCode": group.bestSupplierCode,
+            "rows": [
+                {
+                    "supplierCode": row.supplierCode,
+                    "unitPriceExTax": str(row.unitPriceExTax),
+                    "deltaVsMinPct": str(row.deltaVsMinPct),
+                    "deltaVsMedianPct": str(row.deltaVsMedianPct),
+                    "flag": row.flag,
+                }
+                for row in group.rows
+            ],
+        }
+        for group in groups
+    ]
+    cheapest = "、".join(f"{g.itemCode}@{g.bestSupplierCode}" for g in groups[:3])
+    return ToolResult(
+        data={"groups": payload, "currency": "CNY", "priceBasis": "EX_TAX"},
+        answer=f"{segmentYear} 年度完成 {len(groups)} 个物料的比价；最低价：{cheapest}。",
+    )
+
+
 async def procurementPolicySearchHandler(
     session: AsyncSession, args: dict, ctx: AgentToolContext
 ) -> ToolResult:

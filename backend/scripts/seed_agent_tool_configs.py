@@ -52,6 +52,14 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "handler_kind": "BUILTIN",
         "handler_ref": "supplier_risk",
         "arg_extractor_kind": "supplier_risk_key",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "供应商编码 / 统一键"},
+            },
+            "required": ["key"],
+            "additionalProperties": False,
+        },
         "enabled": True,
     },
     {
@@ -172,6 +180,32 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "enabled": True,
     },
     {
+        "name": "quotation_compare",
+        "description": "年度报价确定性比价（CNY/未税/同物料同年度；相对中位价偏差标记，零 LLM）",
+        "data_object": "PURCHASE_ORDER",
+        "data_layers": ["DWD"],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "quotation_compare",
+        "arg_extractor_kind": "quotation_compare",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "itemKeys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 20,
+                },
+                "segmentYear": {"type": "integer", "minimum": 2000, "maximum": 2100},
+                "lowThresholdPct": {"type": "number", "minimum": 0, "maximum": 1},
+                "highThresholdPct": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "required": ["itemKeys", "segmentYear"],
+            "additionalProperties": False,
+        },
+        "enabled": True,
+    },
+    {
         "name": "graph_traverse",
         "description": "供应链链路推理：从供应商出发的多跳可达业务实体",
         "data_object": "SUPPLIER",
@@ -179,6 +213,14 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "handler_kind": "BUILTIN",
         "handler_ref": "graph_traverse",
         "arg_extractor_kind": "supplier_graph_key",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "供应商编码 / 统一键"},
+            },
+            "required": ["key"],
+            "additionalProperties": False,
+        },
         "enabled": True,
     },
     # ---- feat-wiki-knowledge M8：企业 Wiki 知识工具 ----

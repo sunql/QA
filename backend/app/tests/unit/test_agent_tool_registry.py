@@ -73,7 +73,7 @@ class TestBuiltinRegistry:
             "supplier_360", "supplier_risk", "graph_traverse",
             "material_search", "supplier_search", "purchase_history_query",
             "quotation_query", "procurement_policy_search",
-            "contract_document_search",
+            "contract_document_search", "quotation_compare",
             "wiki_search", "wiki_read", "rule_evaluate", "coverage_status",
         }
 
@@ -83,7 +83,7 @@ class TestBuiltinRegistry:
             "supplier_key", "supplier_risk_key", "supplier_graph_key",
             "material_search", "supplier_search", "purchase_history_query",
             "quotation_query", "procurement_policy_search",
-            "contract_document_search",
+            "contract_document_search", "quotation_compare",
             "wiki_text", "wiki_no_args",
         }
 

@@ -179,6 +179,7 @@ export const zhCN = {
     procurementBindings: "采购源绑定",
     procurementKnowledge: "采购知识检索",
     procurementAgents: "采购 Agent 场景",
+    procurementCopilot: "采购 Copilot",
     workflowInstances: "工作流实例",
     workflowApprovals: "待办审批",
     workflowDefinitions: "工作流定义"
@@ -3668,6 +3669,19 @@ export const zhCN = {
     notRunnable: "未启用",
     loadFailed: "场景目录加载失败",
     empty: "目录为空（场景 Agent 未注册）"
+  },
+  copilot: {
+    title: "采购 Copilot",
+    scenario: "选择场景 Agent",
+    model: "选择模型（必选，后端不改派）",
+    placeholder: "例如：不锈钢板有哪些可以供货的供应商？（Ctrl/⌘+Enter 发送）",
+    send: "发送",
+    empty: "还没有对话——选个场景，问一句采购问题",
+    loadFailed: "场景/模型加载失败",
+    sendFailed: "Copilot 请求失败",
+    singleTurnHint: "每条消息是一次独立的只读分析（无会话记忆）；多候选或缺少参数时 Agent 会追问，补充后重发即可。",
+    openTrace: "查看执行轨迹",
+    tokens: "Tokens"
   }
 },
 } as const;

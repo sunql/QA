@@ -70,6 +70,32 @@ PROFILE_SEEDS: dict[str, tuple[str, list[str], int, int]] = {
         10,
         15,
     ),
+    "PROCUREMENT_QUOTATION_ANALYST": (
+        _READONLY_BASE
+        + "\n职责：报价比较。先按物料与年度取报价（quotation_query），再用"
+        " quotation_compare 产出比价矩阵；回答里必须写明口径（CNY / 未税 / 同年度）"
+        " 与偏差标记的含义，异常低价要提示人工复核，不替业务下结论。",
+        ["quotation_query", "quotation_compare"],
+        12,
+        18,
+    ),
+    "PROCUREMENT_SOURCING": (
+        _READONLY_BASE
+        + "\n职责：采购寻源。用户给物料或需求时，先定位物料 → 找可供供应商 →"
+        " 逐个补充 360 视图/风险/历史采购，最后给出**候选清单 + 每家的依据与风险提示**；"
+        "\n候选为空或数据缺失时，明确说明缺哪一环（物料没有供应商关系 / 主数据缺失），"
+        "不要用常识补候选。",
+        [
+            "material_search",
+            "supplier_search",
+            "supplier_360",
+            "supplier_risk",
+            "graph_traverse",
+            "purchase_history_query",
+        ],
+        15,
+        20,
+    ),
     "PROCUREMENT_CONTRACT_SEARCH_AGENT": (
         _READONLY_BASE
         + "\n职责：合同条款检索。围绕合同条款、付款/交付约定、违约责任回答，"

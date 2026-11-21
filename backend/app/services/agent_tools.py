@@ -47,6 +47,9 @@ from app.services.agent_tools_procurement import (
     purchaseHistoryHandler as _purchaseHistoryHandler,
 )
 from app.services.agent_tools_procurement import (
+    quotationCompareHandler as _quotationCompareHandler,
+)
+from app.services.agent_tools_procurement import (
     quotationQueryHandler as _quotationQueryHandler,
 )
 from app.services.agent_tools_procurement import (
@@ -245,6 +248,7 @@ BUILTIN_HANDLERS: dict[str, AgentHandler] = {
     "quotation_query": _quotationQueryHandler,
     "procurement_policy_search": _procurementPolicySearchHandler,
     "contract_document_search": _contractDocumentSearchHandler,
+    "quotation_compare": _quotationCompareHandler,
     # feat-wiki-knowledge M8：知识工具的实现集中在 agent_tools_wiki，
     # 这里只做登记（handler 引擎在代码、元数据在 DB 的既有分工）。
     **WIKI_HANDLERS,
@@ -276,6 +280,8 @@ ARG_EXTRACTORS: dict[str, ArgExtractor] = {
     "contract_document_search": lambda raw: (
         {"question": raw.strip()} if isinstance(raw, str) and raw.strip() else None
     ),
+    # 比价是结构化工具（物料列表 + 年度）⇒ chat 前奏不抽参数，一律走结构化 args。
+    "quotation_compare": lambda raw: None,
     **WIKI_ARG_EXTRACTORS,
 }
 

@@ -155,3 +155,28 @@ async def test_heal_is_idempotent_and_leaves_layered_agents_alone(
         ("SUPPLIER", "DIM"),
         ("SUPPLIER", "FEATURE"),
     }
+
+
+@pytest.mark.asyncio
+async def test_policiesFor_multi_tool_agent_unions_tool_layers(
+    pgSession: AsyncSession,
+) -> None:
+    """多工具场景 Agent（PROCUREMENT_SOURCING）的策略 = 工具组并集。
+
+    只按主工具派生 ⇒ 运行期 ACL 对 DWD（purchase_history_query）与
+    FEATURE（supplier_360/risk）一律 PERMISSION_DENIED。
+    """
+    from scripts.seed_agents import seedAgents
+
+    await seedAgents(pgSession)
+    await pgSession.commit()
+
+    policies = await _policiesFor(pgSession, "PROCUREMENT_SOURCING")
+    pairs = {(p.data_object, p.data_layer) for p in policies}
+
+    assert ("PURCHASE_ORDER", "DWD") in pairs
+    assert ("MATERIAL", "DIM") in pairs
+    assert ("SUPPLIER", "FEATURE") in pairs
+    assert ("SUPPLIER", "DIM") in pairs
+    # 并集不重复（同键只一条）
+    assert len(pairs) == len(policies)

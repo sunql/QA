@@ -179,6 +179,7 @@ export const enUS = {
     procurementBindings: "Source Bindings",
     procurementKnowledge: "Procurement Knowledge",
     procurementAgents: "Agent Scenarios",
+    procurementCopilot: "Procurement Copilot",
     workflowInstances: "Workflow Instances",
     workflowApprovals: "My Approvals",
     workflowDefinitions: "Workflow Definitions"
@@ -3659,11 +3660,24 @@ export const enUS = {
     noDocuments: "未命中文档（检查密级权限或关键词）"
   },
   catalog: {
-    title: "采购 Agent 场景目录",
-    runnable: "可运行",
-    notRunnable: "未启用",
-    loadFailed: "场景目录加载失败",
-    empty: "目录为空（场景 Agent 未注册）"
+    title: "Procurement Agent Scenarios",
+    runnable: "Runnable",
+    notRunnable: "Disabled",
+    loadFailed: "Failed to load scenario catalog",
+    empty: "Catalog is empty (no scenario agents registered)"
+  },
+  copilot: {
+    title: "Procurement Copilot",
+    scenario: "Scenario agent",
+    model: "Model (required; the backend never substitutes one)",
+    placeholder: "e.g. Which suppliers can supply stainless steel plates? (Ctrl/Cmd+Enter to send)",
+    send: "Send",
+    empty: "No conversation yet — pick a scenario and ask a procurement question",
+    loadFailed: "Failed to load scenarios/models",
+    sendFailed: "Copilot request failed",
+    singleTurnHint: "Each message is one independent read-only analysis (no conversation memory). The agent asks for clarification when candidates or arguments are ambiguous — resend with more detail.",
+    openTrace: "Open trace",
+    tokens: "Tokens"
   }
 },
 } as const;

@@ -62,6 +62,20 @@ _SEED_ACTOR = CurrentUser(
     userId="seed-admin", roles=("admin",), departments=("procurement",)
 )
 
+# 多工具场景 Agent 的**附加**工具（编排 profile 里绑定的全部工具）。
+# 策略必须是「绑定的工具组」的并集——只按主工具派生 ⇒ 运行期 ACL 对
+# purchase_history_query(DWD) / supplier_360(FEATURE) 一律 PERMISSION_DENIED。
+_AGENT_EXTRA_BINDINGS: dict[str, tuple[str, ...]] = {
+    "PROCUREMENT_SOURCING": (
+        "material_search",
+        "supplier_360",
+        "supplier_risk",
+        "graph_traverse",
+        "purchase_history_query",
+    ),
+    "PROCUREMENT_QUOTATION_ANALYST": ("quotation_compare",),
+}
+
 # 通用 SUPPLIER READ 通配策略（仅供无工具绑定的元数据 Agent 展示；运行时在工具门禁 409）
 _DEFAULT_POLICIES = [
     AgentAccessPolicyCreate(
@@ -84,6 +98,10 @@ _AGENT_DEFAULT_BINDINGS: dict[str, str] = {
     "PROCUREMENT_SUPPLIER_SEARCH_AGENT": "supplier_search",
     "PROCUREMENT_PURCHASE_HISTORY_AGENT": "purchase_history_query",
     "PROCUREMENT_CONTRACT_SEARCH_AGENT": "contract_document_search",
+    # 多工具场景 Agent：主工具登记 supplier_search（单工具运行时用），
+    # 真正的工具组在编排 profile 里（supplier_search/360/risk/graph/purchase_history）。
+    "PROCUREMENT_SOURCING": "supplier_search",
+    "PROCUREMENT_QUOTATION_ANALYST": "quotation_query",
     # feat-wiki-knowledge M8：一个 Agent 绑一个工具（agent_definition.tool_name
     # 是单值列），故知识工具各配一个可运行 Agent。
     "WIKI_SEARCH_AGENT": "wiki_search",
@@ -132,10 +150,13 @@ async def _policiesFor(session: Any, code: str) -> list[AgentAccessPolicyCreate]
     tool_name = _AGENT_DEFAULT_BINDINGS.get(code)
     if tool_name is None:
         return list(_DEFAULT_POLICIES)
-    tool = agent_tool_config_registry.get(tool_name)
-    if tool is None:
+    tools = [t for name in (tool_name, *_AGENT_EXTRA_BINDINGS.get(code, ())) if (t := agent_tool_config_registry.get(name)) is not None]
+    if not tools:
         # 工具被禁用或未 seed → 回退通配（旧行为兼容）
         return list(_DEFAULT_POLICIES)
+    if len(tools) > 1:
+        return _unionPolicies(tools)
+    tool = tools[0]
     if not tool.data_layers:
         return [
             AgentAccessPolicyCreate(
@@ -154,6 +175,24 @@ async def _policiesFor(session: Any, code: str) -> list[AgentAccessPolicyCreate]
         )
         for layer in tool.data_layers
     ]
+
+
+def _unionPolicies(tools: list[Any]) -> list[AgentAccessPolicyCreate]:
+    """多工具：按 (data_object, data_layer) 取并集（同键只留一条，保持确定性）。"""
+    seen: dict[tuple[str, str | None], AgentAccessPolicyCreate] = {}
+    for tool in tools:
+        layers = list(tool.data_layers) if tool.data_layers else [None]
+        for layer in layers:
+            key = (tool.data_object, layer)
+            if key in seen:
+                continue
+            seen[key] = AgentAccessPolicyCreate(
+                data_object=tool.data_object,
+                permission=AgentPermission.READ,
+                data_layer=layer,
+                notes="Phase 6.4 Agent 运行时种子（多工具并集，最小权限）",
+            )
+    return [seen[key] for key in sorted(seen, key=lambda k: (k[0], k[1] or ""))]
 
 
 def _agent(
@@ -216,6 +255,18 @@ AGENT_SEEDS: list[dict[str, Any]] = [
         "采购供应商检索 Agent",
         "按物料反查在册供应商（供应关系图）或按名称/编码检索供应商主数据（supplier_search 工具，只读无 LLM）。",
         layers=("DIM",),
+    ),
+    _agent(
+        "PROCUREMENT_QUOTATION_ANALYST",
+        "采购报价分析 Agent",
+        "报价结构化比较与偏差解释：quotation_query 取数 + quotation_compare 确定性比价（只读分析）。",
+        layers=("DWD",),
+    ),
+    _agent(
+        "PROCUREMENT_SOURCING",
+        "采购寻源 Agent",
+        "候选供应商寻源与能力评估：按物料找供应商、看 360 视图、风险、供应链路与历史采购（多工具编排，只读）。",
+        layers=("DIM", "DWD"),
     ),
     _agent(
         "PROCUREMENT_CONTRACT_SEARCH_AGENT",

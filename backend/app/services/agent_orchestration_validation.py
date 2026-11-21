@@ -51,6 +51,7 @@ READ_ONLY_HANDLER_REFS = frozenset({
     "quotation_query",
     "procurement_policy_search",
     "contract_document_search",
+    "quotation_compare",
 })
 
 BUILTIN_HANDLER_KIND = "BUILTIN"

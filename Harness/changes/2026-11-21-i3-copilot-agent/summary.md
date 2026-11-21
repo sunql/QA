@@ -58,3 +58,40 @@ orchestration acceptance / config-api / seed_agents / copilot API / 工具与白
 - 设计 §5.2 的其余场景模板（SOURCING / QUOTATION_ANALYST / FULFILLMENT_MONITOR）：
   等业务定稿。
 - 前端 Copilot 页对接 SSE（M4 面）。
+
+---
+
+## 七、第二轮（同日）：SOURCING 场景 / quotation_compare / 前端 Copilot 页
+
+### 7.1 `PROCUREMENT_SOURCING`（多工具场景）
+- 注册 Agent + profile（6 工具：material_search / supplier_search / supplier_360 /
+  supplier_risk / graph_traverse / purchase_history_query）。
+- **策略必须取工具组并集**：`_policiesFor` 原来只按**主工具**派生 ⇒ 运行期 ACL 对
+  DWD（purchase_history）与 FEATURE（supplier_360/risk）一律 PERMISSION_DENIED。
+  新增 `_AGENT_EXTRA_BINDINGS` + `_unionPolicies`（同键去重、确定性排序）。
+- 编排绑定前置：`supplier_360` / `supplier_risk` / `graph_traverse` 的
+  `input_schema` 补成合法 object schema（原来全是 `{}`）。
+- 实测：SOURCING 跑通「检索物料 → 多候选 ⇒ ASK_USER 追问」，答案里明确让用户选规格
+  （不是失败，是设计要求）。
+
+### 7.2 `quotation_compare`（确定性比价，零 LLM）
+- 新模块 `services/procurement_quotation_compare`：CNY / 未税 / 同物料同年度横向比价；
+  相对中位价 20%（异常低价）与 30%（偏高）阈值；全程 Decimal；非法价格**不猜成 0**
+  （0 会变成「最便宜」）。
+- 工具 handler + 只读 SQL builder（`IN` 列表去重、上限 20 个物料）+ 白名单/seed/schema。
+- `PROCUREMENT_QUOTATION_ANALYST` 场景 Agent + profile（quotation_query + quotation_compare）。
+- **仍待 Oracle**：真实数据跑通/验收证据；口径 5 项默认（币种 CNY / 未税 / 同物料同单位 /
+  同年度横向 / 20%·30%）已在模块文档写明，业务改口径只改常量与用例。
+
+### 7.3 前端 Copilot 页
+- `POST /procurement/copilot/messages` 的 SSE 客户端：自研解析（EventSource 不支持 POST
+  + Authorization）；跨 chunk 拼接、坏帧不炸整条流。
+- 页面：场景下拉（只列 runnable）/ 模型下拉（必选，后端不改派）/ 输入区 / 对话卡
+  （轨迹步骤 + 最终答案 + PAUSED 追问高亮 + 轨迹链接 + tokens）。
+- 路由 `/procurement/copilot` + 菜单 seed（icon 用已注册的 `message`）+ zh/en 文案。
+- 测试：SSE 解析 7 例、页面 3 例（含 PAUSED 渲染成追问、错误展示 detail）。
+
+### 7.4 顺手修的存量红基线
+- `test_seed_menu_config` 的计数与路径清单一度停在 53 行 / 45 项（实际已 64 项）⇒
+  改为**从 `SECTIONS`/`ITEMS` 推导**并补齐 11 个早就在 seed 里却没登记的路径。
+

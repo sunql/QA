@@ -753,12 +753,18 @@ def createApp() -> FastAPI:
     # P5 工作流 / 审批（L 级独立立项）：开关关闭时整组不注册（404）⇒
     # 「没开 = 没有这个面」；import 也留在条件内（未启用的子系统不加载）。
     if settings.enableWorkflow:
-        from app.api.v1 import workflow
+        from app.api.v1 import procurement_rfqs, workflow
 
         app.include_router(
             workflow.router,
             prefix="/api/v1/workflow",
             tags=["workflow"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
+        app.include_router(
+            procurement_rfqs.router,
+            prefix="/api/v1/procurement/rfqs",
+            tags=["procurement-rfqs"],
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
         )
     app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])

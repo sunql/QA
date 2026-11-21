@@ -53,6 +53,24 @@ class ProcurementRfqService:
         notes: str | None = None,
     ) -> ProcurementRfqDraft:
         """创建询价草稿（幂等：同 key 同 payload ⇒ 返回既有；异 payload ⇒ 409）。"""
+        draft, _created = await self.createDraftWithStatus(
+            session, request_id=request_id, deadline=deadline, payload=payload,
+            idempotencyKey=idempotencyKey, actor=actor, notes=notes,
+        )
+        return draft
+
+    async def createDraftWithStatus(
+        self,
+        session: AsyncSession,
+        *,
+        request_id: str,
+        deadline: datetime,
+        payload: dict,
+        idempotencyKey: str,
+        actor: str,
+        notes: str | None = None,
+    ) -> tuple[ProcurementRfqDraft, bool]:
+        """创建询价草稿，返回 ``(草稿, 是否本次新建)``（幂等语义同 createDraft）。"""
         if not request_id.strip():
             raise ValidationError("request_id 必填")
         payloadHash = computePayloadHash(payload)
@@ -68,7 +86,7 @@ class ProcurementRfqService:
                 raise ConflictError(
                     f"Idempotency-Key {idempotencyKey} 已被不同 payload 使用（409）"
                 )
-            return existing
+            return existing, False
         draft = ProcurementRfqDraft(
             rfq_draft_id=uuid4(),
             version=1,
@@ -83,7 +101,7 @@ class ProcurementRfqService:
         )
         session.add(draft)
         await session.flush()
-        return draft
+        return draft, True
 
     async def getDraft(
         self, session: AsyncSession, rfqDraftId
@@ -235,6 +253,19 @@ class ProcurementRfqService:
                     .order_by(ProcurementRfqDecision.id)
                 )
             ).scalars().all()
+        )
+
+    async def listDrafts(
+        self, session: AsyncSession, *, createdBy: str | None = None,
+        limit: int = 50,
+    ) -> list[ProcurementRfqDraft]:
+        stmt = select(ProcurementRfqDraft).order_by(
+            ProcurementRfqDraft.created_time.desc()
+        ).limit(max(1, min(limit, 100)))
+        if createdBy:
+            stmt = stmt.where(ProcurementRfqDraft.created_by == createdBy)
+        return list(
+            (await session.execute(stmt)).scalars().all()
         )
 
     async def _validationProblems(

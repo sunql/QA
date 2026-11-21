@@ -939,3 +939,12 @@ MSG_COPILOT_NOT_PROCUREMENT_AGENT = (
 MSG_COPILOT_STREAM_TIMEOUT = (
     "本次流式转发的等待时间已到；运行仍在后台继续，可用轨迹地址继续跟进"
 )
+# --- I3 多轮 Copilot 会话 -----------------------------------------------------
+MSG_COPILOT_CONVERSATION_NOT_FOUND = "会话不存在或无权访问"
+MSG_COPILOT_CONVERSATION_AGENT_MISMATCH = (
+    "会话绑定的场景 Agent 是 {current}，与本次请求的 {requested} 不一致；"
+    "换场景请开新会话"
+)
+MSG_COPILOT_CONVERSATION_TOO_MANY_TURNS = (
+    "本会话已达到 {limit} 轮上限，请开一个新会话继续"
+)

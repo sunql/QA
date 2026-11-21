@@ -135,6 +135,23 @@ APPROVED_TABLES: tuple[TableRuling, ...] = (
             "RFQ 首期没有矩阵化审批 ⇒ 决策事实自带留痕表，避免第二套审批语义"
         ),
     ),
+    TableRuling(
+        tableName="procurement_copilot_conversation",
+        replacement="0162",
+        reason=(
+            "多轮 Copilot 会话壳（I3）：会话是独立的归属概念（谁开的、绑哪个 "
+            "Agent/模型、多少轮）。不放进 agent_orchestration_run——那是编排域"
+            "共享表，会话语义会反向污染所有 run"
+        ),
+    ),
+    TableRuling(
+        tableName="procurement_copilot_turn",
+        replacement="0162",
+        reason=(
+            "轮次映射（用户原文 ↔ 哪次 run 回答）：追问时两条轮次指向同一 run，"
+            "历史不被改写；界面展示用轮次原文，而不是被 resume 追加过的 run.question"
+        ),
+    ),
 )
 
 # 延后（D3：M6 决策）。**M6 前不许建**；若 M6 裁决要建，先改本目录再动表。

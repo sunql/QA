@@ -29,12 +29,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.agent_orchestration_schemas import (
     AgentRunCreate,
     AgentRunCreated,
+    AgentRunResume,
     AgentRunStepRead,
 )
 from app.domain.exceptions import ValidationError
@@ -43,10 +45,11 @@ from app.domain.procurement_copilot_schemas import (
     CopilotMessageRequest,
 )
 from app.infrastructure.database import getSessionFactory
+from app.services import procurement_copilot_conversation as conversationStore
 from app.services.agent_orchestration_run_service import (
     AgentOrchestrationRunService,
 )
-from app.services.agent_orchestration_types import RunStatus
+from app.services.agent_orchestration_types import PauseCode, RunStatus
 from app.services.messages_zh import (
     MSG_COPILOT_NOT_PROCUREMENT_AGENT,
     MSG_COPILOT_STREAM_TIMEOUT,
@@ -106,11 +109,16 @@ def assertProcurementAgent(agentCode: str) -> None:
         )
 
 
-def toRunCreate(dto: CopilotMessageRequest) -> AgentRunCreate:
-    """Copilot 请求 → 编排运行请求（**一对一**，不加语义）。"""
+def toRunCreate(
+    dto: CopilotMessageRequest, *, inputText: str | None = None
+) -> AgentRunCreate:
+    """Copilot 请求 → 编排运行请求。
+
+    `inputText` 只在多轮时覆盖（= 上下文块 + 当前问题）；其余字段**一对一**。
+    """
     return AgentRunCreate(
         agent_code=dto.agent_code,
-        input=dto.message,
+        input=inputText if inputText is not None else dto.message,
         model_config_id=dto.model_config_id,
         limits=dto.limits,
     )
@@ -122,11 +130,121 @@ async def createCopilotRun(
     actor: Any,
     *,
     service: AgentOrchestrationRunService | None = None,
+    inputText: str | None = None,
 ) -> AgentRunCreated:
     """校验域前缀 → 复用 `createRun` 落一个 QUEUED 运行。"""
     assertProcurementAgent(dto.agent_code)
     runner = service or AgentOrchestrationRunService()
-    return await runner.createRun(session, toRunCreate(dto), actor)
+    return await runner.createRun(session, toRunCreate(dto, inputText=inputText), actor)
+
+
+@dataclass(frozen=True)
+class CopilotTurnResult:
+    """一轮的结果：跑在哪个 run 上、属于哪个会话、是否续跑。"""
+
+    runId: str
+    conversationId: str
+    status: str
+    resumed: bool
+
+
+async def _resumeTargetRunId(
+    session: AsyncSession,
+    turns: list[Any],
+    actor: Any,
+    service: AgentOrchestrationRunService,
+) -> str | None:
+    """上一轮停在「等我回答」⇒ 返回其 runId（续跑）；否则 None（新开 run）。"""
+    lastRunId = conversationStore.lastRunId(turns)
+    if lastRunId is None:
+        return None
+    try:
+        run = await service.getRun(session, lastRunId, actor)
+    except Exception:  # noqa: BLE001 —— run 不可读（被删/异常）⇒ 当作无历史
+        return None
+    if run.status != RunStatus.PAUSED:
+        return None
+    if run.pause_code == PauseCode.NEEDS_INPUT:
+        return lastRunId
+    return None
+
+
+async def _history(
+    session: AsyncSession,
+    turns: list[Any],
+    actor: Any,
+    service: AgentOrchestrationRunService,
+) -> list[Any]:
+    """最近几轮 → 上下文历史（逐 run 取答案；读不到就当作无答案）。"""
+    views: dict[str, tuple[str | None, str]] = {}
+    for turn in turns[-conversationStore.MAX_CONTEXT_TURNS:]:
+        try:
+            run = await service.getRun(session, turn.run_id, actor)
+        except Exception:  # noqa: BLE001
+            continue
+        views[turn.run_id] = (
+            run.final_answer,
+            str(getattr(run.status, "value", run.status)),
+        )
+    return conversationStore.historyFromTurns(turns, views)
+
+
+async def prepareCopilotTurn(
+    session: AsyncSession,
+    dto: CopilotMessageRequest,
+    actor: Any,
+    *,
+    service: AgentOrchestrationRunService | None = None,
+) -> CopilotTurnResult:
+    """一轮对话的完整编排：会话 → （续跑 or 带上下文新跑）→ 落轮次。"""
+    assertProcurementAgent(dto.agent_code)
+    runner = service or AgentOrchestrationRunService()
+    conversationId = (
+        UUID(dto.conversation_id) if dto.conversation_id else None
+    )
+    conversation = await conversationStore.loadOrCreateConversation(
+        session,
+        conversationId=conversationId,
+        actor=actor,
+        agentCode=dto.agent_code,
+        modelConfigId=dto.model_config_id,
+    )
+    turns = await conversationStore.listTurns(session, conversation.conversation_id)
+
+    resumeRunId = await _resumeTargetRunId(session, turns, actor, runner)
+    if resumeRunId is not None:
+        await runner.resumeRun(
+            session, resumeRunId, AgentRunResume(input=dto.message), actor
+        )
+        await conversationStore.appendTurn(
+            session, conversation, question=dto.message, runId=resumeRunId
+        )
+        await session.commit()
+        return CopilotTurnResult(
+            runId=resumeRunId,
+            conversationId=str(conversation.conversation_id),
+            status=RunStatus.QUEUED.value,
+            resumed=True,
+        )
+
+    history = await _history(session, turns, actor, runner)
+    created = await runner.createRun(
+        session,
+        toRunCreate(
+            dto, inputText=conversationStore.buildRunInput(dto.message, history)
+        ),
+        actor,
+    )
+    await conversationStore.appendTurn(
+        session, conversation, question=dto.message, runId=created.run_id
+    )
+    await session.commit()
+    return CopilotTurnResult(
+        runId=created.run_id,
+        conversationId=str(conversation.conversation_id),
+        status=str(created.status),
+        resumed=False,
+    )
 
 
 def _stepPayload(step: AgentRunStepRead) -> dict[str, Any]:

@@ -149,3 +149,156 @@ async def test_copilot_route_absent_when_orchestration_disabled(
         json={"message": "x", "agentCode": PROC_AGENT_CODE, "modelConfigId": 1},
     )
     assert resp.status_code == 404, resp.text
+
+
+# ---------------------------------------------------------------------------
+# 多轮会话（feat/copilot-multiturn）
+# ---------------------------------------------------------------------------
+
+
+async def test_first_message_creates_conversation_and_turn(
+    client: AsyncClient,
+) -> None:
+    modelId = await _seedRunnableProcurementAgent(client)
+
+    resp = await client.post(
+        COPILOT_PATH, headers=OWNER_HEADERS, json=_message(PROC_AGENT_CODE, modelId)
+    )
+
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["conversationId"]
+    assert body["resumed"] is False
+
+    detail = await client.get(
+        f"/api/v1/procurement/copilot/conversations/{body['conversationId']}",
+        headers=OWNER_HEADERS,
+    )
+    assert detail.status_code == 200, detail.text
+    turns = detail.json()["turns"]
+    assert len(turns) == 1
+    assert turns[0]["question"] == "哪些供应商能供不锈钢板？"
+    assert turns[0]["runId"] == body["runId"]
+
+
+async def test_second_message_carries_context_into_new_run(
+    client: AsyncClient,
+) -> None:
+    """同一会话的第二问 ⇒ 新 run，且 run.question 带上一轮上下文。"""
+    modelId = await _seedRunnableProcurementAgent(client)
+    first = (
+        await client.post(
+            COPILOT_PATH, headers=OWNER_HEADERS, json=_message(PROC_AGENT_CODE, modelId)
+        )
+    ).json()
+
+    second = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json={**_message(PROC_AGENT_CODE, modelId), "conversationId": first["conversationId"]},
+    )
+
+    assert second.status_code == 202, second.text
+    body = second.json()
+    assert body["runId"] != first["runId"]
+    assert body["conversationId"] == first["conversationId"]
+    assert body["resumed"] is False
+
+    run = await client.get(f"/api/v1/agent-runs/{body['runId']}", headers=OWNER_HEADERS)
+    question = run.json()["question"]
+    assert "[对话上下文]" in question
+    assert "哪些供应商能供不锈钢板？" in question
+    assert question.endswith("哪些供应商能供不锈钢板？")  # 当前问题在最后（同一句）
+
+    conversation = await client.get(
+        f"/api/v1/procurement/copilot/conversations/{body['conversationId']}",
+        headers=OWNER_HEADERS,
+    )
+    assert len(conversation.json()["turns"]) == 2
+
+
+async def test_paused_need_input_is_resumed_not_restarted(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """上一轮停在「等我回答」⇒ 下一句 resume 同一个 run（不重复花钱重跑）。"""
+    from sqlalchemy import update
+
+    from app.domain.agent_orchestration_models import AgentOrchestrationRun
+
+    modelId = await _seedRunnableProcurementAgent(client)
+    first = (
+        await client.post(
+            COPILOT_PATH, headers=OWNER_HEADERS, json=_message(PROC_AGENT_CODE, modelId)
+        )
+    ).json()
+
+    await dbSession.execute(
+        update(AgentOrchestrationRun)
+        .where(AgentOrchestrationRun.run_id == first["runId"])
+        .values(status="PAUSED", pause_code="NEEDS_INPUT")
+    )
+    await dbSession.commit()
+
+    second = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json={
+            **_message(PROC_AGENT_CODE, modelId),
+            "conversationId": first["conversationId"],
+            "message": "选 ITM-1 那个规格",
+        },
+    )
+
+    assert second.status_code == 202, second.text
+    body = second.json()
+    assert body["resumed"] is True
+    assert body["runId"] == first["runId"]
+    assert body["status"] == "QUEUED"
+
+    run = await client.get(f"/api/v1/agent-runs/{first['runId']}", headers=OWNER_HEADERS)
+    runBody = run.json()
+    assert runBody["status"] == "QUEUED"
+    assert runBody["pauseCode"] is None
+    assert "选 ITM-1 那个规格" in runBody["question"]
+
+
+async def test_other_user_cannot_read_conversation(
+    client: AsyncClient,
+) -> None:
+    modelId = await _seedRunnableProcurementAgent(client)
+    created = (
+        await client.post(
+            COPILOT_PATH, headers=OWNER_HEADERS, json=_message(PROC_AGENT_CODE, modelId)
+        )
+    ).json()
+
+    resp = await client.get(
+        f"/api/v1/procurement/copilot/conversations/{created['conversationId']}",
+        headers={"X-User-Id": "someone-else", "X-User-Roles": "analyst"},
+    )
+
+    assert resp.status_code == 404, resp.text
+
+
+async def test_switching_agent_inside_conversation_is_rejected(
+    client: AsyncClient,
+) -> None:
+    """会话绑定 Agent：换场景必须新开会话（否则上下文串味）。"""
+    modelId = await _seedRunnableProcurementAgent(client)
+    created = (
+        await client.post(
+            COPILOT_PATH, headers=OWNER_HEADERS, json=_message(PROC_AGENT_CODE, modelId)
+        )
+    ).json()
+
+    resp = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json={
+            **_message("PROCUREMENT_ANOTHER_AGENT", modelId),
+            "conversationId": created["conversationId"],
+        },
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert "新会话" in resp.text

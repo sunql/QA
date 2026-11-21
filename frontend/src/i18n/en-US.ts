@@ -3676,6 +3676,9 @@ export const enUS = {
     loadFailed: "Failed to load scenarios/models",
     sendFailed: "Copilot request failed",
     singleTurnHint: "Each message is one independent read-only analysis (no conversation memory). The agent asks for clarification when candidates or arguments are ambiguous — resend with more detail.",
+    newConversation: "New conversation",
+    conversation: "Conversation",
+    resumed: "Follow-up",
     openTrace: "Open trace",
     tokens: "Tokens"
   }

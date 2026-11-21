@@ -1807,6 +1807,13 @@ class DocumentCatalog(Base, TimestampMixin):
             "status IN ('ACTIVE','EXPIRED','ARCHIVED')",
             name="ck_document_status",
         ),
+        # 0163：预览类别（TEXT/MARKDOWN/HTML/PDF/OFFICE/IMAGE）——
+        # 落库而非每次推断：推断规则会变，落库后已入库文档的呈现不变。
+        CheckConstraint(
+            "preview_kind IS NULL OR preview_kind IN "
+            "('TEXT','MARKDOWN','HTML','PDF','OFFICE','IMAGE')",
+            name="ck_document_preview_kind",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
@@ -1822,6 +1829,18 @@ class DocumentCatalog(Base, TimestampMixin):
     )
     storage_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # --- 0163：原文阅览 / 向量化状态所需元数据 ---
+    #: 上传时的真实 MIME（wiki 侧也要记；缺失则按扩展名推断）
+    mime_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    #: 字节数（前端显示体积）
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    #: 预览类别（见 services/document_preview_kinds）
+    preview_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    #: 最近一次向量化的完成时间（NULL = 未向量化；目录页据此显示状态，
+    #: 避免 N 行文档 = N 次 Milvus 查询）
+    vectorized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     def __repr__(self) -> str:
         return (

@@ -59,6 +59,7 @@ from app.domain.wiki_learning_models import (
 )
 from app.domain.wiki_models import WikiPage
 from app.domain.wiki_schemas import WikiImportDraft, WikiImportExecuteRequest
+from app.services.document_preview_kinds import kindFor
 from app.infrastructure.llm.factory import createClient
 from app.infrastructure.object_storage import (
     buildSourceObjectName,
@@ -262,6 +263,10 @@ class WikiImportService:
             content_hash=contentHash,
             storage_url=storageUrl,
             actor=actor,
+            # 0163：原文阅览元数据（与文档中心同一套推断规则）
+            mime_type=mime_type,
+            file_size=len(content),
+            preview_kind=kindFor(mime_type, filename),
         )
         await session.commit()
         return storageUrl

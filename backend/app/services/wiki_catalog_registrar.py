@@ -33,6 +33,9 @@ class WikiCatalogRegistrar:
         content_hash: str,
         storage_url: str | None,
         actor: CurrentUser,
+        mime_type: str | None = None,
+        file_size: int | None = None,
+        preview_kind: str | None = None,
     ) -> DocumentCatalog | None:
         """同 hash 已存在则返回既有行，否则新建。**可能返回 ``None``**（见下）。
 
@@ -66,6 +69,10 @@ class WikiCatalogRegistrar:
                 owner=owner,
                 storage_url=storage_url,
                 content_hash=content_hash,
+                # 0163：原文阅览元数据（wiki 侧也记 ⇒ 两边口径一致）
+                mime_type=mime_type,
+                file_size=file_size,
+                preview_kind=preview_kind,
             )
             .on_conflict_do_nothing(index_elements=["content_hash"])
             .returning(DocumentCatalog.id)

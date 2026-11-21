@@ -174,6 +174,9 @@ class DocumentService:
             security_level=dto.security_level,
             storage_url=dto.storage_url,
             content_hash=dto.content_hash,
+            mime_type=dto.mime_type,
+            file_size=dto.file_size,
+            preview_kind=dto.preview_kind,
         )
         session.add(entity)
         try:

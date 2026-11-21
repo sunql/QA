@@ -3109,6 +3109,10 @@ class DocumentCreate(CamelModel):
     security_level: DocumentSecurityLevel = Field(default=DocumentSecurityLevel.L1)
     storage_url: str | None = Field(default=None, max_length=512)
     content_hash: str | None = Field(default=None, max_length=64)
+    # --- 0163：原文阅览所需元数据 ---
+    mime_type: str | None = Field(default=None, max_length=120)
+    file_size: int | None = Field(default=None, ge=0)
+    preview_kind: str | None = Field(default=None, max_length=20)
 
 
 class DocumentUpdate(CamelModel):
@@ -3122,6 +3126,10 @@ class DocumentUpdate(CamelModel):
     security_level: DocumentSecurityLevel | None = Field(default=None)
     storage_url: str | None = Field(default=None, max_length=512)
     content_hash: str | None = Field(default=None, max_length=64)
+    mime_type: str | None = Field(default=None, max_length=120)
+    file_size: int | None = Field(default=None, ge=0)
+    preview_kind: str | None = Field(default=None, max_length=20)
+    vectorized_at: datetime | None = None
 
 
 class DocumentRead(CamelModel):
@@ -3137,6 +3145,10 @@ class DocumentRead(CamelModel):
     security_level: DocumentSecurityLevel
     storage_url: str | None = None
     content_hash: str | None = None
+    mime_type: str | None = None
+    file_size: int | None = None
+    preview_kind: str | None = None
+    vectorized_at: datetime | None = None
     created_time: datetime
     updated_time: datetime
 

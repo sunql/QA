@@ -20,6 +20,7 @@ from app.domain.exceptions import ConflictError
 from app.services.messages_zh import MSG_DOCUMENT_CONTENT_EXISTS
 from app.services.document_parser import DocumentParserError, parse_document
 from app.services.chunk_splitter import Chunk, split_by_paragraphs
+from app.services.document_preview_kinds import kindFor
 from app.services.document_service import DocumentService
 from app.services.vector_similarity import distanceToSimilarity
 from app.infrastructure.milvus_client import insertDocumentChunks, searchDocumentChunks
@@ -203,6 +204,10 @@ class RagService:
                     security_level=security_level,
                     storage_url=storageUrl,
                     content_hash=contentHash,
+                    # 0163：原文阅览所需元数据（mime/size/预览类别）
+                    mime_type=mime_type,
+                    file_size=len(content),
+                    preview_kind=kindFor(mime_type, filename),
                 ),
                 actor=actor,
             )
@@ -215,7 +220,13 @@ class RagService:
             await self._doc_svc.updateDocument(
                 session,
                 existing_doc.id,
-                DocumentUpdate(storage_url=storageUrl, content_hash=contentHash),
+                DocumentUpdate(
+                    storage_url=storageUrl,
+                    content_hash=contentHash,
+                    mime_type=mime_type,
+                    file_size=len(content),
+                    preview_kind=kindFor(mime_type, filename),
+                ),
                 actor=actor,
             )
 

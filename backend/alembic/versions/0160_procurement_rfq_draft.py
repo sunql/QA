@@ -1,9 +1,7 @@
 """M5-1：询价草稿表 + business_command.payload_hash（DRAFT-only）。
 
 迁移号 0160（main 线 head=0152；**0153–0159 归采购线 b1–b4 与 A4-0 预留**
-——迁移号串行占号纪律）。⚠️ 当前 down_revision=0152 供本分支本地开发/测试；
-**合并时必须重指到彼时 head**（预计 0159 = A4-0），否则出现双 head。
-本迁移不得先于 b1–b4 合并。
+——迁移号串行占号纪律）。✅ 已重指 0158（b4 归拢后 main 迁移 head）。
 
 Revision ID: 0160
 """
@@ -15,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0160"
-down_revision = "0152"
+down_revision = "0158"
 branch_labels = None
 depends_on = None
 

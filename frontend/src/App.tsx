@@ -63,6 +63,7 @@ import BusinessObjectPage from "./pages/BusinessObjectPage";
 import DataDomainPage from "./pages/DataDomainPage";
 import WorkflowInstancesPage from "./pages/WorkflowInstancesPage";
 import ProcurementRfqPage from "./pages/ProcurementRfqPage";
+import ProcurementBindingsPage from "./pages/ProcurementBindingsPage";
 import WorkflowApprovalsPage from "./pages/WorkflowApprovalsPage";
 import WorkflowDefinitionsPage from "./pages/WorkflowDefinitionsPage";
 import DocumentsPage from "./pages/DocumentsPage";
@@ -145,6 +146,7 @@ export default function App() {
         <Route path="business-objects" element={<BusinessObjectPage />} />
         <Route path="data-domains" element={<DataDomainPage />} />
         <Route path="procurement/rfq" element={<ProcurementRfqPage />} />
+        <Route path="procurement/bindings" element={<ProcurementBindingsPage />} />
         <Route path="workflow" element={<WorkflowInstancesPage />} />
         <Route path="workflow/approvals" element={<WorkflowApprovalsPage />} />
         <Route path="workflow/definitions" element={<WorkflowDefinitionsPage />} />

@@ -114,11 +114,18 @@ class TestAgentToolAssembly:
 
 class TestHandlerRegistries:
     def test_builtin_has_expected_keys(self):
-        """供应链 3 个 + feat-wiki-knowledge M8 的 4 个知识工具。"""
+        """供应链 3 个 + M3-1 采购检索 5 个 + I3 采购 Copilot 2 个 + feat-wiki-knowledge M8 的 4 个知识工具。
+
+        ⚠️ 本断言是**集合相等型**（不是包含）⇒ 每次新增 builtin handler 都必须
+        同步这里，否则本用例红（2026-11-21 实测：`contract_document_search` /
+        `quotation_compare` 由 I3 采购 Copilot 批次加入注册表，但期望集没跟上
+        ⇒ 在 main 上留了两个真·净新增失败）。
+        """
         assert set(BUILTIN_HANDLERS.keys()) == {
             "supplier_360", "supplier_risk", "graph_traverse",
             "material_search", "supplier_search", "purchase_history_query",
             "quotation_query", "procurement_policy_search",
+            "contract_document_search", "quotation_compare",
             "wiki_search", "wiki_read", "rule_evaluate", "coverage_status",
         }
 
@@ -126,10 +133,12 @@ class TestHandlerRegistries:
         assert "nl2sql_default" in NL2SQL_HANDLERS
 
     def test_arg_extractors_expected_keys(self):
+        """与 `BUILTIN_HANDLERS` 同款集合相等断言 ⇒ 同样要跟着新工具同步。"""
         assert set(ARG_EXTRACTORS.keys()) == {
             "supplier_key", "supplier_risk_key", "supplier_graph_key",
             "material_search", "supplier_search", "purchase_history_query",
             "quotation_query", "procurement_policy_search",
+            "contract_document_search", "quotation_compare",
             "wiki_text", "wiki_no_args",
         }
 

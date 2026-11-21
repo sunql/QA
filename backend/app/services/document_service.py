@@ -177,6 +177,7 @@ class DocumentService:
             mime_type=dto.mime_type,
             file_size=dto.file_size,
             preview_kind=dto.preview_kind,
+            vectorized_at=dto.vectorized_at,
         )
         session.add(entity)
         try:

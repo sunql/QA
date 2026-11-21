@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import Depends
@@ -208,6 +209,7 @@ class RagService:
                     mime_type=mime_type,
                     file_size=len(content),
                     preview_kind=kindFor(mime_type, filename),
+                    vectorized_at=datetime.now(timezone.utc),
                 ),
                 actor=actor,
             )
@@ -226,6 +228,7 @@ class RagService:
                     mime_type=mime_type,
                     file_size=len(content),
                     preview_kind=kindFor(mime_type, filename),
+                    vectorized_at=datetime.now(timezone.utc),
                 ),
                 actor=actor,
             )
@@ -243,6 +246,12 @@ class RagService:
             "status": "ingested",
             "storage_url": storageUrl,
             "content_hash": contentHash,
+            # 0163：原文阅览元数据（前端据此决定预览方式与体积展示）
+            "mime_type": mime_type,
+            "file_size": len(content),
+            "preview_kind": kindFor(mime_type, filename),
+            # 上传路径本身完成了向量化 ⇒ 目录页显示「已向量化」
+            "vectorized_at": datetime.now(timezone.utc).isoformat(),
         }
 
     async def searchDocuments(

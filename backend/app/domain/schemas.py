@@ -3113,6 +3113,7 @@ class DocumentCreate(CamelModel):
     mime_type: str | None = Field(default=None, max_length=120)
     file_size: int | None = Field(default=None, ge=0)
     preview_kind: str | None = Field(default=None, max_length=20)
+    vectorized_at: datetime | None = None
 
 
 class DocumentUpdate(CamelModel):

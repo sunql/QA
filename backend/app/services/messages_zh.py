@@ -948,3 +948,7 @@ MSG_COPILOT_CONVERSATION_AGENT_MISMATCH = (
 MSG_COPILOT_CONVERSATION_TOO_MANY_TURNS = (
     "本会话已达到 {limit} 轮上限，请开一个新会话继续"
 )
+
+# --- 文档源文件（原文阅览）——三档错误语义，处置动作不同 -----------------------
+MSG_DOCUMENT_SOURCE_NOT_FOUND = "文档 {id} 没有可阅览的源文件（未上传或已被清理）"
+MSG_DOCUMENT_SOURCE_UNAVAILABLE = "源文件存储暂时不可用，请稍后重试"

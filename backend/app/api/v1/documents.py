@@ -20,7 +20,7 @@ import logging
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import getCurrentUser, getDb
@@ -37,7 +37,11 @@ from app.domain.schemas import (
 )
 from app.infrastructure.rate_limit import limiter, rateLimitValue
 from app.services.document_service import DocumentService
-from app.services.messages_zh import MSG_DOCUMENT_SOURCE_STORE_FAILED
+from app.services.messages_zh import (
+    MSG_DOCUMENT_SOURCE_NOT_FOUND,
+    MSG_DOCUMENT_SOURCE_STORE_FAILED,
+    MSG_DOCUMENT_SOURCE_UNAVAILABLE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +93,66 @@ async def getDocument(
 ) -> DocumentRead:
     doc = await service.getDocument(session, documentId, user=_user)
     return DocumentRead.model_validate(doc)
+
+
+@router.get(
+    "/{documentId:int}/source",
+    summary="文档源文件（原文阅览 / 下载）",
+    response_class=Response,
+)
+async def downloadDocumentSource(
+    documentId: int,
+    request: Request,
+    disposition: str = Query(default="inline", pattern="^(inline|attachment)$"),
+    _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: DocumentService = Depends(getDocumentService),
+) -> Response:
+    """返回文档**原件字节**。
+
+    ACL 先行：``service.getDocument`` 已做密级闸（无权限 ⇒ 403）；
+    **不许**在这里自己查库绕过——原文是整份文件，比检索片段敏感得多。
+
+    错误语义（三档，处置动作不同）：
+    - 403：无密级权限
+    - 404：文档不存在，或该文档没有源文件（storage_url 空 / 对象已被删）
+    - 503：对象存储不可用（基础设施故障，**不是**「文件没了」）
+    """
+    from app.infrastructure.object_storage import ObjectStorageError
+    from app.services.document_source_service import (
+        contentDisposition,
+        loadSourceFile,
+    )
+
+    catalog = await service.getDocument(session, documentId, user=_user)
+    try:
+        source = await loadSourceFile(session, catalog)
+    except ObjectStorageError as exc:
+        logger.exception("文档源文件读取失败: document_id=%s", documentId)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=MSG_DOCUMENT_SOURCE_UNAVAILABLE,
+        ) from exc
+    if source is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=MSG_DOCUMENT_SOURCE_NOT_FOUND.format(id=documentId),
+        )
+
+    inline = disposition == "inline" and source.inline
+    return Response(
+        content=source.content,
+        media_type=source.contentType,
+        headers={
+            "Content-Disposition": contentDisposition(
+                source.filename, inline=inline
+            ),
+            "Content-Length": str(source.size),
+            # 文档不是用户自己的站外资源 ⇒ 禁止被当成可执行内容
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 @router.post("", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)

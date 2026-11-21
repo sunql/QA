@@ -121,3 +121,23 @@ export async function cancelRfqDraft(
   );
   return res.data;
 }
+
+/**
+ * 发送询价（M6-1：经 ERP/SRM 命令端口；默认端口 = 模拟器，无真实副作用）。
+ *
+ * 服务端前置三条：①已审批（READY_TO_SEND）②二次确认（confirm=true）
+ * ③幂等键（Idempotency-Key 头）。缺一 ⇒ 4xx。
+ * 幂等键由调用方生成一次并复用（重试同一键 ⇒ 同一外部引用，不重复发送）。
+ */
+export async function sendRfqDraft(
+  rfqDraftId: string,
+  options: { confirm: boolean; idempotencyKey?: string },
+): Promise<RfqDraft> {
+  const idem = options.idempotencyKey ?? crypto.randomUUID();
+  const res = await httpClient.post<RfqDraft>(
+    `${BASE}/drafts/${rfqDraftId}/send`,
+    { confirm: options.confirm },
+    { headers: { "Idempotency-Key": idem } },
+  );
+  return res.data;
+}

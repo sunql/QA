@@ -38,6 +38,8 @@ export interface ProcurementPermissions {
   canApprove: boolean;
   /** 可取消草稿（当前后端不限角色 ⇒ 登录即可）。 */
   canCancel: boolean;
+  /** 可发送（**外部副作用** ⇒ 后端 sendRfq 要求审批角色，前端同口径）。 */
+  canSend: boolean;
   /** 首期恒 false：自动定标/签署/付款在代码层不可达。 */
   canProhibitedAuto: false;
 }
@@ -67,6 +69,8 @@ export function resolveProcurementPermissions(
     canDraft: true,
     canApprove: isApprover,
     canCancel: true,
+    // 发送是外部副作用（写 ERP/SRM）⇒ 与审批同白名单（后端 sendRfq 调 _assertApproverRoles）
+    canSend: isApprover,
     canProhibitedAuto: false,
   };
 }
@@ -95,6 +99,11 @@ export function availableRfqActions(
     case "PENDING_APPROVAL":
       // 审批动作需审批角色；创建人自己是创建人时仍显示（服务端会拒自批 ⇒ 前端提示）
       if (permissions.canApprove) actions.push("approve", "reject");
+      break;
+    case "READY_TO_SEND":
+      // M6-1：发送出口（服务端要求 已审批 + 二次确认 + 幂等键 + 审批角色）
+      if (permissions.canSend) actions.push("send");
+      if (permissions.canCancel) actions.push("cancel");
       break;
     default:
       break;

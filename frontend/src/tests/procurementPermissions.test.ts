@@ -42,6 +42,13 @@ describe("采购权限矩阵（设计稿 §6.6）", () => {
     expect(p.canRead).toBe(true);
   });
 
+  it("发送需审批角色（外部副作用，与后端 sendRfq 同白名单）", () => {
+    expect(resolveProcurementPermissions([]).canSend).toBe(false);
+    expect(resolveProcurementPermissions(["procurement"]).canSend).toBe(false);
+    expect(resolveProcurementPermissions(["procurement-approver"]).canSend).toBe(true);
+    expect(resolveProcurementPermissions(["admin"]).canSend).toBe(true);
+  });
+
   it("PROHIBITED_AUTO 首期恒不可达", () => {
     const p = resolveProcurementPermissions(["admin"]);
     expect(p.canProhibitedAuto).toBe(false);
@@ -61,6 +68,11 @@ describe("采购权限矩阵（设计稿 §6.6）", () => {
     ]);
     // 无审批角色 ⇒ PENDING_APPROVAL 不出审批按钮
     expect(availableRfqActions("PENDING_APPROVAL", plain, false)).toEqual([]);
+    // M6-1：READY_TO_SEND ⇒ 审批角色可发（无角色不出发送按钮）
+    expect(new Set(availableRfqActions("READY_TO_SEND", approver, false))).toEqual(
+      new Set(["send", "cancel"]),
+    );
+    expect(availableRfqActions("READY_TO_SEND", plain, false)).toEqual(["cancel"]);
     // 终态 ⇒ 无动作
     expect(availableRfqActions("REJECTED", approver, false)).toEqual([]);
     expect(availableRfqActions("CLOSED", approver, false)).toEqual([]);

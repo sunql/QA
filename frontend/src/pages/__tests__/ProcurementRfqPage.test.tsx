@@ -87,6 +87,49 @@ describe("ProcurementRfqPage", () => {
     expect(buttons.some((t) => t.toLowerCase().includes("send"))).toBe(false);
   });
 
+  it("M6-1：READY_TO_SEND + 审批角色 ⇒ 出现发送按钮（外部副作用需角色）", async () => {
+    authState.roles = ["procurement-approver"];
+    api.listRfqDrafts.mockResolvedValue([
+      makeDraft({ status: "READY_TO_SEND", version: 3 }),
+    ]);
+    api.getRfqDraft.mockResolvedValue(
+      makeDraft({ status: "READY_TO_SEND", version: 3 }),
+    );
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("READY_TO_SEND")).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: /详\s*情/ })[0]);
+    await waitFor(
+      () => {
+        expect(screen.getByText(/发\s*送询价/)).toBeTruthy();
+      },
+      { timeout: 4000 },
+    );
+  });
+
+  it("M6-1：READY_TO_SEND 但无审批角色 ⇒ 不出发送按钮", async () => {
+    authState.roles = [];
+    api.listRfqDrafts.mockResolvedValue([
+      makeDraft({ status: "READY_TO_SEND", version: 3 }),
+    ]);
+    api.getRfqDraft.mockResolvedValue(
+      makeDraft({ status: "READY_TO_SEND", version: 3 }),
+    );
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("READY_TO_SEND")).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: /详\s*情/ })[0]);
+    await waitFor(
+      () => {
+        expect(screen.getAllByText(/v\d+/).length).toBeGreaterThan(0);
+      },
+      { timeout: 4000 },
+    );
+    expect(screen.queryByText(/发\s*送询价/)).toBeNull();
+  });
+
   it("权限矩阵：无审批角色 ⇒ 不出审批按钮（前端入口裁剪）", async () => {
     authState.roles = [];
     api.listRfqDrafts.mockResolvedValue([

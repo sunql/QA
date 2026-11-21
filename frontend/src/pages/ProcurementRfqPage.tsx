@@ -38,6 +38,7 @@ import {
   decideRfqApproval,
   getRfqDraft,
   listRfqDrafts,
+  sendRfqDraft,
   submitRfqApproval,
   validateRfqDraft,
   type RfqDraft,
@@ -419,6 +420,34 @@ function buildActions(
     );
   }
   // PENDING_APPROVAL 的 approve/reject 在**审批人视角**渲染（自批禁止由服务端裁决）。
+  if (draft.status === "READY_TO_SEND" && allowed.has("send")) {
+    actions.push(
+      <Button
+        key="send"
+        type="primary"
+        danger
+        size="small"
+        onClick={() => {
+          // 二次确认（外部副作用）：幂等键在确认时生成一次并复用（重试不重复发送）
+          const idem = crypto.randomUUID();
+          Modal.confirm({
+            title: t("procurement.rfq.confirm.sendTitle"),
+            content: t("procurement.rfq.confirm.sendContent"),
+            okText: t("procurement.rfq.action.send"),
+            okButtonProps: { danger: true },
+            cancelText: t("common.cancel"),
+            onOk: () =>
+              act(
+                () => sendRfqDraft(id, { confirm: true, idempotencyKey: idem }),
+                t("procurement.rfq.done.send"),
+              ),
+          });
+        }}
+      >
+        {t("procurement.rfq.action.send")}
+      </Button>,
+    );
+  }
   if (draft.status === "PENDING_APPROVAL" && allowed.has("approve")) {
     actions.push(
       <Popconfirm key="approve" title={t("procurement.rfq.confirm.approve")}

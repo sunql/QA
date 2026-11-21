@@ -3602,21 +3602,25 @@ export const enUS = {
       cancel: "取消草稿",
       submit: "提交审批",
       approve: "通过",
-      reject: "驳回"
+      reject: "驳回",
+      send: "Send RFQ"
     },
     done: {
       validate: "校验完成",
       cancel: "草稿已取消",
       submit: "已提交审批",
       approve: "已通过",
-      reject: "已驳回"
+      reject: "已驳回",
+      send: "RFQ sent"
     },
     confirm: {
       validate: "执行校验？（不通过将转待更正）",
       cancel: "确认取消该草稿？",
       submit: "确认提交审批？（提交后进入审批人待办）",
       approve: "确认通过？",
-      reject: "确认驳回？"
+      reject: "确认驳回？",
+      sendTitle: "Send this RFQ?",
+      sendContent: "Sending is an external side effect: it goes through the ERP/SRM port (a simulator in M6-1, no real delivery). The draft becomes SENT and cannot be undone."
     },
     decisionsTitle: "决策链",
     decision: {

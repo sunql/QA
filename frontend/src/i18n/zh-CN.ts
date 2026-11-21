@@ -3542,21 +3542,25 @@ export const zhCN = {
       cancel: "取消草稿",
       submit: "提交审批",
       approve: "通过",
-      reject: "驳回"
+      reject: "驳回",
+      send: "发送询价"
     },
     done: {
       validate: "校验完成",
       cancel: "草稿已取消",
       submit: "已提交审批",
       approve: "已通过",
-      reject: "已驳回"
+      reject: "已驳回",
+      send: "询价已发送"
     },
     confirm: {
       validate: "执行校验？（不通过将转待更正）",
       cancel: "确认取消该草稿？",
       submit: "确认提交审批？（提交后进入审批人待办）",
       approve: "确认通过？",
-      reject: "确认驳回？"
+      reject: "确认驳回？",
+      sendTitle: "确认发送询价？",
+      sendContent: "发送是外部副作用：将通过 ERP/SRM 端口发出（M6-1 阶段为模拟器，不产生真实发送）。发送后草稿进入 SENT 终态，不可撤销。"
     },
     decisionsTitle: "决策链",
     decision: {

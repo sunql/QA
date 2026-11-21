@@ -1,5 +1,10 @@
 # I2 知识服务 → 100% 完成计划（2026-11-21 实测版）
 
+> **执行进度**：I2-A ✅ 已完成（commit `168e5b65`）——「找出可以供应不锈钢板的供应商」
+> 由 **0 证据 → 11 条 / GRAPH 5 + METRIC 5 + SQL 1（三通道 OK）**；
+> 「收货单宽表」⇒ 命中 `DWD_GOODS_RECEIPT_DTL`（前缀剥离生效）。
+> **I2-B（契约+冲突）与 I2-C（v2 索引+语料）待做**；RAG 路仍 `DEGRADED(v2_missing)`。
+
 > 基线 commit `0811ae43` ｜ dev 栈真实 HTTP 查询 ｜ 对应 §12-I2 与 §4.1–4.3
 
 ## 一、现状实测（四通道真实查询）
@@ -28,7 +33,7 @@
 
 ## 三、三批执行
 
-### I2-A 匹配召回（代码，0.5–1 天）★ 决定 80% 的收益
+### I2-A 匹配召回（✅ 已完成 2026-11-21，commit `168e5b65`）★ 决定 80% 的收益
 - **复用** `services/recall_keyword_anchor.selectAnchoredMatches`
   （2–6 字 n-gram、问句片段 ⊂ 类名/别名、`isExact`+`fragmentLength` 打分）——
   与 chat 召回（#157/#158）**同一套语义**，不另造。

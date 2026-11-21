@@ -11,12 +11,13 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.graph_traversal import getGraphTraversalService
 from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.knowledge_schemas import ProcurementGraphNeighborsRead
+from app.infrastructure.neo4j_client import BUSINESS_ENTITY_LABELS
 from app.services.graph_traversal_service import GraphTraversalService
 from app.services.knowledge.graph_neighbors import buildNeighborsView
 
@@ -39,7 +40,17 @@ async def getProcurementGraphNeighbors(
 ) -> ProcurementGraphNeighborsRead:
     """受控邻接：统一实体 → 白名单内的多跳邻居（nodes/edges/truncated 自证）。"""
     response.headers["Cache-Control"] = "no-store"
-    traversal = await service.traverse(entityType, entityKey, maxHops)
+    # 与 /graph/traverse 同口径：非法 label ⇒ 422（**不是 500**——M2-2b 初版漏了这层，
+    # 非法 label 抛 ValueError 直穿成 500，Q01 探针实证）
+    if entityType not in BUSINESS_ENTITY_LABELS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid entityType: {entityType!r}，合法值：{sorted(BUSINESS_ENTITY_LABELS)}",
+        )
+    try:
+        traversal = await service.traverse(entityType, entityKey, maxHops)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return buildNeighborsView(
         traversal.hops,
         startType=entityType,

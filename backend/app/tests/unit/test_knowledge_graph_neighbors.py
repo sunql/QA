@@ -107,3 +107,14 @@ def test_graph_neighbors_registered_in_both_wirings() -> None:
         assert "procurement_knowledge_graph.router" in code, (
             f"{rel} 未注册 graph/neighbors 路由（漏一边 ⇒ 那一侧 404）"
         )
+
+
+def test_invalid_label_returns_422_not_500() -> None:
+    """M2-2b 修正：非法 entityType ⇒ **422**（初版 ValueError 直穿成 500，Q01 探针实证）。"""
+    import inspect
+
+    from app.api.v1 import procurement_knowledge_graph as mod
+
+    src = inspect.getsource(mod.getProcurementGraphNeighbors)
+    assert "BUSINESS_ENTITY_LABELS" in src, "必须校验 entityType 白名单"
+    assert "HTTPException" in src and "422" in src, "非法 label 必须转 422"

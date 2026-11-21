@@ -33,17 +33,26 @@ _TEST_DB = "qa_metadata_test"
 # 破坏性夹具只允许指向测试库：qa_metadata_test / qa_metadata_test_solo / ..._t16。
 # 必须是完整库名或以 `_` 续名 —— `qa_metadata_testing` 之类的近似名不受信。
 _TEST_DB_PATTERN = re.compile(rf"^{_TEST_DB}($|_)")
+# 主机白名单：库名对不等于目标对 —— 远端（staging/共享）PG 上若恰好有
+# `qa_metadata_test*` 同名库，只校验库名会放行 ⇒ 迁移 DDL / TRUNCATE / 建删库
+# 会打到那台机器。CI 与本地都用回环地址（CI=127.0.0.1:5434，本地=localhost:5434）。
+_ALLOWED_TEST_DB_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
 
 _schemaReady = False
 
 
 def assertTestDatabase(url: str) -> None:
-    """库名白名单：conftest 每个用例 TRUNCATE 全库（CASCADE），点错库等于清生产。
+    """测试库双白名单：**库名** `qa_metadata_test*` + **主机必须是回环地址**。
 
-    Neo4j / Milvus 的测试夹具早就有同款 fail-fast（`_neo4j_support`、
-    `milvus_isolation`），PG 侧此前没有 —— 手滑把 `TEST_DATABASE_URL` 复制成
-    生产 DSN，整套集成测试会把本体与业务表删干净。
+    conftest 每个用例 TRUNCATE 全库（CASCADE），`_ensureSchema()` 还会跑
+    `alembic upgrade head`（DDL）；Neo4j / Milvus 的测试夹具早就有同款 fail-fast
+    （`_neo4j_support`、`milvus_isolation`），PG 侧此前只挡了库名、没挡主机。
+
+    确有需要连非回环的独立测试实例时，显式设置 `QA_TEST_DB_ALLOW_REMOTE=1`
+    —— 让"连远端测试库"成为一个**写出来的决定**，而不是默认行为。
     """
+    from sqlalchemy.engine import make_url
+
     from scripts.kpi_metric_db_guard import databaseNameOf
 
     name = databaseNameOf(url)
@@ -51,6 +60,14 @@ def assertTestDatabase(url: str) -> None:
         raise RuntimeError(
             f"拒绝在非测试库 {name!r} 上跑测试：夹具会 TRUNCATE 全库（CASCADE）。"
             f"TEST_DATABASE_URL 必须指向 {_TEST_DB}* 库。"
+        )
+    host = (make_url(url).host or "").lower()
+    if host not in _ALLOWED_TEST_DB_HOSTS and os.environ.get("QA_TEST_DB_ALLOW_REMOTE") != "1":
+        raise RuntimeError(
+            f"拒绝在非回环主机 {host!r} 上跑测试：夹具会 TRUNCATE 全库，"
+            f"`_ensureSchema()` 还会跑 alembic DDL。允许的主机："
+            f"{sorted(_ALLOWED_TEST_DB_HOSTS)}；确需连远端测试实例请显式设置 "
+            f"QA_TEST_DB_ALLOW_REMOTE=1。"
         )
 
 
@@ -62,7 +79,11 @@ def resolveTestDatabaseUrl() -> str:
         return explicit
     dbUrl = os.environ.get("DATABASE_URL", "")
     if dbUrl.startswith("postgresql"):
-        return re.sub(r"/[^/]*$", f"/{_TEST_DB}", dbUrl)
+        # 改写的是**库名**，主机/端口原样保留 ⇒ 改写后必须再过一次双白名单
+        # （否则「生产主机的 DATABASE_URL」会带着测试库名被放行）。
+        rewritten = re.sub(r"/[^/]*$", f"/{_TEST_DB}", dbUrl)
+        assertTestDatabase(rewritten)
+        return rewritten
     raise RuntimeError(
         "真实 PG 测试需要 TEST_DATABASE_URL（或 DATABASE_URL 指向真实 PostgreSQL），"
         f"禁止 sqlite 内存库。示例：TEST_DATABASE_URL=postgresql+asyncpg://user:pw@localhost:5432/{_TEST_DB}"

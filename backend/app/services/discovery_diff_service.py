@@ -18,8 +18,11 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.exceptions import ValidationError
 from app.services.semantic_compiler import compileManifest
+from app.services.semantic_compiler_bindings import SourceBindingCompileError
 from app.services.semantic_diff_service import SemanticDiff, diffManifests
+from app.services.semantic_domain_slice import sliceManifestToDomain
 from app.services.semantic_registry_service import semanticRegistry
 
 
@@ -43,14 +46,27 @@ async def computeOntologyDiff(
     没有 ACTIVE 发布时基线取空 ⇒ 当前全部类/属性表现为 `ADDITIVE`
     （「还没发布过」是正常状态，不是错误）。
 
-    ⚠️ `domainCode` **只用于定位基线**（取该域的 ACTIVE 发布），**不裁剪候选侧**
-    ——候选是全域编译结果（`compileManifest` 无域参数）⇒ 比较范围恒为全域。
-    该事实由 `scope="GLOBAL"` 如实披露（代码审查 M-2），避免调用方把
-    `domainCode=SALES` 误读成「只看 SALES 域的差异」。
+    ⚠️ **两侧必须同口径**：按域发布后，域 ACTIVE 行的正文是**切片**
+    （D-10），而候选是全域编译结果 ⇒ 不裁剪候选侧的话，
+    「切片 vs 全量」会把**别的域**的成千上万个类/JOIN/绑定全报成 `ADDITIVE`
+    （评审看到「新增 3000 个类」等于什么都没看到），而且**他域的破坏性删除
+    在两边都不存在 ⇒ 彻底不可见**。
+
+    ⇒ 候选侧按**同一个域**切一次（切片是幂等的 ⇒ 与基线同宇宙），
+    并用 `scope` 如实披露比较范围（`DOMAIN` / `GLOBAL`）。
     """
 
     baseline = await semanticRegistry.getActive(session, domainCode=domainCode)
-    candidate = await compileManifest(session)
+    try:
+        candidate = await compileManifest(session)
+    except SourceBindingCompileError as exc:
+        # 源绑定数据不满足发布不变量（表达式不安全 / 归属错配）——
+        # 这是**治理数据问题**，调用方能修 ⇒ 给一条说得清「哪条绑定」的 422，
+        # 而不是让未处理异常变成 500（丢掉诊断信息）。
+        raise ValidationError(f"源绑定数据不满足发布约束：{exc}") from exc
+    scopeDomain = baseline.domain_code if baseline is not None else domainCode
+    if scopeDomain is not None:
+        candidate = sliceManifestToDomain(candidate, scopeDomain)
     baseManifest: dict[str, Any] = baseline.manifest if baseline is not None else {}
     diff = diffManifests(baseManifest, candidate)
     return OntologyDiffResult(
@@ -58,6 +74,6 @@ async def computeOntologyDiff(
         baselineVersion=baseline.version if baseline is not None else None,
         baselineHash=baseline.manifest_hash if baseline is not None else None,
         baselineDomainCode=baseline.domain_code if baseline is not None else None,
-        scope="GLOBAL",
+        scope="DOMAIN" if scopeDomain is not None else "GLOBAL",
         diff=diff,
     )

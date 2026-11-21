@@ -112,6 +112,7 @@ async def test_delete_domain_with_release_snapshot_returns_409(
             domain_code="XDOMREL",
             version="2026.11.09-1",
             manifest_json={"schemaVersion": "v1", "classes": [], "joins": []},
+            schema_version="v1",
             manifest_hash="0" * 64,
         )
     )

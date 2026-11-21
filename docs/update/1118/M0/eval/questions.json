@@ -1,0 +1,88 @@
+{
+  "version": "v1",
+  "created": "2026-11-18",
+  "source": "《智能采购平台详细设计方案_V0.3》附录 B：建议的首期采购问题验收集（Q01–Q07）",
+  "notes": [
+    "v1 只覆盖附录 B 的 Q01–Q07（M0.4 §4.6 的「最低集」）；问卷 D 回收后再升 v2 补 5 类 × ≥2 题。",
+    "v1 把 v0 的「指定物料 / 这些供应商」换成具体编码：v0 实跑时模型因缺实体而拒答（3 次重试后抛 Nl2SqlError），问题本身不可执行。实体编码是占位值，评的是开关两态一致性，不是答案对错。",
+    "Q03 走 NL2SQL 负路径：采购域本体没有质量/合规事实表，两态都应产出「无法回答」类查询 ⇒ 检验开关不会把「数据缺口」变成「有答案」。答案语义正确性归 M2。",
+    "Q04 走 RAG + Rule、Q06/Q07 走 Workflow，均不经过语义发布开关的 NL2SQL 路径 ⇒ 不评。",
+    "改了任何一题都必须升 version 并重算 sha256；脚本会拒绝摘要不符的问题集（M0.4 §4.6）。"
+  ],
+  "questions": [
+    {
+      "id": "Q01",
+      "question": "哪些供应商可以供应物料编码 A0001 的物料？",
+      "category": "supply_relation",
+      "channel": "nl2sql",
+      "parityApplicable": true,
+      "negative": false,
+      "allowedNoAnswer": false,
+      "acceptanceFocus": "物料消歧、供应关系来源、数据更新时间"
+    },
+    {
+      "id": "Q02",
+      "question": "供应商 S0001、S0002、S0003 近 12 个月的交付表现如何？",
+      "category": "metric",
+      "channel": "nl2sql",
+      "parityApplicable": true,
+      "negative": false,
+      "allowedNoAnswer": false,
+      "acceptanceFocus": "指标口径、时间窗口、缺失数据提示"
+    },
+    {
+      "id": "Q03",
+      "question": "供应商 S0001、S0002、S0003 是否有重大质量或合规风险？",
+      "category": "risk_compliance",
+      "channel": "nl2sql",
+      "parityApplicable": true,
+      "negative": false,
+      "allowedNoAnswer": false,
+      "acceptanceFocus": "数据缺口识别（采购域无质量/合规事实表）、两态口径一致、权限过滤"
+    },
+    {
+      "id": "Q04",
+      "question": "当前采购制度对该品类询价有哪些要求？",
+      "category": "policy",
+      "channel": "rag",
+      "parityApplicable": false,
+      "notApplicableReason": "RAG + Rule 通道，不经过语义发布开关的 NL2SQL 路径（v0 不评）",
+      "negative": false,
+      "allowedNoAnswer": false,
+      "acceptanceFocus": "有效版本、页码/条款引用"
+    },
+    {
+      "id": "Q05",
+      "question": "对比供应商 S0001、S0002、S0003 的历史采购价格和交期。",
+      "category": "price_compare",
+      "channel": "nl2sql",
+      "parityApplicable": true,
+      "negative": false,
+      "allowedNoAnswer": false,
+      "acceptanceFocus": "币种/税率/计量单位归一、样本范围"
+    },
+    {
+      "id": "Q06",
+      "question": "帮我准备一份询价草稿。",
+      "category": "workflow",
+      "channel": "workflow",
+      "parityApplicable": false,
+      "notApplicableReason": "Copilot + Command Draft（M5 通道），不经 NL2SQL",
+      "negative": false,
+      "allowedNoAnswer": false,
+      "acceptanceFocus": "只生成草稿、不触发发送"
+    },
+    {
+      "id": "Q07",
+      "question": "确认后发送询价。",
+      "category": "workflow",
+      "channel": "workflow",
+      "parityApplicable": false,
+      "notApplicableReason": "Workflow + Approved Command（M6 通道），不经 NL2SQL",
+      "negative": false,
+      "allowedNoAnswer": false,
+      "acceptanceFocus": "审批、二次确认、幂等、外部回执"
+    }
+  ],
+  "sha256": "d70740cc0095955423c6f4d5e65fd11e49b53c0453b208a10e489479842632d8"
+}

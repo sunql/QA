@@ -18,6 +18,7 @@ import dataclasses
 
 import pytest
 
+from app.domain.semantic_manifest_schema import SCHEMA_VERSION
 from app.services.semantic_registry_service import SemanticReleaseIntegrityError
 from app.services.semantic_schema_adapter import (
     SemanticSnapshotMalformedError,
@@ -86,7 +87,7 @@ def _prop(
 def _manifest() -> dict:
     """三个类：Supplier（被继承）、PurchaseOrder（继承 Supplier）、Material。"""
     return {
-        "schemaVersion": "v1",  # 与 SCHEMA_VERSION 一致
+        "schemaVersion": SCHEMA_VERSION,  # 与代码当前版本一致
         "domains": [],
         "classes": [
             {
@@ -704,6 +705,11 @@ class Test顺序确定性:
     JOIN 顺序来自自增 id（插入序 ⇒ 跨环境不同）⇒ 直读侧的顺序**本身不是契约**。
     快照侧必须自己给出**确定的**顺序，否则同一份发布在不同机器上会渲染出
     不同的 prompt ⇒ 发布快照的字节确定性就白做了。
+
+    A4 之后的职责划分：**渲染器**（`nl2sql_schema.buildSchemaText`）按共享
+    排序键统一排两侧；**复原层**只做「manifest 顺序 → 实体顺序」的忠实搬运，
+    仍不排序（下面的 `test_列顺序忠实于manifest里属性的顺序` 钉这一半）。
+    渲染顺序本身由 `test_semantic_render_order.py` 守卫。
     """
 
     def test_同一份manifest两次复原渲染出逐字节相同的文本(self) -> None:
@@ -720,18 +726,16 @@ class Test顺序确定性:
         assert firstText.encode("utf-8") == secondText.encode("utf-8")
 
     def test_列顺序忠实于manifest里属性的顺序(self) -> None:
-        """复原层**不额外排序**：列顺序 = manifest 里该类 properties 的顺序。
+        """复原层**不额外排序**：实体上的列顺序 = manifest 里该类 properties 的顺序。
 
-        为什么钉这条：快照侧的列序若由复原层自己排（而不是由编译器排），
-        排序键就换成了「复原层看得见的东西」—— 一旦复原层引入了新字段
-        （比如改按 sourceColumn 排），列序就会在**不重新发布**的情况下改变
-        ⇒ 已发布的快照不再是稳定契约。
+        为什么钉这条：复原层若自己排（而不是忠实搬运），排序键就换成了
+        「复原层看得见的东西」—— 一旦复原层引入了新字段（比如改按
+        sourceColumn 排），manifest 与复原视图之间的字段面就悄悄分叉，
+        `_assertByteIdentical` 那类对比也会被掩盖。
 
-        「编译器按属性名排序」那一半由 P1a 的 golden manifest 反向守卫负责
-        （`test_semantic_manifest_golden.py`）。
+        A4 之后渲染器会按共享键重排 —— 所以这里**断言实体顺序而不是文本**：
+        文本顺序由 `test_semantic_render_order.py` 的 V3 守卫。
         """
-        from app.services.nl2sql_schema import buildSchemaText
-
         manifest = _manifest()
         supplier = manifest["classes"][0]
         assert [p["propertyName"] for p in supplier["properties"]] == [
@@ -741,7 +745,9 @@ class Test顺序确定性:
         # 手工把属性倒序 —— 复原层不该把它排回来。
         supplier["properties"] = list(reversed(supplier["properties"]))
 
-        classes, joins = restoreSnapshotSchema(manifest, ["Supplier"])
-        text = buildSchemaText(classes, joins=joins)
+        classes, _joins = restoreSnapshotSchema(manifest, ["Supplier"])
 
-        assert text.index("SUPPLIER_NAME") < text.index("SUPPLIER_CODE")
+        assert [p.property_name for p in classes[0].properties] == [
+            "SUPPLIER_NAME",
+            "SUPPLIER_CODE",
+        ], "复原层必须忠实搬运 manifest 顺序，排序是渲染器的职责（A4）"

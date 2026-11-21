@@ -1,120 +1,185 @@
-"""seed_business_objects 幂等写入 6 行 + 可通过 API 查到。"""
+"""seed_business_objects 幂等写入 **5 行** + 可通过 API 查到。
+
+## 契约（SSOT = ``backend/scripts/seed_business_objects.py`` 的模块 docstring）
+
+- **SUPPLIER / MATERIAL / PO / GR 四行必 seed**；
+- **IQC** 仅当 ``ontology_class`` 已有 ``IncomingInspection`` 时 seed；
+- **NCR 自 0133 收紧 ``header_class_id`` NOT NULL 后不再 seed** —— 无本体类的
+  BO 无法落库，其业务语义待本体建模后经 ``/business-objects`` 正式创建；
+- **类缺失 ⇒ 该行整行跳过**（不是「建行并留 NULL」）：``_seed_rows`` 过滤掉
+  ``header_class_id is None`` 的行。
+
+## 为什么本文件 2026-11-18 重写
+
+旧断言（6 行含 NCR / header_class_id 为 NULL / 「conftest 不 re-seed」）
+三处都与现行契约不符：
+
+1. **行数是 5 不是 6** —— NCR 自 0133 起不再 seed（脚本 docstring 明写）；
+2. **header_class_id 不再是 NULL** —— 集成测试的 autouse ``warmAgentCaches``
+   每个用例前会补种 5 个最小 header 类（``app/tests/_pg_support.seedHeaderOntologyClasses``），
+   所以 BO 行总能解析到 header；
+3. **「先建行留 NULL、后回填」的场景已不存在** —— 0133 之后类缺失是**整行跳过**，
+   不是建行留 NULL ⇒ 回归场景改为「类缺失 ⇒ 无行；类到达 ⇒ 行被建出来且绑定正确」。
+
+重写是**把断言对齐当前设计**，不是放宽断言：行数、绑定、幂等性、图标签
+全部仍逐项硬断言。
+"""
+from __future__ import annotations
+
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text as _text
 
 from app.domain.models import BusinessObject
-from scripts.seed_business_objects import seedBusinessObjects
+from scripts.seed_business_objects import HEADER_CLASS_NAMES, seedBusinessObjects
+
+# BO code → 本体类 class_name（graph_label 也等于 class_name）
+_EXPECTED_HEADERS = {
+    "SUPPLIER": "Supplier",
+    "MATERIAL": "ItemMaster",
+    "PO": "PurchaseOrder",
+    "GR": "Receipt",
+    "IQC": "IncomingInspection",
+}
+
+# 0133 起不再 seed 的 code（无本体类 ⇒ BO 无法落库）
+_RETIRED_CODES = ("NCR",)
+
+
+async def _insertHeaderClasses(dbSession) -> None:
+    """补回 5 个 header 本体类。
+
+    ``source_table`` **必须与 ``seed_ontology.CLASSES`` 同款**：后续调
+    ``seed_ontology.seed()`` 的用例经 ``_seedClasses`` 按 source_table 查重复用，
+    缺了会撞 ``uq_ontology_class_name_version``（class_name, version 唯一约束）。
+    CLASSES 没有的类（IncomingInspection）source_table 置 None，无碰撞面。
+    """
+    import seed_ontology
+
+    sourceTableByName = {c["class_name"]: c["source_table"] for c in seed_ontology.CLASSES}
+    for name in HEADER_CLASS_NAMES:
+        await dbSession.execute(
+            _text(
+                """
+                INSERT INTO ontology_class
+                    (class_name, source_table, object_type, version,
+                     valid_from, created_by, created_time, updated_time)
+                VALUES (:cn, :st, :ot, 1, now(), 'seed-test-header', now(), now())
+                """
+            ),
+            {
+                "cn": name,
+                "st": sourceTableByName.get(name),
+                "ot": "Master" if name in ("Supplier", "ItemMaster") else "Transaction",
+            },
+        )
+    await dbSession.commit()
 
 
 @pytest.mark.asyncio
-async def test_first_run_inserts_six_mappings(dbSession):
+async def test_first_run_inserts_five_mappings(dbSession):
+    """5 行必 seed（SUPPLIER/MATERIAL/PO/GR/IQC）；NCR 不 seed。"""
     inserted = await seedBusinessObjects(dbSession)
-    assert inserted == 6
+    assert inserted == 5
 
     rows = (await dbSession.execute(select(func.count()).select_from(BusinessObject))).scalar()
-    assert rows == 6
+    assert rows == 5
+
+    codes = sorted((await dbSession.execute(select(BusinessObject.code))).scalars().all())
+    assert codes == ["GR", "IQC", "MATERIAL", "PO", "SUPPLIER"]
+    for retired in _RETIRED_CODES:
+        assert retired not in codes, f"{retired} 自 0133 起不再 seed（无本体类 ⇒ BO 无法落库）"
 
 
 @pytest.mark.asyncio
 async def test_second_run_is_idempotent(dbSession):
-    """upsert 语义：第二次执行不改变业务对象的最终状态（每行 ON CONFLICT DO UPDATE 触发）.
+    """upsert 语义：第二次执行不改变业务对象的最终状态（每行 ON CONFLICT DO UPDATE 触发）。
 
     注意：ON CONFLICT DO UPDATE 的 rowcount 包含所有冲突行（即使值未变），所以
-    inserted2 == 6 是 PostgreSQL 的正常行为；断言改为「数据状态一致 + 行数仍为 6」。
+    inserted2 == 5 是 PostgreSQL 的正常行为；断言改为「数据状态一致 + 行数仍为 5」。
     """
-    from sqlalchemy import text as _text
-
     await seedBusinessObjects(dbSession)
     inserted2 = await seedBusinessObjects(dbSession)
-    assert inserted2 == 6  # 6 行均被 DO UPDATE 触发
+    assert inserted2 == 5  # 5 行均被 DO UPDATE 触发
 
-    # 业务不变量：行数 = 6 + 6 行的 graph_label 等于硬编码期望值
-    # 用 raw SQL 绕开 SQLAlchemy ORM identity map 缓存（与 test_backfills 同因）
-    raw = (await dbSession.execute(
-        _text("SELECT code, graph_label, header_class_id FROM business_object ORDER BY code")
-    )).all()
+    # 用 raw SQL 绕开 SQLAlchemy ORM identity map 缓存（seed 内部 commit 后，
+    # session 的 BusinessObject 缓存与最新行状态可能不一致）
+    raw = (
+        await dbSession.execute(
+            _text("SELECT code, graph_label, header_class_id FROM business_object ORDER BY code")
+        )
+    ).all()
     by_code = {code: (label, hcid) for code, label, hcid in raw}
 
-    for code, expected_label in [
-        ("SUPPLIER", "Supplier"),
-        ("MATERIAL", "ItemMaster"),
-        ("PO", "PurchaseOrder"),
-        ("GR", "Receipt"),
-        ("IQC", "IncomingInspection"),
-    ]:
-        assert by_code[code][0] == expected_label
-        # ontology_class 此时为空（conftest 不 re-seed），header_class_id 应为 NULL
-        assert by_code[code][1] is None
-    assert by_code["NCR"][0] is None
-    assert by_code["NCR"][1] is None
+    assert len(by_code) == 5
+    for code, className in _EXPECTED_HEADERS.items():
+        assert by_code[code][0] == className
+        # 集成测试的 autouse warmAgentCaches 已补种 5 个 header 类 ⇒ 必非 NULL
+        assert by_code[code][1] is not None, f"{code}.header_class_id 不应为 NULL"
 
 
 @pytest.mark.asyncio
-async def test_backfills_header_class_id_when_ontology_added_later(dbSession):
-    """回归测试：模拟「先 seed business_object、ontology_class 后到」的真实场景.
+async def test_missing_header_class_skips_row_and_creates_it_when_class_arrives(dbSession):
+    """回归测试：类缺失时**整行跳过**，类到达后再 seed ⇒ 行被建出来且绑定正确。
 
-    场景：
-      1. ontology_class 为空（迁移未跑）→ 第一次 seed 把 5 行的 header_class_id 写成 NULL
-      2. 迁移补上 5 个 ontology_class 行
-      3. 第二次 seed 应回填 header_class_id（不是 DO NOTHING 静默跳过）
+    这是 0133 之后的现行语义。旧实现的 bug 是「ON CONFLICT DO NOTHING 导致
+    header_class_id 永远不回填」——在 NOT NULL 收紧后该 bug 表现为「类缺失时
+    建出一堆 header_class_id 为 NULL 的坏行」；现在的契约是**不建行**，
+    类到位后 seed 才建，且绑定到正确的类 id。
 
-    旧实现的 bug：ON CONFLICT DO NOTHING 导致 step 3 不写回，header_class_id 永远为 NULL。
+    步骤：
+      1. 清掉 BO 行与 5 个 header 类
+      2. seed ⇒ 0 行（类缺失 ⇒ 整行跳过）
+      3. 补回 5 个本体类
+      4. seed ⇒ 5 行，header_class_id 逐个对上类 id
+      5. 再 seed ⇒ 行数与绑定不变（幂等）
     """
-    from app.domain.models import OntologyClass
-
-    # step 1: ontology_class 空，seed 一次（header_class_id 全 NULL）
-    inserted1 = await seedBusinessObjects(dbSession)
-    assert inserted1 == 6  # 全部 DO UPDATE（conftest 已 pre-seed 6 行）
-
-    rows = (await dbSession.execute(select(BusinessObject))).scalars().all()
-    by_code_before = {r.code: r for r in rows}
-    # 没有 ontology_class 时 header_class_id 应为 NULL
-    assert by_code_before["SUPPLIER"].header_class_id is None
-    assert by_code_before["MATERIAL"].header_class_id is None
-
-    # step 2: 补 5 行 ontology_class（模拟 0039/0040 迁移就绪）
-    for class_name, source in [
-        ("Supplier", "DWD_SUPPLIER"),
-        ("ItemMaster", "DWD_MATERIAL"),
-        ("PurchaseOrder", "DWD_PURCHASE_ORDER"),
-        ("Receipt", "DWD_GOODS_RECEIPT"),
-        ("IncomingInspection", "DWD_INCOMING_INSPECTION"),
-    ]:
-        dbSession.add(
-            OntologyClass(
-                class_name=class_name,
-                source_table=source,
-                object_type="Master" if class_name in ("Supplier", "ItemMaster") else "Transaction",
-                valid_from=__import__("datetime").datetime.now(__import__("datetime").UTC),
-            )
-        )
+    # 1) 清 BO 行 + 5 个 header 类（BO 先删：header_class_id 是 FK ON DELETE RESTRICT）
+    await dbSession.execute(_text("DELETE FROM business_object"))
+    placeholders = ", ".join(f":c{i}" for i in range(len(HEADER_CLASS_NAMES)))
+    params = {f"c{i}": name for i, name in enumerate(HEADER_CLASS_NAMES)}
+    await dbSession.execute(
+        _text(f"DELETE FROM ontology_class WHERE class_name IN ({placeholders})"), params
+    )
     await dbSession.commit()
 
-    # step 3: 重跑 seed（应回填 5 个 NULL → 非 NULL）
-    await seedBusinessObjects(dbSession)
+    # 2) 类缺失 ⇒ 一行都不建
+    inserted1 = await seedBusinessObjects(dbSession)
+    assert inserted1 == 0
+    rows1 = (await dbSession.execute(_text("SELECT COUNT(*) FROM business_object"))).scalar()
+    assert rows1 == 0, "类缺失时不应建出 header_class_id 为 NULL 的坏行"
 
-    # 用 raw SQL 验证 DB 真实状态，绕开 SQLAlchemy 2.x ORM identity map 缓存
-    # （seedBusinessObjects 内部 commit 后，session 的 BusinessObject 缓存与最新行
-    # 状态不一致；用 text() 走直连拿权威值）
-    from sqlalchemy import text as _text
+    # 3) 类到达
+    await _insertHeaderClasses(dbSession)
 
-    raw = (await dbSession.execute(
-        _text("SELECT code, header_class_id FROM business_object ORDER BY code")
-    )).all()
-    by_code_after = {code: hcid for code, hcid in raw}
+    # 4) 再 seed ⇒ 5 行，绑定到正确的类 id
+    inserted2 = await seedBusinessObjects(dbSession)
+    assert inserted2 == 5
 
-    classes_raw = (await dbSession.execute(
-        _text("SELECT class_name, id FROM ontology_class")
-    )).all()
-    classes = {cn: cid for cn, cid in classes_raw}
+    raw = (
+        await dbSession.execute(
+            _text("SELECT code, header_class_id FROM business_object ORDER BY code")
+        )
+    ).all()
+    by_code = {code: hcid for code, hcid in raw}
+    class_ids = {
+        cn: cid
+        for cn, cid in (
+            await dbSession.execute(_text("SELECT class_name, id FROM ontology_class"))
+        ).all()
+    }
+    assert len(by_code) == 5
+    for code, className in _EXPECTED_HEADERS.items():
+        assert by_code[code] == class_ids[className], f"{code} 绑定错类"
 
-    assert by_code_after["SUPPLIER"] == classes["Supplier"]
-    assert by_code_after["MATERIAL"] == classes["ItemMaster"]
-    assert by_code_after["PO"] == classes["PurchaseOrder"]
-    assert by_code_after["GR"] == classes["Receipt"]
-    assert by_code_after["IQC"] == classes["IncomingInspection"]
-    # NCR 故意保持 NULL（无本体类）
-    assert by_code_after["NCR"] is None
+    # 5) 幂等：再 seed 不改行数也不改绑定
+    inserted3 = await seedBusinessObjects(dbSession)
+    assert inserted3 == 5
+    raw2 = (
+        await dbSession.execute(
+            _text("SELECT code, header_class_id FROM business_object ORDER BY code")
+        )
+    ).all()
+    assert {code: hcid for code, hcid in raw2} == by_code
 
 
 @pytest.mark.asyncio
@@ -123,19 +188,16 @@ async def test_codes_are_uppercase(dbSession):
     codes = sorted(
         (await dbSession.execute(select(BusinessObject.code))).scalars().all()
     )
-    assert codes == ["GR", "IQC", "MATERIAL", "NCR", "PO", "SUPPLIER"]
+    assert codes == ["GR", "IQC", "MATERIAL", "PO", "SUPPLIER"]
 
 
 @pytest.mark.asyncio
 async def test_graph_labels_resolve_to_class_names(dbSession):
-    """5 个业务对象 graph_label = header_class.class_name；NCR 为 NULL."""
+    """5 个业务对象 graph_label = header_class.class_name；NCR 根本不存在。"""
     await seedBusinessObjects(dbSession)
     rows = (await dbSession.execute(select(BusinessObject))).scalars().all()
     by_code = {r.code: r for r in rows}
-    assert by_code["SUPPLIER"].graph_label == "Supplier"
-    assert by_code["MATERIAL"].graph_label == "ItemMaster"
-    assert by_code["PO"].graph_label == "PurchaseOrder"
-    assert by_code["GR"].graph_label == "Receipt"
-    assert by_code["IQC"].graph_label == "IncomingInspection"
-    assert by_code["NCR"].graph_label is None
-    assert by_code["NCR"].header_class_id is None
+    for code, className in _EXPECTED_HEADERS.items():
+        assert by_code[code].graph_label == className
+    for retired in _RETIRED_CODES:
+        assert retired not in by_code, f"{retired} 不应存在（0133 起不 seed）"

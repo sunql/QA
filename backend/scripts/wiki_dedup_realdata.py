@@ -28,7 +28,7 @@
 精确识别任务与挂账页，另按**内容派生的确定性 page_id** 清掉「上次跑到第 6 步、
 台账已删、页成了孤儿」的情况。绝不 TRUNCATE 全库，也不碰非本脚本的数据。
 
-写库闸：只允许打到 ``qa_metadata_test``（端口 5433）。生产库 ``qa_metadata`` 曾
+写库闸：只允许打到 ``qa_metadata_test``（测试库 SSOT 端口 **5434**）。生产库 ``qa_metadata`` 曾
 发生过整库误删事故（见 memory: qa-system-pg-wipe-incident），本脚本**拒绝**写入
 任何非测试库。注意 Alembic/settings 只认 ``DATABASE_URL``，``TEST_DATABASE_URL``
 会被 Alembic 静默忽略（memory: qa-system-alembic-targets-prod），故运行命令必须
@@ -38,7 +38,7 @@
 —— 这里刻意不写死具体 head：唯一索引拆到 0062 之后 head 会继续往后走，本脚本的
 前置条件始终是「0061 的那两列在」）：
 
-    DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' \\
+    DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5434/qa_metadata_test' \\
         .venv/bin/python -m scripts.wiki_dedup_realdata
 """
 
@@ -161,8 +161,9 @@ def _guardDatabaseUrl() -> str:
     databaseUrl = os.environ.get("DATABASE_URL", "").strip()
     if not databaseUrl:
         raise SystemExit(
-            "未设置 DATABASE_URL。本脚本会写数据，只允许打到 qa_metadata_test，请显式指定：\n"
-            "  DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/"
+            "未设置 DATABASE_URL。本脚本会写数据，只允许打到 qa_metadata_test（端口 5434），"
+            "请显式指定：\n"
+            "  DATABASE_URL='postgresql+asyncpg://<user>:<pwd>@localhost:5434/"
             "qa_metadata_test' \\\n"
             "      .venv/bin/python -m scripts.wiki_dedup_realdata"
         )

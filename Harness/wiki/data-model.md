@@ -12,6 +12,31 @@
 
 ### 后续表（Phase 2-3）
 - `ontology_class`：本体类，`source_table` 映射物理表，支持 `parent_class_id` 继承，`version` + `valid_from/to` 版本。
+  **实际列清单（2026-11-19 生产实测核对，与 ORM `models.py:236` 一致）**：
+  `id, class_name, class_alias, description, source_table, parent_class_id, created_by,
+  created_time, updated_time, version, valid_from, valid_to, object_type, object_owner`。
+  ⚠️ **该表没有 `is_active` / `is_stub` / `datasource_id` 列**——写 SQL 前别想当然（2026-11-19 一次猜列翻车实录）。
+  - **停用/恢复只能走软删除墓碑**：置 `valid_to = now()` 即从召回消失
+    （`ontology_service.listClasses` 只返回 `valid_to IS NULL` 的行）；复活必须**原地**把
+    `valid_to` 置回 NULL（id 不变 ⇒ Milvus 向量仍指向同一个 id，换行=换 class_id=白干）。
+  - 🔴 **本体层无「类→数据源」绑定 ⇒ 召回不按会话数据源过滤**：`chat_recall.py:224` /
+    `chat_service.py:996` 的 `listClasses` 全局取类，SQL 却在会话选定数据源上执行、
+    值域采样也打在当前源上 ⇒ **登记在 A 源的物理表、在 B 源会话里被召回**，planner 一选就
+    ORA-00942（每问还附赠 6 次值域采样空往返）。事故实例：2026-11-19 生产
+    「公司目前有多少供应商」——`DIM_SUPPLIER`（THBI 真表）因向量排序洗牌掉出 topK，
+    planner 被校验器引导到跨源幽灵类 `main_data_supplier` ⇒ 全链失败。
+    **根治 = 召回入口按 `datasourceId` 过滤候选类**（批次待立）；止血 = 对 THBI 查不到的
+    跨源类置 `valid_to` 墓碑。V0.3 计划已立案的「本体无类→源绑定」真空洞在现有多源问答的实例。
+  **采购域 5 个类的物理表绑定（2026-11-18 校准，迁移 `0153`）**：`Supplier`→`BPSUPPLIER`、`ItemMaster`→`ITMMASTER`、`PurchaseOrder`→`PORDER`、`Receipt`→`PRECEIPT`（**ERP 业务表词表**）、`IncomingInspection`→**NULL**（来料检验无物理表）。
+  ⚠️ 迁移 `0039`/`0040` 当年写的是 **DWD_\* 词表**（`DWD_SUPPLIER` 等）—— 那张表在系统的查询目标里**不存在**，且与本体 SSOT（`backend/seed_ontology.py` 的 `CLASSES`）**分叉** ⇒ NL2SQL 指向不存在的表 + 干净库上 `seed_ontology.seed()` 撞 `uq_ontology_class_name_version` 唯一约束。`0153` 已校准（**纯数据迁移，无 DDL** ⇒ `alembic check` / drift 不受影响）。
+  **绑定词表的 SSOT = `seed_ontology.CLASSES`**；`seed_ontology._seedClasses` 按 **`source_table`** 查重复用 ⇒ 两个种子的 `source_table` 必须同款，否则干净库上 seed 直接崩。门禁：`backend/scripts/procurement_class_source_table_realdata.py`（干净库真跑迁移链 + 断言无 `DWD_*` 残留 + 断言 seed 复用不崩）。
+  ⚠️ **DWD 族存在「两套并行命名」，同名 ≠ 同表（2026-11-18 源侧实测）**：`DWD_*` 类分两族 ——
+  **有效族**（`_DTL` 命名，如 `DWD_PURCHASE_ORDER_DTL` 1,023,442 行）与
+  **墓碑族**（`_LINE` 命名，如 `DWD_PURCHASE_ORDER_LINE` 927,648 行，`valid_to=2026-09-19`）——
+  二者是**不同的物理表**，且 `_DTL` 族**缺** `PROMISED_RECEIPT_DATE`/`ORDER_QTY`/`LINE_AMOUNT_EXCL_TAX`/`MATERIAL_CODE`/`RECEIPT_DATE`/`RECEIPT_NO`。
+  12 条采购 KPI 的公式引用的是**墓碑族** ⇒ 源绑定清单 = 34 有效候选 **＋ 7 个复活墓碑类 = 41 类**（[变更 SSOT](../changes/2026-11-18-procurement-m0-questionnaire-intake/summary.md)）。
+  墓碑族的物理列数 = 本体属性数（抽样 `missing=0`）⇒ **复活无列级缺口**。
+  另：`DWD_ARRIVAL_ORDER_DTL`（**81,754 行**，`ARR_QTY`/`QUALIFIED_QTY`/`INSPECT_DATE` 100% 填充）**就是来料检验的落地表** —— 与上面 `IncomingInspection→NULL`（ERP 业务表词表口径）不冲突，是两套词表。
 - `ontology_property`：属性，`data_type`、`is_primary_key`、`is_foreign_key`、`ref_class_id`、`source_column`。
 - `ontology_metric`：指标，**技术形态 SSOT**。现有列：`formula`(Text NN，逃生舱)、`agg_function`(varchar20 default 'SUM')、`target_class_id`(FK→ontology_class，单值，语义=role=BASE)、`dimension_defaults`(JSON，**零消费者**)。
   🔴 **该表在 NL2SQL 链路零消费者**（`nl2sql_service.py:34-35` 不 import、`nl2sql_prompts.py` 0 个 "etric"、`buildSchemaText` 只渲染类、`chat_recall` 用 `typeFilter="class"`）⇒ **补数据不改变任何一条 SQL**。
@@ -596,3 +621,488 @@ request_time    TIMESTAMPTZ NOT NULL
 
 > 事实源：`backend/app/domain/discovery_models.py`、
 > `backend/app/services/discovery_snapshot_service.py`。
+
+## M1 增量：采购源绑定域（类 → 源表 / 属性 → 列）
+
+**日期**：2026-11-18 · **变更**：[2026-11-18-m1-procurement-binding-tables](../changes/2026-11-18-m1-procurement-binding-tables/summary.md)（结构层）·
+[2026-11-18-m1-procurement-binding-service](../changes/2026-11-18-m1-procurement-binding-service/summary.md)（行为层）· **迁移 `0154`**
+
+设计来源 `docs/update/1118/M0/A8-采购源绑定候选与表结构设计.md` §4；决策 **D2（两张表）** ·
+**D-3（候选 ≠ 结论）**。绑定范围 **41 类**（G1 汇合实测：34 候选 + 7 复活墓碑类）。
+
+本域**只写元数据库**，不写业务库；物理表的读取仍走既有 NL2SQL 通道。
+
+### procurement_source_binding（一个本体类落到哪张物理表）
+
+| 列 | 类型 | 约束 / 默认 | 说明 |
+|---|---|---|---|
+| `id` | BIGINT PK | | |
+| `class_id` | BIGINT | NOT NULL，FK → `ontology_class.id` **RESTRICT** | **唯一键必须含 `class_id`** —— 实测 `DWD_SUPPLIER_PRICE_LIST` 与 `DWD_SUPPLIER_PRICE_LIST_DEL` 指向同一张表（同表双类） |
+| `datasource_id` | BIGINT | NOT NULL，FK → `data_source.id` **RESTRICT** | |
+| `schema_name` | VARCHAR(100) | NOT NULL | Oracle owner / PG schema / MySQL database |
+| `source_table` | VARCHAR(100) | NOT NULL | 物理表名（**可 ≠ `class_name`**） |
+| `binding_role` | VARCHAR(20) | NOT NULL，CHECK ∈ `BASE/NUMERATOR/DENOMINATOR/FILTER` | 复用 `MetricSourceRole` |
+| `filter_expression` | TEXT | 可空 | 源表行级谓词（指标级 `filter_expression` 之外）。⚠️ 必须是**依赖行**的谓词：至少含一处「**裸列 ↔ 常量**」的直接比较，顶层只有 AND / NOT（`OR` / `CASE` 禁）⇒ 恒真谓词（`A = A` / `ABS(A) >= 0` / `CASE…ELSE 1 END = 1`）从语法上不可达 |
+| `filter_allowlist` | VARCHAR(100)[] | 可空 | 过滤表达式允许引用的**列名白名单**（D2：独立列，**不进 JSON**）。⚠️ 只授权**列**；**函数**走系统内置的 `SAFE_SCALAR_FUNCTIONS`（**不可自报**），**结构词**（`SELECT`/`FROM`/`UNION`/**`TABLE`**/`LATERAL` …）一律禁。⚠️ **元素超长是静默截断**（PG `VARCHAR(100)[]`）⇒ 长度闸门必须住在校验层（共享常量 `MAX_ALLOWLIST_ITEM_LENGTH`），只卡 DTO 层不够 |
+| `is_candidate` | BOOLEAN | NOT NULL，默认 `true` | TRUE = **未经确认**，不得进入任何读路径 / manifest |
+| `confirmed_by` | VARCHAR(64) | 可空 | 确认人（**候选行为空**） |
+| `confirmed_time` | TIMESTAMPTZ | 可空 | 确认时刻 |
+| `valid_from` | TIMESTAMPTZ | NOT NULL，默认 `now()` | 生效起始 |
+| `valid_to` | TIMESTAMPTZ | 可空，CHECK `valid_to IS NULL OR valid_to > valid_from` | **NULL = 当前生效**；失效是**软失效**（不删行 ⇒ 历史证据不丢） |
+| `created_by` | VARCHAR(64) | 可空 | |
+
+索引：`uq_procurement_source_binding_active(class_id, datasource_id, schema_name, source_table, binding_role)`
+**部分唯一**（`WHERE valid_to IS NULL`）—— 同一键位只允许**一条生效**绑定，
+失效后可再新建 ⇒ 软版本化。另有 `ix_procurement_source_binding_table(datasource_id, schema_name, source_table)`、
+`ix_procurement_source_binding_class(class_id)`。
+
+### procurement_property_binding（一个属性落到哪一列 + 复合键位）
+
+| 列 | 类型 | 约束 / 默认 | 说明 |
+|---|---|---|---|
+| `id` | BIGINT PK | | |
+| `source_binding_id` | BIGINT | NOT NULL，FK → `procurement_source_binding.id` **CASCADE** | 生命周期**从属**（源绑定删 ⇒ 子绑定删） |
+| `property_id` | BIGINT | NOT NULL，FK → `ontology_property.id` **RESTRICT** | 证据不悬空 |
+| `source_column` | VARCHAR(100) | NOT NULL | 物理列名（**允许 ≠ `ontology_property.source_column`**） |
+| `key_ordinal` | SMALLINT | 可空，CHECK `>= 1` | 复合主键的**键位**（1..n）；**NULL = 非键列** |
+| `transform_expression` | TEXT | 可空 | 列级变换（TRUNC / UPPER / 单位换算）；**为空 = 直读** |
+| `is_candidate` / `confirmed_by` / `confirmed_time` / `valid_from` / `valid_to` | | 同上表 | 候选与有效期语义完全一致 |
+
+索引：`uq_procurement_property_binding_active(source_binding_id, property_id)`（部分唯一）·
+`uq_procurement_property_binding_key_ordinal(source_binding_id, key_ordinal)`（部分唯一，`key_ordinal IS NOT NULL`）。
+
+### 状态机（行为层，M1-1.1）
+
+```
+        创建（写入口）              确认（人显式触发）        失效（软失效）
+   ────────────────────▶  候选  ────────────────────▶  已确认  ────────────────────▶  已失效
+   is_candidate = TRUE                                   valid_to = <now>
+```
+
+- **新建一律落候选**（D-3）；确认必须由人显式触发，**确认人取当前登录用户**（不接受客户端传入）。
+- **候选 ⇔ 无确认人**由库层 CHECK 钉死（`ck_*_candidate` / `ck_*_confirmed`），不靠文档措辞。
+- **确认前置**：源绑定至少有一条属性绑定（`FILTER` 角色例外 —— 过滤源不承载列映射）；
+  且复合键序号必须 **1..n 连续**（库层只保证不重复，**连续性由服务层补**）。
+- **软失效级联**：源绑定失效 ⇒ 其属性绑定**一并失效** ⇒ 不会出现「父已过期、子还生效」的孤儿映射。
+  ⚠️ 失效时刻取 `max(now, valid_from + 1s)` —— `now()` 是事务开始时刻，与同事务新建行的
+  `valid_from` **完全相同**，直接写会撞 `valid_to > valid_from` 的 CHECK。
+- **过期后可同键位再建**（部分唯一索引只约束生效行）⇒ 这是「改绑定」而非「改行」的机制。
+
+### 读视图（HTTP 层，两档鉴权）
+
+| 视图 | 过滤条件 | 鉴权 |
+|---|---|---|
+| `GET /api/v1/procurement-bindings` | 全量（含候选、含已失效） | **admin** |
+| `GET /api/v1/procurement-bindings/{id}` | 单条详情（含属性绑定） | **admin** |
+| `GET /api/v1/procurement-bindings/effective` | `is_candidate = FALSE AND valid_to IS NULL` | **登录即可** |
+| `GET /api/v1/procurement-bindings/effective/properties` | 自身已确认且生效 **且父已确认且生效** | **登录即可** |
+
+⇒ **D-3 在 HTTP 面的落法**：候选是未经确认的治理草案，普通用户看到会当成结论 ⇒ 全量视图限 admin；
+只有「已确认且当前生效」的行对所有登录用户可见。
+
+**状态机（确认 = 版本冻结点）**：`候选态（父未确认）──▶ 确认态（父已确认，子集合冻结）──▶ 失效态（只读）`。
+⇒ 父已确认时追加 / 确认 / 失效子绑定一律 **409**；父已失效时改子绑定 **422**。
+要改绑必须走「失效现役行 → 建新候选 → 重新确认」。
+**锁序固定为 父 → 子**（`SELECT ... FOR UPDATE` + `populate_existing`）⇒ 不死锁、不 TOCTOU。
+
+**生效属性映射的两条父状态谓词可观测性不同**（变异反证实测）：
+「父必须已确认」✅ 可观测（子可先于父被确认）；「父必须未失效」⚪ **冗余防御**
+（父失效时子由级联失效一并作废 ⇒ 删掉该谓词行为不变）。
+
+> 事实源：`backend/app/domain/procurement_binding_models.py`（ORM）、
+> `backend/app/services/procurement_binding_validation.py`（纯校验）、
+> `backend/app/services/procurement_binding_service.py`（编排）、
+> `backend/app/api/v1/procurement_bindings.py`（10 条路由）。
+
+## M1 增量：发布校验结论表（`semantic_release_check`）
+
+**日期**：2026-11-18 · **变更**：[2026-11-18-m1-semantic-release-check](../changes/2026-11-18-m1-semantic-release-check/summary.md)· **迁移 `0155`**
+
+回答一个问题：**「这次发布到底查了什么、每项结论如何」**。
+闸门结论原先只以 `blockers` / `warnings` 两个字符串数组出现在写接口的响应体里 ——
+**响应一关就没了** ⇒ 无法回答「上周那次被拦下的发布，拦在哪一条、后来怎么处理的」。
+
+### semantic_release_check（一个发布版本的逐项校验结论）
+
+| 列 | 类型 | 约束 / 默认 | 说明 |
+|---|---|---|---|
+| `id` | BIGINT PK | | |
+| `release_id` | BIGINT | NOT NULL，FK → `semantic_release.id` **CASCADE** | 发布被删 ⇒ 校验证据一并消失（不留孤儿证据） |
+| `check_code` | VARCHAR(64) | NOT NULL，CHECK 非空 | 校验项编码（机器可读，如 `METRIC_SOURCE_PRESENT`） |
+| `check_item` | VARCHAR(200) | NOT NULL，CHECK 非空 | 校验项名称（中文，展示用） |
+| `severity` | VARCHAR(10) | NOT NULL，CHECK ∈ `ERROR/WARNING` | **该校验项失败时的**严重级别：`ERROR` = 阻断发布；`WARNING` = 治理债 |
+| `result` | VARCHAR(10) | NOT NULL，CHECK ∈ `PASS/FAIL` | **本次**的结论 |
+| `target_type` | VARCHAR(32) | 可空 | 被校验对象类型（`RELEASE` / `METRIC` / …） |
+| `target_key` | VARCHAR(200) | 可空 | 被校验对象标识（指标名等；**NULL = 发布级校验项**） |
+| `detail` | TEXT | NOT NULL | 结论详情（人类可读） |
+| `checked_time` | TIMESTAMPTZ | NOT NULL，默认 `now()` | 校验发生时刻（**覆盖写 ⇒ 每次评估刷新**） |
+| `checked_by` | VARCHAR(64) | 可空 | 触发本次校验的操作人 |
+| `created_time` / `updated_time` | TIMESTAMPTZ | NOT NULL，默认 `now()` | `TimestampMixin` |
+
+索引：`ix_semantic_release_check_release(release_id)` ·
+`uq_semantic_release_check_unique(release_id, check_code, COALESCE(target_key, ''))` **唯一**。
+⚠️ **`COALESCE` 不可省**：PostgreSQL 的 NULL 互不相等，直接建唯一索引会让
+`target_key IS NULL` 的**发布级**校验项（快照完整性 / Manifest 契约）无限重复落库。
+
+### 两个字段为什么正交（而不是合成一列枚举）
+
+- `severity` 回答「**若这条失败会有多严重**」；
+- `result` 回答「**这次结论如何**」。
+
+合成一列（`PASS/WARN/ERROR/FAIL`）后就无法表达「本次通过、但若失败就是 ERROR」的风险面；
+分两列则「全 PASS 的报告」也能直接告诉读者每项的风险面。
+
+### 落表口径（行为层，M1-1.2）
+
+- **逐项落表，`PASS` 也落**：只落失败项会让「通过」与「没跑」不可区分 ⇒ 评审看到空表。
+- **覆盖写（replace-all）**：一个 release 的「当前校验结论」只有一份；历史由 `audit_log` 承担。
+- **失败也要落表**：校验失败 ⇒ **先提交 check 行再抛原异常**（`getDb` 在异常时 rollback，
+  否则证据随事务消失）⇒ 「不得激活」才可证（M1-a DoD 第 3 条）。
+- **闸门口径零漂移**：`checksToGateResult(evaluatePublishChecks(m)) == evaluatePublishGate(m)`。
+- **闸门与落表同源**：校验项集合**只算一次**，闸门结论与落表行都从它派生
+  （否则「闸门算一遍、落表再算一遍」会静默错位）。
+- **失败尝试也留痕（`audit_log`）**：check 表是覆盖写的 ⇒ 上一轮的 FAIL 行会被下一轮删掉。
+  唯一写 `audit_log` 的地方是**成功**的状态迁移 ⇒ 被闸门拦下的那次尝试在两边都没痕迹，
+  「那次被哪一条拦下的」就再也查不到 —— **而这正是这张表要回答的问题**。
+  ⇒ 失败路径补一条审计：`action="UPDATE"`（审计动作是**封闭词表**，扩词要改 ORM CHECK + 占迁移号），
+  `after` 里带 `blocked=true` / `phase` / `blockerCount` / `blockers` / `errorCount` / `checkCount`。
+- **上限从契约推导，截断必须显式标记**：上限 = `2 + 3 × MAX_MANIFEST_METRICS`
+  （`MAX_MANIFEST_METRICS` = Manifest 契约 `metrics` 数组的 `maxItems`，从
+  `semantic_manifest_schema` 导出）。⚠️ 写死一个「看起来更宽」的数会出事：
+  契约允许的**合法** manifest 也会被截断，而截断丢的是**尾部**校验项 ——
+  尾部往往正是最后一条指标的 ERROR 结论行。
+  ⇒ 超限时保留上限-1 条 + 追加一条 `CHECKS_TRUNCATED`（`severity=ERROR` / `result=FAIL`）合成行：
+  表里查得到「报告被截断」，闸门把它当**阻断项**（fail-closed），且闸门与落表用**同一个集合**。
+  ✅ **M1-1.3 批次 B 已重推**为
+  `6 + 3 × MAX_MANIFEST_METRICS + 2 × MAX_MANIFEST_SOURCE_BINDINGS`（= **10006**）——
+  契约上限变了而公式没变 ⇒ 合法 manifest 被静默截断（同一类缺陷，第三犯的机会）。
+  ⇒ 上限**从契约常量推导**（代码里不再写死数字），单测钉死公式本身。
+
+### 读接口分页口径
+
+`GET /api/v1/semantic/releases/{releaseId}/checks` 支持 `limit`（1~200，默认 50）/ `offset`（≥0）。
+⚠️ `rows` 是**当前页**，而 `total` 与 `summary` 覆盖**全部行** ——
+否则读者翻到第二页、看到「这一页没有 ERROR」就会误判「整体通过」。
+
+校验项目录（新增校验项只加常量，不改表结构）：
+
+| code | 目标类型 | severity | 判据 |
+|---|---|---|---|
+| `SNAPSHOT_INTEGRITY` | RELEASE | ERROR | 快照规范化 / 体量 / 哈希一致 |
+| `MANIFEST_SCHEMA` | RELEASE | ERROR | Manifest 满足其 `schemaVersion` 对应的契约（v1 / v2） |
+| `METRIC_SOURCE_PRESENT` | METRIC | WARNING | 指标有源类引用 |
+| `METRIC_NUMERATOR_LANDING` | METRIC | WARNING/ERROR | 指标分子度量有落点类 |
+| `METRIC_DENOMINATOR_LANDING` | METRIC | WARNING/ERROR | 指标分母度量有落点类（仅 RATIO/DIFFERENCE） |
+| `CHECKS_TRUNCATED` | RELEASE | ERROR | 结论条数超上限（报告不完整 ⇒ 阻断） |
+| `DOMAIN_SLICE_EMPTY` | RELEASE | ERROR | 域切片为空（不能发布空采购快照） |
+| `DOMAIN_SLICE_CROSS_DOMAIN` | RELEASE | WARNING | 为满足引用契约补齐了跨域依赖类 |
+| `SOURCE_BINDING_CANDIDATE` | RELEASE | WARNING | 仍有未确认（候选）绑定（D-3 治理债） |
+| `SOURCE_BINDING_JOIN_MISSING` | BINDING | **ERROR** | 绑定所属类在**整个本体**里零 JOIN 边（孤岛） |
+| `SOURCE_BINDING_PROPERTY_UNBOUND` | BINDING | WARNING | 类已绑源表，但有属性没有 `sourceColumn` 绑定 |
+
+（M1-1.3 批次 B 已把「采购源绑定缺 JOIN」等采购域校验项接进**同一张表**。）
+
+> 事实源：`backend/app/domain/semantic_release_check_models.py`（ORM）、
+> `backend/app/services/semantic_release_check_types.py`（类型与常量 · **叶子模块**）、
+> `backend/app/services/semantic_release_checks.py`（发布级 + 指标级纯评估）、
+> `backend/app/services/semantic_release_domain_checks.py`（域级 + 绑定级纯评估）、
+> `backend/app/services/semantic_release_check_service.py`（落表 / 回读）。
+> 真机验证：`backend/scripts/semantic_release_check_realdata.py`。
+>
+> ⚠️ **为什么拆三个模块**：域级模块要 import `PublishCheck`，而 checks 模块又要 import
+> 域级模块 ⇒ 类型必须住**零业务依赖的叶子模块**，否则形成结构上的 import 环
+> （与 `semantic_manifest_version` 同一类问题，见下文）。
+
+## M1 增量：Manifest 契约 v2（采购源绑定入档）
+
+**日期**：2026-11-19 · **变更**：[2026-11-19-m1-procurement-domain-release](../changes/2026-11-19-m1-procurement-domain-release/summary.md)（批次 A）· **迁移 `0156`**
+
+回答一个问题：**「发布的快照里，采购源绑定到底是怎么落的」**。
+M1-1.1 把绑定做成了两张治理表（类 → 物理表 / 属性 → 列），
+但发布快照是**运行期唯一真相** —— 绑定不入档 ⇒ 快照不自包含、
+「已发布的采购语义」无法离线复算。
+
+### v2 契约：新增 `sourceBindings` 分区
+
+```jsonc
+"sourceBindings": [{
+  "className": "DWD_PURCHASE_ORDER_DTL",   // 必填（按**名字**，不按 id）
+  "datasourceName": "THBI",                  // 可空
+  "schemaName": "ERP",                       // 可空
+  "sourceTable": "PORDER",                   // 必填
+  "bindingRole": "BASE",                     // BASE/NUMERATOR/DENOMINATOR/FILTER
+  "filterExpression": null,
+  "filterAllowlist": [],
+  "properties": [{
+    "propertyName": "PO_NO",
+    "sourceColumn": "PO_NO",
+    "keyOrdinal": 1,                          // 可空（复合键序号）
+    "transformExpression": null
+  }]
+}]
+```
+
+**为什么单独分区而不是折进 `classes[].sourceTable`**：绑定是「类 →（数据源, schema, 表）」的
+**一对多**映射，还带过滤/变换表达式、键序号与逐属性映射 ⇒ 折进 v1 字段会**丢掉真信息**，
+而失真的快照比没有快照更危险。
+
+### 版本分发（升版的连锁面）
+
+`MANIFEST_SCHEMAS = {v1, v2}`；`MANIFEST_SCHEMA_V2` 由 `_deriveV2(v1)` **派生**
+（复制粘贴 ⇒ 两版契约悄悄漂移）。`validateManifest` **按 `manifest.schemaVersion` 取 Schema**：
+
+- **未知版本直接拒绝**（不放行、不猜）；
+- **v1 快照继续按 v1 校验**（历史快照不许被新契约判死）；
+- v2 追加**引用闸**：绑定 `className` 必须存在；绑定 `propertyName` 必须属于**该类**
+  （空属性类也必须校验 ⇒ 用 `allowed is not None` 判定，不能用 `and allowed` ——
+  后者让「空属性集合」被当成「不检查」）；同一绑定 `keyOrdinal` 不重复；
+  同一 `(className, datasourceName, schemaName, sourceTable, bindingRole)` 不重复；
+  同一绑定内 `propertyName` 不重复（库里属性名无唯一约束 ⇒ 自己挡）。
+
+⚠️ **版本字面量必须冻结**（`app/domain/semantic_manifest_version.py`，零 import 的叶子模块）：
+
+- 注册表的**键**与每版 Schema 的 `schemaVersion` const 都用**版本字面量**
+  （`SCHEMA_VERSION_V1` / `SCHEMA_VERSION_V2`），**不得**用「当前版本」——
+  否则升到 v3 时 v2 会从注册表里消失、v2 契约被改写成 v3 ⇒ 已发布的 v2 快照
+  当场变成「未知版本」⇒ 无法校验 / 激活 / 回放；
+- `_assertCurrentVersionRegistered()` 在 **import 期**就炸（升版漏登记不必等到发版才发现）；
+- 单测钉死「注册表里每一版都自述自己的版本」；
+- 该叶子模块同时**断开 ORM 的 import 环**：`app/domain/models.py` → 子模型 →
+  `semantic_manifest_schema` → `app.domain.schemas` → services → `app.domain.models`
+  （今天只靠导入顺序侥幸成立）。实测 `import app.domain.models` 不再连带加载
+  `app.domain.schemas` / `jsonschema` / 三个 service registry。
+
+⚠️ **「哪一版含绑定分区」是版本配置**（`MANIFEST_SCHEMA_SOURCE_BINDING_VERSIONS`），
+不是版本字符串比较：用「版本 ≠ v1」判断 ⇒ 未来任何不带该分区的版本会走进绑定引用闸 ⇒
+读一个不存在的键 ⇒ KeyError ⇒ 500（而不是一条可读的契约错误）。
+
+⚠️ **升版是连锁面，不是改一行常量**，五处必须一起处置：
+
+| 面 | 处置 |
+|---|---|
+| `semantic_release.schema_version` 的 `server_default` + DB 默认值 | 迁移 **0156** 改 `'v2'`；ORM 改用 `server_default=SCHEMA_VERSION`（drift 守卫靠单测钉住，`alembic check` 只比名不比式） |
+| 库里既有 v1 ACTIVE 快照 | `semantic_schema_adapter.schemaVersionMismatch` 只认当前版本 ⇒ **降级直读治理表**（既有设计：宁可慢一点也不能少给事实）⇒ **发版顺序见 SSOT §9.1**：先切代码 → 建一份 v2 发布并 activate；中间窗口期是**降级直读**（功能正确、性能回退） |
+| 发布校验项文案 | PASS detail 写**实际版本**（`Manifest 满足 {version} 契约`） |
+| `semantic_diff_service.MANIFEST_SECTIONS` | 增 `sourceBindings` ⇒ 自动落进 `UNCOVERED_SECTIONS`（API 契约显式披露「未覆盖」） |
+| 夹具 | 版本取 `SCHEMA_VERSION` 动态值；夹具的版本必须与行 `schema_version` 一致（不一致 ⇒ 被判漂移） |
+
+### 什么进快照、什么不进（字节确定性铁律）
+
+| 进 | 不进 | 理由 |
+|---|---|---|
+| `className` / `datasourceName` / `schemaName` / `sourceTable` / `bindingRole` | 自增 `id` | 同一治理内容必须编译出同样字节（`measure.class_id` / `kpis.datasourceId` 已各犯过一次） |
+| `filterExpression` / `filterAllowlist` | `validFrom` / `validTo` | 时间戳进快照 ⇒ 两次编译字节不同 ⇒ M1-a DoD 第 2 条被破坏 |
+| 每个属性绑定的 `propertyName` / `sourceColumn` / `keyOrdinal` / `transformExpression` | `is_candidate = TRUE` 的**候选**绑定 | **D-3**：候选不是结论，不得被读路径消费；manifest 就是读路径的数据源 |
+| — | `createdBy` / `confirmedBy` / `confirmedTime` | 实例相关残留列，与「换环境必须得到同样字节」冲突 |
+
+⇒ 编译口径：**只收 `is_candidate = FALSE` 且 `valid_to IS NULL` 的绑定**；
+墓碑类（`valid_to` 非空）及其属性整体**丢弃**（丢弃不是报错 —— 墓碑类上的绑定是「历史」，
+报错会把一次正常发布挡死）。
+
+### 编译期发布不变量（不只是「写入时校验过」）
+
+| 不变量 | 判据 | 失败形态 |
+|---|---|---|
+| **候选 fail-closed** | `is_candidate` 必须**显式为假**（`is False`，不是 `not row.is_candidate` —— 后者在 `None` 时 fail-open） | 未知候选态 ⇒ 不进快照 |
+| **生效时刻** | `valid_from` 不得晚于此刻（未来才生效的绑定**还没生效**） | 不进快照 |
+| **表达式安全** | 过滤表达式复用 `validateFilterExpression(expr, allowlist)`、列级变换复用 `validateTransformExpression(expr, sourceColumn)`（都是纯函数） | 抛 `SourceBindingCompileError` ⇒ **422**（不是 500） |
+| **属性归属** | 属性必须属于**绑定所属的类**（库侧无此约束，只有写路径在挡） | 抛错并**定位到绑定 id** |
+
+⇒ 表达式安全从「入口校验」升级为**发布不变量**：绕过写路径入库的行
+（运维脚本 / 数据修复 / 未来的批量导入）不会把越权表达式带进快照。
+
+⚠️ **抛错而不是悄悄丢弃**：这类行一旦进快照，读路径就会拿着越权表达式去查库；
+而「悄悄跳过」会让问题不可见（没有校验行可指认是哪一条绑定）。
+批次 B 补绑定级校验项后，失败会**落表成 check 行**并定位到具体绑定。
+
+⚠️ **同一类可有多条 BASE 绑定**（多落点是合法设计）⇒ 契约不收紧，
+但**读路径接线时必须显式消歧**（否则「这条类指哪张表」是未定义行为）。
+
+### 契约上限（从契约导出，不写死）
+
+`MAX_MANIFEST_SOURCE_BINDINGS = 2000`、`MAX_MANIFEST_BINDING_PROPERTIES = 500`
+（v2 Schema 的 `maxItems`）⇒ 发布校验项条数上限要**从它们推导**（批次 B 重推为 10006）。
+
+> 事实源：`backend/app/domain/semantic_manifest_schema.py`（契约 + 版本分发）、
+> `backend/app/domain/semantic_manifest_version.py`（版本字面量 · 叶子模块）、
+> `backend/app/services/semantic_compiler_bindings.py`（绑定分区编译 + 发布不变量）、
+> `backend/app/services/semantic_compiler.py`（接线）、
+> `backend/alembic/versions/0156_semantic_manifest_v2.py`（迁移）。
+
+## M1 增量：采购域发布编排（域切片 + 回滚）
+
+**日期**：2026-11-19 · **变更**：[2026-11-19-m1-procurement-domain-release](../changes/2026-11-19-m1-procurement-domain-release/summary.md)（批次 B）· **无新表**（复用 `semantic_release` / `semantic_release_check`）
+
+回答两个问题：**「采购域发布出去的那份快照里到底有什么」** 与
+**「发错了怎么退回去」**。
+
+### 域发布 = 存**切片**，不是全量
+
+`domain_code` 非空时，`POST /api/v1/semantic/releases` 编译全量后**按域切片**再落库：
+
+```
+业务对象挂域 → 类（+父类闭包）→ JOIN → 指标 → KPI
+      ↓ 引用闭合补齐（四条来源取**联合不动点**）
+本域指标引用到的类
+  + 选中类的 properties[].refClassName（**属性引用**）
+  + 有绑定类的一跳 JOIN 邻居
+  + 以上补进来的类的父类闭包
+```
+
+⚠️ **补齐是幂等的**：对切片再切一次得到**同一份** ⇒ 发布校验项可以只依赖
+**已存快照**复算（否则「跨域补齐了什么」在 validate 阶段就复算不出来 ⇒ 证据不可复算）。
+
+⚠️ **四条来源必须取一个「联合不动点」**（代码评审 HIGH）：它们互相喂新类 ——
+新类又有自己的属性引用、自己的绑定、自己的父类。**只做 JOIN 邻居闭包 + 父类闭包
+两个独立闭包是不够的**：带绑定的**父类**会被判成孤岛 ⇒ 合法发布被 ERROR 阻断。
+⇒ 实现成一个迭代到稳定的 `_closure`（度量引用 / 属性引用 / JOIN 邻居 / 父类闭包
+交替迭代）。
+
+⚠️ **属性引用（`properties[].refClassName`）也必须闭**：v2 引用契约要求属性的
+`refClassName` 必须存在于切片里 ⇒ 不闭 ⇒ **该域永远发不出去**（表引用型字典是
+常见建模，不是假想场景）。
+
+⚠️ **孤岛判据取全本体口径**：切片阶段把有绑定类的一跳 JOIN 邻居拉进来 ⇒ 两个口径等价 ⇒
+「只连跨域边」的类不会被误判成孤岛。
+
+### 回滚 = **新建副本式**（D-11）
+
+`POST /api/v1/semantic/releases/{releaseId}/rollback`，body `{version, note?}`。
+
+| 形态 | 结论 |
+|---|---|
+| **A. 新建副本式**（采纳） | 以历史版本为源新建 DRAFT → VALIDATED → ACTIVE；同作用域旧 ACTIVE 在**同一事务**里归档；副本 `manifest_hash` 与源**逐字相同** |
+| B. 状态回退式（ARCHIVED → ACTIVE） | 历史行被「复活」；与 `ck_semantic_release_status` / 状态机冲突 |
+
+⇒ 副本直接**复制源行的正文与哈希** ⇒ 回滚的语义是「回到那个内容」，
+不是「重新编译一次」（重编译会带上治理表的最新变化）。
+
+⚠️ **回滚源不得为 DRAFT**（草稿从未发布过 ⇒ 没有「回到」的对象）⇒ 409。
+
+### 候选绑定：只出**一条**发布级汇总行
+
+候选绑定**不进快照**（D-3）⇒ 数量**没有契约上限** ⇒ 若按候选逐条出校验项，
+条数上界就无从推导 ⇒ 候选只出**一条发布级汇总行**（WARNING，detail 带总数 + 前 5 个类名）。
+
+⚠️ **没查过候选数就不出这一行**（`candidateBindingCount: int | None`）：
+写一句「没有候选绑定」是**没依据的结论**（比缺一行更坏）。
+
+### 绑定级校验项的定位键
+
+`target_key` = `类名@数据源.schema.表#角色`（**五元组**）。
+
+⚠️ **必须带角色与数据源**：一个类可以绑到同一张表的多个角色（BASE / NUMERATOR …），
+也可以在**两个数据源**里各绑一次；少一个维度 ⇒ 两行撞
+`uq_semantic_release_check_unique` ⇒ **整次发布 500**。
+⚠️ 列宽 `String(200)`：超宽时改用「类名摘要(64) + 完整身份 sha256[:16]」，**不截断**
+（截断会让两个不同的绑定撞成同一个键）。
+
+### diff 视图纳入绑定分区（批次 B）
+
+`sourceBindings` 从 `UNCOVERED_SECTIONS` 移到 `COVERED_SECTIONS`，字段级覆盖：
+`filterExpression`（BREAKING）/ `filterAllowlist`（BREAKING）/
+`properties[].sourceColumn`（BREAKING）/ `properties[].transformExpression`（BREAKING）/
+`properties[].keyOrdinal`（COSMETIC）。
+
+⚠️ diff 侧的绑定身份同样必须带 `datasourceName`（少一个维度 ⇒ 两行被挤成一条 ⇒ **变更被吞**）。
+
+⚠️ **披露面随之扩大**：`GET /api/v1/ontology-discovery/diff` 的 `coveredFields`
+多出 `sourceBindings` 分区（字段级：绑定自身字段 + `properties[].*`）。
+这是**对外契约的扩大**（多披露比少披露安全）⇒ 断言「披露分区集合相等」的用例必须同步。
+
+⚠️ **diff 两侧必须同口径**（代码评审 HIGH）：基线 = 该域的 ACTIVE 行（**切片**），
+候选 = 全域编译结果 ⇒ **两侧不可比**（差异报告在说谎）。⇒ 候选侧按**同一个域**
+切一次；`scope` 如实披露 `DOMAIN`（域作用域）/ `GLOBAL`（全局作用域）。
+
+⚠️ **绑定键的渲染器只有一份**：校验侧与差异侧共用
+`semantic_release_check_types.bindingTargetKey()` ⇒ 差异报告里的一个绑定名，
+能在 check 表里查到**同一行**（各写一份 ⇒ 迟早漂移 ⇒ 查不到）。
+
+### 版本号在**作用域内**唯一（迁移 0157）
+
+| 作用域 | 唯一索引 | 键 |
+|---|---|---|
+| 全局（`domain_code IS NULL`） | `uq_semantic_release_global_version` | `(version)` |
+| 域（`domain_code IS NOT NULL`） | `uq_semantic_release_domain_version`（**迁移 0157**） | `(version, domain_code)` |
+
+⇒ **不同域可以复用同一个版本号**（版本号标识「哪一次发布」，不是「哪一套治理内容」）；
+**同一域内不行**。
+
+⚠️ **服务层查重不够**：查重是「先查后写」⇒ 两个并发请求可以同时查到「没有重复」
+然后同时写入 ⇒ **库侧唯一索引**才是兜底（全局作用域早就是「查重 + 索引」双保险，
+域作用域本批补齐成同款）。
+
+⚠️ **建索引前先探测存量重复**（迁移 0157 里的 `_assertNoDuplicateDomainVersions`）：
+同域重复版本号意味着「哪一次发布」无法标识 ⇒ **报错、不自动修**（不删行、不改版本号）
+⇒ 必须人工裁决。静默挑一条留下 = 伪造发布历史。
+
+> 迁移号：**0156**（manifest v2 默认值）→ **0157**（域作用域版本号唯一索引）
+> → **0158**（M1-1.4 采购本体对象核对与补齐，见下节）。
+> A4-0（审批面放开 `instance_id`）按「串行占号、不许插队」规则取下一个空号 **0159**。
+
+### 采购本体对象：墓碑类必须**原地复活**（迁移 0158，M1-1.4）
+
+V0.3 §3.2 的 10 个采购本体对象逐条核对后，补齐动作落 **0158**（数据迁移 + 一张**迁移专用日志表**）：
+
+| 动作 | 对象 | 内容 |
+|---|---|---|
+| 复活 7 个墓碑类（清 `valid_to`） | PR / PO / GR / INVOICE / PAY | `DWD_PURCHASE_REQUISITION_LINE`、`DWD_REQUISITION_ORDER_LINK`、`DWD_PURCHASE_ORDER_LINE`、`DWD_GOODS_RECEIPT_LINE`、`DWD_PURCHASE_INVOICE`、`DWD_PURCHASE_INVOICE_LINE`、`DWD_SUPPLIER_PAYMENT` |
+| 新增 4 个 BO | PR / QUOT / POL / PAY | `business_object` 4 行，`primary_domain_id='PROCUREMENT'` |
+| 改指 1 个 BO 的头类 | INVOICE | `DWD_AP_INVOICE_DTL`（46 行文件抽取旁表）→ `DWD_PURCHASE_INVOICE`（38,323 行） |
+| 明确不建 | CONTRACT / SUPPLIER_PERFORMANCE / RFQ | 见核对表 §4（CONTRACT 承载面 = 文档目录，**实测 0 份**） |
+
+⚠️ **为什么必须复活而不是新建 v2 行**：`ontology_metric_source` 用 **`class_id`** 引用类；
+编译器遇到**墓碑类**的源引用会**整条丢弃**（`semantic_compiler_sections.groupMetricSources`）
+⇒ 指标只剩一半口径 ⇒ **静默口径漂移**（OTD 只剩分母、三单匹配只剩 FILTER），
+且指标归不了属 ⇒ 被域切片 **fail-closed 排除**。
+新建 v2 行会**换 `class_id`** ⇒ 指标源仍指向旧 id ⇒ 换汤不换药。**原地复活保持 `class_id`**。
+
+**实测（开发库 5433）**：
+
+| 项 | 补齐前 | 补齐后 |
+|---|---|---|
+| 编译后保留的指标源 | **3 / 18**（丢 15） | **18 / 18**（丢 0） |
+| 采购域切片 类 / 指标 / KPI | **6 / 1 / 1** | **10 / 9 / 9** |
+
+⚠️ **迁移是自包含的**（不 import `app.*`）⇒ 与决策目录
+`app/domain/procurement_object_catalog.py` 的一致性由**单测里的漂移守卫**钉住
+（`app/tests/unit/test_procurement_object_catalog.py`，含变异反证）。
+⚠️ **在 Lineage A 环境（测试库 5434）整批 no-op**：所有锚点是 Lineage B 类名（`DWD_*` / `DIM_*`）⇒
+找不到类 ⇒ 什么都不改（不报错、不产生半截状态）。
+⚠️ **变更日志表 `procurement_object_reconciliation_journal`**：升级时逐条记录
+「实际复活了哪个 class id / 原墓碑时间戳」「插了哪几个 BO code」「改指前的头类 id 与 graph_label」。
+没有它，降级只能按「类名 + 当前状态」反推 ⇒ 会把**升级前就活跃**的同名类一并墓碑化
+（误改不属于本迁移的数据），且原 `graph_label` / 时间戳只能硬编码猜回去。
+降级末尾删表 ⇒ 降级后库形状与本迁移无关（实测 `downgrade 0157` 后原时间戳 / 原 graph_label 全部精确还原）。
+⚠️ **降级删 BO 用 `pg_constraint` 动态枚举**所有引用 `business_object` 的外键
+（不写死表名；当前 4 张：`business_object_domain` / `document_entity_relation` /
+`entity_mapping` / `feature_definition`）⇒ 任一引用存在就保留该行，不让降级撞 RESTRICT。
+⚠️ **`business_object` 的主键是 `code`，没有 `id` 列** —— 迁移里写 `RETURNING id` 会直接报
+`UndefinedColumnError`（评审后改写时踩到）。
+⚠️ **复活不按 `version` 过滤**：墓碑行可能不是 v1；按版本锚定会静默 0 行 = 类仍是墓碑。
+
+> 事实源：`backend/app/domain/procurement_object_catalog.py`、
+> `backend/alembic/versions/0158_procurement_object_reconciliation.py`、
+> 核对表 `docs/update/1118/M1/M1-1.4-采购本体对象核对表.md`、
+> 证据 `docs/update/1118/M1/evidence/procurement-domain-slice-{before,after}.txt`。
+
+### 编排层 / 支撑层的文件切分
+
+`semantic_release_service.py`（编排层）与 `semantic_release_support.py`（支撑层）分开：
+
+| 层 | 职责 | 住哪 |
+|---|---|---|
+| 编排层 | 编译 → 切片 → 落库 → 状态迁移 → 审计 | `semantic_release_service.py` |
+| 支撑层 | 输入校验 / 校验项评估 / 审计留痕 / 撞库翻译 | `semantic_release_support.py` |
+
+⚠️ **分层方向决定谁住哪**：编排层 import 支撑层 ⇒ 支撑层**不能**反向 import 编排层 ⇒
+`ReleaseEvaluation` 必须住支撑层；而状态机判定 `isTransitionAllowed` **留在编排层**
+（支撑层不需要它）⇒ 依赖单向成立。
+
+> 事实源：`backend/app/services/semantic_domain_slice.py`（发布切片）、
+> `backend/app/services/knowledge/domain_slice.py`（转发层，保持旧 import 路径）、
+> `backend/app/services/semantic_release_domain_checks.py`（域级 + 绑定级校验项）、
+> `backend/app/services/procurement_binding_candidates.py`（活库候选汇总）、
+> `backend/app/services/semantic_release_service.py`（编排层：切片接线 + `rollback()`）、
+> `backend/app/services/semantic_release_support.py`（支撑层）、
+> `backend/app/services/semantic_diff_service.py`（绑定分区 diff）。

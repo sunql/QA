@@ -540,6 +540,7 @@ def createApp() -> FastAPI:
         model_config,
         ontology,
         organizations,
+        procurement_bindings,
         research,
         roles,
         reports,
@@ -570,6 +571,12 @@ def createApp() -> FastAPI:
     app.include_router(id_mapping.router, prefix="/api/v1", tags=["id-mapping"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(
         term_dictionary.router, prefix="/api/v1", tags=["term-dictionary"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
+    )
+    app.include_router(
+        procurement_bindings.router,
+        prefix="/api/v1",
+        tags=["procurement-bindings"],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
     )
     app.include_router(datasource.router, prefix="/api/v1/datasources", tags=["datasources"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     app.include_router(local_import.router, prefix="/api/v1/datasources", tags=["datasources"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])

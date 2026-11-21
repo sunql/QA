@@ -1,6 +1,6 @@
 """feat-admin-user-password：admin创建用户密码+重置密码端到端集成测试。
 
-全链路真实 PG (TEST_DATABASE_URL=...5433/qa_metadata_test)；通过 X-User-* stub 头走 admin。
+全链路真实 PG (TEST_DATABASE_URL=...5434/qa_metadata_test)；通过 X-User-* stub 头走 admin。
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.infrastructure import database as dbModule
 from app.models.rbac import User
 from scripts.seed_rbac import seedRbacBaseline
 
@@ -18,8 +19,32 @@ AUTH_ADMIN = {"X-User-Id": "admin", "X-User-Roles": "admin"}
 
 @pytest.fixture(autouse=True)
 async def _rbacSeeds(dbSession: AsyncSession) -> None:
-    """幂等 seed RBAC 基线：admin 用户/角色 → getAdminOnlyActor 能识别 admin actor。"""
+    """幂等 seed RBAC 基线：admin 用户/角色 → getAdminOnlyActor 能识别 admin actor。
+
+    另两件必需的前置（都是现行契约，不是本测试特例）：
+
+    1. **清除 admin 的 ``must_change_password``**：``seedRbacBaseline`` 新建 admin
+       时置 True（首次登录强制改密，设计如此），而 ``mustChangePasswordGuard``
+       （audit-fx-1.3）会把非白名单端点的请求一律 403 MUST_CHANGE_PASSWORD ⇒
+       不清标志就无法测「admin 创建用户」本身。与 ``test_user_clearance.py``
+       同一处置。
+    2. **seed 菜单**：``IdentityService.create_user`` 会给新用户写
+       ``permission_grant``（默认菜单 ``item.profile``），该表对 ``menu_config.code``
+       有外键 ⇒ 测试库 TRUNCATE 后菜单为空会炸 ``fk_permission_grant_menu``。
+       用真实种子 ``seed_menu_config``（与生产同一份 59 行），不手搓假树。
+    """
     await seedRbacBaseline(dbSession)
+
+    admin = (
+        await dbSession.execute(select(User).where(User.username == "admin"))
+    ).scalar_one()
+    if admin.must_change_password:
+        admin.must_change_password = False
+        await dbSession.commit()
+
+    from scripts.seed_menu_config import seed_menu_config
+
+    await seed_menu_config(dbModule.getSessionFactory())
 
 
 @pytest.mark.asyncio

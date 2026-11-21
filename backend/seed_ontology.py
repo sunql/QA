@@ -1459,6 +1459,15 @@ async def _seedClasses(session: Any) -> dict[str, int]:
                 existing.object_type = c["object_type"]
             if c.get("object_owner") is not None and existing.object_owner != c["object_owner"]:
                 existing.object_owner = c["object_owner"]
+            # class_alias / description 同样按契约回写（2026-11-18 补）：
+            # 迁移 0039/0040 留下的行带的是「结构性建模，0 行」这类**占位描述**，
+            # 且 class_alias 为 NULL ⇒ NL2SQL 渲染的 schema 文本里中文别名缺失、
+            # 描述还在说「0 行」。_seedProperties 对别名/描述本就是这个口径
+            # （seed 提供就校正、不提供就保留 DB 既有值），类级此前漏了这两项。
+            if c.get("class_alias") is not None and existing.class_alias != c["class_alias"]:
+                existing.class_alias = c["class_alias"]
+            if c.get("description") is not None and existing.description != c["description"]:
+                existing.description = c["description"]
             logger.info("class exists: %s (id=%d, name=%s)", c["source_table"], existing.id, existing.class_name)
         else:
             obj = OntologyClass(created_by="seed_ontology", **c)

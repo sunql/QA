@@ -2,7 +2,8 @@
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+
+from app.tests import _pg_support
 
 
 @pytest.mark.asyncio
@@ -59,26 +60,28 @@ async def test_document_entity_relation_invalid_entity_type_rejected(
 @pytest.mark.asyncio
 async def test_db_fk_constraint_exists() -> None:
     """三表 entity_type 列上有 FK 指向 business_object.code."""
-    engine = create_async_engine(
-        "postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test"
-    )
-    async with engine.connect() as conn:
-        for table in (
-            "entity_mapping",
-            "feature_definition",
-            "document_entity_relation",
-        ):
-            row = (
-                await conn.execute(
-                    text(
-                        f"""
-                        SELECT pg_get_constraintdef(oid)
-                        FROM pg_constraint
-                        WHERE conrelid = '{table}'::regclass
-                          AND contype = 'f'
-                          AND pg_get_constraintdef(oid) LIKE '%business_object%'
-                    """
+    engine = await _pg_support._newEngine()
+    # 断言失败也要 dispose（否则连接池挂到测试结束，掩盖真正的断言错误）
+    try:
+        async with engine.connect() as conn:
+            for table in (
+                "entity_mapping",
+                "feature_definition",
+                "document_entity_relation",
+            ):
+                row = (
+                    await conn.execute(
+                        text(
+                            f"""
+                            SELECT pg_get_constraintdef(oid)
+                            FROM pg_constraint
+                            WHERE conrelid = '{table}'::regclass
+                              AND contype = 'f'
+                              AND pg_get_constraintdef(oid) LIKE '%business_object%'
+                        """
+                        )
                     )
-                )
-            ).first()
-            assert row is not None, f"{table} 缺少 FK 到 business_object"
+                ).first()
+                assert row is not None, f"{table} 缺少 FK 到 business_object"
+    finally:
+        await engine.dispose()

@@ -19,6 +19,10 @@ from typing import Any
 from app.domain.external_text import escapeAngleBrackets, sanitizeSchemaField
 from app.domain.models import OntologyClass, OntologyJoin
 from app.domain.query_plan import JoinSpec, QueryPlan
+from app.services.semantic_manifest_common import (
+    joinKeySortKey,
+    propertyNameSortKey,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +319,13 @@ def buildSchemaText(
             header += f"  [{_ISLAND_MARKER}]"
         blocks.append(header)
         blocks.append("  Columns:")
-        for prop in cls.properties:
+        # A4：按 `property_name` 排序渲染，键与语义编译器共享（`propertyNameSortKey`）。
+        # 直读侧的原顺序是 ORM `selectin` 的**物理行序**（`relationship` 无
+        # `order_by`）⇒ 不仅与快照侧不同，连自己和自己都不保证一致。排序把
+        # 「开关切换」变成对 prompt 的**恒等变换**，同时修掉直读侧的非确定性。
+        for prop in sorted(
+            cls.properties, key=lambda prop: propertyNameSortKey(prop.property_name)
+        ):
             column = prop.source_column or _UNMAPPED_COLUMN_MARKER
             markers: list[str] = []
             if prop.is_primary_key:
@@ -395,7 +405,8 @@ def _renderJoinLines(
         if cls.id is not None and cls.source_table
     }
     lines: list[str] = []
-    for join in joins:
+    # A4：与快照侧同序。键与语义编译器共享（`joinKeySortKey`）。
+    for join in sorted(joins, key=lambda join: joinKeySortKey(join.join_key)):
         srcTable = tableByClassId.get(join.source_class_id)
         tgtTable = tableByClassId.get(join.target_class_id)
         if not srcTable or not tgtTable:

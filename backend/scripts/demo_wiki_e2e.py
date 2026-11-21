@@ -7,7 +7,7 @@
 
 跑法（**必须先指定库**，见下面的写库闸）：
 
-    DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test' \\
+    DATABASE_URL='postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test' \\
         .venv/bin/python -m scripts.demo_wiki_e2e
 
 设计取舍，先说清楚：

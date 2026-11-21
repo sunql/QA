@@ -37,6 +37,8 @@ from __future__ import annotations
 
 from collections import Counter
 
+import pytest
+
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
 from app.services.nl2sql_schema import buildSchemaText
 from app.services.semantic_compiler import compileFromRows
@@ -124,8 +126,9 @@ def _ormClass(
 def _dataset() -> tuple[list[OntologyClass], list[OntologyProperty], list[OntologyJoin]]:
     """一套能同时覆盖「继承 / 外键 / JOIN / 子集外引用」的数据。
 
-    属性顺序**刻意不按名字排**（与生产物理行序同形）—— 列序差异是 D12 F4 的
-    已知差异，本文件用「内容等价（行多重集）」判它，而不是逐字判。
+    属性顺序**刻意不按名字排**（与生产物理行序同形）—— D12 F4 的列序差异
+    曾让本文件只能判「内容等价」；A4 起两侧在渲染期共用排序键 ⇒ 可以（并且
+    必须）**逐字节**判。
     """
     supplierProps = (
         _ormProperty(101, SUPPLIER_ID, "SUPPLIER_NAME", alias="供应商名称",
@@ -203,9 +206,21 @@ def _renderBoth(classNames: list[str]):
     return ormText, snapshotText
 
 
-def _assertContentEqual(ormText: str, snapshotText: str) -> None:
-    """内容等价（行多重集）——列序差异不计入（D12 F4 已知差异）。"""
-    assert Counter(ormText.splitlines()) == Counter(snapshotText.splitlines())
+def _assertByteIdentical(ormText: str, snapshotText: str) -> None:
+    """**逐字节**相等（A4 起；此前只判行多重集，因为两侧列序不同）。
+
+    强于内容等价：内容等价会放过多余的**排序差异**，而排序差异正是
+    G3 第 2 条不过的根因（F14：内容等价 ≠ 顺序等价）。
+    失败时先报行多重集差（定位「少了/多了哪行」），再报逐字节不等。
+    """
+    if ormText != snapshotText:
+        onlyOrm = Counter(ormText.splitlines()) - Counter(snapshotText.splitlines())
+        onlySnapshot = Counter(snapshotText.splitlines()) - Counter(ormText.splitlines())
+        pytest.fail(
+            "两条路径的 schema 文本必须逐字节相同（开关切换 = prompt 恒等变换）；"
+            f"仅直读有 {sum(onlyOrm.values())} 行（示例 {list(onlyOrm)[:3]}），"
+            f"仅快照有 {sum(onlySnapshot.values())} 行（示例 {list(onlySnapshot)[:3]}）"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -216,19 +231,19 @@ def _assertContentEqual(ormText: str, snapshotText: str) -> None:
 class Test与ORM路径等价:
     """变体 A（子集内解析）钉成契约。"""
 
-    def test_全量类集两条路径内容等价(self) -> None:
+    def test_全量类集两条路径逐字节一致(self) -> None:
         ormText, snapshotText = _renderBoth(
             ["Supplier", "PurchaseOrder", "Material", "Warehouse", "Receipt"]
         )
-        _assertContentEqual(ormText, snapshotText)
+        _assertByteIdentical(ormText, snapshotText)
 
-    def test_召回子集两条路径内容等价(self) -> None:
+    def test_召回子集两条路径逐字节一致(self) -> None:
         ormText, snapshotText = _renderBoth(["PurchaseOrder", "Receipt"])
-        _assertContentEqual(ormText, snapshotText)
+        _assertByteIdentical(ormText, snapshotText)
 
-    def test_单类子集两条路径内容等价(self) -> None:
+    def test_单类子集两条路径逐字节一致(self) -> None:
         ormText, snapshotText = _renderBoth(["Receipt"])
-        _assertContentEqual(ormText, snapshotText)
+        _assertByteIdentical(ormText, snapshotText)
 
     def test_子类单独成集时父类不出现在两条路径的文本里(self) -> None:
         """变体 A 的核心断言：子集外的父类**不**被拉进来渲染。"""

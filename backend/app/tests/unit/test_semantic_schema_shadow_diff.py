@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.domain.semantic_manifest_schema import SCHEMA_VERSION
 from scripts import semantic_schema_shadow_diff as diffModule
 
 
@@ -145,7 +146,7 @@ class Test版本闸门:
     """
 
     def test_版本一致时没有错误(self) -> None:
-        snapshot = _FakeSnapshot({"schemaVersion": "v1", "classes": []})
+        snapshot = _FakeSnapshot({"schemaVersion": SCHEMA_VERSION, "classes": []})
         assert diffModule._versionGate(snapshot) is None
 
     def test_版本不一致时给出错误说明(self) -> None:
@@ -187,7 +188,7 @@ class Test基线取全集:
         from app.services.semantic_schema_adapter import restoreSnapshotSchema
 
         manifest = {
-            "schemaVersion": "v1",
+            "schemaVersion": SCHEMA_VERSION,
             "classes": [
                 {"className": "Supplier", "sourceTable": "SUPPLIER", "properties": []},
                 {

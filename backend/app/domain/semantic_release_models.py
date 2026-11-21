@@ -32,6 +32,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.domain.enums import SemanticReleaseStatus
 from app.domain.models import Base, BigIntPk, TimestampMixin
 
+# ⚠️ 只 import **叶子模块**的版本字面量，不 import 契约模块本身：
+# `app.domain.semantic_manifest_schema` → `app.domain.schemas` → services
+# → `app.domain.models` ⇒ 在 ORM 聚合模块里形成一条**回到自身的 import 环**，
+# 今天只靠导入顺序侥幸成立（code-review LOW-4）。
+from app.domain.semantic_manifest_version import SCHEMA_VERSION
+
 _JSONB = JSON().with_variant(postgresql.JSONB(), "postgresql")
 
 
@@ -51,9 +57,10 @@ class SemanticRelease(Base, TimestampMixin):
         ),
         nullable=True,
     )
-    # 发布版本号（如 2026.11.09-1）。首期只有全局作用域，版本号唯一性由下方
-    # `uq_semantic_release_global_version`（WHERE domain_code IS NULL）保证；
-    # 按域发布上线时须补同域版唯一索引（届时再随迁移一起做，不提前建）。
+    # 发布版本号（如 2026.11.09-1）。版本号在**同一作用域内**唯一：
+    # 全局作用域由 `uq_semantic_release_global_version`（WHERE domain_code IS NULL）
+    # 保证；域作用域由 `uq_semantic_release_domain_version`（version + domain_code，
+    # WHERE domain_code IS NOT NULL）保证 ⇒ 不同域可以复用同一个版本号。
     version: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(
         String(20),
@@ -62,8 +69,11 @@ class SemanticRelease(Base, TimestampMixin):
         server_default=SemanticReleaseStatus.DRAFT.value,
     )
     # Manifest 自身的 Schema 版本（与发布 version 解耦，便于 Schema 演进时回放旧快照）。
+    # ⚠️ 默认值必须与 `app.domain.semantic_manifest_schema.SCHEMA_VERSION` 一致
+    # （drift 守卫只比名不比值 ⇒ 单测 `test_release_orm_default_schema_version_matches`
+    # 负责钉住两者相等）。
     schema_version: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default="v1"
+        String(20), nullable=False, server_default=SCHEMA_VERSION
     )
     # 自包含快照：类 / 属性 / JOIN / 指标 / BO / 域，全部在这一次编译里固化。
     manifest_json: Mapped[dict] = mapped_column(_JSONB, nullable=False)
@@ -83,6 +93,15 @@ class SemanticRelease(Base, TimestampMixin):
             "version",
             unique=True,
             postgresql_where=sa_text("domain_code IS NULL"),
+        ),
+        # 同域内版本号唯一。⚠️ 键必须含 domain_code：版本号标识的是「哪一次
+        # 发布」，不同域**可以**复用同一个版本号（全局作用域同理：跨域不冲突）。
+        Index(
+            "uq_semantic_release_domain_version",
+            "version",
+            "domain_code",
+            unique=True,
+            postgresql_where=sa_text("domain_code IS NOT NULL"),
         ),
         # 同域最多一条 ACTIVE。COALESCE 把 NULL 归一，否则全局快照漏防。
         Index(

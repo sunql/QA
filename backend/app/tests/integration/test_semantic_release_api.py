@@ -9,6 +9,7 @@ D9 的两条硬约束在这里钉住：
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -18,8 +19,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
-from app.domain.models import DataDomain
-from app.domain.semantic_manifest_schema import manifestHash
+from app.domain.models import (
+    AuditLog,
+    BusinessObject,
+    DataDomain,
+    OntologyClass,
+)
+from app.domain.semantic_manifest_schema import (
+    SCHEMA_VERSION,
+    ManifestSchemaError,
+    manifestHash,
+)
+from app.domain.semantic_release_check_models import SemanticReleaseCheck
 from app.domain.semantic_release_models import SemanticRelease
 from app.infrastructure.llm.embedding_provider_factory import resetEmbeddingClientCache
 from app.infrastructure.security import crypto
@@ -35,13 +46,14 @@ _ADMIN_HEADERS = {"X-User-Id": "test-admin", "X-User-Roles": "admin"}
 _USER_HEADERS = {"X-User-Id": "test-user", "X-User-Roles": "user"}
 
 _MINIMAL_MANIFEST: dict[str, Any] = {
-    "schemaVersion": "v1",
+    "schemaVersion": SCHEMA_VERSION,
     "domains": [],
     "classes": [],
     "joins": [],
     "metrics": [],
     "kpis": [],
     "businessObjects": [],
+    "sourceBindings": [],
 }
 
 
@@ -74,6 +86,8 @@ async def _insertRelease(
         domain_code=domainCode,
         manifest_json=body,
         manifest_hash=manifestHash(body),
+        # 与生产写路径同一口径：行版本跟着正文走（不替正文盖当前版本）。
+        schema_version=body.get("schemaVersion") or SCHEMA_VERSION,
     )
     session.add(row)
     await session.commit()
@@ -145,7 +159,7 @@ async def test_list_returns_summaries_and_total(client: AsyncClient, dbSession: 
     # 列表不带 ~1MB 快照正文；字段走 camelCase。
     assert "manifest" not in payload["rows"][0]
     assert payload["rows"][0]["manifestHash"] == second.manifest_hash
-    assert payload["rows"][0]["schemaVersion"] == "v1"
+    assert payload["rows"][0]["schemaVersion"] == SCHEMA_VERSION
 
 
 async def test_list_filters_by_status_and_domain(client: AsyncClient, dbSession: AsyncSession) -> None:
@@ -408,12 +422,74 @@ async def test_http_illegal_transition_is_409(
         f"{SEMANTIC_RELEASES_PATH}/1/validate",
         f"{SEMANTIC_RELEASES_PATH}/1/activate",
         f"{SEMANTIC_RELEASES_PATH}/1/archive",
+        f"{SEMANTIC_RELEASES_PATH}/1/rollback",
     ],
 )
 async def test_write_routes_are_forbidden_for_non_admin(client: AsyncClient, path: str) -> None:
     response = await client.post(path, headers=_USER_HEADERS, json={"version": "x"})
 
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 回滚（副本式，D-11）：HTTP 层契约
+# ---------------------------------------------------------------------------
+
+
+async def test_rollback_over_http_creates_a_copy(client: AsyncClient) -> None:
+    """回滚走完整 HTTP 链路：副本的 manifest_hash 与源**逐字相同**。"""
+    created = await client.post(
+        SEMANTIC_RELEASES_PATH, headers=_ADMIN_HEADERS, json={"version": "2026.11.19-rb-http"}
+    )
+    releaseId = created.json()["release"]["id"]
+    sourceHash = created.json()["release"]["manifestHash"]
+    await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{releaseId}/validate", headers=_ADMIN_HEADERS
+    )
+    await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{releaseId}/activate", headers=_ADMIN_HEADERS
+    )
+
+    response = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{releaseId}/rollback",
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-rb-http-copy", "note": "回滚到上一版"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["release"]["status"] == "ACTIVE"
+    assert body["release"]["version"] == "2026.11.19-rb-http-copy"
+    assert body["release"]["manifestHash"] == sourceHash
+    assert body["release"]["id"] != releaseId
+    assert response.headers["cache-control"] == "no-store"
+
+
+async def test_rollback_of_a_draft_is_409(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """草稿从未发布过 ⇒ 409（不是 404 / 500）。"""
+    row = await _insertRelease(dbSession, version="2026.11.19-rb-draft-http", status="DRAFT")
+
+    response = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/rollback",
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-rb-draft-http-2"},
+    )
+
+    assert response.status_code == 409
+    assert "error" in response.json()
+
+
+async def test_rollback_of_a_missing_release_is_404(client: AsyncClient) -> None:
+    response = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/999999/rollback",
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-rb-missing"},
+    )
+
+    assert response.status_code == 404
+    assert "error" in response.json()
 
 
 # ---------------------------------------------------------------------------
@@ -1067,3 +1143,543 @@ async def test_pinned_release_denial_does_not_leak_existence(
         assert missingRoutes[channel]["degradedReason"] == MSG_PINNED_RELEASE_UNAVAILABLE
     assert missing.json()["release"]["degraded"] is True
     assert unauthorized.json()["release"]["degraded"] is True
+
+
+# ---------------------------------------------------------------------------
+# 发布校验落表（M1-1.2）：HTTP 层契约 + 失败路径取证
+#
+# 为什么放在这个文件里（而不是新建一个 integration 文件）：
+# CI 的 integration 分片是「`find | sort` 后下标 mod 4」⇒ **新增 integration 文件
+# 会让其后所有文件的下标整体 +1、分片归属轮转一位** ⇒ 依赖「同分片邻居副作用」的
+# 既有用例会突然红（见 `Harness/rules/测试规范.md` §目录分片稳定性）。
+#
+# M1-a DoD 第 3 条在这里钉死：
+# 「validate 报 ERROR → check 表可查到该条 → 不得激活」。
+# 本批的「缺 JOIN 的绑定」等价物 = 一条**已发布**的 RATIO 指标缺分子/分母落点
+# （D07 闸门的硬拒绝条件）；真正的采购域「缺 JOIN」校验项随 M1-1.3 接进**同一张表**
+# —— 落表机制先立，判据后加。
+# ---------------------------------------------------------------------------
+
+CHECK_CODE_INTEGRITY = "SNAPSHOT_INTEGRITY"
+CHECK_CODE_SCHEMA = "MANIFEST_SCHEMA"
+CHECK_CODE_SOURCE = "METRIC_SOURCE_PRESENT"
+CHECK_CODE_NUMERATOR = "METRIC_NUMERATOR_LANDING"
+CHECK_CODE_DENOMINATOR = "METRIC_DENOMINATOR_LANDING"
+
+# 样本 manifest 里那条「已发布却缺落点」的 RATIO 指标（闸门阻断源）。
+_BLOCKED_METRIC_NAME = "iqc_pass_rate"
+
+
+def _measure(className: str) -> dict[str, Any]:
+    return {
+        "agg": "SUM",
+        "expr": None,
+        "filter": None,
+        "className": className,
+        "classAlias": None,
+    }
+
+
+def _healthyManifest() -> dict[str, Any]:
+    """一份**能过发布闸门**的 manifest：样本 manifest 补齐落点类与源类引用。
+
+    样本 manifest 里的 `iqc_pass_rate` 是「已发布的 RATIO 指标缺分子/分母落点」
+    ⇒ 闸门必然阻断；这里给每条指标补上落点类与 `sources`，让它变成可发布版本。
+    """
+    manifest = sampleManifest()
+    landings = {
+        "supplier_delivery_days": ("Supplier", None),
+        "po_amount": ("PurchaseOrder", None),
+        "iqc_pass_rate": ("InspectionRecord", "PurchaseOrder"),
+    }
+    for metric in manifest["metrics"]:
+        numeratorClass, denominatorClass = landings[metric["metricName"]]
+        metric["numeratorMeasure"] = _measure(numeratorClass)
+        metric["denominatorMeasure"] = _measure(denominatorClass) if denominatorClass else None
+        metric["sources"] = [{"className": numeratorClass, "role": "BASE"}]
+    return manifest
+
+
+async def test_draft_creation_persists_check_rows(client: AsyncClient) -> None:
+    """草稿编译也要落校验结论：评审要看到「编译出来的东西被查过什么」。"""
+    created = await client.post(
+        SEMANTIC_RELEASES_PATH,
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.18-check-draft"},
+    )
+    assert created.status_code == 201
+    releaseId = created.json()["release"]["id"]
+
+    response = await client.get(
+        f"{SEMANTIC_RELEASES_PATH}/{releaseId}/checks", headers=_ADMIN_HEADERS
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    rows = body["rows"]
+    assert body["total"] == len(rows)
+    assert body["summary"]["total"] == len(rows)
+    assert {row["checkCode"] for row in rows} >= {
+        CHECK_CODE_INTEGRITY,
+        CHECK_CODE_SCHEMA,
+    }
+    assert all(row["result"] == "PASS" for row in rows)
+    assert body["summary"]["failed"] == 0
+    assert body["summary"]["errorCount"] == 0
+    assert all(row["releaseId"] == releaseId for row in rows)
+    assert all(row["severity"] in ("ERROR", "WARNING") for row in rows)
+    assert all(row["checkItem"] and row["detail"] for row in rows)
+    assert all(row["checkedBy"] == "test-admin" for row in rows)
+
+
+async def test_blocked_validation_persists_the_error_row(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """M1-a DoD 第 3 条（上半）：validate 报 ERROR ⇒ 那一条在 check 表里查得到。"""
+    row = await _insertRelease(
+        dbSession,
+        version="2026.11.18-check-blocked",
+        manifest=sampleManifest(),
+    )
+
+    validated = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/validate", headers=_ADMIN_HEADERS
+    )
+    assert validated.status_code == 409
+
+    response = await client.get(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/checks", headers=_ADMIN_HEADERS
+    )
+    assert response.status_code == 200
+    body = response.json()
+    rows = body["rows"]
+    failed = [item for item in rows if item["result"] == "FAIL"]
+    errorRows = [item for item in failed if item["severity"] == "ERROR"]
+    assert errorRows, "闸门阻断必须留下 ERROR 结论行（否则「不得激活」不可证）"
+    assert {item["checkCode"] for item in errorRows} == {
+        CHECK_CODE_NUMERATOR,
+        CHECK_CODE_DENOMINATOR,
+    }
+    assert all(item["targetKey"] == _BLOCKED_METRIC_NAME for item in errorRows)
+    assert body["summary"]["errorCount"] == len(errorRows)
+    assert body["summary"]["failed"] == len(failed)
+    assert body["summary"]["warningCount"] == len(failed) - len(errorRows)
+
+
+async def test_blocked_release_cannot_be_activated(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """M1-a DoD 第 3 条（下半）：被闸门拦下的版本**不得**被激活，状态原地不动。"""
+    row = await _insertRelease(
+        dbSession,
+        version="2026.11.18-check-noact",
+        manifest=sampleManifest(),
+    )
+    await client.post(f"{SEMANTIC_RELEASES_PATH}/{row.id}/validate", headers=_ADMIN_HEADERS)
+
+    activated = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/activate", headers=_ADMIN_HEADERS
+    )
+    assert activated.status_code == 409
+
+    detail = await client.get(f"{SEMANTIC_RELEASES_PATH}/{row.id}", headers=_ADMIN_HEADERS)
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "DRAFT"
+
+
+async def test_passed_validation_persists_all_pass_rows(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """闸门放行 ⇒ 每一项都留下 PASS 结论（「通过」与「没跑」必须可区分）。"""
+    row = await _insertRelease(
+        dbSession,
+        version="2026.11.18-check-ok",
+        manifest=_healthyManifest(),
+    )
+
+    validated = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/validate", headers=_ADMIN_HEADERS
+    )
+    assert validated.status_code == 200
+    assert validated.json()["release"]["status"] == "VALIDATED"
+
+    response = await client.get(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/checks", headers=_ADMIN_HEADERS
+    )
+    assert response.status_code == 200
+    body = response.json()
+    rows = body["rows"]
+    assert rows
+    assert all(item["result"] == "PASS" for item in rows)
+    assert body["summary"]["failed"] == 0
+    assert body["summary"]["errorCount"] == 0
+    assert body["summary"]["passed"] == len(rows)
+    assert {item["checkCode"] for item in rows} >= {
+        CHECK_CODE_INTEGRITY,
+        CHECK_CODE_SCHEMA,
+        CHECK_CODE_SOURCE,
+        CHECK_CODE_NUMERATOR,
+        CHECK_CODE_DENOMINATOR,
+    }
+
+
+async def test_re_evaluation_replaces_previous_rows(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """同一个 release 再次评估 ⇒ **覆盖**旧结论（不是追加两轮历史）。"""
+    row = await _insertRelease(
+        dbSession,
+        version="2026.11.18-check-re",
+        manifest=sampleManifest(),
+    )
+    blocked = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/validate", headers=_ADMIN_HEADERS
+    )
+    assert blocked.status_code == 409
+    before = await client.get(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/checks", headers=_ADMIN_HEADERS
+    )
+    beforeRows = before.json()["rows"]
+    assert any(item["result"] == "FAIL" for item in beforeRows)
+
+    # 把快照换成可发布的版本（= 治理表改完后的重新编译结果）。
+    row.manifest_json = _healthyManifest()
+    row.manifest_hash = manifestHash(row.manifest_json)
+    await dbSession.commit()
+
+    passed = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/validate", headers=_ADMIN_HEADERS
+    )
+    assert passed.status_code == 200
+
+    after = await client.get(f"{SEMANTIC_RELEASES_PATH}/{row.id}/checks", headers=_ADMIN_HEADERS)
+    afterRows = after.json()["rows"]
+    assert len(afterRows) == len(beforeRows), "结论必须覆盖写，不能两轮并存"
+    assert all(item["result"] == "PASS" for item in afterRows)
+
+
+async def test_checks_of_unknown_release_is_404(client: AsyncClient) -> None:
+    response = await client.get(f"{SEMANTIC_RELEASES_PATH}/999999/checks", headers=_ADMIN_HEADERS)
+
+    assert response.status_code == 404
+    assert "error" in response.json()
+
+
+async def test_checks_route_is_forbidden_for_non_admin(client: AsyncClient) -> None:
+    """校验结论含治理元数据（谁查的、拦在哪一条）⇒ 非 admin 一律 403。"""
+    response = await client.get(f"{SEMANTIC_RELEASES_PATH}/1/checks", headers=_USER_HEADERS)
+
+    assert response.status_code == 403
+
+
+async def test_tampered_snapshot_persists_integrity_fail_row(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """绕过写路径改坏哈希：fail-closed 契约不变，但失败结论仍要落表。"""
+    row = await _insertRelease(
+        dbSession,
+        version="2026.11.18-check-bad",
+        manifest=_healthyManifest(),
+    )
+    row.manifest_hash = "b" * 64
+    await dbSession.commit()
+
+    with pytest.raises(SemanticReleaseIntegrityError):
+        await client.post(f"{SEMANTIC_RELEASES_PATH}/{row.id}/validate", headers=_ADMIN_HEADERS)
+
+    stored = (
+        await dbSession.execute(
+            select(SemanticReleaseCheck).where(SemanticReleaseCheck.release_id == row.id)
+        )
+    ).scalars().all()
+    assert len(stored) == 1
+    assert stored[0].check_code == CHECK_CODE_INTEGRITY
+    assert stored[0].result == "FAIL"
+    assert stored[0].severity == "ERROR"
+
+
+async def test_broken_manifest_persists_schema_fail_row(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """快照内容不满足 v1 契约 ⇒ 沿用既有异常类型（ValueError 系，不改成 409/422），
+    但**契约失败的结论同样要落表** —— 否则「它被哪一条拦下的」查不到。"""
+    row = await _insertRelease(
+        dbSession,
+        version="2026.11.18-check-badschema",
+        manifest={
+            "schemaVersion": SCHEMA_VERSION,
+            "metrics": [{"metricName": "M"}],
+        },
+    )
+
+    with pytest.raises(ManifestSchemaError):
+        await client.post(f"{SEMANTIC_RELEASES_PATH}/{row.id}/validate", headers=_ADMIN_HEADERS)
+
+    stored = (
+        await dbSession.execute(
+            select(SemanticReleaseCheck).where(SemanticReleaseCheck.release_id == row.id)
+        )
+    ).scalars().all()
+    schemaRows = [item for item in stored if item.check_code == CHECK_CODE_SCHEMA]
+    assert len(schemaRows) == 1
+    assert schemaRows[0].result == "FAIL"
+    assert schemaRows[0].severity == "ERROR"
+
+
+async def test_tampered_snapshot_blocks_activation_and_records_the_failure(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """校验通过之后、激活之前快照被改坏 ⇒ 激活必须 fail-closed，且失败结论落表。
+
+    旧版 ACTIVE 不受影响（本事务在抛错前只提交了校验结论）。
+    """
+    row = await _insertRelease(
+        dbSession,
+        version="2026.11.18-check-badactivate",
+        status="VALIDATED",
+        manifest=_healthyManifest(),
+    )
+    row.manifest_hash = "b" * 64
+    await dbSession.commit()
+
+    with pytest.raises(SemanticReleaseIntegrityError):
+        await client.post(f"{SEMANTIC_RELEASES_PATH}/{row.id}/activate", headers=_ADMIN_HEADERS)
+
+    # 读路径同样做完整性校验 ⇒ 详情端点也会拒（fail-closed），状态直接验库。
+    await dbSession.refresh(row)
+    assert row.status == "VALIDATED"
+
+    stored = (
+        await dbSession.execute(
+            select(SemanticReleaseCheck).where(SemanticReleaseCheck.release_id == row.id)
+        )
+    ).scalars().all()
+    assert len(stored) == 1
+    assert stored[0].check_code == CHECK_CODE_INTEGRITY
+    assert stored[0].result == "FAIL"
+
+
+async def test_checks_pagination_keeps_total_and_summary_over_all_rows(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """分页时 `total` / `summary` 必须覆盖**全部**行，而不是当前页。
+
+    否则读者翻到第二页、看到「这一页没有 ERROR」就会误判「整体通过」。
+    """
+    row = await _insertRelease(
+        dbSession,
+        version="2026.11.18-check-page",
+        manifest=sampleManifest(),
+    )
+    await client.post(f"{SEMANTIC_RELEASES_PATH}/{row.id}/validate", headers=_ADMIN_HEADERS)
+
+    full = await client.get(f"{SEMANTIC_RELEASES_PATH}/{row.id}/checks", headers=_ADMIN_HEADERS)
+    assert full.status_code == 200
+    fullBody = full.json()
+    fullTotal = fullBody["total"]
+    assert fullTotal > 1
+
+    first = await client.get(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/checks?limit=1&offset=0", headers=_ADMIN_HEADERS
+    )
+    assert first.status_code == 200
+    firstBody = first.json()
+    assert len(firstBody["rows"]) == 1
+    assert firstBody["total"] == fullTotal, "total 不得被 limit 截断"
+    assert firstBody["summary"] == fullBody["summary"], "summary 必须是整份报告的结论"
+
+    second = await client.get(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/checks?limit=1&offset=1", headers=_ADMIN_HEADERS
+    )
+    assert second.status_code == 200
+    secondBody = second.json()
+    assert len(secondBody["rows"]) == 1
+    assert secondBody["rows"][0]["id"] != firstBody["rows"][0]["id"]
+    assert secondBody["total"] == fullTotal
+
+
+async def test_checks_pagination_rejects_out_of_range_params(client: AsyncClient) -> None:
+    """分页参数越界 ⇒ 422（与列表端点同口径）。"""
+    for query in ("?limit=0", "?limit=201", "?offset=-1"):
+        response = await client.get(
+            f"{SEMANTIC_RELEASES_PATH}/1/checks{query}", headers=_ADMIN_HEADERS
+        )
+        assert response.status_code == 422, query
+
+
+async def test_response_blockers_match_the_failed_rows_in_the_table(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """响应里的阻断项数必须与表里的 FAIL/ERROR 行数一致（同一份事实源）。
+
+    409 响应体把闸门报告折进 `error` 文案（`（N 项阻断）`）⇒ 这里把 N 抠出来
+    与表里的 ERROR 行数对账。
+    """
+    row = await _insertRelease(
+        dbSession,
+        version="2026.11.18-check-align",
+        manifest=sampleManifest(),
+    )
+    validated = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{row.id}/validate", headers=_ADMIN_HEADERS
+    )
+    assert validated.status_code == 409
+    errorText = validated.json()["error"]
+    matched = re.search(r"（(\d+) 项阻断）", errorText)
+    assert matched, f"409 文案里应有阻断项计数：{errorText!r}"
+    blockerCount = int(matched.group(1))
+
+    response = await client.get(f"{SEMANTIC_RELEASES_PATH}/{row.id}/checks", headers=_ADMIN_HEADERS)
+    body = response.json()
+    errorRows = [
+        item
+        for item in body["rows"]
+        if item["result"] == "FAIL" and item["severity"] == "ERROR"
+    ]
+    assert blockerCount == len(errorRows)
+    assert body["summary"]["errorCount"] == len(errorRows)
+
+
+# ---------------------------------------------------------------------------
+# 批次 B（域发布）：回滚留痕 + diff 同口径
+#
+# 为什么并进本文件而不是新建 integration 文件：
+# CI 的 integration 分片是「`find | sort` 后下标 mod 4」⇒ **新增 integration 文件
+# 会让其后所有文件的下标整体 +1、分片归属轮转一位** ⇒ 依赖「同分片邻居副作用」的
+# 既有用例会突然红（见 `Harness/rules/测试规范.md` §目录分片稳定性）。
+# ---------------------------------------------------------------------------
+
+DISCOVERY_DIFF_PATH = "/api/v1/ontology-discovery/diff"
+
+
+async def _seedDomainClass(
+    session: AsyncSession,
+    *,
+    domainCode: str,
+    className: str,
+    boCode: str,
+) -> None:
+    """种「一个域 + 一个本体类 + 一个业务对象」。"""
+    if await session.get(DataDomain, domainCode) is None:
+        session.add(DataDomain(code=domainCode, name=domainCode, enabled=True))
+    cls = OntologyClass(class_name=className, source_table=f"T_{className}")
+    session.add(cls)
+    await session.flush()
+    session.add(
+        BusinessObject(
+            code=boCode,
+            name=boCode,
+            header_class_id=cls.id,
+            primary_domain_id=domainCode,
+        )
+    )
+    await session.commit()
+
+
+async def test_rollback_copy_records_a_create_audit(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """回滚副本是一次**创建** ⇒ 审计里必须有 CREATE 行（含回滚来源）。
+
+    没有这条 ⇒ 审计里只有一堆 UPDATE，查不到「谁创建了这条发布」。
+    """
+    created = await client.post(
+        SEMANTIC_RELEASES_PATH,
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-audit-src"},
+    )
+    releaseId = created.json()["release"]["id"]
+    await client.post(f"{SEMANTIC_RELEASES_PATH}/{releaseId}/validate", headers=_ADMIN_HEADERS)
+    await client.post(f"{SEMANTIC_RELEASES_PATH}/{releaseId}/activate", headers=_ADMIN_HEADERS)
+
+    rolled = await client.post(
+        f"{SEMANTIC_RELEASES_PATH}/{releaseId}/rollback",
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-audit-copy"},
+    )
+    assert rolled.status_code == 200
+    copyId = rolled.json()["release"]["id"]
+
+    rows = (
+        await dbSession.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.entity_type == "semantic_release",
+                AuditLog.entity_id == copyId,
+            )
+            .order_by(AuditLog.id)
+        )
+    ).scalars().all()
+    actions = [row.action for row in rows]
+    assert actions[0] == "CREATE", actions
+    after = rows[0].after_json or {}
+    assert after.get("rolledFromReleaseId") == releaseId
+    assert after.get("requestedVersion") == "2026.11.19-audit-copy"
+    assert after.get("status") == "DRAFT"
+
+
+async def test_diff_compares_the_domain_slice_on_both_sides(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """域发布的 diff：**基线与候选同口径**（两侧都是该域的切片）。
+
+    不裁剪候选侧的话，「切片 vs 全量」会把别的域的类全报成 `ADDITIVE`
+    （评审看到「新增 1 个类」其实是另一个域的东西），而且**他域的破坏性删除
+    在两边都不存在 ⇒ 彻底不可见**。
+    """
+    await _seedDomainClass(
+        dbSession, domainCode="PROCD1", className="采购订单D1", boCode="PUR_ORDER_D1"
+    )
+    await _seedDomainClass(
+        dbSession, domainCode="PROCD2", className="质检记录D2", boCode="QA_RECORD_D2"
+    )
+    created = await client.post(
+        SEMANTIC_RELEASES_PATH,
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-diff-base", "domainCode": "PROCD1"},
+    )
+    assert created.status_code == 201
+    releaseId = created.json()["release"]["id"]
+    assert (await client.post(f"{SEMANTIC_RELEASES_PATH}/{releaseId}/validate", headers=_ADMIN_HEADERS)).status_code == 200
+    assert (await client.post(f"{SEMANTIC_RELEASES_PATH}/{releaseId}/activate", headers=_ADMIN_HEADERS)).status_code == 200
+
+    response = await client.get(
+        f"{DISCOVERY_DIFF_PATH}", headers=_ADMIN_HEADERS, params={"domainCode": "PROCD1"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # 比较范围如实披露。
+    assert body["scope"] == "DOMAIN"
+    assert body["baselineDomainCode"] == "PROCD1"
+    assert body["baselineReleaseId"] == releaseId
+    # 候选侧也切了域 ⇒ 另一个域的类不进入比较范围。
+    targets = {change["target"] for change in body["changes"]}
+    assert "质检记录D2" not in targets
+    assert body["changeCount"] == 0
+
+
+async def test_diff_of_a_global_release_reports_the_global_scope(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """不带 `domainCode` ⇒ 比较范围是 GLOBAL（如实披露，不假装是域内比较）。"""
+    await _seedDomainClass(
+        dbSession, domainCode="PROCE1", className="采购订单E1", boCode="PUR_ORDER_E1"
+    )
+    created = await client.post(
+        SEMANTIC_RELEASES_PATH,
+        headers=_ADMIN_HEADERS,
+        json={"version": "2026.11.19-diff-global"},
+    )
+    assert created.status_code == 201
+    releaseId = created.json()["release"]["id"]
+    await client.post(f"{SEMANTIC_RELEASES_PATH}/{releaseId}/validate", headers=_ADMIN_HEADERS)
+    await client.post(f"{SEMANTIC_RELEASES_PATH}/{releaseId}/activate", headers=_ADMIN_HEADERS)
+
+    response = await client.get(f"{DISCOVERY_DIFF_PATH}", headers=_ADMIN_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == "GLOBAL"
+    assert body["baselineDomainCode"] is None

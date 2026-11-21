@@ -931,3 +931,11 @@ MSG_FIELD_HINT_TRUNCATED = " 等 {count} 个"
 MSG_METRIC_TIME_SCOPE_PLACEHOLDER_REQUIRES_COLUMN = (
     "指标 formula 声明了时间占位符（time_scope）时必须同时配置 time_column（时间列）"
 )
+
+# --- I3-a 采购 Copilot 统一对话入口（设计稿 §8.4） ---------------------------
+MSG_COPILOT_NOT_PROCUREMENT_AGENT = (
+    "Copilot 只接受采购域 Agent（`PROCUREMENT_` 前缀），收到 {code}"
+)
+MSG_COPILOT_STREAM_TIMEOUT = (
+    "本次流式转发的等待时间已到；运行仍在后台继续，可用轨迹地址继续跟进"
+)

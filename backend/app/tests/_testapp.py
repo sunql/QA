@@ -262,6 +262,15 @@ def buildTestApp(testFactory: Any) -> FastAPI:
             tags=["agent-runs"],
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
         )
+        # I3-a 采购 Copilot 入口：与 main.py 同一开关、同一前缀、同一依赖。
+        from app.api.v1 import procurement_copilot
+
+        testApp.include_router(
+            procurement_copilot.router,
+            prefix="/api/v1/procurement",
+            tags=["procurement-copilot"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
     # 语义发布只读 API（P1b / D9）：与 main.py 同一开关、同一 admin 门禁。
     if settings.enableSemanticRelease:
         from app.api.v1 import semantic_releases

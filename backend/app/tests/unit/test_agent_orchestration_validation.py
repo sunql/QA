@@ -17,12 +17,23 @@ from app.services.agent_orchestration_validation import (
 from app.services.agent_tool_types import ToolResult
 
 
-def test_only_seven_read_only_handlers_are_allowed():
+def test_read_only_whitelist_is_exactly_the_reviewed_set():
+    """白名单**逐个点名**（集合相等）：新增工具必须过一次显式评审。
+
+    I3-a（2026-11-21）新增 5 个采购检索 handler：material_search /
+    supplier_search / purchase_history_query / quotation_query /
+    procurement_policy_search —— 全部只读（SELECT 行数上限 + 文档 RAG），
+    不放行则采购场景 Agent 的 profile 绑不上工具、Copilot 跑不起来。
+    """
     assert isinstance(READ_ONLY_HANDLER_REFS, frozenset)
     assert frozenset({
         "supplier_360", "supplier_risk", "graph_traverse", "wiki_search",
         "wiki_read", "rule_evaluate", "coverage_status",
+        "material_search", "supplier_search", "purchase_history_query",
+        "quotation_query", "procurement_policy_search",
+        "contract_document_search",
     }) == READ_ONLY_HANDLER_REFS
+    # 非只读 / LLM 直跑 SQL 的 handler 永不放行
     assert "nl2sql_default" not in READ_ONLY_HANDLER_REFS
     assert "execute_sql" not in READ_ONLY_HANDLER_REFS
 

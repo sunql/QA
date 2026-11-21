@@ -286,6 +286,30 @@ async def _resolveDbUser(session: AsyncSession, username: str) -> User | None:
     return row
 
 
+async def buildCurrentUserForUserId(
+    session: AsyncSession, userId: str
+) -> CurrentUser | None:
+    """按 `userId`（= users.username）还原完整的 CurrentUser；查无此人 ⇒ None。
+
+    用途：**编排运行里的工具上下文**。`agent_orchestration_runner` 只把
+    `run.created_by`（用户名）作为 ``actor`` 传给工具，没有请求级
+    ``getCurrentUser``；文档类工具需要用户身份做密级过滤，缺了就只能
+    fail-closed（2026-11-21 实测：合同/制度检索全部「缺少用户身份」）。
+    查不到（stub id / 已删用户）⇒ 返回 None，调用方继续 fail-closed。
+    """
+    dbUser = await _resolveDbUser(session, userId)
+    if dbUser is None:
+        return None
+    roles, departments = await _loadDbRolesAndOrgs(session, dbUser.id)
+    return CurrentUser(
+        userId=userId,
+        tenantId="default",
+        roles=roles,
+        departments=departments,
+        dbUserId=dbUser.id,
+    )
+
+
 async def _loadDbRolesAndOrgs(
     session: AsyncSession, user_id: int
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:

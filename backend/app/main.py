@@ -679,6 +679,16 @@ def createApp() -> FastAPI:
             tags=["agent-runs"],
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
         )
+        # I3-a 采购 Copilot 入口（设计稿 §8.4）：创建的就是一次 agent-run，
+        # 所以与 run 生命周期同开关——编排关闭时这个面整体不存在（404）。
+        from app.api.v1 import procurement_copilot
+
+        app.include_router(
+            procurement_copilot.router,
+            prefix="/api/v1/procurement",
+            tags=["procurement-copilot"],
+            dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+        )
     # 语义发布只读 API（P1b / D9）：开关关闭时整组不注册（404），
     # import 也留在条件内；整组挂 requireAdmin —— 草稿/归档版本与 created_by/note
     # 属于治理元数据，不对普通用户开放。

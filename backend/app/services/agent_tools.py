@@ -35,6 +35,9 @@ from app.services.agent_tool_types import (
     ToolResult,
 )
 from app.services.agent_tools_procurement import (
+    contractDocumentSearchHandler as _contractDocumentSearchHandler,
+)
+from app.services.agent_tools_procurement import (
     materialSearchHandler as _materialSearchHandler,
 )
 from app.services.agent_tools_procurement import (
@@ -241,6 +244,7 @@ BUILTIN_HANDLERS: dict[str, AgentHandler] = {
     "purchase_history_query": _purchaseHistoryHandler,
     "quotation_query": _quotationQueryHandler,
     "procurement_policy_search": _procurementPolicySearchHandler,
+    "contract_document_search": _contractDocumentSearchHandler,
     # feat-wiki-knowledge M8：知识工具的实现集中在 agent_tools_wiki，
     # 这里只做登记（handler 引擎在代码、元数据在 DB 的既有分工）。
     **WIKI_HANDLERS,
@@ -267,6 +271,9 @@ ARG_EXTRACTORS: dict[str, ArgExtractor] = {
     ),
     # 制度检索：整条输入即问题（对齐 wiki_text）。
     "procurement_policy_search": lambda raw: (
+        {"question": raw.strip()} if isinstance(raw, str) and raw.strip() else None
+    ),
+    "contract_document_search": lambda raw: (
         {"question": raw.strip()} if isinstance(raw, str) and raw.strip() else None
     ),
     **WIKI_ARG_EXTRACTORS,

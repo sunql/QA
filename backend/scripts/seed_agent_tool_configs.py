@@ -32,6 +32,16 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "handler_kind": "BUILTIN",
         "handler_ref": "supplier_360",
         "arg_extractor_kind": "supplier_key",
+        # 编排路径（agent-runs）绑定工具要求合法 object schema；单工具运行时
+        # （agent-runtime）走 ARG_EXTRACTORS，不读这个字段 ⇒ 补上对老路径零影响。
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "供应商编码 / 统一键"},
+            },
+            "required": ["key"],
+            "additionalProperties": False,
+        },
         "enabled": True,
     },
     {
@@ -52,6 +62,15 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "handler_kind": "BUILTIN",
         "handler_ref": "material_search",
         "arg_extractor_kind": "material_search",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "description": "物料编码/名称关键词"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+            "required": ["q"],
+            "additionalProperties": False,
+        },
         "enabled": True,
     },
     {
@@ -62,6 +81,15 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "handler_kind": "BUILTIN",
         "handler_ref": "supplier_search",
         "arg_extractor_kind": "supplier_search",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "description": "供应商名称/编码关键词"},
+                "materialKey": {"type": "string", "description": "物料编码（给了就走供应关系图反查）"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+            "additionalProperties": False,
+        },
         "enabled": True,
     },
     {
@@ -72,6 +100,75 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "handler_kind": "BUILTIN",
         "handler_ref": "purchase_history_query",
         "arg_extractor_kind": "purchase_history_query",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "supplierKey": {"type": "string", "description": "供应商编码"},
+                "materialKey": {"type": "string"},
+                "monthsBack": {"type": "integer", "minimum": 1, "maximum": 36},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+            "required": ["supplierKey"],
+            "additionalProperties": False,
+        },
+        "enabled": True,
+    },
+    {
+        "name": "quotation_query",
+        "description": "报价查询（业务库只读）：供应商/物料/报价段年度任一必填（M3-2，SQL Guard 闸门）",
+        "data_object": "SUPPLIER",
+        "data_layers": ["DWD"],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "quotation_query",
+        "arg_extractor_kind": "quotation_query",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "supplierKey": {"type": "string"},
+                "materialKey": {"type": "string"},
+                "segmentYear": {"type": "integer", "description": "报价段年度"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+            "additionalProperties": False,
+        },
+        "enabled": True,
+    },
+    {
+        "name": "procurement_policy_search",
+        "description": "采购制度/合同文档检索（RAG，密级闸 fail-closed；M2-3 文档检索接工具）",
+        "data_object": "DOCUMENT",
+        "data_layers": ["FEATURE"],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "procurement_policy_search",
+        "arg_extractor_kind": "procurement_policy_search",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "制度/合同类问题"},
+                "topK": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            "required": ["question"],
+            "additionalProperties": False,
+        },
+        "enabled": True,
+    },
+    {
+        "name": "contract_document_search",
+        "description": "合同文档检索（RAG，按 CONTRACT 类型收窄，密级闸 fail-closed；设计稿 §5.2）",
+        "data_object": "DOCUMENT",
+        "data_layers": ["FEATURE"],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "contract_document_search",
+        "arg_extractor_kind": "contract_document_search",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "合同条款/履约类问题"},
+                "topK": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            "required": ["question"],
+            "additionalProperties": False,
+        },
         "enabled": True,
     },
     {
@@ -140,6 +237,10 @@ def _needsUpdate(row: AgentToolConfig, seed: dict) -> bool:
         or row.handler_ref != seed["handler_ref"]
         or row.arg_extractor_kind
         != seed.get("arg_extractor_kind", "supplier_key")
+        # 编排路径要求 input_schema 是合法 object schema；漏比这一项 ⇒
+        # 库里遗留的 `{}` 永远不会被 seed 修好（2026-11-21 实测：
+        # profile 绑定直接 ValidationError，而 seed 报「0 changed」）。
+        or (row.input_schema or {}) != seed.get("input_schema", {})
     )
 
 

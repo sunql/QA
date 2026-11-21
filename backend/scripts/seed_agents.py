@@ -83,6 +83,7 @@ _AGENT_DEFAULT_BINDINGS: dict[str, str] = {
     "PROCUREMENT_MATERIAL_SEARCH_AGENT": "material_search",
     "PROCUREMENT_SUPPLIER_SEARCH_AGENT": "supplier_search",
     "PROCUREMENT_PURCHASE_HISTORY_AGENT": "purchase_history_query",
+    "PROCUREMENT_CONTRACT_SEARCH_AGENT": "contract_document_search",
     # feat-wiki-knowledge M8：一个 Agent 绑一个工具（agent_definition.tool_name
     # 是单值列），故知识工具各配一个可运行 Agent。
     "WIKI_SEARCH_AGENT": "wiki_search",
@@ -215,6 +216,12 @@ AGENT_SEEDS: list[dict[str, Any]] = [
         "采购供应商检索 Agent",
         "按物料反查在册供应商（供应关系图）或按名称/编码检索供应商主数据（supplier_search 工具，只读无 LLM）。",
         layers=("DIM",),
+    ),
+    _agent(
+        "PROCUREMENT_CONTRACT_SEARCH_AGENT",
+        "采购合同检索 Agent",
+        "检索采购合同条款与履约约定（contract_document_search 工具，CONTRACT 类型收窄，密级闸 fail-closed）。",
+        layers=("FEATURE",),
     ),
     _agent(
         "PROCUREMENT_PURCHASE_HISTORY_AGENT",

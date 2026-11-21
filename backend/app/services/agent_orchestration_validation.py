@@ -41,6 +41,16 @@ READ_ONLY_HANDLER_REFS = frozenset({
     "wiki_read",
     "rule_evaluate",
     "coverage_status",
+    # I3-a 采购检索工具（M3-1）：handler 全部只读——两张表的 SELECT（行数上限 +
+    # 字面量转义）与文档 RAG 检索，**无** INSERT/UPDATE/DELETE/commit。
+    # 白名单是编排运行能绑定/调用的唯一依据：不放行 ⇒ 采购场景 Agent 的
+    # profile 永远绑不上工具（实测 2026-11-21，seed 直接 ValidationError）。
+    "material_search",
+    "supplier_search",
+    "purchase_history_query",
+    "quotation_query",
+    "procurement_policy_search",
+    "contract_document_search",
 })
 
 BUILTIN_HANDLER_KIND = "BUILTIN"

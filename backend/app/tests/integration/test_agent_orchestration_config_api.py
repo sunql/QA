@@ -465,8 +465,12 @@ async def test_tool_options_lists_only_enabled_valid_whitelisted_tools(
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert [option["toolName"] for option in body] == ["orch_alpha", "orch_zeta"]
-    for option in body:
+    # 只对本用例自己造的 ``orch_`` 工具做集合断言：种子工具（seed_agent_tool_configs）
+    # 里也有白名单内且 schema 合法的工具（如 material_search / supplier_360），
+    # 它们出现在选项里是**正确行为**，不该被这条过滤语义的用例钉死。
+    orchTools = [o for o in body if o["toolName"].startswith("orch_")]
+    assert [option["toolName"] for option in orchTools] == ["orch_alpha", "orch_zeta"]
+    for option in orchTools:
         assert set(option.keys()) == {"toolName", "description", "inputSchema"}
         assert "handlerRef" not in option
         assert option["inputSchema"] == _VALID_SCHEMA

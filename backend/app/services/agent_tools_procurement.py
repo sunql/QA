@@ -305,6 +305,23 @@ async def quotationQueryHandler(
     )
 
 
+async def _resolveToolUser(session: AsyncSession, ctx: AgentToolContext) -> Any | None:
+    """工具侧用户身份：优先 ctx.user；否则按 ``ctx.actor``（用户名）还原。
+
+    编排运行的 ctx 只带 actor（run.created_by）⇒ 文档类工具若不还原身份，
+    密级闸永远 fail-closed。查不到身份仍返回 None（继续 fail-closed）。
+    """
+    user = getattr(ctx, "user", None)
+    if user is not None:
+        return user
+    actor = getattr(ctx, "actor", None)
+    if not actor or session is None:
+        return None
+    from app.dependencies import buildCurrentUserForUserId
+
+    return await buildCurrentUserForUserId(session, actor)
+
+
 async def procurementPolicySearchHandler(
     session: AsyncSession, args: dict, ctx: AgentToolContext
 ) -> ToolResult:
@@ -315,7 +332,7 @@ async def procurementPolicySearchHandler(
     question = str(args.get("question") or "").strip()
     if not question:
         return ToolResult(data={"evidence": []}, answer="请提供要检索的制度问题。")
-    user = getattr(ctx, "user", None)
+    user = await _resolveToolUser(session, ctx)
     if user is None:
         return ToolResult(
             data={"evidence": []},
@@ -336,6 +353,51 @@ async def procurementPolicySearchHandler(
             "total": len(evidence),
         },
         answer=f"命中 {len(evidence)} 条制度证据（含密级与生效期溯源）。",
+    )
+
+
+#: 合同类文档的类型集合（工具语义「合同」= 文档目录里的 CONTRACT）。
+CONTRACT_DOCUMENT_TYPES = ("CONTRACT",)
+
+
+async def contractDocumentSearchHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """合同文档检索（设计稿 §5.2 `contract_document_search`）。
+
+    与 `procurement_policy_search` 同一条文档检索链（RAG + 密级闸 + catalog
+    核验），只是把 `documentTypes` 收窄到 **CONTRACT**。密级闸同样
+    **fail-closed**：ctx.user 缺失就不检索。
+    """
+    question = str(args.get("question") or "").strip()
+    if not question:
+        return ToolResult(data={"evidence": []}, answer="请提供要检索的合同问题。")
+    user = await _resolveToolUser(session, ctx)
+    if user is None:
+        return ToolResult(
+            data={"evidence": []},
+            answer="无法核验文档密级（缺少用户身份）⇒ 不执行合同检索；请经带身份的入口使用。",
+        )
+    limit = int(args.get("topK") or args.get("limit") or 5)
+    evidence = await searchProcurementDocuments(
+        session,
+        user,
+        query=question,
+        documentTypes=list(CONTRACT_DOCUMENT_TYPES),
+        topK=max(1, min(limit, 20)),
+    )
+    if not evidence:
+        return ToolResult(
+            data={"evidence": [], "documentTypes": list(CONTRACT_DOCUMENT_TYPES)},
+            answer=f"未命中与「{question}」相关的合同文档（已按 CONTRACT 类型过滤）。",
+        )
+    return ToolResult(
+        data={
+            "evidence": [e.model_dump(mode="json", by_alias=True) for e in evidence],
+            "total": len(evidence),
+            "documentTypes": list(CONTRACT_DOCUMENT_TYPES),
+        },
+        answer=f"命中 {len(evidence)} 条合同证据（含密级与生效期溯源）。",
     )
 
 

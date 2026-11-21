@@ -1025,10 +1025,13 @@ def findSuppliersOfMaterial(materialKey: str, limit: int = 20) -> list[dict[str,
     只读；materialKey 不存在 ⇒ 空列表（调用方自行区分「无此物料」与「无供应商」）。
     """
     _assertBusinessLabel("Supplier")
-    _assertBusinessLabel("Material")
+    # Phase 4.4 起物料节点的 label 是 **ItemMaster**（"Material" 已不在白名单，
+    # 传进来直接 ValueError）。2026-11-21 实测：写死 "Material" ⇒ supplier_search
+    # 的 materialKey 路**必然** TOOL_EXECUTION_FAILED。
+    _assertBusinessLabel("ItemMaster")
     driver = getDriver()
     cql = """
-        MATCH (s:BusinessEntity:Supplier)-[:SUPPLIES]->(m:BusinessEntity:Material {key: $key})
+        MATCH (s:BusinessEntity:Supplier)-[:SUPPLIES]->(m:BusinessEntity:ItemMaster {key: $key})
         RETURN s.key AS key, s.code AS code, s.name AS name
         ORDER BY s.key
         LIMIT $limit

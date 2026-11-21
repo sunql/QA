@@ -259,3 +259,101 @@ async def test_purchase_history_requires_supplier_key(dbSession) -> None:
     result = await purchaseHistoryHandler(dbSession, {}, SimpleNamespace())
     assert result.data["rows"] == [] and result.data["summary"] == {}
     assert result.answer, "缺 supplierKey ⇒ 友好提示"
+
+
+# ── I3-b：contract_document_search（合同类收窄；密级闸 fail-closed）─────────
+
+
+def test_contract_document_search_registered() -> None:
+    from app.services.agent_orchestration_validation import READ_ONLY_HANDLER_REFS
+    from app.services.agent_tools import ARG_EXTRACTORS
+
+    assert "contract_document_search" in BUILTIN_HANDLERS
+    assert "contract_document_search" in ARG_EXTRACTORS
+    # 编排运行能绑定/调用它的唯一依据就是这份白名单
+    assert "contract_document_search" in READ_ONLY_HANDLER_REFS
+
+
+@pytest.mark.asyncio
+async def test_contract_document_search_narrows_to_contract_type(monkeypatch) -> None:
+    from app.services import agent_tools_procurement as mod
+
+    captured: dict = {}
+
+    async def _fakeSearch(session, user, **kwargs):
+        captured.update(kwargs)
+        return [
+            SimpleNamespace(
+                model_dump=lambda **_: {"ref": "DOC-1", "snippet": "交付延迟按日 0.5% 计违约金"}
+            )
+        ]
+
+    monkeypatch.setattr(mod, "searchProcurementDocuments", _fakeSearch)
+    ctx = SimpleNamespace(user=SimpleNamespace(userId="u1"))
+
+    result = await mod.contractDocumentSearchHandler(
+        None, {"question": "合同里的交付违约金怎么算", "topK": 3}, ctx
+    )
+
+    assert captured["documentTypes"] == ["CONTRACT"]
+    assert captured["topK"] == 3
+    assert result.data["documentTypes"] == ["CONTRACT"]
+    assert result.data["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_contract_document_search_fails_closed_without_user(monkeypatch) -> None:
+    from app.services import agent_tools_procurement as mod
+
+    async def _forbidden(*args, **kwargs):  # pragma: no cover - 不应被调用
+        raise AssertionError("无用户身份时不允许检索（密级闸 fail-closed）")
+
+    monkeypatch.setattr(mod, "searchProcurementDocuments", _forbidden)
+
+    result = await mod.contractDocumentSearchHandler(
+        None, {"question": "合同?"}, SimpleNamespace(user=None)
+    )
+
+    assert result.data["evidence"] == []
+    assert "密级" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_contract_document_search_requires_question() -> None:
+    from app.services import agent_tools_procurement as mod
+
+    result = await mod.contractDocumentSearchHandler(
+        None, {"question": "   "}, SimpleNamespace(user=SimpleNamespace(userId="u"))
+    )
+
+    assert result.data["evidence"] == []
+
+
+@pytest.mark.asyncio
+async def test_document_tool_resolves_user_from_actor(monkeypatch) -> None:
+    """编排路径只给 actor（run.created_by）⇒ 工具要自己还原出用户身份。
+
+    2026-11-21 实测：不还原 ⇒ 合同/制度检索永远停在「缺少用户身份」。
+    """
+    from app.services import agent_tools_procurement as mod
+
+    captured: dict = {}
+
+    async def _fakeResolve(session, userId):
+        captured["resolvedFor"] = userId
+        return SimpleNamespace(userId=userId, dbUserId=1, roles=("admin",), departments=())
+
+    async def _fakeSearch(session, user, **kwargs):
+        captured["user"] = user
+        return []
+
+    monkeypatch.setattr("app.dependencies.buildCurrentUserForUserId", _fakeResolve)
+    monkeypatch.setattr(mod, "searchProcurementDocuments", _fakeSearch)
+
+    # session 非 None：身份还原要查库（这里被 _fakeResolve 截获）
+    await mod.contractDocumentSearchHandler(
+        object(), {"question": "交付违约金"}, SimpleNamespace(user=None, actor="admin")
+    )
+
+    assert captured["resolvedFor"] == "admin"
+    assert captured["user"] is not None

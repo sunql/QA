@@ -358,9 +358,12 @@ def buildQuotationSql(
     if segmentYear:
         conds.append(f"SEG_YEAR = {int(segmentYear)}")
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    # CURRENCY_CODE / UOM / PRICE_LIST_CODE 一并取：**比价时要按报价单分
+    # （含税/不含税）、按单位分组**（2026-11-22 实测得出）。
     return (
         f"SELECT SUPPLIER_CODE, ITEM_CODE, SEG_YEAR, UNIT_PRICE_EX_TAX, "
-        f"SEG_START_DATE, SEG_END_DATE FROM DWD_PURCHASE_QUOTATION_YEARLY_DTL"
+        f"SEG_START_DATE, SEG_END_DATE, CURRENCY_CODE, UOM, PRICE_LIST_CODE "
+        f"FROM DWD_PURCHASE_QUOTATION_YEARLY_DTL"
         f"{where} ORDER BY SEG_YEAR DESC, ITEM_CODE "
         f"FETCH FIRST {limit} ROWS ONLY"
     )
@@ -443,8 +446,11 @@ def buildQuotationCompareSql(itemCodes: list[str], segmentYear: int) -> str:
     """多物料年度报价 SQL（确定性）：一次取齐同年度、指定物料的全部供应商报价。"""
     items = [code for code in dict.fromkeys(itemCodes) if code][:_COMPARE_MAX_ITEMS]
     quoted = ", ".join(f"'{_esc(code)}'" for code in items)
+    # PRICE_LIST_CODE / UOM / CURRENCY_CODE 必须取：比价要按报价单分（含税/
+    # 不含税不可混比）、按单位分组（2026-11-22 实测得出）。
     return (
-        f"SELECT SUPPLIER_CODE, ITEM_CODE, SEG_YEAR, UNIT_PRICE_EX_TAX "
+        f"SELECT SUPPLIER_CODE, ITEM_CODE, SEG_YEAR, UNIT_PRICE_EX_TAX, "
+        f"PRICE_LIST_CODE, UOM, CURRENCY_CODE "
         f"FROM DWD_PURCHASE_QUOTATION_YEARLY_DTL "
         f"WHERE SEG_YEAR = {int(segmentYear)} AND ITEM_CODE IN ({quoted}) "
         f"ORDER BY ITEM_CODE, SUPPLIER_CODE"
@@ -503,6 +509,10 @@ async def quotationCompareHandler(
             "segmentYear": group.segmentYear,
             "currency": group.currency,
             "priceBasis": group.priceBasis,
+            # 分组口径必须随结果出去（前端要能告诉用户「这是在哪个报价单、
+            # 哪个单位口径下比的」）
+            "priceListCode": group.priceListCode,
+            "uom": group.uom,
             "lowestPrice": str(group.lowestPrice),
             "medianPrice": str(group.medianPrice),
             "spreadPct": str(group.spreadPct),

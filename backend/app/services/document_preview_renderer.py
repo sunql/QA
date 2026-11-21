@@ -66,6 +66,11 @@ th{background:#f7f8fa;font-weight:600}
 iframe{width:100%;height:70vh;border:1px solid #e5e6eb;border-radius:6px}
 """
 
+#: 预览渲染的规模上限（防止 19MB Excel / 十万行表把响应撑爆）。
+#: 超限时截断并**明示**「已截断」——静默截断会让用户以为数据只有这些。
+MAX_PREVIEW_ROWS = 2000
+MAX_PREVIEW_COLS = 50
+
 #: 包裹用户 HTML 的 iframe sandbox（禁止脚本/同源/表单/顶层导航）。
 _HTML_SANDBOX = "allow-popups allow-popups-to-escape-sandbox"
 
@@ -186,15 +191,69 @@ def _renderXlsx(content: bytes) -> PreviewResult:
     for sheet in workbook.worksheets:
         parts.append(f"<div class=\"sheet-name\">{escapeHtml(sheet.title)}</div>")
         rows: list[str] = []
-        for row in sheet.iter_rows(values_only=True):
+        truncated = False
+        for index, row in enumerate(sheet.iter_rows(values_only=True)):
+            if index >= MAX_PREVIEW_ROWS:
+                truncated = True
+                break
             cells = "".join(
                 f"<td>{escapeHtml('' if value is None else str(value))}</td>"
-                for value in row
+                for value in row[:MAX_PREVIEW_COLS]
             )
             rows.append(f"<tr>{cells}</tr>")
         if rows:
             parts.append("<table>" + "".join(rows) + "</table>")
+        if truncated:
+            parts.append(_truncatedNote())
     return PreviewResult(html=_shell("文档预览", "".join(parts)))
+
+
+def _truncatedNote() -> str:
+    return (
+        f"<p class=\"truncated\">仅预览前 {MAX_PREVIEW_ROWS} 行；"
+        "完整内容请下载原文。</p>"
+    )
+
+
+def _renderXls(content: bytes) -> PreviewResult:
+    """**老式 .xls（OLE2 二进制）** → 每个 sheet 一张表（走 xlrd 2.x）。
+
+    ⚠️ 这个分支是必需的不是可选的：`.xls` 是**二进制**，若不单独渲染而落到
+    文本兜底，字节会被当 UTF-8 解码 ⇒ **页面上全是乱码**（2026-11-22 实测：
+    用户上传 19MB 的 .xls，预览乱码）。
+    """
+    import io
+
+    import xlrd
+
+    workbook = xlrd.open_workbook(file_contents=content)
+    parts: list[str] = []
+    for sheet in workbook.sheets():
+        parts.append(f"<div class=\"sheet-name\">{escapeHtml(sheet.name)}</div>")
+        rows: list[str] = []
+        truncated = False
+        for rowIndex in range(min(sheet.nrows, MAX_PREVIEW_ROWS)):
+            cells = "".join(
+                f"<td>{escapeHtml(_xlsCellText(sheet.cell_value(rowIndex, colIndex)))}</td>"
+                for colIndex in range(min(sheet.ncols, MAX_PREVIEW_COLS))
+            )
+            rows.append(f"<tr>{cells}</tr>")
+        if sheet.nrows > MAX_PREVIEW_ROWS:
+            truncated = True
+        if rows:
+            parts.append("<table>" + "".join(rows) + "</table>")
+        if truncated:
+            parts.append(_truncatedNote())
+    return PreviewResult(html=_shell("文档预览", "".join(parts)))
+
+
+def _xlsCellText(value: Any) -> str:
+    """xlrd 的 cell 值 → 展示文本（浮点整数去掉 '.0'，None ⇒ 空）。"""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def _renderPptx(content: bytes) -> PreviewResult:
@@ -234,11 +293,25 @@ def renderOffice(content: bytes, filename: str) -> PreviewResult:
             return _renderDocx(content)
         if extension in ("xlsx", "xlsm"):
             return _renderXlsx(content)
+        if extension == "xls":
+            return _renderXls(content)
         if extension == "pptx":
             return _renderPptx(content)
-    except Exception:  # noqa: BLE001 —— 渲染失败退回纯文本，不让预览整个挂掉
-        pass
-    return renderText(content)
+    except Exception:  # noqa: BLE001 —— 渲染失败给可行动提示，不让预览整个挂掉
+        return _unsupportedPreview(filename)
+    # 未知 Office 扩展名（如旧 .doc/.ppt）：**不能**按文本读二进制（会乱码）
+    return _unsupportedPreview(filename)
+
+
+def _unsupportedPreview(filename: str) -> PreviewResult:
+    """无法在线渲染时的可行动提示（**绝不**把二进制当文本吐出来）。"""
+    body = (
+        "<div class=\"unsupported\">"
+        f"<p>当前格式（{escapeHtml(filename)}）暂不支持在线预览。</p>"
+        "<p>请使用「原文」按钮下载后，用对应的办公软件打开。</p>"
+        "</div>"
+    )
+    return PreviewResult(html=_shell("文档预览", body))
 
 
 def renderPreview(

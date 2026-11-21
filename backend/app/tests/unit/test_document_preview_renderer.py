@@ -102,11 +102,47 @@ def test_officePptxKeepsEachSlide() -> None:
     assert "第 1 页" in result.html
 
 
-def test_brokenOfficeFallsBackToText() -> None:
-    """坏文件 ⇒ 退回纯文本，**不抛异常**（预览不该让整个页面挂）。"""
+def test_brokenOfficeShowsActionableHintInsteadOfGarbage() -> None:
+    """坏文件 ⇒ 可行动提示，**不能**把二进制当文本吐出来。
+
+    2026-11-22 实测：.xls 落到文本兜底后，19MB 二进制被当 UTF-8 解码 ⇒
+    页面全是乱码。渲染失败/格式不支持时要给「请下载原文」的指引。
+    """
     result = renderOffice(b"not-a-real-docx", "a.docx")
 
-    assert "<pre>" in result.html
+    assert "暂不支持在线预览" in result.html
+    assert "下载" in result.html
+    assert "<pre>" not in result.html
+
+
+def test_xlsIsRenderedAsTableNotGarbage() -> None:
+    """.xls（OLE2 二进制）必须走 xlrd 渲染，**不能**当文本解码。"""
+    import xlwt  # noqa: F401  # 仅当依赖存在时用于生成样本
+
+    workbook = xlwt.Workbook()
+    sheet = workbook.add_sheet("报价")
+    sheet.write(0, 0, "供应商")
+    sheet.write(0, 1, "单价")
+    sheet.write(1, 0, "B024")
+    sheet.write(1, 1, 12.5)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+
+    result = renderOffice(buffer.getvalue(), "a.xls")
+
+    assert "<table>" in result.html
+    assert "报价" in result.html
+    assert "供应商" in result.html
+    assert "B024" in result.html
+    # 浮点整数不显示 .0
+    assert ">12.5<" in result.html
+
+
+def test_unknownBinaryOfficeIsNotDecodedAsText() -> None:
+    """旧 .doc（解析器不支持、渲染器不认）⇒ 提示，而不是乱码文本。"""
+    result = renderOffice(b"\xd0\xcf\x11\xe0binary", "old.doc")
+
+    assert "暂不支持在线预览" in result.html
 
 
 def test_renderPreviewDispatchesByKind() -> None:

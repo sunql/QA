@@ -3680,6 +3680,9 @@ export const zhCN = {
     loadFailed: "场景/模型加载失败",
     sendFailed: "Copilot 请求失败",
     singleTurnHint: "每条消息是一次独立的只读分析（无会话记忆）；多候选或缺少参数时 Agent 会追问，补充后重发即可。",
+    newConversation: "新会话",
+    conversation: "会话",
+    resumed: "续问",
     openTrace: "查看执行轨迹",
     tokens: "Tokens"
   }

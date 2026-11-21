@@ -36,6 +36,8 @@ class CopilotMessageRequest(CamelModel):
     limits: AgentRunLimits | None = None
     #: stream = SSE 过程流；task = 202 + 任务引用（调用方自己轮询轨迹）。
     mode: Literal["stream", "task"] = "stream"
+    #: 多轮会话 id（缺省 = 新开一个会话；响应里会回传新 id）。
+    conversation_id: str | None = Field(default=None, max_length=36)
 
 
 class CopilotTaskRead(CamelModel):
@@ -48,3 +50,27 @@ class CopilotTaskRead(CamelModel):
     run_id: str
     status: str
     steps_url: str
+    conversation_id: str
+    #: True = 这一轮是对上一轮追问的回答（resume 同一个 run）
+    resumed: bool = False
+
+
+class CopilotTurnRead(CamelModel):
+    """会话中的一轮：用户原文 + 对应的运行状态/答案。"""
+
+    seq: int
+    question: str
+    run_id: str
+    status: str
+    answer: str | None = None
+    pause_code: str | None = None
+    created_at: str
+
+
+class CopilotConversationRead(CamelModel):
+    """会话详情（只有创建者能读）。"""
+
+    conversation_id: str
+    agent_code: str
+    model_config_id: int
+    turns: tuple[CopilotTurnRead, ...] = ()

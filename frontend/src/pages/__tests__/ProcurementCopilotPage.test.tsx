@@ -152,3 +152,51 @@ describe("ProcurementCopilotPage", () => {
     );
   });
 });
+
+
+describe("ProcurementCopilotPage 多轮会话", () => {
+  it("第二轮带上后端回传的 conversationId；新会话清空会话 id", async () => {
+    mockOptions();
+    const payloads: Array<Record<string, unknown>> = [];
+    api.streamCopilotMessage.mockImplementation(async (payload, handlers) => {
+      payloads.push(payload);
+      handlers.onRun?.({
+        runId: `r-${payloads.length}`,
+        stepsUrl: "/api/v1/agent-runs/x/steps",
+        conversationId: "conv-123456",
+        resumed: false,
+      });
+      handlers.onDone?.({
+        runId: `r-${payloads.length}`,
+        status: "SUCCEEDED",
+        answer: "答案",
+        pauseCode: null,
+        errorCode: null,
+        errorMessage: null,
+        totalTokens: 1,
+        cost: 0,
+        stepsUrl: "/api/v1/agent-runs/x/steps",
+      });
+    });
+
+    renderPage();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+
+    const box = screen.getByPlaceholderText(/不锈钢板/);
+    fireEvent.change(box, { target: { value: "第一问" } });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+    await waitFor(() => expect(payloads).toHaveLength(1));
+    expect(payloads[0].conversationId).toBeUndefined();
+
+    fireEvent.change(box, { target: { value: "第二问" } });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+    await waitFor(() => expect(payloads).toHaveLength(2));
+    expect(payloads[1].conversationId).toBe("conv-123456");
+
+    fireEvent.click(screen.getByRole("button", { name: /新会话/ }));
+    fireEvent.change(box, { target: { value: "第三问" } });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+    await waitFor(() => expect(payloads).toHaveLength(3));
+    expect(payloads[2].conversationId).toBeUndefined();
+  });
+});

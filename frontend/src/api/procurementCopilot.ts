@@ -17,6 +17,10 @@ import { readSseStream, type SseEvent } from "../utils/sseStream";
 export interface CopilotRunRef {
   runId: string;
   stepsUrl: string;
+  /** 多轮会话 id（首轮由后端生成并回传） */
+  conversationId?: string;
+  /** true = 这一轮是对上一轮追问的回答（后端 resume 了同一个 run） */
+  resumed?: boolean;
 }
 
 export interface CopilotStepPayload {
@@ -63,6 +67,8 @@ export interface CopilotMessageRequest {
   agentCode: string;
   /** **必填且后端不改派**（后端不替你选模型）。 */
   modelConfigId: number;
+  /** 多轮会话 id；缺省 = 新开会话（响应里会回传新 id）。 */
+  conversationId?: string;
 }
 
 /** 把后端的错误体（字符串 / pydantic 数组）压成一句可展示的话。 */

@@ -43,6 +43,8 @@ interface CopilotTurn {
   id: string;
   question: string;
   agentCode: string;
+  /** true = 对上一轮追问的回答（后端 resume 同一 run） */
+  resumed?: boolean;
   runId: string | null;
   stepsUrl: string | null;
   steps: CopilotStepPayload[];
@@ -73,6 +75,7 @@ export default function ProcurementCopilotPage() {
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<CopilotTurn[]>([]);
   const [busy, setBusy] = useState(false);
+  const [conversationId, setConversationId] = useState<string | undefined>();
   const [loadError, setLoadError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -117,6 +120,7 @@ export default function ProcurementCopilotPage() {
         id,
         question: text,
         agentCode,
+        resumed: undefined,
         runId: null,
         stepsUrl: null,
         steps: [],
@@ -133,10 +137,21 @@ export default function ProcurementCopilotPage() {
     abortRef.current = controller;
     try {
       await streamCopilotMessage(
-        { message: text, agentCode, modelConfigId: modelId },
         {
-          onRun: (run) =>
-            updateTurn(id, { runId: run.runId, stepsUrl: run.stepsUrl }),
+          message: text,
+          agentCode,
+          modelConfigId: modelId,
+          ...(conversationId ? { conversationId } : {}),
+        },
+        {
+          onRun: (run) => {
+            if (run.conversationId) setConversationId(run.conversationId);
+            updateTurn(id, {
+              runId: run.runId,
+              stepsUrl: run.stepsUrl,
+              resumed: run.resumed,
+            });
+          },
           onStep: (step) =>
             setTurns((prev) =>
               prev.map((turn) =>
@@ -225,6 +240,20 @@ export default function ProcurementCopilotPage() {
             >
               {t("procurement.copilot.send")}
             </Button>
+            <Button
+              disabled={busy || turns.length === 0}
+              onClick={() => {
+                setTurns([]);
+                setConversationId(undefined);
+              }}
+            >
+              {t("procurement.copilot.newConversation")}
+            </Button>
+            {conversationId && (
+              <Text type="secondary">
+                {t("procurement.copilot.conversation")}: {conversationId.slice(0, 8)}…
+              </Text>
+            )}
           </Space>
         </div>
       </Card>
@@ -243,6 +272,9 @@ export default function ProcurementCopilotPage() {
                     <Tag color={STATUS_COLOR[turn.status]}>{turn.status}</Tag>
                     <Text strong>{turn.question}</Text>
                     <Text type="secondary">{turn.agentCode}</Text>
+                    {turn.resumed && (
+                      <Tag color="blue">{t("procurement.copilot.resumed")}</Tag>
+                    )}
                     {turn.pauseCode && <Tag color="warning">{turn.pauseCode}</Tag>}
                   </Space>
                 }

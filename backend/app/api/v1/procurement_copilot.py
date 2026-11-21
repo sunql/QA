@@ -25,8 +25,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
-from app.domain.exceptions import DomainError
+from app.domain.exceptions import DomainError, NotFoundError
 from app.domain.procurement_copilot_schemas import (
+    CopilotConversationRead,
     CopilotMessageRequest,
     CopilotTaskRead,
 )
@@ -36,8 +37,12 @@ from app.services.procurement_copilot import (
     CopilotStreamOptions,
     buildStepsUrl,
     copilotStreamOptions,
-    createCopilotRun,
+    prepareCopilotTurn,
     streamCopilotRun,
+)
+from app.services.procurement_copilot_conversation import (
+    getOwnedConversation,
+    listTurns,
 )
 from app.services.stream_events import StreamEvent
 
@@ -47,11 +52,15 @@ SSE_MEDIA_TYPE = "text/event-stream"
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
-def _taskResponse(runId: str, runStatus: str) -> CopilotTaskRead:
+def _taskResponse(
+    runId: str, runStatus: str, conversationId: str, resumed: bool
+) -> CopilotTaskRead:
     return CopilotTaskRead(
         run_id=runId,
         status=runStatus,
         steps_url=buildStepsUrl(runId),
+        conversation_id=conversationId,
+        resumed=resumed,
     )
 
 
@@ -71,21 +80,33 @@ async def postCopilotMessage(
     streamOptions: CopilotStreamOptions = Depends(copilotStreamOptions),
 ) -> CopilotTaskRead | StreamingResponse:
     """一句采购问题 → 一次采购域只读 Agent 运行（过程流 / 任务引用）。"""
-    # 先创建：创建期的领域错误（404/409/422）必须以**HTTP 状态码**返回，
+    # 先落轮次：创建期的领域错误（404/409/422）必须以**HTTP 状态码**返回，
     # 不能在 SSE 已经开始吐字节之后才变成一条 error 事件。
-    created = await createCopilotRun(session, dto, currentUser)
+    turn = await prepareCopilotTurn(session, dto, currentUser)
 
     if dto.mode == "task":
-        return _taskResponse(created.run_id, str(created.status))
+        return _taskResponse(
+            turn.runId, turn.status, turn.conversationId, turn.resumed
+        )
 
     async def eventSource() -> AsyncIterator[str]:
         try:
             async for event in streamCopilotRun(
-                created.run_id,
+                turn.runId,
                 currentUser,
                 pollInterval=streamOptions.pollInterval,
                 maxWaitSeconds=streamOptions.maxWaitSeconds,
             ):
+                if event.event == "copilot_run":
+                    # 会话 id 只在这里出现一次（后续步骤/终态不必重复）
+                    event = StreamEvent(
+                        event.event,
+                        {
+                            **event.data,
+                            "conversationId": turn.conversationId,
+                            "resumed": turn.resumed,
+                        },
+                    )
                 yield event.toSse()
         except DomainError as exc:
             yield StreamEvent(
@@ -93,8 +114,8 @@ async def postCopilotMessage(
                 {
                     "error": exc.message,
                     "errorType": "domain",
-                    "runId": created.run_id,
-                    "stepsUrl": buildStepsUrl(created.run_id),
+                    "runId": turn.runId,
+                    "stepsUrl": buildStepsUrl(turn.runId),
                 },
             ).toSse()
 
@@ -104,4 +125,59 @@ async def postCopilotMessage(
         eventSource(),
         media_type=SSE_MEDIA_TYPE,
         headers=SSE_HEADERS,
+    )
+
+
+@router.get(
+    "/copilot/conversations/{conversationId}",
+    response_model=CopilotConversationRead,
+    summary="多轮 Copilot 会话详情（创建者或 admin）",
+)
+async def getCopilotConversation(
+    conversationId: str,
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> CopilotConversationRead:
+    """会话 + 每轮的运行状态/答案（刷新页面后恢复线程用）。"""
+    from uuid import UUID
+
+    from app.domain.procurement_copilot_schemas import (
+        CopilotConversationRead,
+        CopilotTurnRead,
+    )
+    from app.services.agent_orchestration_run_service import (
+        AgentOrchestrationRunService,
+    )
+
+    try:
+        parsedId = UUID(conversationId)
+    except ValueError as exc:
+        raise NotFoundError("会话不存在或无权访问") from exc
+    conversation = await getOwnedConversation(session, parsedId, currentUser)
+    turns = await listTurns(session, parsedId)
+    runService = AgentOrchestrationRunService()
+    views: list[CopilotTurnRead] = []
+    for turn in turns:
+        try:
+            run = await runService.getRun(session, turn.run_id, currentUser)
+        except DomainError:
+            continue
+        views.append(
+            CopilotTurnRead(
+                seq=turn.seq,
+                question=turn.question,
+                run_id=turn.run_id,
+                status=str(getattr(run.status, "value", run.status)),
+                answer=run.final_answer,
+                pause_code=None
+                if run.pause_code is None
+                else str(getattr(run.pause_code, "value", run.pause_code)),
+                created_at=turn.created_time.isoformat(),
+            )
+        )
+    return CopilotConversationRead(
+        conversation_id=str(conversation.conversation_id),
+        agent_code=conversation.agent_code,
+        model_config_id=conversation.model_config_id,
+        turns=tuple(views),
     )

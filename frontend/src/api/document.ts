@@ -93,7 +93,10 @@ export async function fetchDocumentSource(
     params: { disposition },
     responseType: "blob",
   });
-  const blob = res.data as Blob;
+  // ⚠️ 浏览器构造的 Blob **会丢掉 charset**（实测：响应头 text/plain;charset=utf-8
+  // → blob.type 只剩 "text/plain"）⇒ `window.open(blobUrl)` 后 Chrome 按系统默认
+  // 编码解释纯文本 ⇒ 中文乱码。用响应头重建 Blob，把 charset 带回来。
+  const blob = retypeBlob(res.data as Blob, res.headers?.["content-type"]);
   const url = URL.createObjectURL(blob);
   const dispositionHeader = res.headers["content-disposition"] ?? "";
   const utf8Match = dispositionHeader.match(/filename\*=UTF-8''([^;]+)/i);
@@ -123,8 +126,25 @@ export async function fetchDocumentPreview(
   const res = await httpClient.get(`${BASE}/${key}/preview`, {
     responseType: "blob",
   });
-  const url = URL.createObjectURL(res.data as Blob);
+  const blob = retypeBlob(res.data as Blob, res.headers?.["content-type"]);
+  const url = URL.createObjectURL(blob);
   return { url, revoke: () => URL.revokeObjectURL(url) };
+}
+
+/**
+ * 用响应头的完整 `Content-Type`（**含 charset**）重建 Blob。
+ *
+ * 为什么必须重建：浏览器从 XHR/fetch 得到的 Blob 其 `type` 会**丢掉 charset**
+ * （实测 `text/plain; charset=utf-8` → `"text/plain"`）。`window.open(blobUrl)`
+ * 时浏览器按 blob 的 type 决定编码，没有 charset 就按系统默认解释
+ * ⇒ 纯文本里的中文变乱码（HTML 靠页面内 `<meta charset>` 自证，所以没暴露）。
+ */
+function retypeBlob(blob: Blob, contentType: unknown): Blob {
+  // axios 的 headers 值类型是 AxiosHeaderValue（string | number | ...）⇒ 先归一成字符串
+  const type = typeof contentType === "string" ? contentType : "";
+  if (!type) return blob;
+  if (blob.type === type) return blob;
+  return new Blob([blob], { type });
 }
 
 /**

@@ -235,3 +235,67 @@ describe("api/document 预览鉴权", () => {
     expect(result.url).toBe("blob:preview");
   });
 });
+
+describe("api/document blob 编码（乱码修复）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("fetchDocumentSource 用响应头的完整 Content-Type 重建 Blob（保住 charset）", async () => {
+    // 真实浏览器行为：响应头带 charset，但 Blob.type 会**丢掉**它
+    // ⇒ window.open(blobUrl) 后中文乱码。必须重建。
+    const createObjectURL = vi.fn((_blob: Blob) => "blob:x");
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL,
+      revokeObjectURL: vi.fn(),
+    });
+    httpMock.get.mockResolvedValue({
+      data: new Blob(["# 采购制度"], { type: "text/plain" }), // 注意：无 charset
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
+
+    const { fetchDocumentSource } = await import("../api/document");
+    await fetchDocumentSource(4);
+
+    const passedBlob = createObjectURL.mock.calls[0]?.[0] as Blob;
+    expect(passedBlob.type).toBe("text/plain; charset=utf-8");
+  });
+
+  it("fetchDocumentPreview 同样保住 charset", async () => {
+    const createObjectURL = vi.fn((_blob: Blob) => "blob:y");
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL,
+      revokeObjectURL: vi.fn(),
+    });
+    httpMock.get.mockResolvedValue({
+      data: new Blob(["<html>"], { type: "text/html" }),
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+
+    const { fetchDocumentPreview } = await import("../api/document");
+    await fetchDocumentPreview(4);
+
+    const passedBlob = createObjectURL.mock.calls[0]?.[0] as Blob;
+    expect(passedBlob.type).toBe("text/html; charset=utf-8");
+  });
+
+  it("没有 content-type 头时原样返回（不炸）", async () => {
+    const createObjectURL = vi.fn((_blob: Blob) => "blob:z");
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL,
+      revokeObjectURL: vi.fn(),
+    });
+    httpMock.get.mockResolvedValue({
+      data: new Blob(["x"]),
+      headers: {},
+    });
+
+    const { fetchDocumentPreview } = await import("../api/document");
+    await fetchDocumentPreview(1);
+
+    expect(createObjectURL).toHaveBeenCalled();
+  });
+});

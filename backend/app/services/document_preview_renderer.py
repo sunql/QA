@@ -122,13 +122,19 @@ def _shell(title: str, bodyHtml: str) -> str:
 
 def renderText(content: bytes) -> PreviewResult:
     """纯文本 → ``<pre>``（转义，保行）。"""
-    text = content.decode("utf-8", errors="replace")
+    from app.services.text_encoding import decodeText
+
+    # 编码探测：国内 Windows 导出的 txt 常是 GBK/GB18030，
+    # 一律按 UTF-8 解码会乱码（2026-11-22 实测）
+    text = decodeText(content)
     return PreviewResult(html=_shell("文档预览", f"<pre>{escapeHtml(text)}</pre>"))
 
 
 def renderMarkdown(content: bytes) -> PreviewResult:
     """Markdown → 渲染 + 消毒。"""
-    text = content.decode("utf-8", errors="replace")
+    from app.services.text_encoding import decodeText
+
+    text = decodeText(content)
     body = f"<div class=\"md\">{sanitizeMarkdown(text)}</div>"
     return PreviewResult(html=_shell("文档预览", body))
 
@@ -138,7 +144,9 @@ def renderHtml(content: bytes) -> PreviewResult:
 
     **外链图片禁止**（跟踪像素 / 视觉 SSRF）⇒ 已在消毒器里剥掉 ``<img>``。
     """
-    text = content.decode("utf-8", errors="replace")
+    from app.services.text_encoding import decodeText
+
+    text = decodeText(content)
     safe = sanitizeHtml(text)
     body = (
         f"<iframe sandbox=\"{_HTML_SANDBOX}\" srcdoc=\"{htmlLib.escape(safe, quote=True)}\">"

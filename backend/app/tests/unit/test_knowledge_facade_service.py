@@ -539,3 +539,35 @@ async def test_facadeReportsCrossChannelConflicts() -> None:
     dumped = conflict.model_dump(by_alias=True)
     assert dumped["channels"] == ("GRAPH", "SQL")
     assert dumped["entries"][0]["channel"] == "GRAPH"
+
+
+@pytest.mark.asyncio
+async def test_facadeDedupesSameKeyWithinChannel() -> None:
+    """同通道同键重复（RAG 实测同一属性命中 3 次）⇒ 只保留 confidence 最高一条。"""
+    from app.domain.knowledge_schemas import (
+        KNOWLEDGE_CHANNEL_RAG,
+        KnowledgeEvidenceRead,
+    )
+
+    def _ev(conf: float | None) -> KnowledgeEvidenceRead:
+        return KnowledgeEvidenceRead(
+            channel=KNOWLEDGE_CHANNEL_RAG, kind="PROPERTY", ref="SUPPLIER_NAME",
+            title="SUPPLIER_NAME", snippet=f"距离{conf}", confidence=conf,
+        )
+
+    async def _rag(inp: Any) -> RouteOutcome:
+        return RouteOutcome(
+            channel=KNOWLEDGE_CHANNEL_RAG,
+            status=KNOWLEDGE_ROUTE_OK,
+            evidence=(_ev(0.83), _ev(0.88), _ev(0.85)),
+        )
+
+    facade, _calls = _facade(routeRunners={KNOWLEDGE_CHANNEL_RAG: _rag})
+    response = await facade.query(
+        KnowledgeQueryRequest(domain="PROCUREMENT", question="供应商名称", channels=("RAG",)),
+        user=_USER,
+        session=_FAKE_SESSION,
+    )
+    assert len(response.evidence) == 1, "同键重复必须去重"
+    assert response.evidence[0].confidence == 0.88, "保留置信度最高的一条"
+    assert response.conflicts == ()

@@ -90,6 +90,19 @@ _ROUTE_RUNNERS: dict[str, RouteRunner] = {
 }
 
 
+def _dedupeEvidence(
+    evidence: list[KnowledgeEvidenceRead],
+) -> list[KnowledgeEvidenceRead]:
+    """同 (channel, kind, ref) 只保留一条（confidence 最高；无则首条）。"""
+    best: dict[tuple[str, str, str], KnowledgeEvidenceRead] = {}
+    for item in evidence:
+        key = (item.channel, item.kind, item.ref)
+        current = best.get(key)
+        if current is None or (item.confidence or 0.0) > (current.confidence or 0.0):
+            best[key] = item
+    return list(best.values())
+
+
 class KnowledgeFacade:
     """知识服务编排器。
 
@@ -167,6 +180,10 @@ class KnowledgeFacade:
         evidence: list[KnowledgeEvidenceRead] = []
         for outcome in outcomes:
             evidence.extend(outcome.evidence)
+        # 同通道同键去重（RAG 路实测同一属性命中 3 次，距离略有差异）：
+        # 保留 confidence 最高的一条；无 confidence 时保留首条。冲突检测也依赖
+        # 「每个通道对同一对象只有一条主张」，否则会自相矛盾。
+        evidence = list(_dedupeEvidence(evidence))
         entities: list[KnowledgeEntityRead] = []
         for outcome in outcomes:
             entities.extend(outcome.entities)

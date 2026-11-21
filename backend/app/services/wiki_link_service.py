@@ -215,9 +215,17 @@ class WikiLinkService:
         query: str | None = None,
         limit: int = 50,
     ) -> list[LinkableTarget]:
-        """给 admin 弹窗选择器用：列 ontology_class / ontology_property / ontology_metric。"""
+        """给 admin 弹窗选择器用：列 ontology_class / ontology_property / ontology_metric。
+
+        - class 过滤 ``valid_to IS NULL``：召回只取活类，墓碑类（已停用）链上去
+          永远不会生效，必须在下拉阶段就挡住。
+        - 三分支统一 ``ORDER BY name, id``：此前无排序 + ``LIMIT``，同一查询在
+          不同执行计划下返回不同子集 ⇒ 用户「上次能搜到、这次搜不到」。
+          **limit 必须在 order_by 之后**,否则先截断再排序,返回的是随机 N 条。
+        - property / metric 是硬删,没有 valid_to 列,不需要也不应该加过滤。
+        """
         if type == "class":
-            stmt = select(OntologyClass)
+            stmt = select(OntologyClass).where(OntologyClass.valid_to.is_(None))
             if query:
                 pattern = f"%{query.upper()}%"
                 stmt = stmt.where(
@@ -226,7 +234,9 @@ class WikiLinkService:
                         OntologyClass.class_alias.ilike(pattern),
                     )
                 )
-            stmt = stmt.limit(limit)
+            stmt = stmt.order_by(
+                OntologyClass.class_name.asc(), OntologyClass.id.asc()
+            ).limit(limit)
             rows = (await session.execute(stmt)).scalars().all()
             return [
                 LinkableTarget(
@@ -248,7 +258,9 @@ class WikiLinkService:
                         OntologyProperty.property_alias.ilike(pattern),
                     )
                 )
-            stmt = stmt.limit(limit)
+            stmt = stmt.order_by(
+                OntologyProperty.property_name.asc(), OntologyProperty.id.asc()
+            ).limit(limit)
             rows = (await session.execute(stmt)).scalars().all()
             return [
                 LinkableTarget(
@@ -270,7 +282,9 @@ class WikiLinkService:
                         OntologyMetric.metric_alias.ilike(pattern),
                     )
                 )
-            stmt = stmt.limit(limit)
+            stmt = stmt.order_by(
+                OntologyMetric.metric_name.asc(), OntologyMetric.id.asc()
+            ).limit(limit)
             rows = (await session.execute(stmt)).scalars().all()
             return [
                 LinkableTarget(

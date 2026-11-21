@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -155,9 +155,12 @@ async def update_link(
 
 @router.get("/linkables")
 async def list_linkables(
-    type: str,
+    # Literal ⇒ 非法 type 直接 422（此前静默返回 200 []，前端无从得知参数写错）
+    type: Literal["class", "property", "metric"],
     q: str | None = None,
-    limit: int = 50,
+    # 上限 200：q 是服务端全表检索，前端默认只要 50 条；
+    # 不设上限会让「搜索」退化成一次拉全表。
+    limit: int = Query(default=50, ge=1, le=200),
     _admin: CurrentUser = Depends(getAdminOnlyActor),
     session: AsyncSession = Depends(getSessionDep),
 ):

@@ -226,3 +226,73 @@ async def test_create_link_rejects_unknown_type(client: AsyncClient) -> None:
               "ontology_id": 1, "weight": 1.0},
     )
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# linkables：墓碑过滤 / 参数校验 / 服务端检索覆盖全表（2026-11-21）
+# ---------------------------------------------------------------------------
+async def test_linkables_excludes_soft_deleted_class(
+    client: AsyncClient, dbSession: AsyncSession,
+) -> None:
+    """已停用类（valid_to 非空）在 HTTP 层同样不得返回。"""
+    from datetime import datetime, timezone
+
+    from app.domain.models import OntologyClass
+
+    now = datetime.now(timezone.utc)
+    dbSession.add_all([
+        OntologyClass(class_name="ZZ_TOMB_LIVE", version=1, valid_from=now),
+        OntologyClass(class_name="ZZ_TOMB_DEAD", version=1, valid_from=now, valid_to=now),
+    ])
+    await dbSession.commit()
+
+    resp = await client.get(
+        "/api/v1/admin/wiki-links/linkables?type=class&q=ZZ_TOMB",
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    assert [item["name"] for item in resp.json()] == ["ZZ_TOMB_LIVE"]
+
+
+async def test_linkables_rejects_invalid_type_returns_422(client: AsyncClient) -> None:
+    """非法 type 必须是 422（此前静默返回 200 []，前端无从得知参数写错）。"""
+    resp = await client.get(
+        "/api/v1/admin/wiki-links/linkables?type=join",
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 422
+
+
+async def test_linkables_rejects_limit_out_of_range_returns_422(client: AsyncClient) -> None:
+    for qs in ("type=class&limit=0", "type=class&limit=201", "type=class&limit=abc"):
+        resp = await client.get(
+            f"/api/v1/admin/wiki-links/linkables?{qs}",
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 422, qs
+
+
+async def test_linkables_q_can_reach_beyond_default_limit(
+    client: AsyncClient, dbSession: AsyncSession,
+) -> None:
+    """q 必须在**全表**上检索，而不是只在前 50 条里筛。
+
+    回归锚点：插入 51 条同前缀类，`q=ZZ_BULK&limit=200` 必须全部命中。
+    """
+    from datetime import datetime, timezone
+
+    from app.domain.models import OntologyClass
+
+    now = datetime.now(timezone.utc)
+    dbSession.add_all([
+        OntologyClass(class_name=f"ZZ_BULK_{i:03d}", version=1, valid_from=now)
+        for i in range(51)
+    ])
+    await dbSession.commit()
+
+    resp = await client.get(
+        "/api/v1/admin/wiki-links/linkables?type=class&q=ZZ_BULK&limit=200",
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    assert len(resp.json()) == 51

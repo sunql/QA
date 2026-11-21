@@ -244,3 +244,75 @@ async def test_create_metric_link_persists(dbSession):
     )
     assert row.ontology_type == "metric"
     assert row.ontology_id == 801
+
+
+# ---------------------------------------------------------------------------
+# linkables 正确性：墓碑过滤 + 确定性排序 + limit 在排序之后（2026-11-21）
+# ---------------------------------------------------------------------------
+async def test_list_linkable_targets_excludes_soft_deleted_class(dbSession):
+    """已停用（valid_to 非空）的类不得出现在可链接目标里。
+
+    召回只取活类 ⇒ 选中墓碑类会「建链成功但永远不生效」，必须在下拉就挡住。
+    """
+    from app.domain.models import OntologyClass
+
+    now = datetime.now(timezone.utc)
+    dbSession.add_all([
+        OntologyClass(class_name="ZZ_TOMB_LIVE", version=1, valid_from=now),
+        OntologyClass(class_name="ZZ_TOMB_DEAD", version=1, valid_from=now, valid_to=now),
+    ])
+    await dbSession.flush()
+
+    targets = await _svc.listLinkableTargets(dbSession, "class", query="ZZ_TOMB", limit=50)
+    assert [t.name for t in targets] == ["ZZ_TOMB_LIVE"]
+
+
+async def test_list_linkable_targets_orders_class_by_name_then_id(dbSession):
+    from app.domain.models import OntologyClass
+
+    now = datetime.now(timezone.utc)
+    for name in ("ZZ_ORD_C", "ZZ_ORD_A", "ZZ_ORD_B"):
+        dbSession.add(OntologyClass(class_name=name, version=1, valid_from=now))
+    await dbSession.flush()
+
+    targets = await _svc.listLinkableTargets(dbSession, "class", query="ZZ_ORD", limit=50)
+    assert [t.name for t in targets] == ["ZZ_ORD_A", "ZZ_ORD_B", "ZZ_ORD_C"]
+
+
+async def test_list_linkable_targets_orders_property_by_name_then_id(dbSession):
+    from app.domain.models import OntologyClass, OntologyProperty
+
+    now = datetime.now(timezone.utc)
+    parent = OntologyClass(class_name="ZZ_P_OWNER", version=1, valid_from=now)
+    dbSession.add(parent)
+    await dbSession.flush()
+    for name in ("ZZ_P_ORD_C", "ZZ_P_ORD_A", "ZZ_P_ORD_B"):
+        dbSession.add(OntologyProperty(class_id=parent.id, property_name=name, data_type="STRING"))
+    await dbSession.flush()
+
+    targets = await _svc.listLinkableTargets(dbSession, "property", query="ZZ_P_ORD", limit=50)
+    assert [t.name for t in targets] == ["ZZ_P_ORD_A", "ZZ_P_ORD_B", "ZZ_P_ORD_C"]
+
+
+async def test_list_linkable_targets_orders_metric_by_name_then_id(dbSession):
+    from app.domain.models import OntologyMetric
+
+    for name in ("ZZ_M_ORD_C", "ZZ_M_ORD_A", "ZZ_M_ORD_B"):
+        dbSession.add(OntologyMetric(metric_name=name, formula="1", agg_function="SUM"))
+    await dbSession.flush()
+
+    targets = await _svc.listLinkableTargets(dbSession, "metric", query="ZZ_M_ORD", limit=50)
+    assert [t.name for t in targets] == ["ZZ_M_ORD_A", "ZZ_M_ORD_B", "ZZ_M_ORD_C"]
+
+
+async def test_list_linkable_targets_limit_applied_after_order(dbSession):
+    """limit 必须在排序之后生效（先 limit 后排序会返回随机 2 条）。"""
+    from app.domain.models import OntologyClass
+
+    now = datetime.now(timezone.utc)
+    for name in ("ZZ_LIM_C", "ZZ_LIM_A", "ZZ_LIM_B"):
+        dbSession.add(OntologyClass(class_name=name, version=1, valid_from=now))
+    await dbSession.flush()
+
+    targets = await _svc.listLinkableTargets(dbSession, "class", query="ZZ_LIM", limit=2)
+    assert [t.name for t in targets] == ["ZZ_LIM_A", "ZZ_LIM_B"]

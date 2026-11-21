@@ -23,6 +23,7 @@ from app.domain.exceptions import ConflictError
 from app.domain.schemas import EntityMappingCreate
 from app.schemas.procurement_rfq import RfqDraftCreate
 from app.services.entity_mapping_service import EntityMappingService
+from app.services.procurement_rfq_service import ProcurementRfqService
 
 
 def _user(userId: str = "creator-1") -> SimpleNamespace:
@@ -68,9 +69,7 @@ async def test_create_then_replay_via_api(dbSession) -> None:
     from app.api.v1.procurement_rfqs import createRfqDraft
 
     await _seedSupplier(dbSession)
-    svc = ProcurementRfqServiceLocal = __import__(
-        "app.services.procurement_rfq_service", fromlist=["ProcurementRfqService"]
-    ).ProcurementRfqService()
+    svc = ProcurementRfqService()
 
     resp1 = SimpleNamespace(headers={})
     out1 = await createRfqDraft(
@@ -100,9 +99,7 @@ async def test_full_flow_via_api_to_ready_to_send(dbSession) -> None:
     )
 
     await _seedSupplier(dbSession)
-    svc = __import__(
-        "app.services.procurement_rfq_service", fromlist=["ProcurementRfqService"]
-    ).ProcurementRfqService()
+    svc = ProcurementRfqService()
     creator, approver = _user("creator-1"), _user("approver-1")
     draftId = str(uuid4())  # 占位（真实 id 由 create 返回）
 
@@ -144,9 +141,7 @@ async def test_self_approval_conflict_via_api(dbSession) -> None:
     )
 
     await _seedSupplier(dbSession)
-    svc = __import__(
-        "app.services.procurement_rfq_service", fromlist=["ProcurementRfqService"]
-    ).ProcurementRfqService()
+    svc = ProcurementRfqService()
     creator = _user("creator-1")
     resp = SimpleNamespace(headers={})
     created = await createRfqDraft(

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
@@ -95,13 +96,29 @@ async def getDocument(
     return DocumentRead.model_validate(doc)
 
 
+async def _resolveDocument(
+    session: AsyncSession,
+    documentKey: str,
+    service: DocumentService,
+    user: Any,
+) -> Any:
+    """``documentKey`` ⇒ catalog 行。
+
+    支持两种写法：**自增 id**（列表主键）与**业务编号**（DOC-xxx）。
+    采购知识检索的证据里存的是业务编号（可读、可引用）⇒ 回溯原件时用它更方便。
+    """
+    if documentKey.isdigit():
+        return await service.getDocument(session, int(documentKey), user=user)
+    return await service.getDocumentByCode(session, documentKey, user=user)
+
+
 @router.get(
-    "/{documentId:int}/source",
-    summary="文档源文件（原文阅览 / 下载）",
+    "/{documentKey}/source",
+    summary="文档源文件（原文阅览 / 下载；documentKey 可为自增 id 或业务编号 DOC-xxx）",
     response_class=Response,
 )
 async def downloadDocumentSource(
-    documentId: int,
+    documentKey: str,
     request: Request,
     disposition: str = Query(default="inline", pattern="^(inline|attachment)$"),
     _user=Depends(getCurrentUser),
@@ -124,11 +141,11 @@ async def downloadDocumentSource(
         loadSourceFile,
     )
 
-    catalog = await service.getDocument(session, documentId, user=_user)
+    catalog = await _resolveDocument(session, documentKey, service, _user)
     try:
         source = await loadSourceFile(session, catalog)
     except ObjectStorageError as exc:
-        logger.exception("文档源文件读取失败: document_id=%s", documentId)
+        logger.exception("文档源文件读取失败: document_key=%s", documentKey)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=MSG_DOCUMENT_SOURCE_UNAVAILABLE,
@@ -136,7 +153,7 @@ async def downloadDocumentSource(
     if source is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=MSG_DOCUMENT_SOURCE_NOT_FOUND.format(id=documentId),
+            detail=MSG_DOCUMENT_SOURCE_NOT_FOUND.format(id=documentKey),
         )
 
     inline = disposition == "inline" and source.inline
@@ -156,12 +173,12 @@ async def downloadDocumentSource(
 
 
 @router.get(
-    "/{documentId:int}/preview",
-    summary="文档通用预览（统一 HTML，涵盖 excel/word/ppt/pdf/md/html…）",
+    "/{documentKey}/preview",
+    summary="文档通用预览（统一 HTML；documentKey 可为自增 id 或业务编号 DOC-xxx）",
     response_class=Response,
 )
 async def previewDocument(
-    documentId: int,
+    documentKey: str,
     _user=Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
     service: DocumentService = Depends(getDocumentService),
@@ -180,11 +197,11 @@ async def previewDocument(
     from app.services.document_preview_renderer import renderPreview
     from app.services.document_source_service import loadSourceFile
 
-    catalog = await service.getDocument(session, documentId, user=_user)
+    catalog = await _resolveDocument(session, documentKey, service, _user)
     try:
         source = await loadSourceFile(session, catalog)
     except ObjectStorageError as exc:
-        logger.exception("文档预览读取失败: document_id=%s", documentId)
+        logger.exception("文档预览读取失败: document_key=%s", documentKey)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=MSG_DOCUMENT_SOURCE_UNAVAILABLE,
@@ -192,13 +209,13 @@ async def previewDocument(
     if source is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=MSG_DOCUMENT_SOURCE_NOT_FOUND.format(id=documentId),
+            detail=MSG_DOCUMENT_SOURCE_NOT_FOUND.format(id=documentKey),
         )
 
     if source.previewKind in (KIND_PDF, KIND_IMAGE):
         # 原件直出：浏览器原生 PDF 查看器 / 图片查看器（保真最好）
         return RedirectResponse(
-            url=f"/api/v1/documents/{documentId}/source",
+            url=f"/api/v1/documents/{documentKey}/source",
             status_code=status.HTTP_302_FOUND,
         )
 

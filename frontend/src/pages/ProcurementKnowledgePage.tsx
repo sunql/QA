@@ -19,6 +19,7 @@ import {
   message,
 } from "antd";
 import { useTranslation } from "../i18n";
+import { documentPreviewUrl } from "../api/document";
 import {
   getGraphNeighbors,
   queryKnowledge,
@@ -38,6 +39,7 @@ const CHANNEL_COLOR: Record<string, string> = {
 };
 
 function EvidenceCard({ e }: { e: KnowledgeEvidence }) {
+  const { t } = useTranslation();
   return (
     <Card size="small" title={`${e.kind} · ${e.title}`} style={{ marginBottom: 12 }}>
       {e.snippet && <p>{e.snippet}</p>}
@@ -59,7 +61,24 @@ function EvidenceCard({ e }: { e: KnowledgeEvidence }) {
           </Descriptions.Item>
         )}
         {e.sourceRef?.documentId != null && (
-          <Descriptions.Item label="文档">{e.sourceRef.documentId}</Descriptions.Item>
+          <Descriptions.Item label="文档">
+            <Space size="small">
+              {e.sourceRef.documentId}
+              {/* 回溯原件：后端 source/preview 端点接受业务编号 */}
+              <Button
+                size="small"
+                type="link"
+                onClick={() =>
+                  window.open(
+                    documentPreviewUrl(e.sourceRef?.documentId ?? ""),
+                    "_blank",
+                  )
+                }
+              >
+                {t("document.preview")}
+              </Button>
+            </Space>
+          </Descriptions.Item>
         )}
         {e.validAt && (
           <Descriptions.Item label="生效日">{e.validAt.slice(0, 10)}</Descriptions.Item>

@@ -432,3 +432,38 @@ async def test_vectorize_404_when_no_source(
     resp = await client.post(f"/api/v1/documents/{created['id']}/vectorize")
 
     assert resp.status_code == 422, resp.text
+
+
+async def test_source_accepts_business_code(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    """业务编号（DOC-xxx）也能取原件——采购知识证据里存的就是它。"""
+    created = await _createDocument(client, dbSession, fakeMinio)
+
+    resp = await client.get(
+        f"/api/v1/documents/{created['documentId']}/source"
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.content
+
+
+async def test_preview_accepts_business_code(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    created = await _createDocument(client, dbSession, fakeMinio)
+
+    resp = await client.get(
+        f"/api/v1/documents/{created['documentId']}/preview"
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert "<html" in resp.text
+
+
+async def test_source_unknown_business_code_is_404(
+    client: AsyncClient,
+) -> None:
+    resp = await client.get("/api/v1/documents/DOC-NOT-EXIST/source")
+
+    assert resp.status_code == 404, resp.text

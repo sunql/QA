@@ -86,7 +86,7 @@ export async function deleteDocument(id: number): Promise<void> {
  *    实际做法见 `openDocumentSource`：先 fetch 拿 blob 再 objectURL。
  */
 export async function fetchDocumentSource(
-  id: number,
+  id: number | string,
   disposition: "inline" | "attachment" = "inline",
 ): Promise<{ url: string; filename: string; revoke: () => void }> {
   const res = await httpClient.get(`${BASE}/${id}/source`, {
@@ -104,14 +104,19 @@ export async function fetchDocumentSource(
   return { url, filename, revoke: () => URL.revokeObjectURL(url) };
 }
 
-/** 预览 URL（统一 HTML；PDF/图片由后端 302 到原件）。 */
-export function documentPreviewUrl(id: number): string {
-  return `${API_BASE_URL}${BASE}/${id}/preview`;
+/**
+ * 预览 URL（统一 HTML；PDF/图片由后端 302 到原件）。
+ *
+ * `key` 可以是自增 id 或**业务编号**（DOC-xxx）——采购知识证据里存的是业务
+ * 编号（可读、可引用），后端两种都认。
+ */
+export function documentPreviewUrl(key: number | string): string {
+  return `${API_BASE_URL}${BASE}/${key}/preview`;
 }
 
 /** 向量化：把已入库文档的原文灌进向量库（wiki 导入的文件靠它才能被检索到）。 */
 export async function vectorizeDocument(
-  id: number,
+  id: number | string,
 ): Promise<{ documentId: string; chunks: number; replaced: boolean }> {
   const res = await httpClient.post(`${BASE}/${id}/vectorize`);
   return res.data;

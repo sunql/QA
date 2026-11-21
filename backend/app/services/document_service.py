@@ -136,6 +136,41 @@ class DocumentService:
 
         return entity
 
+    async def getDocumentByCode(
+        self,
+        session: AsyncSession,
+        documentId: str,
+        user: CurrentUser | None = None,
+    ) -> DocumentCatalog:
+        """按**业务编号**（DOC-xxx）取文档；不存在抛 NotFoundError。
+
+        采购知识检索的证据里 ``sourceRef.documentId`` 存的是业务编号（可读、可
+        引用），而列表主键是自增 id ⇒ 证据要回溯原件时需要按编号再查一次。
+        密级闸与 ``getDocument`` 同口径。
+        """
+        entity = (
+            await session.execute(
+                select(DocumentCatalog).where(
+                    DocumentCatalog.document_id == documentId
+                )
+            )
+        ).scalars().first()
+        if entity is None:
+            raise NotFoundError(MSG_DOCUMENT_NOT_FOUND.format(id=documentId))
+        if user is not None:
+            clearance_levels = await buildClearanceFilter(session, user)
+            entity_level = (
+                entity.security_level.value
+                if hasattr(entity.security_level, "value")
+                else str(entity.security_level)
+            )
+            if entity_level not in clearance_levels:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="您无权查看此文档",
+                )
+        return entity
+
     async def findByContentHash(
         self, session: AsyncSession, content_hash: str
     ) -> DocumentCatalog | None:

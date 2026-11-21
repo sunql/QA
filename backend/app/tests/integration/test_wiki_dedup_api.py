@@ -16,7 +16,7 @@
 返回「还在」假象的坑（见 seed upsert 的教训），台账计数尤其要用裸 SQL 读。
 
 运行：
-    TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test \
+    TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test \
         .venv/bin/pytest app/tests/integration/test_wiki_dedup_api.py -q
 """
 

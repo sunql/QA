@@ -1,0 +1,46 @@
+采购域切片可达性探针 · 只读（M1-1.4）
+口径：compileManifest（真实治理表 12 张）→ sliceManifestByDomain(PROCUREMENT)。
+
+域切片 domain = PROCUREMENT
+
+--- 本体总量 ---
+ontology_class 总数 = 77
+活跃类（valid_to IS NULL）= 59
+墓碑类（valid_to 非空）= 18
+
+--- 本批 7 个采购类的墓碑状态 ---
+DWD_GOODS_RECEIPT_LINE: 墓碑 valid_to=2026-09-19 04:04:19.112245+00:00
+DWD_PURCHASE_INVOICE: 墓碑 valid_to=2026-09-19 04:04:05.965391+00:00
+DWD_PURCHASE_INVOICE_LINE: 墓碑 valid_to=2026-09-19 04:04:09.706286+00:00
+DWD_PURCHASE_ORDER_LINE: 墓碑 valid_to=2026-09-19 04:05:06.919438+00:00
+DWD_PURCHASE_REQUISITION_LINE: 墓碑 valid_to=2026-09-19 04:04:28.821094+00:00
+DWD_REQUISITION_ORDER_LINK: 墓碑 valid_to=2026-09-19 04:04:57.165317+00:00
+DWD_SUPPLIER_PAYMENT: 墓碑 valid_to=2026-09-19 04:04:48.585405+00:00
+
+--- 指标源（口径）完整性 ---
+ontology_metric_source 行数 = 18
+编译后保留的 source 条数 = 3
+被丢弃（指向墓碑类）= 15  ← 丢弃即口径缺失
+  [口径缺失] KPI_INVOICE_MATCH_RATE 发票三单匹配率：sources 为空
+  [口径缺失] KPI_PAYMENT_ON_TIME 付款及时率：sources 为空
+  [口径缺失] KPI_PURCHASE_CYCLE_TIME 采购周期：sources 为空
+  [口径缺失] KPI_SUPPLIER_DEFECT_RATE 供应商来料不良率：sources 为空
+  [口径缺失] KPI_SUPPLIER_DELAY_DAYS 供应商平均延误天数：sources 为空
+  [口径缺失] KPI_SUPPLIER_FPY 供应商一次合格率：sources 为空
+  [口径缺失] KPI_SUPPLIER_NCR_RATE 供应商 NCR 率：sources 为空
+  [口径缺失] KPI_SUPPLIER_OTD 供应商准时交付率：sources 为空
+  [口径缺失] KPI_SUPPLIER_OVERDUE_RATIO 供应商逾期率：sources 为空
+
+--- 采购域切片 ---
+classNames 数 = 6
+businessObjects 数 = 6
+  BO AR → 头类 DWD_ARRIVAL_ORDER_DTL
+  BO GR → 头类 DWD_GOODS_RECEIPT_DTL
+  BO INVOICE → 头类 DWD_AP_INVOICE_DTL
+  BO MATERIAL → 头类 DIM_IMATERIAL
+  BO PO → 头类 DWD_PURCHASE_ORDER_DTL
+  BO SUPPLIER → 头类 DIM_SUPPLIER
+metrics 数 = 1
+  指标 KPI_SUPPLIER_MAINTENANCE_RATIO 供应商资质合规率 源=[DIM_SUPPLIER/BASE]
+kpis 数 = 1
+  KPI KPI_SUPPLIER_MAINTENANCE_RATIO · 供应商资质合规率

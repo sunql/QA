@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from app.domain.models import (
@@ -17,6 +17,10 @@ from app.domain.models import (
     OntologyMetricSource,
     OntologyProperty,
 )
+from app.domain.procurement_binding_models import (
+    ProcurementPropertyBinding,
+    ProcurementSourceBinding,
+)
 
 
 def canonicalJson(payload: Any) -> str:
@@ -24,6 +28,40 @@ def canonicalJson(payload: Any) -> str:
     return json.dumps(
         payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
     )
+
+
+#: 绑定行的默认生效时刻（**过去**）—— 库侧 `valid_from` 是 `now()` 默认值，
+#: 测试里显式给一个过去的时刻 ⇒ 「当前生效」这条判据真的被走到，
+#: 而不是靠「字段为 None 时按已生效处理」的兜底蒙混过关。
+DEFAULT_VALID_FROM = datetime(2020, 1, 1, tzinfo=UTC)
+
+
+# 快照里**不得出现**的键（自增 id / 行身份 / 时间戳 / 实例态）。
+#
+# 为什么单列一份、两处守卫共用：字节确定性铁律要求「同一治理内容两次编译字节一致」，
+# 而这两类字段都会随环境/时间/状态变化 ⇒ 一旦入档，DoD 第 2 条直接被破坏。
+# ⚠️ 必须**单点定义**：两处各写一份清单 ⇒ 任一处漏项只被另一处覆盖，
+# 看上去有守卫、实则那个漏项没人管（这正是「清单漂移 ⇒ 假绿」的典型形态）。
+FORBIDDEN_MANIFEST_KEYS: frozenset[str] = frozenset(
+    {
+        # 自增 id / 行身份
+        "class_id",
+        "classId",
+        "datasourceId",
+        "targetClassId",
+        "sourceBindingId",
+        "propertyId",
+        # 时间戳 / 实例态
+        "validFrom",
+        "validTo",
+        "confirmedBy",
+        "confirmedTime",
+        "isCandidate",
+        "createdBy",
+        "createdTime",
+        "updatedTime",
+    }
+)
 
 
 def makeClass(
@@ -53,6 +91,7 @@ def makeProperty(
     class_id: int,
     name: str,
     *,
+    propertyId: int | None = None,
     alias: str | None = None,
     businessAliases: list[str] | None = None,
     dataType: str = "STRING",
@@ -68,6 +107,7 @@ def makeProperty(
     regexPattern: str | None = None,
 ) -> OntologyProperty:
     return OntologyProperty(
+        id=propertyId,
         class_id=class_id,
         property_name=name,
         property_alias=alias,
@@ -225,4 +265,58 @@ def makeDataSource(ds_id: int, name: str) -> DataSource:
         database_name="db",
         username="u",
         password_encrypted="x",
+    )
+
+
+def makeSourceBinding(
+    binding_id: int,
+    class_id: int,
+    datasource_id: int,
+    schema_name: str,
+    source_table: str,
+    *,
+    binding_role: str = "BASE",
+    filter_expression: str | None = None,
+    filter_allowlist: list[str] | None = None,
+    is_candidate: bool = False,
+    valid_from: datetime | None = None,
+    valid_to: datetime | None = None,
+) -> ProcurementSourceBinding:
+    return ProcurementSourceBinding(
+        id=binding_id,
+        class_id=class_id,
+        datasource_id=datasource_id,
+        schema_name=schema_name,
+        source_table=source_table,
+        binding_role=binding_role,
+        filter_expression=filter_expression,
+        filter_allowlist=filter_allowlist,
+        is_candidate=is_candidate,
+        valid_from=valid_from if valid_from is not None else DEFAULT_VALID_FROM,
+        valid_to=valid_to,
+    )
+
+
+def makePropertyBinding(
+    binding_id: int,
+    source_binding_id: int,
+    property_id: int,
+    source_column: str,
+    *,
+    key_ordinal: int | None = None,
+    transform_expression: str | None = None,
+    is_candidate: bool = False,
+    valid_from: datetime | None = None,
+    valid_to: datetime | None = None,
+) -> ProcurementPropertyBinding:
+    return ProcurementPropertyBinding(
+        id=binding_id,
+        source_binding_id=source_binding_id,
+        property_id=property_id,
+        source_column=source_column,
+        key_ordinal=key_ordinal,
+        transform_expression=transform_expression,
+        is_candidate=is_candidate,
+        valid_from=valid_from if valid_from is not None else DEFAULT_VALID_FROM,
+        valid_to=valid_to,
     )

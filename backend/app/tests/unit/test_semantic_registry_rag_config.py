@@ -46,13 +46,31 @@ def test_开关开且鉴权为stub时告警() -> None:
     assert "stub" in reason
 
 
-def test_开关开且鉴权为real但放行stub头时仍告警() -> None:
-    """AUTH_MODE=real 但放行 stub 头 ⇒ 身份仍可伪造 ⇒ 同样必须告警。"""
+def test_开关开且鉴权为real但不放行stub头时无告警() -> None:
+    """AUTH_MODE=real 且 ALLOW_STUB_WHEN_REAL=false ⇒ stub 头解析前即被拒。
+
+    `AUTH_STUB_ENABLED=true` 不构成暴露面（只影响落到 stub 分支之后的行为）。
+    """
     settings = Settings(
         _env_file=None,
         ENABLE_SEMANTIC_REGISTRY_RAG="true",
         AUTH_MODE="real",
         AUTH_STUB_ENABLED="true",
+        ALLOW_STUB_WHEN_REAL="false",
+        JWT_SECRET="test-secret-at-least-32-chars-long-000",
+    )
+
+    assert semanticRegistryRagAuthMisconfiguration(settings) is None
+
+
+def test_开关开且鉴权为real但放行stub头时仍告警() -> None:
+    """AUTH_MODE=real 但 ALLOW_STUB_WHEN_REAL=true ⇒ 身份仍可伪造 ⇒ 必须告警。"""
+    settings = Settings(
+        _env_file=None,
+        ENABLE_SEMANTIC_REGISTRY_RAG="true",
+        AUTH_MODE="real",
+        AUTH_STUB_ENABLED="true",
+        ALLOW_STUB_WHEN_REAL="true",
         JWT_SECRET="test-secret-at-least-32-chars-long-000",
     )
 

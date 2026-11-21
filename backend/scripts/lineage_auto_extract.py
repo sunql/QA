@@ -7,7 +7,7 @@
 
 运行：
     cd backend
-    DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test \\
+    DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test \\
       uv run python scripts/lineage_auto_extract.py
 """
 from __future__ import annotations

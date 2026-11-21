@@ -363,3 +363,112 @@ agent_tool_in_use_orchestration; referencingAgents=['legacy_agent']; orchestrati
 > `backend/app/api/v1/procurement_knowledge.py`、
 > `backend/app/domain/knowledge_schemas.py`、
 > `backend/app/services/knowledge/`（编排 + 权限 + 域切片 + 四路）。
+
+## 采购源绑定（M1-1.1）
+
+**日期**：2026-11-18 · **变更**：[2026-11-18-m1-procurement-binding-service](../changes/2026-11-18-m1-procurement-binding-service/summary.md)
+前缀 `/api/v1/procurement-bindings`；JSON 为 camelCase；写入口全部 **admin**。
+**新建一律落候选**（D-3）⇒ 候选不得进入任何读路径。
+
+| 端点 | 鉴权 | 说明 |
+|---|---|---|
+| `GET /api/v1/procurement-bindings` | **admin** | 全量列表（含候选与已失效）；可选 `classId` / `datasourceId` / `effectiveOnly` |
+| `GET /api/v1/procurement-bindings/effective` | 任意登录用户 | **生效视图**：已确认且 `valid_to IS NULL` —— 候选与失效行一律不出现 |
+| `GET /api/v1/procurement-bindings/effective/properties` | 任意登录用户 | **生效的属性映射**（读路径唯一入口）：自身已确认且生效 **且父已确认且生效** |
+| `GET /api/v1/procurement-bindings/{id}` | **admin** | 详情 = 绑定本体 + 其属性绑定列表；不存在 → **404** |
+| `POST /api/v1/procurement-bindings` | **admin** | 新增**候选**源绑定 → **201**；同键位重复 → **409** |
+| `POST /api/v1/procurement-bindings/{id}/properties` | **admin** | 新增**候选**属性绑定 → **201**；重复属性 / 键序号 → **409**；父已确认 → **409**（子集合冻结） |
+| `POST /api/v1/procurement-bindings/{id}/confirm` | **admin** | 源绑定确认（候选 → 已确认）；重复确认 → **409**；属性未全部确认 → **422** |
+| `POST /api/v1/procurement-bindings/{id}/expire` | **admin** | 软失效（写 `valid_to`，不删行）；重复失效 → **409**；**级联失效子绑定并逐行写审计** |
+| `POST /api/v1/procurement-bindings/{id}/properties/{propertyBindingId}/confirm` | **admin** | 属性绑定确认（候选 → 已确认）；路径父 id 与归属不符 → **404** |
+| `POST /api/v1/procurement-bindings/{id}/properties/{propertyBindingId}/expire` | **admin** | 单条属性绑定软失效（绑错列不必作废整个源绑定）；路径父 id 与归属不符 → **404** |
+
+**路由顺序**：`/effective` 与 `/effective/properties` 必须声明在 `/{id}` **之前**，否则会被 `/{id}` 吃掉
+（`id: int` 解析失败 ⇒ 422 而不是列表）。
+
+**状态机（确认 = 版本冻结点）**
+
+```
+候选态（父未确认）──▶ 确认态（父已确认，子集合冻结）──▶ 失效态（只读）
+   可增删子、可确认子        只能整体失效（级联子）        不可再写
+```
+
+⇒ 父已确认时追加 / 确认 / 失效子绑定一律 **409**；父已失效时改子绑定 **422**。
+要改绑必须走「失效现役行 → 建新候选 → 重新确认」。
+**锁序固定为 父 → 子**（`SELECT ... FOR UPDATE`）⇒ 并发确认不会 TOCTOU，也不会死锁。
+
+**状态码语义**
+
+| 情形 | 状态码 |
+|---|---|
+| 非 admin 调写入口 / 全量读视图 | **403** |
+| 类 / 数据源 / 属性不存在、属性跨类、过滤白名单不合法、**变换表达式不合法**、键序号不连续、**确认时属性未全部确认**、**父已失效时改子绑定**、**actor 超长**、**键序号越 SMALLINT** | **422** |
+| 同键位重复、重复确认、重复失效、**父已确认时改子集合（冻结）** | **409** |
+| 绑定 id 不存在、**路径父 id 与属性绑定归属不符** | **404** |
+
+⚠️ 「属性绑定不存在」与「属性绑定不属于该父」**共用一句文案**（「不存在或不属于源绑定 id=Y」）
+⇒ 不给存在性探测留口子。
+
+⚠️ **数据库异常按约束类型分流**：唯一约束（`uq_*`）⇒ **409**；
+CHECK（`ck_*`）/ 外键 / 非空 ⇒ **422**（用户改数据即可解决，重试无用）；
+其余 `DBAPIError`（长度超限 / 数值越界）⇒ **422**。
+⚠️ commit 路径**也**走翻译器 —— 延迟约束在 commit 时才触发，裸 commit ⇒ 500。
+约束名**只进服务端日志**，用户只看到归一化提示。
+⚠️ **有效期窗口父子嵌套**：级联失效时父行的失效时刻会**后移**到
+`max(父原失效时刻, 各子行最早合法失效时刻)` ⇒ **子行的 `validTo` 恒 ≤ 父行的 `validTo`**。
+
+**过滤表达式的语法**（`filterExpression`）
+
+```
+<裸列> <比较符> <常量>            ← 必须至少有一处
+以 AND / NOT / 括号连接（OR 禁）
+函数只能出现在受控清单里，且不能单独构成一条过滤
+```
+
+顶层只有 AND / NOT ⇒ 合取式；只要有一项依赖行 ⇒ 整个过滤依赖行 ⇒ 不可能恒真。
+
+**请求体要点**
+
+- `SourceBindingCreate`：`classId` / `datasourceId` / `schemaName` / `sourceTable` /
+  `bindingRole`（`BASE|NUMERATOR|DENOMINATOR|FILTER`）/ `filterExpression` / `filterAllowlist`。
+  ⚠️ **给了 `filterExpression` 就必须给非空 `filterAllowlist`**（不给 = 默认放行 = 越权读 ⇒ 422），
+  且表达式用到的每个**列**标识符都要在白名单内（大小写不敏感；字符串字面量整段剥掉）。
+  ⚠️ 白名单项**必须是合法标识符且 ≤100 字符** —— PostgreSQL 对 `ARRAY(String(100))`
+  的**元素超长是静默截断**（不报错）⇒ 写时校验的白名单与落库的白名单会不是同一个对象。
+  ⚠️ **三张互不重叠的授权清单**（白名单只授权**列**）：
+  | 清单 | 授权什么 | 谁来填 |
+  |---|---|---|
+  | `filterAllowlist` | **列**（数据） | 写入方自报 |
+  | `SAFE_SCALAR_FUNCTIONS`（21 个） | **函数**（代码） | **系统内置，不可自报** |
+  | 保留字禁表（37 词） | **结构词** —— 表达式里不许出现的 SQL 结构 | 系统内置 |
+  ⇒ 白名单**自报** `SELECT` / `FROM` 也塞不进子查询；自报 `PG_SLEEP` 也调不动函数。
+  ⚠️ 过滤表达式**禁 `OR`**（`X = 1 OR 1=1` 恒真 ⇒ 行级过滤被抹平成全表读）；
+  禁 `OR` 只在**剥掉字面量后**的文本上匹配 ⇒ `STATUS = 'A OR B'` 不误杀。
+  ⚠️ 过滤表达式**必须至少含一处「裸列 ↔ 常量」的直接比较**（**恒真谓词闸门**）——
+  禁 `OR` 只堵住恒真的一种写法，`A = A` / `ABS(A) >= 0` / `CASE ... ELSE 1 END = 1` /
+  `UPPER(A) = 'X'` 照样恒真或与行无关 ⇒ 顶层只有 AND / NOT 时，只要有一项依赖行，
+  **整个合取式就依赖行** ⇒ 恒真从**语法**上不可达。
+  ⇒ 代价（刻意取舍）：**只有函数比较**的表达式不被接受（`UPPER(A) = 'X'` ⇒ 422），
+  需要函数时**另配一处裸列比较**：`STATUS = '有效' AND UPPER(NAME) = 'X'`。
+  ⚠️ 过滤表达式**禁 `CASE`**（`ELSE` 分支恒为 1，NULL 也走 ELSE ⇒ 恒真）。
+  ⚠️ 结构词禁表含 **`TABLE` / `LATERAL`** —— PostgreSQL 的 `TABLE relation` ≡
+  `SELECT * FROM relation` ⇒ `EXISTS (TABLE other_tbl)` 不出现 SELECT / FROM 也能跨表读。
+  ⚠️ 中文字面量**允许**（业务数据是中文）：共享的 DQ 表达式校验器只认 ASCII ⇒
+  送检前把**字面量内部**的非 ASCII 字符掩码成占位符（引号之外仍被拒）。
+  ⚠️ 纯空白 `filterExpression` ⇒ 落库为 **NULL**（与「没有过滤」同状态）。
+- `PropertyBindingCreate`：`propertyId` / `sourceColumn` / `keyOrdinal`（1..32767，NULL = 非键列）/ `transformExpression`。
+  ⚠️ **`transformExpression` 与 `filterExpression` 同级闸门**：禁 DML / UNION / 注释 / `;`、禁 `OR`、
+  **列** ⊆ {本属性 `sourceColumn`}、**函数** ⊆ 受控函数清单（21 个）。
+  ⚠️ `keyOrdinal` 上限 **32767** —— 库列是 SMALLINT，越界值会在绑定参数阶段抛 DataError ⇒ 500。
+  ⚠️ **建时**就校验键序号**前缀**（1..N-1 必须已存在）⇒ 缺位不会拖到「确认」才撞墙。
+- **确认请求体不接受确认人**：确认人取当前登录用户（防伪造审计）。
+- **actor 长度 ≤64 字符** —— `createdBy` / `confirmedBy` 库列是 `String(64)`，
+  超长抛 `StringDataRightTruncationError`（**不是** IntegrityError）⇒ 未处理就是 500 ⇒ 边界先拒 422。
+
+**审计**：写端点全部落 `audit_log`（entity_type = `procurement_source_binding` /
+`procurement_property_binding`）；候选→确认复用 **`UPDATE`** 动作（before / after 双端快照）。
+
+> 事实源：`backend/app/api/v1/procurement_bindings.py`、
+> `backend/app/services/procurement_binding_service.py`、
+> `backend/app/services/procurement_binding_validation.py`。
+> 变异反证：`backend/scripts/check_procurement_binding_mutations.py`（证明测试不是「永远绿」）。

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.domain.semantic_manifest_schema import SCHEMA_VERSION
+
 
 def _property(
     name: str,
@@ -141,9 +143,13 @@ def _kpi(
 
 
 def sampleManifest() -> dict[str, Any]:
-    """一份跨两个域的发布快照样本（每次调用返回**新字典**，测试互不污染）。"""
+    """一份跨两个域的发布快照样本（每次调用返回**新字典**，测试互不污染）。
+
+    版本取 `SCHEMA_VERSION`（当前契约），并带齐 v2 的 `sourceBindings` 段
+    ⇒ 样本代表「当前契约的合法 manifest」，契约升版时只需改这一处。
+    """
     return {
-        "schemaVersion": "v1",
+        "schemaVersion": SCHEMA_VERSION,
         "domains": [
             {
                 "code": "PROCUREMENT",
@@ -255,4 +261,5 @@ def sampleManifest() -> dict[str, Any]:
                 "INSPECTION_RECORD", "检验记录", "InspectionRecord", "QUALITY"
             ),
         ],
+        "sourceBindings": [],
     }

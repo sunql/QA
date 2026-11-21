@@ -13,24 +13,37 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, Path, Query, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
-from app.domain.exceptions import ValidationError
+from app.domain.exceptions import NotFoundError, ValidationError
+from app.domain.semantic_release_models import SemanticRelease
 from app.domain.semantic_release_schemas import (
+    SemanticReleaseCheckPage,
+    SemanticReleaseCheckRead,
+    SemanticReleaseCheckSummary,
     SemanticReleaseCreateRequest,
     SemanticReleaseOperationRead,
     SemanticReleasePage,
+    SemanticReleaseRollbackRequest,
     SemanticReleaseSnapshotRead,
     SemanticReleaseSummaryRead,
 )
-from app.services.messages_zh import MSG_SEMANTIC_RELEASE_SCOPE_CONFLICT
+from app.services.messages_zh import (
+    MSG_SEMANTIC_RELEASE_NOT_FOUND,
+    MSG_SEMANTIC_RELEASE_SCOPE_CONFLICT,
+)
 from app.services.semantic_registry_service import (
     DEFAULT_LIST_LIMIT,
     MAX_LIST_LIMIT,
     MAX_RELEASE_ID,
     SemanticReleaseSnapshot,
     semanticRegistry,
+)
+from app.services.semantic_release_check_service import (
+    semanticReleaseCheckService,
+    toCheckDict,
 )
 from app.services.semantic_release_service import (
     SemanticReleaseOperation,
@@ -118,6 +131,43 @@ async def getSemanticRelease(
     return _toSnapshotRead(snapshot)
 
 
+@router.get("/{releaseId}/checks", response_model=SemanticReleaseCheckPage)
+async def listSemanticReleaseChecks(
+    response: Response,
+    releaseId: int = Path(..., ge=1, le=MAX_RELEASE_ID),
+    limit: int = Query(default=DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(getDb),
+) -> SemanticReleaseCheckPage:
+    """某次发布的逐项校验结论（校验项 / severity / result / detail）。
+
+    这是 M1-a DoD 第 3 条的取证面：「validate 报 ERROR → check 表可查到该条
+    → 不得激活」。失败结论同样落表 ⇒ 这里能查到「它被哪一条拦下的」。
+
+    分页语义：`rows` 是**当前页**，`total` 与 `summary` 覆盖**全部行**
+    ⇒ 翻页时 summary 不会变成「这一页的结论」，读者不会误判「这一页没有 ERROR
+    ⇒ 整体通过」。
+
+    与 `GET /{releaseId}` 的 fail-closed 差异：详情端点会拒掉被篡改的快照
+    （完整性），而本端点**故意仍可读**历史校验证据 —— 证据要能被取到才有意义。
+    """
+    _noStore(response)
+    exists = await session.scalar(select(SemanticRelease.id).where(SemanticRelease.id == releaseId))
+    if exists is None:
+        raise NotFoundError(MSG_SEMANTIC_RELEASE_NOT_FOUND.format(releaseId=releaseId))
+
+    rows = await semanticReleaseCheckService.listChecks(
+        session, releaseId, limit=limit, offset=offset
+    )
+    total = await semanticReleaseCheckService.countChecks(session, releaseId)
+    summary = await semanticReleaseCheckService.summarizeChecksInDb(session, releaseId)
+    return SemanticReleaseCheckPage(
+        rows=[SemanticReleaseCheckRead.model_validate(toCheckDict(row)) for row in rows],
+        total=total,
+        summary=SemanticReleaseCheckSummary.model_validate(summary),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 写路径（D10）：状态机 DRAFT → VALIDATED → ACTIVE → ARCHIVED
 # ---------------------------------------------------------------------------
@@ -195,5 +245,33 @@ async def archiveSemanticRelease(
     _noStore(response)
     operation = await semanticReleaseService.archive(
         session, releaseId, actor=user.userId, departments=user.departments
+    )
+    return _toOperationRead(operation)
+
+
+@router.post("/{releaseId}/rollback", response_model=SemanticReleaseOperationRead)
+async def rollbackSemanticRelease(
+    response: Response,
+    payload: SemanticReleaseRollbackRequest,
+    releaseId: int = Path(..., ge=1, le=MAX_RELEASE_ID),
+    user: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> SemanticReleaseOperationRead:
+    """回滚到某个历史版本 —— **副本式**（D-11）。
+
+    以目标历史版本为源**新建**一份 DRAFT → VALIDATED → ACTIVE，同作用域原有的
+    ACTIVE 在同一事务里归档；新副本的 `manifest_hash` 与源**逐字相同**
+    ⇒ 回滚的语义是「回到那个内容」，不是「重新编译一次」。
+
+    ARCHIVED 保持终态：历史行不会被「复活」，审计里「曾经下线」的事实不被抹掉。
+    """
+    _noStore(response)
+    operation = await semanticReleaseService.rollback(
+        session,
+        releaseId,
+        version=payload.version,
+        actor=user.userId,
+        departments=user.departments,
+        note=payload.note,
     )
     return _toOperationRead(operation)

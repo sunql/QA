@@ -1,0 +1,109 @@
+目标库 DSN = postgresql+asyncpg://qa_user:***@localhost:5433/qa_metadata（只读）
+== KPI_COST_SAVING (metric=8, source=ESCAPE_HATCH)
+   治理: num=['ORDER_QTY', 'UNIT_PRICE'] den=[] grain=['SUPPLIER_CODE', 'MATERIAL_CODE'] timeGrain=month
+   技术: grain=['SUPPLIER_CODE', 'MATERIAL_CODE'] timeGrain=month timeColumn=None 引用列=8
+   源类: ['DWD_PURCHASE_ORDER_LINE', 'DWD_SUPPLIER_PRICE_LIST_DEL']
+   解析: resolved=4 unknown=[] missing=[]
+   对账: verdict=pass degraded=False tierA=True
+   本体覆盖: 缺列=无 | SQL 表不在源类=无
+
+== KPI_INVOICE_MATCH_RATE (metric=5, source=ESCAPE_HATCH)
+   治理: num=['LINE_AMOUNT_EXCL_TAX'] den=['AMOUNT_EXCL_TAX'] grain=['SUPPLIER_CODE', 'INVOICE_DATE'] timeGrain=month
+   技术: grain=['SUPPLIER_CODE', 'INVOICE_DATE'] timeGrain=month timeColumn=INVOICE_DATE 引用列=12
+   源类: ['DWD_PURCHASE_INVOICE', 'DWD_PURCHASE_INVOICE_LINE', 'DWD_PURCHASE_ORDER_LINE']
+   解析: resolved=4 unknown=[] missing=[]
+   对账: verdict=pass degraded=False tierA=True
+   本体覆盖: 缺列=无 | SQL 表不在源类=无
+
+== KPI_PAYMENT_ON_TIME (metric=4, source=ESCAPE_HATCH)
+   治理: num=['VALUE_DATE'] den=['DUE_DATE'] grain=['SUPPLIER_CODE'] timeGrain=month
+   技术: grain=['SUPPLIER_CODE'] timeGrain=month timeColumn=None 引用列=3
+   源类: ['DWD_SUPPLIER_PAYMENT']
+   解析: resolved=3 unknown=[] missing=[]
+   对账: verdict=pass degraded=False tierA=True
+   本体覆盖: 缺列=无 | SQL 表不在源类=无
+
+== KPI_PURCHASE_CYCLE_TIME (metric=6, source=ESCAPE_HATCH)
+   治理: num=['CREATION_DATE', 'RECEIPT_DATE'] den=[] grain=['SUPPLIER_CODE', 'FACILITY_CODE'] timeGrain=month
+   技术: grain=['SUPPLIER_CODE', 'FACILITY_CODE'] timeGrain=month timeColumn=None 引用列=8
+   源类: ['DWD_GOODS_RECEIPT_LINE', 'DWD_PURCHASE_REQUISITION_LINE', 'DWD_REQUISITION_ORDER_LINK']
+   解析: resolved=4 unknown=[] missing=[]
+   对账: verdict=pass degraded=False tierA=True
+   本体覆盖: 缺列=无 | SQL 表不在源类=无
+
+== KPI_PURCHASE_PRICE_VARIANCE (metric=9, source=ESCAPE_HATCH)
+   治理: num=['UNIT_PRICE'] den=['UNIT_PRICE'] grain=['MATERIAL_CODE', 'FACILITY_CODE'] timeGrain=month
+   技术: grain=['MATERIAL_CODE', 'FACILITY_CODE'] timeGrain=month timeColumn=None 引用列=7
+   源类: ['DWD_PURCHASE_ORDER_LINE', 'DWD_SUPPLIER_PRICE_LIST_DEL']
+   解析: resolved=4 unknown=[] missing=[]
+   对账: verdict=pass degraded=False tierA=True
+   本体覆盖: 缺列=无 | SQL 表不在源类=无
+
+== KPI_SUPPLIER_DEFECT_RATE (metric=11, source=NONE)
+   治理: num=[] den=[] grain=[] timeGrain=month
+   技术: grain=['SUPPLIER_CODE', 'MATERIAL_CODE', 'FACILITY_CODE'] timeGrain=month timeColumn=None 引用列=None
+   源类: []
+   解析: resolved=0 unknown=[] missing=[]
+   对账: verdict=unknown degraded=True tierA=False
+     - [governance/unknown] governance_columns_absent: 治理侧未声明分子列
+     - [governance/unknown] governance_columns_absent: 治理侧未声明分母列
+     - [governance/unknown] governance_grain_absent: 治理侧未声明结构化粒度键
+   本体覆盖: 不可判（SQL 解析失败） | SQL 表不在源类=不可判（无 SQL 或解析失败）
+
+== KPI_SUPPLIER_DELAY_DAYS (metric=7, source=ESCAPE_HATCH)
+   治理: num=['PROMISED_RECEIPT_DATE', 'RECEIPT_DATE'] den=[] grain=['SUPPLIER_CODE', 'FACILITY_CODE'] timeGrain=month
+   技术: grain=['SUPPLIER_CODE', 'FACILITY_CODE'] timeGrain=month timeColumn=None 引用列=6
+   源类: ['DWD_GOODS_RECEIPT_LINE', 'DWD_PURCHASE_ORDER_LINE']
+   解析: resolved=4 unknown=[] missing=[]
+   对账: verdict=pass degraded=False tierA=True
+   本体覆盖: 缺列=无 | SQL 表不在源类=无
+
+== KPI_SUPPLIER_FPY (metric=12, source=NONE)
+   治理: num=[] den=[] grain=[] timeGrain=month
+   技术: grain=['SUPPLIER_CODE', 'MATERIAL_CODE', 'FACILITY_CODE'] timeGrain=month timeColumn=None 引用列=None
+   源类: []
+   解析: resolved=0 unknown=[] missing=[]
+   对账: verdict=unknown degraded=True tierA=False
+     - [governance/unknown] governance_columns_absent: 治理侧未声明分子列
+     - [governance/unknown] governance_columns_absent: 治理侧未声明分母列
+     - [governance/unknown] governance_grain_absent: 治理侧未声明结构化粒度键
+   本体覆盖: 不可判（SQL 解析失败） | SQL 表不在源类=不可判（无 SQL 或解析失败）
+
+== KPI_SUPPLIER_MAINTENANCE_RATIO (metric=10, source=NONE)
+   治理: num=[] den=[] grain=[] timeGrain=None
+   技术: grain=['SUPPLIER_CODE'] timeGrain=None timeColumn=None 引用列=None
+   源类: ['DIM_SUPPLIER']
+   解析: resolved=0 unknown=[] missing=[]
+   对账: verdict=unknown degraded=True tierA=False
+     - [governance/unknown] governance_columns_absent: 治理侧未声明分子列
+     - [governance/unknown] governance_columns_absent: 治理侧未声明分母列
+     - [governance/unknown] governance_grain_absent: 治理侧未声明结构化粒度键
+   本体覆盖: 不可判（SQL 解析失败） | SQL 表不在源类=不可判（无 SQL 或解析失败）
+
+== KPI_SUPPLIER_NCR_RATE (metric=13, source=NONE)
+   治理: num=[] den=[] grain=[] timeGrain=month
+   技术: grain=['SUPPLIER_CODE', 'MATERIAL_CODE', 'FACILITY_CODE'] timeGrain=month timeColumn=None 引用列=None
+   源类: []
+   解析: resolved=0 unknown=[] missing=[]
+   对账: verdict=unknown degraded=True tierA=False
+     - [governance/unknown] governance_columns_absent: 治理侧未声明分子列
+     - [governance/unknown] governance_columns_absent: 治理侧未声明分母列
+     - [governance/unknown] governance_grain_absent: 治理侧未声明结构化粒度键
+   本体覆盖: 不可判（SQL 解析失败） | SQL 表不在源类=不可判（无 SQL 或解析失败）
+
+== KPI_SUPPLIER_OTD (metric=2, source=ESCAPE_HATCH)
+   治理: num=['RECEIPT_DATE'] den=['PROMISED_RECEIPT_DATE'] grain=['SUPPLIER_CODE', 'FACILITY_CODE'] timeGrain=month
+   技术: grain=['SUPPLIER_CODE', 'FACILITY_CODE'] timeGrain=month timeColumn=None 引用列=6
+   源类: ['DWD_GOODS_RECEIPT_LINE', 'DWD_PURCHASE_ORDER_LINE']
+   解析: resolved=4 unknown=[] missing=[]
+   对账: verdict=pass degraded=False tierA=True
+   本体覆盖: 缺列=无 | SQL 表不在源类=无
+
+== KPI_SUPPLIER_OVERDUE_RATIO (metric=3, source=ESCAPE_HATCH)
+   治理: num=['RECEIPT_DATE'] den=['PROMISED_RECEIPT_DATE'] grain=['SUPPLIER_CODE', 'FACILITY_CODE'] timeGrain=month
+   技术: grain=['SUPPLIER_CODE', 'FACILITY_CODE'] timeGrain=month timeColumn=None 引用列=6
+   源类: ['DWD_GOODS_RECEIPT_LINE', 'DWD_PURCHASE_ORDER_LINE']
+   解析: resolved=4 unknown=[] missing=[]
+   对账: verdict=pass degraded=False tierA=True
+   本体覆盖: 缺列=无 | SQL 表不在源类=无
+

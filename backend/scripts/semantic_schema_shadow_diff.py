@@ -424,8 +424,10 @@ def _contentDiff(directLines: list[str], snapshotLines: list[str]) -> int:
     块搬到类 B 的块时，整段多重集仍然相等，但事实归属变了（列挂到了别的表上）。
     ⇒ 逐块比 ⇒ 错位会被算成**内容差异**，不会被「内容差异 = 0」掩盖。
 
-    两侧渲染的是同一批事实（类 / 列 / JOIN / 口径摘要），只是类内列的
-    呈现顺序不同：治理表侧按物理行序，快照侧按 propertyName 排序。
+    两侧渲染的是同一批事实（类 / 列 / JOIN / 口径摘要）。A4 之前类内列序
+    不同（治理表侧物理行序 vs 快照侧 propertyName）；A4 起渲染器两侧统一按
+    共享排序键排序 ⇒ 正常应逐字节一致，出现顺序差异即回归。
+    分类逻辑保留：它同时服务历史报告与回归定位。
     把「丢了内容」和「顺序不同」混成一个指标，就会把排序问题误报成
     数据缺失 —— 这正是 D13 要避免的误判。
     """
@@ -653,10 +655,11 @@ def _renderReport(
     if orderOnlyTotal:
         lines.append("")
         lines.append(
-            "已知差异来源（按归因分类，不写死块类型）："
-            "治理表侧属性顺序 = 物理行序（`OntologyClass.properties` 关系**没有 ORDER BY**），"
-            "快照侧 = propertyName 排序；"
-            "治理表侧 JOIN 顺序 = 自增 id（插入序，跨环境不同），快照侧 = joinKey 排序。"
+            "顺序差异归因（A4 前为已知差异，A4 起**属回归**）：A4 之前治理表侧"
+            "属性顺序 = 物理行序（`OntologyClass.properties` 关系**没有 ORDER BY**）、"
+            "JOIN 顺序 = 自增 id；快照侧 = propertyName / joinKey 排序。"
+            "A4 起渲染器两侧共用 `propertyNameSortKey` / `joinKeySortKey` ⇒ "
+            "本段非空说明有一侧退回了原顺序或用错了键。"
             f"受影响块：{kindText or '（无）'}。"
         )
     return "\n".join(lines) + "\n"

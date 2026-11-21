@@ -54,6 +54,17 @@ class SemanticReleaseCreateRequest(CamelModel):
     note: str | None = Field(default=None, max_length=2000)
 
 
+class SemanticReleaseRollbackRequest(CamelModel):
+    """回滚到某个历史版本（D-11：副本式）。
+
+    `version` 是**新副本**的版本号（不复用旧版本号：域内版本号本来就不唯一，
+    复用会让「这份是回滚来的」这件事在版本号上看不出来）。
+    """
+
+    version: str = Field(min_length=1, max_length=32)
+    note: str | None = Field(default=None, max_length=2000)
+
+
 class SemanticReleaseOperationRead(CamelModel):
     """写操作结果：落库后的汇总 + 本次发布闸门报告。
 
@@ -65,3 +76,41 @@ class SemanticReleaseOperationRead(CamelModel):
     release: SemanticReleaseSummaryRead
     blockers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class SemanticReleaseCheckRead(CamelModel):
+    """一条发布校验结论（`semantic_release_check` 的一行）。
+
+    `severity` 是「若失败会有多严重」，`result` 是「这次结论」——
+    两者正交，见 `semantic_release_check_models` 的模块文档串。
+    """
+
+    id: int
+    release_id: int
+    check_code: str
+    check_item: str
+    severity: str
+    result: str
+    target_type: str | None
+    target_key: str | None
+    detail: str
+    checked_time: datetime
+    checked_by: str | None
+
+
+class SemanticReleaseCheckSummary(CamelModel):
+    """校验结论汇总：前端据此判断「能不能发」。"""
+
+    total: int
+    passed: int
+    failed: int
+    error_count: int
+    warning_count: int
+
+
+class SemanticReleaseCheckPage(CamelModel):
+    """某次发布的全部校验结论 + 汇总。"""
+
+    rows: list[SemanticReleaseCheckRead]
+    total: int
+    summary: SemanticReleaseCheckSummary

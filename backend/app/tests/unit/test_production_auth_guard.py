@@ -117,7 +117,12 @@ def test_development_with_stub_mode_passes() -> None:
 
 
 def test_production_real_mode_with_stub_headers_is_flagged() -> None:
-    """第二个独立情形：AUTH_MODE=real 但 AUTH_STUB_ENABLED=1 仍可伪造 X-User-* 头。"""
+    """生产**策略闸**：real 模式下保留 AUTH_STUB_ENABLED=1 即 flagged。
+
+    这是刻意比「暴露面」更严的口径：`ALLOW_STUB_WHEN_REAL=false` 时 stub 头其实
+    在解析前就被拒（见 `_stubHeadersUnreachable`），但生产不允许保留「stub 可用」
+    的开关状态——一旦有人同时打开 `ALLOW_STUB_WHEN_REAL` 就立刻可伪造。
+    """
     reason = productionAuthMisconfiguration(
         Settings(APP_ENV="production", AUTH_MODE="real", AUTH_STUB_ENABLED=True)
     )

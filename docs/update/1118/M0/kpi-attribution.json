@@ -1,0 +1,50 @@
+{
+  "KPI_COST_SAVING": {
+    "category": "真口径分歧",
+    "note": "基准价来源：治理定义『标准/历史基准价』+ 源写 DWD_PURCHASE_CONTRACT，实现用价目表 DWD_SUPPLIER_PRICE_LIST_DEL；合同价与价目表价常不同值，须业务拍板（问卷 B/D）"
+  },
+  "KPI_INVOICE_MATCH_RATE": {
+    "category": "技术层需改",
+    "note": "定义要求三单（订单+收货+发票），SQL 只 join 订单行与发票行（两单），缺收货单匹配条件 ⇒ 匹配率偏高"
+  },
+  "KPI_PAYMENT_ON_TIME": {
+    "category": "技术层需改",
+    "note": "列名不同（PAYMENT_DATE→VALUE_DATE、DWD_PAYMENT→DWD_SUPPLIER_PAYMENT）是对账层已 pass 的原因：P0 normalizer 把治理结构化列改写成了物理列（identity 阶段命中），不是 alias 的功劳（dry-run keep=0，本批尚未回填）；剩余缺口=分母缺『已到约定账期』时点过滤（COUNT(DUE_DATE) 含未到期）+ 无 time_column"
+  },
+  "KPI_PURCHASE_CYCLE_TIME": {
+    "category": "技术层需改",
+    "note": "定义与实现一致（请购创建→收货，TRUNC 到日符合『天』）；缺 time_column，无法按治理要求的『月』粒度切片"
+  },
+  "KPI_PURCHASE_PRICE_VARIANCE": {
+    "category": "真口径分歧",
+    "note": "治理明写『统一口径用采购合同价为基准』，实现用价目表；另 AVG(比率) 与加权口径未约定、无 time_column"
+  },
+  "KPI_SUPPLIER_DEFECT_RATE": {
+    "category": "技术层需改",
+    "note": "execution_source=NONE、无 formula、无 ontology_metric_source；本体 77 类里没有来料检验类（DWD_INCOMING_INSPECTION 未建模），需先补源类+绑定+measure"
+  },
+  "KPI_SUPPLIER_DELAY_DAYS": {
+    "category": "技术层需改",
+    "note": "过滤用原值比较、差值用 TRUNC（同日不同时刻会被『未逾期』过滤却在差值里为 0），边界不一致；缺 time_column"
+  },
+  "KPI_SUPPLIER_FPY": {
+    "category": "技术层需改",
+    "note": "同 DEFECT_RATE：无源类/无 measure；另治理引用的 INSPECTION_RETRY_COUNT 字段来源未定"
+  },
+  "KPI_SUPPLIER_MAINTENANCE_RATIO": {
+    "category": "治理层需改",
+    "note": "治理侧未定义『活跃供应商』判定与『资质有效』的字段口径，源里的 DWD_SUPPLIER_CERTIFICATION 在本体不存在；先补治理定义再建 measure（技术缺口是结果不是原因）"
+  },
+  "KPI_SUPPLIER_NCR_RATE": {
+    "category": "技术层需改",
+    "note": "同 DEFECT_RATE：无源类/无 measure；另需 NCR 表（DWD_NCR）建模"
+  },
+  "KPI_SUPPLIER_OTD": {
+    "category": "技术层需改",
+    "note": "INNER JOIN 收货行把未收货订单从分母剔除（分母变成『已收货行数』）＋多次收货扇出放大计数＋计数单位是收货行而非订单行；缺时间窗与 time_column"
+  },
+  "KPI_SUPPLIER_OVERDUE_RATIO": {
+    "category": "技术层需改",
+    "note": "同 OTD 的 INNER JOIN：未收货的逾期单（最典型逾期）被剔除 ⇒ 逾期率系统性偏低；缺时间窗与 time_column"
+  }
+}

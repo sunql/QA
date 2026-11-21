@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.services.semantic_release_check_types import bindingTargetKey
+
 # 严重度取值（与设计稿 D-6 的风险分级一一对应）。
 BREAKING = "BREAKING"
 ADDITIVE = "ADDITIVE"
@@ -46,10 +48,16 @@ _RISK_BY_SEVERITY = {BREAKING: RISK_HIGH, ADDITIVE: RISK_LOW, COSMETIC: RISK_INF
 SECTION_CLASSES = "classes"
 SECTION_PROPERTIES = "properties"
 SECTION_JOINS = "joins"
+SECTION_SOURCE_BINDINGS = "sourceBindings"
 
-_SECTION_ORDER = {SECTION_CLASSES: 0, SECTION_PROPERTIES: 1, SECTION_JOINS: 2}
+_SECTION_ORDER = {
+    SECTION_CLASSES: 0,
+    SECTION_PROPERTIES: 1,
+    SECTION_JOINS: 2,
+    SECTION_SOURCE_BINDINGS: 3,
+}
 
-# Manifest v1 的顶层分区全集（`semantic_manifest_schema.MANIFEST_SCHEMA`）。
+# Manifest 的顶层分区全集（`semantic_manifest_schema.MANIFEST_SCHEMAS`）。
 MANIFEST_SECTIONS = (
     "domains",
     "classes",
@@ -57,10 +65,16 @@ MANIFEST_SECTIONS = (
     "metrics",
     "kpis",
     "businessObjects",
+    "sourceBindings",
 )
 
-# 本引擎**已覆盖**的分区：类、类内属性、JOIN。
-COVERED_SECTIONS = (SECTION_CLASSES, SECTION_PROPERTIES, SECTION_JOINS)
+# 本引擎**已覆盖**的分区：类、类内属性、JOIN、源绑定（v2 / M1-1.3 批次 B）。
+COVERED_SECTIONS = (
+    SECTION_CLASSES,
+    SECTION_PROPERTIES,
+    SECTION_JOINS,
+    SECTION_SOURCE_BINDINGS,
+)
 
 # 本引擎**未覆盖**的分区（plan D-10 已登记为范围裁剪）。
 # ⚠️ 必须在 API 契约里**披露**：否则「KPI 被删了」这类变更会得到
@@ -179,6 +193,13 @@ class SemanticDiff:
                 field for field, _kind, _severity in _PROPERTY_FIELDS
             ),
             SECTION_JOINS: tuple(field for field, _kind, _severity in _JOIN_FIELDS),
+            SECTION_SOURCE_BINDINGS: tuple(
+                field for field, _kind, _severity in _BINDING_FIELDS
+            )
+            + tuple(
+                f"properties[].{field}"
+                for field, _kind, _severity in _BINDING_PROPERTY_FIELDS
+            ),
         }
 
     @property
@@ -238,6 +259,22 @@ _JOIN_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("description", "JOIN_DESCRIPTION_CHANGED", COSMETIC),
 )
 
+# v2 源绑定（M1-1.3 批次 B）：绑定的身份是**复合键**
+# `(className, datasourceName, schemaName, sourceTable, bindingRole)`，
+# 同一张表可以绑多个角色 ⇒ 不能像 classes 那样按单字段建索引。
+_BINDING_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("filterExpression", "BINDING_FILTER_EXPRESSION_CHANGED", BREAKING),
+    ("filterAllowlist", "BINDING_FILTER_ALLOWLIST_CHANGED", BREAKING),
+)
+
+# 绑定内逐属性的映射。`sourceColumn` / `transformExpression` 变了 ⇒ 取到的值变了
+# ⇒ 破坏性；`keyOrdinal` 只影响复合键的拼接顺序 ⇒ 外观性。
+_BINDING_PROPERTY_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("sourceColumn", "BINDING_PROPERTY_SOURCE_COLUMN_CHANGED", BREAKING),
+    ("transformExpression", "BINDING_PROPERTY_TRANSFORM_CHANGED", BREAKING),
+    ("keyOrdinal", "BINDING_PROPERTY_KEY_ORDINAL_CHANGED", COSMETIC),
+)
+
 
 def diffManifests(
     base: Mapping[str, Any], candidate: Mapping[str, Any]
@@ -257,6 +294,7 @@ def diffManifests(
     changes.extend(_diffClasses(base, candidate))
     changes.extend(_diffProperties(base, candidate))
     changes.extend(_diffJoins(base, candidate))
+    changes.extend(_diffSourceBindings(base, candidate))
     return SemanticDiff(changes=tuple(_sortedChanges(changes)))
 
 
@@ -608,6 +646,124 @@ def _diffJoins(
                 )
             )
     return changes
+
+
+# ---------------------------------------------------------------- 源绑定层（v2）
+
+
+def _diffSourceBindings(
+    base: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> list[SemanticChange]:
+    """比较 v2 的 `sourceBindings` 分区（M1-1.3 批次 B）。
+
+    身份是**复合键** `(className, datasourceName, schemaName, sourceTable,
+    bindingRole)` —— 同一张表可以绑多个角色（BASE / NUMERATOR / …），
+    按单字段建索引会把它们挤成一条 ⇒ 用复合键建索引。
+    """
+    baseByKey = _indexBindings(_section(base, SECTION_SOURCE_BINDINGS))
+    candidateByKey = _indexBindings(_section(candidate, SECTION_SOURCE_BINDINGS))
+    changes: list[SemanticChange] = []
+    for key in sorted(candidateByKey):
+        if key not in baseByKey:
+            changes.append(
+                SemanticChange(
+                    kind="BINDING_ADDED",
+                    severity=ADDITIVE,
+                    section=SECTION_SOURCE_BINDINGS,
+                    target=key,
+                )
+            )
+            continue
+        changes.extend(
+            _compareFields(
+                baseByKey[key],
+                candidateByKey[key],
+                _BINDING_FIELDS,
+                section=SECTION_SOURCE_BINDINGS,
+                target=key,
+            )
+        )
+        changes.extend(_diffBindingProperties(baseByKey[key], candidateByKey[key], key))
+    for key in sorted(baseByKey):
+        if key not in candidateByKey:
+            changes.append(
+                SemanticChange(
+                    kind="BINDING_REMOVED",
+                    severity=BREAKING,
+                    section=SECTION_SOURCE_BINDINGS,
+                    target=key,
+                )
+            )
+    return changes
+
+
+def _diffBindingProperties(
+    before: Mapping[str, Any], after: Mapping[str, Any], bindingKey: str
+) -> list[SemanticChange]:
+    """比较一条绑定内部的逐属性映射。"""
+    beforeByName = _indexByName(_section(before, "properties"), "propertyName")
+    afterByName = _indexByName(_section(after, "properties"), "propertyName")
+    changes: list[SemanticChange] = []
+    for name in sorted(afterByName):
+        target = f"{bindingKey}#{name}"
+        if name not in beforeByName:
+            changes.append(
+                SemanticChange(
+                    kind="BINDING_PROPERTY_ADDED",
+                    severity=ADDITIVE,
+                    section=SECTION_SOURCE_BINDINGS,
+                    target=target,
+                )
+            )
+            continue
+        changes.extend(
+            _compareFields(
+                beforeByName[name],
+                afterByName[name],
+                _BINDING_PROPERTY_FIELDS,
+                section=SECTION_SOURCE_BINDINGS,
+                target=target,
+            )
+        )
+    for name in sorted(beforeByName):
+        if name not in afterByName:
+            changes.append(
+                SemanticChange(
+                    kind="BINDING_PROPERTY_REMOVED",
+                    severity=BREAKING,
+                    section=SECTION_SOURCE_BINDINGS,
+                    target=f"{bindingKey}#{name}",
+                )
+            )
+    return changes
+
+
+def _indexBindings(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    """按复合键建索引；重复键取**首条**（契约保证唯一，此处防御性取首条）。"""
+
+    index: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        key = _bindingKey(row)
+        if key not in index:
+            index[key] = row
+    return index
+
+
+def _bindingKey(binding: Mapping[str, Any]) -> str:
+    """绑定的复合身份键（**与校验侧共用同一个渲染器** ⇒ 两侧可对账）。
+
+    ⚠️ 必须含 **datasourceName**：契约里的身份是五元组
+    `(className, datasourceName, schemaName, sourceTable, bindingRole)`
+    —— 同一个类的同一张表在**两个数据源**里各绑一次是合法的两行，
+    少了数据源会把它们挤成一条 ⇒ 变更被吞掉。
+
+    ⚠️ 渲染器住在叶子模块 `semantic_release_check_types`（校验侧用它写
+    `target_key` 列）⇒ 差异报告里的一个绑定名，能在 check 表里查到同一行。
+    """
+
+    return bindingTargetKey(binding)
 
 
 # ---------------------------------------------------------------- 工具

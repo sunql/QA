@@ -339,7 +339,7 @@ docker compose up -d backend
 ```bash
 # 正确
 DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata
-TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test
+TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test
 ```
 
 ### 7.5.2 Neo4j 不可达（`GraphTraversalService` 返回空）

@@ -1,4 +1,4 @@
-"""Manifest JSON Schema v1（P1a / D7）：合法通过、非法全拒、哈希稳定。
+"""Manifest JSON Schema v1 / v2（P1a / D7；v2 = M1-1.3 / D-9）：合法通过、非法全拒、哈希稳定。
 
 D7 完成定义（排程原文）：「合法 Manifest 通过、5 类非法输入全部拒绝；哈希稳定」。
 
@@ -7,6 +7,12 @@ D7 完成定义（排程原文）：「合法 Manifest 通过、5 类非法输�
 
 Schema 只是第一道闸；引用完整性（类名、指标名、域名）是 Schema 表达不了的部分，
 由 `validateManifest` 的第二遍检查兜底 —— 回放历史快照时同样要过这一关。
+
+**v2 追加**（M1-1.3 / D-9）：
+- **按版本分发**：v1 快照继续按 v1 校验（历史快照不许被新契约判死）；
+- **未知版本直接拒绝**（不放行、不猜）；
+- v2 追加 `sourceBindings` 分区与它的引用闸（类必须存在 / 属性必须属于该类 /
+  键序号不重复 / 绑定主键不重复）。
 """
 
 from __future__ import annotations
@@ -19,7 +25,11 @@ from typing import Any
 import pytest
 
 from app.domain.semantic_manifest_schema import (
+    MANIFEST_SCHEMA_SOURCE_BINDING_VERSIONS,
+    MANIFEST_SCHEMAS,
     SCHEMA_VERSION,
+    SCHEMA_VERSION_V1,
+    SCHEMA_VERSION_V2,
     ManifestSchemaError,
     canonicalManifestJson,
     manifestHash,
@@ -27,7 +37,7 @@ from app.domain.semantic_manifest_schema import (
 )
 from app.services.semantic_compiler import SCHEMA_VERSION as COMPILER_SCHEMA_VERSION
 from app.services.semantic_compiler import compileFromRows
-from app.tests.unit._semantic_rows import canonicalJson
+from app.tests.unit._semantic_rows import FORBIDDEN_MANIFEST_KEYS, canonicalJson
 from app.tests.unit.test_semantic_manifest_golden import compileGolden
 
 _GOLDEN_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "semantic_manifest_golden.json"
@@ -50,8 +60,9 @@ def test_schema_version_matches_compiler() -> None:
 def test_release_orm_default_schema_version_matches() -> None:
     """`semantic_release.schema_version` 的库侧默认值不得与 Schema 版本漂移。
 
-    迁移 0142 写死了 `server_default='v1'`。SCHEMA_VERSION 一旦 +1，这里会先红，
-    逼着做一次明确决定（补迁移改默认值，还是由落库路径显式赋值）。
+    迁移 0142 写死了 `server_default='v1'`（v2 起由迁移 **0156** 改成 `'v2'`）。
+    SCHEMA_VERSION 一旦 +1，这里会先红，逼着做一次明确决定
+    （补迁移改默认值，还是由落库路径显式赋值）。
     """
     from app.domain.semantic_release_models import SemanticRelease
 
@@ -140,7 +151,7 @@ def test_rejects_invalid_enum_and_schema_version() -> None:
         validateManifest(broken)
 
     broken = golden()
-    broken["schemaVersion"] = "v2"
+    broken["schemaVersion"] = "v99"
 
     with pytest.raises(ManifestSchemaError, match="schemaVersion"):
         validateManifest(broken)
@@ -332,14 +343,185 @@ def test_manifest_carries_no_instance_ids() -> None:
 
 
 def _assertNoInstanceIds(value: Any, path: str = "") -> None:
-    forbidden = {"class_id", "classId", "datasourceId", "targetClassId"}
+    """快照里不得出现的键（**键名级**判定，不看值）。
+
+    清单单点定义在 `app/tests/unit/_semantic_rows.py::FORBIDDEN_MANIFEST_KEYS`
+    （与 golden 的文本级守卫共用）⇒ 两处守卫不会各漏各的。
+
+    两类禁止键：
+    - **自增 id / 行身份**（`class_id` / `classId` / `datasourceId` / …）；
+    - **时间戳与实例态**（`validFrom` / `validTo` / `confirmedTime` / `isCandidate` / …）。
+
+    后者与前者同罪：有效期与候选态随时间/状态变化 ⇒ 同一治理内容两次编译的字节
+    不同 ⇒ M1-a DoD 第 2 条（同输入两次编译字节一致）被破坏。
+    """
     if isinstance(value, dict):
         for key, child in value.items():
-            assert key not in forbidden, f"{path}.{key} 是实例相关 id，不得进入 Manifest"
+            assert (
+                key not in FORBIDDEN_MANIFEST_KEYS
+            ), f"{path}.{key} 是实例相关 id，不得进入 Manifest"
             _assertNoInstanceIds(child, f"{path}.{key}")
     elif isinstance(value, list):
         for index, child in enumerate(value):
             _assertNoInstanceIds(child, f"{path}[{index}]")
+
+
+# ---------------------------------------------------------------------------
+# 5. v2 版本分发与绑定引用闸（M1-1.3 / D-9）
+# ---------------------------------------------------------------------------
+
+
+def test_schema_registry_covers_v1_and_v2() -> None:
+    """版本注册表必须同时收 v1 与 v2，且各自钉住自己的 `schemaVersion`。"""
+    assert set(MANIFEST_SCHEMAS) == {SCHEMA_VERSION_V1, SCHEMA_VERSION}
+    assert MANIFEST_SCHEMAS[SCHEMA_VERSION_V1]["properties"]["schemaVersion"] == {
+        "const": SCHEMA_VERSION_V1
+    }
+    assert MANIFEST_SCHEMAS[SCHEMA_VERSION]["properties"]["schemaVersion"] == {
+        "const": SCHEMA_VERSION
+    }
+
+
+def test_every_registered_schema_pins_its_own_version() -> None:
+    """注册表里每一版都必须**自述自己的版本**（code-review HIGH-1 的通用守卫）。
+
+    失败形态（已实证）：把 `MANIFEST_SCHEMAS` 的键与 `schemaVersion` 的 const
+    都写成「当前版本」⇒ 升到 v3 时，v2 从注册表里消失、v2 的契约被改写成 v3
+    ⇒ 已发布的 v2 快照当场变成「未知版本」⇒ 无法校验 / 激活 / 回放。
+    ⇒ 本用例把「键 == 自述版本」钉死，任何一版漂移都会红。
+    """
+    for version, schema in MANIFEST_SCHEMAS.items():
+        const = schema["properties"]["schemaVersion"].get("const")
+        assert const == version, f"{version} 的契约自述为 {const!r}"
+
+
+def test_v2_contract_stays_frozen_when_current_version_moves() -> None:
+    """v2 契约必须**冻结**：它的 `schemaVersion` 与 `$id` 不得跟着「当前版本」走。"""
+    v2 = MANIFEST_SCHEMAS[SCHEMA_VERSION_V2]
+
+    assert v2["properties"]["schemaVersion"] == {"const": "v2"}
+    assert v2["$id"].endswith("/v2.json")
+    assert v2["title"] == "Semantic Manifest v2"
+
+
+def test_only_v2_carries_the_source_binding_section() -> None:
+    """「哪一版含绑定分区」是**版本配置**，不是版本字符串比较。
+
+    用「版本 ≠ v1」判断 ⇒ 未来任何不带该分区的版本会走进绑定引用闸 ⇒
+    读一个不存在的键 ⇒ KeyError ⇒ 500（而不是一条可读的契约错误）。
+    """
+    assert SCHEMA_VERSION_V2 in MANIFEST_SCHEMA_SOURCE_BINDING_VERSIONS
+    assert SCHEMA_VERSION_V1 not in MANIFEST_SCHEMA_SOURCE_BINDING_VERSIONS
+
+
+def test_v1_snapshot_still_validates_under_v1_schema() -> None:
+    """v1 快照（历史库里的 ACTIVE 快照）继续按 v1 校验。
+
+    契约演进的底线：**绝不偷偷放宽 v1，也不让新分区把历史快照判死**。
+    """
+    v1 = golden()
+    v1["schemaVersion"] = SCHEMA_VERSION_V1
+    del v1["sourceBindings"]
+
+    validateManifest(v1)
+
+
+def test_v1_snapshot_carrying_source_bindings_is_rejected() -> None:
+    """v1 契约没有 `sourceBindings` 分区 ⇒ 多出来的键必须被拒。"""
+    v1 = golden()
+    v1["schemaVersion"] = SCHEMA_VERSION_V1
+
+    with pytest.raises(ManifestSchemaError, match="sourceBindings"):
+        validateManifest(v1)
+
+
+def test_unknown_schema_version_is_rejected_not_guessed() -> None:
+    """未知版本直接拒绝：既不按 v2 放行，也不按 v1 放行。"""
+    broken = golden()
+    broken["schemaVersion"] = "v99"
+
+    with pytest.raises(ManifestSchemaError, match="未知"):
+        validateManifest(broken)
+
+
+def test_v2_rejects_binding_of_unknown_class() -> None:
+    broken = golden()
+    broken["sourceBindings"][0]["className"] = "NoSuchClass"
+
+    with pytest.raises(ManifestSchemaError, match="NoSuchClass"):
+        validateManifest(broken)
+
+
+def test_v2_rejects_property_belonging_to_another_class() -> None:
+    """绑定的属性必须属于**该类**：`onTimeQty` 属于 PurchaseOrder，不是 Supplier。"""
+    broken = golden()
+    broken["sourceBindings"][0]["properties"][0]["propertyName"] = "onTimeQty"
+
+    with pytest.raises(ManifestSchemaError, match="不属于类"):
+        validateManifest(broken)
+
+
+def test_v2_rejects_property_on_class_without_properties() -> None:
+    """类存在但**一个属性都没有** ⇒ 任何属性名都是张冠李戴。
+
+    空集合不能被当成「不检查」—— 那会让「绑了一个不存在的属性」静默通过。
+    """
+    broken = golden()
+    template = copy.deepcopy(broken["classes"][0])
+    template["className"] = "EmptyClass"
+    template["properties"] = []
+    broken["classes"].append(template)
+    broken["sourceBindings"][0]["className"] = "EmptyClass"
+
+    with pytest.raises(ManifestSchemaError, match="不属于类"):
+        validateManifest(broken)
+
+
+def test_v2_rejects_duplicate_key_ordinal() -> None:
+    """复合键序号重复 ⇒ 键的定义有歧义（键列到底是哪几个）。"""
+    broken = golden()
+    broken["sourceBindings"][0]["properties"][1]["keyOrdinal"] = 1
+
+    with pytest.raises(ManifestSchemaError, match="keyOrdinal"):
+        validateManifest(broken)
+
+
+def test_v2_rejects_duplicate_binding_identity() -> None:
+    """同一 `(类, 数据源, schema, 表, 角色)` 不得重复（否则「这条绑定指哪张表」是多解）。"""
+    broken = golden()
+    broken["sourceBindings"].append(copy.deepcopy(broken["sourceBindings"][0]))
+
+    with pytest.raises(ManifestSchemaError, match="重复"):
+        validateManifest(broken)
+
+
+def test_v2_rejects_duplicate_property_name_inside_one_binding() -> None:
+    """同一绑定内 `propertyName` 不得重复（库里属性名无唯一约束 ⇒ 自己挡）。
+
+    重复 ⇒「这个属性映到哪一列」变成多解。
+    """
+    broken = golden()
+    broken["sourceBindings"][0]["properties"][1]["propertyName"] = "supplierCode"
+
+    with pytest.raises(ManifestSchemaError, match="propertyName 重复"):
+        validateManifest(broken)
+
+
+def test_schema_error_message_is_truncated() -> None:
+    """结构错误消息必须截断（security F6）：jsonschema 会把**被拒的值**原样嵌进去。
+
+    一条 4000 字符的文本被拒 ⇒ 错误消息可达几十 KB ⇒ 落进
+    `semantic_release_check.detail` 就是一份可观的垃圾（还会抄走值里的内容）。
+    """
+    broken = golden()
+    broken["domains"][0]["description"] = "x" * 5000
+
+    with pytest.raises(ManifestSchemaError) as excinfo:
+        validateManifest(broken)
+
+    message = str(excinfo.value)
+    assert "已截断" in message
+    assert len(message) < 2000
 
 
 def _classByName(manifest: dict[str, Any], name: str) -> dict[str, Any]:
@@ -367,4 +549,4 @@ def _reverseKeyOrder(value: Any) -> Any:
     return value
 
 
-_GOLDEN_HASH = "29ecf144f910f4e7d9b3c2a204a6bb8c48d1e0666a22b4d318d8dd3368cfe867"
+_GOLDEN_HASH = "cb6ffa4873611942a7afd011554cdf5964b4fd6e71157e8ea64d3d5336dd95b1"

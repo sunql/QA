@@ -6,7 +6,7 @@
 
 本文件直接构建**生产 app**（`app.main.createApp()`），钉三件事：
 
-1. 开关开启时路由集合恰好 7 条（3 条读 + 4 条写；集合相等：漏/多/改名都会红，
+1. 开关开启时路由集合恰好 9 条（4 条读 + 5 条写；集合相等：漏/多/改名都会红，
    空集必然不等）；
 2. 每条路由的依赖链里同时声明了 `requireAdmin` 与 `getCurrentUser`：
    前者在 include 层、后者由 `requireAdmin`（参数依赖）与 `mustChangePasswordGuard`
@@ -14,7 +14,7 @@
    ⚠️ 二者**不是**「删任一层两条都红」的严格双保险 —— `getCurrentUser` 有旁路
    （`mustChangePasswordGuard` 也依赖它），删掉 include 层的 `requireAdmin` 时
    `[requireAdmin]` 会红、`[getCurrentUser]` 可能仍绿；
-3. 开关关闭时这 7 条路由一条都不注册（404 的前提）。
+3. 开关关闭时这 8 条路由一条都不注册（404 的前提）。
 
 反向断言（探测器不恒真）：公开路由 `/api/v1/health` 必须被判为「无 admin 门禁」；
 另有正向对照（`test_detector_sees_include_context_dependencies`）证明
@@ -23,7 +23,7 @@
 ⚠️ **版本敏感**：本特性的门禁声明在 `include_router(dependencies=[...])` 上，而
 FastAPI ≥0.141 把它放进 `_IncludedRouter.include_context`、不并入 `route.dependant`
 （0.136.x 会并入）。2026-11-10 的 PR #115 CI 用的正是 `uv.lock` 里的 **0.141.1**，
-只沿 dependant 探测会把 7 条路由全判成「没有门禁」⇒ 本文件的路由树展开必须
+只沿 dependant 探测会把 9 条路由全判成「没有门禁」⇒ 本文件的路由树展开必须
 同时回收 include 上下文里的依赖。
 """
 
@@ -51,10 +51,12 @@ _EXPECTED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", _PREFIX),
         ("GET", f"{_PREFIX}/active"),
         ("GET", f"{_PREFIX}/{{releaseId}}"),
+        ("GET", f"{_PREFIX}/{{releaseId}}/checks"),
         ("POST", _PREFIX),
         ("POST", f"{_PREFIX}/{{releaseId}}/validate"),
         ("POST", f"{_PREFIX}/{{releaseId}}/activate"),
         ("POST", f"{_PREFIX}/{{releaseId}}/archive"),
+        ("POST", f"{_PREFIX}/{{releaseId}}/rollback"),
     }
 )
 
@@ -78,7 +80,7 @@ def _buildApp(monkeypatch: pytest.MonkeyPatch, *, enabled: bool) -> FastAPI:
         getSettings.cache_clear()
 
 
-def test_routes_are_exactly_the_expected_seven(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_routes_are_exactly_the_expected_nine(monkeypatch: pytest.MonkeyPatch) -> None:
     routes = _semanticRoutes(_buildApp(monkeypatch, enabled=True))
 
     assert routes, "路由枚举为空——路由树结构变化会让本守卫空集通过"

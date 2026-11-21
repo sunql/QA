@@ -1,10 +1,18 @@
-"""验证 Alembic 0047 / 0085 / 0105 后 session_message 新列/索引落地。"""
+"""验证 Alembic 0047 / 0085 / 0105 后 session_message 新列/索引落地。
+
+**库来源**：走 `app.tests._pg_support._newEngine()`（测试库 + `_ensureSchema()`），
+**不再直连 `settings.databaseUrl`**。
+
+⚠️ 原实现读 `settings.databaseUrl`（= `DATABASE_URL` 指向的库）：本地是
+**开发库 5433 `qa_metadata`**，CI 是**测试库 5434 `qa_metadata_test`** ⇒ 同一份代码
+在两处给出**两个不同结论**（本地绿 / CI 红，或反之）⇒ 假绿。
+测试库由迁移链 `upgrade head` 产生 ⇒ 查测试库的 schema **同样**能拦住
+「迁移跑了但 ORM 没加列」（这才是本文件要拦的东西）。
+"""
 import pytest
 from sqlalchemy import inspect
-from sqlalchemy.ext.asyncio import create_async_engine
-
-from app.config import getSettings
 from app.domain.models import SessionMessage
+from app.tests import _pg_support
 
 
 @pytest.mark.asyncio
@@ -15,8 +23,7 @@ async def test_session_message_has_new_columns() -> None:
         insp = inspect(sync_conn)
         return {c["name"] for c in insp.get_columns("session_message")}
 
-    settings = getSettings()
-    engine = create_async_engine(settings.databaseUrl)
+    engine = await _pg_support._newEngine()
     async with engine.begin() as conn:
         cols = await conn.run_sync(_columns)
     await engine.dispose()
@@ -33,8 +40,7 @@ async def test_session_message_has_new_indexes() -> None:
         insp = inspect(sync_conn)
         return {i["name"] for i in insp.get_indexes("session_message")}
 
-    settings = getSettings()
-    engine = create_async_engine(settings.databaseUrl)
+    engine = await _pg_support._newEngine()
     async with engine.begin() as conn:
         idx = await conn.run_sync(_indexes)
     await engine.dispose()
@@ -51,7 +57,7 @@ async def test_session_message_interrupted_column_contract() -> None:
        历史行读成 None 而前端 `interrupted: boolean`（必填）静默拿不到值；
     2. 库侧默认 `false` —— 636 行历史行是加列时回填的，不是写路径补的，故默认值本身
        就是契约（老版本代码写入的行也必须读成「未中断」）；
-    3. ORM 与库一致 —— 本文件直连 prod `settings.databaseUrl` 取实际 schema，
+    3. ORM 与库一致 —— 本文件查**测试库**的实际 schema（测试库由迁移链产生），
        正是为了拦住「迁移跑了但 ORM 没加列」这类只在运行期才炸的漂移。
     """
     from sqlalchemy import inspect as sa_inspect
@@ -63,8 +69,7 @@ async def test_session_message_interrupted_column_contract() -> None:
                 return c
         return None
 
-    settings = getSettings()
-    engine = create_async_engine(settings.databaseUrl)
+    engine = await _pg_support._newEngine()
     async with engine.begin() as conn:
         col = await conn.run_sync(_col)
     await engine.dispose()
@@ -90,8 +95,7 @@ async def test_session_message_chart_columns_contract() -> None:
     def _cols(sync_conn):
         return {c["name"]: c for c in inspect(sync_conn).get_columns("session_message")}
 
-    settings = getSettings()
-    engine = create_async_engine(settings.databaseUrl)
+    engine = await _pg_support._newEngine()
     async with engine.begin() as conn:
         cols = await conn.run_sync(_cols)
     await engine.dispose()

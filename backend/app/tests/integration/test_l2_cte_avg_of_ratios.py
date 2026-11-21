@@ -7,7 +7,7 @@
 - SQL 在 PG 沙箱执行，验证 schema 和数值范围
 
 运行：
-    TEST_DATABASE_URL=postgresql+asyncpg://qa_user:pass@localhost:5433/qa_metadata_test \
+    TEST_DATABASE_URL=postgresql+asyncpg://qa_user:pass@localhost:5434/qa_metadata_test \
         uv run pytest app/tests/integration/test_l2_cte_avg_of_ratios.py -v
 """
 
@@ -108,10 +108,22 @@ async def _cleanup_po_lines_sandbox(dbSession):
 
     yield
 
-    # 测试后清表（保留表结构）
+    # 测试后**删表**（2026-11-18 改：原先只清数据、保留表结构）
+    #
+    # 为什么必须删：共享测试库是 `alembic check` 的判定目标（本地全绿判据 1）。
+    # `alembic check` 比对「DB ↔ ORM metadata」，DB 里多一张 ORM 没声明的表
+    # ⇒ 报 remove_table ⇒ 判据 1 变红。而这个 sandbox 表**只在测试期间需要**
+    # （建表语句自带 DROP TABLE IF EXISTS + CREATE，setup 已幂等）⇒ 删掉零成本。
+    #
+    # ⚠️ 必须**先回滚 dbSession**：本文件的用例用 dbSession 对 po_lines_sandbox
+    # 跑过 SELECT，未提交的事务会持有该表的 ACCESS SHARE 锁；DROP TABLE 要
+    # ACCESS EXCLUSIVE ⇒ 直接 DROP 会**无限等锁**（实测把整套测试挂死 10 分钟）。
+    # 回滚释放锁后再删；再配 lock_timeout ⇒ 万一还有别的持锁者，15 秒后报错，
+    # 而不是把整轮 CI 拖死。
+    await dbSession.rollback()
     async with factory() as session:
-        await session.execute(text("DELETE FROM po_lines_sandbox"))
-        await session.execute(text("ALTER SEQUENCE po_lines_sandbox_id_seq RESTART WITH 1"))
+        await session.execute(text("SET lock_timeout = '15s'"))
+        await session.execute(text("DROP TABLE IF EXISTS po_lines_sandbox"))
         await session.commit()
 
 

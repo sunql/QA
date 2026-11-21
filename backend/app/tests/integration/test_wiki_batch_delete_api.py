@@ -20,7 +20,7 @@ SQLAlchemy 的 identity map 仍持有先前的 WikiPage 对象，用 ``select(Mo
 会命中缓存返回「还在」的假象（本项目踩过，见 seed upsert 的教训）。
 
 运行：
-    TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5433/qa_metadata_test \\
+    TEST_DATABASE_URL=postgresql+asyncpg://qa_user:qa_pg_dev_2026@localhost:5434/qa_metadata_test \\
         .venv/bin/pytest app/tests/integration/test_wiki_batch_delete_api.py -q
 """
 
@@ -33,6 +33,7 @@ from httpx import AsyncClient
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import getSettings
 from app.domain.wiki_learning_models import (
     ProcessWorkflow,
     StructureSuggestion,
@@ -370,14 +371,21 @@ async def test_batch_delete_requires_authentication(
     # Arrange
     pageId = await _createPage(client, title="不该被删掉")
     monkeypatch.setenv("AUTH_STUB_ENABLED", "0")
+    # getSettings() 带 @lru_cache：只改 env 不失效缓存 ⇒ 请求仍读到 stub=true
+    # ⇒ 断言 403 会拿到 200（恒红，且是**假红**——产品侧鉴权没问题）。
+    getSettings.cache_clear()
 
     # Act
-    resp = await client.post(_BATCH, json={"pageIds": [pageId]})
+    try:
+        resp = await client.post(_BATCH, json={"pageIds": [pageId]})
 
-    # Assert
-    assert resp.status_code == 403
+        # Assert
+        assert resp.status_code == 403
+    finally:
+        monkeypatch.delenv("AUTH_STUB_ENABLED")
+        getSettings.cache_clear()
+
     # 鉴权发生在删除之前：拒绝的请求不能留下任何副作用
-    monkeypatch.delenv("AUTH_STUB_ENABLED")
     assert (await client.get(f"{_BASE}/{pageId}")).status_code == 200
 
 

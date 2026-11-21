@@ -3,8 +3,8 @@
 本文件钉死四件事：
 
 1. **开关默认关**：关 ⇒ 输出与「今天的直读渲染」**逐字节一致**，且连库都不碰；
-2. **开关开且快照新鲜**：输出与直读**内容等价**（行多重集相等），
-   但**类内列序按快照**（按 `propertyName` 排序）⇒ D14 的结论在运行期的体现；
+2. **开关开且快照新鲜**：输出与直读**逐字节一致**（A4 起两侧共用
+   `propertyName` / `joinKey` 排序键）；路径差异由 INFO 日志「快照已复原」证明；
 3. **反向守卫**（任务卡原文：「开关开但快照缺字段 ⇒ 报错而非静默降级」）：
    快照缺事实（少列 / 多列 / 少 JOIN 边）⇒ 必须**记 error 级日志**，
    且降级后的输出与「开关关」**逐字节一致** —— 降级不许看起来跟「快照生效」一样；
@@ -17,12 +17,12 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
 from types import SimpleNamespace
 
 import pytest
 
 from app.domain.models import OntologyClass, OntologyJoin, OntologyProperty
+from app.domain.semantic_manifest_schema import SCHEMA_VERSION
 from app.services import semantic_schema_adapter as adapterModule
 from app.services import semantic_schema_gate as gate
 from app.services.nl2sql_schema import buildSchemaText
@@ -82,8 +82,9 @@ def _dataset(*, supplierProps: tuple | None = None, joins: tuple | None = None):
     """
     if supplierProps is None:
         supplierProps = (
-            # 物理行序刻意不按名字排（与生产堆物理序同形）：
-            # 快照侧按 propertyName 排序 ⇒ 两侧列序不同、内容相同。
+            # 物理行序刻意不按名字排（与生产物理行序同形）：
+            # A4 起两侧都按 propertyName 排序 ⇒ 直读侧也被排成
+            # SUPPLIER_CODE → SUPPLIER_NAME（与快照侧逐字节一致）。
             _prop(101, SUPPLIER_ID, "SUPPLIER_NAME", sourceColumn="SUPPLIER_NAME"),
             _prop(102, SUPPLIER_ID, "SUPPLIER_CODE", isPk=True, sourceColumn="SUPPLIER_CODE"),
         )
@@ -246,21 +247,32 @@ class Test开关:
             if r.levelname == "INFO"
         ), "生产闸门路径上无 ACTIVE 快照时必须记 info，说明影子未生效"
 
-    async def test_开关打开且快照新鲜时内容等价但列序按快照(self, switchOn, monkeypatch) -> None:
-        """D14 的结论在运行期的体现：内容不变、**类内列序**按快照（按名排序）。"""
+    async def test_开关打开且快照新鲜时与直读逐字节一致(
+        self, switchOn, monkeypatch
+    ) -> None:
+        """A4 起两侧共用排序键 ⇒ 开关切换是对 prompt 的**恒等变换**。
+
+        ⚠️ 文本一致之后「看起来走了快照」已经没有区分力（降级直读也会得到
+        同一份文本）⇒ 路径证据只能用**发布 id**：`snapshotReused` 只在
+        「快照通过事实校验且被返回」时非空。不能用「快照已复原」日志 ——
+        它在 `_factDiff` 判定**之前**就打出来了，降级路径同样会有该日志
+        （review MEDIUM-1）。
+        """
         classes, properties, joins = _dataset()
         _installSnapshot(monkeypatch, _FakeSnapshot(_manifest(classes, properties, joins)))
 
-        text = await gate.renderSchemaText(classes, joins=joins, session=_FakeSession())
+        result = await gate.renderSchemaWithRelease(
+            classes, joins=joins, session=_FakeSession()
+        )
         direct = buildSchemaText(classes, joins=joins)
 
-        # 内容等价（行多重集相等）
-        assert Counter(text.splitlines()) == Counter(direct.splitlines())
-        # 但列序不同 ⇒ 文本不相同 ⇒ 证明确实走了快照路径
-        assert text != direct
-        # 快照侧按 propertyName 排序；直读侧是物理行序（这里刻意不按名排）
-        assert _columnOrder(text) == ["SUPPLIER_CODE", "SUPPLIER_NAME"]
-        assert _columnOrder(direct) == ["SUPPLIER_NAME", "SUPPLIER_CODE"]
+        assert result.text == direct
+        assert result.semanticReleaseId == 1, (
+            "必须回报发布 id —— 文本一致时这是唯一能区分「真用了快照」与「降级直读」的证据"
+        )
+        # 两侧列序都按 propertyName：直读侧的原物理行序被渲染期排序覆盖
+        assert _columnOrder(result.text) == ["SUPPLIER_CODE", "SUPPLIER_NAME"]
+        assert _columnOrder(direct) == ["SUPPLIER_CODE", "SUPPLIER_NAME"]
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +381,7 @@ class Test不许炸问答:
         """
         classes, properties, joins = _dataset()
         _installSnapshot(
-            monkeypatch, _FakeSnapshot({"schemaVersion": "v1", "classes": [123]})
+            monkeypatch, _FakeSnapshot({"schemaVersion": SCHEMA_VERSION, "classes": [123]})
         )
 
         text = await gate.renderSchemaText(classes, joins=joins, session=_FakeSession())
@@ -380,8 +392,9 @@ class Test不许炸问答:
         """session 缺席 ⇒ 取不到快照 ⇒ **确定地**直读（不许「试一把再降级」）。
 
         为什么重要：`getActive(None)` 在**缓存冷**时抛异常、**缓存热**时命中
-        ⇒ 同一轮的两次渲染可能一次走快照一次直读 ⇒ **列序不同 ⇒ prompt 不同**
-        ⇒ 行为不可复现、问题难定位（安全评审 M-2 / 代码评审 LOW-1）。
+        ⇒ 同一轮的两次渲染可能一次走快照一次直读。A4 后两侧文本虽然一致，
+        但**路径不确定**仍然是问题（快照被绕过 ⇒ 发布语义失效且无告警）
+        ⇒ 必须确定地直读并保证一次都不查快照（安全评审 M-2 / 代码评审 LOW-1）。
         """
         classes, properties, joins = _dataset()
         registry = _installSnapshot(

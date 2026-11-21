@@ -364,9 +364,13 @@ def productionAuthMisconfiguration(settings: Settings) -> str | None:
     1) ``APP_ENV=production`` 但 ``AUTH_MODE`` 不是 ``real``（漏设即默认 ``stub``）：
        ``getCurrentUser`` 会把无头请求解析为 ``anonymous`` 而**不抛异常**，
        router 级 ``Depends(getCurrentUser)`` 因此形同虚设——非公开路由匿名可达。
-    2) ``APP_ENV=production`` 但 ``AUTH_STUB_ENABLED`` 为真：任何客户端可伪造
-       ``X-User-Roles=admin`` 绕过 ACL。注意 ``AUTH_MODE=real`` 但
-       ``AUTH_STUB_ENABLED=1`` 时本条仍成立。
+    2) ``APP_ENV=production`` 但 ``AUTH_STUB_ENABLED`` 为真：**生产策略禁止**
+       该配置。严格说，``AUTH_MODE=real`` + ``ALLOW_STUB_WHEN_REAL=false`` 时
+       stub 头在解析前已被拒（暴露面判定见 ``_stubHeadersUnreachable``），
+       但生产不允许保留「stub 可用」的开关状态：一旦有人同时打开
+       ``ALLOW_STUB_WHEN_REAL`` 就立刻变成可伪造，而这种组合很难在部署 review
+       里被发现。故本条是**策略闸**（刻意比暴露面更严），与
+       ``_stubHeadersUnreachable`` 不是同一口径。
 
     只做「返回原因」这一件事，不抛异常、不阻塞启动：是否 fail-fast 是调用方的
     运行时行为决定，不属于本函数。
@@ -390,6 +394,24 @@ def productionAuthMisconfiguration(settings: Settings) -> str | None:
     return None
 
 
+def _stubHeadersUnreachable(settings: Settings) -> bool:
+    """当前配置是否**根本走不到** stub 头解析（决定开关类告警是否需要响）。
+
+    判定必须与应用实际鉴权分支一致（`app/dependencies.py` 的
+    `getCurrentUser`）：stub 分支只有在
+    ``(AUTH_MODE != "real" 或 ALLOW_STUB_WHEN_REAL) 且 AUTH_STUB_ENABLED`` 时才可达；
+    其余组合下带 `X-User-*` 的请求在解析头之前就被拒（403）⇒ **不可伪造**。
+
+    用 `AUTH_STUB_ENABLED` 单变量判断会漏掉三件事：① `AUTH_MODE=real` +
+    `ALLOW_STUB_WHEN_REAL=false` 时已经拒了；② 该变量只在落到 stub 分支后才检查；
+    ③ 否则「real 模式本地栈全开开关」会刷 5 条假 ERROR，让真告警失去信号价值。
+    """
+    stubBranchReachable = (
+        settings.authMode != "real" or settings.allowStubWhenReal
+    ) and settings.authStubEnabled
+    return not stubBranchReachable
+
+
 def semanticReleaseAuthMisconfiguration(settings: Settings) -> str | None:
     """启用语义发布只读 API 时鉴权必须是「真鉴权」；否则返回原因（纯函数）。
 
@@ -403,13 +425,15 @@ def semanticReleaseAuthMisconfiguration(settings: Settings) -> str | None:
     """
     if not settings.enableSemanticRelease:
         return None
-    if settings.authMode == "real" and not settings.authStubEnabled:
+    if _stubHeadersUnreachable(settings):
         return None
     return (
         "ENABLE_SEMANTIC_RELEASE=true 但鉴权仍为 stub"
-        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
+        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}, "
+        f"ALLOW_STUB_WHEN_REAL={settings.allowStubWhenReal}）："
         "任意客户端可伪造 X-User-Roles=admin 读取完整语义快照。"
-        "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
+        "该开关只应在真鉴权环境启用（AUTH_MODE=real 且 ALLOW_STUB_WHEN_REAL=0；"
+        "AUTH_STUB_ENABLED 单独为 true 不会放行 stub 头）。"
     )
 
 
@@ -428,13 +452,15 @@ def semanticRegistryNl2sqlAuthMisconfiguration(settings: Settings) -> str | None
     """
     if not settings.enableSemanticRegistryNl2sql:
         return None
-    if settings.authMode == "real" and not settings.authStubEnabled:
+    if _stubHeadersUnreachable(settings):
         return None
     return (
         "ENABLE_SEMANTIC_REGISTRY_NL2SQL=true 但鉴权仍为 stub"
-        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
+        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}, "
+        f"ALLOW_STUB_WHEN_REAL={settings.allowStubWhenReal}）："
         "问答链路会按已发布语义快照作答，任意客户端可伪造身份读到治理 IP 口径。"
-        "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
+        "该开关只应在真鉴权环境启用（AUTH_MODE=real 且 ALLOW_STUB_WHEN_REAL=0；"
+        "AUTH_STUB_ENABLED 单独为 true 不会放行 stub 头）。"
     )
 
 
@@ -450,13 +476,15 @@ def semanticRegistryRagAuthMisconfiguration(settings: Settings) -> str | None:
     """
     if not settings.enableSemanticRegistryRag:
         return None
-    if settings.authMode == "real" and not settings.authStubEnabled:
+    if _stubHeadersUnreachable(settings):
         return None
     return (
         "ENABLE_SEMANTIC_REGISTRY_RAG=true 但鉴权仍为 stub"
-        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
+        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}, "
+        f"ALLOW_STUB_WHEN_REAL={settings.allowStubWhenReal}）："
         "过滤维度（域/组织/实体）的来源身份不可信，治理维度收窄形同虚设。"
-        "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
+        "该开关只应在真鉴权环境启用（AUTH_MODE=real 且 ALLOW_STUB_WHEN_REAL=0；"
+        "AUTH_STUB_ENABLED 单独为 true 不会放行 stub 头）。"
     )
 
 
@@ -477,13 +505,15 @@ def knowledgeFacadeAuthMisconfiguration(settings: Settings) -> str | None:
     """
     if not settings.enableKnowledgeFacade:
         return None
-    if settings.authMode == "real" and not settings.authStubEnabled:
+    if _stubHeadersUnreachable(settings):
         return None
     return (
         "ENABLE_KNOWLEDGE_FACADE=true 但鉴权仍为 stub"
-        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
+        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}, "
+        f"ALLOW_STUB_WHEN_REAL={settings.allowStubWhenReal}）："
         "知识查询的域可见性按可伪造的调用方身份推导，域级隔离形同虚设。"
-        "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
+        "该开关只应在真鉴权环境启用（AUTH_MODE=real 且 ALLOW_STUB_WHEN_REAL=0；"
+        "AUTH_STUB_ENABLED 单独为 true 不会放行 stub 头）。"
     )
 
 
@@ -503,13 +533,15 @@ def workflowAuthMisconfiguration(settings: Settings) -> str | None:
     """
     if not settings.enableWorkflow:
         return None
-    if settings.authMode == "real" and not settings.authStubEnabled:
+    if _stubHeadersUnreachable(settings):
         return None
     return (
         "ENABLE_WORKFLOW=true 但鉴权仍为 stub"
-        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}）："
+        f"（AUTH_MODE={settings.authMode!r}, AUTH_STUB_ENABLED={settings.authStubEnabled}, "
+        f"ALLOW_STUB_WHEN_REAL={settings.allowStubWhenReal}）："
         "任意客户端可伪造 X-User-Roles / X-User-Id 冒充审批人，推进审批并放行业务写。"
-        "该开关只应在 AUTH_MODE=real 且 AUTH_STUB_ENABLED=0 的环境启用。"
+        "该开关只应在真鉴权环境启用（AUTH_MODE=real 且 ALLOW_STUB_WHEN_REAL=0；"
+        "AUTH_STUB_ENABLED 单独为 true 不会放行 stub 头）。"
     )
 
 

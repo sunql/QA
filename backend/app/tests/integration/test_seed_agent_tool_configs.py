@@ -1,6 +1,6 @@
 """seed_agent_tool_configs.py 集成测试（真实 PG + Alembic）。
 
-强制规则（Harness/rules/测试规范.md）：真实 PostgreSQL（5433/qa_metadata_test），
+强制规则（Harness/rules/测试规范.md）：真实 PostgreSQL（5434/qa_metadata_test），
 pgSession fixture 每测试 TRUNCATE 隔离。
 
 覆盖：

@@ -53,13 +53,14 @@ def test_empty_input_produces_minimal_manifest() -> None:
     # 空输入时每类集合都显式出现（空数组），不能省略键 —— 否则下游 `manifest["metrics"]`
     # 在旧快照上 KeyError，Schema 校验也要靠「键必须存在」。
     assert manifest == {
-        "schemaVersion": "v1",
+        "schemaVersion": "v2",
         "domains": [],
         "classes": [],
         "joins": [],
         "metrics": [],
         "kpis": [],
         "businessObjects": [],
+        "sourceBindings": [],
     }
 
 

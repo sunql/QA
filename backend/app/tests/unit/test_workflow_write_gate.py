@@ -692,7 +692,10 @@ def test_存储层本身确实在写P5表():
 
 
 def test_P5表的ORM定义点唯一():
-    """P5 表的 ``__tablename__`` 只允许出现在 ``app/domain/workflow_models.py``。"""
+    """P5 表的 ``__tablename__`` 只允许出现在 ``app/domain/workflow_models.py``。
+    M1-1.6 追加：准则 H 禁建的 ``procurement_*`` 表（FORBIDDEN_DUPLICATE_TABLE_NAMES）
+    任何 ``__tablename__`` 出现即红 —— 与 ``test_procurement_scope_ruling.py`` 同一份目录。"""
+    from app.domain.procurement_scope_ruling import FORBIDDEN_DUPLICATE_TABLE_NAMES
 
     offenders: list[str] = []
     for path, rel in _sourceFiles():
@@ -710,6 +713,8 @@ def test_P5表的ORM定义点唯一():
                 if prefix in stripped:
                     offenders.append(f"{rel}:{no}: {stripped}")
                     break
+            if any(name in stripped for name in FORBIDDEN_DUPLICATE_TABLE_NAMES):
+                offenders.append(f"{rel}:{no}: {stripped}")
 
     assert offenders == [], (
         "P5 表在别处也有 ORM 定义 ⇒ 写入口收敛守卫会漏掉一处：\n" + "\n".join(offenders)

@@ -2794,7 +2794,18 @@ export const enUS = {
   loadTargetsFailed: "Failed to load linkable targets",
   noLinks: "No links",
   selectPageHint: "Select a Wiki page on the left first",
-  pageTreeLabel: "Select Wiki page"
+  pageTreeLabel: "Select Wiki page",
+  treeLoadFailed: "Failed to load category tree",
+  edit: "Edit",
+  editBinding: "Edit Binding",
+  updateSuccess: "Updated",
+  updateFailed: "Update failed",
+  pageSearchPlaceholder: "Search all pages (title/content)",
+  treeLimitHint: "Showing {shown}/{total} pages; use the search above to reach the rest",
+  searchResultCount: "{total} matches",
+  searchFailed: "Page search failed",
+  noSearchResults: "No matching pages",
+  uncategorized: "Uncategorized"
 },
   wikiCategories: {
   title: "Wiki Category Management",

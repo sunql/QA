@@ -1,8 +1,8 @@
-"""Task 3.2: Streaming upload size limit — RED test.
+"""流式上传大小上限的守卫（Task 3.2 / audit-fx-3.2）。
 
-Audit Finding 8 (MEDIUM): file upload endpoints accept unbounded multipart bodies.
-Fix: per-endpoint streaming size limit (documents: 50 MB, wiki: 10 MB) with HTTP 413
-returned when exceeded.
+**测机制，不测数字**：上限已改为可配置（`MAX_UPLOAD_MB`，默认 1 GB）——
+把具体阈值写死会让「调整上限」变成「测试红」。这里把上限**压到很小的值**
+再撞，既快又与被配置的具体数值无关。
 """
 
 from __future__ import annotations
@@ -18,29 +18,33 @@ _ADMIN_HEADERS = {"X-User-Id": "wiki-test-admin", "X-User-Roles": "admin"}
 
 @pytest.mark.asyncio
 async def test_document_upload_above_limit_rejected(
-    client: AsyncClient, dbSession: AsyncSession
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
 ) -> None:
-    """POST /api/v1/documents/upload with a 60 MB file → 413 Payload Too Large.
+    """超过上限 → 413（把上限压到 1 KB，传 4 KB 必拒）。"""
+    from app.api.v1 import documents as documentsApi
 
-    Uses 60 MB (above 50 MB limit) — small enough to complete quickly while
-    still proving the size guard is implemented.
-    """
-    # No headers needed — same as test_rag_ingest_provenance.py which passes
-    big = b"x" * (60 * 1024 * 1024)
+    monkeypatch.setattr(documentsApi, "MAX_UPLOAD_BYTES", 1024)
+    big = b"x" * (4 * 1024)
     files = {"file": ("big.pdf", big, "application/pdf")}
+
     resp = await client.post("/api/v1/documents/upload", files=files)
-    assert resp.status_code == 413
+
+    assert resp.status_code == 413, resp.text
 
 
 @pytest.mark.asyncio
-async def test_wiki_upload_above_10mb_rejected(
-    client: AsyncClient, dbSession: AsyncSession
+async def test_wiki_upload_above_limit_rejected(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
 ) -> None:
-    """POST /api/v1/wiki/import/preview-file with a 15 MB file → 413 Payload Too Large.
+    """wiki 上传同样受上限约束（上限压到 1 KB，传 4 KB 必拒）。"""
+    from app.api.v1 import wiki_import as wikiImportApi
 
-    Uses 15 MB (above 10 MB limit). The wiki file upload endpoint is /preview-file.
-    """
-    big = b"x" * (15 * 1024 * 1024)
+    monkeypatch.setattr(wikiImportApi, "MAX_UPLOAD_BYTES", 1024)
+    big = b"x" * (4 * 1024)
     files = {"file": ("big.md", big, "text/markdown")}
-    resp = await client.post("/api/v1/wiki/import/preview-file", files=files, headers=_ADMIN_HEADERS)
-    assert resp.status_code == 413
+
+    resp = await client.post(
+        "/api/v1/wiki/import/preview-file", files=files, headers=_ADMIN_HEADERS
+    )
+
+    assert resp.status_code == 413, resp.text

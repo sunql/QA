@@ -70,6 +70,23 @@ class _FakeMinio:
 
 
 @pytest.fixture(autouse=True)
+def ensureMilvusDatabase() -> None:
+    """确保 CI 的 Milvus 隔离库存在（幂等）。
+
+    隔离库是**惰性创建**的（只在首次用到本体清理夹具时建），而 CI 分片按
+    「排序后文件下标 mod N」切分 ⇒ 新增 integration 文件会把一部分文件挪到
+    别的分片；落到一个「还没有任何文件建过库」的分片时，直接撞
+    ``database not found[qa_ci]``，在闸门上表现为**净新增失败**（假回归）。
+
+    本文件测向量化，必须自己确保库存在（与 ``test_milvus_document_fields``
+    同一约定）。
+    """
+    from app.tests.milvus_isolation import ensureIsolatedDatabaseForTest
+
+    ensureIsolatedDatabaseForTest()
+
+
+@pytest.fixture(autouse=True)
 def fakeMinio() -> Iterator[_FakeMinio]:
     fake = _FakeMinio()
     with patch(_CLIENT, return_value=fake):

@@ -25,6 +25,7 @@ from app.schemas.procurement_rfq import (
     RfqDraftCreate,
     RfqDraftRead,
     RfqExpectedVersionBody,
+    RfqSendBody,
 )
 from app.services.procurement_rfq_service import (
     ProcurementRfqService,
@@ -204,6 +205,32 @@ async def cancelRfqDraft(
     draft = await ProcurementRfqService().cancelDraft(
         session, rfqDraftId, actor=currentUser.userId,
         expectedVersion=body.expectedVersion if body else None,
+        roles=currentUser.roles,
+    )
+    decisions = await ProcurementRfqService().listDecisions(session, draft.rfq_draft_id)
+    return _toRead(draft, decisions)
+
+
+@router.post("/drafts/{rfqDraftId}/send", response_model=RfqDraftRead)
+async def sendRfqDraft(
+    response: Response,
+    rfqDraftId: str,
+    body: RfqSendBody,
+    idempotencyKey: str = Header(alias="Idempotency-Key"),
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> RfqDraftRead:
+    """发送询价（M6-1：经 ERP/SRM 命令端口；默认端口 = 模拟器，无真实副作用）。
+
+    前置三条缺一不可：**已审批**（READY_TO_SEND）/ **二次确认**（confirm=true）/
+    **幂等键**（头必填，同键重复 ⇒ 同一外部引用）。
+    """
+    response.headers["Cache-Control"] = "no-store"
+    draft = await ProcurementRfqService().sendRfq(
+        session, rfqDraftId,
+        actor=currentUser.userId,
+        idempotencyKey=idempotencyKey,
+        confirm=body.confirm,
         roles=currentUser.roles,
     )
     decisions = await ProcurementRfqService().listDecisions(session, draft.rfq_draft_id)

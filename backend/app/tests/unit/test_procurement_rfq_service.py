@@ -147,18 +147,26 @@ async def test_validate_unknown_supplier_goes_needs_correction(dbSession) -> Non
 
 
 @pytest.mark.asyncio
-async def test_ready_to_send_has_no_outbound_transition_d4(dbSession) -> None:
-    """D-4 负向用例：READY_TO_SEND 在 M5 无出口（SENDING 不可达）。"""
+async def test_ready_to_send_outbound_is_gated_not_open(dbSession) -> None:
+    """D-4 负向用例（**M6-1 更新**）：SENDING 出口存在，但**不可跳过发送前置**。
+
+    D-4 的原始约束是「状态机无 SENDING 出口」；M6-1 接入 ERP/SRM 命令端口后
+    允许 READY_TO_SEND→SENDING ⇒ 约束**下沉**为发送前置三条：
+    ①已审批（状态必须 READY_TO_SEND）②二次确认 ③幂等键
+    （另：发送需审批角色）。本用例钉住「跳不过去」：
+    - DRAFT 不能直接进 SENDING（未审批）；
+    - READY_TO_SEND 不能直接进 SENT（必须经 SENDING ⇒ 经端口）。
+    """
     from app.services.procurement_rfq_state_machine import (
         allowedRfqTransitions,
         assertRfqTransition,
     )
 
-    assert allowedRfqTransitions("READY_TO_SEND") == frozenset({"CANCELLED"})
+    assert "SENDING" in allowedRfqTransitions("READY_TO_SEND"), "M6-1：允许进入 SENDING"
     with pytest.raises(ValueError):
-        assertRfqTransition("READY_TO_SEND", "SENDING")
+        assertRfqTransition("DRAFT", "SENDING"), "未审批不得发送"
     with pytest.raises(ValueError):
-        assertRfqTransition("READY_TO_SEND", "SENT")
+        assertRfqTransition("READY_TO_SEND", "SENT"), "必须经 SENDING（经端口）"
 
 
 @pytest.mark.asyncio
@@ -376,3 +384,100 @@ async def test_decide_approval_requires_role(dbSession) -> None:
         actor="ap", roles=("admin",),
     )
     assert result.status == "READY_TO_SEND"
+
+
+# ── M6-1：发送（ERP/SRM 命令端口）─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_requires_ready_to_send_state(dbSession) -> None:
+    """未审批 ⇒ 不可发送（DoD 2 在发送路径同样成立）。"""
+    from app.domain.exceptions import ConflictError
+    from app.services.procurement_rfq_service import ProcurementRfqService
+
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m6-1a", actor="creator"
+    )
+    with pytest.raises(ConflictError):
+        await svc.sendRfq(
+            dbSession, d.rfq_draft_id, actor="creator",
+            idempotencyKey="send-1", confirm=True, roles=("procurement-approver",),
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_requires_confirmation(dbSession) -> None:
+    """二次确认闸：confirm=False ⇒ 拒绝（防误触）。"""
+    from app.domain.exceptions import ValidationError
+    from app.services.procurement_rfq_service import ProcurementRfqService
+
+    await _seedSupplier(dbSession)
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m6-1b", actor="creator"
+    )
+    await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.decideApproval(
+        dbSession, d.rfq_draft_id, decision="APPROVE", actor="approver",
+        roles=("procurement-approver",),
+    )
+    with pytest.raises(ValidationError):
+        await svc.sendRfq(
+            dbSession, d.rfq_draft_id, actor="approver",
+            idempotencyKey="send-1", confirm=False, roles=("procurement-approver",),
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_via_port_transitions_to_sent(dbSession) -> None:
+    """已审批 ⇒ 经端口发送 ⇒ SENT + SEND 决策留痕 + 外部引用可追溯。"""
+    from app.services.procurement_command_port import SimulatedErpSrmAdapter
+    from app.services.procurement_rfq_service import ProcurementRfqService
+
+    await _seedSupplier(dbSession)
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m6-1c", actor="creator"
+    )
+    await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.decideApproval(
+        dbSession, d.rfq_draft_id, decision="APPROVE", actor="approver",
+        roles=("procurement-approver",),
+    )
+    port = SimulatedErpSrmAdapter()
+    result = await svc.sendRfq(
+        dbSession, d.rfq_draft_id, actor="approver",
+        idempotencyKey="send-1", confirm=True,
+        roles=("procurement-approver",), port=port,
+    )
+    assert result.status == "SENT"
+    assert port.sentKeys == ["send-1"], "端口只被调用一次"
+    decisions = await svc.listDecisions(dbSession, d.rfq_draft_id)
+    assert [x.decision for x in decisions] == ["SUBMIT", "APPROVE", "SEND"]
+
+
+@pytest.mark.asyncio
+async def test_send_requires_approver_role(dbSession) -> None:
+    """发送属外部副作用 ⇒ 需审批角色（无角色 ⇒ 403 语义）。"""
+    from app.domain.exceptions import PermissionDeniedError
+    from app.services.procurement_rfq_service import ProcurementRfqService
+
+    await _seedSupplier(dbSession)
+    svc = ProcurementRfqService()
+    d = await svc.createDraft(
+        dbSession, **_createArgs(), idempotencyKey="idem-m6-1d", actor="creator"
+    )
+    await svc.validateDraft(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.submitForApproval(dbSession, d.rfq_draft_id, actor="creator")
+    await svc.decideApproval(
+        dbSession, d.rfq_draft_id, decision="APPROVE", actor="approver",
+        roles=("procurement-approver",),
+    )
+    with pytest.raises(PermissionDeniedError):
+        await svc.sendRfq(
+            dbSession, d.rfq_draft_id, actor="plain",
+            idempotencyKey="send-1", confirm=True, roles=("procurement",),
+        )

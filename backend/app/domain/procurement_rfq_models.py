@@ -55,7 +55,7 @@ class ProcurementRfqDecision(Base, TimestampMixin):
     __tablename__ = "procurement_rfq_decision"
     __table_args__ = (
         sa.CheckConstraint(
-            "decision IN ('SUBMIT','APPROVE','REJECT','CANCEL')",
+            "decision IN ('SUBMIT','APPROVE','REJECT','CANCEL','SEND')",
             name="ck_rfq_decision_kind",
         ),
         sa.Index("ix_rfq_decision_draft", "rfq_draft_id"),

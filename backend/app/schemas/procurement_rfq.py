@@ -63,3 +63,9 @@ class RfqDecisionBody(RfqExpectedVersionBody):
     """审批决策请求体。"""
 
     note: str | None = Field(default=None, max_length=2000)
+
+
+class RfqSendBody(RfqExpectedVersionBody):
+    """发送询价请求体（M6-1）：``confirm=true`` = 二次确认（防误触）。"""
+
+    confirm: bool = False

@@ -161,12 +161,23 @@ async def test_self_approval_conflict_via_api(dbSession) -> None:
         )
 
 
-def test_no_send_endpoint_in_router() -> None:
-    """D-4 负向：RFQ 路由不得含 send 端点（DRAFT-only，发送留给 M6）。"""
+def test_send_endpoint_exists_but_is_gated() -> None:
+    """M6-1：send 端点**存在**，但受发送前置约束（审批角色 + 已审批 + 二次确认）。
+
+    D-4 的原始断言是「无 send 端点」；M6-1 接入 ERP/SRM 命令端口后端点落地
+    ⇒ 约束**下沉**为服务端的三条前置（另有负向用例在 service 层）。
+    """
     from app.api.v1.procurement_rfqs import router
 
     sendPaths = [r.path for r in router.routes if "/send" in r.path]
-    assert sendPaths == [], f"D-4：不得存在发送端点，实际 {sendPaths}"
+    assert len(sendPaths) == 1, f"M6-1：send 端点应恰好一个，实际 {sendPaths}"
+    # 发送必须要求 Idempotency-Key 头（幂等键）
+    import inspect
+
+    from app.api.v1.procurement_rfqs import sendRfqDraft
+
+    source = inspect.getsource(sendRfqDraft)
+    assert 'Header(alias="Idempotency-Key")' in source, "发送必须带幂等键头"
 
 
 def test_rfqs_registered_in_both_wirings() -> None:

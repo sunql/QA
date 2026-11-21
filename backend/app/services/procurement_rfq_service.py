@@ -11,6 +11,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -22,6 +23,7 @@ from app.domain.procurement_rfq_models import (
     ProcurementRfqDecision,
     ProcurementRfqDraft,
 )
+from app.services.procurement_command_port import defaultCommandPort
 from app.services.procurement_rfq_state_machine import (
     assertRfqTransition,
 )
@@ -301,6 +303,64 @@ class ProcurementRfqService:
             session, rfqDraftId=draft.rfq_draft_id, decision=decision, actor=actor
         )
         await session.flush()
+        await session.commit()
+        await session.refresh(draft)
+        return draft
+
+    async def sendRfq(
+        self,
+        session: AsyncSession,
+        rfqDraftId,
+        *,
+        actor: str,
+        idempotencyKey: str,
+        confirm: bool,
+        roles: Sequence[str] | None = None,
+        port: Any | None = None,
+    ) -> ProcurementRfqDraft:
+        """发送询价（**M6-1**：经 ERP/SRM 命令端口；DRAFT-only 阶段的首个外部副作用）。
+
+        前置（三条缺一不可，设计稿 §6.3）：
+        1. **已审批**：状态必须是 READY_TO_SEND（未审批 ⇒ 409）；
+        2. **二次确认**：``confirm=True``（防误触）；
+        3. **幂等键**：同键重复发送 ⇒ 同一外部引用（不重复发）。
+
+        默认端口 = 模拟器（无真实副作用）；真实适配器接入前不会真发。
+        """
+        _assertApproverRoles(roles)
+        draft = await self.getDraft(session, rfqDraftId)
+        if draft.status != "READY_TO_SEND":
+            raise ConflictError(
+                f"草稿状态 {draft.status} 不可发送（须已审批到 READY_TO_SEND）"
+            )
+        if not confirm:
+            raise ValidationError("发送需二次确认（confirm=true）")
+        commandPort = port if port is not None else defaultCommandPort()
+        payload = {
+            "rfqDraftId": str(draft.rfq_draft_id),
+            "requestId": draft.request_id,
+            "supplierKeys": (draft.payload_json or {}).get("supplierKeys") or [],
+            "lineItems": (draft.payload_json or {}).get("lineItems") or [],
+        }
+        assertRfqTransition(draft.status, "SENDING")
+        draft.status = "SENDING"
+        await session.flush()
+        result = await commandPort.sendRfq(payload, idempotencyKey=idempotencyKey)
+        target = "SENT" if result.status == "SENT" else "FAILED"
+        assertRfqTransition(draft.status, target)
+        draft.status = target
+        draft.version += 1
+        # 决策留痕（谁/何时发出/外部引用）+ outbox 事件（事实流）
+        session.add(
+            ProcurementRfqDecision(
+                rfq_draft_id=draft.rfq_draft_id, decision="SEND",
+                actor=actor, note=result.externalRef, decided_time=_now(),
+            )
+        )
+        await _appendRfqOutbox(
+            session, rfqDraftId=draft.rfq_draft_id,
+            decision="SEND", actor=actor,
+        )
         await session.commit()
         await session.refresh(draft)
         return draft

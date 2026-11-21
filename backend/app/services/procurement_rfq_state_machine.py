@@ -23,8 +23,10 @@ _RFQ_TRANSITIONS: Mapping[str, frozenset[str]] = MappingProxyType({
     "VALIDATING": frozenset({"NEEDS_CORRECTION", "PENDING_APPROVAL"}),
     "NEEDS_CORRECTION": frozenset({"VALIDATING", "CANCELLED"}),
     "PENDING_APPROVAL": frozenset({"READY_TO_SEND", "REJECTED"}),
-    "READY_TO_SEND": frozenset({"CANCELLED"}),  # D-4：SENDING 在 M5 不可达
-    "SENDING": frozenset({"SENT"}),  # M6 启用
+    # M6-1：接入 ERP/SRM 命令端口后允许进入 SENDING（**前置 = 已审批到 READY_TO_SEND**，
+    # 且发送必须走端口 + 幂等键 + 二次确认）。M5 阶段（D-4）无发送端点 ⇒ 不可达。
+    "READY_TO_SEND": frozenset({"SENDING", "CANCELLED"}),
+    "SENDING": frozenset({"SENT", "FAILED"}),
     "SENT": frozenset({"CLOSED"}),  # M6 启用
     "REJECTED": frozenset(),  # 终态
     "CANCELLED": frozenset(),  # 终态
@@ -37,6 +39,7 @@ RFQ_TRANSITIONS: Mapping[str, Mapping[str, frozenset[str]]] = MappingProxyType({
 
 _LIVE_RFQ_STATUSES = frozenset({
     "DRAFT", "VALIDATING", "NEEDS_CORRECTION", "PENDING_APPROVAL", "READY_TO_SEND",
+    "SENDING",
 })
 
 

@@ -97,6 +97,14 @@ export interface DocumentRead {
   securityLevel: DocumentSecurityLevel;
   storageUrl: string | null;
   contentHash: string | null;
+  /** 上传时的真实 MIME（0163） */
+  mimeType: string | null;
+  /** 字节数（0163） */
+  fileSize: number | null;
+  /** 预览类别（0163）：TEXT/MARKDOWN/HTML/PDF/OFFICE/IMAGE */
+  previewKind: string | null;
+  /** 最近一次向量化完成时间（0163）；null = 未向量化 */
+  vectorizedAt: string | null;
   createdTime: string;
   updatedTime: string;
 }

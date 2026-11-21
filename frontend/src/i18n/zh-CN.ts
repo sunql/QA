@@ -3695,6 +3695,14 @@ export const zhCN = {
     resumed: "续问",
     openTrace: "查看执行轨迹",
     tokens: "Tokens"
+  },
+  document: {
+    viewSource: "原文",
+    preview: "预览",
+    vectorize: "向量化",
+    vectorized: "已向量化",
+    notVectorized: "未向量化",
+    vectorizeSuccess: "向量化完成：{chunks} 个片段"
   }
 },
 } as const;

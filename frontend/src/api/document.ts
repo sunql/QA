@@ -72,6 +72,52 @@ export async function deleteDocument(id: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// 原文阅览 / 向量化（0163）
+// ---------------------------------------------------------------------------
+
+/**
+ * 原文 URL（浏览器直接打开）。
+ *
+ * 用 `window.open` 而不是 fetch：PDF 要**浏览器原生查看器**渲染（保真 100%），
+ * fetch 回来的是 blob 下载不了也没法内嵌。
+ *
+ * ⚠️ 需要带 Authorization 头 ⇒ 不能用裸 `<a href>`（不会带 Bearer）。
+ *    这里返回带 token 的 URL，token 走 query 参数会被后端拒绝 ⇒
+ *    实际做法见 `openDocumentSource`：先 fetch 拿 blob 再 objectURL。
+ */
+export async function fetchDocumentSource(
+  id: number,
+  disposition: "inline" | "attachment" = "inline",
+): Promise<{ url: string; filename: string; revoke: () => void }> {
+  const res = await httpClient.get(`${BASE}/${id}/source`, {
+    params: { disposition },
+    responseType: "blob",
+  });
+  const blob = res.data as Blob;
+  const url = URL.createObjectURL(blob);
+  const dispositionHeader = res.headers["content-disposition"] ?? "";
+  const utf8Match = dispositionHeader.match(/filename\*=UTF-8''([^;]+)/i);
+  const plainMatch = dispositionHeader.match(/filename="([^"]+)"/i);
+  const filename = utf8Match
+    ? decodeURIComponent(utf8Match[1])
+    : (plainMatch?.[1] ?? "document");
+  return { url, filename, revoke: () => URL.revokeObjectURL(url) };
+}
+
+/** 预览 URL（统一 HTML；PDF/图片由后端 302 到原件）。 */
+export function documentPreviewUrl(id: number): string {
+  return `${API_BASE_URL}${BASE}/${id}/preview`;
+}
+
+/** 向量化：把已入库文档的原文灌进向量库（wiki 导入的文件靠它才能被检索到）。 */
+export async function vectorizeDocument(
+  id: number,
+): Promise<{ documentId: string; chunks: number; replaced: boolean }> {
+  const res = await httpClient.post(`${BASE}/${id}/vectorize`);
+  return res.data;
+}
+
+// ---------------------------------------------------------------------------
 // Document-Entity Relations
 // ---------------------------------------------------------------------------
 

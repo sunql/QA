@@ -3692,6 +3692,14 @@ export const enUS = {
     resumed: "Follow-up",
     openTrace: "Open trace",
     tokens: "Tokens"
+  },
+  document: {
+    viewSource: "Source",
+    preview: "Preview",
+    vectorize: "Vectorize",
+    vectorized: "Vectorized",
+    notVectorized: "Not vectorized",
+    vectorizeSuccess: "Vectorized: {chunks} chunks"
   }
 },
 } as const;

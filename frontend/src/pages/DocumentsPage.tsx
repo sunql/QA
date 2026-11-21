@@ -39,6 +39,9 @@ import {
   listDocuments,
   createDocument,
   updateDocument,
+  fetchDocumentSource,
+  documentPreviewUrl,
+  vectorizeDocument,
   deleteDocument,
   uploadDocument,
   listRelations,
@@ -115,11 +118,19 @@ function DocList({
   loading,
   onEdit,
   onDelete,
+  onOpenSource,
+  onPreview,
+  onVectorize,
+  vectorizingId,
 }: {
   docs: DocumentRead[];
   loading: boolean;
   onEdit: (record: DocumentRead) => void;
   onDelete: (id: number) => void;
+  onOpenSource: (record: DocumentRead) => void;
+  onPreview: (record: DocumentRead) => void;
+  onVectorize: (record: DocumentRead) => void;
+  vectorizingId: number | null;
 }) {
   const { t } = useTranslation();
 
@@ -168,10 +179,36 @@ function DocList({
       render: (v: string | null) => v ?? "—",
     },
     {
+      title: "向量化",
+      dataIndex: "vectorizedAt",
+      width: 110,
+      render: (v: string | null) =>
+        v ? (
+          <Tag color="success">{t("document.vectorized")}</Tag>
+        ) : (
+          <Tag color="default">{t("document.notVectorized")}</Tag>
+        ),
+    },
+    {
       title: "操作",
-      width: 140,
+      width: 300,
       render: (_: unknown, record: DocumentRead) => (
-        <Space>
+        <Space wrap>
+          <Button size="small" onClick={() => onOpenSource(record)}>
+            {t("document.viewSource")}
+          </Button>
+          <Button size="small" onClick={() => onPreview(record)}>
+            {t("document.preview")}
+          </Button>
+          {!record.vectorizedAt && (
+            <Button
+              size="small"
+              loading={vectorizingId === record.id}
+              onClick={() => onVectorize(record)}
+            >
+              {t("document.vectorize")}
+            </Button>
+          )}
           <Button size="small" onClick={() => onEdit(record)}>
             {t("common.edit")}
           </Button>
@@ -360,6 +397,7 @@ export default function DocumentsPage() {
   // Documents tab
   const [docs, setDocs] = useState<DocumentRead[]>([]);
   const [docLoading, setDocLoading] = useState(false);
+  const [vectorizingId, setVectorizingId] = useState<number | null>(null);
   const [docModal, setDocModal] = useState(false);
   const [editingDoc, setEditingDoc] = useState<DocumentRead | null>(null);
   const [docForm] = Form.useForm<DocFormValues>();
@@ -430,6 +468,46 @@ export default function DocumentsPage() {
       securityLevel: record.securityLevel,
     });
     setDocModal(true);
+  };
+
+  /** 打开原件（浏览器内联预览/下载）。 */
+  const handleOpenSource = async (record: DocumentRead) => {
+    try {
+      const { url, filename, revoke } = await fetchDocumentSource(record.id);
+      const opened = window.open(url, "_blank");
+      if (!opened) {
+        // 弹窗被拦 ⇒ 退化成下载，用户至少拿到文件
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = filename;
+        anchor.click();
+      }
+      // 延迟回收：浏览器读完 blob 后即可释放
+      window.setTimeout(() => revoke(), 60_000);
+    } catch {
+      // handled by interceptor
+    }
+  };
+
+  /** 统一预览（新窗口打开后端渲染的 HTML）。 */
+  const handlePreview = (record: DocumentRead) => {
+    window.open(documentPreviewUrl(record.id), "_blank");
+  };
+
+  /** 向量化：把已入库文档的原文灌进向量库。 */
+  const handleVectorize = async (record: DocumentRead) => {
+    setVectorizingId(record.id);
+    try {
+      const result = await vectorizeDocument(record.id);
+      void message.success(
+        t("document.vectorizeSuccess", { chunks: result.chunks }),
+      );
+      void loadDocs();
+    } catch {
+      // handled by interceptor
+    } finally {
+      setVectorizingId(null);
+    }
   };
 
   const handleDeleteDoc = async (id: number) => {
@@ -593,6 +671,10 @@ export default function DocumentsPage() {
             loading={docLoading}
             onEdit={openEditDoc}
             onDelete={handleDeleteDoc}
+            onOpenSource={(record) => void handleOpenSource(record)}
+            onPreview={handlePreview}
+            onVectorize={(record) => void handleVectorize(record)}
+            vectorizingId={vectorizingId}
           />
         </TabPane>
 

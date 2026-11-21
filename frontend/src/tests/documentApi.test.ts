@@ -153,3 +153,60 @@ describe("api/document", () => {
     });
   });
 });
+// ---------------------------------------------------------------------------
+// 原文阅览 / 向量化（0163）
+// ---------------------------------------------------------------------------
+
+describe("api/document 原文阅览与向量化", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("fetchDocumentSource 取 blob 并解析中文文件名（RFC 5987）", async () => {
+    const revoke = vi.fn();
+    const createObjectURL = vi.fn(() => "blob:mock");
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL,
+      revokeObjectURL: revoke,
+    });
+    httpMock.get.mockResolvedValue({
+      data: new Blob(["x"]),
+      headers: {
+        "content-disposition":
+          "inline; filename=\"document.pdf\"; filename*=UTF-8''%E9%87%87%E8%B4%AD.pdf",
+      },
+    });
+
+    const { fetchDocumentSource } = await import("../api/document");
+    const result = await fetchDocumentSource(5);
+
+    expect(httpMock.get).toHaveBeenCalledWith("/documents/5/source", {
+      params: { disposition: "inline" },
+      responseType: "blob",
+    });
+    expect(result.url).toBe("blob:mock");
+    // 中文名从 filename* 解出来（不是 ASCII 回退名）
+    expect(result.filename).toBe("采购.pdf");
+    result.revoke();
+    expect(revoke).toHaveBeenCalled();
+  });
+
+  it("documentPreviewUrl 指向预览端点", async () => {
+    const { documentPreviewUrl } = await import("../api/document");
+    const url = documentPreviewUrl(7);
+    expect(url).toContain("/documents/7/preview");
+  });
+
+  it("vectorizeDocument 走 POST", async () => {
+    httpMock.post.mockResolvedValue({
+      data: { documentId: "DOC-1", chunks: 12, replaced: false },
+    });
+
+    const { vectorizeDocument } = await import("../api/document");
+    const result = await vectorizeDocument(3);
+
+    expect(httpMock.post).toHaveBeenCalledWith("/documents/3/vectorize");
+    expect(result.chunks).toBe(12);
+  });
+});

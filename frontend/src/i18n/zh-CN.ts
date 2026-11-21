@@ -3513,6 +3513,7 @@ export const zhCN = {
     actionFailed: "操作失败",
     createSuccess: "草稿已创建",
     openDetail: "详情",
+        selfApprovalHint: "你是本单提交人，审批须由他人完成（自批会被服务端拒绝）。",
     col: {
       requestId: "请购单号",
       status: "状态",

@@ -3509,6 +3509,7 @@ export const enUS = {
     actionFailed: "操作失败",
     createSuccess: "草稿已创建",
     openDetail: "详情",
+        selfApprovalHint: "You submitted this RFQ; approval must come from someone else (self-approval is rejected by the server).",
     col: {
       requestId: "请购单号",
       status: "状态",

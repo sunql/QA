@@ -21,6 +21,19 @@ const api = vi.hoisted(() => ({
 
 vi.mock("../../api/procurementRfq", () => api);
 
+// 权限矩阵（§6.6）：默认无审批角色 ⇒ 审批按钮不出；用例可切角色。
+const authState = vi.hoisted(() => ({ roles: [] as string[] }));
+const auth = vi.hoisted(() => ({
+  useAuthStore: vi.fn(
+    (selector: (s: { user: { username: string; roles: string[] } | null }) => unknown) =>
+      selector({
+        user: { username: "creator-1", roles: authState.roles },
+      }),
+  ),
+}));
+
+vi.mock("../../stores/authStore", () => auth);
+
 function makeDraft(overrides: Partial<RfqDraft> = {}): RfqDraft {
   return {
     rfqDraftId: "d-1",
@@ -74,7 +87,33 @@ describe("ProcurementRfqPage", () => {
     expect(buttons.some((t) => t.toLowerCase().includes("send"))).toBe(false);
   });
 
+  it("权限矩阵：无审批角色 ⇒ 不出审批按钮（前端入口裁剪）", async () => {
+    authState.roles = [];
+    api.listRfqDrafts.mockResolvedValue([
+      makeDraft({ status: "PENDING_APPROVAL", version: 2 }),
+    ]);
+    api.getRfqDraft.mockResolvedValue(
+      makeDraft({ status: "PENDING_APPROVAL", version: 2 }),
+    );
+    // authStore 的 user 缺省为 null ⇒ 无角色 ⇒ 不可审批
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("PENDING_APPROVAL")).toBeTruthy();
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: /详\s*情/ })[0]);
+    // 抽屉打开（详情里的版本号可见）后断言：无审批角色 ⇒ 无「通过/驳回」按钮
+    await waitFor(
+      () => {
+        expect(screen.getAllByText(/v\d+/).length).toBeGreaterThan(0);
+      },
+      { timeout: 4000 },
+    );
+    expect(screen.queryByText(/通\s*过/)).toBeNull();
+    expect(screen.queryByText(/驳\s*回/)).toBeNull();
+  });
+
   it("PENDING_APPROVAL 视角展示审批动作（自批禁止由服务端裁决）", async () => {
+    authState.roles = ["procurement-approver"];
     api.listRfqDrafts.mockResolvedValue([
       makeDraft({ status: "PENDING_APPROVAL", version: 2 }),
     ]);

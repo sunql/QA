@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  Alert,
   Button,
   Descriptions,
   Drawer,
@@ -25,6 +26,12 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
 import { useTranslation } from "../i18n";
+import { useAuthStore } from "../stores/authStore";
+import {
+  availableRfqActions,
+  resolveProcurementPermissions,
+  selfApprovalHintKey,
+} from "../utils/procurementPermissions";
 import {
   cancelRfqDraft,
   createRfqDraft,
@@ -71,6 +78,7 @@ interface CreateFormValues {
 
 export default function ProcurementRfqPage() {
   const { t } = useTranslation();
+  const user = useAuthStore((s) => s.user);
   const [drafts, setDrafts] = useState<RfqDraft[]>([]);
   const [loading, setLoading] = useState(false);
   const [detail, setDetail] = useState<RfqDraft | null>(null);
@@ -224,7 +232,13 @@ export default function ProcurementRfqPage() {
   ];
 
   const statusActions = detail
-    ? buildActions(detail, t, act)
+    ? buildActions(
+        detail,
+        t,
+        act,
+        resolveProcurementPermissions(user?.roles),
+        detail.createdBy === user?.username,
+      )
     : [];
 
   return (
@@ -350,16 +364,28 @@ interface ActFn {
 
 type TFn = (key: string) => string;
 
-/** 按 status 生成可用动作（后端状态机是裁决者，前端只做入口裁剪）。 */
+/** 按 status + 权限矩阵生成可用动作（后端状态机与角色闸是裁决者，前端只做入口裁剪）。 */
 function buildActions(
   draft: RfqDraft,
   t: TFn,
   act: ActFn,
+  permissions: ReturnType<typeof resolveProcurementPermissions>,
+  isCreator: boolean,
 ): React.ReactNode[] {
   const actions: React.ReactNode[] = [];
   const v = draft.version;
   const id = draft.rfqDraftId;
-  if (draft.status === "DRAFT") {
+  const allowed = new Set(
+    availableRfqActions(draft.status, permissions, isCreator),
+  );
+  // 自批提示（服务端会拒自批 ⇒ 前端先说清）
+  const hintKey = selfApprovalHintKey(isCreator);
+  if (hintKey != null && draft.status === "PENDING_APPROVAL") {
+    actions.push(
+      <Alert key="self-approval-hint" type="info" showIcon message={t(hintKey)} />,
+    );
+  }
+  if (draft.status === "DRAFT" && allowed.has("validate")) {
     actions.push(
       <Popconfirm
         key="validate"
@@ -371,15 +397,17 @@ function buildActions(
         </Button>
       </Popconfirm>,
     );
-    actions.push(
-      <Popconfirm key="cancel" title={t("procurement.rfq.confirm.cancel")}
+    if (allowed.has("cancel")) {
+      actions.push(
+        <Popconfirm key="cancel" title={t("procurement.rfq.confirm.cancel")}
         onConfirm={() => void act(() => cancelRfqDraft(id, v), t("procurement.rfq.done.cancel"))}
-      >
-        <Button danger size="small">{t("procurement.rfq.action.cancel")}</Button>
-      </Popconfirm>,
-    );
+        >
+          <Button danger size="small">{t("procurement.rfq.action.cancel")}</Button>
+        </Popconfirm>,
+      );
+    }
   }
-  if (draft.status === "VALIDATING") {
+  if (draft.status === "VALIDATING" && allowed.has("submit")) {
     actions.push(
       <Popconfirm key="submit" title={t("procurement.rfq.confirm.submit")}
         onConfirm={() => void act(() => submitRfqApproval(id), t("procurement.rfq.done.submit"))}
@@ -391,7 +419,7 @@ function buildActions(
     );
   }
   // PENDING_APPROVAL 的 approve/reject 在**审批人视角**渲染（自批禁止由服务端裁决）。
-  if (draft.status === "PENDING_APPROVAL") {
+  if (draft.status === "PENDING_APPROVAL" && allowed.has("approve")) {
     actions.push(
       <Popconfirm key="approve" title={t("procurement.rfq.confirm.approve")}
         onConfirm={() => void act(() => decideRfqApproval(id, "APPROVE"), t("procurement.rfq.done.approve"))}
@@ -401,13 +429,15 @@ function buildActions(
         </Button>
       </Popconfirm>,
     );
-    actions.push(
-      <Popconfirm key="reject" title={t("procurement.rfq.confirm.reject")}
+    if (allowed.has("reject")) {
+      actions.push(
+        <Popconfirm key="reject" title={t("procurement.rfq.confirm.reject")}
         onConfirm={() => void act(() => decideRfqApproval(id, "REJECT"), t("procurement.rfq.done.reject"))}
-      >
-        <Button danger size="small">{t("procurement.rfq.action.reject")}</Button>
-      </Popconfirm>,
-    );
+        >
+          <Button danger size="small">{t("procurement.rfq.action.reject")}</Button>
+        </Popconfirm>,
+      );
+    }
   }
   return actions;
 }

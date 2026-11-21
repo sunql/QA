@@ -120,7 +120,8 @@ export const zhCN = {
     foundation: "业务基础信息",
     systemConfig: "系统信息配置",
     auditSecurity: "审计安全",
-    research: "研究分析"
+    research: "研究分析",
+    procurement: "采购协同",
   },
   item: {
     chat: "AIChatService",
@@ -174,6 +175,10 @@ export const zhCN = {
     changePassword: "修改密码",
     researchSession: "研究会话",
     researchCompare: "研究对比",
+    procurementRfq: "询价草稿",
+    procurementBindings: "采购源绑定",
+    procurementKnowledge: "采购知识检索",
+    procurementAgents: "采购 Agent 场景",
     workflowInstances: "工作流实例",
     workflowApprovals: "待办审批",
     workflowDefinitions: "工作流定义"

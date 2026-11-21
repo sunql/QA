@@ -120,7 +120,8 @@ export const enUS = {
     foundation: "Foundation",
     systemConfig: "System Config",
     auditSecurity: "Audit & Security",
-    research: "Research"
+    research: "Research",
+    procurement: "Procurement",
   },
   item: {
     chat: "AIChatService",
@@ -174,6 +175,10 @@ export const enUS = {
     changePassword: "Change Password",
     researchSession: "Research Session",
     researchCompare: "Research Compare",
+    procurementRfq: "RFQ Drafts",
+    procurementBindings: "Source Bindings",
+    procurementKnowledge: "Procurement Knowledge",
+    procurementAgents: "Agent Scenarios",
     workflowInstances: "Workflow Instances",
     workflowApprovals: "My Approvals",
     workflowDefinitions: "Workflow Definitions"

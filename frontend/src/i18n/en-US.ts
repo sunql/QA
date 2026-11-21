@@ -3693,6 +3693,7 @@ export const enUS = {
     openTrace: "Open trace",
     tokens: "Tokens"
   },
+},
   document: {
     viewSource: "Source",
     preview: "Preview",
@@ -3701,5 +3702,4 @@ export const enUS = {
     notVectorized: "Not vectorized",
     vectorizeSuccess: "Vectorized: {chunks} chunks"
   }
-},
 } as const;

@@ -210,3 +210,28 @@ describe("api/document 原文阅览与向量化", () => {
     expect(result.chunks).toBe(12);
   });
 });
+
+describe("api/document 预览鉴权", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("fetchDocumentPreview 走 httpClient（带 token）而不是裸 URL", async () => {
+    // 裸 window.open(URL) 不带 Authorization ⇒ 后端判「请先登录」
+    const revoke = vi.fn();
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:preview"),
+      revokeObjectURL: revoke,
+    });
+    httpMock.get.mockResolvedValue({ data: new Blob(["<html>"]) });
+
+    const { fetchDocumentPreview } = await import("../api/document");
+    const result = await fetchDocumentPreview("DOC-ABC");
+
+    expect(httpMock.get).toHaveBeenCalledWith("/documents/DOC-ABC/preview", {
+      responseType: "blob",
+    });
+    expect(result.url).toBe("blob:preview");
+  });
+});

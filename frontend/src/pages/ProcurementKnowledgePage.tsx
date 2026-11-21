@@ -19,7 +19,7 @@ import {
   message,
 } from "antd";
 import { useTranslation } from "../i18n";
-import { documentPreviewUrl } from "../api/document";
+import { fetchDocumentPreview } from "../api/document";
 import {
   getGraphNeighbors,
   queryKnowledge,
@@ -40,6 +40,17 @@ const CHANNEL_COLOR: Record<string, string> = {
 
 function EvidenceCard({ e }: { e: KnowledgeEvidence }) {
   const { t } = useTranslation();
+  /** 预览必须带鉴权（裸 URL 会被后端判「请先登录」）。 */
+  const openPreview = async (documentId?: string | null) => {
+    if (!documentId) return;
+    try {
+      const { url, revoke } = await fetchDocumentPreview(documentId);
+      window.open(url, "_blank");
+      window.setTimeout(() => revoke(), 60_000);
+    } catch {
+      // handled by interceptor
+    }
+  };
   return (
     <Card size="small" title={`${e.kind} · ${e.title}`} style={{ marginBottom: 12 }}>
       {e.snippet && <p>{e.snippet}</p>}
@@ -68,12 +79,7 @@ function EvidenceCard({ e }: { e: KnowledgeEvidence }) {
               <Button
                 size="small"
                 type="link"
-                onClick={() =>
-                  window.open(
-                    documentPreviewUrl(e.sourceRef?.documentId ?? ""),
-                    "_blank",
-                  )
-                }
+                onClick={() => void openPreview(e.sourceRef?.documentId)}
               >
                 {t("document.preview")}
               </Button>

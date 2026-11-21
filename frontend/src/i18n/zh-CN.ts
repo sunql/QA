@@ -3696,6 +3696,7 @@ export const zhCN = {
     openTrace: "查看执行轨迹",
     tokens: "Tokens"
   },
+},
   document: {
     viewSource: "原文",
     preview: "预览",
@@ -3704,5 +3705,4 @@ export const zhCN = {
     notVectorized: "未向量化",
     vectorizeSuccess: "向量化完成：{chunks} 个片段"
   }
-},
 } as const;

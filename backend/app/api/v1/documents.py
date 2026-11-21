@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -46,9 +47,17 @@ from app.services.messages_zh import (
 
 logger = logging.getLogger(__name__)
 
-# Streaming upload size limit (audit-fx-3.2): documents may be up to 50 MB.
-# Streaming read prevents OOM from unbounded in-memory accumulation.
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+# 上传字节上限（可配置，默认 1 GB）。
+#
+# 为什么不是「完全无限制」：上传路径是「**全量读进内存**再解析」
+# （``await file.read()`` ⇒ ``b"".join(chunks)``）⇒ 真无限制等于留一扇
+# 「单个登录用户就能把后端容器 OOM 掉」的门（影响**所有**用户，不只是他）。
+# 1 GB 对采购制度/合同/指标文档绰绰有余（实测最大样本 3.9 MB），
+# 等于用户视角「没有实际限制」，同时保留一道防 OOM 的闸。
+#
+# 运维可调：``MAX_UPLOAD_MB=2048``（环境变量）。
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "1024"))
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 router = APIRouter()
 

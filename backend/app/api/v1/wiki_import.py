@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from fastapi import (
     APIRouter,
@@ -77,11 +78,14 @@ router = APIRouter(
 
 _importService = WikiImportService()
 
-# 单次上传的字节上限。粘贴路径有 MAX_SOURCE_CHARS（1M 字符）兜着，上传路径
-# 若不加限就等于留了一扇**同样输入、无上限**的后门：`await file.read()` 会
-# 把整个文件读进内存，PDF 解析又是 CPU 密集的同步调用。10 MB 对
-# 「一篇制度文档」绰绰有余，同时把内存与 CPU 的放大封顶。
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+# 单次上传的字节上限（可配置，默认 1 GB）。
+#
+# 同 documents：上传路径是「全量读进内存再解析」⇒ 真无限制等于一扇
+# OOM 后门（PDF 解析还是 CPU 密集的同步调用）。1 GB 对「一套制度/合同
+# 文档」绰绰有余，等于用户视角「没有实际限制」。
+# 运维可调：``MAX_UPLOAD_MB=2048``（环境变量）。
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "1024"))
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 _MB = 1024 * 1024
 
 

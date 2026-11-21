@@ -105,10 +105,32 @@ export async function fetchDocumentSource(
 }
 
 /**
- * 预览 URL（统一 HTML；PDF/图片由后端 302 到原件）。
+ * 预览：取回渲染好的 HTML 并**带鉴权**返回可打开的 URL。
+ *
+ * ⚠️ 不能用 `window.open(裸URL)`：预览端点要登录（Bearer 头），
+ * 裸 URL 会被后端判「请先登录」。这里走 httpClient（带 token）取 blob，
+ * 再用 objectURL 打开。
+ *
+ * PDF/图片由后端 302 到 `/source` ⇒ axios 会自动跟随重定向 ⇒ 拿到的
+ * blob 就是原件（PDF 在浏览器里渲染效果与直接打开原件一致）。
  *
  * `key` 可以是自增 id 或**业务编号**（DOC-xxx）——采购知识证据里存的是业务
  * 编号（可读、可引用），后端两种都认。
+ */
+export async function fetchDocumentPreview(
+  key: number | string,
+): Promise<{ url: string; revoke: () => void }> {
+  const res = await httpClient.get(`${BASE}/${key}/preview`, {
+    responseType: "blob",
+  });
+  const url = URL.createObjectURL(res.data as Blob);
+  return { url, revoke: () => URL.revokeObjectURL(url) };
+}
+
+/**
+ * 预览 URL（**仅用于展示链接**，不能直接 window.open）——
+ * 直接打开不带 Authorization ⇒ 后端判「请先登录」。
+ * 真正打开请用 `fetchDocumentPreview`。
  */
 export function documentPreviewUrl(key: number | string): string {
   return `${API_BASE_URL}${BASE}/${key}/preview`;

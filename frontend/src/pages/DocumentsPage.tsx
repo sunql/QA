@@ -40,7 +40,7 @@ import {
   createDocument,
   updateDocument,
   fetchDocumentSource,
-  documentPreviewUrl,
+  fetchDocumentPreview,
   vectorizeDocument,
   deleteDocument,
   uploadDocument,
@@ -66,6 +66,7 @@ import { useTranslation } from "../i18n";
 import FilterBar from "../components/ontology/FilterBar";
 import type { FilterField } from "../components/ontology/FilterBar";
 import { contains, matchSelect } from "../utils/ontologyFilter";
+import { useTablePagination } from "../utils/useTablePagination";
 import { toIsoDateParam } from "../utils/dateParam";
 import type { FilterValues } from "../utils/ontologyFilter";
 import type { EntityType } from "../types/entityMapping";
@@ -133,6 +134,8 @@ function DocList({
   vectorizingId: number | null;
 }) {
   const { t } = useTranslation();
+  // 分页与本体管理各 tab 页同口径（useTablePagination：可切页大小 + 快速跳转）
+  const { pagination } = useTablePagination();
 
   const columns = [
     {
@@ -233,7 +236,7 @@ function DocList({
         dataSource={docs}
         columns={columns}
         scroll={{ x: 1000 }}
-        pagination={{ pageSize: 20 }}
+        pagination={pagination}
       />
     </div>
   );
@@ -253,6 +256,8 @@ function RelationList({
   onDelete: (id: number) => void;
 }) {
   const { t } = useTranslation();
+  // 与本体管理各 tab 页同口径
+  const { pagination } = useTablePagination();
 
   const columns = [
     { title: "文档编号", dataIndex: "documentId", width: 180 },
@@ -295,7 +300,7 @@ function RelationList({
         dataSource={relations}
         columns={columns}
         scroll={{ x: 700 }}
-        pagination={{ pageSize: 20 }}
+        pagination={pagination}
       />
     </div>
   );
@@ -489,9 +494,18 @@ export default function DocumentsPage() {
     }
   };
 
-  /** 统一预览（新窗口打开后端渲染的 HTML）。 */
-  const handlePreview = (record: DocumentRead) => {
-    window.open(documentPreviewUrl(record.id), "_blank");
+  /** 统一预览（**必须带鉴权**取 blob：裸 URL 会被后端判「请先登录」）。 */
+  const handlePreview = async (record: DocumentRead) => {
+    try {
+      const { url, revoke } = await fetchDocumentPreview(record.id);
+      const opened = window.open(url, "_blank");
+      if (!opened) {
+        message.warning(t("document.previewBlocked"));
+      }
+      window.setTimeout(() => revoke(), 60_000);
+    } catch {
+      // handled by interceptor
+    }
   };
 
   /** 向量化：把已入库文档的原文灌进向量库。 */
@@ -672,7 +686,7 @@ export default function DocumentsPage() {
             onEdit={openEditDoc}
             onDelete={handleDeleteDoc}
             onOpenSource={(record) => void handleOpenSource(record)}
-            onPreview={handlePreview}
+            onPreview={(record) => void handlePreview(record)}
             onVectorize={(record) => void handleVectorize(record)}
             vectorizingId={vectorizingId}
           />

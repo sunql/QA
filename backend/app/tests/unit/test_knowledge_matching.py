@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from app.services.knowledge.matching import (
     TermSpec,
+    classTerms,
     matchTerms,
     normalizeText,
     sortScored,
@@ -83,3 +84,67 @@ def test_sortScoredIsDeterministicOnTie() -> None:
     ordered = sortScored(items)
 
     assert [(score, key) for score, key, _ in ordered] == [(9, "C"), (5, "A"), (5, "B")]
+
+
+# ---------------------------------------------------------------------------
+# I2-A：自然问法召回（问句片段 ⊂ 类词项 + 别名去前缀）
+# 背景：实测「找出可以供应不锈钢板的供应商」四通道 0 证据——因为
+# matchTerms 只做「类词项 ⊂ 问句」的精确包含，而别名是「供应商主数据」。
+# ---------------------------------------------------------------------------
+
+
+def _cls(name: str, alias: str | None = None) -> dict:
+    return {
+        "className": name,
+        "classAlias": alias,
+        "properties": [],
+    }
+
+
+def test_naturalWordingMatchesAliasByFragment() -> None:
+    """问句片段「供应商」⊂ 别名「供应商主数据」⇒ 命中（片段方向反转）。"""
+    matched = matchTerms(
+        "找出可以供应不锈钢板的供应商",
+        classTerms(_cls("DIM_SUPPLIER", "供应商主数据")),
+    )
+    assert matched, "自然问法（供应商）必须命中「供应商主数据」"
+    texts = [m.text for m in matched]
+    assert "供应商主数据" in texts
+
+
+def test_fragmentMatchWeighsLessThanExact() -> None:
+    """片段命中降档（精确包含仍为原权重）⇒ 排序不被放宽逻辑打乱。"""
+    cls = _cls("DIM_SUPPLIER", "供应商主数据")
+    exact = matchTerms("供应商主数据有哪些", classTerms(cls))
+    partial = matchTerms("供应商有哪些", classTerms(cls))
+    exactAlias = [m for m in exact if m.text == "供应商主数据"]
+    partialAlias = [m for m in partial if m.text == "供应商主数据"]
+    assert exactAlias and partialAlias
+    assert partialAlias[0].weight < exactAlias[0].weight
+
+
+def test_classAliasDropsDwdDimOdsPrefix() -> None:
+    """别名带 DWD/DIM/ODS 前缀 ⇒ 去前缀后可被自然问法命中。"""
+    matched = matchTerms(
+        "收货单宽表有哪些字段",
+        classTerms(_cls("DWD_GOODS_RECEIPT_DTL", "DWD收货单宽表")),
+    )
+    assert matched, "去前缀后「收货单宽表」应命中"
+    assert any(m.text == "dwd收货单宽表" for m in matched)
+
+
+def test_partialMatchingKeepsIrrelevantQuestionEmpty() -> None:
+    """放宽方向不许把无关问题变成有命中（噪声守卫）。"""
+    assert matchTerms(
+        "今天天气怎么样",
+        classTerms(_cls("DIM_SUPPLIER", "供应商主数据")),
+    ) == ()
+
+
+def test_partialMatchingIgnoresSingleCharFragments() -> None:
+    """单字片段不参与（与 MIN_TERM_LENGTH 同口径）。"""
+    matched = matchTerms(
+        "商",
+        classTerms(_cls("DIM_SUPPLIER", "供应商主数据")),
+    )
+    assert matched == ()

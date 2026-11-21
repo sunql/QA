@@ -22,6 +22,11 @@ G5 的三条验收（试点问题集端到端 / 权限双向 / 引用可回溯�
    切出的每个词都出现在问题里即算命中，权重降一档。
 4. 命中**按词项文本去重**计分：同一个别名写两遍不加分（否则别名多的条目虚高）。
 5. **单字符词项不参与匹配**（`料` 能命中任何含「料」的问题）。
+6. **自然问法（I2-A，2026-11-21）**：严格包含（词项 ⊂ 问句）之外，再补两个方向——
+   ① **去类名前缀**：`DWD_/DIM_/ODS_`（含别名写法 `DWD收货单宽表`）剥掉后重试严格包含；
+   ② **片段命中**：词项里的 ≥3 字 CJK 片段 / ≥3 字符 ASCII 词出现在问句里即算命中（降两档）。
+   实测动因：别名「供应商主数据」对自然问法「供应商」永不命中 ⇒ 四通道 0 证据。
+   噪声守卫：片段最小 3 字（避开「数据/公司」这类 2 字常用词）。
 """
 
 from __future__ import annotations
@@ -50,10 +55,16 @@ _CJK_RE = re.compile(r"[一-鿿]")
 
 @dataclass(frozen=True, slots=True)
 class TermSpec:
-    """一个参与匹配的词项（文本 + 权重）。"""
+    """一个参与匹配的词项（文本 + 权重 + 是否允许放宽匹配）。
+
+    ``allowPartial``：是否参与 I2-A 的两档放宽（去前缀 / 片段命中）。
+    **只给类名/类别名与指标名/别名置 True**——属性词项保持精确（否则
+    SQL schema 会被无关属性撑大：实测「供应商 交付天数」把 `supplier_name` 也带进来）。
+    """
 
     text: str
     weight: int = WEIGHT_NAME
+    allowPartial: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +113,42 @@ def _containsTerm(term: str, question: str) -> bool:
     return _asciiTermMatches(term, question)
 
 
+#: 类名/别名常见前缀（`DWD_` / `DIM_` / `ODS_`，也覆盖 `DWD收货单宽表` 这种无下划线写法）。
+_CLASS_PREFIX_RE = re.compile(r"^(dwd|dim|ods)[_\-\s]?", re.IGNORECASE)
+
+#: 片段命中的最短片段（2 字/词噪声太大：「数据」「公司」）。
+PARTIAL_MIN_FRAGMENT = 3
+
+
+def stripClassPrefix(text: str) -> str:
+    """剥掉类名前缀（`DWD_GOODS_RECEIPT_DTL` / `DWD收货单宽表` → 去前缀）。"""
+    return _CLASS_PREFIX_RE.sub("", text)
+
+
+def _partialFragmentSize(term: str, question: str) -> int:
+    """词项里出现在问句中的**最长**片段长度（0 = 无片段命中）。
+
+    口径：CJK 词项按 3–6 字滑窗；ASCII 词项按 ≥3 字符整词（`supplier` ⊂ `dim_supplier`）。
+    片段方向是「**词项片段 ⊂ 问句**」——与严格包含相反，用于自然问法（问句只说
+    别名的一部分）。
+    """
+    if not term or not question:
+        return 0
+    best = 0
+    if hasCjk(term):
+        maxSize = min(6, len(term))
+        for size in range(maxSize, PARTIAL_MIN_FRAGMENT - 1, -1):
+            for start in range(0, len(term) - size + 1):
+                if term[start : start + size] in question:
+                    return size
+        return 0
+    # ASCII：以「词」为片段（避免子串误命中，如 po ⊂ portfolio）
+    for part in splitIdentifier(term):
+        if len(part) >= PARTIAL_MIN_FRAGMENT and part in question:
+            best = max(best, len(part))
+    return best
+
+
 def matchTerms(question: str, terms: Sequence[TermSpec]) -> tuple[MatchedTerm, ...]:
     """命中的词项（去重、按出现顺序）。
 
@@ -130,10 +177,26 @@ def matchTerms(question: str, terms: Sequence[TermSpec]) -> tuple[MatchedTerm, .
             seen.add(norm)
             matched.append(MatchedTerm(norm, spec.weight))
             continue
-        parts = splitIdentifier(text)
-        if len(parts) > 1 and all(part in questionTokens for part in parts):
+        # ① 去类名前缀后重试严格包含（降一档；仅放宽词项）
+        stripped = stripClassPrefix(norm) if spec.allowPartial else norm
+        if stripped and stripped != norm and _containsTerm(stripped, questionNorm):
             seen.add(norm)
             matched.append(MatchedTerm(norm, max(1, spec.weight - 1)))
+            continue
+        # ② 片段命中：词项的 ≥3 字片段出现在问句里（降两档；仅放宽词项）
+        for candidate in (
+            ((norm, stripped) if stripped else (norm,)) if spec.allowPartial else ()
+        ):
+            size = _partialFragmentSize(candidate, questionNorm)
+            if size >= PARTIAL_MIN_FRAGMENT:
+                seen.add(norm)
+                matched.append(MatchedTerm(norm, max(1, spec.weight - 2)))
+                break
+        else:
+            parts = splitIdentifier(text)
+            if len(parts) > 1 and all(part in questionTokens for part in parts):
+                seen.add(norm)
+                matched.append(MatchedTerm(norm, max(1, spec.weight - 1)))
     return tuple(matched)
 
 
@@ -190,10 +253,10 @@ def classTerms(cls: Mapping[str, Any]) -> tuple[TermSpec, ...]:
     terms: list[TermSpec] = []
     name = textOrNone(cls.get("className"))
     if name:
-        terms.append(TermSpec(name, WEIGHT_NAME))
+        terms.append(TermSpec(name, WEIGHT_NAME, allowPartial=True))
     alias = textOrNone(cls.get("classAlias"))
     if alias:
-        terms.append(TermSpec(alias, WEIGHT_ALIAS))
+        terms.append(TermSpec(alias, WEIGHT_ALIAS, allowPartial=True))
     properties = cls.get("properties")
     if isinstance(properties, list):
         for prop in properties:

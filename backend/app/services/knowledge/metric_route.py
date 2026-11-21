@@ -65,7 +65,8 @@ def _metricTerms(metric: Mapping[str, Any]) -> tuple[TermSpec, ...]:
     ):
         value = textOrNone(metric.get(key))
         if value:
-            terms.append(TermSpec(value, weight))
+            # I2-A：指标名/别名/目标类名允许片段命中（自然问法「供应商」⊂「供应商准时交付率」）
+            terms.append(TermSpec(value, weight, allowPartial=True))
     kpiCodes = metric.get("kpiCodes")
     if isinstance(kpiCodes, list):
         for code in kpiCodes:
@@ -81,7 +82,7 @@ def _kpiTerms(kpi: Mapping[str, Any]) -> tuple[TermSpec, ...]:
     for key, weight in (("kpiCode", WEIGHT_NAME), ("kpiName", WEIGHT_ALIAS)):
         value = textOrNone(kpi.get(key))
         if value:
-            terms.append(TermSpec(value, weight))
+            terms.append(TermSpec(value, weight, allowPartial=True))
     keywords = kpi.get("semanticKeywords")
     if isinstance(keywords, list):
         for keyword in keywords:
@@ -90,7 +91,7 @@ def _kpiTerms(kpi: Mapping[str, Any]) -> tuple[TermSpec, ...]:
                 terms.append(TermSpec(keywordText, WEIGHT_ALIAS))
     metricName = textOrNone(kpi.get("metricName"))
     if metricName:
-        terms.append(TermSpec(metricName, WEIGHT_NAME))
+        terms.append(TermSpec(metricName, WEIGHT_NAME, allowPartial=True))
     return tuple(terms)
 
 

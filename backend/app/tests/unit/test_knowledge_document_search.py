@@ -184,3 +184,48 @@ def test_documents_search_registered_in_both_wirings() -> None:
         assert "procurement_knowledge_documents.router" in code, (
             f"{rel} 未注册 documents/search 路由（漏一边 ⇒ 那一侧 404）"
         )
+
+
+def test_buildsEvidenceFromPlainStringRowFromDb() -> None:
+    """回归：DB 行返回**纯 str**（SQLAlchemy String 列不还原 Enum）。
+
+    2026-11-21 实测：documents/search 500 `'str' object has no attribute 'value'`
+    —— 单测用 Enum 构造对象掩盖了真实链路形态。
+    """
+    from types import SimpleNamespace
+
+    from app.services.knowledge.document_search import buildDocumentEvidence
+
+    row = SimpleNamespace(
+        document_id="DOC-STR",
+        document_name="采购制度（DB 行形态）",
+        document_type="PURCHASE_SPEC",      # 纯 str（非 Enum）
+        version="v1.0",
+        status="ACTIVE",
+        security_level="L2",                # 纯 str
+        effective_date=date(2026, 1, 1),
+        owner=None,
+    )
+    evidence = buildDocumentEvidence(_hit("DOC-STR"), row)
+    assert evidence.security is not None and evidence.security.level == "L2"
+    assert evidence.source_ref is not None and evidence.source_ref.document_id == "DOC-STR"
+
+
+def test_filterAcceptsPlainStringDocumentType() -> None:
+    """回归：documentTypes 过滤对纯 str 行同样生效（不得 500）。"""
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        document_id="DOC-STR", document_name="x", document_type="PURCHASE_SPEC",
+        version="v1.0", status="ACTIVE", security_level="L1",
+        effective_date=None, owner=None,
+    )
+    kept = filterDocumentHits(
+        [_hit("DOC-STR")],
+        {"DOC-STR": row},
+        relationsByDoc={},
+        documentTypes=["PURCHASE_SPEC"],
+        entityKeys=None,
+        effectiveAt=None,
+    )
+    assert [h["document_id"] for h in kept] == ["DOC-STR"]

@@ -43,6 +43,17 @@ logger = logging.getLogger(__name__)
 MAX_SNIPPET_LENGTH = 300
 
 
+def _enumValue(value: object) -> str:
+    """枚举/字符串统一取值。
+
+    ⚠️ **DB 行返回的是纯 str**（SQLAlchemy String 列不还原 Enum），而单测里
+    手工构造的 ORM 对象常带 Enum ⇒ 直接 `.value` 在真实链路上必炸
+    （2026-11-21 实测：documents/search 500 `'str' object has no attribute 'value'`）。
+    """
+    inner = getattr(value, "value", value)
+    return str(inner)
+
+
 def _clip(text: str) -> str:
     return text if len(text) <= MAX_SNIPPET_LENGTH else text[:MAX_SNIPPET_LENGTH] + "…"
 
@@ -70,7 +81,7 @@ def filterDocumentHits(
             continue  # fail-closed：密级/有效期无法核验
         if catalog.status != DocumentStatus.ACTIVE:
             continue  # 过期/归档版本不返回
-        if requestedTypes and catalog.document_type.value.upper() not in requestedTypes:
+        if requestedTypes and _enumValue(catalog.document_type).upper() not in requestedTypes:
             continue
         if requestedEntities:
             rels = relationsByDoc.get(catalog.document_id, set())
@@ -114,7 +125,7 @@ def buildDocumentEvidence(
         confidence=confidence,
         valid_at=validAt,
         security=KnowledgeEvidenceSecurity(
-            level=catalog.security_level.value,
+            level=_enumValue(catalog.security_level),
             scope=(),
         ),
         source_ref=KnowledgeEvidenceSourceRef(

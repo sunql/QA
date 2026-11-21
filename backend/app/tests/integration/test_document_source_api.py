@@ -467,3 +467,79 @@ async def test_source_unknown_business_code_is_404(
     resp = await client.get("/api/v1/documents/DOC-NOT-EXIST/source")
 
     assert resp.status_code == 404, resp.text
+
+
+# ---------------------------------------------------------------------------
+# Office → PDF 预览（保真）
+# ---------------------------------------------------------------------------
+
+
+async def test_officePreviewReturnsPdfWhenConverterAvailable(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio, monkeypatch
+) -> None:
+    """OFFICE + 转换可用 ⇒ 直接返回 **application/pdf**（浏览器原生渲染，保真）。"""
+    from app.services import document_office_pdf as officePdf
+
+    async def _fakeConvert(content, filename, **kwargs):
+        return b"%PDF-1.7 converted"
+
+    monkeypatch.setattr(officePdf, "convertToPdfAsync", _fakeConvert)
+    monkeypatch.delenv("OFFICE_PDF_PREVIEW", raising=False)
+
+    created = await _createDocument(
+        client, dbSession, fakeMinio, filename="a.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    resp = await client.get(f"/api/v1/documents/{created['id']}/preview")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("application/pdf")
+    assert resp.content == b"%PDF-1.7 converted"
+    # 下载名是 .pdf（不是原 xlsx）
+    assert ".pdf" in resp.headers["content-disposition"]
+
+
+async def test_officePreviewFallsBackToHtmlWhenConverterFails(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio, monkeypatch
+) -> None:
+    """转换不可用 ⇒ **退回 HTML 渲染**（降级，不 500、不空白）。"""
+    from app.services import document_office_pdf as officePdf
+
+    async def _fail(content, filename, **kwargs):
+        return None
+
+    monkeypatch.setattr(officePdf, "convertToPdfAsync", _fail)
+
+    created = await _createDocument(
+        client, dbSession, fakeMinio, filename="a.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    resp = await client.get(f"/api/v1/documents/{created['id']}/preview")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/html")
+
+
+async def test_officePreviewRespectsDisabledFlag(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio, monkeypatch
+) -> None:
+    """`OFFICE_PDF_PREVIEW=0` ⇒ 不转换，直接 HTML。"""
+    from app.services import document_office_pdf as officePdf
+
+    async def _shouldNotRun(*args, **kwargs):  # pragma: no cover - 不应被调用
+        raise AssertionError("开关关闭时不得调用转换器")
+
+    monkeypatch.setattr(officePdf, "convertToPdfAsync", _shouldNotRun)
+    monkeypatch.setenv("OFFICE_PDF_PREVIEW", "0")
+
+    created = await _createDocument(
+        client, dbSession, fakeMinio, filename="a.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    resp = await client.get(f"/api/v1/documents/{created['id']}/preview")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")

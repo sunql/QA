@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
@@ -103,6 +104,29 @@ async def getDocument(
 ) -> DocumentRead:
     doc = await service.getDocument(session, documentId, user=_user)
     return DocumentRead.model_validate(doc)
+
+
+async def _officePdf(
+    catalog: Any, content: bytes, filename: str
+) -> bytes | None:
+    """Office → PDF（带内容寻址缓存）；不可用 ⇒ None（调用方退回 HTML）。"""
+    from app.services import document_office_pdf as officePdf
+    from app.services.document_preview_cache import (
+        readCachedPreview,
+        writeCachedPreview,
+    )
+
+    if not officePdf.officePdfEnabled():
+        return None
+    contentHash = catalog.content_hash or ""
+    if contentHash:
+        cached = readCachedPreview(contentHash, officePdf.CONVERTER_VERSION)
+        if cached is not None:
+            return cached
+    pdf = await officePdf.convertToPdfAsync(content, filename)
+    if pdf is not None and contentHash:
+        writeCachedPreview(contentHash, officePdf.CONVERTER_VERSION, pdf)
+    return pdf
 
 
 async def _resolveDocument(
@@ -202,9 +226,16 @@ async def previewDocument(
     iframe sandbox；响应带 CSP + nosniff。
     """
     from app.infrastructure.object_storage import ObjectStorageError
-    from app.services.document_preview_kinds import KIND_IMAGE, KIND_PDF
+    from app.services.document_preview_kinds import (
+        KIND_IMAGE,
+        KIND_OFFICE,
+        KIND_PDF,
+    )
     from app.services.document_preview_renderer import renderPreview
-    from app.services.document_source_service import loadSourceFile
+    from app.services.document_source_service import (
+        contentDisposition,
+        loadSourceFile,
+    )
 
     catalog = await _resolveDocument(session, documentKey, service, _user)
     try:
@@ -227,6 +258,25 @@ async def previewDocument(
             url=f"/api/v1/documents/{documentKey}/source",
             status_code=status.HTTP_302_FOUND,
         )
+
+    if source.previewKind == KIND_OFFICE:
+        # Office 先尝试**转 PDF**（保真：列宽/合并/配色/条件格式都不丢）；
+        # 转换不可用（未装 LibreOffice / 超时 / 坏文件）⇒ 退回 HTML 渲染。
+        pdf = await _officePdf(catalog, source.content, source.filename)
+        if pdf is not None:
+            return Response(
+                content=pdf,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": contentDisposition(
+                        f"{Path(source.filename).stem}.pdf", inline=True
+                    ),
+                    # PDF 由我们生成 ⇒ 允许浏览器内置查看器渲染；禁脚本
+                    "Content-Security-Policy": "sandbox allow-popups; default-src 'none'; object-src 'none'",
+                    "X-Content-Type-Options": "nosniff",
+                    "Cache-Control": "private, no-store",
+                },
+            )
 
     rendered = renderPreview(
         source.content,

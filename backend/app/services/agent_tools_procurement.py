@@ -27,6 +27,28 @@ from app.services.research_sql_runner import assertReadonlySql
 _MAX_LIMIT = 50
 
 
+def _col(row: Any, name: str) -> Any:
+    """**大小写不敏感**地取列值。
+
+    ⚠️ 为什么必须这样：Oracle 的 ``cursor.description`` 返回大写标识符，而
+    ``business_db_pool`` 统一把它们**小写化**（见该文件 :698）⇒ 用大写 key
+    去 get **永远拿到 None**。
+
+    2026-11-22 实测踩到：``quotation_query`` / ``purchase_history`` 两个
+    工具从 Oracle 取到行后，``row.get("SUPPLIER_CODE")`` 全是 None ⇒
+    **它们在生产上从没返回过真实数据**（一直返回"命中 0 条"）。
+    """
+    if not isinstance(row, dict):
+        return None
+    if name in row:
+        return row[name]
+    lowered = name.lower()
+    for key, value in row.items():
+        if isinstance(key, str) and key.lower() == lowered:
+            return value
+    return None
+
+
 def _camelRow(row: Any) -> dict[str, Any]:
     """entity_mapping 行 → camelCase dict（与 API 契约对齐）。"""
     return {
@@ -301,13 +323,15 @@ def _ensureActive(ds: DataSource) -> None:
 
 
 def _camelHistoryRow(row: dict[str, Any]) -> dict[str, Any]:
+    """Oracle 行 → camelCase（列名大小写不敏感，见 ``_col``）。"""
+    creationDate = _col(row, "CREATION_DATE")
     return {
-        "supplierCode": row.get("SUPPLIER_CODE"),
-        "poNo": row.get("PO_NO"),
-        "materialCode": row.get("MATERIAL_CODE"),
-        "orderQty": row.get("ORDER_QTY"),
-        "unitPrice": row.get("UNIT_PRICE"),
-        "creationDate": str(row.get("CREATION_DATE")) if row.get("CREATION_DATE") else None,
+        "supplierCode": _col(row, "SUPPLIER_CODE"),
+        "poNo": _col(row, "PO_NO"),
+        "materialCode": _col(row, "MATERIAL_CODE"),
+        "orderQty": _col(row, "ORDER_QTY"),
+        "unitPrice": _col(row, "UNIT_PRICE"),
+        "creationDate": str(creationDate) if creationDate else None,
     }
 
 
@@ -343,13 +367,20 @@ def buildQuotationSql(
 
 
 def _camelQuotationRow(row: dict[str, Any]) -> dict[str, Any]:
+    """Oracle 行 → camelCase（列名大小写不敏感，见 ``_col``）。"""
+    segmentStart = _col(row, "SEG_START_DATE")
+    segmentEnd = _col(row, "SEG_END_DATE")
     return {
-        "supplierCode": row.get("SUPPLIER_CODE"),
-        "itemCode": row.get("ITEM_CODE"),
-        "segmentYear": row.get("SEG_YEAR"),
-        "unitPriceExTax": row.get("UNIT_PRICE_EX_TAX"),
-        "segmentStart": str(row.get("SEG_START_DATE")) if row.get("SEG_START_DATE") else None,
-        "segmentEnd": str(row.get("SEG_END_DATE")) if row.get("SEG_END_DATE") else None,
+        "supplierCode": _col(row, "SUPPLIER_CODE"),
+        "itemCode": _col(row, "ITEM_CODE"),
+        "segmentYear": _col(row, "SEG_YEAR"),
+        "unitPriceExTax": _col(row, "UNIT_PRICE_EX_TAX"),
+        # 真数据里还有币种与单位（2026-11-22 实测：DWD_PURCHASE_QUOTATION_YEARLY_DTL
+        # 有 currency_code=CNY / uom=UN）——带上，比价时才能判「同币种同单位」
+        "currency": _col(row, "CURRENCY_CODE"),
+        "uom": _col(row, "UOM"),
+        "segmentStart": str(segmentStart) if segmentStart else None,
+        "segmentEnd": str(segmentEnd) if segmentEnd else None,
     }
 
 
@@ -616,11 +647,11 @@ async def purchaseHistoryHandler(
     summary = summaryRows[0] if summaryRows else {}
     rows = [_camelHistoryRow(r) for r in detailRows]
     camelSummary = {
-        "orderCount": summary.get("ORDER_COUNT"),
-        "totalQty": summary.get("TOTAL_QTY"),
-        "minPrice": summary.get("MIN_PRICE"),
-        "maxPrice": summary.get("MAX_PRICE"),
-        "avgPrice": summary.get("AVG_PRICE"),
+        "orderCount": _col(summary, "ORDER_COUNT"),
+        "totalQty": _col(summary, "TOTAL_QTY"),
+        "minPrice": _col(summary, "MIN_PRICE"),
+        "maxPrice": _col(summary, "MAX_PRICE"),
+        "avgPrice": _col(summary, "AVG_PRICE"),
     }
     return ToolResult(
         data={"via": "business_db", "datasourceId": ds.id, "summary": camelSummary, "rows": rows},

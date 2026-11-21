@@ -296,3 +296,22 @@ async def test_linkables_q_can_reach_beyond_default_limit(
     )
     assert resp.status_code == 200
     assert len(resp.json()) == 51
+
+
+async def test_linkables_unauthorized_returns_403(client: AsyncClient) -> None:
+    """可链接对象列表同样是 admin-only（防未来误删 getAdminOnlyActor）。"""
+    resp = await client.get(
+        "/api/v1/admin/wiki-links/linkables?type=class",
+        headers={"X-User-Id": "not-admin", "X-User-Roles": "user"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_update_link_unauthorized_returns_403(client: AsyncClient) -> None:
+    """编辑链接（PATCH）同样是 admin-only。"""
+    resp = await client.patch(
+        "/api/v1/admin/wiki-links/1",
+        headers={"X-User-Id": "not-admin", "X-User-Roles": "user"},
+        json={"weight": 0.5},
+    )
+    assert resp.status_code == 403

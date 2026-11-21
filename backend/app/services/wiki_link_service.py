@@ -18,6 +18,7 @@ from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import (
     OntologyClass, OntologyMetric, OntologyProperty, WikiOntologyLink,
 )
+from app.utils.like_escape import LIKE_ESCAPE, escapeLike
 
 
 class LinkNotFoundError(NotFoundError):
@@ -227,11 +228,11 @@ class WikiLinkService:
         if type == "class":
             stmt = select(OntologyClass).where(OntologyClass.valid_to.is_(None))
             if query:
-                pattern = f"%{query.upper()}%"
+                pattern = f"%{escapeLike(query.upper())}%"
                 stmt = stmt.where(
                     or_(
-                        OntologyClass.class_name.ilike(pattern),
-                        OntologyClass.class_alias.ilike(pattern),
+                        OntologyClass.class_name.ilike(pattern, escape=LIKE_ESCAPE),
+                        OntologyClass.class_alias.ilike(pattern, escape=LIKE_ESCAPE),
                     )
                 )
             stmt = stmt.order_by(
@@ -251,11 +252,11 @@ class WikiLinkService:
         if type == "property":
             stmt = select(OntologyProperty)
             if query:
-                pattern = f"%{query.upper()}%"
+                pattern = f"%{escapeLike(query.upper())}%"
                 stmt = stmt.where(
                     or_(
-                        OntologyProperty.property_name.ilike(pattern),
-                        OntologyProperty.property_alias.ilike(pattern),
+                        OntologyProperty.property_name.ilike(pattern, escape=LIKE_ESCAPE),
+                        OntologyProperty.property_alias.ilike(pattern, escape=LIKE_ESCAPE),
                     )
                 )
             stmt = stmt.order_by(
@@ -275,11 +276,11 @@ class WikiLinkService:
         if type == "metric":
             stmt = select(OntologyMetric)
             if query:
-                pattern = f"%{query.upper()}%"
+                pattern = f"%{escapeLike(query.upper())}%"
                 stmt = stmt.where(
                     or_(
-                        OntologyMetric.metric_name.ilike(pattern),
-                        OntologyMetric.metric_alias.ilike(pattern),
+                        OntologyMetric.metric_name.ilike(pattern, escape=LIKE_ESCAPE),
+                        OntologyMetric.metric_alias.ilike(pattern, escape=LIKE_ESCAPE),
                     )
                 )
             stmt = stmt.order_by(

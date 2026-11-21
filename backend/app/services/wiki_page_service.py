@@ -32,6 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
+from app.utils.like_escape import LIKE_ESCAPE as _LIKE_ESCAPE
+from app.utils.like_escape import escapeLike as _escapeLike
 from app.domain.schemas import _UnsetType
 from app.domain.wiki_learning_models import (
     ProcessWorkflow,
@@ -144,7 +146,6 @@ _IDENTITY_HASH_LEN = 8
 _UNSET_DIMENSION: object = object()
 
 # ILIKE 的转义字符（必须同时传给 `.ilike(..., escape=...)`，否则 PG 不认）。
-_LIKE_ESCAPE = "\\"
 
 # 检索结果的默认条数。LLM/Agent 的上下文窗口不是垃圾桶：命中 200 条时全塞进去，
 # 既挤掉真正相关的条目，也让「检索到了什么」无法复述。
@@ -189,18 +190,6 @@ def _dedupePreservingOrder(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
-def _escapeLike(raw: str) -> str:
-    """把用户输入里的 ILIKE 通配符转义成字面量。
-
-    不转义的后果不是注入（参数仍走绑定），而是**语义失控**：一个 ``%`` 就让
-    条件退化成「匹配任意内容」。用户搜「增长率 % 的算法」本意是找那个百分号，
-    结果拿到全表。
-    """
-    return (
-        raw.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
-        .replace("%", f"{_LIKE_ESCAPE}%")
-        .replace("_", f"{_LIKE_ESCAPE}_")
-    )
 
 
 def sanitizePageId(raw: str) -> str:

@@ -316,3 +316,22 @@ async def test_list_linkable_targets_limit_applied_after_order(dbSession):
 
     targets = await _svc.listLinkableTargets(dbSession, "class", query="ZZ_LIM", limit=2)
     assert [t.name for t in targets] == ["ZZ_LIM_A", "ZZ_LIM_B"]
+
+
+async def test_list_linkable_targets_treats_like_wildcards_literally(dbSession):
+    """用户输入的 % / _ 必须当字面量，不能退化成「匹配任意内容」。
+
+    不转义时 pattern 变成 ``%ZZ_PCT_A%B%``，`A` 与 `B` 之间任意字符都命中
+    （例如 ZZ_PCT_AXB）⇒ 搜索语义失控、还平白扫全表。
+    """
+    from app.domain.models import OntologyClass
+
+    now = datetime.now(timezone.utc)
+    dbSession.add_all([
+        OntologyClass(class_name="ZZ_PCT_A%B", version=1, valid_from=now),
+        OntologyClass(class_name="ZZ_PCT_AXB", version=1, valid_from=now),
+    ])
+    await dbSession.flush()
+
+    targets = await _svc.listLinkableTargets(dbSession, "class", query="ZZ_PCT_A%B", limit=50)
+    assert [t.name for t in targets] == ["ZZ_PCT_A%B"]

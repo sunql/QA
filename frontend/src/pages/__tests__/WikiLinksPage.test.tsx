@@ -33,12 +33,14 @@ const api = vi.hoisted(() => ({
   listLinkableTargets: vi.fn(),
   listWikiCategoryTree: vi.fn(),
   listWikiPages: vi.fn(),
+  searchWikiPages: vi.fn(),
 }));
 
 vi.mock("../../api/adminWikiLinks", () => api);
 vi.mock("../../api/wikiPages", () => ({
   listWikiCategoryTree: api.listWikiCategoryTree,
   listWikiPages: api.listWikiPages,
+  searchWikiPages: api.searchWikiPages,
   createWikiCategory: vi.fn(),
   updateWikiCategory: vi.fn(),
   deleteWikiCategory: vi.fn(),
@@ -218,6 +220,7 @@ describe("WikiLinksPage", () => {
     api.listLinkableTargets.mockResolvedValue([]);
     api.listWikiCategoryTree.mockResolvedValue(SEED_TREE);
     api.listWikiPages.mockResolvedValue({ rows: SEED_PAGES, total: SEED_PAGES.length });
+    api.searchWikiPages.mockResolvedValue({ rows: [], total: 0 });
   });
 
   it("renders title and empty state", () => {
@@ -245,6 +248,7 @@ describe("WikiLinksPage 交互", () => {
     api.listLinkableTargets.mockResolvedValue([]);
     api.listWikiCategoryTree.mockResolvedValue(SEED_TREE);
     api.listWikiPages.mockResolvedValue({ rows: SEED_PAGES, total: SEED_PAGES.length });
+    api.searchWikiPages.mockResolvedValue({ rows: [], total: 0 });
   });
 
   it("renders the wiki category tree", async () => {
@@ -390,6 +394,7 @@ describe("链接列表显示对象名", () => {
     api.listLinkableTargets.mockResolvedValue([]);
     api.listWikiCategoryTree.mockResolvedValue(SEED_TREE);
     api.listWikiPages.mockResolvedValue({ rows: SEED_PAGES, total: SEED_PAGES.length });
+    api.searchWikiPages.mockResolvedValue({ rows: [], total: 0 });
   });
 
   afterEach(async () => {
@@ -443,6 +448,7 @@ describe("标签本地化", () => {
     api.listLinkableTargets.mockResolvedValue([]);
     api.listWikiCategoryTree.mockResolvedValue(SEED_TREE);
     api.listWikiPages.mockResolvedValue({ rows: SEED_PAGES, total: SEED_PAGES.length });
+    api.searchWikiPages.mockResolvedValue({ rows: [], total: 0 });
   });
 
   // 语言是模块级全局状态：用 afterEach 复位，避免英文用例中途失败时把 en 泄漏给后续用例
@@ -476,5 +482,277 @@ describe("标签本地化", () => {
     await waitFor(() => {
       expect(api.listLinkableTargets).toHaveBeenCalledWith("metric");
     });
+  });
+});
+// ---------------------------------------------------------------------------
+// 2026-11-21 可用性修复：
+//   1) 本体对象下拉走服务端检索（默认 50 条，可检索全表）
+//   2) 左树默认 50 页 + 全量页面检索
+//   3) 链接行编辑入口（PATCH weight / note）
+// ---------------------------------------------------------------------------
+describe("WikiLinksPage 可用性修复", () => {
+  beforeEach(async () => {
+    await i18n.changeLanguage("zh-CN");
+    vi.clearAllMocks();
+    api.listWikiLinks.mockResolvedValue([]);
+    api.listLinkableTargets.mockResolvedValue([]);
+    api.listWikiCategoryTree.mockResolvedValue(SEED_TREE);
+    api.listWikiPages.mockResolvedValue({ rows: SEED_PAGES, total: SEED_PAGES.length });
+    api.searchWikiPages.mockResolvedValue({ rows: [], total: 0 });
+  });
+
+  it("默认只加载 50 页", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(api.listWikiPages).toHaveBeenCalledWith({ limit: 50 });
+    });
+  });
+
+  it("总页数超过已加载页数时给出提示", async () => {
+    api.listWikiPages.mockResolvedValue({ rows: SEED_PAGES, total: 120 });
+    renderPage();
+    expect(await screen.findByText(/已显示 7\/120 页/)).toBeInTheDocument();
+  });
+
+  it("搜索全部页面并展示扁平结果（树被替换）", async () => {
+    api.searchWikiPages.mockResolvedValue({
+      rows: [{
+        ...SEED_PAGES[0], id: 999, pageId: "page-999",
+        title: "远端的页面", categoryId: 7,
+      }],
+      total: 1,
+    });
+    renderPage();
+    await waitFor(() => {
+      expect(document.querySelector(".ant-tree")).toBeInTheDocument();
+    });
+
+    const box = screen.getByPlaceholderText("搜索全部页面（标题/正文）");
+    fireEvent.change(box, { target: { value: "远端" } });
+    fireEvent.keyDown(box, { key: "Enter", code: "Enter", keyCode: 13 });
+
+    await waitFor(() => {
+      expect(api.searchWikiPages).toHaveBeenCalledWith({ query: "远端", limit: 50 });
+    });
+    expect(await screen.findByText("远端的页面")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(document.querySelector(".ant-tree")).toBeNull();
+    });
+  });
+
+  it("空白搜索不发请求并保持分类树", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(document.querySelector(".ant-tree")).toBeInTheDocument();
+    });
+    const box = screen.getByPlaceholderText("搜索全部页面（标题/正文）");
+    fireEvent.change(box, { target: { value: "   " } });
+    fireEvent.keyDown(box, { key: "Enter", code: "Enter", keyCode: 13 });
+
+    await waitFor(() => {
+      expect(api.searchWikiPages).not.toHaveBeenCalled();
+    });
+    expect(document.querySelector(".ant-tree")).toBeInTheDocument();
+  });
+
+  it("搜索结果标注分类名（无分类显示未分类）", async () => {
+    api.searchWikiPages.mockResolvedValue({
+      rows: [
+        { ...SEED_PAGES[0], id: 901, pageId: "p-901", title: "甲页面", categoryId: 7 },
+        { ...SEED_PAGES[0], id: 902, pageId: "p-902", title: "乙页面", categoryId: null },
+      ],
+      total: 2,
+    });
+    renderPage();
+    const box = screen.getByPlaceholderText("搜索全部页面（标题/正文）");
+    fireEvent.change(box, { target: { value: "页面" } });
+    fireEvent.keyDown(box, { key: "Enter", code: "Enter", keyCode: 13 });
+
+    expect(await screen.findByText("甲页面")).toBeInTheDocument();
+    expect(screen.getByText("入库作业")).toBeInTheDocument();
+    expect(screen.getByText("未分类")).toBeInTheDocument();
+  });
+
+  it("本体对象搜索走后端，防抖后只发最终关键词", async () => {
+    renderPage();
+    await clickTreeNode("供应商准入流程");
+    await userEvent.click(screen.getByRole("button", { name: /\+\s*添加绑定/ }));
+    await waitFor(() => {
+      expect(api.listLinkableTargets).toHaveBeenCalledWith("class");
+    });
+
+    const combo = screen.getByRole("combobox", { name: "本体对象" });
+    fireEvent.change(combo, { target: { value: "S" } });
+    fireEvent.change(combo, { target: { value: "SU" } });
+
+    await waitFor(() => {
+      expect(api.listLinkableTargets).toHaveBeenCalledWith("class", "SU");
+    }, { timeout: 2000 });
+    // 中间态 "S" 不应被请求（防抖合并）
+    expect(
+      api.listLinkableTargets.mock.calls.filter((c) => c[1] === "S"),
+    ).toHaveLength(0);
+  });
+
+  it("清空本体对象搜索后回到默认列表（不带空串 q）", async () => {
+    renderPage();
+    await clickTreeNode("供应商准入流程");
+    await userEvent.click(screen.getByRole("button", { name: /\+\s*添加绑定/ }));
+    await waitFor(() => {
+      expect(api.listLinkableTargets).toHaveBeenCalledWith("class");
+    });
+
+    const combo = screen.getByRole("combobox", { name: "本体对象" });
+    fireEvent.change(combo, { target: { value: "SU" } });
+    await waitFor(() => {
+      expect(api.listLinkableTargets).toHaveBeenCalledWith("class", "SU");
+    }, { timeout: 2000 });
+
+    fireEvent.change(combo, { target: { value: "" } });
+    await waitFor(() => {
+      const calls = api.listLinkableTargets.mock.calls;
+      expect(calls[calls.length - 1]).toEqual(["class"]);
+    });
+  });
+
+  it("搜索结果替换选项后仍保留已选对象的 label", async () => {
+    api.listLinkableTargets
+      .mockResolvedValueOnce([makeLinkable({ id: 42, name: "供应商", alias: null })])
+      .mockResolvedValueOnce([makeLinkable({ id: 99, name: "XYZ 对象", alias: null })]);
+    api.createWikiLink.mockResolvedValue(makeLink({ id: 100 }));
+
+    renderPage();
+    await clickTreeNode("供应商准入流程");
+    await userEvent.click(screen.getByRole("button", { name: /\+\s*添加绑定/ }));
+    const combo = screen.getByRole("combobox", { name: "本体对象" });
+    await selectOption(combo, "供应商");
+
+    fireEvent.change(combo, { target: { value: "XYZ" } });
+    await waitFor(() => {
+      expect(api.listLinkableTargets).toHaveBeenCalledWith("class", "XYZ");
+    }, { timeout: 2000 });
+
+    await waitFor(() => {
+      expect(
+        document.querySelector(".ant-select-selection-item")?.textContent,
+      ).toBe("供应商");
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: /提\s*交/ }));
+    await waitFor(() => {
+      expect(api.createWikiLink).toHaveBeenCalledWith(
+        expect.objectContaining({ ontology_id: 42 }),
+      );
+    });
+  });
+
+  it("编辑弹窗预填权重与备注", async () => {
+    api.listWikiLinks.mockResolvedValue([
+      makeLink({ id: 7, weight: 0.8, note: "旧备注", ontology_name: "DIM_X", ontology_alias: null }),
+    ]);
+    renderPage();
+    await clickTreeNode("供应商准入流程");
+    await userEvent.click(await screen.findByRole("button", { name: /编\s*辑/ }));
+
+    expect(
+      await screen.findByText("编辑绑定", { selector: ".ant-modal-title" }),
+    ).toBeInTheDocument();
+    const note = await screen.findByLabelText("备注");
+    await waitFor(() => {
+      expect((note as HTMLTextAreaElement).value).toBe("旧备注");
+    });
+    // 权重也必须预填（否则用户一提交就把原权重改成默认值）
+    expect(screen.getByRole("slider")).toHaveAttribute("aria-valuenow", "0.8");
+  });
+
+  it("提交编辑调用 PATCH 并刷新列表", async () => {
+    api.listWikiLinks.mockResolvedValue([
+      makeLink({ id: 7, weight: 0.8, note: "旧备注", ontology_name: "DIM_X", ontology_alias: null }),
+    ]);
+    api.updateWikiLink.mockResolvedValue(makeLink({ id: 7 }));
+
+    renderPage();
+    await clickTreeNode("供应商准入流程");
+    await userEvent.click(await screen.findByRole("button", { name: /编\s*辑/ }));
+
+    const note = await screen.findByLabelText("备注");
+    await waitFor(() => {
+      expect((note as HTMLTextAreaElement).value).toBe("旧备注");
+    });
+    fireEvent.change(note, { target: { value: "新备注" } });
+    await userEvent.click(screen.getByRole("button", { name: /提\s*交/ }));
+
+    await waitFor(() => {
+      expect(api.updateWikiLink).toHaveBeenCalledWith(7, {
+        weight: 0.8,
+        note: "新备注",
+      });
+    });
+    await waitFor(() => {
+      expect(api.listWikiLinks.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("取消编辑不发 PATCH", async () => {
+    api.listWikiLinks.mockResolvedValue([
+      makeLink({ id: 7, weight: 0.8, note: "旧备注", ontology_name: "DIM_X", ontology_alias: null }),
+    ]);
+    renderPage();
+    await clickTreeNode("供应商准入流程");
+    await userEvent.click(await screen.findByRole("button", { name: /编\s*辑/ }));
+    await screen.findByText("编辑绑定", { selector: ".ant-modal-title" });
+
+    await userEvent.click(screen.getByRole("button", { name: /取\s*消/ }));
+    expect(api.updateWikiLink).not.toHaveBeenCalled();
+  });
+
+  it("清空备注时提交空串（null 会被后端当「不修改」）", async () => {
+    api.listWikiLinks.mockResolvedValue([
+      makeLink({ id: 7, weight: 0.8, note: "旧备注", ontology_name: "DIM_X", ontology_alias: null }),
+    ]);
+    api.updateWikiLink.mockResolvedValue(makeLink({ id: 7 }));
+
+    renderPage();
+    await clickTreeNode("供应商准入流程");
+    await userEvent.click(await screen.findByRole("button", { name: /编\s*辑/ }));
+
+    const note = await screen.findByLabelText("备注");
+    await waitFor(() => {
+      expect((note as HTMLTextAreaElement).value).toBe("旧备注");
+    });
+    fireEvent.change(note, { target: { value: "" } });
+    await userEvent.click(screen.getByRole("button", { name: /提\s*交/ }));
+
+    await waitFor(() => {
+      expect(api.updateWikiLink).toHaveBeenCalledWith(7, {
+        weight: 0.8,
+        note: "",
+      });
+    });
+  });
+
+  it("关闭并重开添加弹窗后，遗留防抖请求不覆盖默认列表", async () => {
+    renderPage();
+    await clickTreeNode("供应商准入流程");
+    const addBtn = screen.getByRole("button", { name: /\+\s*添加绑定/ });
+    await userEvent.click(addBtn);
+    await waitFor(() => {
+      expect(api.listLinkableTargets).toHaveBeenCalledWith("class");
+    });
+
+    // 输入后 300ms 内关闭再打开：旧定时器必须被清掉
+    const combo = screen.getByRole("combobox", { name: "本体对象" });
+    fireEvent.change(combo, { target: { value: "AB" } });
+    // 用同步 fireEvent 完成「关闭→重开」：userEvent 的异步等待可能超过 300ms
+    // 防抖窗口，让定时器在关闭前就自然触发，测不到竞态。
+    fireEvent.click(screen.getByRole("button", { name: /取\s*消/ }));
+    fireEvent.click(addBtn);
+
+    // 等过一个完整防抖窗口
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const calls = api.listLinkableTargets.mock.calls;
+    expect(calls[calls.length - 1]).toEqual(["class"]);
+    expect(calls.filter((c) => c[1] === "AB")).toHaveLength(0);
   });
 });

@@ -18,6 +18,7 @@ from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import (
     OntologyClass, OntologyMetric, OntologyProperty, WikiOntologyLink,
 )
+from app.utils.like_escape import LIKE_ESCAPE, escapeLike
 
 
 class LinkNotFoundError(NotFoundError):
@@ -215,19 +216,36 @@ class WikiLinkService:
         query: str | None = None,
         limit: int = 50,
     ) -> list[LinkableTarget]:
-        """给 admin 弹窗选择器用：列 ontology_class / ontology_property / ontology_metric。"""
+        """给 admin 弹窗选择器用：列 ontology_class / ontology_property / ontology_metric。
+
+        - class 过滤 ``valid_to IS NULL``：召回只取活类，墓碑类（已停用）链上去
+          永远不会生效，必须在下拉阶段就挡住。
+        - 三分支统一 ``ORDER BY name, id``：此前无排序 + ``LIMIT``，同一查询在
+          不同执行计划下返回不同子集 ⇒ 用户「上次能搜到、这次搜不到」。
+          **limit 必须在 order_by 之后**,否则先截断再排序,返回的是随机 N 条。
+        - property / metric 是硬删,没有 valid_to 列,不需要也不应该加过滤。
+        """
         if type == "class":
-            stmt = select(OntologyClass)
+            # 只投影需要的列：select(OntologyClass) 会触发 lazy="selectin" 的
+            # properties/metrics/children 级联加载，而这里只用 name/alias/desc。
+            stmt = select(
+                OntologyClass.id,
+                OntologyClass.class_name,
+                OntologyClass.class_alias,
+                OntologyClass.description,
+            ).where(OntologyClass.valid_to.is_(None))
             if query:
-                pattern = f"%{query.upper()}%"
+                pattern = f"%{escapeLike(query.upper())}%"
                 stmt = stmt.where(
                     or_(
-                        OntologyClass.class_name.ilike(pattern),
-                        OntologyClass.class_alias.ilike(pattern),
+                        OntologyClass.class_name.ilike(pattern, escape=LIKE_ESCAPE),
+                        OntologyClass.class_alias.ilike(pattern, escape=LIKE_ESCAPE),
                     )
                 )
-            stmt = stmt.limit(limit)
-            rows = (await session.execute(stmt)).scalars().all()
+            stmt = stmt.order_by(
+                OntologyClass.class_name.asc(), OntologyClass.id.asc()
+            ).limit(limit)
+            rows = (await session.execute(stmt)).all()
             return [
                 LinkableTarget(
                     id=r.id,
@@ -239,17 +257,24 @@ class WikiLinkService:
                 for r in rows
             ]
         if type == "property":
-            stmt = select(OntologyProperty)
+            stmt = select(
+                OntologyProperty.id,
+                OntologyProperty.property_name,
+                OntologyProperty.property_alias,
+                OntologyProperty.description,
+            )
             if query:
-                pattern = f"%{query.upper()}%"
+                pattern = f"%{escapeLike(query.upper())}%"
                 stmt = stmt.where(
                     or_(
-                        OntologyProperty.property_name.ilike(pattern),
-                        OntologyProperty.property_alias.ilike(pattern),
+                        OntologyProperty.property_name.ilike(pattern, escape=LIKE_ESCAPE),
+                        OntologyProperty.property_alias.ilike(pattern, escape=LIKE_ESCAPE),
                     )
                 )
-            stmt = stmt.limit(limit)
-            rows = (await session.execute(stmt)).scalars().all()
+            stmt = stmt.order_by(
+                OntologyProperty.property_name.asc(), OntologyProperty.id.asc()
+            ).limit(limit)
+            rows = (await session.execute(stmt)).all()
             return [
                 LinkableTarget(
                     id=r.id,
@@ -261,17 +286,23 @@ class WikiLinkService:
                 for r in rows
             ]
         if type == "metric":
-            stmt = select(OntologyMetric)
+            stmt = select(
+                OntologyMetric.id,
+                OntologyMetric.metric_name,
+                OntologyMetric.metric_alias,
+            )
             if query:
-                pattern = f"%{query.upper()}%"
+                pattern = f"%{escapeLike(query.upper())}%"
                 stmt = stmt.where(
                     or_(
-                        OntologyMetric.metric_name.ilike(pattern),
-                        OntologyMetric.metric_alias.ilike(pattern),
+                        OntologyMetric.metric_name.ilike(pattern, escape=LIKE_ESCAPE),
+                        OntologyMetric.metric_alias.ilike(pattern, escape=LIKE_ESCAPE),
                     )
                 )
-            stmt = stmt.limit(limit)
-            rows = (await session.execute(stmt)).scalars().all()
+            stmt = stmt.order_by(
+                OntologyMetric.metric_name.asc(), OntologyMetric.id.asc()
+            ).limit(limit)
+            rows = (await session.execute(stmt)).all()
             return [
                 LinkableTarget(
                     id=r.id,

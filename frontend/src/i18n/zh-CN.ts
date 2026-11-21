@@ -2799,7 +2799,17 @@ export const zhCN = {
   noLinks: "暂无链接",
   selectPageHint: "请先选择左侧 Wiki 页面",
   pageTreeLabel: "请选择 Wiki 页面",
-  treeLoadFailed: "加载分类树失败"
+  treeLoadFailed: "加载分类树失败",
+  edit: "编辑",
+  editBinding: "编辑绑定",
+  updateSuccess: "更新成功",
+  updateFailed: "更新失败",
+  pageSearchPlaceholder: "搜索全部页面（标题/正文）",
+  treeLimitHint: "已显示 {shown}/{total} 页，可用上方搜索检索全部",
+  searchResultCount: "命中 {total} 条",
+  searchFailed: "页面检索失败",
+  noSearchResults: "没有匹配的页面",
+  uncategorized: "未分类"
 },
   wikiCategories: {
   title: "Wiki 分类管理",

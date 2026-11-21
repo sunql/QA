@@ -1,0 +1,25 @@
+{
+  "generatedAt": "2026-11-21T13:07:09.570869+00:00",
+  "purpose": "M7 判据 6 性能压测的数据规模参照（dev 栈）",
+  "postgres": {
+    "ontology_class": 77,
+    "ontology_property": 4182,
+    "business_object": 11,
+    "entity_mapping": 354422,
+    "kpi_catalog": 12,
+    "document_catalog": 4,
+    "document_entity_relation": 0,
+    "semantic_release": 7
+  },
+  "milvus": {
+    "ontology_class_embeddings_v2": 59,
+    "ontology_property_embeddings_v2": 4182,
+    "kpi_catalog_embeddings_v2": 12,
+    "ontology_metric_embeddings_v2": 12,
+    "document_embeddings": 32
+  },
+  "neo4j": {
+    "nodes": 192565,
+    "relationships": 523010
+  }
+}

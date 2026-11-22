@@ -318,8 +318,13 @@ class DocumentService:
             action="DELETE",
             actor=actor.userId,
             actor_departments=actor.departments,
-            before=before_state,
-            after={"vectorsDeleteFailed": vectorsDeleteFailed},
+            before=(
+                {**before_state, "_vectorsDeleteFailed": True}
+                if vectorsDeleteFailed
+                else before_state
+            ),
+            # DELETE 审计契约要求 after=None（test_document_audit 钉住）；
+            # 向量清理失败标记挂在 before 的 `_vectorsDeleteFailed` 上，不破坏契约。
         )
         await session.delete(entity)
         await session.commit()

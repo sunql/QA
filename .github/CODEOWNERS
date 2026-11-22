@@ -124,6 +124,14 @@ backend/app/domain/__init__.py          @sunql
 backend/app/models/__init__.py          @sunql
 backend/app/services/__init__.py        @sunql
 backend/app/infrastructure/llm/__init__.py  @sunql
+# ⚠️ `app/utils` 包 init（2026-11-21 PR #172 事故补）：`ci_surface.py` **显式**
+# 把它钉成 CI 相关面（第二十三轮评审 C-3：`python -m app.utils.ci_shard` 会先
+# 执行父包 init ⇒ 在 shard 选择之前就能改写测试文件）。
+# ⚠️ 之前一直没列 ⇒ 因为它**从未进过收集前闭包**；PR #172 新增
+# `app/utils/like_escape.py` 并被 `wiki_link_service` import ⇒ 包 init 第一次
+# 进闭包 ⇒ 闭包守卫红（真·净新增失败）。⇒ 补上，并加**先验**守卫
+# `test_every_ci_surface_package_init_has_a_codeowner`（不再等它进闭包才红）。
+backend/app/utils/__init__.py           @sunql
 
 # ---- 环境定义文件（第五轮安全评审 MEDIUM-2 / MEDIUM-3）----
 # `backend/.env` 被 conftest `load_dotenv(override=True)` 读 ⇒ 覆盖 CI 注入的全部变量

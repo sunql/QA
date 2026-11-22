@@ -49,6 +49,8 @@ _WRITE_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/ontology-discovery/proposals/{proposalId}/review"),
         # G4：发布走既有 activate 写口 —— 更要 admin。
         ("POST", "/api/v1/ontology-discovery/proposals/{proposalId}/publish"),
+        # G4-1：增量监测要连业务库采集快照（高成本运维动作）。
+        ("POST", "/api/v1/ontology-discovery/sources/{sourceId}/monitor"),
         # 采购源绑定（M1-1.1）：绑定是治理事实，确认权必须收口。
         ("POST", "/api/v1/procurement-bindings"),
         ("POST", "/api/v1/procurement-bindings/{id}/properties"),

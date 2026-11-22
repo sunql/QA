@@ -656,3 +656,30 @@ async def test_提案发布走唯一写口并回填release(apiClient, dbSession)
     assert body["proposalStatus"] == "PUBLISHED"
     assert body["status"] == "ACTIVE"
     assert body["releaseId"] > 0
+
+
+async def test_增量监测返回changed并可选起运行(apiClient, dbSession, monkeypatch):
+    from app.api.v1 import ontology_discovery as apiModule
+    from app.services.discovery_monitor_service import MonitorResult
+
+    seeded = await _seedA2(dbSession)
+    calls: list[int] = []
+
+    async def _fakeCheck(session, *, sourceId, createdBy=None):
+        return MonitorResult(sourceId=sourceId, snapshotId=999, changed=True, runId=999)
+
+    async def _fakePipeline(runId, **kwargs):
+        calls.append(runId)
+
+    monkeypatch.setattr(apiModule._monitorService, "checkSource", _fakeCheck)
+    monkeypatch.setattr(apiModule._runService, "runPipeline", _fakePipeline)
+
+    resp = await apiClient.post(
+        f"/api/v1/ontology-discovery/sources/{seeded['sourceId']}/monitor"
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["changed"] is True
+    assert body["runId"] == 999
+    assert calls == [999]

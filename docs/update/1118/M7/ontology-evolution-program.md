@@ -56,7 +56,7 @@
 | ↳ **G3-4 API + Worker** ✅ | `POST /runs`（202 + BackgroundTasks，2/minute）/ `GET /runs/{id}` / `/candidates` / `/findings` / `/proposals`（建/列/详情/提交/审核）；新读面一律 admin（AI 未确认结论 + 在途治理件） | 2–3 | 路由 auth 守卫登记 9 条新路由（36 passed）；API 层 8 例；后台用 `ownSession()` 自开会话 |
 | **G4 A3：增量监测 + 发布联动 + 评测** | `/diff` 周期驱动提案；`POST /proposals/{id}/publish` 调**既有** `activate`；`discovery_evaluation` + 上下游回归（Graph/RAG/NL2SQL/Agent 各 1 条冒烟）；回滚演练 | **7–9** | 端到端演练通过：发现→提案→审核→发布→**回滚**；误合并率 0 |
 | ↳ **G4-0 发布联动** ✅ | `semanticReleaseService.publishProposal`（唯一写口：`createDraftFromManifest` → `markValidated` → `activate`）；提案置 PUBLISHED + 回填 `release_id`；`POST /proposals/{id}/publish` admin | 2 | 单测 6（发布链/状态门/防重/篡改/缺 manifest）+ API 1；F1 守卫改为「只允许 `semanticReleaseService.publishProposal`」 |
-| ↳ **G4-1 增量监测** ⏳ | `/diff` 周期驱动提案（快照变化 → 候选 → 提案） | 3 | 定时演练 |
+| ↳ **G4-1 增量监测** ✅ | `POST /sources/{id}/monitor`（admin，5/minute）：采集快照，内容没变**不起运行**；变了起 `trigger=DIFF` 的运行（剖析+候选）；**不自动拼提案**（候选不是结论，AI 不替人拍板本体） | 2 | 单测 4 + API 1；路由 auth 38 passed |
 | ↳ **G4-2 评测 + 回滚演练** ⏳ | `discovery_evaluation` 表（**需新迁移 0167**）+ 上下游冒烟 + 回滚 | 2–4 | 端到端演练通过 |
 | **G5 采购域首期实践** | 供应商 + 物料两对象：真实数据剖析 → 产出候选与治理建议；业务确认与签收；评测基线（准确率/召回/人工耗时） | **4–6** | 业务签收的候选清单 + 误报复核记录 + 评测报告 |
 

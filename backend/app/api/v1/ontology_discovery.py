@@ -39,6 +39,7 @@ from app.domain.discovery_schemas import (
     DiscoveryCandidateRead,
     DiscoveryFindingPage,
     DiscoveryFindingRead,
+    DiscoveryMonitorRead,
     DiscoveryProposalCreateRequest,
     DiscoveryProposalPage,
     DiscoveryProposalRead,
@@ -62,6 +63,7 @@ from app.domain.discovery_schemas import (
 from app.infrastructure.rate_limit import enforceRouteLimit
 from app.services.audit_service import AuditService
 from app.services.discovery_diff_service import computeOntologyDiff
+from app.services.discovery_monitor_service import DiscoveryMonitorService
 from app.services.discovery_proposal_service import DiscoveryProposalService
 from app.services.discovery_run_service import DiscoveryRunService
 from app.services.discovery_snapshot_service import DiscoverySnapshotService
@@ -85,6 +87,9 @@ _CAPTURE_LIMIT_SCOPE = "ontology-discovery:capture"
 
 _service = DiscoverySnapshotService()
 _runService = DiscoveryRunService()
+_monitorService = DiscoveryMonitorService(
+    snapshotService=_service, runService=_runService
+)
 _proposalService = DiscoveryProposalService()
 _audit = AuditService()
 
@@ -385,6 +390,8 @@ async def getOntologyDiff(
 
 _MAX_RUN_LIMIT = "2/minute"
 _RUN_LIMIT_SCOPE = "ontology-discovery:run"
+_MONITOR_LIMIT = "5/minute"
+_MONITOR_LIMIT_SCOPE = "ontology-discovery:monitor"
 _MAX_CANDIDATE_PAGE = 200
 
 
@@ -804,4 +811,48 @@ async def publishDiscoveryProposal(
         status=operation.release.status,
         blockers=list(operation.blockers),
         warnings=list(operation.warnings),
+    )
+
+
+@router.post("/sources/{sourceId}/monitor", response_model=DiscoveryMonitorRead)
+async def monitorDiscoverySource(
+    request: Request,
+    response: Response,
+    background: BackgroundTasks,
+    sourceId: int = Path(..., ge=1),
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryMonitorRead:
+    """增量监测：采集最新快照，变了就起一次运行（剖析 + 候选）。
+
+    限流 5/minute：每次监测都要连业务库读数据字典。
+    周期驱动由外部调度器调用本端点（本批不自造 Worker 拓扑）。
+    """
+    enforceRouteLimit(request, _MONITOR_LIMIT, _MONITOR_LIMIT_SCOPE)
+    _noStore(response)
+    result = await _monitorService.checkSource(
+        session, sourceId=sourceId, createdBy=admin.userId
+    )
+    await _audit.record(
+        session,
+        entity_type="discovery_source",
+        entity_id=sourceId,
+        action="UPDATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        before={"snapshotId": None},
+        after={
+            "snapshotId": result.snapshotId,
+            "changed": result.changed,
+            "runId": result.runId,
+        },
+    )
+    await session.commit()
+    if result.runId is not None:
+        background.add_task(_runService.runPipeline, result.runId)
+    return DiscoveryMonitorRead(
+        source_id=result.sourceId,
+        snapshot_id=result.snapshotId,
+        changed=result.changed,
+        run_id=result.runId,
     )

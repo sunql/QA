@@ -347,3 +347,12 @@ class DiscoveryPublishRead(CamelModel):
     status: str
     blockers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class DiscoveryMonitorRead(CamelModel):
+    """一次增量监测的结论。"""
+
+    source_id: int
+    snapshot_id: int
+    changed: bool
+    run_id: int | None

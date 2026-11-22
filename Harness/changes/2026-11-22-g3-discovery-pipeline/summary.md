@@ -168,7 +168,23 @@ G3 的 **0/1/2/3/4 全部落地**。按此前登记的口径，**「审核后生
 测试：`test_semantic_release_publish_proposal.py`（6 例）+ 发现 API 发布用例（1 例）；
 F1 守卫 16 例 + 路由 auth 36 例；发布链回归 **181 passed**。
 
-## 十一、G4 剩余
+## 十一、G4-1 增量监测（同批落地）
 
-- **G4-1 增量监测**：`/diff` 周期驱动提案（快照变化 → 候选 → 提案）。
+`app/services/discovery_monitor_service.py` + `POST /sources/{id}/monitor`（admin，5/minute）：
+
+```
+captureSnapshot（内容寻址，幂等）
+  ├─ reused=true（同内容）⇒ changed=false，不起运行（不烧 LLM）
+  └─ reused=false ⇒ 建 RUNNING（trigger=DIFF）⇒ 后台剖析 + 候选
+```
+
+- **判变复用快照哈希**，不自己再 diff 一遍（第二套口径会漂移）。
+- **不自动把候选拼成提案**：候选不是结论（D-3），自动组装 = 机器替人拍板本体
+  ⇒ 触碰「AI 写本体」红线。提案仍是人工组装 + 四眼审核。
+- **周期驱动由外部调度器调本端点**；本批不自造 Worker 拓扑（P5 裁决）。
+
+测试：monitor 服务 4 例 + API 1 例；路由 auth 38 passed。
+
+## 十二、G4 剩余
+
 - **G4-2 评测 + 回滚演练**：`discovery_evaluation`（**需新迁移 0167**）、上下游冒烟、回滚演练。

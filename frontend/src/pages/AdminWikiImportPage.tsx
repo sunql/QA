@@ -60,7 +60,8 @@ const SOURCE_TYPES = ["MARKDOWN", "PDF", "WORD", "CSV", "API"] as const;
  * Phase 5 加 PPTX/XLSX/XLS；老式 .ppt/.xls 二进制格式由后端抛
  * UnsupportedFileTypeError → 前端提示另存。
  */
-const UPLOAD_ACCEPT = ".pdf,.docx,.pptx,.xlsx,.xls,.txt,.md,.markdown";
+// 与文档中心共用同一份白名单（后端解析器支持范围），避免两处各写一份漂移
+import { DOCUMENT_UPLOAD_ACCEPT as UPLOAD_ACCEPT } from "../utils/uploadAccept";
 
 /** 任务状态 → antd Tag 颜色 */
 const STATUS_COLOR: Record<string, string> = {

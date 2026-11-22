@@ -97,6 +97,18 @@ export interface DocumentRead {
   securityLevel: DocumentSecurityLevel;
   storageUrl: string | null;
   contentHash: string | null;
+  /** 上传时的真实 MIME（0163） */
+  mimeType: string | null;
+  /** 字节数（0163） */
+  fileSize: number | null;
+  /** 预览类别（0163）：TEXT/MARKDOWN/HTML/PDF/OFFICE/IMAGE */
+  previewKind: string | null;
+  /** 最近一次向量化完成时间（0163）；null = 未向量化 */
+  vectorizedAt: string | null;
+  /** AI 上下文开关（0165，人工）：false ⇒ 不参与知识检索 / LLM 注入 */
+  aiContextEnabled?: boolean;
+  /** 关闭原因 */
+  aiContextNote?: string | null;
   createdTime: string;
   updatedTime: string;
 }
@@ -119,6 +131,10 @@ export interface DocumentUpdate {
   owner?: string;
   effectiveDate?: string;
   securityLevel?: string;
+  /** AI 上下文开关（人工）：false ⇒ 不参与知识检索 / LLM 注入 */
+  aiContextEnabled?: boolean;
+  /** 关闭原因（给下一个人看） */
+  aiContextNote?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,14 +145,16 @@ export interface DocEntityRelationRead {
   id: number;
   documentId: string;
   entityType: EntityType;
-  entityKey: number;
+  /** 关联目标的键（字符串：编码 / 类名 / 指标名 / `类名.属性名`） */
+  entityKey: string;
   relationType: DocEntityRelationType;
 }
 
 export interface DocEntityRelationCreate {
   documentId: string;
   entityType: EntityType;
-  entityKey: number;
+  /** 关联目标的键：业务对象编码（D135）/ 类名 / 指标名 / `类名.属性名` */
+  entityKey: string;
   relationType?: DocEntityRelationType;
 }
 

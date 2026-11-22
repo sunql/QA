@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import Depends
@@ -20,6 +21,7 @@ from app.domain.exceptions import ConflictError
 from app.services.messages_zh import MSG_DOCUMENT_CONTENT_EXISTS
 from app.services.document_parser import DocumentParserError, parse_document
 from app.services.chunk_splitter import Chunk, split_by_paragraphs
+from app.services.document_preview_kinds import kindFor
 from app.services.document_service import DocumentService
 from app.services.vector_similarity import distanceToSimilarity
 from app.infrastructure.milvus_client import insertDocumentChunks, searchDocumentChunks
@@ -203,6 +205,11 @@ class RagService:
                     security_level=security_level,
                     storage_url=storageUrl,
                     content_hash=contentHash,
+                    # 0163：原文阅览所需元数据（mime/size/预览类别）
+                    mime_type=mime_type,
+                    file_size=len(content),
+                    preview_kind=kindFor(mime_type, filename),
+                    vectorized_at=datetime.now(timezone.utc),
                 ),
                 actor=actor,
             )
@@ -215,7 +222,14 @@ class RagService:
             await self._doc_svc.updateDocument(
                 session,
                 existing_doc.id,
-                DocumentUpdate(storage_url=storageUrl, content_hash=contentHash),
+                DocumentUpdate(
+                    storage_url=storageUrl,
+                    content_hash=contentHash,
+                    mime_type=mime_type,
+                    file_size=len(content),
+                    preview_kind=kindFor(mime_type, filename),
+                    vectorized_at=datetime.now(timezone.utc),
+                ),
                 actor=actor,
             )
 
@@ -232,6 +246,12 @@ class RagService:
             "status": "ingested",
             "storage_url": storageUrl,
             "content_hash": contentHash,
+            # 0163：原文阅览元数据（前端据此决定预览方式与体积展示）
+            "mime_type": mime_type,
+            "file_size": len(content),
+            "preview_kind": kindFor(mime_type, filename),
+            # 上传路径本身完成了向量化 ⇒ 目录页显示「已向量化」
+            "vectorized_at": datetime.now(timezone.utc).isoformat(),
         }
 
     async def searchDocuments(

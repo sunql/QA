@@ -199,6 +199,7 @@ async def generateQueryPlan(
     wikiRulesBlock: str | None = None,
     kpiContractText: str | None = None,
     kpiContractBlock: str | None = None,
+    documentContext: str | None = None,
     timeScopeFact: str | None = None,
     session: AsyncSession | None = None,
     pinnedReleaseId: int | None = None,
@@ -263,6 +264,7 @@ async def generateQueryPlan(
             kpiContractText=kpiContractText,
             kpiContractBlock=kpiContractBlock,
             timeScopeFact=timeScopeFact,
+            documentContext=documentContext,
         )
         userPrompt = _buildPlanUserPrompt(
             question, errors,

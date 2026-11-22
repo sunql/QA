@@ -6,7 +6,7 @@
  * 3. 语义检索 — 输入问题，从已上传文档中检索相关内容片段
  */
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   Table,
   Button,
@@ -26,6 +26,7 @@ import {
   List,
   Alert,
   DatePicker,
+  Switch,
 } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
 import {
@@ -39,6 +40,12 @@ import {
   listDocuments,
   createDocument,
   updateDocument,
+  fetchDocumentSource,
+  fetchDocumentPreview,
+  vectorizeDocument,
+  listRelationTargets,
+  updateRelation,
+  type RelationTarget,
   deleteDocument,
   uploadDocument,
   listRelations,
@@ -63,6 +70,12 @@ import { useTranslation } from "../i18n";
 import FilterBar from "../components/ontology/FilterBar";
 import type { FilterField } from "../components/ontology/FilterBar";
 import { contains, matchSelect } from "../utils/ontologyFilter";
+import { useTablePagination } from "../utils/useTablePagination";
+import { listBusinessObjects } from "../api/businessObject";
+import {
+  DOCUMENT_UPLOAD_ACCEPT,
+  DOCUMENT_UPLOAD_HINT,
+} from "../utils/uploadAccept";
 import { toIsoDateParam } from "../utils/dateParam";
 import type { FilterValues } from "../utils/ontologyFilter";
 import type { EntityType } from "../types/entityMapping";
@@ -84,6 +97,20 @@ const STATUS_COLOR: Record<string, string> = {
 // ---------------------------------------------------------------------------
 // Document form
 // ---------------------------------------------------------------------------
+
+/** 关联对象类型 → 输入提示（告诉用户「该填什么」而不是让他猜）。 */
+function targetHintFor(entityType: string): string {
+  switch (entityType) {
+    case "ONTOLOGY_CLASS":
+      return "选择本体类（如 DIM_SUPPLIER）；制度/规范类文档通常关联到类";
+    case "ONTOLOGY_METRIC":
+      return "选择指标；指标口径类文档通常关联到指标";
+    case "ONTOLOGY_PROPERTY":
+      return "选择属性（类名.属性名）；字段说明类文档通常关联到属性";
+    default:
+      return "选择具体业务对象实例（编码/名称可搜）";
+  }
+}
 
 interface DocFormValues {
   documentId: string;
@@ -115,13 +142,27 @@ function DocList({
   loading,
   onEdit,
   onDelete,
+  onOpenSource,
+  onPreview,
+  onVectorize,
+  vectorizingId,
+  onToggleAi,
+  togglingAiId,
 }: {
   docs: DocumentRead[];
   loading: boolean;
   onEdit: (record: DocumentRead) => void;
   onDelete: (id: number) => void;
+  onOpenSource: (record: DocumentRead) => void;
+  onPreview: (record: DocumentRead) => void;
+  onVectorize: (record: DocumentRead) => void;
+  vectorizingId: number | null;
+  onToggleAi: (record: DocumentRead, enabled: boolean) => void;
+  togglingAiId: number | null;
 }) {
   const { t } = useTranslation();
+  // 分页与本体管理各 tab 页同口径（useTablePagination：可切页大小 + 快速跳转）
+  const { pagination } = useTablePagination();
 
   const columns = [
     {
@@ -168,10 +209,49 @@ function DocList({
       render: (v: string | null) => v ?? "—",
     },
     {
+      title: "AI 可用",
+      dataIndex: "aiContextEnabled",
+      width: 100,
+      render: (v: boolean | undefined, record: DocumentRead) => (
+        <Switch
+          size="small"
+          checked={v !== false}
+          loading={togglingAiId === record.id}
+          onChange={(checked) => onToggleAi(record, checked)}
+        />
+      ),
+    },
+    {
+      title: "向量化",
+      dataIndex: "vectorizedAt",
+      width: 110,
+      render: (v: string | null) =>
+        v ? (
+          <Tag color="success">{t("document.vectorized")}</Tag>
+        ) : (
+          <Tag color="default">{t("document.notVectorized")}</Tag>
+        ),
+    },
+    {
       title: "操作",
-      width: 140,
+      width: 300,
       render: (_: unknown, record: DocumentRead) => (
-        <Space>
+        <Space wrap>
+          <Button size="small" onClick={() => onOpenSource(record)}>
+            {t("document.viewSource")}
+          </Button>
+          <Button size="small" onClick={() => onPreview(record)}>
+            {t("document.preview")}
+          </Button>
+          {!record.vectorizedAt && (
+            <Button
+              size="small"
+              loading={vectorizingId === record.id}
+              onClick={() => onVectorize(record)}
+            >
+              {t("document.vectorize")}
+            </Button>
+          )}
           <Button size="small" onClick={() => onEdit(record)}>
             {t("common.edit")}
           </Button>
@@ -196,7 +276,7 @@ function DocList({
         dataSource={docs}
         columns={columns}
         scroll={{ x: 1000 }}
-        pagination={{ pageSize: 20 }}
+        pagination={pagination}
       />
     </div>
   );
@@ -210,12 +290,16 @@ function RelationList({
   relations,
   loading,
   onDelete,
+  onEdit,
 }: {
   relations: DocEntityRelationRead[];
   loading: boolean;
   onDelete: (id: number) => void;
+  onEdit: (record: DocEntityRelationRead) => void;
 }) {
   const { t } = useTranslation();
+  // 与本体管理各 tab 页同口径
+  const { pagination } = useTablePagination();
 
   const columns = [
     { title: "文档编号", dataIndex: "documentId", width: 180 },
@@ -236,16 +320,21 @@ function RelationList({
     },
     {
       title: "操作",
-      width: 100,
+      width: 160,
       render: (_: unknown, record: DocEntityRelationRead) => (
-        <Popconfirm
-          title="确认删除此关联？"
-          onConfirm={() => onDelete(record.id)}
-        >
-          <Button size="small" danger>
-            {t("common.delete")}
+        <Space>
+          <Button size="small" onClick={() => onEdit(record)}>
+            {t("common.edit")}
           </Button>
-        </Popconfirm>
+          <Popconfirm
+            title="确认删除此关联？"
+            onConfirm={() => onDelete(record.id)}
+          >
+            <Button size="small" danger>
+              {t("common.delete")}
+            </Button>
+          </Popconfirm>
+        </Space>
       ),
     },
   ];
@@ -258,7 +347,7 @@ function RelationList({
         dataSource={relations}
         columns={columns}
         scroll={{ x: 700 }}
-        pagination={{ pageSize: 20 }}
+        pagination={pagination}
       />
     </div>
   );
@@ -360,6 +449,16 @@ export default function DocumentsPage() {
   // Documents tab
   const [docs, setDocs] = useState<DocumentRead[]>([]);
   const [docLoading, setDocLoading] = useState(false);
+  const [vectorizingId, setVectorizingId] = useState<number | null>(null);
+  // —— 新建关联：可搜索下拉所需状态 ——
+  const [businessObjects, setBusinessObjects] = useState<
+    { code: string; name: string }[]
+  >([]);
+  const [relEntityType, setRelEntityType] = useState<string | undefined>();
+  const [targets, setTargets] = useState<RelationTarget[]>([]);
+  const [editingRel, setEditingRel] = useState<DocEntityRelationRead | null>(null);
+  const [togglingAiId, setTogglingAiId] = useState<number | null>(null);
+  const [targetLoading, setTargetLoading] = useState(false);
   const [docModal, setDocModal] = useState(false);
   const [editingDoc, setEditingDoc] = useState<DocumentRead | null>(null);
   const [docForm] = Form.useForm<DocFormValues>();
@@ -392,6 +491,18 @@ export default function DocumentsPage() {
   useEffect(() => {
     void loadDocs();
   }, [loadDocs]);
+
+  // 业务对象码（关联对象类型下拉的「业务对象」分组）
+  useEffect(() => {
+    void (async () => {
+      try {
+        const rows = await listBusinessObjects();
+        setBusinessObjects(rows.map((row) => ({ code: row.code, name: row.name })));
+      } catch {
+        // 拦截器已提示；类型下拉退化为只有知识对象分组
+      }
+    })();
+  }, []);
 
   // Load relations
   const loadRels = useCallback(async () => {
@@ -430,6 +541,74 @@ export default function DocumentsPage() {
       securityLevel: record.securityLevel,
     });
     setDocModal(true);
+  };
+
+  /** 打开原件（浏览器内联预览/下载）。 */
+  const handleOpenSource = async (record: DocumentRead) => {
+    try {
+      const { url, filename, revoke } = await fetchDocumentSource(record.id);
+      const opened = window.open(url, "_blank");
+      if (!opened) {
+        // 弹窗被拦 ⇒ 退化成下载，用户至少拿到文件
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = filename;
+        anchor.click();
+      }
+      // 延迟回收：浏览器读完 blob 后即可释放
+      window.setTimeout(() => revoke(), 60_000);
+    } catch {
+      // handled by interceptor
+    }
+  };
+
+  /** 统一预览（**必须带鉴权**取 blob：裸 URL 会被后端判「请先登录」）。 */
+  const handlePreview = async (record: DocumentRead) => {
+    try {
+      const { url, revoke } = await fetchDocumentPreview(record.id);
+      const opened = window.open(url, "_blank");
+      if (!opened) {
+        message.warning(t("document.previewBlocked"));
+      }
+      window.setTimeout(() => revoke(), 60_000);
+    } catch {
+      // handled by interceptor
+    }
+  };
+
+  /** 向量化：把已入库文档的原文灌进向量库。 */
+  const handleVectorize = async (record: DocumentRead) => {
+    setVectorizingId(record.id);
+    try {
+      const result = await vectorizeDocument(record.id);
+      void message.success(
+        t("document.vectorizeSuccess", { chunks: result.chunks }),
+      );
+      void loadDocs();
+    } catch {
+      // handled by interceptor
+    } finally {
+      setVectorizingId(null);
+    }
+  };
+
+  /** AI 上下文开关（0165 人工）：关闭后该文档不再参与知识检索 / LLM 注入。 */
+  const handleToggleAi = async (record: DocumentRead, enabled: boolean) => {
+    setTogglingAiId(record.id);
+    try {
+      await updateDocument(record.id, {
+        aiContextEnabled: enabled,
+        aiContextNote: enabled ? null : "运营手工关闭（文本质量/适用范围待确认）",
+      });
+      void message.success(
+        enabled ? t("document.aiEnabled") : t("document.aiDisabled"),
+      );
+      void loadDocs();
+    } catch {
+      // handled by interceptor
+    } finally {
+      setTogglingAiId(null);
+    }
   };
 
   const handleDeleteDoc = async (id: number) => {
@@ -509,7 +688,55 @@ export default function DocumentsPage() {
 
   // Relation handlers
   const openCreateRel = () => {
+    setEditingRel(null);
     void relForm.resetFields();
+    setRelEntityType(undefined);
+    setTargets([]);
+    setRelModal(true);
+  };
+
+  /** 拉候选：类型必传（避免依赖还没更新的 state），关键词可空 ⇒ 可浏览。 */
+  const loadTargets = useCallback((entityType: string, keyword: string) => {
+    setTargetLoading(true);
+    void listRelationTargets({ entityType, q: keyword })
+      .then(setTargets)
+      .catch(() => setTargets([]))
+      .finally(() => setTargetLoading(false));
+  }, []);
+
+  /** 搜索框输入：当前类型 + 关键词（**不做防抖定时器**——antd Select 每次输入都会
+   *  触发；这里用 requestId 丢弃过期响应，避免慢请求覆盖新结果）。 */
+  const targetsRequestId = useRef(0);
+  const searchTargets = useCallback(
+    (keyword: string) => {
+      if (!relEntityType) return;
+      const requestId = ++targetsRequestId.current;
+      setTargetLoading(true);
+      void listRelationTargets({ entityType: relEntityType, q: keyword })
+        .then((rows) => {
+          if (requestId === targetsRequestId.current) setTargets(rows);
+        })
+        .catch(() => {
+          if (requestId === targetsRequestId.current) setTargets([]);
+        })
+        .finally(() => {
+          if (requestId === targetsRequestId.current) setTargetLoading(false);
+        });
+    },
+    [relEntityType],
+  );
+
+  /** 打开「编辑关联」：回填现有值，并拉该类型下的候选（保证当前值有候选）。 */
+  const openEditRel = (record: DocEntityRelationRead) => {
+    setEditingRel(record);
+    setRelEntityType(record.entityType);
+    relForm.setFieldsValue({
+      documentId: record.documentId,
+      entityType: record.entityType,
+      entityKey: record.entityKey,
+      relationType: record.relationType,
+    });
+    loadTargets(record.entityType, record.entityKey);
     setRelModal(true);
   };
 
@@ -522,8 +749,18 @@ export default function DocumentsPage() {
         entityKey: values.entityKey,
         relationType: values.relationType,
       };
-      await createRelation(payload);
-      void message.success(t("toast.created"));
+      if (editingRel) {
+        // 编辑：文档编号不可改（换了文档就是另一条关联，应新增而非改）
+        await updateRelation(editingRel.id, {
+          entityType: payload.entityType,
+          entityKey: payload.entityKey,
+          relationType: payload.relationType,
+        });
+        void message.success(t("toast.updated"));
+      } else {
+        await createRelation(payload);
+        void message.success(t("toast.created"));
+      }
       setRelModal(false);
       void loadRels();
     } catch {
@@ -593,6 +830,12 @@ export default function DocumentsPage() {
             loading={docLoading}
             onEdit={openEditDoc}
             onDelete={handleDeleteDoc}
+            onOpenSource={(record) => void handleOpenSource(record)}
+            onPreview={(record) => void handlePreview(record)}
+            onVectorize={(record) => void handleVectorize(record)}
+            vectorizingId={vectorizingId}
+            onToggleAi={(record, enabled) => void handleToggleAi(record, enabled)}
+            togglingAiId={togglingAiId}
           />
         </TabPane>
 
@@ -616,6 +859,7 @@ export default function DocumentsPage() {
             relations={relations}
             loading={relLoading}
             onDelete={handleDeleteRel}
+            onEdit={openEditRel}
           />
         </TabPane>
 
@@ -714,7 +958,7 @@ export default function DocumentsPage() {
             rules={[{ required: true, message: "请选择文件" }]}
           >
             <Upload.Dragger
-              accept=".pdf,.docx,.doc,.txt,.md"
+              accept={DOCUMENT_UPLOAD_ACCEPT}
               maxCount={1}
               fileList={uploadFile ? [uploadFile] : []}
               beforeUpload={(file) => {
@@ -731,7 +975,7 @@ export default function DocumentsPage() {
               <p>
                 <UploadOutlined />
               </p>
-              <p>点击或拖拽上传 PDF / DOCX / TXT / MD 文件</p>
+              <p>点击或拖拽上传 {DOCUMENT_UPLOAD_HINT} 文件</p>
             </Upload.Dragger>
           </Form.Item>
           <Space.Compact style={{ width: "100%" }}>
@@ -761,46 +1005,103 @@ export default function DocumentsPage() {
 
       {/* Relation create modal */}
       <Modal
-        title="新建文档关联"
+        title={editingRel ? "编辑文档关联" : "新建文档关联"}
         open={relModal}
         onOk={() => void handleCreateRel()}
         onCancel={() => setRelModal(false)}
         okText={t("common.confirm")}
         cancelText={t("common.cancel")}
-        width={480}
+        width={560}
         destroyOnHidden
       >
-        <Form form={relForm} layout="vertical">
+        <Form
+          form={relForm}
+          layout="vertical"
+          onValuesChange={(changed: Record<string, unknown>) => {
+            if ("entityType" in changed) {
+              const nextType = changed.entityType as string | undefined;
+              setRelEntityType(nextType);
+              // 换类型 ⇒ 旧的目标键一定无效（不同命名空间）
+              relForm.setFieldValue("entityKey", undefined);
+              setTargets([]);
+              if (nextType) loadTargets(nextType, "");
+            }
+          }}
+        >
+          {/* 文档：可搜下拉（按编号或名称），不再让用户手打编号 */}
           <Form.Item
             name="documentId"
-            label="文档编号"
-            rules={[{ required: true, message: "必填" }]}
-          >
-            <Input placeholder="如 DOC-2026-001" />
-          </Form.Item>
-          <Form.Item
-            name="entityType"
-            label="实体类型"
-            rules={[{ required: true, message: "必填" }]}
+            label="文档"
+            rules={[{ required: true, message: "请选择文档" }]}
+            extra="可输入文档编号或名称过滤"
           >
             <Select
+              showSearch
+              optionFilterProp="label"
+              disabled={editingRel !== null}
+              placeholder="搜索并选择文档"
+              options={docs.map((doc) => ({
+                value: doc.documentId,
+                label: `${doc.documentId} · ${doc.documentName}`,
+              }))}
+            />
+          </Form.Item>
+
+          {/* 关联对象类型：业务对象码（动态）+ 三类知识对象 */}
+          <Form.Item
+            name="entityType"
+            label="关联对象类型"
+            rules={[{ required: true, message: "请选择类型" }]}
+            extra="一份制度/合同通常关联「本体类 / 指标 / 属性」，而不是某个具体业务单据"
+          >
+            <Select
+              placeholder="选择关联对象类型"
               options={[
-                { value: "SUPPLIER", label: "供应商" },
-                { value: "MATERIAL", label: "物料" },
-                { value: "PO", label: "采购订单" },
-                { value: "GR", label: "收货单" },
-                { value: "IQC", label: "来料检验" },
-                { value: "NCR", label: "不合格处理" },
+                {
+                  label: "本体类（知识）",
+                  options: [
+                    { value: "ONTOLOGY_CLASS", label: "本体类" },
+                    { value: "ONTOLOGY_METRIC", label: "指标" },
+                    { value: "ONTOLOGY_PROPERTY", label: "属性" },
+                  ],
+                },
+                {
+                  label: "业务对象",
+                  options: businessObjects.map((item) => ({
+                    value: item.code,
+                    label: item.name ? `${item.name}（${item.code}）` : item.code,
+                  })),
+                },
               ]}
             />
           </Form.Item>
+
+          {/* 目标键：按类型给可搜索候选（不再让用户猜 enterprise_key） */}
           <Form.Item
             name="entityKey"
-            label="实体键（enterprise_key）"
-            rules={[{ required: true, message: "必填" }]}
+            label="关联对象"
+            rules={[{ required: true, message: "请选择关联对象" }]}
+            extra={
+              relEntityType
+                ? targetHintFor(relEntityType)
+                : "先选类型，再从这里搜索选择"
+            }
           >
-            <Input type="number" placeholder="如 100001" />
+            <Select
+              showSearch
+              filterOption={false}
+              onSearch={(value) => void searchTargets(value)}
+              placeholder={relEntityType ? "输入关键词搜索，或留空浏览前 20 项" : "先选择关联对象类型"}
+              disabled={!relEntityType}
+              loading={targetLoading}
+              options={targets.map((target) => ({
+                value: target.key,
+                label: `${target.label}${target.hint && target.hint !== target.label ? `（${target.hint}）` : ""}`,
+              }))}
+              notFoundContent={targetLoading ? "搜索中…" : "没有匹配项"}
+            />
           </Form.Item>
+
           <Form.Item name="relationType" label="关联类型">
             <Select
               options={DOC_RELATION_TYPE_OPTIONS}

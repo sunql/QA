@@ -3695,6 +3695,16 @@ export const zhCN = {
     resumed: "续问",
     openTrace: "查看执行轨迹",
     tokens: "Tokens"
-  }
+  },
 },
+  document: {
+    viewSource: "原文",
+    preview: "预览",
+    vectorize: "向量化",
+    vectorized: "已向量化",
+    notVectorized: "未向量化",
+    aiEnabled: "已开启：该文档参与知识检索与 AI 回答",
+    aiDisabled: "已关闭：该文档不再参与知识检索与 AI 回答",
+    vectorizeSuccess: "向量化完成：{chunks} 个片段"
+  }
 } as const;

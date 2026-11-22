@@ -249,6 +249,13 @@ class KnowledgeEvidenceSecurity(CamelModel):
     scope: tuple[str, ...] = ()
 
 
+class KnowledgeEntityHintRead(CamelModel):
+    """一条实体提示（`type` + `code`），用于证据的「关联对象」。"""
+
+    type: str
+    code: str
+
+
 class KnowledgeEvidenceRead(CamelModel):
     """一条引用（证据）。
 
@@ -273,6 +280,9 @@ class KnowledgeEvidenceRead(CamelModel):
     #: 一句话结论（§4.2 `summary`）：有可执行结果时含数值；无则 None（不编）
     summary: str | None = None
     snippet: str | None = None
+    #: 该证据关联的业务/知识对象（来自 `document_entity_relation`）。
+    #: LLM 与前端据此知道「这份文档说的是哪个供应商/本体类/指标」。
+    related_entities: tuple["KnowledgeEntityHintRead", ...] = ()
     release_id: int | None = None
     release_version: str | None = None
     source: str = KNOWLEDGE_SOURCE_RELEASE

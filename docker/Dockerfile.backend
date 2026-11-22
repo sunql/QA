@@ -66,6 +66,14 @@ RUN printf 'Types: deb\nURIs: https://mirrors.aliyun.com/debian\nSuites: trixie 
         tesseract-ocr \
         tesseract-ocr-chi-sim \
         poppler-utils \
+        # Office → PDF（文档预览保真）：Excel/Word/PPT 由 LibreOffice 无头转换，
+        # 浏览器原生 PDF 查看器渲染。**不加** libreoffice-core 全家桶：
+        # 只装三个应用包，省掉 Base/Math 等无关组件。
+        libreoffice-calc \
+        libreoffice-writer \
+        libreoffice-impress \
+        # 中文字体（缺少会在转出的 PDF 里显示方框）
+        fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 # 从 builder 复制 venv + 源码 + uv 二进制

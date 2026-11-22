@@ -6,6 +6,8 @@ document_id 业务唯一；storage_url / content_hash 可选（文件上传后�
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -29,8 +31,12 @@ from app.services.messages_zh import (
     MSG_DOCUMENT_DUPLICATE,
     MSG_DOCUMENT_NOT_FOUND,
     MSG_DOCUMENT_REL_EXISTS,
+    MSG_DOCUMENT_REL_INVALID_TARGET,
+    MSG_DOCUMENT_REL_INVALID_TARGET,
     MSG_DOCUMENT_REL_NOT_FOUND,
 )
+
+logger = logging.getLogger(__name__)
 
 _audit = AuditService()
 
@@ -50,6 +56,12 @@ def _duplicateError(document_id: str) -> ConflictError:
 
 def _contentHashDuplicateError() -> ConflictError:
     return ConflictError(MSG_DOCUMENT_CONTENT_DUPLICATE)
+
+
+def _isUniqueViolation(error: IntegrityError) -> bool:
+    """Postgres 唯一冲突判定（23505 / UniqueViolation）。"""
+    text = str(getattr(error, "orig", error))
+    return "23505" in text or "duplicate key value" in text.lower()
 
 
 def _entity_to_dict(entity: DocumentCatalog) -> dict:
@@ -136,6 +148,41 @@ class DocumentService:
 
         return entity
 
+    async def getDocumentByCode(
+        self,
+        session: AsyncSession,
+        documentId: str,
+        user: CurrentUser | None = None,
+    ) -> DocumentCatalog:
+        """按**业务编号**（DOC-xxx）取文档；不存在抛 NotFoundError。
+
+        采购知识检索的证据里 ``sourceRef.documentId`` 存的是业务编号（可读、可
+        引用），而列表主键是自增 id ⇒ 证据要回溯原件时需要按编号再查一次。
+        密级闸与 ``getDocument`` 同口径。
+        """
+        entity = (
+            await session.execute(
+                select(DocumentCatalog).where(
+                    DocumentCatalog.document_id == documentId
+                )
+            )
+        ).scalars().first()
+        if entity is None:
+            raise NotFoundError(MSG_DOCUMENT_NOT_FOUND.format(id=documentId))
+        if user is not None:
+            clearance_levels = await buildClearanceFilter(session, user)
+            entity_level = (
+                entity.security_level.value
+                if hasattr(entity.security_level, "value")
+                else str(entity.security_level)
+            )
+            if entity_level not in clearance_levels:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="您无权查看此文档",
+                )
+        return entity
+
     async def findByContentHash(
         self, session: AsyncSession, content_hash: str
     ) -> DocumentCatalog | None:
@@ -174,6 +221,10 @@ class DocumentService:
             security_level=dto.security_level,
             storage_url=dto.storage_url,
             content_hash=dto.content_hash,
+            mime_type=dto.mime_type,
+            file_size=dto.file_size,
+            preview_kind=dto.preview_kind,
+            vectorized_at=dto.vectorized_at,
         )
         session.add(entity)
         try:
@@ -323,13 +374,89 @@ class DocumentService:
             await session.commit()
         except IntegrityError as exc:
             await session.rollback()
-            raise ConflictError(
-                MSG_DOCUMENT_REL_EXISTS.format(
-                    documentId=dto.document_id,
-                    entityType=dto.entity_type,
-                    entityKey=dto.entity_key,
-                )
-            ) from exc
+            # **只有唯一冲突**才是「已存在」。其他约束（外键/CHECK）若也报
+            # 「已存在」，会把真实原因藏起来（2026-11-22 实测：entity_type
+            # 外键拦住 ONTOLOGY_CLASS，用户看到的是「关联已存在」）
+            if _isUniqueViolation(exc):
+                raise ConflictError(
+                    MSG_DOCUMENT_REL_EXISTS.format(
+                        documentId=dto.document_id,
+                        entityType=dto.entity_type,
+                        entityKey=dto.entity_key,
+                    )
+                ) from exc
+            logger.exception(
+                "创建文档关联失败（非唯一冲突）: doc=%s type=%s key=%s",
+                dto.document_id,
+                dto.entity_type,
+                dto.entity_key,
+            )
+            raise ValidationError(MSG_DOCUMENT_REL_INVALID_TARGET) from exc
+        await session.refresh(entity)
+        return entity
+
+    async def updateRelation(
+        self,
+        session: AsyncSession,
+        id: int,
+        dto: "DocEntityRelationUpdate",
+        actor: CurrentUser | None = None,
+    ) -> DocumentEntityRelation:
+        """更新关联（部分字段）。
+
+        改 ``entity_type`` / ``entity_key`` 等价于「换关联目标」——仍受唯一约束
+        约束（改成已存在的组合 ⇒ 409，而不是静默产生重复行）。
+        """
+        entity = await self.getRelation(session, id)
+        updates = dto.model_dump(exclude_unset=True, exclude_none=True)
+        if not updates:
+            return entity
+        before = {
+            "documentId": entity.document_id,
+            "entityType": entity.entity_type,
+            "entityKey": entity.entity_key,
+            "relationType": str(entity.relation_type),
+        }
+        for key, value in updates.items():
+            setattr(entity, key, value)
+        # rollback 会把 ORM 实例**全部 expire**，之后读属性会触发同步懒加载 ⇒
+        # async 上下文里爆 MissingGreenlet。冲突信息必须在回滚**之前**取好。
+        conflictDocumentId = entity.document_id
+        conflictEntityType = entity.entity_type
+        conflictEntityKey = entity.entity_key
+        try:
+            # ⚠️ 审计写入会 flush ⇒ 唯一冲突可能在**这里**就抛出（早于 commit）。
+            # 放在 try 内才能被翻译成 409，否则冒成 500（2026-11-22 实测）。
+            await _audit.record(
+                session,
+                entity_type="document_entity_relation",
+                entity_id=entity.id,
+                action="UPDATE",
+                actor=getattr(actor, "userId", "system") if actor else "system",
+                actor_departments=tuple(getattr(actor, "departments", ()) or ())
+                if actor
+                else (),
+                before=before,
+                after={
+                    "documentId": entity.document_id,
+                    "entityType": entity.entity_type,
+                    "entityKey": entity.entity_key,
+                    "relationType": str(entity.relation_type),
+                },
+            )
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            if _isUniqueViolation(exc):
+                raise ConflictError(
+                    MSG_DOCUMENT_REL_EXISTS.format(
+                        documentId=conflictDocumentId,
+                        entityType=conflictEntityType,
+                        entityKey=conflictEntityKey,
+                    )
+                ) from exc
+            logger.exception("更新文档关联失败（非唯一冲突）: id=%s", id)
+            raise ValidationError(MSG_DOCUMENT_REL_INVALID_TARGET) from exc
         await session.refresh(entity)
         return entity
 

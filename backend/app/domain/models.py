@@ -709,11 +709,10 @@ class FeatureDefinition(Base, TimestampMixin):
     feature_name: Mapped[str] = mapped_column(String(100), nullable=False)
     feature_alias: Mapped[str | None] = mapped_column(String(200), nullable=True)
     feature_definition: Mapped[str | None] = mapped_column(Text, nullable=True)
-    entity_type: Mapped[str] = mapped_column(
-        String(20),
-        ForeignKey("business_object.code", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # 0164：**去掉外键** —— 关联目标不只有业务对象码，还包括知识对象
+    # （ONTOLOGY_CLASS / ONTOLOGY_METRIC / ONTOLOGY_PROPERTY）。
+    # 合法性由应用层校验（schemas._validateRelationEntityType）。
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False)
     calculation_logic: Mapped[str] = mapped_column(Text, nullable=False)
     window_size: Mapped[str | None] = mapped_column(String(20), nullable=True)
     refresh_frequency: Mapped[FeatureRefreshFrequency] = mapped_column(
@@ -1572,11 +1571,10 @@ class EntityMapping(Base, TimestampMixin):
     __tablename__ = "entity_mapping"
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
-    entity_type: Mapped[str] = mapped_column(
-        String(20),
-        ForeignKey("business_object.code", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # 0164：**去掉外键** —— 关联目标不只有业务对象码，还包括知识对象
+    # （ONTOLOGY_CLASS / ONTOLOGY_METRIC / ONTOLOGY_PROPERTY）。
+    # 合法性由应用层校验（schemas._validateRelationEntityType）。
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False)
     enterprise_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
     enterprise_code: Mapped[str] = mapped_column(String(100), nullable=False)
     source_system: Mapped[SourceSystem] = mapped_column(String(20), nullable=False)
@@ -1807,6 +1805,13 @@ class DocumentCatalog(Base, TimestampMixin):
             "status IN ('ACTIVE','EXPIRED','ARCHIVED')",
             name="ck_document_status",
         ),
+        # 0163：预览类别（TEXT/MARKDOWN/HTML/PDF/OFFICE/IMAGE）——
+        # 落库而非每次推断：推断规则会变，落库后已入库文档的呈现不变。
+        CheckConstraint(
+            "preview_kind IS NULL OR preview_kind IN "
+            "('TEXT','MARKDOWN','HTML','PDF','OFFICE','IMAGE')",
+            name="ck_document_preview_kind",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
@@ -1822,6 +1827,25 @@ class DocumentCatalog(Base, TimestampMixin):
     )
     storage_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # --- 0163：原文阅览 / 向量化状态所需元数据 ---
+    #: 上传时的真实 MIME（wiki 侧也要记；缺失则按扩展名推断）
+    mime_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    #: 字节数（前端显示体积）
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    #: 预览类别（见 services/document_preview_kinds）
+    preview_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    #: 最近一次向量化的完成时间（NULL = 未向量化；目录页据此显示状态，
+    #: 避免 N 行文档 = N 次 Milvus 查询）
+    vectorized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # --- 0165：AI 上下文开关（**人工**判定，不做自动质量判罚）---
+    #: False ⇒ 不参与知识检索 / LLM 注入（运营在文档中心关掉不可信的文档）
+    ai_context_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=sa.true()
+    )
+    #: 为什么关（给下一个人看；可空）
+    ai_context_note: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     def __repr__(self) -> str:
         return (
@@ -1842,11 +1866,10 @@ class DocumentEntityRelation(Base):
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
     document_id: Mapped[str] = mapped_column(String(50), nullable=False)
-    entity_type: Mapped[str] = mapped_column(
-        String(20),
-        ForeignKey("business_object.code", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # 0164：**去掉外键** —— 关联目标不只有业务对象码，还包括知识对象
+    # （ONTOLOGY_CLASS / ONTOLOGY_METRIC / ONTOLOGY_PROPERTY）。
+    # 合法性由应用层校验（schemas._validateRelationEntityType）。
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False)
     entity_key: Mapped[str] = mapped_column(String(100), nullable=False)
     relation_type: Mapped[DocEntityRelationType] = mapped_column(
         String(30), nullable=False
@@ -1856,11 +1879,16 @@ class DocumentEntityRelation(Base):
     )
 
     __table_args__ = (
-        # 注：DB 上**没有** uq_doc_entity_rel。0030 建表时创建过，但 0042
-        # `DROP COLUMN entity_key` 把它级联删除、重建列后未重建 ⇒ 全新库与
-        # 5433 实测都不存在。ORM 曾一直声明它，导致 alembic 提议 ADD。
-        # 这里按 DB 实际情况移除声明；若要真正恢复唯一性，必须先评估重复行并
-        # 写专用迁移（见 Harness/changes/fix-alembic-residual-36/summary.md）。
+        # 0164：补回唯一性（0030 建过、0042 重建列时丢掉了）。没有它，
+        # service 的「SELECT 查重」在并发下挡不住重复关联。
+        Index(
+            "uq_doc_rel_document_entity",
+            "document_id",
+            "entity_type",
+            "entity_key",
+            "relation_type",
+            unique=True,
+        ),
         Index("ix_doc_rel_entity", "entity_type", "entity_key"),
         Index("ix_doc_rel_document", "document_id"),
         CheckConstraint(

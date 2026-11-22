@@ -167,7 +167,9 @@ class StreamQueryMixin:
                 ):
                     yield event
                 return
-        outcome = await self._planAndGenerateSql(session, dto, pc, intent, state)
+        outcome = await self._planAndGenerateSql(
+            session, dto, pc, intent, state, user=user
+        )
         if outcome.sql is None and self._isFollowUpRetryCandidate(dto.question, intent, state):
             # C：短句新查询计划不可回答 → 升级追问重试一次（先 B 多步重跑，再退回
             # 单轮 FOLLOW_UP 状态注入；仍不可回答则走下方固定兜底文案）。
@@ -188,7 +190,7 @@ class StreamQueryMixin:
                     yield event
                 return
             outcome = await self._planAndGenerateSql(
-                session, dto, pc, IntentType.FOLLOW_UP, state
+                session, dto, pc, IntentType.FOLLOW_UP, state, user=user
             )
             if outcome.sql is not None:
                 intent = IntentType.FOLLOW_UP
@@ -444,9 +446,17 @@ class StreamQueryMixin:
         thinkFilter: ThinkStreamFilter | None = (
             ThinkStreamFilter() if await isThinkHideEnabled(session) else None
         )
+        # P1：答案阶段可选注入「文档依据」（CHAT_DOC_CONTEXT=1 时生效；
+        # 关闭时 documentContext=None ⇒ prompt 与原来逐字一致）
+        from app.services.chat_document_context import buildDocumentContext
+
+        documentContext = await buildDocumentContext(
+            session, user, dto.question
+        ) if user is not None else None
         async for chunk, answerConfig, (wastedPt, wastedCt) in self._streamAnswerWithFallback(
             session, dto.sessionId, pc.configs, pc.selected, dto, finalSql, data,
             forced=pc.forcedModel, history=pc.contextPrompt,
+            documentContext=documentContext,
         ):
             answerModelName = answerConfig.model_name
             if chunk.isDone:

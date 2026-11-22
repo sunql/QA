@@ -79,6 +79,23 @@ def _validateBusinessObjectCode(code: str) -> str:
 
 
 BusinessObjectCodeType = Annotated[str, BeforeValidator(_validateBusinessObjectCode)]
+
+
+def _validateRelationEntityType(code: str) -> str:
+    """文档关联的实体类型：业务对象码（注册表校验）**或**三类知识对象。
+
+    知识对象（本体类/指标/属性）不在 ``business_object`` 注册表里——它们是
+    治理元数据而非业务单据。一份制度/合同往往关联的是这类对象，而不是某个
+    具体实体键（2026-11-22 用户反馈）。
+    """
+    from app.services.document_relation_targets import KNOWLEDGE_ENTITY_TYPES
+
+    if code in KNOWLEDGE_ENTITY_TYPES:
+        return code
+    return _validateBusinessObjectCode(code)
+
+
+RelationEntityType = Annotated[str, BeforeValidator(_validateRelationEntityType)]
 """Pydantic annotated type for dynamic BusinessObjectCode validation.
 
 Replaces the hardcoded Literal. Validation is runtime against the business_object
@@ -3109,6 +3126,11 @@ class DocumentCreate(CamelModel):
     security_level: DocumentSecurityLevel = Field(default=DocumentSecurityLevel.L1)
     storage_url: str | None = Field(default=None, max_length=512)
     content_hash: str | None = Field(default=None, max_length=64)
+    # --- 0163：原文阅览所需元数据 ---
+    mime_type: str | None = Field(default=None, max_length=120)
+    file_size: int | None = Field(default=None, ge=0)
+    preview_kind: str | None = Field(default=None, max_length=20)
+    vectorized_at: datetime | None = None
 
 
 class DocumentUpdate(CamelModel):
@@ -3122,6 +3144,13 @@ class DocumentUpdate(CamelModel):
     security_level: DocumentSecurityLevel | None = Field(default=None)
     storage_url: str | None = Field(default=None, max_length=512)
     content_hash: str | None = Field(default=None, max_length=64)
+    mime_type: str | None = Field(default=None, max_length=120)
+    file_size: int | None = Field(default=None, ge=0)
+    preview_kind: str | None = Field(default=None, max_length=20)
+    vectorized_at: datetime | None = None
+    # --- 0165：AI 上下文开关（人工）---
+    ai_context_enabled: bool | None = None
+    ai_context_note: str | None = Field(default=None, max_length=200)
 
 
 class DocumentRead(CamelModel):
@@ -3137,6 +3166,12 @@ class DocumentRead(CamelModel):
     security_level: DocumentSecurityLevel
     storage_url: str | None = None
     content_hash: str | None = None
+    mime_type: str | None = None
+    file_size: int | None = None
+    preview_kind: str | None = None
+    vectorized_at: datetime | None = None
+    ai_context_enabled: bool = True
+    ai_context_note: str | None = None
     created_time: datetime
     updated_time: datetime
 
@@ -3144,16 +3179,24 @@ class DocumentRead(CamelModel):
 class DocEntityRelationCreate(CamelModel):
     """创建文档-实体关联的请求体（Phase 5.1 + entity_key VARCHAR）。"""
     document_id: str = Field(..., min_length=1, max_length=50)
-    entity_type: BusinessObjectCodeType = Field(...)
+    entity_type: RelationEntityType = Field(...)
     entity_key: str = Field(..., min_length=1, max_length=100)
     relation_type: DocEntityRelationType = Field(default=DocEntityRelationType.CONTRACT)
+
+
+class DocEntityRelationUpdate(CamelModel):
+    """更新文档-实体关联（所有字段可选，只改传了的）。"""
+
+    entity_type: RelationEntityType | None = Field(default=None)
+    entity_key: str | None = Field(default=None, min_length=1, max_length=100)
+    relation_type: DocEntityRelationType | None = Field(default=None)
 
 
 class DocEntityRelationRead(CamelModel):
     """文档-实体关联响应（Phase 5.1 + entity_key VARCHAR）。"""
     id: int
     document_id: str
-    entity_type: BusinessObjectCodeType
+    entity_type: RelationEntityType
     entity_key: str
     relation_type: DocEntityRelationType
 

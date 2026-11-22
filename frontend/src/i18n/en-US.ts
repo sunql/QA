@@ -3692,6 +3692,16 @@ export const enUS = {
     resumed: "Follow-up",
     openTrace: "Open trace",
     tokens: "Tokens"
-  }
+  },
 },
+  document: {
+    viewSource: "Source",
+    preview: "Preview",
+    vectorize: "Vectorize",
+    vectorized: "Vectorized",
+    notVectorized: "Not vectorized",
+    aiEnabled: "Enabled: this document is used in knowledge retrieval and AI answers",
+    aiDisabled: "Disabled: this document is excluded from knowledge retrieval and AI answers",
+    vectorizeSuccess: "Vectorized: {chunks} chunks"
+  }
 } as const;

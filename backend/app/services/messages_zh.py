@@ -948,3 +948,19 @@ MSG_COPILOT_CONVERSATION_AGENT_MISMATCH = (
 MSG_COPILOT_CONVERSATION_TOO_MANY_TURNS = (
     "本会话已达到 {limit} 轮上限，请开一个新会话继续"
 )
+
+# --- 文档源文件（原文阅览）——三档错误语义，处置动作不同 -----------------------
+MSG_DOCUMENT_SOURCE_NOT_FOUND = "文档 {id} 没有可阅览的源文件（未上传或已被清理）"
+MSG_DOCUMENT_SOURCE_UNAVAILABLE = "源文件存储暂时不可用，请稍后重试"
+
+# --- 文档向量化（把已入库文档灌进 document_embeddings）------------------------
+MSG_DOCUMENT_VECTORIZE_FORBIDDEN = (
+    "只有文档归属部门的成员或管理员可以执行向量化（该操作会消耗模型额度）"
+)
+MSG_DOCUMENT_VECTORIZE_NO_SOURCE = "该文档没有源文件，无法向量化（请重新上传）"
+
+# --- 文档关联（0164：目标可以是业务对象或知识对象）----------------------------
+MSG_DOCUMENT_REL_INVALID_TARGET = (
+    "关联目标不合法：实体类型必须是业务对象码，或本体类/指标/属性"
+    "（ONTOLOGY_CLASS / ONTOLOGY_METRIC / ONTOLOGY_PROPERTY）"
+)

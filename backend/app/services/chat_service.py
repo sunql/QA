@@ -395,6 +395,26 @@ def _prepareEscapeHatchFormula(
     return cast(str, prepared.formula), None
 
 
+async def _documentContextForPlan(
+    session: Any,
+    user: CurrentUser | None,
+    sub_question: str | None,
+    question: str,
+) -> str | None:
+    """P2：计划阶段口径注入（**失败隔离**：增强项不许打挂问答）。"""
+    if user is None:
+        return None
+    try:
+        from app.services.chat_document_context import buildDocumentContext
+
+        return await buildDocumentContext(
+            session, user, sub_question or question, forSql=True
+        )
+    except Exception:  # noqa: BLE001 —— 文档口径是增强项
+        logger.warning("文档口径注入失败（忽略，不影响 SQL 生成）", exc_info=True)
+        return None
+
+
 class ChatService(
     RecallMixin, MultiStepMixin, MultiStepPersistMixin,
     StreamEntryMixin, StreamShortcutMixin, StreamQueryMixin, StreamMultiStepMixin, StreamPersistMixin,
@@ -1189,6 +1209,7 @@ class ChatService(
         global_filters: GlobalFilters | None = None,
         pinned_release_id: int | None = None,
         direct_only: bool = False,
+        user: CurrentUser | None = None,
     ) -> _SqlOutcome:
         """ReAct 两阶段（计划→校验→SQL）+ REFINE 捷径 + 降级 + 用量记录。
 
@@ -1265,6 +1286,12 @@ class ChatService(
         # 别把这里的异常处理搬到调用点。
         kpi_contract_block = await self._collectKpiContractBlock(session, question)
 
+        # P2：SQL/计划阶段可选注入口径（**独立开关** CHAT_DOC_CONTEXT_SQL，默认关）。
+        # 只在计划阶段注入：它决定选类/聚合/分组，口径在这里最有用；
+        # SQL 阶段沿用计划结果，不重复注入（省 token，也避免两处口径不一致）。
+        planDocumentContext = await _documentContextForPlan(
+            session, user, sub_question, dto.question
+        )
         (planResult, sqlResult), sqlConfig, (wastedPt, wastedCt) = await self._callWithFallback(
             session, dto.sessionId, pc.configs, pc.selected, "nl2sql",
             lambda cfg: self._twoStageGenerate(
@@ -1288,6 +1315,8 @@ class ChatService(
                 wikiRulesBlock=wiki_block,
                 # ★ KPI 口径契约（Tier B）：业务方签字的口径规范，注入计划 system prompt。
                 kpiContractBlock=kpi_contract_block,
+                # ★ P2：制度/规范口径（独立开关 CHAT_DOC_CONTEXT_SQL）注入计划 prompt。
+                documentContext=planDocumentContext,
                 # 魔数治理 Phase 2 hard tier：session 传入让 nl2sql 编排层现读阈值。
                 session=session,
                 # P2 D16：钉住那一版语义发布（运行记录 → 钉住）。
@@ -1653,6 +1682,7 @@ class ChatService(
         globalFiltersText: str | None = None,
         wikiRulesBlock: str | None = None,
         kpiContractBlock: str | None = None,
+        documentContext: str | None = None,
         session: Any = None,
         pinnedReleaseId: int | None = None,
         directOnly: bool = False,
@@ -1691,6 +1721,7 @@ class ChatService(
             globalFiltersText=globalFiltersText,
             wikiRulesBlock=wikiRulesBlock,
             kpiContractBlock=kpiContractBlock,
+            documentContext=documentContext,
             session=session,
             pinnedReleaseId=pinnedReleaseId,
             directOnly=directOnly,
@@ -2404,6 +2435,7 @@ class ChatService(
         data: list[dict],
         history: str = "",
         full_data_threshold: int | None = None,
+        documentContext: str | None = None,
     ) -> str:
         """构造回答阶段的 user prompt；history 为最近对话历史（1-5，可为空串）。
 
@@ -2418,6 +2450,10 @@ class ChatService(
         full_data_threshold（Task 2）：FULL_DATA_THRESHOLD 迁 system_config 后，
         由持 session 的调用方现读后传入；None 时 summarize_data 回落模块默认。
         本方法是 @staticmethod（无 session），不在此读 DB。
+
+        documentContext（P1）：文档依据小节（已格式化）。None/空串 ⇒ prompt 与
+        原来**逐字一致**（开关关闭时行为不变）。数据优先规则写在
+        ``chat_document_context.answerPromptSection``。
         """
         summaryDict = summarize_data(data, fullDataThreshold=full_data_threshold)
         summary = json.dumps(summaryDict, ensure_ascii=False, default=str)
@@ -2448,6 +2484,8 @@ class ChatService(
         safeQuestion = wrapUntrusted(UntrustedLabel.USER_QUESTION, question)
         safeSql = wrapUntrusted(UntrustedLabel.SQL_RESULT, sql)
         safeData = wrapUntrusted(UntrustedLabel.DATA_SUMMARY, summary)
+        from app.services.chat_document_context import answerPromptSection
+
         return (
             f"{renderSecurityPreamble()}\n\n"
             f"用户问题：\n{safeQuestion}\n\n"
@@ -2456,6 +2494,7 @@ class ChatService(
             f"{truncationNote}"
             f"{emptyHint}"
             f"{historyPart}"
+            f"{answerPromptSection(documentContext)}"
         )
 
     @staticmethod

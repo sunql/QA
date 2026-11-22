@@ -27,6 +27,28 @@ from app.services.research_sql_runner import assertReadonlySql
 _MAX_LIMIT = 50
 
 
+def _col(row: Any, name: str) -> Any:
+    """**大小写不敏感**地取列值。
+
+    ⚠️ 为什么必须这样：Oracle 的 ``cursor.description`` 返回大写标识符，而
+    ``business_db_pool`` 统一把它们**小写化**（见该文件 :698）⇒ 用大写 key
+    去 get **永远拿到 None**。
+
+    2026-11-22 实测踩到：``quotation_query`` / ``purchase_history`` 两个
+    工具从 Oracle 取到行后，``row.get("SUPPLIER_CODE")`` 全是 None ⇒
+    **它们在生产上从没返回过真实数据**（一直返回"命中 0 条"）。
+    """
+    if not isinstance(row, dict):
+        return None
+    if name in row:
+        return row[name]
+    lowered = name.lower()
+    for key, value in row.items():
+        if isinstance(key, str) and key.lower() == lowered:
+            return value
+    return None
+
+
 def _camelRow(row: Any) -> dict[str, Any]:
     """entity_mapping 行 → camelCase dict（与 API 契约对齐）。"""
     return {
@@ -301,13 +323,15 @@ def _ensureActive(ds: DataSource) -> None:
 
 
 def _camelHistoryRow(row: dict[str, Any]) -> dict[str, Any]:
+    """Oracle 行 → camelCase（列名大小写不敏感，见 ``_col``）。"""
+    creationDate = _col(row, "CREATION_DATE")
     return {
-        "supplierCode": row.get("SUPPLIER_CODE"),
-        "poNo": row.get("PO_NO"),
-        "materialCode": row.get("MATERIAL_CODE"),
-        "orderQty": row.get("ORDER_QTY"),
-        "unitPrice": row.get("UNIT_PRICE"),
-        "creationDate": str(row.get("CREATION_DATE")) if row.get("CREATION_DATE") else None,
+        "supplierCode": _col(row, "SUPPLIER_CODE"),
+        "poNo": _col(row, "PO_NO"),
+        "materialCode": _col(row, "MATERIAL_CODE"),
+        "orderQty": _col(row, "ORDER_QTY"),
+        "unitPrice": _col(row, "UNIT_PRICE"),
+        "creationDate": str(creationDate) if creationDate else None,
     }
 
 
@@ -334,22 +358,32 @@ def buildQuotationSql(
     if segmentYear:
         conds.append(f"SEG_YEAR = {int(segmentYear)}")
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    # CURRENCY_CODE / UOM / PRICE_LIST_CODE 一并取：**比价时要按报价单分
+    # （含税/不含税）、按单位分组**（2026-11-22 实测得出）。
     return (
         f"SELECT SUPPLIER_CODE, ITEM_CODE, SEG_YEAR, UNIT_PRICE_EX_TAX, "
-        f"SEG_START_DATE, SEG_END_DATE FROM DWD_PURCHASE_QUOTATION_YEARLY_DTL"
+        f"SEG_START_DATE, SEG_END_DATE, CURRENCY_CODE, UOM, PRICE_LIST_CODE "
+        f"FROM DWD_PURCHASE_QUOTATION_YEARLY_DTL"
         f"{where} ORDER BY SEG_YEAR DESC, ITEM_CODE "
         f"FETCH FIRST {limit} ROWS ONLY"
     )
 
 
 def _camelQuotationRow(row: dict[str, Any]) -> dict[str, Any]:
+    """Oracle 行 → camelCase（列名大小写不敏感，见 ``_col``）。"""
+    segmentStart = _col(row, "SEG_START_DATE")
+    segmentEnd = _col(row, "SEG_END_DATE")
     return {
-        "supplierCode": row.get("SUPPLIER_CODE"),
-        "itemCode": row.get("ITEM_CODE"),
-        "segmentYear": row.get("SEG_YEAR"),
-        "unitPriceExTax": row.get("UNIT_PRICE_EX_TAX"),
-        "segmentStart": str(row.get("SEG_START_DATE")) if row.get("SEG_START_DATE") else None,
-        "segmentEnd": str(row.get("SEG_END_DATE")) if row.get("SEG_END_DATE") else None,
+        "supplierCode": _col(row, "SUPPLIER_CODE"),
+        "itemCode": _col(row, "ITEM_CODE"),
+        "segmentYear": _col(row, "SEG_YEAR"),
+        "unitPriceExTax": _col(row, "UNIT_PRICE_EX_TAX"),
+        # 真数据里还有币种与单位（2026-11-22 实测：DWD_PURCHASE_QUOTATION_YEARLY_DTL
+        # 有 currency_code=CNY / uom=UN）——带上，比价时才能判「同币种同单位」
+        "currency": _col(row, "CURRENCY_CODE"),
+        "uom": _col(row, "UOM"),
+        "segmentStart": str(segmentStart) if segmentStart else None,
+        "segmentEnd": str(segmentEnd) if segmentEnd else None,
     }
 
 
@@ -387,6 +421,54 @@ async def quotationQueryHandler(
     )
 
 
+async def policyComplianceHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """`policy_compliance_check`：把一条**结论/做法**拿去比对企业制度文档。
+
+    P3 的用途（见评估文档）：Copilot 给出"数据结论"后，用本工具回答
+    「这么做合不合规 / 制度怎么说」，从而给出三段式：
+    **数据值 + 文档依据 + 是否一致**。
+
+    密级闸 fail-closed：ctx.user 缺失（且无法按 actor 还原）⇒ 不检索。
+    """
+    claim = str(args.get("claim") or args.get("question") or "").strip()
+    if not claim:
+        return ToolResult(
+            data={"evidence": []}, answer="请提供要核对的结论或做法（claim）。"
+        )
+    user = await _resolveToolUser(session, ctx)
+    if user is None:
+        return ToolResult(
+            data={"evidence": []},
+            answer="无法核验文档密级（缺少用户身份）⇒ 不执行制度核对；请经带身份的入口使用。",
+        )
+    limit = int(args.get("topK") or args.get("limit") or 3)
+    evidence = await searchProcurementDocuments(
+        session, user, query=claim, topK=max(1, min(limit, 10))
+    )
+    if not evidence:
+        return ToolResult(
+            data={"evidence": [], "compliant": None},
+            answer=f"未检索到与「{claim}」相关的制度条款，无法判定合规性（不要臆测）。",
+        )
+    payload = [e.model_dump(mode="json", by_alias=True) for e in evidence]
+    related = sorted(
+        {
+            f"{entity.type}:{entity.code}"
+            for item in evidence
+            for entity in getattr(item, "related_entities", ())
+        }
+    )
+    return ToolResult(
+        data={"evidence": payload, "relatedEntities": related, "compliant": None},
+        answer=(
+            f"找到 {len(evidence)} 条相关制度条款，请据此说明「制度怎么说、"
+            f"与当前结论是否一致」；若两者冲突，以**查询数据**为准并指出冲突。"
+        ),
+    )
+
+
 async def _resolveToolUser(session: AsyncSession, ctx: AgentToolContext) -> Any | None:
     """工具侧用户身份：优先 ctx.user；否则按 ``ctx.actor``（用户名）还原。
 
@@ -412,8 +494,11 @@ def buildQuotationCompareSql(itemCodes: list[str], segmentYear: int) -> str:
     """多物料年度报价 SQL（确定性）：一次取齐同年度、指定物料的全部供应商报价。"""
     items = [code for code in dict.fromkeys(itemCodes) if code][:_COMPARE_MAX_ITEMS]
     quoted = ", ".join(f"'{_esc(code)}'" for code in items)
+    # PRICE_LIST_CODE / UOM / CURRENCY_CODE 必须取：比价要按报价单分（含税/
+    # 不含税不可混比）、按单位分组（2026-11-22 实测得出）。
     return (
-        f"SELECT SUPPLIER_CODE, ITEM_CODE, SEG_YEAR, UNIT_PRICE_EX_TAX "
+        f"SELECT SUPPLIER_CODE, ITEM_CODE, SEG_YEAR, UNIT_PRICE_EX_TAX, "
+        f"PRICE_LIST_CODE, UOM, CURRENCY_CODE "
         f"FROM DWD_PURCHASE_QUOTATION_YEARLY_DTL "
         f"WHERE SEG_YEAR = {int(segmentYear)} AND ITEM_CODE IN ({quoted}) "
         f"ORDER BY ITEM_CODE, SUPPLIER_CODE"
@@ -472,6 +557,10 @@ async def quotationCompareHandler(
             "segmentYear": group.segmentYear,
             "currency": group.currency,
             "priceBasis": group.priceBasis,
+            # 分组口径必须随结果出去（前端要能告诉用户「这是在哪个报价单、
+            # 哪个单位口径下比的」）
+            "priceListCode": group.priceListCode,
+            "uom": group.uom,
             "lowestPrice": str(group.lowestPrice),
             "medianPrice": str(group.medianPrice),
             "spreadPct": str(group.spreadPct),
@@ -616,11 +705,11 @@ async def purchaseHistoryHandler(
     summary = summaryRows[0] if summaryRows else {}
     rows = [_camelHistoryRow(r) for r in detailRows]
     camelSummary = {
-        "orderCount": summary.get("ORDER_COUNT"),
-        "totalQty": summary.get("TOTAL_QTY"),
-        "minPrice": summary.get("MIN_PRICE"),
-        "maxPrice": summary.get("MAX_PRICE"),
-        "avgPrice": summary.get("AVG_PRICE"),
+        "orderCount": _col(summary, "ORDER_COUNT"),
+        "totalQty": _col(summary, "TOTAL_QTY"),
+        "minPrice": _col(summary, "MIN_PRICE"),
+        "maxPrice": _col(summary, "MAX_PRICE"),
+        "avgPrice": _col(summary, "AVG_PRICE"),
     }
     return ToolResult(
         data={"via": "business_db", "datasourceId": ds.id, "summary": camelSummary, "rows": rows},

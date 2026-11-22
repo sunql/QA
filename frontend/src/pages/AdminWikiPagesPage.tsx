@@ -30,6 +30,7 @@ import {
 } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
 import { useTranslation } from "../i18n";
+import { useTablePagination } from "../utils/useTablePagination";
 import {
     batchDeleteWikiPages,
     createWikiPage,
@@ -82,7 +83,6 @@ const STAGE_LABEL: Record<string, string> = {
 // 现状：status 字段不参与 learning_feedback 写回，所以「跳过中间档」不会污染
 // 学习闭环；历史状态变迁在 wiki_page 表的 updated_at 上有迹可查，
 // 不依赖强约束的状态机来兜底（见 wiki_page_service.updatePage）。
-const PAGE_SIZE = 20;
 
 interface CreateFormValues {
     title: string;
@@ -121,8 +121,21 @@ export default function AdminWikiPagesPage() {
 
     const [rows, setRows] = useState<WikiPage[]>([]);
     const [total, setTotal] = useState(0);
-    const [page, setPage] = useState(0);
     const [loading, setLoading] = useState(false);
+    // 分页与本体管理各 tab 页同口径（useTablePagination，服务端模式）。
+    // 换页大小回到第 1 页（服务端分页下当前页可能越界）。
+    const { pagination: basePagination, state: pageState } = useTablePagination({
+        serverTotal: total,
+    });
+    const pagination = {
+        ...basePagination,
+        onChange: (current: number, pageSize: number) => {
+            basePagination.onChange?.(
+                pageSize !== pageState.pageSize ? 1 : current,
+                pageSize,
+            );
+        },
+    };
 
     const [dimensionFilter, setDimensionFilter] = useState<
         KnowledgeDimension | undefined
@@ -191,14 +204,14 @@ export default function AdminWikiPagesPage() {
                 ? await searchWikiPages({
                       query: effectiveQuery,
                       dimension: dimensionFilter,
-                      limit: PAGE_SIZE,
-                      offset: page * PAGE_SIZE,
+                      limit: pageState.pageSize,
+                      offset: (pageState.current - 1) * pageState.pageSize,
                   })
                 : await listWikiPages({
                       dimension: dimensionFilter,
                       status: statusFilter,
-                      limit: PAGE_SIZE,
-                      offset: page * PAGE_SIZE,
+                      limit: pageState.pageSize,
+                      offset: (pageState.current - 1) * pageState.pageSize,
                   });
             setRows(res.rows);
             setTotal(res.total);
@@ -208,7 +221,16 @@ export default function AdminWikiPagesPage() {
         } finally {
             setLoading(false);
         }
-    }, [dimensionFilter, statusFilter, page, searchQuery, searchMode, message, t]);
+    }, [
+        dimensionFilter,
+        statusFilter,
+        pageState.current,
+        pageState.pageSize,
+        searchQuery,
+        searchMode,
+        message,
+        t,
+    ]);
 
     useEffect(() => {
         void fetchList();
@@ -330,10 +352,13 @@ export default function AdminWikiPagesPage() {
                 type: res.notFound.length > 0 ? "warning" : "success",
                 text: `${summary}${missing}`,
             });
-            if (page > 0 && res.deletedPageIds.length >= rows.length) {
+            if (
+                pageState.current > 1 &&
+                res.deletedPageIds.length >= rows.length
+            ) {
                 // 当前页被整页删空 → 回第一页。只 setPage 不 fetchList：page 变化会
                 // 触发 useEffect 重新拉取，两个都做会多发一次请求。
-                setPage(0);
+                basePagination.onChange?.(1, pageState.pageSize);
             } else {
                 void fetchList();
             }
@@ -344,7 +369,7 @@ export default function AdminWikiPagesPage() {
         } finally {
             setBatchDeleting(false);
         }
-    }, [selectedPageIds, page, rows.length, fetchList, t]);
+    }, [selectedPageIds, pageState.current, rows.length, fetchList, t]);
 
     /**
      * 行多选。
@@ -536,7 +561,7 @@ export default function AdminWikiPagesPage() {
                     value={searchMode}
                     onChange={(v) => {
                         setSearchMode(v as "semantic" | "keyword");
-                        setPage(0);
+                        basePagination.onChange?.(1, pageState.pageSize);
                         setSemanticHits(null);
                     }}
                     options={[
@@ -552,7 +577,7 @@ export default function AdminWikiPagesPage() {
                     value={searchInput}
                     onChange={(e) => setSearchInput(e.target.value)}
                     onSearch={(v) => {
-                        setPage(0);
+                        basePagination.onChange?.(1, pageState.pageSize);
                         setSearchQuery(v);
                     }}
                 />
@@ -563,7 +588,7 @@ export default function AdminWikiPagesPage() {
                     placeholder={t("wikiPages.filters.dimension")}
                     value={dimensionFilter}
                     onChange={(v: KnowledgeDimension | undefined) => {
-                        setPage(0);
+                        basePagination.onChange?.(1, pageState.pageSize);
                         setDimensionFilter(v);
                     }}
                     options={dimensionOptions}
@@ -576,7 +601,7 @@ export default function AdminWikiPagesPage() {
                     placeholder={t("wikiPages.filters.status")}
                     value={statusFilter}
                     onChange={(v: WikiPageStatus | undefined) => {
-                        setPage(0);
+                        basePagination.onChange?.(1, pageState.pageSize);
                         setStatusFilter(v);
                     }}
                     options={WIKI_PAGE_STATUSES.map((s) => ({
@@ -622,13 +647,7 @@ export default function AdminWikiPagesPage() {
                     columns={columns}
                     rowSelection={rowSelection}
                     dataSource={rows}
-                    pagination={{
-                        current: page + 1,
-                        pageSize: PAGE_SIZE,
-                        total,
-                        showSizeChanger: false,
-                        onChange: (p) => setPage(p - 1),
-                    }}
+                    pagination={pagination}
                     locale={{ emptyText: t("wikiPages.empty") }}
                 />
             )}

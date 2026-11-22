@@ -69,7 +69,11 @@ async def parse_document(content: bytes, mime_type: str, filename: str) -> list[
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
     if mime_type == "text/plain" or ext in ("txt", "md", "markdown"):
-        return _parsePlainText(content.decode("utf-8", errors="replace"))
+        # 编码探测：GBK/GB18030 的 txt 若按 UTF-8 解码，**入库切块也是乱码**
+        # （比预览乱码更糟：检索会命中一堆乱码片段）
+        from app.services.text_encoding import decodeText
+
+        return _parsePlainText(decodeText(content))
 
     if mime_type == "application/pdf" or ext == "pdf":
         return _parsePdf(content)

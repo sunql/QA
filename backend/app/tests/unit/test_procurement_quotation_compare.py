@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.procurement_quotation_compare import (
+    EX_TAX_PRICE_LIST_CODES,
     FLAG_ABOVE,
     FLAG_BELOW,
     FLAG_NORMAL,
@@ -24,12 +25,22 @@ from app.services.procurement_quotation_compare import (
 )
 
 
-def _q(supplier: str, price: str, *, item: str = "ITM-1", year: int = 2026) -> QuotationQuote:
+def _q(
+    supplier: str,
+    price: str,
+    *,
+    item: str = "ITM-1",
+    year: int = 2026,
+    priceList: str = "T21",
+    uom: str = "KG",
+) -> QuotationQuote:
     return QuotationQuote(
         supplierCode=supplier,
         itemCode=item,
         segmentYear=year,
         unitPriceExTax=Decimal(price),
+        priceListCode=priceList,
+        uom=uom,
     )
 
 
@@ -47,11 +58,12 @@ def test_toDecimal_rejects_invalid_without_guessing() -> None:
 
 
 def test_quotesFromRows_drops_rows_without_price_or_code() -> None:
+    # 用**小写**列名：与真实链路一致（business_db_pool 统一小写化 Oracle 列名）
     rows = [
-        {"SUPPLIER_CODE": "S1", "ITEM_CODE": "I1", "SEG_YEAR": 2026, "UNIT_PRICE_EX_TAX": "10"},
-        {"SUPPLIER_CODE": "S2", "ITEM_CODE": "I1", "SEG_YEAR": 2026, "UNIT_PRICE_EX_TAX": None},
-        {"SUPPLIER_CODE": "", "ITEM_CODE": "I1", "SEG_YEAR": 2026, "UNIT_PRICE_EX_TAX": "9"},
-        {"SUPPLIER_CODE": "S3", "ITEM_CODE": "I1", "SEG_YEAR": "2026", "UNIT_PRICE_EX_TAX": "bad"},
+        {"supplier_code": "S1", "item_code": "I1", "seg_year": 2026, "unit_price_ex_tax": "10"},
+        {"supplier_code": "S2", "item_code": "I1", "seg_year": 2026, "unit_price_ex_tax": None},
+        {"supplier_code": "", "item_code": "I1", "seg_year": 2026, "unit_price_ex_tax": "9"},
+        {"supplier_code": "S3", "item_code": "I1", "seg_year": "2026", "unit_price_ex_tax": "bad"},
     ]
 
     quotes = quotesFromRows(rows)
@@ -148,8 +160,11 @@ async def test_quotation_compare_handler_returns_groups(monkeypatch) -> None:
     class _Adapter:
         async def execute_read_only(self, sql: str):
             return [
-                {"SUPPLIER_CODE": "S1", "ITEM_CODE": "ITM-1", "SEG_YEAR": 2026, "UNIT_PRICE_EX_TAX": "80"},
-                {"SUPPLIER_CODE": "S2", "ITEM_CODE": "ITM-1", "SEG_YEAR": 2026, "UNIT_PRICE_EX_TAX": "120"},
+                # 小写列名（真实链路：business_db_pool 统一小写化）
+                {"supplier_code": "S1", "item_code": "ITM-1", "seg_year": 2026,
+                 "unit_price_ex_tax": "80", "price_list_code": "T21", "uom": "KG"},
+                {"supplier_code": "S2", "item_code": "ITM-1", "seg_year": 2026,
+                 "unit_price_ex_tax": "120", "price_list_code": "T21", "uom": "KG"},
             ]
 
     async def _fakeResolve(session, ctx):
@@ -182,3 +197,98 @@ async def test_quotation_compare_handler_requires_inputs() -> None:
         None, {"itemKeys": ["ITM-1"]}, SimpleNamespace()
     )
     assert noYear.data["groups"] == [] and "segmentYear" in noYear.answer
+
+
+# ---------------------------------------------------------------------------
+# 真数据口径（2026-11-22 连 THBI Oracle 实测 50,599 行后修订）
+# ---------------------------------------------------------------------------
+
+
+def test_taxPriceListsAreFilteredOutByDefault() -> None:
+    """含税价报价单（T20/T10）必须排除——同一列装的是含税价。"""
+    groups = buildComparison(
+        [
+            _q("S1", "100", priceList="T21"),   # 不含税价
+            _q("S2", "113", priceList="T20"),   # 含税价（不可混比）
+        ]
+    )
+
+    assert len(groups) == 1
+    assert groups[0].priceListCode == "T21"
+    assert [r.supplierCode for r in groups[0].rows] == ["S1"]
+
+
+def test_priceListFilterCanBeDisabled() -> None:
+    """显式不过滤时两组分开（调用方明确知道自己在比什么）。"""
+    groups = buildComparison(
+        [
+            _q("S1", "100", priceList="T21"),
+            _q("S2", "113", priceList="T20"),
+        ],
+        priceListCodes=None,
+    )
+
+    assert {g.priceListCode for g in groups} == {"T21", "T20"}
+
+
+def test_differentUomAreNotComparedTogether() -> None:
+    """不同单位不可比（实测同物料多 UOM = 0，但分组仍要按它切）。"""
+    groups = buildComparison(
+        [
+            _q("S1", "10", uom="KG"),
+            _q("S2", "20", uom="PCS"),
+        ]
+    )
+
+    assert len(groups) == 2
+    assert {g.uom for g in groups} == {"KG", "PCS"}
+
+
+def test_duplicateRowsAreDeduped() -> None:
+    """实测 6,270 组完全重复行 ⇒ 重复会扭曲中位价与供应商家数。"""
+    groups = buildComparison([_q("S1", "100"), _q("S1", "100"), _q("S2", "120")])
+
+    assert len(groups) == 1
+    assert [r.supplierCode for r in groups[0].rows] == ["S1", "S2"]
+    assert groups[0].medianPrice == Decimal("110")
+
+
+def test_quotesFromRows_readsRealOracleColumns() -> None:
+    """真数据列名是**小写**（business_db_pool 统一小写化）⇒ 取值必须不敏感。"""
+    rows = [
+        {
+            "supplier_code": "B024",
+            "item_code": "502226100001",
+            "seg_year": 2026,
+            "unit_price_ex_tax": 0.174,
+            "price_list_code": "T21",
+            "uom": "UN",
+            "currency_code": "CNY",
+        }
+    ]
+
+    quotes = quotesFromRows(rows)
+
+    assert len(quotes) == 1
+    assert quotes[0].supplierCode == "B024"
+    assert quotes[0].unitPriceExTax == Decimal("0.174")
+    assert quotes[0].priceListCode == "T21"
+    assert quotes[0].uom == "UN"
+    assert quotes[0].currency == "CNY"
+
+
+def test_exTaxPriceListCodesCoverBothRealPriceLists() -> None:
+    assert EX_TAX_PRICE_LIST_CODES == frozenset({"T21", "T11"})
+
+
+def test_col_accessor_isCaseInsensitive() -> None:
+    """大写/小写 key 都要能取——**真实链路是小写**，但不同 adapter 可能给大写。
+
+    这条不是为了迁就大写的实现，而是防止有人把 ``_col`` 改回 ``row.get``。
+    """
+    from app.services.procurement_quotation_compare import _col
+
+    assert _col({"seg_year": 2026}, "SEG_YEAR") == 2026
+    assert _col({"SEG_YEAR": 2026}, "SEG_YEAR") == 2026
+    assert _col({"Seg_Year": 2026}, "SEG_YEAR") == 2026
+    assert _col({"other": 1}, "SEG_YEAR") is None

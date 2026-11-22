@@ -17,10 +17,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import getCurrentUser, getDb
@@ -30,6 +33,7 @@ from app.domain.schemas import (
     BusinessObjectCodeType,
     DocEntityRelationCreate,
     DocEntityRelationRead,
+    DocEntityRelationUpdate,
     DocumentCreate,
     DocumentRead,
     DocumentUpdate,
@@ -37,13 +41,25 @@ from app.domain.schemas import (
 )
 from app.infrastructure.rate_limit import limiter, rateLimitValue
 from app.services.document_service import DocumentService
-from app.services.messages_zh import MSG_DOCUMENT_SOURCE_STORE_FAILED
+from app.services.messages_zh import (
+    MSG_DOCUMENT_SOURCE_NOT_FOUND,
+    MSG_DOCUMENT_SOURCE_STORE_FAILED,
+    MSG_DOCUMENT_SOURCE_UNAVAILABLE,
+)
 
 logger = logging.getLogger(__name__)
 
-# Streaming upload size limit (audit-fx-3.2): documents may be up to 50 MB.
-# Streaming read prevents OOM from unbounded in-memory accumulation.
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+# 上传字节上限（可配置，默认 1 GB）。
+#
+# 为什么不是「完全无限制」：上传路径是「**全量读进内存**再解析」
+# （``await file.read()`` ⇒ ``b"".join(chunks)``）⇒ 真无限制等于留一扇
+# 「单个登录用户就能把后端容器 OOM 掉」的门（影响**所有**用户，不只是他）。
+# 1 GB 对采购制度/合同/指标文档绰绰有余（实测最大样本 3.9 MB），
+# 等于用户视角「没有实际限制」，同时保留一道防 OOM 的闸。
+#
+# 运维可调：``MAX_UPLOAD_MB=2048``（环境变量）。
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "1024"))
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 router = APIRouter()
 
@@ -89,6 +105,233 @@ async def getDocument(
 ) -> DocumentRead:
     doc = await service.getDocument(session, documentId, user=_user)
     return DocumentRead.model_validate(doc)
+
+
+async def _officePdf(
+    catalog: Any, content: bytes, filename: str
+) -> bytes | None:
+    """Office → PDF（带内容寻址缓存）；不可用 ⇒ None（调用方退回 HTML）。"""
+    from app.services import document_office_pdf as officePdf
+    from app.services.document_preview_cache import (
+        readCachedPreview,
+        writeCachedPreview,
+    )
+
+    if not officePdf.officePdfEnabled():
+        return None
+    contentHash = catalog.content_hash or ""
+    if contentHash:
+        cached = readCachedPreview(contentHash, officePdf.CONVERTER_VERSION)
+        if cached is not None:
+            return cached
+    pdf = await officePdf.convertToPdfAsync(content, filename)
+    if pdf is not None and contentHash:
+        writeCachedPreview(contentHash, officePdf.CONVERTER_VERSION, pdf)
+    return pdf
+
+
+async def _resolveDocument(
+    session: AsyncSession,
+    documentKey: str,
+    service: DocumentService,
+    user: Any,
+) -> Any:
+    """``documentKey`` ⇒ catalog 行。
+
+    支持两种写法：**自增 id**（列表主键）与**业务编号**（DOC-xxx）。
+    采购知识检索的证据里存的是业务编号（可读、可引用）⇒ 回溯原件时用它更方便。
+    """
+    if documentKey.isdigit():
+        return await service.getDocument(session, int(documentKey), user=user)
+    return await service.getDocumentByCode(session, documentKey, user=user)
+
+
+@router.get(
+    "/{documentKey}/source",
+    summary="文档源文件（原文阅览 / 下载；documentKey 可为自增 id 或业务编号 DOC-xxx）",
+    response_class=Response,
+)
+async def downloadDocumentSource(
+    documentKey: str,
+    request: Request,
+    disposition: str = Query(default="inline", pattern="^(inline|attachment)$"),
+    _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: DocumentService = Depends(getDocumentService),
+) -> Response:
+    """返回文档**原件字节**。
+
+    ACL 先行：``service.getDocument`` 已做密级闸（无权限 ⇒ 403）；
+    **不许**在这里自己查库绕过——原文是整份文件，比检索片段敏感得多。
+
+    错误语义（三档，处置动作不同）：
+    - 403：无密级权限
+    - 404：文档不存在，或该文档没有源文件（storage_url 空 / 对象已被删）
+    - 503：对象存储不可用（基础设施故障，**不是**「文件没了」）
+    """
+    from app.infrastructure.object_storage import ObjectStorageError
+    from app.services.document_source_service import (
+        contentDisposition,
+        loadSourceFile,
+    )
+
+    catalog = await _resolveDocument(session, documentKey, service, _user)
+    try:
+        source = await loadSourceFile(session, catalog)
+    except ObjectStorageError as exc:
+        logger.exception("文档源文件读取失败: document_key=%s", documentKey)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=MSG_DOCUMENT_SOURCE_UNAVAILABLE,
+        ) from exc
+    if source is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=MSG_DOCUMENT_SOURCE_NOT_FOUND.format(id=documentKey),
+        )
+
+    inline = disposition == "inline" and source.inline
+    return Response(
+        content=source.content,
+        media_type=source.contentType,
+        headers={
+            "Content-Disposition": contentDisposition(
+                source.filename, inline=inline
+            ),
+            "Content-Length": str(source.size),
+            # 文档不是用户自己的站外资源 ⇒ 禁止被当成可执行内容
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+@router.get(
+    "/{documentKey}/preview",
+    summary="文档通用预览（统一 HTML；documentKey 可为自增 id 或业务编号 DOC-xxx）",
+    response_class=Response,
+)
+async def previewDocument(
+    documentKey: str,
+    _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: DocumentService = Depends(getDocumentService),
+) -> Response:
+    """把文档渲染成**一段自包含 HTML**（前端 iframe 直接打开）。
+
+    分派规则见 ``services/document_preview_renderer``：TEXT / MARKDOWN /
+    HTML / OFFICE 服务端渲染；**PDF 与图片走原件直出**（浏览器原生查看器，
+    保真 100%、零服务端成本）—— 故这两种返回 302 指到 ``/source``。
+
+    安全：ACL 先行（复用 getDocument 的密级闸）；用户 HTML 经消毒 +
+    iframe sandbox；响应带 CSP + nosniff。
+    """
+    from app.infrastructure.object_storage import ObjectStorageError
+    from app.services.document_preview_kinds import (
+        KIND_IMAGE,
+        KIND_OFFICE,
+        KIND_PDF,
+    )
+    from app.services.document_preview_renderer import renderPreview
+    from app.services.document_source_service import (
+        contentDisposition,
+        loadSourceFile,
+    )
+
+    catalog = await _resolveDocument(session, documentKey, service, _user)
+    try:
+        source = await loadSourceFile(session, catalog)
+    except ObjectStorageError as exc:
+        logger.exception("文档预览读取失败: document_key=%s", documentKey)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=MSG_DOCUMENT_SOURCE_UNAVAILABLE,
+        ) from exc
+    if source is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=MSG_DOCUMENT_SOURCE_NOT_FOUND.format(id=documentKey),
+        )
+
+    if source.previewKind in (KIND_PDF, KIND_IMAGE):
+        # 原件直出：浏览器原生 PDF 查看器 / 图片查看器（保真最好）
+        return RedirectResponse(
+            url=f"/api/v1/documents/{documentKey}/source",
+            status_code=status.HTTP_302_FOUND,
+        )
+
+    if source.previewKind == KIND_OFFICE:
+        # Office 先尝试**转 PDF**（保真：列宽/合并/配色/条件格式都不丢）；
+        # 转换不可用（未装 LibreOffice / 超时 / 坏文件）⇒ 退回 HTML 渲染。
+        pdf = await _officePdf(catalog, source.content, source.filename)
+        if pdf is not None:
+            return Response(
+                content=pdf,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": contentDisposition(
+                        f"{Path(source.filename).stem}.pdf", inline=True
+                    ),
+                    # PDF 由我们生成 ⇒ 允许浏览器内置查看器渲染；禁脚本
+                    "Content-Security-Policy": "sandbox allow-popups; default-src 'none'; object-src 'none'",
+                    "X-Content-Type-Options": "nosniff",
+                    "Cache-Control": "private, no-store",
+                },
+            )
+
+    rendered = renderPreview(
+        source.content,
+        previewKind=source.previewKind,
+        filename=source.filename,
+    )
+    return Response(
+        content=rendered.html,
+        media_type="text/html; charset=utf-8",
+        headers={
+            # 用户内容渲染成的页面：**禁脚本、禁外部资源**（预览页不需要联网）
+            "Content-Security-Policy": (
+                "default-src 'none'; img-src data:; style-src 'unsafe-inline'; "
+                "frame-src 'self' data:; sandbox allow-popups"
+            ),
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+@router.post(
+    "/{documentId:int}/vectorize",
+    summary="把已入库文档向量化（进 document_embeddings，采购知识检索可见）",
+    status_code=status.HTTP_200_OK,
+)
+@limiter.limit(rateLimitValue)
+async def vectorizeDocument(
+    request: Request,
+    documentId: int,
+    _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: DocumentService = Depends(getDocumentService),
+) -> dict:
+    """读回**已存的源文件** → 切块 → embedding → 写 document_embeddings。
+
+    不重新上传、不重新解析用户文件；幂等（先删旧向量再写）。
+    写 ACL：只有 owner 部门成员 / admin 能触发（**消耗 embedding 额度**）。
+    """
+    from app.services.document_vectorize_service import vectorizeDocument as _run
+
+    catalog = await service.getDocument(session, documentId, user=_user)
+    result = await _run(
+        session,
+        catalog,
+        actor=_user,
+        isAdmin="admin" in (_user.roles or ()),
+    )
+    return {
+        "documentId": result.documentId,
+        "chunks": result.chunks,
+        "replaced": result.replaced,
+        "status": "vectorized",
+    }
 
 
 @router.post("", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
@@ -160,6 +403,54 @@ async def getRelation(
 ) -> DocEntityRelationRead:
     rel = await service.getRelation(session, relationId)
     return DocEntityRelationRead.model_validate(rel)
+
+
+@router.get(
+    "/relations/targets",
+    summary="文档关联的目标候选（新建关联时的可搜索下拉）",
+)
+async def listRelationTargets(
+    entityType: str = Query(..., max_length=32, description="业务对象码或 ONTOLOGY_*"),
+    q: str = Query(default="", max_length=100, description="关键词（可空 ⇒ 返回前 N 个）"),
+    limit: int = Query(default=20, ge=1, le=50),
+    _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> list[dict]:
+    """按关联类型返回候选：业务对象（编码/名称）、本体类、指标、属性。
+
+    ``q`` 为空时返回该类型前 N 个 —— 用户可以先浏览再选，不必先想关键词。
+    """
+    from app.services.document_relation_targets import (
+        KNOWLEDGE_ENTITY_TYPES,
+        searchRelationTargets,
+    )
+    from app.services.business_object_registry import businessObjectRegistry
+
+    if entityType not in KNOWLEDGE_ENTITY_TYPES and not businessObjectRegistry.isValid(
+        entityType
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"不支持的关联类型：{entityType}",
+        )
+    return await searchRelationTargets(session, entityType, q, limit)
+
+
+@router.put(
+    "/relations/{relationId:int}",
+    response_model=DocEntityRelationRead,
+    summary="更新文档关联（改关联对象或关联类型）",
+)
+async def updateRelation(
+    relationId: int,
+    payload: DocEntityRelationUpdate,
+    _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: DocumentService = Depends(getDocumentService),
+) -> DocEntityRelationRead:
+    """部分更新；改成已存在的组合 ⇒ 409。"""
+    entity = await service.updateRelation(session, relationId, payload, actor=_user)
+    return DocEntityRelationRead.model_validate(entity)
 
 
 @router.post("/relations", response_model=DocEntityRelationRead, status_code=status.HTTP_201_CREATED)

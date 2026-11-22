@@ -221,6 +221,8 @@ async def test_seed_paths_aligned_with_frontend_routes(
         "/workflow", "/workflow/approvals", "/workflow/definitions",
         # I3：采购 Copilot 对话入口（M4-2 前端面）
         "/procurement/copilot",
+        # G1/G5（2026-11-22）：语义发布管理页 + 本体发现工作台
+        "/semantic-release", "/discovery-review",
     }
 
     svc = MenuConfigService(dbSession)

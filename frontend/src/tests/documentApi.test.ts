@@ -117,7 +117,16 @@ describe("api/document", () => {
     });
     expect(axiosMock.postForm).toHaveBeenCalledTimes(1);
     const call = axiosMock.postForm.mock.calls[0];
-    expect(call[0]).toMatch(/\/documents\/upload$/);
+    // 元数据必须走 **Query 参数**（后端按 Query 读取；放 FormData 会被静默忽略）
+    expect(call[0]).toContain("/documents/upload?");
+    expect(call[0]).toContain("documentType=CONTRACT");
+    expect(call[0]).toContain("version=v1");
+    expect(call[0]).toContain("owner=alice");
+    expect(call[0]).toContain("effectiveDate=2026-09-01");
+    expect(call[0]).toContain("securityLevel=L1");
+    const form = call[1] as FormData;
+    expect(form.get("file")).toBeTruthy();
+    expect(form.get("documentType")).toBeNull();
     expect(call[2].headers["X-Tenant-Id"]).toBeDefined();
     // feat-user-auth: 不再注入 X-User-Id，由 Authorization: Bearer 替代
     expect(call[2].headers["X-User-Id"]).toBeUndefined();

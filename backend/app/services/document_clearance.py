@@ -4,9 +4,12 @@
 返回该用户可访问的密级列表，供 Milvus 检索过滤使用。
 
 过滤规则（优先级递减）：
-1. compliance_officer 角色 OR l3_acl 表中有记录 → ["L0", "L1", "L2", "L3"]
+1. admin 角色 OR compliance_officer 角色 OR l3_acl 表中有记录 → ["L0", "L1", "L2", "L3"]
 2. restricted_access=True OR restricted_viewer 角色 → ["L0", "L1", "L2"]
 3. 默认 → ["L0", "L1"]
+
+> admin 必须是全密级：管理员要维护文档目录；若 admin 自己也看不到 L2/L3，
+> 「上传成功但列表里没有」会变成常态（2026-11-22 实测踩中）。
 """
 
 from __future__ import annotations
@@ -65,7 +68,7 @@ async def buildClearanceFilter(
     hasComplianceRole = _hasRole(user, "compliance_officer")
     inL3Acl = await _inL3Acl(session, user.dbUserId)
 
-    if hasComplianceRole or inL3Acl:
+    if _hasRole(user, "admin") or hasComplianceRole or inL3Acl:
         return CLEARANCE_ALL
 
     # 检查 restricted_access 字段（需查 User 模型）

@@ -16,6 +16,10 @@ from neo4j import Driver, GraphDatabase
 
 from app.config import getSettings
 from app.domain.enums import ClassRelationType
+from app.domain.graph_allowlist import (
+    BUSINESS_ENTITY_LABELS,
+    BUSINESS_RELATION_TYPES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,39 +29,11 @@ _ALLOWED_LABELS = frozenset({"Class", "Property", "Metric", "KpiCatalog"})
 # =============================================================================
 # 业务实体子图（Phase 6.2 feat-semantic-relations）
 # =============================================================================
-
-# 业务实体节点 label：节点统一携带 BusinessEntity 主 label + 具体类型副 label，
-# 与本体图（Class/Property/Metric）物理隔离 —— 本体同步/删除路径永不触碰业务节点。
-# CQL label 不可参数化，必须白名单防注入（同 _ALLOWED_LABELS 模式）。
-BUSINESS_ENTITY_LABELS = frozenset(
-    {
-        "Supplier",
-        "ItemMaster",        # 原 Material（Phase 4.4 统一为 class_name）
-        "PurchaseOrder",
-        "Receipt",            # 原 GoodsReceipt
-        "IncomingInspection",
-        "Contract",           # 由文档目录提供
-        # 删除：Material / GoodsReceipt / NCR（Phase 4.4 NCR 不入图）
-    }
-)
-
-# 业务关系类型（Sheet 16 采购业务流转语义）：
-# Supplier-SUPPLIES->Material / PurchaseOrder-CONTAINS->Material /
-# PurchaseOrder-GENERATES->GoodsReceipt / GoodsReceipt-INSPECTED_BY->IncomingInspection /
-# IncomingInspection-GENERATED->NCR / Supplier-SIGNED->Contract
-# PLACES（Supplier->PurchaseOrder）为 THBI 采购订单真实数据回填新增
-# （feat-business-graph-backfill）：demo 种子里没有「供应商下单」语义边。
-# CQL 关系类型同样不可参数化，白名单防注入。
-BUSINESS_RELATION_TYPES = frozenset(
-    {
-        "SUPPLIES",
-        "CONTAINS",
-        "GENERATES",
-        "INSPECTED_BY",
-        "SIGNED",
-        "PLACES",
-    }
-)
+#
+# 业务实体 label / 关系类型白名单住在 `app.domain.graph_allowlist`（单选事实源）：
+# 发布校验码 `GRF-001` 也要用它们，而校验模块不该反向 import 基础设施层。
+# 这里 re-export，历史调用方（`from app.infrastructure.neo4j_client import
+# BUSINESS_ENTITY_LABELS`）不受影响。
 
 # 多跳遍历上限（Phase 6.3）：防止无界 variable-length path 拖垮图库。
 # 业务链路语义上限为 5 跳（Supplier->Material<-PO->GR->IQC->NCR）。

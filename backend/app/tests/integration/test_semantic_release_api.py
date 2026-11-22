@@ -19,10 +19,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
+from app.domain.graph_allowlist import BUSINESS_ENTITY_LABELS
 from app.domain.models import (
     AuditLog,
     BusinessObject,
     DataDomain,
+    DataSource,
     OntologyClass,
 )
 from app.domain.semantic_manifest_schema import (
@@ -1185,6 +1187,14 @@ def _healthyManifest() -> dict[str, Any]:
 
     样本 manifest 里的 `iqc_pass_rate` 是「已发布的 RATIO 指标缺分子/分母落点」
     ⇒ 闸门必然阻断；这里给每条指标补上落点类与 `sources`，让它变成可发布版本。
+
+    G2 设计码（CLS/REL/AGT/GRF/MET）也进同一张报告 ⇒「健康」还必须满足：
+    - **GRF-001**：入图业务对象的头类要声明主键（否则图节点无法稳定定位）；
+    - **MET-002**：已发布 KPI 要绑定**启用中**的数据源（用例里由
+      `_seedActiveDatasource` 落一行 `THBI Oracle`）。
+
+    不做这两件事，「健康基线」在新码下必然出一堆 WARNING FAIL —— 那是 fixture
+    的欠账，不是被测算法的缺陷。
     """
     manifest = sampleManifest()
     landings = {
@@ -1197,7 +1207,39 @@ def _healthyManifest() -> dict[str, Any]:
         metric["numeratorMeasure"] = _measure(numeratorClass)
         metric["denominatorMeasure"] = _measure(denominatorClass) if denominatorClass else None
         metric["sources"] = [{"className": numeratorClass, "role": "BASE"}]
+    for cls in manifest["classes"]:
+        if cls["properties"]:
+            cls["properties"][0]["isPrimaryKey"] = True
+    for kpi in manifest["kpis"]:
+        kpi["datasourceName"] = _HEALTHY_DATASOURCE_NAME
+    # 不在 Neo4j 业务实体白名单里的对象**明确不入图**（graphLabel=null），
+    # 而不是留一个查不到的 label —— 这是合法的治理选择，也是 GRF-001 的正例。
+    for businessObject in manifest["businessObjects"]:
+        if businessObject.get("graphLabel") not in BUSINESS_ENTITY_LABELS:
+            businessObject["graphLabel"] = None
     return manifest
+
+
+#: 「健康基线」里已发布 KPI 绑定的数据源（用例内由 `_seedActiveDatasource` 落库）。
+_HEALTHY_DATASOURCE_NAME = "THBI Oracle"
+
+
+async def _seedActiveDatasource(session: AsyncSession) -> None:
+    """落一行启用中的数据源 —— MET-002 的「有效绑定」需要一个真实存在的数据源。"""
+    session.add(
+        DataSource(
+            name=_HEALTHY_DATASOURCE_NAME,
+            type="oracle",
+            host="127.0.0.1",
+            port=1521,
+            database_name="THBI",
+            username="readonly",
+            # 不参与任何查询：只用来满足「数据源存在且启用」这个事实。
+            password_encrypted="not-used-in-this-test",
+            is_active=True,
+        )
+    )
+    await session.commit()
 
 
 async def test_draft_creation_persists_check_rows(client: AsyncClient) -> None:
@@ -1224,7 +1266,8 @@ async def test_draft_creation_persists_check_rows(client: AsyncClient) -> None:
         CHECK_CODE_INTEGRITY,
         CHECK_CODE_SCHEMA,
     }
-    assert all(row["result"] == "PASS" for row in rows)
+    failed = [(row["checkCode"], row["detail"]) for row in rows if row["result"] != "PASS"]
+    assert failed == []
     assert body["summary"]["failed"] == 0
     assert body["summary"]["errorCount"] == 0
     assert all(row["releaseId"] == releaseId for row in rows)
@@ -1292,6 +1335,7 @@ async def test_passed_validation_persists_all_pass_rows(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:
     """闸门放行 ⇒ 每一项都留下 PASS 结论（「通过」与「没跑」必须可区分）。"""
+    await _seedActiveDatasource(dbSession)
     row = await _insertRelease(
         dbSession,
         version="2026.11.18-check-ok",
@@ -1311,7 +1355,12 @@ async def test_passed_validation_persists_all_pass_rows(
     body = response.json()
     rows = body["rows"]
     assert rows
-    assert all(item["result"] == "PASS" for item in rows)
+    failedRows = [
+        (item["checkCode"], item["detail"])
+        for item in rows
+        if item["result"] != "PASS"
+    ]
+    assert failedRows == []
     assert body["summary"]["failed"] == 0
     assert body["summary"]["errorCount"] == 0
     assert body["summary"]["passed"] == len(rows)
@@ -1328,6 +1377,7 @@ async def test_re_evaluation_replaces_previous_rows(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:
     """同一个 release 再次评估 ⇒ **覆盖**旧结论（不是追加两轮历史）。"""
+    await _seedActiveDatasource(dbSession)
     row = await _insertRelease(
         dbSession,
         version="2026.11.18-check-re",

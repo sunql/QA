@@ -326,24 +326,33 @@ def test_malformed_sources_are_tolerated_as_missing_source() -> None:
 def test_cap_is_derived_from_the_manifest_contract() -> None:
     """上限 ≥ 契约允许的最大校验项数。
 
-    契约（M1-1.3 批次 B 后）：
+    契约（M1-1.3 批次 B + G2 设计码后）：
     - 6 条发布级（快照完整性 / Manifest 契约 / 结论截断 / 域切片为空 /
       跨域依赖补齐 / 候选绑定治理债）
     - 每条指标最多 3 条（源类 / 分子 / 分母）
     - 每条绑定最多 2 条（无 JOIN 边 / 属性未绑列）
+    - 每条 KPI 最多 1 条（MET-002；无已发布 KPI 时 1 条汇总行）
+    - 5 条设计码汇总行（CLS-001 / CLS-002 / REL-001 / AGT-001 / GRF-001）
 
-    = 6 + 3 × MAX_MANIFEST_METRICS + 2 × MAX_MANIFEST_SOURCE_BINDINGS。
+    = 6 + 3 × MAX_MANIFEST_METRICS + 2 × MAX_MANIFEST_SOURCE_BINDINGS
+      + MAX_MANIFEST_KPIS + 1 + 5。
 
     ⚠️ 写死一个「看起来更宽」的数会出事：契约允许的**合法** manifest 也会被截断，
     而截断丢的是**尾部**校验项 —— 尾部往往正是最后一条指标的 ERROR 结论行。
     """
     from app.domain.semantic_manifest_schema import (
+        MAX_MANIFEST_KPIS,
         MAX_MANIFEST_METRICS,
         MAX_MANIFEST_SOURCE_BINDINGS,
     )
 
     assert MAX_CHECKS_PER_RELEASE == (
-        6 + 3 * MAX_MANIFEST_METRICS + 2 * MAX_MANIFEST_SOURCE_BINDINGS
+        6
+        + 3 * MAX_MANIFEST_METRICS
+        + 2 * MAX_MANIFEST_SOURCE_BINDINGS
+        + MAX_MANIFEST_KPIS
+        + 1
+        + 5
     )
     assert MAX_CHECKS_PER_RELEASE >= MAX_MANIFEST_METRICS * 3
 

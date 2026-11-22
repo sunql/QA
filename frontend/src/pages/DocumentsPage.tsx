@@ -19,7 +19,6 @@ import {
   Popconfirm,
   message,
   Tabs,
-  Upload,
   Card,
   Typography,
   Descriptions,
@@ -35,7 +34,6 @@ import {
   UploadOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
-import type { UploadFile } from "antd/es/upload/interface";
 import {
   listDocuments,
   createDocument,
@@ -47,7 +45,6 @@ import {
   updateRelation,
   type RelationTarget,
   deleteDocument,
-  uploadDocument,
   listRelations,
   createRelation,
   deleteRelation,
@@ -70,16 +67,14 @@ import { useTranslation } from "../i18n";
 import FilterBar from "../components/ontology/FilterBar";
 import type { FilterField } from "../components/ontology/FilterBar";
 import { contains, matchSelect } from "../utils/ontologyFilter";
+import { documentFilterFields } from "../utils/documentFilters";
 import { useTablePagination } from "../utils/useTablePagination";
 import { listBusinessObjects } from "../api/businessObject";
-import {
-  DOCUMENT_UPLOAD_ACCEPT,
-  DOCUMENT_UPLOAD_HINT,
-} from "../utils/uploadAccept";
 import { toIsoDateParam } from "../utils/dateParam";
 import type { FilterValues } from "../utils/ontologyFilter";
 import type { EntityType } from "../types/entityMapping";
 import { DocumentQaPanel } from "../components/documents/DocumentQaPanel";
+import DocumentUploadModal from "../components/documents/DocumentUploadModal";
 
 const { TextArea } = Input;
 const { TabPane } = Tabs;
@@ -466,9 +461,6 @@ export default function DocumentsPage() {
 
   // Upload modal
   const [uploadModal, setUploadModal] = useState(false);
-  const [uploadFile, setUploadFile] = useState<UploadFile | null>(null);
-  const [uploadForm] = Form.useForm();
-  const [uploading, setUploading] = useState(false);
 
   // Relations tab
   const [relations, setRelations] = useState<DocEntityRelationRead[]>([]);
@@ -656,36 +648,6 @@ export default function DocumentsPage() {
     }
   };
 
-  // Upload handler
-  const handleUpload = async () => {
-    if (!uploadFile?.originFileObj) {
-      void message.warning("请选择要上传的文件");
-      return;
-    }
-    const values = await uploadForm.validateFields();
-    setUploading(true);
-    try {
-      const result = await uploadDocument(uploadFile.originFileObj, {
-        documentType: values.documentType,
-        version: values.version,
-        owner: values.owner,
-        effectiveDate: values.effectiveDate,
-        securityLevel: values.securityLevel,
-      });
-      void message.success(
-        `上传成功：${result.documentId}（${result.chunks} 个 chunks 已向量化）`,
-      );
-      setUploadModal(false);
-      setUploadFile(null);
-      void uploadForm.resetFields();
-      void loadDocs();
-    } catch {
-      // handled by interceptor
-    } finally {
-      setUploading(false);
-    }
-  };
-
   // Relation handlers
   const openCreateRel = () => {
     setEditingRel(null);
@@ -786,11 +748,7 @@ export default function DocumentsPage() {
     return true;
   });
 
-  const filterFields: FilterField[] = [
-    { key: "documentId", label: "文档编号" },
-    { key: "documentType", label: "类型", type: "select" },
-    { key: "status", label: "状态", type: "select" },
-  ];
+  const filterFields: FilterField[] = documentFilterFields();
 
   return (
     <div>
@@ -936,72 +894,15 @@ export default function DocumentsPage() {
         </Form>
       </Modal>
 
-      {/* Upload modal */}
-      <Modal
-        title="上传文档（RAG 向量化）"
+      <DocumentUploadModal
         open={uploadModal}
-        onOk={() => void handleUpload()}
-        onCancel={() => {
+        onClose={() => setUploadModal(false)}
+        onUploaded={() => {
           setUploadModal(false);
-          setUploadFile(null);
+          void loadDocs();
         }}
-        okText={t("common.confirm")}
-        cancelText={t("common.cancel")}
-        width={560}
-        destroyOnHidden
-        confirmLoading={uploading}
-      >
-        <Form form={uploadForm} layout="vertical">
-          <Form.Item
-            name="file"
-            label="选择文件"
-            rules={[{ required: true, message: "请选择文件" }]}
-          >
-            <Upload.Dragger
-              accept={DOCUMENT_UPLOAD_ACCEPT}
-              maxCount={1}
-              fileList={uploadFile ? [uploadFile] : []}
-              beforeUpload={(file) => {
-                setUploadFile({
-                  uid: "-1",
-                  name: file.name,
-                  status: "done",
-                  originFileObj: file,
-                });
-                return false; // prevent auto upload
-              }}
-              onRemove={() => setUploadFile(null)}
-            >
-              <p>
-                <UploadOutlined />
-              </p>
-              <p>点击或拖拽上传 {DOCUMENT_UPLOAD_HINT} 文件</p>
-            </Upload.Dragger>
-          </Form.Item>
-          <Space.Compact style={{ width: "100%" }}>
-            <Form.Item name="documentType" label="文档类型" style={{ width: "50%" }}>
-              <Select options={DOCUMENT_TYPE_OPTIONS} />
-            </Form.Item>
-            <Form.Item name="securityLevel" label="安全级别" style={{ width: "50%" }}>
-              <Select options={DOCUMENT_SECURITY_OPTIONS} />
-            </Form.Item>
-          </Space.Compact>
-          <Space.Compact style={{ width: "100%" }}>
-            <Form.Item name="version" label="版本" style={{ width: "50%" }}>
-              <Input placeholder="v1.0" />
-            </Form.Item>
-            <Form.Item name="owner" label="Owner" style={{ width: "50%" }}>
-              <Input placeholder="负责人" />
-            </Form.Item>
-          </Space.Compact>
-        </Form>
-        <Alert
-          type="info"
-          showIcon
-          message="上传后将自动解析文档内容、分块并生成向量，存入 Milvus 文档向量库。"
-          style={{ marginTop: 8 }}
-        />
-      </Modal>
+        onPartiallyUploaded={() => void loadDocs()}
+      />
 
       {/* Relation create modal */}
       <Modal

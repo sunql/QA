@@ -23,11 +23,40 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Path, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Path, Query, Request, Response
+from fastapi import status as http_status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb, requireAdmin
+from app.domain.discovery_pipeline_models import (
+    DiscoveryCandidate,
+    DiscoveryEvaluation,
+    DiscoveryFinding,
+    DiscoveryProposal,
+    DiscoveryRun,
+)
 from app.domain.discovery_schemas import (
+    DiscoveryCandidateDecisionRequest,
+    DiscoveryCandidatePage,
+    DiscoveryCandidateRead,
+    DiscoveryEvaluateRequest,
+    DiscoveryEvaluationPage,
+    DiscoveryEvaluationRead,
+    DiscoveryFindingDecisionRequest,
+    DiscoveryFindingPage,
+    DiscoveryFindingRead,
+    DiscoveryMonitorRead,
+    DiscoveryProposalCreateRequest,
+    DiscoveryProposalPage,
+    DiscoveryProposalRead,
+    DiscoveryPublishRead,
+    DiscoveryPublishRequest,
+    DiscoveryReviewRead,
+    DiscoveryReviewRequest,
+    DiscoveryRunPage,
+    DiscoveryRunRead,
+    DiscoveryRunRequest,
     DiscoverySnapshotPage,
     DiscoverySnapshotRead,
     DiscoverySnapshotSummaryRead,
@@ -41,9 +70,15 @@ from app.domain.discovery_schemas import (
 )
 from app.infrastructure.rate_limit import enforceRouteLimit
 from app.services.audit_service import AuditService
+from app.services.discovery_candidate_review import DiscoveryCandidateReviewService
 from app.services.discovery_diff_service import computeOntologyDiff
+from app.services.discovery_evaluation_service import DiscoveryEvaluationService
+from app.services.discovery_monitor_service import DiscoveryMonitorService
+from app.services.discovery_proposal_service import DiscoveryProposalService
+from app.services.discovery_run_service import DiscoveryRunService
 from app.services.discovery_snapshot_service import DiscoverySnapshotService
 from app.services.semantic_diff_service import selectChangesForResponse
+from app.services.semantic_release_service import semanticReleaseService
 
 router = APIRouter(tags=["ontology-discovery"])
 
@@ -61,6 +96,13 @@ _CAPTURE_LIMIT = "10/minute"
 _CAPTURE_LIMIT_SCOPE = "ontology-discovery:capture"
 
 _service = DiscoverySnapshotService()
+_runService = DiscoveryRunService()
+_monitorService = DiscoveryMonitorService(
+    snapshotService=_service, runService=_runService
+)
+_evaluationService = DiscoveryEvaluationService()
+_candidateReviewService = DiscoveryCandidateReviewService()
+_proposalService = DiscoveryProposalService()
 _audit = AuditService()
 
 
@@ -341,3 +383,691 @@ async def getOntologyDiff(
             for change in shown
         ],
     )
+
+
+# =============================================================================
+# A2（G3-4）：运行 / 候选 / 问题 / 提案 / 审核
+# =============================================================================
+#
+# 门禁（追加到模块 docstring 的同一张表）：
+#
+# | POST `/runs` | `requireAdmin`（连业务库剖析 + 调 LLM，成本与授权动作） |
+# | GET  `/runs/{runId}` | `requireAdmin`（含 error_message / 模型信息） |
+# | GET  `/candidates`、`/findings` | `requireAdmin`（AI 未确认结论，普通用户不得当事实） |
+# | POST `/proposals`、`/proposals/{id}/submit`、`/proposals/{id}/review` | `requireAdmin` |
+# | GET  `/proposals`、`/proposals/{id}` | `requireAdmin`（未发布的治理在途件） |
+#
+# 后台执行：`POST /runs` 只受理（建 RUNNING 行）并返回 202；剖析与候选在
+# `BackgroundTasks` 里用**自有会话**跑（见 `discovery_run_service` 的会话隔离说明）。
+
+_MAX_RUN_LIMIT = "2/minute"
+_RUN_LIMIT_SCOPE = "ontology-discovery:run"
+_MONITOR_LIMIT = "5/minute"
+_MONITOR_LIMIT_SCOPE = "ontology-discovery:monitor"
+_MAX_CANDIDATE_PAGE = 200
+
+
+def _runRead(run) -> DiscoveryRunRead:
+    return DiscoveryRunRead(
+        id=run.id,
+        source_id=run.source_id,
+        snapshot_id=run.snapshot_id,
+        trigger=run.trigger,
+        status=run.status,
+        model_version=run.model_version,
+        prompt_version=run.prompt_version,
+        prompt_tokens=run.prompt_tokens,
+        completion_tokens=run.completion_tokens,
+        cost=float(run.cost or 0),
+        error_message=run.error_message,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        created_by=run.created_by,
+    )
+
+
+def _proposalRead(row) -> DiscoveryProposalRead:
+    return DiscoveryProposalRead(
+        id=row.id,
+        title=row.title,
+        source_id=row.source_id,
+        base_release_id=row.base_release_id,
+        release_id=row.release_id,
+        diff_json=dict(row.diff_json or {}),
+        impact_json=dict(row.impact_json) if row.impact_json is not None else None,
+        status=row.status,
+        proposer=row.proposer,
+        created_time=row.created_time,
+        updated_time=row.updated_time,
+    )
+
+
+def _reviewRead(row) -> DiscoveryReviewRead:
+    return DiscoveryReviewRead(
+        id=row.id,
+        proposal_id=row.proposal_id,
+        reviewer=row.reviewer,
+        decision=row.decision,
+        comment=row.comment,
+        approval_task_id=row.approval_task_id,
+        created_time=row.created_time,
+    )
+
+
+@router.post("/runs", response_model=DiscoveryRunRead, status_code=http_status.HTTP_202_ACCEPTED)
+async def startDiscoveryRun(
+    request: Request,
+    response: Response,
+    background: BackgroundTasks,
+    payload: DiscoveryRunRequest,
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryRunRead:
+    """受理一次发现运行（202）：剖析 + （默认）候选生成在后台执行。
+
+    限流 2/minute：剖析要连业务库跑聚合、候选要调 LLM，都是高成本动作。
+    """
+    enforceRouteLimit(request, _MAX_RUN_LIMIT, _RUN_LIMIT_SCOPE)
+    _noStore(response)
+    run = await _runService.startRun(
+        session,
+        sourceId=payload.source_id,
+        snapshotId=payload.snapshot_id,
+        createdBy=admin.userId,
+    )
+    await _audit.record(
+        session,
+        entity_type="discovery_run",
+        entity_id=run.id,
+        action="CREATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        after={
+            "sourceId": run.source_id,
+            "snapshotId": run.snapshot_id,
+            "trigger": run.trigger,
+            "withCandidates": payload.with_candidates,
+            "tables": payload.tables,
+        },
+    )
+    await session.commit()
+    background.add_task(
+        _runService.runPipeline,
+        run.id,
+        tables=payload.tables,
+        withCandidates=payload.with_candidates,
+    )
+    return _runRead(run)
+
+
+@router.get("/runs/{runId}", response_model=DiscoveryRunRead)
+async def getDiscoveryRun(
+    response: Response,
+    runId: int = Path(..., ge=1),
+    _admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryRunRead:
+    _noStore(response)
+    return _runRead(await _runService.getRun(session, runId))
+
+
+@router.get("/candidates", response_model=DiscoveryCandidatePage)
+async def listDiscoveryCandidates(
+    response: Response,
+    runId: int | None = Query(default=None, ge=1),
+    status: str | None = Query(default=None, description="CANDIDATE / NEEDS_EVIDENCE / …"),
+    limit: int = Query(default=50, ge=1, le=_MAX_CANDIDATE_PAGE),
+    offset: int = Query(default=0, ge=0),
+    _admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryCandidatePage:
+    """AI 候选（**未确认结论**）⇒ 限 admin，普通用户不得当事实消费。"""
+    _noStore(response)
+    conditions = []
+    if runId is not None:
+        conditions.append(DiscoveryCandidate.run_id == runId)
+    if status:
+        conditions.append(DiscoveryCandidate.status == status)
+    base = select(DiscoveryCandidate).where(*conditions)
+    total = int(
+        await session.scalar(
+            select(func.count()).select_from(DiscoveryCandidate).where(*conditions)
+        )
+        or 0
+    )
+    rows = (
+        await session.execute(
+            base.order_by(DiscoveryCandidate.id.desc()).limit(limit).offset(offset)
+        )
+    ).scalars().all()
+    return DiscoveryCandidatePage(rows=[_candidateRead(row) for row in rows], total=total)
+
+
+@router.get("/findings", response_model=DiscoveryFindingPage)
+async def listDiscoveryFindings(
+    response: Response,
+    runId: int | None = Query(default=None, ge=1),
+    status: str | None = Query(default=None, description="OPEN / ACKNOWLEDGED / …"),
+    limit: int = Query(default=50, ge=1, le=_MAX_CANDIDATE_PAGE),
+    offset: int = Query(default=0, ge=0),
+    _admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryFindingPage:
+    _noStore(response)
+    conditions = []
+    if runId is not None:
+        conditions.append(DiscoveryFinding.run_id == runId)
+    if status:
+        conditions.append(DiscoveryFinding.status == status)
+    total = int(
+        await session.scalar(
+            select(func.count()).select_from(DiscoveryFinding).where(*conditions)
+        )
+        or 0
+    )
+    rows = (
+        await session.execute(
+            select(DiscoveryFinding)
+            .where(*conditions)
+            .order_by(DiscoveryFinding.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    return DiscoveryFindingPage(rows=[_findingRead(row) for row in rows], total=total)
+
+
+@router.post("/proposals", response_model=DiscoveryProposalRead, status_code=201)
+async def createDiscoveryProposal(
+    response: Response,
+    payload: DiscoveryProposalCreateRequest,
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryProposalRead:
+    """建提案草稿（manifest 必须过契约；有基线则同时算影响面）。"""
+    _noStore(response)
+    proposal = await _proposalService.createProposal(
+        session,
+        sourceId=payload.source_id,
+        title=payload.title,
+        proposalManifest=payload.manifest,
+        proposer=admin.userId,
+        baseReleaseId=payload.base_release_id,
+        note=payload.note,
+    )
+    await _audit.record(
+        session,
+        entity_type="discovery_proposal",
+        entity_id=proposal.id,
+        action="CREATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        after={
+            "title": proposal.title,
+            "sourceId": proposal.source_id,
+            "baseReleaseId": proposal.base_release_id,
+            "status": proposal.status,
+            "impact": proposal.impact_json,
+        },
+    )
+    await session.commit()
+    await session.refresh(proposal)
+    return _proposalRead(proposal)
+
+
+@router.get("/proposals", response_model=DiscoveryProposalPage)
+async def listDiscoveryProposals(
+    response: Response,
+    status: str | None = Query(default=None),
+    sourceId: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=50, ge=1, le=_MAX_CANDIDATE_PAGE),
+    offset: int = Query(default=0, ge=0),
+    _admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryProposalPage:
+    _noStore(response)
+    conditions = []
+    if status:
+        conditions.append(DiscoveryProposal.status == status)
+    if sourceId is not None:
+        conditions.append(DiscoveryProposal.source_id == sourceId)
+    total = int(
+        await session.scalar(
+            select(func.count()).select_from(DiscoveryProposal).where(*conditions)
+        )
+        or 0
+    )
+    rows = (
+        await session.execute(
+            select(DiscoveryProposal)
+            .where(*conditions)
+            .order_by(DiscoveryProposal.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    return DiscoveryProposalPage(
+        rows=[_proposalRead(row) for row in rows], total=total
+    )
+
+
+@router.get("/proposals/{proposalId}", response_model=DiscoveryProposalRead)
+async def getDiscoveryProposal(
+    response: Response,
+    proposalId: int = Path(..., ge=1),
+    _admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryProposalRead:
+    _noStore(response)
+    return _proposalRead(
+        await _proposalService.getProposal(session, proposalId)
+    )
+
+
+@router.post("/proposals/{proposalId}/submit", response_model=DiscoveryProposalRead)
+async def submitDiscoveryProposal(
+    response: Response,
+    proposalId: int = Path(..., ge=1),
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryProposalRead:
+    """DRAFT → IN_REVIEW（提交后只能由**别人**审核）。"""
+    _noStore(response)
+    proposal = await _proposalService.submitForReview(
+        session, proposalId, actor=admin.userId
+    )
+    await _audit.record(
+        session,
+        entity_type="discovery_proposal",
+        entity_id=proposal.id,
+        action="UPDATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        before={"status": "DRAFT"},
+        after={"status": proposal.status},
+    )
+    await session.commit()
+    await session.refresh(proposal)
+    return _proposalRead(proposal)
+
+
+@router.post("/proposals/{proposalId}/review", response_model=DiscoveryReviewRead, status_code=201)
+async def reviewDiscoveryProposal(
+    response: Response,
+    payload: DiscoveryReviewRequest,
+    proposalId: int = Path(..., ge=1),
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryReviewRead:
+    """四眼审核：`reviewer != proposer`（否则 409）；结论驱动状态机。"""
+    _noStore(response)
+    review = await _proposalService.review(
+        session,
+        proposalId,
+        reviewer=admin.userId,
+        decision=payload.decision,
+        comment=payload.comment,
+        approvalTaskId=payload.approval_task_id,
+    )
+    proposal = await _proposalService.getProposal(session, proposalId)
+    await _audit.record(
+        session,
+        entity_type="discovery_proposal",
+        entity_id=proposal.id,
+        action="CREATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        after={
+            "reviewId": review.id,
+            "decision": review.decision,
+            "status": proposal.status,
+            "approvalTaskId": review.approval_task_id,
+        },
+    )
+    await session.commit()
+    await session.refresh(review)
+    return _reviewRead(review)
+
+
+@router.post(
+    "/proposals/{proposalId}/publish",
+    response_model=DiscoveryPublishRead,
+    status_code=201,
+)
+async def publishDiscoveryProposal(
+    response: Response,
+    payload: DiscoveryPublishRequest,
+    proposalId: int = Path(..., ge=1),
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryPublishRead:
+    """发布已批准（APPROVED）的提案：DRAFT → VALIDATED → ACTIVE（**唯一写口**）。
+
+    本端点只调 `semanticReleaseService.publishProposal` —— 发现域**不写**
+    `semantic_release` 行（F1 红线）；发布后提案置 `PUBLISHED` 并回填 `release_id`。
+    """
+    _noStore(response)
+    operation = await semanticReleaseService.publishProposal(
+        session,
+        proposalId=proposalId,
+        version=payload.version,
+        actor=admin.userId,
+        domainCode=payload.domain_code,
+        departments=admin.departments or None,
+        note=payload.note,
+    )
+    proposal = await _proposalService.getProposal(session, proposalId)
+    await _audit.record(
+        session,
+        entity_type="discovery_proposal",
+        entity_id=proposal.id,
+        action="UPDATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        before={"status": "APPROVED"},
+        after={
+            "status": proposal.status,
+            "releaseId": operation.release.id,
+            "version": operation.release.version,
+        },
+    )
+    await session.commit()
+    return DiscoveryPublishRead(
+        proposal_id=proposal.id,
+        proposal_status=proposal.status,
+        release_id=operation.release.id,
+        version=operation.release.version,
+        status=operation.release.status,
+        blockers=list(operation.blockers),
+        warnings=list(operation.warnings),
+    )
+
+
+@router.post("/sources/{sourceId}/monitor", response_model=DiscoveryMonitorRead)
+async def monitorDiscoverySource(
+    request: Request,
+    response: Response,
+    background: BackgroundTasks,
+    sourceId: int = Path(..., ge=1),
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryMonitorRead:
+    """增量监测：采集最新快照，变了就起一次运行（剖析 + 候选）。
+
+    限流 5/minute：每次监测都要连业务库读数据字典。
+    周期驱动由外部调度器调用本端点（本批不自造 Worker 拓扑）。
+    """
+    enforceRouteLimit(request, _MONITOR_LIMIT, _MONITOR_LIMIT_SCOPE)
+    _noStore(response)
+    result = await _monitorService.checkSource(
+        session, sourceId=sourceId, createdBy=admin.userId
+    )
+    await _audit.record(
+        session,
+        entity_type="discovery_source",
+        entity_id=sourceId,
+        action="UPDATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        before={"snapshotId": None},
+        after={
+            "snapshotId": result.snapshotId,
+            "changed": result.changed,
+            "runId": result.runId,
+        },
+    )
+    await session.commit()
+    if result.runId is not None:
+        background.add_task(_runService.runPipeline, result.runId)
+    return DiscoveryMonitorRead(
+        source_id=result.sourceId,
+        snapshot_id=result.snapshotId,
+        changed=result.changed,
+        run_id=result.runId,
+    )
+
+
+@router.post(
+    "/runs/{runId}/evaluate",
+    response_model=DiscoveryEvaluationRead,
+    status_code=201,
+)
+async def evaluateDiscoveryRun(
+    response: Response,
+    payload: DiscoveryEvaluateRequest,
+    runId: int = Path(..., ge=1),
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryEvaluationRead:
+    """对一次运行做可复算评测（证据完整率 → PASS / FAIL / INCONCLUSIVE）。"""
+    _noStore(response)
+    row = await _evaluationService.evaluateRun(
+        session,
+        runId=runId,
+        datasetVersion=payload.dataset_version,
+        proposalId=payload.proposal_id,
+        note=payload.note,
+        createdBy=admin.userId,
+    )
+    await _audit.record(
+        session,
+        entity_type="discovery_evaluation",
+        entity_id=row.id,
+        action="CREATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        after={
+            "runId": runId,
+            "proposalId": row.proposal_id,
+            "datasetVersion": row.dataset_version,
+            "verdict": row.verdict,
+        },
+    )
+    await session.commit()
+    return _evaluationRead(row)
+
+
+@router.get("/evaluations", response_model=DiscoveryEvaluationPage)
+async def listDiscoveryEvaluations(
+    response: Response,
+    proposalId: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=50, ge=1, le=_MAX_CANDIDATE_PAGE),
+    offset: int = Query(default=0, ge=0),
+    _admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryEvaluationPage:
+    _noStore(response)
+    conditions = []
+    if proposalId is not None:
+        conditions.append(DiscoveryEvaluation.proposal_id == proposalId)
+    total = int(
+        await session.scalar(
+            select(func.count()).select_from(DiscoveryEvaluation).where(*conditions)
+        )
+        or 0
+    )
+    rows = (
+        await session.execute(
+            select(DiscoveryEvaluation)
+            .where(*conditions)
+            .order_by(DiscoveryEvaluation.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    return DiscoveryEvaluationPage(
+        rows=[_evaluationRead(row) for row in rows], total=total
+    )
+
+
+def _evaluationRead(row) -> DiscoveryEvaluationRead:
+    return DiscoveryEvaluationRead(
+        id=row.id,
+        proposal_id=row.proposal_id,
+        dataset_version=row.dataset_version,
+        metrics_json=dict(row.metrics_json or {}),
+        verdict=row.verdict,
+        note=row.note,
+        created_by=row.created_by,
+        created_time=row.created_time,
+    )
+
+
+def _candidateRead(row) -> DiscoveryCandidateRead:
+    return DiscoveryCandidateRead(
+        id=row.id,
+        run_id=row.run_id,
+        source_id=row.source_id,
+        snapshot_id=row.snapshot_id,
+        candidate_type=row.candidate_type,
+        table_name=row.table_name,
+        column_name=row.column_name,
+        target_code=row.target_code,
+        payload=dict(row.payload or {}),
+        evidence_refs=list(row.evidence_refs or []),
+        confidence=float(row.confidence) if row.confidence is not None else None,
+        model_version=row.model_version,
+        prompt_version=row.prompt_version,
+        status=row.status,
+        decided_by=row.decided_by,
+        decided_time=row.decided_time,
+        decision_note=row.decision_note,
+        linked_entity_type=row.linked_entity_type,
+        linked_entity_code=row.linked_entity_code,
+        created_time=row.created_time,
+    )
+
+
+def _findingRead(row) -> DiscoveryFindingRead:
+    return DiscoveryFindingRead(
+        id=row.id,
+        run_id=row.run_id,
+        source_id=row.source_id,
+        snapshot_id=row.snapshot_id,
+        finding_type=row.finding_type,
+        table_name=row.table_name,
+        column_name=row.column_name,
+        severity=row.severity,
+        status=row.status,
+        detail=row.detail,
+        evidence_refs=list(row.evidence_refs or []),
+        decision_note=row.decision_note,
+        linked_entity_type=row.linked_entity_type,
+        linked_entity_code=row.linked_entity_code,
+        created_time=row.created_time,
+    )
+
+
+@router.get("/runs", response_model=DiscoveryRunPage)
+async def listDiscoveryRuns(
+    response: Response,
+    sourceId: int | None = Query(default=None, ge=1),
+    status: str | None = Query(default=None, description="RUNNING / SUCCEEDED / FAILED"),
+    limit: int = Query(default=20, ge=1, le=_MAX_CANDIDATE_PAGE),
+    offset: int = Query(default=0, ge=0),
+    _admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryRunPage:
+    """运行列表（前台「发现评审」页的运行选择器）。"""
+    _noStore(response)
+    conditions = []
+    if sourceId is not None:
+        conditions.append(DiscoveryRun.source_id == sourceId)
+    if status:
+        conditions.append(DiscoveryRun.status == status)
+    total = int(
+        await session.scalar(
+            select(func.count()).select_from(DiscoveryRun).where(*conditions)
+        )
+        or 0
+    )
+    rows = (
+        await session.execute(
+            select(DiscoveryRun)
+            .where(*conditions)
+            .order_by(DiscoveryRun.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    return DiscoveryRunPage(rows=[_runRead(row) for row in rows], total=total)
+
+
+@router.patch(
+    "/candidates/{candidateId}/decision", response_model=DiscoveryCandidateRead
+)
+async def decideDiscoveryCandidate(
+    response: Response,
+    payload: DiscoveryCandidateDecisionRequest,
+    candidateId: int = Path(..., ge=1),
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryCandidateRead:
+    """业务决断：采纳 / 驳回 / 待证（可改判，历史留 audit_log）。"""
+    _noStore(response)
+    before = await session.get(DiscoveryCandidate, candidateId)
+    beforeStatus = before.status if before is not None else None
+    row = await _candidateReviewService.decideCandidate(
+        session,
+        candidateId=candidateId,
+        status=payload.status,
+        note=payload.note,
+        actor=admin.userId,
+        linkedEntityType=payload.linked_entity_type,
+        linkedEntityCode=payload.linked_entity_code,
+    )
+    await _audit.record(
+        session,
+        entity_type="discovery_candidate",
+        entity_id=row.id,
+        action="UPDATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        before={"status": beforeStatus},
+        after={
+            "status": row.status,
+            "note": row.decision_note,
+            "linked": [row.linked_entity_type, row.linked_entity_code],
+        },
+    )
+    await session.commit()
+    return _candidateRead(row)
+
+
+@router.patch("/findings/{findingId}/status", response_model=DiscoveryFindingRead)
+async def decideDiscoveryFinding(
+    response: Response,
+    payload: DiscoveryFindingDecisionRequest,
+    findingId: int = Path(..., ge=1),
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryFindingRead:
+    """问题处理：确认 / 已解决 / 忽略（可改判）。"""
+    _noStore(response)
+    before = await session.get(DiscoveryFinding, findingId)
+    beforeStatus = before.status if before is not None else None
+    row = await _candidateReviewService.resolveFinding(
+        session,
+        findingId=findingId,
+        status=payload.status,
+        note=payload.note,
+        actor=admin.userId,
+        linkedEntityType=payload.linked_entity_type,
+        linkedEntityCode=payload.linked_entity_code,
+    )
+    await _audit.record(
+        session,
+        entity_type="discovery_finding",
+        entity_id=row.id,
+        action="UPDATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        before={"status": beforeStatus},
+        after={
+            "status": row.status,
+            "note": row.decision_note,
+            "linked": [row.linked_entity_type, row.linked_entity_code],
+        },
+    )
+    await session.commit()
+    return _findingRead(row)

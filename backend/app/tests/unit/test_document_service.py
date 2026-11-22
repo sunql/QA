@@ -155,12 +155,48 @@ class TestDocumentService:
     # --- deleteDocument ---
 
     @pytest.mark.asyncio
-    async def test_deleteDocument_removes_row(self, dbSession):
+    async def test_deleteDocument_removes_row(self, dbSession, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "app.infrastructure.milvus_client.deleteDocumentChunks",
+            lambda documentId: calls.append(documentId),
+        )
         svc = self._make_svc()
         doc = await svc.createDocument(dbSession, self._doc_dto(), self._actor)
         await svc.deleteDocument(dbSession, doc.id, self._actor)
         with pytest.raises(NotFoundError):
             await svc.getDocument(dbSession, doc.id)
+        assert calls == [self._doc_dto().document_id], "删除必须同步清理 Milvus 向量"
+
+    @pytest.mark.asyncio
+    async def test_deleteDocument_survives_milvus_failure(self, dbSession, monkeypatch):
+        def _boom(documentId: str) -> None:
+            raise RuntimeError("milvus down")
+
+        monkeypatch.setattr(
+            "app.infrastructure.milvus_client.deleteDocumentChunks", _boom
+        )
+        svc = self._make_svc()
+        doc = await svc.createDocument(dbSession, self._doc_dto(), self._actor)
+
+        await svc.deleteDocument(dbSession, doc.id, self._actor)  # 不抛
+
+        with pytest.raises(NotFoundError):
+            await svc.getDocument(dbSession, doc.id)
+
+
+    @pytest.mark.asyncio
+    async def test_list_returns_newest_first(self, dbSession):
+        """上传成功回到第一页要能看到：列表按 id 倒序。"""
+        svc = self._make_svc()
+        for i in range(3):
+            await svc.createDocument(
+                dbSession, self._doc_dto(document_id=f"DOC-{i}"), self._actor
+            )
+
+        page = await svc.listDocuments(dbSession, limit=2, offset=0)
+
+        assert [row.document_id for row in page] == ["DOC-2", "DOC-1"]
 
 
 class TestDocumentEntityRelationService:

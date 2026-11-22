@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -64,10 +65,13 @@ DEFAULT_ACCESS_POLICY: dict[str, Any] = {"mode": "READ_ONLY"}
 # - mode：访问模式，当前只允许 READ_ONLY
 # - schema_owner：**库模式属主**（Oracle schema / MySQL 库），内省时的目标命名空间。
 #   ⚠️ 与 `discovery_source.owner`（业务责任人）是两件事，刻意不同名。
-ALLOWED_POLICY_KEYS = frozenset({"mode", "schema_owner"})
+ALLOWED_POLICY_KEYS = frozenset({"mode", "schema_owner", "tables"})
 
 # 策略 JSON 体积上限（字节）：策略是配置不是数据载荷，超大即拒绝。
-MAX_POLICY_BYTES = 4096
+MAX_POLICY_BYTES = 16384
+
+#: 策略里 tables 白名单的上限（防止把策略当数据载荷）。
+MAX_POLICY_TABLES = 200
 
 # 快照体积上限（字节）：快照内容会**整份**回给每个读它的人（详情端点）
 # ⇒ 超大快照既是响应放大器，也是把外部文本搬进内存的入口。超限即拒绝采集。
@@ -90,7 +94,14 @@ MSG_SOURCE_OWNER_REQUIRED = "发现源责任人不能为空"
 MSG_SOURCE_FIELD_NOT_UPDATABLE = "发现源不支持修改该字段：{field}"
 MSG_SOURCE_STATUS_INVALID = "发现源状态非法：{status}（仅允许 ACTIVE / DISABLED）"
 MSG_SOURCE_POLICY_NOT_OBJECT = "发现源访问策略必须是 JSON 对象"
-MSG_SOURCE_POLICY_UNKNOWN_KEY = "发现源访问策略含未知键：{keys}（仅支持 mode / schema_owner）"
+MSG_SOURCE_POLICY_UNKNOWN_KEY = (
+    "发现源访问策略含未知键：{keys}（仅支持 mode / schema_owner / tables）"
+)
+MSG_SOURCE_POLICY_TABLES_INVALID = "访问策略 tables 必须是非空的表名数组"
+MSG_SOURCE_POLICY_TABLES_TOO_MANY = "访问策略 tables 过多：{count} > {limit}"
+MSG_SNAPSHOT_POLICY_NO_TABLES_MATCHED = (
+    "访问策略 tables 里的表在该源上一个都不存在：{tables}（检查 owner/大小写）"
+)
 MSG_SOURCE_POLICY_MODE_INVALID = "发现源访问策略 mode 非法：{mode}（仅支持 READ_ONLY）"
 MSG_SOURCE_POLICY_SCHEMA_OWNER_INVALID = "发现源访问策略 schema_owner 必须是非空字符串"
 MSG_SOURCE_POLICY_TOO_LARGE = "发现源访问策略过大：{size} 字节 > {limit} 字节"
@@ -101,7 +112,10 @@ MSG_SOURCE_POLICY_SCHEMA_OWNER_ORACLE_ONLY = (
 MSG_DATASOURCE_INACTIVE = "数据源 {id} 已停用，不允许采集快照"
 MSG_SNAPSHOT_NOT_FOUND = "元数据快照 {id} 不存在"
 MSG_SNAPSHOT_CONFLICT = "元数据快照写入冲突，请重试"
-MSG_SNAPSHOT_TOO_LARGE = "元数据快照过大：{size} 字节 > {limit} 字节（请缩小采集范围）"
+MSG_SNAPSHOT_TOO_LARGE = (
+    "元数据快照过大：{size} 字节 > {limit} 字节"
+    "（请缩小采集范围：在发现源访问策略里用 tables 限定表，或按 owner 拆分源）"
+)
 
 
 @dataclass(frozen=True)
@@ -294,12 +308,61 @@ def normalizePolicy(policy: Mapping[str, Any] | None) -> dict[str, Any]:
         if not isinstance(schemaOwner, str) or not schemaOwner.strip():
             raise ValidationError(MSG_SOURCE_POLICY_SCHEMA_OWNER_INVALID)
         normalized["schema_owner"] = schemaOwner.strip()
+    if "tables" in normalized:
+        normalized["tables"] = normalizePolicyTables(normalized["tables"])
     size = len(json.dumps(normalized, ensure_ascii=False).encode("utf-8"))
     if size > MAX_POLICY_BYTES:
         raise ValidationError(
             MSG_SOURCE_POLICY_TOO_LARGE.format(size=size, limit=MAX_POLICY_BYTES)
         )
     return normalized
+
+
+_TABLE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
+
+
+def normalizePolicyTables(raw: Any) -> list[str]:
+    """校验并归一 `tables` 白名单（去空白、去重保序、严格标识符）。"""
+
+    if not isinstance(raw, list) or not raw:
+        raise ValidationError(MSG_SOURCE_POLICY_TABLES_INVALID)
+    if len(raw) > MAX_POLICY_TABLES:
+        raise ValidationError(
+            MSG_SOURCE_POLICY_TABLES_TOO_MANY.format(
+                count=len(raw), limit=MAX_POLICY_TABLES
+            )
+        )
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            raise ValidationError(MSG_SOURCE_POLICY_TABLES_INVALID)
+        name = item.strip()
+        if not name or not _TABLE_IDENTIFIER.match(name):
+            raise ValidationError(MSG_SOURCE_POLICY_TABLES_INVALID)
+        key = name.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(name)
+    return normalized
+
+
+def applyTablePolicy(
+    tables: Sequence[TableSchemaRead], policy: Mapping[str, Any]
+) -> list[TableSchemaRead]:
+    """按策略 `tables` 收窄采集范围（大小写不敏感；空交集 ⇒ 拒绝而不是静默空快照）。"""
+
+    wanted = policy.get("tables")
+    if not wanted:
+        return list(tables)
+    wantedUpper = {str(name).upper() for name in wanted}
+    filtered = [table for table in tables if table.table_name.upper() in wantedUpper]
+    if not filtered:
+        raise ValidationError(
+            MSG_SNAPSHOT_POLICY_NO_TABLES_MATCHED.format(tables="、".join(wanted))
+        )
+    return filtered
 
 
 def assertPolicyMatchesDatasource(
@@ -482,7 +545,10 @@ class DiscoverySnapshotService:
         # 采集前复检策略适用范围（数据源类型可能已改 ⇒ 承诺不能失效）。
         assertPolicyMatchesDatasource(policy, datasource)
         effective = withConnectOverride(datasource, connectOverride)
-        tables = await self._introspectWithOverride(effective, datasource, connectOverride, policy)
+        tables = await self._introspectWithOverride(
+            effective, datasource, connectOverride, policy
+        )
+        tables = applyTablePolicy(tables, policy)
         snapshot = normalizeSnapshot(tables)
         snapshotSize = len(
             json.dumps(snapshot, ensure_ascii=False).encode("utf-8")

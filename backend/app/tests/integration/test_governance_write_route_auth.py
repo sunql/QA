@@ -42,6 +42,20 @@ _WRITE_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/ontology-discovery/sources"),
         ("PATCH", "/api/v1/ontology-discovery/sources/{sourceId}"),
         ("POST", "/api/v1/ontology-discovery/snapshots"),
+        # WP-ONT-AI A2（G3-4）：剖析 + 候选是成本动作；提案/审核是治理在途件。
+        ("POST", "/api/v1/ontology-discovery/runs"),
+        ("POST", "/api/v1/ontology-discovery/proposals"),
+        ("POST", "/api/v1/ontology-discovery/proposals/{proposalId}/submit"),
+        ("POST", "/api/v1/ontology-discovery/proposals/{proposalId}/review"),
+        # G4：发布走既有 activate 写口 —— 更要 admin。
+        ("POST", "/api/v1/ontology-discovery/proposals/{proposalId}/publish"),
+        # G4-1：增量监测要连业务库采集快照（高成本运维动作）。
+        ("POST", "/api/v1/ontology-discovery/sources/{sourceId}/monitor"),
+        # G4-2：评测结论是治理证据。
+        ("POST", "/api/v1/ontology-discovery/runs/{runId}/evaluate"),
+        # G5：候选择/问题处置是治理写动作。
+        ("PATCH", "/api/v1/ontology-discovery/candidates/{candidateId}/decision"),
+        ("PATCH", "/api/v1/ontology-discovery/findings/{findingId}/status"),
         # 采购源绑定（M1-1.1）：绑定是治理事实，确认权必须收口。
         ("POST", "/api/v1/procurement-bindings"),
         ("POST", "/api/v1/procurement-bindings/{id}/properties"),
@@ -74,6 +88,14 @@ _ADMIN_ONLY_READ_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("GET", "/api/v1/procurement-bindings"),
         ("GET", "/api/v1/procurement-bindings/{id}"),
+        # WP-ONT-AI A2（G3-4）：AI 未确认结论 / 未发布治理在途件 ⇒ 普通用户不得当事实。
+        ("GET", "/api/v1/ontology-discovery/runs/{runId}"),
+        ("GET", "/api/v1/ontology-discovery/candidates"),
+        ("GET", "/api/v1/ontology-discovery/findings"),
+        ("GET", "/api/v1/ontology-discovery/proposals"),
+        ("GET", "/api/v1/ontology-discovery/proposals/{proposalId}"),
+        ("GET", "/api/v1/ontology-discovery/evaluations"),
+        ("GET", "/api/v1/ontology-discovery/runs"),
     }
 )
 

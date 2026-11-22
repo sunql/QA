@@ -79,11 +79,24 @@ class ReleaseCheckContext:
       （候选不进快照 ⇒ 只能实时查；没查就不出这一行 —— 宁可少一行，
       也不写一句「没有候选绑定」这种没依据的结论）。
     - `candidateClassNames`：候选绑定涉及的类名（取前几个，供 detail 展示）。
+    - `activeDatasourceNames`：**活库**里启用中的数据源名字集合（`None` = 没查过）。
+      用于 `MET-002`：快照只记数据源**名字**（id 是自增主键，入档会让跨环境字节不一致），
+      「名字还在不在、是否停用」只能实时查。
+    - `relationViolations`：**活库** `ontology_relation` 的违规条目（端点类已墓碑 /
+      关系类型不在代码白名单）；`None` = 没查过 ⇒ `REL-001` 只判 manifest 内可见部分。
+    - `agentViolations`：**活库** `agent_definition` 的违规条目（域/层不在启用词表 /
+      工具未注册或已停用 / 未绑定工具）；`None` = 没查过 ⇒ `AGT-001` 不出行。
+
+    ⚠️ 三个 `None` 的语义统一：**没查过 ≠ 没问题**。校验项宁可少一行，
+    也不写一句没依据的「全部正常」。
     """
 
     domainCode: str | None = None
     candidateBindingCount: int | None = None
     candidateClassNames: tuple[str, ...] = ()
+    activeDatasourceNames: frozenset[str] | None = None
+    relationViolations: tuple[str, ...] | None = None
+    agentViolations: tuple[str, ...] | None = None
 
 
 def evaluateDomainChecks(

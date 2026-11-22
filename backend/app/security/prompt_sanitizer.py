@@ -56,6 +56,8 @@ _ALLOWED_LABELS: frozenset[str] = frozenset(
         "kpi_contract",
         # P1：文档依据（答案阶段注入的制度/口径片段，仅供参考数据）
         "document_context",
+        # G3-2：发现域剖析事实（外部业务库的行数/空值/值域；数据，不是指令）
+        "discovery_profile",
         # 3 个向后兼容（旧代码已用，避免一次性重命名多处）
         "feature_catalog",   # nl2sql_prompts.py 现有标签
         "term_dictionary",   # nl2sql_prompts.py 现有标签
@@ -65,7 +67,7 @@ _ALLOWED_LABELS: frozenset[str] = frozenset(
 
 
 class UntrustedLabel:
-    """预定义 label 常量（13 个）— 防 label 注入。"""
+    """预定义 label 常量（14 个）— 防 label 注入。"""
 
     USER_QUESTION = "user_question"
     ONTOLOGY_RECALL = "ontology_recall"
@@ -77,6 +79,7 @@ class UntrustedLabel:
     AGENT_TOOL_RESULT = "agent_tool_result"
     KPI_CONTRACT = "kpi_contract"  # B3：KPI 治理契约（plan prompt 专用）
     DOCUMENT_CONTEXT = "document_context"  # P1：文档依据（答案阶段注入）
+    DISCOVERY_PROFILE = "discovery_profile"  # G3-2：发现域剖析事实（候选生成）
     # 向后兼容旧代码（feature_catalog / term_dictionary / user_content）
     FEATURE_CATALOG = "feature_catalog"
     TERM_DICTIONARY = "term_dictionary"

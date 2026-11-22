@@ -1,0 +1,136 @@
+"""候选/问题的**业务决断**（G5 前台签收的写口）。
+
+前台「发现评审」页每行点「采纳 / 驳回 / 待证」就是调用这里的两个方法：
+
+- `decideCandidate`：`CANDIDATE|NEEDS_EVIDENCE|ACCEPTED|REJECTED` 之间切换，
+  记 `decided_by/decided_time` 与 `decision_note`；
+- `resolveFinding`：`OPEN|ACKNOWLEDGED|RESOLVED|IGNORED`，记 `decision_note`。
+
+## 允许改判
+
+业务先判「待证」、补证据后改判「采纳」是正常流程 ⇒ 不锁死单向状态机，
+只校验取值合法。历史由 `audit_log`（API 层记录）承担，本表只保留**最近一次**决断。
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.domain.discovery_pipeline_models import (
+    DiscoveryCandidate,
+    DiscoveryFinding,
+)
+from app.domain.exceptions import NotFoundError, ValidationError
+
+CANDIDATE_DECISIONS = frozenset({"CANDIDATE", "ACCEPTED", "REJECTED", "NEEDS_EVIDENCE"})
+FINDING_DECISIONS = frozenset({"OPEN", "ACKNOWLEDGED", "RESOLVED", "IGNORED"})
+LINKED_ENTITY_TYPES = frozenset(
+    {"ONTOLOGY_CLASS", "ONTOLOGY_PROPERTY", "ONTOLOGY_METRIC"}
+)
+
+MSG_CANDIDATE_NOT_FOUND = "候选 {id} 不存在"
+MSG_CANDIDATE_STATUS_INVALID = (
+    "候选决断非法：{status}（仅 CANDIDATE / ACCEPTED / REJECTED / NEEDS_EVIDENCE）"
+)
+MSG_FINDING_NOT_FOUND = "问题 {id} 不存在"
+MSG_FINDING_STATUS_INVALID = "问题状态非法：{status}（仅 OPEN / ACKNOWLEDGED / RESOLVED / IGNORED）"
+
+MAX_NOTE_LENGTH = 2000
+MAX_LINK_CODE_LENGTH = 200
+
+MSG_LINK_TYPE_INVALID = (
+    "关联对象类型非法：{type}（仅 ONTOLOGY_CLASS / ONTOLOGY_PROPERTY / ONTOLOGY_METRIC）"
+)
+MSG_LINK_PAIR_INVALID = "关联对象必须同时给 linkedEntityType 与 linkedEntityCode"
+MSG_LINK_CODE_INVALID = "关联对象键不能为空（最多 200 字）"
+MSG_RESOLVE_REQUIRES_LINK = "把问题置为「已解决」前必须先关联到本体对象（类/属性/指标）"
+
+
+class DiscoveryCandidateReviewService:
+    async def decideCandidate(
+        self,
+        session: AsyncSession,
+        *,
+        candidateId: int,
+        status: str,
+        note: str | None = None,
+        actor: str,
+        linkedEntityType: str | None = None,
+        linkedEntityCode: str | None = None,
+    ) -> DiscoveryCandidate:
+        normalized = (status or "").strip().upper()
+        if normalized not in CANDIDATE_DECISIONS:
+            raise ValidationError(MSG_CANDIDATE_STATUS_INVALID.format(status=status))
+        candidate = await session.get(DiscoveryCandidate, candidateId)
+        if candidate is None:
+            raise NotFoundError(MSG_CANDIDATE_NOT_FOUND.format(id=candidateId))
+        candidate.status = normalized
+        candidate.decided_by = actor
+        candidate.decided_time = datetime.now(UTC)
+        candidate.decision_note = _normalizeNote(note)
+        linkType, linkCode = _normalizeLink(linkedEntityType, linkedEntityCode)
+        if linkType is not None:
+            candidate.linked_entity_type = linkType
+            candidate.linked_entity_code = linkCode
+        await session.commit()
+        await session.refresh(candidate)
+        return candidate
+
+    async def resolveFinding(
+        self,
+        session: AsyncSession,
+        *,
+        findingId: int,
+        status: str,
+        note: str | None = None,
+        actor: str,
+        linkedEntityType: str | None = None,
+        linkedEntityCode: str | None = None,
+    ) -> DiscoveryFinding:
+        normalized = (status or "").strip().upper()
+        if normalized not in FINDING_DECISIONS:
+            raise ValidationError(MSG_FINDING_STATUS_INVALID.format(status=status))
+        finding = await session.get(DiscoveryFinding, findingId)
+        if finding is None:
+            raise NotFoundError(MSG_FINDING_NOT_FOUND.format(id=findingId))
+        linkType, linkCode = _normalizeLink(linkedEntityType, linkedEntityCode)
+        if linkType is not None:
+            finding.linked_entity_type = linkType
+            finding.linked_entity_code = linkCode
+        if normalized == "RESOLVED" and not finding.linked_entity_code:
+            raise ValidationError(MSG_RESOLVE_REQUIRES_LINK)
+        finding.status = normalized
+        finding.decision_note = _normalizeNote(note)
+        await session.commit()
+        await session.refresh(finding)
+        return finding
+
+
+def _normalizeLink(
+    entityType: str | None, entityCode: str | None
+) -> tuple[str | None, str | None]:
+    """校验 (类型, 自然键) 成对出现；都不给 = 不改动。"""
+    if entityType is None and entityCode is None:
+        return None, None
+    if entityType is None or entityCode is None:
+        raise ValidationError(MSG_LINK_PAIR_INVALID)
+    normalizedType = entityType.strip().upper()
+    if normalizedType not in LINKED_ENTITY_TYPES:
+        raise ValidationError(MSG_LINK_TYPE_INVALID.format(type=entityType))
+    normalizedCode = entityCode.strip()
+    if not normalizedCode or len(normalizedCode) > MAX_LINK_CODE_LENGTH:
+        raise ValidationError(MSG_LINK_CODE_INVALID)
+    return normalizedType, normalizedCode
+
+
+def _normalizeNote(note: str | None) -> str | None:
+    if note is None:
+        return None
+    cleaned = note.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_NOTE_LENGTH:
+        raise ValidationError(f"备注过长：{len(cleaned)} > {MAX_NOTE_LENGTH}")
+    return cleaned

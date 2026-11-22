@@ -1161,3 +1161,86 @@ async def test_按源统计快照传空集合直接返回空(dbSession):
     counts = await service.countSnapshotsBySource(dbSession, sourceIds=[])
 
     assert counts == {}
+
+
+# ---------------------------------------------------------------- 采集范围白名单（0163 之后）
+
+
+async def test_策略tables白名单收窄采集范围(dbSession):
+    """大 schema（如 ZJTH 1695 表）可按表名白名单收窄，快照只含命中的表。"""
+
+    ds = await _seedDatasource(dbSession)
+    fake = _FakeIntrospection(
+        [
+            _table("DIM_SUPPLIER", columns=[_column("BPSNUM_0")]),
+            _table("DIM_IMATERIAL", columns=[_column("ITMREF_0")]),
+            _table("HUGE_TABLE", columns=[_column("X")]),
+        ]
+    )
+    service = DiscoverySnapshotService(introspectionService=fake)
+    source = await service.registerSource(
+        dbSession,
+        name="白名单源",
+        datasourceId=ds.id,
+        owner="张业务",
+        accessPolicy={"mode": "READ_ONLY", "tables": ["dim_supplier", "DIM_IMATERIAL"]},
+    )
+    await dbSession.commit()
+
+    captured = await service.captureSnapshot(dbSession, sourceId=source.id)
+    await dbSession.commit()
+
+    row = await dbSession.get(MetadataSnapshot, captured.snapshotId)
+    assert captured.tableCount == 2
+    names = sorted(table["tableName"] for table in row.snapshot_json["tables"])
+    assert names == ["DIM_IMATERIAL", "DIM_SUPPLIER"]  # 大小写不敏感匹配、按原名落库
+
+
+async def test_策略tables与源上表完全不相交则拒绝(dbSession):
+    ds = await _seedDatasource(dbSession)
+    fake = _FakeIntrospection([_table("DIM_SUPPLIER", columns=[_column("BPSNUM_0")])])
+    service = DiscoverySnapshotService(introspectionService=fake)
+    source = await service.registerSource(
+        dbSession,
+        name="空交集源",
+        datasourceId=ds.id,
+        owner="张业务",
+        accessPolicy={"mode": "READ_ONLY", "tables": ["NO_SUCH_TABLE"]},
+    )
+    await dbSession.commit()
+
+    with pytest.raises(ValidationError):
+        await service.captureSnapshot(dbSession, sourceId=source.id)
+
+
+@pytest.mark.parametrize(
+    "badTables",
+    [[], "DIM_SUPPLIER", [""], ["T-1"], [123], [f"T{index}" for index in range(201)]],
+)
+async def test_策略tables非法取值被拒绝(dbSession, badTables):
+    ds = await _seedDatasource(dbSession)
+    service = DiscoverySnapshotService(introspectionService=_FakeIntrospection([]))
+
+    with pytest.raises(ValidationError):
+        await service.registerSource(
+            dbSession,
+            name=f"非法策略源{abs(hash(str(badTables))) % 10000}",
+            datasourceId=ds.id,
+            owner="张业务",
+            accessPolicy={"mode": "READ_ONLY", "tables": badTables},
+        )
+
+
+async def test_策略tables去重保序(dbSession):
+    ds = await _seedDatasource(dbSession)
+    fake = _FakeIntrospection([_table("A", columns=[_column("x")]), _table("B", columns=[_column("y")])])
+    service = DiscoverySnapshotService(introspectionService=fake)
+    source = await service.registerSource(
+        dbSession,
+        name="去重源",
+        datasourceId=ds.id,
+        owner="张业务",
+        accessPolicy={"mode": "READ_ONLY", "tables": [" A ", "a", "B"]},
+    )
+
+    assert source.access_policy["tables"] == ["A", "B"]

@@ -41,6 +41,16 @@ M1-a DoD：「每条 check 落表可查」。只落失败项 ⇒ 评审看到的
 | `SOURCE_BINDING_CANDIDATE` | RELEASE | WARNING | 仍有未确认（候选）绑定（D-3 治理债） |
 | `SOURCE_BINDING_JOIN_MISSING` | BINDING | **ERROR** | 绑定所属类在整个本体里零 JOIN 边（孤岛） |
 | `SOURCE_BINDING_PROPERTY_UNBOUND` | BINDING | WARNING | 类已绑源表，但有属性没绑 `sourceColumn` |
+| `CLS-001` | CLASS | ERROR | 类名唯一、objectType 合法、父子继承无环 |
+| `CLS-002` | BUSINESS_OBJECT | ERROR | 头类存在、主域存在且已启用 |
+| `REL-001` | RELEASE | ERROR | JOIN 两端类存在 + 活库语义关系类型 / 端点合法 |
+| `AGT-001` | RELEASE | WARNING | Agent 域/层在启用词表、绑定工具已注册且启用 |
+| `GRF-001` | RELEASE | WARNING | 图 label 在 Neo4j 白名单、头类有主键属性 |
+| `MET-002` | KPI | WARNING | 已发布 KPI 绑定有效数据源、关联指标已发布 |
+
+（`CLS-001`/`CLS-002`/`REL-001`/`AGT-001`/`GRF-001` 是设计稿 §5.5 的校验码，
+实现在 `semantic_release_design_checks`（G2）；活库事实由
+`semantic_release_context_facts` 装载。）
 
 （M1-1.3 批次 B 把采购域校验项接进同一张表 —— 机制先立，判据后加。）
 
@@ -66,6 +76,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.domain.semantic_manifest_schema import (
+    MAX_MANIFEST_KPIS,
     MAX_MANIFEST_METRICS,
     MAX_MANIFEST_SOURCE_BINDINGS,
     ManifestSchemaError,
@@ -86,6 +97,7 @@ from app.services.semantic_release_check_types import (
     PublishCheck,
     PublishGateResult,
 )
+from app.services.semantic_release_design_checks import evaluateDesignChecks
 from app.services.semantic_release_domain_checks import (
     ReleaseCheckContext,
     evaluateDomainChecks,
@@ -115,14 +127,24 @@ MAX_GATE_MESSAGES = 20
 #   跨域依赖补齐 / 候选绑定治理债）
 #   + 每条指标最多 3 条（源类引用 / 分子落点 / 分母落点）
 #   + 每条绑定最多 2 条（无 JOIN 边 / 属性未绑列）
-#   = 6 + 3 × MAX_MANIFEST_METRICS + 2 × MAX_MANIFEST_SOURCE_BINDINGS。
+#   + 每条 KPI 最多 1 条（MET-002；无已发布 KPI 时出 1 条汇总行）
+#   + 5 条设计码汇总行（CLS-001 / CLS-002 / REL-001 / AGT-001 / GRF-001 各 1 条）
+#   = 6 + 3 × MAX_MANIFEST_METRICS + 2 × MAX_MANIFEST_SOURCE_BINDINGS
+#     + MAX_MANIFEST_KPIS + 1 + 5。
 # ⚠️ 写死一个「看起来更宽」的数会出事：契约允许的合法 manifest 也会被截断，
 # 而截断丢的是**尾部**校验项 —— 尾部往往正是最后一条指标的 ERROR 结论行
 # （安全评审 HIGH-1）。⇒ 上限必须 ≥ 契约上限，截断只应作用于**绕过契约**的 manifest。
 # ⚠️ 绑定级校验项**不**按候选数计（候选不进快照 ⇒ 数量无契约上限）⇒
 # 候选只出**一条发布级汇总行**（见域级模块的 `CHECK_SOURCE_BINDING_CANDIDATE`）。
+# ⚠️ 设计码 CLS/REL/GRF/AGT 也是**每个码一条汇总行**（不逐类/逐 JOIN）：
+# 逐类会有 5000 条、逐 JOIN 会有 20000 条，写放大且没人读 —— 汇总行条数是常数。
 MAX_CHECKS_PER_RELEASE = (
-    6 + 3 * MAX_MANIFEST_METRICS + 2 * MAX_MANIFEST_SOURCE_BINDINGS
+    6
+    + 3 * MAX_MANIFEST_METRICS
+    + 2 * MAX_MANIFEST_SOURCE_BINDINGS
+    + MAX_MANIFEST_KPIS
+    + 1
+    + 5
 )
 
 # 「没有落点的比率不可执行」——D07 发布闸门要求只对这两类指标硬拒绝。
@@ -141,9 +163,11 @@ def evaluateManifestChecks(
     不传 ⇒ 不做域切片校验（全局发布没有域），但绑定级校验照做
     （绑定分区在 manifest 里，自足）。
     """
+    live = context or ReleaseCheckContext()
     checks: list[PublishCheck] = [_schemaCheck(manifest)]
     checks.extend(evaluatePublishChecks(manifest))
-    checks.extend(evaluateDomainChecks(manifest, context=context or ReleaseCheckContext()))
+    checks.extend(evaluateDomainChecks(manifest, context=live))
+    checks.extend(evaluateDesignChecks(manifest, context=live))
     return _dedupe(checks)
 
 

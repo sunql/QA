@@ -249,16 +249,20 @@ export async function uploadDocument(
     securityLevel?: string;
   } = {},
 ): Promise<{ documentId: string; chunks: number }> {
+  // ⚠️ 后端 `/documents/upload` 的元数据是 **Query 参数**（不是 multipart 字段）；
+  // 放进 FormData 会被静默忽略 ⇒ 文档类型恒 OTHER、安全级别恒 L1、owner 为空。
+  const params = new URLSearchParams();
+  if (opts.documentType) params.set("documentType", opts.documentType);
+  if (opts.version) params.set("version", opts.version);
+  if (opts.owner) params.set("owner", opts.owner);
+  if (opts.effectiveDate) params.set("effectiveDate", opts.effectiveDate);
+  if (opts.securityLevel) params.set("securityLevel", opts.securityLevel);
+
   const form = new FormData();
   form.append("file", file);
-  if (opts.documentType) form.set("documentType", opts.documentType);
-  if (opts.version) form.set("version", opts.version);
-  if (opts.owner) form.set("owner", opts.owner);
-  if (opts.effectiveDate) form.set("effectiveDate", opts.effectiveDate);
-  if (opts.securityLevel) form.set("securityLevel", opts.securityLevel);
-
+  const query = params.toString();
   const res = await axios.postForm<{ documentId: string; chunks: number }>(
-    `${API_BASE_URL}${BASE}/upload`,
+    `${API_BASE_URL}${BASE}/upload${query ? `?${query}` : ""}`,
     form,
     {
       headers: authHeaders(),

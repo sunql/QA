@@ -3781,7 +3781,20 @@ export const zhCN = {
     started: "开始时间",
     model: "模型",
     noRunsHint: "没有可用的发现运行（或当前账号无权限）——先在后台触发一次剖析",
-    notePlaceholder: "备注（驳回理由 / 待证需补什么 / 负责人）"
+    notePlaceholder: "备注（驳回理由 / 待证需补什么 / 负责人）",
+    linked: "关联本体",
+    linkOntology: "关联本体",
+    linkTitle: "关联到本体对象",
+    linkClass: "本体类",
+    linkProperty: "本体属性",
+    linkMetric: "本体指标",
+    linkClassFirst: "先选本体类",
+    linkPick: "选择要关联的对象",
+    linkPickFirst: "请先选择关联对象",
+    linkSaved: "关联已保存",
+    existingMatch: "本体里已有类 {name}，可直接去更新它",
+    openOntology: "打开本体管理",
+    noMatchHint: "本体里暂无对应类——可在本体管理页新建后回到这里关联"
   },
   discoveryAdmin: {
     title: "本体发现（发现源 → 快照 → 运行 → 评审）",

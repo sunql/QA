@@ -65,6 +65,8 @@ export interface DiscoveryCandidate {
   decidedBy: string | null;
   decidedTime: string | null;
   decisionNote: string | null;
+  linkedEntityType: string | null;
+  linkedEntityCode: string | null;
   createdTime: string;
 }
 
@@ -86,6 +88,8 @@ export interface DiscoveryFinding {
   detail: string;
   evidenceRefs: DiscoveryEvidenceRef[];
   decisionNote: string | null;
+  linkedEntityType: string | null;
+  linkedEntityCode: string | null;
   createdTime: string;
 }
 
@@ -147,7 +151,7 @@ export async function listFindings(params: {
 
 export async function decideCandidate(
   id: number,
-  payload: { status: string; note?: string | null },
+  payload: { status: string; note?: string | null; linkedEntityType?: string | null; linkedEntityCode?: string | null },
 ): Promise<DiscoveryCandidate> {
   const res = await httpClient.patch<DiscoveryCandidate>(
     `${CANDIDATES}/${id}/decision`,
@@ -158,7 +162,7 @@ export async function decideCandidate(
 
 export async function decideFinding(
   id: number,
-  payload: { status: string; note?: string | null },
+  payload: { status: string; note?: string | null; linkedEntityType?: string | null; linkedEntityCode?: string | null },
 ): Promise<DiscoveryFinding> {
   const res = await httpClient.patch<DiscoveryFinding>(
     `${FINDINGS}/${id}/status`,

@@ -745,13 +745,20 @@ async def test_候选决断落状态与备注(apiClient, dbSession):
 
     resp = await apiClient.patch(
         f"/api/v1/ontology-discovery/candidates/{candidateId}/decision",
-        json={"status": "REJECTED", "note": "语义不符"},
+        json={
+            "status": "REJECTED",
+            "note": "语义不符",
+            "linkedEntityType": "ONTOLOGY_CLASS",
+            "linkedEntityCode": "Supplier",
+        },
     )
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["status"] == "REJECTED"
     assert body["decisionNote"] == "语义不符"
+    assert body["linkedEntityType"] == "ONTOLOGY_CLASS"
+    assert body["linkedEntityCode"] == "Supplier"
     assert body["decidedBy"]
 
 

@@ -3778,7 +3778,20 @@ export const enUS = {
     started: "Started",
     model: "Model",
     noRunsHint: "No discovery runs available (or no permission) — trigger a profiling run first",
-    notePlaceholder: "Note (reject reason / evidence needed / owner)"
+    notePlaceholder: "Note (reject reason / evidence needed / owner)",
+    linked: "Linked ontology",
+    linkOntology: "Link ontology",
+    linkTitle: "Link to ontology object",
+    linkClass: "Class",
+    linkProperty: "Property",
+    linkMetric: "Metric",
+    linkClassFirst: "Pick a class first",
+    linkPick: "Pick the object",
+    linkPickFirst: "Pick an object first",
+    linkSaved: "Link saved",
+    existingMatch: "Class {name} already exists — open it to update",
+    openOntology: "Open ontology admin",
+    noMatchHint: "No matching class yet — create it in ontology admin, then link here"
   },
   discoveryAdmin: {
     title: "Ontology Discovery (source → snapshot → run → review)",

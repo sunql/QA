@@ -24,17 +24,28 @@ from app.domain.discovery_pipeline_models import (
 )
 from app.domain.exceptions import NotFoundError, ValidationError
 
-CANDIDATE_DECISIONS = frozenset({"ACCEPTED", "REJECTED", "NEEDS_EVIDENCE"})
+CANDIDATE_DECISIONS = frozenset({"CANDIDATE", "ACCEPTED", "REJECTED", "NEEDS_EVIDENCE"})
 FINDING_DECISIONS = frozenset({"OPEN", "ACKNOWLEDGED", "RESOLVED", "IGNORED"})
+LINKED_ENTITY_TYPES = frozenset(
+    {"ONTOLOGY_CLASS", "ONTOLOGY_PROPERTY", "ONTOLOGY_METRIC"}
+)
 
 MSG_CANDIDATE_NOT_FOUND = "候选 {id} 不存在"
 MSG_CANDIDATE_STATUS_INVALID = (
-    "候选决断非法：{status}（仅 ACCEPTED / REJECTED / NEEDS_EVIDENCE）"
+    "候选决断非法：{status}（仅 CANDIDATE / ACCEPTED / REJECTED / NEEDS_EVIDENCE）"
 )
 MSG_FINDING_NOT_FOUND = "问题 {id} 不存在"
 MSG_FINDING_STATUS_INVALID = "问题状态非法：{status}（仅 OPEN / ACKNOWLEDGED / RESOLVED / IGNORED）"
 
 MAX_NOTE_LENGTH = 2000
+MAX_LINK_CODE_LENGTH = 200
+
+MSG_LINK_TYPE_INVALID = (
+    "关联对象类型非法：{type}（仅 ONTOLOGY_CLASS / ONTOLOGY_PROPERTY / ONTOLOGY_METRIC）"
+)
+MSG_LINK_PAIR_INVALID = "关联对象必须同时给 linkedEntityType 与 linkedEntityCode"
+MSG_LINK_CODE_INVALID = "关联对象键不能为空（最多 200 字）"
+MSG_RESOLVE_REQUIRES_LINK = "把问题置为「已解决」前必须先关联到本体对象（类/属性/指标）"
 
 
 class DiscoveryCandidateReviewService:
@@ -46,6 +57,8 @@ class DiscoveryCandidateReviewService:
         status: str,
         note: str | None = None,
         actor: str,
+        linkedEntityType: str | None = None,
+        linkedEntityCode: str | None = None,
     ) -> DiscoveryCandidate:
         normalized = (status or "").strip().upper()
         if normalized not in CANDIDATE_DECISIONS:
@@ -57,6 +70,10 @@ class DiscoveryCandidateReviewService:
         candidate.decided_by = actor
         candidate.decided_time = datetime.now(UTC)
         candidate.decision_note = _normalizeNote(note)
+        linkType, linkCode = _normalizeLink(linkedEntityType, linkedEntityCode)
+        if linkType is not None:
+            candidate.linked_entity_type = linkType
+            candidate.linked_entity_code = linkCode
         await session.commit()
         await session.refresh(candidate)
         return candidate
@@ -69,6 +86,8 @@ class DiscoveryCandidateReviewService:
         status: str,
         note: str | None = None,
         actor: str,
+        linkedEntityType: str | None = None,
+        linkedEntityCode: str | None = None,
     ) -> DiscoveryFinding:
         normalized = (status or "").strip().upper()
         if normalized not in FINDING_DECISIONS:
@@ -76,11 +95,34 @@ class DiscoveryCandidateReviewService:
         finding = await session.get(DiscoveryFinding, findingId)
         if finding is None:
             raise NotFoundError(MSG_FINDING_NOT_FOUND.format(id=findingId))
+        linkType, linkCode = _normalizeLink(linkedEntityType, linkedEntityCode)
+        if linkType is not None:
+            finding.linked_entity_type = linkType
+            finding.linked_entity_code = linkCode
+        if normalized == "RESOLVED" and not finding.linked_entity_code:
+            raise ValidationError(MSG_RESOLVE_REQUIRES_LINK)
         finding.status = normalized
         finding.decision_note = _normalizeNote(note)
         await session.commit()
         await session.refresh(finding)
         return finding
+
+
+def _normalizeLink(
+    entityType: str | None, entityCode: str | None
+) -> tuple[str | None, str | None]:
+    """校验 (类型, 自然键) 成对出现；都不给 = 不改动。"""
+    if entityType is None and entityCode is None:
+        return None, None
+    if entityType is None or entityCode is None:
+        raise ValidationError(MSG_LINK_PAIR_INVALID)
+    normalizedType = entityType.strip().upper()
+    if normalizedType not in LINKED_ENTITY_TYPES:
+        raise ValidationError(MSG_LINK_TYPE_INVALID.format(type=entityType))
+    normalizedCode = entityCode.strip()
+    if not normalizedCode or len(normalizedCode) > MAX_LINK_CODE_LENGTH:
+        raise ValidationError(MSG_LINK_CODE_INVALID)
+    return normalizedType, normalizedCode
 
 
 def _normalizeNote(note: str | None) -> str | None:

@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { I18nextProvider } from "react-i18next";
+import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import i18n from "../i18n/i18n";
 import DiscoveryReviewPage from "../pages/DiscoveryReviewPage";
@@ -16,6 +17,18 @@ const api = vi.hoisted(() => ({
   decideFinding: vi.fn(),
 }));
 vi.mock("../api/discoveryReview", () => api);
+vi.mock("../api/ontologyTargets", () => ({
+  listOntologyClasses: vi.fn().mockResolvedValue([
+    { id: 1, className: "Supplier", classAlias: "供应商", sourceTable: "DIM_SUPPLIER", objectType: "Master" },
+  ]),
+  listOntologyProperties: vi.fn().mockResolvedValue([
+    { id: 11, classId: 1, propertyName: "supplier_name", propertyAlias: "名称" },
+  ]),
+  listOntologyMetrics: vi.fn().mockResolvedValue([
+    { id: 21, metricName: "supplier_count", metricAlias: "供应商数" },
+  ]),
+}));
+
 
 const RUN = {
   id: 7,
@@ -73,11 +86,13 @@ const FINDING = {
 
 function renderPage() {
   return render(
+    <MemoryRouter>
     <I18nextProvider i18n={i18n}>
       <ConfigProvider locale={zhCN}>
         <DiscoveryReviewPage />
       </ConfigProvider>
-    </I18nextProvider>,
+    </I18nextProvider>
+    </MemoryRouter>,
   );
 }
 

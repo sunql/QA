@@ -72,7 +72,11 @@ CANDIDATE_PAYLOAD_COMMENT = "0166，WP-ONT-AI A2：候选内容（JSON 对象，
 CANDIDATE_EVIDENCE_COMMENT = "0166，WP-ONT-AI A2：证据引用（JSON 数组，复用 KnowledgeEvidence 契约；不得为空）"
 CANDIDATE_STATUS_COMMENT = "0166，WP-ONT-AI A2：候选状态（CANDIDATE / NEEDS_EVIDENCE / ACCEPTED / REJECTED / MERGED）"
 CANDIDATE_DECISION_NOTE_COMMENT = "0168，WP-ONT-AI G5：业务判定备注（驳回理由 / 待证需补证据）"
+CANDIDATE_LINK_TYPE_COMMENT = "0169，WP-ONT-AI G5：关联的本体对象类型（ONTOLOGY_CLASS / ONTOLOGY_PROPERTY / ONTOLOGY_METRIC）"
+CANDIDATE_LINK_CODE_COMMENT = "0169，WP-ONT-AI G5：关联对象自然键（类名 / 类名.属性名 / 指标名）"
 FINDING_DECISION_NOTE_COMMENT = "0168，WP-ONT-AI G5：问题处理备注（负责人 / 处理建议）"
+FINDING_LINK_TYPE_COMMENT = "0169，WP-ONT-AI G5：问题关联的本体对象类型"
+FINDING_LINK_CODE_COMMENT = "0169，WP-ONT-AI G5：问题关联对象自然键"
 FINDING_TYPE_COMMENT = "0166，WP-ONT-AI A2：问题类型（DUPLICATE / CONFLICT / MISSING / MAPPING）"
 FINDING_SEVERITY_COMMENT = "0166，WP-ONT-AI A2：问题严重级别（ERROR / WARNING / INFO）"
 FINDING_STATUS_COMMENT = "0166，WP-ONT-AI A2：问题状态（OPEN / ACKNOWLEDGED / RESOLVED / IGNORED）"
@@ -325,6 +329,12 @@ class DiscoveryCandidate(Base):
     decision_note: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment=CANDIDATE_DECISION_NOTE_COMMENT
     )
+    linked_entity_type: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, comment=CANDIDATE_LINK_TYPE_COMMENT
+    )
+    linked_entity_code: Mapped[str | None] = mapped_column(
+        String(200), nullable=True, comment=CANDIDATE_LINK_CODE_COMMENT
+    )
     created_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
@@ -420,6 +430,12 @@ class DiscoveryFinding(Base):
     )
     decision_note: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment=FINDING_DECISION_NOTE_COMMENT
+    )
+    linked_entity_type: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, comment=FINDING_LINK_TYPE_COMMENT
+    )
+    linked_entity_code: Mapped[str | None] = mapped_column(
+        String(200), nullable=True, comment=FINDING_LINK_CODE_COMMENT
     )
     created_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False

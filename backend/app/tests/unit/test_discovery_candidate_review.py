@@ -149,3 +149,80 @@ async def test_invalid_finding_status_is_rejected(dbSession: Any) -> None:
         await DiscoveryCandidateReviewService().resolveFinding(
             dbSession, findingId=findingId, status="DONE", actor="biz"
         )
+
+
+async def test_candidate_link_to_ontology_object(dbSession: Any) -> None:
+    candidateId, _ = await _seed(dbSession)
+
+    row = await DiscoveryCandidateReviewService().decideCandidate(
+        dbSession,
+        candidateId=candidateId,
+        status="ACCEPTED",
+        actor="biz",
+        linkedEntityType="ontology_class",
+        linkedEntityCode="Supplier",
+    )
+
+    assert (row.linked_entity_type, row.linked_entity_code) == ("ONTOLOGY_CLASS", "Supplier")
+
+
+async def test_link_pair_must_be_complete(dbSession: Any) -> None:
+    candidateId, _ = await _seed(dbSession)
+
+    with pytest.raises(ValidationError):
+        await DiscoveryCandidateReviewService().decideCandidate(
+            dbSession, candidateId=candidateId, status="ACCEPTED", actor="biz",
+            linkedEntityType="ONTOLOGY_CLASS",
+        )
+
+
+async def test_link_type_must_be_known(dbSession: Any) -> None:
+    candidateId, _ = await _seed(dbSession)
+
+    with pytest.raises(ValidationError):
+        await DiscoveryCandidateReviewService().decideCandidate(
+            dbSession, candidateId=candidateId, status="ACCEPTED", actor="biz",
+            linkedEntityType="TABLE", linkedEntityCode="X",
+        )
+
+
+async def test_resolving_finding_requires_a_link(dbSession: Any) -> None:
+    _, findingId = await _seed(dbSession)
+
+    with pytest.raises(ValidationError):
+        await DiscoveryCandidateReviewService().resolveFinding(
+            dbSession, findingId=findingId, status="RESOLVED", actor="biz"
+        )
+
+
+async def test_finding_can_be_resolved_after_linking(dbSession: Any) -> None:
+    _, findingId = await _seed(dbSession)
+    service = DiscoveryCandidateReviewService()
+    await service.resolveFinding(
+        dbSession, findingId=findingId, status="ACKNOWLEDGED", actor="biz",
+        linkedEntityType="ONTOLOGY_CLASS", linkedEntityCode="Supplier",
+    )
+
+    row = await service.resolveFinding(
+        dbSession, findingId=findingId, status="RESOLVED", actor="biz"
+    )
+
+    assert row.status == "RESOLVED"
+    assert row.linked_entity_code == "Supplier"
+
+
+async def test_link_only_keeps_candidate_status(dbSession: Any) -> None:
+    candidateId, _ = await _seed(dbSession)
+
+    row = await DiscoveryCandidateReviewService().decideCandidate(
+        dbSession,
+        candidateId=candidateId,
+        status="CANDIDATE",
+        actor="biz",
+        linkedEntityType="ONTOLOGY_CLASS",
+        linkedEntityCode="Supplier",
+    )
+
+    assert row.status == "CANDIDATE"
+    assert row.linked_entity_code == "Supplier"
+    assert row.decided_by == "biz"

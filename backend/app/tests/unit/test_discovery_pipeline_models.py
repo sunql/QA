@@ -33,6 +33,7 @@ _MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[3] / "alembic" / "ver
 _MIGRATION_STEM = "0166_discovery_pipeline"
 _EVALUATION_MIGRATION_STEM = "0167_discovery_evaluation"
 _DECISION_NOTE_STEM = "0168_discovery_decision_note"
+_LINK_ENTITY_STEM = "0169_discovery_link_entity"
 
 _TABLES = (
     DiscoveryRun.__table__,
@@ -289,6 +290,7 @@ def test_迁移列注释与orm逐字一致():
     comments = _migrationColumnComments(_loadMigration())
     comments.update(_migrationColumnComments(_loadMigration(_EVALUATION_MIGRATION_STEM)))
     comments.update(_addColumnComments(_loadMigration(_DECISION_NOTE_STEM)))
+    comments.update(_addColumnComments(_loadMigration(_LINK_ENTITY_STEM)))
     ormComments = {
         (table.name, column.name): column.comment
         for table in _TABLES
@@ -377,3 +379,13 @@ def test_评审备注迁移链在0167之后():
     added = [call[1] for call in calls if call[0] == "add_column"]
     assert added == ["discovery_candidate", "discovery_finding"]
     assert len(f"{_DECISION_NOTE_STEM}.py") <= 32
+
+
+def test_关联本体迁移链在0168之后():
+    module = _loadMigration(_LINK_ENTITY_STEM)
+
+    assert module.revision == "0169"
+    assert module.down_revision == "0168"
+    calls = _recordedOps(module, "upgrade")
+    assert [call[0] for call in calls if call[0] == "add_column"].count("add_column") == 4
+    assert len(f"{_LINK_ENTITY_STEM}.py") <= 32

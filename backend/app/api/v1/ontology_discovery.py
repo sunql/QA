@@ -932,6 +932,8 @@ def _candidateRead(row) -> DiscoveryCandidateRead:
         decided_by=row.decided_by,
         decided_time=row.decided_time,
         decision_note=row.decision_note,
+        linked_entity_type=row.linked_entity_type,
+        linked_entity_code=row.linked_entity_code,
         created_time=row.created_time,
     )
 
@@ -950,6 +952,8 @@ def _findingRead(row) -> DiscoveryFindingRead:
         detail=row.detail,
         evidence_refs=list(row.evidence_refs or []),
         decision_note=row.decision_note,
+        linked_entity_type=row.linked_entity_type,
+        linked_entity_code=row.linked_entity_code,
         created_time=row.created_time,
     )
 
@@ -1009,6 +1013,8 @@ async def decideDiscoveryCandidate(
         status=payload.status,
         note=payload.note,
         actor=admin.userId,
+        linkedEntityType=payload.linked_entity_type,
+        linkedEntityCode=payload.linked_entity_code,
     )
     await _audit.record(
         session,
@@ -1018,7 +1024,11 @@ async def decideDiscoveryCandidate(
         actor=admin.userId,
         actor_departments=admin.departments or None,
         before={"status": beforeStatus},
-        after={"status": row.status, "note": row.decision_note},
+        after={
+            "status": row.status,
+            "note": row.decision_note,
+            "linked": [row.linked_entity_type, row.linked_entity_code],
+        },
     )
     await session.commit()
     return _candidateRead(row)
@@ -1042,6 +1052,8 @@ async def decideDiscoveryFinding(
         status=payload.status,
         note=payload.note,
         actor=admin.userId,
+        linkedEntityType=payload.linked_entity_type,
+        linkedEntityCode=payload.linked_entity_code,
     )
     await _audit.record(
         session,
@@ -1051,7 +1063,11 @@ async def decideDiscoveryFinding(
         actor=admin.userId,
         actor_departments=admin.departments or None,
         before={"status": beforeStatus},
-        after={"status": row.status, "note": row.decision_note},
+        after={
+            "status": row.status,
+            "note": row.decision_note,
+            "linked": [row.linked_entity_type, row.linked_entity_code],
+        },
     )
     await session.commit()
     return _findingRead(row)

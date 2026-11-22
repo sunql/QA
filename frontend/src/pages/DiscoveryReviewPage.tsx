@@ -28,6 +28,7 @@ import {
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import { useNavigate } from "react-router-dom";
 import { useTranslation } from "../i18n";
 import { useAuthStore } from "../stores/authStore";
 import {
@@ -40,6 +41,14 @@ import {
   type DiscoveryFinding,
   type DiscoveryRunSummary,
 } from "../api/discoveryReview";
+import {
+  listOntologyClasses,
+  listOntologyMetrics,
+  listOntologyProperties,
+  type OntologyClassOption,
+  type OntologyMetricOption,
+  type OntologyPropertyOption,
+} from "../api/ontologyTargets";
 
 const { Text } = Typography;
 
@@ -85,9 +94,18 @@ export default function DiscoveryReviewPage() {
   const [candidates, setCandidates] = useState<DiscoveryCandidate[]>([]);
   const [findings, setFindings] = useState<DiscoveryFinding[]>([]);
   const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
   const [target, setTarget] = useState<DecideTarget | null>(null);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [linkTarget, setLinkTarget] = useState<DecideTarget | null>(null);
+  const [linkType, setLinkType] = useState("ONTOLOGY_CLASS");
+  const [linkClassId, setLinkClassId] = useState<number | undefined>();
+  const [linkCode, setLinkCode] = useState<string | undefined>();
+  const [ontologyClasses, setOntologyClasses] = useState<OntologyClassOption[]>([]);
+  const [ontologyProperties, setOntologyProperties] = useState<OntologyPropertyOption[]>([]);
+  const [ontologyMetrics, setOntologyMetrics] = useState<OntologyMetricOption[]>([]);
+  const [linkBusy, setLinkBusy] = useState(false);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -106,6 +124,23 @@ export default function DiscoveryReviewPage() {
   useEffect(() => {
     void loadRuns();
   }, [loadRuns]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const [classes, properties, metrics] = await Promise.all([
+          listOntologyClasses(),
+          listOntologyProperties(),
+          listOntologyMetrics(),
+        ]);
+        setOntologyClasses(classes);
+        setOntologyProperties(properties);
+        setOntologyMetrics(metrics);
+      } catch {
+        // interceptor 已提示
+      }
+    })();
+  }, []);
 
   const loadRows = useCallback(async () => {
     if (runId === undefined) {
@@ -143,6 +178,71 @@ export default function DiscoveryReviewPage() {
     return candidateJudged + findingJudged;
   }, [candidates, findings]);
   const total = candidates.length + findings.length;
+
+  const openLink = (kind: DecideKind, row: DiscoveryCandidate | DiscoveryFinding, label: string) => {
+    setLinkTarget({ kind, id: row.id, label, status: row.status });
+    setLinkType(row.linkedEntityType ?? "ONTOLOGY_CLASS");
+    setLinkCode(row.linkedEntityCode ?? undefined);
+    setLinkClassId(undefined);
+  };
+
+  const saveLink = async () => {
+    if (!linkTarget) return;
+    if (!linkCode) {
+      message.warning(t("discoveryReview.linkPickFirst"));
+      return;
+    }
+    setLinkBusy(true);
+    try {
+      const payload = {
+        status: linkTarget.status,
+        linkedEntityType: linkType,
+        linkedEntityCode: linkCode,
+      };
+      if (linkTarget.kind === "candidate") {
+        await decideCandidate(linkTarget.id, payload);
+      } else {
+        await decideFinding(linkTarget.id, payload);
+      }
+      message.success(t("discoveryReview.linkSaved"));
+      setLinkTarget(null);
+      await loadRows();
+    } catch {
+      // interceptor 已提示
+    } finally {
+      setLinkBusy(false);
+    }
+  };
+
+  const linkOptions = (() => {
+    if (linkType === "ONTOLOGY_METRIC") {
+      return ontologyMetrics.map((item) => ({
+        value: item.metricName,
+        label: item.metricAlias ? `${item.metricName}（${item.metricAlias}）` : item.metricName,
+      }));
+    }
+    if (linkType === "ONTOLOGY_PROPERTY") {
+      const cls = ontologyClasses.find((item) => item.id === linkClassId);
+      return ontologyProperties
+        .filter((item) => item.classId === linkClassId)
+        .map((item) => ({
+          value: `${cls?.className ?? item.classId}.${item.propertyName}`,
+          label: item.propertyAlias ? `${item.propertyName}（${item.propertyAlias}）` : item.propertyName,
+        }));
+    }
+    return ontologyClasses.map((item) => ({
+      value: item.className,
+      label: item.classAlias ? `${item.className}（${item.classAlias}）` : item.className,
+    }));
+  })();
+
+  const matchedClass = (() => {
+    if (!linkTarget || linkTarget.kind !== "candidate") return undefined;
+    const targetCode = linkTarget.label.split(" ").slice(1).join(" ").trim();
+    return ontologyClasses.find(
+      (item) => item.className.toUpperCase() === targetCode.toUpperCase(),
+    );
+  })();
 
   const openDecide = (kind: DecideKind, row: DiscoveryCandidate | DiscoveryFinding, label: string) => {
     setTarget({ kind, id: row.id, label, status: row.status });
@@ -198,10 +298,16 @@ export default function DiscoveryReviewPage() {
       width: 140,
       render: (value: string) => <Tag color={STATUS_COLOR[value] ?? "default"}>{value}</Tag>,
     },
-    { title: t("discoveryReview.note"), dataIndex: "decisionNote", width: 200, render: (value: string | null) => value ?? "—" },
+    { title: t("discoveryReview.note"), dataIndex: "decisionNote", width: 180, render: (value: string | null) => value ?? "—" },
+    {
+      title: t("discoveryReview.linked"),
+      width: 200,
+      render: (_, row) =>
+        row.linkedEntityCode ? <Text code>{row.linkedEntityType}:{row.linkedEntityCode}</Text> : "—",
+    },
     {
       title: t("discoveryReview.action"),
-      width: 260,
+      width: 300,
       render: (_, row) => (
         <Space wrap>
           <Button size="small" type="primary" disabled={!isAdmin} onClick={() => openDecide("candidate", row, `${row.candidateType} ${row.targetCode ?? ""}`)}>
@@ -212,6 +318,9 @@ export default function DiscoveryReviewPage() {
           </Button>
           <Button size="small" disabled={!isAdmin} onClick={() => openDecide("candidate", row, `${row.candidateType} ${row.targetCode ?? ""}`)}>
             {t("discoveryReview.needsEvidence")}
+          </Button>
+          <Button size="small" disabled={!isAdmin} onClick={() => openLink("candidate", row, `${row.candidateType} ${row.targetCode ?? ""}`)}>
+            {t("discoveryReview.linkOntology")}
           </Button>
         </Space>
       ),
@@ -240,10 +349,16 @@ export default function DiscoveryReviewPage() {
       width: 140,
       render: (value: string) => <Tag color={STATUS_COLOR[value] ?? "default"}>{value}</Tag>,
     },
-    { title: t("discoveryReview.note"), dataIndex: "decisionNote", width: 180, render: (value: string | null) => value ?? "—" },
+    { title: t("discoveryReview.note"), dataIndex: "decisionNote", width: 160, render: (value: string | null) => value ?? "—" },
+    {
+      title: t("discoveryReview.linked"),
+      width: 200,
+      render: (_, row) =>
+        row.linkedEntityCode ? <Text code>{row.linkedEntityType}:{row.linkedEntityCode}</Text> : "—",
+    },
     {
       title: t("discoveryReview.action"),
-      width: 240,
+      width: 300,
       render: (_, row) => (
         <Space wrap>
           <Button size="small" disabled={!isAdmin} onClick={() => openDecide("finding", row, `${row.findingType} ${row.tableName ?? ""}`)}>
@@ -254,6 +369,9 @@ export default function DiscoveryReviewPage() {
           </Button>
           <Button size="small" disabled={!isAdmin} onClick={() => openDecide("finding", row, `${row.findingType} ${row.tableName ?? ""}`)}>
             {t("discoveryReview.ignore")}
+          </Button>
+          <Button size="small" disabled={!isAdmin} onClick={() => openLink("finding", row, `${row.findingType} ${row.tableName ?? ""}`)}>
+            {t("discoveryReview.linkOntology")}
           </Button>
         </Space>
       ),
@@ -396,6 +514,84 @@ export default function DiscoveryReviewPage() {
               {t(option.labelKey)}
             </Button>
           ))}
+        </Space>
+      </Modal>
+
+      <Modal
+        title={`${t("discoveryReview.linkTitle")} · ${linkTarget?.label ?? ""}`}
+        open={linkTarget !== null}
+        onCancel={() => setLinkTarget(null)}
+        onOk={() => void saveLink()}
+        confirmLoading={linkBusy}
+        destroyOnHidden
+      >
+        {matchedClass && (
+          <Alert
+            type="success"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={t("discoveryReview.existingMatch", { name: matchedClass.className })}
+            action={
+              <Button size="small" onClick={() => navigate("/ontology")}>
+                {t("discoveryReview.openOntology")}
+              </Button>
+            }
+          />
+        )}
+        {!matchedClass && linkTarget?.kind === "candidate" && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={t("discoveryReview.noMatchHint")}
+            action={
+              <Button size="small" onClick={() => navigate("/ontology")}>
+                {t("discoveryReview.openOntology")}
+              </Button>
+            }
+          />
+        )}
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Select
+            style={{ width: "100%" }}
+            value={linkType}
+            onChange={(value) => {
+              setLinkType(value);
+              setLinkClassId(undefined);
+              setLinkCode(undefined);
+            }}
+            options={[
+              { value: "ONTOLOGY_CLASS", label: t("discoveryReview.linkClass") },
+              { value: "ONTOLOGY_PROPERTY", label: t("discoveryReview.linkProperty") },
+              { value: "ONTOLOGY_METRIC", label: t("discoveryReview.linkMetric") },
+            ]}
+          />
+          {linkType === "ONTOLOGY_PROPERTY" && (
+            <Select
+              style={{ width: "100%" }}
+              placeholder={t("discoveryReview.linkClassFirst")}
+              value={linkClassId}
+              onChange={(value) => {
+                setLinkClassId(value);
+                setLinkCode(undefined);
+              }}
+              showSearch
+              optionFilterProp="label"
+              options={ontologyClasses.map((item) => ({
+                value: item.id,
+                label: item.classAlias ? `${item.className}（${item.classAlias}）` : item.className,
+              }))}
+            />
+          )}
+          <Select
+            style={{ width: "100%" }}
+            placeholder={t("discoveryReview.linkPick")}
+            value={linkCode}
+            onChange={(value) => setLinkCode(value)}
+            showSearch
+            optionFilterProp="label"
+            options={linkOptions}
+          />
         </Space>
       </Modal>
     </div>

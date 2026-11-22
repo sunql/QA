@@ -244,6 +244,8 @@ class DiscoveryCandidateRead(CamelModel):
     decided_by: str | None
     decided_time: datetime | None
     decision_note: str | None = None
+    linked_entity_type: str | None = None
+    linked_entity_code: str | None = None
     created_time: datetime
 
 
@@ -265,6 +267,8 @@ class DiscoveryFindingRead(CamelModel):
     detail: str
     evidence_refs: list[Any]
     decision_note: str | None = None
+    linked_entity_type: str | None = None
+    linked_entity_code: str | None = None
     created_time: datetime
 
 
@@ -389,6 +393,10 @@ class DiscoveryCandidateDecisionRequest(CamelModel):
 
     status: str = Field(..., description="ACCEPTED / REJECTED / NEEDS_EVIDENCE")
     note: str | None = Field(default=None, max_length=MAX_NOTE_LENGTH)
+    linked_entity_type: str | None = Field(
+        default=None, max_length=32, description="ONTOLOGY_CLASS / ONTOLOGY_PROPERTY / ONTOLOGY_METRIC"
+    )
+    linked_entity_code: str | None = Field(default=None, max_length=200, description="类名 / 类名.属性名 / 指标名")
 
 
 class DiscoveryFindingDecisionRequest(CamelModel):
@@ -396,6 +404,8 @@ class DiscoveryFindingDecisionRequest(CamelModel):
 
     status: str = Field(..., description="OPEN / ACKNOWLEDGED / RESOLVED / IGNORED")
     note: str | None = Field(default=None, max_length=MAX_NOTE_LENGTH)
+    linked_entity_type: str | None = Field(default=None, max_length=32)
+    linked_entity_code: str | None = Field(default=None, max_length=200)
 
 
 class DiscoveryRunPage(CamelModel):

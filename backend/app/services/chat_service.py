@@ -2404,6 +2404,7 @@ class ChatService(
         data: list[dict],
         history: str = "",
         full_data_threshold: int | None = None,
+        documentContext: str | None = None,
     ) -> str:
         """构造回答阶段的 user prompt；history 为最近对话历史（1-5，可为空串）。
 
@@ -2418,6 +2419,10 @@ class ChatService(
         full_data_threshold（Task 2）：FULL_DATA_THRESHOLD 迁 system_config 后，
         由持 session 的调用方现读后传入；None 时 summarize_data 回落模块默认。
         本方法是 @staticmethod（无 session），不在此读 DB。
+
+        documentContext（P1）：文档依据小节（已格式化）。None/空串 ⇒ prompt 与
+        原来**逐字一致**（开关关闭时行为不变）。数据优先规则写在
+        ``chat_document_context.answerPromptSection``。
         """
         summaryDict = summarize_data(data, fullDataThreshold=full_data_threshold)
         summary = json.dumps(summaryDict, ensure_ascii=False, default=str)
@@ -2448,6 +2453,8 @@ class ChatService(
         safeQuestion = wrapUntrusted(UntrustedLabel.USER_QUESTION, question)
         safeSql = wrapUntrusted(UntrustedLabel.SQL_RESULT, sql)
         safeData = wrapUntrusted(UntrustedLabel.DATA_SUMMARY, summary)
+        from app.services.chat_document_context import answerPromptSection
+
         return (
             f"{renderSecurityPreamble()}\n\n"
             f"用户问题：\n{safeQuestion}\n\n"
@@ -2456,6 +2463,7 @@ class ChatService(
             f"{truncationNote}"
             f"{emptyHint}"
             f"{historyPart}"
+            f"{answerPromptSection(documentContext)}"
         )
 
     @staticmethod

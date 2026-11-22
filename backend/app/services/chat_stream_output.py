@@ -121,6 +121,7 @@ class ChatStreamOutputMixin:
         data: list[dict],
         forced: bool = False,
         history: str = "",
+        documentContext: str | None = None,
     ) -> AsyncIterator[tuple[StreamChunk, LlmConfig, tuple[int, int]]]:
         """流式回答：主模型失败且未产出任何 token 时降级到最便宜可用模型。
 
@@ -144,6 +145,7 @@ class ChatStreamOutputMixin:
                 content=self._buildAnswerPrompt(
                     dto.question, sql, data, history=history,
                     full_data_threshold=full_data_threshold,
+                    documentContext=documentContext,
                 ),
             ),
         ]

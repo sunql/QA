@@ -909,3 +909,61 @@ async def test_disabledDocumentIsExcludedFromRetrieval(
         dbSession, actor, query="供应商准入", topK=3, searchFn=_fakeSearch
     )
     assert rows == [], "关闭后不得参与检索"
+
+
+# ---------------------------------------------------------------------------
+# P1：答案阶段「文档依据」注入（真实库 + 人工开关）
+# ---------------------------------------------------------------------------
+
+
+async def test_documentContextRespectsManualSwitch(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    """启用中的文档能进「文档依据」；关掉开关后上下文为空。
+
+    这是 P1 的数据面保证（prompt 面由
+    `app/tests/unit/test_chat_document_context.py` 覆盖）。
+    """
+    import os
+    from types import SimpleNamespace
+
+    from app.services import chat_document_context as docContext
+    from app.services.knowledge.document_search import searchProcurementDocuments
+
+    content = "采购询价管理制度：单笔超过 5 万元须向不少于三家供应商询价。".encode()
+    created = await _createDocument(
+        client, dbSession, fakeMinio, content=content, filename="询价制度.md",
+        mime="text/markdown",
+    )
+
+    async def _fakeSearch(query, *, user, session, top_k):
+        return [
+            {
+                "document_id": created["documentId"],
+                "chunk_text": content.decode("utf-8"),
+                "chunk_sequence": 0,
+                "distance": 0.1,
+            }
+        ]
+
+    actor = SimpleNamespace(userId="admin", roles=("admin",), departments=(), dbUserId=1)
+    os.environ[docContext.FLAG_ENV] = "1"
+    try:
+        evidence = await searchProcurementDocuments(
+            dbSession, actor, query="询价几家", topK=3, searchFn=_fakeSearch
+        )
+        block = docContext.formatDocumentContext(list(evidence))
+        assert block is not None and "三家" in block, "启用文档应进入文档依据"
+
+        await client.put(
+            f"/api/v1/documents/{created['id']}",
+            json={"aiContextEnabled": False, "aiContextNote": "测试关闭"},
+        )
+        evidence = await searchProcurementDocuments(
+            dbSession, actor, query="询价几家", topK=3, searchFn=_fakeSearch
+        )
+        assert docContext.formatDocumentContext(list(evidence)) is None, (
+            "关闭开关后不得再进文档依据"
+        )
+    finally:
+        os.environ.pop(docContext.FLAG_ENV, None)

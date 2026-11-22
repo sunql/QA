@@ -444,9 +444,17 @@ class StreamQueryMixin:
         thinkFilter: ThinkStreamFilter | None = (
             ThinkStreamFilter() if await isThinkHideEnabled(session) else None
         )
+        # P1：答案阶段可选注入「文档依据」（CHAT_DOC_CONTEXT=1 时生效；
+        # 关闭时 documentContext=None ⇒ prompt 与原来逐字一致）
+        from app.services.chat_document_context import buildDocumentContext
+
+        documentContext = await buildDocumentContext(
+            session, user, dto.question
+        ) if user is not None else None
         async for chunk, answerConfig, (wastedPt, wastedCt) in self._streamAnswerWithFallback(
             session, dto.sessionId, pc.configs, pc.selected, dto, finalSql, data,
             forced=pc.forcedModel, history=pc.contextPrompt,
+            documentContext=documentContext,
         ):
             answerModelName = answerConfig.model_name
             if chunk.isDone:

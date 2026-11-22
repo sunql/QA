@@ -133,6 +133,19 @@ curl -X POST http://127.0.0.1:8010/api/v1/ontology-discovery/proposals/1/review 
 
 结论：`APPROVE` → APPROVED；`REJECT` → REJECTED；`REQUEST_CHANGES` → 退回 DRAFT（可改后重提）。
 
+### 4.6 增量监测（G4-1）
+
+```bash
+curl -X POST -H 'X-User-Id: admin' -H 'X-User-Roles: admin' \
+  http://127.0.0.1:8010/api/v1/ontology-discovery/sources/1/monitor
+# → {"sourceId":1,"snapshotId":8,"changed":true,"runId":5}
+```
+
+- 内容没变（快照同哈希）⇒ `changed=false`、**不起运行**（不花剖析/LLM 成本）。
+- 变了 ⇒ 起一个 `trigger=DIFF` 的运行，剖析 + 候选自动跑；提案仍要人工组装 + 四眼审核
+  （候选不是结论，机器不替人拍板本体）。
+- 限流 5/minute；周期驱动由外部调度器定时调本端点。
+
 ## 五、G4：发布已批准提案
 
 ```bash

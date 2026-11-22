@@ -81,6 +81,11 @@ from app.services.semantic_release_checks import (
     checksToGateResult,
     evaluateManifestChecks,
 )
+from app.services.semantic_release_context_facts import (
+    loadActiveDatasourceNames,
+    loadAgentViolations,
+    loadRelationViolations,
+)
 from app.services.semantic_release_domain_checks import ReleaseCheckContext
 
 _MAX_VERSION_LENGTH = 32  # 与 semantic_release.version 列宽一致
@@ -186,6 +191,11 @@ async def _checkContext(
 
     `scopeClassNames`：本次发布快照里的类名 ⇒ 候选统计**按发布域收窄**
     （否则采购域发布会把别的域的候选债算进自己的报告 ⇒ 报告与快照两个宇宙）。
+
+    设计码（G2）要的活库事实一并装载（`semantic_release_context_facts`）：
+    启用数据源名字（MET-002）、语义关系违规（REL-001）、Agent 配置违规（AGT-001）。
+    三个加载器都返回**空集**而不是 `None` —— 这里确实查过了，「查了且为空」
+    与「没查」是两件事（`None` 的语义留给测试与纯函数调用方）。
     """
     summary = await summarizeCandidateBindings(
         session, scopeClassNames=scopeClassNames
@@ -194,6 +204,11 @@ async def _checkContext(
         domainCode=domainCode,
         candidateBindingCount=summary.count,
         candidateClassNames=summary.classNames,
+        activeDatasourceNames=await loadActiveDatasourceNames(session),
+        relationViolations=await loadRelationViolations(
+            session, scopeClassNames=scopeClassNames
+        ),
+        agentViolations=await loadAgentViolations(session),
     )
 
 

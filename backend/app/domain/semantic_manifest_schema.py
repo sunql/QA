@@ -59,6 +59,10 @@ MAX_MANIFEST_METRICS = 2000
 MAX_MANIFEST_SOURCE_BINDINGS = 2000
 MAX_MANIFEST_BINDING_PROPERTIES = 500
 
+# 契约允许的 **KPI 条数上限**。`MET-002` 逐 KPI 出一条校验项
+# ⇒ 发布校验项上限必须把它算进去（同样不许写死）。
+MAX_MANIFEST_KPIS = 2000
+
 _MAX_REPORTED_ERRORS = 10
 _MAX_NAME_LENGTH = 200
 _MAX_TEXT_LENGTH = 4000
@@ -299,7 +303,7 @@ MANIFEST_SCHEMA_V1: dict[str, Any] = {
             "classes": _array(_CLASS_SCHEMA, maxItems=5000),
             "joins": _array(_JOIN_SCHEMA, maxItems=20000),
             "metrics": _array(_METRIC_SCHEMA, maxItems=MAX_MANIFEST_METRICS),
-            "kpis": _array(_KPI_SCHEMA, maxItems=2000),
+            "kpis": _array(_KPI_SCHEMA, maxItems=MAX_MANIFEST_KPIS),
             "businessObjects": _array(_BUSINESS_OBJECT_SCHEMA, maxItems=1000),
         }
     ),

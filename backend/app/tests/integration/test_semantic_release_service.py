@@ -23,6 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import (
+    AgentDefinition,
+    AgentToolConfig,
     AuditLog,
     BusinessObject,
     DataDomain,
@@ -32,6 +34,7 @@ from app.domain.models import (
     OntologyClass,
     OntologyMetric,
     OntologyProperty,
+    OntologyRelation,
 )
 from app.domain.procurement_binding_models import ProcurementSourceBinding
 from app.domain.semantic_manifest_schema import SCHEMA_VERSION, manifestHash
@@ -49,7 +52,13 @@ from app.services.semantic_release_checks import (
     SEVERITY_ERROR,
     PublishCheck,
 )
+from app.services.semantic_release_context_facts import (
+    loadActiveDatasourceNames,
+    loadAgentViolations,
+    loadRelationViolations,
+)
 from app.services.semantic_release_service import semanticReleaseService
+from app.tests._knowledge_manifest import sampleManifest
 
 _MINIMAL_MANIFEST: dict[str, Any] = {
     "schemaVersion": SCHEMA_VERSION,
@@ -1279,3 +1288,189 @@ async def test_candidate_count_is_scoped_to_the_snapshot_classes(
     ]
     assert len(validatedRows) == 1
     assert validatedRows[0].result == "PASS"
+
+
+# ---------------------------------------------------------------------------
+# G2：设计稿 §5.5 校验码的活库事实（真实 PG）
+# ---------------------------------------------------------------------------
+
+
+async def test_active_datasource_names_exclude_disabled_sources(
+    session: AsyncSession,
+) -> None:
+    """MET-002 的「有效」判据 = 启用中；停用源不算有效绑定。"""
+    await _seedDatasource(session, name="启用源")
+    session.add(
+        DataSource(
+            name="停用源",
+            type="oracle",
+            host="db.example.internal",
+            port=1521,
+            database_name="ZJTH",
+            username="qa_readonly",
+            password_encrypted="encrypted",
+            is_active=False,
+        )
+    )
+    await session.commit()
+
+    names = await loadActiveDatasourceNames(session)
+
+    assert "启用源" in names
+    assert "停用源" not in names
+
+
+async def _seedRelation(
+    session: AsyncSession,
+    *,
+    sourceName: str,
+    targetName: str,
+    relationType: str,
+    targetTombstoned: bool = False,
+) -> None:
+    source = OntologyClass(class_name=sourceName, source_table=f"T_{sourceName}")
+    target = OntologyClass(
+        class_name=targetName,
+        source_table=f"T_{targetName}",
+        valid_to=datetime.now(UTC) if targetTombstoned else None,
+    )
+    session.add_all([source, target])
+    await session.flush()
+    session.add(
+        OntologyRelation(
+            source_class_id=source.id,
+            target_class_id=target.id,
+            relation_type=relationType,
+        )
+    )
+    await session.commit()
+
+
+async def test_relation_violations_flag_bad_types_and_tombstoned_endpoints(
+    session: AsyncSession,
+) -> None:
+    """REL-001 的活库部分：类型不在白名单 / 端点类已墓碑，都要报出来。"""
+    await _seedRelation(
+        session, sourceName="关系源A", targetName="关系目标A", relationType="SUPPLIES"
+    )
+    await _seedRelation(
+        session, sourceName="关系源B", targetName="关系目标B", relationType="NOT_ALLOWED"
+    )
+    await _seedRelation(
+        session,
+        sourceName="关系源C",
+        targetName="关系目标C",
+        relationType="SUPPLIES",
+        targetTombstoned=True,
+    )
+
+    violations = await loadRelationViolations(session)
+
+    assert any("不在代码白名单" in item for item in violations)
+    assert any("墓碑" in item for item in violations)
+    assert not any("关系源A-[SUPPLIES]->关系目标A" in item for item in violations)
+
+
+async def test_relation_violations_are_scoped_to_the_release_classes(
+    session: AsyncSession,
+) -> None:
+    """按发布快照里的类收窄 ⇒ 报告与快照同一宇宙（别把别的域的关系算进来）。"""
+    await _seedRelation(
+        session, sourceName="域内源", targetName="域内目标", relationType="NOT_ALLOWED"
+    )
+
+    unrelated = await loadRelationViolations(session, scopeClassNames=["别的类"])
+    inScope = await loadRelationViolations(session, scopeClassNames=["域内源"])
+
+    assert unrelated == ()
+    assert any("域内源" in item for item in inScope)
+
+
+async def test_agent_violations_flag_unknown_domains_and_missing_tools(
+    session: AsyncSession,
+) -> None:
+    """AGT-001 的活库部分：域不在启用词表 / 未绑定工具，都要报出来。"""
+    session.add(
+        AgentDefinition(
+            agent_code="AGENT_BAD",
+            agent_name="坏 Agent",
+            status="active",
+            data_domains=["NO_SUCH_DOMAIN"],
+            data_layers=["DIM"],
+            tool_name=None,
+        )
+    )
+    session.add(
+        AgentToolConfig(
+            name="g2_probe_tool",
+            data_object="SUPPLIER",
+            data_layers=[],
+            input_schema={},
+            handler_kind="BUILTIN",
+            handler_ref="g2_probe_tool",
+            enabled=True,
+        )
+    )
+    session.add(
+        AgentDefinition(
+            agent_code="AGENT_GOOD",
+            agent_name="好 Agent",
+            status="active",
+            data_domains=[],
+            data_layers=[],
+            tool_name="g2_probe_tool",
+        )
+    )
+    await session.commit()
+
+    violations = await loadAgentViolations(session)
+
+    assert any("AGENT_BAD 的数据域 NO_SUCH_DOMAIN" in item for item in violations)
+    assert not any("AGENT_GOOD" in item for item in violations)
+
+
+async def test_design_codes_reach_the_persisted_report_from_live_facts(
+    session: AsyncSession,
+) -> None:
+    """端到端：createDraft/validate 的落表报告里能查到 G2 的码与活库事实。
+
+    - `MET-002`：快照里的 KPI 绑了一个**不存在**的数据源 ⇒ 逐 KPI FAIL；
+    - `AGT-001`：启用中的 Agent 数据域非法 ⇒ 一条 WARNING FAIL；
+    - `CLS-001` / `REL-001`：样本 manifest 干净 ⇒ PASS（同一张表里正交并存）。
+    """
+    manifest = sampleManifest()
+    for kpi in manifest["kpis"]:
+        kpi["datasourceName"] = "不存在的源"
+    session.add(
+        AgentDefinition(
+            agent_code="AGENT_E2E",
+            agent_name="端到端 Agent",
+            status="active",
+            data_domains=["NO_SUCH_DOMAIN"],
+            data_layers=["DIM"],
+            tool_name=None,
+        )
+    )
+    await session.commit()
+    row = await _insertRelease(
+        session, version="2026.11.22-g2-e2e", manifest=manifest
+    )
+
+    # 样本 manifest 的 RATIO 指标缺分母落点 ⇒ 闸门仍会阻断，
+    # 但**证据先行**：校验结论在抛异常前已经落表。
+    with pytest.raises(ConflictError):
+        await semanticReleaseService.markValidated(session, row.id, actor="tester")
+
+    checks = await _checksOf(session, row.id)
+    byCode = {check.check_code: check for check in checks}
+
+    assert byCode["CLS-001"].result == RESULT_PASS
+    assert byCode["REL-001"].result == RESULT_PASS
+    assert byCode["AGT-001"].result == RESULT_FAIL
+    assert byCode["AGT-001"].severity == "WARNING"
+    assert "AGENT_E2E" in byCode["AGT-001"].detail
+
+    kpiRows = [check for check in checks if check.check_code == "MET-002"]
+    assert len(kpiRows) == len(manifest["kpis"])
+    assert all(check.result == RESULT_FAIL for check in kpiRows)
+    assert all("不存在的源" in check.detail for check in kpiRows)

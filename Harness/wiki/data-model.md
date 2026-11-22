@@ -607,12 +607,33 @@ request_time    TIMESTAMPTZ NOT NULL
   （误操作 / DBA 直连 / 将来新写的代码路径都绕不过）。**TRUNCATE 不受影响** ⇒ 测试夹具的
   「每测试清库」照常工作。
 
+### 发现流水线六表（WP-ONT-AI A2 / G3，迁移 0166）
+
+`discovery_run` → `discovery_profile` / `discovery_candidate` / `discovery_finding`
+（run 的产物；FK `CASCADE`，run 删 ⇒ 证据一并消失）→ `discovery_proposal` →
+`discovery_review`。要点：
+
+- **`discovery_run` 带 LLM 计量三列**（`prompt_tokens` / `completion_tokens` / `cost`，
+  CHECK 非负）—— 发现域一引入 LLM 就必须计量（守卫测试同时钉住）。
+- **`discovery_candidate.evidence_refs` 不得为空**（`jsonb_array_length > 0`）：
+  空证据的候选不可复核，而「证据完整率 100%」是硬红线。
+- **`discovery_profile` 的 `(run_id, table_name, COALESCE(column_name,''))` 唯一**：
+  列名为 NULL 表示表级指标，`COALESCE` 不可省（同 `semantic_release_check` 的坑）。
+- **`discovery_proposal` 只持 `release_id` 指针**：`diff_json` 入库前必须过
+  `compileManifest`；发布只调既有 `activate`（本域不写治理表）。
+- **`discovery_review.approval_task_id` 可空 + `ON DELETE SET NULL`**：首期轻量审核，
+  二期接 P5 审批时回填（非空时要求 `subject_type='ontology_proposal'`，服务层判）。
+- **四眼不在库层**：`reviewer != proposer` 是跨表约束，CHECK 表达不了 ⇒ 服务层 409。
+
 ### 迁移文件
 
 - `alembic/versions/0146_discovery_snapshot.py` — 建 2 张表 + 2 个索引（纯加法）
   - **文件主干（stem）** = `0146_discovery_snapshot`（22 字符）；文件名含 `.py` = 26 字符
   - **revision id** = `0146`，**down_revision = "0145"**
 - `alembic/versions/0147_snapshot_immutability.py` — 建不可变触发器 + 触发函数
+- `alembic/versions/0166_discovery_pipeline.py` — 建流水线六表 + 12 个索引（纯加法；
+  ORM `app/domain/discovery_pipeline_models.py`，双向钉住见
+  `test_discovery_pipeline_models.py`）
   - **文件主干（stem）** = `0147_snapshot_immutability`（26 字符）；文件名含 `.py` = 29 字符
   - **revision id** = `0147`，**down_revision = "0146"**
   - `downgrade()` 用 `IF EXISTS` 幂等删触发器与函数
@@ -799,8 +820,18 @@ request_time    TIMESTAMPTZ NOT NULL
 | `SOURCE_BINDING_CANDIDATE` | RELEASE | WARNING | 仍有未确认（候选）绑定（D-3 治理债） |
 | `SOURCE_BINDING_JOIN_MISSING` | BINDING | **ERROR** | 绑定所属类在**整个本体**里零 JOIN 边（孤岛） |
 | `SOURCE_BINDING_PROPERTY_UNBOUND` | BINDING | WARNING | 类已绑源表，但有属性没有 `sourceColumn` 绑定 |
+| `CLS-001` | CLASS | ERROR | 类名唯一 / objectType 合法 / **父子继承无环** |
+| `CLS-002` | BUSINESS_OBJECT | ERROR | 头类存在 / 主域存在且**启用** |
+| `REL-001` | RELEASE | ERROR | JOIN 两端类存在 + 活库语义关系类型白名单 / 端点墓碑 |
+| `AGT-001` | RELEASE | WARNING | Agent 域/层在启用词表 + 绑定工具已注册且启用（活库） |
+| `GRF-001` | RELEASE | WARNING | 图 label 在 Neo4j 业务实体白名单 + 入图对象头类有主键 |
+| `MET-002` | KPI | WARNING | 已发布 KPI 绑定启用中数据源 + 关联指标已发布 |
 
-（M1-1.3 批次 B 已把「采购源绑定缺 JOIN」等采购域校验项接进**同一张表**。）
+（M1-1.3 批次 B 已把「采购源绑定缺 JOIN」等采购域校验项接进**同一张表**；
+G2 把设计稿 §5.5 的 6 个校验码接进同一张表 —— 判据在
+`app/services/semantic_release_design_checks.py`，活库事实在
+`app/services/semantic_release_context_facts.py`。`CLS/REL/GRF/AGT` 每码**一条汇总行**，
+`MET-002` **逐 KPI**；`None` = 没查过 ⇒ 该行不出现。）
 
 > 事实源：`backend/app/domain/semantic_release_check_models.py`（ORM）、
 > `backend/app/services/semantic_release_check_types.py`（类型与常量 · **叶子模块**）、

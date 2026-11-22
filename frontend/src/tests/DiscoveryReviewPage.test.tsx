@@ -142,3 +142,31 @@ describe("DiscoveryReviewPage", () => {
     }));
   });
 });
+
+
+it("admin：关联本体弹窗可保存关联", async () => {
+  api.decideCandidate.mockResolvedValue({ ...CANDIDATE, linkedEntityType: "ONTOLOGY_CLASS", linkedEntityCode: "Supplier" });
+  renderPage();
+
+  await waitFor(() => expect(screen.getByText("SUPPLIER")).toBeTruthy());
+  fireEvent.click(screen.getAllByRole("button", { name: /关联本体/ })[0]);
+
+  await waitFor(() => expect(screen.getByText(/本体里已有类 Supplier/)).toBeTruthy());
+  const linkModal = Array.from(document.querySelectorAll(".ant-modal")).find(
+    (node) => node.textContent?.includes("关联到本体对象"),
+  ) as HTMLElement;
+
+  const selectors = linkModal.querySelectorAll(".ant-select-selector");
+  fireEvent.mouseDown(selectors[1] as Element); // 第二个下拉 = 关联对象
+  const options = await screen.findAllByText(/^Supplier/);
+  fireEvent.click(options[options.length - 1]);
+  fireEvent.click(linkModal.querySelector(".ant-modal-footer .ant-btn-primary") as Element);
+
+  await waitFor(() =>
+    expect(api.decideCandidate).toHaveBeenLastCalledWith(11, {
+      status: "CANDIDATE",
+      linkedEntityType: "ONTOLOGY_CLASS",
+      linkedEntityCode: "Supplier",
+    }),
+  );
+});

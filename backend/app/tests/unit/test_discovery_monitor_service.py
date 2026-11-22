@@ -15,7 +15,6 @@ import pytest
 from app.domain.discovery_models import DiscoverySource
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import DataSource
-from app.infrastructure.security.crypto import encryptApiKey
 from app.services.discovery_monitor_service import DiscoveryMonitorService
 from app.services.discovery_snapshot_service import SnapshotCapture
 
@@ -60,7 +59,7 @@ async def _seed(session: Any, *, status: str = "ACTIVE") -> int:
         port=1521,
         database_name="THBI",
         username="THBI",
-        password_encrypted=encryptApiKey("secret"),
+        password_encrypted="dummy-ciphertext-not-decrypted-in-tests",
         is_active=True,
     )
     session.add(datasource)

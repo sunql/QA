@@ -116,3 +116,85 @@ describe("OntologyDiscoveryPage", () => {
     await waitFor(() => expect(adminApi.captureSnapshot).toHaveBeenCalledWith(1));
   });
 });
+
+
+function modalAt(index = 0): HTMLElement {
+  return document.querySelectorAll(".ant-modal")[index] as HTMLElement;
+}
+
+async function pickComboboxIn(modal: HTMLElement, selectIndex: number, optionText: RegExp) {
+  const selectors = modal.querySelectorAll(".ant-select-selector");
+  fireEvent.mouseDown(selectors[selectIndex] as Element);
+  const options = await screen.findAllByText(optionText);
+  fireEvent.click(options[options.length - 1]);
+}
+
+it("监测变化调用后端并提示无变化", async () => {
+  adminApi.monitorSource.mockResolvedValue({
+    sourceId: 1, snapshotId: 1, changed: false, runId: null,
+  });
+  renderPage();
+
+  await waitFor(() => expect(screen.getByText("probe:THBI Oracle")).toBeTruthy());
+  fireEvent.click(screen.getByRole("button", { name: /监测变化/ }));
+
+  await waitFor(() => expect(adminApi.monitorSource).toHaveBeenCalledWith(1));
+});
+
+it("登记发现源：填表提交调用 createSource", async () => {
+  adminApi.createSource.mockResolvedValue({ ...SOURCE, id: 2, name: "新源" });
+  renderPage();
+
+  await waitFor(() => expect(screen.getByText("probe:THBI Oracle")).toBeTruthy());
+  fireEvent.click(screen.getByRole("button", { name: /登记发现源/ }));
+
+  const modal = modalAt(0);
+  const inputs = modal.querySelectorAll("input");
+  fireEvent.change(inputs[0] as Element, { target: { value: "新源" } });
+  fireEvent.change(inputs[2] as Element, { target: { value: "张三" } });
+  await pickComboboxIn(modal, 0, /THBI Oracle/);
+  fireEvent.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+  await waitFor(() =>
+    expect(adminApi.createSource).toHaveBeenCalledWith({
+      name: "新源",
+      datasourceId: 1,
+      owner: "张三",
+      accessPolicy: { mode: "READ_ONLY" },
+      note: null,
+    }),
+  );
+});
+
+it("运行页签：选源后加载快照表并提交运行", async () => {
+  adminApi.listSnapshots.mockResolvedValue({
+    rows: [{ id: 9, sourceId: 1, schemaHash: "a".repeat(64), tableCount: 1, columnCount: 2, capturedAt: "2026-11-22T10:00:00Z", createdBy: "x" }],
+    total: 1,
+  });
+  adminApi.getSnapshot.mockResolvedValue({
+    id: 9, sourceId: 1, schemaHash: "a".repeat(64), tableCount: 1, columnCount: 2,
+    capturedAt: "2026-11-22T10:00:00Z", createdBy: "x",
+    snapshot: { tables: [{ tableName: "DIM_SUPPLIER", owner: "THBI", columns: [] }] },
+  });
+  adminApi.startRun.mockResolvedValue({ id: 12, status: "RUNNING", snapshotId: 9 });
+  renderPage();
+
+  await waitFor(() => expect(screen.getByText("probe:THBI Oracle")).toBeTruthy());
+  fireEvent.click(screen.getByRole("tab", { name: "运行" }));
+  fireEvent.click(await screen.findByRole("button", { name: /触发运行/ }));
+
+  const modal = modalAt(0);
+  await pickComboboxIn(modal, 0, /probe:THBI Oracle/);
+  await waitFor(() => expect(adminApi.listSnapshots).toHaveBeenCalledWith({ sourceId: 1, limit: 1 }));
+  await waitFor(() => expect(adminApi.getSnapshot).toHaveBeenCalledWith(9));
+
+  fireEvent.click(screen.getByRole("button", { name: /确\s*定/ }));
+  await waitFor(() =>
+    expect(adminApi.startRun).toHaveBeenCalledWith({
+      sourceId: 1,
+      snapshotId: null,
+      tables: null,
+      withCandidates: true,
+    }),
+  );
+});

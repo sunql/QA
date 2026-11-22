@@ -182,6 +182,29 @@ docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'backend|fron
 > - 生产无 worker 容器 ⇒ 发现运行的异步任务走 API 进程内 `BackgroundTasks`（单进程）；
 >   本批不新增 worker 容器。
 
+### 5.5 按需开启的开关（本次实测会用到）
+
+生产 `.env` 默认可能没开这些；按业务需要补齐后 **recreate backend**（改 env 后 `restart` 无效）：
+
+| 开关 | 打开后出现 | 影响面 |
+|---|---|---|
+| `ENABLE_SEMANTIC_RELEASE=true` | `/api/v1/semantic/releases`（语义发布页） | admin-only；关闭时整组 404 |
+| `ENABLE_KNOWLEDGE_FACADE=true` | `/api/v1/procurement/agents/catalog`、知识查询 | 读侧登录可用；关闭时 404（Copilot 页会报 catalog 404） |
+| `ENABLE_AGENT_ORCHESTRATION=true` | `/api/v1/procurement/copilot/*`、agent-runs | **Copilot 页面必需**；关闭时 404 |
+| `ENABLE_WORKFLOW=true` | `/api/v1/workflow/*`、`/procurement/rfqs/*` | 仅在用 RFQ/审批时开 |
+
+Copilot 首次启用还需种子（幂等，按顺序）：
+
+```bash
+qa_compose exec backend python -m scripts.seed_agent_tool_configs
+qa_compose exec backend python -m scripts.seed_agents
+qa_compose exec backend python -m scripts.seed_procurement_agent_profiles
+qa_compose exec backend python -m scripts.seed_agent_orchestration_menu
+```
+
+> `mode=task` 的 Copilot run 需要 `agent-orchestration-worker`（生产默认无 worker ⇒ task 会停在 RUNNING；
+> 流式 `mode=stream` 在 API 进程内可跑）。要开 worker 属**新增拓扑**，另批评估。
+
 ---
 
 ## 6. Phase 4 验收探针

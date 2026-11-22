@@ -30,7 +30,6 @@ from app.domain.discovery_pipeline_models import (
 from app.domain.exceptions import NoAvailableModelError, ValidationError
 from app.domain.models import DataSource, LlmConfig
 from app.infrastructure.llm.base_client import LlmMessage, LlmResponse
-from app.infrastructure.security.crypto import encryptApiKey
 from app.services.discovery_candidate_service import DiscoveryCandidateService
 
 _SNAPSHOT: dict[str, Any] = {
@@ -109,7 +108,7 @@ async def _seed(
         port=1521,
         database_name="THBI",
         username="THBI",
-        password_encrypted=encryptApiKey("secret"),
+        password_encrypted="dummy-ciphertext-not-decrypted-in-tests",
         is_active=True,
     )
     session.add(datasource)

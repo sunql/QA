@@ -23,7 +23,6 @@ from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.models import DataSource
 from app.domain.semantic_manifest_schema import manifestHash
 from app.domain.semantic_release_models import SemanticRelease
-from app.infrastructure.security.crypto import encryptApiKey
 from app.services.semantic_release_service import semanticReleaseService
 from app.tests._knowledge_manifest import sampleManifest
 
@@ -71,7 +70,7 @@ async def _seedProposal(
         port=1521,
         database_name="THBI",
         username="THBI",
-        password_encrypted=encryptApiKey("secret"),
+        password_encrypted="dummy-ciphertext-not-decrypted-in-tests",
         is_active=True,
     )
     session.add(datasource)

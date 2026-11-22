@@ -20,7 +20,6 @@ from app.domain.discovery_pipeline_models import (
 )
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import DataSource
-from app.infrastructure.security.crypto import encryptApiKey
 from app.services.discovery_candidate_review import DiscoveryCandidateReviewService
 
 
@@ -32,7 +31,7 @@ async def _seed(session: Any) -> tuple[int, int]:
         port=1521,
         database_name="THBI",
         username="THBI",
-        password_encrypted=encryptApiKey("secret"),
+        password_encrypted="dummy-ciphertext-not-decrypted-in-tests",
         is_active=True,
     )
     session.add(datasource)

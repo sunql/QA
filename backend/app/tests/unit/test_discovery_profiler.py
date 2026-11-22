@@ -22,7 +22,6 @@ from app.domain.discovery_models import DiscoverySource, MetadataSnapshot
 from app.domain.discovery_pipeline_models import DiscoveryProfile, DiscoveryRun
 from app.domain.exceptions import DataSourceError, ValidationError
 from app.domain.models import DataSource
-from app.infrastructure.security.crypto import encryptApiKey
 from app.services.discovery_profiler import DiscoveryProfiler
 
 _SNAPSHOT: dict[str, Any] = {
@@ -91,7 +90,7 @@ async def _seed(
         port=1521,
         database_name="THBI",
         username="THBI",
-        password_encrypted=encryptApiKey("secret"),
+        password_encrypted="dummy-ciphertext-not-decrypted-in-tests",
         is_active=True,
     )
     session.add(datasource)

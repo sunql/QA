@@ -904,6 +904,7 @@ export default function DocumentsPage() {
           setUploadModal(false);
           void loadDocs();
         }}
+        onPartiallyUploaded={() => void loadDocs()}
       />
 
       {/* Relation create modal */}

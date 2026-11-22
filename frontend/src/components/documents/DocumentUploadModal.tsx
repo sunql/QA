@@ -41,10 +41,18 @@ interface FileOutcome {
 interface Props {
   open: boolean;
   onClose: () => void;
+  /** 全部成功：关闭并刷新 */
   onUploaded: () => void;
+  /** 部分成功（弹窗保持打开展示结果）：父页面也要刷新列表，别等用户手动点刷新 */
+  onPartiallyUploaded?: () => void;
 }
 
-export default function DocumentUploadModal({ open, onClose, onUploaded }: Props) {
+export default function DocumentUploadModal({
+  open,
+  onClose,
+  onUploaded,
+  onPartiallyUploaded,
+}: Props) {
   const [form] = Form.useForm();
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [outcomes, setOutcomes] = useState<FileOutcome[]>([]);
@@ -103,7 +111,12 @@ export default function DocumentUploadModal({ open, onClose, onUploaded }: Props
     } finally {
       setUploading(false);
     }
-    const failed = collected.filter((item) => item.status === "fail").length;
+    const okCount = collected.filter((item) => item.status === "ok").length;
+    const failed = collected.length - okCount;
+    if (okCount > 0 && failed > 0) {
+      // 部分成功：弹窗留着给用户看/重试，但列表必须刷新（否则新文档“看不见”）
+      onPartiallyUploaded?.();
+    }
     if (failed === 0) {
       message.success(`批量上传完成：${collected.length} 个文件`);
       reset();

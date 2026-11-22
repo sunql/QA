@@ -66,3 +66,24 @@ describe("DocumentUploadModal", () => {
     expect(api.uploadDocument).not.toHaveBeenCalled();
   });
 });
+
+
+  it("部分成功也会触发列表刷新（弹窗保持打开）", async () => {
+    const onPartial = vi.fn();
+    api.uploadDocument
+      .mockRejectedValueOnce({ response: { data: { error: "内容重复" } } })
+      .mockResolvedValueOnce({ documentId: "DOC2", chunks: 1 });
+
+    render(
+      <DocumentUploadModal
+        open
+        onClose={vi.fn()}
+        onUploaded={vi.fn()}
+        onPartiallyUploaded={onPartial}
+      />,
+    );
+    await pickFiles("a.pdf", "b.pdf");
+    fireEvent.click(screen.getByRole("button", { name: /开始上传/ }));
+
+    await waitFor(() => expect(onPartial).toHaveBeenCalled());
+  });

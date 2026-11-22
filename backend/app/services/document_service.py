@@ -98,7 +98,8 @@ class DocumentService:
     ) -> list[DocumentCatalog]:
         """列表查询，支持按类型/安全等级/状态/业务编号过滤，并应用密级过滤。"""
         limit = min(limit, _MAX_LIMIT)
-        stmt = select(DocumentCatalog).order_by(DocumentCatalog.id)
+        # 最新在前：上传成功后回到列表第一页就能看到（否则新文档排在最后一页）。
+        stmt = select(DocumentCatalog).order_by(DocumentCatalog.id.desc())
 
         # 密级过滤（Task 4.4）
         if user is not None:

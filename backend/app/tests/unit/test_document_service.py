@@ -163,6 +163,20 @@ class TestDocumentService:
             await svc.getDocument(dbSession, doc.id)
 
 
+    @pytest.mark.asyncio
+    async def test_list_returns_newest_first(self, dbSession):
+        """上传成功回到第一页要能看到：列表按 id 倒序。"""
+        svc = self._make_svc()
+        for i in range(3):
+            await svc.createDocument(
+                dbSession, self._doc_dto(document_id=f"DOC-{i}"), self._actor
+            )
+
+        page = await svc.listDocuments(dbSession, limit=2, offset=0)
+
+        assert [row.document_id for row in page] == ["DOC-2", "DOC-1"]
+
+
 class TestDocumentEntityRelationService:
     """DocumentEntityRelation CRUD。"""
 

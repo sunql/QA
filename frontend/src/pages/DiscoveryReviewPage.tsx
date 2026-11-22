@@ -68,6 +68,13 @@ interface DecideTarget {
   status: string;
 }
 
+function formatTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
 export default function DiscoveryReviewPage() {
   const { t } = useTranslation();
   const user = useAuthStore((state) => state.user);
@@ -124,6 +131,11 @@ export default function DiscoveryReviewPage() {
   useEffect(() => {
     void loadRows();
   }, [loadRows]);
+
+  const selectedRun = useMemo(
+    () => runs.find((run) => run.id === runId),
+    [runs, runId],
+  );
 
   const judged = useMemo(() => {
     const candidateJudged = candidates.filter((row) => row.status !== "CANDIDATE").length;
@@ -277,7 +289,7 @@ export default function DiscoveryReviewPage() {
             onChange={(value) => setRunId(value)}
             options={runs.map((run) => ({
               value: run.id,
-              label: `#${run.id} · ${run.status} · ${run.startedAt} · ${run.modelVersion ?? "—"}`,
+              label: `#${run.id} · ${run.status} · ${formatTime(run.startedAt)} · ${run.modelVersion ?? "—"}`,
             }))}
           />
           <Button onClick={() => { void loadRuns(); void loadRows(); }}>
@@ -292,8 +304,32 @@ export default function DiscoveryReviewPage() {
         </Space>
       </Card>
 
+      {selectedRun && (
+        <Card size="small" style={{ marginBottom: 12 }} title={t("discoveryReview.runDetail")}>
+          <Descriptions size="small" column={4}>
+            <Descriptions.Item label="run">#{selectedRun.id}</Descriptions.Item>
+            <Descriptions.Item label={t("discoveryReview.status")}>
+              <Tag color={STATUS_COLOR[selectedRun.status] ?? "default"}>{selectedRun.status}</Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label={t("discoveryReview.started")}>{formatTime(selectedRun.startedAt)}</Descriptions.Item>
+            <Descriptions.Item label={t("discoveryReview.model")}>{selectedRun.modelVersion ?? "—"}</Descriptions.Item>
+            <Descriptions.Item label="tokens">{selectedRun.promptTokens} / {selectedRun.completionTokens}</Descriptions.Item>
+            <Descriptions.Item label="cost">{selectedRun.cost}</Descriptions.Item>
+            <Descriptions.Item label="source">#{selectedRun.sourceId}</Descriptions.Item>
+            <Descriptions.Item label="snapshot">#{selectedRun.snapshotId ?? "—"}</Descriptions.Item>
+          </Descriptions>
+          {selectedRun.errorMessage && (
+            <Alert type="error" showIcon message={selectedRun.errorMessage} style={{ marginTop: 8 }} />
+          )}
+        </Card>
+      )}
+
       {runId === undefined ? (
-        <Empty description={t("discoveryReview.noRun")} />
+        <Empty
+          description={
+            runs.length === 0 ? t("discoveryReview.noRunsHint") : t("discoveryReview.noRun")
+          }
+        />
       ) : (
         <Tabs
           items={[

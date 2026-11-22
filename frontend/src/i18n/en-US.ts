@@ -3774,6 +3774,10 @@ export const enUS = {
     decided: "Decision saved",
     progress: "Decided {judged} / {total}",
     decideTitle: "Decision",
+    runDetail: "Run detail",
+    started: "Started",
+    model: "Model",
+    noRunsHint: "No discovery runs available (or no permission) — trigger a profiling run first",
     notePlaceholder: "Note (reject reason / evidence needed / owner)"
   },
 } as const;

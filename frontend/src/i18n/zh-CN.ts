@@ -3777,6 +3777,10 @@ export const zhCN = {
     decided: "判定已保存",
     progress: "已判定 {judged} / {total}",
     decideTitle: "判定",
+    runDetail: "运行详情",
+    started: "开始时间",
+    model: "模型",
+    noRunsHint: "没有可用的发现运行（或当前账号无权限）——先在后台触发一次剖析",
     notePlaceholder: "备注（驳回理由 / 待证需补什么 / 负责人）"
   },
 } as const;

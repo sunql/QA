@@ -3813,6 +3813,9 @@ export const enUS = {
     tables: "Tables (empty = all)",
     tablesHint: "Specify tables explicitly; all tables is expensive",
     tablesPlaceholder: "Pick tables from the latest snapshot",
-    withCandidates: "Generate candidates (LLM)"
+    withCandidates: "Generate candidates (LLM)",
+    editPolicy: "Edit policy",
+    policyTables: "Only these tables (optional)",
+    policyTablesHint: "Comma separated; empty = all tables of the owner. Large schemas (e.g. ZJTH 1695 tables) must be scoped or exceed the 4MB snapshot limit"
   },
 } as const;

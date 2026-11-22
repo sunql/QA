@@ -38,6 +38,8 @@ export default function SourcesPanel() {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [form] = Form.useForm();
+  const [policySource, setPolicySource] = useState<DiscoverySource | null>(null);
+  const [policyForm] = Form.useForm();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -132,6 +134,21 @@ export default function SourcesPanel() {
           <Button
             size="small"
             disabled={!isAdmin}
+            onClick={() => {
+              setPolicySource(row);
+              policyForm.setFieldsValue({
+                schemaOwner: (row.accessPolicy as Record<string, unknown>).schema_owner ?? "",
+                tables: Array.isArray((row.accessPolicy as Record<string, unknown>).tables)
+                  ? ((row.accessPolicy as Record<string, unknown>).tables as string[]).join(",")
+                  : "",
+              });
+            }}
+          >
+            {t("discoveryAdmin.editPolicy")}
+          </Button>
+          <Button
+            size="small"
+            disabled={!isAdmin}
             loading={busyId === row.id}
             onClick={() =>
               void runAction(row.id, async () => {
@@ -167,13 +184,16 @@ export default function SourcesPanel() {
         onOk={async () => {
           const values = await form.validateFields();
           try {
+            const tables = parseTables(values.tables);
             await createSource({
               name: values.name,
               datasourceId: values.datasourceId,
               owner: values.owner,
-              accessPolicy: values.schemaOwner
-                ? { mode: "READ_ONLY", schema_owner: values.schemaOwner }
-                : { mode: "READ_ONLY" },
+              accessPolicy: {
+                mode: "READ_ONLY",
+                ...(values.schemaOwner ? { schema_owner: values.schemaOwner } : {}),
+                ...(tables.length ? { tables } : {}),
+              },
               note: values.note ?? null,
             });
             message.success(t("discoveryAdmin.opSuccess"));
@@ -207,11 +227,70 @@ export default function SourcesPanel() {
           >
             <Input maxLength={100} placeholder="THBI" />
           </Form.Item>
+          <Form.Item
+            name="tables"
+            label={t("discoveryAdmin.policyTables")}
+            extra={t("discoveryAdmin.policyTablesHint")}
+          >
+            <Input placeholder="DIM_SUPPLIER,DIM_IMATERIAL" />
+          </Form.Item>
           <Form.Item name="note" label={t("discoveryAdmin.note")}>
             <Input.TextArea rows={2} />
           </Form.Item>
         </Form>
       </Modal>
+
+      <Modal
+        title={`${t("discoveryAdmin.editPolicy")} · ${policySource?.name ?? ""}`}
+        open={policySource !== null}
+        onCancel={() => setPolicySource(null)}
+        onOk={async () => {
+          if (!policySource) return;
+          const values = await policyForm.validateFields();
+          const tables = parseTables(values.tables);
+          try {
+            await updateSource(policySource.id, {
+              accessPolicy: {
+                mode: "READ_ONLY",
+                ...(values.schemaOwner ? { schema_owner: values.schemaOwner } : {}),
+                ...(tables.length ? { tables } : {}),
+              },
+            });
+            message.success(t("discoveryAdmin.opSuccess"));
+            setPolicySource(null);
+            policyForm.resetFields();
+            await load();
+          } catch {
+            // interceptor 已提示
+          }
+        }}
+        destroyOnHidden
+      >
+        <Form form={policyForm} layout="vertical">
+          <Form.Item name="schemaOwner" label={t("discoveryAdmin.schemaOwner")} extra={t("discoveryAdmin.schemaOwnerHint")}>
+            <Input maxLength={100} placeholder="THBI" />
+          </Form.Item>
+          <Form.Item
+            name="tables"
+            label={t("discoveryAdmin.policyTables")}
+            extra={t("discoveryAdmin.policyTablesHint")}
+          >
+            <Input placeholder="DIM_SUPPLIER,DIM_IMATERIAL" />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
+  );
+}
+
+function parseTables(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return Array.from(
+    new Set(
+      raw
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
   );
 }

@@ -3816,6 +3816,9 @@ export const zhCN = {
     tables: "剖析表（不选=全部）",
     tablesHint: "建议显式指定，全部表很贵",
     tablesPlaceholder: "从该源最新快照选择表",
-    withCandidates: "生成候选（调用 LLM）"
+    withCandidates: "生成候选（调用 LLM）",
+    editPolicy: "编辑策略",
+    policyTables: "仅采集这些表（可选）",
+    policyTablesHint: "逗号分隔；留空=该 owner 全部表。大 schema（如 ZJTH 1695 表）必须限定，否则超过 4MB 快照上限"
   },
 } as const;

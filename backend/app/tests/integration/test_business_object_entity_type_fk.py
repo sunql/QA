@@ -59,16 +59,18 @@ async def test_document_entity_relation_invalid_entity_type_rejected(
 
 @pytest.mark.asyncio
 async def test_db_fk_constraint_exists() -> None:
-    """三表 entity_type 列上有 FK 指向 business_object.code."""
+    """**两表** entity_type 上有 FK 指向 business_object.code。
+
+    ⚠️ `document_entity_relation` 已按 **0164** 有意移除外键：一份制度/合同往往关联的是
+    本体类/指标/属性（`ONTOLOGY_*`），而不是某个业务对象实例 ⇒ 单一 FK 指向
+    `business_object(code)` 会把这些合法值全挡掉。它的合法性改由应用层白名单校验，
+    并发重复则由唯一索引 `uq_doc_rel_document_entity` 兜底（见下一个用例）。
+    """
     engine = await _pg_support._newEngine()
     # 断言失败也要 dispose（否则连接池挂到测试结束，掩盖真正的断言错误）
     try:
         async with engine.connect() as conn:
-            for table in (
-                "entity_mapping",
-                "feature_definition",
-                "document_entity_relation",
-            ):
+            for table in ("entity_mapping", "feature_definition"):
                 row = (
                     await conn.execute(
                         text(
@@ -83,5 +85,46 @@ async def test_db_fk_constraint_exists() -> None:
                     )
                 ).first()
                 assert row is not None, f"{table} 缺少 FK 到 business_object"
+            dropped = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conrelid = 'document_entity_relation'::regclass
+                          AND contype = 'f'
+                          AND pg_get_constraintdef(oid) LIKE '%business_object%'
+                        """
+                    )
+                )
+            ).first()
+            assert dropped is None, (
+                "document_entity_relation 不应再有到 business_object 的 FK（0164 已移除）"
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_document_relation_dedupe_unique_index_exists() -> None:
+    """0164 的替代守卫：文档关联的去重靠**唯一索引**，不是 SELECT-then-INSERT。"""
+
+    engine = await _pg_support._newEngine()
+    try:
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT indexdef
+                        FROM pg_indexes
+                        WHERE tablename = 'document_entity_relation'
+                          AND indexname = 'uq_doc_rel_document_entity'
+                        """
+                    )
+                )
+            ).first()
+            assert row is not None, "缺少唯一索引 uq_doc_rel_document_entity"
+            assert "UNIQUE" in row[0].upper()
     finally:
         await engine.dispose()

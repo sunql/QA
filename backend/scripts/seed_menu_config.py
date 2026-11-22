@@ -100,6 +100,7 @@ ITEMS: list[dict[str, Any]] = [
     # feat-data-domain-layer：数据域管理页（业务对象主域/附域的授权源）
     {"parent": "section.bizConfig", "code": "item.dataDomains", "label_key": "menu.item.dataDomains", "icon_code": "cluster", "sort_order": 372, "path": "/data-domains"},
     {"parent": "section.bizConfig", "code": "item.ontologyProperties", "label_key": "menu.item.ontologyProperties", "icon_code": "tags", "sort_order": 375, "path": "/ontology-properties"},
+    {"parent": "section.bizConfig", "code": "item.semanticRelease", "label_key": "menu.item.semanticRelease", "icon_code": "workflow", "sort_order": 378, "path": "/semantic-release"},
     # P5 Workflow/Command/Approval：实例列表（提交入口在页内）+ 待办审批。
     # 两项都只是**读/操作面**：写接口受 ENABLE_WORKFLOW 开关与审批持有人校验约束。
     {"parent": "section.bizConfig", "code": "item.workflowInstances", "label_key": "menu.item.workflowInstances", "icon_code": "workflow", "sort_order": 377, "path": "/workflow"},

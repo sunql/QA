@@ -67,6 +67,7 @@ import ProcurementBindingsPage from "./pages/ProcurementBindingsPage";
 import ProcurementKnowledgePage from "./pages/ProcurementKnowledgePage";
 import ProcurementAgentCatalogPage from "./pages/ProcurementAgentCatalogPage";
 import ProcurementCopilotPage from "./pages/ProcurementCopilotPage";
+import SemanticReleasePage from "./pages/SemanticReleasePage";
 import WorkflowApprovalsPage from "./pages/WorkflowApprovalsPage";
 import WorkflowDefinitionsPage from "./pages/WorkflowDefinitionsPage";
 import DocumentsPage from "./pages/DocumentsPage";
@@ -158,6 +159,7 @@ export default function App() {
         <Route path="workflow/definitions" element={<WorkflowDefinitionsPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="ontology-properties" element={<OntologyPropertyAdminPage />} />
+        <Route path="semantic-release" element={<SemanticReleasePage />} />
         <Route path="profile" element={<ProfilePage />} />
         <Route path="change-password" element={<ChangePasswordPage />} />
         <Route path="research" element={<ResearchListPage />} />

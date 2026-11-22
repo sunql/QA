@@ -34,10 +34,10 @@
 
 | 文件 | 镜像 | 平台 | sha256 | 大小 |
 |---|---|---|---|---|
-| `/tmp/qa-backend-amd64-1122-hotfix2.tar.gz` | `qa-system-backend:amd64-1122-hotfix2` | linux/amd64 | `85a2f084a2101fd6b1db3a6aa3a1e2e09407392dfcc07d4d46538a082aa34ad6` | 490M |
+| `/tmp/qa-backend-amd64-1122-hotfix2.tar.gz` | `qa-system-backend:amd64-1122-hotfix2` | linux/amd64 | `ef87a1ab925029c3f36bed481fd981df37ca765dd9161d9279653b94d0c83dac` | 490M |
 | `/tmp/qa-frontend-amd64-1122-hotfix2.tar.gz` | `qa-system-frontend:amd64-1122-hotfix2` | linux/amd64 | `b10a2c6bbda7bfee609f41803ace38827b885726c70a3c0d647b12eaa15f4482` | 26M |
 
-镜像标识：backend `sha256:0edd8700edf026ed4942863001694031edd1e132abf2c5fe6f755fccb231c7cc`｜frontend `sha256:6723a1495b8df3c8f254d42f4f3f1608c62b7fadb055ea0dacc740a508488153`
+镜像标识：backend `sha256:8333bdd8c1ea1dfd6b42f8e8f17611aed6144c949571960680ea0ba214ab6e1e`｜frontend `sha256:6723a1495b8df3c8f254d42f4f3f1608c62b7fadb055ea0dacc740a508488153`
 前端 bundle：`index-xylVnr95.js`（css `index-WW9dT-wP.css`）
 
 镜像内自证：

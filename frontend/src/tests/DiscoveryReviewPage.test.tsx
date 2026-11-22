@@ -170,3 +170,67 @@ it("admin：关联本体弹窗可保存关联", async () => {
     }),
   );
 });
+
+
+it("admin：问题关联本体走 decideFinding", async () => {
+  api.decideFinding.mockResolvedValue({ ...FINDING, linkedEntityType: "ONTOLOGY_METRIC", linkedEntityCode: "supplier_count" });
+  renderPage();
+
+  await waitFor(() => expect(screen.getByText("SUPPLIER")).toBeTruthy());
+  fireEvent.click(screen.getByRole("tab", { name: /主数据问题/ }));
+  await waitFor(() => expect(screen.getByText("MISSING")).toBeTruthy());
+
+  fireEvent.click(screen.getAllByRole("button", { name: /关联本体/ })[0]);
+  const linkModal = Array.from(document.querySelectorAll(".ant-modal")).find(
+    (node) => node.textContent?.includes("关联到本体对象"),
+  ) as HTMLElement;
+  const selectors = linkModal.querySelectorAll(".ant-select-selector");
+  fireEvent.mouseDown(selectors[0] as Element);
+  fireEvent.click((await screen.findAllByText("本体指标")).pop() as Element);
+  fireEvent.mouseDown(selectors[1] as Element);
+  fireEvent.click((await screen.findAllByText(/supplier_count/)).pop() as Element);
+  fireEvent.click(linkModal.querySelector(".ant-modal-footer .ant-btn-primary") as Element);
+
+  await waitFor(() =>
+    expect(api.decideFinding).toHaveBeenLastCalledWith(3, {
+      status: "OPEN",
+      linkedEntityType: "ONTOLOGY_METRIC",
+      linkedEntityCode: "supplier_count",
+    }),
+  );
+});
+
+
+it("admin：问题用判定弹窗置已解决", async () => {
+  api.decideFinding.mockResolvedValue({ ...FINDING, status: "RESOLVED" });
+  renderPage();
+
+  await waitFor(() => expect(screen.getByText("SUPPLIER")).toBeTruthy());
+  fireEvent.click(screen.getByRole("tab", { name: /主数据问题/ }));
+  await waitFor(() => expect(screen.getByText("MISSING")).toBeTruthy());
+
+  fireEvent.click(screen.getByRole("button", { name: /已解决/ }));
+  await waitFor(() => expect(screen.getByPlaceholderText(/备注（驳回理由/)).toBeTruthy());
+  const buttons = screen.getAllByRole("button", { name: /已解决/ });
+  fireEvent.click(buttons[buttons.length - 1]);
+
+  await waitFor(() =>
+    expect(api.decideFinding).toHaveBeenCalledWith(3, { status: "RESOLVED", note: null }),
+  );
+});
+
+it("切换运行会重新加载候选/问题", async () => {
+  api.listDiscoveryRuns.mockResolvedValue({
+    rows: [{ ...RUN, id: 7 }, { ...RUN, id: 8 }],
+    total: 2,
+  });
+  renderPage();
+
+  await waitFor(() => expect(api.listCandidates).toHaveBeenCalledWith({ runId: 7 }));
+  const combos = document.querySelectorAll(".ant-select-selector");
+  fireEvent.mouseDown(combos[0] as Element);
+  const options = await screen.findAllByText(/#8/);
+  fireEvent.click(options[options.length - 1]);
+
+  await waitFor(() => expect(api.listCandidates).toHaveBeenCalledWith({ runId: 8 }));
+});

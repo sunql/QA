@@ -198,3 +198,54 @@ it("运行页签：选源后加载快照表并提交运行", async () => {
     }),
   );
 });
+
+
+it("编辑策略：保存表白名单调用 updateSource", async () => {
+  adminApi.updateSource.mockResolvedValue({ ...SOURCE });
+  renderPage();
+
+  await waitFor(() => expect(screen.getByText("probe:THBI Oracle")).toBeTruthy());
+  fireEvent.click(screen.getByRole("button", { name: /编辑策略/ }));
+
+  const modal = modalAt(0);
+  const inputs = modal.querySelectorAll("input");
+  fireEvent.change(inputs[1] as Element, { target: { value: "DIM_SUPPLIER, dim_imaterial" } });
+  fireEvent.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+  await waitFor(() =>
+    expect(adminApi.updateSource).toHaveBeenCalledWith(1, {
+      accessPolicy: { mode: "READ_ONLY", tables: ["DIM_SUPPLIER", "dim_imaterial"] },
+    }),
+  );
+});
+
+it("停用发现源：调用 updateSource(DISABLED)", async () => {
+  adminApi.updateSource.mockResolvedValue({ ...SOURCE, status: "DISABLED" });
+  renderPage();
+
+  await waitFor(() => expect(screen.getByText("probe:THBI Oracle")).toBeTruthy());
+  fireEvent.click(screen.getByRole("button", { name: /停\s*用/ }));
+
+  await waitFor(() =>
+    expect(adminApi.updateSource).toHaveBeenCalledWith(1, { status: "DISABLED" }),
+  );
+});
+
+
+it("有 RUNNING 运行时每 5 秒自动刷新", async () => {
+  reviewApi.listDiscoveryRuns.mockResolvedValue({
+    rows: [{ id: 7, sourceId: 1, snapshotId: 1, trigger: "MANUAL", status: "RUNNING",
+             modelVersion: null, promptVersion: null, promptTokens: 0, completionTokens: 0,
+             cost: 0, errorMessage: null, startedAt: "2026-11-22T10:00:00Z", finishedAt: null,
+             createdBy: "x" }],
+    total: 1,
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "运行" }));
+  await waitFor(() => expect(reviewApi.listDiscoveryRuns).toHaveBeenCalled());
+  const calls = reviewApi.listDiscoveryRuns.mock.calls.length;
+
+  await new Promise((resolve) => setTimeout(resolve, 5200));
+
+  expect(reviewApi.listDiscoveryRuns.mock.calls.length).toBeGreaterThan(calls);
+}, 15000);

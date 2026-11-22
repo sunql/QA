@@ -17,13 +17,16 @@
 | ④ | 新上传文档排在列表最后一页 | `listDocuments` 改 **`id DESC`**（最新在前） |
 | ⑤ | **删除文档后向量还在**（RAG 仍能检索到已删文档） | `deleteDocument` 调 `deleteDocumentChunks`（Milvus 故障不阻断删除，记 ERROR/审计） |
 | ⑥ | 历史删除留下的**孤儿向量** | 新增 `scripts/purge_orphan_document_vectors`（默认只报告，`--apply` 真删） |
+| ⑦ | 批量上传**部分成功**（含重复文件）时列表不刷新，新文档要手动刷新才出现 | 新增 `onPartiallyUploaded`：有任一成功就后台刷新列表，弹窗保留结果/可重试 |
+| ⑧ | 文档目录筛选栏「类型 / 状态」下拉**展开为空** | 给 FilterBar 的 select 字段补 `options`（类型全部词表；状态含 ARCHIVED） |
 
 **验收标准**：
 1. 上传选 `SOP / L2 / v1.1 / owner / 生效日期` ⇒ 列表原样显示；
 2. 上传弹窗可多选、逐条结果、可重试失败项；
 3. admin 列表能看 L0–L3；新上传的排在最前；
 4. `alembic_version` 仍为 **0169**（本批无迁移）；
-5. 删除文档后：`python -m scripts.purge_orphan_document_vectors` 不应再把它列为孤儿（新删的立即清）；历史孤儿用同一脚本 `--apply` 清理。
+5. 删除文档后：`python -m scripts.purge_orphan_document_vectors` 不应再把它列为孤儿（新删的立即清）；历史孤儿用同一脚本 `--apply` 清理；
+6. 文档目录筛选栏「类型 / 状态」下拉有选项；批量上传部分成功时列表自动出现新文档。
 
 ---
 
@@ -32,10 +35,10 @@
 | 文件 | 镜像 | 平台 | sha256 | 大小 |
 |---|---|---|---|---|
 | `/tmp/qa-backend-amd64-1122-hotfix2.tar.gz` | `qa-system-backend:amd64-1122-hotfix2` | linux/amd64 | `85a2f084a2101fd6b1db3a6aa3a1e2e09407392dfcc07d4d46538a082aa34ad6` | 490M |
-| `/tmp/qa-frontend-amd64-1122-hotfix2.tar.gz` | `qa-system-frontend:amd64-1122-hotfix2` | linux/amd64 | `35ce2646797cf0501fb36553ed4eb636c27ead2918c552188b7661d9897d103e` | 26M |
+| `/tmp/qa-frontend-amd64-1122-hotfix2.tar.gz` | `qa-system-frontend:amd64-1122-hotfix2` | linux/amd64 | `b10a2c6bbda7bfee609f41803ace38827b885726c70a3c0d647b12eaa15f4482` | 26M |
 
-镜像标识：backend `sha256:0edd8700edf026ed4942863001694031edd1e132abf2c5fe6f755fccb231c7cc`｜frontend `sha256:0f4f3c7086f337f79f0aa90e712377881cb729728242ad65547bb6dfb564cbf8`
-前端 bundle：`index-uUeXdHJq.js`（css `index-WW9dT-wP.css`）
+镜像标识：backend `sha256:0edd8700edf026ed4942863001694031edd1e132abf2c5fe6f755fccb231c7cc`｜frontend `sha256:6723a1495b8df3c8f254d42f4f3f1608c62b7fadb055ea0dacc740a508488153`
+前端 bundle：`index-xylVnr95.js`（css `index-WW9dT-wP.css`）
 
 镜像内自证：
 
@@ -134,7 +137,8 @@ curl -s -o /dev/null -w "backend=%{http_code}\n" http://localhost:8000/api/v1/he
 docker exec qa-frontend sh -c '
   h=/usr/share/nginx/html
   echo bundle=$(ls $h/assets/index-*.js | head -1 | xargs basename)
-  echo batch=$(grep -c "重试失败项" $h/assets/index-*.js)'
+  echo batch=$(grep -c "重试失败项" $h/assets/index-*.js)
+  echo archived=$(grep -c "已归档" $h/assets/index-*.js)'
 # 期望：bundle = index-uUeXdHJq.js；batch = 1
 ```
 

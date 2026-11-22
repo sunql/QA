@@ -253,3 +253,23 @@ curl -X POST http://127.0.0.1:8010/api/v1/ontology-discovery/proposals/1/publish
 - `POST /runs` 的 `tables` 子集目前闭包在进程内后台任务里（单进程；进程重启会丢任务）。
 - 候选生成依赖可用的模型配置；无配置时运行仍 `SUCCEEDED`（剖析结果保留），只是没有候选。
 - 发布只允许「提案 → 既有发布链」；发现域不写治理表。
+
+## 附录：批量上传文档（生产）
+
+文档中心页面上传弹窗是**单文件**（`maxCount=1`）；批量请用脚本（仓库自带）：
+
+```bash
+# 在**生产宿主机**执行（后端 8000 已映射到本机）
+cd /opt/qa-system
+USERNAME=admin PASSWORD='***' \
+  ./scripts/bulk_upload_documents.sh /data/docs \
+  # 可选环境变量：
+  #   DOCUMENT_TYPE=POLICY  SECURITY_LEVEL=L1  VERSION=v1.0  OWNER=采购部
+  #   或直接 TOKEN='eyJ...'；DRY_RUN=1 只列文件不上传
+```
+
+- 只收 **pdf / docx / txt / md**（与 `/documents/upload` 支持类型一致）；
+- **单文件 ≤ 50 MB**（超限 413）；
+- **串行**上传（每份都要落 MinIO + 解析 + 向量化），重复内容计为 `DUP`（不会重复入库），失败不中断，最后汇总 `成功/重复/失败`；
+- 上传成功即触发向量化；如需事后重新向量化，用文档中心行内「AI 上下文/重新向量化」入口。
+

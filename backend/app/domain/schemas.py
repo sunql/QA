@@ -3179,6 +3179,14 @@ class DocEntityRelationCreate(CamelModel):
     relation_type: DocEntityRelationType = Field(default=DocEntityRelationType.CONTRACT)
 
 
+class DocEntityRelationUpdate(CamelModel):
+    """更新文档-实体关联（所有字段可选，只改传了的）。"""
+
+    entity_type: RelationEntityType | None = Field(default=None)
+    entity_key: str | None = Field(default=None, min_length=1, max_length=100)
+    relation_type: DocEntityRelationType | None = Field(default=None)
+
+
 class DocEntityRelationRead(CamelModel):
     """文档-实体关联响应（Phase 5.1 + entity_key VARCHAR）。"""
     id: int

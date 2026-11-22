@@ -213,6 +213,23 @@ export async function createRelation(
   return res.data;
 }
 
+export interface DocEntityRelationUpdate {
+  entityType?: string;
+  entityKey?: string;
+  relationType?: DocEntityRelationCreate["relationType"];
+}
+
+export async function updateRelation(
+  id: number,
+  payload: DocEntityRelationUpdate,
+): Promise<DocEntityRelationRead> {
+  const res = await httpClient.put<DocEntityRelationRead>(
+    `${BASE}/relations/${id}`,
+    payload,
+  );
+  return res.data;
+}
+
 export async function deleteRelation(id: number): Promise<void> {
   await httpClient.delete(`${BASE}/relations/${id}`);
 }

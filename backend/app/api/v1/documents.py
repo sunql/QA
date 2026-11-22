@@ -33,6 +33,7 @@ from app.domain.schemas import (
     BusinessObjectCodeType,
     DocEntityRelationCreate,
     DocEntityRelationRead,
+    DocEntityRelationUpdate,
     DocumentCreate,
     DocumentRead,
     DocumentUpdate,
@@ -433,6 +434,23 @@ async def listRelationTargets(
             detail=f"不支持的关联类型：{entityType}",
         )
     return await searchRelationTargets(session, entityType, q, limit)
+
+
+@router.put(
+    "/relations/{relationId:int}",
+    response_model=DocEntityRelationRead,
+    summary="更新文档关联（改关联对象或关联类型）",
+)
+async def updateRelation(
+    relationId: int,
+    payload: DocEntityRelationUpdate,
+    _user=Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+    service: DocumentService = Depends(getDocumentService),
+) -> DocEntityRelationRead:
+    """部分更新；改成已存在的组合 ⇒ 409。"""
+    entity = await service.updateRelation(session, relationId, payload, actor=_user)
+    return DocEntityRelationRead.model_validate(entity)
 
 
 @router.post("/relations", response_model=DocEntityRelationRead, status_code=status.HTTP_201_CREATED)

@@ -30,6 +30,7 @@ from app.domain.enums import DocumentStatus
 from app.domain.knowledge_schemas import (
     KNOWLEDGE_CHANNEL_RAG,
     KNOWLEDGE_SOURCE_LIVE,
+    KnowledgeEntityHintRead,
     KnowledgeEvidenceRead,
     KnowledgeEvidenceSecurity,
     KnowledgeEvidenceSourceRef,
@@ -98,7 +99,9 @@ def filterDocumentHits(
 
 
 def buildDocumentEvidence(
-    hit: dict[str, Any], catalog: DocumentCatalog
+    hit: dict[str, Any],
+    catalog: DocumentCatalog,
+    relatedEntities: tuple[tuple[str, str], ...] = (),
 ) -> KnowledgeEvidenceRead:
     """chunk 命中 + catalog 全行 → M2-1 契约证据（security/sourceRef/validAt 回填）。"""
     distance = hit.get("distance")
@@ -127,6 +130,11 @@ def buildDocumentEvidence(
         security=KnowledgeEvidenceSecurity(
             level=_enumValue(catalog.security_level),
             scope=(),
+        ),
+        # 文档关联的业务/知识对象（LLM 据此知道这份文档说的是哪个对象）
+        related_entities=tuple(
+            KnowledgeEntityHintRead(type=entityType, code=entityKey)
+            for entityType, entityKey in relatedEntities
         ),
         source_ref=KnowledgeEvidenceSourceRef(
             system=None,
@@ -174,7 +182,9 @@ async def searchProcurementDocuments(
     ).scalars().all()
     catalogById = {row.document_id: row for row in catalogRows}
     relationsByDoc: dict[str, set[tuple[str, str]]] = {}
-    if entityKeys:
+    # 关联**总是**加载：既用于 entityKeys 过滤，也回填证据的 related_entities
+    # （否则关联只存不用——LLM 拿不到「这份文档讲的是哪个对象」）
+    if uniqueIds:
         relationRows = (
             await session.execute(
                 select(DocumentEntityRelation).where(
@@ -196,6 +206,10 @@ async def searchProcurementDocuments(
         effectiveAt=effectiveAt,
     )
     return [
-        buildDocumentEvidence(hit, catalogById[hit["document_id"]])
+        buildDocumentEvidence(
+            hit,
+            catalogById[hit["document_id"]],
+            tuple(sorted(relationsByDoc.get(hit["document_id"], set()))),
+        )
         for hit in kept
     ]

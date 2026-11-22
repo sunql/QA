@@ -137,14 +137,16 @@ export interface DocEntityRelationRead {
   id: number;
   documentId: string;
   entityType: EntityType;
-  entityKey: number;
+  /** 关联目标的键（字符串：编码 / 类名 / 指标名 / `类名.属性名`） */
+  entityKey: string;
   relationType: DocEntityRelationType;
 }
 
 export interface DocEntityRelationCreate {
   documentId: string;
   entityType: EntityType;
-  entityKey: number;
+  /** 关联目标的键：业务对象编码（D135）/ 类名 / 指标名 / `类名.属性名` */
+  entityKey: string;
   relationType?: DocEntityRelationType;
 }
 

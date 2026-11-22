@@ -32,6 +32,7 @@ from app.services.messages_zh import (
     MSG_DOCUMENT_NOT_FOUND,
     MSG_DOCUMENT_REL_EXISTS,
     MSG_DOCUMENT_REL_INVALID_TARGET,
+    MSG_DOCUMENT_REL_INVALID_TARGET,
     MSG_DOCUMENT_REL_NOT_FOUND,
 )
 
@@ -390,6 +391,71 @@ class DocumentService:
                 dto.entity_type,
                 dto.entity_key,
             )
+            raise ValidationError(MSG_DOCUMENT_REL_INVALID_TARGET) from exc
+        await session.refresh(entity)
+        return entity
+
+    async def updateRelation(
+        self,
+        session: AsyncSession,
+        id: int,
+        dto: "DocEntityRelationUpdate",
+        actor: CurrentUser | None = None,
+    ) -> DocumentEntityRelation:
+        """更新关联（部分字段）。
+
+        改 ``entity_type`` / ``entity_key`` 等价于「换关联目标」——仍受唯一约束
+        约束（改成已存在的组合 ⇒ 409，而不是静默产生重复行）。
+        """
+        entity = await self.getRelation(session, id)
+        updates = dto.model_dump(exclude_unset=True, exclude_none=True)
+        if not updates:
+            return entity
+        before = {
+            "documentId": entity.document_id,
+            "entityType": entity.entity_type,
+            "entityKey": entity.entity_key,
+            "relationType": str(entity.relation_type),
+        }
+        for key, value in updates.items():
+            setattr(entity, key, value)
+        # rollback 会把 ORM 实例**全部 expire**，之后读属性会触发同步懒加载 ⇒
+        # async 上下文里爆 MissingGreenlet。冲突信息必须在回滚**之前**取好。
+        conflictDocumentId = entity.document_id
+        conflictEntityType = entity.entity_type
+        conflictEntityKey = entity.entity_key
+        try:
+            # ⚠️ 审计写入会 flush ⇒ 唯一冲突可能在**这里**就抛出（早于 commit）。
+            # 放在 try 内才能被翻译成 409，否则冒成 500（2026-11-22 实测）。
+            await _audit.record(
+                session,
+                entity_type="document_entity_relation",
+                entity_id=entity.id,
+                action="UPDATE",
+                actor=getattr(actor, "userId", "system") if actor else "system",
+                actor_departments=tuple(getattr(actor, "departments", ()) or ())
+                if actor
+                else (),
+                before=before,
+                after={
+                    "documentId": entity.document_id,
+                    "entityType": entity.entity_type,
+                    "entityKey": entity.entity_key,
+                    "relationType": str(entity.relation_type),
+                },
+            )
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            if _isUniqueViolation(exc):
+                raise ConflictError(
+                    MSG_DOCUMENT_REL_EXISTS.format(
+                        documentId=conflictDocumentId,
+                        entityType=conflictEntityType,
+                        entityKey=conflictEntityKey,
+                    )
+                ) from exc
+            logger.exception("更新文档关联失败（非唯一冲突）: id=%s", id)
             raise ValidationError(MSG_DOCUMENT_REL_INVALID_TARGET) from exc
         await session.refresh(entity)
         return entity

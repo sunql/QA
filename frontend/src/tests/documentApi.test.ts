@@ -328,3 +328,35 @@ describe("api/document 关联目标（可搜索下拉）", () => {
     expect(httpMock.get.mock.calls[0][1].params.q).toBe("");
   });
 });
+
+describe("api/document 关联修改", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("updateRelation 走 PUT /documents/relations/{id}", async () => {
+    httpMock.put.mockResolvedValue({
+      data: {
+        id: 7,
+        documentId: "DOC-1",
+        entityType: "ONTOLOGY_METRIC",
+        entityKey: "到货及时率",
+        relationType: "SPEC",
+      },
+    });
+
+    const { updateRelation } = await import("../api/document");
+    const row = await updateRelation(7, {
+      entityType: "ONTOLOGY_METRIC",
+      entityKey: "到货及时率",
+      relationType: "SPEC",
+    });
+
+    expect(httpMock.put).toHaveBeenCalledWith("/documents/relations/7", {
+      entityType: "ONTOLOGY_METRIC",
+      entityKey: "到货及时率",
+      relationType: "SPEC",
+    });
+    expect(row.entityKey).toBe("到货及时率");
+  });
+});

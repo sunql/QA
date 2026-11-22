@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+from types import SimpleNamespace
 from typing import Any, Iterator
 from unittest.mock import patch
 
@@ -678,3 +679,151 @@ async def test_createRelation_acceptsKnowledgeEntityType(
     body = resp.json()
     assert body["entityType"] == "ONTOLOGY_CLASS"
     assert body["entityKey"] == "DIM_SUPPLIER"
+
+
+# ---------------------------------------------------------------------------
+# 关联修改（2026-11-22 用户反馈：建了不能改）
+# ---------------------------------------------------------------------------
+
+
+async def _createRelation(client: AsyncClient, documentId: str, **overrides):
+    payload = {
+        "documentId": documentId,
+        "entityType": "ONTOLOGY_CLASS",
+        "entityKey": "DIM_SUPPLIER",
+        "relationType": "SPEC",
+        **overrides,
+    }
+    resp = await client.post("/api/v1/documents/relations", json=payload)
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+async def test_updateRelation_changesTargetAndType(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    created = await _createDocument(client, dbSession, fakeMinio)
+    rel = await _createRelation(client, created["documentId"])
+
+    resp = await client.put(
+        f"/api/v1/documents/relations/{rel['id']}",
+        json={
+            "entityType": "ONTOLOGY_METRIC",
+            "entityKey": "到货及时率",
+            "relationType": "8D_REPORT",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["entityType"] == "ONTOLOGY_METRIC"
+    assert body["entityKey"] == "到货及时率"
+    assert body["relationType"] == "8D_REPORT"
+    assert body["documentId"] == created["documentId"]
+
+
+async def test_updateRelation_partialKeepsOtherFields(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    created = await _createDocument(client, dbSession, fakeMinio)
+    rel = await _createRelation(client, created["documentId"])
+
+    resp = await client.put(
+        f"/api/v1/documents/relations/{rel['id']}", json={"relationType": "SOP"}
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["relationType"] == "SOP"
+    # 只改了类型，目标不动
+    assert body["entityType"] == "ONTOLOGY_CLASS"
+    assert body["entityKey"] == "DIM_SUPPLIER"
+
+
+async def test_updateRelation_conflictWhenDuplicating(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    """改成已存在的组合 ⇒ 409（不能静默产生重复行）。"""
+    created = await _createDocument(client, dbSession, fakeMinio)
+    first = await _createRelation(client, created["documentId"])
+    second = await _createRelation(
+        client, created["documentId"], entityKey="DIM_ITEM", relationType="SOP"
+    )
+
+    resp = await client.put(
+        f"/api/v1/documents/relations/{second['id']}",
+        json={"entityKey": "DIM_SUPPLIER", "relationType": "SPEC"},
+    )
+
+    assert resp.status_code == 409, resp.text
+    assert first["id"] != second["id"]
+
+
+async def test_updateRelation_404ForUnknown(client: AsyncClient) -> None:
+    resp = await client.put(
+        "/api/v1/documents/relations/999999", json={"relationType": "SOP"}
+    )
+
+    assert resp.status_code == 404, resp.text
+
+
+async def test_documentEvidenceCarriesRelatedEntities(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio, mockEmbeddingService: Any
+) -> None:
+    """**关联要能进 LLM**：文档检索的证据必须带 `relatedEntities`。
+
+    2026-11-22 实测：关联此前只存不用——AIChat/Agent 路径没人传 entityKeys，
+    关联对模型完全不可见。现在证据回填关联对象，Agent/Copilot 的答案里能看到
+    「这份文档讲的是哪个对象」。
+    """
+    import hashlib
+
+    from sqlalchemy import select
+
+    from app.domain.models import DocumentCatalog
+
+    content = "供应商准入制度：注册资本不得低于 1000 万。".encode("utf-8")
+    created = await _createDocument(
+        client, dbSession, fakeMinio, content=content, filename="准入制度.md",
+        mime="text/markdown",
+    )
+    await _createRelation(client, created["documentId"])
+
+    # 让文档有向量（检索需要 chunk）
+    with patch(
+        "app.services.rag_service._getEmbeddingService",
+        return_value=mockEmbeddingService,
+    ):
+        resp = await client.post(
+            f"/api/v1/documents/{created['id']}/vectorize"
+        )
+    assert resp.status_code == 200, resp.text
+
+    # 直接走服务层（searchFn 是该模块文档规定的注入点）：
+    # 知识检索 HTTP 路由受 enableKnowledgeFacade 开关控制，与本用例要验证的
+    # 「关联是否回填到证据」无关。
+    from app.services.knowledge.document_search import searchProcurementDocuments
+
+    async def _fakeSearch(query, *, user, session, top_k):
+        return [
+            {
+                "document_id": created["documentId"],
+                "chunk_text": content.decode("utf-8"),
+                "chunk_sequence": 0,
+                "distance": 0.1,
+            }
+        ]
+
+    actor = SimpleNamespace(
+        userId="admin", roles=("admin",), departments=(), dbUserId=1
+    )
+    rows = await searchProcurementDocuments(
+        dbSession, actor, query="供应商准入 注册资本", topK=3, searchFn=_fakeSearch
+    )
+
+    assert rows, "应有检索命中"
+    related = rows[0].related_entities
+    assert any(
+        item.type == "ONTOLOGY_CLASS" and item.code == "DIM_SUPPLIER"
+        for item in related
+    ), f"证据未回填关联：{related}"

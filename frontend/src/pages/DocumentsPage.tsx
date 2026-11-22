@@ -43,6 +43,7 @@ import {
   fetchDocumentPreview,
   vectorizeDocument,
   listRelationTargets,
+  updateRelation,
   type RelationTarget,
   deleteDocument,
   uploadDocument,
@@ -271,10 +272,12 @@ function RelationList({
   relations,
   loading,
   onDelete,
+  onEdit,
 }: {
   relations: DocEntityRelationRead[];
   loading: boolean;
   onDelete: (id: number) => void;
+  onEdit: (record: DocEntityRelationRead) => void;
 }) {
   const { t } = useTranslation();
   // 与本体管理各 tab 页同口径
@@ -299,16 +302,21 @@ function RelationList({
     },
     {
       title: "操作",
-      width: 100,
+      width: 160,
       render: (_: unknown, record: DocEntityRelationRead) => (
-        <Popconfirm
-          title="确认删除此关联？"
-          onConfirm={() => onDelete(record.id)}
-        >
-          <Button size="small" danger>
-            {t("common.delete")}
+        <Space>
+          <Button size="small" onClick={() => onEdit(record)}>
+            {t("common.edit")}
           </Button>
-        </Popconfirm>
+          <Popconfirm
+            title="确认删除此关联？"
+            onConfirm={() => onDelete(record.id)}
+          >
+            <Button size="small" danger>
+              {t("common.delete")}
+            </Button>
+          </Popconfirm>
+        </Space>
       ),
     },
   ];
@@ -430,6 +438,7 @@ export default function DocumentsPage() {
   >([]);
   const [relEntityType, setRelEntityType] = useState<string | undefined>();
   const [targets, setTargets] = useState<RelationTarget[]>([]);
+  const [editingRel, setEditingRel] = useState<DocEntityRelationRead | null>(null);
   const [targetLoading, setTargetLoading] = useState(false);
   const [docModal, setDocModal] = useState(false);
   const [editingDoc, setEditingDoc] = useState<DocumentRead | null>(null);
@@ -641,6 +650,7 @@ export default function DocumentsPage() {
 
   // Relation handlers
   const openCreateRel = () => {
+    setEditingRel(null);
     void relForm.resetFields();
     setRelEntityType(undefined);
     setTargets([]);
@@ -678,6 +688,20 @@ export default function DocumentsPage() {
     [relEntityType],
   );
 
+  /** 打开「编辑关联」：回填现有值，并拉该类型下的候选（保证当前值有候选）。 */
+  const openEditRel = (record: DocEntityRelationRead) => {
+    setEditingRel(record);
+    setRelEntityType(record.entityType);
+    relForm.setFieldsValue({
+      documentId: record.documentId,
+      entityType: record.entityType,
+      entityKey: record.entityKey,
+      relationType: record.relationType,
+    });
+    loadTargets(record.entityType, record.entityKey);
+    setRelModal(true);
+  };
+
   const handleCreateRel = async () => {
     const values = await relForm.validateFields();
     try {
@@ -687,8 +711,18 @@ export default function DocumentsPage() {
         entityKey: values.entityKey,
         relationType: values.relationType,
       };
-      await createRelation(payload);
-      void message.success(t("toast.created"));
+      if (editingRel) {
+        // 编辑：文档编号不可改（换了文档就是另一条关联，应新增而非改）
+        await updateRelation(editingRel.id, {
+          entityType: payload.entityType,
+          entityKey: payload.entityKey,
+          relationType: payload.relationType,
+        });
+        void message.success(t("toast.updated"));
+      } else {
+        await createRelation(payload);
+        void message.success(t("toast.created"));
+      }
       setRelModal(false);
       void loadRels();
     } catch {
@@ -785,6 +819,7 @@ export default function DocumentsPage() {
             relations={relations}
             loading={relLoading}
             onDelete={handleDeleteRel}
+            onEdit={openEditRel}
           />
         </TabPane>
 
@@ -930,7 +965,7 @@ export default function DocumentsPage() {
 
       {/* Relation create modal */}
       <Modal
-        title="新建文档关联"
+        title={editingRel ? "编辑文档关联" : "新建文档关联"}
         open={relModal}
         onOk={() => void handleCreateRel()}
         onCancel={() => setRelModal(false)}
@@ -963,6 +998,7 @@ export default function DocumentsPage() {
             <Select
               showSearch
               optionFilterProp="label"
+              disabled={editingRel !== null}
               placeholder="搜索并选择文档"
               options={docs.map((doc) => ({
                 value: doc.documentId,

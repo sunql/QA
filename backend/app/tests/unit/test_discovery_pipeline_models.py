@@ -21,6 +21,7 @@ import sqlalchemy as sa
 
 from app.domain.discovery_pipeline_models import (
     DiscoveryCandidate,
+    DiscoveryEvaluation,
     DiscoveryFinding,
     DiscoveryProfile,
     DiscoveryProposal,
@@ -30,6 +31,7 @@ from app.domain.discovery_pipeline_models import (
 
 _MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[3] / "alembic" / "versions"
 _MIGRATION_STEM = "0166_discovery_pipeline"
+_EVALUATION_MIGRATION_STEM = "0167_discovery_evaluation"
 
 _TABLES = (
     DiscoveryRun.__table__,
@@ -38,6 +40,7 @@ _TABLES = (
     DiscoveryFinding.__table__,
     DiscoveryProposal.__table__,
     DiscoveryReview.__table__,
+    DiscoveryEvaluation.__table__,
 )
 
 
@@ -111,7 +114,7 @@ def _migrationColumnComments(module) -> dict[tuple[str, str], str]:
 # ---------------------------------------------------------------- 表与列
 
 
-def test_六张表都在discovery命名空间内():
+def test_七张表都在discovery命名空间内():
     names = {table.name for table in _TABLES}
 
     assert names == {
@@ -121,6 +124,7 @@ def test_六张表都在discovery命名空间内():
         "discovery_finding",
         "discovery_proposal",
         "discovery_review",
+        "discovery_evaluation",
     }
     assert not any(name.startswith("ontology_") for name in names), (
         "红线：发现域不得把自己写进 ontology_* 命名空间"
@@ -281,7 +285,8 @@ def test_迁移只建这六张新表不触碰既有表():
 
 
 def test_迁移列注释与orm逐字一致():
-    module = _loadMigration()
+    comments = _migrationColumnComments(_loadMigration())
+    comments.update(_migrationColumnComments(_loadMigration(_EVALUATION_MIGRATION_STEM)))
     ormComments = {
         (table.name, column.name): column.comment
         for table in _TABLES
@@ -289,7 +294,7 @@ def test_迁移列注释与orm逐字一致():
         if column.comment
     }
 
-    migrationComments = _migrationColumnComments(module)
+    migrationComments = comments
 
     assert ormComments == migrationComments, (
         "ORM 与迁移的列注释不一致："
@@ -303,14 +308,17 @@ def test_迁移列注释与orm逐字一致():
 def test_迁移check表达式与orm逐字一致():
     """`alembic check` 只比约束名不比式 ⇒ 这一层由单测兜住（只补名 = 假绿）。"""
 
-    module = _loadMigration()
     migrationChecks: dict[str, str] = {}
-    for call in _recordedOps(module, "upgrade"):
-        if call[0] != "create_table":
-            continue
-        for item in call[2]:
-            if isinstance(item, sa.CheckConstraint):
-                migrationChecks[item.name] = str(item.sqltext)
+    for module in (
+        _loadMigration(),
+        _loadMigration(_EVALUATION_MIGRATION_STEM),
+    ):
+        for call in _recordedOps(module, "upgrade"):
+            if call[0] != "create_table":
+                continue
+            for item in call[2]:
+                if isinstance(item, sa.CheckConstraint):
+                    migrationChecks[item.name] = str(item.sqltext)
 
     for table in _TABLES:
         for name, expression in _checkExpressions(table).items():
@@ -334,3 +342,13 @@ def test_迁移的唯一索引也是coalesce表达式且唯一():
 
 def test_迁移文件名不超过32字符():
     assert len(f"{_MIGRATION_STEM}.py") <= 32
+
+
+def test_评测迁移链在0166之后且只建评测表():
+    module = _loadMigration(_EVALUATION_MIGRATION_STEM)
+
+    assert module.revision == "0167"
+    assert module.down_revision == "0166"
+    created = [call[1] for call in _recordedOps(module, "upgrade") if call[0] == "create_table"]
+    assert created == ["discovery_evaluation"]
+    assert len(f"{_EVALUATION_MIGRATION_STEM}.py") <= 32

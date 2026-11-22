@@ -185,6 +185,27 @@ captureSnapshot（内容寻址，幂等）
 
 测试：monitor 服务 4 例 + API 1 例；路由 auth 38 passed。
 
-## 十二、G4 剩余
+## 十二、G4-2 评测 + 回滚演练（同批落地）
 
-- **G4-2 评测 + 回滚演练**：`discovery_evaluation`（**需新迁移 0167**）、上下游冒烟、回滚演练。
+- **迁移 0167**：`discovery_evaluation`（`proposal_id` 可空 RESTRICT；`datasetVersion` 非空；
+  `metricsJson` 必须对象；`verdict` 三态）。
+- **`DiscoveryEvaluationService.evaluateRun`**：从运行数据算**可复算指标**
+  （候选数 / 问题数 / 分类分布 / **证据完整率**），并落结论：
+  - `PASS`：有候选且证据完整率 = 1；
+  - `FAIL`：有候选但存在**证据解析不了**的候选（脏数据/人工改库）；
+  - `INCONCLUSIVE`：没有候选 —— **没结论 ≠ 质量差**（不混成 FAIL）。
+- **`recordEvaluation`**：脚本/人工上报（verdict / metrics / datasetVersion 契约校验）。
+- **API**：`POST /runs/{runId}/evaluate`、`GET /evaluations`（均 admin）。
+- **回滚演练**（单测）：发布新提案 → ACTIVE 变新版 → `rollback` 到旧 ACTIVE
+  ⇒ 新 ACTIVE 归档、内容与 `manifest_hash` 回到旧版。
+
+不做「候选准确率/召回率」：需要业务标注集（G5 试点签收后才存在）；本批只给
+**不依赖人工标注**的可复算指标，避免自己估一个数当验收。
+
+测试：评测服务 5 例 + 回滚演练 1 例 + 评测 API 1 例；路由 auth **58 passed**；
+dev 库（5433）已升级 **0167**。
+
+## 十三、G4 完成状态
+
+G4-0/1/2 全部落地。**整合方案（G1–G5）只剩 G5 采购域首期实践**：
+真实数据剖析 → 候选 → 提案 → 业务签收与评测基线（需要业务侧标注与签收）。

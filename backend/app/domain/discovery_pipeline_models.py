@@ -578,3 +578,67 @@ class DiscoveryReview(Base):
             f"<DiscoveryReview id={self.id} proposal={self.proposal_id} "
             f"decision={self.decision}>"
         )
+
+
+EVALUATION_DATASET_VERSION_COMMENT = "0167，WP-ONT-AI A3：评测数据集版本（业务签署的基线）"
+EVALUATION_METRICS_COMMENT = "0167，WP-ONT-AI A3：评测指标（JSON 对象：候选数/证据完整率/分类分布等）"
+EVALUATION_VERDICT_COMMENT = "0167，WP-ONT-AI A3：评测结论（PASS / FAIL / INCONCLUSIVE）"
+
+
+class DiscoveryEvaluation(Base):
+    """一次发现评测的结论（`discovery_evaluation`，0167）。
+
+    只记录**结论与指标**：数据集版本由业务签署（`datasetVersion`），指标是
+    可复算的摘要（不是原始明细）；明细仍由 `discovery_run` / `discovery_candidate` 承载。
+    `verdict=INCONCLUSIVE` 用于「没有候选可评」这类**没结论**的情况
+    —— 与 `FAIL` 区分，避免把「没跑出东西」当成「质量差」。
+    """
+
+    __tablename__ = "discovery_evaluation"
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    proposal_id: Mapped[int | None] = mapped_column(
+        BigIntFk,
+        ForeignKey(
+            "discovery_proposal.id",
+            ondelete="RESTRICT",
+            name="fk_discovery_evaluation_proposal",
+        ),
+        nullable=True,
+    )
+    dataset_version: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment=EVALUATION_DATASET_VERSION_COMMENT
+    )
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, comment=EVALUATION_METRICS_COMMENT
+    )
+    verdict: Mapped[str] = mapped_column(
+        String(20), nullable=False, comment=EVALUATION_VERDICT_COMMENT
+    )
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "verdict IN ('PASS','FAIL','INCONCLUSIVE')",
+            name="ck_discovery_evaluation_verdict",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(metrics_json) = 'object'",
+            name="ck_discovery_evaluation_metrics_object",
+        ),
+        CheckConstraint(
+            "length(btrim(dataset_version)) > 0",
+            name="ck_discovery_evaluation_dataset_version",
+        ),
+        Index("ix_discovery_evaluation_proposal", "proposal_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DiscoveryEvaluation id={self.id} dataset={self.dataset_version} "
+            f"verdict={self.verdict}>"
+        )

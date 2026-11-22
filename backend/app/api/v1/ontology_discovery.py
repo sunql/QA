@@ -31,12 +31,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import CurrentUser, getCurrentUser, getDb, requireAdmin
 from app.domain.discovery_pipeline_models import (
     DiscoveryCandidate,
+    DiscoveryEvaluation,
     DiscoveryFinding,
     DiscoveryProposal,
 )
 from app.domain.discovery_schemas import (
     DiscoveryCandidatePage,
     DiscoveryCandidateRead,
+    DiscoveryEvaluateRequest,
+    DiscoveryEvaluationPage,
+    DiscoveryEvaluationRead,
     DiscoveryFindingPage,
     DiscoveryFindingRead,
     DiscoveryMonitorRead,
@@ -63,6 +67,7 @@ from app.domain.discovery_schemas import (
 from app.infrastructure.rate_limit import enforceRouteLimit
 from app.services.audit_service import AuditService
 from app.services.discovery_diff_service import computeOntologyDiff
+from app.services.discovery_evaluation_service import DiscoveryEvaluationService
 from app.services.discovery_monitor_service import DiscoveryMonitorService
 from app.services.discovery_proposal_service import DiscoveryProposalService
 from app.services.discovery_run_service import DiscoveryRunService
@@ -90,6 +95,7 @@ _runService = DiscoveryRunService()
 _monitorService = DiscoveryMonitorService(
     snapshotService=_service, runService=_runService
 )
+_evaluationService = DiscoveryEvaluationService()
 _proposalService = DiscoveryProposalService()
 _audit = AuditService()
 
@@ -855,4 +861,90 @@ async def monitorDiscoverySource(
         snapshot_id=result.snapshotId,
         changed=result.changed,
         run_id=result.runId,
+    )
+
+
+@router.post(
+    "/runs/{runId}/evaluate",
+    response_model=DiscoveryEvaluationRead,
+    status_code=201,
+)
+async def evaluateDiscoveryRun(
+    response: Response,
+    payload: DiscoveryEvaluateRequest,
+    runId: int = Path(..., ge=1),
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryEvaluationRead:
+    """对一次运行做可复算评测（证据完整率 → PASS / FAIL / INCONCLUSIVE）。"""
+    _noStore(response)
+    row = await _evaluationService.evaluateRun(
+        session,
+        runId=runId,
+        datasetVersion=payload.dataset_version,
+        proposalId=payload.proposal_id,
+        note=payload.note,
+        createdBy=admin.userId,
+    )
+    await _audit.record(
+        session,
+        entity_type="discovery_evaluation",
+        entity_id=row.id,
+        action="CREATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        after={
+            "runId": runId,
+            "proposalId": row.proposal_id,
+            "datasetVersion": row.dataset_version,
+            "verdict": row.verdict,
+        },
+    )
+    await session.commit()
+    return _evaluationRead(row)
+
+
+@router.get("/evaluations", response_model=DiscoveryEvaluationPage)
+async def listDiscoveryEvaluations(
+    response: Response,
+    proposalId: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=50, ge=1, le=_MAX_CANDIDATE_PAGE),
+    offset: int = Query(default=0, ge=0),
+    _admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryEvaluationPage:
+    _noStore(response)
+    conditions = []
+    if proposalId is not None:
+        conditions.append(DiscoveryEvaluation.proposal_id == proposalId)
+    total = int(
+        await session.scalar(
+            select(func.count()).select_from(DiscoveryEvaluation).where(*conditions)
+        )
+        or 0
+    )
+    rows = (
+        await session.execute(
+            select(DiscoveryEvaluation)
+            .where(*conditions)
+            .order_by(DiscoveryEvaluation.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    return DiscoveryEvaluationPage(
+        rows=[_evaluationRead(row) for row in rows], total=total
+    )
+
+
+def _evaluationRead(row) -> DiscoveryEvaluationRead:
+    return DiscoveryEvaluationRead(
+        id=row.id,
+        proposal_id=row.proposal_id,
+        dataset_version=row.dataset_version,
+        metrics_json=dict(row.metrics_json or {}),
+        verdict=row.verdict,
+        note=row.note,
+        created_by=row.created_by,
+        created_time=row.created_time,
     )

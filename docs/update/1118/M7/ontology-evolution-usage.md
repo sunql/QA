@@ -146,6 +146,21 @@ curl -X POST -H 'X-User-Id: admin' -H 'X-User-Roles: admin' \
   （候选不是结论，机器不替人拍板本体）。
 - 限流 5/minute；周期驱动由外部调度器定时调本端点。
 
+### 4.7 评测（G4-2）
+
+```bash
+curl -X POST -H 'Content-Type: application/json' \
+  -H 'X-User-Id: admin' -H 'X-User-Roles: admin' \
+  -d '{"datasetVersion":"pilot-2026-11"}' \
+  http://127.0.0.1:8010/api/v1/ontology-discovery/runs/4/evaluate
+
+curl -H 'X-User-Id: admin' -H 'X-User-Roles: admin' \
+  'http://127.0.0.1:8010/api/v1/ontology-discovery/evaluations?limit=10'
+```
+
+结论三态：`PASS`（有候选且证据全可解析）/ `FAIL`（有候选但证据不实）/ `INCONCLUSIVE`（没候选）。
+指标只含**可复算**项（候选数/问题数/分类分布/证据完整率）；准确率/召回率要业务标注集（G5）。
+
 ## 五、G4：发布已批准提案
 
 ```bash

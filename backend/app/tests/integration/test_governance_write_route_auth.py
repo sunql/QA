@@ -51,6 +51,8 @@ _WRITE_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/ontology-discovery/proposals/{proposalId}/publish"),
         # G4-1：增量监测要连业务库采集快照（高成本运维动作）。
         ("POST", "/api/v1/ontology-discovery/sources/{sourceId}/monitor"),
+        # G4-2：评测结论是治理证据。
+        ("POST", "/api/v1/ontology-discovery/runs/{runId}/evaluate"),
         # 采购源绑定（M1-1.1）：绑定是治理事实，确认权必须收口。
         ("POST", "/api/v1/procurement-bindings"),
         ("POST", "/api/v1/procurement-bindings/{id}/properties"),
@@ -89,6 +91,7 @@ _ADMIN_ONLY_READ_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/ontology-discovery/findings"),
         ("GET", "/api/v1/ontology-discovery/proposals"),
         ("GET", "/api/v1/ontology-discovery/proposals/{proposalId}"),
+        ("GET", "/api/v1/ontology-discovery/evaluations"),
     }
 )
 

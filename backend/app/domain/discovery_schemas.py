@@ -356,3 +356,27 @@ class DiscoveryMonitorRead(CamelModel):
     snapshot_id: int
     changed: bool
     run_id: int | None
+
+
+class DiscoveryEvaluateRequest(CamelModel):
+    model_config = ConfigDict(**CamelModel.model_config, extra="forbid")
+
+    dataset_version: str = Field(..., min_length=1, max_length=64, description="评测数据集版本")
+    proposal_id: int | None = Field(default=None, gt=0, description="可选：关联提案")
+    note: str | None = Field(default=None, max_length=MAX_NOTE_LENGTH)
+
+
+class DiscoveryEvaluationRead(CamelModel):
+    id: int
+    proposal_id: int | None
+    dataset_version: str
+    metrics_json: dict[str, Any]
+    verdict: str
+    note: str | None
+    created_by: str | None
+    created_time: datetime
+
+
+class DiscoveryEvaluationPage(CamelModel):
+    rows: list[DiscoveryEvaluationRead]
+    total: int

@@ -191,3 +191,37 @@ async def test_publish_rejects_a_missing_manifest(dbSession: Any) -> None:
         await semanticReleaseService.publishProposal(
             dbSession, proposalId=proposalId, version="v-nomanifest", actor="bob"
         )
+
+
+async def test_publish_then_rollback_restores_the_previous_manifest(dbSession) -> None:
+    """G4-2 回滚演练：发布新提案 ⇒ 回滚到旧版本 ⇒ ACTIVE 内容回到旧那份。"""
+    from app.domain.semantic_manifest_schema import SCHEMA_VERSION
+
+    baseManifest = _healthyManifest()
+    base = SemanticRelease(
+        version="2026.11.22-base-active",
+        status="ACTIVE",
+        domain_code=None,
+        manifest_json=baseManifest,
+        manifest_hash=manifestHash(baseManifest),
+        schema_version=SCHEMA_VERSION,
+    )
+    dbSession.add(base)
+    await dbSession.commit()
+    await dbSession.refresh(base)
+    baseId = base.id
+
+    proposalId = await _seedProposal(dbSession)
+    published = await semanticReleaseService.publishProposal(
+        dbSession, proposalId=proposalId, version="2026.11.22-drill-pub", actor="bob"
+    )
+    assert published.release.status == "ACTIVE"
+
+    rolled = await semanticReleaseService.rollback(
+        dbSession, baseId, version="2026.11.22-drill-rb", actor="bob"
+    )
+
+    assert rolled.release.status == "ACTIVE"
+    assert rolled.release.manifest_hash == manifestHash(baseManifest)
+    archived = await dbSession.get(SemanticRelease, published.release.id)
+    assert archived.status == "ARCHIVED"

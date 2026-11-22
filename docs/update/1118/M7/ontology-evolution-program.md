@@ -57,7 +57,7 @@
 | **G4 A3：增量监测 + 发布联动 + 评测** | `/diff` 周期驱动提案；`POST /proposals/{id}/publish` 调**既有** `activate`；`discovery_evaluation` + 上下游回归（Graph/RAG/NL2SQL/Agent 各 1 条冒烟）；回滚演练 | **7–9** | 端到端演练通过：发现→提案→审核→发布→**回滚**；误合并率 0 |
 | ↳ **G4-0 发布联动** ✅ | `semanticReleaseService.publishProposal`（唯一写口：`createDraftFromManifest` → `markValidated` → `activate`）；提案置 PUBLISHED + 回填 `release_id`；`POST /proposals/{id}/publish` admin | 2 | 单测 6（发布链/状态门/防重/篡改/缺 manifest）+ API 1；F1 守卫改为「只允许 `semanticReleaseService.publishProposal`」 |
 | ↳ **G4-1 增量监测** ✅ | `POST /sources/{id}/monitor`（admin，5/minute）：采集快照，内容没变**不起运行**；变了起 `trigger=DIFF` 的运行（剖析+候选）；**不自动拼提案**（候选不是结论，AI 不替人拍板本体） | 2 | 单测 4 + API 1；路由 auth 38 passed |
-| ↳ **G4-2 评测 + 回滚演练** ⏳ | `discovery_evaluation` 表（**需新迁移 0167**）+ 上下游冒烟 + 回滚 | 2–4 | 端到端演练通过 |
+| ↳ **G4-2 评测 + 回滚演练** ✅ | 迁移 **0167** `discovery_evaluation`；`evaluateRun` 可复算指标（证据完整率 → PASS/FAIL/**INCONCLUSIVE** 三态）；`POST /runs/{id}/evaluate` + `GET /evaluations`；**发布→回滚演练**（发布新提案后回滚到旧 ACTIVE，内容与哈希回到旧版） | 2–4 | 评测服务 5 例 + 回滚演练 1 例；路由 auth 58 passed；dev 库已升 0167 |
 | **G5 采购域首期实践** | 供应商 + 物料两对象：真实数据剖析 → 产出候选与治理建议；业务确认与签收；评测基线（准确率/召回/人工耗时） | **4–6** | 业务签收的候选清单 + 误报复核记录 + 评测报告 |
 
 **顺序理由**：G1/G2 是"出口与守门员"，先做完，G3 产出的提案才有地方去、才拦得住；

@@ -624,6 +624,9 @@ request_time    TIMESTAMPTZ NOT NULL
 - **`discovery_review.approval_task_id` 可空 + `ON DELETE SET NULL`**：首期轻量审核，
   二期接 P5 审批时回填（非空时要求 `subject_type='ontology_proposal'`，服务层判）。
 - **四眼不在库层**：`reviewer != proposer` 是跨表约束，CHECK 表达不了 ⇒ 服务层 409。
+- **`discovery_evaluation`（0167）**：一次评测 = 数据集版本 + 可复算指标 + verdict
+  （`PASS` / `FAIL` / **`INCONCLUSIVE`** 三态 —— 没有候选时是「没结论」，不是「质量差」）；
+  `proposal_id` 可空（可只评一次运行），有引用时 RESTRICT。
 
 ### 迁移文件
 
@@ -631,6 +634,7 @@ request_time    TIMESTAMPTZ NOT NULL
   - **文件主干（stem）** = `0146_discovery_snapshot`（22 字符）；文件名含 `.py` = 26 字符
   - **revision id** = `0146`，**down_revision = "0145"**
 - `alembic/versions/0147_snapshot_immutability.py` — 建不可变触发器 + 触发函数
+- `alembic/versions/0167_discovery_evaluation.py` — 建评测表（纯加法）
 - `alembic/versions/0166_discovery_pipeline.py` — 建流水线六表 + 12 个索引（纯加法；
   ORM `app/domain/discovery_pipeline_models.py`，双向钉住见
   `test_discovery_pipeline_models.py`）

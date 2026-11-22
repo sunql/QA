@@ -51,6 +51,7 @@ ALLOWED_DISCOVERY_TABLES = frozenset(
         "discovery_finding",
         "discovery_proposal",
         "discovery_review",
+        "discovery_evaluation",
     }
 )
 

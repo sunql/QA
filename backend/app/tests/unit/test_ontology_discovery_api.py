@@ -683,3 +683,23 @@ async def test_增量监测返回changed并可选起运行(apiClient, dbSession,
     assert body["changed"] is True
     assert body["runId"] == 999
     assert calls == [999]
+
+
+async def test_评测运行返回可复算指标(apiClient, dbSession):
+    seeded = await _seedA2(dbSession)
+
+    resp = await apiClient.post(
+        f"/api/v1/ontology-discovery/runs/{seeded['runId']}/evaluate",
+        json={"datasetVersion": "pilot-2026-11"},
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["datasetVersion"] == "pilot-2026-11"
+    assert body["metricsJson"]["candidateCount"] == 2
+    # _seedA2 没种剖析行 ⇒ 证据解析不了 ⇒ FAIL（有候选但证据不实）
+    assert body["verdict"] == "FAIL"
+
+    listed = await apiClient.get("/api/v1/ontology-discovery/evaluations")
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["total"] >= 1

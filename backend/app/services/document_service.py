@@ -292,9 +292,25 @@ class DocumentService:
     async def deleteDocument(
         self, session: AsyncSession, id: int, actor: CurrentUser
     ) -> None:
-        """删除文档；不存在抛 NotFoundError。级联删 document_entity_relation（ondelete CASCADE）。"""
+        """删除文档：DB 行 + 关联（CASCADE）**+ Milvus 向量 chunk**。
+
+        ⚠️ 向量必须一起删：只删 DB 行会让已删除文档的 chunk 继续被 RAG 检索到
+        （知识泄漏 + 检索结果指向不存在的文档）。Milvus 不可用时**不阻断删除**
+        （元数据是权威），但会记 ERROR 日志与审计标记 `vectorsDeleteFailed`。
+        """
         entity = await self.getDocument(session, id)
         before_state = _entity_to_dict(entity)
+        vectorsDeleteFailed = False
+        try:
+            from app.infrastructure.milvus_client import deleteDocumentChunks
+
+            deleteDocumentChunks(entity.document_id)
+        except Exception:  # noqa: BLE001 - 向量库不可用不阻断元数据删除
+            vectorsDeleteFailed = True
+            logger.exception(
+                "删除文档时清理 Milvus 向量失败（document_id=%s，向量可能残留）",
+                entity.document_id,
+            )
         await _audit.record(
             session,
             entity_type="document_catalog",
@@ -303,6 +319,7 @@ class DocumentService:
             actor=actor.userId,
             actor_departments=actor.departments,
             before=before_state,
+            after={"vectorsDeleteFailed": vectorsDeleteFailed},
         )
         await session.delete(entity)
         await session.commit()

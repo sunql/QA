@@ -1,144 +1,267 @@
-# 生产部署 runbook：本体发现 G1–G5 + 文档 AI 上下文（2026-11-22）
+# 生产部署：本体发现 G1–G5 + 文档 AI 上下文（2026-11-22）
 
-> **开发机无法直连生产**（内网隔离、无 SSH 通道）⇒ 本文件 + 镜像包交付，
-> **你在生产宿主机逐条执行**。
->
-> 代码基线：`e4e73339`（`feat/ontology-evolution`；= PR #177 合并后的 main 树）。
-> 前置：**PR #177 需先合入 main**（merge commit；闸门按「净新增 0」人工确认，同 #176）。
+- **代码版本**：`feat/ontology-evolution @ e4e73339`（= PR #177 合并后的 main 树；部署前 #177 必须先合 main）
+- **部署日期**：2026-11-22（开发机产出镜像与本文档，**宿主机逐条执行**；开发机不直连生产）
+- **本次动**：**前端 + 后端两个容器** + 数据库迁移（**0152 → 0169**，共 16 个）
+- **不动**：postgres / neo4j / milvus / ollama 容器；不改 `/opt/qa-system/docker/.env`
 
-## 0. 本批改动概览
+---
 
-| 面 | 内容 |
-|---|---|
-| 后端 | G2 六个发布校验码；发现流水线（剖析/候选/提案/审核/发布/监测/评测）；关联本体；新 API（admin） |
-| 前端 | 语义发布管理页；本体发现工作台（发现源/运行/评审）+ 评审关联本体 |
-| 迁移 | **0152 → 0169**（其中 0153–0158 采购域、0160–0165 文档/询价、**0166–0169 本体发现**） |
-| 数据 | 无既有表结构破坏性变更（加法为主；0153/0158 有数据回填与 journal 自删表） |
-| 环境变量 | 无新增必填项；`ENABLE_SEMANTIC_RELEASE=true` 才会注册发布路由 |
+## 0. 一句话说清这次改了什么
 
-## 1. 交付物（开发机已产出）
+生产现役基线 = **1119 批次（main `c959b77f`，库 `0152`）**。此后合入 main 的两批：
 
-| 文件 | 镜像 | sha256 | 大小 |
-|---|---|---|---|
-| `/tmp/qa-backend-amd64-1122.tar.gz` | `qa-system-backend:amd64-1122`（linux/amd64） | `2fedf50d214a60271fa1997e8494a1690f60b6cf6f547e66375c20280aadc8f9` | 490M |
-| `/tmp/qa-frontend-amd64-1122.tar.gz` | `qa-system-frontend:amd64-1122`（linux/amd64，`VITE_API_BASE_URL=` 空） | `b5fbcef547b0a03728c6def19f9e5cdc479769aed082fd44ebc75fd261f80caf` | 26M |
+| PR | 内容 | 影响面 |
+|---|---|---|
+| **#176** | 文档用于 AI 上下文（P0–P3）+ WP-ONT-AI 融合契约 | 后端（文档上下文/守卫）+ 3 个文档迁移 |
+| **#177** | **本体发现与持续演进 G1–G5**：语义发布 6 校验码、发现流水线（剖析/候选/提案/四眼审核/发布/监测/评测）、前台工作台与评审、关联本体 | 后端 + 前端 + 4 个发现迁移 |
+
+**数据库**：`alembic upgrade head` 会把库从 **0152** 升到 **0169**，共 **16 个**迁移
+（0159 不在链上：`0158 → 0160`）：
+
+| 迁移 | 内容 | 可逆性 |
+|---|---|---|
+| 0153 | 校准采购域 5 个本体类 `source_table`（DWD_* → ERP 表词表） | 数据 UPDATE，down 有反向映射 |
+| 0154 | CREATE `procurement_source_binding` / `procurement_property_binding` | drop 两表 |
+| 0155 | CREATE `semantic_release_check` | drop 表 |
+| 0156 | Manifest v2（`semantic_release.schema_version` 等） | 恢复 v1 约定 |
+| 0157 | 域作用域版本号唯一索引 | drop 索引 |
+| 0158 | 采购本体对象核对与补齐（含 journal 自删表） | down 回滚数据，journal 自删 |
+| 0160 | 询价草稿表 + `business_command.payload_hash` | drop 表/列 |
+| 0161 | 询价决策类型扩 `SEND`（放宽 CHECK） | 恢复旧 CHECK |
+| 0162 | Copilot 会话壳 + 轮次映射 | drop 两表 |
+| 0163 | 文档目录补原文/向量化元数据（加可空列） | 删列 |
+| 0164 | 文档关联 entity_type 允许知识对象 + 去重唯一索引 | 恢复 FK/删索引 |
+| 0165 | 文档「可用于 AI 上下文」人工开关 | 删列 |
+| 0166 | CREATE 发现流水线六表（run/profile/candidate/finding/proposal/review） | drop 六表 |
+| 0167 | CREATE `discovery_evaluation` | drop 表 |
+| 0168 | 候选/问题补 `decision_note` | 删两列 |
+| 0169 | 候选/问题补 `linked_entity_type/code` | 删四列 |
+
+> 0153 / 0158 含**数据回填**，其余为建表 / 加可空列 / 建索引 / 放宽 CHECK。
+> 有 DDL+数据回填 ⇒ **必须 pg_dump**（§3）。
+
+**验收标准**：
+1. `alembic_version` = **0169**，backend 启动日志 `Application startup complete.` 且无 blocking 漂移；
+2. 前端 bundle = §1 回填值；「业务配置 → **发现评审**」三个页签可打开；「语义发布」页可打开；
+3. `GET /api/v1/ontology-discovery/{runs,candidates,findings,proposals,evaluations}` 非 404（401/403 正常）；
+4. 发现评审可选运行、可判定、可「关联本体」；发布页可看校验结论（含 CLS/REL/GRP/AGT/GRF/MET 码）。
+
+---
+
+## 1. 交付物（开发机已产出并自证）
+
+| 文件 | 镜像（→ 生产引用名见 §4） | 平台 | sha256 | 大小 |
+|---|---|---|---|---|
+| `/tmp/qa-backend-amd64-1122.tar.gz` | `qa-system-backend:amd64-1122` | linux/amd64 | `2fedf50d214a60271fa1997e8494a1690f60b6cf6f547e66375c20280aadc8f9` | 490M |
+| `/tmp/qa-frontend-amd64-1122.tar.gz` | `qa-system-frontend:amd64-1122`（`VITE_API_BASE_URL=` 空 ⇒ 同源） | linux/amd64 | `b5fbcef547b0a03728c6def19f9e5cdc479769aed082fd44ebc75fd261f80caf` | 26M |
 
 镜像标识（生产核对用）：
 
 | 项 | backend | frontend |
 |---|---|---|
-| 解压后镜像体积 | 517 MB | 27.5 MB |
-| 平台 | linux/amd64 | linux/amd64 |
-| 本机冒烟 | `import app.main` ✅ | — |
+| image ID（`docker image inspect .Id`） | `sha256:b8652634ce1ea3cb0d9d4c655899abffc625d88c202e48317e090e39c065daa4` | `sha256:8c0e06c6998167d58b469592e614604cbb07ec3eba47db51542bf1d80d1d9b87` |
+| 解压后体积 | 517 MB | 27.5 MB |
+| 前端 bundle | — | **`assets/index-DPRRPLTb.js`**（css `index-WW9dT-wP.css`，与现役同源） |
 
-> 构建命令（可复现）：`docker buildx build --platform linux/amd64 -f docker/Dockerfile.backend -t qa-system-backend:amd64-1122 --load .`；
-> 前端追加 `--build-arg VITE_API_BASE_URL=`（空 ⇒ 同源相对路径，生产必须）。
-
-## 2. 生产预检（只读，不改动）
+镜像内容自证（开发机已实测）：
 
 ```bash
-# 1.1 compose 入口（唯一权威：从现役容器 label 读，不要 ls 猜）
+# backend：迁移最高 0169；关键新代码在
+docker run --rm --platform linux/amd64 --entrypoint sh qa-system-backend:amd64-1122 -c '
+  ls /app/alembic/versions | grep -E "^016[6-9]"          # 0166…0169 四个
+  ls /app/app/services | grep -E "discovery_(candidate_service|monitor_service|proposal_service|evaluation_service|signoff)"
+  grep -c normalizePolicyTables /app/app/services/discovery_snapshot_service.py   # 2
+  grep -c publishProposal /app/app/services/semantic_release_service.py           # 1
+  python -c "import app.main" && echo import-ok'
+# frontend：bundle 含新页面文案
+docker run --rm --platform linux/amd64 qa-system-frontend:amd64-1122 sh -c '
+  ls /usr/share/nginx/html/assets/index-*.js
+  grep -c "本体发现" /usr/share/nginx/html/assets/index-*.js
+  grep -c "关联本体" /usr/share/nginx/html/assets/index-*.js'
+```
+
+---
+
+## 2. Phase 0 生产预检（只读，不改动）
+
+```bash
+# ⓪ compose 入口 —— 从现役容器 label 读出（唯一权威），不要靠 ls 猜
 docker inspect qa-frontend qa-backend \
   --format '{{.Name}} => {{index .Config.Labels "com.docker.compose.project.config_files"}}'
-# 预期：/opt/qa-system/docker/docker-compose.centos7.yml
+qa_compose() {
+  docker-compose -p qa-system \
+    --env-file /opt/qa-system/docker/.env \
+    -f /opt/qa-system/docker/docker-compose.centos7.yml "$@"
+}
+qa_compose config --quiet && echo COMPOSE_OK
+qa_compose config --images        # 回填 §4 的 tag 目标名（backend/frontend 各自实际引用名）
 
-# 1.2 现役版本
-docker inspect qa-backend --format '{{.Config.Image}}'; docker inspect qa-frontend --format '{{.Config.Image}}'
-# 1.3 生产库迁移版本（容器内展开变量，避免占位符被 bash 吃）
-docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select version_num from alembic_version;"'
-# 预期：0152（1119 批次已执行）。若是 0143 或其他，先记录，不继续。
+# ⚠️ 不要改 /opt/qa-system/docker/.env（SECRET_KEY 是 Fernet 主密钥）
 
-# 1.4 磁盘与备份空间
-df -h /opt /var/lib/docker | tail -2
+# ① 现役容器与镜像（回滚锚点以实际输出为准）
+docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'backend|frontend'
+
+# ② 现役前端 bundle（记录，回滚时对照）
+docker exec qa-frontend sh -c 'ls /usr/share/nginx/html/assets/index-*.js'
+
+# ③ 现役库 alembic 版本（预期 0152；若为 0143 ⇒ 1119 批次未执行，停下发我）
+docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "select version_num from alembic_version"'
+
+# ④ 健康与磁盘
+curl -s -o /dev/null -w "backend_health=%{http_code}\n" http://localhost:8000/api/v1/health
+curl -s -o /dev/null -w "frontend_health=%{http_code}\n" http://localhost:5173/
+df -h /var/lib/docker
 ```
 
-**停点**：`alembic_version` 不是 0152 ⇒ 先停下来核对（可能与 1119 批次是否落地有关）。
+**停下条件**：③ 不是 **0152**；④ 任一非 200；② 记下来备用（不是固定值也继续，只要记录）。
 
-## 3. 强制备份（有 DDL，必做）
+---
+
+## 3. Phase 1 回滚锚点（镜像 tag + **pg_dump**）
 
 ```bash
-TS=$(date +%Y%m%d-%H%M)
-mkdir -p /opt/qa-system/backups/$TS
-docker exec qa-postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
-  > /opt/qa-system/backups/$TS/qa_metadata-before-0169.dump
-ls -lh /opt/qa-system/backups/$TS/
+# ① 镜像锚点（名字以 §2 ⓪ 的 config --images 为准；示例为 1119 实测值）
+docker tag <backend现役引用名>   <backend现役引用名>:pre-1122
+docker tag <frontend现役引用名>  <frontend现役引用名>:pre-1122
+docker images | grep -E 'pre-1122'
+
+# ② 数据库锚点（本次有 DDL+数据回填，必须备份）
+docker exec qa-postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' \
+  > /opt/qa-system/backups/pg_pre_1122_$(date +%Y%m%d_%H%M).sql
+ls -lh /opt/qa-system/backups/ | tail -3      # 0 字节 ⇒ 重跑并检查报错
 ```
 
-## 4. 导入镜像
+> 旧 backend 镜像的 CMD 是 `alembic upgrade head && uvicorn`；库升到 0169 后旧镜像启动会
+> `Can't locate revision identified by '0169'` **起不来** ⇒ 回滚必须先降级到预检版本（§7）。
+
+---
+
+## 4. Phase 2 传输 + 校验 + 加载 + tag
+
+开发机 → 生产（scp / U 盘均可），**传完先比对 sha256**（§1 表）。
 
 ```bash
-gunzip -c qa-backend-amd64-1122.tar.gz  | docker load
-gunzip -c qa-frontend-amd64-1122.tar.gz | docker load
-docker images | grep -E 'qa-system-(backend|frontend).*1122'
+docker load -i qa-backend-amd64-1122.tar.gz
+docker load -i qa-frontend-amd64-1122.tar.gz
+
+# tag 成**生产 compose 实际引用的名字**（§2 ⓪/⑩ 的输出），例如：
+#   1119 实测：backend = qa-backend:offline；frontend = qa-system_frontend
+docker tag qa-system-backend:amd64-1122  <backend现役引用名>
+docker tag qa-system-frontend:amd64-1122 <frontend现役引用名>
+docker images | grep -E '<backend现役引用名>|<frontend现役引用名>'
+# 两行 Image ID 应变为 §1 的 b8652634… / 8c0e06c6…
 ```
 
-## 5. 切换（先后端，后前端）
+---
+
+## 5. Phase 3 切换（先后端，再前端，不碰数据容器）
 
 ```bash
-cd /opt/qa-system/docker
-# 4.1 后端（启动时 CMD 自动 alembic upgrade head ⇒ 0152 → 0169）
-docker tag qa-system-backend:amd64-1122  qa-system-backend:prod-1122
-docker compose -f docker-compose.centos7.yml --env-file .env up -d backend
-docker logs -f qa-backend   # 看到 upgrade 到 0169 且 uvicorn 启动
-# 4.2 迁移版本复核
-docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select version_num from alembic_version;"'
-# 预期：0169
+# ① 后端（CMD 会跑 alembic upgrade head：0152 → 0169，然后起 uvicorn）
+qa_compose up -d --no-build --no-deps --force-recreate backend
+docker logs -f qa-backend 2>&1 \
+  | grep -E "Running upgrade|015[3-9]|016[0-9]|Application startup complete|ERROR|blocking" | head -60
 
-# 4.3 前端
-docker tag qa-system-frontend:amd64-1122 qa-system-frontend:prod-1122
-docker compose -f docker-compose.centos7.yml --env-file .env up -d frontend
+# ② 迁移版本复核
+docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "select version_num from alembic_version"'      # 期望 0169
+
+# ③ 菜单 seed（新增「发现评审」；幂等，预期 67 rows upserted）
+qa_compose exec backend python -m scripts.seed_menu_config
+
+# ④ 前端
+qa_compose up -d --no-build --no-deps --force-recreate frontend
+docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'backend|frontend'
 ```
 
-> ⚠️ 若 `docker compose` 用旧版 v1：不要使用 `!override` 语法的文件；生产入口是自包含的
-> `docker-compose.centos7.yml`。
+> - `--no-build` 防止现场 build；`--no-deps` 防止顺带重启 postgres/neo4j/milvus；
+>   `--force-recreate` 保证真的换镜像。
+> - v1 compose：**不要加 `--remove-orphans`**。
+> - 生产无 worker 容器 ⇒ 发现运行的异步任务走 API 进程内 `BackgroundTasks`（单进程）；
+>   本批不新增 worker 容器。
 
-## 6. 菜单 seed（新增「发现评审」）
+---
+
+## 6. Phase 4 验收探针
+
+### 6.1 后端
 
 ```bash
-docker compose -f docker-compose.centos7.yml exec backend python -m scripts.seed_menu_config
-# 幂等；预期输出 67 rows upserted（旧环境可能 66→67）
-```
+docker logs qa-backend --since 10m 2>&1 | grep -E "Application startup complete|INFO  \[alembic" | tail -10
+docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "select version_num from alembic_version"'                                    # 0169
+curl -s -o /dev/null -w "backend_health=%{http_code}\n" http://localhost:8000/api/v1/health   # 200
 
-## 7. 冒烟
-
-```bash
-# 6.1 健康
-curl -s http://127.0.0.1:8000/api/v1/health
-# 6.2 新路由已注册（401/403 = 正常；404 = 未注册）
+# 新路由已注册（401/403 = 正常；404 = 未注册）
 for p in runs candidates findings proposals evaluations; do
-  curl -s -o /dev/null -w "$p=%{http_code} " http://127.0.0.1:8000/api/v1/ontology-discovery/$p; done; echo
-# 6.3 发布路由（ENABLE_SEMANTIC_RELEASE=true 时）
-curl -s -o /dev/null -w "releases=%{http_code}\n" http://127.0.0.1:8000/api/v1/semantic/releases
-# 6.4 前端 bundle 含新页面
-docker exec qa-frontend sh -c "grep -l '本体发现' /usr/share/nginx/html/assets/*.js | head -1"
-# 6.5 浏览器：登录 → 业务配置 → 发现评审（三页签）；语义发布页
+  curl -s -o /dev/null -w "$p=%{http_code} " http://localhost:8000/api/v1/ontology-discovery/$p
+done; echo
+
+# 语义发布路由（ENABLE_SEMANTIC_RELEASE=true 时）
+curl -s -o /dev/null -w "releases=%{http_code}\n" http://localhost:8000/api/v1/semantic/releases
+
+# 新表已建
+docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dt"' \
+  | grep -E "discovery_(run|profile|candidate|finding|proposal|review|evaluation)"   # 7 张
 ```
 
-## 8. 回滚（★关键：旧镜像 CMD 会升级 head）
-
-旧 backend 镜像 head = **0152**；库已到 0169 时，旧镜像启动即
-`Can't locate revision identified by '0169'` **起不来**。回滚顺序：
+### 6.2 前端（代码探针）
 
 ```bash
-# 7.1 用**新镜像**把库降回 0152（0153–0169 的 down 主要是 drop 加法表/列；
-#     0158 有数据回填，务必确认 pg_dump 已完成）
-docker run --rm --network <prod_network> -e DATABASE_URL=postgresql+asyncpg://... \
-  qa-system-backend:amd64-1122 alembic downgrade 0152
-# 7.2 换回旧 tag 重建
-docker tag <old_backend_image> qa-system-backend:prod
-docker compose -f docker-compose.centos7.yml --env-file .env up -d backend frontend
-# 7.3 复核库版本回到 0152，健康接口 200
+docker exec qa-frontend sh -c '
+h=/usr/share/nginx/html
+echo bundle=$(ls $h/assets/index-*.js | head -1 | xargs basename)
+echo discovery_new=$(grep -c "本体发现" $h/assets/index-*.js)
+echo review_new=$(grep -c "关联本体" $h/assets/index-*.js)
+echo release_new=$(grep -c "语义发布" $h/assets/index-*.js)
+echo css=$(ls $h/assets/*.css | head -1 | xargs basename)
+echo resolver=$(grep -c "resolver 127.0.0.11" /etc/nginx/conf.d/default.conf)'
+# 期望：bundle = index-DPRRPLTb.js；discovery_new/review_new/release_new ≥1；resolver=1
 ```
 
-## 9. 验收判据
+### 6.3 浏览器端到端（硬刷新 Ctrl+Shift+R）
 
-- 迁移 = 0169；健康 200；新路由非 404；前端三页签可用；
-- 语义发布页可打开（admin）；
-- 发现评审可选运行、可判定、可关联本体；
-- `pg_dump` 产物在 `/opt/qa-system/backups/<TS>/`。
+1. 登录 → 侧边栏「业务配置」下出现 **发现评审**；
+2. 「发现评审」三个页签：发现源 / 运行 / 评审（可登记源、采快照、触发运行、判定、关联本体）；
+3. 「语义发布」页：列表 / 详情 / 校验结论（severity × result）/ 激活 / 回滚；
+4. 聊天页正常回答（文档 AI 上下文为加法特性，不改既有链路）。
 
-## 10. 未随本批上生产的（明确）
+---
 
-- `feat/ontology-evolution` 之外的分支工作（无）；
-- G5 的业务签收数据（属于运营，不是代码）；
-- 「采纳即自动写本体」：仅策略登记（`Harness/rules/本体发现与落地边界.md`），无代码。
+## 7. 回滚（后端回滚必须先降级 DB）
+
+```bash
+# ① 预检版本记录为 PRE_VER（0152；若 1119 未执行则 0143）
+qa_compose stop backend
+
+# ② 用**新镜像**一次性降级到预检版本（需要能连库；挂 .env 与 qa_compose 同文件）
+docker run --rm --network <qa-system 网络名> \
+  -v /opt/qa-system/docker/.env:/app/.env:ro \
+  qa-system-backend:amd64-1122 \
+  alembic downgrade <PRE_VER>
+# 网络名：docker network ls 实测（1119 为 qa-system_default）
+docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "select version_num from alembic_version"'                # 应回到 PRE_VER
+
+# ③ 换回旧镜像
+docker tag <backend现役引用名>:pre-1122  <backend现役引用名>
+docker tag <frontend现役引用名>:pre-1122 <frontend现役引用名>
+qa_compose up -d --no-build --no-deps --force-recreate backend frontend
+```
+
+> - downgrade 会 drop 本批新建的表/列并反向回填 0153/0158 的数据 ⇒ 部署窗口内产生的
+>   发现/发布数据会丢（部署前 pg_dump 兜底）。
+> - **前端可单独回滚**（不动库，只换 frontend tag + recreate）。
+> - 不想动库的替代：保持库=0169、只回滚前端（前端无 DB 依赖）。
+
+---
+
+## 8. 本批明确没做的事
+
+- ❌ 不新增 worker 容器（生产保持无 worker 拓扑；发现运行走 API 进程内后台任务）；
+- ❌ 不改生产 `.env`、不动 ENABLE_* 开关（`ENABLE_SEMANTIC_RELEASE` 未开时发布路由 404，属预期）；
+- ❌ 不动 postgres / neo4j / milvus / ollama 容器与数据；
+- ❌ 不做「采纳即自动写本体」（仅策略登记：`Harness/rules/本体发现与落地边界.md`）；
+- ❌ 不带任何未合 main 的分支改动（部署基线 = #177 合并后的 main 树）。

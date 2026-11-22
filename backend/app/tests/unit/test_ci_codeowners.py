@@ -353,3 +353,42 @@ def test_every_ci_surface_file_in_the_pre_collection_closure_has_a_codeowner() -
     assert not ownerless, (
         f"这些 CI 相关面文件（收集前闭包内）在 CODEOWNERS 里没有 owner：{ownerless}"
     )
+
+
+def test_every_ci_surface_package_init_has_a_codeowner() -> None:
+    """先验守卫（#172 事故补）：凡被 CI 相关面钉住的**包 init**，必须有 owner。
+
+    **#172 的事故链**（2026-11-21 实测）：
+      ① `wiki_link_service` import 了新建的 `app/utils/like_escape`
+      ⇒ `app/utils/__init__.py`（`ci_surface.py` 显式钉住的包 init，
+        第二十三轮评审 C-3：`-m app.utils.ci_shard` 会先执行它）
+      ⇒ 第一次进入「收集前闭包」
+      ⇒ 而 CODEOWNERS 里**没有**它（只有 `app/`、`app/domain/`、`app/models/`、
+        `app/services/`、`app/infrastructure/` 等包 init 的条目）
+      ⇒ 上一条闭包守卫红 ⇒ 本批 PR #172 在 main 上留了一个真·净新增失败。
+
+    ⚠️ 上一条守卫是**事后**的：只有文件**已经进闭包**才会红 ⇒ 属于「等它发作
+    才补救」。本条改成**先验**：把 CI 相关面 pattern 命中的**包 init**全列出来
+    （无论在不在闭包内）⇒ 缺 owner 立刻红 ⇒ 下次再往 `app/utils/` 之类目录加
+    模块时，在**进闭包之前**就被挡住。
+
+    ⚠️ 反过来也要成立：这条不能把「没被钉住」的包 init 拉进来要求 owner
+    ⇒ 只对 `detectCiSurfaceChanges` 命中的那些断言。
+    """
+    from app.utils.ci_surface import detectCiSurfaceChanges
+
+    backendRoot = _REPO_ROOT / "backend"
+    candidates = sorted(
+        path.relative_to(_REPO_ROOT).as_posix()
+        for path in backendRoot.rglob("__init__.py")
+        if "__pycache__" not in path.parts
+    )
+    assert candidates, "没扫到任何包 init（路径写错了？）"
+
+    pinned = [path for path in candidates if detectCiSurfaceChanges((path,))]
+    assert pinned, "没有任何包 init 被 CI 相关面钉住 ⇒ 清单被清空了（假绿）"
+
+    ownerless = [path for path in pinned if _effectiveOwner(path) is None]
+    assert not ownerless, (
+        f"这些被 CI 相关面钉住的包 init 在 CODEOWNERS 里没有 owner：{ownerless}"
+    )

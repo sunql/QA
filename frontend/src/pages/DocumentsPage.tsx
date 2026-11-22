@@ -67,6 +67,7 @@ import { useTranslation } from "../i18n";
 import FilterBar from "../components/ontology/FilterBar";
 import type { FilterField } from "../components/ontology/FilterBar";
 import { contains, matchSelect } from "../utils/ontologyFilter";
+import { documentFilterFields } from "../utils/documentFilters";
 import { useTablePagination } from "../utils/useTablePagination";
 import { listBusinessObjects } from "../api/businessObject";
 import { toIsoDateParam } from "../utils/dateParam";
@@ -747,11 +748,7 @@ export default function DocumentsPage() {
     return true;
   });
 
-  const filterFields: FilterField[] = [
-    { key: "documentId", label: "文档编号" },
-    { key: "documentType", label: "类型", type: "select" },
-    { key: "status", label: "状态", type: "select" },
-  ];
+  const filterFields: FilterField[] = documentFilterFields();
 
   return (
     <div>

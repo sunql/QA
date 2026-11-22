@@ -1,0 +1,367 @@
+/** G5 前台签收：发现评审页。
+ *
+ * 业务在这里逐条判定 AI 候选与主数据问题（采纳/驳回/待证；确认/已解决/忽略），
+ * 备注随判定一起落库（`decision_note`），历史由 audit_log 承担。
+ *
+ * 口径：
+ * - 整组接口 **admin-only**（后端 `requireAdmin`）；
+ * - 候选是**未确认结论**：只有判定「采纳」并走提案→四眼审核→发布后才可能生效；
+ * - 判定**可改判**（待证 → 采纳是正常流程）。
+ */
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Alert,
+  Button,
+  Card,
+  Descriptions,
+  Empty,
+  Input,
+  Modal,
+  Progress,
+  Select,
+  Space,
+  Table,
+  Tabs,
+  Tag,
+  Typography,
+  message,
+} from "antd";
+import type { ColumnsType } from "antd/es/table";
+import { useTranslation } from "../i18n";
+import { useAuthStore } from "../stores/authStore";
+import {
+  decideCandidate,
+  decideFinding,
+  listCandidates,
+  listDiscoveryRuns,
+  listFindings,
+  type DiscoveryCandidate,
+  type DiscoveryFinding,
+  type DiscoveryRunSummary,
+} from "../api/discoveryReview";
+
+const { Text } = Typography;
+
+const STATUS_COLOR: Record<string, string> = {
+  CANDIDATE: "default",
+  NEEDS_EVIDENCE: "warning",
+  ACCEPTED: "success",
+  REJECTED: "error",
+  MERGED: "processing",
+  OPEN: "default",
+  ACKNOWLEDGED: "processing",
+  RESOLVED: "success",
+  IGNORED: "default",
+};
+const SEVERITY_COLOR: Record<string, string> = {
+  ERROR: "error",
+  WARNING: "warning",
+  INFO: "default",
+};
+
+type DecideKind = "candidate" | "finding";
+interface DecideTarget {
+  kind: DecideKind;
+  id: number;
+  label: string;
+  status: string;
+}
+
+export default function DiscoveryReviewPage() {
+  const { t } = useTranslation();
+  const user = useAuthStore((state) => state.user);
+  const isAdmin = (user?.roles ?? []).includes("admin");
+
+  const [runs, setRuns] = useState<DiscoveryRunSummary[]>([]);
+  const [runId, setRunId] = useState<number | undefined>();
+  const [candidates, setCandidates] = useState<DiscoveryCandidate[]>([]);
+  const [findings, setFindings] = useState<DiscoveryFinding[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [target, setTarget] = useState<DecideTarget | null>(null);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const loadRuns = useCallback(async () => {
+    try {
+      const page = await listDiscoveryRuns({ limit: 50 });
+      setRuns(page.rows);
+      setRunId((current) => {
+        if (current !== undefined) return current;
+        const firstDone = page.rows.find((row) => row.status === "SUCCEEDED");
+        return (firstDone ?? page.rows[0])?.id;
+      });
+    } catch {
+      // interceptor 已提示
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadRuns();
+  }, [loadRuns]);
+
+  const loadRows = useCallback(async () => {
+    if (runId === undefined) {
+      setCandidates([]);
+      setFindings([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const [candidatePage, findingPage] = await Promise.all([
+        listCandidates({ runId }),
+        listFindings({ runId }),
+      ]);
+      setCandidates(candidatePage.rows);
+      setFindings(findingPage.rows);
+    } catch {
+      // interceptor 已提示
+    } finally {
+      setLoading(false);
+    }
+  }, [runId]);
+
+  useEffect(() => {
+    void loadRows();
+  }, [loadRows]);
+
+  const judged = useMemo(() => {
+    const candidateJudged = candidates.filter((row) => row.status !== "CANDIDATE").length;
+    const findingJudged = findings.filter((row) => row.status !== "OPEN").length;
+    return candidateJudged + findingJudged;
+  }, [candidates, findings]);
+  const total = candidates.length + findings.length;
+
+  const openDecide = (kind: DecideKind, row: DiscoveryCandidate | DiscoveryFinding, label: string) => {
+    setTarget({ kind, id: row.id, label, status: row.status });
+    setNote(row.decisionNote ?? "");
+  };
+
+  const submitDecide = async (status: string) => {
+    if (!target) return;
+    setBusy(true);
+    try {
+      if (target.kind === "candidate") {
+        await decideCandidate(target.id, { status, note: note.trim() || null });
+      } else {
+        await decideFinding(target.id, { status, note: note.trim() || null });
+      }
+      message.success(t("discoveryReview.decided"));
+      setTarget(null);
+      setNote("");
+      await loadRows();
+    } catch {
+      // interceptor 已提示
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const candidateColumns: ColumnsType<DiscoveryCandidate> = [
+    { title: t("discoveryReview.candidateType"), dataIndex: "candidateType", width: 130 },
+    {
+      title: t("discoveryReview.target"),
+      width: 260,
+      render: (_, row) => (
+        <Space direction="vertical" size={0}>
+          <Text>{row.tableName ?? "—"}{row.columnName ? `.${row.columnName}` : ""}</Text>
+          <Text type="secondary">{row.targetCode ?? "—"}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: t("discoveryReview.confidence"),
+      dataIndex: "confidence",
+      width: 100,
+      render: (value: number | null) => (value === null ? "—" : value.toFixed(2)),
+    },
+    {
+      title: t("discoveryReview.evidence"),
+      width: 90,
+      render: (_, row) => <Tag>{row.evidenceRefs.length}</Tag>,
+    },
+    {
+      title: t("discoveryReview.status"),
+      dataIndex: "status",
+      width: 140,
+      render: (value: string) => <Tag color={STATUS_COLOR[value] ?? "default"}>{value}</Tag>,
+    },
+    { title: t("discoveryReview.note"), dataIndex: "decisionNote", width: 200, render: (value: string | null) => value ?? "—" },
+    {
+      title: t("discoveryReview.action"),
+      width: 260,
+      render: (_, row) => (
+        <Space wrap>
+          <Button size="small" type="primary" disabled={!isAdmin} onClick={() => openDecide("candidate", row, `${row.candidateType} ${row.targetCode ?? ""}`)}>
+            {t("discoveryReview.accept")}
+          </Button>
+          <Button size="small" danger disabled={!isAdmin} onClick={() => openDecide("candidate", row, `${row.candidateType} ${row.targetCode ?? ""}`)}>
+            {t("discoveryReview.reject")}
+          </Button>
+          <Button size="small" disabled={!isAdmin} onClick={() => openDecide("candidate", row, `${row.candidateType} ${row.targetCode ?? ""}`)}>
+            {t("discoveryReview.needsEvidence")}
+          </Button>
+        </Space>
+      ),
+    },
+  ];
+
+  const findingColumns: ColumnsType<DiscoveryFinding> = [
+    { title: t("discoveryReview.findingType"), dataIndex: "findingType", width: 120 },
+    {
+      title: t("discoveryReview.severity"),
+      dataIndex: "severity",
+      width: 100,
+      render: (value: string) => <Tag color={SEVERITY_COLOR[value] ?? "default"}>{value}</Tag>,
+    },
+    {
+      title: t("discoveryReview.target"),
+      width: 220,
+      render: (_, row) => (
+        <Text>{row.tableName ?? "—"}{row.columnName ? `.${row.columnName}` : ""}</Text>
+      ),
+    },
+    { title: t("discoveryReview.detail"), dataIndex: "detail", render: (value: string) => <Text>{value}</Text> },
+    {
+      title: t("discoveryReview.status"),
+      dataIndex: "status",
+      width: 140,
+      render: (value: string) => <Tag color={STATUS_COLOR[value] ?? "default"}>{value}</Tag>,
+    },
+    { title: t("discoveryReview.note"), dataIndex: "decisionNote", width: 180, render: (value: string | null) => value ?? "—" },
+    {
+      title: t("discoveryReview.action"),
+      width: 240,
+      render: (_, row) => (
+        <Space wrap>
+          <Button size="small" disabled={!isAdmin} onClick={() => openDecide("finding", row, `${row.findingType} ${row.tableName ?? ""}`)}>
+            {t("discoveryReview.acknowledge")}
+          </Button>
+          <Button size="small" type="primary" disabled={!isAdmin} onClick={() => openDecide("finding", row, `${row.findingType} ${row.tableName ?? ""}`)}>
+            {t("discoveryReview.resolve")}
+          </Button>
+          <Button size="small" disabled={!isAdmin} onClick={() => openDecide("finding", row, `${row.findingType} ${row.tableName ?? ""}`)}>
+            {t("discoveryReview.ignore")}
+          </Button>
+        </Space>
+      ),
+    },
+  ];
+
+  const decideOptions: { key: string; labelKey: string }[] =
+    target?.kind === "candidate"
+      ? [
+          { key: "ACCEPTED", labelKey: "discoveryReview.accept" },
+          { key: "REJECTED", labelKey: "discoveryReview.reject" },
+          { key: "NEEDS_EVIDENCE", labelKey: "discoveryReview.needsEvidence" },
+        ]
+      : [
+          { key: "ACKNOWLEDGED", labelKey: "discoveryReview.acknowledge" },
+          { key: "RESOLVED", labelKey: "discoveryReview.resolve" },
+          { key: "IGNORED", labelKey: "discoveryReview.ignore" },
+          { key: "OPEN", labelKey: "discoveryReview.reopen" },
+        ];
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h2>{t("discoveryReview.title")}</h2>
+      {!isAdmin && (
+        <Alert type="info" showIcon style={{ marginBottom: 12 }} message={t("discoveryReview.adminOnly")} />
+      )}
+      <Card size="small" style={{ marginBottom: 16 }}>
+        <Space wrap>
+          <Select
+            style={{ width: 420 }}
+            placeholder={t("discoveryReview.runPlaceholder")}
+            value={runId}
+            onChange={(value) => setRunId(value)}
+            options={runs.map((run) => ({
+              value: run.id,
+              label: `#${run.id} · ${run.status} · ${run.startedAt} · ${run.modelVersion ?? "—"}`,
+            }))}
+          />
+          <Button onClick={() => { void loadRuns(); void loadRows(); }}>
+            {t("common.refresh")}
+          </Button>
+          {total > 0 && (
+            <Space size={8} style={{ minWidth: 280 }}>
+              <Text>{t("discoveryReview.progress", { judged, total })}</Text>
+              <Progress percent={Math.round((judged / total) * 100)} size="small" style={{ width: 160 }} />
+            </Space>
+          )}
+        </Space>
+      </Card>
+
+      {runId === undefined ? (
+        <Empty description={t("discoveryReview.noRun")} />
+      ) : (
+        <Tabs
+          items={[
+            {
+              key: "candidates",
+              label: `${t("discoveryReview.candidates")} (${candidates.length})`,
+              children: (
+                <Table
+                  rowKey="id"
+                  size="small"
+                  loading={loading}
+                  dataSource={candidates}
+                  columns={candidateColumns}
+                  pagination={{ pageSize: 20 }}
+                />
+              ),
+            },
+            {
+              key: "findings",
+              label: `${t("discoveryReview.findings")} (${findings.length})`,
+              children: (
+                <Table
+                  rowKey="id"
+                  size="small"
+                  loading={loading}
+                  dataSource={findings}
+                  columns={findingColumns}
+                  pagination={{ pageSize: 20 }}
+                />
+              ),
+            },
+          ]}
+        />
+      )}
+
+      <Modal
+        title={t("discoveryReview.decideTitle")}
+        open={target !== null}
+        onCancel={() => setTarget(null)}
+        footer={null}
+        destroyOnHidden
+      >
+        <Descriptions size="small" column={1} style={{ marginBottom: 12 }}>
+          <Descriptions.Item label={t("discoveryReview.target")}>{target?.label}</Descriptions.Item>
+          <Descriptions.Item label={t("discoveryReview.status")}>
+            <Tag color={STATUS_COLOR[target?.status ?? ""] ?? "default"}>{target?.status}</Tag>
+          </Descriptions.Item>
+        </Descriptions>
+        <Input.TextArea
+          rows={3}
+          value={note}
+          placeholder={t("discoveryReview.notePlaceholder")}
+          onChange={(event) => setNote(event.target.value)}
+          style={{ marginBottom: 12 }}
+        />
+        <Space wrap>
+          {decideOptions.map((option) => (
+            <Button
+              key={option.key}
+              type={option.key === "ACCEPTED" || option.key === "RESOLVED" ? "primary" : "default"}
+              loading={busy}
+              onClick={() => void submitDecide(option.key)}
+            >
+              {t(option.labelKey)}
+            </Button>
+          ))}
+        </Space>
+      </Modal>
+    </div>
+  );
+}

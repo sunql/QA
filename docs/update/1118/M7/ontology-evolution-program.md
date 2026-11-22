@@ -58,7 +58,7 @@
 | ↳ **G4-0 发布联动** ✅ | `semanticReleaseService.publishProposal`（唯一写口：`createDraftFromManifest` → `markValidated` → `activate`）；提案置 PUBLISHED + 回填 `release_id`；`POST /proposals/{id}/publish` admin | 2 | 单测 6（发布链/状态门/防重/篡改/缺 manifest）+ API 1；F1 守卫改为「只允许 `semanticReleaseService.publishProposal`」 |
 | ↳ **G4-1 增量监测** ✅ | `POST /sources/{id}/monitor`（admin，5/minute）：采集快照，内容没变**不起运行**；变了起 `trigger=DIFF` 的运行（剖析+候选）；**不自动拼提案**（候选不是结论，AI 不替人拍板本体） | 2 | 单测 4 + API 1；路由 auth 38 passed |
 | ↳ **G4-2 评测 + 回滚演练** ✅ | 迁移 **0167** `discovery_evaluation`；`evaluateRun` 可复算指标（证据完整率 → PASS/FAIL/**INCONCLUSIVE** 三态）；`POST /runs/{id}/evaluate` + `GET /evaluations`；**发布→回滚演练**（发布新提案后回滚到旧 ACTIVE，内容与哈希回到旧版） | 2–4 | 评测服务 5 例 + 回滚演练 1 例；路由 auth 58 passed；dev 库已升 0167 |
-| **G5 采购域首期实践** ◐ | 供应商 + 物料两对象：真实数据剖析 → 候选与治理建议；业务确认与签收；评测基线（准确率/召回/人工耗时） | **4–6** | ◐ **工程件已就绪**：`scripts/discovery_pilot_supplier_material.py`（剖析→候选→评测→导出签收物料）+ 签收模板 `docs/update/1118/M7/pilot/G5-签收清单模板.md`；**真跑与业务签收待办**（2026-11-22 实测 THBI Oracle 主机不可达；且准确率/召回需业务标注） |
+| **G5 采购域首期实践** ◐ | 供应商 + 物料两对象：真实数据剖析 → 候选与治理建议；业务确认与签收；评测基线（准确率/召回/人工耗时） | **4–6** | ✅ **工程件 + 真跑 + 前台页**：首跑 run=7（18 候选/16 问题/PASS，摘要已归档）+ 签收模板 + **0168 决断 API** + **前台「发现评审」页**（采纳/驳回/待证/问题处置 + 备注）；**剩余=业务逐条签收**（准确率/召回需标注集） |
 
 **顺序理由**：G1/G2 是"出口与守门员"，先做完，G3 产出的提案才有地方去、才拦得住；
 G5 放在最后是因为它需要前面全部就绪（这也是 WP §8 的 A→B→C 顺序）。

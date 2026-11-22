@@ -71,6 +71,8 @@ CANDIDATE_TYPE_COMMENT = "0166，WP-ONT-AI A2：候选类型（OBJECT / PROPERTY
 CANDIDATE_PAYLOAD_COMMENT = "0166，WP-ONT-AI A2：候选内容（JSON 对象，结构按 candidate_type）"
 CANDIDATE_EVIDENCE_COMMENT = "0166，WP-ONT-AI A2：证据引用（JSON 数组，复用 KnowledgeEvidence 契约；不得为空）"
 CANDIDATE_STATUS_COMMENT = "0166，WP-ONT-AI A2：候选状态（CANDIDATE / NEEDS_EVIDENCE / ACCEPTED / REJECTED / MERGED）"
+CANDIDATE_DECISION_NOTE_COMMENT = "0168，WP-ONT-AI G5：业务判定备注（驳回理由 / 待证需补证据）"
+FINDING_DECISION_NOTE_COMMENT = "0168，WP-ONT-AI G5：问题处理备注（负责人 / 处理建议）"
 FINDING_TYPE_COMMENT = "0166，WP-ONT-AI A2：问题类型（DUPLICATE / CONFLICT / MISSING / MAPPING）"
 FINDING_SEVERITY_COMMENT = "0166，WP-ONT-AI A2：问题严重级别（ERROR / WARNING / INFO）"
 FINDING_STATUS_COMMENT = "0166，WP-ONT-AI A2：问题状态（OPEN / ACKNOWLEDGED / RESOLVED / IGNORED）"
@@ -320,6 +322,9 @@ class DiscoveryCandidate(Base):
     decided_time: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    decision_note: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment=CANDIDATE_DECISION_NOTE_COMMENT
+    )
     created_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
@@ -412,6 +417,9 @@ class DiscoveryFinding(Base):
     detail: Mapped[str] = mapped_column(Text, nullable=False)
     evidence_refs: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=sa_text("'[]'::jsonb")
+    )
+    decision_note: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment=FINDING_DECISION_NOTE_COMMENT
     )
     created_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False

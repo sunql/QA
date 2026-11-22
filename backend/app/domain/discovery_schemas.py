@@ -243,6 +243,7 @@ class DiscoveryCandidateRead(CamelModel):
     status: str
     decided_by: str | None
     decided_time: datetime | None
+    decision_note: str | None = None
     created_time: datetime
 
 
@@ -263,6 +264,7 @@ class DiscoveryFindingRead(CamelModel):
     status: str
     detail: str
     evidence_refs: list[Any]
+    decision_note: str | None = None
     created_time: datetime
 
 
@@ -379,4 +381,23 @@ class DiscoveryEvaluationRead(CamelModel):
 
 class DiscoveryEvaluationPage(CamelModel):
     rows: list[DiscoveryEvaluationRead]
+    total: int
+
+
+class DiscoveryCandidateDecisionRequest(CamelModel):
+    model_config = ConfigDict(**CamelModel.model_config, extra="forbid")
+
+    status: str = Field(..., description="ACCEPTED / REJECTED / NEEDS_EVIDENCE")
+    note: str | None = Field(default=None, max_length=MAX_NOTE_LENGTH)
+
+
+class DiscoveryFindingDecisionRequest(CamelModel):
+    model_config = ConfigDict(**CamelModel.model_config, extra="forbid")
+
+    status: str = Field(..., description="OPEN / ACKNOWLEDGED / RESOLVED / IGNORED")
+    note: str | None = Field(default=None, max_length=MAX_NOTE_LENGTH)
+
+
+class DiscoveryRunPage(CamelModel):
+    rows: list[DiscoveryRunRead]
     total: int

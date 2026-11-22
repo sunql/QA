@@ -34,13 +34,16 @@ from app.domain.discovery_pipeline_models import (
     DiscoveryEvaluation,
     DiscoveryFinding,
     DiscoveryProposal,
+    DiscoveryRun,
 )
 from app.domain.discovery_schemas import (
+    DiscoveryCandidateDecisionRequest,
     DiscoveryCandidatePage,
     DiscoveryCandidateRead,
     DiscoveryEvaluateRequest,
     DiscoveryEvaluationPage,
     DiscoveryEvaluationRead,
+    DiscoveryFindingDecisionRequest,
     DiscoveryFindingPage,
     DiscoveryFindingRead,
     DiscoveryMonitorRead,
@@ -51,6 +54,7 @@ from app.domain.discovery_schemas import (
     DiscoveryPublishRequest,
     DiscoveryReviewRead,
     DiscoveryReviewRequest,
+    DiscoveryRunPage,
     DiscoveryRunRead,
     DiscoveryRunRequest,
     DiscoverySnapshotPage,
@@ -66,6 +70,7 @@ from app.domain.discovery_schemas import (
 )
 from app.infrastructure.rate_limit import enforceRouteLimit
 from app.services.audit_service import AuditService
+from app.services.discovery_candidate_review import DiscoveryCandidateReviewService
 from app.services.discovery_diff_service import computeOntologyDiff
 from app.services.discovery_evaluation_service import DiscoveryEvaluationService
 from app.services.discovery_monitor_service import DiscoveryMonitorService
@@ -96,6 +101,7 @@ _monitorService = DiscoveryMonitorService(
     snapshotService=_service, runService=_runService
 )
 _evaluationService = DiscoveryEvaluationService()
+_candidateReviewService = DiscoveryCandidateReviewService()
 _proposalService = DiscoveryProposalService()
 _audit = AuditService()
 
@@ -534,31 +540,7 @@ async def listDiscoveryCandidates(
             base.order_by(DiscoveryCandidate.id.desc()).limit(limit).offset(offset)
         )
     ).scalars().all()
-    return DiscoveryCandidatePage(
-        rows=[
-            DiscoveryCandidateRead(
-                id=row.id,
-                run_id=row.run_id,
-                source_id=row.source_id,
-                snapshot_id=row.snapshot_id,
-                candidate_type=row.candidate_type,
-                table_name=row.table_name,
-                column_name=row.column_name,
-                target_code=row.target_code,
-                payload=dict(row.payload or {}),
-                evidence_refs=list(row.evidence_refs or []),
-                confidence=float(row.confidence) if row.confidence is not None else None,
-                model_version=row.model_version,
-                prompt_version=row.prompt_version,
-                status=row.status,
-                decided_by=row.decided_by,
-                decided_time=row.decided_time,
-                created_time=row.created_time,
-            )
-            for row in rows
-        ],
-        total=total,
-    )
+    return DiscoveryCandidatePage(rows=[_candidateRead(row) for row in rows], total=total)
 
 
 @router.get("/findings", response_model=DiscoveryFindingPage)
@@ -592,26 +574,7 @@ async def listDiscoveryFindings(
             .offset(offset)
         )
     ).scalars().all()
-    return DiscoveryFindingPage(
-        rows=[
-            DiscoveryFindingRead(
-                id=row.id,
-                run_id=row.run_id,
-                source_id=row.source_id,
-                snapshot_id=row.snapshot_id,
-                finding_type=row.finding_type,
-                table_name=row.table_name,
-                column_name=row.column_name,
-                severity=row.severity,
-                status=row.status,
-                detail=row.detail,
-                evidence_refs=list(row.evidence_refs or []),
-                created_time=row.created_time,
-            )
-            for row in rows
-        ],
-        total=total,
-    )
+    return DiscoveryFindingPage(rows=[_findingRead(row) for row in rows], total=total)
 
 
 @router.post("/proposals", response_model=DiscoveryProposalRead, status_code=201)
@@ -948,3 +911,147 @@ def _evaluationRead(row) -> DiscoveryEvaluationRead:
         created_by=row.created_by,
         created_time=row.created_time,
     )
+
+
+def _candidateRead(row) -> DiscoveryCandidateRead:
+    return DiscoveryCandidateRead(
+        id=row.id,
+        run_id=row.run_id,
+        source_id=row.source_id,
+        snapshot_id=row.snapshot_id,
+        candidate_type=row.candidate_type,
+        table_name=row.table_name,
+        column_name=row.column_name,
+        target_code=row.target_code,
+        payload=dict(row.payload or {}),
+        evidence_refs=list(row.evidence_refs or []),
+        confidence=float(row.confidence) if row.confidence is not None else None,
+        model_version=row.model_version,
+        prompt_version=row.prompt_version,
+        status=row.status,
+        decided_by=row.decided_by,
+        decided_time=row.decided_time,
+        decision_note=row.decision_note,
+        created_time=row.created_time,
+    )
+
+
+def _findingRead(row) -> DiscoveryFindingRead:
+    return DiscoveryFindingRead(
+        id=row.id,
+        run_id=row.run_id,
+        source_id=row.source_id,
+        snapshot_id=row.snapshot_id,
+        finding_type=row.finding_type,
+        table_name=row.table_name,
+        column_name=row.column_name,
+        severity=row.severity,
+        status=row.status,
+        detail=row.detail,
+        evidence_refs=list(row.evidence_refs or []),
+        decision_note=row.decision_note,
+        created_time=row.created_time,
+    )
+
+
+@router.get("/runs", response_model=DiscoveryRunPage)
+async def listDiscoveryRuns(
+    response: Response,
+    sourceId: int | None = Query(default=None, ge=1),
+    status: str | None = Query(default=None, description="RUNNING / SUCCEEDED / FAILED"),
+    limit: int = Query(default=20, ge=1, le=_MAX_CANDIDATE_PAGE),
+    offset: int = Query(default=0, ge=0),
+    _admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryRunPage:
+    """运行列表（前台「发现评审」页的运行选择器）。"""
+    _noStore(response)
+    conditions = []
+    if sourceId is not None:
+        conditions.append(DiscoveryRun.source_id == sourceId)
+    if status:
+        conditions.append(DiscoveryRun.status == status)
+    total = int(
+        await session.scalar(
+            select(func.count()).select_from(DiscoveryRun).where(*conditions)
+        )
+        or 0
+    )
+    rows = (
+        await session.execute(
+            select(DiscoveryRun)
+            .where(*conditions)
+            .order_by(DiscoveryRun.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    return DiscoveryRunPage(rows=[_runRead(row) for row in rows], total=total)
+
+
+@router.patch(
+    "/candidates/{candidateId}/decision", response_model=DiscoveryCandidateRead
+)
+async def decideDiscoveryCandidate(
+    response: Response,
+    payload: DiscoveryCandidateDecisionRequest,
+    candidateId: int = Path(..., ge=1),
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryCandidateRead:
+    """业务决断：采纳 / 驳回 / 待证（可改判，历史留 audit_log）。"""
+    _noStore(response)
+    before = await session.get(DiscoveryCandidate, candidateId)
+    beforeStatus = before.status if before is not None else None
+    row = await _candidateReviewService.decideCandidate(
+        session,
+        candidateId=candidateId,
+        status=payload.status,
+        note=payload.note,
+        actor=admin.userId,
+    )
+    await _audit.record(
+        session,
+        entity_type="discovery_candidate",
+        entity_id=row.id,
+        action="UPDATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        before={"status": beforeStatus},
+        after={"status": row.status, "note": row.decision_note},
+    )
+    await session.commit()
+    return _candidateRead(row)
+
+
+@router.patch("/findings/{findingId}/status", response_model=DiscoveryFindingRead)
+async def decideDiscoveryFinding(
+    response: Response,
+    payload: DiscoveryFindingDecisionRequest,
+    findingId: int = Path(..., ge=1),
+    admin: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> DiscoveryFindingRead:
+    """问题处理：确认 / 已解决 / 忽略（可改判）。"""
+    _noStore(response)
+    before = await session.get(DiscoveryFinding, findingId)
+    beforeStatus = before.status if before is not None else None
+    row = await _candidateReviewService.resolveFinding(
+        session,
+        findingId=findingId,
+        status=payload.status,
+        note=payload.note,
+        actor=admin.userId,
+    )
+    await _audit.record(
+        session,
+        entity_type="discovery_finding",
+        entity_id=row.id,
+        action="UPDATE",
+        actor=admin.userId,
+        actor_departments=admin.departments or None,
+        before={"status": beforeStatus},
+        after={"status": row.status, "note": row.decision_note},
+    )
+    await session.commit()
+    return _findingRead(row)

@@ -1,0 +1,129 @@
+/** G5 发现评审页：候选/问题列表 + 判定入口 + 非 admin 只读。 */
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { ConfigProvider } from "antd";
+import zhCN from "antd/locale/zh_CN";
+import { I18nextProvider } from "react-i18next";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import i18n from "../i18n/i18n";
+import DiscoveryReviewPage from "../pages/DiscoveryReviewPage";
+import { useAuthStore } from "../stores/authStore";
+
+const api = vi.hoisted(() => ({
+  listDiscoveryRuns: vi.fn(),
+  listCandidates: vi.fn(),
+  listFindings: vi.fn(),
+  decideCandidate: vi.fn(),
+  decideFinding: vi.fn(),
+}));
+vi.mock("../api/discoveryReview", () => api);
+
+const RUN = {
+  id: 7,
+  sourceId: 1,
+  snapshotId: 1,
+  trigger: "MANUAL",
+  status: "SUCCEEDED",
+  modelVersion: "deepseek-flash",
+  promptVersion: "v1",
+  promptTokens: 100,
+  completionTokens: 20,
+  cost: 0.01,
+  errorMessage: null,
+  startedAt: "2026-11-22T10:00:00Z",
+  finishedAt: "2026-11-22T10:01:00Z",
+  createdBy: "admin",
+};
+
+const CANDIDATE = {
+  id: 11,
+  runId: 7,
+  sourceId: 1,
+  snapshotId: 1,
+  candidateType: "OBJECT",
+  tableName: "DIM_SUPPLIER",
+  columnName: "BPSNUM_0",
+  targetCode: "SUPPLIER",
+  payload: {},
+  evidenceRefs: [{ ref: "DIM_SUPPLIER.BPSNUM_0", summary: "rowCount=3500" }],
+  confidence: 0.95,
+  modelVersion: "deepseek-flash",
+  promptVersion: "v1",
+  status: "CANDIDATE",
+  decidedBy: null,
+  decidedTime: null,
+  decisionNote: null,
+  createdTime: "2026-11-22T10:01:00Z",
+};
+
+const FINDING = {
+  id: 3,
+  runId: 7,
+  sourceId: 1,
+  snapshotId: 1,
+  findingType: "MISSING",
+  tableName: "DIM_SUPPLIER",
+  columnName: "BPSNUM_0",
+  severity: "WARNING",
+  status: "OPEN",
+  detail: "剖析未声明主键",
+  evidenceRefs: [],
+  decisionNote: null,
+  createdTime: "2026-11-22T10:01:00Z",
+};
+
+function renderPage() {
+  return render(
+    <I18nextProvider i18n={i18n}>
+      <ConfigProvider locale={zhCN}>
+        <DiscoveryReviewPage />
+      </ConfigProvider>
+    </I18nextProvider>,
+  );
+}
+
+describe("DiscoveryReviewPage", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listDiscoveryRuns.mockResolvedValue({ rows: [RUN], total: 1 });
+    api.listCandidates.mockResolvedValue({ rows: [CANDIDATE], total: 1 });
+    api.listFindings.mockResolvedValue({ rows: [FINDING], total: 1 });
+  });
+
+  it("展示候选与签收进度", async () => {
+    useAuthStore.setState({ user: { username: "admin", roles: ["admin"] } as never });
+
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText("SUPPLIER")).toBeTruthy());
+    expect(screen.getByText("OBJECT")).toBeTruthy();
+    expect(screen.getByText(/已判定\s*0\s*\/\s*2/)).toBeTruthy();
+  });
+
+  it("非 admin：判定按钮禁用", async () => {
+    useAuthStore.setState({ user: { username: "u", roles: ["analyst"] } as never });
+
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText("SUPPLIER")).toBeTruthy());
+    const accept = screen.getByRole("button", { name: /采\s*纳/ });
+    expect((accept as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("admin：点采纳弹窗并提交判定", async () => {
+    useAuthStore.setState({ user: { username: "admin", roles: ["admin"] } as never });
+    api.decideCandidate.mockResolvedValue({ ...CANDIDATE, status: "ACCEPTED" });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("SUPPLIER")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /采\s*纳/ }));
+
+    await waitFor(() => expect(screen.getByPlaceholderText(/备注（驳回理由/)).toBeTruthy());
+    const buttons = screen.getAllByRole("button", { name: /采\s*纳/ });
+    fireEvent.click(buttons[buttons.length - 1]);
+
+    await waitFor(() => expect(api.decideCandidate).toHaveBeenCalledWith(11, {
+      status: "ACCEPTED",
+      note: null,
+    }));
+  });
+});

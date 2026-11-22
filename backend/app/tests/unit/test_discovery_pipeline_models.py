@@ -32,6 +32,7 @@ from app.domain.discovery_pipeline_models import (
 _MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[3] / "alembic" / "versions"
 _MIGRATION_STEM = "0166_discovery_pipeline"
 _EVALUATION_MIGRATION_STEM = "0167_discovery_evaluation"
+_DECISION_NOTE_STEM = "0168_discovery_decision_note"
 
 _TABLES = (
     DiscoveryRun.__table__,
@@ -287,6 +288,7 @@ def test_迁移只建这六张新表不触碰既有表():
 def test_迁移列注释与orm逐字一致():
     comments = _migrationColumnComments(_loadMigration())
     comments.update(_migrationColumnComments(_loadMigration(_EVALUATION_MIGRATION_STEM)))
+    comments.update(_addColumnComments(_loadMigration(_DECISION_NOTE_STEM)))
     ormComments = {
         (table.name, column.name): column.comment
         for table in _TABLES
@@ -352,3 +354,26 @@ def test_评测迁移链在0166之后且只建评测表():
     created = [call[1] for call in _recordedOps(module, "upgrade") if call[0] == "create_table"]
     assert created == ["discovery_evaluation"]
     assert len(f"{_EVALUATION_MIGRATION_STEM}.py") <= 32
+
+
+def _addColumnComments(module) -> dict[tuple[str, str], str]:
+    """`op.add_column(table, sa.Column(...))` 形态的列注释。"""
+    comments: dict[tuple[str, str], str] = {}
+    for call in _recordedOps(module, "upgrade"):
+        if call[0] != "add_column":
+            continue
+        tableName, column = call[1], call[2]
+        if isinstance(column, sa.Column) and column.comment:
+            comments[(tableName, column.name)] = column.comment
+    return comments
+
+
+def test_评审备注迁移链在0167之后():
+    module = _loadMigration(_DECISION_NOTE_STEM)
+
+    assert module.revision == "0168"
+    assert module.down_revision == "0167"
+    calls = _recordedOps(module, "upgrade")
+    added = [call[1] for call in calls if call[0] == "add_column"]
+    assert added == ["discovery_candidate", "discovery_finding"]
+    assert len(f"{_DECISION_NOTE_STEM}.py") <= 32

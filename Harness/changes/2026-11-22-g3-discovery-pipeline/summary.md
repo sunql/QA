@@ -207,5 +207,18 @@ dev 库（5433）已升级 **0167**。
 
 ## 十三、G4 完成状态
 
-G4-0/1/2 全部落地。**整合方案（G1–G5）只剩 G5 采购域首期实践**：
-真实数据剖析 → 候选 → 提案 → 业务签收与评测基线（需要业务侧标注与签收）。
+G4-0/1/2 全部落地。
+
+## 十四、G5 前台签收（同批落地）
+
+- **迁移 0168**：`discovery_candidate` / `discovery_finding` 补 `decision_note`；
+- **决断写口**：`PATCH /candidates/{id}/decision`（ACCEPTED/REJECTED/NEEDS_EVIDENCE）与
+  `PATCH /findings/{id}/status`（OPEN/ACKNOWLEDGED/RESOLVED/IGNORED），可改判、备注落库；
+- **运行列表**：`GET /runs`（前台运行选择器）；
+- **前台页**：「业务配置 → 发现评审」——候选/问题两个页签、判定弹窗、签收进度、证据条数；
+- **试点真跑**：dev THBI run=7（DIM_SUPPLIER+DIM_IMATERIAL）→ 18 候选 / 16 问题 / PASS，
+  摘要归档 `docs/update/1118/M7/pilot/summary-dev-2026-11-22.md`（真实值 CSV 只在 /tmp）。
+
+测试：决断服务 6 例 + API 3 例 + 前端 6 例；路由 auth 64 passed；i18n 对等 25 passed。
+
+**剩余**：业务逐条判定（准确率/召回标注集）与签收签字；其后可把采纳候选组装成提案（G3-3）。

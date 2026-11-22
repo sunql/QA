@@ -53,6 +53,9 @@ _WRITE_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/ontology-discovery/sources/{sourceId}/monitor"),
         # G4-2：评测结论是治理证据。
         ("POST", "/api/v1/ontology-discovery/runs/{runId}/evaluate"),
+        # G5：候选择/问题处置是治理写动作。
+        ("PATCH", "/api/v1/ontology-discovery/candidates/{candidateId}/decision"),
+        ("PATCH", "/api/v1/ontology-discovery/findings/{findingId}/status"),
         # 采购源绑定（M1-1.1）：绑定是治理事实，确认权必须收口。
         ("POST", "/api/v1/procurement-bindings"),
         ("POST", "/api/v1/procurement-bindings/{id}/properties"),
@@ -92,6 +95,7 @@ _ADMIN_ONLY_READ_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/ontology-discovery/proposals"),
         ("GET", "/api/v1/ontology-discovery/proposals/{proposalId}"),
         ("GET", "/api/v1/ontology-discovery/evaluations"),
+        ("GET", "/api/v1/ontology-discovery/runs"),
     }
 )
 

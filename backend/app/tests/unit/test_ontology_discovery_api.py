@@ -703,3 +703,68 @@ async def test_评测运行返回可复算指标(apiClient, dbSession):
     listed = await apiClient.get("/api/v1/ontology-discovery/evaluations")
     assert listed.status_code == 200, listed.text
     assert listed.json()["total"] >= 1
+
+
+async def _firstCandidateAndFinding(session, runId: int) -> tuple[int, int]:
+    from sqlalchemy import select as _select
+
+    from app.domain.discovery_pipeline_models import (
+        DiscoveryCandidate,
+        DiscoveryFinding,
+    )
+
+    candidate = (
+        await session.execute(
+            _select(DiscoveryCandidate).where(DiscoveryCandidate.run_id == runId)
+        )
+    ).scalars().first()
+    finding = (
+        await session.execute(
+            _select(DiscoveryFinding).where(DiscoveryFinding.run_id == runId)
+        )
+    ).scalars().first()
+    return candidate.id, finding.id
+
+
+async def test_运行列表可按源过滤(apiClient, dbSession):
+    seeded = await _seedA2(dbSession)
+
+    resp = await apiClient.get(
+        "/api/v1/ontology-discovery/runs", params={"sourceId": seeded["sourceId"]}
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["total"] >= 1
+    assert body["rows"][0]["id"] == seeded["runId"]
+
+
+async def test_候选决断落状态与备注(apiClient, dbSession):
+    seeded = await _seedA2(dbSession)
+    candidateId, _ = await _firstCandidateAndFinding(dbSession, seeded["runId"])
+
+    resp = await apiClient.patch(
+        f"/api/v1/ontology-discovery/candidates/{candidateId}/decision",
+        json={"status": "REJECTED", "note": "语义不符"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "REJECTED"
+    assert body["decisionNote"] == "语义不符"
+    assert body["decidedBy"]
+
+
+async def test_问题处置落状态与备注(apiClient, dbSession):
+    seeded = await _seedA2(dbSession)
+    _, findingId = await _firstCandidateAndFinding(dbSession, seeded["runId"])
+
+    resp = await apiClient.patch(
+        f"/api/v1/ontology-discovery/findings/{findingId}/status",
+        json={"status": "ACKNOWLEDGED", "note": "已指派"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "ACKNOWLEDGED"
+    assert body["decisionNote"] == "已指派"

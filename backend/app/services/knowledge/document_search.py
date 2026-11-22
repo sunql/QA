@@ -197,6 +197,16 @@ async def searchProcurementDocuments(
                 (str(row.entity_type).upper(), str(row.entity_key))
             )
 
+    # AI 上下文开关（0165，**人工**）：运营关掉的文档不参与检索。
+    # 为什么是人工：自动判乱码实测反复误判（中文文档里的编码会让"大写词比例"
+    # 冲到 90%+）⇒ 决定权交给运营，脚本只作提示。
+    catalogById = {
+        docId: row
+        for docId, row in catalogById.items()
+        if getattr(row, "ai_context_enabled", True)
+    }
+    hits = [hit for hit in hits if hit.get("document_id") in catalogById]
+
     kept = filterDocumentHits(
         hits,
         catalogById,

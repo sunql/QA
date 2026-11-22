@@ -3700,6 +3700,8 @@ export const enUS = {
     vectorize: "Vectorize",
     vectorized: "Vectorized",
     notVectorized: "Not vectorized",
+    aiEnabled: "Enabled: this document is used in knowledge retrieval and AI answers",
+    aiDisabled: "Disabled: this document is excluded from knowledge retrieval and AI answers",
     vectorizeSuccess: "Vectorized: {chunks} chunks"
   }
 } as const;

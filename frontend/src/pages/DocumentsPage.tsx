@@ -26,6 +26,7 @@ import {
   List,
   Alert,
   DatePicker,
+  Switch,
 } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
 import {
@@ -145,6 +146,8 @@ function DocList({
   onPreview,
   onVectorize,
   vectorizingId,
+  onToggleAi,
+  togglingAiId,
 }: {
   docs: DocumentRead[];
   loading: boolean;
@@ -154,6 +157,8 @@ function DocList({
   onPreview: (record: DocumentRead) => void;
   onVectorize: (record: DocumentRead) => void;
   vectorizingId: number | null;
+  onToggleAi: (record: DocumentRead, enabled: boolean) => void;
+  togglingAiId: number | null;
 }) {
   const { t } = useTranslation();
   // 分页与本体管理各 tab 页同口径（useTablePagination：可切页大小 + 快速跳转）
@@ -202,6 +207,19 @@ function DocList({
       dataIndex: "effectiveDate",
       width: 110,
       render: (v: string | null) => v ?? "—",
+    },
+    {
+      title: "AI 可用",
+      dataIndex: "aiContextEnabled",
+      width: 100,
+      render: (v: boolean | undefined, record: DocumentRead) => (
+        <Switch
+          size="small"
+          checked={v !== false}
+          loading={togglingAiId === record.id}
+          onChange={(checked) => onToggleAi(record, checked)}
+        />
+      ),
     },
     {
       title: "向量化",
@@ -439,6 +457,7 @@ export default function DocumentsPage() {
   const [relEntityType, setRelEntityType] = useState<string | undefined>();
   const [targets, setTargets] = useState<RelationTarget[]>([]);
   const [editingRel, setEditingRel] = useState<DocEntityRelationRead | null>(null);
+  const [togglingAiId, setTogglingAiId] = useState<number | null>(null);
   const [targetLoading, setTargetLoading] = useState(false);
   const [docModal, setDocModal] = useState(false);
   const [editingDoc, setEditingDoc] = useState<DocumentRead | null>(null);
@@ -570,6 +589,25 @@ export default function DocumentsPage() {
       // handled by interceptor
     } finally {
       setVectorizingId(null);
+    }
+  };
+
+  /** AI 上下文开关（0165 人工）：关闭后该文档不再参与知识检索 / LLM 注入。 */
+  const handleToggleAi = async (record: DocumentRead, enabled: boolean) => {
+    setTogglingAiId(record.id);
+    try {
+      await updateDocument(record.id, {
+        aiContextEnabled: enabled,
+        aiContextNote: enabled ? null : "运营手工关闭（文本质量/适用范围待确认）",
+      });
+      void message.success(
+        enabled ? t("document.aiEnabled") : t("document.aiDisabled"),
+      );
+      void loadDocs();
+    } catch {
+      // handled by interceptor
+    } finally {
+      setTogglingAiId(null);
     }
   };
 
@@ -796,6 +834,8 @@ export default function DocumentsPage() {
             onPreview={(record) => void handlePreview(record)}
             onVectorize={(record) => void handleVectorize(record)}
             vectorizingId={vectorizingId}
+            onToggleAi={(record, enabled) => void handleToggleAi(record, enabled)}
+            togglingAiId={togglingAiId}
           />
         </TabPane>
 

@@ -1839,6 +1839,13 @@ class DocumentCatalog(Base, TimestampMixin):
     vectorized_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # --- 0165：AI 上下文开关（**人工**判定，不做自动质量判罚）---
+    #: False ⇒ 不参与知识检索 / LLM 注入（运营在文档中心关掉不可信的文档）
+    ai_context_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=sa.true()
+    )
+    #: 为什么关（给下一个人看；可空）
+    ai_context_note: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     def __repr__(self) -> str:
         return (

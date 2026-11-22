@@ -827,3 +827,85 @@ async def test_documentEvidenceCarriesRelatedEntities(
         item.type == "ONTOLOGY_CLASS" and item.code == "DIM_SUPPLIER"
         for item in related
     ), f"证据未回填关联：{related}"
+
+
+# ---------------------------------------------------------------------------
+# AI 上下文人工开关（0165，用户裁定：人工而非自动判罚）
+# ---------------------------------------------------------------------------
+
+
+async def test_ai_context_defaults_enabled(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    """新文档默认「可用于 AI 上下文」。"""
+    created = await _createDocument(client, dbSession, fakeMinio)
+
+    detail = await client.get(f"/api/v1/documents/{created['id']}")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["aiContextEnabled"] is True
+
+
+async def test_ai_context_canBeTurnedOffAndBackOn(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio
+) -> None:
+    """人工开关：关掉附原因、再打开。"""
+    created = await _createDocument(client, dbSession, fakeMinio)
+
+    off = await client.put(
+        f"/api/v1/documents/{created['id']}",
+        json={"aiContextEnabled": False, "aiContextNote": "文本疑似乱码"},
+    )
+    assert off.status_code == 200, off.text
+    assert off.json()["aiContextEnabled"] is False
+    assert off.json()["aiContextNote"] == "文本疑似乱码"
+
+    on = await client.put(
+        f"/api/v1/documents/{created['id']}",
+        json={"aiContextEnabled": True, "aiContextNote": None},
+    )
+    assert on.status_code == 200, on.text
+    assert on.json()["aiContextEnabled"] is True
+
+
+async def test_disabledDocumentIsExcludedFromRetrieval(
+    client: AsyncClient, dbSession: Any, fakeMinio: _FakeMinio, mockEmbeddingService: Any
+) -> None:
+    """关掉开关的文档**不参与检索**（人工决定生效于检索面）。"""
+    from types import SimpleNamespace
+
+    from app.services.knowledge.document_search import searchProcurementDocuments
+
+    content = "供应商准入制度：注册资本不得低于 1000 万。".encode("utf-8")
+    created = await _createDocument(
+        client, dbSession, fakeMinio, content=content, filename="准入制度.md",
+        mime="text/markdown",
+    )
+
+    async def _fakeSearch(query, *, user, session, top_k):
+        return [
+            {
+                "document_id": created["documentId"],
+                "chunk_text": content.decode("utf-8"),
+                "chunk_sequence": 0,
+                "distance": 0.1,
+            }
+        ]
+
+    actor = SimpleNamespace(userId="admin", roles=("admin",), departments=(), dbUserId=1)
+
+    # 开关开 ⇒ 能检索到
+    rows = await searchProcurementDocuments(
+        dbSession, actor, query="供应商准入", topK=3, searchFn=_fakeSearch
+    )
+    assert rows, "开启时应能检索到"
+
+    # 关掉后再检索 ⇒ 空
+    await client.put(
+        f"/api/v1/documents/{created['id']}",
+        json={"aiContextEnabled": False, "aiContextNote": "测试关闭"},
+    )
+    rows = await searchProcurementDocuments(
+        dbSession, actor, query="供应商准入", topK=3, searchFn=_fakeSearch
+    )
+    assert rows == [], "关闭后不得参与检索"

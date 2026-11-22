@@ -3148,6 +3148,9 @@ class DocumentUpdate(CamelModel):
     file_size: int | None = Field(default=None, ge=0)
     preview_kind: str | None = Field(default=None, max_length=20)
     vectorized_at: datetime | None = None
+    # --- 0165：AI 上下文开关（人工）---
+    ai_context_enabled: bool | None = None
+    ai_context_note: str | None = Field(default=None, max_length=200)
 
 
 class DocumentRead(CamelModel):
@@ -3167,6 +3170,8 @@ class DocumentRead(CamelModel):
     file_size: int | None = None
     preview_kind: str | None = None
     vectorized_at: datetime | None = None
+    ai_context_enabled: bool = True
+    ai_context_note: str | None = None
     created_time: datetime
     updated_time: datetime
 

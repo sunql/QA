@@ -15,12 +15,15 @@
 | ② | 上传弹窗只有单文件、且**没有生效日期**（新建有、编辑有） | 上传弹窗改**多选批量** + 共用元数据 + 逐条结果 + 失败重试 + **生效日期** |
 | ③ | admin 上传 **L2** 文档后列表看不到 | `buildClearanceFilter`：**admin → 全密级 L0–L3** |
 | ④ | 新上传文档排在列表最后一页 | `listDocuments` 改 **`id DESC`**（最新在前） |
+| ⑤ | **删除文档后向量还在**（RAG 仍能检索到已删文档） | `deleteDocument` 调 `deleteDocumentChunks`（Milvus 故障不阻断删除，记 ERROR/审计） |
+| ⑥ | 历史删除留下的**孤儿向量** | 新增 `scripts/purge_orphan_document_vectors`（默认只报告，`--apply` 真删） |
 
 **验收标准**：
 1. 上传选 `SOP / L2 / v1.1 / owner / 生效日期` ⇒ 列表原样显示；
 2. 上传弹窗可多选、逐条结果、可重试失败项；
 3. admin 列表能看 L0–L3；新上传的排在最前；
-4. `alembic_version` 仍为 **0169**（本批无迁移）。
+4. `alembic_version` 仍为 **0169**（本批无迁移）；
+5. 删除文档后：`python -m scripts.purge_orphan_document_vectors` 不应再把它列为孤儿（新删的立即清）；历史孤儿用同一脚本 `--apply` 清理。
 
 ---
 
@@ -28,10 +31,10 @@
 
 | 文件 | 镜像 | 平台 | sha256 | 大小 |
 |---|---|---|---|---|
-| `/tmp/qa-backend-amd64-1122-hotfix2.tar.gz` | `qa-system-backend:amd64-1122-hotfix2` | linux/amd64 | `018299f4dfa4fa887b53bf0a48df1321929cf8a0a660caabe1876ab03b7feffb` | 490M |
+| `/tmp/qa-backend-amd64-1122-hotfix2.tar.gz` | `qa-system-backend:amd64-1122-hotfix2` | linux/amd64 | `85a2f084a2101fd6b1db3a6aa3a1e2e09407392dfcc07d4d46538a082aa34ad6` | 490M |
 | `/tmp/qa-frontend-amd64-1122-hotfix2.tar.gz` | `qa-system-frontend:amd64-1122-hotfix2` | linux/amd64 | `35ce2646797cf0501fb36553ed4eb636c27ead2918c552188b7661d9897d103e` | 26M |
 
-镜像标识：backend `sha256:349f6247827b6ab4376daab06315c7d3bf1c40c251ef9d6a08a6aa35b8b01206`｜frontend `sha256:0f4f3c7086f337f79f0aa90e712377881cb729728242ad65547bb6dfb564cbf8`
+镜像标识：backend `sha256:0edd8700edf026ed4942863001694031edd1e132abf2c5fe6f755fccb231c7cc`｜frontend `sha256:0f4f3c7086f337f79f0aa90e712377881cb729728242ad65547bb6dfb564cbf8`
 前端 bundle：`index-uUeXdHJq.js`（css `index-WW9dT-wP.css`）
 
 镜像内自证：
@@ -39,7 +42,9 @@
 ```bash
 docker run --rm --platform linux/amd64 --entrypoint sh qa-system-backend:amd64-1122-hotfix2 -c '
   grep -c "DocumentCatalog.id.desc" /app/app/services/document_service.py
-  grep -c "_hasRole(user, \"admin\")" /app/app/services/document_clearance.py'
+  grep -c "_hasRole(user, \"admin\")" /app/app/services/document_clearance.py
+  grep -c deleteDocumentChunks /app/app/services/document_service.py
+  ls /app/scripts/purge_orphan_document_vectors.py'
 docker run --rm --platform linux/amd64 qa-system-frontend:amd64-1122-hotfix2 sh -c '
   ls /usr/share/nginx/html/assets/index-*.js
   grep -c "重试失败项" /usr/share/nginx/html/assets/index-*.js'
@@ -118,6 +123,11 @@ docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -c "select version_num from alembic_version"'                     # 0169
 docker exec qa-backend sh -c 'grep -c "DocumentCatalog.id.desc" /app/app/services/document_service.py'        # 1
 docker exec qa-backend sh -c 'grep -c "_hasRole(user, \"admin\")" /app/app/services/document_clearance.py'    # 1
+docker exec qa-backend sh -c 'grep -c deleteDocumentChunks /app/app/services/document_service.py'             # ≥1
+docker exec qa-backend ls /app/scripts/purge_orphan_document_vectors.py                                      # 存在
+# 历史孤儿向量清理（先报告，确认后 --apply；建议在维护窗口执行）
+qa_compose exec backend python -m scripts.purge_orphan_document_vectors
+qa_compose exec backend python -m scripts.purge_orphan_document_vectors --apply
 curl -s -o /dev/null -w "backend=%{http_code}\n" http://localhost:8000/api/v1/health
 
 # 前端：bundle + 批量上传文案

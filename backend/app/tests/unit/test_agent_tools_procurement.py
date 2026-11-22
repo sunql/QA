@@ -455,3 +455,79 @@ async def test_supplier_search_material_without_suppliers_is_distinct_from_not_f
     missing = await mod.supplierSearchHandler(None, {"q": "不存在"}, SimpleNamespace())
     assert "未命中" in missing.answer
     assert missing.data["via"] == "entity_mapping"
+
+
+# ── P3：policy_compliance_check（制度合规核对）────────────────────────────────
+
+
+def test_policy_compliance_registered() -> None:
+    from app.services.agent_orchestration_validation import READ_ONLY_HANDLER_REFS
+    from app.services.agent_tools import ARG_EXTRACTORS
+
+    assert "policy_compliance_check" in BUILTIN_HANDLERS
+    assert "policy_compliance_check" in ARG_EXTRACTORS
+    assert "policy_compliance_check" in READ_ONLY_HANDLER_REFS
+
+
+@pytest.mark.asyncio
+async def test_policy_compliance_returnsEvidenceAndEntities(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from app.services import agent_tools_procurement as mod
+
+    evidence = SimpleNamespace(
+        model_dump=lambda **_: {"ref": "DOC-1", "title": "询价制度"},
+        related_entities=(SimpleNamespace(type="ONTOLOGY_CLASS", code="DIM_SUPPLIER"),),
+    )
+
+    async def _fakeSearch(session, user, *, query, topK):
+        assert "不少于三家" in query
+        return [evidence]
+
+    async def _fakeUser(session, ctx):
+        return SimpleNamespace(userId="admin", dbUserId=1, roles=("admin",), departments=())
+
+    monkeypatch.setattr(mod, "searchProcurementDocuments", _fakeSearch)
+    monkeypatch.setattr(mod, "_resolveToolUser", _fakeUser)
+
+    result = await mod.policyComplianceHandler(
+        object(), {"claim": "询价应不少于三家供应商"}, SimpleNamespace()
+    )
+
+    assert result.data["evidence"]
+    assert result.data["relatedEntities"] == ["ONTOLOGY_CLASS:DIM_SUPPLIER"]
+    assert "以**查询数据**为准" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_policy_compliance_failsClosedWithoutUser(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from app.services import agent_tools_procurement as mod
+
+    async def _forbidden(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("无身份不得检索")
+
+    async def _noUser(session, ctx):
+        return None
+
+    monkeypatch.setattr(mod, "searchProcurementDocuments", _forbidden)
+    monkeypatch.setattr(mod, "_resolveToolUser", _noUser)
+
+    result = await mod.policyComplianceHandler(
+        object(), {"claim": "x"}, SimpleNamespace()
+    )
+
+    assert result.data["evidence"] == []
+    assert "密级" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_policy_compliance_requiresClaim() -> None:
+    from types import SimpleNamespace
+
+    from app.services import agent_tools_procurement as mod
+
+    result = await mod.policyComplianceHandler(object(), {}, SimpleNamespace())
+
+    assert result.data["evidence"] == []

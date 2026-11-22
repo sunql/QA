@@ -30,6 +30,7 @@ from app.dependencies import CurrentUser  # noqa: E402
 from app.domain.agent_orchestration_models import AgentOrchestrationProfile  # noqa: E402
 from app.domain.agent_orchestration_schemas import (  # noqa: E402
     AgentOrchestrationProfileCreate,
+    AgentOrchestrationProfileUpdate,
     AgentOrchestrationToggle,
 )
 from app.domain.models import AgentDefinition  # noqa: E402
@@ -58,7 +59,7 @@ PROFILE_SEEDS: dict[str, tuple[str, list[str], int, int]] = {
         _READONLY_BASE
         + "\n职责：物料检索。根据用户描述找到对应物料（编码/名称/规格），"
         "并回答该物料由哪些供应商可供（如工具支持）。回答先给命中实体，再给依据。",
-        ["material_search"],
+        ["material_search", "policy_compliance_check"],
         10,
         15,
     ),
@@ -92,6 +93,7 @@ PROFILE_SEEDS: dict[str, tuple[str, list[str], int, int]] = {
             "supplier_risk",
             "graph_traverse",
             "purchase_history_query",
+            "policy_compliance_check",
         ],
         15,
         20,
@@ -100,7 +102,7 @@ PROFILE_SEEDS: dict[str, tuple[str, list[str], int, int]] = {
         _READONLY_BASE
         + "\n职责：合同条款检索。围绕合同条款、付款/交付约定、违约责任回答，"
         "每条结论必须引用命中的合同文档片段与生效期；没有命中就说没有，不要套用常识。",
-        ["contract_document_search"],
+        ["contract_document_search", "policy_compliance_check"],
         10,
         15,
     ),
@@ -129,6 +131,38 @@ async def _getAgent(session: AsyncSession, agentCode: str) -> AgentDefinition | 
     return (await session.execute(stmt)).scalars().first()
 
 
+async def _reconcileToolBindings(
+    session: AsyncSession,
+    service: AgentOrchestrationConfigService,
+    agentCode: str,
+    existing: AgentOrchestrationProfile,
+    requiredTools: list[str],
+) -> None:
+    """把 `requiredTools` 中缺失的工具补进已有 profile（幂等，不动其他字段）。"""
+    profile = await service.get(session, agentCode)
+    current = {binding.tool_name for binding in profile.bindings}
+    missing = [name for name in requiredTools if name not in current]
+    if not missing:
+        return
+    merged = sorted(current | set(requiredTools))
+    await service.update(
+        session,
+        agentCode,
+        AgentOrchestrationProfileUpdate(
+            instructions=profile.instructions,
+            tool_names=merged,
+            default_max_iterations=profile.default_max_iterations,
+            default_max_tool_calls=profile.default_max_tool_calls,
+            default_max_cost_usd=profile.default_max_cost_usd,
+            default_timeout_seconds=profile.default_timeout_seconds,
+            max_observation_chars=profile.max_observation_chars,
+            revision=profile.revision,
+        ),
+        _SEED_ACTOR,
+    )
+    print(f"[seed_procurement_agent_profiles] {agentCode}: 补齐工具 {missing}")
+
+
 async def seedProcurementAgentProfiles(session: AsyncSession) -> dict[str, str]:
     """为采购场景 Agent 建 profile 并启用；返回 {agent_code: 结果}。
 
@@ -149,6 +183,11 @@ async def seedProcurementAgentProfiles(session: AsyncSession) -> dict[str, str]:
         if existing is not None:
             outcome[agentCode] = (
                 "already-enabled" if existing.enabled else "already-disabled"
+            )
+            # 幂等补齐：把本清单里**新增**的工具补进已有 profile
+            # （不覆盖管理员改过的其他字段；缺工具不补 ⇒ 新工具永远绑不上）
+            await _reconcileToolBindings(
+                session, service, agentCode, existing, toolNames
             )
             continue
         created = await service.create(

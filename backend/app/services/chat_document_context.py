@@ -23,8 +23,11 @@ from app.security.prompt_sanitizer import UntrustedLabel, wrapUntrusted
 
 logger = logging.getLogger(__name__)
 
-#: 开关（默认**关**：先灰度，验收后再放开）。
+#: 答案阶段开关（默认**关**：先灰度，验收后再放开）。
 FLAG_ENV = "CHAT_DOC_CONTEXT"
+#: SQL/计划阶段开关（**独立**，默认关）：注入口径会影响生成的 SQL，风险更高，
+#: 因此与答案阶段分开灰度（可以只开答案阶段）。
+FLAG_SQL_ENV = "CHAT_DOC_CONTEXT_SQL"
 
 #: 注入上限（条数 / 字符数）。
 MAX_DOCUMENTS = 3
@@ -33,8 +36,18 @@ MAX_CONTEXT_CHARS = 1200
 MAX_SNIPPET_CHARS = 400
 
 
+def _flagOn(name: str) -> bool:
+    return os.environ.get(name, "0").strip().lower() in {"1", "true", "yes"}
+
+
 def chatDocContextEnabled() -> bool:
-    return os.environ.get(FLAG_ENV, "0").strip().lower() in {"1", "true", "yes"}
+    """答案阶段开关。"""
+    return _flagOn(FLAG_ENV)
+
+
+def chatDocContextSqlEnabled() -> bool:
+    """SQL/计划阶段开关（独立灰度）。"""
+    return _flagOn(FLAG_SQL_ENV)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -76,13 +89,15 @@ async def buildDocumentContext(
     question: str,
     *,
     topK: int = MAX_DOCUMENTS,
+    forSql: bool = False,
 ) -> str | None:
     """按问题检索文档并格式化；开关关 / 无人身份 / 无命中 ⇒ None。
 
     **异常一律降级为 None**：文档检索是增强项，失败不能把问答整条打挂
     （与 RAG 路的"失败不阻断"口径一致）。
     """
-    if not chatDocContextEnabled() or user is None:
+    enabled = chatDocContextSqlEnabled() if forSql else chatDocContextEnabled()
+    if not enabled or user is None:
         return None
     try:
         from app.services.knowledge.document_search import searchProcurementDocuments

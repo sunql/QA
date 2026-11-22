@@ -155,3 +155,62 @@ def test_answerPromptIncludesDocSectionWhenProvided() -> None:
     assert "文档依据" in prompt
     assert "不少于三家" in prompt
     assert "以**查询结果为准**" in prompt
+
+
+# ---------------------------------------------------------------------------
+# P2：计划阶段口径注入（独立开关 CHAT_DOC_CONTEXT_SQL）
+# ---------------------------------------------------------------------------
+
+
+def test_sqlStageFlagIsIndependentOfAnswerStage(monkeypatch) -> None:
+    """两个阶段独立灰度：只开答案阶段不该让 SQL 阶段注入。"""
+    monkeypatch.setenv(docContext.FLAG_ENV, "1")
+    monkeypatch.delenv(docContext.FLAG_SQL_ENV, raising=False)
+    assert docContext.chatDocContextEnabled() is True
+    assert docContext.chatDocContextSqlEnabled() is False
+
+    monkeypatch.setenv(docContext.FLAG_SQL_ENV, "1")
+    monkeypatch.delenv(docContext.FLAG_ENV, raising=False)
+    assert docContext.chatDocContextEnabled() is False
+    assert docContext.chatDocContextSqlEnabled() is True
+
+
+@pytest.mark.asyncio
+async def test_buildForSqlReturnsNoneWhenSqlFlagOff(monkeypatch) -> None:
+    monkeypatch.delenv(docContext.FLAG_SQL_ENV, raising=False)
+    monkeypatch.setenv(docContext.FLAG_ENV, "1")  # 答案阶段开着也不影响
+
+    result = await docContext.buildDocumentContext(
+        session=None, user=SimpleNamespace(), question="询价几家", forSql=True
+    )
+
+    assert result is None
+
+
+def test_planPromptCarriesDocumentContext() -> None:
+    """口径要进**计划** system prompt，且带"以数据为准"的口径约束。"""
+    from app.services.nl2sql_prompts import _buildPlanSystemPrompt
+    from app.services.nl2sql_service import Nl2SqlService
+
+    prompt = _buildPlanSystemPrompt(
+        "CLASS: DWD_PO_LINE",
+        Nl2SqlService.resolveDialect(None, None),
+        None,
+        documentContext="采购询价管理制度：不少于三家供应商",
+    )
+
+    assert "document_context" in prompt
+    assert "不少于三家" in prompt
+    assert "以数据为准" in prompt
+
+
+def test_planPromptUnchangedWithoutDocumentContext() -> None:
+    """不传口径 ⇒ 计划 prompt 与原来逐字一致（灰度零风险）。"""
+    from app.services.nl2sql_prompts import _buildPlanSystemPrompt
+    from app.services.nl2sql_service import Nl2SqlService
+
+    dialect = Nl2SqlService.resolveDialect(None, None)
+    withoutParam = _buildPlanSystemPrompt("CLASS: X", dialect, None)
+    withNone = _buildPlanSystemPrompt("CLASS: X", dialect, None, documentContext=None)
+
+    assert withoutParam == withNone

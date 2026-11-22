@@ -206,6 +206,25 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "enabled": True,
     },
     {
+        "name": "policy_compliance_check",
+        "description": "制度合规核对：把一条结论/做法拿去比对企业制度文档（P3，密级闸 fail-closed）",
+        "data_object": "DOCUMENT",
+        "data_layers": ["FEATURE"],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "policy_compliance_check",
+        "arg_extractor_kind": "policy_compliance_check",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "claim": {"type": "string", "description": "待核对的结论或做法"},
+                "topK": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            "required": ["claim"],
+            "additionalProperties": False,
+        },
+        "enabled": True,
+    },
+    {
         "name": "graph_traverse",
         "description": "供应链链路推理：从供应商出发的多跳可达业务实体",
         "data_object": "SUPPLIER",

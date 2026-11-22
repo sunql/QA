@@ -167,7 +167,9 @@ class StreamQueryMixin:
                 ):
                     yield event
                 return
-        outcome = await self._planAndGenerateSql(session, dto, pc, intent, state)
+        outcome = await self._planAndGenerateSql(
+            session, dto, pc, intent, state, user=user
+        )
         if outcome.sql is None and self._isFollowUpRetryCandidate(dto.question, intent, state):
             # C：短句新查询计划不可回答 → 升级追问重试一次（先 B 多步重跑，再退回
             # 单轮 FOLLOW_UP 状态注入；仍不可回答则走下方固定兜底文案）。
@@ -188,7 +190,7 @@ class StreamQueryMixin:
                     yield event
                 return
             outcome = await self._planAndGenerateSql(
-                session, dto, pc, IntentType.FOLLOW_UP, state
+                session, dto, pc, IntentType.FOLLOW_UP, state, user=user
             )
             if outcome.sql is not None:
                 intent = IntentType.FOLLOW_UP

@@ -256,20 +256,26 @@ curl -X POST http://127.0.0.1:8010/api/v1/ontology-discovery/proposals/1/publish
 
 ## 附录：批量上传文档（生产）
 
-文档中心页面上传弹窗是**单文件**（`maxCount=1`）；批量请用脚本（仓库自带）：
+### A. 页面上批量（推荐日常使用）
+
+文档中心 → **上传文档**：
+
+1. 「选择文件」支持**多选 / 多文件拖拽**；
+2. 文档类型 / 安全级别 / 版本 / Owner 为**共用元数据**；
+3. 点「开始上传」→ **串行**逐个上传（每份自动解析、分块、向量化）；
+4. 弹窗内逐条显示 成功/失败；**失败的可以「只重试失败项」**；全部成功自动关闭并刷新列表。
+
+> 单文件 ≤ 50 MB；重复内容会失败并提示「内容重复」（不会重复入库）。
+
+### B. 脚本批量（作业化 / 一次性导入整目录）
 
 ```bash
-# 在**生产宿主机**执行（后端 8000 已映射到本机）
 cd /opt/qa-system
+DRY_RUN=1 ./scripts/bulk_upload_documents.sh /data/docs/采购制度        # 先看会传哪些
 USERNAME=admin PASSWORD='***' \
-  ./scripts/bulk_upload_documents.sh /data/docs \
-  # 可选环境变量：
-  #   DOCUMENT_TYPE=POLICY  SECURITY_LEVEL=L1  VERSION=v1.0  OWNER=采购部
-  #   或直接 TOKEN='eyJ...'；DRY_RUN=1 只列文件不上传
+  ./scripts/bulk_upload_documents.sh /data/docs/采购制度
+# 可选：DOCUMENT_TYPE=POLICY SECURITY_LEVEL=L1 VERSION=v1.0 OWNER=采购部；或 TOKEN='eyJ...'
 ```
 
-- 只收 **pdf / docx / txt / md**（与 `/documents/upload` 支持类型一致）；
-- **单文件 ≤ 50 MB**（超限 413）；
-- **串行**上传（每份都要落 MinIO + 解析 + 向量化），重复内容计为 `DUP`（不会重复入库），失败不中断，最后汇总 `成功/重复/失败`；
-- 上传成功即触发向量化；如需事后重新向量化，用文档中心行内「AI 上下文/重新向量化」入口。
-
+- 只收 **pdf / docx / txt / md**；重复内容计 `DUP`；失败不中断并汇总。
+- 适用于「整目录制度文件」这类一次几十上百份、不需要逐份调元数据的场景。

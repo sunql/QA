@@ -552,6 +552,7 @@ class Nl2SqlService:
         globalFiltersText: str | None = None,
         wikiRulesBlock: str | None = None,
         kpiContractBlock: str | None = None,
+        documentContext: str | None = None,
         session: AsyncSession | None = None,
         pinnedReleaseId: int | None = None,
         directOnly: bool = False,
@@ -582,6 +583,7 @@ class Nl2SqlService:
             featureCatalogText=featureCatalogText,
             globalFiltersText=globalFiltersText,
             wikiRulesBlock=wikiRulesBlock,
+            documentContext=documentContext,
             kpiContractText=await _buildKpiContractOrNone(session, question),
             kpiContractBlock=kpiContractBlock,
             # 语义快照闸门（D15）：session 缺席也能跑（闸门会降级直读）。

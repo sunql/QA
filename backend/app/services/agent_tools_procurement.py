@@ -421,6 +421,54 @@ async def quotationQueryHandler(
     )
 
 
+async def policyComplianceHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """`policy_compliance_check`：把一条**结论/做法**拿去比对企业制度文档。
+
+    P3 的用途（见评估文档）：Copilot 给出"数据结论"后，用本工具回答
+    「这么做合不合规 / 制度怎么说」，从而给出三段式：
+    **数据值 + 文档依据 + 是否一致**。
+
+    密级闸 fail-closed：ctx.user 缺失（且无法按 actor 还原）⇒ 不检索。
+    """
+    claim = str(args.get("claim") or args.get("question") or "").strip()
+    if not claim:
+        return ToolResult(
+            data={"evidence": []}, answer="请提供要核对的结论或做法（claim）。"
+        )
+    user = await _resolveToolUser(session, ctx)
+    if user is None:
+        return ToolResult(
+            data={"evidence": []},
+            answer="无法核验文档密级（缺少用户身份）⇒ 不执行制度核对；请经带身份的入口使用。",
+        )
+    limit = int(args.get("topK") or args.get("limit") or 3)
+    evidence = await searchProcurementDocuments(
+        session, user, query=claim, topK=max(1, min(limit, 10))
+    )
+    if not evidence:
+        return ToolResult(
+            data={"evidence": [], "compliant": None},
+            answer=f"未检索到与「{claim}」相关的制度条款，无法判定合规性（不要臆测）。",
+        )
+    payload = [e.model_dump(mode="json", by_alias=True) for e in evidence]
+    related = sorted(
+        {
+            f"{entity.type}:{entity.code}"
+            for item in evidence
+            for entity in getattr(item, "related_entities", ())
+        }
+    )
+    return ToolResult(
+        data={"evidence": payload, "relatedEntities": related, "compliant": None},
+        answer=(
+            f"找到 {len(evidence)} 条相关制度条款，请据此说明「制度怎么说、"
+            f"与当前结论是否一致」；若两者冲突，以**查询数据**为准并指出冲突。"
+        ),
+    )
+
+
 async def _resolveToolUser(session: AsyncSession, ctx: AgentToolContext) -> Any | None:
     """工具侧用户身份：优先 ctx.user；否则按 ``ctx.actor``（用户名）还原。
 

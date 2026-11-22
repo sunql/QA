@@ -21,6 +21,7 @@ import {
   message,
 } from "antd";
 import { UploadOutlined } from "@ant-design/icons";
+import { DatePicker } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
 import { uploadDocument } from "../../api/document";
 import {
@@ -28,6 +29,7 @@ import {
   DOCUMENT_TYPE_OPTIONS,
 } from "../../types/document";
 import { DOCUMENT_UPLOAD_ACCEPT, DOCUMENT_UPLOAD_HINT } from "../../utils/uploadAccept";
+import { toIsoDateParam } from "../../utils/dateParam";
 
 interface FileOutcome {
   uid: string;
@@ -69,6 +71,7 @@ export default function DocumentUploadModal({ open, onClose, onUploaded }: Props
       version: values.version,
       owner: values.owner,
       securityLevel: values.securityLevel,
+      effectiveDate: toIsoDateParam(values.effectiveDate),
     };
     const collected: FileOutcome[] = [];
     setUploading(true);
@@ -185,6 +188,9 @@ export default function DocumentUploadModal({ open, onClose, onUploaded }: Props
             <Input placeholder="负责人" />
           </Form.Item>
         </Space.Compact>
+        <Form.Item name="effectiveDate" label="生效日期（共用，可选）">
+          <DatePicker style={{ width: "100%" }} format="YYYY-MM-DD" />
+        </Form.Item>
       </Form>
 
       {uploading && (

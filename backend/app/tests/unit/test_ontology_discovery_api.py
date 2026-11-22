@@ -15,6 +15,8 @@ unit 分片用路径稳定哈希 ⇒ 新建 unit 文件安全。
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -362,3 +364,295 @@ async def test_diff响应如实报告截断与丢弃的破坏性条数(apiClient
     # 展示出来的 500 条必须**全是破坏性变更**（破坏性优先）。
     severities = {change["severity"] for change in payload["changes"]}
     assert severities == {"BREAKING"}, severities
+
+
+# =============================================================================
+# G3-4：运行 / 候选 / 问题 / 提案 / 审核
+# =============================================================================
+
+
+async def _seedA2(session, *, suffix: str = "") -> dict[str, int]:
+    """种源 + 快照 + 一条成功运行 + 候选 + 问题。"""
+    from app.domain.discovery_models import DiscoverySource, MetadataSnapshot
+    from app.domain.discovery_pipeline_models import (
+        DiscoveryCandidate,
+        DiscoveryFinding,
+        DiscoveryRun,
+    )
+
+    ds = await _seedDatasource(session, name=f"A2演示源{suffix}", type="oracle")
+    source = DiscoverySource(
+        name=f"A2源{suffix}",
+        datasource_id=ds.id,
+        owner="data-owner",
+        access_policy={"mode": "READ_ONLY"},
+    )
+    session.add(source)
+    await session.flush()
+    snapshot = MetadataSnapshot(
+        source_id=source.id,
+        schema_hash=hashlib.sha256(suffix.encode()).hexdigest(),
+        snapshot_json={"schemaVersion": "v2", "tables": []},
+        table_count=0,
+        column_count=0,
+    )
+    session.add(snapshot)
+    await session.flush()
+    run = DiscoveryRun(
+        source_id=source.id,
+        snapshot_id=snapshot.id,
+        trigger="MANUAL",
+        status="SUCCEEDED",
+        prompt_tokens=100,
+        completion_tokens=20,
+        cost=0.00042,
+        model_version="fake-model",
+        prompt_version="v1",
+    )
+    session.add(run)
+    await session.flush()
+    session.add_all(
+        [
+            DiscoveryCandidate(
+                run_id=run.id,
+                source_id=source.id,
+                snapshot_id=snapshot.id,
+                candidate_type="OBJECT",
+                table_name="DIM_SUPPLIER",
+                target_code="SUPPLIER",
+                payload={"className": "Supplier"},
+                evidence_refs=[{"table": "DIM_SUPPLIER", "column": "BPSNUM_0"}],
+                status="CANDIDATE",
+            ),
+            DiscoveryCandidate(
+                run_id=run.id,
+                source_id=source.id,
+                snapshot_id=snapshot.id,
+                candidate_type="PROPERTY",
+                table_name="DIM_SUPPLIER",
+                column_name="BPSNAM_0",
+                payload={"propertyName": "supplier_name"},
+                evidence_refs=[{"table": "DIM_SUPPLIER", "column": "BPSNAM_0"}],
+                status="CANDIDATE",
+            ),
+            DiscoveryFinding(
+                run_id=run.id,
+                source_id=source.id,
+                snapshot_id=snapshot.id,
+                finding_type="MISSING",
+                table_name="DIM_SUPPLIER",
+                column_name="BPSNAM_0",
+                severity="WARNING",
+                detail="名称列有空值",
+            ),
+        ]
+    )
+    await session.commit()
+    return {"sourceId": source.id, "snapshotId": snapshot.id, "runId": run.id}
+
+
+async def test_受理运行返回202并落running行(apiClient, dbSession, monkeypatch):
+    from app.api.v1 import ontology_discovery as apiModule
+
+    seeded = await _seedA2(dbSession)
+    calls: list[tuple] = []
+
+    async def _fakePipeline(runId, **kwargs):
+        calls.append((runId, kwargs))
+
+    monkeypatch.setattr(apiModule._runService, "runPipeline", _fakePipeline)
+
+    resp = await apiClient.post(
+        "/api/v1/ontology-discovery/runs",
+        json={"sourceId": seeded["sourceId"], "tables": ["DIM_SUPPLIER"]},
+    )
+
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["status"] == "RUNNING"
+    assert body["snapshotId"] == seeded["snapshotId"]
+    assert calls and calls[0][1]["tables"] == ["DIM_SUPPLIER"]
+
+
+async def test_受理运行拒绝未知字段(apiClient, dbSession):
+    seeded = await _seedA2(dbSession)
+
+    resp = await apiClient.post(
+        "/api/v1/ontology-discovery/runs",
+        json={"sourceId": seeded["sourceId"], "oops": 1},
+    )
+
+    assert resp.status_code == 422
+
+
+async def test_运行详情可查(apiClient, dbSession):
+    seeded = await _seedA2(dbSession)
+
+    resp = await apiClient.get(f"/api/v1/ontology-discovery/runs/{seeded['runId']}")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["promptTokens"] == 100
+    assert body["completionTokens"] == 20
+    assert body["modelVersion"] == "fake-model"
+
+
+async def test_候选列表按run过滤且total是全量(apiClient, dbSession):
+    seeded = await _seedA2(dbSession)
+
+    resp = await apiClient.get(
+        "/api/v1/ontology-discovery/candidates",
+        params={"runId": seeded["runId"], "limit": 1},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["rows"]) == 1
+    assert body["total"] == 2
+
+
+async def test_问题列表返回证据为空数组(apiClient, dbSession):
+    seeded = await _seedA2(dbSession)
+
+    resp = await apiClient.get(
+        "/api/v1/ontology-discovery/findings",
+        params={"runId": seeded["runId"]},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["rows"][0]["evidenceRefs"] == []
+
+
+async def test_提案创建返回201且状态DRAFT(apiClient, dbSession):
+    from app.tests._knowledge_manifest import sampleManifest
+
+    seeded = await _seedA2(dbSession)
+
+    created = await apiClient.post(
+        "/api/v1/ontology-discovery/proposals",
+        json={
+            "sourceId": seeded["sourceId"],
+            "title": "供应商主数据修订",
+            "manifest": sampleManifest(),
+        },
+    )
+    assert created.status_code == 201, created.text
+    proposal = created.json()
+    assert proposal["status"] == "DRAFT"
+    assert proposal["diffJson"]["kind"] == "MANIFEST_REPLACEMENT"
+
+
+async def test_提案提交审核全流程(apiClient, dbSession):
+    """提案人 ≠ 审核人（stub 身份的 userId 由 API 提供）⇒ 用服务以 alice 建提案。"""
+    from app.services.discovery_proposal_service import DiscoveryProposalService
+    from app.tests._knowledge_manifest import sampleManifest
+
+    seeded = await _seedA2(dbSession)
+    created = await DiscoveryProposalService().createProposal(
+        dbSession,
+        sourceId=seeded["sourceId"],
+        title="供应商主数据修订",
+        proposalManifest=sampleManifest(),
+        proposer="alice",
+    )
+    proposal = {"id": created.id}
+
+    submitted = await apiClient.post(
+        f"/api/v1/ontology-discovery/proposals/{proposal['id']}/submit"
+    )
+    assert submitted.status_code == 200, submitted.text
+    assert submitted.json()["status"] == "IN_REVIEW"
+
+    reviewed = await apiClient.post(
+        f"/api/v1/ontology-discovery/proposals/{proposal['id']}/review",
+        json={"decision": "APPROVE", "comment": "同意"},
+    )
+    assert reviewed.status_code == 201, reviewed.text
+    assert reviewed.json()["decision"] == "APPROVE"
+
+    detail = await apiClient.get(
+        f"/api/v1/ontology-discovery/proposals/{proposal['id']}"
+    )
+    assert detail.json()["status"] == "APPROVED"
+
+
+async def test_提案列表可按状态过滤(apiClient, dbSession):
+    from app.services.discovery_proposal_service import DiscoveryProposalService
+    from app.tests._knowledge_manifest import sampleManifest
+
+    seeded = await _seedA2(dbSession)
+    service = DiscoveryProposalService()
+    await service.createProposal(
+        dbSession,
+        sourceId=seeded["sourceId"],
+        title="草稿提案",
+        proposalManifest=sampleManifest(),
+        proposer="alice",
+    )
+
+    resp = await apiClient.get(
+        "/api/v1/ontology-discovery/proposals", params={"status": "DRAFT"}
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["total"] == 1
+    assert resp.json()["rows"][0]["proposer"] == "alice"
+
+
+def _publishableManifest() -> dict:
+    """能过发布闸门的样本（补齐 RATIO 落点与源类引用）。"""
+    import copy
+
+    from app.tests._knowledge_manifest import sampleManifest
+
+    manifest = copy.deepcopy(sampleManifest())
+    landings = {
+        "supplier_delivery_days": ("Supplier", None),
+        "po_amount": ("PurchaseOrder", None),
+        "iqc_pass_rate": ("InspectionRecord", "PurchaseOrder"),
+    }
+    for metric in manifest["metrics"]:
+        numeratorClass, denominatorClass = landings[metric["metricName"]]
+        metric["numeratorMeasure"] = {
+            "agg": "SUM", "expr": None, "filter": None,
+            "className": numeratorClass, "classAlias": None,
+        }
+        metric["denominatorMeasure"] = (
+            {"agg": "SUM", "expr": None, "filter": None,
+             "className": denominatorClass, "classAlias": None}
+            if denominatorClass else None
+        )
+        metric["sources"] = [{"className": numeratorClass, "role": "BASE"}]
+    return manifest
+
+
+async def test_提案发布走唯一写口并回填release(apiClient, dbSession):
+    """G4：提交 → 审核 → 发布（DRAFT→VALIDATED→ACTIVE），提案置 PUBLISHED。"""
+    from app.services.discovery_proposal_service import DiscoveryProposalService
+
+    seeded = await _seedA2(dbSession)
+    proposal = await DiscoveryProposalService().createProposal(
+        dbSession,
+        sourceId=seeded["sourceId"],
+        title="发布提案",
+        proposalManifest=_publishableManifest(),
+        proposer="alice",
+    )
+    await apiClient.post(f"/api/v1/ontology-discovery/proposals/{proposal.id}/submit")
+    await apiClient.post(
+        f"/api/v1/ontology-discovery/proposals/{proposal.id}/review",
+        json={"decision": "APPROVE"},
+    )
+
+    resp = await apiClient.post(
+        f"/api/v1/ontology-discovery/proposals/{proposal.id}/publish",
+        json={"version": "2026.11.22-publish1"},
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["proposalStatus"] == "PUBLISHED"
+    assert body["status"] == "ACTIVE"
+    assert body["releaseId"] > 0

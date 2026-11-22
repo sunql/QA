@@ -46,10 +46,18 @@
 
 | 阶段 | 内容 | 人日 | 验收判据 |
 |---|---|---|---|
-| **G1 发布管理前端页** | 发布列表 / 版本详情 / 校验结果（severity×result）/ 激活 / 回滚；绑定页已有可复用组件 | **2–3** | 管理员可在浏览器完成「发布→激活→回滚」全流程，无需脚本 |
-| **G2 补 6 个校验码** | CLS-001（类名唯一/无环）、CLS-002（business_object 头类存在）、REL-001（关系两端类存在 + 白名单）、AGT-001（Agent 域/层/工具一致）、GRF-001（图 label/relation 白名单）、MET-002（KPI 绑定数据源）；**全部读现表即可判**，不需新表 | **3–4** | 每个码有单测（正/反例）；在真实发布上能产出对应 check 行 |
-| **G3 A2：剖析 + 候选 + 提案 + 审核** | `discovery_profile/candidate/finding/proposal/review` 五表；`POST /runs`（异步 Worker）+ `/candidates` + `/findings` + `/proposals` + `/review`；候选证据复用 Evidence 契约；**提案 diff 必须能过 `compileManifest`** | **10–12** | 采购域两张表（供应商、物料）跑通：剖析→候选→提案→审核→生成 release DRAFT |
+| **G1 发布管理前端页** ✅ | 发布列表 / 版本详情 / 校验结果（severity×result）/ 激活 / 回滚；绑定页已有可复用组件 | **2–3** | ✅ `7a421a3f`：管理员可在浏览器完成「发布→激活→回滚」全流程，无需脚本 |
+| **G2 补 6 个校验码** ✅ | CLS-001（类名唯一/无环）、CLS-002（business_object 头类存在 + 主域启用）、REL-001（关系两端类存在 + 白名单）、AGT-001（Agent 域/层/工具一致）、GRF-001（图 label 白名单 + 主键可定位）、MET-002（KPI 绑定有效数据源）；**全部读现表即可判**，不需新表 | **3–4** | ✅ 每个码有单测（正/反例，`test_semantic_release_design_checks.py`）；集成用例证明真实发布上产出对应 check 行；`MAX_CHECKS_PER_RELEASE` 同步从契约重推导 |
+| **G3 A2：剖析 + 候选 + 提案 + 审核** | `discovery_profile/candidate/finding/proposal/review` 五表 + `discovery_run`；`POST /runs`（异步 Worker）+ `/candidates` + `/findings` + `/proposals` + `/review`；候选证据复用 Evidence 契约；**提案 diff 必须能过 `compileManifest`** | **10–12** | 采购域两张表（供应商、物料）跑通：剖析→候选→提案→审核→生成 release DRAFT |
+| ↳ **G3-0 数据底座** ✅ | 迁移 **0166** 六表 + 守卫白名单扩到 8 张（`2026-11-22-g3-discovery-pipeline`） | 1 | `alembic upgrade head`（含空库从 0 全跑）成功；`alembic check` 新六表无漂移；ORM↔迁移 16 例双向钉住 |
+| ↳ **G3-1 剖析器** ✅ | 确定性 SQL 剖析（唯一性/空值/值域）→ `discovery_profile`，**不调 LLM** | 2–3 | ✅ dev THBI：`DIM_SUPPLIER` 3,500 行/229 列、`DIM_IMATERIAL` 350,922 行/248 列；两次 run 的 **479/479** 个 `sql_digest` 完全一致 |
+| ↳ **G3-2 候选生成** ✅ | **首次引入 LLM**：剖析事实 → 候选 / 主数据问题；证据完整率 100%；token/cost 写回 `discovery_run`；F1 计量守卫翻转为「必须带计量」 | 3–4 | 单测 19（prompt 构造与解析）+ 服务 8（真实 PG + 假 LLM）；真数据跑等 G5（需可用模型配置） |
+| ↳ **G3-3 提案 + 审核** ✅ | `diff_json` = 「完整 manifest + 基线」（补丁无法独立校验）；入库前过 `validateManifest`；影响面用既有 `diffManifests`；四眼（reviewer≠proposer ⇒ 409）；`approval_task_id` 非空须指向 `ontology_proposal` | 3 | 单测 16（真实 PG）；**批准只到 APPROVED，不建 release**（发布留 G4 唯一写口） |
+| ↳ **G3-4 API + Worker** ✅ | `POST /runs`（202 + BackgroundTasks，2/minute）/ `GET /runs/{id}` / `/candidates` / `/findings` / `/proposals`（建/列/详情/提交/审核）；新读面一律 admin（AI 未确认结论 + 在途治理件） | 2–3 | 路由 auth 守卫登记 9 条新路由（36 passed）；API 层 8 例；后台用 `ownSession()` 自开会话 |
 | **G4 A3：增量监测 + 发布联动 + 评测** | `/diff` 周期驱动提案；`POST /proposals/{id}/publish` 调**既有** `activate`；`discovery_evaluation` + 上下游回归（Graph/RAG/NL2SQL/Agent 各 1 条冒烟）；回滚演练 | **7–9** | 端到端演练通过：发现→提案→审核→发布→**回滚**；误合并率 0 |
+| ↳ **G4-0 发布联动** ✅ | `semanticReleaseService.publishProposal`（唯一写口：`createDraftFromManifest` → `markValidated` → `activate`）；提案置 PUBLISHED + 回填 `release_id`；`POST /proposals/{id}/publish` admin | 2 | 单测 6（发布链/状态门/防重/篡改/缺 manifest）+ API 1；F1 守卫改为「只允许 `semanticReleaseService.publishProposal`」 |
+| ↳ **G4-1 增量监测** ⏳ | `/diff` 周期驱动提案（快照变化 → 候选 → 提案） | 3 | 定时演练 |
+| ↳ **G4-2 评测 + 回滚演练** ⏳ | `discovery_evaluation` 表（**需新迁移 0167**）+ 上下游冒烟 + 回滚 | 2–4 | 端到端演练通过 |
 | **G5 采购域首期实践** | 供应商 + 物料两对象：真实数据剖析 → 产出候选与治理建议；业务确认与签收；评测基线（准确率/召回/人工耗时） | **4–6** | 业务签收的候选清单 + 误报复核记录 + 评测报告 |
 
 **顺序理由**：G1/G2 是"出口与守门员"，先做完，G3 产出的提案才有地方去、才拦得住；

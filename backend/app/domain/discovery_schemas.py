@@ -177,3 +177,173 @@ class SemanticDiffRead(CamelModel):
     )
     partial: bool = Field(..., description="True = 未覆盖全部分区，不能据此断言无破坏性变更")
     changes: list[SemanticChangeRead]
+
+
+# ---------------------------------------------------------------- A2：运行
+
+
+class DiscoveryRunRequest(CamelModel):
+    """受理一次发现运行（剖析 + 可选候选生成）。
+
+    **未知字段一律拒绝**：`source_id` 决定连哪条被授权的业务库。
+    """
+
+    model_config = ConfigDict(**CamelModel.model_config, extra="forbid")
+
+    source_id: int = Field(..., gt=0, description="发现源 id")
+    snapshot_id: int | None = Field(
+        default=None, gt=0, description="快照 id；不传 = 该源最新快照"
+    )
+    tables: list[str] | None = Field(
+        default=None,
+        max_length=50,
+        description="只剖析这些表（不传 = 快照全部表；建议显式指定控制成本）",
+    )
+    with_candidates: bool = Field(
+        default=True, description="剖析后是否继续调用 LLM 生成候选"
+    )
+
+
+class DiscoveryRunRead(CamelModel):
+    """运行记录（含 LLM 计量）。"""
+
+    id: int
+    source_id: int
+    snapshot_id: int | None
+    trigger: str
+    status: str
+    model_version: str | None
+    prompt_version: str | None
+    prompt_tokens: int
+    completion_tokens: int
+    cost: float
+    error_message: str | None
+    started_at: datetime
+    finished_at: datetime | None
+    created_by: str | None
+
+
+# ---------------------------------------------------------------- A2：候选 / 问题
+
+
+class DiscoveryCandidateRead(CamelModel):
+    id: int
+    run_id: int
+    source_id: int
+    snapshot_id: int
+    candidate_type: str
+    table_name: str | None
+    column_name: str | None
+    target_code: str | None
+    payload: dict[str, Any]
+    evidence_refs: list[Any]
+    confidence: float | None
+    model_version: str | None
+    prompt_version: str | None
+    status: str
+    decided_by: str | None
+    decided_time: datetime | None
+    created_time: datetime
+
+
+class DiscoveryCandidatePage(CamelModel):
+    rows: list[DiscoveryCandidateRead]
+    total: int
+
+
+class DiscoveryFindingRead(CamelModel):
+    id: int
+    run_id: int
+    source_id: int
+    snapshot_id: int | None
+    finding_type: str
+    table_name: str | None
+    column_name: str | None
+    severity: str
+    status: str
+    detail: str
+    evidence_refs: list[Any]
+    created_time: datetime
+
+
+class DiscoveryFindingPage(CamelModel):
+    rows: list[DiscoveryFindingRead]
+    total: int
+
+
+# ---------------------------------------------------------------- A2：提案 / 审核
+
+
+class DiscoveryProposalCreateRequest(CamelModel):
+    """建提案草稿。`manifest` 是**候选后的完整 manifest**（不是补丁）。"""
+
+    model_config = ConfigDict(**CamelModel.model_config, extra="forbid")
+
+    source_id: int = Field(..., gt=0, description="发现源 id")
+    title: str = Field(..., min_length=1, max_length=200, description="提案标题")
+    manifest: dict[str, Any] = Field(..., description="完整 manifest（必须满足 schemaVersion 契约）")
+    base_release_id: int | None = Field(
+        default=None, gt=0, description="基线发布 id；给了才算影响面"
+    )
+    note: str | None = Field(default=None, max_length=MAX_NOTE_LENGTH, description="备注")
+
+
+class DiscoveryProposalRead(CamelModel):
+    id: int
+    title: str
+    source_id: int
+    base_release_id: int | None
+    release_id: int | None
+    diff_json: dict[str, Any]
+    impact_json: dict[str, Any] | None
+    status: str
+    proposer: str
+    created_time: datetime
+    updated_time: datetime
+
+
+class DiscoveryProposalPage(CamelModel):
+    rows: list[DiscoveryProposalRead]
+    total: int
+
+
+class DiscoveryReviewRequest(CamelModel):
+    model_config = ConfigDict(**CamelModel.model_config, extra="forbid")
+
+    decision: str = Field(..., description="APPROVE / REJECT / REQUEST_CHANGES")
+    comment: str | None = Field(default=None, max_length=MAX_NOTE_LENGTH)
+    approval_task_id: int | None = Field(
+        default=None, gt=0, description="可选：P5 审批任务（须指向 ontology_proposal）"
+    )
+
+
+class DiscoveryReviewRead(CamelModel):
+    id: int
+    proposal_id: int
+    reviewer: str
+    decision: str
+    comment: str | None
+    approval_task_id: int | None
+    created_time: datetime
+
+
+class DiscoveryPublishRequest(CamelModel):
+    """发布已批准的提案（走既有发布写口，**不新建发布通道**）。"""
+
+    model_config = ConfigDict(**CamelModel.model_config, extra="forbid")
+
+    version: str = Field(..., min_length=1, max_length=32, description="新发布版本号（作用域内唯一）")
+    domain_code: str | None = Field(
+        default=None, max_length=64, description="发布作用域；不传 = 全局"
+    )
+    note: str | None = Field(default=None, max_length=MAX_NOTE_LENGTH)
+
+
+class DiscoveryPublishRead(CamelModel):
+    proposal_id: int
+    proposal_status: str
+    release_id: int
+    version: str
+    status: str
+    blockers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)

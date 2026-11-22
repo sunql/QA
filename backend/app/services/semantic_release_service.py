@@ -35,8 +35,9 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.discovery_pipeline_models import DiscoveryProposal
 from app.domain.enums import SemanticReleaseStatus
-from app.domain.exceptions import ConflictError, ValidationError
+from app.domain.exceptions import ConflictError, NotFoundError, ValidationError
 from app.domain.semantic_manifest_schema import (
     SCHEMA_VERSION,
     canonicalManifestJson,
@@ -85,6 +86,18 @@ from app.services.semantic_release_support import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 发现提案发布（G4）的错误文案。
+MSG_DISCOVERY_PROPOSAL_NOT_FOUND = "发现提案 {proposalId} 不存在"
+MSG_DISCOVERY_PROPOSAL_NOT_APPROVED = (
+    "发现提案 {proposalId} 当前状态 {status}，只有 APPROVED 的提案可以发布"
+)
+MSG_DISCOVERY_PROPOSAL_ALREADY_PUBLISHED = (
+    "发现提案 {proposalId} 已发布（release {releaseId}），不重复发布"
+)
+MSG_DISCOVERY_PROPOSAL_MANIFEST_MISSING = (
+    "发现提案 {proposalId} 的 diff_json 缺少 manifest，无法发布"
+)
 
 # 合法状态迁移矩阵。ARCHIVED 是终态（回滚 = 重新激活一份历史快照的副本，
 # 不是把 ARCHIVED 改回 ACTIVE —— 那会让审计里的历史状态失去意义）。
@@ -178,6 +191,75 @@ class SemanticReleaseService:
                 )
             )
 
+        return await self._persistDraft(
+            session,
+            manifest=manifest,
+            version=normalizedVersion,
+            domainCode=domainCode,
+            actor=actor,
+            departments=departments,
+            note=note,
+        )
+
+    async def createDraftFromManifest(
+        self,
+        session: AsyncSession,
+        *,
+        version: str,
+        manifest: dict[str, Any],
+        actor: str,
+        domainCode: str | None = None,
+        departments: tuple[str, ...] | None = None,
+        note: str | None = None,
+    ) -> SemanticReleaseOperation:
+        """从**给定 manifest** 建草稿（不编译治理表）。
+
+        用途：发现提案发布（G4）——提案的 manifest 是「候选后的完整快照」，
+        它与当前治理表**未必一致**（提案尚未落到治理表）⇒ 不能走 `createDraft`
+        的编译路径，否则发布出去的会是「治理表现状」而不是「审核过的提案」。
+
+        与 `createDraft` 共用同一道契约闸 / 体量闸 / 版本唯一闸 / 校验落表 / 审计
+        （全部在 `_persistDraft`）。
+        """
+        _validateActor(actor, departments)
+        _validateNote(note)
+        normalizedVersion = _normalizeVersion(version)
+        validateDomainCode(domainCode)
+        if domainCode is not None:
+            await _requireDomainExists(session, domainCode)
+        await _requireVersionFree(session, normalizedVersion, domainCode)
+        _validateManifestOrReject(manifest)
+        canonical = canonicalManifestJson(manifest)
+        sizeBytes = len(canonical.encode("utf-8"))
+        if sizeBytes > MAX_MANIFEST_BYTES:
+            raise ValidationError(
+                MSG_SEMANTIC_RELEASE_MANIFEST_TOO_LARGE.format(
+                    size=sizeBytes, max=MAX_MANIFEST_BYTES
+                )
+            )
+        return await self._persistDraft(
+            session,
+            manifest=manifest,
+            version=normalizedVersion,
+            domainCode=domainCode,
+            actor=actor,
+            departments=departments,
+            note=note,
+        )
+
+    async def _persistDraft(
+        self,
+        session: AsyncSession,
+        *,
+        manifest: dict[str, Any],
+        version: str,
+        domainCode: str | None,
+        actor: str,
+        departments: tuple[str, ...] | None,
+        note: str | None,
+    ) -> SemanticReleaseOperation:
+        """草稿落库的**共用尾部**（校验项 → 行 → checks → 审计 → 提交）。"""
+        sizeBytes = len(canonicalManifestJson(manifest).encode("utf-8"))
         # ⚠️ 单一事实源：**闸门结论与落表行来自同一份校验项集合**
         # （此前是「闸门算一遍、落表再算一遍」⇒ 两边可能静默错位）。
         # 候选统计按**快照里的类**收窄 ⇒ 报告与快照同一宇宙。
@@ -187,7 +269,7 @@ class SemanticReleaseService:
         )
         gate = checksToGateResult(draftChecks)
         row = SemanticRelease(
-            version=normalizedVersion,
+            version=version,
             domain_code=domainCode,
             status=SemanticReleaseStatus.DRAFT.value,
             schema_version=manifest.get("schemaVersion") or SCHEMA_VERSION,
@@ -200,7 +282,6 @@ class SemanticReleaseService:
         try:
             await session.flush()
             # 草稿也要落校验结论：评审要看到「编译出来的东西被查过什么」。
-            # （编译产物刚刚规范化 + 算过哈希 ⇒ 完整性天然通过）
             await semanticReleaseCheckService.replaceChecks(
                 session,
                 row.id,
@@ -218,7 +299,7 @@ class SemanticReleaseService:
             await session.commit()
         except IntegrityError as exc:
             await session.rollback()
-            raise _mapCreateIntegrityError(exc, normalizedVersion, domainCode) from exc
+            raise _mapCreateIntegrityError(exc, version, domainCode) from exc
 
         await session.refresh(row)
         logger.info(
@@ -230,6 +311,84 @@ class SemanticReleaseService:
             len(gate.blockers),
         )
         return SemanticReleaseOperation(release=row, blockers=gate.blockers, warnings=gate.warnings)
+
+    async def publishProposal(
+        self,
+        session: AsyncSession,
+        *,
+        proposalId: int,
+        version: str,
+        actor: str,
+        domainCode: str | None = None,
+        departments: tuple[str, ...] | None = None,
+        note: str | None = None,
+    ) -> SemanticReleaseOperation:
+        """把 **APPROVED** 的发现提案发布成 ACTIVE（G4，发布唯一写口）。
+
+        流程全部走本服务既有方法：提案 manifest → `createDraftFromManifest`
+        → `markValidated` → `activate`。成功后提案置 `PUBLISHED` 并回填 `release_id`。
+
+        ⚠️ 端到端只有这一条入口：发现域不写 `semantic_release` 行（F1 红线），
+        `/proposals/{id}/publish` 只能调本方法。
+        """
+        proposal = await self._loadProposal(session, proposalId)
+        if proposal.status != "APPROVED":
+            raise ConflictError(
+                MSG_DISCOVERY_PROPOSAL_NOT_APPROVED.format(
+                    proposalId=proposalId, status=proposal.status
+                )
+            )
+        if proposal.release_id is not None:
+            raise ConflictError(
+                MSG_DISCOVERY_PROPOSAL_ALREADY_PUBLISHED.format(
+                    proposalId=proposalId, releaseId=proposal.release_id
+                )
+            )
+        manifest = (proposal.diff_json or {}).get("manifest")
+        if not isinstance(manifest, dict):
+            raise ValidationError(
+                MSG_DISCOVERY_PROPOSAL_MANIFEST_MISSING.format(proposalId=proposalId)
+            )
+
+        draft = await self.createDraftFromManifest(
+            session,
+            version=version,
+            manifest=manifest,
+            actor=actor,
+            domainCode=domainCode,
+            departments=departments,
+            note=note,
+        )
+        await self.markValidated(
+            session, draft.release.id, actor=actor, departments=departments
+        )
+        result = await self.activate(
+            session, draft.release.id, actor=actor, departments=departments
+        )
+
+        # 各步已各自提交 ⇒ 重新取行（避免 session 内旧实例与库里不一致）。
+        proposal = await self._loadProposal(session, proposalId)
+        proposal.status = "PUBLISHED"
+        proposal.release_id = result.release.id
+        await session.commit()
+        await session.refresh(proposal)
+        logger.info(
+            "发现提案已发布：proposal=%s release=%s version=%r",
+            proposalId,
+            result.release.id,
+            result.release.version,
+        )
+        return result
+
+    async def _loadProposal(
+        self, session: AsyncSession, proposalId: int
+    ) -> DiscoveryProposal:
+        proposal = await session.get(DiscoveryProposal, proposalId)
+        if proposal is None:
+            raise NotFoundError(
+                MSG_DISCOVERY_PROPOSAL_NOT_FOUND.format(proposalId=proposalId)
+            )
+        return proposal
 
     async def markValidated(
         self,

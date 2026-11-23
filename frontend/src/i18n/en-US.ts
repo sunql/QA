@@ -3704,6 +3704,7 @@ export const enUS = {
     slotSupplierAll: "All",
     slotOverdue: "Min overdue days",
     scenarioRun: "Run scenario",
+    answerTitle: "Interpretation & suggestions",
     scenarioFree: "Free Q&A (expert mode)",
     scenarioFreeDesc: "Pick an agent and ask freely; read-only tools, evidence-backed answers.",
     enterScenario: "Enter",

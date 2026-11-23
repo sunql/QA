@@ -3707,6 +3707,7 @@ export const zhCN = {
     slotSupplierAll: "全部",
     slotOverdue: "最低逾期天数",
     scenarioRun: "运行场景",
+    answerTitle: "解读与建议",
     scenarioFree: "自由问答（专家模式）",
     scenarioFreeDesc: "任选场景 Agent 自由提问，只读工具取数、结论必带依据。",
     enterScenario: "进入",

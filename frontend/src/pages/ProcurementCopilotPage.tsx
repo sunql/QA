@@ -50,6 +50,8 @@ import type { DataSource } from "../types/datasource";
 import type { ModelConfig } from "../types/modelConfig";
 import { getAgentRunSteps } from "../api/agentOrchestrationApi";
 import type { AgentRunStepRead } from "../types/agentOrchestration";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   deleteCopilotConversation,
   getCopilotConversation,
@@ -62,7 +64,7 @@ import {
 } from "../api/procurementCopilot";
 
 const { TextArea } = Input;
-const { Paragraph, Text } = Typography;
+const { Text } = Typography;
 
 /** 当前会话 id 的本地留存键：刷新后自动恢复同一条线程。 */
 const CONVERSATION_STORAGE_KEY = "copilot.conversationId";
@@ -672,21 +674,12 @@ export default function ProcurementCopilotPage() {
                   </Space>
                 }
               >
-                {turn.steps.length > 0 && (
-                  <ol style={{ paddingLeft: 20, marginTop: 0 }}>
-                    {turn.steps.map((step) => (
-                      <li key={`${turn.id}-${step.stepNo}`}>
-                        <Text type="secondary">
-                          {step.kind} · {step.status}
-                          {step.toolName ? ` · ${step.toolName}` : ""}
-                        </Text>
-                        {step.planSummary && <div>{step.planSummary}</div>}
-                        {step.errorMessage && (
-                          <Text type="danger">{step.errorMessage}</Text>
-                        )}
-                      </li>
-                    ))}
-                  </ol>
+                {/* 内部步骤行不再进会话流（业务只关心结果与建议）；
+                    执行细节在「查看执行轨迹」抽屉里。出错的轮次保留错误摘要。 */}
+                {turn.steps.some((step) => step.errorMessage) && (
+                  <Text type="danger">
+                    {turn.steps.find((step) => step.errorMessage)?.errorMessage}
+                  </Text>
                 )}
                 {turn.steps
                   .map((step) => parsePendingDeliveryStep(step))
@@ -695,7 +688,19 @@ export default function ProcurementCopilotPage() {
                   .map((parsed) => (
                     <PendingDeliveryResultCard key={`${turn.id}-pd`} result={parsed} />
                   ))}
-                {turn.answer && <Paragraph>{turn.answer}</Paragraph>}
+                {turn.answer && (
+                  <Card
+                    size="small"
+                    title={t("procurement.copilot.answerTitle")}
+                    style={{ marginTop: 8 }}
+                  >
+                    <div className="markdown-body">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {turn.answer}
+                      </ReactMarkdown>
+                    </div>
+                  </Card>
+                )}
                 {askOf(turn) && (
                   <Alert type="warning" showIcon message={askOf(turn)} style={{ marginTop: 8 }} />
                 )}

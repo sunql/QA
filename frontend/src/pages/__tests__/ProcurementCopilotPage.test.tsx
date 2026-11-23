@@ -129,7 +129,8 @@ describe("ProcurementCopilotPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
 
     await waitFor(() => expect(screen.getByText("命中 16 个物料")).toBeTruthy());
-    expect(screen.getByText(/material_search/)).toBeTruthy();
+    // 步骤行不再进会话流（收进「查看执行轨迹」抽屉），答案为 Markdown 卡
+    expect(screen.getByText("解读与建议")).toBeTruthy();
     expect(screen.getByText(/4337/)).toBeTruthy();
     // 不可运行的场景不在下拉里
     expect(screen.queryByText("采购 AI 副驾")).toBeNull();

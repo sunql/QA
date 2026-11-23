@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   getAgentCatalog: vi.fn(),
   listModels: vi.fn(),
   streamCopilotMessage: vi.fn(),
+  getAgentRunSteps: vi.fn(),
 }));
 
 vi.mock("../../api/procurementKnowledge", () => ({
@@ -27,6 +28,9 @@ vi.mock("../../api/procurementKnowledge", () => ({
 vi.mock("../../api/modelConfig", () => ({ listModels: api.listModels }));
 vi.mock("../../api/procurementCopilot", () => ({
   streamCopilotMessage: api.streamCopilotMessage,
+}));
+vi.mock("../../api/agentOrchestrationApi", () => ({
+  getAgentRunSteps: api.getAgentRunSteps,
 }));
 
 function renderPage() {
@@ -153,6 +157,124 @@ describe("ProcurementCopilotPage", () => {
   });
 });
 
+
+describe("ProcurementCopilotPage 执行轨迹", () => {
+  function mockOneTurn() {
+    mockOptions();
+    api.streamCopilotMessage.mockImplementation(async (_payload, handlers) => {
+      handlers.onRun?.({ runId: "r-9", stepsUrl: "/api/v1/agent-runs/r-9/steps" });
+      handlers.onDone?.({
+        runId: "r-9",
+        status: "SUCCEEDED",
+        answer: "答案",
+        pauseCode: null,
+        errorCode: null,
+        errorMessage: null,
+        totalTokens: 10,
+        cost: 0,
+        stepsUrl: "/api/v1/agent-runs/r-9/steps",
+      });
+    });
+  }
+
+  async function sendOneQuestion() {
+    renderPage();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.change(screen.getByPlaceholderText(/不锈钢板/), {
+      target: { value: "找不锈钢板" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+    await waitFor(() => expect(screen.getByText("答案")).toBeTruthy());
+  }
+
+  it("轨迹按钮不是裸链接（裸链接带不上 Authorization ⇒ 新窗口只会看到「请先登录」）", async () => {
+    mockOneTurn();
+    await sendOneQuestion();
+
+    expect(
+      screen.queryByRole("link", { name: /查看执行轨迹/ }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /查看执行轨迹/ }),
+    ).toBeTruthy();
+  });
+
+  it("点击后带鉴权拉取 /agent-runs/{runId}/steps 并在页内抽屉展示", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    mockOneTurn();
+    api.getAgentRunSteps.mockResolvedValue([
+      {
+        stepNo: 0,
+        iterationNo: 1,
+        kind: "PLAN",
+        status: "SUCCEEDED",
+        action: "CALL_TOOL",
+        planSummary: "先定位物料",
+        toolName: "material_search",
+        inputJson: null,
+        outputJson: null,
+        answer: null,
+        errorCode: null,
+        errorMessage: null,
+        promptTokens: 12,
+        completionTokens: 3,
+        cost: 0,
+        startedAt: "2026-11-23T10:00:00Z",
+        finishedAt: "2026-11-23T10:00:01Z",
+      },
+    ]);
+    await sendOneQuestion();
+
+    fireEvent.click(screen.getByRole("button", { name: /查看执行轨迹/ }));
+
+    await waitFor(() =>
+      expect(api.getAgentRunSteps).toHaveBeenCalledWith("r-9"),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("先定位物料")).toBeTruthy(),
+    );
+    // 不新开窗口（否则必然回到「请先登录」）
+    expect(openSpy).not.toHaveBeenCalled();
+    openSpy.mockRestore();
+  });
+
+  it("先收到超时事件、随后传输中断：保留超时文案（不被网络错误覆盖）", async () => {
+    mockOptions();
+    api.streamCopilotMessage.mockImplementation(async (_payload, handlers) => {
+      handlers.onRun?.({ runId: "r-7", stepsUrl: "/api/v1/agent-runs/r-7/steps" });
+      handlers.onError?.({
+        error: "本次流式转发的等待时间已到；运行仍在后台继续，可用轨迹地址继续跟进",
+        errorType: "timeout",
+        runId: "r-7",
+        stepsUrl: "/api/v1/agent-runs/r-7/steps",
+      });
+      // nginx 在上游正常收尾后仍可能重置连接 ⇒ fetch 的 body reader 抛 TypeError
+      throw new TypeError("Failed to fetch");
+    });
+
+    renderPage();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.change(screen.getByPlaceholderText(/不锈钢板/), {
+      target: { value: "找不锈钢板" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/流式转发的等待时间已到/)).toBeTruthy(),
+    );
+    expect(screen.queryByText("Failed to fetch")).toBeNull();
+  });
+
+  it("拉取失败时在抽屉内提示错误，而不是空白", async () => {
+    mockOneTurn();
+    api.getAgentRunSteps.mockRejectedValue(new Error("请先登录"));
+    await sendOneQuestion();
+
+    fireEvent.click(screen.getByRole("button", { name: /查看执行轨迹/ }));
+
+    await waitFor(() => expect(screen.getByText("请先登录")).toBeTruthy());
+  });
+});
 
 describe("ProcurementCopilotPage 多轮会话", () => {
   it("第二轮带上后端回传的 conversationId；新会话清空会话 id", async () => {

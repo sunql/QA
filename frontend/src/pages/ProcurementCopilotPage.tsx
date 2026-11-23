@@ -15,8 +15,10 @@ import {
   Alert,
   Button,
   Card,
+  Drawer,
   Empty,
   Input,
+  List,
   Select,
   Space,
   Spin,
@@ -30,6 +32,8 @@ import {
 } from "../api/procurementKnowledge";
 import { listModels } from "../api/modelConfig";
 import type { ModelConfig } from "../types/modelConfig";
+import { getAgentRunSteps } from "../api/agentOrchestrationApi";
+import type { AgentRunStepRead } from "../types/agentOrchestration";
 import {
   streamCopilotMessage,
   type CopilotDonePayload,
@@ -46,7 +50,6 @@ interface CopilotTurn {
   /** true = 对上一轮追问的回答（后端 resume 同一 run） */
   resumed?: boolean;
   runId: string | null;
-  stepsUrl: string | null;
   steps: CopilotStepPayload[];
   status: "RUNNING" | "DONE" | "ERROR";
   answer: string | null;
@@ -59,6 +62,21 @@ const STATUS_COLOR: Record<string, string> = {
   RUNNING: "processing",
   DONE: "success",
   ERROR: "error",
+};
+
+/** 执行轨迹抽屉状态（`runId` 用作并发守卫：慢响应回来时不覆盖新打开的轨迹）。 */
+interface TraceState {
+  runId: string | null;
+  loading: boolean;
+  error: string | null;
+  steps: AgentRunStepRead[];
+}
+
+const EMPTY_TRACE: TraceState = {
+  runId: null,
+  loading: false,
+  error: null,
+  steps: [],
 };
 
 function askOf(turn: CopilotTurn): string | null {
@@ -77,6 +95,7 @@ export default function ProcurementCopilotPage() {
   const [busy, setBusy] = useState(false);
   const [conversationId, setConversationId] = useState<string | undefined>();
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [trace, setTrace] = useState<TraceState>(EMPTY_TRACE);
   const abortRef = useRef<AbortController | null>(null);
 
   const loadOptions = useCallback(async () => {
@@ -110,6 +129,36 @@ export default function ProcurementCopilotPage() {
     );
   };
 
+  /**
+   * 打开执行轨迹。
+   *
+   * 必须**带 Authorization 拉取**再在页内渲染：`/agent-runs/{runId}/steps` 要登录，
+   * 而新窗口/新标签的裸导航带不上 Bearer 头 ⇒ 只会看到 `{"error":"请先登录"}`
+   * （2026-11-23 生产实证）。
+   */
+  const openTrace = async (runId: string) => {
+    setTrace({ runId, loading: true, error: null, steps: [] });
+    try {
+      const steps = await getAgentRunSteps(runId);
+      setTrace((prev) =>
+        prev.runId === runId ? { ...prev, loading: false, steps } : prev,
+      );
+    } catch (err) {
+      setTrace((prev) =>
+        prev.runId === runId
+          ? {
+              ...prev,
+              loading: false,
+              error:
+                err instanceof Error
+                  ? err.message
+                  : t("procurement.copilot.traceFailed"),
+            }
+          : prev,
+      );
+    }
+  };
+
   const handleSend = async () => {
     const text = question.trim();
     if (!text || !agentCode || !modelId || busy) return;
@@ -122,7 +171,6 @@ export default function ProcurementCopilotPage() {
         agentCode,
         resumed: undefined,
         runId: null,
-        stepsUrl: null,
         steps: [],
         status: "RUNNING",
         answer: null,
@@ -148,7 +196,6 @@ export default function ProcurementCopilotPage() {
             if (run.conversationId) setConversationId(run.conversationId);
             updateTurn(id, {
               runId: run.runId,
-              stepsUrl: run.stepsUrl,
               resumed: run.resumed,
             });
           },
@@ -164,7 +211,6 @@ export default function ProcurementCopilotPage() {
               answer: done.answer,
               pauseCode: done.pauseCode,
               totalTokens: done.totalTokens,
-              stepsUrl: done.stepsUrl,
             }),
           onError: (err) =>
             updateTurn(id, { status: "ERROR", error: err.error }),
@@ -173,11 +219,18 @@ export default function ProcurementCopilotPage() {
       );
     } catch (err) {
       if (!controller.signal.aborted) {
-        updateTurn(id, {
-          status: "ERROR",
-          error:
-            err instanceof Error ? err.message : t("procurement.copilot.sendFailed"),
-        });
+        const message =
+          err instanceof Error ? err.message : t("procurement.copilot.sendFailed");
+        // 只覆盖「还在跑」的轮次：若已收到终态事件（done / timeout 等），
+        // 之后 nginx 重置连接导致的 TypeError 不应把有意义的文案冲掉
+        // （2026-11-23：ERR_INCOMPLETE_CHUNKED_ENCODING 覆盖了超时提示）。
+        setTurns((prev) =>
+          prev.map((turn) =>
+            turn.id === id && turn.status === "RUNNING"
+              ? { ...turn, status: "ERROR", error: message }
+              : turn,
+          ),
+        );
       }
     } finally {
       setBusy(false);
@@ -303,8 +356,13 @@ export default function ProcurementCopilotPage() {
                   <Alert type="error" showIcon message={turn.error} style={{ marginTop: 8 }} />
                 )}
                 <Space style={{ marginTop: 8 }}>
-                  {turn.stepsUrl && (
-                    <Button size="small" href={turn.stepsUrl} target="_blank">
+                  {turn.runId && (
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        if (turn.runId) void openTrace(turn.runId);
+                      }}
+                    >
                       {t("procurement.copilot.openTrace")}
                     </Button>
                   )}
@@ -319,6 +377,47 @@ export default function ProcurementCopilotPage() {
           </Space>
         )}
       </Spin>
+      <Drawer
+        title={t("procurement.copilot.traceTitle")}
+        width={640}
+        open={trace.runId !== null}
+        onClose={() => setTrace(EMPTY_TRACE)}
+      >
+        {trace.loading && <Spin />}
+        {!trace.loading && trace.error && (
+          <Alert type="error" showIcon message={trace.error} />
+        )}
+        {!trace.loading && !trace.error && trace.steps.length === 0 && (
+          <Empty description={t("procurement.copilot.traceEmpty")} />
+        )}
+        {!trace.loading && !trace.error && trace.steps.length > 0 && (
+          <List
+            dataSource={trace.steps}
+            renderItem={(step) => (
+              <List.Item key={step.stepNo}>
+                <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                  <Space wrap>
+                    <Tag>{`#${step.stepNo}`}</Tag>
+                    <Text type="secondary">
+                      {step.kind} · {step.status}
+                      {step.toolName ? ` · ${step.toolName}` : ""}
+                    </Text>
+                    <Text type="secondary">
+                      {t("procurement.copilot.tokens")}:{" "}
+                      {step.promptTokens + step.completionTokens}
+                    </Text>
+                  </Space>
+                  {step.planSummary && <div>{step.planSummary}</div>}
+                  {step.answer && <div>{step.answer}</div>}
+                  {step.errorMessage && (
+                    <Text type="danger">{step.errorMessage}</Text>
+                  )}
+                </Space>
+              </List.Item>
+            )}
+          />
+        )}
+      </Drawer>
     </div>
   );
 }

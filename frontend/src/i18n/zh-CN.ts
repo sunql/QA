@@ -3697,6 +3697,9 @@ export const zhCN = {
     conversation: "会话",
     resumed: "续问",
     openTrace: "查看执行轨迹",
+    traceTitle: "执行轨迹",
+    traceEmpty: "这次运行没有记录步骤",
+    traceFailed: "轨迹加载失败",
     tokens: "Tokens"
   },
 },

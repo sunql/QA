@@ -3694,6 +3694,9 @@ export const enUS = {
     conversation: "Conversation",
     resumed: "Follow-up",
     openTrace: "Open trace",
+    traceTitle: "Execution trace",
+    traceEmpty: "No steps were recorded for this run",
+    traceFailed: "Failed to load trace",
     tokens: "Tokens"
   },
 },

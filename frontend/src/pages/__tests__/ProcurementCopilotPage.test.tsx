@@ -48,13 +48,30 @@ beforeEach(() => {
 });
 
 function renderPage() {
-  return render(
+  const utils = render(
     <I18nextProvider i18n={i18n}>
       <ConfigProvider locale={zhCN}>
         <ProcurementCopilotPage />
       </ConfigProvider>
     </I18nextProvider>,
   );
+  // 首页是场景卡片墙：进「自由问答」视图（若本地留存已触发自动恢复则已在对话面）
+  const freeCard = screen.queryByText(/自由问答/);
+  if (freeCard) fireEvent.click(freeCard);
+  return utils;
+}
+
+/** 进入「待到货」场景视图。 */
+function renderScenario() {
+  const utils = render(
+    <I18nextProvider i18n={i18n}>
+      <ConfigProvider locale={zhCN}>
+        <ProcurementCopilotPage />
+      </ConfigProvider>
+    </I18nextProvider>,
+  );
+  fireEvent.click(screen.getByText(/待到货/));
+  return utils;
 }
 
 function mockOptions() {
@@ -502,7 +519,7 @@ describe("ProcurementCopilotPage 待到货场景", () => {
       });
     });
 
-    renderPage();
+    renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /运行场景/ }));
 
@@ -512,6 +529,8 @@ describe("ProcurementCopilotPage 待到货场景", () => {
     expect(message).toContain("近12个月");
     expect(message).toContain("供应商=全部");
     expect(message).toContain("最低逾期天数=0");
+    // 场景钉死 Agent：即使页面默认选了别的 Agent，也要以 SOURCING 发起
+    expect(payloads[0].agentCode).toBe("PROCUREMENT_SOURCING");
     await waitFor(() => expect(screen.getByText("欠交汇总")).toBeTruthy());
   });
 
@@ -533,7 +552,7 @@ describe("ProcurementCopilotPage 待到货场景", () => {
       });
     });
 
-    renderPage();
+    renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.change(screen.getByPlaceholderText("全部"), {
       target: { value: "F109" },
@@ -543,5 +562,88 @@ describe("ProcurementCopilotPage 待到货场景", () => {
     await waitFor(() => expect(payloads).toHaveLength(1));
     const message = String(payloads[0].message);
     expect(message).toContain("供应商=F109");
+  });
+});
+
+
+describe("ProcurementCopilotPage 场景钉 Agent", () => {
+  it("当前会话绑的是合同 Agent 时，场景运行自动换 SOURCING 并开新会话（清 conversationId）", async () => {
+    // 让默认选中的场景是合同 Agent（catalog 第一个 runnable），
+    // 这样第一问绑定 CONTRACT 会话，场景运行时才会触发「换 Agent ⇒ 新会话」。
+    api.getAgentCatalog.mockResolvedValue([
+      { agentCode: "PROCUREMENT_CONTRACT_SEARCH_AGENT", agentName: "合同检索 Agent", runnable: true, status: "active", description: null, tool: null },
+      { agentCode: "PROCUREMENT_SOURCING", agentName: "采购寻源 Agent", runnable: true, status: "active", description: null, tool: null },
+    ]);
+    api.listModels.mockResolvedValue([
+      { id: 3, modelName: "Qwen3.8-27B-4bit", provider: "local", isActive: true },
+    ]);
+    // 先手动走一轮拿到会话 id（绑定到默认选中的场景）
+    const payloads: Array<Record<string, unknown>> = [];
+    api.streamCopilotMessage.mockImplementation(async (payload, handlers) => {
+      payloads.push(payload);
+      handlers.onRun?.({
+        runId: `r-${payloads.length}`,
+        stepsUrl: "/api/v1/agent-runs/x/steps",
+        conversationId: `conv-${payloads.length}`,
+      });
+      handlers.onDone?.({
+        runId: `r-${payloads.length}`,
+        status: "SUCCEEDED",
+        answer: "ok",
+        pauseCode: null,
+        errorCode: null,
+        errorMessage: null,
+        totalTokens: 1,
+        cost: 0,
+        stepsUrl: "/api/v1/agent-runs/x/steps",
+      });
+    });
+
+    renderPage();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+
+    // 第一问：自由问答视图（默认 catalog 第一个 runnable）
+    fireEvent.change(screen.getByPlaceholderText(/不锈钢板/), {
+      target: { value: "自由问题" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+    await waitFor(() => expect(payloads).toHaveLength(1));
+
+    // 场景运行：先回卡片墙进「待到货」，Agent 被钉到 SOURCING，且不带会话 id（防 422 串味）
+    fireEvent.click(screen.getByRole("button", { name: /场景$/ }));
+    fireEvent.click(screen.getByText("待到货 / 逾期未到"));
+    fireEvent.click(screen.getByRole("button", { name: /运行场景/ }));
+    await waitFor(() => expect(payloads).toHaveLength(2));
+    expect(payloads[1].agentCode).toBe("PROCUREMENT_SOURCING");
+    expect(payloads[1].conversationId).toBeUndefined();
+  });
+});
+
+
+describe("ProcurementCopilotPage 场景卡片墙（首页）", () => {
+  it("首页渲染场景大卡（待到货 + 自由问答），点进入才见工作区", async () => {
+    mockOptions();
+    const { container } = render(
+      <I18nextProvider i18n={i18n}>
+        <ConfigProvider locale={zhCN}>
+          <ProcurementCopilotPage />
+        </ConfigProvider>
+      </I18nextProvider>,
+    );
+    expect(screen.getByText("待到货 / 逾期未到")).toBeTruthy();
+    expect(screen.getByText(/自由问答/)).toBeTruthy();
+    // 首页不显示对话输入框
+    expect(screen.queryByPlaceholderText(/不锈钢板/)).toBeNull();
+
+    // 进入待到货：出现槽位与运行按钮
+    fireEvent.click(screen.getByText("待到货 / 逾期未到"));
+    await waitFor(() => expect(screen.getByRole("button", { name: /运行场景/ })).toBeTruthy());
+    expect(container).toBeTruthy();
+
+    // 返回卡片墙
+    const backBtn = screen.getAllByRole("button", { name: /场景/ })
+      .find((el) => el.textContent?.trim() === "场景");
+    fireEvent.click(backBtn as HTMLElement);
+    expect(screen.getByText("待到货 / 逾期未到")).toBeTruthy();
   });
 });

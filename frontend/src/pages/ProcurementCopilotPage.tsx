@@ -15,17 +15,25 @@ import {
   Alert,
   Button,
   Card,
+  Col,
   Drawer,
   Empty,
   Input,
   InputNumber,
   List,
+  Row,
   Select,
   Space,
   Spin,
   Tag,
   Typography,
 } from "antd";
+import {
+  ArrowRightOutlined,
+  CarOutlined,
+  CommentOutlined,
+  LeftOutlined,
+} from "@ant-design/icons";
 import { useTranslation } from "../i18n";
 import ConversationHistoryPanel from "../components/copilot/ConversationHistoryPanel";
 import HistoryToggleButton from "../components/chat/HistoryToggleButton";
@@ -192,7 +200,10 @@ export default function ProcurementCopilotPage() {
   useEffect(() => {
     void loadConversations();
     const stored = localStorage.getItem(CONVERSATION_STORAGE_KEY);
-    if (stored) void restoreConversation(stored);
+    if (stored) {
+      setView("free");
+      void restoreConversation(stored);
+    }
   }, [loadConversations, restoreConversation]);
 
   /** 删除会话：删当前会话时一并清空线程；随后刷新侧栏。 */
@@ -255,7 +266,13 @@ export default function ProcurementCopilotPage() {
     }
   };
 
-  /** 待到货场景槽位（P0 场景；工具 pending_delivery_query，探针定口径）。 */
+  /** 页面两级结构：home = 场景卡片墙；进入场景后才是槽位 + 对话。 */
+  const [view, setView] = useState<"home" | "pending_delivery" | "free">("home");
+
+  /** 待到货场景槽位（P0 场景；工具 pending_delivery_query，探针定口径）。
+   * 场景钉死 Agent：pending_delivery_query 只绑在 PROCUREMENT_SOURCING 上，
+   * 用别的 Agent 跑只会得到「工具不存在」的自我描述（2026-11-23 生产实证）。 */
+  const PENDING_DELIVERY_AGENT = "PROCUREMENT_SOURCING";
   const [monthsBack, setMonthsBack] = useState(12);
   const [supplierKey, setSupplierKey] = useState("");
   const [minOverdueDays, setMinOverdueDays] = useState(0);
@@ -269,16 +286,29 @@ export default function ProcurementCopilotPage() {
     );
   }, [monthsBack, supplierKey, minOverdueDays]);
 
-  const handleSend = async (textOverride?: string) => {
+  const handleSend = async (
+    textOverride?: string,
+    options?: { agentCode?: string },
+  ) => {
     const text = (textOverride ?? question).trim();
-    if (!text || !agentCode || !modelId || busy) return;
+    // 场景会钉死自己的 Agent：与当前会话绑定不一致 ⇒ 后端 422（会话绑定 Agent），
+    // 所以这里换 Agent 时必须开新会话（清 conversationId）。
+    const scenarioAgent = options?.agentCode;
+    const effectiveAgent = scenarioAgent ?? agentCode;
+    const effectiveConversation =
+      scenarioAgent && scenarioAgent !== agentCode ? undefined : conversationId;
+    if (!text || !effectiveAgent || !modelId || busy) return;
+    if (scenarioAgent && scenarioAgent !== agentCode) {
+      setAgentCode(scenarioAgent);
+      setConversationId(undefined);
+    }
     const id = `turn-${Date.now()}`;
     setTurns((prev) => [
       ...prev,
       {
         id,
         question: text,
-        agentCode,
+        agentCode: effectiveAgent,
         resumed: undefined,
         runId: null,
         steps: [],
@@ -297,9 +327,9 @@ export default function ProcurementCopilotPage() {
       await streamCopilotMessage(
         {
           message: text,
-          agentCode,
+          agentCode: effectiveAgent,
           modelConfigId: modelId,
-          ...(conversationId ? { conversationId } : {}),
+          ...(effectiveConversation ? { conversationId: effectiveConversation } : {}),
         },
         {
           onRun: (run) => {
@@ -354,53 +384,139 @@ export default function ProcurementCopilotPage() {
   return (
     <div style={{ display: "flex", height: "100%", position: "relative" }}>
       <div style={{ flex: 1, minWidth: 0, padding: 24, overflowY: "auto" }}>
-      <h2>{t("procurement.copilot.title")}</h2>
+      <Space align="center" style={{ marginBottom: 12 }}>
+        {view !== "home" && (
+          <Button
+            icon={<LeftOutlined />}
+            onClick={() => setView("home")}
+          >
+            {t("procurement.copilot.backToScenarios")}
+          </Button>
+        )}
+        <h2 style={{ margin: 0 }}>{t("procurement.copilot.title")}</h2>
+      </Space>
+      {view === "home" ? (
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={12} lg={8}>
+            <Card
+              hoverable
+              style={{ height: "100%", borderRadius: 12 }}
+              styles={{ body: { padding: 16, display: "flex", flexDirection: "column", gap: 10 } }}
+              onClick={() => setView("pending_delivery")}
+            >
+              <div
+                style={{
+                  height: 110, borderRadius: 8,
+                  background: "linear-gradient(135deg, #e6f4ff 0%, #f0f7ff 100%)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}
+              >
+                <CarOutlined style={{ fontSize: 48, color: "#1677ff" }} />
+              </div>
+              <Text strong style={{ fontSize: 16 }}>
+                {t("procurement.copilot.scenarioDelivery")}
+              </Text>
+              <Text type="secondary" style={{ minHeight: 44 }}>
+                {t("procurement.copilot.scenarioDeliveryDesc")}
+              </Text>
+              <Button type="primary" block icon={<ArrowRightOutlined />} iconPosition="end">
+                {t("procurement.copilot.enterScenario")}
+              </Button>
+            </Card>
+          </Col>
+          <Col xs={24} md={12} lg={8}>
+            <Card
+              hoverable
+              style={{ height: "100%", borderRadius: 12 }}
+              styles={{ body: { padding: 16, display: "flex", flexDirection: "column", gap: 10 } }}
+              onClick={() => setView("free")}
+            >
+              <div
+                style={{
+                  height: 110, borderRadius: 8,
+                  background: "linear-gradient(135deg, #f0f5ff 0%, #f9f0ff 100%)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}
+              >
+                <CommentOutlined style={{ fontSize: 48, color: "#2f54eb" }} />
+              </div>
+              <Text strong style={{ fontSize: 16 }}>
+                {t("procurement.copilot.scenarioFree")}
+              </Text>
+              <Text type="secondary" style={{ minHeight: 44 }}>
+                {t("procurement.copilot.scenarioFreeDesc")}
+              </Text>
+              <Button type="primary" block icon={<ArrowRightOutlined />} iconPosition="end">
+                {t("procurement.copilot.enterScenario")}
+              </Button>
+            </Card>
+          </Col>
+        </Row>
+      ) : (
+        <>
+      {view === "pending_delivery" && (
+        <Card size="small" style={{ marginBottom: 16 }} title={t("procurement.copilot.scenarioDelivery")}>
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            <Space wrap size={8} align="center">
+              <Text type="secondary">{t("procurement.copilot.model")}</Text>
+              <Select
+                style={{ minWidth: 220 }}
+                placeholder={t("procurement.copilot.model")}
+                value={modelId}
+                onChange={setModelId}
+                options={models.map((model) => ({
+                  value: model.id,
+                  label: model.modelName,
+                }))}
+              />
+            </Space>
+            <Space wrap size={4}>
+              <Text type="secondary">{t("procurement.copilot.slotMonths")}</Text>
+              <InputNumber
+                min={1}
+                max={36}
+                value={monthsBack}
+                onChange={(v) => setMonthsBack(Number(v) || 12)}
+              />
+              <Text type="secondary">{t("procurement.copilot.slotOverdue")}</Text>
+              <InputNumber
+                min={0}
+                value={minOverdueDays}
+                onChange={(v) => setMinOverdueDays(Number(v) || 0)}
+              />
+            </Space>
+            <Space wrap size={4}>
+              <Text type="secondary">{t("procurement.copilot.slotSupplier")}</Text>
+              <Input
+                style={{ width: 140 }}
+                value={supplierKey}
+                placeholder={t("procurement.copilot.slotSupplierAll")}
+                onChange={(event) => setSupplierKey(event.target.value)}
+              />
+            </Space>
+            <Button
+              type="primary"
+              disabled={busy || !modelId}
+              onClick={() =>
+                void handleSend(composePendingDeliveryQuestion(), {
+                  agentCode: PENDING_DELIVERY_AGENT,
+                })
+              }
+            >
+              {t("procurement.copilot.scenarioRun")}
+            </Button>
+          </Space>
+        </Card>
+      )}
+      {view === "free" && (
       <Alert
         type="info"
         showIcon
         style={{ marginBottom: 12 }}
         message={t("procurement.copilot.singleTurnHint")}
       />
-      <Card size="small" style={{ marginBottom: 16 }} title={t("procurement.copilot.scenarioDelivery")}>
-        <Space wrap>
-          <Space size={4}>
-            <Text type="secondary">{t("procurement.copilot.slotMonths")}</Text>
-            <InputNumber
-              min={1}
-              max={36}
-              value={monthsBack}
-              onChange={(v) => setMonthsBack(Number(v) || 12)}
-            />
-          </Space>
-          <Space size={4}>
-            <Text type="secondary">{t("procurement.copilot.slotSupplier")}</Text>
-            <Input
-              style={{ width: 140 }}
-              value={supplierKey}
-              placeholder={t("procurement.copilot.slotSupplierAll")}
-              onChange={(event) => setSupplierKey(event.target.value)}
-            />
-          </Space>
-          <Space size={4}>
-            <Text type="secondary">{t("procurement.copilot.slotOverdue")}</Text>
-            <InputNumber
-              min={0}
-              value={minOverdueDays}
-              onChange={(v) => setMinOverdueDays(Number(v) || 0)}
-            />
-          </Space>
-          <Button
-            disabled={busy || !agentCode || !modelId}
-            onClick={() => void handleSend(composePendingDeliveryQuestion())}
-          >
-            {t("procurement.copilot.scenarioRun")}
-          </Button>
-        </Space>
-      </Card>
-      {loadError && (
-        <Alert type="error" showIcon message={loadError} style={{ marginBottom: 12 }} />
       )}
-
+      {view === "free" && (
       <Card size="small" style={{ marginBottom: 16 }}>
         <Space wrap>
           <Select
@@ -460,7 +576,14 @@ export default function ProcurementCopilotPage() {
           </Space>
         </div>
       </Card>
-
+      )}
+      {loadError && (
+        <Alert type="error" showIcon message={loadError} style={{ marginBottom: 12 }} />
+      )}
+        </>
+      )
+      }
+      {view !== "home" && (
       <Spin spinning={busy && turns.length === 0}>
         {turns.length === 0 ? (
           <Empty description={t("procurement.copilot.empty")} />
@@ -527,6 +650,7 @@ export default function ProcurementCopilotPage() {
           </Space>
         )}
       </Spin>
+      )}
       <Drawer
         title={t("procurement.copilot.traceTitle")}
         width={640}
@@ -569,7 +693,7 @@ export default function ProcurementCopilotPage() {
         )}
       </Drawer>
       </div>
-      {historyOpen ? (
+      {view !== "home" && (historyOpen ? (
         <ConversationHistoryPanel
           conversations={conversations}
           currentConversationId={conversationId}
@@ -585,7 +709,7 @@ export default function ProcurementCopilotPage() {
         />
       ) : (
         <HistoryToggleButton onClick={() => setHistoryOpen(true)} />
-      )}
+      ))}
     </div>
   );
 }

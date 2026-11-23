@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import NotFoundError, ValidationError
@@ -271,3 +271,23 @@ async def listOwnedConversations(
         )
         for conversation in conversations
     ]
+
+
+async def deleteOwnedConversation(
+    session: AsyncSession,
+    conversationId: UUID,
+    actor: object,
+) -> None:
+    """删除**自己的**会话及其轮次（别人的会话一律 404，与详情同口径）。
+
+    `procurement_copilot_turn` 没有库级 FK（见 0162），故先显式删轮次再删会话。
+    **不删 run**：编排运行是独立审计对象，删会话只断开「线程」这层组织。
+    """
+    conversation = await getOwnedConversation(session, conversationId, actor)
+    await session.execute(
+        delete(ProcurementCopilotTurn).where(
+            ProcurementCopilotTurn.conversation_id == conversationId
+        )
+    )
+    await session.delete(conversation)
+    await session.commit()

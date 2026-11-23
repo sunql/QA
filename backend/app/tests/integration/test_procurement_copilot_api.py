@@ -347,3 +347,41 @@ async def test_conversation_list_is_owner_scoped(client: AsyncClient) -> None:
     assert resp.status_code == 200
     ids = [r["conversationId"] for r in resp.json()]
     assert conversationId not in ids
+
+
+async def test_delete_conversation_removes_it_from_list(client: AsyncClient) -> None:
+    """删除自己的会话：204，随后列表与详情都不再可见。"""
+    modelId = await _seedRunnableProcurementAgent(client)
+    created = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json=_message(PROC_AGENT_CODE, modelId),
+    )
+    conversationId = created.json()["conversationId"]
+
+    resp = await client.delete(f"{LIST_PATH}/{conversationId}", headers=OWNER_HEADERS)
+    assert resp.status_code == 204
+
+    rows = (await client.get(LIST_PATH, headers=OWNER_HEADERS)).json()
+    assert conversationId not in [r["conversationId"] for r in rows]
+    detail = await client.get(f"{LIST_PATH}/{conversationId}", headers=OWNER_HEADERS)
+    assert detail.status_code == 404
+
+
+async def test_delete_conversation_is_owner_scoped(client: AsyncClient) -> None:
+    """别人的会话：删除返回 404，且原会话不受影响。"""
+    modelId = await _seedRunnableProcurementAgent(client)
+    created = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json=_message(PROC_AGENT_CODE, modelId),
+    )
+    conversationId = created.json()["conversationId"]
+
+    blocked = await client.delete(
+        f"{LIST_PATH}/{conversationId}", headers=OUTSIDER_HEADERS
+    )
+    assert blocked.status_code == 404
+
+    rows = (await client.get(LIST_PATH, headers=OWNER_HEADERS)).json()
+    assert conversationId in [r["conversationId"] for r in rows]

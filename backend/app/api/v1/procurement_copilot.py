@@ -42,6 +42,7 @@ from app.services.procurement_copilot import (
     streamCopilotRun,
 )
 from app.services.procurement_copilot_conversation import (
+    deleteOwnedConversation,
     getOwnedConversation,
     listOwnedConversations,
     listTurns,
@@ -153,6 +154,27 @@ async def listCopilotConversations(
         )
         for row in rows
     ]
+
+
+@router.delete(
+    "/copilot/conversations/{conversationId}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="删除多轮 Copilot 会话（创建者）",
+)
+async def deleteCopilotConversation(
+    conversationId: str,
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> Response:
+    """删除会话及其轮次；别人的会话 404（不泄露是否存在）。"""
+    from uuid import UUID
+
+    try:
+        parsedId = UUID(conversationId)
+    except ValueError as exc:
+        raise NotFoundError("会话不存在或无权访问") from exc
+    await deleteOwnedConversation(session, parsedId, currentUser)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(

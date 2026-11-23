@@ -50,20 +50,33 @@ def _buildClient(
     updated_at_epoch: int,
     endpoint: str,
     key_cipher: str,
+    model_name: str,
+    provider_value: str,
 ) -> BaseLlmClient:
     """构造 LLM 客户端（同步，LRU 缓存）。
 
-    cache key 包含 updated_at_epoch，确保 endpoint/key 变更后 cache miss。
+    cache key 包含 updated_at_epoch + model_name + provider：任何一项变更都要
+    重建客户端，否则运行中的进程会一直用旧配置（OpenAiClient 在构造时固化这些值）。
+
+    ⚠️ 曾经把 ``model_name`` 写死成 ``"cached-model"``、provider 写死 OPENAI，
+    导致走这条路径的调用被上游 400（2026-11-23 生产实测）。
     """
+    settings = getSettings()
+    provider = ProviderType(provider_value)
     key = decryptApiKey(key_cipher)
-    # 构造兼容 config 对象供 OpenAiClient 使用
+    # 构造兼容 config 对象供客户端使用（需含 model_name / api_endpoint / provider）
     config = type("_CacheClientConfig", (), {
         "id": config_id,
-        "model_name": "cached-model",
+        "model_name": model_name,
         "api_endpoint": endpoint,
         "api_key_encrypted": key_cipher,
+        "provider": provider.value,
     })()
-    provider = ProviderType.OPENAI
+    if provider == ProviderType.OLLAMA:
+        return OllamaClient(config, baseUrl=endpoint or settings.ollamaBaseUrl)
+    # 密文为空时按 provider 回退到环境变量 key（与 createClient 同口径）
+    if not key:
+        key = _resolveApiKey(config, provider, settings)
     # audit-fx-1.1：生产环境阻断非 https / 私有 IP endpoint
     if endpoint:
         validateEndpointUrl(endpoint)
@@ -91,6 +104,8 @@ async def getOrCreateClient(
         epoch,
         cfg.api_endpoint or "",
         cfg.api_key_encrypted or "",
+        cfg.model_name,
+        cfg.provider,
     )
 
 

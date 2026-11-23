@@ -8,7 +8,7 @@ TDD: RED(2 tests) -> GREEN(factory.py + model_config_service.py)
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,7 +56,7 @@ async def test_cache_invalidated_on_endpoint_update(dbSession: AsyncSession, mod
     # 显式更新 updated_at（确保 cache key 变化）
     original_updated_at = modelConfig.updated_time
     modelConfig.api_endpoint = "https://api.anthropic.com/v1"
-    modelConfig.updated_time = datetime.now(timezone.utc)
+    modelConfig.updated_time = datetime.now(UTC)
     await dbSession.commit()
 
     # 第二次调用：cache key 变化，应返回新客户端
@@ -76,3 +76,35 @@ async def test_cache_returns_same_object_if_unchanged(
     c1 = await llmFactory.getOrCreateClient(modelConfig.id, session=dbSession)
     c2 = await llmFactory.getOrCreateClient(modelConfig.id, session=dbSession)
     assert c1 is c2, "配置未变时 LRU cache 应返回同一实例"
+
+
+@pytest.mark.asyncio
+async def test_cache_client_uses_configured_model_name(
+    dbSession: AsyncSession,
+    modelConfig: LlmConfig,
+):
+    """客户端必须带**配置里的** model_name。
+
+    回归：``_buildClient`` 曾把 model_name 写死成 ``"cached-model"``，
+    任何走这条路径的调用都会被上游 400（2026-11-23 生产实测）。
+    """
+    client = await llmFactory.getOrCreateClient(modelConfig.id, session=dbSession)
+    assert client._modelName == "test-cache-model"
+    assert client._modelName != "cached-model"
+
+
+@pytest.mark.asyncio
+async def test_cache_invalidated_on_model_name_change(
+    dbSession: AsyncSession,
+    modelConfig: LlmConfig,
+):
+    """改 model_name 后 cache miss，新客户端带新模型名。"""
+    client1 = await llmFactory.getOrCreateClient(modelConfig.id, session=dbSession)
+
+    modelConfig.model_name = "test-cache-model-v2"
+    modelConfig.updated_time = datetime.now(UTC)
+    await dbSession.commit()
+
+    client2 = await llmFactory.getOrCreateClient(modelConfig.id, session=dbSession)
+    assert client2 is not client1
+    assert client2._modelName == "test-cache-model-v2"

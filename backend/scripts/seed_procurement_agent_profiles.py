@@ -66,8 +66,11 @@ PROFILE_SEEDS: dict[str, tuple[str, list[str], int, int]] = {
     "PROCUREMENT_SUPPLIER_SEARCH_AGENT": (
         _READONLY_BASE
         + "\n职责：供应商检索与 360 视图。按名称/编码定位供应商，"
-        "汇总其基础信息、供货关系与风险信号；多候选时列出候选并让用户确认。",
-        ["supplier_search", "supplier_360"],
+        "汇总其基础信息、供货关系与风险信号；多候选时列出候选并让用户确认。"
+        "\n定位顺序：用户只给**品类/物料描述**（如「外购标准件」）时，先调 "
+        "material_search 把品类解析成具体物料编码，再用供应商检索工具的 "
+        "materialKey 反查可供供应商；只有物料也解析不出来时才反问用户。",
+        ["material_search", "supplier_search", "supplier_360"],
         10,
         15,
     ),

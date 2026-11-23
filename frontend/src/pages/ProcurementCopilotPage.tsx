@@ -42,6 +42,8 @@ import {
   type AgentCatalogEntry,
 } from "../api/procurementKnowledge";
 import { listModels } from "../api/modelConfig";
+import { listDataSources } from "../api/datasource";
+import type { DataSource } from "../types/datasource";
 import type { ModelConfig } from "../types/modelConfig";
 import { getAgentRunSteps } from "../api/agentOrchestrationApi";
 import type { AgentRunStepRead } from "../types/agentOrchestration";
@@ -148,13 +150,20 @@ export default function ProcurementCopilotPage() {
   const loadOptions = useCallback(async () => {
     setLoadError(null);
     try {
-      const [catalog, modelRows] = await Promise.all([
+      const [catalog, modelRows, dsRows] = await Promise.all([
         getAgentCatalog(),
         listModels(true),
+        listDataSources(true),
       ]);
       const runnable = catalog.filter((entry) => entry.runnable);
       setScenarios(runnable);
       setModels(modelRows);
+      setDatasources(Array.isArray(dsRows) ? dsRows : []);
+      setDatasourceId(
+        (prev) =>
+          prev ??
+          (Array.isArray(dsRows) ? dsRows.find((d) => d.isDefault)?.id ?? dsRows[0]?.id : undefined),
+      );
       setAgentCode((prev) => prev ?? runnable[0]?.agentCode);
       setModelId((prev) => prev ?? modelRows[0]?.id);
     } catch (err) {
@@ -273,18 +282,23 @@ export default function ProcurementCopilotPage() {
    * 场景钉死 Agent：pending_delivery_query 只绑在 PROCUREMENT_SOURCING 上，
    * 用别的 Agent 跑只会得到「工具不存在」的自我描述（2026-11-23 生产实证）。 */
   const PENDING_DELIVERY_AGENT = "PROCUREMENT_SOURCING";
+  const [datasources, setDatasources] = useState<DataSource[]>([]);
+  const [datasourceId, setDatasourceId] = useState<number | undefined>();
   const [monthsBack, setMonthsBack] = useState(12);
   const [supplierKey, setSupplierKey] = useState("");
   const [minOverdueDays, setMinOverdueDays] = useState(0);
 
   const composePendingDeliveryQuestion = useCallback(() => {
     const supplier = supplierKey.trim() || "全部";
+    const ds = datasources.find((d) => d.id === datasourceId);
+    const dsText = ds ? `数据源 id=${ds.id}（${ds.name}）` : "数据源=默认";
     return (
-      `分析待到货情况：时间窗=近${monthsBack}个月；供应商=${supplier}；` +
-      `最低逾期天数=${minOverdueDays}。请调用 pending_delivery_query 工具，` +
+      `分析待到货情况：${dsText}；时间窗=近${monthsBack}个月；供应商=${supplier}；` +
+      `最低逾期天数=${minOverdueDays}。请调用 pending_delivery_query 工具` +
+      `（datasourceId=${datasourceId ?? "缺省"}），` +
       "按供应商汇总欠交量并给催货建议，引用订单号与物料编码。"
     );
-  }, [monthsBack, supplierKey, minOverdueDays]);
+  }, [monthsBack, supplierKey, minOverdueDays, datasources, datasourceId]);
 
   const handleSend = async (
     textOverride?: string,
@@ -467,6 +481,19 @@ export default function ProcurementCopilotPage() {
                 options={models.map((model) => ({
                   value: model.id,
                   label: model.modelName,
+                }))}
+              />
+            </Space>
+            <Space wrap size={4}>
+              <Text type="secondary">{t("procurement.copilot.slotDatasource")}</Text>
+              <Select
+                style={{ minWidth: 200 }}
+                placeholder={t("procurement.copilot.slotDatasource")}
+                value={datasourceId}
+                onChange={setDatasourceId}
+                options={datasources.map((d) => ({
+                  value: d.id,
+                  label: d.name,
                 }))}
               />
             </Space>

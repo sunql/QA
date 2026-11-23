@@ -23,12 +23,14 @@ const api = vi.hoisted(() => ({
   listCopilotConversations: vi.fn(),
   getCopilotConversation: vi.fn(),
   deleteCopilotConversation: vi.fn(),
+  listDataSources: vi.fn(),
 }));
 
 vi.mock("../../api/procurementKnowledge", () => ({
   getAgentCatalog: api.getAgentCatalog,
 }));
 vi.mock("../../api/modelConfig", () => ({ listModels: api.listModels }));
+vi.mock("../../api/datasource", () => ({ listDataSources: api.listDataSources }));
 vi.mock("../../api/procurementCopilot", () => ({
   streamCopilotMessage: api.streamCopilotMessage,
   listCopilotConversations: api.listCopilotConversations,
@@ -41,6 +43,10 @@ vi.mock("../../api/agentOrchestrationApi", () => ({
 
 beforeEach(() => {
   api.listCopilotConversations.mockResolvedValue([]);
+  api.listDataSources.mockResolvedValue([
+    { id: 1, name: "THBI Oracle", type: "oracle", isDefault: true },
+    { id: 10, name: "SRM-TH-01", type: "mysql", isDefault: false },
+  ]);
   api.getCopilotConversation.mockReset();
   api.deleteCopilotConversation.mockReset();
   api.deleteCopilotConversation.mockResolvedValue(undefined);
@@ -529,6 +535,9 @@ describe("ProcurementCopilotPage 待到货场景", () => {
     expect(message).toContain("近12个月");
     expect(message).toContain("供应商=全部");
     expect(message).toContain("最低逾期天数=0");
+    // 数据源槽位：默认选中 isDefault 源，消息里带 id 给工具取
+    expect(message).toContain("数据源 id=1");
+    expect(message).toContain("datasourceId=1");
     // 场景钉死 Agent：即使页面默认选了别的 Agent，也要以 SOURCING 发起
     expect(payloads[0].agentCode).toBe("PROCUREMENT_SOURCING");
     await waitFor(() => expect(screen.getByText("欠交汇总")).toBeTruthy());
@@ -645,5 +654,41 @@ describe("ProcurementCopilotPage 场景卡片墙（首页）", () => {
       .find((el) => el.textContent?.trim() === "场景");
     fireEvent.click(backBtn as HTMLElement);
     expect(screen.getByText("待到货 / 逾期未到")).toBeTruthy();
+  });
+});
+
+
+describe("ProcurementCopilotPage 数据源槽位", () => {
+  it("切换数据源后，场景消息带新数据源 id", async () => {
+    mockOptions();
+    const payloads: Array<Record<string, unknown>> = [];
+    api.streamCopilotMessage.mockImplementation(async (payload, handlers) => {
+      payloads.push(payload);
+      handlers.onDone?.({
+        runId: "r-ds",
+        status: "SUCCEEDED",
+        answer: "ok",
+        pauseCode: null,
+        errorCode: null,
+        errorMessage: null,
+        totalTokens: 1,
+        cost: 0,
+        stepsUrl: "/api/v1/agent-runs/r-ds/steps",
+      });
+    });
+
+    renderScenario();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+
+    // 场景卡里 Select 顺序：模型在上、数据源在下
+    const selects = screen.getAllByRole("combobox");
+    fireEvent.mouseDown(selects[1]);
+    fireEvent.click(await waitFor(() => screen.getByText("SRM-TH-01")));
+
+    fireEvent.click(screen.getByRole("button", { name: /运行场景/ }));
+    await waitFor(() => expect(payloads).toHaveLength(1));
+    const message = String(payloads[0].message);
+    expect(message).toContain("数据源 id=10");
+    expect(message).toContain("datasourceId=10");
   });
 });

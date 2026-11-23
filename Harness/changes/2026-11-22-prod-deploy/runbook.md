@@ -3,7 +3,8 @@
 - **代码版本**：`feat/ontology-evolution @ e4e73339`（= PR #177 合并后的 main 树；部署前 #177 必须先合 main）
 - **部署日期**：2026-11-22（开发机产出镜像与本文档，**宿主机逐条执行**；开发机不直连生产）
 - **本次动**：**前端 + 后端两个容器** + 数据库迁移（**0152 → 0169**，共 16 个）
-- **不动**：postgres / neo4j / milvus / ollama 容器；不改 `/opt/qa-system/docker/.env`
+- **不动**：postgres / neo4j / milvus / ollama 容器；**不改** `/opt/qa-system/docker/.env` 的
+  `SECRET_KEY` / 口令类配置（**仅允许追加 `ENABLE_*` 开关行**，改完必须 `--force-recreate backend`，见 §5.5）
 
 ---
 
@@ -97,7 +98,8 @@ qa_compose() {
 qa_compose config --quiet && echo COMPOSE_OK
 qa_compose config --images        # 回填 §4 的 tag 目标名（backend/frontend 各自实际引用名）
 
-# ⚠️ 不要改 /opt/qa-system/docker/.env（SECRET_KEY 是 Fernet 主密钥）
+# ⚠️ 不要改写 /opt/qa-system/docker/.env（SECRET_KEY 是 Fernet 主密钥）
+#    只允许「追加 ENABLE_* 开关行」，且改完必须 force-recreate backend（§5.5）
 
 # ① 现役容器与镜像（回滚锚点以实际输出为准）
 docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'backend|frontend'
@@ -182,16 +184,95 @@ docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'backend|fron
 > - 生产无 worker 容器 ⇒ 发现运行的异步任务走 API 进程内 `BackgroundTasks`（单进程）；
 >   本批不新增 worker 容器。
 
-### 5.5 按需开启的开关（本次实测会用到）
+### 5.5 按需开启的开关
 
-生产 `.env` 默认可能没开这些；按业务需要补齐后 **recreate backend**（改 env 后 `restart` 无效）：
+生产 `.env` 默认可能没开这些；按业务需要补齐后 **必须 recreate backend**（改 env 后 `restart` **无效**）。
 
 | 开关 | 打开后出现 | 影响面 |
 |---|---|---|
 | `ENABLE_SEMANTIC_RELEASE=true` | `/api/v1/semantic/releases`（语义发布页） | admin-only；关闭时整组 404 |
 | `ENABLE_KNOWLEDGE_FACADE=true` | `/api/v1/procurement/agents/catalog`、知识查询 | 读侧登录可用；关闭时 404（Copilot 页会报 catalog 404） |
 | `ENABLE_AGENT_ORCHESTRATION=true` | `/api/v1/procurement/copilot/*`、agent-runs | **Copilot 页面必需**；关闭时 404 |
-| `ENABLE_WORKFLOW=true` | `/api/v1/workflow/*`、`/procurement/rfqs/*` | 仅在用 RFQ/审批时开 |
+| `ENABLE_WORKFLOW=true` | `/api/v1/workflow/*`、`/procurement/rfqs/*` | RFQ 草稿 + P5 审批写面；关闭时 404 |
+
+#### 5.5.1 2026-11-23 生产实测已开清单
+
+截至 2026-11-23，生产 `/opt/qa-system/docker/.env` 已全部为：
+
+```
+ENABLE_SEMANTIC_RELEASE=true      # 语义发布页
+ENABLE_KNOWLEDGE_FACADE=true      # agents/catalog、知识查询（Copilot 页依赖）
+ENABLE_AGENT_ORCHESTRATION=true   # copilot/*、agent-runs
+ENABLE_WORKFLOW=true              # workflow/*、procurement/rfqs/*（询价草稿）
+AUTH_MODE=real
+AUTH_STUB_ENABLED=false
+ALLOW_STUB_WHEN_REAL=false
+```
+
+#### 5.5.2 顺序铁律：先改 `.env`，后 create —— 反了就是「改了没生效」
+
+**事故实证（2026-11-23）**：`ENABLE_WORKFLOW=true` 写进 `.env` 的时间（13:42:26）比
+`qa-backend` 容器创建时间（13:38:40）晚 **3 分 46 秒** ⇒ 容器里没有该变量 ⇒
+`/api/v1/procurement/rfqs/drafts` 与 `/api/v1/workflow/instances` 双双 **404**，
+而 `.env` 里明明写着 `true`。
+
+原因：compose 的 `env_file` **只在创建容器时注入一次**，`restart` / `start` 都不会重读。
+
+```bash
+qa_compose() {
+  docker-compose -p qa-system \
+    --env-file /opt/qa-system/docker/.env \
+    -f /opt/qa-system/docker/docker-compose.centos7.yml "$@"
+}
+
+# ① 备份（.env 含 SECRET_KEY，禁止覆盖式重写）
+cp /opt/qa-system/docker/.env /opt/qa-system/docker/.env.bak_$(date +%Y%m%d_%H%M)
+
+# ② 只动目标开关行：有则改，无则追加
+if grep -q '^ENABLE_WORKFLOW=' /opt/qa-system/docker/.env; then
+  sed -i 's/^ENABLE_WORKFLOW=.*/ENABLE_WORKFLOW=true/' /opt/qa-system/docker/.env
+else
+  printf '\nENABLE_WORKFLOW=true\n' >> /opt/qa-system/docker/.env
+fi
+
+# ③ 必须 recreate（--no-deps 不碰 postgres/neo4j/milvus/ollama）
+qa_compose up -d --no-build --no-deps --force-recreate backend
+```
+
+#### 5.5.3 生效验证：只认状态码 404 → 401/403
+
+```bash
+# ① env 是否真的进了容器（对比容器创建时间与 .env mtime，能一眼看出「反序」）
+docker exec qa-backend env | grep -E "ENABLE_WORKFLOW|ENABLE_SEMANTIC_RELEASE"
+stat -c '%y  .env' /opt/qa-system/docker/.env
+docker inspect qa-backend --format '{{.Created}}'
+
+# ② 进程内设置
+docker exec qa-backend python -c "from app.config import getSettings; print(getSettings().enableWorkflow)"
+
+# ③ 路由面：401/403 = 已注册（正常）；404 = 未注册
+curl -s -o /dev/null -w "rfq_drafts=%{http_code}\n" http://localhost:8000/api/v1/procurement/rfqs/drafts
+curl -s -o /dev/null -w "workflow=%{http_code}\n"   http://localhost:8000/api/v1/workflow/instances
+```
+
+> **不要用 `app.routes` 判断路由在不在**：FastAPI 0.141 起 `include_router()` 被包成
+> `_IncludedRouter`，直接迭代 `app.routes` 只能看到 app 自己声明的少数路由 ⇒
+> 会得到「路由不存在」的**空集假阴性**（本地实测：`app.routes` 70 条 vs 真实 456 条）。
+> 确需枚举时用公开 API：
+>
+> ```bash
+> docker exec qa-backend python -c "
+> from fastapi.routing import iter_route_contexts
+> from app.main import app
+> print([c.path for c in iter_route_contexts(app.routes) if 'rfqs' in c.path][:3])
+> "
+> ```
+
+#### 5.5.4 `ENABLE_WORKFLOW` 的安全前置
+
+该开关同时放出 `/api/v1/workflow/*` —— **审批推进与业务放行的写面**。启用前必须确认
+`.env` 是 `AUTH_MODE=real` 且 `AUTH_STUB_ENABLED=false` / `ALLOW_STUB_WHEN_REAL` 不为 `1`；
+否则任意客户端可伪造 `X-User-Roles` 冒充审批人（`app/config.py:534` 只**告警不阻断**启动）。
 
 Copilot 首次启用还需种子（幂等，按顺序）：
 
@@ -224,6 +305,11 @@ done; echo
 
 # 语义发布路由（ENABLE_SEMANTIC_RELEASE=true 时）
 curl -s -o /dev/null -w "releases=%{http_code}\n" http://localhost:8000/api/v1/semantic/releases
+
+# 开关组路由（404 = 开关没进进程，见 §5.5.2 的「先改 .env 后 recreate」）
+curl -s -o /dev/null -w "catalog=%{http_code}\n"  http://localhost:8000/api/v1/procurement/agents/catalog
+curl -s -o /dev/null -w "rfq_drafts=%{http_code}\n" http://localhost:8000/api/v1/procurement/rfqs/drafts
+curl -s -o /dev/null -w "workflow=%{http_code}\n"   http://localhost:8000/api/v1/workflow/instances
 
 # 新表已建
 docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dt"' \
@@ -284,7 +370,8 @@ qa_compose up -d --no-build --no-deps --force-recreate backend frontend
 ## 8. 本批明确没做的事
 
 - ❌ 不新增 worker 容器（生产保持无 worker 拓扑；发现运行走 API 进程内后台任务）；
-- ❌ 不改生产 `.env`、不动 ENABLE_* 开关（`ENABLE_SEMANTIC_RELEASE` 未开时发布路由 404，属预期）；
+- ❌ 不改生产 `.env` 的 `SECRET_KEY` / 口令类配置；`ENABLE_*` 开关由业务按需开启（步骤与顺序见 §5.5，
+  截至 2026-11-23 四个开关均已开），**未开时对应路由 404 属预期**；
 - ❌ 不动 postgres / neo4j / milvus / ollama 容器与数据；
 - ❌ 不做「采纳即自动写本体」（仅策略登记：`Harness/rules/本体发现与落地边界.md`）；
 - ❌ 不带任何未合 main 的分支改动（部署基线 = #177 合并后的 main 树）。

@@ -88,7 +88,10 @@ PROFILE_SEEDS: dict[str, tuple[str, list[str], int, int]] = {
         + "\n职责：采购寻源。用户给物料或需求时，先定位物料 → 找可供供应商 →"
         " 逐个补充 360 视图/风险/历史采购，最后给出**候选清单 + 每家的依据与风险提示**；"
         "\n候选为空或数据缺失时，明确说明缺哪一环（物料没有供应商关系 / 主数据缺失），"
-        "不要用常识补候选。",
+        "不要用常识补候选。"
+        + "\n待到货分析：用户问「待到货/逾期未到/欠交」时，调 pending_delivery_query"
+          "（时间窗/供应商/逾期天数从问题里取，缺省近 12 个月），按供应商汇总后给催货建议；"
+          "答案里引用订单号与物料编码。",
         [
             "material_search",
             "supplier_search",
@@ -97,6 +100,7 @@ PROFILE_SEEDS: dict[str, tuple[str, list[str], int, int]] = {
             "graph_traverse",
             "purchase_history_query",
             "policy_compliance_check",
+            "pending_delivery_query",
         ],
         15,
         20,

@@ -720,3 +720,191 @@ async def purchaseHistoryHandler(
             f"明细返回 {len(rows)} 行。"
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# 待到货 / 逾期未到（pending_delivery_query，2026-11-23 探针定口径）
+# ---------------------------------------------------------------------------
+
+_PENDING_TABLE = "ZJTH.PORDERQ"
+#: 健全性阈值：欠交量 ≥ 1e6 视为源侧脏数据（探针实测 43 行「数量=物料码」），
+#: 剔除但**显式回报**（excludedRows），不静默丢。
+_OPEN_QTY_SANITY_MAX = 1_000_000
+
+
+def buildPendingDeliverySummarySql(*, monthsBack: int, today: date) -> str:
+    """欠交汇总（单语句）：行数 / 总欠交量 / 逾期行数 / 脏数据行数。
+
+    欠交 = QTYSTU_0 - RCPQTYSTU_0（库存单位，对账抽样 10/10 一致）；
+    逾期 = today - EXTRCPDAT_0 > 0（EXTRCPDAT 全非空，无需回退）。
+    """
+    since = _minusMonths(today, max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX)))
+    todayLit = f"DATE '{today.isoformat()}'"
+    return f"""
+SELECT
+  SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} THEN 1 ELSE 0 END) AS OPEN_LINES,
+  NVL(SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} THEN OPEN_QTY ELSE 0 END), 0) AS OPEN_QTY,
+  SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} AND OVERDUE_DAYS > 0 THEN 1 ELSE 0 END) AS OVERDUE_LINES,
+  SUM(CASE WHEN OPEN_QTY >= {_OPEN_QTY_SANITY_MAX} THEN 1 ELSE 0 END) AS EXCLUDED_ROWS
+FROM (
+  SELECT QTYSTU_0 - RCPQTYSTU_0 AS OPEN_QTY,
+         TRUNC({todayLit}) - TRUNC(EXTRCPDAT_0) AS OVERDUE_DAYS
+  FROM {_PENDING_TABLE}
+  WHERE ORDDAT_0 >= DATE '{since.isoformat()}'
+)""".strip()
+
+
+def buildPendingDeliveryBySupplierSql(
+    *, monthsBack: int, today: date, limit: int
+) -> str:
+    """按供应商聚合欠交（催货清单的分组视角）。"""
+    since = _minusMonths(today, max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX)))
+    todayLit = f"DATE '{today.isoformat()}'"
+    limit = max(1, min(limit, _MAX_LIMIT))
+    return f"""
+SELECT
+  BPSNUM_0 AS SUPPLIER_CODE,
+  COUNT(*) AS OPEN_LINES,
+  SUM(OPEN_QTY) AS OPEN_QTY,
+  SUM(CASE WHEN OVERDUE_DAYS > 0 THEN 1 ELSE 0 END) AS OVERDUE_LINES
+FROM (
+  SELECT BPSNUM_0,
+         QTYSTU_0 - RCPQTYSTU_0 AS OPEN_QTY,
+         TRUNC({todayLit}) - TRUNC(EXTRCPDAT_0) AS OVERDUE_DAYS
+  FROM {_PENDING_TABLE}
+  WHERE ORDDAT_0 >= DATE '{since.isoformat()}'
+    AND QTYSTU_0 - RCPQTYSTU_0 > 0
+    AND QTYSTU_0 - RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}
+)
+GROUP BY BPSNUM_0
+ORDER BY OPEN_QTY DESC
+FETCH FIRST {limit} ROWS ONLY""".strip()
+
+
+def buildPendingDeliveryLinesSql(
+    *,
+    monthsBack: int,
+    today: date,
+    supplierKey: str | None,
+    minOverdueDays: int | None,
+    limit: int,
+) -> str:
+    """TOP 欠交订单行（明细下钻）：可选供应商 / 逾期下限过滤。"""
+    since = _minusMonths(today, max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX)))
+    todayLit = f"DATE '{today.isoformat()}'"
+    limit = max(1, min(limit, _MAX_LIMIT))
+    conds = [
+        f"ORDDAT_0 >= DATE '{since.isoformat()}'",
+        "QTYSTU_0 - RCPQTYSTU_0 > 0",
+        f"QTYSTU_0 - RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}",
+    ]
+    if supplierKey:
+        conds.append(f"BPSNUM_0 = '{_esc(supplierKey)}'")
+    if minOverdueDays:
+        conds.append(f"TRUNC({todayLit}) - TRUNC(EXTRCPDAT_0) >= {int(minOverdueDays)}")
+    where = " AND ".join(conds)
+    return f"""
+SELECT POHNUM_0, POPLIN_0, ITMREF_0, BPSNUM_0,
+       QTYSTU_0 AS ORDERED_QTY, RCPQTYSTU_0 AS RECEIVED_QTY,
+       (QTYSTU_0 - RCPQTYSTU_0) AS OPEN_QTY,
+       EXTRCPDAT_0,
+       TRUNC({todayLit}) - TRUNC(EXTRCPDAT_0) AS OVERDUE_DAYS
+FROM {_PENDING_TABLE}
+WHERE {where}
+ORDER BY (QTYSTU_0 - RCPQTYSTU_0) DESC
+FETCH FIRST {limit} ROWS ONLY""".strip()
+
+
+def _camelPendingRow(row: dict[str, Any]) -> dict[str, Any]:
+    expected = _col(row, "EXTRCPDAT_0")
+    return {
+        "poNo": _col(row, "POHNUM_0"),
+        "poLine": _col(row, "POPLIN_0"),
+        "materialCode": _col(row, "ITMREF_0"),
+        "supplierCode": _col(row, "BPSNUM_0"),
+        "orderedQty": _col(row, "ORDERED_QTY"),
+        "receivedQty": _col(row, "RECEIVED_QTY"),
+        "openQty": _col(row, "OPEN_QTY"),
+        "expectedDate": str(expected) if expected else None,
+        "overdueDays": _col(row, "OVERDUE_DAYS"),
+    }
+
+
+async def pendingDeliveryHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """`pending_delivery_query`：欠交汇总 + 按供应商 + TOP 明细（三段只读 SQL）。
+
+    脏数据（欠交量 ≥ 1e6 的源侧录入错误）剔除并在 summary.excludedRows 显式回报。
+    """
+    monthsBack = int(args.get("monthsBack") or 12)
+    supplierKey = str(args.get("supplierKey") or "").strip() or None
+    minOverdueDays = args.get("minOverdueDays")
+    limit = int(args.get("limit") or 20)
+
+    ds = await _resolveBusinessDatasource(session, ctx)
+    _ensureActive(ds)
+    adapter = _adapterFor(ds.id, ds)
+    today = date.today()
+
+    summaryRows = await adapter.execute_read_only(
+        buildPendingDeliverySummarySql(monthsBack=monthsBack, today=today)
+    )
+    summaryRow = summaryRows[0] if summaryRows else {}
+    openLines = int(_col(summaryRow, "OPEN_LINES") or 0)
+    if openLines == 0:
+        return ToolResult(
+            data={
+                "via": "business_db", "datasourceId": ds.id,
+                "summary": {"openLines": 0, "openQty": 0, "overdueLines": 0,
+                            "excludedRows": int(_col(summaryRow, "EXCLUDED_ROWS") or 0)},
+                "bySupplier": [], "topLines": [],
+            },
+            answer=f"近 {monthsBack} 个月没有欠交订单行（全部已交清）。",
+        )
+
+    supplierRows = await adapter.execute_read_only(
+        buildPendingDeliveryBySupplierSql(monthsBack=monthsBack, today=today, limit=5)
+    )
+    lineRows = await adapter.execute_read_only(
+        buildPendingDeliveryLinesSql(
+            monthsBack=monthsBack, today=today,
+            supplierKey=supplierKey, minOverdueDays=minOverdueDays, limit=limit,
+        )
+    )
+
+    bySupplier = [
+        {
+            "supplierCode": _col(r, "SUPPLIER_CODE"),
+            "openLines": int(_col(r, "OPEN_LINES") or 0),
+            "openQty": _col(r, "OPEN_QTY"),
+            "overdueLines": int(_col(r, "OVERDUE_LINES") or 0),
+        }
+        for r in supplierRows
+    ]
+    topLines = [_camelPendingRow(r) for r in lineRows]
+    summary = {
+        "openLines": openLines,
+        "openQty": _col(summaryRow, "OPEN_QTY"),
+        "overdueLines": int(_col(summaryRow, "OVERDUE_LINES") or 0),
+        "excludedRows": int(_col(summaryRow, "EXCLUDED_ROWS") or 0),
+    }
+    topSuppliers = "、".join(
+        f"{s['supplierCode']}({s['openQty']})" for s in bySupplier[:3]
+    )
+    excludedNote = (
+        f"；另有 {summary['excludedRows']} 行源侧数量异常已剔除"
+        if summary["excludedRows"]
+        else ""
+    )
+    return ToolResult(
+        data={
+            "via": "business_db", "datasourceId": ds.id,
+            "summary": summary, "bySupplier": bySupplier, "topLines": topLines,
+        },
+        answer=(
+            f"近 {monthsBack} 个月欠交 {openLines} 行、总量 {summary['openQty']}；"
+            f"其中逾期 {summary['overdueLines']} 行{excludedNote}。"
+            f"欠交 TOP 供应商：{topSuppliers}。"
+        ),
+    )

@@ -531,3 +531,125 @@ async def test_policy_compliance_requiresClaim() -> None:
     result = await mod.policyComplianceHandler(object(), {}, SimpleNamespace())
 
     assert result.data["evidence"] == []
+
+
+# ── 待到货/逾期未到（pending_delivery_query，2026-11-23 探针定口径） ─────────
+#
+# 口径（探针 scripts/probe_pending_delivery.py 实测得出）：
+#   欠交量 = QTYSTU_0 - RCPQTYSTU_0（同为库存单位；对账抽样 10/10 一致）
+#   健全性 = 欠交量 < 1e6（43 行「数量=物料码」脏数据必须剔除且显式回报）
+#   时间窗 = ORDDAT_0 >= today - monthsBack 月（DATE 字面量，确定性可测）
+#   逾期   = today - EXTRCPDAT_0 > 0（EXTRCPDAT 全非空，无需回退）
+
+
+def test_pending_delivery_registered() -> None:
+    assert "pending_delivery_query" in BUILTIN_HANDLERS
+    from app.services.agent_tools import ARG_EXTRACTORS
+
+    assert "pending_delivery_query" in ARG_EXTRACTORS
+
+
+def test_pending_delivery_in_tool_seed() -> None:
+    """工具元数据必须进种子（input_schema 给 planner 出参依据）。"""
+    from scripts.seed_agent_tool_configs import TOOL_SEEDS
+
+    entry = next((s for s in TOOL_SEEDS if s["name"] == "pending_delivery_query"), None)
+    assert entry is not None, "pending_delivery_query 必须进 TOOL_SEEDS"
+    schema = entry["input_schema"]
+    assert schema["additionalProperties"] is False
+    for key in ("monthsBack", "supplierKey", "minOverdueDays", "limit"):
+        assert key in schema["properties"]
+
+
+def test_build_pending_delivery_summary_sql() -> None:
+    from app.services.agent_tools_procurement import buildPendingDeliverySummarySql
+
+    sql = buildPendingDeliverySummarySql(monthsBack=12, today=date(2026, 11, 23))
+    assert sql.strip().upper().startswith("SELECT")
+    assert "PORDERQ" in sql
+    # 时间窗：12 个月前 = 2025-11-23
+    assert "DATE '2025-11-23'" in sql
+    # 健全性阈值 + 欠交口径
+    assert "QTYSTU_0 - RCPQTYSTU_0" in sql
+    assert "1000000" in sql
+    # 脏数据必须显式计数（不静默丢）
+    assert "EXCLUDED_ROWS" in sql
+    assert ";" not in sql
+
+
+def test_build_pending_delivery_lines_sql_filters() -> None:
+    from app.services.agent_tools_procurement import buildPendingDeliveryLinesSql
+
+    sql = buildPendingDeliveryLinesSql(
+        monthsBack=12, today=date(2026, 11, 23),
+        supplierKey=None, minOverdueDays=None, limit=20,
+    )
+    assert "BPSNUM_0 = " not in sql, "无供应商 ⇒ 不加过滤"
+    assert "FETCH FIRST 20 ROWS ONLY" in sql.upper()
+    assert "OVERDUE_DAYS" in sql
+
+    sql2 = buildPendingDeliveryLinesSql(
+        monthsBack=3, today=date(2026, 11, 23),
+        supplierKey="F109", minOverdueDays=30, limit=5,
+    )
+    assert "BPSNUM_0 = 'F109'" in sql2
+    assert ">= 30" in sql2, "minOverdueDays 过滤逾期下限"
+    assert "DATE '2026-08-23'" in sql2
+    assert "FETCH FIRST 5 ROWS ONLY" in sql2.upper()
+
+
+@pytest.mark.asyncio
+async def test_pending_delivery_handler_shapes_result(monkeypatch) -> None:
+    """handler：三段只读 SQL（汇总/按供应商/TOP 行），脏数据行数显式回报。"""
+    from app.services import agent_tools_procurement
+
+    captured: list[str] = []
+
+    class _FakeAdapter:
+        async def execute_read_only(self, sql: str):
+            captured.append(sql)
+            if "EXCLUDED_ROWS" in sql:
+                return [{
+                    "OPEN_LINES": 12, "OPEN_QTY": 5000.0,
+                    "OVERDUE_LINES": 7, "EXCLUDED_ROWS": 3,
+                }]
+            if "GROUP BY BPSNUM_0" in sql.upper():
+                return [
+                    {"SUPPLIER_CODE": "F109", "OPEN_LINES": 5,
+                     "OPEN_QTY": 3000.0, "OVERDUE_LINES": 4},
+                    {"SUPPLIER_CODE": "B170", "OPEN_LINES": 3,
+                     "OPEN_QTY": 1200.0, "OVERDUE_LINES": 1},
+                ]
+            return [
+                {"POHNUM_0": "T22511POH1251Q", "POPLIN_0": 1000,
+                 "ITMREF_0": "502447700001", "BPSNUM_0": "F109",
+                 "ORDERED_QTY": 1000000.0, "RECEIVED_QTY": 9600.0,
+                 "OPEN_QTY": 990400.0, "EXTRCPDAT_0": "2025-11-28",
+                 "OVERDUE_DAYS": 360},
+            ]
+
+    monkeypatch.setattr(
+        agent_tools_procurement, "_adapterFor", lambda dsId, ds: _FakeAdapter()
+    )
+    monkeypatch.setattr(
+        agent_tools_procurement, "_resolveBusinessDatasource",
+        async_simple(ds=SimpleNamespace(id=1, name="THBI", is_active=True)),
+    )
+
+    from app.services.agent_tools_procurement import pendingDeliveryHandler
+
+    result = await pendingDeliveryHandler(
+        None, {"monthsBack": 12}, SimpleNamespace()
+    )
+    assert len(captured) == 3, "汇总 + 按供应商 + TOP 行，三段只读 SQL"
+    assert result.data["summary"]["openLines"] == 12
+    assert result.data["summary"]["excludedRows"] == 3, "脏数据必须显式回报"
+    assert result.data["bySupplier"][0]["supplierCode"] == "F109"
+    assert result.data["topLines"][0]["overdueDays"] == 360
+    assert "欠交" in result.answer and "12" in result.answer
+
+
+def async_simple(ds):
+    async def _resolve(session, ctx):
+        return ds
+    return _resolve

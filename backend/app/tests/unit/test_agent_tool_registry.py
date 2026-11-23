@@ -74,7 +74,7 @@ class TestBuiltinRegistry:
             "material_search", "supplier_search", "purchase_history_query",
             "quotation_query", "procurement_policy_search",
             "contract_document_search", "quotation_compare",
-            "policy_compliance_check",
+            "policy_compliance_check", "pending_delivery_query",
             "wiki_search", "wiki_read", "rule_evaluate", "coverage_status",
         }
 
@@ -85,7 +85,7 @@ class TestBuiltinRegistry:
             "material_search", "supplier_search", "purchase_history_query",
             "quotation_query", "procurement_policy_search",
             "contract_document_search", "quotation_compare",
-            "policy_compliance_check",
+            "policy_compliance_check", "pending_delivery_query",
             "wiki_text", "wiki_no_args",
         }
 

@@ -53,6 +53,9 @@ READ_ONLY_HANDLER_REFS = frozenset({
     "contract_document_search",
     "quotation_compare",
     "policy_compliance_check",
+    # 待到货/逾期未到（2026-11-23）：三段只读 SELECT（汇总/按供应商/TOP 行），
+    # 欠交 = 订购-已收（库存单位），脏数据（≥1e6）剔除且显式回报。
+    "pending_delivery_query",
 })
 
 BUILTIN_HANDLER_KIND = "BUILTIN"

@@ -22,6 +22,7 @@ const api = vi.hoisted(() => ({
   getAgentRunSteps: vi.fn(),
   listCopilotConversations: vi.fn(),
   getCopilotConversation: vi.fn(),
+  deleteCopilotConversation: vi.fn(),
 }));
 
 vi.mock("../../api/procurementKnowledge", () => ({
@@ -32,6 +33,7 @@ vi.mock("../../api/procurementCopilot", () => ({
   streamCopilotMessage: api.streamCopilotMessage,
   listCopilotConversations: api.listCopilotConversations,
   getCopilotConversation: api.getCopilotConversation,
+  deleteCopilotConversation: api.deleteCopilotConversation,
 }));
 vi.mock("../../api/agentOrchestrationApi", () => ({
   getAgentRunSteps: api.getAgentRunSteps,
@@ -40,6 +42,8 @@ vi.mock("../../api/agentOrchestrationApi", () => ({
 beforeEach(() => {
   api.listCopilotConversations.mockResolvedValue([]);
   api.getCopilotConversation.mockReset();
+  api.deleteCopilotConversation.mockReset();
+  api.deleteCopilotConversation.mockResolvedValue(undefined);
   localStorage.clear();
 });
 
@@ -441,5 +445,103 @@ describe("ProcurementCopilotPage 历史侧栏", () => {
       expect(api.getCopilotConversation).toHaveBeenCalledWith("c-a"),
     );
     await waitFor(() => expect(screen.getByText("会话A的答案")).toBeTruthy());
+  });
+});
+
+describe("ProcurementCopilotPage 删除会话", () => {
+  it("侧栏删除：Popconfirm 确认后调接口并刷新列表", async () => {
+    mockOptions();
+    api.listCopilotConversations.mockResolvedValue([
+      {
+        conversationId: "c-del",
+        agentCode: "PROCUREMENT_SOURCING",
+        modelConfigId: 3,
+        turnCount: 1,
+        lastQuestion: "要删的问题",
+        updatedAt: "2026-11-23T10:00:00Z",
+      },
+    ]);
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("要删的问题")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: /删除会话/ }));
+    await waitFor(() =>
+      expect(screen.getByText(/确定删除该会话吗/)).toBeTruthy(),
+    );
+
+    const okButtons = screen.getAllByRole("button", { name: /确\s?定/ });
+    fireEvent.click(okButtons[okButtons.length - 1]);
+
+    await waitFor(() =>
+      expect(api.deleteCopilotConversation).toHaveBeenCalledWith("c-del"),
+    );
+    await waitFor(() =>
+      expect(api.listCopilotConversations.mock.calls.length).toBeGreaterThan(1),
+    );
+  });
+});
+
+
+describe("ProcurementCopilotPage 待到货场景", () => {
+  it("场景卡：默认槽位运行 ⇒ 发出的消息带 pending_delivery_query 与时间窗", async () => {
+    mockOptions();
+    const payloads: Array<Record<string, unknown>> = [];
+    api.streamCopilotMessage.mockImplementation(async (payload, handlers) => {
+      payloads.push(payload);
+      handlers.onDone?.({
+        runId: "r-s1",
+        status: "SUCCEEDED",
+        answer: "欠交汇总",
+        pauseCode: null,
+        errorCode: null,
+        errorMessage: null,
+        totalTokens: 1,
+        cost: 0,
+        stepsUrl: "/api/v1/agent-runs/r-s1/steps",
+      });
+    });
+
+    renderPage();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /运行场景/ }));
+
+    await waitFor(() => expect(payloads).toHaveLength(1));
+    const message = String(payloads[0].message);
+    expect(message).toContain("pending_delivery_query");
+    expect(message).toContain("近12个月");
+    expect(message).toContain("供应商=全部");
+    expect(message).toContain("最低逾期天数=0");
+    await waitFor(() => expect(screen.getByText("欠交汇总")).toBeTruthy());
+  });
+
+  it("场景卡：填供应商与逾期天数后消息带槽位值", async () => {
+    mockOptions();
+    const payloads: Array<Record<string, unknown>> = [];
+    api.streamCopilotMessage.mockImplementation(async (payload, handlers) => {
+      payloads.push(payload);
+      handlers.onDone?.({
+        runId: "r-s2",
+        status: "SUCCEEDED",
+        answer: "ok",
+        pauseCode: null,
+        errorCode: null,
+        errorMessage: null,
+        totalTokens: 1,
+        cost: 0,
+        stepsUrl: "/api/v1/agent-runs/r-s2/steps",
+      });
+    });
+
+    renderPage();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.change(screen.getByPlaceholderText("全部"), {
+      target: { value: "F109" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /运行场景/ }));
+
+    await waitFor(() => expect(payloads).toHaveLength(1));
+    const message = String(payloads[0].message);
+    expect(message).toContain("供应商=F109");
   });
 });

@@ -18,6 +18,7 @@ import {
   Drawer,
   Empty,
   Input,
+  InputNumber,
   List,
   Select,
   Space,
@@ -37,6 +38,7 @@ import type { ModelConfig } from "../types/modelConfig";
 import { getAgentRunSteps } from "../api/agentOrchestrationApi";
 import type { AgentRunStepRead } from "../types/agentOrchestration";
 import {
+  deleteCopilotConversation,
   getCopilotConversation,
   listCopilotConversations,
   streamCopilotMessage,
@@ -193,6 +195,19 @@ export default function ProcurementCopilotPage() {
     if (stored) void restoreConversation(stored);
   }, [loadConversations, restoreConversation]);
 
+  /** 删除会话：删当前会话时一并清空线程；随后刷新侧栏。 */
+  const handleDeleteConversation = useCallback(
+    async (id: string) => {
+      await deleteCopilotConversation(id);
+      if (id === conversationId) {
+        setTurns([]);
+        setConversationId(undefined);
+      }
+      await loadConversations();
+    },
+    [conversationId, loadConversations],
+  );
+
   // 会话 id 变化即落盘/清理
   useEffect(() => {
     if (conversationId) {
@@ -240,8 +255,22 @@ export default function ProcurementCopilotPage() {
     }
   };
 
-  const handleSend = async () => {
-    const text = question.trim();
+  /** 待到货场景槽位（P0 场景；工具 pending_delivery_query，探针定口径）。 */
+  const [monthsBack, setMonthsBack] = useState(12);
+  const [supplierKey, setSupplierKey] = useState("");
+  const [minOverdueDays, setMinOverdueDays] = useState(0);
+
+  const composePendingDeliveryQuestion = useCallback(() => {
+    const supplier = supplierKey.trim() || "全部";
+    return (
+      `分析待到货情况：时间窗=近${monthsBack}个月；供应商=${supplier}；` +
+      `最低逾期天数=${minOverdueDays}。请调用 pending_delivery_query 工具，` +
+      "按供应商汇总欠交量并给催货建议，引用订单号与物料编码。"
+    );
+  }, [monthsBack, supplierKey, minOverdueDays]);
+
+  const handleSend = async (textOverride?: string) => {
+    const text = (textOverride ?? question).trim();
     if (!text || !agentCode || !modelId || busy) return;
     const id = `turn-${Date.now()}`;
     setTurns((prev) => [
@@ -332,6 +361,42 @@ export default function ProcurementCopilotPage() {
         style={{ marginBottom: 12 }}
         message={t("procurement.copilot.singleTurnHint")}
       />
+      <Card size="small" style={{ marginBottom: 16 }} title={t("procurement.copilot.scenarioDelivery")}>
+        <Space wrap>
+          <Space size={4}>
+            <Text type="secondary">{t("procurement.copilot.slotMonths")}</Text>
+            <InputNumber
+              min={1}
+              max={36}
+              value={monthsBack}
+              onChange={(v) => setMonthsBack(Number(v) || 12)}
+            />
+          </Space>
+          <Space size={4}>
+            <Text type="secondary">{t("procurement.copilot.slotSupplier")}</Text>
+            <Input
+              style={{ width: 140 }}
+              value={supplierKey}
+              placeholder={t("procurement.copilot.slotSupplierAll")}
+              onChange={(event) => setSupplierKey(event.target.value)}
+            />
+          </Space>
+          <Space size={4}>
+            <Text type="secondary">{t("procurement.copilot.slotOverdue")}</Text>
+            <InputNumber
+              min={0}
+              value={minOverdueDays}
+              onChange={(v) => setMinOverdueDays(Number(v) || 0)}
+            />
+          </Space>
+          <Button
+            disabled={busy || !agentCode || !modelId}
+            onClick={() => void handleSend(composePendingDeliveryQuestion())}
+          >
+            {t("procurement.copilot.scenarioRun")}
+          </Button>
+        </Space>
+      </Card>
       {loadError && (
         <Alert type="error" showIcon message={loadError} style={{ marginBottom: 12 }} />
       )}
@@ -510,6 +575,7 @@ export default function ProcurementCopilotPage() {
           currentConversationId={conversationId}
           loading={historyLoading}
           onSelect={(id) => void restoreConversation(id)}
+          onDelete={(id) => handleDeleteConversation(id)}
           onNewConversation={() => {
             setTurns([]);
             setConversationId(undefined);

@@ -11,6 +11,7 @@ const httpMock = vi.hoisted(() => ({
 vi.mock("../api/client", () => ({ httpClient: httpMock }));
 
 import {
+  deleteCopilotConversation,
   describeCopilotError,
   getCopilotConversation,
   listCopilotConversations,
@@ -18,6 +19,7 @@ import {
 
 beforeEach(() => {
   httpMock.get.mockReset();
+  httpMock.delete.mockReset();
 });
 
 describe("listCopilotConversations", () => {
@@ -85,5 +87,15 @@ describe("describeCopilotError", () => {
 
   it("无法识别时用 fallback", () => {
     expect(describeCopilotError({ nope: 1 }, "fallback")).toBe("fallback");
+  });
+});
+
+describe("deleteCopilotConversation", () => {
+  it("DELETE 会话（id 做 URL 编码）", async () => {
+    httpMock.delete.mockResolvedValue({ data: null });
+    await deleteCopilotConversation("c 1");
+    expect(httpMock.delete).toHaveBeenCalledWith(
+      "/procurement/copilot/conversations/c%201",
+    );
   });
 });

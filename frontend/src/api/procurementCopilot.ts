@@ -112,6 +112,15 @@ export async function getCopilotConversation(
   return res.data;
 }
 
+/** 删除会话（连带轮次；运行记录保留）。 */
+export async function deleteCopilotConversation(
+  conversationId: string,
+): Promise<void> {
+  await httpClient.delete(
+    `/procurement/copilot/conversations/${encodeURIComponent(conversationId)}`,
+  );
+}
+
 export interface CopilotMessageRequest {
   message: string;
   agentCode: string;

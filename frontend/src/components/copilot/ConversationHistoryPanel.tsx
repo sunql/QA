@@ -3,8 +3,8 @@
  * 差异只有一处：Copilot 暂无「删除会话」接口，故不提供删除动作。
  */
 
-import { Button, Empty, List, Space, Spin, Tag, Typography } from "antd";
-import { MenuFoldOutlined, PlusOutlined } from "@ant-design/icons";
+import { Button, Empty, List, Popconfirm, Space, Spin, Tag, Typography } from "antd";
+import { DeleteOutlined, MenuFoldOutlined, PlusOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 import "dayjs/locale/zh-cn";
@@ -21,6 +21,7 @@ interface ConversationHistoryPanelProps {
   currentConversationId: string | undefined;
   loading: boolean;
   onSelect: (conversationId: string) => void;
+  onDelete: (conversationId: string) => Promise<void> | void;
   onNewConversation: () => void;
   onCollapse: () => void;
 }
@@ -35,6 +36,7 @@ export default function ConversationHistoryPanel({
   currentConversationId,
   loading,
   onSelect,
+  onDelete,
   onNewConversation,
   onCollapse,
 }: ConversationHistoryPanelProps) {
@@ -119,12 +121,32 @@ export default function ConversationHistoryPanel({
                     <Text ellipsis style={{ maxWidth: 240 }}>
                       {itemTitle(item, t("procurement.copilot.historyUntitled"))}
                     </Text>
-                    <Space size={6} wrap>
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        {dayjs(item.updatedAt).fromNow()}
-                      </Text>
-                      <Tag>{`${item.turnCount}`}</Tag>
-                    </Space>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <Space size={6} wrap>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {dayjs(item.updatedAt).fromNow()}
+                        </Text>
+                        <Tag>{`${item.turnCount}`}</Tag>
+                      </Space>
+                      <Popconfirm
+                        title={t("procurement.copilot.historyDeleteConfirm")}
+                        okText={t("common.confirm")}
+                        cancelText={t("common.cancel")}
+                        onConfirm={(e) => {
+                          e?.stopPropagation();
+                          void onDelete(item.conversationId);
+                        }}
+                        onCancel={(e) => e?.stopPropagation()}
+                      >
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<DeleteOutlined />}
+                          aria-label={t("procurement.copilot.historyDeleteAria")}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      </Popconfirm>
+                    </div>
                   </Space>
                 </List.Item>
               );

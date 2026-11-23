@@ -830,6 +830,17 @@ def _camelPendingRow(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _loadActiveDatasource(session: AsyncSession, datasourceId: int) -> DataSource:
+    """按 id 取数据源（场景槽位指定）；不存在或停用 fail-closed。"""
+    ds = (
+        await session.execute(select(DataSource).where(DataSource.id == datasourceId))
+    ).scalars().first()
+    if ds is None:
+        raise ConflictError(f"数据源不存在（id={datasourceId}）")
+    _ensureActive(ds)
+    return ds
+
+
 async def pendingDeliveryHandler(
     session: AsyncSession, args: dict, ctx: AgentToolContext
 ) -> ToolResult:
@@ -841,9 +852,14 @@ async def pendingDeliveryHandler(
     supplierKey = str(args.get("supplierKey") or "").strip() or None
     minOverdueDays = args.get("minOverdueDays")
     limit = int(args.get("limit") or 20)
+    datasourceId = args.get("datasourceId")
 
-    ds = await _resolveBusinessDatasource(session, ctx)
-    _ensureActive(ds)
+    if datasourceId:
+        # 场景槽位显式指定（2026-11-23 用户要求）：不再默默落默认源
+        ds = await _loadActiveDatasource(session, int(datasourceId))
+    else:
+        ds = await _resolveBusinessDatasource(session, ctx)
+        _ensureActive(ds)
     adapter = _adapterFor(ds.id, ds)
     today = date.today()
 

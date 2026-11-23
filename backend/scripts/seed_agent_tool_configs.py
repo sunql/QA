@@ -117,6 +117,8 @@ TOOL_SEEDS: list[dict[str, Any]] = [
                                 "description": "供应商编码（可选，如 F109；缺省=全部）"},
                 "minOverdueDays": {"type": "integer", "minimum": 0,
                                    "description": "最低逾期天数（可选，0=不筛）"},
+                "datasourceId": {"type": "integer", "minimum": 1,
+                                 "description": "数据源 id（从问题中的 数据源 id=N 取；缺省=默认业务源）"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
             },
             "additionalProperties": False,

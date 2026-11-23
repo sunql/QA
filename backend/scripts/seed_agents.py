@@ -72,6 +72,7 @@ _AGENT_EXTRA_BINDINGS: dict[str, tuple[str, ...]] = {
         "supplier_risk",
         "graph_traverse",
         "purchase_history_query",
+        "pending_delivery_query",
     ),
     "PROCUREMENT_QUOTATION_ANALYST": ("quotation_compare",),
 }
@@ -402,23 +403,18 @@ async def _reconcilePolicies(session: Any, code: str) -> tuple[int, int]:
         for p in await service.listPolicies(session, code)
     }
     added = 0
-    for layer in tool.data_layers:
-        if (tool.data_object, layer) not in have:
-            try:
-                await service.addPolicy(
-                    session,
-                    code,
-                    AgentAccessPolicyCreate(
-                        data_object=tool.data_object,
-                        permission=AgentPermission.READ,
-                        data_layer=layer,
-                        notes="Phase 6.4 Agent 运行时种子（显式分层，最小权限）",
-                    ),
-                    _SEED_ACTOR,
-                )
-            except ConflictError:
-                continue  # 并发：另一进程已补齐该层
-            added += 1
+    # 按**全部绑定工具**（primary + extras）的并集补缺：工具后补的场景
+    # （如 pending_delivery_query 只绑 profile）重跑 seed 必须自动拿到授权，
+    # 否则运行时 deny-by-default 判 PERMISSION_DENIED（2026-11-23 生产实证）。
+    for pol in await _policiesFor(session, code):
+        key = (pol.data_object, _normalizeDataLayer(pol.data_layer))
+        if key in have:
+            continue
+        try:
+            await service.addPolicy(session, code, pol, _SEED_ACTOR)
+        except ConflictError:
+            continue  # 并发：另一进程已补齐该层
+        added += 1
     return deleted, added
 
 

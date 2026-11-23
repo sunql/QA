@@ -557,7 +557,7 @@ def test_pending_delivery_in_tool_seed() -> None:
     assert entry is not None, "pending_delivery_query 必须进 TOOL_SEEDS"
     schema = entry["input_schema"]
     assert schema["additionalProperties"] is False
-    for key in ("monthsBack", "supplierKey", "minOverdueDays", "limit"):
+    for key in ("monthsBack", "supplierKey", "minOverdueDays", "datasourceId", "limit"):
         assert key in schema["properties"]
 
 
@@ -653,3 +653,39 @@ def async_simple(ds):
     async def _resolve(session, ctx):
         return ds
     return _resolve
+
+
+@pytest.mark.asyncio
+async def test_pending_delivery_handler_honors_datasource_arg(monkeypatch) -> None:
+    """args.datasourceId 指定数据源（场景槽位）：不再默默落默认源。"""
+    from app.services import agent_tools_procurement
+
+    class _FakeAdapter:
+        async def execute_read_only(self, sql: str):
+            if "EXCLUDED_ROWS" in sql:
+                return [{"OPEN_LINES": 1, "OPEN_QTY": 10.0,
+                         "OVERDUE_LINES": 1, "EXCLUDED_ROWS": 0}]
+            if "GROUP BY BPSNUM_0" in sql.upper():
+                return []
+            return []
+
+    picked: dict = {}
+
+    async def _fakeById(session, dsId):
+        picked["id"] = dsId
+        return SimpleNamespace(id=dsId, name="指定源", is_active=True)
+
+    monkeypatch.setattr(
+        agent_tools_procurement, "_adapterFor", lambda dsId, ds: _FakeAdapter()
+    )
+    monkeypatch.setattr(
+        agent_tools_procurement, "_loadActiveDatasource", _fakeById
+    )
+
+    from app.services.agent_tools_procurement import pendingDeliveryHandler
+
+    result = await pendingDeliveryHandler(
+        None, {"monthsBack": 12, "datasourceId": 7}, SimpleNamespace()
+    )
+    assert picked["id"] == 7
+    assert result.data["datasourceId"] == 7

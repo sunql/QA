@@ -74,3 +74,15 @@ class CopilotConversationRead(CamelModel):
     agent_code: str
     model_config_id: int
     turns: tuple[CopilotTurnRead, ...] = ()
+
+
+class CopilotConversationSummary(CamelModel):
+    """会话列表项：侧栏「历史会话」用，不返回全部轮次正文。"""
+
+    conversation_id: str
+    agent_code: str
+    model_config_id: int
+    turn_count: int
+    #: 最后一轮的用户问题（预览用；没有轮次时为 None）
+    last_question: str | None = None
+    updated_at: str

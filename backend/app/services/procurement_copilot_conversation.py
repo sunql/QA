@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import NotFoundError, ValidationError
@@ -197,3 +197,77 @@ def historyFromTurns(
 
 def lastRunId(turns: Sequence[ProcurementCopilotTurn]) -> str | None:
     return turns[-1].run_id if turns else None
+
+
+@dataclass(frozen=True)
+class ConversationSummaryRow:
+    """会话列表项（service 层只读视图，DTO 转换在 API 层）。"""
+
+    conversation: ProcurementCopilotConversation
+    turnCount: int
+    lastQuestion: str | None
+
+
+async def listOwnedConversations(
+    session: AsyncSession,
+    actor: object,
+    *,
+    limit: int = 20,
+) -> list[ConversationSummaryRow]:
+    """列出**当前用户自己**的会话（最近更新在前）。
+
+    与 `getOwnedConversation` 同口径：只看自己的，别人的既不可见也不计数
+    （admin 也只看自己的 —— 历史会话属于个人会话空间）。
+    """
+    userId = str(getattr(actor, "userId", ""))
+    conversations = (
+        await session.execute(
+            select(ProcurementCopilotConversation)
+            .where(ProcurementCopilotConversation.created_by == userId)
+            .order_by(
+                ProcurementCopilotConversation.updated_time.desc(),
+                ProcurementCopilotConversation.id.desc(),
+            )
+            .limit(limit)
+        )
+    ).scalars().all()
+    if not conversations:
+        return []
+
+    ids = [c.conversation_id for c in conversations]
+    counts = dict(
+        (
+            await session.execute(
+                select(
+                    ProcurementCopilotTurn.conversation_id,
+                    func.count(ProcurementCopilotTurn.id),
+                )
+                .where(ProcurementCopilotTurn.conversation_id.in_(ids))
+                .group_by(ProcurementCopilotTurn.conversation_id)
+            )
+        ).all()
+    )
+    # PG DISTINCT ON：每个会话取 seq 最大的一条（最后一问）
+    lastRows = (
+        await session.execute(
+            select(
+                ProcurementCopilotTurn.conversation_id,
+                ProcurementCopilotTurn.question,
+            )
+            .where(ProcurementCopilotTurn.conversation_id.in_(ids))
+            .order_by(
+                ProcurementCopilotTurn.conversation_id,
+                ProcurementCopilotTurn.seq.desc(),
+            )
+            .distinct(ProcurementCopilotTurn.conversation_id)
+        )
+    ).all()
+    lastQuestions = {row[0]: row[1] for row in lastRows}
+    return [
+        ConversationSummaryRow(
+            conversation=conversation,
+            turnCount=int(counts.get(conversation.conversation_id, 0)),
+            lastQuestion=lastQuestions.get(conversation.conversation_id),
+        )
+        for conversation in conversations
+    ]

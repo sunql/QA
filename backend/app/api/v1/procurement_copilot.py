@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,7 @@ from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.exceptions import DomainError, NotFoundError
 from app.domain.procurement_copilot_schemas import (
     CopilotConversationRead,
+    CopilotConversationSummary,
     CopilotMessageRequest,
     CopilotTaskRead,
 )
@@ -42,6 +43,7 @@ from app.services.procurement_copilot import (
 )
 from app.services.procurement_copilot_conversation import (
     getOwnedConversation,
+    listOwnedConversations,
     listTurns,
 )
 from app.services.stream_events import StreamEvent
@@ -126,6 +128,31 @@ async def postCopilotMessage(
         media_type=SSE_MEDIA_TYPE,
         headers=SSE_HEADERS,
     )
+
+
+@router.get(
+    "/copilot/conversations",
+    response_model=list[CopilotConversationSummary],
+    summary="多轮 Copilot 会话列表（当前用户，最近更新在前）",
+)
+async def listCopilotConversations(
+    limit: int = Query(default=20, ge=1, le=50),
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> list[CopilotConversationSummary]:
+    """侧栏「历史会话」的数据源：只列**自己的**会话 + 轮数 + 最后一问。"""
+    rows = await listOwnedConversations(session, currentUser, limit=limit)
+    return [
+        CopilotConversationSummary(
+            conversation_id=str(row.conversation.conversation_id),
+            agent_code=row.conversation.agent_code,
+            model_config_id=row.conversation.model_config_id,
+            turn_count=row.turnCount,
+            last_question=row.lastQuestion,
+            updated_at=row.conversation.updated_time.isoformat(),
+        )
+        for row in rows
+    ]
 
 
 @router.get(

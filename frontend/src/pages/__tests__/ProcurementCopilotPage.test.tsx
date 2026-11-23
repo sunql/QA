@@ -11,7 +11,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { I18nextProvider } from "react-i18next";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "../../i18n/i18n";
 import ProcurementCopilotPage from "../ProcurementCopilotPage";
 
@@ -20,6 +20,8 @@ const api = vi.hoisted(() => ({
   listModels: vi.fn(),
   streamCopilotMessage: vi.fn(),
   getAgentRunSteps: vi.fn(),
+  listCopilotConversations: vi.fn(),
+  getCopilotConversation: vi.fn(),
 }));
 
 vi.mock("../../api/procurementKnowledge", () => ({
@@ -28,10 +30,18 @@ vi.mock("../../api/procurementKnowledge", () => ({
 vi.mock("../../api/modelConfig", () => ({ listModels: api.listModels }));
 vi.mock("../../api/procurementCopilot", () => ({
   streamCopilotMessage: api.streamCopilotMessage,
+  listCopilotConversations: api.listCopilotConversations,
+  getCopilotConversation: api.getCopilotConversation,
 }));
 vi.mock("../../api/agentOrchestrationApi", () => ({
   getAgentRunSteps: api.getAgentRunSteps,
 }));
+
+beforeEach(() => {
+  api.listCopilotConversations.mockResolvedValue([]);
+  api.getCopilotConversation.mockReset();
+  localStorage.clear();
+});
 
 function renderPage() {
   return render(
@@ -320,5 +330,116 @@ describe("ProcurementCopilotPage 多轮会话", () => {
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
     await waitFor(() => expect(payloads).toHaveLength(3));
     expect(payloads[2].conversationId).toBeUndefined();
+  });
+});
+
+describe("ProcurementCopilotPage 历史会话", () => {
+  it("刷新后按本地留存恢复上一次会话（问题 + 答案）", async () => {
+    mockOptions();
+    localStorage.setItem("copilot.conversationId", "c-1");
+    api.listCopilotConversations.mockResolvedValue([
+      {
+        conversationId: "c-1",
+        agentCode: "PROCUREMENT_SOURCING",
+        modelConfigId: 3,
+        turnCount: 1,
+        lastQuestion: "历史问题",
+        updatedAt: "2026-11-23T10:00:00Z",
+      },
+    ]);
+    api.getCopilotConversation.mockResolvedValue({
+      conversationId: "c-1",
+      agentCode: "PROCUREMENT_SOURCING",
+      modelConfigId: 3,
+      turns: [
+        {
+          seq: 1,
+          question: "历史问题",
+          runId: "r-old",
+          status: "SUCCEEDED",
+          answer: "历史答案",
+          pauseCode: null,
+          createdAt: "2026-11-23T10:00:00Z",
+        },
+      ],
+    });
+
+    renderPage();
+
+    await waitFor(() =>
+      expect(api.getCopilotConversation).toHaveBeenCalledWith("c-1"),
+    );
+    await waitFor(() =>
+      expect(screen.getAllByText("历史问题").length).toBeGreaterThan(0),
+    );
+    expect(screen.getByText("历史答案")).toBeTruthy();
+    // 恢复的轮次也能看轨迹（runId 来自轮次记录）
+    expect(screen.getByRole("button", { name: /查看执行轨迹/ })).toBeTruthy();
+  });
+
+  it("首次对话拿到会话 id 后落盘，供下次刷新恢复", async () => {
+    mockOptions();
+    localStorage.removeItem("copilot.conversationId");
+    api.listCopilotConversations.mockResolvedValue([]);
+    api.streamCopilotMessage.mockImplementation(async (_payload, handlers) => {
+      handlers.onRun?.({
+        runId: "r-2",
+        stepsUrl: "/api/v1/agent-runs/r-2/steps",
+        conversationId: "c-2",
+      });
+    });
+
+    renderPage();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.change(screen.getByPlaceholderText(/不锈钢板/), {
+      target: { value: "找不锈钢板" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+
+    await waitFor(() =>
+      expect(localStorage.getItem("copilot.conversationId")).toBe("c-2"),
+    );
+  });
+});
+
+describe("ProcurementCopilotPage 历史侧栏", () => {
+  it("点击侧栏会话即恢复该会话（不需要下拉框）", async () => {
+    mockOptions();
+    api.listCopilotConversations.mockResolvedValue([
+      {
+        conversationId: "c-a",
+        agentCode: "PROCUREMENT_SOURCING",
+        modelConfigId: 3,
+        turnCount: 2,
+        lastQuestion: "会话A的问题",
+        updatedAt: "2026-11-23T10:00:00Z",
+      },
+    ]);
+    api.getCopilotConversation.mockResolvedValue({
+      conversationId: "c-a",
+      agentCode: "PROCUREMENT_SOURCING",
+      modelConfigId: 3,
+      turns: [
+        {
+          seq: 1,
+          question: "会话A的问题",
+          runId: "r-a",
+          status: "SUCCEEDED",
+          answer: "会话A的答案",
+          pauseCode: null,
+          createdAt: "2026-11-23T10:00:00Z",
+        },
+      ],
+    });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("会话A的问题")).toBeTruthy());
+
+    fireEvent.click(screen.getByText("会话A的问题"));
+
+    await waitFor(() =>
+      expect(api.getCopilotConversation).toHaveBeenCalledWith("c-a"),
+    );
+    await waitFor(() => expect(screen.getByText("会话A的答案")).toBeTruthy());
   });
 });

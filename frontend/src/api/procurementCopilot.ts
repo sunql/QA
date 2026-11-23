@@ -11,6 +11,7 @@
  */
 
 import { API_BASE_URL } from "../config";
+import { httpClient } from "./client";
 import { authHeaders } from "./authHeaders";
 import { readSseStream, type SseEvent } from "../utils/sseStream";
 
@@ -60,6 +61,55 @@ export interface CopilotStreamHandlers {
   onStep?: (payload: CopilotStepPayload) => void;
   onDone?: (payload: CopilotDonePayload) => void;
   onError?: (payload: CopilotErrorPayload) => void;
+}
+
+/** 会话列表项（侧栏「历史会话」用）。 */
+export interface CopilotConversationSummary {
+  conversationId: string;
+  agentCode: string;
+  modelConfigId: number;
+  turnCount: number;
+  lastQuestion: string | null;
+  updatedAt: string;
+}
+
+/** 会话中的一轮（刷新后恢复线程用）。 */
+export interface CopilotTurnRead {
+  seq: number;
+  question: string;
+  runId: string;
+  status: string;
+  answer: string | null;
+  pauseCode: string | null;
+  createdAt: string;
+}
+
+export interface CopilotConversationDetail {
+  conversationId: string;
+  agentCode: string;
+  modelConfigId: number;
+  turns: CopilotTurnRead[];
+}
+
+/** 列出当前用户的历史会话（最近更新在前）。 */
+export async function listCopilotConversations(
+  limit = 20,
+): Promise<CopilotConversationSummary[]> {
+  const res = await httpClient.get<CopilotConversationSummary[]>(
+    "/procurement/copilot/conversations",
+    { params: { limit } },
+  );
+  return res.data;
+}
+
+/** 读取会话详情（含每轮问题/状态/答案）。 */
+export async function getCopilotConversation(
+  conversationId: string,
+): Promise<CopilotConversationDetail> {
+  const res = await httpClient.get<CopilotConversationDetail>(
+    `/procurement/copilot/conversations/${encodeURIComponent(conversationId)}`,
+  );
+  return res.data;
 }
 
 export interface CopilotMessageRequest {

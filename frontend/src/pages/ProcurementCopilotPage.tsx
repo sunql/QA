@@ -26,6 +26,8 @@ import {
   Typography,
 } from "antd";
 import { useTranslation } from "../i18n";
+import ConversationHistoryPanel from "../components/copilot/ConversationHistoryPanel";
+import HistoryToggleButton from "../components/chat/HistoryToggleButton";
 import {
   getAgentCatalog,
   type AgentCatalogEntry,
@@ -35,13 +37,28 @@ import type { ModelConfig } from "../types/modelConfig";
 import { getAgentRunSteps } from "../api/agentOrchestrationApi";
 import type { AgentRunStepRead } from "../types/agentOrchestration";
 import {
+  getCopilotConversation,
+  listCopilotConversations,
   streamCopilotMessage,
+  type CopilotConversationSummary,
   type CopilotDonePayload,
   type CopilotStepPayload,
+  type CopilotTurnRead,
 } from "../api/procurementCopilot";
 
 const { TextArea } = Input;
 const { Paragraph, Text } = Typography;
+
+/** 当前会话 id 的本地留存键：刷新后自动恢复同一条线程。 */
+const CONVERSATION_STORAGE_KEY = "copilot.conversationId";
+
+/** 运行状态 → 界面轮次状态（PAUSED 是正常终态，渲染成 DONE + pauseCode）。 */
+const RESTORED_STATUS: Record<string, CopilotTurn["status"]> = {
+  SUCCEEDED: "DONE",
+  PAUSED: "DONE",
+  FAILED: "ERROR",
+  CANCELLED: "ERROR",
+};
 
 interface CopilotTurn {
   id: string;
@@ -84,6 +101,23 @@ function askOf(turn: CopilotTurn): string | null {
   return ask?.planSummary ?? null;
 }
 
+/** 后端恢复的轮次 → 页面轮次（无流式步骤，轨迹按 runId 现拉）。 */
+function restoredTurn(row: CopilotTurnRead, agentCode: string): CopilotTurn {
+  return {
+    id: `turn-${row.seq}-${row.runId}`,
+    question: row.question,
+    agentCode,
+    resumed: false,
+    runId: row.runId,
+    steps: [],
+    status: RESTORED_STATUS[row.status] ?? "RUNNING",
+    answer: row.answer,
+    pauseCode: row.pauseCode,
+    error: null,
+    totalTokens: 0,
+  };
+}
+
 export default function ProcurementCopilotPage() {
   const { t } = useTranslation();
   const [scenarios, setScenarios] = useState<AgentCatalogEntry[]>([]);
@@ -96,6 +130,9 @@ export default function ProcurementCopilotPage() {
   const [conversationId, setConversationId] = useState<string | undefined>();
   const [loadError, setLoadError] = useState<string | null>(null);
   const [trace, setTrace] = useState<TraceState>(EMPTY_TRACE);
+  const [conversations, setConversations] = useState<CopilotConversationSummary[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
 
   const loadOptions = useCallback(async () => {
@@ -120,6 +157,50 @@ export default function ProcurementCopilotPage() {
   useEffect(() => {
     void loadOptions();
   }, [loadOptions]);
+
+  /** 侧栏历史：拿不到就不显示，不阻断对话主流程。 */
+  const loadConversations = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const rows = await listCopilotConversations();
+      setConversations(Array.isArray(rows) ? rows : []);
+    } catch {
+      /* 列表失败静默：对话本身仍可用 */
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  /** 选中历史会话：恢复轮次、场景与模型（Agent/模型绑定在会话上）。 */
+  const restoreConversation = useCallback(async (id: string) => {
+    try {
+      const detail = await getCopilotConversation(id);
+      setConversationId(detail.conversationId);
+      setAgentCode((prev) => prev ?? detail.agentCode);
+      setModelId((prev) => prev ?? detail.modelConfigId);
+      setTurns(detail.turns.map((row) => restoredTurn(row, detail.agentCode)));
+    } catch {
+      // 会话不存在/无权访问：清掉本地记录，回到新会话
+      localStorage.removeItem(CONVERSATION_STORAGE_KEY);
+      setConversationId(undefined);
+    }
+  }, []);
+
+  // 打开页面：拉历史列表 + 恢复上次的会话（刷新不丢线程）
+  useEffect(() => {
+    void loadConversations();
+    const stored = localStorage.getItem(CONVERSATION_STORAGE_KEY);
+    if (stored) void restoreConversation(stored);
+  }, [loadConversations, restoreConversation]);
+
+  // 会话 id 变化即落盘/清理
+  useEffect(() => {
+    if (conversationId) {
+      localStorage.setItem(CONVERSATION_STORAGE_KEY, conversationId);
+    } else {
+      localStorage.removeItem(CONVERSATION_STORAGE_KEY);
+    }
+  }, [conversationId]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -193,7 +274,10 @@ export default function ProcurementCopilotPage() {
         },
         {
           onRun: (run) => {
-            if (run.conversationId) setConversationId(run.conversationId);
+            if (run.conversationId) {
+              setConversationId(run.conversationId);
+              void loadConversations();
+            }
             updateTurn(id, {
               runId: run.runId,
               resumed: run.resumed,
@@ -239,7 +323,8 @@ export default function ProcurementCopilotPage() {
   };
 
   return (
-    <div style={{ padding: 24 }}>
+    <div style={{ display: "flex", height: "100%", position: "relative" }}>
+      <div style={{ flex: 1, minWidth: 0, padding: 24, overflowY: "auto" }}>
       <h2>{t("procurement.copilot.title")}</h2>
       <Alert
         type="info"
@@ -418,6 +503,23 @@ export default function ProcurementCopilotPage() {
           />
         )}
       </Drawer>
+      </div>
+      {historyOpen ? (
+        <ConversationHistoryPanel
+          conversations={conversations}
+          currentConversationId={conversationId}
+          loading={historyLoading}
+          onSelect={(id) => void restoreConversation(id)}
+          onNewConversation={() => {
+            setTurns([]);
+            setConversationId(undefined);
+            void loadConversations();
+          }}
+          onCollapse={() => setHistoryOpen(false)}
+        />
+      ) : (
+        <HistoryToggleButton onClick={() => setHistoryOpen(true)} />
+      )}
     </div>
   );
 }

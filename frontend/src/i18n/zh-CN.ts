@@ -3309,7 +3309,6 @@ export const zhCN = {
       attribution: "结论 → 假设验证表 → 数据 → 备选假设",
       compare: "对比维度表 → 数据 → 差异分析"
     },
-    history: "历史会话"
   },
   history: {
     title: "历史会话",
@@ -3695,6 +3694,11 @@ export const zhCN = {
     singleTurnHint: "每条消息是一次独立的只读分析（无会话记忆）；多候选或缺少参数时 Agent 会追问，补充后重发即可。",
     newConversation: "新会话",
     conversation: "会话",
+    history: "历史会话",
+    historyEmpty: "还没有历史会话",
+    historyUntitled: "（无标题会话）",
+    historyCollapse: "收起历史",
+    historyNew: "新建会话",
     resumed: "续问",
     openTrace: "查看执行轨迹",
     traceTitle: "执行轨迹",

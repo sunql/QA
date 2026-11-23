@@ -3306,7 +3306,6 @@ export const enUS = {
       attribution: "Conclusion → Hypothesis table → Data → Alternatives",
       compare: "Comparison table → Data → Diff analysis"
     },
-    history: "History"
   },
   history: {
     title: "Research history",
@@ -3692,6 +3691,11 @@ export const enUS = {
     singleTurnHint: "Each message is one independent read-only analysis (no conversation memory). The agent asks for clarification when candidates or arguments are ambiguous — resend with more detail.",
     newConversation: "New conversation",
     conversation: "Conversation",
+    history: "History",
+    historyEmpty: "No conversations yet",
+    historyUntitled: "(Untitled conversation)",
+    historyCollapse: "Collapse history",
+    historyNew: "New conversation",
     resumed: "Follow-up",
     openTrace: "Open trace",
     traceTitle: "Execution trace",

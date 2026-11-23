@@ -268,7 +268,7 @@ describe("ProcurementCopilotPage 执行轨迹", () => {
       expect(api.getAgentRunSteps).toHaveBeenCalledWith("r-9"),
     );
     await waitFor(() =>
-      expect(screen.getByText("先定位物料")).toBeTruthy(),
+      expect(screen.getAllByText("先定位物料").length).toBeGreaterThan(0),
     );
     // 不新开窗口（否则必然回到「请先登录」）
     expect(openSpy).not.toHaveBeenCalled();
@@ -524,6 +524,24 @@ describe("ProcurementCopilotPage 待到货场景", () => {
         stepsUrl: "/api/v1/agent-runs/r-s1/steps",
       });
     });
+    // done 后回读终态步骤：TOOL 带 outputJson ⇒ 结构化卡渲染
+    api.getAgentRunSteps.mockResolvedValue([
+      {
+        stepNo: 1, iterationNo: 1, kind: "TOOL", status: "SUCCEEDED",
+        action: null, planSummary: null, toolName: "pending_delivery_query",
+        inputJson: null,
+        outputJson: { text: JSON.stringify({ data: {
+          summary: { openLines: 9828, openQty: 209421924.058, overdueLines: 9828, excludedRows: 7 },
+          bySupplier: [{ supplierCode: "J1", openLines: 2405, openQty: 57363604, overdueLines: 2405 }],
+          topLines: [{ poNo: "T22511POH1251Q", poLine: 1000, materialCode: "502447700001",
+            supplierCode: "F109", orderedQty: 1000000, receivedQty: 9600, openQty: 990400,
+            expectedDate: "2025-11-28 00:00:00", overdueDays: 360 }],
+        }, answer: "" }) },
+        answer: null, errorCode: null, errorMessage: null,
+        promptTokens: 0, completionTokens: 0, cost: 0,
+        startedAt: "2026-11-23T10:00:00Z", finishedAt: "2026-11-23T10:00:01Z",
+      },
+    ]);
 
     renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
@@ -541,6 +559,12 @@ describe("ProcurementCopilotPage 待到货场景", () => {
     // 场景钉死 Agent：即使页面默认选了别的 Agent，也要以 SOURCING 发起
     expect(payloads[0].agentCode).toBe("PROCUREMENT_SOURCING");
     await waitFor(() => expect(screen.getByText("欠交汇总")).toBeTruthy());
+    // done 回读步骤 ⇒ 结构化结果卡（数据不经 LLM 复述）
+    await waitFor(() =>
+      expect(screen.getByText("待到货分析结果")).toBeTruthy(),
+    );
+    expect(screen.getByText("J1")).toBeTruthy();
+    expect(screen.getByText("T22511POH1251Q")).toBeTruthy();
   });
 
   it("场景卡：填供应商与逾期天数后消息带槽位值", async () => {

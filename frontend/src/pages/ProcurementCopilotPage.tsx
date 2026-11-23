@@ -117,6 +117,25 @@ function askOf(turn: CopilotTurn): string | null {
 }
 
 /** 后端恢复的轮次 → 页面轮次（无流式步骤，轨迹按 runId 现拉）。 */
+/** REST 终态步骤 → 流式步骤形态：关键差异是 outputJson（observation 的
+ * {text, truncated}）与**终态 status** —— 流式只推步骤到场一次（RUNNING），
+ * 完成态必须回读才能渲染结构化结果卡（2026-11-23 生产实证）。 */
+function restoredStep(step: AgentRunStepRead): CopilotStepPayload {
+  return {
+    stepNo: step.stepNo,
+    iterationNo: step.iterationNo,
+    kind: step.kind,
+    status: step.status,
+    action: step.action ?? null,
+    planSummary: step.planSummary ?? null,
+    toolName: step.toolName ?? null,
+    answer: step.answer ?? null,
+    errorCode: step.errorCode ?? null,
+    errorMessage: step.errorMessage ?? null,
+    output: (step.outputJson as { text?: string } | null) ?? null,
+  };
+}
+
 function restoredTurn(row: CopilotTurnRead, agentCode: string): CopilotTurn {
   return {
     id: `turn-${row.seq}-${row.runId}`,
@@ -179,6 +198,22 @@ export default function ProcurementCopilotPage() {
   useEffect(() => {
     void loadOptions();
   }, [loadOptions]);
+
+  /** 终态回读：done 到达后拉一次完整步骤（含 outputJson），替换流式中间态。 */
+  const refreshSteps = useCallback(async (turnId: string, runId: string) => {
+    try {
+      // 映射必须在 updater **外**完成：setTurns 的 updater 由 React 在渲染期
+      // 惰性执行，里面抛错 try/catch 包不住 ⇒ 整棵树崩（实测 2026-11-23）。
+      const mapped = (await getAgentRunSteps(runId)).map(restoredStep);
+      setTurns((prev) =>
+        prev.map((turn) =>
+          turn.id === turnId ? { ...turn, steps: mapped } : turn,
+        ),
+      );
+    } catch {
+      /* 回读失败保留流式中间态（轨迹抽屉仍可现拉） */
+    }
+  }, []);
 
   /** 侧栏历史：拿不到就不显示，不阻断对话主流程。 */
   const loadConversations = useCallback(async () => {
@@ -365,13 +400,15 @@ export default function ProcurementCopilotPage() {
                 turn.id === id ? { ...turn, steps: [...turn.steps, step] } : turn,
               ),
             ),
-          onDone: (done: CopilotDonePayload) =>
+          onDone: (done: CopilotDonePayload) => {
             updateTurn(id, {
               status: "DONE",
               answer: done.answer,
               pauseCode: done.pauseCode,
               totalTokens: done.totalTokens,
-            }),
+            });
+            void refreshSteps(id, done.runId);
+          },
           onError: (err) =>
             updateTurn(id, { status: "ERROR", error: err.error }),
         },

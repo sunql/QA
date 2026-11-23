@@ -35,6 +35,8 @@ export interface CopilotStepPayload {
   answer: string | null;
   errorCode: string | null;
   errorMessage: string | null;
+  /** TOOL 步骤的 observation：{"text": "<json 字符串>", "truncated": bool} */
+  output?: { text?: string; truncated?: boolean } | null;
 }
 
 export interface CopilotDonePayload {

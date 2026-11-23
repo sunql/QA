@@ -36,6 +36,9 @@ import {
 } from "@ant-design/icons";
 import { useTranslation } from "../i18n";
 import ConversationHistoryPanel from "../components/copilot/ConversationHistoryPanel";
+import PendingDeliveryResultCard, {
+  parsePendingDeliveryStep,
+} from "../components/copilot/PendingDeliveryResultCard";
 import HistoryToggleButton from "../components/chat/HistoryToggleButton";
 import {
   getAgentCatalog,
@@ -648,6 +651,13 @@ export default function ProcurementCopilotPage() {
                     ))}
                   </ol>
                 )}
+                {turn.steps
+                  .map((step) => parsePendingDeliveryStep(step))
+                  .filter((parsed) => parsed !== null)
+                  .slice(0, 1)
+                  .map((parsed) => (
+                    <PendingDeliveryResultCard key={`${turn.id}-pd`} result={parsed} />
+                  ))}
                 {turn.answer && <Paragraph>{turn.answer}</Paragraph>}
                 {askOf(turn) && (
                   <Alert type="warning" showIcon message={askOf(turn)} style={{ marginTop: 8 }} />

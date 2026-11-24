@@ -17,7 +17,9 @@ export const zhCN = {
     invalidCredentials: "用户名或密码错误",
     accountDisabled: "账号已停用，请联系管理员",
     rateLimited: "尝试次数过多，请稍后再试",
-    networkError: "网络异常，请稍后重试"
+    networkError: "网络异常，请稍后重试",
+    tagline: "企业智能工作空间 · AI 助手",
+    footer: "泰鸿万立 · 企业智能工作空间"
   },
   changePassword: {
     title: "修改密码",

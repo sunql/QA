@@ -110,3 +110,144 @@ body,
   padding-bottom: 8px;
   vertical-align: top;
 }
+
+/* ── 登录页：AI 主题（深空蓝渐变 + 神经网络光斑 + 玻璃拟态卡片） ── */
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse 80% 60% at 15% 20%, rgba(34, 119, 255, 0.18) 0%, transparent 60%),
+    radial-gradient(ellipse 70% 55% at 85% 75%, rgba(0, 221, 255, 0.14) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 50% at 70% 15%, rgba(114, 46, 209, 0.16) 0%, transparent 65%),
+    linear-gradient(135deg, #060f1f 0%, #0b1d36 45%, #081426 100%);
+}
+/* 科技网格底纹 */
+.login-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(90, 160, 255, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(90, 160, 255, 0.06) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 70% 70% at 50% 50%, #000 30%, transparent 75%);
+  pointer-events: none;
+}
+/* 神经节点光斑 */
+.login-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(2px);
+  pointer-events: none;
+}
+.login-orb-1 {
+  width: 220px; height: 220px;
+  left: 8%; top: 14%;
+  background: radial-gradient(circle at 35% 35%, rgba(0, 221, 255, 0.30), rgba(0, 221, 255, 0.04) 65%);
+  box-shadow: 0 0 80px rgba(0, 221, 255, 0.18);
+}
+.login-orb-2 {
+  width: 140px; height: 140px;
+  right: 12%; top: 58%;
+  background: radial-gradient(circle at 40% 40%, rgba(114, 46, 209, 0.35), rgba(114, 46, 209, 0.05) 65%);
+  box-shadow: 0 0 70px rgba(114, 46, 209, 0.20);
+}
+.login-orb-3 {
+  width: 90px; height: 90px;
+  right: 22%; top: 18%;
+  background: radial-gradient(circle at 40% 40%, rgba(34, 119, 255, 0.32), rgba(34, 119, 255, 0.04) 65%);
+  box-shadow: 0 0 50px rgba(34, 119, 255, 0.18);
+}
+/* 玻璃拟态卡片 */
+.login-card {
+  position: relative;
+  z-index: 1;
+  width: 420px;
+  padding: 40px 36px 28px;
+  background: rgba(13, 30, 52, 0.72);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(120, 180, 255, 0.28);
+  border-radius: 16px;
+  box-shadow: 0 12px 48px rgba(2, 10, 24, 0.55);
+}
+.login-brand {
+  text-align: center;
+  margin-bottom: 28px;
+}
+.login-brand-icon {
+  font-size: 40px;
+  color: #00ddff;
+  filter: drop-shadow(0 0 12px rgba(0, 221, 255, 0.55));
+}
+.login-title {
+  color: #ffffff;
+  font-size: 26px;
+  font-weight: 600;
+  margin: 12px 0 6px;
+  letter-spacing: 1px;
+}
+.login-tagline {
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  letter-spacing: 2px;
+}
+/* 白字 + 大字号（label 14px / 输入 15px） */
+.login-card .ant-form-item-label > label {
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 500;
+}
+.login-card .ant-input,
+.login-card .ant-input-password input {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(140, 180, 255, 0.35);
+  color: #ffffff;
+  font-size: 15px;
+}
+.login-card .ant-input::placeholder,
+.login-card .ant-input-password input::placeholder {
+  color: rgba(255, 255, 255, 0.38);
+}
+.login-card .ant-input-affix-wrapper {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(140, 180, 255, 0.35);
+}
+.login-card .ant-input-affix-wrapper > input.ant-input {
+  background: transparent;
+  border: none;
+}
+.login-card .ant-input-affix-wrapper-focused,
+.login-card .ant-input-affix-wrapper:focus-within {
+  border-color: #00ddff;
+  box-shadow: 0 0 0 2px rgba(0, 221, 255, 0.15);
+}
+.login-card .ant-input:focus,
+.login-card .ant-input:hover {
+  border-color: #00ddff;
+}
+.login-card .ant-checkbox-wrapper {
+  color: #ffffff;
+  font-size: 14px;
+}
+.login-card .ant-checkbox-inner {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(140, 180, 255, 0.45);
+}
+.login-card .login-forgot {
+  margin-top: 16px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 13px;
+}
+.login-footer {
+  position: absolute;
+  bottom: 20px;
+  width: 100%;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.38);
+  font-size: 12px;
+  letter-spacing: 1px;
+}

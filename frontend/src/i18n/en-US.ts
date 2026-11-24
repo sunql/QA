@@ -17,7 +17,9 @@ export const enUS = {
     invalidCredentials: "Invalid username or password",
     accountDisabled: "Account disabled, contact your admin",
     rateLimited: "Too many attempts, please try later",
-    networkError: "Network error, please try again"
+    networkError: "Network error, please try again",
+    tagline: "Enterprise AI Workspace · AI Assistants",
+    footer: "TAIHONG · Enterprise AI Workspace"
   },
   changePassword: {
     title: "Change Password",
@@ -725,6 +727,8 @@ export const enUS = {
     validationFailed: "The request was rejected: {detail}",
     validationFailedGeneric: "The request parameters failed validation",
     networkError: "Network error, please try again later",
+    tagline: "Enterprise AI Workspace · AI Assistants",
+    footer: "TAIHONG · Enterprise AI Workspace",
     requestFailed: "Operation failed: {message}"
   },
   empty: {

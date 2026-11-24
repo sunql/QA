@@ -626,6 +626,10 @@ def test_build_pending_delivery_summary_sql() -> None:
     sql = buildPendingDeliverySummarySql(
         monthsBack=12, today=date(2026, 11, 23), filters=_PENDING_FILTERS_EMPTY
     )
+    # 回归（2026-11-24 生产实测 ORA-00904）：外层 FROM 子查询**没有**别名，
+    # 引用内层别名（如 Q.BPSNUM_0）即 ORA-00904 ⇒ 500
+    assert "GROUP BY Q." not in sql
+    assert "\n  Q." not in sql
     assert sql.strip().upper().startswith("SELECT")
     assert "PORDERQ" in sql
     # 时间窗：12 个月前 = 2025-11-23
@@ -655,6 +659,14 @@ def test_build_pending_delivery_lines_sql_filters() -> None:
         minOverdueDays=30, limit=5,
     )
     assert "Q.BPSNUM_0 IN ('F109', 'B125')" in sql2
+
+    # BySupplier 外层同样不得引用内层别名
+    from app.services.agent_tools_procurement import buildPendingDeliveryBySupplierSql
+    supplier_sql = buildPendingDeliveryBySupplierSql(
+        monthsBack=12, today=date(2026, 11, 23), limit=5, filters=PendingDeliveryFilters()
+    )
+    assert "GROUP BY Q." not in supplier_sql
+    assert "BPSNUM_0 AS SUPPLIER_CODE" in supplier_sql
     assert ">= 30" in sql2, "minOverdueDays 过滤逾期下限"
     assert "DATE '2026-08-23'" in sql2
     assert "FETCH FIRST 5 ROWS ONLY" in sql2.upper()
@@ -754,3 +766,60 @@ async def test_pending_delivery_handler_honors_datasource_arg(monkeypatch) -> No
     )
     assert picked["id"] == 7
     assert result.data["datasourceId"] == 7
+
+
+@pytest.mark.asyncio
+async def test_pending_delivery_material_name_resolved_via_mdm(monkeypatch) -> None:
+    """中文物料名 ⇒ 先经 MDM 解析成 ERP 编码再进 SQL（ITMDES1_0 几乎无中文）。"""
+    from app.services import agent_tools_procurement
+
+    class _FakeAdapter:
+        async def execute_read_only(self, sql: str):
+            if "EXCLUDED_ROWS" in sql:
+                return [{"OPEN_LINES": 1, "OPEN_QTY": 5.0,
+                         "OVERDUE_LINES": 1, "EXCLUDED_ROWS": 0}]
+            if "GROUP BY" in sql.upper():
+                return []
+            return []
+
+    class _FakeMapping:
+        def __init__(self, *_a, **_k):
+            pass
+
+        async def searchMappings(self, session, *, q, entityType, limit):
+            assert entityType == "MATERIAL" and q == "不锈钢板"
+            return [SimpleNamespace(enterprise_code="AJE0000781")]
+
+    monkeypatch.setattr(agent_tools_procurement, "EntityMappingService", _FakeMapping)
+    monkeypatch.setattr(
+        agent_tools_procurement, "_adapterFor", lambda dsId, ds: _FakeAdapter()
+    )
+    monkeypatch.setattr(
+        agent_tools_procurement, "_resolveBusinessDatasource",
+        async_simple(ds=SimpleNamespace(id=1, name="THBI", is_active=True)),
+    )
+
+    captured: list[str] = []
+
+    origAdapter = agent_tools_procurement._adapterFor
+    def _capture(dsId, ds):
+        return _CaptureAdapter(origAdapter, captured)
+
+    class _CaptureAdapter:
+        def __init__(self, factory, sink):
+            pass
+        async def execute_read_only(self, sql):
+            captured.append(sql)
+            return [{"OPEN_LINES": 1, "OPEN_QTY": 5.0,
+                     "OVERDUE_LINES": 1, "EXCLUDED_ROWS": 0}]
+
+    monkeypatch.setattr(agent_tools_procurement, "_adapterFor", _capture)
+
+    from app.services.agent_tools_procurement import pendingDeliveryHandler
+
+    await pendingDeliveryHandler(
+        None, {"monthsBack": 12, "materialKeys": ["不锈钢板"]}, SimpleNamespace()
+    )
+    lines_sql = next(sql for sql in captured if "ORDER BY" in sql.upper())
+    assert "AJE0000781" in lines_sql, "MDM 解析出的编码必须进 IN"
+    assert "ITMDES1_0 LIKE '%不锈钢板%'" in lines_sql, "原词保留作 LIKE 兜底"

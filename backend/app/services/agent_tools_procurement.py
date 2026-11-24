@@ -856,7 +856,7 @@ def buildPendingDeliveryBySupplierSql(
     limit = max(1, min(limit, _MAX_LIMIT))
     return f"""
 SELECT
-  Q.BPSNUM_0 AS SUPPLIER_CODE,
+  BPSNUM_0 AS SUPPLIER_CODE,
   COUNT(*) AS OPEN_LINES,
   SUM(OPEN_QTY) AS OPEN_QTY,
   SUM(CASE WHEN OVERDUE_DAYS > 0 THEN 1 ELSE 0 END) AS OVERDUE_LINES
@@ -869,7 +869,7 @@ FROM (
     AND Q.QTYSTU_0 - Q.RCPQTYSTU_0 > 0
     AND Q.QTYSTU_0 - Q.RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}{filters.filterSql()}
 )
-GROUP BY Q.BPSNUM_0
+GROUP BY BPSNUM_0
 ORDER BY OPEN_QTY DESC
 FETCH FIRST {limit} ROWS ONLY""".strip()
 
@@ -953,11 +953,29 @@ async def pendingDeliveryHandler(
         return tuple(str(item).strip() for item in raw if str(item).strip())
 
     legacySupplier = str(args.get("supplierKey") or "").strip()
+    materialTerms = _strList("materialKeys")
+    materialCodes, materialNames = PendingDeliveryFilters._splitKeys(materialTerms)
+    # 中文物料名在 ERP 原表几乎不存在（ITMDES1_0 实测 35 万行仅 1 条含「标准件」），
+    # 业务词在 MDM entity_mapping 里 ⇒ 先把名称词解析成 ERP 编码，再进 SQL；
+    # 原词保留作 ITMDES1_0 LIKE 兜底（映射未覆盖的行仍可命中）。
+    resolvedCodes: list[str] = []
+    for term in materialNames:
+        try:
+            hits = await EntityMappingService().searchMappings(
+                session, q=term, entityType="MATERIAL", limit=50
+            )
+        except Exception:  # noqa: BLE001 — MDM 不可用降级为仅 LIKE
+            continue
+        resolvedCodes.extend(
+            str(getattr(row, "enterprise_code", "") or "")
+            for row in hits
+            if getattr(row, "enterprise_code", None)
+        )
     try:
         filters = PendingDeliveryFilters(
             supplierKeys=_strList("supplierKeys")
             or ((legacySupplier,) if legacySupplier else ()),
-            materialKeys=_strList("materialKeys"),
+            materialKeys=tuple(dict.fromkeys([*materialCodes, *resolvedCodes, *materialNames])),
             siteKeys=_strList("siteKeys"),
             dateFrom=args.get("dateFrom"),
             dateTo=args.get("dateTo"),

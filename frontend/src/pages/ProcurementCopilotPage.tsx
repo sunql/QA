@@ -483,11 +483,15 @@ export default function ProcurementCopilotPage() {
 
       // 用户在输入栏写的文字作为主句；**冲突的槽位以对话框为准**——
       // 文字里提到了哪个维度，高级参数里对应维度就让位（2026-11-24 生产反馈）。
-      // 关键词启发式：出现「供应商/物料/基地/时间」即视为该维度已在文字里指定。
+      // 两层启发式（规划器是最终仲裁，尾注里同时附带「冲突以文字为准」指令）：
+      //   ① 关键词：供应商/物料/基地/时间窗…
+      //   ② 编码模式：B109/F109（供应商码）、AJE0000781/长数字（物料码）、T3/C1（基地码）
+      //     ——「分析一下B109待到货情况」没写「供应商」三个字也算指定（生产实测漏判）
       const lead = overrides?.questionText?.trim() ?? "";
-      const mentionsSupplier = /供应商|厂家/.test(lead);
-      const mentionsMaterial = /物料|材料/.test(lead);
-      const mentionsSite = /基地|厂区|工厂/.test(lead);
+      const mentionsSupplier = /供应商|厂家/.test(lead) || /\b[A-Z]\d{2,4}\b/.test(lead);
+      const mentionsMaterial =
+        /物料|材料/.test(lead) || /\b[A-Z]{2,}\d{4,}\b/.test(lead) || /\b\d{10,}\b/.test(lead);
+      const mentionsSite = /基地|厂区|工厂|车间/.test(lead) || /\bT\d{1,2}\b|\bC\d\b/.test(lead);
       const mentionsTime = /时间窗|个月|时间段|日期|近\d|上[半]年|本年度|本年/.test(lead);
 
       const parts: string[] = [dsText];
@@ -528,7 +532,8 @@ export default function ProcurementCopilotPage() {
       return (
         `${lead || "分析待到货情况"}（${parts.join("；")}）。` +
         `请调用 pending_delivery_query 工具（datasourceId=${datasourceId ?? "缺省"}${argsText}），` +
-        "按供应商汇总欠交量并给催货建议，引用订单号与物料编码。"
+        "按供应商汇总欠交量并给催货建议，引用订单号与物料编码。" +
+        "若上方括号内的参数与用户问题描述冲突，以用户问题描述为准。"
       );
     },
     [monthsBack, supplierKeys, materialKeys, siteKeys, minOverdueDays, datasources, datasourceId],

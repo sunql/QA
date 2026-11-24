@@ -68,4 +68,28 @@ docker buildx build --platform "$PLATFORM" \
   --build-arg "RUNTIME_BASE=${BASE_TAG}" \
   -t "$IMAGE_TAG" --load .
 
-echo "[build] ✅ 完成：${IMAGE_TAG}"
+# ---- 构建后自检：防止「镜像时间对、内容旧」（2026-11-24 实战踩过：
+#      amd64 构建启动早于某次提交 ⇒ 上下文快照是旧代码）
+# 做法：进镜像 grep 本批的关键代码标记，缺任一即失败退出。
+echo "[build] 自检：镜像内关键代码标记…"
+CHECK_MARKERS=(
+  "app/services/agent_tools_procurement.py:_PendingDialect"
+  "app/api/v1/procurement_analytics.py:该数据源执行待到货查询失败"
+  "app/api/v1/procurement_copilot.py:deleteCopilotConversation"
+)
+MISSING=""
+for marker in "${CHECK_MARKERS[@]}"; do
+  file="${marker%%:*}"
+  pattern="${marker#*:}"
+  if ! docker run --rm --platform "$PLATFORM" --entrypoint sh "$IMAGE_TAG" -c \
+      "grep -qF '$pattern' /app/$file"; then
+    MISSING="${MISSING} '$file:$pattern'"
+  fi
+done
+if [ -n "$MISSING" ]; then
+  echo "[build] ❌ 镜像内缺少关键代码：${MISSING}" >&2
+  echo "[build]    ⇒ 构建上下文可能是旧代码，请确认提交时间晚于构建启动时间" >&2
+  exit 1
+fi
+
+echo "[build] ✅ 完成：${IMAGE_TAG}（关键代码自检通过）"

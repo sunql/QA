@@ -2,14 +2,18 @@
 
 - **代码版本**：`feat/ontology-evolution`（1895e3eb..HEAD，pending01 之后的全部修复；**未合 main 即部署**，同 pending01 先例）
 - **部署日期**：2026-11-24（开发机产出镜像与本文档，宿主机逐条执行）
-- **本次动**：**仅 frontend 一个容器**（backend / worker 保持 pending01 镜像不动）
+- **本次动**：**backend + agent-orchestration-worker + frontend 三个容器**
+  （worker 与 backend 同镜像；backend 含方言适配 + 友好错误修复）
 - **迁移**：**零迁移**（alembic 保持 **0169**）
 - **种子**：**无需**
-- **范围（2026-11-24 口径）**：本包只解决 **①首页问题**（打开 Copilot 自动恢复旧会话
-  ⇒ 跨账号 detail 404 + 「默认进到待到货」；改为落在场景卡片墙，历史从侧栏恢复）
-  与 **②隐藏历史对话**（侧栏默认收起，浮钮展开）。其余已本地验证的功能
-  （run 级复用 / 供应商名称 / 物料描述 / MySQL 方言等）**不在本包**，随后端批次发布；
-  侧栏「删除会话」按钮已做降级提示（旧后端无 DELETE 端点 ⇒ 点删除弹「暂不支持」）
+- **范围（2026-11-24 口径）**：
+  ① **首页问题**（打开 Copilot 自动恢复旧会话 ⇒ 跨账号 detail 404 + 「默认进到待到货」；
+     改为落在场景卡片墙，历史从侧栏恢复）；
+  ② **隐藏历史对话**（侧栏默认收起，浮钮展开）；
+  ③ **随 backend 一并带上**（同一后端镜像发布，成本为零）：MySQL 方言适配
+     （生产 1248 'Every derived table must have its own alias'）、数据源失败友好化
+     （502 + 中文 detail，不再显示「网络异常」）、**DELETE 会话接口**
+     （侧栏删除按钮本次即可用）、run 级同日复用、供应商名称 + 物料描述列。
 - **前置**：**1124-pending01 已部署**（本批不含 pending-delivery 工具首装与端点首注册的验收依赖其存在）
 - **不动**：postgres / neo4j / milvus / ollama / mysql-demo；不改 `.env`
 
@@ -20,8 +24,9 @@
 | 主题 | 内容 |
 |---|---|
 | **① 首页修复** | 移除「打开 Copilot 自动恢复上次会话」：跨账号 detail 404 消除；不再「默认进到待到货」，落在场景卡片墙；历史会话从侧栏一键恢复 |
-| **② 隐藏历史对话** | 侧栏默认**收起**（浮钮展开）；删除按钮对旧后端降级提示 |
-| **（随 bundle 的 UI 打磨）** | 以下已本地验证、随 bundle 生效：标题带场景名、欢迎态统计卡+chips、结果卡三块 Collapse、轨迹 Timeline、进度弹窗、Tabs 纯切换器、输入框边框、参数单行+重置、.pd-table 表格风格 |
+| **② 隐藏历史对话** | 侧栏默认**收起**（浮钮展开） |
+| **③ 后端随包** | MySQL 方言适配（1248）；数据源失败 ⇒ 502 + 中文 detail；**DELETE 会话接口**（删除按钮本次可用）；run 级同日复用；供应商名称 + 物料描述 |
+| **（随 bundle 的 UI 打磨）** | 标题带场景名、欢迎态统计卡+chips、结果卡三块 Collapse、轨迹 Timeline、进度弹窗、Tabs 纯切换器、输入框边框、参数单行+重置、.pd-table 表格风格 |
 
 **验收标准**：
 1. `alembic_version` 仍为 **0169**；三容器 Image ID 与 §1 一致；health 200；
@@ -35,21 +40,39 @@
 
 ## 1. 交付物（开发机已产出并自证）
 
-| 文件 | 镜像 | 平台 | sha256 | 大小 |
-|---|---|---|---|---|
-| `/tmp/qa-frontend-amd64-1124-fix02.tar.gz` | `qa-system-frontend:amd64-1124-fix02` | linux/amd64 | `0e2a088a1516c7ab158677f7546a4421377533c23abc76818162137fa9f34067` | 26M |
+> **构建方式（2026-11-24 起）**：后端拆出**基础镜像**（系统包层预构建）
+> —— `docker/Dockerfile.backend.base` → `qa-system-backend-base:2026-11-amd64`，
+> 业务镜像引用它。构建命令：
+> ```bash
+> ./scripts/build_backend_images.sh --platform linux/amd64 --tag amd64-1124-fix02
+> ./scripts/build_frontend_image.sh --platform linux/amd64 --tag amd64-1124-fix02
+> ```
+> 业务层重建 **1–3 分钟**（此前每次 15–25 分钟：apt 装 ~200 个 deb 且随业务代码
+> 变动缓存失效）。基础镜像**每 platform 只建一次**；`docker save` 业务镜像自带
+> 父层 ⇒ 生产仍只需传一个 tar。
 
-镜像标识：frontend `3caa4e9db431a`；前端 bundle `index-Cynv99we.js`
+| 文件                                         | 镜像                                    | 平台          | sha256                                                             | 大小  |
+| ------------------------------------------ | ------------------------------------- | ----------- | ------------------------------------------------------------------ | --- |
+| `/tmp/qa-backend-amd64-1124-fix02.tar.gz`  | `qa-system-backend:amd64-1124-fix02`  | linux/amd64 | `a9bc686a2864f01ff3cd1bb8b8f37164b7da26874b7d2bf1202e53ea926a385c` | 490M |
+| `/tmp/qa-frontend-amd64-1124-fix02.tar.gz` | `qa-system-frontend:amd64-1124-fix02` | linux/amd64 | `b4df9f6c4215a15cd5e87a3fbfcd30c6d53e96ca975d80c97a756bbaa6f935e2` | 26M |
+
+镜像标识：backend `e7d03546e2d8`｜frontend `276bf0e1447a`；前端 bundle `index-Dd2cXydV.js`
+（基础镜像 `qa-system-backend-base:2026-11-amd64` = `6359bbf4d394`，已含在后端 tar 内）
 
 镜像内自证（开发机已跑，输出见交付记录）：
 
 ```bash
+docker run --rm --platform linux/amd64 --entrypoint sh qa-system-backend:amd64-1124-fix02 -c '
+  grep -c "_PendingDialect" /app/app/services/agent_tools_procurement.py
+  grep -c "该数据源执行待到货查询失败" /app/app/api/v1/procurement_analytics.py
+  grep -c "deleteCopilotConversation" /app/app/api/v1/procurement_copilot.py
+  which tesseract; which libreoffice'
 docker run --rm --platform linux/amd64 qa-system-frontend:amd64-1124-fix02 sh -c '
   ls /usr/share/nginx/html/assets/index-*.js
   grep -c "分析内容" /usr/share/nginx/html/assets/index-*.js
-  grep -c "历史会话" /usr/share/nginx/html/assets/index-*.js
-  grep -c "暂不支持删除会话" /usr/share/nginx/html/assets/index-*.js'
-# 实测：frontend bundle=index-Cynv99we.js / content_tag=1 / sidebar=1 / del_hint=1
+  grep -c "历史会话" /usr/share/nginx/html/assets/index-*.js'
+# 实测：backend dialect=13 / friendly=1 / delete_api=1 / tesseract+libreoffice 均在；
+#       frontend bundle=index-Dd2cXydV.js / content_tag=1 / sidebar=1
 ```
 
 ---
@@ -105,10 +128,12 @@ docker images | grep pre-1124-fix02
 sha256sum qa-backend-amd64-1124-fix02.tar.gz qa-frontend-amd64-1124-fix02.tar.gz
 # 与 §1 开发机值比对，不一致 ⇒ 停
 
+docker load -i qa-backend-amd64-1124-fix02.tar.gz
 docker load -i qa-frontend-amd64-1124-fix02.tar.gz
+docker tag qa-system-backend:amd64-1124-fix02   qa-backend:offline
 docker tag qa-system-frontend:amd64-1124-fix02  qa-system_frontend
 docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep -E 'qa-backend:offline|qa-system_frontend'
-# Image ID 与 §1 一致
+# Image ID 与 §1 一致（backend e7d03546e2d8 / frontend 276bf0e1447a）
 ```
 
 ---
@@ -116,13 +141,19 @@ docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep -E 'qa-backend:
 ## 5. Phase 3 切换（backend → worker → frontend）
 
 ```bash
+qa_compose up -d --no-build --no-deps --force-recreate backend
+docker logs -f qa-backend 2>&1 | grep -E "Application startup complete|ERROR|Can't locate" | head -5
+
+qa_compose up -d --no-build --no-deps --force-recreate agent-orchestration-worker
+docker logs --tail 5 qa-agent-orchestration-worker 2>&1 | grep -E "启动|Error" | head -3
+
 qa_compose up -d --no-build --no-deps --force-recreate frontend
-docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep frontend
+docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'backend|worker|frontend'
 ```
 
-**种子**：本批**无需任何种子**（工具 schema / profile 绑定 / ACL 沿用 pending01 已落库状态；
-工具与 profile 均无变更，`git diff 1895e3eb..HEAD -- backend/scripts/` 为空）。
-若 pending01 的 SOURCING 指令更新脚本当时未执行，补跑见 pending01 runbook §5（幂等）。
+**种子**：本批**无需新增种子**（工具 schema / profile 绑定 / ACL 沿用 pending01 已落库状态）。
+若 pending01 的 SOURCING 指令更新脚本当时未执行，补跑 pending01 runbook §5 的指令脚本（幂等）——
+本批后端带 DELETE 会话接口，删除按钮随之可用。
 
 ---
 
@@ -156,8 +187,15 @@ docker exec qa-frontend sh -c '
 ## 7. 回滚（零迁移，30 秒级）
 
 ```bash
+# 仅回前端
 docker tag qa-system_frontend:pre-1124-fix02 qa-system_frontend
 qa_compose up -d --no-build --no-deps --force-recreate frontend
+
+# 全量回滚（库不动，本批零迁移）
+docker tag qa-backend:pre-1124-fix02 qa-backend:offline
+docker tag qa-system_frontend:pre-1124-fix02 qa-system_frontend
+qa_compose up -d --no-build --no-deps --force-recreate backend agent-orchestration-worker frontend
+docker logs --tail 3 qa-backend | grep "Application startup complete"
 ```
 
 > 库保持 0169 ⇒ 无需 downgrade。复用产生的 turn 指向旧 run，回滚后旧代码

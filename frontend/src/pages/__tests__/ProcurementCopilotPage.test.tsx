@@ -11,6 +11,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { I18nextProvider } from "react-i18next";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "../../i18n/i18n";
 import ProcurementCopilotPage from "../ProcurementCopilotPage";
@@ -79,11 +80,13 @@ beforeEach(() => {
 
 function renderPage() {
   const utils = render(
-    <I18nextProvider i18n={i18n}>
-      <ConfigProvider locale={zhCN}>
-        <ProcurementCopilotPage />
-      </ConfigProvider>
-    </I18nextProvider>,
+    <MemoryRouter>
+      <I18nextProvider i18n={i18n}>
+        <ConfigProvider locale={zhCN}>
+          <ProcurementCopilotPage />
+        </ConfigProvider>
+      </I18nextProvider>
+    </MemoryRouter>,
   );
   // 首页是场景卡片墙：进「自由问答」视图（若本地留存已触发自动恢复则已在对话面）
   const freeCard = screen.queryByText(/自由问答/);
@@ -94,11 +97,13 @@ function renderPage() {
 /** 进入「待到货」场景视图。 */
 function renderScenario() {
   const utils = render(
-    <I18nextProvider i18n={i18n}>
-      <ConfigProvider locale={zhCN}>
-        <ProcurementCopilotPage />
-      </ConfigProvider>
-    </I18nextProvider>,
+    <MemoryRouter>
+      <I18nextProvider i18n={i18n}>
+        <ConfigProvider locale={zhCN}>
+          <ProcurementCopilotPage />
+        </ConfigProvider>
+      </I18nextProvider>
+    </MemoryRouter>,
   );
   fireEvent.click(screen.getByText(/待到货/));
   return utils;
@@ -400,11 +405,13 @@ describe("ProcurementCopilotPage 历史会话", () => {
     });
 
     render(
-      <I18nextProvider i18n={i18n}>
-        <ConfigProvider locale={zhCN}>
-          <ProcurementCopilotPage />
-        </ConfigProvider>
-      </I18nextProvider>,
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}>
+          <ConfigProvider locale={zhCN}>
+            <ProcurementCopilotPage />
+          </ConfigProvider>
+        </I18nextProvider>
+      </MemoryRouter>,
     );
 
     // 落在卡片墙，且**没有**去拉旧会话详情（404 噪音消除）
@@ -699,11 +706,13 @@ describe("ProcurementCopilotPage 场景卡片墙（首页）", () => {
   it("首页渲染场景大卡（待到货 + 自由问答），点进入才见工作区", async () => {
     mockOptions();
     const { container } = render(
-      <I18nextProvider i18n={i18n}>
-        <ConfigProvider locale={zhCN}>
-          <ProcurementCopilotPage />
-        </ConfigProvider>
-      </I18nextProvider>,
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}>
+          <ConfigProvider locale={zhCN}>
+            <ProcurementCopilotPage />
+          </ConfigProvider>
+        </I18nextProvider>
+      </MemoryRouter>,
     );
     expect(screen.getByText("待到货 / 逾期未到")).toBeTruthy();
     expect(screen.getByText(/自由问答/)).toBeTruthy();

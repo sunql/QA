@@ -154,8 +154,11 @@ export async function getPendingDeliverySummary(
   const query: Record<string, string | number> = {};
   if (params.datasourceId !== undefined) query.datasourceId = params.datasourceId;
   if (params.monthsBack !== undefined) query.monthsBack = params.monthsBack;
+  // 多值参数用**逗号分隔**：axios 默认把数组序列化成 `key[]=v`，
+  // 与后端（FastAPI 读取逗号分隔字符串）对不上 ⇒ 静默变成空过滤。
   for (const key of ["supplierKeys", "materialKeys", "siteKeys"] as const) {
-    for (const value of params[key] ?? []) query[key] = value;
+    const values = params[key] ?? [];
+    if (values.length > 0) query[key] = values.join(",");
   }
   if (params.dateFrom) query.dateFrom = params.dateFrom;
   if (params.dateTo) query.dateTo = params.dateTo;

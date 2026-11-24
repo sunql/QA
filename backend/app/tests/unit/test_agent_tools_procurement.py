@@ -967,3 +967,39 @@ def test_purchase_history_and_quotation_mysql_dialect() -> None:
         supplierKey="SUP001", materialKey=None, segmentYear=2026, limit=10,
     )
     assert "FETCH FIRST 10 ROWS ONLY" in oracleQuotation.upper()
+
+
+def test_pending_delivery_lines_sql_supports_offset_and_count() -> None:
+    """明细页需要分页：lines SQL 带 offset，另有 count SQL 出总数。"""
+    from app.services.agent_tools_procurement import (
+        buildPendingDeliveryCountSql,
+        buildPendingDeliveryLinesSql,
+    )
+
+    lines = buildPendingDeliveryLinesSql(
+        monthsBack=12, today=date(2026, 11, 24),
+        filters=PendingDeliveryFilters(), minOverdueDays=None, limit=50, offset=100,
+    )
+    assert "OFFSET 100" in lines
+    assert "FETCH FIRST 50 ROWS ONLY" in lines.upper()
+
+    count = buildPendingDeliveryCountSql(
+        monthsBack=12, today=date(2026, 11, 24), filters=PendingDeliveryFilters(),
+    )
+    assert count.strip().upper().startswith("SELECT COUNT(*)")
+    assert "QTYSTU_0 - Q.RCPQTYSTU_0 > 0" in count
+    # 脏数据阈值同样生效（否则总数与明细对不上）
+    assert "1000000" in count
+
+
+def test_pending_delivery_lines_offset_mysql_dialect() -> None:
+    """MySQL 方言：LIMIT n OFFSET m（不是 Oracle 的 FETCH ... OFFSET）。"""
+    from app.services.agent_tools_procurement import buildPendingDeliveryLinesSql
+
+    sql = buildPendingDeliveryLinesSql(
+        monthsBack=12, today=date(2026, 11, 24),
+        filters=PendingDeliveryFilters(), minOverdueDays=None, limit=20, offset=40,
+        dialect="mysql",
+    )
+    assert "LIMIT 20 OFFSET 40" in sql
+    assert "FETCH FIRST" not in sql.upper()

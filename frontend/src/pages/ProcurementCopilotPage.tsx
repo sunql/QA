@@ -10,7 +10,7 @@
  * 页面把它渲染成「需要你补充」的追问，用户接着发下一条即可。
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -38,11 +38,13 @@ import {
 } from "antd";
 import {
   ArrowRightOutlined,
+  TableOutlined,
   CarOutlined,
   CommentOutlined,
   LeftOutlined,
 } from "@ant-design/icons";
 import { useTranslation } from "../i18n";
+import { useNavigate } from "react-router-dom";
 import { useAuthStore } from "../stores/authStore";
 import ConversationHistoryPanel from "../components/copilot/ConversationHistoryPanel";
 import PendingDeliveryResultCard, {
@@ -140,6 +142,9 @@ function askOf(turn: CopilotTurn): string | null {
 /** REST 终态步骤 → 流式步骤形态：关键差异是 outputJson（observation 的
  * {text, truncated}）与**终态 status** —— 流式只推步骤到场一次（RUNNING），
  * 完成态必须回读才能渲染结构化结果卡（2026-11-23 生产实证）。 */
+/** 置顶会话的本地留存键。 */
+const PINNED_STORAGE_KEY = "copilot.pinnedConversations";
+
 /** 消息 → 短标题：截到参数括号「（」前（即用户的主句），兜底 24 字。 */
 function shortTitle(question: string): string {
   const cut = question.indexOf("（");
@@ -185,6 +190,7 @@ function restoredTurn(row: CopilotTurnRead, agentCode: string): CopilotTurn {
 
 export default function ProcurementCopilotPage() {
   const { t } = useTranslation();
+  const nav = useNavigate();
   // 数据源切换是治理动作（可指向别的业务库）⇒ 仅 admin 可见（2026-11-24 需求）
   const user = useAuthStore((s) => s.user);
   const isAdmin = (user?.roles ?? []).includes("admin");
@@ -199,6 +205,29 @@ export default function ProcurementCopilotPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [trace, setTrace] = useState<TraceState>(EMPTY_TRACE);
   const [conversations, setConversations] = useState<CopilotConversationSummary[]>([]);
+  /** 置顶的会话（本地持久化；跨设备同步需上移后端 ⇒ 加迁移，另批）。 */
+  const [pinnedIds, setPinnedIds] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(PINNED_STORAGE_KEY);
+      const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+      return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+    } catch {
+      return [];
+    }
+  });
+  const togglePin = useCallback((conversationId: string) => {
+    setPinnedIds((prev) => {
+      const next = prev.includes(conversationId)
+        ? prev.filter((id) => id !== conversationId)
+        : [conversationId, ...prev];
+      try {
+        localStorage.setItem(PINNED_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        /* 隐私模式/配额满：仅内存生效 */
+      }
+      return next;
+    });
+  }, []);
   // 历史侧栏默认收起（2026-11-24 反馈）：聚焦当前对话，历史从右侧浮钮展开
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -356,6 +385,13 @@ export default function ProcurementCopilotPage() {
     error: string | null;
     data: PendingDeliverySummaryResponse | null;
   }>({ loading: false, error: null, data: null });
+
+  /** agentCode → 场景显示名（历史侧栏分组用）。 */
+  const agentNames = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const entry of scenarios) map[entry.agentCode] = entry.agentName;
+    return map;
+  }, [scenarios]);
 
   /** 会话内带结构化结果的轮次（顺序）——多结果用 Tabs 切换，不再纵向堆叠文字墙。 */
   const resultTurns = turns
@@ -1138,7 +1174,16 @@ export default function ProcurementCopilotPage() {
               }))}
             />
             {active.parsed ? (
-              <PendingDeliveryResultCard result={active.parsed} />
+              <>
+                <PendingDeliveryResultCard result={active.parsed} />
+                <Button
+                  size="small"
+                  icon={<TableOutlined />}
+                  onClick={() => void nav("/procurement/pending-delivery")}
+                >
+                  {t("procurement.copilot.viewPendingDeliveryLines")}
+                </Button>
+              </>
             ) : (
               <Empty description={t("procurement.copilot.traceEmpty")} />
             )}
@@ -1352,8 +1397,11 @@ export default function ProcurementCopilotPage() {
           conversations={conversations}
           currentConversationId={conversationId}
           loading={historyLoading}
+          pinnedIds={pinnedIds}
+          agentNames={agentNames}
           onSelect={(id) => void restoreConversation(id)}
           onDelete={(id) => handleDeleteConversation(id)}
+          onTogglePin={togglePin}
           onNewConversation={() => {
             setTurns([]);
             setConversationId(undefined);

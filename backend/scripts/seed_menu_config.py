@@ -149,6 +149,7 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.procurement", "code": "item.procurementBindings", "label_key": "menu.item.procurementBindings", "icon_code": "partition", "sort_order": 2720, "path": "/procurement/bindings"},
     {"parent": "section.procurement", "code": "item.procurementKnowledge", "label_key": "menu.item.procurementKnowledge", "icon_code": "book", "sort_order": 2730, "path": "/procurement/knowledge"},
     {"parent": "section.procurement", "code": "item.procurementCopilot", "label_key": "menu.item.procurementCopilot", "icon_code": "message", "sort_order": 2740, "path": "/procurement/copilot"},
+    {"parent": "section.procurement", "code": "item.procurementPendingDelivery", "label_key": "menu.item.procurementPendingDelivery", "icon_code": "tags", "sort_order": 2745, "path": "/procurement/pending-delivery"},
     {"parent": "section.procurement", "code": "item.procurementAgents", "label_key": "menu.item.procurementAgents", "icon_code": "appstore", "sort_order": 2740, "path": "/procurement/agents"},
 ]
 

@@ -163,9 +163,9 @@ async def test_summary_passes_filter_slots(client: AsyncClient, monkeypatch) -> 
         SUMMARY_PATH,
         headers=OWNER_HEADERS,
         params={
-            "supplierKeys": ["F109", "B125"],
-            "materialKeys": ["502447700001"],
-            "siteKeys": ["T3"],
+            "supplierKeys": "F109,B125",
+            "materialKeys": "502447700001",
+            "siteKeys": "T3",
             "dateFrom": "2026-01-01",
             "dateTo": "2026-06-30",
         },
@@ -256,3 +256,64 @@ async def test_summary_datasource_failure_is_friendly_502(
     )
     assert resp.status_code == 502
     assert "待到货查询失败" in resp.json()["detail"]
+
+
+LINES_PATH = "/api/v1/procurement/pending-delivery/lines"
+
+
+@pytest.mark.asyncio
+async def test_lines_endpoint_returns_paged_rows(client: AsyncClient, monkeypatch) -> None:
+    """明细页端点：返回 {total, rows}（分页），行含供应商名与物料描述。"""
+    captured: list[str] = []
+
+    class _FakeAdapter:
+        async def execute_read_only(self, sql: str):
+            captured.append(sql)
+            if sql.strip().upper().startswith("SELECT COUNT(*)"):
+                return [{"TOTAL_ROWS": 42}]
+            return [
+                {
+                    "POHNUM_0": "T22511POH1251Q", "POPLIN_0": 1000,
+                    "ITMREF_0": "502447700001", "BPSNUM_0": "F109",
+                    "SUPPLIER_NAME": "上海纳特汽车标准件有限公司",
+                    "MATERIAL_DESC": "X13 平头铆螺母",
+                    "ORDERED_QTY": 1000000.0, "RECEIVED_QTY": 9600.0,
+                    "OPEN_QTY": 990400.0, "EXTRCPDAT_0": "2025-11-28",
+                    "OVERDUE_DAYS": 360,
+                },
+            ]
+
+    # analytics 模块是**值导入**（from ... import _adapterFor）⇒ 必须 patch 它自己的引用
+    monkeypatch.setattr(
+        "app.api.v1.procurement_analytics._adapterFor",
+        lambda dsId, ds: _FakeAdapter(),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.procurement_analytics._resolveBusinessDatasource", _fakeResolve
+    )
+    monkeypatch.setattr(
+        "app.api.v1.procurement_analytics._loadActiveDatasource", _fakeById
+    )
+
+    resp = await client.get(
+        LINES_PATH,
+        headers=OWNER_HEADERS,
+        params={"datasourceId": 10, "offset": 20, "limit": 20, "minOverdueDays": 30},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 42
+    assert body["rows"][0]["supplierName"] == "上海纳特汽车标准件有限公司"
+    assert body["rows"][0]["materialDesc"] == "X13 平头铆螺母"
+    assert body["rows"][0]["overdueDays"] == 360
+    # 分页与逾期过滤真的进了 SQL
+    assert "OFFSET 20" in captured[-1]
+    assert ">= 30" in captured[-1]
+
+
+@pytest.mark.asyncio
+async def test_lines_endpoint_rejects_bad_date(client: AsyncClient) -> None:
+    resp = await client.get(
+        LINES_PATH, headers=OWNER_HEADERS, params={"dateFrom": "2026/01/01"}
+    )
+    assert resp.status_code == 422

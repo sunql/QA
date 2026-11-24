@@ -768,11 +768,17 @@ class _PendingDialect:
             return f"COALESCE({expr}, {default})"
         return f"NVL({expr}, {default})"
 
-    def tail(self, limit: int) -> str:
-        """行数限制：MySQL 8.0.19 以下不支持 FETCH FIRST，统一 LIMIT 更稳。"""
+    def tail(self, limit: int, offset: int = 0) -> str:
+        """行数限制（+ 可选偏移）：MySQL 8.0.19 以下不支持 FETCH FIRST，统一 LIMIT 更稳。
+
+        Oracle：``FETCH FIRST n ROWS ONLY OFFSET m``；
+        MySQL：``LIMIT n OFFSET m``（注意顺序与 Oracle 相反）。
+        """
         if self.name == "mysql":
-            return f"LIMIT {int(limit)}"
-        return f"FETCH FIRST {int(limit)} ROWS ONLY"
+            base = f"LIMIT {int(limit)}"
+            return f"{base} OFFSET {int(offset)}" if offset else base
+        base = f"FETCH FIRST {int(limit)} ROWS ONLY"
+        return f"{base} OFFSET {int(offset)}" if offset else base
 
     @staticmethod
     def fromAdapter(adapter: Any) -> _PendingDialect:
@@ -1030,6 +1036,7 @@ def buildPendingDeliveryLinesSql(
     filters: PendingDeliveryFilters | None,
     minOverdueDays: int | None,
     limit: int,
+    offset: int = 0,
     dialect: str = "oracle",
 ) -> str:
     """TOP 欠交订单行（明细下钻）：多选供应商/物料/基地 + 日期段 + 逾期下限。方言语义同 summary。"""
@@ -1037,6 +1044,7 @@ def buildPendingDeliveryLinesSql(
     d = _PendingDialect(dialect)
     todayLit = f"DATE '{today.isoformat()}'"
     limit = max(1, min(limit, _MAX_LIMIT))
+    offset = max(0, int(offset))
     conds = [
         filters.windowSql(monthsBack, today),
         "Q.QTYSTU_0 - Q.RCPQTYSTU_0 > 0",
@@ -1055,7 +1063,27 @@ SELECT Q.POHNUM_0, Q.POPLIN_0, Q.ITMREF_0, Q.BPSNUM_0, b.BPSNAM_0 AS SUPPLIER_NA
 FROM {_PENDING_TABLE} Q{filters.joinSql(withSupplierName=True, withItemDesc=True)}
 WHERE {where}
 ORDER BY (Q.QTYSTU_0 - Q.RCPQTYSTU_0) DESC
-{d.tail(limit)}""".strip()
+{d.tail(limit, offset)}""".strip()
+
+
+def buildPendingDeliveryCountSql(
+    *,
+    monthsBack: int,
+    today: date,
+    filters: PendingDeliveryFilters | None,
+    dialect: str = "oracle",
+) -> str:
+    """欠交行总数（明细页分页用）——与 lines SQL 同口径（含脏数据阈值）。"""
+    filters = filters or PendingDeliveryFilters()
+    where = " AND ".join([
+        filters.windowSql(monthsBack, today),
+        "Q.QTYSTU_0 - Q.RCPQTYSTU_0 > 0",
+        f"Q.QTYSTU_0 - Q.RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}",
+    ]) + filters.filterSql()
+    return f"""
+SELECT COUNT(*) AS TOTAL_ROWS
+FROM {_PENDING_TABLE} Q{filters.joinSql(withSupplierName=True, withItemDesc=True)}
+WHERE {where}""".strip()
 
 
 def _camelPendingRow(row: dict[str, Any]) -> dict[str, Any]:

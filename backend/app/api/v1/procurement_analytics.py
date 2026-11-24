@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -19,25 +20,56 @@ from app.services.agent_tool_types import AgentToolContext
 from app.services.agent_tools_procurement import (
     PendingDeliveryFilters,
     _adapterFor,
+    _camelPendingRow,
+    _loadActiveDatasource,
+    _PendingDialect,
     _resolveBusinessDatasource,
+    buildPendingDeliveryCountSql,
+    buildPendingDeliveryLinesSql,
     pendingDeliveryHandler,
 )
 
 router = APIRouter(tags=["procurement-analytics"])
 
 
+def _today() -> date:
+    return date.today()
+
+
+def _col(row: dict[str, Any], name: str) -> Any:
+    """列名大小写不敏感取值（adapter 返回小写键，见 agent_tools_procurement._col）。"""
+    if name in row:
+        return row[name]
+    lowered = name.lower()
+    if lowered in row:
+        return row[lowered]
+    return row.get(name.upper())
+
+
+def _splitKeys(raw: str | None) -> tuple[str, ...]:
+    """逗号分隔的多值参数 → 元组。
+
+    为什么用逗号而不用重复键（``?a=1&a=2``）：axios 默认把数组序列化成
+    ``key[]=v``，与 FastAPI 的 ``list[str]`` 参数名对不上 ⇒ 静默收到空列表。
+    逗号分隔在两边都稳定。
+    """
+    if not raw:
+        return ()
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
 def _filtersFromQuery(
-    supplierKeys: list[str],
-    materialKeys: list[str],
-    siteKeys: list[str],
+    supplierKeys: str | None,
+    materialKeys: str | None,
+    siteKeys: str | None,
     dateFrom: str | None,
     dateTo: str | None,
 ) -> PendingDeliveryFilters:
     """Query 参数 → filters（非法日期在这里抛 ValidationError ⇒ 422）。"""
     return PendingDeliveryFilters(
-        supplierKeys=tuple(supplierKeys),
-        materialKeys=tuple(materialKeys),
-        siteKeys=tuple(siteKeys),
+        supplierKeys=_splitKeys(supplierKeys),
+        materialKeys=_splitKeys(materialKeys),
+        siteKeys=_splitKeys(siteKeys),
         dateFrom=dateFrom,
         dateTo=dateTo,
     )
@@ -50,9 +82,9 @@ def _filtersFromQuery(
 async def getPendingDeliverySummary(
     datasourceId: int | None = Query(default=None, ge=1),
     monthsBack: int = Query(default=12, ge=1, le=36),
-    supplierKeys: list[str] = Query(default=[]),
-    materialKeys: list[str] = Query(default=[]),
-    siteKeys: list[str] = Query(default=[]),
+    supplierKeys: str | None = Query(default=None, description="逗号分隔"),
+    materialKeys: str | None = Query(default=None, description="逗号分隔"),
+    siteKeys: str | None = Query(default=None, description="逗号分隔"),
     dateFrom: str | None = Query(default=None),
     dateTo: str | None = Query(default=None),
     currentUser: CurrentUser = Depends(getCurrentUser),
@@ -134,3 +166,66 @@ def _ensureActiveAnalytics(ds: Any) -> None:
     from app.services.datasource_service import ensureDatasourceActive
 
     ensureDatasourceActive(ds)
+
+
+#: 明细页单页行数上限（工具侧 50；明细页允许更多，便于翻页浏览）。
+_LINES_PAGE_MAX = 200
+
+
+@router.get(
+    "/pending-delivery/lines",
+    summary="待到货欠交明细（分页，供明细页使用）",
+)
+async def listPendingDeliveryLines(
+    datasourceId: int | None = Query(default=None, ge=1),
+    monthsBack: int = Query(default=12, ge=1, le=36),
+    supplierKeys: str | None = Query(default=None, description="逗号分隔"),
+    materialKeys: str | None = Query(default=None, description="逗号分隔"),
+    siteKeys: str | None = Query(default=None, description="逗号分隔"),
+    dateFrom: str | None = Query(default=None),
+    dateTo: str | None = Query(default=None),
+    minOverdueDays: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=_LINES_PAGE_MAX),
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> dict[str, Any]:
+    """欠交明细（分页 + 总数）——与工具同口径；明细页专用（工具 limit 上限 50）。"""
+    filters = _filtersFromQuery(
+        supplierKeys, materialKeys, siteKeys, dateFrom, dateTo
+    )
+    try:
+        if datasourceId is not None:
+            ds = await _loadActiveDatasource(session, datasourceId)
+        else:
+            ds = await _resolveBusinessDatasource(session, currentUser)
+        _ensureActiveAnalytics(ds)
+        adapter = _adapterFor(ds.id, ds)
+        dialect = _PendingDialect.fromAdapter(adapter).name
+        countRows = await adapter.execute_read_only(
+            buildPendingDeliveryCountSql(
+                monthsBack=monthsBack, today=_today(), filters=filters, dialect=dialect
+            )
+        )
+        rows = await adapter.execute_read_only(
+            buildPendingDeliveryLinesSql(
+                monthsBack=monthsBack, today=_today(), filters=filters,
+                minOverdueDays=minOverdueDays or None, limit=limit,
+                offset=offset, dialect=dialect,
+            )
+        )
+    except DomainError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 数据源侧失败友好化（未处理异常绕过 CORS）
+        raise HTTPException(
+            status_code=502,
+            detail=f"该数据源执行待到货明细查询失败：{str(exc)[:200]}",
+        ) from exc
+
+    total = int(_col(countRows[0], "TOTAL_ROWS") or 0) if countRows else 0
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "rows": [_camelPendingRow(r) for r in rows],
+    }

@@ -14,7 +14,9 @@ import {
   deleteCopilotConversation,
   describeCopilotError,
   getCopilotConversation,
+  getPendingDeliverySummary,
   listCopilotConversations,
+  listPendingDeliverySites,
 } from "../api/procurementCopilot";
 
 beforeEach(() => {
@@ -97,5 +99,48 @@ describe("deleteCopilotConversation", () => {
     expect(httpMock.delete).toHaveBeenCalledWith(
       "/procurement/copilot/conversations/c%201",
     );
+  });
+});
+
+describe("getPendingDeliverySummary", () => {
+  it("带过滤参数请求统计端点（多值逗号分隔）", async () => {
+    httpMock.get.mockResolvedValue({
+      data: {
+        summary: { openLines: 12, openQty: 500, overdueLines: 7, excludedRows: 0 },
+        bySupplier: [],
+        topLines: [],
+      },
+    });
+
+    const result = await getPendingDeliverySummary({
+      datasourceId: 1,
+      monthsBack: 6,
+      supplierKeys: ["F109", "B125"],
+    });
+
+    expect(httpMock.get).toHaveBeenCalledWith(
+      "/procurement/pending-delivery/summary",
+      { params: { datasourceId: 1, monthsBack: 6, supplierKeys: "F109,B125" } },
+    );
+    expect(result.summary.openLines).toBe(12);
+  });
+});
+
+describe("listPendingDeliverySites", () => {
+  it("带 datasourceId 请求基地字典", async () => {
+    httpMock.get.mockResolvedValue({ data: [{ code: "T3", name: "模具厂" }] });
+    const rows = await listPendingDeliverySites(10);
+    expect(httpMock.get).toHaveBeenCalledWith("/procurement/pending-delivery/sites", {
+      params: { datasourceId: 10 },
+    });
+    expect(rows[0].code).toBe("T3");
+  });
+
+  it("不带 datasourceId 时 params 为空对象", async () => {
+    httpMock.get.mockResolvedValue({ data: [] });
+    await listPendingDeliverySites();
+    expect(httpMock.get).toHaveBeenCalledWith("/procurement/pending-delivery/sites", {
+      params: {},
+    });
   });
 });

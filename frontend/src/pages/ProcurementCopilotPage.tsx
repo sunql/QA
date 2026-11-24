@@ -16,12 +16,14 @@ import {
   Button,
   Card,
   Col,
+  Collapse,
   DatePicker,
   Drawer,
   Empty,
   Input,
   InputNumber,
   List,
+  Modal,
   Row,
   Segmented,
   Select,
@@ -802,125 +804,131 @@ export default function ProcurementCopilotPage() {
         </>
       )}
       {view === "pending_delivery" && showAdvanced && (
-        <Card size="small" style={{ marginBottom: 16 }} title={t("procurement.copilot.advancedParams")}>
-          <Space direction="vertical" size={8} style={{ width: "100%" }}>
-            <Space wrap size={8} align="center">
-              <Text type="secondary">{t("procurement.copilot.model")}</Text>
-              <Select
-                style={{ minWidth: 200 }}
-                placeholder={t("procurement.copilot.model")}
-                value={modelId}
-                onChange={setModelId}
-                options={models.map((model) => ({
-                  value: model.id,
-                  label: model.modelName,
-                }))}
-              />
-              <Text type="secondary">{t("procurement.copilot.slotDatasource")}</Text>
-              <Select
-                style={{ minWidth: 180 }}
-                placeholder={t("procurement.copilot.slotDatasource")}
-                value={datasourceId}
-                onChange={setDatasourceId}
-                options={datasources.map((d) => ({
-                  value: d.id,
-                  label: d.name,
-                }))}
-              />
-            </Space>
-            <Space wrap size={8} align="center">
-              <Text type="secondary">{t("procurement.copilot.slotTime")}</Text>
-              <Segmented
-                value={dateMode}
-                onChange={(value) => setDateMode(value as "months" | "range")}
-                options={[
-                  { label: t("procurement.copilot.timeMonths"), value: "months" },
-                  { label: t("procurement.copilot.timeRange"), value: "range" },
-                ]}
-              />
-              {dateMode === "months" ? (
-                <>
-                  <InputNumber
-                    min={1}
-                    max={36}
-                    value={monthsBack}
-                    onChange={(v) => setMonthsBack(Number(v) || 12)}
-                  />
-                  <Text type="secondary">{t("procurement.copilot.timeMonthsUnit")}</Text>
-                </>
-              ) : (
-                <RangePicker
-                  value={dateRange}
-                  onChange={(value) => {
-                    if (value && value[0] && value[1]) {
-                      setDateRange([value[0], value[1]]);
-                    } else {
-                      setDateRange(null);
-                    }
-                  }}
+        <Card
+          size="small"
+          style={{
+            marginBottom: 16,
+            border: "1.5px solid #91caff",
+            background: "#f7faff",
+            borderRadius: 8,
+          }}
+          title={
+            <Text strong style={{ color: "#1677ff" }}>
+              {t("procurement.copilot.advancedParams")}
+            </Text>
+          }
+        >
+          <Space wrap size={[16, 8]} align="center">
+            <Text type="secondary">{t("procurement.copilot.model")}</Text>
+            <Select
+              style={{ minWidth: 160 }}
+              placeholder={t("procurement.copilot.model")}
+              value={modelId}
+              onChange={setModelId}
+              options={models.map((model) => ({
+                value: model.id,
+                label: model.modelName,
+              }))}
+            />
+            <Text type="secondary">{t("procurement.copilot.slotDatasource")}</Text>
+            <Select
+              style={{ minWidth: 150 }}
+              placeholder={t("procurement.copilot.slotDatasource")}
+              value={datasourceId}
+              onChange={setDatasourceId}
+              options={datasources.map((d) => ({
+                value: d.id,
+                label: d.name,
+              }))}
+            />
+            <Text type="secondary">{t("procurement.copilot.slotTime")}</Text>
+            <Segmented
+              value={dateMode}
+              onChange={(value) => setDateMode(value as "months" | "range")}
+              options={[
+                { label: t("procurement.copilot.timeMonths"), value: "months" },
+                { label: t("procurement.copilot.timeRange"), value: "range" },
+              ]}
+            />
+            {dateMode === "months" ? (
+              <>
+                <InputNumber
+                  min={1}
+                  max={36}
+                  value={monthsBack}
+                  onChange={(v) => setMonthsBack(Number(v) || 12)}
                 />
-              )}
-            </Space>
-            <Space wrap size={8} align="center">
-              <Text type="secondary">{t("procurement.copilot.slotSupplier")}</Text>
-              <Select
-                mode="multiple"
-                showSearch
-                allowClear
-                maxTagCount={2}
-                style={{ minWidth: 260, maxWidth: 420 }}
-                placeholder={t("procurement.copilot.searchSupplier")}
-                value={supplierKeys}
-                onSearch={(q) => remoteSearch("SUPPLIER", q, setSupplierOptions)}
-                onChange={setSupplierKeys}
-                options={supplierOptions.map((item) => ({
-                  value: item.code,
-                  label: `${item.name}（${item.code}）`,
-                }))}
-                filterOption={false}
+                <Text type="secondary">{t("procurement.copilot.timeMonthsUnit")}</Text>
+              </>
+            ) : (
+              <RangePicker
+                size="middle"
+                value={dateRange}
+                onChange={(value) => {
+                  if (value && value[0] && value[1]) {
+                    setDateRange([value[0], value[1]]);
+                  } else {
+                    setDateRange(null);
+                  }
+                }}
               />
-              <Text type="secondary">{t("procurement.copilot.slotMaterial")}</Text>
-              <Select
-                mode="multiple"
-                showSearch
-                allowClear
-                maxTagCount={2}
-                style={{ minWidth: 260, maxWidth: 420 }}
-                placeholder={t("procurement.copilot.searchMaterial")}
-                value={materialKeys}
-                onSearch={(q) => remoteSearch("MATERIAL", q, setMaterialOptions)}
-                onChange={setMaterialKeys}
-                options={materialOptions.map((item) => ({
-                  value: item.code,
-                  label: `${item.name}（${item.code}）`,
-                }))}
-                filterOption={false}
-              />
-            </Space>
-            <Space wrap size={8} align="center">
-              <Text type="secondary">{t("procurement.copilot.slotSite")}</Text>
-              <Select
-                mode="multiple"
-                showSearch
-                allowClear
-                maxTagCount={3}
-                style={{ minWidth: 260, maxWidth: 460 }}
-                placeholder={t("procurement.copilot.searchSite")}
-                value={siteKeys}
-                onChange={setSiteKeys}
-                optionFilterProp="label"
-                options={siteOptions.map((item) => ({
-                  value: item.code,
-                  label: `${item.name}（${item.code}）`,
-                }))}
-              />
-              <Text type="secondary">{t("procurement.copilot.slotOverdue")}</Text>
-              <InputNumber
-                min={0}
-                value={minOverdueDays}
-                onChange={(v) => setMinOverdueDays(Number(v) || 0)}
-              />
-            </Space>
+            )}
+            <Text type="secondary">{t("procurement.copilot.slotSupplier")}</Text>
+            <Select
+              mode="multiple"
+              showSearch
+              allowClear
+              maxTagCount={1}
+              style={{ minWidth: 200, maxWidth: 320 }}
+              placeholder={t("procurement.copilot.searchSupplier")}
+              value={supplierKeys}
+              onSearch={(q) => remoteSearch("SUPPLIER", q, setSupplierOptions)}
+              onChange={setSupplierKeys}
+              options={supplierOptions.map((item) => ({
+                value: item.code,
+                label: `${item.name}（${item.code}）`,
+              }))}
+              filterOption={false}
+            />
+            <Text type="secondary">{t("procurement.copilot.slotMaterial")}</Text>
+            <Select
+              mode="multiple"
+              showSearch
+              allowClear
+              maxTagCount={1}
+              style={{ minWidth: 200, maxWidth: 320 }}
+              placeholder={t("procurement.copilot.searchMaterial")}
+              value={materialKeys}
+              onSearch={(q) => remoteSearch("MATERIAL", q, setMaterialOptions)}
+              onChange={setMaterialKeys}
+              options={materialOptions.map((item) => ({
+                value: item.code,
+                label: `${item.name}（${item.code}）`,
+              }))}
+              filterOption={false}
+            />
+            <Text type="secondary">{t("procurement.copilot.slotSite")}</Text>
+            <Select
+              mode="multiple"
+              showSearch
+              allowClear
+              maxTagCount={2}
+              style={{ minWidth: 220, maxWidth: 340 }}
+              placeholder={t("procurement.copilot.searchSite")}
+              value={siteKeys}
+              onChange={setSiteKeys}
+              optionFilterProp="label"
+              options={siteOptions.map((item) => ({
+                value: item.code,
+                label: `${item.name}（${item.code}）`,
+              }))}
+            />
+            <Text type="secondary">{t("procurement.copilot.slotOverdue")}</Text>
+            <InputNumber
+              min={0}
+              value={minOverdueDays}
+              onChange={(v) => setMinOverdueDays(Number(v) || 0)}
+            />
           </Space>
         </Card>
       )}
@@ -963,11 +971,6 @@ export default function ProcurementCopilotPage() {
                 ? t("procurement.copilot.hideAdvanced")
                 : t("procurement.copilot.advancedParams")}
             </Button>
-            {conversationId && (
-              <Text type="secondary">
-                {t("procurement.copilot.conversation")}: {conversationId.slice(0, 8)}…
-              </Text>
-            )}
           </Space>
         </Card>
       )}
@@ -1031,11 +1034,6 @@ export default function ProcurementCopilotPage() {
             >
               {t("procurement.copilot.newConversation")}
             </Button>
-            {conversationId && (
-              <Text type="secondary">
-                {t("procurement.copilot.conversation")}: {conversationId.slice(0, 8)}…
-              </Text>
-            )}
           </Space>
         </div>
       </Card>
@@ -1046,52 +1044,61 @@ export default function ProcurementCopilotPage() {
         </>
       )
       }
-      {/* 会话内多结果：Tabs 切换（默认最近一次），不再纵向堆叠 */}
-      {view === "pending_delivery" && resultTurns.length > 0 && (
-        <Card
-          size="small"
-          styles={{ body: { padding: "8px 16px 16px" } }}
-          title={
-            <Space size={8}>
+      {/* 会话内多结果：Tabs 仅作切换器，内容只渲染激活项（滚动不会看到其他结果） */}
+      {view === "pending_delivery" && resultTurns.length > 0 && (() => {
+        const activeIndex = resultTurns.findIndex(
+          (item) => item.turn.id === (activeResultTurnId ?? resultTurns[resultTurns.length - 1].turn.id),
+        );
+        const active = resultTurns[activeIndex >= 0 ? activeIndex : resultTurns.length - 1];
+        return (
+          <Card
+            size="small"
+            styles={{ body: { padding: "8px 16px 16px" } }}
+            title={
+              <Space size={8}>
+                <Text strong style={{ fontSize: 14 }}>
+                  {t("procurement.copilot.resultsTitle")}
+                </Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {t("procurement.copilot.resultsHint")}
+                </Text>
+              </Space>
+            }
+            style={{ marginBottom: 16 }}
+          >
+            <Tabs
+              type="card"
+              size="middle"
+              activeKey={active.turn.id}
+              onChange={setActiveResultTurnId}
+              items={resultTurns.map((item, index) => ({
+                key: item.turn.id,
+                label: (
+                  <Tooltip title={item.turn.question} placement="top">
+                    <span style={{ fontSize: 13 }}>
+                      {`#${index + 1} ${item.turn.question.slice(0, 14)}${
+                        item.turn.question.length > 14 ? "…" : ""
+                      }`}
+                    </span>
+                  </Tooltip>
+                ),
+              }))}
+            />
+            {/* 激活轮次的问题前置（Tab 栏下、结果最上面），上下文一眼可见 */}
+            <Space wrap size={6} style={{ marginBottom: 8 }}>
               <Text strong style={{ fontSize: 14 }}>
-                {t("procurement.copilot.resultsTitle")}
+                {active.turn.question}
               </Text>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {t("procurement.copilot.resultsHint")}
-              </Text>
+              <Text type="secondary">{active.turn.agentCode}</Text>
             </Space>
-          }
-          style={{ marginBottom: 16 }}
-        >
-          <Tabs
-            type="card"
-            size="middle"
-            activeKey={activeResultTurnId ?? resultTurns[resultTurns.length - 1].turn.id}
-            onChange={setActiveResultTurnId}
-            items={resultTurns.map((item, index) => ({
-              key: item.turn.id,
-              label: (
-                <Tooltip title={item.turn.question} placement="top">
-                  <span style={{ fontSize: 13 }}>
-                    {`#${index + 1} ${item.turn.question.slice(0, 14)}${
-                      item.turn.question.length > 14 ? "…" : ""
-                    }`}
-                    <Tag
-                      color={STATUS_COLOR[item.turn.status]}
-                      style={{ marginLeft: 6, marginRight: 0 }}
-                    >
-                      {item.turn.status}
-                    </Tag>
-                  </span>
-                </Tooltip>
-              ),
-              children: item.parsed ? (
-                <PendingDeliveryResultCard result={item.parsed} />
-              ) : null,
-            }))}
-          />
-        </Card>
-      )}
+            {active.parsed ? (
+              <PendingDeliveryResultCard result={active.parsed} />
+            ) : (
+              <Empty description={t("procurement.copilot.traceEmpty")} />
+            )}
+          </Card>
+        );
+      })()}
       {view !== "home" && (
       <Spin spinning={busy && turns.length === 0}>
         {turns.length === 0 ? (
@@ -1101,86 +1108,114 @@ export default function ProcurementCopilotPage() {
         ) : (
           <Space direction="vertical" size="middle" style={{ width: "100%" }}>
             {[...turns].reverse().map((turn) => (
-              <Card
-                key={turn.id}
-                size="small"
-                title={
-                  <Space wrap>
-                    <Tag color={STATUS_COLOR[turn.status]}>{turn.status}</Tag>
-                    <Text strong>{turn.question}</Text>
-                    <Text type="secondary">{turn.agentCode}</Text>
-                    {turn.resumed && (
-                      <Tag color="blue">{t("procurement.copilot.resumed")}</Tag>
-                    )}
-                    {turn.pauseCode && <Tag color="warning">{turn.pauseCode}</Tag>}
-                  </Space>
-                }
-              >
-                {/* 内部步骤行不再进会话流（业务只关心结果与建议）；
-                    执行细节在「查看执行轨迹」抽屉里。出错的轮次保留错误摘要。 */}
-                {turn.steps.some((step) => step.errorMessage) && (
-                  <Text type="danger">
-                    {turn.steps.find((step) => step.errorMessage)?.errorMessage}
-                  </Text>
+              <div key={turn.id}>
+                {/* 失败轮次的错误摘要外置（抽屉默认收起，不能把错误藏起来） */}
+                {turn.status === "ERROR" && turn.error && (
+                  <Alert
+                    type="error"
+                    showIcon
+                    style={{ marginBottom: 8 }}
+                    message={
+                      <Space wrap>
+                        <Text strong>{turn.question}</Text>
+                        <Text>{turn.error}</Text>
+                      </Space>
+                    }
+                  />
                 )}
-                {/* 场景视图：结果统一收进顶部 Tabs 区（多结果可切换对比）；
-                    自由视图保持内联。 */}
-                {view !== "pending_delivery" &&
-                  turn.steps
-                    .map((step) => parsePendingDeliveryStep(step))
-                    .filter((parsed) => parsed !== null)
-                    .slice(0, 1)
-                    .map((parsed) => (
-                      <PendingDeliveryResultCard key={`${turn.id}-pd`} result={parsed} />
-                    ))}
-                {view === "pending_delivery" && resultTurns.length > 1 &&
-                  resultTurns.some((item) => item.turn.id === turn.id) && (
-                    <Text type="secondary" style={{ display: "block", marginTop: 4 }}>
-                      {t("procurement.copilot.resultInTabs")}
-                    </Text>
-                  )}
-                {turn.answer && (
-                  <Card
-                    size="small"
-                    title={t("procurement.copilot.answerTitle")}
-                    style={{ marginTop: 8 }}
-                  >
-                    <div className="markdown-body">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {turn.answer}
-                      </ReactMarkdown>
-                    </div>
-                  </Card>
-                )}
-                {askOf(turn) && (
-                  <Alert type="warning" showIcon message={askOf(turn)} style={{ marginTop: 8 }} />
-                )}
-                {turn.error && (
-                  <Alert type="error" showIcon message={turn.error} style={{ marginTop: 8 }} />
-                )}
-                <Space style={{ marginTop: 8 }}>
-                  {turn.runId && (
-                    <Button
-                      size="small"
-                      onClick={() => {
-                        if (turn.runId) void openTrace(turn.runId);
-                      }}
-                    >
-                      {t("procurement.copilot.openTrace")}
-                    </Button>
-                  )}
-                  {turn.totalTokens > 0 && (
-                    <Text type="secondary">
-                      {t("procurement.copilot.tokens")}: {turn.totalTokens}
-                    </Text>
-                  )}
-                </Space>
-              </Card>
+                <Collapse
+                  items={[{
+                    key: turn.id,
+                    forceRender: true,
+                    label: (
+                      <Space wrap>
+                        <Tag color={STATUS_COLOR[turn.status]}>
+                          {turn.status === "DONE"
+                            ? t("procurement.copilot.contentTag")
+                            : turn.status}
+                        </Tag>
+                        <Text strong>{turn.question}</Text>
+                        <Text type="secondary">{turn.agentCode}</Text>
+                        {turn.resumed && (
+                          <Tag color="blue">{t("procurement.copilot.resumed")}</Tag>
+                        )}
+                        {turn.pauseCode && <Tag color="warning">{turn.pauseCode}</Tag>}
+                      </Space>
+                    ),
+                    children: (
+                      <>
+                        {turn.answer && (
+                          <Card
+                            size="small"
+                            title={t("procurement.copilot.answerTitle")}
+                            style={{ marginBottom: 8 }}
+                          >
+                            <div className="markdown-body">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {turn.answer}
+                              </ReactMarkdown>
+                            </div>
+                          </Card>
+                        )}
+                        {askOf(turn) && (
+                          <Alert
+                            type="warning"
+                            showIcon
+                            style={{ marginBottom: 8 }}
+                            message={askOf(turn)}
+                          />
+                        )}
+                        <Space wrap>
+                          {turn.runId && (
+                            <Button
+                              size="small"
+                              onClick={() => {
+                                if (turn.runId) void openTrace(turn.runId);
+                              }}
+                            >
+                              {t("procurement.copilot.openTrace")}
+                            </Button>
+                          )}
+                          {turn.totalTokens > 0 && (
+                            <Text type="secondary">
+                              {t("procurement.copilot.tokens")}: {turn.totalTokens}
+                            </Text>
+                          )}
+                        </Space>
+                      </>
+                    ),
+                  }]}
+                />
+              </div>
             ))}
           </Space>
         )}
       </Spin>
       )}
+      {/* ④ 分析进度弹窗：发送后出结果前可见，终态自动关闭 */}
+      <Modal
+        open={busy}
+        footer={null}
+        closable={false}
+        maskClosable={false}
+        keyboard={false}
+        width={360}
+        centered
+      >
+        <div style={{ textAlign: "center", padding: "16px 0" }}>
+          <Spin size="large" />
+          <div style={{ marginTop: 12 }}>
+            <Text strong>{t("procurement.copilot.analyzing")}</Text>
+          </div>
+          <Text type="secondary" style={{ display: "block", marginTop: 4 }}>
+            {turns[turns.length - 1]?.question?.slice(0, 30)}
+            {(turns[turns.length - 1]?.question?.length ?? 0) > 30 ? "…" : ""}
+          </Text>
+          <Text type="secondary" style={{ display: "block", marginTop: 4 }}>
+            {t("procurement.copilot.analyzingTip")}
+          </Text>
+        </div>
+      </Modal>
       <Drawer
         title={t("procurement.copilot.traceTitle")}
         width={640}

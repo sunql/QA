@@ -240,6 +240,8 @@ describe("ProcurementCopilotPage 执行轨迹", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
     await waitFor(() => expect(screen.getByText("答案")).toBeTruthy());
+    // 轮次抽屉默认收起：测试需要内部按钮时先展开
+    fireEvent.click(screen.getAllByText("分析内容")[0]);
   }
 
   it("轨迹按钮不是裸链接（裸链接带不上 Authorization ⇒ 新窗口只会看到「请先登录」）", async () => {
@@ -280,7 +282,7 @@ describe("ProcurementCopilotPage 执行轨迹", () => {
     ]);
     await sendOneQuestion();
 
-    fireEvent.click(screen.getByRole("button", { name: /查看执行轨迹/ }));
+    fireEvent.click(await waitFor(() => screen.findByRole("button", { name: /查看执行轨迹/ })));
 
     await waitFor(() =>
       expect(api.getAgentRunSteps).toHaveBeenCalledWith("r-9"),
@@ -421,7 +423,7 @@ describe("ProcurementCopilotPage 历史会话", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
 
-    await waitFor(() => expect(screen.getByText(/c-2/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("RUNNING")).toBeTruthy());
     expect(localStorage.getItem("copilot.conversationId")).toBeNull();
   });
 });
@@ -838,11 +840,9 @@ describe("三个交互优化", () => {
     expect(screen.getByRole("tab", { name: /#1/ })).toBeTruthy();
     expect(screen.getByRole("tab", { name: /#2/ })).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: /#1/ }));
-    await waitFor(() => expect(screen.getAllByText("PO-AAA").length).toBeGreaterThan(0));
-    // PO-BBB 不出现在**激活面板**里（ antd Tabs 隐藏面板仍留在 DOM ⇒ 查激活卡片内部）
-    const activePane = screen.getByRole("tabpanel");
-    expect(activePane.textContent).toContain("PO-AAA");
-    expect(activePane.textContent).not.toContain("PO-BBB");
+    // 切换器只渲染激活项 ⇒ PO-AAA 出现、PO-BBB 离开 DOM
+    await waitFor(() => expect(screen.getByText("PO-AAA")).toBeTruthy());
+    expect(screen.queryByText("PO-BBB")).toBeNull();
   });
 
   it("② 仅改高级参数（不写字）发送按钮可用，消息用默认主句", async () => {

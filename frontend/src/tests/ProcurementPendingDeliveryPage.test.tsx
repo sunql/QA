@@ -84,7 +84,9 @@ beforeEach(() => {
 describe("ProcurementPendingDeliveryPage", () => {
   it("初次加载：带默认时间窗 + 分页参数，行显示供应商名与物料描述", async () => {
     renderPage();
-    await waitFor(() => expect(api.listPendingDeliveryLines).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(api.listPendingDeliveryLines).toHaveBeenCalled(),
+    );
 
     const query = api.listPendingDeliveryLines.mock.calls[0][0];
     expect(query.monthsBack).toBe(12);
@@ -107,7 +109,9 @@ describe("ProcurementPendingDeliveryPage", () => {
 
   it("改筛选（最低逾期天数）⇒ offset 重置为 0 并重新请求", async () => {
     renderPage();
-    await waitFor(() => expect(api.listPendingDeliveryLines).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(api.listPendingDeliveryLines).toHaveBeenCalled(),
+    );
     const firstCalls = api.listPendingDeliveryLines.mock.calls.length;
 
     // 两个 InputNumber：月份、逾期天数（后者在后）
@@ -115,27 +119,35 @@ describe("ProcurementPendingDeliveryPage", () => {
     fireEvent.change(overdueInput, { target: { value: "30" } });
 
     await waitFor(() =>
-      expect(api.listPendingDeliveryLines.mock.calls.length).toBeGreaterThan(firstCalls),
+      expect(api.listPendingDeliveryLines.mock.calls.length).toBeGreaterThan(
+        firstCalls,
+      ),
     );
-    const last = api.listPendingDeliveryLines.mock.calls.at(-1)?.[0];
+    const calls = api.listPendingDeliveryLines.mock.calls;
+    const last = calls[calls.length - 1][0];
     expect(last.minOverdueDays).toBe(30);
     expect(last.offset).toBe(0);
   });
 
   it("点「查询」重新拉数；点「重置」清空筛选并回第 1 页", async () => {
     renderPage();
-    await waitFor(() => expect(api.listPendingDeliveryLines).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(api.listPendingDeliveryLines).toHaveBeenCalled(),
+    );
     const before = api.listPendingDeliveryLines.mock.calls.length;
 
     fireEvent.click(screen.getByRole("button", { name: /查询/ }));
     await waitFor(() =>
-      expect(api.listPendingDeliveryLines.mock.calls.length).toBeGreaterThan(before),
+      expect(api.listPendingDeliveryLines.mock.calls.length).toBeGreaterThan(
+        before,
+      ),
     );
 
     // 重置：清筛选 + 回第 1 页（offset=0）
     fireEvent.click(screen.getByRole("button", { name: /重置/ }));
     await waitFor(() => {
-      const last = api.listPendingDeliveryLines.mock.calls.at(-1)?.[0];
+      const calls = api.listPendingDeliveryLines.mock.calls;
+      const last = calls[calls.length - 1][0];
       expect(last?.offset).toBe(0);
       expect(last?.monthsBack).toBe(12);
       expect(last?.supplierKeys ?? []).toEqual([]);
@@ -145,13 +157,19 @@ describe("ProcurementPendingDeliveryPage", () => {
   it("搜索供应商 ⇒ 走 entity-mapping 远程搜索", async () => {
     api.searchMappings.mockResolvedValue([
       {
-        id: 1, entityType: "SUPPLIER", enterpriseKey: 1,
-        enterpriseCode: "F109", sourceSystem: "ERP", sourceCode: "ERP-1",
+        id: 1,
+        entityType: "SUPPLIER",
+        enterpriseKey: 1,
+        enterpriseCode: "F109",
+        sourceSystem: "ERP",
+        sourceCode: "ERP-1",
         name: "上海纳特",
       },
     ]);
     renderPage();
-    await waitFor(() => expect(api.listPendingDeliveryLines).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(api.listPendingDeliveryLines).toHaveBeenCalled(),
+    );
 
     // aria-label 同时落在 combobox 与其内部 input ⇒ 取 combobox 那个
     const supplierSelect = screen
@@ -168,7 +186,9 @@ describe("ProcurementPendingDeliveryPage", () => {
   it("非 admin：看不到数据源选择", async () => {
     authState.roles = ["procurement"];
     renderPage();
-    await waitFor(() => expect(api.listPendingDeliveryLines).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(api.listPendingDeliveryLines).toHaveBeenCalled(),
+    );
     expect(screen.queryByText("数据源")).toBeNull();
   });
 });

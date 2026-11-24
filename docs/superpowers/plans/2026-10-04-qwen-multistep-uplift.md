@@ -1157,7 +1157,7 @@ metadata:
 - Hook 1 在 `_resolveExplicitMultiStep` 末 → 临时覆盖 `dto.modelId`（仅本轮）
 - Hook 2 在 `_executeDataStep` 第 295 行 `_planAndGenerateSql` 前 → 替换 `step_plan.sub_question`
 
-**Why:** Qwen3.8-27B-4bit 在 B019 这类对比题上按 prompt 指示主动填 `target="无法回答"`（不是校验失败，是模型层偏好）。见 `qwen-multistep-step3-diagnosis.md` 同级目录。
+**Why:** Qwen3.8-27B-4bit 在 B019 这类对比题上按 prompt 指示主动填 `target="无法回答"`（不是校验失败，是模型层偏好）。见 `Harness/changes/feat-qwen-multistep-uplift/qwen-multistep-step3-diagnosis.md`。
 
 **How to apply:**
 - 加新一类对比题：加 1 条 `QueryPatternRouter._PATTERNS` entry 或 1 条 `StepSubquestionRewriter._RULES` entry

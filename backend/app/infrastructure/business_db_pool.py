@@ -610,6 +610,10 @@ class _OracleAdapter:
     # 数据源归属（evidence 记录用）；由 get_adapter 缓存时写入
     datasourceId: int | None = None
 
+    # SQL 方言标识（与 _BusinessAdapter.dialect 对齐）：待到货等按方言分叉
+    # SQL 的工具据此选构造分支（2026-11-24 生产 1248：切 MySQL 源跑 Oracle SQL）
+    dialect: str = "oracle"
+
     def __init__(self, host: str, port: int, service_name: str, username: str, password: str) -> None:
         self._dsn = _build_oracle_dsn(host, port, service_name)
         self._username = username

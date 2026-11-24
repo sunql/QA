@@ -660,7 +660,15 @@ export default function ProcurementCopilotPage() {
             {t("procurement.copilot.backToScenarios")}
           </Button>
         )}
-        <h2 style={{ margin: 0 }}>{t("procurement.copilot.title")}</h2>
+        <h2 style={{ margin: 0 }}>
+          {view === "home"
+            ? t("procurement.copilot.title")
+            : `${t("procurement.copilot.title")} · ${
+                view === "pending_delivery"
+                  ? t("procurement.copilot.scenarioDelivery")
+                  : t("procurement.copilot.scenarioFree")
+              }`}
+        </h2>
       </Space>
       {view === "home" ? (
         <Row gutter={[16, 16]}>
@@ -744,7 +752,7 @@ export default function ProcurementCopilotPage() {
           </Typography.Title>
           <Text type="secondary">{t("procurement.copilot.heroSubtitle")}</Text>
           <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-            <Col span={24}>
+            <Col xs={24} md={16}>
               <Card
                 size="small"
                 loading={summaryState.loading}
@@ -781,11 +789,48 @@ export default function ProcurementCopilotPage() {
                 ) : null}
               </Card>
             </Col>
+            <Col xs={24} md={8}>
+              <Card size="small" title={t("procurement.copilot.tryAsk")}>
+                          <Space direction="vertical" size={6} style={{ width: "100%" }}>
+            {PENDING_DELIVERY_CHIPS.map((chip) => (
+              <Button
+                key={chip.label}
+                block
+                style={{ textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                disabled={busy || !modelId}
+                onClick={() => {
+                  setMonthsBack(chip.monthsBack);
+                  setMinOverdueDays(chip.overdue);
+                  void handleSend(
+                    composePendingDeliveryQuestion({
+                      monthsBack: chip.monthsBack,
+                      supplierKeys: [],
+                      overdue: chip.overdue,
+                    }),
+                    { agentCode: PENDING_DELIVERY_AGENT },
+                  );
+                }}
+              >
+                <span>{chip.label}</span>
+                <ArrowRightOutlined />
+              </Button>
+            ))}
+          </Space>
+              </Card>
+            </Col>
           </Row>
         </>
       )}
       {view === "pending_delivery" && (
-        <Card size="small" style={{ marginBottom: 16 }}>
+        <Card
+          size="small"
+          style={{
+            marginBottom: 16,
+            border: "1.5px solid #91caff",
+            borderRadius: 10,
+            background: "#f7faff",
+          }}
+        >
           <TextArea
             rows={2}
             value={question}
@@ -823,36 +868,6 @@ export default function ProcurementCopilotPage() {
                 ? t("procurement.copilot.hideAdvanced")
                 : t("procurement.copilot.advancedParams")}
             </Button>
-          </Space>
-        </Card>
-      )}
-      {/* 推荐问题 chips：场景工作区常驻（欢迎态与对话态都可点，支持一天多次查询） */}
-      {view === "pending_delivery" && (
-        <Card size="small" style={{ marginBottom: 16 }} title={t("procurement.copilot.tryAsk")}>
-          <Space direction="vertical" size={6} style={{ width: "100%" }}>
-            {PENDING_DELIVERY_CHIPS.map((chip) => (
-              <Button
-                key={chip.label}
-                block
-                style={{ textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}
-                disabled={busy || !modelId}
-                onClick={() => {
-                  setMonthsBack(chip.monthsBack);
-                  setMinOverdueDays(chip.overdue);
-                  void handleSend(
-                    composePendingDeliveryQuestion({
-                      monthsBack: chip.monthsBack,
-                      supplierKeys: [],
-                      overdue: chip.overdue,
-                    }),
-                    { agentCode: PENDING_DELIVERY_AGENT },
-                  );
-                }}
-              >
-                <span>{chip.label}</span>
-                <ArrowRightOutlined />
-              </Button>
-            ))}
           </Space>
         </Card>
       )}
@@ -994,7 +1009,15 @@ export default function ProcurementCopilotPage() {
       />
       )}
       {view === "free" && (
-      <Card size="small" style={{ marginBottom: 16 }}>
+      <Card
+        size="small"
+        style={{
+          marginBottom: 16,
+          border: "1.5px solid #91caff",
+          borderRadius: 10,
+          background: "#f7faff",
+        }}
+      >
         <Space wrap>
           <Select
             style={{ minWidth: 280 }}

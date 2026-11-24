@@ -934,3 +934,36 @@ async def test_pending_delivery_same_day_cache(monkeypatch) -> None:
     await pendingDeliveryHandler(None, {"monthsBack": 6}, SimpleNamespace())
     assert calls["count"] > first
     agent_tools_procurement._PENDING_RESULT_CACHE.clear()
+
+
+def test_purchase_history_and_quotation_mysql_dialect() -> None:
+    """采购历史 / 报价两个工具也要方言安全（MySQL 8.0.31 前无 FETCH FIRST）。"""
+    from app.services.agent_tools_procurement import (
+        buildPurchaseHistorySql,
+        buildQuotationSql,
+    )
+
+    history = buildPurchaseHistorySql(
+        supplierKey="SUP001", materialKey=None, monthsBack=12, limit=20,
+        today=date(2026, 11, 24), dialect="mysql",
+    )
+    assert "LIMIT 20" in history, "MySQL 行数上限必须用 LIMIT"
+    assert "FETCH FIRST" not in history.upper()
+
+    quotation = buildQuotationSql(
+        supplierKey="SUP001", materialKey=None, segmentYear=2026, limit=10,
+        dialect="mysql",
+    )
+    assert "LIMIT 10" in quotation
+    assert "FETCH FIRST" not in quotation.upper()
+
+    # Oracle 默认不变
+    oracleHistory = buildPurchaseHistorySql(
+        supplierKey="SUP001", materialKey=None, monthsBack=12, limit=20,
+        today=date(2026, 11, 24),
+    )
+    assert "FETCH FIRST 20 ROWS ONLY" in oracleHistory.upper()
+    oracleQuotation = buildQuotationSql(
+        supplierKey="SUP001", materialKey=None, segmentYear=2026, limit=10,
+    )
+    assert "FETCH FIRST 10 ROWS ONLY" in oracleQuotation.upper()

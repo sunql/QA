@@ -239,13 +239,14 @@ def buildPurchaseHistorySql(
     monthsBack: int,
     limit: int,
     today: date,
+    dialect: str = "oracle",
 ) -> str:
     """采购历史明细 SQL 模板（确定性，非 LLM 生成；单语句只读 + 行数上限）。
 
     列名来自本体映射（class 20 `DWD_PURCHASE_ORDER_LINE`：SUPPLIER_CODE /
     MATERIAL_CODE / PO_NO / ORDER_QTY / UNIT_PRICE / CREATION_DATE）。
     时间窗 = `CREATION_DATE >= today - monthsBack 月`（DATE 字面量，Oracle/PG 通吃）；
-    行数上限 `FETCH FIRST`（Oracle 12c+ / PG 通用）。
+    行数上限按方言分叉（MySQL 8.0.31 前不支持 FETCH FIRST ⇒ 用 LIMIT）。
     """
     monthsBack = max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX))
     limit = max(1, min(limit, _MAX_LIMIT))
@@ -258,7 +259,7 @@ def buildPurchaseHistorySql(
     return (
         f"SELECT SUPPLIER_CODE, PO_NO, MATERIAL_CODE, ORDER_QTY, UNIT_PRICE, "
         f"CREATION_DATE FROM {_HISTORY_TABLE} WHERE {where} "
-        f"ORDER BY CREATION_DATE DESC FETCH FIRST {limit} ROWS ONLY"
+        f"ORDER BY CREATION_DATE DESC {_PendingDialect(dialect).tail(limit)}"
     )
 
 
@@ -345,6 +346,7 @@ def buildQuotationSql(
     materialKey: str | None,
     segmentYear: int | None,
     limit: int,
+    dialect: str = "oracle",
 ) -> str:
     """年度报价明细 SQL 模板（确定性）。
 
@@ -369,7 +371,7 @@ def buildQuotationSql(
         f"SEG_START_DATE, SEG_END_DATE, CURRENCY_CODE, UOM, PRICE_LIST_CODE "
         f"FROM DWD_PURCHASE_QUOTATION_YEARLY_DTL"
         f"{where} ORDER BY SEG_YEAR DESC, ITEM_CODE "
-        f"FETCH FIRST {limit} ROWS ONLY"
+        f"{_PendingDialect(dialect).tail(limit)}"
     )
 
 
@@ -410,6 +412,7 @@ async def quotationQueryHandler(
     sql = buildQuotationSql(
         supplierKey=supplierKey, materialKey=materialKey,
         segmentYear=segmentYear, limit=limit,
+        dialect=_PendingDialect.fromAdapter(adapter).name,
     )
     assertReadonlySql(sql)
     rows = [_camelQuotationRow(r) for r in await adapter.execute_read_only(sql)]
@@ -690,6 +693,7 @@ async def purchaseHistoryHandler(
     detailSql = buildPurchaseHistorySql(
         supplierKey=supplierKey, materialKey=materialKey,
         monthsBack=monthsBack, limit=limit, today=today,
+        dialect=_PendingDialect.fromAdapter(adapter).name,
     )
     since = _minusMonths(today, monthsBack)
     conds = [f"SUPPLIER_CODE = '{_esc(supplierKey)}'"]
@@ -771,7 +775,7 @@ class _PendingDialect:
         return f"FETCH FIRST {int(limit)} ROWS ONLY"
 
     @staticmethod
-    def fromAdapter(adapter: Any) -> "_PendingDialect":
+    def fromAdapter(adapter: Any) -> _PendingDialect:
         """从 adapter 读方言；Oracle 适配器（或测试桩）缺属性 ⇒ 回落 oracle。"""
         name = str(getattr(adapter, "dialect", "") or "oracle").lower()
         if name not in ("mysql", "oracle"):

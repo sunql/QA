@@ -138,7 +138,7 @@ qa_compose up -d --no-build --no-deps --force-recreate frontend
 docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'backend|worker|frontend'
 ```
 
-**种子（两步，均幂等）**：
+**种子（三步，均幂等）**：
 
 ```bash
 # ① 工具 schema：pending_delivery_query 新槽位（dateFrom/dateTo/三组多选）进 DB
@@ -146,6 +146,10 @@ qa_compose exec backend python -m scripts.seed_agent_tool_configs
 
 # ② Agent ACL 愈合：SOURCING 自动补 PURCHASE_ORDER/ODS 授权（漏了 ⇒ 场景 PERMISSION_DENIED）
 qa_compose exec backend python -m scripts.seed_agents
+
+# ③ 编排绑定：把 pending_delivery_query 补进 SOURCING profile（漏了 ⇒
+#    「请求的工具不在工具目录」——2026-11-24 生产实测，①②不含此步）
+qa_compose exec backend python -m scripts.seed_procurement_agent_profiles
 ```
 
 **SOURCING 编排指令更新（播种器只补工具不改指令，必须手动执行一次）**：

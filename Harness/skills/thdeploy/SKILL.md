@@ -48,7 +48,7 @@ qa_compose() {
 | backend 镜像引用名（compose 实际引用） | `qa-backend:offline` |
 | frontend 镜像引用名（compose 实际引用） | `qa-system_frontend` |
 | compose 网络（回滚 downgrade 用） | `qa-system_default` |
-| worker 拓扑 | **与 backend 同镜像，切换时随 backend 一起 recreate**（2026-11-23 起在跑；旧 runbook「生产无 worker」已过时） |
+| worker 拓扑 | **与 backend 同镜像，切换时随 backend 一起 recreate**（2026-11-23 起在跑；旧 runbook「生产无 worker」已过时）。依据见 [[2026-11-23-copilot-prod-fixes]] runbook：「发版后 worker 不会自动换镜像（`image:` 是显式引用），换 backend 镜像时要一并 `--force-recreate agent-orchestration-worker`」 |
 | psql 惯用法（凭据走容器 env，不写明文） | `docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "…"'` |
 | 备份目录与命名 | `/opt/qa-system/backups/pg_pre_<标识>_$(date +%Y%m%d_%H%M).sql`（plain SQL，`docker exec qa-postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"'` 导出；0 字节⇒重跑） |
 | 切换命令 | `qa_compose up -d --no-build --no-deps --force-recreate <svc>`；**v1 禁止 `--remove-orphans`** |

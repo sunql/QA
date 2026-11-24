@@ -1,7 +1,8 @@
 # 生产发版 1124-fix04：待到货明细页 + 侧栏增强 + 菜单
 
 - **代码版本**：`feat/ontology-evolution @ 8787509d`
-- **本次动**：**backend + frontend 两个容器**（worker 沿用现状，不动）
+- **本次动**：**backend + frontend + agent-orchestration-worker 三个容器**
+  （worker 与 backend **同镜像**，不重建它就跑旧代码 ⇒ 见 §4.5）
 - **迁移**：**零**（alembic 仍 0169）
 - **种子**：**必须跑 `seed_menu_config`**（新增菜单行 ⇒ 不跑 seed 就看不到菜单，这是本批最容易漏的一步）
 
@@ -94,11 +95,45 @@ docker tag qa-system-frontend:amd64-1124-fix04  qa-system_frontend
 docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep -E 'qa-backend:offline|qa-system_frontend'
 ```
 
+### 4.5 worker 镜像必须一并指向新镜像（**别漏**）
+
+生产上 `qa-agent-orchestration-worker` 与 `qa-backend` **跑同一个镜像**
+（2026-11-23 实测：两者 Image ID 同为 `ccb0226b…`）。本批 backend 镜像含
+**MySQL 方言适配**（生产 1248 `Every derived table must have its own alias` 修复，
+代码版本 `8787509d` 已含 `105ebba1`）——**worker 不换镜像 ⇒ Copilot 编排任务里的
+「待到货」仍走旧 Oracle SQL 而 500**（API 直连路径正常 ⇒ 两条路径行为不一致）。
+
+worker 是 **opt-in profile** 服务，compose 定义里**只有 `build:`、没有 `image:`**
+（镜像名由 compose 派生）；生产现役是靠 11-23 那次 `docker tag` 对齐到
+`qa-backend:offline` 的。tag 换新后必须**显式重建 worker**：
+
+```bash
+# ① 确认 worker 现役镜像与 backend 现役一致（不一致 ⇒ 先查清再动）
+docker ps --format '{{.Names}} {{.Image}} {{.Status}}' | grep -E 'backend|worker'
+#   期望：两个容器 Image 均为 qa-backend:offline
+
+# ② 重建（在 §5 切换里一并执行；--no-build 防现场 build，--no-deps 不碰数据容器）
+qa_compose up -d --no-build --no-deps --force-recreate agent-orchestration-worker
+
+# ③ 复核：两个容器的 Image ID 必须相同且为 §1 的 f83bf5619368
+docker inspect qa-backend qa-agent-orchestration-worker \
+  --format '{{.Name}} {{.Image}}'
+```
+
+> 依据：[[2026-11-23-copilot-prod-fixes]] runbook §「发版后 worker 不会自动换镜像
+> （`image:` 是显式引用）：换 backend 镜像时要一并 `--force-recreate
+> agent-orchestration-worker`，否则 worker 跑的还是旧代码」。
+
 ## 5. Phase 3 切换 + **菜单种子（关键）**
 
 ```bash
 qa_compose up -d --no-build --no-deps --force-recreate backend
 docker logs -f qa-backend 2>&1 | grep -E "Application startup complete|ERROR|Can't locate" | head -5
+
+# ★ worker：与 backend 同镜像 ⇒ 必须一并重建，否则跑旧代码（见 §4.5）
+qa_compose up -d --no-build --no-deps --force-recreate agent-orchestration-worker
+docker inspect qa-backend qa-agent-orchestration-worker \
+  --format '{{.Name}} {{.Image}}'      # 期望两者 Image ID 相同且为 §1 的 f83bf5619368
 
 qa_compose up -d --no-build --no-deps --force-recreate frontend
 
@@ -122,6 +157,12 @@ docker exec qa-frontend sh -c 'ls /usr/share/nginx/html/assets/index-*.js'   # i
 # 新端点（登录守卫 ⇒ 401/403/409 均表示已注册）
 curl -s -o /dev/null -w "lines=%{http_code}\n" \
   "http://localhost:8000/api/v1/procurement/pending-delivery/lines?limit=20&offset=0"
+
+# worker 已换新镜像 + 启动正常（若沿用旧镜像 ⇒ 本批方言修复在编排任务侧不生效）
+docker logs --tail 20 qa-agent-orchestration-worker 2>&1 | grep -iE "warmed up|worker|error" | head -5
+docker exec qa-agent-orchestration-worker python -c \
+  "from app.services.agent_tools_procurement import _PendingDialect; print(_PendingDialect('mysql').name)" 2>/dev/null
+# 期望输出 mysql（说明 worker 镜像是含方言修复的新镜像）
 ```
 
 浏览器（硬刷新）：
@@ -134,7 +175,10 @@ curl -s -o /dev/null -w "lines=%{http_code}\n" \
 ```bash
 docker tag qa-backend:pre-1124-fix04 qa-backend:offline
 docker tag qa-system_frontend:pre-1124-fix04 qa-system_frontend
-qa_compose up -d --no-build --no-deps --force-recreate backend frontend
+# worker 也要换回旧镜像（与 backend 同镜像 ⇒ 一并回滚）
+qa_compose up -d --no-build --no-deps --force-recreate backend agent-orchestration-worker frontend
+docker inspect qa-backend qa-agent-orchestration-worker \
+  --format '{{.Name}} {{.Image}}'      # 期望两者 Image ID 相同且为回滚锚点
 # 菜单行留着无害（指向已回退的路由 ⇒ 404）；要彻底移除：
 docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -c "delete from menu_config where code = '"'"'item.procurementPendingDelivery'"'"';"'

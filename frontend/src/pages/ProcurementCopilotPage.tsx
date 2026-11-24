@@ -94,6 +94,8 @@ const RESTORED_STATUS: Record<string, CopilotTurn["status"]> = {
 interface CopilotTurn {
   id: string;
   question: string;
+  /** 创建时间（ms）——同条件结果复用的 24h 窗口依据 */
+  createdAt?: number;
   agentCode: string;
   /** true = 对上一轮追问的回答（后端 resume 同一 run） */
   resumed?: boolean;
@@ -570,6 +572,7 @@ export default function ProcurementCopilotPage() {
       {
         id,
         question: text,
+        createdAt: Date.now(),
         agentCode: effectiveAgent,
         resumed: undefined,
         runId: null,
@@ -741,7 +744,7 @@ export default function ProcurementCopilotPage() {
           </Typography.Title>
           <Text type="secondary">{t("procurement.copilot.heroSubtitle")}</Text>
           <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-            <Col xs={24} md={16}>
+            <Col span={24}>
               <Card
                 size="small"
                 loading={summaryState.loading}
@@ -776,35 +779,6 @@ export default function ProcurementCopilotPage() {
                     )}
                   </>
                 ) : null}
-              </Card>
-            </Col>
-            <Col xs={24} md={8}>
-              <Card size="small" title={t("procurement.copilot.tryAsk")}>
-                <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                  {PENDING_DELIVERY_CHIPS.map((chip) => (
-                    <Button
-                      key={chip.label}
-                      block
-                      style={{ textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}
-                      disabled={busy || !modelId}
-                      onClick={() => {
-                        setMonthsBack(chip.monthsBack);
-                        setMinOverdueDays(chip.overdue);
-                        void handleSend(
-                          composePendingDeliveryQuestion({
-                            monthsBack: chip.monthsBack,
-                            supplierKeys: [],
-                            overdue: chip.overdue,
-                          }),
-                          { agentCode: PENDING_DELIVERY_AGENT },
-                        );
-                      }}
-                    >
-                      <span>{chip.label}</span>
-                      <ArrowRightOutlined />
-                    </Button>
-                  ))}
-                </Space>
               </Card>
             </Col>
           </Row>
@@ -849,6 +823,36 @@ export default function ProcurementCopilotPage() {
                 ? t("procurement.copilot.hideAdvanced")
                 : t("procurement.copilot.advancedParams")}
             </Button>
+          </Space>
+        </Card>
+      )}
+      {/* 推荐问题 chips：场景工作区常驻（欢迎态与对话态都可点，支持一天多次查询） */}
+      {view === "pending_delivery" && (
+        <Card size="small" style={{ marginBottom: 16 }} title={t("procurement.copilot.tryAsk")}>
+          <Space direction="vertical" size={6} style={{ width: "100%" }}>
+            {PENDING_DELIVERY_CHIPS.map((chip) => (
+              <Button
+                key={chip.label}
+                block
+                style={{ textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                disabled={busy || !modelId}
+                onClick={() => {
+                  setMonthsBack(chip.monthsBack);
+                  setMinOverdueDays(chip.overdue);
+                  void handleSend(
+                    composePendingDeliveryQuestion({
+                      monthsBack: chip.monthsBack,
+                      supplierKeys: [],
+                      overdue: chip.overdue,
+                    }),
+                    { agentCode: PENDING_DELIVERY_AGENT },
+                  );
+                }}
+              >
+                <span>{chip.label}</span>
+                <ArrowRightOutlined />
+              </Button>
+            ))}
           </Space>
         </Card>
       )}

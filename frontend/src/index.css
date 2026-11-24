@@ -99,3 +99,14 @@ body,
 .pd-table.ant-table-wrapper .ant-table {
   background: transparent;
 }
+
+/* 长文本（物料描述/供应商名称）在单元格内完整换行展示 */
+.pd-table .ant-table-cell {
+  white-space: normal !important;
+  word-break: break-word;
+}
+.pd-table .ant-table-tbody > tr > td {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  vertical-align: top;
+}

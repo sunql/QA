@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, time
 from time import monotonic
 from typing import Any
 from uuid import UUID
@@ -189,6 +190,47 @@ async def _history(
     return conversationStore.historyFromTurns(turns, views)
 
 
+async def _sameDayReusableRunId(
+    session: AsyncSession, *, dto: Any, actor: Any
+) -> str | None:
+    """同日同问复用（2026-11-24 需求：一天内多次查询数据未变化 ⇒ 复用）。
+
+    命中条件：同用户 + 同 Agent + 同模型 + **同问题文本** + 当日 +
+    状态 ∈ {QUEUED, RUNNING, SUCCEEDED}（进行中的复用 = 相同问题并发去重；
+    FAILED/CANCELLED **不复用** —— 给用户重试的机会）。
+    复用 = 本轮 turn 直接指向该 run（SSE 跟随其终态，**零 LLM 成本**）；
+    文字/参数不同 ⇒ 正常新跑。resume（追问续跑）优先级更高，在上文已处理。
+    """
+    # 惰性导入：本模块被 run service 侧引用 ⇒ 顶层 import 模型会成环
+    from sqlalchemy import select as sa_select
+
+    from app.domain.agent_orchestration_models import AgentOrchestrationRun
+    from app.domain.procurement_copilot_models import ProcurementCopilotTurn
+
+    todayStart = datetime.combine(datetime.now(UTC).date(), time.min, tzinfo=UTC)
+    stmt = (
+        sa_select(AgentOrchestrationRun.run_id)
+        .join(
+            ProcurementCopilotTurn,
+            ProcurementCopilotTurn.run_id == AgentOrchestrationRun.run_id,
+        )
+        .where(
+            AgentOrchestrationRun.created_by == str(getattr(actor, "userId", "")),
+            AgentOrchestrationRun.agent_code == dto.agent_code,
+            AgentOrchestrationRun.model_config_id == dto.model_config_id,
+            AgentOrchestrationRun.status.in_(
+                (RunStatus.QUEUED.value, RunStatus.RUNNING.value, RunStatus.SUCCEEDED.value)
+            ),
+            AgentOrchestrationRun.created_time >= todayStart,
+            ProcurementCopilotTurn.question == dto.message,
+        )
+        .order_by(AgentOrchestrationRun.created_time.desc(), AgentOrchestrationRun.id.desc())
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).scalars().first()
+    return row
+
+
 async def prepareCopilotTurn(
     session: AsyncSession,
     dto: CopilotMessageRequest,
@@ -225,6 +267,23 @@ async def prepareCopilotTurn(
             conversationId=str(conversation.conversation_id),
             status=RunStatus.QUEUED.value,
             resumed=True,
+        )
+
+    # 同日同问复用（resume 优先级更高，上文已处理）：命中 ⇒ turn 指向既有
+    # SUCCEEDED run，SSE 立刻吐 done —— 零 LLM 成本（2026-11-24 需求：
+    # 一天多次查询数据未变化 ⇒ 后台判断复用，前台正常问话即可）。
+    reusedRunId = await _sameDayReusableRunId(session, dto=dto, actor=actor)
+    if reusedRunId is not None:
+        await conversationStore.appendTurn(
+            session, conversation, question=dto.message, runId=reusedRunId
+        )
+        await session.commit()
+        reusedRun = await runner.getRun(session, reusedRunId, actor)
+        return CopilotTurnResult(
+            runId=reusedRunId,
+            conversationId=str(conversation.conversation_id),
+            status=str(getattr(reusedRun.status, "value", reusedRun.status)),
+            resumed=False,
         )
 
     history = await _history(session, turns, actor, runner)

@@ -806,25 +806,27 @@ describe("供应商/物料远程搜索多选", () => {
 });
 
 
+function twoResultSteps(poNo: string) {
+  return [
+    {
+      stepNo: 1, iterationNo: 1, kind: "TOOL", status: "SUCCEEDED",
+      action: null, planSummary: null, toolName: "pending_delivery_query",
+      inputJson: null,
+      outputJson: { text: JSON.stringify({ data: {
+        summary: { openLines: 1, openQty: 10, overdueLines: 1, excludedRows: 0 },
+        bySupplier: [], topLines: [{ poNo, poLine: 1000, materialCode: "M1",
+          supplierCode: "S1", orderedQty: 100, receivedQty: 90, openQty: 10,
+          expectedDate: "2026-01-01", overdueDays: 5 }],
+      }, answer: "" }) },
+      answer: null, errorCode: null, errorMessage: null,
+      promptTokens: 0, completionTokens: 0, cost: 0,
+      startedAt: "2026-11-24T00:00:00Z", finishedAt: "2026-11-24T00:00:01Z",
+    },
+  ];
+
+}
+
 describe("三个交互优化", () => {
-  function twoResultSteps(poNo: string) {
-    return [
-      {
-        stepNo: 1, iterationNo: 1, kind: "TOOL", status: "SUCCEEDED",
-        action: null, planSummary: null, toolName: "pending_delivery_query",
-        inputJson: null,
-        outputJson: { text: JSON.stringify({ data: {
-          summary: { openLines: 1, openQty: 10, overdueLines: 1, excludedRows: 0 },
-          bySupplier: [], topLines: [{ poNo, poLine: 1000, materialCode: "M1",
-            supplierCode: "S1", orderedQty: 100, receivedQty: 90, openQty: 10,
-            expectedDate: "2026-01-01", overdueDays: 5 }],
-        }, answer: "" }) },
-        answer: null, errorCode: null, errorMessage: null,
-        promptTokens: 0, completionTokens: 0, cost: 0,
-        startedAt: "2026-11-24T00:00:00Z", finishedAt: "2026-11-24T00:00:01Z",
-      },
-    ];
-  }
 
   it("③ 会话内多结果：Tabs 切换显示不同轮次的结果", async () => {
     mockOptions();

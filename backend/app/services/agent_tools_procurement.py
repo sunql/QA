@@ -10,9 +10,11 @@ input_schema / handler_ref）在 DB ``agent_tool_config``（admin 维护）。
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -737,6 +739,11 @@ _PENDING_SUPPLIER_TABLE = "ZJTH.BPSUPPLIER"
 _OPEN_QTY_SANITY_MAX = 1_000_000
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+#: 待到货查询的同日结果缓存：key = 全部过滤参数 + 数据源 + 当天日期，
+#: TTL = 距当日午夜（ODS 每日 ETL ⇒ 同日数据视为不变，2026-11-24 需求）。
+#: 进程内缓存：重启即失效（保守侧），跨天由 key 中的日期自然隔离。
+_PENDING_RESULT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 
@@ -836,6 +843,80 @@ class PendingDeliveryFilters:
             parts.extend(f"f.FCYNAM_0 LIKE '%{_esc(k)}%'" for k in names)
             conds.append("(" + " OR ".join(parts) + ")")
         return (" AND " + " AND ".join(conds)) if conds else ""
+
+
+def _pendingCacheKey(
+    *, datasourceId: int, monthsBack: int, filters: PendingDeliveryFilters,
+    minOverdueDays: int | None, today: date,
+) -> str:
+    payload = {
+        "ds": datasourceId,
+        "months": monthsBack,
+        "from": filters.dateFrom,
+        "to": filters.dateTo,
+        "suppliers": sorted(filters.supplierKeys),
+        "materials": sorted(filters.materialKeys),
+        "sites": sorted(filters.siteKeys),
+        "overdue": minOverdueDays,
+        "day": today.isoformat(),
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _cacheTtlSeconds(now: datetime) -> int:
+    """TTL = 距当日午夜（同日复用，跨天自然失效）。"""
+    midnight = datetime.combine(now.date() + timedelta(days=1), time.min)
+    return max(60, int((midnight - now).total_seconds()))
+
+
+async def _loadPendingDeliveryData(
+    adapter, *, datasourceId: int, monthsBack: int, today: date,
+    filters: PendingDeliveryFilters, minOverdueDays: int | None, limit: int,
+) -> dict[str, Any]:
+    """三段查询（汇总/按供应商/TOP 行）+ 同日结果缓存。
+
+    命中 ⇒ 不再查库（省 DB 与工具执行成本）；未命中 ⇒ 查询并写缓存。
+    """
+    cacheKey = _pendingCacheKey(
+        datasourceId=datasourceId, monthsBack=monthsBack, filters=filters,
+        minOverdueDays=minOverdueDays, today=today,
+    )
+    hit = _PENDING_RESULT_CACHE.get(cacheKey)
+    now = datetime.now()
+    if hit is not None and hit[0] > now.timestamp():
+        return hit[1]
+
+    summaryRows = await adapter.execute_read_only(buildPendingDeliverySummarySql(
+        monthsBack=monthsBack, today=today, filters=filters))
+    supplierRows = await adapter.execute_read_only(buildPendingDeliveryBySupplierSql(
+        monthsBack=monthsBack, today=today, limit=5, filters=filters))
+    lineRows = await adapter.execute_read_only(buildPendingDeliveryLinesSql(
+        monthsBack=monthsBack, today=today, filters=filters,
+        minOverdueDays=minOverdueDays, limit=limit))
+
+    summaryRow = summaryRows[0] if summaryRows else {}
+    data: dict[str, Any] = {
+        "summary": {
+            "openLines": int(_col(summaryRow, "OPEN_LINES") or 0),
+            "openQty": _col(summaryRow, "OPEN_QTY"),
+            "overdueLines": int(_col(summaryRow, "OVERDUE_LINES") or 0),
+            "excludedRows": int(_col(summaryRow, "EXCLUDED_ROWS") or 0),
+        },
+        "bySupplier": [
+            {
+                "supplierCode": _col(r, "SUPPLIER_CODE"),
+                "supplierName": _col(r, "SUPPLIER_NAME"),
+                "openLines": int(_col(r, "OPEN_LINES") or 0),
+                "openQty": _col(r, "OPEN_QTY"),
+                "overdueLines": int(_col(r, "OVERDUE_LINES") or 0),
+            }
+            for r in supplierRows
+        ],
+        "topLines": [_camelPendingRow(r) for r in lineRows],
+    }
+    _PENDING_RESULT_CACHE[cacheKey] = (_cacheTtlSeconds(now) + now.timestamp(), data)
+    return data
 
 
 def buildPendingDeliverySummarySql(
@@ -1008,53 +1089,25 @@ async def pendingDeliveryHandler(
     adapter = _adapterFor(ds.id, ds)
     today = date.today()
 
-    summaryRows = await adapter.execute_read_only(
-        buildPendingDeliverySummarySql(monthsBack=monthsBack, today=today, filters=filters)
+    data = await _loadPendingDeliveryData(
+        adapter, datasourceId=ds.id, monthsBack=monthsBack, today=today,
+        filters=filters, minOverdueDays=minOverdueDays, limit=limit,
     )
-    summaryRow = summaryRows[0] if summaryRows else {}
-    openLines = int(_col(summaryRow, "OPEN_LINES") or 0)
+    summary = data["summary"]
+    bySupplier = data["bySupplier"]
+    lineRows = data["topLines"]
+    openLines = int(summary["openLines"] or 0)
     if openLines == 0:
         return ToolResult(
             data={
                 "via": "business_db", "datasourceId": ds.id,
-                "summary": {"openLines": 0, "openQty": 0, "overdueLines": 0,
-                            "excludedRows": int(_col(summaryRow, "EXCLUDED_ROWS") or 0)},
-                "bySupplier": [], "topLines": [],
+                "summary": summary, "bySupplier": [], "topLines": [],
             },
             answer=f"近 {monthsBack} 个月没有欠交订单行（全部已交清）。",
         )
 
-    supplierRows = await adapter.execute_read_only(
-        buildPendingDeliveryBySupplierSql(
-            monthsBack=monthsBack, today=today, limit=5, filters=filters
-        )
-    )
-    lineRows = await adapter.execute_read_only(
-        buildPendingDeliveryLinesSql(
-            monthsBack=monthsBack, today=today,
-            filters=filters, minOverdueDays=minOverdueDays, limit=limit,
-        )
-    )
-
-    bySupplier = [
-        {
-            "supplierCode": _col(r, "SUPPLIER_CODE"),
-            "supplierName": _col(r, "SUPPLIER_NAME"),
-            "openLines": int(_col(r, "OPEN_LINES") or 0),
-            "openQty": _col(r, "OPEN_QTY"),
-            "overdueLines": int(_col(r, "OVERDUE_LINES") or 0),
-        }
-        for r in supplierRows
-    ]
-    topLines = [_camelPendingRow(r) for r in lineRows]
-    summary = {
-        "openLines": openLines,
-        "openQty": _col(summaryRow, "OPEN_QTY"),
-        "overdueLines": int(_col(summaryRow, "OVERDUE_LINES") or 0),
-        "excludedRows": int(_col(summaryRow, "EXCLUDED_ROWS") or 0),
-    }
     topSuppliers = "、".join(
-        f"{s['supplierCode']}({s['openQty']})" for s in bySupplier[:3]
+        f"{item['supplierCode']}({item['openQty']})" for item in bySupplier[:3]
     )
     excludedNote = (
         f"；另有 {summary['excludedRows']} 行源侧数量异常已剔除"
@@ -1064,7 +1117,7 @@ async def pendingDeliveryHandler(
     return ToolResult(
         data={
             "via": "business_db", "datasourceId": ds.id,
-            "summary": summary, "bySupplier": bySupplier, "topLines": topLines,
+            "summary": summary, "bySupplier": bySupplier, "topLines": lineRows,
         },
         answer=(
             f"近 {monthsBack} 个月欠交 {openLines} 行、总量 {summary['openQty']}；"

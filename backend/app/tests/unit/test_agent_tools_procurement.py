@@ -833,3 +833,47 @@ async def test_pending_delivery_material_name_resolved_via_mdm(monkeypatch) -> N
     lines_sql = next(sql for sql in captured if "ORDER BY" in sql.upper())
     assert "AJE0000781" in lines_sql, "MDM 解析出的编码必须进 IN"
     assert "ITMDES1_0 LIKE '%不锈钢板%'" in lines_sql, "原词保留作 LIKE 兜底"
+
+
+@pytest.mark.asyncio
+async def test_pending_delivery_same_day_cache(monkeypatch) -> None:
+    """同参数同日二次调用 ⇒ 不再查库（复用缓存），换参数/换源 ⇒ 重新查询。"""
+    from app.services import agent_tools_procurement
+
+    calls = {"count": 0}
+
+    class _FakeAdapter:
+        async def execute_read_only(self, sql: str):
+            calls["count"] += 1
+            if "EXCLUDED_ROWS" in sql:
+                return [{"OPEN_LINES": 2, "OPEN_QTY": 50.0,
+                         "OVERDUE_LINES": 1, "EXCLUDED_ROWS": 0}]
+            if "GROUP BY" in sql.upper():
+                return [{"SUPPLIER_CODE": "F109", "SUPPLIER_NAME": "纳特",
+                         "OPEN_LINES": 1, "OPEN_QTY": 30.0, "OVERDUE_LINES": 1}]
+            return [{"POHNUM_0": "P1", "POPLIN_0": 1000, "ITMREF_0": "M1",
+                     "BPSNUM_0": "F109", "SUPPLIER_NAME": "纳特",
+                     "MATERIAL_DESC": "desc", "ORDERED_QTY": 40.0,
+                     "RECEIVED_QTY": 10.0, "OPEN_QTY": 30.0,
+                     "EXTRCPDAT_0": "2026-01-01", "OVERDUE_DAYS": 5}]
+
+    monkeypatch.setattr(
+        agent_tools_procurement, "_adapterFor", lambda dsId, ds: _FakeAdapter()
+    )
+    monkeypatch.setattr(
+        agent_tools_procurement, "_resolveBusinessDatasource",
+        async_simple(ds=SimpleNamespace(id=1, name="THBI", is_active=True)),
+    )
+    agent_tools_procurement._PENDING_RESULT_CACHE.clear()
+
+    from app.services.agent_tools_procurement import pendingDeliveryHandler
+
+    await pendingDeliveryHandler(None, {"monthsBack": 12}, SimpleNamespace())
+    first = calls["count"]
+    # 同参数二次调用 ⇒ 命中缓存，不再查库
+    await pendingDeliveryHandler(None, {"monthsBack": 12}, SimpleNamespace())
+    assert calls["count"] == first, "同参数同日应命中缓存"
+    # 换参数 ⇒ 重新查询
+    await pendingDeliveryHandler(None, {"monthsBack": 6}, SimpleNamespace())
+    assert calls["count"] > first
+    agent_tools_procurement._PENDING_RESULT_CACHE.clear()

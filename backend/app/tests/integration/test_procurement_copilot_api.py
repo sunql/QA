@@ -186,7 +186,11 @@ async def test_first_message_creates_conversation_and_turn(
 async def test_second_message_carries_context_into_new_run(
     client: AsyncClient,
 ) -> None:
-    """同一会话的第二问 ⇒ 新 run，且 run.question 带上一轮上下文。"""
+    """同一会话的**不同**追问 ⇒ 新 run，且 run.question 带上一轮上下文。
+
+    同文字重复提问不在此列：run 级同日复用会直接指向既有 run
+    （见 test_same_day_same_question_reuses_run，2026-11-24 产品口径）。
+    """
     modelId = await _seedRunnableProcurementAgent(client)
     first = (
         await client.post(
@@ -194,10 +198,12 @@ async def test_second_message_carries_context_into_new_run(
         )
     ).json()
 
+    followup = "那B125的情况呢？"
     second = await client.post(
         COPILOT_PATH,
         headers=OWNER_HEADERS,
-        json={**_message(PROC_AGENT_CODE, modelId), "conversationId": first["conversationId"]},
+        json={**_message(PROC_AGENT_CODE, modelId), "message": followup,
+              "conversationId": first["conversationId"]},
     )
 
     assert second.status_code == 202, second.text
@@ -209,8 +215,8 @@ async def test_second_message_carries_context_into_new_run(
     run = await client.get(f"/api/v1/agent-runs/{body['runId']}", headers=OWNER_HEADERS)
     question = run.json()["question"]
     assert "[对话上下文]" in question
-    assert "哪些供应商能供不锈钢板？" in question
-    assert question.endswith("哪些供应商能供不锈钢板？")  # 当前问题在最后（同一句）
+    assert "哪些供应商能供不锈钢板？" in question  # 上一轮进上下文
+    assert question.rstrip().endswith(followup)  # 当前追问在最后
 
     conversation = await client.get(
         f"/api/v1/procurement/copilot/conversations/{body['conversationId']}",
@@ -385,3 +391,27 @@ async def test_delete_conversation_is_owner_scoped(client: AsyncClient) -> None:
 
     rows = (await client.get(LIST_PATH, headers=OWNER_HEADERS)).json()
     assert conversationId in [r["conversationId"] for r in rows]
+
+
+@pytest.mark.asyncio
+async def test_same_day_same_question_reuses_run(client: AsyncClient) -> None:
+    """同日同问复用（2026-11-24 需求）：同问两次 ⇒ 第二次复用首个 run，零新查询。"""
+    modelId = await _seedRunnableProcurementAgent(client)
+    payload = _message(PROC_AGENT_CODE, modelId)
+
+    first = await client.post(COPILOT_PATH, headers=OWNER_HEADERS, json=payload)
+    assert first.status_code == 202
+    firstRunId = first.json()["runId"]
+
+    second = await client.post(COPILOT_PATH, headers=OWNER_HEADERS, json=payload)
+    assert second.status_code == 202
+    assert second.json()["runId"] == firstRunId, "同日同问必须复用既有 run"
+
+    # 不同问题 ⇒ 新 run（不复用）
+    other = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json={**payload, "message": "换个问题：B125 的欠交情况如何？"},
+    )
+    assert other.status_code == 202
+    assert other.json()["runId"] != firstRunId

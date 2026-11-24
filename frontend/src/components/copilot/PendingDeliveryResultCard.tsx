@@ -214,17 +214,15 @@ export default function PendingDeliveryResultCard({
                 dataSource={topLines}
                 columns={[
                   { title: "订单号", dataIndex: "poNo", width: 170 },
-                  { title: "物料编码", dataIndex: "materialCode", ellipsis: true },
+                  { title: "物料编码", dataIndex: "materialCode" },
                   {
                     title: "物料描述",
                     dataIndex: "materialDesc",
-                    ellipsis: true,
                     render: (value: string | null) => value ?? "-",
                   },
                   {
                     title: "供应商",
                     render: (_: unknown, row) => supplierLabel(row.supplierCode, row.supplierName),
-                    ellipsis: true,
                   },
                   { title: "订购量", render: (_: unknown, row) => fmtQty(row.orderedQty) },
                   { title: "已收", render: (_: unknown, row) => fmtQty(row.receivedQty) },

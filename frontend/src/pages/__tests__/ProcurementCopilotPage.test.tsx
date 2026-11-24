@@ -24,6 +24,7 @@ const api = vi.hoisted(() => ({
   getCopilotConversation: vi.fn(),
   deleteCopilotConversation: vi.fn(),
   listDataSources: vi.fn(),
+  getPendingDeliverySummary: vi.fn(),
 }));
 
 vi.mock("../../api/procurementKnowledge", () => ({
@@ -36,6 +37,7 @@ vi.mock("../../api/procurementCopilot", () => ({
   listCopilotConversations: api.listCopilotConversations,
   getCopilotConversation: api.getCopilotConversation,
   deleteCopilotConversation: api.deleteCopilotConversation,
+  getPendingDeliverySummary: api.getPendingDeliverySummary,
 }));
 vi.mock("../../api/agentOrchestrationApi", () => ({
   getAgentRunSteps: api.getAgentRunSteps,
@@ -43,6 +45,11 @@ vi.mock("../../api/agentOrchestrationApi", () => ({
 
 beforeEach(() => {
   api.listCopilotConversations.mockResolvedValue([]);
+  api.getPendingDeliverySummary.mockResolvedValue({
+    summary: { openLines: 9828, openQty: 209421924.058, overdueLines: 9828, excludedRows: 7 },
+    bySupplier: [{ supplierCode: "J1", openLines: 2405, openQty: 57363604, overdueLines: 2405 }],
+    topLines: [],
+  });
   api.listDataSources.mockResolvedValue([
     { id: 1, name: "THBI Oracle", type: "oracle", isDefault: true },
     { id: 10, name: "SRM-TH-01", type: "mysql", isDefault: false },
@@ -546,7 +553,7 @@ describe("ProcurementCopilotPage 待到货场景", () => {
 
     renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: /运行场景/ }));
+    fireEvent.click(screen.getByText("全部供应商概览（近 12 个月）"));
 
     await waitFor(() => expect(payloads).toHaveLength(1));
     const message = String(payloads[0].message);
@@ -588,14 +595,20 @@ describe("ProcurementCopilotPage 待到货场景", () => {
 
     renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
     fireEvent.change(screen.getByPlaceholderText("全部"), {
       target: { value: "F109" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /运行场景/ }));
+    fireEvent.change(screen.getByPlaceholderText(/补充说明/), {
+      target: { value: "看 F109 的欠交" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
 
     await waitFor(() => expect(payloads).toHaveLength(1));
     const message = String(payloads[0].message);
     expect(message).toContain("供应商=F109");
+    expect(message).toContain("看 F109 的欠交");
+    expect(message).toContain("pending_delivery_query");
   });
 });
 
@@ -643,10 +656,14 @@ describe("ProcurementCopilotPage 场景钉 Agent", () => {
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
     await waitFor(() => expect(payloads).toHaveLength(1));
 
-    // 场景运行：先回卡片墙进「待到货」，Agent 被钉到 SOURCING，且不带会话 id（防 422 串味）
-    fireEvent.click(screen.getByRole("button", { name: /场景$/ }));
+    // 场景运行：先回卡片墙进「待到货」，点 chip —— Agent 钉 SOURCING 且不带会话 id（防 422 串味）
+    fireEvent.click(screen.getAllByRole("button", { name: /场景$/ })
+      .find((el) => el.textContent?.trim() === "场景") as HTMLElement);
     fireEvent.click(screen.getByText("待到货 / 逾期未到"));
-    fireEvent.click(screen.getByRole("button", { name: /运行场景/ }));
+    await waitFor(() =>
+      expect(screen.getByText("全部供应商概览（近 12 个月）")).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByText("全部供应商概览（近 12 个月）"));
     await waitFor(() => expect(payloads).toHaveLength(2));
     expect(payloads[1].agentCode).toBe("PROCUREMENT_SOURCING");
     expect(payloads[1].conversationId).toBeUndefined();
@@ -669,9 +686,11 @@ describe("ProcurementCopilotPage 场景卡片墙（首页）", () => {
     // 首页不显示对话输入框
     expect(screen.queryByPlaceholderText(/不锈钢板/)).toBeNull();
 
-    // 进入待到货：出现槽位与运行按钮
+    // 进入待到货：欢迎态（问候 + 业务现状 + 推荐 chips）
     fireEvent.click(screen.getByText("待到货 / 逾期未到"));
-    await waitFor(() => expect(screen.getByRole("button", { name: /运行场景/ })).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/你好，我是采购待到货分析助手/)).toBeTruthy());
+    expect(screen.getByText("业务现状（实时）")).toBeTruthy();
+    expect(screen.getByText("试试这样问我")).toBeTruthy();
     expect(container).toBeTruthy();
 
     // 返回卡片墙
@@ -705,12 +724,16 @@ describe("ProcurementCopilotPage 数据源槽位", () => {
     renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
 
-    // 场景卡里 Select 顺序：模型在上、数据源在下
+    fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
+    // 高级面板里 Select 顺序：模型在上、数据源在下
     const selects = screen.getAllByRole("combobox");
     fireEvent.mouseDown(selects[1]);
     fireEvent.click(await waitFor(() => screen.getByText("SRM-TH-01")));
 
-    fireEvent.click(screen.getByRole("button", { name: /运行场景/ }));
+    fireEvent.change(screen.getByPlaceholderText(/补充说明/), {
+      target: { value: "看欠交" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
     await waitFor(() => expect(payloads).toHaveLength(1));
     const message = String(payloads[0].message);
     expect(message).toContain("数据源 id=10");

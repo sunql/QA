@@ -309,6 +309,15 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     )
     testApp.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    # 待到货场景轻量统计（欢迎态业务现状卡；只读，登录即可）
+    from app.api.v1 import procurement_analytics
+
+    testApp.include_router(
+        procurement_analytics.router,
+        prefix="/api/v1/procurement",
+        tags=["procurement-analytics"],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+    )
     testApp.include_router(system.router, prefix="/api/v1/system", tags=["system"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     # 图只读查询（/system/graph/nodes*）。此前漏挂 ⇒ 该端点零集成覆盖，
     # 「列表不下发主键 + 关系端点恒返空」两个静默缺陷得以长期隐身。

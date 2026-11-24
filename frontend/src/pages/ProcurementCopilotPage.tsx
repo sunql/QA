@@ -23,6 +23,7 @@ import {
   List,
   Row,
   Select,
+  Statistic,
   Space,
   Spin,
   Tag,
@@ -55,8 +56,10 @@ import remarkGfm from "remark-gfm";
 import {
   deleteCopilotConversation,
   getCopilotConversation,
+  getPendingDeliverySummary,
   listCopilotConversations,
   streamCopilotMessage,
+  type PendingDeliverySummaryResponse,
   type CopilotConversationSummary,
   type CopilotDonePayload,
   type CopilotStepPayload,
@@ -122,6 +125,10 @@ function askOf(turn: CopilotTurn): string | null {
 /** REST 终态步骤 → 流式步骤形态：关键差异是 outputJson（observation 的
  * {text, truncated}）与**终态 status** —— 流式只推步骤到场一次（RUNNING），
  * 完成态必须回读才能渲染结构化结果卡（2026-11-23 生产实证）。 */
+function fmtOpenQty(value: number): string {
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 3 }).format(value);
+}
+
 function restoredStep(step: AgentRunStepRead): CopilotStepPayload {
   return {
     stepNo: step.stepNo,
@@ -322,23 +329,80 @@ export default function ProcurementCopilotPage() {
    * 场景钉死 Agent：pending_delivery_query 只绑在 PROCUREMENT_SOURCING 上，
    * 用别的 Agent 跑只会得到「工具不存在」的自我描述（2026-11-23 生产实证）。 */
   const PENDING_DELIVERY_AGENT = "PROCUREMENT_SOURCING";
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [summaryState, setSummaryState] = useState<{
+    loading: boolean;
+    error: string | null;
+    data: PendingDeliverySummaryResponse | null;
+  }>({ loading: false, error: null, data: null });
+
+  /** 推荐问题 = 预设槽位组合（chips 承载任务模板，槽位表单降级为高级入口）。 */
+  const PENDING_DELIVERY_CHIPS = [
+    { label: "全部供应商概览（近 12 个月）", monthsBack: 12, supplier: "", overdue: 0 },
+    { label: "近期欠交（近 3 个月）", monthsBack: 3, supplier: "", overdue: 0 },
+    { label: "逾期超 30 天的欠交", monthsBack: 12, supplier: "", overdue: 30 },
+    { label: "长期逾期（超 90 天）", monthsBack: 12, supplier: "", overdue: 90 },
+  ];
   const [datasources, setDatasources] = useState<DataSource[]>([]);
   const [datasourceId, setDatasourceId] = useState<number | undefined>();
   const [monthsBack, setMonthsBack] = useState(12);
   const [supplierKey, setSupplierKey] = useState("");
   const [minOverdueDays, setMinOverdueDays] = useState(0);
 
-  const composePendingDeliveryQuestion = useCallback(() => {
-    const supplier = supplierKey.trim() || "全部";
-    const ds = datasources.find((d) => d.id === datasourceId);
-    const dsText = ds ? `数据源 id=${ds.id}（${ds.name}）` : "数据源=默认";
-    return (
-      `分析待到货情况：${dsText}；时间窗=近${monthsBack}个月；供应商=${supplier}；` +
-      `最低逾期天数=${minOverdueDays}。请调用 pending_delivery_query 工具` +
-      `（datasourceId=${datasourceId ?? "缺省"}），` +
-      "按供应商汇总欠交量并给催货建议，引用订单号与物料编码。"
-    );
-  }, [monthsBack, supplierKey, minOverdueDays, datasources, datasourceId]);
+  /** 欢迎态业务现状：进入场景/换数据源/换时间窗即拉取（零 LLM 成本）。 */
+  useEffect(() => {
+    if (view !== "pending_delivery") return;
+    let cancelled = false;
+    setSummaryState((prev) => ({ ...prev, loading: true, error: null }));
+    getPendingDeliverySummary({
+      datasourceId,
+      monthsBack,
+    })
+      .then((data) => {
+        if (!cancelled) setSummaryState({ loading: false, error: null, data });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setSummaryState({
+            loading: false,
+            error: err instanceof Error ? err.message : "统计加载失败",
+            data: null,
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, datasourceId, monthsBack]);
+
+  const composePendingDeliveryQuestion = useCallback(
+    (overrides?: {
+      monthsBack?: number;
+      supplier?: string;
+      overdue?: number;
+      questionText?: string;
+    }) => {
+      // chips 传显式槽位：setXxx 是异步 state，闭包里取到的还是旧值
+      // （2026-11-24 实测：chip「近 3 个月」会发成 12 个月）
+      const months = overrides?.monthsBack ?? monthsBack;
+      const supplier = (overrides?.supplier ?? supplierKey).trim() || "全部";
+      const overdue = overrides?.overdue ?? minOverdueDays;
+      const ds = datasources.find((d) => d.id === datasourceId);
+      const dsText = ds ? `数据源 id=${ds.id}（${ds.name}）` : "数据源=默认";
+      // 用户在场景输入栏写的文字作为主句，槽位与工具指令作为尾注合并 ——
+      // 否则高级参数改了也不进消息（发送走的是 question 而不是组合器）
+      const lead = overrides?.questionText?.trim()
+        ? `${overrides.questionText.trim()}`
+        : "分析待到货情况";
+      return (
+        `${lead}（${dsText}；时间窗=近${months}个月；供应商=${supplier}；` +
+        `最低逾期天数=${overdue}）。请调用 pending_delivery_query 工具` +
+        `（datasourceId=${datasourceId ?? "缺省"}），` +
+        "按供应商汇总欠交量并给催货建议，引用订单号与物料编码。"
+      );
+    },
+    [monthsBack, supplierKey, minOverdueDays, datasources, datasourceId],
+  );
 
   const handleSend = async (
     textOverride?: string,
@@ -458,7 +522,13 @@ export default function ProcurementCopilotPage() {
               hoverable
               style={{ height: "100%", borderRadius: 12 }}
               styles={{ body: { padding: 16, display: "flex", flexDirection: "column", gap: 10 } }}
-              onClick={() => setView("pending_delivery")}
+              onClick={() => {
+                // 进入场景 = 全新工作区（参考系统的「进入」语义）：
+                // 旧对话留在历史侧栏，不清场则欢迎态永远被旧轮次顶掉
+                setTurns([]);
+                setConversationId(undefined);
+                setView("pending_delivery");
+              }}
             >
               <div
                 style={{
@@ -510,8 +580,91 @@ export default function ProcurementCopilotPage() {
         </Row>
       ) : (
         <>
-      {view === "pending_delivery" && (
-        <Card size="small" style={{ marginBottom: 16 }} title={t("procurement.copilot.scenarioDelivery")}>
+      {view === "pending_delivery" && turns.length === 0 && (
+        <>
+          <Text
+            type="secondary"
+            style={{ letterSpacing: 2, fontSize: 12, display: "block" }}
+          >
+            PENDING DELIVERY
+          </Text>
+          <Typography.Title level={3} style={{ marginTop: 4, marginBottom: 4 }}>
+            {t("procurement.copilot.heroGreeting")}
+          </Typography.Title>
+          <Text type="secondary">{t("procurement.copilot.heroSubtitle")}</Text>
+          <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+            <Col xs={24} md={16}>
+              <Card
+                size="small"
+                loading={summaryState.loading}
+                title={t("procurement.copilot.businessNow")}
+              >
+                {summaryState.error ? (
+                  <Alert type="warning" showIcon message={summaryState.error} />
+                ) : summaryState.data ? (
+                  <>
+                    <Row gutter={12}>
+                      <Col span={6}>
+                        <Statistic title={t("procurement.copilot.statOpenLines")} value={summaryState.data.summary.openLines} />
+                      </Col>
+                      <Col span={6}>
+                        <Statistic title={t("procurement.copilot.statOpenQty")} value={summaryState.data.summary.openQty} precision={2} />
+                      </Col>
+                      <Col span={6}>
+                        <Statistic title={t("procurement.copilot.statOverdue")} value={summaryState.data.summary.overdueLines} valueStyle={summaryState.data.summary.overdueLines > 0 ? { color: "#cf1322" } : undefined} />
+                      </Col>
+                      <Col span={6}>
+                        <Statistic title={t("procurement.copilot.statExcluded")} value={summaryState.data.summary.excludedRows} />
+                      </Col>
+                    </Row>
+                    {summaryState.data.bySupplier.length > 0 && (
+                      <Text type="secondary" style={{ display: "block", marginTop: 8 }}>
+                        {t("procurement.copilot.statTopSuppliers")}:{" "}
+                        {summaryState.data.bySupplier
+                          .slice(0, 3)
+                          .map((item) => `${item.supplierCode}(${fmtOpenQty(item.openQty)})`)
+                          .join("、")}
+                      </Text>
+                    )}
+                  </>
+                ) : null}
+              </Card>
+            </Col>
+            <Col xs={24} md={8}>
+              <Card size="small" title={t("procurement.copilot.tryAsk")}>
+                <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                  {PENDING_DELIVERY_CHIPS.map((chip) => (
+                    <Button
+                      key={chip.label}
+                      block
+                      style={{ textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                      disabled={busy || !modelId}
+                      onClick={() => {
+                        setMonthsBack(chip.monthsBack);
+                        setSupplierKey(chip.supplier);
+                        setMinOverdueDays(chip.overdue);
+                        void handleSend(
+                          composePendingDeliveryQuestion({
+                            monthsBack: chip.monthsBack,
+                            supplier: chip.supplier,
+                            overdue: chip.overdue,
+                          }),
+                          { agentCode: PENDING_DELIVERY_AGENT },
+                        );
+                      }}
+                    >
+                      <span>{chip.label}</span>
+                      <ArrowRightOutlined />
+                    </Button>
+                  ))}
+                </Space>
+              </Card>
+            </Col>
+          </Row>
+        </>
+      )}
+      {view === "pending_delivery" && showAdvanced && (
+        <Card size="small" style={{ marginBottom: 16 }} title={t("procurement.copilot.advancedParams")}>
           <Space direction="vertical" size={8} style={{ width: "100%" }}>
             <Space wrap size={8} align="center">
               <Text type="secondary">{t("procurement.copilot.model")}</Text>
@@ -563,17 +716,49 @@ export default function ProcurementCopilotPage() {
                 onChange={(event) => setSupplierKey(event.target.value)}
               />
             </Space>
+          </Space>
+        </Card>
+      )}
+      {view === "pending_delivery" && (
+        <Card size="small" style={{ marginBottom: 16 }}>
+          <TextArea
+            rows={2}
+            value={question}
+            placeholder={t("procurement.copilot.scenarioInputPlaceholder")}
+            onChange={(event) => setQuestion(event.target.value)}
+            onPressEnter={(event) => {
+              if (event.ctrlKey || event.metaKey) {
+                void handleSend(
+                  composePendingDeliveryQuestion({ questionText: question }),
+                  { agentCode: PENDING_DELIVERY_AGENT },
+                );
+              }
+            }}
+          />
+          <Space style={{ marginTop: 8 }}>
             <Button
               type="primary"
-              disabled={busy || !modelId}
+              loading={busy}
+              disabled={!question.trim() || !modelId}
               onClick={() =>
-                void handleSend(composePendingDeliveryQuestion(), {
-                  agentCode: PENDING_DELIVERY_AGENT,
-                })
+                void handleSend(
+                  composePendingDeliveryQuestion({ questionText: question }),
+                  { agentCode: PENDING_DELIVERY_AGENT },
+                )
               }
             >
-              {t("procurement.copilot.scenarioRun")}
+              {t("procurement.copilot.send")}
             </Button>
+            <Button onClick={() => setShowAdvanced((prev) => !prev)}>
+              {showAdvanced
+                ? t("procurement.copilot.hideAdvanced")
+                : t("procurement.copilot.advancedParams")}
+            </Button>
+            {conversationId && (
+              <Text type="secondary">
+                {t("procurement.copilot.conversation")}: {conversationId.slice(0, 8)}…
+              </Text>
+            )}
           </Space>
         </Card>
       )}

@@ -123,6 +123,36 @@ export async function deleteCopilotConversation(
   );
 }
 
+/** 欢迎态「业务现状」卡的轻量统计（不走编排，零 LLM 成本）。 */
+export interface PendingDeliverySummaryResponse {
+  summary: {
+    openLines: number;
+    openQty: number;
+    overdueLines: number;
+    excludedRows: number;
+  };
+  bySupplier: {
+    supplierCode: string;
+    openLines: number;
+    openQty: number;
+    overdueLines: number;
+  }[];
+  topLines: unknown[];
+}
+
+export async function getPendingDeliverySummary(
+  params: { datasourceId?: number; monthsBack?: number } = {},
+): Promise<PendingDeliverySummaryResponse> {
+  const query: Record<string, number> = {};
+  if (params.datasourceId !== undefined) query.datasourceId = params.datasourceId;
+  if (params.monthsBack !== undefined) query.monthsBack = params.monthsBack;
+  const res = await httpClient.get<PendingDeliverySummaryResponse>(
+    "/procurement/pending-delivery/summary",
+    { params: query },
+  );
+  return res.data;
+}
+
 export interface CopilotMessageRequest {
   message: string;
   agentCode: string;

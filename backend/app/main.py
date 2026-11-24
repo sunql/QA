@@ -778,6 +778,15 @@ def createApp() -> FastAPI:
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
         )
     app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    # 待到货场景轻量统计（欢迎态业务现状卡；只读，登录即可）
+    from app.api.v1 import procurement_analytics
+
+    app.include_router(
+        procurement_analytics.router,
+        prefix="/api/v1/procurement",
+        tags=["procurement-analytics"],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+    )
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     # auth.router 和 authRouter.router 不加 guard：白名单路径 /auth/me、/auth/change-password、/auth/logout 需无条件放行
     app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"], dependencies=[Depends(rateLimitDep)])

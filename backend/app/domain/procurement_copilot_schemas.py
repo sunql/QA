@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ConfigDict, Field
 
@@ -33,6 +33,11 @@ class CopilotMessageRequest(CamelModel):
     message: str = Field(min_length=1, max_length=COPILOT_MESSAGE_MAX_LENGTH)
     agent_code: str = Field(min_length=1, max_length=64)
     model_config_id: int = Field(ge=1)
+    #: 场景编码（P4）：与 ``slots`` 同时提供 ⇒ 后端按场景模板渲染最终提问
+    #: （冲突让位在服务端）。**续跑回复（回答追问）不带 slots** ⇒ 走自由文本。
+    scenario_code: str | None = Field(default=None, max_length=64)
+    #: 结构化槽位值（键 = slot_schema[].key；值为标量或数组）。
+    slots: dict[str, Any] | None = None
     limits: AgentRunLimits | None = None
     #: stream = SSE 过程流；task = 202 + 任务引用（调用方自己轮询轨迹）。
     mode: Literal["stream", "task"] = "stream"

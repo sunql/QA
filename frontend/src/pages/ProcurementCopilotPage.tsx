@@ -136,6 +136,13 @@ function askOf(turn: CopilotTurn): string | null {
 /** REST 终态步骤 → 流式步骤形态：关键差异是 outputJson（observation 的
  * {text, truncated}）与**终态 status** —— 流式只推步骤到场一次（RUNNING），
  * 完成态必须回读才能渲染结构化结果卡（2026-11-23 生产实证）。 */
+/** 消息 → 短标题：截到参数括号「（」前（即用户的主句），兜底 24 字。 */
+function shortTitle(question: string): string {
+  const cut = question.indexOf("（");
+  const base = cut > 0 ? question.slice(0, cut) : question;
+  return base.length > 24 ? `${base.slice(0, 24)}…` : base;
+}
+
 function fmtOpenQty(value: number): string {
   return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 3 }).format(value);
 }
@@ -803,6 +810,48 @@ export default function ProcurementCopilotPage() {
           </Row>
         </>
       )}
+      {view === "pending_delivery" && (
+        <Card size="small" style={{ marginBottom: 16 }}>
+          <TextArea
+            rows={2}
+            value={question}
+            placeholder={t("procurement.copilot.scenarioInputPlaceholder")}
+            onChange={(event) => setQuestion(event.target.value)}
+            onPressEnter={(event) => {
+              // 组合键与按钮同口径：有文字或改过高级参数均可发送
+              if (
+                (event.ctrlKey || event.metaKey) &&
+                (question.trim() || hasAdvancedFilters)
+              ) {
+                void handleSend(
+                  composePendingDeliveryQuestion({ questionText: question }),
+                  { agentCode: PENDING_DELIVERY_AGENT },
+                );
+              }
+            }}
+          />
+          <Space style={{ marginTop: 8 }}>
+            <Button
+              type="primary"
+              loading={busy}
+              disabled={busy || !modelId || (!question.trim() && !hasAdvancedFilters)}
+              onClick={() =>
+                void handleSend(
+                  composePendingDeliveryQuestion({ questionText: question }),
+                  { agentCode: PENDING_DELIVERY_AGENT },
+                )
+              }
+            >
+              {t("procurement.copilot.send")}
+            </Button>
+            <Button onClick={() => setShowAdvanced((prev) => !prev)}>
+              {showAdvanced
+                ? t("procurement.copilot.hideAdvanced")
+                : t("procurement.copilot.advancedParams")}
+            </Button>
+          </Space>
+        </Card>
+      )}
       {view === "pending_delivery" && showAdvanced && (
         <Card
           size="small"
@@ -932,48 +981,6 @@ export default function ProcurementCopilotPage() {
           </Space>
         </Card>
       )}
-      {view === "pending_delivery" && (
-        <Card size="small" style={{ marginBottom: 16 }}>
-          <TextArea
-            rows={2}
-            value={question}
-            placeholder={t("procurement.copilot.scenarioInputPlaceholder")}
-            onChange={(event) => setQuestion(event.target.value)}
-            onPressEnter={(event) => {
-              // 组合键与按钮同口径：有文字或改过高级参数均可发送
-              if (
-                (event.ctrlKey || event.metaKey) &&
-                (question.trim() || hasAdvancedFilters)
-              ) {
-                void handleSend(
-                  composePendingDeliveryQuestion({ questionText: question }),
-                  { agentCode: PENDING_DELIVERY_AGENT },
-                );
-              }
-            }}
-          />
-          <Space style={{ marginTop: 8 }}>
-            <Button
-              type="primary"
-              loading={busy}
-              disabled={busy || !modelId || (!question.trim() && !hasAdvancedFilters)}
-              onClick={() =>
-                void handleSend(
-                  composePendingDeliveryQuestion({ questionText: question }),
-                  { agentCode: PENDING_DELIVERY_AGENT },
-                )
-              }
-            >
-              {t("procurement.copilot.send")}
-            </Button>
-            <Button onClick={() => setShowAdvanced((prev) => !prev)}>
-              {showAdvanced
-                ? t("procurement.copilot.hideAdvanced")
-                : t("procurement.copilot.advancedParams")}
-            </Button>
-          </Space>
-        </Card>
-      )}
       {view === "free" && (
       <Alert
         type="info"
@@ -1084,13 +1091,6 @@ export default function ProcurementCopilotPage() {
                 ),
               }))}
             />
-            {/* 激活轮次的问题前置（Tab 栏下、结果最上面），上下文一眼可见 */}
-            <Space wrap size={6} style={{ marginBottom: 8 }}>
-              <Text strong style={{ fontSize: 14 }}>
-                {active.turn.question}
-              </Text>
-              <Text type="secondary">{active.turn.agentCode}</Text>
-            </Space>
             {active.parsed ? (
               <PendingDeliveryResultCard result={active.parsed} />
             ) : (
@@ -1134,7 +1134,7 @@ export default function ProcurementCopilotPage() {
                             ? t("procurement.copilot.contentTag")
                             : turn.status}
                         </Tag>
-                        <Text strong>{turn.question}</Text>
+                        <Text strong>{shortTitle(turn.question)}</Text>
                         <Text type="secondary">{turn.agentCode}</Text>
                         {turn.resumed && (
                           <Tag color="blue">{t("procurement.copilot.resumed")}</Tag>
@@ -1144,6 +1144,23 @@ export default function ProcurementCopilotPage() {
                     ),
                     children: (
                       <>
+                        {/* 完整消息（含参数尾注）默认不可见，展开抽屉在此查看 */}
+                        <div
+                          style={{
+                            marginBottom: 8,
+                            padding: "6px 10px",
+                            background: "#fafafa",
+                            border: "1px solid #f0f0f0",
+                            borderRadius: 6,
+                          }}
+                        >
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            {t("procurement.copilot.detailContent")}：
+                          </Text>
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            {turn.question}
+                          </Text>
+                        </div>
                         {turn.answer && (
                           <Card
                             size="small"

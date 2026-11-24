@@ -37,7 +37,7 @@
 
 | 文件 | 镜像 | 平台 | sha256 | 大小 |
 |---|---|---|---|---|
-| `/tmp/qa-frontend-amd64-1124-fix02.tar.gz` | `qa-system-frontend:amd64-1124-fix02` | linux/amd64 | `26b4229e41e26b97f6ffff4ef6244e360d0fa67d1527c367b6f9cc91f12d9e1a` | 26M |
+| `/tmp/qa-frontend-amd64-1124-fix02.tar.gz` | `qa-system-frontend:amd64-1124-fix02` | linux/amd64 | `0e2a088a1516c7ab158677f7546a4421377533c23abc76818162137fa9f34067` | 26M |
 
 镜像标识：frontend `3caa4e9db431a`；前端 bundle `index-Cynv99we.js`
 

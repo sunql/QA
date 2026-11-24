@@ -10,10 +10,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
+from app.domain.exceptions import DomainError
 from app.services.agent_tool_types import AgentToolContext
 from app.services.agent_tools_procurement import (
     PendingDeliveryFilters,
@@ -74,7 +75,17 @@ async def getPendingDeliverySummary(
     if datasourceId is not None:
         args["datasourceId"] = datasourceId
     ctx = AgentToolContext(actor=str(getattr(currentUser, "userId", "") or "runtime"))
-    result = await pendingDeliveryHandler(session, args, ctx)
+    try:
+        result = await pendingDeliveryHandler(session, args, ctx)
+    except DomainError:
+        # 认证/参数/冲突类错误保持原语义（401/403/404/409/422），不转 502
+        raise
+    except Exception as exc:  # noqa: BLE001 — 仅数据源执行失败（方言/缺表/连接）友好化：
+        # 未处理异常会绕过 CORS 中间件 ⇒ 浏览器只见 CORS 错误（2026-11-24 实测）
+        raise HTTPException(
+            status_code=502,
+            detail=f"该数据源执行待到货查询失败：{str(exc)[:200]}",
+        ) from exc
     data = dict(result.data)
     data["filters"] = {
         "supplierKeys": list(filters.supplierKeys),
@@ -99,11 +110,19 @@ async def listPendingDeliverySites(
     ds = await _resolveBusinessDatasource(session, currentUser)
     _ensureActiveAnalytics(ds)
     adapter = _adapterFor(ds.id, ds)
-    rows = await adapter.execute_read_only(
-        "SELECT F.FCY_0, F.FCYNAM_0 FROM ZJTH.FACILITY F "
-        "WHERE EXISTS (SELECT 1 FROM ZJTH.PORDERQ Q WHERE Q.POHFCY_0 = F.FCY_0) "
-        "ORDER BY F.FCY_0 FETCH FIRST 100 ROWS ONLY"
-    )
+    rows: list[dict[str, Any]]
+    try:
+        rows = await adapter.execute_read_only(
+            "SELECT F.FCY_0, F.FCYNAM_0 FROM ZJTH.FACILITY F "
+            "WHERE EXISTS (SELECT 1 FROM ZJTH.PORDERQ Q WHERE Q.POHFCY_0 = F.FCY_0) "
+            "ORDER BY F.FCY_0 FETCH FIRST 100 ROWS ONLY")
+    except DomainError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 同 summary：数据源侧失败友好化
+        raise HTTPException(
+            status_code=502,
+            detail=f"该数据源读取基地字典失败：{str(exc)[:200]}",
+        ) from exc
     return [
         {"code": str(r.get("fcy_0") or r.get("FCY_0") or ""),
          "name": str(r.get("fcynam_0") or r.get("FCYNAM_0") or "")}

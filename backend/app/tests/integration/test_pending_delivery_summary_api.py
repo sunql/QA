@@ -19,6 +19,19 @@ from app.tests.integration._agent_runs_api_helpers import client as client
 SUMMARY_PATH = "/api/v1/procurement/pending-delivery/summary"
 
 
+@pytest.fixture(autouse=True)
+def _clearPendingCache():
+    """待到货同日缓存是模块级全局 ⇒ 用例间必须清理，否则命中缓存跳过查询。
+
+    （实测 2026-11-24：MySQL 方言用例写入缓存后，后续 502 用例命中缓存返回 200。）
+    """
+    from app.services.agent_tools_procurement import _PENDING_RESULT_CACHE
+
+    _PENDING_RESULT_CACHE.clear()
+    yield
+    _PENDING_RESULT_CACHE.clear()
+
+
 @pytest.mark.asyncio
 async def test_summary_returns_structured_payload(
     client: AsyncClient, monkeypatch
@@ -93,6 +106,10 @@ SITES_PATH = "/api/v1/procurement/pending-delivery/sites"
 
 async def _fakeResolve(session, ctx):
     return SimpleNamespace(id=1, name="THBI", is_active=True)
+
+
+async def _fakeById(session, dsId):
+    return SimpleNamespace(id=dsId, name="SRM", is_active=True)
 
 
 @pytest.mark.asyncio
@@ -170,3 +187,72 @@ async def test_summary_rejects_bad_date(client: AsyncClient) -> None:
         params={"dateFrom": "2026/01/01"},
     )
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_summary_mysql_dialect_works(client: AsyncClient, monkeypatch) -> None:
+    """datasourceId 指向 MySQL 源 ⇒ 方言适配生成合法 SQL（1248 修复回归）。"""
+    captured: list[str] = []
+
+    class _MySQLAdapter:
+        dialect = "mysql"
+
+        async def execute_read_only(self, sql: str):
+            captured.append(sql)
+            if "EXCLUDED_ROWS" in sql:
+                return [{"OPEN_LINES": 1, "OPEN_QTY": 10.0,
+                         "OVERDUE_LINES": 1, "EXCLUDED_ROWS": 0}]
+            if "GROUP BY" in sql.upper():
+                return []
+            return []
+
+    monkeypatch.setattr(
+        "app.services.agent_tools_procurement._adapterFor",
+        lambda dsId, ds: _MySQLAdapter(),
+    )
+    async def _fakeResolve(session, ctx):
+        return SimpleNamespace(id=10, name="SRM", is_active=True)
+
+    monkeypatch.setattr(
+        "app.api.v1.procurement_analytics._resolveBusinessDatasource", _fakeResolve
+    )
+    # handler 内部按 args.datasourceId 走 _loadActiveDatasource（测试库无 id=10）
+    monkeypatch.setattr(
+        "app.services.agent_tools_procurement._loadActiveDatasource", _fakeById
+    )
+
+    resp = await client.get(
+        SUMMARY_PATH, headers=OWNER_HEADERS, params={"datasourceId": 10}
+    )
+    assert resp.status_code == 200
+    assert "NVL(" not in captured[0], "MySQL 方言不得含 NVL"
+    assert ") t" in captured[0], "派生表必须有别名（1248 修复）"
+
+
+@pytest.mark.asyncio
+async def test_summary_datasource_failure_is_friendly_502(
+    client: AsyncClient, monkeypatch
+) -> None:
+    """数据源侧失败 ⇒ 502 带友好 detail（未处理异常会绕过 CORS 头）。"""
+
+    class _BoomAdapter:
+        async def execute_read_only(self, sql: str):
+            raise RuntimeError("(1248, 'Every derived table must have its own alias')")
+
+    monkeypatch.setattr(
+        "app.services.agent_tools_procurement._adapterFor",
+        lambda dsId, ds: _BoomAdapter(),
+    )
+    monkeypatch.setattr(
+        "app.services.agent_tools_procurement._resolveBusinessDatasource",
+        _fakeResolve,
+    )
+    monkeypatch.setattr(
+        "app.services.agent_tools_procurement._loadActiveDatasource", _fakeById
+    )
+
+    resp = await client.get(
+        SUMMARY_PATH, headers=OWNER_HEADERS, params={"datasourceId": 10}
+    )
+    assert resp.status_code == 502
+    assert "待到货查询失败" in resp.json()["detail"]

@@ -91,3 +91,32 @@ class CopilotConversationSummary(CamelModel):
     #: 最后一轮的用户问题（预览用；没有轮次时为 None）
     last_question: str | None = None
     updated_at: str
+
+
+class CopilotScenarioSlotRead(CamelModel):
+    """场景槽位定义（P4）：前端槽位表单按此动态生成。"""
+
+    key: str
+    type: str
+    label: str
+    required: bool = False
+    conflict_keywords: list[str] = Field(default_factory=list)
+    #: 编码让位模式（lookaround 正则；None = 无编码启发式）
+    code_pattern: str | None = None
+    #: 尾注显示格式（可带 {value} 占位，如「近{value}个月」）
+    display_template: str | None = None
+
+
+class CopilotScenarioRead(CamelModel):
+    """`GET /api/v1/procurement/copilot/scenarios` 响应项：卡片墙数据源。"""
+
+    scenario_code: str
+    name: str
+    description: str
+    icon_code: str
+    agent_code: str
+    slot_schema: list[CopilotScenarioSlotRead]
+    question_template: str
+    chips: list[dict[str, Any]]
+    result_renderer: str
+    required_role: str | None = None

@@ -115,3 +115,21 @@ class TestSaveValidation:
             await svc.save(
                 **{**VALID_ARGS, "slotSchema": [{"key": "x", "type": "number"}]}
             )
+
+    @pytest.mark.asyncio
+    async def test_invalid_code_pattern_rejected(self) -> None:
+        svc, _session = _service(_AgentRow())
+        with pytest.raises(ValidationError, match="codePattern 非法"):
+            await svc.save(
+                **{
+                    **VALID_ARGS,
+                    "slotSchema": [
+                        {
+                            "key": "supplierKeys",
+                            "type": "entityMulti",
+                            "label": "供应商",
+                            "codePattern": "(?<![0-9A-Za-z)",
+                        }
+                    ],
+                }
+            )

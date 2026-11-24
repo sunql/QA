@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -17,6 +18,7 @@ from app.domain.copilot_scenario_models import (
 )
 from app.domain.exceptions import NotFoundError, ValidationError
 from app.domain.models import AgentDefinition
+from app.services.copilot_scenario_render import compileCodePattern
 
 
 class CopilotScenarioService:
@@ -137,3 +139,13 @@ class CopilotScenarioService:
                 raise ValidationError("slot 缺少 key")
             if not str(slot.get("label", "")).strip():
                 raise ValidationError(f"slot {slot.get('key')} 缺少 label")
+            # codePattern 必须是合法 regex（渲染时 re.error 走 fail-closed
+            # 不命中——把配置错误拦在保存时，别等运行时静默失灵）
+            codePattern = slot.get("codePattern")
+            if codePattern:
+                try:
+                    compileCodePattern(str(codePattern))
+                except re.error as exc:
+                    raise ValidationError(
+                        f"slot {slot.get('key')} codePattern 非法：{exc}"
+                    ) from exc

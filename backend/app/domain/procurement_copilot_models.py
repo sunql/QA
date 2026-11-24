@@ -34,6 +34,8 @@ class ProcurementCopilotConversation(Base, TimestampMixin):
     __table_args__ = (
         sa.Index("uq_copilot_conversation_id", "conversation_id", unique=True),
         sa.Index("ix_copilot_conversation_owner", "created_by"),
+        # 会话置顶（0170）：侧栏「置顶优先」排序用
+        sa.Index("ix_copilot_conversation_pinned", "pinned_at"),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)

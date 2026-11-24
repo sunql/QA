@@ -30,6 +30,7 @@ from app.domain.procurement_copilot_schemas import (
     CopilotConversationRead,
     CopilotConversationSummary,
     CopilotMessageRequest,
+    CopilotScenarioRead,
     CopilotTaskRead,
 )
 from app.infrastructure.rate_limit import limiter, rateLimitValue
@@ -55,9 +56,7 @@ SSE_MEDIA_TYPE = "text/event-stream"
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
-def _taskResponse(
-    runId: str, runStatus: str, conversationId: str, resumed: bool
-) -> CopilotTaskRead:
+def _taskResponse(runId: str, runStatus: str, conversationId: str, resumed: bool) -> CopilotTaskRead:
     return CopilotTaskRead(
         run_id=runId,
         status=runStatus,
@@ -65,6 +64,67 @@ def _taskResponse(
         conversation_id=conversationId,
         resumed=resumed,
     )
+
+
+@router.get(
+    "/copilot/scenarios",
+    response_model=list[CopilotScenarioRead],
+    summary="Copilot 场景列表（启用项按 sort_order；required_role 门控可见性）",
+)
+async def listCopilotScenarios(
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> list[CopilotScenarioRead]:
+    """卡片墙数据源（P4）：场景 = DB 配置行，非 admin 隐藏 admin 专属场景。"""
+    from sqlalchemy import select
+
+    from app.domain.copilot_scenario_models import CopilotScenario as ScenarioModel
+    from app.domain.procurement_copilot_schemas import CopilotScenarioSlotRead
+
+    userRoles = tuple(getattr(currentUser, "roles", None) or ())
+    rows = (
+        (
+            await session.execute(
+                select(ScenarioModel)
+                .where(ScenarioModel.enabled.is_(True))
+                .order_by(ScenarioModel.sort_order, ScenarioModel.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    views: list[CopilotScenarioRead] = []
+    for row in rows:
+        # required_role = 可见角色（NULL=全员）；用户不具备 ⇒ 直接跳过
+        # （不回 403 —— 卡片墙里「看不见」比报错更符合场景目录语义）
+        if row.required_role and row.required_role not in userRoles:
+            continue
+        views.append(
+            CopilotScenarioRead(
+                scenario_code=row.scenario_code,
+                name=row.name,
+                description=row.description,
+                icon_code=row.icon_code,
+                agent_code=row.agent_code,
+                slot_schema=[
+                    CopilotScenarioSlotRead(
+                        key=str(slot.get("key", "")),
+                        type=str(slot.get("type", "")),
+                        label=str(slot.get("label", "")),
+                        required=bool(slot.get("required", False)),
+                        conflict_keywords=[str(kw) for kw in (slot.get("conflictKeywords") or [])],
+                        code_pattern=slot.get("codePattern"),
+                        display_template=slot.get("displayTemplate"),
+                    )
+                    for slot in (row.slot_schema or [])
+                ],
+                question_template=row.question_template,
+                chips=list(row.chips or []),
+                result_renderer=row.result_renderer,
+                required_role=row.required_role,
+            )
+        )
+    return views
 
 
 @router.post(
@@ -88,9 +148,7 @@ async def postCopilotMessage(
     turn = await prepareCopilotTurn(session, dto, currentUser)
 
     if dto.mode == "task":
-        return _taskResponse(
-            turn.runId, turn.status, turn.conversationId, turn.resumed
-        )
+        return _taskResponse(turn.runId, turn.status, turn.conversationId, turn.resumed)
 
     async def eventSource() -> AsyncIterator[str]:
         try:

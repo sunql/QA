@@ -9,13 +9,17 @@ from app.services.copilot_scenario_render import renderScenarioQuestion
 
 SCHEMA = [
     {"key": "monthsBack", "type": "number", "label": "时间窗",
-     "required": True, "conflictKeywords": ["时间窗", "个月"]},
+     "required": True, "conflictKeywords": ["时间窗", "个月"],
+     "displayTemplate": "近{value}个月"},
     {"key": "supplierKeys", "type": "entityMulti", "label": "供应商",
-     "conflictKeywords": ["供应商", "厂家"]},
+     "conflictKeywords": ["供应商", "厂家"],
+     "codePattern": "(?<![0-9A-Za-z])[A-Z]\\d{2,4}(?![0-9A-Za-z])"},
     {"key": "materialKeys", "type": "entityMulti", "label": "物料",
-     "conflictKeywords": ["物料", "材料"]},
+     "conflictKeywords": ["物料", "材料"],
+     "codePattern": "(?<![0-9A-Za-z])(?:[A-Z]{2,}\\d{4,}[A-Z]?|\\d{10,}[A-Z]?)(?![0-9A-Za-z])"},
     {"key": "siteKeys", "type": "dictMulti", "label": "基地",
-     "conflictKeywords": ["基地", "厂区", "工厂"]},
+     "conflictKeywords": ["基地", "厂区", "工厂", "车间"],
+     "codePattern": "(?<![0-9A-Za-z])(?:T\\d{1,2}|C\\d)(?![0-9A-Za-z])"},
     {"key": "minOverdueDays", "type": "number", "label": "最低逾期天数"},
 ]
 
@@ -37,8 +41,8 @@ class TestRenderScenarioQuestion:
         assert out.startswith("分析待到货情况（")
         assert "供应商=B125" in out
         assert "supplierKeys=[B125]" in out
-        # number 槽位渲染原始值（displayFormat 留给场景配置层，保持渲染器通用）
-        assert "时间窗=12" in out
+        # displayTemplate 驱动显示格式（与旧前端「近12个月」口径一致）
+        assert "时间窗=近12个月" in out
         assert "以用户问题描述为准" in out
 
     def test_code_mention_yields_supplier_slot(self) -> None:
@@ -51,8 +55,8 @@ class TestRenderScenarioQuestion:
         # 编码命中 ⇒ supplier 让位：tail 与 tool args 都不携带
         assert "供应商=" not in out
         assert "supplierKeys=" not in out
-        # 非冲突维度保留
-        assert "时间窗=12" in out
+        # 编码只命中其归属槽位（codePattern 按槽位配置）——时间窗等数值维度保留
+        assert "时间窗=近12个月" in out
         assert "最低逾期天数=0" in out
 
     def test_keyword_mention_yields_supplier_slot(self) -> None:
@@ -88,6 +92,16 @@ class TestRenderScenarioQuestion:
             slots=SLOTS, slotSchema=SCHEMA, message=None,
         )
         assert out.startswith("分析待到货情况（近12个月）（")
+
+    def test_long_code_mention_yields_material_only(self) -> None:
+        """长编码（物料码）只让位物料槽位，供应商/基地不跟着让位。"""
+        out = renderScenarioQuestion(
+            template=TEMPLATE,
+            slots={**SLOTS, "materialKeys": ["AJE0000781"]},
+            slotSchema=SCHEMA, message="分析201000000000001111D的待到货",
+        )
+        assert "supplierKeys=[B125]" in out
+        assert "materialKeys=" not in out
 
     def test_message_supplies_missing_slot(self) -> None:
         """有文字时缺槽位不报错——文字即取数意图。"""

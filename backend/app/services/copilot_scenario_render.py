@@ -3,7 +3,8 @@
 设计文档：docs/superpowers/specs/2026-11-24-copilot-scenario-config-design.md
 
 关键决策：**冲突让位与提问组装在后端**。前端只传结构化槽位 + 用户文字；
-模板与让位启发式（关键词/编码模式）跟场景配置走（DB），改配置即时生效，
+让位启发式（``conflictKeywords`` / ``codePattern``）、显示格式
+（``displayTemplate``）与模板全部跟场景配置走（DB），改配置即时生效，
 不再依赖前端发版。
 """
 
@@ -14,23 +15,23 @@ from typing import Any
 
 from app.domain.exceptions import ValidationError
 
-#: 编码模式（B109/F109 供应商码、T3/C1 基地码）——纯编码提问也算指定。
-#: 注意：Python ``\b`` 在 CJK↔字母数字边界不生效（下B109 中的 B109 匹配不到，
-#: 2026-11-24 生产实证），必须用显式 lookaround 声明边界。
-_CODE_PATTERN = re.compile(
-    r"(?<![0-9A-Za-z])[A-Z]\d{2,4}(?![0-9A-Za-z])"
-    r"|(?<![0-9A-Za-z])T\d{1,2}(?![0-9A-Za-z])"
-    r"|(?<![0-9A-Za-z])C\d(?![0-9A-Za-z])"
-)
-#: 长编码（物料码：AJE0000781 / 201000000000001111D）。
-_LONG_CODE_PATTERN = re.compile(
-    r"(?<![0-9A-Za-z])[A-Z]{2,}\d{4,}(?![0-9A-Za-z])"
-    r"|(?<![0-9A-Za-z])\d{10,}(?![0-9A-Za-z])"
-)
+#: 槽位 schema 中允许的启发式字段（渲染器只认这几个键，其余忽略）。
+_CODE_PATTERN_KEY = "codePattern"
+_DISPLAY_KEY = "displayTemplate"
+
+
+def compileCodePattern(pattern: str) -> re.Pattern[str]:
+    """编译槽位配置里的编码模式（保存时校验用；非法 regex 在配置时 fail loud）。
+
+    注意：Python ``\\b`` 在 CJK↔字母数字边界不生效（「下B109」中的 B109
+    匹配不到，2026-11-24 生产实证）——配置里的模式必须用显式 lookaround
+    声明边界，例如 ``(?<![0-9A-Za-z])[A-Z]\\d{2,4}(?![0-9A-Za-z])``。
+    """
+    return re.compile(pattern)
 
 
 def _mentionsKeywords(text: str, keywords: list[str] | None) -> bool:
-    """关键词命中（对所有槽位类型生效）。"""
+    """关键词命中（子串包含，对所有槽位类型生效）。"""
     if keywords:
         for kw in keywords:
             if kw and kw in text:
@@ -38,10 +39,25 @@ def _mentionsKeywords(text: str, keywords: list[str] | None) -> bool:
     return False
 
 
-def _mentionsEntityCode(text: str) -> bool:
-    """短编码/长编码命中（只对实体类槽位生效——编码是某个实体的标识，
-    不代表时间窗等数值维度被指定）。"""
-    return bool(_CODE_PATTERN.search(text) or _LONG_CODE_PATTERN.search(text))
+def _mentionsSlot(lead: str, item: dict[str, Any]) -> bool:
+    """冲突让位判定：文字命中的维度让位（该槽位不进尾注/参数）。
+
+    两层启发式（均从槽位配置读取）：
+    - ``conflictKeywords``：关键词子串（如「供应商」「厂家」）；
+    - ``codePattern``：编码正则（如 B109 供应商码）。编码是某个实体的
+      标识 ⇒ 只配置在实体类槽位上，不代表时间窗等数值维度被指定。
+    """
+    if not lead:
+        return False
+    if _mentionsKeywords(lead, item.get("conflictKeywords")):
+        return True
+    pattern = item.get(_CODE_PATTERN_KEY)
+    if not pattern:
+        return False
+    try:
+        return bool(re.search(str(pattern), lead))
+    except re.error:
+        return False  # 配置错误 fail-closed（保存时已 fail loud 拦截）
 
 
 def _fmtValue(value: Any) -> str:
@@ -56,9 +72,17 @@ def _fmtArgs(value: Any) -> str:
     return str(value)
 
 
+def _fmtDisplay(item: dict[str, Any], value: Any) -> str:
+    """尾注显示值：``displayTemplate`` 可带 ``{value}`` 占位
+    （如 时间窗 显示为「近12个月」）；未配置则渲染原始值。"""
+    display = item.get(_DISPLAY_KEY)
+    if display:
+        return str(display).replace("{value}", _fmtValue(value))
+    return _fmtValue(value)
+
+
 def _renderTemplate(template: str, slots: dict[str, Any]) -> str:
-    """``{slot}`` 占位替换（str.replace 而非 str.format：模板里可能有其他花括号）。
-    语义与 conflictKeywords 同源：场景配置驱动，改配置即时生效。"""
+    """``{slot}`` 占位替换（str.replace 而非 str.format：模板里可能有其他花括号）。"""
     out = template
     for key, value in slots.items():
         out = out.replace("{" + str(key) + "}", _fmtValue(value))
@@ -76,8 +100,7 @@ def renderScenarioQuestion(
 
     - ``message``（用户补充文字）为主句；**文字提到的维度让位**——该槽位
       不进参数尾注（冲突以用户问题描述为准，2026-11-24 生产口径）；
-    - 让位判定两层启发式：``conflictKeywords``（对所有槽位生效）+
-      编码模式（仅对实体类槽位 entityMulti/dictMulti 生效）；
+    - 让位判定从槽位配置读 ``conflictKeywords`` + ``codePattern``；
     - ``template``（场景配置的主句）：用户无补充文字时作为 lead，
       ``{slot}`` 占位用槽位值替换（str 原样、list 用「、」连接）；
     - 尾注附「冲突以用户问题描述为准」仲裁指令（双保险，规划器是最终仲裁）。
@@ -101,14 +124,15 @@ def renderScenarioQuestion(
         value = slots.get(key)
         if value is None or (isinstance(value, list) and not value):
             continue
-        keywords = item.get("conflictKeywords") or []
-        mentioned = _mentionsKeywords(lead, list(keywords))
-        if not mentioned and item.get("type") in ("entityMulti", "dictMulti"):
-            mentioned = _mentionsEntityCode(lead)
-        if mentioned:
+        if _mentionsSlot(lead, item):
             continue
-        tailParts.append(f"{item.get('label') or key}={_fmtValue(value)}")
-        argsParts.append(f"{key}=[{_fmtArgs(value)}]")
+        tailParts.append(
+            f"{item.get('label') or key}={_fmtDisplay(item, value)}"
+        )
+        if isinstance(value, list):
+            argsParts.append(f"{key}=[{_fmtArgs(value)}]")
+        else:
+            argsParts.append(f"{key}={value}")
 
     leadText = lead or _renderTemplate(template, slots).strip()
     if not leadText:

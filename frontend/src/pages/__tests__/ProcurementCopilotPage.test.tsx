@@ -15,6 +15,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "../../i18n/i18n";
 import ProcurementCopilotPage from "../ProcurementCopilotPage";
 
+const authState = vi.hoisted(() => ({ roles: ["admin"] as string[] }));
+
 const api = vi.hoisted(() => ({
   getAgentCatalog: vi.fn(),
   listModels: vi.fn(),
@@ -34,6 +36,10 @@ vi.mock("../../api/procurementKnowledge", () => ({
 }));
 vi.mock("../../api/modelConfig", () => ({ listModels: api.listModels }));
 vi.mock("../../api/datasource", () => ({ listDataSources: api.listDataSources }));
+vi.mock("../../stores/authStore", () => ({
+  useAuthStore: (selector: (state: { user: unknown }) => unknown) =>
+    selector({ user: { roles: authState.roles } }),
+}));
 vi.mock("../../api/entityMapping", () => ({ searchMappings: api.searchMappings }));
 vi.mock("../../api/procurementCopilot", () => ({
   streamCopilotMessage: api.streamCopilotMessage,
@@ -64,6 +70,7 @@ beforeEach(() => {
     { id: 10, name: "SRM-TH-01", type: "mysql", isDefault: false },
   ]);
   api.getAgentRunSteps.mockReset();
+  authState.roles = ["admin"];
   api.getCopilotConversation.mockReset();
   api.deleteCopilotConversation.mockReset();
   api.deleteCopilotConversation.mockResolvedValue(undefined);
@@ -1018,5 +1025,30 @@ describe("冲突检测：纯编码也算指定", () => {
     // 非冲突维度保留 + 冲突仲裁指令
     expect(message).toContain("时间窗=近12个月");
     expect(message).toContain("以用户问题描述为准");
+  });
+});
+
+
+describe("数据源选择仅 admin 可见", () => {
+  it("非 admin：高级参数里不出现「数据源」标签与下拉", async () => {
+    authState.roles = ["procurement"];
+    mockOptions();
+    renderScenario();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
+
+    expect(screen.queryByText("数据源")).toBeNull();
+    // 但其他槽位仍在
+    expect(screen.getByText("时间窗")).toBeTruthy();
+  });
+
+  it("admin：可见数据源标签与下拉", async () => {
+    authState.roles = ["admin"];
+    mockOptions();
+    renderScenario();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
+
+    expect(screen.getByText("数据源")).toBeTruthy();
   });
 });

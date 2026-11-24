@@ -43,6 +43,7 @@ import {
   LeftOutlined,
 } from "@ant-design/icons";
 import { useTranslation } from "../i18n";
+import { useAuthStore } from "../stores/authStore";
 import ConversationHistoryPanel from "../components/copilot/ConversationHistoryPanel";
 import PendingDeliveryResultCard, {
   parsePendingDeliveryStep,
@@ -184,6 +185,9 @@ function restoredTurn(row: CopilotTurnRead, agentCode: string): CopilotTurn {
 
 export default function ProcurementCopilotPage() {
   const { t } = useTranslation();
+  // 数据源切换是治理动作（可指向别的业务库）⇒ 仅 admin 可见（2026-11-24 需求）
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = (user?.roles ?? []).includes("admin");
   const [scenarios, setScenarios] = useState<AgentCatalogEntry[]>([]);
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [agentCode, setAgentCode] = useState<string | undefined>();
@@ -906,17 +910,24 @@ export default function ProcurementCopilotPage() {
                 label: model.modelName,
               }))}
             />
-            <div style={{ fontSize: 12, color: "#5a6b87", marginBottom: 4 }}>{t("procurement.copilot.slotDatasource")}</div>
-            <Select
-              style={{ minWidth: 150 }}
-              placeholder={t("procurement.copilot.slotDatasource")}
-              value={datasourceId}
-              onChange={setDatasourceId}
-              options={datasources.map((d) => ({
-                value: d.id,
-                label: d.name,
-              }))}
-            />
+            {/* 数据源切换 = 治理动作（可指向别的业务库）⇒ 仅 admin 可见 */}
+            {isAdmin && (
+              <>
+                <div style={{ fontSize: 12, color: "#5a6b87", marginBottom: 4 }}>
+                  {t("procurement.copilot.slotDatasource")}
+                </div>
+                <Select
+                  style={{ minWidth: 150 }}
+                  placeholder={t("procurement.copilot.slotDatasource")}
+                  value={datasourceId}
+                  onChange={setDatasourceId}
+                  options={datasources.map((d) => ({
+                    value: d.id,
+                    label: d.name,
+                  }))}
+                />
+              </>
+            )}
             <div style={{ fontSize: 12, color: "#5a6b87", marginBottom: 4 }}>{t("procurement.copilot.slotTime")}</div>
             <Segmented
               value={dateMode}

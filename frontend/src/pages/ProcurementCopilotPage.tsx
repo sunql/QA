@@ -22,6 +22,7 @@ import {
   Empty,
   Input,
   InputNumber,
+  message,
   Modal,
   Row,
   Segmented,
@@ -283,14 +284,20 @@ export default function ProcurementCopilotPage() {
   /** 删除会话：删当前会话时一并清空线程；随后刷新侧栏。 */
   const handleDeleteConversation = useCallback(
     async (id: string) => {
-      await deleteCopilotConversation(id);
+      try {
+        await deleteCopilotConversation(id);
+      } catch {
+        // 旧后端无 DELETE 端点（1124-fix02 仅发前端）⇒ 友好提示而非裸 404
+        message.warning(t("procurement.copilot.deleteUnavailable"));
+        return;
+      }
       if (id === conversationId) {
         setTurns([]);
         setConversationId(undefined);
       }
       await loadConversations();
     },
-    [conversationId, loadConversations],
+    [conversationId, loadConversations, t],
   );
 
   useEffect(() => () => abortRef.current?.abort(), []);

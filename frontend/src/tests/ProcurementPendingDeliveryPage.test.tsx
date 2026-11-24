@@ -124,9 +124,9 @@ describe("ProcurementPendingDeliveryPage", () => {
       ),
     );
     const calls = api.listPendingDeliveryLines.mock.calls;
-    const last = calls[calls.length - 1][0];
-    expect(last.minOverdueDays).toBe(30);
-    expect(last.offset).toBe(0);
+    const last = calls.at(-1)?.[0];
+    expect(last?.minOverdueDays).toBe(30);
+    expect(last?.offset).toBe(0);
   });
 
   it("点「查询」重新拉数；点「重置」清空筛选并回第 1 页", async () => {
@@ -147,7 +147,7 @@ describe("ProcurementPendingDeliveryPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /重置/ }));
     await waitFor(() => {
       const calls = api.listPendingDeliveryLines.mock.calls;
-      const last = calls[calls.length - 1][0];
+      const last = calls.at(-1)?.[0];
       expect(last?.offset).toBe(0);
       expect(last?.monthsBack).toBe(12);
       expect(last?.supplierKeys ?? []).toEqual([]);

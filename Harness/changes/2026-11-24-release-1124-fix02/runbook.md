@@ -37,9 +37,9 @@
 
 | 文件 | 镜像 | 平台 | sha256 | 大小 |
 |---|---|---|---|---|
-| `/tmp/qa-frontend-amd64-1124-fix02.tar.gz` | `qa-system-frontend:amd64-1124-fix02` | linux/amd64 | `ef0b3d2f5b618d61d8477186ced55ed55fa2b43cbe0c4f1c756a9bbfb79ec6ad` | 26M |
+| `/tmp/qa-frontend-amd64-1124-fix02.tar.gz` | `qa-system-frontend:amd64-1124-fix02` | linux/amd64 | `26b4229e41e26b97f6ffff4ef6244e360d0fa67d1527c367b6f9cc91f12d9e1a` | 26M |
 
-镜像标识：frontend `0782b0e81609`；前端 bundle `index-Bir6SCFl.js`
+镜像标识：frontend `3caa4e9db431a`；前端 bundle `index-Cynv99we.js`
 
 镜像内自证（开发机已跑，输出见交付记录）：
 
@@ -49,7 +49,7 @@ docker run --rm --platform linux/amd64 qa-system-frontend:amd64-1124-fix02 sh -c
   grep -c "分析内容" /usr/share/nginx/html/assets/index-*.js
   grep -c "历史会话" /usr/share/nginx/html/assets/index-*.js
   grep -c "暂不支持删除会话" /usr/share/nginx/html/assets/index-*.js'
-# 实测：frontend bundle=index-Bir6SCFl.js / content_tag=1 / sidebar=1 / del_hint=1
+# 实测：frontend bundle=index-Cynv99we.js / content_tag=1 / sidebar=1 / del_hint=1
 ```
 
 ---

@@ -63,6 +63,7 @@ beforeEach(() => {
     { id: 1, name: "THBI Oracle", type: "oracle", isDefault: true },
     { id: 10, name: "SRM-TH-01", type: "mysql", isDefault: false },
   ]);
+  api.getAgentRunSteps.mockReset();
   api.getCopilotConversation.mockReset();
   api.deleteCopilotConversation.mockReset();
   api.deleteCopilotConversation.mockResolvedValue(undefined);
@@ -802,5 +803,118 @@ describe("供应商/物料远程搜索多选", () => {
     const message = String(payloads[0].message);
     expect(message).toContain("供应商=F109");
     expect(message).toContain("supplierKeys=[F109");
+  });
+});
+
+
+describe("三个交互优化", () => {
+  function twoResultSteps(poNo: string) {
+    return [
+      {
+        stepNo: 1, iterationNo: 1, kind: "TOOL", status: "SUCCEEDED",
+        action: null, planSummary: null, toolName: "pending_delivery_query",
+        inputJson: null,
+        outputJson: { text: JSON.stringify({ data: {
+          summary: { openLines: 1, openQty: 10, overdueLines: 1, excludedRows: 0 },
+          bySupplier: [], topLines: [{ poNo, poLine: 1000, materialCode: "M1",
+            supplierCode: "S1", orderedQty: 100, receivedQty: 90, openQty: 10,
+            expectedDate: "2026-01-01", overdueDays: 5 }],
+        }, answer: "" }) },
+        answer: null, errorCode: null, errorMessage: null,
+        promptTokens: 0, completionTokens: 0, cost: 0,
+        startedAt: "2026-11-24T00:00:00Z", finishedAt: "2026-11-24T00:00:01Z",
+      },
+    ];
+  }
+
+  it("③ 会话内多结果：Tabs 切换显示不同轮次的结果", async () => {
+    mockOptions();
+    let n = 0;
+    api.streamCopilotMessage.mockImplementation(async (_payload, handlers) => {
+      n += 1;
+      const poNo = n === 1 ? "PO-AAA" : "PO-BBB";
+      handlers.onRun?.({ runId: `r-${n}`, stepsUrl: "/api/v1/agent-runs/x/steps", conversationId: "c-1" });
+      // 必须在 onDone **之前**设置：onDone 同步触发 refreshSteps，
+      // 后置的 mockResolvedValue 赶不上这次调用（实测踩坑）
+      api.getAgentRunSteps.mockResolvedValue(twoResultSteps(poNo));
+      handlers.onDone?.({
+        runId: `r-${n}`, status: "SUCCEEDED", answer: `答案${n}`,
+        pauseCode: null, errorCode: null, errorMessage: null,
+        totalTokens: 1, cost: 0, stepsUrl: "/api/v1/agent-runs/x/steps",
+      });
+    });
+
+    renderScenario();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.click(screen.getByText("全部供应商概览（近 12 个月）"));
+    await waitFor(() => expect(screen.getByText("PO-AAA")).toBeTruthy());
+
+    fireEvent.change(screen.getByPlaceholderText(/补充说明/), {
+      target: { value: "再按基地看一次" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+    await waitFor(() => expect(screen.getByText("PO-BBB")).toBeTruthy());
+    // 两个 Tab；当前激活的是最近一次（#2），切回 #1 应显示 PO-AAA
+    expect(screen.getByRole("tab", { name: /#1/ })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: /#2/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /#1/ }));
+    await waitFor(() => expect(screen.getAllByText("PO-AAA").length).toBeGreaterThan(0));
+    // PO-BBB 不出现在**激活面板**里（ antd Tabs 隐藏面板仍留在 DOM ⇒ 查激活卡片内部）
+    const activePane = screen.getByRole("tabpanel");
+    expect(activePane.textContent).toContain("PO-AAA");
+    expect(activePane.textContent).not.toContain("PO-BBB");
+  });
+
+  it("② 仅改高级参数（不写字）发送按钮可用，消息用默认主句", async () => {
+    mockOptions();
+    const payloads: Array<Record<string, unknown>> = [];
+    api.streamCopilotMessage.mockImplementation(async (payload, handlers) => {
+      payloads.push(payload);
+      handlers.onDone?.({
+        runId: "r-adv", status: "SUCCEEDED", answer: "ok",
+        pauseCode: null, errorCode: null, errorMessage: null,
+        totalTokens: 1, cost: 0, stepsUrl: "/api/v1/agent-runs/x/steps",
+      });
+    });
+
+    renderScenario();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
+    const siteSelect = screen.getAllByRole("combobox")[4];
+    fireEvent.mouseDown(siteSelect);
+    fireEvent.click(await waitFor(() => screen.getByText("模具厂（T3）")));
+
+    const sendBtn = screen.getByRole("button", { name: /发\s*送/ });
+    expect((sendBtn as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(sendBtn);
+
+    await waitFor(() => expect(payloads).toHaveLength(1));
+    const message = String(payloads[0].message);
+    expect(message).toContain("分析待到货情况");
+    expect(message).toContain("基地=T3");
+  });
+
+  it("① 重进场景：高级参数重置（summary 请求不再带 siteKeys）", async () => {
+    mockOptions();
+    renderScenario();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
+    const siteSelect = screen.getAllByRole("combobox")[4];
+    fireEvent.mouseDown(siteSelect);
+    fireEvent.click(await waitFor(() => screen.getByText("模具厂（T3）")));
+    await waitFor(() => {
+      const calls = api.getPendingDeliverySummary.mock.calls;
+      expect(calls[calls.length - 1][0]?.siteKeys).toEqual(["T3"]);
+    });
+
+    // 回卡片墙再进入 ⇒ 参数重置
+    fireEvent.click(screen.getAllByRole("button", { name: /场景$/ })
+      .find((el) => el.textContent?.trim() === "场景") as HTMLElement);
+    fireEvent.click(screen.getByText("待到货 / 逾期未到"));
+    await waitFor(() => {
+      const calls = api.getPendingDeliverySummary.mock.calls;
+      const last = calls[calls.length - 1][0] ?? {};
+      expect(last.siteKeys ?? []).toEqual([]);
+    });
   });
 });

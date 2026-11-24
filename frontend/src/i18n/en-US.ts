@@ -3727,6 +3727,8 @@ export const enUS = {
     searchMaterial: "Search material by name/code",
     searchSite: "Filter site by name/code",
     exportCsv: "Export lines (CSV)",
+    resultsTitle: "Analysis results",
+    resultInTabs: "This result moved to the Results tabs above",
     scenarioFree: "Free Q&A (expert mode)",
     scenarioFreeDesc: "Pick an agent and ask freely; read-only tools, evidence-backed answers.",
     enterScenario: "Enter",

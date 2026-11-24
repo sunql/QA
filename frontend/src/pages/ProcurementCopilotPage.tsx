@@ -28,6 +28,7 @@ import {
   Statistic,
   Space,
   Spin,
+  Tabs,
   Tag,
   Typography,
 } from "antd";
@@ -340,11 +341,22 @@ export default function ProcurementCopilotPage() {
    * 用别的 Agent 跑只会得到「工具不存在」的自我描述（2026-11-23 生产实证）。 */
   const PENDING_DELIVERY_AGENT = "PROCUREMENT_SOURCING";
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [activeResultTurnId, setActiveResultTurnId] = useState<string | null>(null);
   const [summaryState, setSummaryState] = useState<{
     loading: boolean;
     error: string | null;
     data: PendingDeliverySummaryResponse | null;
   }>({ loading: false, error: null, data: null });
+
+  /** 会话内带结构化结果的轮次（顺序）——多结果用 Tabs 切换，不再纵向堆叠文字墙。 */
+  const resultTurns = turns
+    .map((turn) => ({
+      turn,
+      parsed: turn.steps
+        .map((step) => parsePendingDeliveryStep(step))
+        .find((parsed) => parsed !== null) ?? null,
+    }))
+    .filter((item) => item.parsed !== null);
 
   /** 推荐问题 = 预设槽位组合（chips 承载任务模板，槽位表单降级为高级入口）。 */
   const PENDING_DELIVERY_CHIPS = [
@@ -363,6 +375,28 @@ export default function ProcurementCopilotPage() {
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [minOverdueDays, setMinOverdueDays] = useState(0);
   const [siteOptions, setSiteOptions] = useState<{ code: string; name: string }[]>([]);
+  /** 高级参数默认值；进入场景（卡片墙 → 工作区）时整体重置，跨会话不串扰。 */
+  const resetAdvancedParams = useCallback(() => {
+    setMonthsBack(12);
+    setSupplierKeys([]);
+    setMaterialKeys([]);
+    setSiteKeys([]);
+    setDateMode("months");
+    setDateRange(null);
+    setMinOverdueDays(0);
+    setShowAdvanced(false);
+  }, []);
+
+  /** 是否改过高级参数（改了 ⇒ 不写字也能发送）。 */
+  const hasAdvancedFilters =
+    supplierKeys.length > 0 ||
+    materialKeys.length > 0 ||
+    siteKeys.length > 0 ||
+    minOverdueDays > 0 ||
+    monthsBack !== 12 ||
+    (dateMode === "range" && dateRange !== null);
+
+
   const [supplierOptions, setSupplierOptions] = useState<
     { code: string; name: string }[]
   >([]);
@@ -604,9 +638,13 @@ export default function ProcurementCopilotPage() {
               styles={{ body: { padding: 16, display: "flex", flexDirection: "column", gap: 10 } }}
               onClick={() => {
                 // 进入场景 = 全新工作区（参考系统的「进入」语义）：
-                // 旧对话留在历史侧栏，不清场则欢迎态永远被旧轮次顶掉
+                // 旧对话留在历史侧栏，不清场则欢迎态永远被旧轮次顶掉；
+                // 高级参数同样重置 —— 不同会话/不同 chip 之间不串扰
+                // （同会话连续追问不受影响：只有从卡片墙进入才重置）
                 setTurns([]);
                 setConversationId(undefined);
+                resetAdvancedParams();
+                setActiveResultTurnId(null);
                 setView("pending_delivery");
               }}
             >
@@ -873,7 +911,11 @@ export default function ProcurementCopilotPage() {
             placeholder={t("procurement.copilot.scenarioInputPlaceholder")}
             onChange={(event) => setQuestion(event.target.value)}
             onPressEnter={(event) => {
-              if (event.ctrlKey || event.metaKey) {
+              // 组合键与按钮同口径：有文字或改过高级参数均可发送
+              if (
+                (event.ctrlKey || event.metaKey) &&
+                (question.trim() || hasAdvancedFilters)
+              ) {
                 void handleSend(
                   composePendingDeliveryQuestion({ questionText: question }),
                   { agentCode: PENDING_DELIVERY_AGENT },
@@ -885,7 +927,7 @@ export default function ProcurementCopilotPage() {
             <Button
               type="primary"
               loading={busy}
-              disabled={!question.trim() || !modelId}
+              disabled={busy || !modelId || (!question.trim() && !hasAdvancedFilters)}
               onClick={() =>
                 void handleSend(
                   composePendingDeliveryQuestion({ questionText: question }),
@@ -983,10 +1025,31 @@ export default function ProcurementCopilotPage() {
         </>
       )
       }
+      {/* 会话内多结果：Tabs 切换（默认最近一次），不再纵向堆叠 */}
+      {view === "pending_delivery" && resultTurns.length > 0 && (
+        <Card size="small" style={{ marginBottom: 16 }} title={t("procurement.copilot.resultsTitle")}>
+          <Tabs
+            size="small"
+            activeKey={activeResultTurnId ?? resultTurns[resultTurns.length - 1].turn.id}
+            onChange={setActiveResultTurnId}
+            items={resultTurns.map((item, index) => ({
+              key: item.turn.id,
+              label: `#${index + 1} ${item.turn.question.slice(0, 12)}${
+                item.turn.question.length > 12 ? "…" : ""
+              }`,
+              children: item.parsed ? (
+                <PendingDeliveryResultCard result={item.parsed} />
+              ) : null,
+            }))}
+          />
+        </Card>
+      )}
       {view !== "home" && (
       <Spin spinning={busy && turns.length === 0}>
         {turns.length === 0 ? (
-          <Empty description={t("procurement.copilot.empty")} />
+          view === "free" ? (
+            <Empty description={t("procurement.copilot.empty")} />
+          ) : null
         ) : (
           <Space direction="vertical" size="middle" style={{ width: "100%" }}>
             {[...turns].reverse().map((turn) => (
@@ -1012,13 +1075,22 @@ export default function ProcurementCopilotPage() {
                     {turn.steps.find((step) => step.errorMessage)?.errorMessage}
                   </Text>
                 )}
-                {turn.steps
-                  .map((step) => parsePendingDeliveryStep(step))
-                  .filter((parsed) => parsed !== null)
-                  .slice(0, 1)
-                  .map((parsed) => (
-                    <PendingDeliveryResultCard key={`${turn.id}-pd`} result={parsed} />
-                  ))}
+                {/* 场景视图：结果统一收进顶部 Tabs 区（多结果可切换对比）；
+                    自由视图保持内联。 */}
+                {view !== "pending_delivery" &&
+                  turn.steps
+                    .map((step) => parsePendingDeliveryStep(step))
+                    .filter((parsed) => parsed !== null)
+                    .slice(0, 1)
+                    .map((parsed) => (
+                      <PendingDeliveryResultCard key={`${turn.id}-pd`} result={parsed} />
+                    ))}
+                {view === "pending_delivery" && resultTurns.length > 1 &&
+                  resultTurns.some((item) => item.turn.id === turn.id) && (
+                    <Text type="secondary" style={{ display: "block", marginTop: 4 }}>
+                      {t("procurement.copilot.resultInTabs")}
+                    </Text>
+                  )}
                 {turn.answer && (
                   <Card
                     size="small"

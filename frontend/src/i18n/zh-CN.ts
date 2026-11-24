@@ -3730,6 +3730,8 @@ export const zhCN = {
     searchMaterial: "输入物料名称/编码搜索",
     searchSite: "输入基地名称/编码筛选",
     exportCsv: "导出明细(CSV)",
+    resultsTitle: "分析结果",
+    resultInTabs: "本次结果已收进顶部「分析结果」标签页",
     scenarioFree: "自由问答（专家模式）",
     scenarioFreeDesc: "任选场景 Agent 自由提问，只读工具取数、结论必带依据。",
     enterScenario: "进入",

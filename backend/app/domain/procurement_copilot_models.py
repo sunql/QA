@@ -42,6 +42,10 @@ class ProcurementCopilotConversation(Base, TimestampMixin):
     #: 会话内 Agent 与模型**绑定**（中途换场景 = 新会话，避免上下文串味）。
     agent_code: Mapped[str] = mapped_column(sa.String(64), nullable=False)
     model_config_id: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    # 会话置顶（跨设备同步，0170）：NULL = 未置顶；非 NULL = 置顶时间
+    pinned_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
 
 
 class ProcurementCopilotTurn(Base, TimestampMixin):

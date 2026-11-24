@@ -459,6 +459,8 @@ describe("ProcurementCopilotPage 历史侧栏", () => {
     });
 
     renderPage();
+    // 侧栏默认收起：点右侧浮钮展开
+    fireEvent.click(screen.getByRole("button", { name: /展开/ }));
     await waitFor(() => expect(screen.getByText("会话A的问题")).toBeTruthy());
 
     fireEvent.click(screen.getByText("会话A的问题"));
@@ -485,6 +487,8 @@ describe("ProcurementCopilotPage 删除会话", () => {
     ]);
 
     renderPage();
+    // 侧栏默认收起：点右侧浮钮展开
+    fireEvent.click(screen.getByRole("button", { name: /展开/ }));
     await waitFor(() => expect(screen.getByText("要删的问题")).toBeTruthy());
 
     fireEvent.click(screen.getByRole("button", { name: /删除会话/ }));

@@ -194,7 +194,8 @@ export default function ProcurementCopilotPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [trace, setTrace] = useState<TraceState>(EMPTY_TRACE);
   const [conversations, setConversations] = useState<CopilotConversationSummary[]>([]);
-  const [historyOpen, setHistoryOpen] = useState(true);
+  // 历史侧栏默认收起（2026-11-24 反馈）：聚焦当前对话，历史从右侧浮钮展开
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
 

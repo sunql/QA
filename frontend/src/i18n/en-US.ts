@@ -3310,6 +3310,7 @@ export const enUS = {
       attribution: "Conclusion → Hypothesis table → Data → Alternatives",
       compare: "Comparison table → Data → Diff analysis"
     },
+    history: "History",
   },
   history: {
     title: "Research history",

@@ -3311,6 +3311,7 @@ export const zhCN = {
       attribution: "结论 → 假设验证表 → 数据 → 备选假设",
       compare: "对比维度表 → 数据 → 差异分析"
     },
+    history: "历史会话",
   },
   history: {
     title: "历史会话",

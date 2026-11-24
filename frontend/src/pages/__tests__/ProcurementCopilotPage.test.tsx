@@ -774,14 +774,14 @@ describe("供应商/物料远程搜索多选", () => {
     fireEvent.click(await waitFor(() => screen.getByText("飞驰机械（F109）")));
 
     fireEvent.change(screen.getByPlaceholderText(/补充说明/), {
-      target: { value: "看供应商欠交" },
+      target: { value: "看一下欠交明细" },
     });
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
 
     await waitFor(() => expect(payloads).toHaveLength(1));
     const message = String(payloads[0].message);
     expect(message).toContain("供应商=F109");
-    expect(message).toContain("supplierKeys=[F109");
+    expect(message).toContain("supplierKeys=[F109]");
   });
 });
 
@@ -895,5 +895,53 @@ describe("三个交互优化", () => {
       const last = calls[calls.length - 1][0] ?? {};
       expect(last.siteKeys ?? []).toEqual([]);
     });
+  });
+});
+
+
+describe("冲突参数以对话框为准", () => {
+  it("高级参数选了 B125，对话框指定 B019 ⇒ 消息只带 B019（供应商槽位让位）", async () => {
+    mockOptions();
+    api.searchMappings.mockResolvedValue([
+      {
+        id: 1, entityType: "SUPPLIER", enterpriseKey: 1,
+        enterpriseCode: "B125", sourceSystem: "ERP", sourceCode: "ERP-1",
+        name: "B125供应商",
+      },
+    ]);
+    const payloads: Array<Record<string, unknown>> = [];
+    api.streamCopilotMessage.mockImplementation(async (payload, handlers) => {
+      payloads.push(payload);
+      handlers.onDone?.({
+        runId: "r-c", status: "SUCCEEDED", answer: "ok",
+        pauseCode: null, errorCode: null, errorMessage: null,
+        totalTokens: 1, cost: 0, stepsUrl: "/api/v1/agent-runs/x/steps",
+      });
+    });
+
+    renderScenario();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
+    // 与既有供应商搜索用例同款手法（mouseDown + change → debounce → click option）
+    const supplierSelect = screen.getAllByRole("combobox")[2];
+    fireEvent.mouseDown(supplierSelect);
+    fireEvent.change(supplierSelect, { target: { value: "B125" } });
+    await waitFor(() => expect(api.searchMappings).toHaveBeenCalled(), { timeout: 2000 });
+    fireEvent.click(await waitFor(() => screen.getByText("B125供应商（B125）"), { timeout: 3000 }));
+
+    fireEvent.change(screen.getByPlaceholderText(/补充说明/), {
+      target: { value: "分析B019这个供应商的待到货情况" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+
+    await waitFor(() => expect(payloads).toHaveLength(1));
+    const message = String(payloads[0].message);
+    expect(message).toContain("B019");
+    // 供应商槽位让位：尾注不再携带 B125
+    expect(message).not.toContain("供应商=B125");
+    expect(message).not.toContain("supplierKeys=[B125]");
+    // 非冲突维度保留
+    expect(message).toContain("时间窗=近12个月");
+    expect(message).toContain("最低逾期天数=0");
   });
 });

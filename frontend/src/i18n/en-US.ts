@@ -3728,6 +3728,7 @@ export const enUS = {
     searchSite: "Filter site by name/code",
     exportCsv: "Export lines (CSV)",
     resultsTitle: "Analysis results",
+    resultsHint: "Click a tab to switch between runs in this conversation; hover for the full question",
     resultInTabs: "This result moved to the Results tabs above",
     scenarioFree: "Free Q&A (expert mode)",
     scenarioFreeDesc: "Pick an agent and ask freely; read-only tools, evidence-backed answers.",

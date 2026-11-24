@@ -29,6 +29,7 @@ import {
   Space,
   Spin,
   Tabs,
+  Tooltip,
   Tag,
   Typography,
 } from "antd";
@@ -479,24 +480,54 @@ export default function ProcurementCopilotPage() {
       const overdue = overrides?.overdue ?? minOverdueDays;
       const ds = datasources.find((d) => d.id === datasourceId);
       const dsText = ds ? `数据源 id=${ds.id}（${ds.name}）` : "数据源=默认";
-      const dateText =
-        overrides?.dateFrom && overrides?.dateTo
-          ? `时间窗=${overrides.dateFrom}~${overrides.dateTo}`
-          : `时间窗=近${months}个月`;
-      const supplierText = suppliers.length > 0 ? suppliers.join("、") : "全部";
-      const materialText = materials.length > 0 ? `；物料=${materials.join("、")}` : "";
-      const siteText = sites.length > 0 ? `；基地=${sites.join("、")}` : "";
-      // 用户在场景输入栏写的文字作为主句，槽位与工具指令作为尾注合并 ——
-      // 否则高级参数改了也不进消息（发送走的是 question 而不是组合器）
-      const lead = overrides?.questionText?.trim()
-        ? `${overrides.questionText.trim()}`
-        : "分析待到货情况";
+
+      // 用户在输入栏写的文字作为主句；**冲突的槽位以对话框为准**——
+      // 文字里提到了哪个维度，高级参数里对应维度就让位（2026-11-24 生产反馈）。
+      // 关键词启发式：出现「供应商/物料/基地/时间」即视为该维度已在文字里指定。
+      const lead = overrides?.questionText?.trim() ?? "";
+      const mentionsSupplier = /供应商|厂家/.test(lead);
+      const mentionsMaterial = /物料|材料/.test(lead);
+      const mentionsSite = /基地|厂区|工厂/.test(lead);
+      const mentionsTime = /时间窗|个月|时间段|日期|近\d|上[半]年|本年度|本年/.test(lead);
+
+      const parts: string[] = [dsText];
+      if (!mentionsTime) {
+        parts.push(
+          overrides?.dateFrom && overrides?.dateTo
+            ? `时间窗=${overrides.dateFrom}~${overrides.dateTo}`
+            : `时间窗=近${months}个月`,
+        );
+      }
+      if (!mentionsSupplier) {
+        parts.push(`供应商=${suppliers.length > 0 ? suppliers.join("、") : "全部"}`);
+      }
+      if (!mentionsMaterial && materials.length > 0) {
+        parts.push(`物料=${materials.join("、")}`);
+      }
+      if (!mentionsSite && sites.length > 0) {
+        parts.push(`基地=${sites.join("、")}`);
+      }
+      parts.push(`最低逾期天数=${overdue}`);
+
+      // 工具入参：仅传**未让位**的非空维度（格式收敛，修复此前 `[；` 毛刺）
+      const toolArgs: string[] = [];
+      if (!mentionsSupplier && suppliers.length > 0) {
+        toolArgs.push(`supplierKeys=[${suppliers.join(", ")}]`);
+      }
+      if (!mentionsMaterial && materials.length > 0) {
+        toolArgs.push(`materialKeys=[${materials.join(", ")}]`);
+      }
+      if (!mentionsSite && sites.length > 0) {
+        toolArgs.push(`siteKeys=[${sites.join(", ")}]`);
+      }
+      if (!mentionsTime && overrides?.dateFrom && overrides?.dateTo) {
+        toolArgs.push(`dateFrom=${overrides.dateFrom}；dateTo=${overrides.dateTo}`);
+      }
+      const argsText = toolArgs.length > 0 ? `；${toolArgs.join("；")}` : "";
+
       return (
-        `${lead}（${dsText}；${dateText}；供应商=${supplierText}` +
-        `${materialText}${siteText}；最低逾期天数=${overdue}）。` +
-        `请调用 pending_delivery_query 工具（datasourceId=${datasourceId ?? "缺省"}；` +
-        `supplierKeys=[${suppliers.join(",")}；materialKeys=[${materials.join(",")}；` +
-        `siteKeys=[${sites.join(",")}；${overrides?.dateFrom ? `dateFrom=${overrides.dateFrom}；dateTo=${overrides.dateTo}；` : ""}）` +
+        `${lead || "分析待到货情况"}（${parts.join("；")}）。` +
+        `请调用 pending_delivery_query 工具（datasourceId=${datasourceId ?? "缺省"}${argsText}），` +
         "按供应商汇总欠交量并给催货建议，引用订单号与物料编码。"
       );
     },
@@ -1012,16 +1043,43 @@ export default function ProcurementCopilotPage() {
       }
       {/* 会话内多结果：Tabs 切换（默认最近一次），不再纵向堆叠 */}
       {view === "pending_delivery" && resultTurns.length > 0 && (
-        <Card size="small" style={{ marginBottom: 16 }} title={t("procurement.copilot.resultsTitle")}>
+        <Card
+          size="small"
+          styles={{ body: { padding: "8px 16px 16px" } }}
+          title={
+            <Space size={8}>
+              <Text strong style={{ fontSize: 14 }}>
+                {t("procurement.copilot.resultsTitle")}
+              </Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {t("procurement.copilot.resultsHint")}
+              </Text>
+            </Space>
+          }
+          style={{ marginBottom: 16 }}
+        >
           <Tabs
-            size="small"
+            type="card"
+            size="middle"
             activeKey={activeResultTurnId ?? resultTurns[resultTurns.length - 1].turn.id}
             onChange={setActiveResultTurnId}
             items={resultTurns.map((item, index) => ({
               key: item.turn.id,
-              label: `#${index + 1} ${item.turn.question.slice(0, 12)}${
-                item.turn.question.length > 12 ? "…" : ""
-              }`,
+              label: (
+                <Tooltip title={item.turn.question} placement="top">
+                  <span style={{ fontSize: 13 }}>
+                    {`#${index + 1} ${item.turn.question.slice(0, 14)}${
+                      item.turn.question.length > 14 ? "…" : ""
+                    }`}
+                    <Tag
+                      color={STATUS_COLOR[item.turn.status]}
+                      style={{ marginLeft: 6, marginRight: 0 }}
+                    >
+                      {item.turn.status}
+                    </Tag>
+                  </span>
+                </Tooltip>
+              ),
               children: item.parsed ? (
                 <PendingDeliveryResultCard result={item.parsed} />
               ) : null,

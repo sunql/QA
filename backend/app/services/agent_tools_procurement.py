@@ -785,8 +785,14 @@ class PendingDeliveryFilters:
         since = _minusMonths(today, max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX)))
         return f"ORDDAT_0 >= DATE '{since.isoformat()}'"
 
-    def joinSql(self, *, withSupplierName: bool = False) -> str:
-        """过滤 JOIN（m/f）+ 名称字典 JOIN（b=BPSUPPLIER，LEFT 防脏码丢行）。"""
+    def joinSql(
+        self, *, withSupplierName: bool = False, withItemDesc: bool = False
+    ) -> str:
+        """过滤 JOIN（m/f）+ 名称字典 JOIN（b=供应商 / im=物料描述，LEFT 防脏码丢行）。
+
+        im 与过滤用的 m 同表不同别名：过滤 JOIN 只在给了 materialKeys 时出现，
+        描述 JOIN 独立存在（TOP 行表始终要显示物料描述）。
+        """
         joins = ""
         if self.materialKeys:
             joins += f" JOIN {_PENDING_ITEM_TABLE} m ON m.ITMREF_0 = Q.ITMREF_0"
@@ -794,6 +800,8 @@ class PendingDeliveryFilters:
             joins += f" JOIN {_PENDING_FACILITY_TABLE} f ON f.FCY_0 = Q.POHFCY_0"
         if withSupplierName:
             joins += f" LEFT JOIN {_PENDING_SUPPLIER_TABLE} b ON b.BPSNUM_0 = Q.BPSNUM_0"
+        if withItemDesc:
+            joins += f" LEFT JOIN {_PENDING_ITEM_TABLE} im ON im.ITMREF_0 = Q.ITMREF_0"
         return joins
 
     def filterSql(self) -> str:
@@ -901,11 +909,12 @@ def buildPendingDeliveryLinesSql(
     where = " AND ".join(conds) + filters.filterSql()
     return f"""
 SELECT Q.POHNUM_0, Q.POPLIN_0, Q.ITMREF_0, Q.BPSNUM_0, b.BPSNAM_0 AS SUPPLIER_NAME,
+       im.ITMDES1_0 AS MATERIAL_DESC,
        Q.QTYSTU_0 AS ORDERED_QTY, Q.RCPQTYSTU_0 AS RECEIVED_QTY,
        (Q.QTYSTU_0 - Q.RCPQTYSTU_0) AS OPEN_QTY,
        Q.EXTRCPDAT_0,
        TRUNC({todayLit}) - TRUNC(Q.EXTRCPDAT_0) AS OVERDUE_DAYS
-FROM {_PENDING_TABLE} Q{filters.joinSql(withSupplierName=True)}
+FROM {_PENDING_TABLE} Q{filters.joinSql(withSupplierName=True, withItemDesc=True)}
 WHERE {where}
 ORDER BY (Q.QTYSTU_0 - Q.RCPQTYSTU_0) DESC
 FETCH FIRST {limit} ROWS ONLY""".strip()
@@ -917,6 +926,7 @@ def _camelPendingRow(row: dict[str, Any]) -> dict[str, Any]:
         "poNo": _col(row, "POHNUM_0"),
         "poLine": _col(row, "POPLIN_0"),
         "materialCode": _col(row, "ITMREF_0"),
+        "materialDesc": _col(row, "MATERIAL_DESC"),
         "supplierCode": _col(row, "BPSNUM_0"),
         "supplierName": _col(row, "SUPPLIER_NAME"),
         "orderedQty": _col(row, "ORDERED_QTY"),

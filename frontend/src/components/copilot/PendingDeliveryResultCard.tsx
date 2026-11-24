@@ -31,6 +31,7 @@ export interface PendingDeliveryLine {
   poNo: string;
   poLine: number;
   materialCode: string;
+  materialDesc?: string | null;
   supplierCode: string;
   supplierName?: string | null;
   orderedQty: number;
@@ -98,6 +99,7 @@ export default function PendingDeliveryResultCard({
       订单号: row.poNo,
       行号: row.poLine,
       物料编码: row.materialCode,
+      物料描述: row.materialDesc ?? "",
       供应商编码: row.supplierCode,
       供应商名称: row.supplierName ?? "",
       订购量: row.orderedQty,
@@ -211,8 +213,14 @@ export default function PendingDeliveryResultCard({
                 rowKey={(row) => `${row.poNo}/${row.poLine}`}
                 dataSource={topLines}
                 columns={[
-                  { title: "订单号", dataIndex: "poNo" },
-                  { title: "物料", dataIndex: "materialCode", ellipsis: true },
+                  { title: "订单号", dataIndex: "poNo", width: 170 },
+                  { title: "物料编码", dataIndex: "materialCode", ellipsis: true },
+                  {
+                    title: "物料描述",
+                    dataIndex: "materialDesc",
+                    ellipsis: true,
+                    render: (value: string | null) => value ?? "-",
+                  },
                   {
                     title: "供应商",
                     render: (_: unknown, row) => supplierLabel(row.supplierCode, row.supplierName),

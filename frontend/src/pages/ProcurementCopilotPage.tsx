@@ -22,7 +22,6 @@ import {
   Empty,
   Input,
   InputNumber,
-  List,
   Modal,
   Row,
   Segmented,
@@ -31,6 +30,7 @@ import {
   Space,
   Spin,
   Tabs,
+  Timeline,
   Tooltip,
   Tag,
   Typography,
@@ -1247,30 +1247,56 @@ export default function ProcurementCopilotPage() {
           <Empty description={t("procurement.copilot.traceEmpty")} />
         )}
         {!trace.loading && !trace.error && trace.steps.length > 0 && (
-          <List
-            dataSource={trace.steps}
-            renderItem={(step) => (
-              <List.Item key={step.stepNo}>
-                <Space direction="vertical" size={2} style={{ width: "100%" }}>
-                  <Space wrap>
-                    <Tag>{`#${step.stepNo}`}</Tag>
-                    <Text type="secondary">
-                      {step.kind} · {step.status}
-                      {step.toolName ? ` · ${step.toolName}` : ""}
-                    </Text>
-                    <Text type="secondary">
-                      {t("procurement.copilot.tokens")}:{" "}
-                      {step.promptTokens + step.completionTokens}
-                    </Text>
-                  </Space>
-                  {step.planSummary && <div>{step.planSummary}</div>}
-                  {step.answer && <div>{step.answer}</div>}
-                  {step.errorMessage && (
-                    <Text type="danger">{step.errorMessage}</Text>
-                  )}
-                </Space>
-              </List.Item>
-            )}
+          <Timeline
+            items={trace.steps.map((step) => {
+              const stepColor =
+                step.status === "SUCCEEDED" ? "green"
+                : step.status === "RUNNING" ? "blue"
+                : step.status === "FAILED" ? "red" : "gray";
+              const kindLabel =
+                step.kind === "PLAN" ? "规划"
+                : step.kind === "TOOL" ? "工具执行"
+                : step.kind;
+              return {
+                key: `${step.stepNo}`,
+                color: stepColor,
+                children: (
+                  <div style={{ paddingBottom: 8 }}>
+                    <Space wrap size={6} style={{ marginBottom: 4 }}>
+                      <Text strong style={{ fontSize: 13 }}>
+                        {`#${step.stepNo} ${kindLabel}`}
+                      </Text>
+                      {step.toolName && <Tag color="geekblue">{step.toolName}</Tag>}
+                      <Tag color={stepColor}>{step.status}</Tag>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {t("procurement.copilot.tokens")}:{" "}
+                        {step.promptTokens + step.completionTokens}
+                      </Text>
+                    </Space>
+                    {/* 计划/答案正文走 Markdown（分段可读，不再是文字墙） */}
+                    {step.planSummary && (
+                      <div className="markdown-body" style={{ fontSize: 13 }}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {step.planSummary}
+                        </ReactMarkdown>
+                      </div>
+                    )}
+                    {step.answer && (
+                      <div className="markdown-body" style={{ fontSize: 13 }}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {step.answer}
+                        </ReactMarkdown>
+                      </div>
+                    )}
+                    {step.errorMessage && (
+                      <Text type="danger" style={{ fontSize: 12 }}>
+                        {step.errorMessage}
+                      </Text>
+                    )}
+                  </div>
+                ),
+              };
+            })}
           />
         )}
       </Drawer>

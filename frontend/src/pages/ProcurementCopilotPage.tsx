@@ -80,9 +80,6 @@ import {
 const { TextArea } = Input;
 const { Text } = Typography;
 
-/** 当前会话 id 的本地留存键：刷新后自动恢复同一条线程。 */
-const CONVERSATION_STORAGE_KEY = "copilot.conversationId";
-
 /** 运行状态 → 界面轮次状态（PAUSED 是正常终态，渲染成 DONE + pauseCode）。 */
 const RESTORED_STATUS: Record<string, CopilotTurn["status"]> = {
   SUCCEEDED: "DONE",
@@ -257,21 +254,18 @@ export default function ProcurementCopilotPage() {
       setModelId((prev) => prev ?? detail.modelConfigId);
       setTurns(detail.turns.map((row) => restoredTurn(row, detail.agentCode)));
     } catch {
-      // 会话不存在/无权访问：清掉本地记录，回到新会话
-      localStorage.removeItem(CONVERSATION_STORAGE_KEY);
+      // 会话不存在/无权访问（换账号或已删除）：清空线程，保持当前视图
       setConversationId(undefined);
     }
   }, []);
 
-  // 打开页面：拉历史列表 + 恢复上次的会话（刷新不丢线程）
+  // 打开页面：只拉历史列表。**不自动恢复**上次会话 —— 参考系统口径：
+  // 永远落在场景卡片墙，历史线程从侧栏一键恢复。
+  // （自动恢复会串账号：storage 按浏览器存，换账号后 detail 404；
+  //   且上个会话若是待到货，看起来像「默认进到待到货」。2026-11-24 生产实证。）
   useEffect(() => {
     void loadConversations();
-    const stored = localStorage.getItem(CONVERSATION_STORAGE_KEY);
-    if (stored) {
-      setView("free");
-      void restoreConversation(stored);
-    }
-  }, [loadConversations, restoreConversation]);
+  }, [loadConversations]);
 
   /** 删除会话：删当前会话时一并清空线程；随后刷新侧栏。 */
   const handleDeleteConversation = useCallback(
@@ -285,15 +279,6 @@ export default function ProcurementCopilotPage() {
     },
     [conversationId, loadConversations],
   );
-
-  // 会话 id 变化即落盘/清理
-  useEffect(() => {
-    if (conversationId) {
-      localStorage.setItem(CONVERSATION_STORAGE_KEY, conversationId);
-    } else {
-      localStorage.removeItem(CONVERSATION_STORAGE_KEY);
-    }
-  }, [conversationId]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 

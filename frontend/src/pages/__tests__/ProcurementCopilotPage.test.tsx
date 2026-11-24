@@ -379,52 +379,32 @@ describe("ProcurementCopilotPage 多轮会话", () => {
 });
 
 describe("ProcurementCopilotPage 历史会话", () => {
-  it("刷新后按本地留存恢复上一次会话（问题 + 答案）", async () => {
+  it("刷新后停在场景卡片墙，不自动恢复旧会话（修复跨账号 404 与串台）", async () => {
     mockOptions();
-    localStorage.setItem("copilot.conversationId", "c-1");
-    api.listCopilotConversations.mockResolvedValue([
-      {
-        conversationId: "c-1",
-        agentCode: "PROCUREMENT_SOURCING",
-        modelConfigId: 3,
-        turnCount: 1,
-        lastQuestion: "历史问题",
-        updatedAt: "2026-11-23T10:00:00Z",
-      },
-    ]);
+    // 模拟旧版本留下的 storage 记录（可能属于其他账号）
+    localStorage.setItem("copilot.conversationId", "c-stale");
     api.getCopilotConversation.mockResolvedValue({
-      conversationId: "c-1",
+      conversationId: "c-stale",
       agentCode: "PROCUREMENT_SOURCING",
       modelConfigId: 3,
-      turns: [
-        {
-          seq: 1,
-          question: "历史问题",
-          runId: "r-old",
-          status: "SUCCEEDED",
-          answer: "历史答案",
-          pauseCode: null,
-          createdAt: "2026-11-23T10:00:00Z",
-        },
-      ],
+      turns: [],
     });
 
-    renderPage();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ConfigProvider locale={zhCN}>
+          <ProcurementCopilotPage />
+        </ConfigProvider>
+      </I18nextProvider>,
+    );
 
-    await waitFor(() =>
-      expect(api.getCopilotConversation).toHaveBeenCalledWith("c-1"),
-    );
-    await waitFor(() =>
-      expect(screen.getAllByText("历史问题").length).toBeGreaterThan(0),
-    );
-    expect(screen.getByText("历史答案")).toBeTruthy();
-    // 恢复的轮次也能看轨迹（runId 来自轮次记录）
-    expect(screen.getByRole("button", { name: /查看执行轨迹/ })).toBeTruthy();
+    // 落在卡片墙，且**没有**去拉旧会话详情（404 噪音消除）
+    await waitFor(() => expect(screen.getByText(/自由问答/)).toBeTruthy());
+    expect(api.getCopilotConversation).not.toHaveBeenCalled();
   });
 
-  it("首次对话拿到会话 id 后落盘，供下次刷新恢复", async () => {
+  it("首轮拿到会话 id 不再落盘（历史统一走侧栏恢复）", async () => {
     mockOptions();
-    localStorage.removeItem("copilot.conversationId");
     api.listCopilotConversations.mockResolvedValue([]);
     api.streamCopilotMessage.mockImplementation(async (_payload, handlers) => {
       handlers.onRun?.({
@@ -441,9 +421,8 @@ describe("ProcurementCopilotPage 历史会话", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
 
-    await waitFor(() =>
-      expect(localStorage.getItem("copilot.conversationId")).toBe("c-2"),
-    );
+    await waitFor(() => expect(screen.getByText(/c-2/)).toBeTruthy());
+    expect(localStorage.getItem("copilot.conversationId")).toBeNull();
   });
 });
 

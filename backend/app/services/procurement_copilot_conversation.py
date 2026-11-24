@@ -109,7 +109,9 @@ async def getOwnedConversation(
             )
         )
     ).scalars().first()
-    if row is None or row.created_by != getattr(actor, "userId", None):
+    # 归属比较统一 str()：created_by 是 String 列，actor.userId 运行时
+    # 可能是 int（stub 头直传）⇒ 类型不一致会误判 404
+    if row is None or row.created_by != str(getattr(actor, "userId", None)):
         raise NotFoundError(MSG_COPILOT_CONVERSATION_NOT_FOUND)
     return row
 
@@ -219,7 +221,7 @@ async def listOwnedConversations(
     与 `getOwnedConversation` 同口径：只看自己的，别人的既不可见也不计数
     （admin 也只看自己的 —— 历史会话属于个人会话空间）。
     """
-    userId = str(getattr(actor, "userId", ""))
+    userId = str(getattr(actor, "userId", ""))  # 列为 String，比较侧统一 str
     conversations = (
         await session.execute(
             select(ProcurementCopilotConversation)

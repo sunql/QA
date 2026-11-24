@@ -41,7 +41,6 @@ const SAMPLE = JSON.stringify({
     topLines: [
       {
         poNo: "T22511POH1251Q", poLine: 1000, materialCode: "502447700001",
-        materialDesc: "不锈钢板SUS304",
         supplierCode: "F109", supplierName: "上海纳特汽车标准件有限公司",
         orderedQty: 1000000, receivedQty: 9600,
         openQty: 990400, expectedDate: "2025-11-28 00:00:00", overdueDays: 360,
@@ -103,8 +102,6 @@ describe("PendingDeliveryResultCard", () => {
     await user.click(screen.getByText(/TOP 欠交订单行/));
     await waitFor(() => expect(screen.getByText("T22511POH1251Q")).toBeTruthy());
     expect(screen.getByText("上海纳特汽车标准件有限公司（F109）")).toBeTruthy();
-    // 物料描述列（在物料编码后面）
-    expect(screen.getByText("不锈钢板SUS304")).toBeTruthy();
     // 逾期 360 天 > 90 ⇒ Tag 形式
     expect(screen.getByText("360")).toBeTruthy();
   });

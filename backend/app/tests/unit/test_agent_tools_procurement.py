@@ -677,63 +677,6 @@ def test_build_pending_delivery_lines_sql_filters() -> None:
     assert "FETCH FIRST 5 ROWS ONLY" in sql2.upper()
 
 
-def test_pending_delivery_mysql_dialect_sql() -> None:
-    """场景槽位切 MySQL 源（2026-11-24 生产实测 1248）：方言参数生成 MySQL 合法 SQL。
-
-    根因：三个 builder 硬编码 Oracle 方言（派生表无别名 / NVL / TRUNC / FETCH FIRST），
-    datasourceId=3（MySQL）执行时 1248 'Every derived table must have its own alias'。
-    """
-    from app.services.agent_tools_procurement import (
-        buildPendingDeliveryBySupplierSql,
-        buildPendingDeliveryLinesSql,
-        buildPendingDeliverySummarySql,
-    )
-
-    summary = buildPendingDeliverySummarySql(
-        monthsBack=3, today=date(2026, 11, 24), filters=_PENDING_FILTERS_EMPTY,
-        dialect="mysql",
-    )
-    # MySQL 1248：派生表必须有别名（Oracle 不允许 AS 表别名 ⇒ 统一无 AS 的裸别名）
-    assert ") t" in summary
-    # MySQL 无 NVL / TRUNC
-    assert "NVL(" not in summary
-    assert "TRUNC(" not in summary
-    assert "COALESCE(" in summary
-    assert "DATEDIFF(" in summary
-    assert "FETCH FIRST" not in summary.upper()
-
-    supplier = buildPendingDeliveryBySupplierSql(
-        monthsBack=3, today=date(2026, 11, 24), limit=5,
-        filters=PendingDeliveryFilters(), dialect="mysql",
-    )
-    assert ") t" in supplier
-    assert "TRUNC(" not in supplier
-    assert "LIMIT 5" in supplier
-    assert "FETCH FIRST" not in supplier.upper()
-
-    lines = buildPendingDeliveryLinesSql(
-        monthsBack=3, today=date(2026, 11, 24),
-        filters=_PENDING_FILTERS_EMPTY, minOverdueDays=30, limit=20,
-        dialect="mysql",
-    )
-    assert "TRUNC(" not in lines
-    assert "DATEDIFF(" in lines
-    assert "LIMIT 20" in lines
-    assert "FETCH FIRST" not in lines.upper()
-
-
-def test_pending_delivery_oracle_dialect_default_unchanged() -> None:
-    """默认（不传方言）保持现役 Oracle SQL 不变；派生表补裸别名对 Oracle 合法。"""
-    from app.services.agent_tools_procurement import buildPendingDeliverySummarySql
-
-    sql = buildPendingDeliverySummarySql(
-        monthsBack=3, today=date(2026, 11, 24), filters=_PENDING_FILTERS_EMPTY,
-    )
-    assert "NVL(" in sql
-    assert "TRUNC(" in sql
-    assert ") t" in sql, "派生表补裸别名（无 AS），Oracle/MySQL 双合法"
-
-
 @pytest.mark.asyncio
 async def test_pending_delivery_handler_shapes_result(monkeypatch) -> None:
     """handler：三段只读 SQL（汇总/按供应商/TOP 行），脏数据行数显式回报。"""

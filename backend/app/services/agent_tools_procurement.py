@@ -738,6 +738,46 @@ _PENDING_SUPPLIER_TABLE = "ZJTH.BPSUPPLIER"
 #: 剔除但**显式回报**（excludedRows），不静默丢。
 _OPEN_QTY_SANITY_MAX = 1_000_000
 
+
+@dataclass(frozen=True)
+class _PendingDialect:
+    """待到货 SQL 的方言碎片（2026-11-24 生产实测：切 MySQL 源 500）。
+
+    根因：builder 硬编码 Oracle 方言，而场景槽位（datasourceId）可切到
+    MySQL 源——派生表无别名（MySQL 1248）、NVL/TRUNC 不存在。
+    只分叉差异构造，其余模板两边共用；派生表别名统一用**无 AS 裸别名**
+    （Oracle 不允许 ``AS`` 表别名，裸别名两边合法）。
+    其余方言（如 postgresql）回落 Oracle 分支——待到货表是 ERP 影子表，
+    不预期出现在 PG 源；真出现时错误语义同现在（fail loud），不做静默适配。
+    """
+
+    name: str
+
+    def overdueDays(self, todayLit: str, col: str) -> str:
+        """今天 - 预期到货日的天数差。"""
+        if self.name == "mysql":
+            return f"DATEDIFF({todayLit}, {col})"
+        return f"TRUNC({todayLit}) - TRUNC({col})"
+
+    def coalesce(self, expr: str, default: str) -> str:
+        if self.name == "mysql":
+            return f"COALESCE({expr}, {default})"
+        return f"NVL({expr}, {default})"
+
+    def tail(self, limit: int) -> str:
+        """行数限制：MySQL 8.0.19 以下不支持 FETCH FIRST，统一 LIMIT 更稳。"""
+        if self.name == "mysql":
+            return f"LIMIT {int(limit)}"
+        return f"FETCH FIRST {int(limit)} ROWS ONLY"
+
+    @staticmethod
+    def fromAdapter(adapter: Any) -> "_PendingDialect":
+        """从 adapter 读方言；Oracle 适配器（或测试桩）缺属性 ⇒ 回落 oracle。"""
+        name = str(getattr(adapter, "dialect", "") or "oracle").lower()
+        if name not in ("mysql", "oracle"):
+            name = "oracle"
+        return _PendingDialect(name)
+
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 #: 待到货查询的同日结果缓存：key = 全部过滤参数 + 数据源 + 当天日期，
@@ -888,12 +928,15 @@ async def _loadPendingDeliveryData(
         return hit[1]
 
     summaryRows = await adapter.execute_read_only(buildPendingDeliverySummarySql(
-        monthsBack=monthsBack, today=today, filters=filters))
+        monthsBack=monthsBack, today=today, filters=filters,
+        dialect=_PendingDialect.fromAdapter(adapter).name))
     supplierRows = await adapter.execute_read_only(buildPendingDeliveryBySupplierSql(
-        monthsBack=monthsBack, today=today, limit=5, filters=filters))
+        monthsBack=monthsBack, today=today, limit=5, filters=filters,
+        dialect=_PendingDialect.fromAdapter(adapter).name))
     lineRows = await adapter.execute_read_only(buildPendingDeliveryLinesSql(
         monthsBack=monthsBack, today=today, filters=filters,
-        minOverdueDays=minOverdueDays, limit=limit))
+        minOverdueDays=minOverdueDays, limit=limit,
+        dialect=_PendingDialect.fromAdapter(adapter).name))
 
     summaryRow = summaryRows[0] if summaryRows else {}
     data: dict[str, Any] = {
@@ -920,31 +963,39 @@ async def _loadPendingDeliveryData(
 
 
 def buildPendingDeliverySummarySql(
-    *, monthsBack: int, today: date, filters: PendingDeliveryFilters | None = None
+    *, monthsBack: int, today: date, filters: PendingDeliveryFilters | None = None,
+    dialect: str = "oracle",
 ) -> str:
-    """欠交汇总（单语句）：行数 / 总欠交量 / 逾期行数 / 脏数据行数。"""
+    """欠交汇总（单语句）：行数 / 总欠交量 / 逾期行数 / 脏数据行数。
+
+    dialect：oracle（默认，现役 ZJTH）| mysql（场景槽位切 MySQL 源，2026-11-24）。
+    派生表别名 ``) t``：MySQL 必须有（错误 1248），裸别名（无 AS）Oracle 也合法。
+    """
     filters = filters or PendingDeliveryFilters()
+    d = _PendingDialect(dialect)
     todayLit = f"DATE '{today.isoformat()}'"
     return f"""
 SELECT
   SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} THEN 1 ELSE 0 END) AS OPEN_LINES,
-  NVL(SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} THEN OPEN_QTY ELSE 0 END), 0) AS OPEN_QTY,
+  {d.coalesce(f"SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} THEN OPEN_QTY ELSE 0 END)", "0")} AS OPEN_QTY,
   SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} AND OVERDUE_DAYS > 0 THEN 1 ELSE 0 END) AS OVERDUE_LINES,
   SUM(CASE WHEN OPEN_QTY >= {_OPEN_QTY_SANITY_MAX} THEN 1 ELSE 0 END) AS EXCLUDED_ROWS
 FROM (
   SELECT Q.QTYSTU_0 - Q.RCPQTYSTU_0 AS OPEN_QTY,
-         TRUNC({todayLit}) - TRUNC(Q.EXTRCPDAT_0) AS OVERDUE_DAYS
+         {d.overdueDays(todayLit, "Q.EXTRCPDAT_0")} AS OVERDUE_DAYS
   FROM {_PENDING_TABLE} Q{filters.joinSql()}
   WHERE {filters.windowSql(monthsBack, today)}{filters.filterSql()}
-)""".strip()
+) t""".strip()
 
 
 def buildPendingDeliveryBySupplierSql(
     *, monthsBack: int, today: date, limit: int,
     filters: PendingDeliveryFilters | None = None,
+    dialect: str = "oracle",
 ) -> str:
-    """按供应商聚合欠交（催货清单的分组视角）。"""
+    """按供应商聚合欠交（催货清单的分组视角）。方言语义同 summary。"""
     filters = filters or PendingDeliveryFilters()
+    d = _PendingDialect(dialect)
     todayLit = f"DATE '{today.isoformat()}'"
     limit = max(1, min(limit, _MAX_LIMIT))
     return f"""
@@ -957,15 +1008,15 @@ SELECT
 FROM (
   SELECT Q.BPSNUM_0, b.BPSNAM_0 AS SUPPLIER_NAME,
          Q.QTYSTU_0 - Q.RCPQTYSTU_0 AS OPEN_QTY,
-         TRUNC({todayLit}) - TRUNC(Q.EXTRCPDAT_0) AS OVERDUE_DAYS
+         {d.overdueDays(todayLit, "Q.EXTRCPDAT_0")} AS OVERDUE_DAYS
   FROM {_PENDING_TABLE} Q{filters.joinSql(withSupplierName=True)}
   WHERE {filters.windowSql(monthsBack, today)}
     AND Q.QTYSTU_0 - Q.RCPQTYSTU_0 > 0
     AND Q.QTYSTU_0 - Q.RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}{filters.filterSql()}
-)
+) t
 GROUP BY BPSNUM_0
 ORDER BY OPEN_QTY DESC
-FETCH FIRST {limit} ROWS ONLY""".strip()
+{d.tail(limit)}""".strip()
 
 
 def buildPendingDeliveryLinesSql(
@@ -975,9 +1026,11 @@ def buildPendingDeliveryLinesSql(
     filters: PendingDeliveryFilters | None,
     minOverdueDays: int | None,
     limit: int,
+    dialect: str = "oracle",
 ) -> str:
-    """TOP 欠交订单行（明细下钻）：多选供应商/物料/基地 + 日期段 + 逾期下限。"""
+    """TOP 欠交订单行（明细下钻）：多选供应商/物料/基地 + 日期段 + 逾期下限。方言语义同 summary。"""
     filters = filters or PendingDeliveryFilters()
+    d = _PendingDialect(dialect)
     todayLit = f"DATE '{today.isoformat()}'"
     limit = max(1, min(limit, _MAX_LIMIT))
     conds = [
@@ -986,7 +1039,7 @@ def buildPendingDeliveryLinesSql(
         f"Q.QTYSTU_0 - Q.RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}",
     ]
     if minOverdueDays:
-        conds.append(f"TRUNC({todayLit}) - TRUNC(Q.EXTRCPDAT_0) >= {int(minOverdueDays)}")
+        conds.append(f"{d.overdueDays(todayLit, 'Q.EXTRCPDAT_0')} >= {int(minOverdueDays)}")
     where = " AND ".join(conds) + filters.filterSql()
     return f"""
 SELECT Q.POHNUM_0, Q.POPLIN_0, Q.ITMREF_0, Q.BPSNUM_0, b.BPSNAM_0 AS SUPPLIER_NAME,
@@ -994,11 +1047,11 @@ SELECT Q.POHNUM_0, Q.POPLIN_0, Q.ITMREF_0, Q.BPSNUM_0, b.BPSNAM_0 AS SUPPLIER_NA
        Q.QTYSTU_0 AS ORDERED_QTY, Q.RCPQTYSTU_0 AS RECEIVED_QTY,
        (Q.QTYSTU_0 - Q.RCPQTYSTU_0) AS OPEN_QTY,
        Q.EXTRCPDAT_0,
-       TRUNC({todayLit}) - TRUNC(Q.EXTRCPDAT_0) AS OVERDUE_DAYS
+       {d.overdueDays(todayLit, "Q.EXTRCPDAT_0")} AS OVERDUE_DAYS
 FROM {_PENDING_TABLE} Q{filters.joinSql(withSupplierName=True, withItemDesc=True)}
 WHERE {where}
 ORDER BY (Q.QTYSTU_0 - Q.RCPQTYSTU_0) DESC
-FETCH FIRST {limit} ROWS ONLY""".strip()
+{d.tail(limit)}""".strip()
 
 
 def _camelPendingRow(row: dict[str, Any]) -> dict[str, Any]:

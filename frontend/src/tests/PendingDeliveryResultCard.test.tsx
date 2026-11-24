@@ -1,11 +1,15 @@
 /** 待到货结构化结果卡：数据不经 LLM 复述，直接渲染工具 outputJson。 */
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { vi } from "vitest";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { describe, expect, it } from "vitest";
 import { I18nextProvider } from "react-i18next";
 import i18n from "../i18n/i18n";
+vi.mock("../utils/download", () => ({ downloadCsv: vi.fn() }));
+
+import { downloadCsv } from "../utils/download";
 import PendingDeliveryResultCard, {
   parsePendingDeliveryStep,
 } from "../components/copilot/PendingDeliveryResultCard";
@@ -98,5 +102,21 @@ describe("PendingDeliveryResultCard", () => {
       }),
     );
     expect(screen.getByText("待到货分析结果")).toBeTruthy();
+  });
+});
+
+
+describe("导出明细(CSV)", () => {
+  it("点击导出：明细行 + 供应商汇总段写入 CSV", () => {
+    renderCard(SAMPLE);
+    fireEvent.click(screen.getByRole("button", { name: /导出明细/ }));
+
+    expect(downloadCsv).toHaveBeenCalledTimes(1);
+    const [rows, filename] = (downloadCsv as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(filename).toContain("待到货明细_");
+    expect(rows).toHaveLength(2);  // 1 明细 + 1 供应商汇总
+    expect(rows[0]["订单号"]).toBe("T22511POH1251Q");
+    expect(rows[1]["订单号"]).toBe("[供应商汇总] J1");
+    expect(rows[1]["欠交量"]).toBe(57363604);
   });
 });

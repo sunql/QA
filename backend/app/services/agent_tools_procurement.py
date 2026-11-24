@@ -10,13 +10,15 @@ input_schema / handler_ref）在 DB ``agent_tool_config``（admin 维护）。
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.exceptions import ConflictError
+from app.domain.exceptions import ConflictError, ValidationError
 from app.domain.models import DataSource
 from app.infrastructure import neo4j_client
 from app.services.agent_tool_types import AgentToolContext, ToolResult
@@ -727,18 +729,108 @@ async def purchaseHistoryHandler(
 # ---------------------------------------------------------------------------
 
 _PENDING_TABLE = "ZJTH.PORDERQ"
+_PENDING_ITEM_TABLE = "ZJTH.ITMMASTER"
+_PENDING_FACILITY_TABLE = "ZJTH.FACILITY"
 #: 健全性阈值：欠交量 ≥ 1e6 视为源侧脏数据（探针实测 43 行「数量=物料码」），
 #: 剔除但**显式回报**（excludedRows），不静默丢。
 _OPEN_QTY_SANITY_MAX = 1_000_000
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
-def buildPendingDeliverySummarySql(*, monthsBack: int, today: date) -> str:
-    """欠交汇总（单语句）：行数 / 总欠交量 / 逾期行数 / 脏数据行数。
 
-    欠交 = QTYSTU_0 - RCPQTYSTU_0（库存单位，对账抽样 10/10 一致）；
-    逾期 = today - EXTRCPDAT_0 > 0（EXTRCPDAT 全非空，无需回退）。
+@dataclass(frozen=True)
+class PendingDeliveryFilters:
+    """待到货查询过滤（2026-11-24：多选供应商/物料/基地 + 日期段）。
+
+    - materialKeys / siteKeys：**每项**既匹配精确编码也匹配名称模糊
+      （物料名 ITMDES1_0、基地名 FCYNAM_0，分别 JOIN 字典表）；
+    - dateFrom/dateTo（YYYY-MM-DD）：给出即**覆盖** monthsBack（按 ORDDAT_0 过滤）；
+      非法格式 fail-closed 抛 ValidationError，不静默忽略。
     """
-    since = _minusMonths(today, max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX)))
+
+    supplierKeys: tuple[str, ...] = ()
+    materialKeys: tuple[str, ...] = ()
+    siteKeys: tuple[str, ...] = ()
+    dateFrom: str | None = None
+    dateTo: str | None = None
+
+    def __post_init__(self) -> None:
+        for field in ("dateFrom", "dateTo"):
+            value = getattr(self, field)
+            if value is None:
+                continue
+            if not _DATE_RE.match(value):
+                raise ValidationError(
+                    f"{field} 日期格式应为 YYYY-MM-DD，收到 {value!r}"
+                )
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValidationError(
+                    f"{field} 不是有效日期：{value!r}"
+                ) from exc
+
+    @staticmethod
+    def _splitKeys(keys: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """按「含中文 ⇒ 名称模糊」分类：编码走 IN，名称走 LIKE。"""
+        codes = tuple(k for k in keys if not _CJK_RE.search(k))
+        names = tuple(k for k in keys if _CJK_RE.search(k))
+        return codes, names
+
+    def windowSql(self, monthsBack: int, today: date) -> str:
+        if self.dateFrom and self.dateTo:
+            return f"ORDDAT_0 >= DATE '{self.dateFrom}' AND ORDDAT_0 <= DATE '{self.dateTo}'"
+        since = _minusMonths(today, max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX)))
+        return f"ORDDAT_0 >= DATE '{since.isoformat()}'"
+
+    def joinSql(self) -> str:
+        joins = ""
+        if self.materialKeys:
+            joins += f" JOIN {_PENDING_ITEM_TABLE} m ON m.ITMREF_0 = Q.ITMREF_0"
+        if self.siteKeys:
+            joins += f" JOIN {_PENDING_FACILITY_TABLE} f ON f.FCY_0 = Q.POHFCY_0"
+        return joins
+
+    def filterSql(self) -> str:
+        """过滤条件：编码精确 IN + 名称模糊 LIKE（分类见 _splitKeys）。
+
+        物料/基地的 LIKE 条件依赖 joinSql() 已建的字典表别名（m / f）。
+        """
+        conds: list[str] = []
+        if self.supplierKeys:
+            conds.append(
+                "Q.BPSNUM_0 IN ("
+                + ", ".join(f"'{_esc(k)}'" for k in self.supplierKeys) + ")"
+            )
+        if self.materialKeys:
+            codes, names = self._splitKeys(self.materialKeys)
+            parts: list[str] = []
+            if codes:
+                parts.append(
+                    "Q.ITMREF_0 IN ("
+                    + ", ".join(f"'{_esc(k)}'" for k in codes) + ")"
+                )
+            parts.extend(f"m.ITMDES1_0 LIKE '%{_esc(k)}%'" for k in names)
+            conds.append("(" + " OR ".join(parts) + ")")
+        if self.siteKeys:
+            codes, names = self._splitKeys(self.siteKeys)
+            parts = []
+            if codes:
+                parts.append(
+                    "Q.POHFCY_0 IN ("
+                    + ", ".join(f"'{_esc(k)}'" for k in codes) + ")"
+                )
+            parts.extend(f"f.FCYNAM_0 LIKE '%{_esc(k)}%'" for k in names)
+            conds.append("(" + " OR ".join(parts) + ")")
+        return (" AND " + " AND ".join(conds)) if conds else ""
+
+
+def buildPendingDeliverySummarySql(
+    *, monthsBack: int, today: date, filters: PendingDeliveryFilters | None = None
+) -> str:
+    """欠交汇总（单语句）：行数 / 总欠交量 / 逾期行数 / 脏数据行数。"""
+    filters = filters or PendingDeliveryFilters()
     todayLit = f"DATE '{today.isoformat()}'"
     return f"""
 SELECT
@@ -747,36 +839,37 @@ SELECT
   SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} AND OVERDUE_DAYS > 0 THEN 1 ELSE 0 END) AS OVERDUE_LINES,
   SUM(CASE WHEN OPEN_QTY >= {_OPEN_QTY_SANITY_MAX} THEN 1 ELSE 0 END) AS EXCLUDED_ROWS
 FROM (
-  SELECT QTYSTU_0 - RCPQTYSTU_0 AS OPEN_QTY,
-         TRUNC({todayLit}) - TRUNC(EXTRCPDAT_0) AS OVERDUE_DAYS
-  FROM {_PENDING_TABLE}
-  WHERE ORDDAT_0 >= DATE '{since.isoformat()}'
+  SELECT Q.QTYSTU_0 - Q.RCPQTYSTU_0 AS OPEN_QTY,
+         TRUNC({todayLit}) - TRUNC(Q.EXTRCPDAT_0) AS OVERDUE_DAYS
+  FROM {_PENDING_TABLE} Q{filters.joinSql()}
+  WHERE {filters.windowSql(monthsBack, today)}{filters.filterSql()}
 )""".strip()
 
 
 def buildPendingDeliveryBySupplierSql(
-    *, monthsBack: int, today: date, limit: int
+    *, monthsBack: int, today: date, limit: int,
+    filters: PendingDeliveryFilters | None = None,
 ) -> str:
     """按供应商聚合欠交（催货清单的分组视角）。"""
-    since = _minusMonths(today, max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX)))
+    filters = filters or PendingDeliveryFilters()
     todayLit = f"DATE '{today.isoformat()}'"
     limit = max(1, min(limit, _MAX_LIMIT))
     return f"""
 SELECT
-  BPSNUM_0 AS SUPPLIER_CODE,
+  Q.BPSNUM_0 AS SUPPLIER_CODE,
   COUNT(*) AS OPEN_LINES,
   SUM(OPEN_QTY) AS OPEN_QTY,
   SUM(CASE WHEN OVERDUE_DAYS > 0 THEN 1 ELSE 0 END) AS OVERDUE_LINES
 FROM (
-  SELECT BPSNUM_0,
-         QTYSTU_0 - RCPQTYSTU_0 AS OPEN_QTY,
-         TRUNC({todayLit}) - TRUNC(EXTRCPDAT_0) AS OVERDUE_DAYS
-  FROM {_PENDING_TABLE}
-  WHERE ORDDAT_0 >= DATE '{since.isoformat()}'
-    AND QTYSTU_0 - RCPQTYSTU_0 > 0
-    AND QTYSTU_0 - RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}
+  SELECT Q.BPSNUM_0,
+         Q.QTYSTU_0 - Q.RCPQTYSTU_0 AS OPEN_QTY,
+         TRUNC({todayLit}) - TRUNC(Q.EXTRCPDAT_0) AS OVERDUE_DAYS
+  FROM {_PENDING_TABLE} Q{filters.joinSql()}
+  WHERE {filters.windowSql(monthsBack, today)}
+    AND Q.QTYSTU_0 - Q.RCPQTYSTU_0 > 0
+    AND Q.QTYSTU_0 - Q.RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}{filters.filterSql()}
 )
-GROUP BY BPSNUM_0
+GROUP BY Q.BPSNUM_0
 ORDER BY OPEN_QTY DESC
 FETCH FIRST {limit} ROWS ONLY""".strip()
 
@@ -785,33 +878,31 @@ def buildPendingDeliveryLinesSql(
     *,
     monthsBack: int,
     today: date,
-    supplierKey: str | None,
+    filters: PendingDeliveryFilters | None,
     minOverdueDays: int | None,
     limit: int,
 ) -> str:
-    """TOP 欠交订单行（明细下钻）：可选供应商 / 逾期下限过滤。"""
-    since = _minusMonths(today, max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX)))
+    """TOP 欠交订单行（明细下钻）：多选供应商/物料/基地 + 日期段 + 逾期下限。"""
+    filters = filters or PendingDeliveryFilters()
     todayLit = f"DATE '{today.isoformat()}'"
     limit = max(1, min(limit, _MAX_LIMIT))
     conds = [
-        f"ORDDAT_0 >= DATE '{since.isoformat()}'",
-        "QTYSTU_0 - RCPQTYSTU_0 > 0",
-        f"QTYSTU_0 - RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}",
+        filters.windowSql(monthsBack, today),
+        "Q.QTYSTU_0 - Q.RCPQTYSTU_0 > 0",
+        f"Q.QTYSTU_0 - Q.RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}",
     ]
-    if supplierKey:
-        conds.append(f"BPSNUM_0 = '{_esc(supplierKey)}'")
     if minOverdueDays:
-        conds.append(f"TRUNC({todayLit}) - TRUNC(EXTRCPDAT_0) >= {int(minOverdueDays)}")
-    where = " AND ".join(conds)
+        conds.append(f"TRUNC({todayLit}) - TRUNC(Q.EXTRCPDAT_0) >= {int(minOverdueDays)}")
+    where = " AND ".join(conds) + filters.filterSql()
     return f"""
-SELECT POHNUM_0, POPLIN_0, ITMREF_0, BPSNUM_0,
-       QTYSTU_0 AS ORDERED_QTY, RCPQTYSTU_0 AS RECEIVED_QTY,
-       (QTYSTU_0 - RCPQTYSTU_0) AS OPEN_QTY,
-       EXTRCPDAT_0,
-       TRUNC({todayLit}) - TRUNC(EXTRCPDAT_0) AS OVERDUE_DAYS
-FROM {_PENDING_TABLE}
+SELECT Q.POHNUM_0, Q.POPLIN_0, Q.ITMREF_0, Q.BPSNUM_0,
+       Q.QTYSTU_0 AS ORDERED_QTY, Q.RCPQTYSTU_0 AS RECEIVED_QTY,
+       (Q.QTYSTU_0 - Q.RCPQTYSTU_0) AS OPEN_QTY,
+       Q.EXTRCPDAT_0,
+       TRUNC({todayLit}) - TRUNC(Q.EXTRCPDAT_0) AS OVERDUE_DAYS
+FROM {_PENDING_TABLE} Q{filters.joinSql()}
 WHERE {where}
-ORDER BY (QTYSTU_0 - RCPQTYSTU_0) DESC
+ORDER BY (Q.QTYSTU_0 - Q.RCPQTYSTU_0) DESC
 FETCH FIRST {limit} ROWS ONLY""".strip()
 
 
@@ -849,10 +940,30 @@ async def pendingDeliveryHandler(
     脏数据（欠交量 ≥ 1e6 的源侧录入错误）剔除并在 summary.excludedRows 显式回报。
     """
     monthsBack = int(args.get("monthsBack") or 12)
-    supplierKey = str(args.get("supplierKey") or "").strip() or None
     minOverdueDays = args.get("minOverdueDays")
     limit = int(args.get("limit") or 20)
     datasourceId = args.get("datasourceId")
+
+    def _strList(key: str) -> tuple[str, ...]:
+        raw = args.get(key)
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return ()
+        return tuple(str(item).strip() for item in raw if str(item).strip())
+
+    legacySupplier = str(args.get("supplierKey") or "").strip()
+    try:
+        filters = PendingDeliveryFilters(
+            supplierKeys=_strList("supplierKeys")
+            or ((legacySupplier,) if legacySupplier else ()),
+            materialKeys=_strList("materialKeys"),
+            siteKeys=_strList("siteKeys"),
+            dateFrom=args.get("dateFrom"),
+            dateTo=args.get("dateTo"),
+        )
+    except ValidationError as exc:
+        return ToolResult(data={"rows": []}, answer=str(exc))
 
     if datasourceId:
         # 场景槽位显式指定（2026-11-23 用户要求）：不再默默落默认源
@@ -864,7 +975,7 @@ async def pendingDeliveryHandler(
     today = date.today()
 
     summaryRows = await adapter.execute_read_only(
-        buildPendingDeliverySummarySql(monthsBack=monthsBack, today=today)
+        buildPendingDeliverySummarySql(monthsBack=monthsBack, today=today, filters=filters)
     )
     summaryRow = summaryRows[0] if summaryRows else {}
     openLines = int(_col(summaryRow, "OPEN_LINES") or 0)
@@ -880,12 +991,14 @@ async def pendingDeliveryHandler(
         )
 
     supplierRows = await adapter.execute_read_only(
-        buildPendingDeliveryBySupplierSql(monthsBack=monthsBack, today=today, limit=5)
+        buildPendingDeliveryBySupplierSql(
+            monthsBack=monthsBack, today=today, limit=5, filters=filters
+        )
     )
     lineRows = await adapter.execute_read_only(
         buildPendingDeliveryLinesSql(
             monthsBack=monthsBack, today=today,
-            supplierKey=supplierKey, minOverdueDays=minOverdueDays, limit=limit,
+            filters=filters, minOverdueDays=minOverdueDays, limit=limit,
         )
     )
 

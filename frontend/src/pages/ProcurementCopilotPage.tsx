@@ -16,12 +16,14 @@ import {
   Button,
   Card,
   Col,
+  DatePicker,
   Drawer,
   Empty,
   Input,
   InputNumber,
   List,
   Row,
+  Segmented,
   Select,
   Statistic,
   Space,
@@ -47,6 +49,14 @@ import {
 } from "../api/procurementKnowledge";
 import { listModels } from "../api/modelConfig";
 import { listDataSources } from "../api/datasource";
+import { searchMappings } from "../api/entityMapping";
+import {
+  listPendingDeliverySites,
+  type PendingDeliveryQueryFilters,
+} from "../api/procurementCopilot";
+import type { Dayjs } from "dayjs";
+
+const { RangePicker } = DatePicker;
 import type { DataSource } from "../types/datasource";
 import type { ModelConfig } from "../types/modelConfig";
 import { getAgentRunSteps } from "../api/agentOrchestrationApi";
@@ -338,16 +348,70 @@ export default function ProcurementCopilotPage() {
 
   /** 推荐问题 = 预设槽位组合（chips 承载任务模板，槽位表单降级为高级入口）。 */
   const PENDING_DELIVERY_CHIPS = [
-    { label: "全部供应商概览（近 12 个月）", monthsBack: 12, supplier: "", overdue: 0 },
-    { label: "近期欠交（近 3 个月）", monthsBack: 3, supplier: "", overdue: 0 },
-    { label: "逾期超 30 天的欠交", monthsBack: 12, supplier: "", overdue: 30 },
-    { label: "长期逾期（超 90 天）", monthsBack: 12, supplier: "", overdue: 90 },
+    { label: "全部供应商概览（近 12 个月）", monthsBack: 12, overdue: 0 },
+    { label: "近期欠交（近 3 个月）", monthsBack: 3, overdue: 0 },
+    { label: "逾期超 30 天的欠交", monthsBack: 12, overdue: 30 },
+    { label: "长期逾期（超 90 天）", monthsBack: 12, overdue: 90 },
   ];
   const [datasources, setDatasources] = useState<DataSource[]>([]);
   const [datasourceId, setDatasourceId] = useState<number | undefined>();
   const [monthsBack, setMonthsBack] = useState(12);
-  const [supplierKey, setSupplierKey] = useState("");
+  const [supplierKeys, setSupplierKeys] = useState<string[]>([]);
+  const [materialKeys, setMaterialKeys] = useState<string[]>([]);
+  const [siteKeys, setSiteKeys] = useState<string[]>([]);
+  const [dateMode, setDateMode] = useState<"months" | "range">("months");
+  const [dateRange, setDateRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [minOverdueDays, setMinOverdueDays] = useState(0);
+  const [siteOptions, setSiteOptions] = useState<{ code: string; name: string }[]>([]);
+  const [supplierOptions, setSupplierOptions] = useState<
+    { code: string; name: string }[]
+  >([]);
+  const [materialOptions, setMaterialOptions] = useState<
+    { code: string; name: string }[]
+  >([]);
+  /** 远程搜索防抖（Select onSearch 高频触发）。 */
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const remoteSearch = useCallback(
+    (entityType: "SUPPLIER" | "MATERIAL", q: string, setter: (rows: { code: string; name: string }[]) => void) => {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+      searchTimerRef.current = setTimeout(() => {
+        void searchMappings(q, { entityType, limit: 20 })
+          .then((rows) =>
+            setter(
+              rows.map((row) => ({
+                code: row.enterpriseCode,
+                name: row.name ?? row.enterpriseCode,
+              })),
+            ),
+          )
+          .catch(() => undefined);
+      }, 300);
+    },
+    [],
+  );
+
+  /** 基地选项：进场景/换数据源拉一次。 */
+  useEffect(() => {
+    if (view !== "pending_delivery") return;
+    listPendingDeliverySites(datasourceId)
+      .then((rows) => setSiteOptions(Array.isArray(rows) ? rows : []))
+      .catch(() => setSiteOptions([]));
+  }, [view, datasourceId]);
+
+  const effectiveDates = useCallback((): { dateFrom?: string; dateTo?: string } => {
+    if (dateMode === "range" && dateRange) {
+      return { dateFrom: dateRange[0].format("YYYY-MM-DD"), dateTo: dateRange[1].format("YYYY-MM-DD") };
+    }
+    return {};
+  }, [dateMode, dateRange]);
+
+  const currentFilters = useCallback((): PendingDeliveryQueryFilters => ({
+    supplierKeys: supplierKeys,
+    materialKeys: materialKeys,
+    siteKeys: siteKeys,
+    ...effectiveDates(),
+  }), [supplierKeys, materialKeys, siteKeys, effectiveDates]);
 
   /** 欢迎态业务现状：进入场景/换数据源/换时间窗即拉取（零 LLM 成本）。 */
   useEffect(() => {
@@ -357,6 +421,7 @@ export default function ProcurementCopilotPage() {
     getPendingDeliverySummary({
       datasourceId,
       monthsBack,
+      ...currentFilters(),
     })
       .then((data) => {
         if (!cancelled) setSummaryState({ loading: false, error: null, data });
@@ -373,35 +438,50 @@ export default function ProcurementCopilotPage() {
     return () => {
       cancelled = true;
     };
-  }, [view, datasourceId, monthsBack]);
+  }, [view, datasourceId, monthsBack, currentFilters]);
 
   const composePendingDeliveryQuestion = useCallback(
     (overrides?: {
       monthsBack?: number;
-      supplier?: string;
+      supplierKeys?: string[];
+      materialKeys?: string[];
+      siteKeys?: string[];
+      dateFrom?: string;
+      dateTo?: string;
       overdue?: number;
       questionText?: string;
     }) => {
       // chips 传显式槽位：setXxx 是异步 state，闭包里取到的还是旧值
       // （2026-11-24 实测：chip「近 3 个月」会发成 12 个月）
       const months = overrides?.monthsBack ?? monthsBack;
-      const supplier = (overrides?.supplier ?? supplierKey).trim() || "全部";
+      const suppliers = overrides?.supplierKeys ?? supplierKeys;
+      const materials = overrides?.materialKeys ?? materialKeys;
+      const sites = overrides?.siteKeys ?? siteKeys;
       const overdue = overrides?.overdue ?? minOverdueDays;
       const ds = datasources.find((d) => d.id === datasourceId);
       const dsText = ds ? `数据源 id=${ds.id}（${ds.name}）` : "数据源=默认";
+      const dateText =
+        overrides?.dateFrom && overrides?.dateTo
+          ? `时间窗=${overrides.dateFrom}~${overrides.dateTo}`
+          : `时间窗=近${months}个月`;
+      const supplierText = suppliers.length > 0 ? suppliers.join("、") : "全部";
+      const materialText = materials.length > 0 ? `；物料=${materials.join("、")}` : "";
+      const siteText = sites.length > 0 ? `；基地=${sites.join("、")}` : "";
       // 用户在场景输入栏写的文字作为主句，槽位与工具指令作为尾注合并 ——
       // 否则高级参数改了也不进消息（发送走的是 question 而不是组合器）
       const lead = overrides?.questionText?.trim()
         ? `${overrides.questionText.trim()}`
         : "分析待到货情况";
       return (
-        `${lead}（${dsText}；时间窗=近${months}个月；供应商=${supplier}；` +
-        `最低逾期天数=${overdue}）。请调用 pending_delivery_query 工具` +
-        `（datasourceId=${datasourceId ?? "缺省"}），` +
+        `${lead}（${dsText}；${dateText}；供应商=${supplierText}` +
+        `${materialText}${siteText}；最低逾期天数=${overdue}）。` +
+        `请调用 pending_delivery_query 工具（datasourceId=${datasourceId ?? "缺省"}；` +
+        `supplierKeys=[${suppliers.join(",")}；materialKeys=[${materials.join(",")}；` +
+        `siteKeys=[${sites.join(",")}；${overrides?.dateFrom ? `dateFrom=${overrides.dateFrom}；dateTo=${overrides.dateTo}；` : ""}）` +
         "按供应商汇总欠交量并给催货建议，引用订单号与物料编码。"
       );
     },
-    [monthsBack, supplierKey, minOverdueDays, datasources, datasourceId],
+    [monthsBack, supplierKeys, materialKeys, siteKeys, minOverdueDays, datasources, datasourceId],
   );
 
   const handleSend = async (
@@ -641,12 +721,11 @@ export default function ProcurementCopilotPage() {
                       disabled={busy || !modelId}
                       onClick={() => {
                         setMonthsBack(chip.monthsBack);
-                        setSupplierKey(chip.supplier);
                         setMinOverdueDays(chip.overdue);
                         void handleSend(
                           composePendingDeliveryQuestion({
                             monthsBack: chip.monthsBack,
-                            supplier: chip.supplier,
+                            supplierKeys: [],
                             overdue: chip.overdue,
                           }),
                           { agentCode: PENDING_DELIVERY_AGENT },
@@ -669,7 +748,7 @@ export default function ProcurementCopilotPage() {
             <Space wrap size={8} align="center">
               <Text type="secondary">{t("procurement.copilot.model")}</Text>
               <Select
-                style={{ minWidth: 220 }}
+                style={{ minWidth: 200 }}
                 placeholder={t("procurement.copilot.model")}
                 value={modelId}
                 onChange={setModelId}
@@ -678,11 +757,9 @@ export default function ProcurementCopilotPage() {
                   label: model.modelName,
                 }))}
               />
-            </Space>
-            <Space wrap size={4}>
               <Text type="secondary">{t("procurement.copilot.slotDatasource")}</Text>
               <Select
-                style={{ minWidth: 200 }}
+                style={{ minWidth: 180 }}
                 placeholder={t("procurement.copilot.slotDatasource")}
                 value={datasourceId}
                 onChange={setDatasourceId}
@@ -692,28 +769,97 @@ export default function ProcurementCopilotPage() {
                 }))}
               />
             </Space>
-            <Space wrap size={4}>
-              <Text type="secondary">{t("procurement.copilot.slotMonths")}</Text>
-              <InputNumber
-                min={1}
-                max={36}
-                value={monthsBack}
-                onChange={(v) => setMonthsBack(Number(v) || 12)}
+            <Space wrap size={8} align="center">
+              <Text type="secondary">{t("procurement.copilot.slotTime")}</Text>
+              <Segmented
+                value={dateMode}
+                onChange={(value) => setDateMode(value as "months" | "range")}
+                options={[
+                  { label: t("procurement.copilot.timeMonths"), value: "months" },
+                  { label: t("procurement.copilot.timeRange"), value: "range" },
+                ]}
+              />
+              {dateMode === "months" ? (
+                <>
+                  <InputNumber
+                    min={1}
+                    max={36}
+                    value={monthsBack}
+                    onChange={(v) => setMonthsBack(Number(v) || 12)}
+                  />
+                  <Text type="secondary">{t("procurement.copilot.timeMonthsUnit")}</Text>
+                </>
+              ) : (
+                <RangePicker
+                  value={dateRange}
+                  onChange={(value) => {
+                    if (value && value[0] && value[1]) {
+                      setDateRange([value[0], value[1]]);
+                    } else {
+                      setDateRange(null);
+                    }
+                  }}
+                />
+              )}
+            </Space>
+            <Space wrap size={8} align="center">
+              <Text type="secondary">{t("procurement.copilot.slotSupplier")}</Text>
+              <Select
+                mode="multiple"
+                showSearch
+                allowClear
+                maxTagCount={2}
+                style={{ minWidth: 260, maxWidth: 420 }}
+                placeholder={t("procurement.copilot.searchSupplier")}
+                value={supplierKeys}
+                onSearch={(q) => remoteSearch("SUPPLIER", q, setSupplierOptions)}
+                onChange={setSupplierKeys}
+                options={supplierOptions.map((item) => ({
+                  value: item.code,
+                  label: `${item.name}（${item.code}）`,
+                }))}
+                filterOption={false}
+              />
+              <Text type="secondary">{t("procurement.copilot.slotMaterial")}</Text>
+              <Select
+                mode="multiple"
+                showSearch
+                allowClear
+                maxTagCount={2}
+                style={{ minWidth: 260, maxWidth: 420 }}
+                placeholder={t("procurement.copilot.searchMaterial")}
+                value={materialKeys}
+                onSearch={(q) => remoteSearch("MATERIAL", q, setMaterialOptions)}
+                onChange={setMaterialKeys}
+                options={materialOptions.map((item) => ({
+                  value: item.code,
+                  label: `${item.name}（${item.code}）`,
+                }))}
+                filterOption={false}
+              />
+            </Space>
+            <Space wrap size={8} align="center">
+              <Text type="secondary">{t("procurement.copilot.slotSite")}</Text>
+              <Select
+                mode="multiple"
+                showSearch
+                allowClear
+                maxTagCount={3}
+                style={{ minWidth: 260, maxWidth: 460 }}
+                placeholder={t("procurement.copilot.searchSite")}
+                value={siteKeys}
+                onChange={setSiteKeys}
+                optionFilterProp="label"
+                options={siteOptions.map((item) => ({
+                  value: item.code,
+                  label: `${item.name}（${item.code}）`,
+                }))}
               />
               <Text type="secondary">{t("procurement.copilot.slotOverdue")}</Text>
               <InputNumber
                 min={0}
                 value={minOverdueDays}
                 onChange={(v) => setMinOverdueDays(Number(v) || 0)}
-              />
-            </Space>
-            <Space wrap size={4}>
-              <Text type="secondary">{t("procurement.copilot.slotSupplier")}</Text>
-              <Input
-                style={{ width: 140 }}
-                value={supplierKey}
-                placeholder={t("procurement.copilot.slotSupplierAll")}
-                onChange={(event) => setSupplierKey(event.target.value)}
               />
             </Space>
           </Space>

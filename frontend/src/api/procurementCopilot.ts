@@ -140,15 +140,39 @@ export interface PendingDeliverySummaryResponse {
   topLines: unknown[];
 }
 
+export interface PendingDeliveryQueryFilters {
+  supplierKeys?: string[];
+  materialKeys?: string[];
+  siteKeys?: string[];
+  dateFrom?: string;
+  dateTo?: string;
+}
+
 export async function getPendingDeliverySummary(
-  params: { datasourceId?: number; monthsBack?: number } = {},
+  params: PendingDeliveryQueryFilters & { datasourceId?: number; monthsBack?: number } = {},
 ): Promise<PendingDeliverySummaryResponse> {
-  const query: Record<string, number> = {};
+  const query: Record<string, string | number> = {};
   if (params.datasourceId !== undefined) query.datasourceId = params.datasourceId;
   if (params.monthsBack !== undefined) query.monthsBack = params.monthsBack;
+  for (const key of ["supplierKeys", "materialKeys", "siteKeys"] as const) {
+    for (const value of params[key] ?? []) query[key] = value;
+  }
+  if (params.dateFrom) query.dateFrom = params.dateFrom;
+  if (params.dateTo) query.dateTo = params.dateTo;
   const res = await httpClient.get<PendingDeliverySummaryResponse>(
     "/procurement/pending-delivery/summary",
     { params: query },
+  );
+  return res.data;
+}
+
+/** 基地下拉选项（FACILITY 字典 ∩ 订单实际出现过的基地）。 */
+export async function listPendingDeliverySites(
+  datasourceId?: number,
+): Promise<{ code: string; name: string }[]> {
+  const res = await httpClient.get<{ code: string; name: string }[]>(
+    "/procurement/pending-delivery/sites",
+    { params: datasourceId !== undefined ? { datasourceId } : {} },
   );
   return res.data;
 }

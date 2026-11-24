@@ -25,6 +25,8 @@ const api = vi.hoisted(() => ({
   deleteCopilotConversation: vi.fn(),
   listDataSources: vi.fn(),
   getPendingDeliverySummary: vi.fn(),
+  searchMappings: vi.fn(),
+  listPendingDeliverySites: vi.fn(),
 }));
 
 vi.mock("../../api/procurementKnowledge", () => ({
@@ -32,12 +34,14 @@ vi.mock("../../api/procurementKnowledge", () => ({
 }));
 vi.mock("../../api/modelConfig", () => ({ listModels: api.listModels }));
 vi.mock("../../api/datasource", () => ({ listDataSources: api.listDataSources }));
+vi.mock("../../api/entityMapping", () => ({ searchMappings: api.searchMappings }));
 vi.mock("../../api/procurementCopilot", () => ({
   streamCopilotMessage: api.streamCopilotMessage,
   listCopilotConversations: api.listCopilotConversations,
   getCopilotConversation: api.getCopilotConversation,
   deleteCopilotConversation: api.deleteCopilotConversation,
   getPendingDeliverySummary: api.getPendingDeliverySummary,
+  listPendingDeliverySites: api.listPendingDeliverySites,
 }));
 vi.mock("../../api/agentOrchestrationApi", () => ({
   getAgentRunSteps: api.getAgentRunSteps,
@@ -50,6 +54,11 @@ beforeEach(() => {
     bySupplier: [{ supplierCode: "J1", openLines: 2405, openQty: 57363604, overdueLines: 2405 }],
     topLines: [],
   });
+  api.listPendingDeliverySites.mockResolvedValue([
+    { code: "T0", name: "泰鸿万立" },
+    { code: "T3", name: "模具厂" },
+  ]);
+  api.searchMappings.mockResolvedValue([]);
   api.listDataSources.mockResolvedValue([
     { id: 1, name: "THBI Oracle", type: "oracle", isDefault: true },
     { id: 10, name: "SRM-TH-01", type: "mysql", isDefault: false },
@@ -575,7 +584,7 @@ describe("ProcurementCopilotPage 待到货场景", () => {
     expect(screen.getByText("T22511POH1251Q")).toBeTruthy();
   });
 
-  it("场景卡：填供应商与逾期天数后消息带槽位值", async () => {
+  it("高级参数：基地多选后消息带 siteKeys 与用户文字", async () => {
     mockOptions();
     const payloads: Array<Record<string, unknown>> = [];
     api.streamCopilotMessage.mockImplementation(async (payload, handlers) => {
@@ -596,18 +605,22 @@ describe("ProcurementCopilotPage 待到货场景", () => {
     renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
-    fireEvent.change(screen.getByPlaceholderText("全部"), {
-      target: { value: "F109" },
-    });
+
+    // 基地多选（本地选项，label = 名称（编码））
+    const siteSelect = screen.getAllByRole("combobox")[4];
+    fireEvent.mouseDown(siteSelect);
+    fireEvent.click(await waitFor(() => screen.getByText("模具厂（T3）")));
+
     fireEvent.change(screen.getByPlaceholderText(/补充说明/), {
-      target: { value: "看 F109 的欠交" },
+      target: { value: "看 T3 的欠交" },
     });
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
 
     await waitFor(() => expect(payloads).toHaveLength(1));
     const message = String(payloads[0].message);
-    expect(message).toContain("供应商=F109");
-    expect(message).toContain("看 F109 的欠交");
+    expect(message).toContain("基地=T3");
+    expect(message).toContain("siteKeys=[T3");
+    expect(message).toContain("看 T3 的欠交");
     expect(message).toContain("pending_delivery_query");
   });
 });
@@ -725,7 +738,7 @@ describe("ProcurementCopilotPage 数据源槽位", () => {
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
 
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
-    // 高级面板里 Select 顺序：模型在上、数据源在下
+    // 高级面板里 Select 顺序：模型(0)、数据源(1)、供应商(2)、物料(3)、基地(4)
     const selects = screen.getAllByRole("combobox");
     fireEvent.mouseDown(selects[1]);
     fireEvent.click(await waitFor(() => screen.getByText("SRM-TH-01")));
@@ -738,5 +751,56 @@ describe("ProcurementCopilotPage 数据源槽位", () => {
     const message = String(payloads[0].message);
     expect(message).toContain("数据源 id=10");
     expect(message).toContain("datasourceId=10");
+  });
+});
+
+
+describe("供应商/物料远程搜索多选", () => {
+  it("供应商搜索命中后可多选，消息带 supplierKeys", async () => {
+    mockOptions();
+    api.searchMappings.mockResolvedValue([
+      {
+        id: 1, entityType: "SUPPLIER", enterpriseKey: 1,
+        enterpriseCode: "F109", sourceSystem: "ERP", sourceCode: "ERP-1",
+        name: "飞驰机械",
+      },
+    ]);
+    const payloads: Array<Record<string, unknown>> = [];
+    api.streamCopilotMessage.mockImplementation(async (payload, handlers) => {
+      payloads.push(payload);
+      handlers.onDone?.({
+        runId: "r-sup",
+        status: "SUCCEEDED",
+        answer: "ok",
+        pauseCode: null,
+        errorCode: null,
+        errorMessage: null,
+        totalTokens: 1,
+        cost: 0,
+        stepsUrl: "/api/v1/agent-runs/r-sup/steps",
+      });
+    });
+
+    renderScenario();
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
+
+    // 供应商多选（combobox 顺序：模型0/数据源1/供应商2）
+    const supplierSelect = screen.getAllByRole("combobox")[2];
+    fireEvent.mouseDown(supplierSelect);
+    fireEvent.change(supplierSelect, { target: { value: "飞驰" } });
+    // 300ms debounce ⇒ 等待远程搜索回来
+    await waitFor(() => expect(api.searchMappings).toHaveBeenCalled(), { timeout: 2000 });
+    fireEvent.click(await waitFor(() => screen.getByText("飞驰机械（F109）")));
+
+    fireEvent.change(screen.getByPlaceholderText(/补充说明/), {
+      target: { value: "看供应商欠交" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+
+    await waitFor(() => expect(payloads).toHaveLength(1));
+    const message = String(payloads[0].message);
+    expect(message).toContain("供应商=F109");
+    expect(message).toContain("supplierKeys=[F109");
   });
 });

@@ -549,6 +549,64 @@ def test_pending_delivery_registered() -> None:
     assert "pending_delivery_query" in ARG_EXTRACTORS
 
 
+from app.services.agent_tools_procurement import PendingDeliveryFilters  # noqa: E402
+
+_PENDING_FILTERS_EMPTY: PendingDeliveryFilters | None = None
+
+
+def test_pending_delivery_filters_fuzzy_and_dates() -> None:
+    """多选供应商 IN / 物料编码+名称模糊 / 基地编码+名称模糊 / 日期段。"""
+    from app.services.agent_tools_procurement import (
+        PendingDeliveryFilters,
+        buildPendingDeliveryLinesSql,
+    )
+
+    filters = PendingDeliveryFilters(
+        supplierKeys=["F109"],
+        materialKeys=["502447700001", "不锈钢板"],
+        siteKeys=["T3", "滨海"],
+        dateFrom="2026-01-01",
+        dateTo="2026-06-30",
+    )
+    sql = buildPendingDeliveryLinesSql(
+        monthsBack=12, today=date(2026, 11, 23),
+        filters=filters, minOverdueDays=None, limit=10,
+    )
+    # 日期段覆盖 monthsBack（不再出现相对窗口起点）
+    assert "DATE '2026-01-01'" in sql and "DATE '2026-06-30'" in sql
+    assert "ORDDAT_0 >= DATE '2025-11-23'" not in sql
+    # 物料：编码精确 OR 名称模糊（JOIN ITMMASTER）
+    assert "Q.ITMREF_0 IN ('502447700001')" in sql
+    assert "ITMDES1_0 LIKE '%不锈钢板%'" in sql
+    assert "JOIN ZJTH.ITMMASTER" in sql
+    # 基地：编码精确 OR 名称模糊（JOIN FACILITY）
+    assert "Q.POHFCY_0 IN ('T3')" in sql
+    assert "FCYNAM_0 LIKE '%滨海%'" in sql
+    assert "JOIN ZJTH.FACILITY" in sql
+    assert ";" not in sql
+
+    # 只有模糊名（无精确码）⇒ 不渲染空 IN
+    sql2 = buildPendingDeliveryLinesSql(
+        monthsBack=12, today=date(2026, 11, 23),
+        filters=PendingDeliveryFilters(materialKeys=["齿轮"]), minOverdueDays=None, limit=5,
+    )
+    assert "Q.ITMREF_0 IN" not in sql2
+    assert "ITMDES1_0 LIKE '%齿轮%'" in sql2
+
+
+def test_pending_delivery_filters_reject_bad_date() -> None:
+    """日期段格式非法 ⇒ ValidationError（fail-closed，不静默忽略）。"""
+    import pytest as _pytest
+
+    from app.domain.exceptions import ValidationError
+    from app.services.agent_tools_procurement import PendingDeliveryFilters
+
+    with _pytest.raises(ValidationError):
+        PendingDeliveryFilters(dateFrom="2026/01/01")
+    with _pytest.raises(ValidationError):
+        PendingDeliveryFilters(dateTo="2026-13-01")
+
+
 def test_pending_delivery_in_tool_seed() -> None:
     """工具元数据必须进种子（input_schema 给 planner 出参依据）。"""
     from scripts.seed_agent_tool_configs import TOOL_SEEDS
@@ -557,20 +615,23 @@ def test_pending_delivery_in_tool_seed() -> None:
     assert entry is not None, "pending_delivery_query 必须进 TOOL_SEEDS"
     schema = entry["input_schema"]
     assert schema["additionalProperties"] is False
-    for key in ("monthsBack", "supplierKey", "minOverdueDays", "datasourceId", "limit"):
+    for key in ("monthsBack", "dateFrom", "dateTo", "supplierKeys",
+                "materialKeys", "siteKeys", "datasourceId", "limit"):
         assert key in schema["properties"]
 
 
 def test_build_pending_delivery_summary_sql() -> None:
     from app.services.agent_tools_procurement import buildPendingDeliverySummarySql
 
-    sql = buildPendingDeliverySummarySql(monthsBack=12, today=date(2026, 11, 23))
+    sql = buildPendingDeliverySummarySql(
+        monthsBack=12, today=date(2026, 11, 23), filters=_PENDING_FILTERS_EMPTY
+    )
     assert sql.strip().upper().startswith("SELECT")
     assert "PORDERQ" in sql
     # 时间窗：12 个月前 = 2025-11-23
     assert "DATE '2025-11-23'" in sql
     # 健全性阈值 + 欠交口径
-    assert "QTYSTU_0 - RCPQTYSTU_0" in sql
+    assert "Q.QTYSTU_0 - Q.RCPQTYSTU_0" in sql
     assert "1000000" in sql
     # 脏数据必须显式计数（不静默丢）
     assert "EXCLUDED_ROWS" in sql
@@ -582,17 +643,18 @@ def test_build_pending_delivery_lines_sql_filters() -> None:
 
     sql = buildPendingDeliveryLinesSql(
         monthsBack=12, today=date(2026, 11, 23),
-        supplierKey=None, minOverdueDays=None, limit=20,
+        filters=_PENDING_FILTERS_EMPTY, minOverdueDays=None, limit=20,
     )
-    assert "BPSNUM_0 = " not in sql, "无供应商 ⇒ 不加过滤"
+    assert "BPSNUM_0 IN" not in sql, "无供应商 ⇒ 不加过滤"
     assert "FETCH FIRST 20 ROWS ONLY" in sql.upper()
     assert "OVERDUE_DAYS" in sql
 
     sql2 = buildPendingDeliveryLinesSql(
         monthsBack=3, today=date(2026, 11, 23),
-        supplierKey="F109", minOverdueDays=30, limit=5,
+        filters=PendingDeliveryFilters(supplierKeys=["F109", "B125"]),
+        minOverdueDays=30, limit=5,
     )
-    assert "BPSNUM_0 = 'F109'" in sql2
+    assert "Q.BPSNUM_0 IN ('F109', 'B125')" in sql2
     assert ">= 30" in sql2, "minOverdueDays 过滤逾期下限"
     assert "DATE '2026-08-23'" in sql2
     assert "FETCH FIRST 5 ROWS ONLY" in sql2.upper()
@@ -613,7 +675,7 @@ async def test_pending_delivery_handler_shapes_result(monkeypatch) -> None:
                     "OPEN_LINES": 12, "OPEN_QTY": 5000.0,
                     "OVERDUE_LINES": 7, "EXCLUDED_ROWS": 3,
                 }]
-            if "GROUP BY BPSNUM_0" in sql.upper():
+            if "GROUP BY" in sql.upper():
                 return [
                     {"SUPPLIER_CODE": "F109", "OPEN_LINES": 5,
                      "OPEN_QTY": 3000.0, "OVERDUE_LINES": 4},
@@ -665,7 +727,7 @@ async def test_pending_delivery_handler_honors_datasource_arg(monkeypatch) -> No
             if "EXCLUDED_ROWS" in sql:
                 return [{"OPEN_LINES": 1, "OPEN_QTY": 10.0,
                          "OVERDUE_LINES": 1, "EXCLUDED_ROWS": 0}]
-            if "GROUP BY BPSNUM_0" in sql.upper():
+            if "GROUP BY" in sql.upper():
                 return []
             return []
 
@@ -685,7 +747,10 @@ async def test_pending_delivery_handler_honors_datasource_arg(monkeypatch) -> No
     from app.services.agent_tools_procurement import pendingDeliveryHandler
 
     result = await pendingDeliveryHandler(
-        None, {"monthsBack": 12, "datasourceId": 7}, SimpleNamespace()
+        None,
+        {"monthsBack": 12, "datasourceId": 7,
+         "supplierKeys": ["F109"], "siteKeys": ["T3"]},
+        SimpleNamespace(),
     )
     assert picked["id"] == 7
     assert result.data["datasourceId"] == 7

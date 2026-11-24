@@ -6,7 +6,9 @@
  * LLM 的文字只保留「建议」部分，显示在卡片下方。
  */
 
-import { Card, Col, Row, Statistic, Table, Tag, Typography } from "antd";
+import { Button, Card, Col, Row, Statistic, Table, Tag, Typography } from "antd";
+import { DownloadOutlined } from "@ant-design/icons";
+import { downloadCsv } from "../../utils/download";
 import type { CopilotStepPayload } from "../../api/procurementCopilot";
 
 const { Text } = Typography;
@@ -81,8 +83,45 @@ export default function PendingDeliveryResultCard({
   result: PendingDeliveryResult;
 }) {
   const { summary, bySupplier, topLines } = result;
+
+  /** 查询数据集导出：明细行为主表 + 空行分隔的供应商汇总段（CSV，Excel 可直接打开）。 */
+  const handleExport = () => {
+    const detailRows = topLines.map((row) => ({
+      订单号: row.poNo,
+      行号: row.poLine,
+      物料编码: row.materialCode,
+      供应商: row.supplierCode,
+      订购量: row.orderedQty,
+      已收量: row.receivedQty,
+      欠交量: row.openQty,
+      预计到货: row.expectedDate ?? "",
+      逾期天数: row.overdueDays,
+    }));
+    const supplierRows = bySupplier.map((row) => ({
+      订单号: `[供应商汇总] ${row.supplierCode}`,
+      行号: "",
+      物料编码: "",
+      供应商: row.supplierCode,
+      订购量: "",
+      已收量: "",
+      欠交量: row.openQty,
+      预计到货: "",
+      逾期天数: row.overdueLines,
+    }));
+    downloadCsv([...detailRows, ...supplierRows], `待到货明细_${Date.now()}.csv`);
+  };
+
   return (
-    <Card size="small" style={{ marginBottom: 8 }} title="待到货分析结果">
+    <Card
+      size="small"
+      style={{ marginBottom: 8 }}
+      title="待到货分析结果"
+      extra={
+        <Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>
+          导出明细(CSV)
+        </Button>
+      }
+    >
       <Row gutter={12}>
         <Col span={6}>
           <Statistic title="欠交行数" value={summary.openLines} />

@@ -531,9 +531,11 @@ describe("ProcurementCopilotPage 待到货场景", () => {
         inputJson: null,
         outputJson: { text: JSON.stringify({ data: {
           summary: { openLines: 9828, openQty: 209421924.058, overdueLines: 9828, excludedRows: 7 },
-          bySupplier: [{ supplierCode: "J1", openLines: 2405, openQty: 57363604, overdueLines: 2405 }],
+          bySupplier: [{ supplierCode: "J1", supplierName: "河北新泰鸿汽车零部件有限公司",
+            openLines: 2405, openQty: 57363604, overdueLines: 2405 }],
           topLines: [{ poNo: "T22511POH1251Q", poLine: 1000, materialCode: "502447700001",
-            supplierCode: "F109", orderedQty: 1000000, receivedQty: 9600, openQty: 990400,
+            supplierCode: "F109", supplierName: "上海纳特汽车标准件有限公司",
+            orderedQty: 1000000, receivedQty: 9600, openQty: 990400,
             expectedDate: "2025-11-28 00:00:00", overdueDays: 360 }],
         }, answer: "" }) },
         answer: null, errorCode: null, errorMessage: null,
@@ -562,7 +564,22 @@ describe("ProcurementCopilotPage 待到货场景", () => {
     await waitFor(() =>
       expect(screen.getByText("待到货分析结果")).toBeTruthy(),
     );
-    expect(screen.getByText("J1")).toBeTruthy();
+    // 概览面板默认展开（J1 在供应商汇总面板，收起态不渲染）
+    await waitFor(() =>
+      expect(screen.getAllByText("9,828").length).toBeGreaterThan(0),
+    );
+    // Collapse 头节点类名定位（文本匹配会命中祖先节点 ⇒ 不用文本找）。
+    // 结果卡的 suppliers/lines 是后两个面板头（前面可能是欢迎卡遗留的头）。
+    const headers = Array.from(
+      document.querySelectorAll<HTMLElement>(".ant-collapse-header"),
+    ).filter((el) => el.textContent?.includes("按供应商汇总") || el.textContent?.includes("TOP 欠交订单行"));
+    expect(headers.length).toBe(2);
+    fireEvent.click(headers[0]);   // 展开供应商汇总
+    fireEvent.click(headers[1]);   // 展开 TOP 行
+    // 名称出现在：欢迎态统计卡 TOP 文案 + bySupplier 表（多处）⇒ getAllByText
+    await waitFor(() =>
+      expect(screen.getAllByText(/河北新泰鸿汽车零部件有限公司/).length).toBeGreaterThan(0),
+    );
     expect(screen.getByText("T22511POH1251Q")).toBeTruthy();
   });
 
@@ -829,18 +846,24 @@ describe("三个交互优化", () => {
     renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByText("全部供应商概览（近 12 个月）"));
+    await waitFor(() => expect(screen.getByText("待到货分析结果")).toBeTruthy());
+    // TOP 行面板收起态不渲染 ⇒ 展开后行数据可见
+    fireEvent.click(screen.getByText(/TOP 欠交订单行/));
     await waitFor(() => expect(screen.getByText("PO-AAA")).toBeTruthy());
 
     fireEvent.change(screen.getByPlaceholderText(/补充说明/), {
       target: { value: "再按基地看一次" },
     });
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+    await waitFor(() => expect(screen.getAllByText("待到货分析结果").length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByText(/TOP 欠交订单行/));
     await waitFor(() => expect(screen.getByText("PO-BBB")).toBeTruthy());
     // 两个 Tab；当前激活的是最近一次（#2），切回 #1 应显示 PO-AAA
     expect(screen.getByRole("tab", { name: /#1/ })).toBeTruthy();
     expect(screen.getByRole("tab", { name: /#2/ })).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: /#1/ }));
-    // 切换器只渲染激活项 ⇒ PO-AAA 出现、PO-BBB 离开 DOM
+    // 切换器只渲染激活项 ⇒ PO-BBB 离开 DOM；新激活的结果卡面板重新收起 ⇒ 展开 TOP
+    fireEvent.click(screen.getByText(/TOP 欠交订单行/));
     await waitFor(() => expect(screen.getByText("PO-AAA")).toBeTruthy());
     expect(screen.queryByText("PO-BBB")).toBeNull();
   });

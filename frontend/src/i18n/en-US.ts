@@ -3733,6 +3733,7 @@ export const enUS = {
     analyzing: "Analyzing, please wait…",
     analyzingTip: "This dialog closes automatically when the result is ready",
     detailContent: "Full message",
+    resetParams: "Reset",
     resultInTabs: "This result moved to the Results tabs above",
     scenarioFree: "Free Q&A (expert mode)",
     scenarioFreeDesc: "Pick an agent and ask freely; read-only tools, evidence-backed answers.",

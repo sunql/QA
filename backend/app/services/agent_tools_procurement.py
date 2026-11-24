@@ -731,6 +731,7 @@ async def purchaseHistoryHandler(
 _PENDING_TABLE = "ZJTH.PORDERQ"
 _PENDING_ITEM_TABLE = "ZJTH.ITMMASTER"
 _PENDING_FACILITY_TABLE = "ZJTH.FACILITY"
+_PENDING_SUPPLIER_TABLE = "ZJTH.BPSUPPLIER"
 #: 健全性阈值：欠交量 ≥ 1e6 视为源侧脏数据（探针实测 43 行「数量=物料码」），
 #: 剔除但**显式回报**（excludedRows），不静默丢。
 _OPEN_QTY_SANITY_MAX = 1_000_000
@@ -784,12 +785,15 @@ class PendingDeliveryFilters:
         since = _minusMonths(today, max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX)))
         return f"ORDDAT_0 >= DATE '{since.isoformat()}'"
 
-    def joinSql(self) -> str:
+    def joinSql(self, *, withSupplierName: bool = False) -> str:
+        """过滤 JOIN（m/f）+ 名称字典 JOIN（b=BPSUPPLIER，LEFT 防脏码丢行）。"""
         joins = ""
         if self.materialKeys:
             joins += f" JOIN {_PENDING_ITEM_TABLE} m ON m.ITMREF_0 = Q.ITMREF_0"
         if self.siteKeys:
             joins += f" JOIN {_PENDING_FACILITY_TABLE} f ON f.FCY_0 = Q.POHFCY_0"
+        if withSupplierName:
+            joins += f" LEFT JOIN {_PENDING_SUPPLIER_TABLE} b ON b.BPSNUM_0 = Q.BPSNUM_0"
         return joins
 
     def filterSql(self) -> str:
@@ -857,14 +861,15 @@ def buildPendingDeliveryBySupplierSql(
     return f"""
 SELECT
   BPSNUM_0 AS SUPPLIER_CODE,
+  MAX(SUPPLIER_NAME) AS SUPPLIER_NAME,
   COUNT(*) AS OPEN_LINES,
   SUM(OPEN_QTY) AS OPEN_QTY,
   SUM(CASE WHEN OVERDUE_DAYS > 0 THEN 1 ELSE 0 END) AS OVERDUE_LINES
 FROM (
-  SELECT Q.BPSNUM_0,
+  SELECT Q.BPSNUM_0, b.BPSNAM_0 AS SUPPLIER_NAME,
          Q.QTYSTU_0 - Q.RCPQTYSTU_0 AS OPEN_QTY,
          TRUNC({todayLit}) - TRUNC(Q.EXTRCPDAT_0) AS OVERDUE_DAYS
-  FROM {_PENDING_TABLE} Q{filters.joinSql()}
+  FROM {_PENDING_TABLE} Q{filters.joinSql(withSupplierName=True)}
   WHERE {filters.windowSql(monthsBack, today)}
     AND Q.QTYSTU_0 - Q.RCPQTYSTU_0 > 0
     AND Q.QTYSTU_0 - Q.RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}{filters.filterSql()}
@@ -895,12 +900,12 @@ def buildPendingDeliveryLinesSql(
         conds.append(f"TRUNC({todayLit}) - TRUNC(Q.EXTRCPDAT_0) >= {int(minOverdueDays)}")
     where = " AND ".join(conds) + filters.filterSql()
     return f"""
-SELECT Q.POHNUM_0, Q.POPLIN_0, Q.ITMREF_0, Q.BPSNUM_0,
+SELECT Q.POHNUM_0, Q.POPLIN_0, Q.ITMREF_0, Q.BPSNUM_0, b.BPSNAM_0 AS SUPPLIER_NAME,
        Q.QTYSTU_0 AS ORDERED_QTY, Q.RCPQTYSTU_0 AS RECEIVED_QTY,
        (Q.QTYSTU_0 - Q.RCPQTYSTU_0) AS OPEN_QTY,
        Q.EXTRCPDAT_0,
        TRUNC({todayLit}) - TRUNC(Q.EXTRCPDAT_0) AS OVERDUE_DAYS
-FROM {_PENDING_TABLE} Q{filters.joinSql()}
+FROM {_PENDING_TABLE} Q{filters.joinSql(withSupplierName=True)}
 WHERE {where}
 ORDER BY (Q.QTYSTU_0 - Q.RCPQTYSTU_0) DESC
 FETCH FIRST {limit} ROWS ONLY""".strip()
@@ -913,6 +918,7 @@ def _camelPendingRow(row: dict[str, Any]) -> dict[str, Any]:
         "poLine": _col(row, "POPLIN_0"),
         "materialCode": _col(row, "ITMREF_0"),
         "supplierCode": _col(row, "BPSNUM_0"),
+        "supplierName": _col(row, "SUPPLIER_NAME"),
         "orderedQty": _col(row, "ORDERED_QTY"),
         "receivedQty": _col(row, "RECEIVED_QTY"),
         "openQty": _col(row, "OPEN_QTY"),
@@ -1023,6 +1029,7 @@ async def pendingDeliveryHandler(
     bySupplier = [
         {
             "supplierCode": _col(r, "SUPPLIER_CODE"),
+            "supplierName": _col(r, "SUPPLIER_NAME"),
             "openLines": int(_col(r, "OPEN_LINES") or 0),
             "openQty": _col(r, "OPEN_QTY"),
             "overdueLines": int(_col(r, "OVERDUE_LINES") or 0),

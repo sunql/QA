@@ -3736,6 +3736,7 @@ export const zhCN = {
     analyzing: "正在分析，请稍候…",
     analyzingTip: "结果出来后此窗口自动关闭",
     detailContent: "详细内容",
+    resetParams: "重置",
     resultInTabs: "本次结果已收进顶部「分析结果」标签页",
     scenarioFree: "自由问答（专家模式）",
     scenarioFreeDesc: "任选场景 Agent 自由提问，只读工具取数、结论必带依据。",

@@ -79,3 +79,23 @@ body,
   border-radius: 0;
   font-size: 0.9em;
 }
+
+/* ── 待到货结果表格（对齐参考系统：表头淡蓝灰 + 行分隔 + 无竖线） ── */
+.pd-table .ant-table-thead > tr > th {
+  background: #f7f9fb;
+  color: #26334d;
+  font-weight: 600;
+  border-bottom: 1px solid #e8edf3;
+}
+.pd-table .ant-table-thead > tr > th::before {
+  display: none;
+}
+.pd-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid #f0f3f7;
+}
+.pd-table .ant-table-tbody > tr:hover > td {
+  background: #f7faff;
+}
+.pd-table.ant-table-wrapper .ant-table {
+  background: transparent;
+}

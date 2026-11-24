@@ -1,6 +1,6 @@
 /** 待到货结构化结果卡：数据不经 LLM 复述，直接渲染工具 outputJson。 */
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
@@ -35,12 +35,14 @@ const SAMPLE = JSON.stringify({
   data: {
     summary: { openLines: 9828, openQty: 209421924.058, overdueLines: 9828, excludedRows: 7 },
     bySupplier: [
-      { supplierCode: "J1", openLines: 2405, openQty: 57363604, overdueLines: 2405 },
+      { supplierCode: "J1", supplierName: "河北新泰鸿汽车零部件有限公司",
+        openLines: 2405, openQty: 57363604, overdueLines: 2405 },
     ],
     topLines: [
       {
         poNo: "T22511POH1251Q", poLine: 1000, materialCode: "502447700001",
-        supplierCode: "F109", orderedQty: 1000000, receivedQty: 9600,
+        supplierCode: "F109", supplierName: "上海纳特汽车标准件有限公司",
+        orderedQty: 1000000, receivedQty: 9600,
         openQty: 990400, expectedDate: "2025-11-28 00:00:00", overdueDays: 360,
       },
     ],
@@ -48,14 +50,18 @@ const SAMPLE = JSON.stringify({
   answer: "文字建议",
 });
 
-function renderCard(outputText: string | null) {
-  return render(
+import userEvent from "@testing-library/user-event";
+
+function renderCardWithUser(outputText: string | null) {
+  const user = userEvent.setup();
+  const utils = render(
     <I18nextProvider i18n={i18n}>
       <ConfigProvider locale={zhCN}>
         <PendingDeliveryResultCard result={parsePendingDeliveryStep(stepWith(outputText))!} />
       </ConfigProvider>
     </I18nextProvider>,
   );
+  return { user, ...utils };
 }
 
 describe("parsePendingDeliveryStep", () => {
@@ -77,21 +83,31 @@ describe("parsePendingDeliveryStep", () => {
 });
 
 describe("PendingDeliveryResultCard", () => {
-  it("统计块 + 供应商表 + TOP 行表，逾期 >90 天标红", () => {
-    renderCard(SAMPLE);
-    expect(screen.getAllByText("9,828").length).toBeGreaterThan(0);
-    expect(screen.getByText("57,363,604")).toBeTruthy();
-    expect(screen.getByText("990,400")).toBeTruthy();
-    // Statistic 把整数/小数拆在不同 span ⇒ 用 textContent 断言
+  it("概览默认展开；供应商/TOP 面板收起，点击展开后见名称与行", async () => {
+    const { user } = renderCardWithUser(SAMPLE);
+    expect(screen.getByText("结果概览")).toBeTruthy();
     expect(document.body.textContent).toContain("209,421,924.058");
-    expect(screen.getByText("J1")).toBeTruthy();
-    expect(screen.getByText("T22511POH1251Q")).toBeTruthy();
+
+    // 收起态：供应商表与 TOP 行都不在 DOM（antd Collapse 惰性渲染）
+    expect(screen.queryByText("T22511POH1251Q")).toBeNull();
+    expect(screen.queryByText(/河北新泰鸿/)).toBeNull();
+
+    // 展开供应商汇总
+    await user.click(screen.getByText(/按供应商汇总/));
+    await waitFor(() =>
+      expect(screen.getByText("河北新泰鸿汽车零部件有限公司（J1）")).toBeTruthy(),
+    );
+
+    // 展开 TOP 行
+    await user.click(screen.getByText(/TOP 欠交订单行/));
+    await waitFor(() => expect(screen.getByText("T22511POH1251Q")).toBeTruthy());
+    expect(screen.getByText("上海纳特汽车标准件有限公司（F109）")).toBeTruthy();
     // 逾期 360 天 > 90 ⇒ Tag 形式
     expect(screen.getByText("360")).toBeTruthy();
   });
 
-  it("空结果也渲染（openLines=0）", () => {
-    renderCard(
+  it("空结果也渲染（openLines=0）", async () => {
+    const { user } = renderCardWithUser(
       JSON.stringify({
         data: {
           summary: { openLines: 0, openQty: 0, overdueLines: 0, excludedRows: 0 },
@@ -102,21 +118,23 @@ describe("PendingDeliveryResultCard", () => {
       }),
     );
     expect(screen.getByText("待到货分析结果")).toBeTruthy();
+    await user.click(screen.getByText(/按供应商汇总/));
+    expect(document.body.textContent).toContain("共 0 家");
   });
 });
 
-
 describe("导出明细(CSV)", () => {
-  it("点击导出：明细行 + 供应商汇总段写入 CSV", () => {
-    renderCard(SAMPLE);
-    fireEvent.click(screen.getByRole("button", { name: /导出明细/ }));
+  it("点击导出：明细行 + 供应商汇总段写入 CSV", async () => {
+    const { user } = renderCardWithUser(SAMPLE);
+    await user.click(screen.getByRole("button", { name: /导出明细/ }));
 
     expect(downloadCsv).toHaveBeenCalledTimes(1);
     const [rows, filename] = (downloadCsv as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(filename).toContain("待到货明细_");
     expect(rows).toHaveLength(2);  // 1 明细 + 1 供应商汇总
     expect(rows[0]["订单号"]).toBe("T22511POH1251Q");
-    expect(rows[1]["订单号"]).toBe("[供应商汇总] J1");
+    expect(rows[0]["供应商名称"]).toBe("上海纳特汽车标准件有限公司");
+    expect(rows[1]["订单号"]).toBe("[供应商汇总] 河北新泰鸿汽车零部件有限公司");
     expect(rows[1]["欠交量"]).toBe(57363604);
   });
 });

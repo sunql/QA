@@ -868,7 +868,7 @@ export default function ProcurementCopilotPage() {
           }
         >
           <Space wrap size={[16, 8]} align="center">
-            <Text type="secondary">{t("procurement.copilot.model")}</Text>
+            <div style={{ fontSize: 12, color: "#5a6b87", marginBottom: 4 }}>{t("procurement.copilot.model")}</div>
             <Select
               style={{ minWidth: 160 }}
               placeholder={t("procurement.copilot.model")}
@@ -879,7 +879,7 @@ export default function ProcurementCopilotPage() {
                 label: model.modelName,
               }))}
             />
-            <Text type="secondary">{t("procurement.copilot.slotDatasource")}</Text>
+            <div style={{ fontSize: 12, color: "#5a6b87", marginBottom: 4 }}>{t("procurement.copilot.slotDatasource")}</div>
             <Select
               style={{ minWidth: 150 }}
               placeholder={t("procurement.copilot.slotDatasource")}
@@ -890,7 +890,7 @@ export default function ProcurementCopilotPage() {
                 label: d.name,
               }))}
             />
-            <Text type="secondary">{t("procurement.copilot.slotTime")}</Text>
+            <div style={{ fontSize: 12, color: "#5a6b87", marginBottom: 4 }}>{t("procurement.copilot.slotTime")}</div>
             <Segmented
               value={dateMode}
               onChange={(value) => setDateMode(value as "months" | "range")}
@@ -907,7 +907,7 @@ export default function ProcurementCopilotPage() {
                   value={monthsBack}
                   onChange={(v) => setMonthsBack(Number(v) || 12)}
                 />
-                <Text type="secondary">{t("procurement.copilot.timeMonthsUnit")}</Text>
+                <span style={{ fontSize: 12, color: "#5a6b87" }}>{t("procurement.copilot.timeMonthsUnit")}</span>
               </>
             ) : (
               <RangePicker
@@ -922,7 +922,7 @@ export default function ProcurementCopilotPage() {
                 }}
               />
             )}
-            <Text type="secondary">{t("procurement.copilot.slotSupplier")}</Text>
+            <div style={{ fontSize: 12, color: "#5a6b87", marginBottom: 4 }}>{t("procurement.copilot.slotSupplier")}</div>
             <Select
               mode="multiple"
               showSearch
@@ -939,7 +939,7 @@ export default function ProcurementCopilotPage() {
               }))}
               filterOption={false}
             />
-            <Text type="secondary">{t("procurement.copilot.slotMaterial")}</Text>
+            <div style={{ fontSize: 12, color: "#5a6b87", marginBottom: 4 }}>{t("procurement.copilot.slotMaterial")}</div>
             <Select
               mode="multiple"
               showSearch
@@ -956,7 +956,7 @@ export default function ProcurementCopilotPage() {
               }))}
               filterOption={false}
             />
-            <Text type="secondary">{t("procurement.copilot.slotSite")}</Text>
+            <div style={{ fontSize: 12, color: "#5a6b87", marginBottom: 4 }}>{t("procurement.copilot.slotSite")}</div>
             <Select
               mode="multiple"
               showSearch
@@ -972,7 +972,7 @@ export default function ProcurementCopilotPage() {
                 label: `${item.name}（${item.code}）`,
               }))}
             />
-            <Text type="secondary">{t("procurement.copilot.slotOverdue")}</Text>
+            <div style={{ fontSize: 12, color: "#5a6b87", marginBottom: 4 }}>{t("procurement.copilot.slotOverdue")}</div>
             <InputNumber
               min={0}
               value={minOverdueDays}

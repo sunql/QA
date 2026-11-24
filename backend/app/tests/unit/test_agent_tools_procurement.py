@@ -667,6 +667,8 @@ def test_build_pending_delivery_lines_sql_filters() -> None:
     )
     assert "GROUP BY Q." not in supplier_sql
     assert "BPSNUM_0 AS SUPPLIER_CODE" in supplier_sql
+    assert "JOIN ZJTH.BPSUPPLIER" in supplier_sql, "供应商名称经字典 JOIN 带出"
+    assert "SUPPLIER_NAME" in supplier_sql
     assert ">= 30" in sql2, "minOverdueDays 过滤逾期下限"
     assert "DATE '2026-08-23'" in sql2
     assert "FETCH FIRST 5 ROWS ONLY" in sql2.upper()
@@ -689,14 +691,15 @@ async def test_pending_delivery_handler_shapes_result(monkeypatch) -> None:
                 }]
             if "GROUP BY" in sql.upper():
                 return [
-                    {"SUPPLIER_CODE": "F109", "OPEN_LINES": 5,
-                     "OPEN_QTY": 3000.0, "OVERDUE_LINES": 4},
-                    {"SUPPLIER_CODE": "B170", "OPEN_LINES": 3,
-                     "OPEN_QTY": 1200.0, "OVERDUE_LINES": 1},
+                    {"SUPPLIER_CODE": "F109", "SUPPLIER_NAME": "上海纳特汽车标准件有限公司",
+                     "OPEN_LINES": 5, "OPEN_QTY": 3000.0, "OVERDUE_LINES": 4},
+                    {"SUPPLIER_CODE": "B170", "SUPPLIER_NAME": None,
+                     "OPEN_LINES": 3, "OPEN_QTY": 1200.0, "OVERDUE_LINES": 1},
                 ]
             return [
                 {"POHNUM_0": "T22511POH1251Q", "POPLIN_0": 1000,
                  "ITMREF_0": "502447700001", "BPSNUM_0": "F109",
+                 "SUPPLIER_NAME": "上海纳特汽车标准件有限公司",
                  "ORDERED_QTY": 1000000.0, "RECEIVED_QTY": 9600.0,
                  "OPEN_QTY": 990400.0, "EXTRCPDAT_0": "2025-11-28",
                  "OVERDUE_DAYS": 360},
@@ -719,6 +722,8 @@ async def test_pending_delivery_handler_shapes_result(monkeypatch) -> None:
     assert result.data["summary"]["openLines"] == 12
     assert result.data["summary"]["excludedRows"] == 3, "脏数据必须显式回报"
     assert result.data["bySupplier"][0]["supplierCode"] == "F109"
+    assert result.data["bySupplier"][0]["supplierName"] == "上海纳特汽车标准件有限公司"
+    assert result.data["topLines"][0]["supplierName"] == "上海纳特汽车标准件有限公司"
     assert result.data["topLines"][0]["overdueDays"] == 360
     assert "欠交" in result.answer and "12" in result.answer
 

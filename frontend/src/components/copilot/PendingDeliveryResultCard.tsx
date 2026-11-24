@@ -1,12 +1,11 @@
 /** 待到货场景的结构化结果卡：数据直接来自工具 outputJson，不经 LLM 复述。
  *
- * 背景（2026-11-23 生产实测）：planner 把 bySupplier/topLines 复述成大段文字，
- * 不可读。修法：TOOL 步骤的 observation（`{"text": "<json>", "truncated": …}`）
- * 里本来就有结构化数据 ⇒ 前端解析渲染（统计块 + 供应商表 + TOP 行表）；
- * LLM 的文字只保留「建议」部分，显示在卡片下方。
+ * 三块内容用 Collapse 承载（2026-11-24 反馈）：结果概览默认展开，
+ * 供应商汇总 / TOP 明细默认收起，点击展开。
+ * 表格样式走 index.css 的 .pd-table（对齐参考系统表头淡蓝灰风格）。
  */
 
-import { Button, Card, Col, Row, Statistic, Table, Tag, Typography } from "antd";
+import { Button, Card, Collapse, Row, Col, Statistic, Table, Tag, Typography } from "antd";
 import { DownloadOutlined } from "@ant-design/icons";
 import { downloadCsv } from "../../utils/download";
 import type { CopilotStepPayload } from "../../api/procurementCopilot";
@@ -22,6 +21,7 @@ export interface PendingDeliverySummary {
 
 export interface PendingDeliverySupplier {
   supplierCode: string;
+  supplierName?: string | null;
   openLines: number;
   openQty: number;
   overdueLines: number;
@@ -32,6 +32,7 @@ export interface PendingDeliveryLine {
   poLine: number;
   materialCode: string;
   supplierCode: string;
+  supplierName?: string | null;
   orderedQty: number;
   receivedQty: number;
   openQty: number;
@@ -77,6 +78,13 @@ function fmtQty(value: number | undefined): string {
   return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 3 }).format(value);
 }
 
+/** 供应商展示：有名称显示 名称（编码），退化到纯编码。 */
+function supplierLabel(code: string, name?: string | null): string {
+  return name ? `${name}（${code}）` : code;
+}
+
+const SUMMARY_PANEL_KEY = "overview";
+
 export default function PendingDeliveryResultCard({
   result,
 }: {
@@ -90,7 +98,8 @@ export default function PendingDeliveryResultCard({
       订单号: row.poNo,
       行号: row.poLine,
       物料编码: row.materialCode,
-      供应商: row.supplierCode,
+      供应商编码: row.supplierCode,
+      供应商名称: row.supplierName ?? "",
       订购量: row.orderedQty,
       已收量: row.receivedQty,
       欠交量: row.openQty,
@@ -98,10 +107,11 @@ export default function PendingDeliveryResultCard({
       逾期天数: row.overdueDays,
     }));
     const supplierRows = bySupplier.map((row) => ({
-      订单号: `[供应商汇总] ${row.supplierCode}`,
+      订单号: `[供应商汇总] ${row.supplierName ?? row.supplierCode}`,
       行号: "",
       物料编码: "",
-      供应商: row.supplierCode,
+      供应商编码: row.supplierCode,
+      供应商名称: row.supplierName ?? "",
       订购量: "",
       已收量: "",
       欠交量: row.openQty,
@@ -114,7 +124,6 @@ export default function PendingDeliveryResultCard({
   return (
     <Card
       size="small"
-      style={{ marginBottom: 8 }}
       title="待到货分析结果"
       extra={
         <Button size="small" icon={<DownloadOutlined />} onClick={handleExport}>
@@ -122,82 +131,110 @@ export default function PendingDeliveryResultCard({
         </Button>
       }
     >
-      <Row gutter={12}>
-        <Col span={6}>
-          <Statistic title="欠交行数" value={summary.openLines} />
-        </Col>
-        <Col span={6}>
-          {/* 金额/数量带小数：antd Statistic 会按默认精度重排，这里原样输出 */}
-          <div>
-            <Text type="secondary" style={{ display: "block", fontSize: 12 }}>
-              欠交总量
-            </Text>
-            <Text strong style={{ fontSize: 20 }}>
-              {fmtQty(summary.openQty)}
-            </Text>
-          </div>
-        </Col>
-        <Col span={6}>
-          <Statistic
-            title="逾期行数"
-            value={summary.overdueLines}
-            valueStyle={summary.overdueLines > 0 ? { color: "#cf1322" } : undefined}
-          />
-        </Col>
-        <Col span={6}>
-          <Statistic title="剔除异常行" value={summary.excludedRows} />
-        </Col>
-      </Row>
-
-      <Text strong style={{ display: "block", margin: "12px 0 4px" }}>
-        按供应商汇总（欠交量 TOP）
-      </Text>
-      <Table
-        size="small"
-        pagination={false}
-        rowKey={(row) => `${row.supplierCode}`}
-        dataSource={bySupplier}
-        columns={[
-          { title: "供应商", dataIndex: "supplierCode" },
-          { title: "欠交行数", dataIndex: "openLines" },
-          { title: "欠交量", render: (_: unknown, row) => fmtQty(row.openQty) },
+      <Collapse
+        defaultActiveKey={[SUMMARY_PANEL_KEY]}
+        items={[
           {
-            title: "逾期行数",
-            render: (_: unknown, row) =>
-              row.overdueLines > 0 ? (
-                <Tag color="red">{row.overdueLines}</Tag>
-              ) : (
-                row.overdueLines
-              ),
-          },
-        ]}
-      />
-
-      <Text strong style={{ display: "block", margin: "12px 0 4px" }}>
-        TOP 欠交订单行
-      </Text>
-      <Table
-        size="small"
-        pagination={{ pageSize: 10, hideOnSinglePage: true }}
-        rowKey={(row) => `${row.poNo}/${row.poLine}`}
-        dataSource={topLines}
-        columns={[
-          { title: "订单号", dataIndex: "poNo" },
-          { title: "物料", dataIndex: "materialCode", ellipsis: true },
-          { title: "供应商", dataIndex: "supplierCode", width: 80 },
-          { title: "订购量", render: (_: unknown, row) => fmtQty(row.orderedQty) },
-          { title: "已收", render: (_: unknown, row) => fmtQty(row.receivedQty) },
-          { title: "欠交量", render: (_: unknown, row) => fmtQty(row.openQty) },
-          {
-            title: "预计到货",
-            dataIndex: "expectedDate",
-            render: (value: string | null) => (value ? value.slice(0, 10) : "-"),
+            key: SUMMARY_PANEL_KEY,
+            label: <Text strong>结果概览</Text>,
+            children: (
+              <Row gutter={12}>
+                <Col span={6}>
+                  <Statistic title="欠交行数" value={summary.openLines} />
+                </Col>
+                <Col span={6}>
+                  {/* 金额/数量带小数：antd Statistic 会按默认精度重排，这里原样输出 */}
+                  <div>
+                    <Text type="secondary" style={{ display: "block", fontSize: 12 }}>
+                      欠交总量
+                    </Text>
+                    <Text strong style={{ fontSize: 20 }}>
+                      {fmtQty(summary.openQty)}
+                    </Text>
+                  </div>
+                </Col>
+                <Col span={6}>
+                  <Statistic
+                    title="逾期行数"
+                    value={summary.overdueLines}
+                    valueStyle={summary.overdueLines > 0 ? { color: "#cf1322" } : undefined}
+                  />
+                </Col>
+                <Col span={6}>
+                  <Statistic title="剔除异常行" value={summary.excludedRows} />
+                </Col>
+              </Row>
+            ),
           },
           {
-            title: "逾期天数",
-            dataIndex: "overdueDays",
-            render: (value: number) =>
-              value > 90 ? <Tag color="red">{value}</Tag> : value,
+            key: "suppliers",
+            label: (
+              <Text strong>
+                按供应商汇总（欠交量 TOP） · 共 {bySupplier.length} 家
+              </Text>
+            ),
+            children: (
+              <Table
+                className="pd-table"
+                size="small"
+                pagination={false}
+                rowKey={(row) => `${row.supplierCode}`}
+                dataSource={bySupplier}
+                columns={[
+                  {
+                    title: "供应商",
+                    render: (_: unknown, row) => supplierLabel(row.supplierCode, row.supplierName),
+                  },
+                  { title: "欠交行数", dataIndex: "openLines" },
+                  { title: "欠交量", render: (_: unknown, row) => fmtQty(row.openQty) },
+                  {
+                    title: "逾期行数",
+                    render: (_: unknown, row) =>
+                      row.overdueLines > 0 ? (
+                        <Tag color="red">{row.overdueLines}</Tag>
+                      ) : (
+                        row.overdueLines
+                      ),
+                  },
+                ]}
+              />
+            ),
+          },
+          {
+            key: "lines",
+            label: <Text strong>TOP 欠交订单行 · 共 {topLines.length} 行</Text>,
+            children: (
+              <Table
+                className="pd-table"
+                size="small"
+                pagination={{ pageSize: 10, hideOnSinglePage: true }}
+                rowKey={(row) => `${row.poNo}/${row.poLine}`}
+                dataSource={topLines}
+                columns={[
+                  { title: "订单号", dataIndex: "poNo" },
+                  { title: "物料", dataIndex: "materialCode", ellipsis: true },
+                  {
+                    title: "供应商",
+                    render: (_: unknown, row) => supplierLabel(row.supplierCode, row.supplierName),
+                    ellipsis: true,
+                  },
+                  { title: "订购量", render: (_: unknown, row) => fmtQty(row.orderedQty) },
+                  { title: "已收", render: (_: unknown, row) => fmtQty(row.receivedQty) },
+                  { title: "欠交量", render: (_: unknown, row) => fmtQty(row.openQty) },
+                  {
+                    title: "预计到货",
+                    dataIndex: "expectedDate",
+                    render: (value: string | null) => (value ? value.slice(0, 10) : "-"),
+                  },
+                  {
+                    title: "逾期天数",
+                    dataIndex: "overdueDays",
+                    render: (value: number) =>
+                      value > 90 ? <Tag color="red">{value}</Tag> : value,
+                  },
+                ]}
+              />
+            ),
           },
         ]}
       />

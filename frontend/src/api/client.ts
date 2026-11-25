@@ -7,6 +7,15 @@ import { useAuthStore, clearPersistedAuth } from "../stores/authStore";
 import { clearLastSessionIds } from "../stores/persistChatUiState";
 import { notifyUserSwitch } from "../stores/userSwitch";
 
+// 扩展 axios 请求配置：`silentErrors: true` 时响应拦截器**不弹全局错误 toast**，
+// 由调用方自行提示。用于高频轮询接口（如内省 job 进度）——一次失联不该连弹 N 次
+// 「网络异常」，也不该与页面自己的「连接中断」提示重复。
+declare module "axios" {
+  interface AxiosRequestConfig<D = any, P = any> {
+    silentErrors?: boolean;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // AppError interface — unified error shape for frontend error handling
 // ---------------------------------------------------------------------------
@@ -201,8 +210,13 @@ export function createHttpClient(): AxiosInstance {
           ? i18n.t("errors.requestFailedHttp", { status: String(status) })
           : i18n.t("errors.networkError"));
       // 401 不弹 toast —— 由 RequireAuth 或登录页处理；
-      // 预期 404（如未缓存 schema）同理不弹，调用方靠 status 自行分支。
-      if (status !== 401 && !isExpected404(error.config?.url, status)) {
+      // 预期 404（如未缓存 schema）同理不弹，调用方靠 status 自行分支；
+      // silentErrors（如轮询进度）也不弹，调用方自己控制提示节奏。
+      if (
+        status !== 401 &&
+        !isExpected404(error.config?.url, status) &&
+        !error.config?.silentErrors
+      ) {
         showError(errMsg);
       }
       // audit-fx-3.3: use normalizeError to produce AppError with code + status + detail

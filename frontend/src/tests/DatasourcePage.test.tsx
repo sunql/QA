@@ -40,6 +40,9 @@ const api = vi.hoisted(() => ({
 
 vi.mock("../api/datasource", () => api);
 
+// 与 DatasourcePage 的 POLL_INTERVAL_MS 对齐：等 2 个轮询周期（1.5s × 2）再加余量。
+const TWO_POLL_CYCLES_MS = 3_500;
+
 function renderPage() {
   return render(
     <ConfigProvider locale={zhCN}>
@@ -228,6 +231,9 @@ describe("DatasourcePage", () => {
 
     expect(api.startIntrospectJob).toHaveBeenCalled();
     expect(await screen.findByText(/正在缓存 schema/)).toBeTruthy();
+    // 轮询首次返回 {completed:100,total:200} ⇒ 页面必须显示真实进度数值 100/200
+    // （只断言“正在缓存 schema”证明不了进度被渲染）。
+    expect(await screen.findByText(/100\/200/)).toBeInTheDocument();
     // 成功后自动关闭 + 成功提示（轮询间隔 1.5s，真实计时器下需放宽 waitFor 超时）。
     // antd Modal 关闭后仍保留（隐藏的）DOM，故断言「不可见 / 已移除」而非 queryByText 为 null。
     await waitFor(
@@ -240,7 +246,7 @@ describe("DatasourcePage", () => {
     expect(await screen.findByText(/缓存成功/)).toBeInTheDocument();
   });
 
-  it("缓存 Schema 失败：弹窗展示错误且不自动关闭", async () => {
+  it("缓存 Schema 失败：弹窗保持可见且停止轮询（不自动关闭）", async () => {
     const user = userEvent.setup();
     api.startIntrospectJob.mockResolvedValue({
       jobId: "j2", status: "running", total: 10, completed: 0,
@@ -253,7 +259,61 @@ describe("DatasourcePage", () => {
     renderPage();
     await user.click(await screen.findByRole("button", { name: /缓存 Schema/i }));
 
-    expect(await screen.findByText("无法连接数据源")).toBeTruthy();
+    expect(await screen.findByText("无法连接数据源")).toBeInTheDocument();
+    // antd Modal 关闭后 DOM 仍保留 ⇒ 「文本存在」是恒真断言，必须断言弹窗**可见**。
+    // 打开动画首帧 opacity=0，故用 waitFor 等动画结束再判可见。
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeVisible());
+
+    // 终态失败 ⇒ stopPolling：等 2 个轮询周期后调用次数不再增长。
+    const callsAtFailure = api.getIntrospectJob.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, TWO_POLL_CYCLES_MS));
+    expect(api.getIntrospectJob.mock.calls.length).toBe(callsAtFailure);
+  });
+
+  it("关闭弹窗后再次点击「缓存 Schema」：重新启动并显示同一 job 的进度", async () => {
+    const user = userEvent.setup();
+    // 后端 findRunning 返回同一 job（携带当前进度）：mock 成同一 jobId + 已完成 100。
+    const sameJob = { jobId: "j4", status: "running", total: 200, completed: 100 };
+    api.startIntrospectJob.mockResolvedValue(sameJob);
+    api.getIntrospectJob.mockResolvedValue(sameJob);
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /缓存 Schema/i }));
+    expect(await screen.findByText(/100\/200/)).toBeInTheDocument();
+    expect(api.startIntrospectJob).toHaveBeenCalledTimes(1);
+
+    // 关闭弹窗：后台任务继续；轮询随 activeJob 清空而停止。
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    // 再次点击必须重新调用接口（不是只复用本地状态），弹窗重开并显示同一 job 的进度。
+    await user.click(screen.getByRole("button", { name: /缓存 Schema/i }));
+    expect(api.startIntrospectJob).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeVisible());
+    expect(await screen.findByText(/100\/200/)).toBeInTheDocument();
+  });
+
+  it("轮询返回 404（job 已淘汰）：提示任务失效而不是连接中断", async () => {
+    const user = userEvent.setup();
+    api.startIntrospectJob.mockResolvedValue({
+      jobId: "j5", status: "running", total: 10, completed: 0,
+    });
+    // AppError 形状：轮询接口 reject 带 status=404。
+    api.getIntrospectJob.mockRejectedValue(
+      Object.assign(new Error("内省任务不存在"), { status: 404 }),
+    );
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /缓存 Schema/i }));
+
+    // toast 与弹窗 Alert 同文案 ⇒ getAllByText 容忍多匹配。
+    await waitFor(
+      () => expect(screen.getAllByText(/内省任务已失效/).length).toBeGreaterThan(0),
+      { timeout: 5000 },
+    );
+    // 404 不应被计成「与服务器连接中断」。
+    expect(screen.queryByText(/与服务器连接中断/)).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeVisible());
   });
 
   it("轮询连续失败 5 次 ⇒ 提示连接中断并停止", async () => {

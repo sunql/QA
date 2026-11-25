@@ -41,6 +41,13 @@
 
 **并发保护**：同一 `(datasourceId, schema)` 已有 `running` job ⇒ 再次 POST 返回该 jobId，不重复启动。
 
+**单进程假设**：注册表是进程内内存态，GET 必须打到启动该 job 的同一进程。生产 backend 为单进程
+uvicorn（`qa-agent-orchestration-worker` 是独立进程、不服务 HTTP），满足该假设。若未来横向扩容
+backend 副本，本方案需改为共享存储（DB/Redis）——届时另批处理。
+
+**淘汰时机**：惰性淘汰 —— 每次 POST/GET 时顺带清理 `updatedAt` 早于 10 分钟的终态 job，
+不引入后台清理协程。
+
 **分批内省** `SchemaIntrospectionService.introspectBatched(ds, owner, onProgress)`：
 
 ```

@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -27,12 +27,11 @@ from app.domain.enums import (
 from app.domain.exceptions import NotFoundError
 from app.domain.models import DataSource, EntityMapping, FeatureDefinition, FeatureValue
 from app.domain.schemas import Supplier360Read
-from app.services.feature_rule_registry import feature_rule_registry
+from app.services.feature_rule_registry import FeatureRuleReady, FeatureThresholdReady, feature_rule_registry
 from app.services.supplier_360_service import (
     Supplier360Service,
+    _kpiSlotFeatureNames,
 )
-from app.services.supplier_360_service import _kpiSlotFeatureNames
-from app.services.feature_rule_registry import FeatureRuleReady, FeatureThresholdReady
 
 pytestmark = pytest.mark.asyncio
 
@@ -58,9 +57,7 @@ async def _seedDatasource(dbSession: AsyncSession) -> DataSource:
     return ds
 
 
-async def _seedSupplierMappings(
-    dbSession: AsyncSession, key: int, code: str
-) -> list[EntityMapping]:
+async def _seedSupplierMappings(dbSession: AsyncSession, key: int, code: str) -> list[EntityMapping]:
     """SUP000001 × {ERP, SRM} 两条。"""
     rows = [
         EntityMapping(
@@ -130,9 +127,7 @@ async def _seedFeatureValue(
         entity_key=entity_key,
         value=value,
         valid_at=valid_at,
-        computed_at=computed_at or datetime.combine(
-            valid_at, datetime.min.time(), tzinfo=timezone.utc
-        ),
+        computed_at=computed_at or datetime.combine(valid_at, datetime.min.time(), tzinfo=UTC),
     )
     dbSession.add(fv)
     await dbSession.commit()
@@ -182,18 +177,10 @@ async def test_get_supplier_360_aggregates_latest_feature_values(
     await _seedSupplierMappings(dbSession, 100001, "SUP000001")
 
     # Seed 4 features
-    fd_otd = await _seedFeature(
-        dbSession, 1, "SUPPLIER_OTD_3M", alias="3 月准时交付率", unit="%"
-    )
-    fd_defect = await _seedFeature(
-        dbSession, 2, "SUPPLIER_DEFECT_RATE_3M", alias="3 月拒收率", unit="%"
-    )
-    fd_price = await _seedFeature(
-        dbSession, 3, "SUPPLIER_PRICE_VARIANCE_3M", alias="3 月价格偏差", unit="%"
-    )
-    fd_risk = await _seedFeature(
-        dbSession, 4, "SUPPLIER_RISK_SCORE", alias="风险评分", unit="score"
-    )
+    fd_otd = await _seedFeature(dbSession, 1, "SUPPLIER_OTD_3M", alias="3 月准时交付率", unit="%")
+    fd_defect = await _seedFeature(dbSession, 2, "SUPPLIER_DEFECT_RATE_3M", alias="3 月拒收率", unit="%")
+    fd_price = await _seedFeature(dbSession, 3, "SUPPLIER_PRICE_VARIANCE_3M", alias="3 月价格偏差", unit="%")
+    fd_risk = await _seedFeature(dbSession, 4, "SUPPLIER_RISK_SCORE", alias="风险评分", unit="score")
 
     # 老 OTD 值（应被忽略）+ 新 OTD 值（应被取到）
     await _seedFeatureValue(dbSession, 1, "SUP000001", 88.0, date(2026, 7, 31))
@@ -274,14 +261,32 @@ async def test_get_supplier_360_returns_disabled_feature_with_no_value_marker(
 async def test_kpi_slot_feature_names_aggregates_from_registry() -> None:
     """_kpiSlotFeatureNames 聚合自 registry。"""
     feature_rule_registry._loaded = True
-    feature_rule_registry._rules = {("SUPPLIER", "FEATURE", "RISK"): [
-        FeatureRuleReady(id=1, code="a", data_object="SUPPLIER", data_layer="FEATURE",
-                          target_level="RISK", feature_name="X", enabled=True, priority=100,
-                          thresholds=(FeatureThresholdReady("HIGH", "lt", 10, "%", 1),)),
-        FeatureRuleReady(id=2, code="b", data_object="SUPPLIER", data_layer="FEATURE",
-                          target_level="RISK", feature_name="Y", enabled=True, priority=100,
-                          thresholds=(FeatureThresholdReady("HIGH", "lt", 20, "%", 1),)),
-    ]}
+    feature_rule_registry._rules = {
+        ("SUPPLIER", "FEATURE", "RISK"): [
+            FeatureRuleReady(
+                id=1,
+                code="a",
+                data_object="SUPPLIER",
+                data_layer="FEATURE",
+                target_level="RISK",
+                feature_name="X",
+                enabled=True,
+                priority=100,
+                thresholds=(FeatureThresholdReady("HIGH", "lt", 10, "%", 1),),
+            ),
+            FeatureRuleReady(
+                id=2,
+                code="b",
+                data_object="SUPPLIER",
+                data_layer="FEATURE",
+                target_level="RISK",
+                feature_name="Y",
+                enabled=True,
+                priority=100,
+                thresholds=(FeatureThresholdReady("HIGH", "lt", 20, "%", 1),),
+            ),
+        ]
+    }
     names = await _kpiSlotFeatureNames()
     assert set(names) == {"X", "Y"}
     # sorted alphabetically
@@ -392,15 +397,9 @@ async def test_get_supplier_360_str_not_found_raises(dbSession: AsyncSession):
 # ---------------------------------------------------------------------------
 
 
-async def _seedNamedSupplier(
-    dbSession: AsyncSession, key: int, code: str, name: str
-) -> None:
+async def _seedNamedSupplier(dbSession: AsyncSession, key: int, code: str, name: str) -> None:
     # datasource（id=9001）唯一：已存在则跳过（本 helper 可多次调用）
-    dsExists = (
-        await dbSession.execute(
-            select(DataSource.id).where(DataSource.id == 9001)
-        )
-    ).first()
+    dsExists = (await dbSession.execute(select(DataSource.id).where(DataSource.id == 9001))).first()
     if dsExists is None:
         await _seedDatasource(dbSession)
     rows = await _seedSupplierMappings(dbSession, key, code)

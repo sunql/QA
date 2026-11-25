@@ -27,12 +27,11 @@ Round 1 范围：仅接 PG entity_mapping + feature_value；DW ADS view / DW DWS
 from __future__ import annotations
 
 import logging
-from typing import Union
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import BusinessObjectCode, FeatureStatus
+from app.domain.enums import FeatureStatus
 from app.domain.exceptions import NotFoundError
 from app.domain.models import EntityMapping, FeatureDefinition, FeatureValue
 from app.domain.schemas import (
@@ -97,7 +96,7 @@ class Supplier360Service:
     - 子模块失败 → log warning + 该字段空值，整体响应仍返回
     """
 
-    async def get360(self, session: AsyncSession, supplierKey: Union[str, int]) -> Supplier360Read:
+    async def get360(self, session: AsyncSession, supplierKey: str | int) -> Supplier360Read:
         """实时聚合单供应商 360° 数据（plan §5.3）。
 
         supplierKey 同时接受 VARCHAR 业务码（如 THBI '10105'）与 BIGINT
@@ -119,7 +118,7 @@ class Supplier360Service:
     # ------------------------------------------------------------------
 
     async def _resolveSupplier(
-        self, session: AsyncSession, supplierKey: Union[str, int]
+        self, session: AsyncSession, supplierKey: str | int
     ) -> tuple[int, str, str | None]:
         """统一解析入口：返回 (enterprise_key, enterprise_code, supplier_name)。
 

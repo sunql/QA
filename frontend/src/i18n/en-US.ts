@@ -2148,6 +2148,9 @@ export const enUS = {
   datasource: {
   importToOntology: "Import to Ontology",
   cacheSchema: "Cache Schema",
+  introspectProgress: "Caching schema: {done}/{total} tables",
+  introspectFailed: "Caching failed — check the datasource connection",
+  introspectConnectionLost: "Lost connection to the server. Check your network and retry.",
   layers: {
     action: "Data Layers",
     title: "Data Layers — {{name}}",

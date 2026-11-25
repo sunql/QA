@@ -8,6 +8,11 @@ UI 优先策略（与 seed_menu_config 同款）：仅在「行不存在」时 I
 行已存在时**不覆盖任何字段** —— 场景配置是治理资产，改配置走 SQL /
 seed 管理（第一期管理口径，2026-11-24 用户确认），seed 不回滚。
 
+唯一例外是**已退役槽位键的定向清理**（`RETIRED_SLOT_KEYS`）：只移除
+「曾随 seed 发布、后被裁掉」且**显式登记**的键；管理员自加的槽位与其余
+字段一律不动。否则已部署库会永远躺着一个「存在但永不生效」的死槽位
+（2026-11-25 `pending_delivery.datasourceId` 即此例）。
+
 冲突让位启发式（conflictKeywords / codePattern）来自 2026-11-24 生产
 反馈：纯编码提问（如「分析一下B109待到货情况」）也算指定维度。
 codePattern 必须用显式 lookaround 声明边界 —— Python ``\\b`` 在
@@ -19,6 +24,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -209,12 +215,61 @@ SEEDS: list[dict[str, Any]] = [
 ]
 
 
+#: 已从 seed 声明中**退役**、需要定向清理的槽位键（按场景）。
+#:
+#: 只清这些「曾随 seed 发布、后被裁掉」的键：管理员在库里自加的槽位不在
+#: 此表 ⇒ 不会被误删（seed 不回滚管理员配置）。新增退役键时在这里登记。
+RETIRED_SLOT_KEYS: dict[str, frozenset[str]] = {
+    # THBI 硬规则：数据源由本体绑定唯一确定（2026-11-25 取消切换槽位）。
+    "pending_delivery": frozenset({"datasourceId"}),
+}
+
+
+async def _cleanRetiredSlotKeys(
+    session: AsyncSession,
+) -> list[tuple[str, list[str]]]:
+    """定向清理已退役槽位键（只删登记过的键，其余字段/槽位一律不动）。
+
+    返回 `[(scenario_code, 已删除键排序列表), ...]`；无变化 ⇒ 空列表
+    （调用方据此保证幂等：第二次运行不写库、不打印）。
+    """
+    cleaned: list[tuple[str, list[str]]] = []
+    for seed in SEEDS:
+        code = seed["scenario_code"]
+        retired = RETIRED_SLOT_KEYS.get(code)
+        if not retired:
+            continue
+        declared = {slot["key"] for slot in seed["slot_schema"]}
+        row = (
+            await session.execute(
+                select(CopilotScenario).where(CopilotScenario.scenario_code == code)
+            )
+        ).scalars().first()
+        if row is None or not isinstance(row.slot_schema, list):
+            continue
+        stale = sorted(
+            slot.get("key")
+            for slot in row.slot_schema
+            if slot.get("key") in retired and slot.get("key") not in declared
+        )
+        if not stale:
+            continue
+        row.slot_schema = [
+            slot
+            for slot in row.slot_schema
+            if not (slot.get("key") in retired and slot.get("key") not in declared)
+        ]
+        cleaned.append((code, stale))
+    return cleaned
+
+
 async def seed_copilot_scenarios(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
     """幂等 upsert 场景配置。返回 seed 总数。
 
-    冲突键：`scenario_code`（全局唯一）。重复运行不新增行、不刷新字段。
+    冲突键：`scenario_code`（全局唯一）。重复运行不新增行、不刷新字段；
+    仅对 `RETIRED_SLOT_KEYS` 登记的过时槽位做定向清理。
     """
     async with session_factory() as session:
         for seed in SEEDS:
@@ -224,6 +279,9 @@ async def seed_copilot_scenarios(
                 .on_conflict_do_nothing(index_elements=["scenario_code"])
             )
             await session.execute(stmt)
+        cleaned = await _cleanRetiredSlotKeys(session)
+        for code, keys in cleaned:
+            print(f"cleaned {code}: removed slot keys {keys}")
         await session.commit()
     return len(SEEDS)
 

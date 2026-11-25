@@ -8,13 +8,15 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 
 from app.domain.copilot_scenario_models import (
     RESULT_RENDERER_WHITELIST,
     SLOT_TYPE_WHITELIST,
+    CopilotScenario,
 )
 from app.services.copilot_scenario_render import compileCodePattern
-from scripts.seed_copilot_scenarios import SEEDS
+from scripts.seed_copilot_scenarios import SEEDS, seed_copilot_scenarios
 
 if not SEEDS:  # pragma: no cover —— 种子清单为空说明被误改，直接失败
     pytest.fail("SEEDS 为空：场景种子被清空？")
@@ -180,3 +182,85 @@ def test_delivery_tracking_scenario_agent_binding_is_consistent() -> None:
     agent_code = seed["agent_code"]
     assert agent_code in _AGENT_DEFAULT_BINDINGS
     assert _AGENT_DEFAULT_BINDINGS[agent_code] == "delivery_tracking_query"
+
+
+# ── 过时槽位定向清理（已部署库的 datasourceId 残留）─────────────────────────
+
+
+def _legacyScenario(*, scenarioCode: str, slotKeys: tuple[str, ...]) -> CopilotScenario:
+    """构造一条「历史版本」场景行（slot_schema 含指定键，其余字段借种子里同构值）。"""
+    base = next(s for s in SEEDS if s["scenario_code"] == "pending_delivery")
+    return CopilotScenario(
+        **{
+            **base,
+            "scenario_code": scenarioCode,
+            "slot_schema": [
+                {"key": key, "type": "number", "label": key} for key in slotKeys
+            ],
+        }
+    )
+
+
+async def _insertScenario(factory, scenario: CopilotScenario) -> None:
+    async with factory() as session:
+        session.add(scenario)
+        await session.commit()
+
+
+async def _readSlotKeys(factory, code: str) -> list[str] | None:
+    async with factory() as session:
+        row = (
+            await session.execute(
+                select(CopilotScenario).where(CopilotScenario.scenario_code == code)
+            )
+        ).scalars().first()
+        if row is None:
+            return None
+        return [slot["key"] for slot in row.slot_schema]
+
+
+@pytest.mark.asyncio
+async def test_seed_cleanup_removes_only_retired_slot_and_is_idempotent(
+    seedEngine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """只删显式退役的 datasourceId；管理员自加槽位保留；第二次运行无变化。"""
+    factory, _ = seedEngine
+    await _insertScenario(
+        factory,
+        _legacyScenario(
+            scenarioCode="pending_delivery",
+            slotKeys=("monthsBack", "datasourceId", "customSlot"),
+        ),
+    )
+
+    await seed_copilot_scenarios(factory)
+    firstRun = capsys.readouterr().out
+    assert "cleaned pending_delivery: removed slot keys ['datasourceId']" in firstRun
+    keys = await _readSlotKeys(factory, "pending_delivery")
+    assert keys is not None
+    assert "datasourceId" not in keys, "退役键必须被清理"
+    assert "customSlot" in keys, "只删退役键，管理员新增槽位不得误伤"
+
+    await seed_copilot_scenarios(factory)
+    secondRun = capsys.readouterr().out
+    assert "cleaned" not in secondRun, "无变化时不得写库/打印（幂等）"
+    assert await _readSlotKeys(factory, "pending_delivery") == keys
+
+
+@pytest.mark.asyncio
+async def test_seed_cleanup_does_not_touch_unseeded_scenario(
+    seedEngine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """只处理 SEEDS 覆盖到的 scenario_code ⇒ 其它行原样保留。"""
+    factory, _ = seedEngine
+    await _insertScenario(
+        factory,
+        _legacyScenario(
+            scenarioCode="admin_scen", slotKeys=("monthsBack", "datasourceId")
+        ),
+    )
+
+    await seed_copilot_scenarios(factory)
+    out = capsys.readouterr().out
+    assert "cleaned admin_scen" not in out
+    assert await _readSlotKeys(factory, "admin_scen") == ["monthsBack", "datasourceId"]

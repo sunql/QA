@@ -46,10 +46,14 @@ class SchemaIntrospectJobRegistry:
         self,
         *,
         ttlSeconds: float = 600.0,
+        staleTimeoutSeconds: float = 900.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._jobs: dict[str, SchemaIntrospectJob] = {}
         self._ttlSeconds = ttlSeconds
+        # running job 的活性上限：后台任务没真正挂上（客户端提前断开、
+        # ownSession() 开会话即失败等）时没人再刷新 updatedAt，超时即视为僵尸。
+        self._staleTimeoutSeconds = staleTimeoutSeconds
         self._clock = clock
         # 进程内共享可变状态：public 方法与 _evict 均持同一把锁。
         # 用 RLock 是因为 createOrGet/get 会先调 _evict（同线程重入）。
@@ -58,14 +62,32 @@ class SchemaIntrospectJobRegistry:
     def _findRunningLocked(
         self, datasourceId: int, schemaName: str
     ) -> SchemaIntrospectJob | None:
-        """`(datasourceId, schemaName)` 上 running 的 job；调用方须持锁。"""
-        for job in self._jobs.values():
+        """`(datasourceId, schemaName)` 上仍在运行的 job；调用方须持锁。
+
+        running job 不一定是活 job：后台任务可能根本没挂上（客户端提前断开导致
+        Starlette 不执行 background、ownSession() 开会话即失败等），此时没有人
+        再刷新 updatedAt。超过 staleTimeoutSeconds 未更新的 running job 视为僵尸：
+        从注册表移除后按「没有 running job」处理 —— 否则 createOrGet 会永久复用
+        这个死 job，该数据源在进程存活期内再也无法发起内省。
+        正在推进的 job 每次 update() 都会刷新 updatedAt，不会被误判。
+        """
+        now = self._clock()
+        for job in list(self._jobs.values()):
             if (
-                job.datasourceId == datasourceId
-                and job.schemaName == schemaName
-                and job.status == "running"
+                job.datasourceId != datasourceId
+                or job.schemaName != schemaName
+                or job.status != "running"
             ):
-                return job
+                continue
+            idleSeconds = now - job.updatedAt
+            if idleSeconds > self._staleTimeoutSeconds:
+                logger.warning(
+                    "清理僵尸内省 job jobId=%s datasource=%s schema=%s（%.0fs 未更新）",
+                    job.jobId, datasourceId, schemaName, idleSeconds,
+                )
+                del self._jobs[job.jobId]
+                continue
+            return job
         return None
 
     def createOrGet(
@@ -92,7 +114,9 @@ class SchemaIntrospectJobRegistry:
     ) -> SchemaIntrospectJob | None:
         """纯查询：该目标上正在运行的 job；无则 None。
 
-        不创建、不改状态、不做淘汰（running 永不进淘汰集合，见 `_evict`）。
+        不创建、不改状态；唯一的写操作是把超过 staleTimeoutSeconds 未更新的
+        running 僵尸 job 移除（见 `_findRunningLocked`）。终态 job 不进淘汰集合
+        （由 `_evict` 按 TTL 清理）。
         用途：API 判断「是否需要挂后台任务」——不能靠 `createOrGet` 返回值的
         total/completed 是否为零推断，因为刚开始跑尚未报进度的既有 running job
         同样为零，会导致同一 job 被重复挂载执行。
@@ -169,6 +193,11 @@ def _userFacingError(exc: BaseException) -> str:
     from app.domain.exceptions import DataSourceError
 
     if isinstance(exc, DataSourceError):
+        # detail 来自 messages_zh 的固定文案（含可操作提示），不含 DSN / 用户名 /
+        # SQL 原文；底层异常只进服务端日志，绝不拼进对外文案。
+        detail = getattr(exc, "detail", None)
+        if detail and detail.strip():
+            return f"{exc}：{detail.strip()}"
         return str(exc)
     return "数据源 schema 读取失败：请检查数据源连接是否正常"
 
@@ -192,8 +221,12 @@ async def runIntrospectJob(
     from app.services.datasource_service import DataSourceService
     from app.services.schema_introspection_service import SchemaIntrospectionService
 
-    session = ownSession()
+    # ownSession() 本身也可能抛（如连接池初始化失败）。若把它放在 try 之外，
+    # 后台任务会在落任何状态前异常退出 ⇒ job 永挂 running（惰性淘汰只清终态），
+    # createOrGet 永久复用死 job，该数据源无法再发起内省。故开会话也纳入 try。
+    session = None
     try:
+        session = ownSession()
         ds = await DataSourceService().get(session, datasourceId)
         service = SchemaIntrospectionService(adapterProvider=_adapterProvider)
         await service.introspectAndCacheBatched(
@@ -218,4 +251,5 @@ async def runIntrospectJob(
         )
         registry.update(jobId, status="failed", error=_userFacingError(exc))
     finally:
-        await session.close()
+        if session is not None:
+            await session.close()

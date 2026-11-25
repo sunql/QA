@@ -343,6 +343,16 @@ class SchemaIntrospectionService:
         try:
             tableNames = await self._listTableNames(adapter, ds, dsType, schemaName)
             total = len(tableNames)
+            # 表数上限在跑批之前判：total 此时已知，没必要先把几万张表的
+            # 五类元数据查完才拒绝（超大 schema 下代价是几十次全表扫描）。
+            maxTables = getSettings().schemaMaxTables
+            if total > maxTables:
+                raise DataSourceError(
+                    MSG_DATASOURCE_SCHEMA_TABLE_LIMIT_EXCEEDED.format(
+                        datasourceId=ds.id, tableCount=total, maxTables=maxTables
+                    ),
+                    detail=MSG_DATASOURCE_SCHEMA_TABLE_LIMIT_DETAIL,
+                )
             onProgress(0, total)
             merged: dict[str, dict] = {}
             for start in range(0, total, max(1, batchSize)):
@@ -350,6 +360,10 @@ class SchemaIntrospectionService:
                 merged.update(await self._queryBatch(adapter, ds, dsType, schemaName, batch))
                 onProgress(min(start + len(batch), total), total)
         except ValidationError:
+            raise
+        except DataSourceError:
+            # 上限检查抛出的领域异常必须原样上抛，不能被下面的宽 except
+            # 重新包装成「schema 读取失败」（那会丢掉「表数超限」语义）。
             raise
         except Exception as exc:  # noqa: BLE001 - 与 introspect 同口径包装
             logger.error("数据源 %s 分批 schema 读取失败: %s", ds.id, exc, exc_info=True)

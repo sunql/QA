@@ -451,3 +451,14 @@ async def test_get360_profile_has_supplier_name_when_resolved_by_code(
     result = await Supplier360Service().get360(dbSession, "SUP000001")
 
     assert result.profile.supplier_name == "上海骏统贸易有限公司"
+
+
+async def test_get360_profile_has_supplier_name_when_resolved_by_key(
+    dbSession: AsyncSession,
+):
+    """企业键入口同样回填名称（回归：pass 2 曾漏取 name 列 ⇒ None）。"""
+    await _seedNamedSupplier(dbSession, 100001, "SUP000001", "上海骏统贸易有限公司")
+
+    result = await Supplier360Service().get360(dbSession, 100001)
+
+    assert result.profile.supplier_name == "上海骏统贸易有限公司"

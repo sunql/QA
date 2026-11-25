@@ -117,6 +117,9 @@ class CopilotScenarioSlotRead(CamelModel):
     code_pattern: str | None = None
     #: 尾注显示格式（可带 {value} 占位，如「近{value}个月」）
     display_template: str | None = None
+    #: 隐藏槽位：前端表单不渲染（由专用控件写入，如日期区间/数据源）。
+    #: 必须在 API 透出，否则前端拿到 undefined ⇒ 渲染成可见输入框。
+    hidden: bool = False
 
 
 class CopilotScenarioRead(CamelModel):

@@ -103,6 +103,39 @@ async def test_scenarios_list_enabled_ordered_with_payload(
 
 
 @pytest.mark.asyncio
+async def test_scenario_slot_hidden_flag_is_exposed(
+    client: AsyncClient, dbSession: AsyncSession
+) -> None:
+    """hidden 槽位必须通过 API 透出。
+
+    丢了 hidden，前端会把 dateFrom/dateTo 渲染成可见输入框（只填一边 ⇒ 422；
+    「近N月」模式下填了又被静默丢弃）。用**真实场景种子** + 真实 HTTP 链路验证。
+    """
+    from scripts.seed_copilot_scenarios import SEEDS
+
+    for code in ("delivery_tracking", "pending_delivery"):
+        seed = next(s for s in SEEDS if s["scenario_code"] == code)
+        dbSession.add(CopilotScenario(**seed))
+    await dbSession.commit()
+
+    resp = await client.get(SCENARIOS_PATH, headers=OWNER_HEADERS)
+    assert resp.status_code == 200
+    body = resp.json()
+    item = next(i for i in body if i["scenarioCode"] == "delivery_tracking")
+    slots = {slot["key"]: slot for slot in item["slotSchema"]}
+    assert slots["dateFrom"]["hidden"] is True
+    assert slots["dateTo"]["hidden"] is True
+    # 非 hidden 槽位不得被误标
+    assert slots["monthsBack"].get("hidden", False) is False
+
+    # 既有场景同样受益：pending_delivery 的三条 hidden 槽位也要透出
+    pending = next(i for i in body if i["scenarioCode"] == "pending_delivery")
+    pendingSlots = {slot["key"]: slot for slot in pending["slotSchema"]}
+    for key in ("datasourceId", "dateFrom", "dateTo"):
+        assert pendingSlots[key]["hidden"] is True, key
+
+
+@pytest.mark.asyncio
 async def test_admin_only_scenario_hidden_from_non_admin(
     client: AsyncClient, dbSession: AsyncSession
 ) -> None:

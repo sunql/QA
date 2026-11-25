@@ -116,6 +116,7 @@ async def listCopilotScenarios(
                         conflict_keywords=[str(kw) for kw in (slot.get("conflictKeywords") or [])],
                         code_pattern=slot.get("codePattern"),
                         display_template=slot.get("displayTemplate"),
+                        hidden=bool(slot.get("hidden", False)),
                     )
                     for slot in (row.slot_schema or [])
                 ],

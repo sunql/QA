@@ -34,6 +34,8 @@ const api = vi.hoisted(() => ({
   deleteDataSource: vi.fn(),
   testDataSource: vi.fn(),
   introspectDatasource: vi.fn(),
+  startIntrospectJob: vi.fn(),
+  getIntrospectJob: vi.fn(),
 }));
 
 vi.mock("../api/datasource", () => api);
@@ -54,6 +56,8 @@ describe("DatasourcePage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.listDataSources.mockResolvedValue([mockDataSource]);
+    api.startIntrospectJob.mockReset();
+    api.getIntrospectJob.mockReset();
   });
 
   it("渲染标题与表格，并加载数据源列表", async () => {
@@ -183,11 +187,19 @@ describe("DatasourcePage", () => {
     expect(screen.getByRole("button", { name: /智能导入到本体/i })).toBeInTheDocument();
   });
 
-  it("点击「缓存 Schema」调用 introspectDatasource 并提示成功", async () => {
+  it("点击「缓存 Schema」启动内省任务并提示成功", async () => {
     const user = userEvent.setup();
-    api.introspectDatasource.mockResolvedValue({
-      tables: [{ name: "ITMMASTER" }, { name: "PORDER" }],
-      cachedAt: "2026-09-12T00:00:00Z",
+    api.startIntrospectJob.mockResolvedValue({
+      jobId: "j0",
+      status: "running",
+      total: 2,
+      completed: 0,
+    });
+    api.getIntrospectJob.mockResolvedValue({
+      jobId: "j0",
+      status: "succeeded",
+      total: 2,
+      completed: 2,
     });
     renderPage();
     await waitFor(() => expect(screen.getByText("ZJTH-Oracle")).toBeInTheDocument());
@@ -195,9 +207,71 @@ describe("DatasourcePage", () => {
     await user.click(screen.getByRole("button", { name: /缓存 Schema/i }));
 
     await waitFor(() => {
-      expect(api.introspectDatasource).toHaveBeenCalledWith(1);
+      expect(api.startIntrospectJob).toHaveBeenCalledWith(1);
     });
     expect(await screen.findByText(/缓存成功/)).toBeInTheDocument();
+  });
+
+  // ---- 缓存 Schema 进度弹窗（异步 job + 轮询） ----
+
+  it("缓存 Schema：打开进度弹窗并按轮询推进", async () => {
+    const user = userEvent.setup();
+    api.startIntrospectJob.mockResolvedValue({
+      jobId: "j1", status: "running", total: 200, completed: 0,
+    });
+    api.getIntrospectJob
+      .mockResolvedValueOnce({ jobId: "j1", status: "running", total: 200, completed: 100 })
+      .mockResolvedValueOnce({ jobId: "j1", status: "succeeded", total: 200, completed: 200 });
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /缓存 Schema/i }));
+
+    expect(api.startIntrospectJob).toHaveBeenCalled();
+    expect(await screen.findByText(/正在缓存 schema/)).toBeTruthy();
+    // 成功后自动关闭 + 成功提示（轮询间隔 1.5s，真实计时器下需放宽 waitFor 超时）。
+    // antd Modal 关闭后仍保留（隐藏的）DOM，故断言「不可见 / 已移除」而非 queryByText 为 null。
+    await waitFor(
+      () => {
+        const progress = screen.queryByText(/正在缓存 schema/);
+        if (progress) expect(progress).not.toBeVisible();
+      },
+      { timeout: 12000 },
+    );
+    expect(await screen.findByText(/缓存成功/)).toBeInTheDocument();
+  });
+
+  it("缓存 Schema 失败：弹窗展示错误且不自动关闭", async () => {
+    const user = userEvent.setup();
+    api.startIntrospectJob.mockResolvedValue({
+      jobId: "j2", status: "running", total: 10, completed: 0,
+    });
+    api.getIntrospectJob.mockResolvedValue({
+      jobId: "j2", status: "failed", total: 10, completed: 3,
+      error: "无法连接数据源",
+    });
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /缓存 Schema/i }));
+
+    expect(await screen.findByText("无法连接数据源")).toBeTruthy();
+  });
+
+  it("轮询连续失败 5 次 ⇒ 提示连接中断并停止", async () => {
+    const user = userEvent.setup();
+    api.startIntrospectJob.mockResolvedValue({
+      jobId: "j3", status: "running", total: 10, completed: 0,
+    });
+    api.getIntrospectJob.mockRejectedValue(new Error("down"));
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /缓存 Schema/i }));
+
+    // 提示同时出现在弹窗 Alert 与 message toast 中 ⇒ 用 getAllByText 容忍多匹配。
+    // 轮询间隔 1.5s × 5 次失败：真实计时器约需 6s，放宽 waitFor 超时。
+    await waitFor(
+      () => expect(screen.getAllByText(/与服务器连接中断/).length).toBeGreaterThan(0),
+      { timeout: 12000 },
+    );
   });
 
   // ---- Oracle type 切换 + 校验错误 + catch 分支 ----

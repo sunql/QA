@@ -6,7 +6,11 @@ GET    /api/v1/datasources/{datasourceId}   获取
 PUT    /api/v1/datasources/{datasourceId}   更新
 DELETE /api/v1/datasources/{datasourceId}   删除
 POST   /api/v1/datasources/test            测试连接
-POST   /api/v1/datasources/{datasourceId}/introspect  触发 schema 发现并缓存
+POST   /api/v1/datasources/{datasourceId}/introspect  触发 schema 发现并缓存（同步）
+POST   /api/v1/datasources/{datasourceId}/introspect-jobs
+                                          启动异步 schema 内省任务（202 + jobId）
+GET    /api/v1/datasources/{datasourceId}/introspect-jobs/{jobId}
+                                          查询异步内省任务进度
 GET    /api/v1/datasources/{datasourceId}/schema     读取 schema 缓存
 GET    /api/v1/datasources/{datasourceId}/schemas    列出可见 schema（Oracle owner）
 GET    /api/v1/datasources/{datasourceId}/layers     数据层分布（前缀规则 × schema 缓存）
@@ -14,7 +18,15 @@ GET    /api/v1/datasources/{datasourceId}/layers     数据层分布（前缀规
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getCurrentUser, getDb
@@ -37,7 +49,14 @@ from app.domain.schemas import (
 from app.infrastructure.rate_limit import limiter
 from app.services.datasource_service import DataSourceService
 from app.services.ontology_service import OntologyService
-from app.services.schema_introspection_service import SchemaIntrospectionService
+from app.services.schema_introspect_job import (
+    runIntrospectJob,
+    schema_introspect_job_registry,
+)
+from app.services.schema_introspection_service import (
+    SchemaIntrospectionService,
+    _normalizeSchemaName,
+)
 
 router = APIRouter(dependencies=[Depends(getCurrentUser)])
 _service = DataSourceService()
@@ -134,6 +153,69 @@ async def getCachedSchema(
     if cache is None:
         raise NotFoundError(MSG_DATASOURCE_SCHEMA_NOT_CACHED.format(datasourceId=datasourceId))
     return _schemaService.buildResponse(cache)
+
+
+@router.post(
+    "/{datasourceId}/introspect-jobs",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+@limiter.limit(_INTROSPECT_LIMIT)
+async def startIntrospectJob(
+    request: Request,
+    datasourceId: int,
+    background: BackgroundTasks,
+    schema: str | None = Query(default=None, description="Oracle owner 命名空间"),
+    session: AsyncSession = Depends(getDb),
+) -> dict:
+    """启动异步 schema 内省任务；同一目标已在跑则返回既有 jobId。
+
+    立即返回 202 + jobId，进度由 GET .../introspect-jobs/{jobId} 轮询。
+    后台任务用自有会话执行（见 runIntrospectJob 的会话隔离说明）。
+
+    「是否要落后台任务」只能用 findRunning 判断：createOrGet 返回的既有
+    running job 也可能 total/completed 均为 0（刚开始跑、尚未报进度），
+    用它推断会重复挂载同一 job。findRunning 与 createOrGet 之间无 await，
+    单进程事件循环下不会被其它请求插入。
+    """
+    ds = await _service.get(session, datasourceId)
+    schemaName = _normalizeSchemaName(ds, schema)
+    existing = schema_introspect_job_registry.findRunning(
+        datasourceId=ds.id, schemaName=schemaName
+    )
+    if existing is None:
+        job = schema_introspect_job_registry.createOrGet(
+            datasourceId=ds.id, schemaName=schemaName
+        )
+        background.add_task(
+            runIntrospectJob,
+            datasourceId=ds.id,
+            schemaName=schemaName,
+            jobId=job.jobId,
+            registry=schema_introspect_job_registry,
+        )
+    else:
+        job = existing
+    return {
+        "jobId": job.jobId,
+        "status": job.status,
+        "total": job.total,
+        "completed": job.completed,
+    }
+
+
+@router.get("/{datasourceId}/introspect-jobs/{jobId}")
+async def getIntrospectJob(datasourceId: int, jobId: str) -> dict:
+    """查询异步内省任务进度；不存在 / 不属于该数据源 / 已淘汰 ⇒ 404。"""
+    job = schema_introspect_job_registry.get(jobId)
+    if job is None or job.datasourceId != datasourceId:
+        raise NotFoundError(f"内省任务不存在或已过期（jobId={jobId}）")
+    return {
+        "jobId": job.jobId,
+        "status": job.status,
+        "total": job.total,
+        "completed": job.completed,
+        "error": job.error,
+    }
 
 
 @router.get("/{datasourceId}/schemas", response_model=list[str])

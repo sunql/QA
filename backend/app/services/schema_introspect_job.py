@@ -55,19 +55,28 @@ class SchemaIntrospectJobRegistry:
         # 用 RLock 是因为 createOrGet/get 会先调 _evict（同线程重入）。
         self._lock = threading.RLock()
 
+    def _findRunningLocked(
+        self, datasourceId: int, schemaName: str
+    ) -> SchemaIntrospectJob | None:
+        """`(datasourceId, schemaName)` 上 running 的 job；调用方须持锁。"""
+        for job in self._jobs.values():
+            if (
+                job.datasourceId == datasourceId
+                and job.schemaName == schemaName
+                and job.status == "running"
+            ):
+                return job
+        return None
+
     def createOrGet(
         self, *, datasourceId: int, schemaName: str
     ) -> SchemaIntrospectJob:
         """返回该目标上仍在运行的 job；没有则新建一个。"""
         with self._lock:
             self._evict()
-            for job in self._jobs.values():
-                if (
-                    job.datasourceId == datasourceId
-                    and job.schemaName == schemaName
-                    and job.status == "running"
-                ):
-                    return job
+            existing = self._findRunningLocked(datasourceId, schemaName)
+            if existing is not None:
+                return existing
             created = SchemaIntrospectJob(
                 jobId=uuid.uuid4().hex,
                 datasourceId=datasourceId,
@@ -77,6 +86,19 @@ class SchemaIntrospectJobRegistry:
             )
             self._jobs[created.jobId] = created
             return created
+
+    def findRunning(
+        self, *, datasourceId: int, schemaName: str
+    ) -> SchemaIntrospectJob | None:
+        """纯查询：该目标上正在运行的 job；无则 None。
+
+        不创建、不改状态、不做淘汰（running 永不进淘汰集合，见 `_evict`）。
+        用途：API 判断「是否需要挂后台任务」——不能靠 `createOrGet` 返回值的
+        total/completed 是否为零推断，因为刚开始跑尚未报进度的既有 running job
+        同样为零，会导致同一 job 被重复挂载执行。
+        """
+        with self._lock:
+            return self._findRunningLocked(datasourceId, schemaName)
 
     def update(
         self,

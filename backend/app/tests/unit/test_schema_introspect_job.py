@@ -98,6 +98,55 @@ def test_create_or_get_does_not_reuse_failed_job() -> None:
     assert second.status == "running"
 
 
+def test_find_running_returns_running_job_for_target() -> None:
+    """有 running job ⇒ findRunning 返回该 job（纯查询，不新建）。"""
+    registry = SchemaIntrospectJobRegistry(clock=_FakeClock())
+    job = registry.createOrGet(datasourceId=7, schemaName="LC019999")
+
+    found = registry.findRunning(datasourceId=7, schemaName="LC019999")
+
+    assert found is not None
+    assert found.jobId == job.jobId
+    assert found.status == "running"
+
+
+def test_find_running_returns_none_when_no_running_job() -> None:
+    """无 running job ⇒ None，且不得创建新 job（不改变注册表）。"""
+    registry = SchemaIntrospectJobRegistry(clock=_FakeClock())
+
+    assert registry.findRunning(datasourceId=7, schemaName="LC019999") is None
+    # findRunning 本身不产生 job；createOrGet 才创建（这里置终态以验证终态不被返回）
+    registry.update(
+        registry.createOrGet(datasourceId=7, schemaName="LC019999").jobId,
+        status="succeeded",
+    )
+    assert registry.findRunning(datasourceId=7, schemaName="LC019999") is None
+    fresh = registry.createOrGet(datasourceId=7, schemaName="LC019999")
+    assert fresh.status == "running"
+
+
+def test_find_running_ignores_terminal_jobs() -> None:
+    """succeeded / failed 终态不被 findRunning 返回。"""
+    registry = SchemaIntrospectJobRegistry(clock=_FakeClock())
+
+    succeeded = registry.createOrGet(datasourceId=7, schemaName="A")
+    registry.update(succeeded.jobId, status="succeeded")
+    failed = registry.createOrGet(datasourceId=7, schemaName="B")
+    registry.update(failed.jobId, status="failed", error="x")
+
+    assert registry.findRunning(datasourceId=7, schemaName="A") is None
+    assert registry.findRunning(datasourceId=7, schemaName="B") is None
+
+
+def test_find_running_scoped_to_datasource_and_schema() -> None:
+    """只按 (datasourceId, schemaName) 精确命中，不同目标不串。"""
+    registry = SchemaIntrospectJobRegistry(clock=_FakeClock())
+    registry.createOrGet(datasourceId=7, schemaName="LC019999")
+
+    assert registry.findRunning(datasourceId=8, schemaName="LC019999") is None
+    assert registry.findRunning(datasourceId=7, schemaName="THBI") is None
+
+
 def test_update_missing_job_raises_key_error() -> None:
     registry = SchemaIntrospectJobRegistry(clock=_FakeClock())
     try:

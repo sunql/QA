@@ -12,17 +12,25 @@ import PendingDeliveryResultCard, {
 import SupplierRiskResultCard, {
   type SupplierRiskResult,
 } from "./SupplierRiskResultCard";
+import DeliveryTrackingResultCard, {
+  type DeliveryTrackingResult,
+} from "./DeliveryTrackingResultCard";
+import type { StructuredResultRenderer } from "../../api/copilotScenario";
 
 const { Text } = Typography;
 
 export interface ResultTurn {
   turn: CopilotTurn;
-  parsed: PendingDeliveryResult | SupplierRiskResult | null;
+  parsed:
+    | PendingDeliveryResult
+    | SupplierRiskResult
+    | DeliveryTrackingResult
+    | null;
 }
 
 interface PendingDeliveryResultTabsProps {
   /** 场景结果渲染器：决定激活项渲染哪张结构化卡。 */
-  renderer: "pending_delivery" | "supplier_risk";
+  renderer: StructuredResultRenderer;
   resultTurns: ResultTurn[];
   activeResultTurnId: string | null;
   onChange: (turnId: string) => void;
@@ -83,6 +91,10 @@ export default function PendingDeliveryResultTabs({
         <>
           {renderer === "supplier_risk" ? (
             <SupplierRiskResultCard result={active.parsed as SupplierRiskResult} />
+          ) : renderer === "delivery_tracking" ? (
+            <DeliveryTrackingResultCard
+              result={active.parsed as DeliveryTrackingResult}
+            />
           ) : (
             <PendingDeliveryResultCard result={active.parsed as PendingDeliveryResult} />
           )}

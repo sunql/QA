@@ -10,6 +10,7 @@ import i18n from "../i18n/i18n";
 import SupplierRiskResultCard, {
   parseSupplierRiskStep,
 } from "../components/copilot/SupplierRiskResultCard";
+import { parseDeliveryTrackingStep } from "../components/copilot/DeliveryTrackingResultCard";
 import type { CopilotStepPayload } from "../api/procurementCopilot";
 
 function riskStep(toolName: string, outputText: string | null): CopilotStepPayload {
@@ -79,6 +80,42 @@ describe("parseSupplierRiskStep", () => {
     expect(parseSupplierRiskStep(riskStep("pending_delivery_query", SAMPLE))).toBeNull();
     expect(parseSupplierRiskStep(riskStep("supplier_risk", "not-json"))).toBeNull();
     expect(parseSupplierRiskStep(riskStep("supplier_risk", null))).toBeNull();
+  });
+});
+
+describe("渲染器分发", () => {
+  it("delivery_tracking 走新卡解析器（导出面未被接线改坏）", () => {
+    const parsed = parseDeliveryTrackingStep({
+      stepNo: 1,
+      iterationNo: 1,
+      kind: "TOOL",
+      status: "SUCCEEDED",
+      action: null,
+      planSummary: null,
+      toolName: "delivery_tracking_query",
+      answer: null,
+      errorCode: null,
+      errorMessage: null,
+      output: {
+        text: JSON.stringify({
+          data: {
+            window: { dateFrom: "2026-10-24", dateTo: "2026-11-24", mode: "anchorDay" },
+            summary: {
+              totalLines: 19908, totalOrders: 4844, orderedQty: 1, receivedQty: 1,
+              orderArrivalRate: 82.29, qtyArrivalRate: 40.51,
+              allArrivedOrders: 3986, partialArrivedOrders: 448,
+              notArrivedOrders: 410, excludedRows: 0,
+            },
+            bySupplier: [], byOrder: [],
+          },
+        }),
+        truncated: false,
+      },
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.summary.orderArrivalRate).toBe(82.29);
+    // 两个场景互不串味：待到货解析器不接 delivery_tracking 工具
+    expect(parseSupplierRiskStep(riskStep("delivery_tracking_query", SAMPLE))).toBeNull();
   });
 });
 

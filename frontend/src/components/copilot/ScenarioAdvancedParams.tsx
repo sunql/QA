@@ -178,6 +178,25 @@ export default function ScenarioAdvancedParams({
         slot.key === "supplierKeys" ? setSupplierOptions
         : slot.key === "materialKeys" ? setMaterialOptions
         : undefined;
+      // 无远程搜索映射（当前即 orderKeys：订单号）⇒ 自由文本标签输入。
+      // 不能继续用 multiple + filterOption=false + options=[]：那样永远选不中任何值。
+      if (!entityType || !setter) {
+        return (
+          <Space key={slot.key} wrap size={8}>
+            {label(slot)}
+            <Select
+              mode="tags"
+              allowClear
+              maxTagCount="responsive"
+              style={{ minWidth: 200, maxWidth: 320 }}
+              placeholder={`${slot.label}（输入后回车）`}
+              value={Array.isArray(values[slot.key]) ? (values[slot.key] as string[]) : []}
+              onChange={(next: string[]) => onChange(slot.key, next)}
+              tokenSeparators={[",", "，", " "]}
+            />
+          </Space>
+        );
+      }
       return (
         <Space key={slot.key} wrap size={8}>
           {label(slot)}
@@ -189,7 +208,7 @@ export default function ScenarioAdvancedParams({
             style={{ minWidth: 200, maxWidth: 320 }}
             placeholder={slot.label}
             value={Array.isArray(values[slot.key]) ? (values[slot.key] as string[]) : []}
-            onSearch={entityType && setter ? (q) => remoteSearch(entityType, q, setter) : undefined}
+            onSearch={(q) => remoteSearch(entityType, q, setter)}
             onChange={(next: string[]) => onChange(slot.key, next)}
             options={options.map((item) => ({
               value: item.code,

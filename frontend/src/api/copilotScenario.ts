@@ -28,6 +28,13 @@ export interface CopilotScenarioChip {
   [slotKey: string]: unknown;
 }
 
+/** 前端支持专用结构化结果卡的渲染器（后端白名单还含 "none" 等
+ * 无需专用卡的取值 ⇒ API 字段本身仍是 string，只在前端可渲染处收敛）。 */
+export type StructuredResultRenderer =
+  | "pending_delivery"
+  | "supplier_risk"
+  | "delivery_tracking";
+
 export interface CopilotScenario {
   scenarioCode: string;
   name: string;

@@ -1114,6 +1114,83 @@ const DELIVERY_TRACKING_CONFIG: CopilotScenario = {
   requiredRole: null,
 };
 
+describe("ProcurementCopilotPage 到货跟踪渲染器分发", () => {
+  it("result_renderer=delivery_tracking ⇒ 渲染到货跟踪卡（订单到货率为主指标）", async () => {
+    mockOptions();
+    api.listCopilotScenarios.mockResolvedValue([
+      SCENARIO_CONFIG,
+      DELIVERY_TRACKING_CONFIG,
+    ]);
+    const payloads: Array<Record<string, unknown>> = [];
+    api.streamCopilotMessage.mockImplementation(async (payload, handlers) => {
+      payloads.push(payload);
+      // 必须在 onDone **之前**就位：onDone 同步触发 refreshSteps（实测踩坑）
+      api.getAgentRunSteps.mockResolvedValue([
+        {
+          stepNo: 1, iterationNo: 1, kind: "TOOL", status: "SUCCEEDED",
+          action: null, planSummary: null, toolName: "delivery_tracking_query",
+          inputJson: null,
+          outputJson: { text: JSON.stringify({ data: {
+            dataLayer: "thbi_ods_erp",
+            window: { dateFrom: "2026-10-24", dateTo: "2026-11-24", mode: "anchorDay" },
+            summary: {
+              totalLines: 19908, totalOrders: 4844,
+              orderedQty: 98495265.255, receivedQty: 39904579.255,
+              orderArrivalRate: 82.29, qtyArrivalRate: 40.51,
+              allArrivedOrders: 3986, partialArrivedOrders: 448,
+              notArrivedOrders: 410, excludedRows: 0,
+            },
+            bySupplier: [{
+              supplierCode: "B125",
+              supplierName: "浙江力航汽车部件有限公司",
+              totalOrders: 29, allArrivedOrders: 1, partialArrivedOrders: 16,
+              notArrivedOrders: 12, orderArrivalRate: 3.45,
+              orderedQty: 15155100, receivedQty: 2176026,
+            }],
+            byOrder: [],
+          }, answer: "" }), truncated: false },
+          answer: null, errorCode: null, errorMessage: null,
+          promptTokens: 0, completionTokens: 0, cost: 0,
+          startedAt: "2026-11-24T00:00:00Z", finishedAt: "2026-11-24T00:00:01Z",
+        },
+      ]);
+      handlers.onDone?.({
+        runId: "r-dt", status: "SUCCEEDED", answer: "到货概览",
+        pauseCode: null, errorCode: null, errorMessage: null,
+        totalTokens: 1, cost: 0, stepsUrl: "/api/v1/agent-runs/r-dt/steps",
+      });
+    });
+
+    render(
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}>
+          <ConfigProvider locale={zhCN}>
+            <ProcurementCopilotPage />
+          </ConfigProvider>
+        </I18nextProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await waitFor(() => screen.getByText("到货跟踪")));
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+
+    const input = await waitFor(() => screen.getByPlaceholderText(/补充说明/));
+    fireEvent.change(input, { target: { value: "看近 12 个月到货情况" } });
+    fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
+
+    await waitFor(() => expect(payloads).toHaveLength(1));
+    expect(payloads[0].scenarioCode).toBe("delivery_tracking");
+
+    // 新卡的标志性内容（主指标 / 供应商表），且未误渲染待到货卡
+    await waitFor(() =>
+      expect(screen.getByTestId("delivery-primary-rate").textContent).toBe("82.29%"),
+    );
+    expect(screen.getAllByText("订单到货率").length).toBeGreaterThan(0);
+    expect(screen.getByText("浙江力航汽车部件有限公司")).toBeTruthy();
+    expect(screen.queryByText("待到货分析结果")).toBeNull();
+  });
+});
+
+
 describe("场景槽位默认值（anchorDay=0 不得劫持取数窗口）", () => {
   it("非 monthsBack 的数字槽位默认留空（不是 0）", () => {
     const values = defaultSlotValues(DELIVERY_TRACKING_CONFIG);

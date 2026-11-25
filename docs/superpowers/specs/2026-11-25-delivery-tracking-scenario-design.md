@@ -36,6 +36,30 @@ DB 配置。新场景的**外壳**因此可以零代码，但**取数层必须�
 > 不要每次都是去探查实际数据，变成固定的『硬编码』了。」
 > 「每个智能体都确定唯一的一个数据源就好了……从技术层面也没有不同数据源用同一个
 > 智能体的能力，除非都是配置化的，不需要编码。」
+> 「**数据源使用 THBI 这个数据源，一切数据对象都从这个源头获取，按照这个硬规则来。**」
+
+#### 3.0.1 硬规则：一切对象出自 THBI
+
+| 项 | 值 |
+|---|---|
+| 数据源 | `data_source.id=1`（THBI Oracle @ 192.168.205.70:1521/X3V71ORA，用户名 `THBI`） |
+| schema | `THBI`（Oracle owner） |
+| 取数范围 | **只允许 `THBI` schema 下的对象**；不跨 schema、不连其它数据源 |
+
+**推论（贯穿全篇）**：
+
+1. **既有 9 条绑定全部合规** —— 实测 9 个类均为 `datasource_id=1` + `schema_name=THBI`，
+   与硬规则一致，无需迁移；
+2. **待到货场景必须迁到 THBI** —— 它现在查 `ZJTH.PORDERQ` / `ZJTH.ITMMASTER` /
+   `ZJTH.FACILITY` / `ZJTH.BPSUPPLIER`（`ZJTH` 是同实例下的**另一个 owner**），
+   违反硬规则 ⇒ 迁移是**必须项，不是可选项**（3.8）；
+3. **`datasourceId` 切换槽位取消** —— 场景不再提供 admin 切数据源的下拉
+   （切到非 THBI 源会违反硬规则）。既有 `pending_delivery` 场景的
+   `datasourceId` 隐藏槽位一并移除；
+4. **工具不再按「默认活跃源」兜底** —— 改为一律按绑定的 `datasource_id` 取数，
+   绑定缺失即 fail loud（不再有「静默落默认源」这条路径）。
+
+#### 3.0.2 本体对接：复用既有绑定设施
 
 **工具 SQL 只写本体属性名，物理表名与物理列名由本体绑定解析**。
 仓内**已有完整的绑定设施**（M1-1.1 建的），本方案直接复用，不新造：
@@ -212,19 +236,20 @@ WHERE <ORDER_DATE> >= DATE :from AND <ORDER_DATE> < DATE :to
 
 ### 3.4 数据源绑定：每个 Agent 一个
 
-用户原则：「每个智能体都确定唯一的一个数据源就好了」。
+用户原则：「每个智能体都确定唯一的一个数据源就好了」+ **THBI 硬规则**（3.0.1）。
 
 - `DELIVERY_TRACKING_AGENT` 绑定的数据源 = 源绑定行的 `datasource_id`
-  （当前为 `1` THBI Oracle + `schema_name=THBI`）；
+  = **`1`（THBI Oracle）** + `schema_name=THBI`；
 - 工具执行时按绑定解析出的 `datasource_id`/`schema_name`/`source_table` 取数，
   **不在代码里写 `ZJTH.` / `THBI.` 前缀**；
-- 场景的 `datasourceId` 槽位（admin 可切）**保留**，但切换后必须校验
-  该数据源内存在该类的**生效绑定** —— 不存在则 fail loud（`ValidationError`），
-  **不静默回退到默认源**。
+- **场景不提供 `datasourceId` 切换槽位**（THBI 硬规则 ⇒ 切源即违规）：
+  场景配置里删掉该隐藏槽位；既有 `pending_delivery` 场景的同名槽位一并移除；
+- 工具**不再按「默认活跃源」兜底** —— 一律按绑定的 `datasource_id`；
+  绑定缺失即 fail loud（`ValidationError`），**不静默落默认源**。
 
 **跨数据源的行为**（回应用户「没有同一智能体跨数据源的能力，除非都是配置化的」）：
 
-- 本方案**不**支持一个 Agent 同时跨多个数据源取数；
+- 本方案**不支持**一个 Agent 同时跨多个数据源取数；
 - 若业务要求换源，正确做法是**换绑定行**（同 `class_id` + 新 `datasource_id`/`schema_name`/
   `source_table` + 新属性绑定；旧行 `valid_to` 置值做软失效），
   而不是让工具里写死表前缀；
@@ -279,50 +304,55 @@ MDM `entity_mapping`（`entity_type=SUPPLIER`，3,500 行，`source_system=ERP`�
 **决策**：到货判定基于订单行级量（`ORDER_QTY` / `RECEIVED_QTY`），不依赖到货明细表；
 到货明细仅用于展示实际到货日期（`LAST_RECEIPT_DATE`，实测已收行 100% 非空）。
 
-### 3.8 待到货场景一并迁到本体（用户 2026-11-25 决定）
+### 3.8 待到货场景一并迁到本体 + THBI（用户 2026-11-25 决定：必须迁）
 
 `pending_delivery_query` 目前**硬编码** `ZJTH.PORDERQ` / `ZJTH.ITMMASTER` /
 `ZJTH.FACILITY` / `ZJTH.BPSUPPLIER` 与 ERP 原始列名（`QTYSTU_0` / `RCPQTYSTU_0` /
 `EXTRCPDAT_0` / `BPSNUM_0` / `ITMREF_0` / `POHNUM_0` / `POPLIN_0` / `QTYUOM_0` …），
-且查的是 **ERP 源层 `ZJTH`**（近 12 月 84,049 行），与到货跟踪的数仓层（192,467 行）不是同一批数据。
+且查的是 **`ZJTH` owner** —— 违反 3.0.1 的 THBI 硬规则 ⇒ **迁移是必须项**。
 
-**迁移前必须先确认的事实缺口**（这是本节要向你确认的第一件事）：
+**迁移方案：切到 THBI 数仓层（方案 A，定案）**
 
-| 待到货需要的对象 | dev 本体（Lineage B） | 测试库（Lineage A） | 现状 |
-|---|---|---|---|
-| 采购订单行 `ZJTH.PORDERQ` | ❌ 无该类 | ✅ `PurchaseOrderDetail` → `PORDERQ`（**但属性 0 条**） | **两套血统都不可直接用** |
-| 物料 `ZJTH.ITMMASTER` | ✅ `DIM_IMATERIAL`（数仓层） | ✅ `ItemMaster` → `ITMMASTER`（属性 0 条） | dev 可用但**不同层** |
-| 供应商 `ZJTH.BPSUPPLIER` | ✅ `DIM_SUPPLIER`（数仓层） | ✅ `Supplier` → `BPSUPPLIER`（属性 0 条） | dev 可用但**不同层** |
-| 基地 `ZJTH.FACILITY` | ❌ 无该类 | ❌ 无 | **两套都缺** |
+| 待到货现在用 | 迁移后用（THBI） | 本体状态 |
+|---|---|---|
+| `ZJTH.PORDERQ`（订单行） | `THBI.ODS_ERP_PORDERQ` | ❌ 本次**新建类 + 绑定** |
+| `ZJTH.ITMMASTER`（物料名） | `THBI.DIM_IMATERIAL` | ✅ 已绑（248 属性） |
+| `ZJTH.BPSUPPLIER`（供应商名） | `THBI.DIM_SUPPLIER` | ✅ 已绑（229 属性） |
+| `ZJTH.FACILITY`（基地名） | `THBI.DIM_FACILITY` | ❌ 需**新建类 + 绑定**（41 行，实测存在） |
 
-**关键结论**：待到货要迁到本体，**必须先补齐本体类**——
-`ZJTH` 源层的采购订单行 / 物料 / 供应商 / 基地 四个对象，在两套本体血统里都不完整。
+**THBI 侧对象核实（探针实测，全部就位）**：
 
-**迁移方案（两条路，需你选）**：
+- `THBI.DIM_FACILITY`：41 行，含 `FCY_0` + `FCYNAM_0`，
+  基地码形态与待到货现用的一致（`T1` 滨海总厂 / `T3` 模具厂 / `C1` / `J1` / `H1`…）
+  ⇒ 现有 `siteKeys` 的「编码精确 / 名称模糊」过滤逻辑可原样复用；
+- `THBI.ODS_ERP_PORDERQ` 有 `POHFCY_0`（采购地点）—— 对应现有的 `Q.POHFCY_0` 站点过滤列；
+- **站点码域 100% 覆盖**：本期窗口 19,910 行 JOIN `DIM_FACILITY` **0 缺失**；
+- 名称覆盖（本期窗口）：物料名缺 1,883 行（9.4%，`DIM_IMATERIAL`）、
+  供应商名缺 110 行（0.55%，`DIM_SUPPLIER`）⇒ 印证 3.5 的决定：
+  **名称改走 MDM `entity_mapping`**，避免数仓字典的缺失。
 
-**方案 A：待到货也切到数仓层（与到货跟踪同源）**
-- 复用本次新建的 `ODS_ERP_PORDERQ` 类 + `DIM_IMATERIAL` / `DIM_SUPPLIER`；
-- 需补一个数仓层基地类（`THBI.DIM_FACILITY` 实测存在，本体未建类）；
-- **优点**：两个场景同源同口径，数据覆盖面一致（192k vs 84k 行），
-  用户在两个场景看到的数据能对得上；工具实现可共用绑定解析件；
-- **代价**：待到货的现有实测结果会变（数据更多、结果更全），
-  需重跑本地验收与口径基线。
+**迁移后的口径变化（必须显式告知）**：
 
-**方案 B：保留 ERP 源层，为 `ZJTH` 源层补建本体类**
-- 新建 `ZJTH.PORDERQ` / `ZJTH.ITMMASTER` / `ZJTH.BPSUPPLIER` / `ZJTH.FACILITY` 四个类
-  + 绑定（`datasource_id=1`, `schema_name=ZJTH`）；
-- **优点**：待到货行为不变，回归面最小；
-- **代价**：与到货跟踪**跨源不同口径**，两个场景数字对不上；
-  且要建 4 个类（属性可从 Lineage A 的 `seed_ontology.py` 拿到，
-  但 Lineage A 的属性在测试库里是 0 条，需从仓内 `seed_ontology.py` 重新落库）。
+| 维度 | 迁移前（ZJTH 源层） | 迁移后（THBI 数仓层） |
+|---|---|---|
+| 近 12 月行数 | 84,049 | **192,467**（2.3 倍） |
+| 数据截止 | 2026-10-23 | **2026-11-24** |
+| 站点维度 | `POHFCY_0` | 同（`POHFCY_0`） |
+| 供应商/物料名 | ERP 表 | MDM（`entity_mapping.name`） |
 
-**我的建议**：**方案 A**。理由是待到货与到货跟踪本来就是同一业务域的姊妹场景，
-用户会在同一个页面来回看；若一个查数仓层、一个查源层，数字不一致会直接引发
-「到底是哪个对」的信任危机。且方案 A 只需多建 1 个基地类，方案 B 要建 4 个。
+⇒ 待到货的现有实测结果**会变**（数据更多、更全、更新），
+需重跑本地验收并**显式更新口径基线**（不静默漂移）。
 
-**⚠ 需你确认**：方案 A / B 选哪个（见第 11 节）。
-另需注意：两个场景若都走本体，**它们的「物料/供应商」字典来源要统一**
-（本次决策：名称走 MDM `entity_mapping`）。
+**迁移实施要点**：
+
+1. `pending_delivery_query` 的 SQL 模板从硬编码表列改为**绑定编译产物**
+   （与到货跟踪共用同一套解析路径）；
+2. 删掉 `_PENDING_TABLE` / `_PENDING_ITEM_TABLE` / `_PENDING_FACILITY_TABLE` /
+   `_PENDING_SUPPLIER_TABLE` 四个常量与全部裸列名；
+3. 站点过滤从 `Q.POHFCY_0 IN (...)` / `f.FCYNAM_0 LIKE ...` 改为
+   `<PURCHASE_SITE_CODE>` / `<FACILITY_NAME>` 属性（需在 `ODS_ERP_PORDERQ` 类上
+   补 `POHFCY_0` 与 `DIM_FACILITY` 的 `FCY_0`/`FCYNAM_0` 属性绑定）；
+4. 移除场景的 `datasourceId` 隐藏槽位（3.0.1 推论 3）。
 
 ## 4. 口径定义（探针实测结论）
 
@@ -433,6 +463,7 @@ P999=500,000、MAX=2,650,000），是真实的业务大单。
 |---|---|---|---|
 | `ODS_ERP_PORDERQ` 本体类 + 绑定 | 本体资产 | 新增 seed（类 + 属性 + `procurement_source_binding` + `procurement_property_binding`） | 行级到货数据的本体登记；工具取数的唯一锚点 |
 | `POL_ERP` Business Object | 本体资产 | 同上 | 承载新类的 BO（用户 2026-11-25 决定：要增加） |
+| `DIM_FACILITY` 本体类 + 绑定 | 本体资产 | 同上 | 基地字典（待到货 `siteKeys` 过滤用；THBI 实测 41 行，站点码域 100% 覆盖） |
 | 绑定解析 | 服务（**复用**） | `backend/app/services/semantic_compiler_bindings.py` | 类+数据源 → 物理表/列；候选隔离；fail-closed |
 | `delivery_tracking_query` | 工具 | `backend/app/services/agent_tools_procurement.py` + `seed_agent_tool_configs.py` | 概览 + 双层明细取数（**经绑定解析物理表列**） |
 | `DELIVERY_TRACKING_AGENT` | Agent | `backend/scripts/seed_agents.py` + `seed_procurement_agent_profiles.py` | 编排与输出纪律；**绑定唯一数据源** |
@@ -453,11 +484,12 @@ P999=500,000、MAX=2,650,000），是真实的业务大单。
 `_PendingDialect`（方言碎片）、`PendingDeliveryFilters`（过滤/窗口）的思路可提取，
 但窗口语义不同（到货跟踪要 24 日锚点），故新写。
 
-**⚠ 数据源不一致须显式说明**：既有 `pending_delivery_query` 走 ERP 源层
-（`ZJTH.PORDERQ`，源表名硬编码），本场景走数仓层本体类。
-两者数据覆盖面不同（源层近 12 月 84,049 行 vs 数仓层 192,467 行），
-界面上须标注数据层以免误读。**是否把待到货也迁到本体/数仓层**不在本需求范围，
-但应作为后续独立立项（本需求不擅自改动已上线场景）。
+**数据源（THBI 硬规则）**：迁移完成后，**两个场景同源同口径** —— 都走
+`THBI.ODS_ERP_PORDERQ`（经本体绑定），都从 MDM 取名称。
+用户在两个场景看到的数字可以对得上。
+
+迁移前后的口径差异（待到货）已在 3.8 列出，界面须标注数据层以免误读：
+近 12 月行数 84,049 → **192,467**（2.3 倍），数据截止 2026-10-23 → **2026-11-24**。
 
 ### 5.3 工具契约
 
@@ -471,10 +503,11 @@ delivery_tracking_query(
   supplierKeys: str[]   # 供应商码列表（多选，缺省=全部）
   materialKeys: str[]   # 物料列表（可选）
   orderKeys: str[]      # 订单号列表（可选，下钻指定订单）
-  datasourceId: int?    # 数据源（admin 槽位）
   limit: int            # 订单明细上限，默认 50
 )
 ```
+
+**无 `datasourceId` 参数**（THBI 硬规则：数据源由本体绑定唯一确定，不由调用方指定）。
 
 **返回结构**（camelCase，与 `PendingDeliveryResult` 风格一致）。
 下列数值为 2026-11-25 探针在**本期窗口（2026-10-24 ~ 2026-11-24）**的实测值：
@@ -483,7 +516,7 @@ delivery_tracking_query(
 {
   "via": "business_db",
   "datasourceId": 1,
-  "dataLayer": "ods_erp",
+  "dataLayer": "thbi_ods_erp",
   "window": { "dateFrom": "2026-10-24", "dateTo": "2026-11-24", "mode": "anchorDay" },
   "summary": {
     "totalLines": 19910,
@@ -566,9 +599,7 @@ delivery_tracking_query(
     { "key": "materialKeys", "type": "entityMulti", "label": "物料",
       "conflictKeywords": ["物料", "材料"] },
     { "key": "orderKeys", "type": "entityMulti", "label": "订单",
-      "conflictKeywords": ["订单", "订单号"] },
-    { "key": "datasourceId", "type": "number", "label": "数据源",
-      "conflictKeywords": ["数据源"], "hidden": true }
+      "conflictKeywords": ["订单", "订单号"] }
   ],
   "question_template": "分析订单到货情况",
   "chips": [
@@ -583,6 +614,8 @@ delivery_tracking_query(
   "enabled": true
 }
 ```
+
+**无 `datasourceId` 槽位**（THBI 硬规则 ⇒ 数据源由本体绑定唯一确定，不给用户切源）。
 
 **`anchorDay` / `periodIndex` 的槽位类型**：现有 `SLOT_TYPE_WHITELIST` 无「周期」类型。
 两者均用 `number` 类型承载，后端在渲染时做语义转换（见 5.6），
@@ -770,11 +803,21 @@ SQL 模板按解析结果渲染（表名/列名均为绑定解析产物，非代
 
 ## 11. 待业务确认项
 
+**已由用户拍板（2026-11-25）**：
+
+| # | 决定 | 影响 |
+|---|---|---|
+| ✅ 1 | **一切数据对象出自 THBI 数据源**（硬规则） | 3.0.1；待到货必须迁；取消 `datasourceId` 槽位 |
+| ✅ 2 | **新增 Business Object** | 3.2.1，新建 `POL_ERP` |
+| ✅ 3 | **待到货场景一并迁到本体** | 3.8，切 THBI 数仓层（方案 A） |
+| ✅ 4 | **本体对接，不硬编码表名列名** | 3.0.2，复用绑定设施 |
+
+**仍待确认**：
+
 | # | 问题 | 背景 | 我的建议 |
 |---|---|---|---|
-| 1 | **待到货迁移方案 A（切数仓层）还是 B（保留源层、补建 4 个类）？** | 见 3.8。方案 A 需多建 1 个基地类但两场景同源；方案 B 需建 4 个类且两场景数字对不上 | **方案 A** |
-| 2 | 新 BO 编码用 `POL_ERP` 可以吗？ | 既有 `POL` 已被 `DWD_PURCHASE_ORDER_LINE` 占用；新 BO 指向新鲜类，名称须区分 | `POL_ERP`（或业务给定的其它码） |
-| 3 | 两个场景的字典来源统一为 MDM `entity_mapping` 可以吗？ | 数仓 `ODS_ERP_BPSUPPLIER` 覆盖率 100% 但要额外建类；`DIM_SUPPLIER` 覆盖率 99.97% | 用 MDM（免建类、跨场景一致） |
-| 4 | **数仓层基地类 `THBI.DIM_FACILITY` 需要建类吗？** | 待到货的 `siteKeys` 过滤用到基地字典；方案 A 需要它 | 方案 A 下需建（实测 `THBI.DIM_FACILITY` 存在） |
-| 5 | 「到货跟踪」是否也需要基地维度？ | 需求只提时间/供应商/订单/物料 | 本期不加（YAGNI），可后补 |
-| 6 | 到货明细（`ODS_ERP_YPRECEIPTD`）要不要接入？ | 它有到货单号与批次，但 `BPSNUM_0` 全空、覆盖仅 41% 订单 | 本期不接（够用即可）；需要批次追溯时再立项 |
+| 1 | 新 BO 编码用 `POL_ERP` 可以吗？ | 既有 `POL` 已被 `DWD_PURCHASE_ORDER_LINE` 占用；新 BO 指向新鲜类，名称须区分 | `POL_ERP`（或业务给定的其它码） |
+| 2 | 两个场景的字典来源统一为 MDM `entity_mapping` 可以吗？ | 数仓 `ODS_ERP_BPSUPPLIER` 覆盖率 100% 但要额外建类；`DIM_SUPPLIER` 覆盖率 99.97% | 用 MDM（免建类、跨场景一致） |
+| 3 | 「到货跟踪」是否也需要基地维度？ | 需求只提时间/供应商/订单/物料；但待到货有 `siteKeys` | 本期不加（YAGNI），可后补 |
+| 4 | 到货明细（`ODS_ERP_YPRECEIPTD`）要不要接入？ | 它有到货单号与批次，但 `BPSNUM_0` 全空、覆盖仅 41% 订单 | 本期不接（够用即可）；需要批次追溯时再立项 |
+| 5 | 待到货迁移后口径变化，如何告知用户？ | 近 12 月行数 84,049 → 192,467（2.3 倍），数据截止 10-23 → 11-24 | 卡片标注数据层 + 迁移说明；口径基线显式更新 |

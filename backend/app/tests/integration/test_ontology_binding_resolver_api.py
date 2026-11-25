@@ -1,7 +1,7 @@
 """运行时本体绑定解析器（集成）：真实 PG + 真实绑定表。
 
 测试库（5434 `qa_metadata_test_mainline`）**没有**任何 `procurement_source_binding`
-行 ⇒ 本文件自带种数夹具（真实 ORM 行，走真实 CHECK / 唯一索引）。
+行 ⇒ 本文件自带种数夹具（真实 ORM 行，走真实 CHECK / 部分唯一索引）。
 
 刻意把 `ontology_class.source_table` 与 `ontology_property.source_column` 写成
 **过期值**（`STALE_*`）⇒ 解析器一旦回退到本体表/列（而不是读绑定）就会露馅。
@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -36,17 +36,26 @@ _ORDER_DTL_COLUMNS = {
 }
 _CANDIDATE_CLASS = "DWD_PURCHASE_ORDER_DTL_CANDIDATE"
 _TOMBSTONE_CLASS = "DWD_PURCHASE_ORDER_DTL_TOMBSTONED"
+_FUTURE_CLASS = "DWD_PURCHASE_ORDER_DTL_FUTURE"
+_FUTURE_PROPERTY_CLASS = "DWD_PURCHASE_ORDER_DTL_FUTURE_PROPERTY"
+_MULTI_ROLE_CLASS = "DWD_PURCHASE_ORDER_DTL_MULTI_ROLE"
+
+_ONE_DAY = timedelta(days=1)
 
 
 async def _seedThbiDataSource(dbSession: AsyncSession) -> DataSource:
-    """种 THBI 数据源（id 必须 = 1 ⇒ 硬规则的数据源闸门才放行）。"""
+    """种 THBI 数据源（id 必须 = 1 ⇒ 硬规则的数据源闸门才放行）。
+
+    账号用 `THBI`（硬规则里的 THBI Oracle 账号）—— 别写成别的库账号，
+    后续任务照抄这个夹具会把错身份传播下去。
+    """
     dataSource = DataSource(
         name="THBI Oracle",
         type=DataSourceType.ORACLE,
         host="oracle-thbi.internal",
         port=1521,
         database_name="THBI",
-        username="ZJTH",
+        username="THBI",
         password_encrypted="encrypted-placeholder",
         is_active=True,
         oracle_version="19c",
@@ -100,25 +109,33 @@ async def _seedClassWithProperties(
     return ontologyClass.id, propertyIdByName
 
 
-async def _seedBindings(
+async def _seedSourceBinding(
     dbSession: AsyncSession,
     *,
     classId: int,
     propertyIdByName: dict[str, int],
     propertyColumns: dict[str, str],
     sourceTable: str,
+    bindingRole: str = "BASE",
     isCandidate: bool = False,
-) -> None:
-    """种源绑定 + 属性绑定（候选行不带确认人 ⇒ 过 DB CHECK 约束）。"""
+    validFrom: datetime | None = None,
+    propertyValidFrom: datetime | None = None,
+) -> int:
+    """种一条源绑定 + 其属性绑定，返回 sourceBindingId。
+
+    候选行不带确认人 ⇒ 过 DB CHECK「候选 ↔ 无确认人」互斥约束。
+    `validFrom` / `propertyValidFrom` 分别控制源绑定与属性绑定的生效时刻。
+    """
     sourceBinding = ProcurementSourceBinding(
         class_id=classId,
         datasource_id=THBI_DATASOURCE_ID,
         schema_name=THBI_SCHEMA_NAME,
         source_table=sourceTable,
-        binding_role="BASE",
+        binding_role=bindingRole,
         is_candidate=isCandidate,
         confirmed_by=None if isCandidate else "test-binding-resolver",
         confirmed_time=None if isCandidate else datetime.now(UTC),
+        **({} if validFrom is None else {"valid_from": validFrom}),
     )
     dbSession.add(sourceBinding)
     await dbSession.flush()
@@ -132,9 +149,15 @@ async def _seedBindings(
                 is_candidate=isCandidate,
                 confirmed_by=None if isCandidate else "test-binding-resolver",
                 confirmed_time=None if isCandidate else datetime.now(UTC),
+                **(
+                    {}
+                    if propertyValidFrom is None
+                    else {"valid_from": propertyValidFrom}
+                ),
             )
         )
     await dbSession.commit()
+    return sourceBinding.id
 
 
 async def _seedClassWithBinding(
@@ -143,8 +166,11 @@ async def _seedClassWithBinding(
     className: str,
     propertyColumns: dict[str, str],
     sourceTable: str,
+    bindingRole: str = "BASE",
     isCandidate: bool = False,
     isTombstone: bool = False,
+    validFrom: datetime | None = None,
+    propertyValidFrom: datetime | None = None,
 ) -> int:
     """种「本体类 + 属性 + 源绑定 + 属性绑定」四件套，返回 classId。"""
     classId, propertyIdByName = await _seedClassWithProperties(
@@ -153,13 +179,16 @@ async def _seedClassWithBinding(
         propertyColumns=propertyColumns,
         isTombstone=isTombstone,
     )
-    await _seedBindings(
+    await _seedSourceBinding(
         dbSession,
         classId=classId,
         propertyIdByName=propertyIdByName,
         propertyColumns=propertyColumns,
         sourceTable=sourceTable,
+        bindingRole=bindingRole,
         isCandidate=isCandidate,
+        validFrom=validFrom,
+        propertyValidFrom=propertyValidFrom,
     )
     return classId
 
@@ -196,24 +225,26 @@ async def test_resolve_missing_property_fails_closed(
     dbSession, seedThbiOrderDtlBinding
 ) -> None:
     """必需属性未绑定 ⇒ fail-closed，不回退硬编码列。"""
-    with pytest.raises(BindingResolutionError):
+    with pytest.raises(BindingResolutionError) as exc:
         await resolveBinding(
             dbSession,
             className="DWD_PURCHASE_ORDER_DTL",
             requiredProperties=["NOT_A_REAL_PROPERTY"],
         )
+    assert "缺少必需属性的绑定" in str(exc.value)
 
 
 @pytest.mark.asyncio
 async def test_resolve_unknown_class_fails_closed(
     dbSession, seedThbiOrderDtlBinding
 ) -> None:
-    with pytest.raises(BindingResolutionError):
+    with pytest.raises(BindingResolutionError) as exc:
         await resolveBinding(
             dbSession,
             className="NO_SUCH_CLASS_XYZ",
             requiredProperties=["PO_NO"],
         )
+    assert "本体类不存在" in str(exc.value)
 
 
 @pytest.mark.asyncio
@@ -243,12 +274,13 @@ async def test_resolve_candidate_only_binding_fails_closed(dbSession) -> None:
         sourceTable=_CANDIDATE_CLASS,
         isCandidate=True,
     )
-    with pytest.raises(BindingResolutionError):
+    with pytest.raises(BindingResolutionError) as exc:
         await resolveBinding(
             dbSession,
             className=_CANDIDATE_CLASS,
             requiredProperties=["PO_NO"],
         )
+    assert "没有已确认生效的绑定" in str(exc.value)
 
 
 @pytest.mark.asyncio
@@ -262,12 +294,89 @@ async def test_resolve_tombstoned_class_fails_closed(dbSession) -> None:
         sourceTable=_TOMBSTONE_CLASS,
         isTombstone=True,
     )
-    with pytest.raises(BindingResolutionError):
+    with pytest.raises(BindingResolutionError) as exc:
         await resolveBinding(
             dbSession,
             className=_TOMBSTONE_CLASS,
             requiredProperties=["PO_NO"],
         )
+    assert "墓碑" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_resolve_future_binding_fails_closed(dbSession) -> None:
+    """未来才生效的绑定不是「已生效」⇒ 不得进读路径。"""
+    await _seedThbiDataSource(dbSession)
+    await _seedClassWithBinding(
+        dbSession,
+        className=_FUTURE_CLASS,
+        propertyColumns={"PO_NO": "PO_NO"},
+        sourceTable=_FUTURE_CLASS,
+        validFrom=datetime.now(UTC) + _ONE_DAY,
+    )
+    with pytest.raises(BindingResolutionError) as exc:
+        await resolveBinding(
+            dbSession,
+            className=_FUTURE_CLASS,
+            requiredProperties=["PO_NO"],
+        )
+    # 必须是「源绑定未生效」⇒ 不能被「属性缺失」这条更粗的判据掩盖
+    assert "没有已确认生效的绑定" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_resolve_future_property_binding_fails_closed(dbSession) -> None:
+    """源绑定已生效、但属性绑定未来才生效 ⇒ 该属性不可用 ⇒ 必需属性缺失 fail-closed。"""
+    await _seedThbiDataSource(dbSession)
+    await _seedClassWithBinding(
+        dbSession,
+        className=_FUTURE_PROPERTY_CLASS,
+        propertyColumns={"PO_NO": "PO_NO"},
+        sourceTable=_FUTURE_PROPERTY_CLASS,
+        propertyValidFrom=datetime.now(UTC) + _ONE_DAY,
+    )
+    with pytest.raises(BindingResolutionError) as exc:
+        await resolveBinding(
+            dbSession,
+            className=_FUTURE_PROPERTY_CLASS,
+            requiredProperties=["PO_NO"],
+        )
+    assert "缺少必需属性的绑定" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_resolve_multi_role_binding_uses_base_only(dbSession) -> None:
+    """多角色合法：BASE + FILTER 并存时只认 BASE，FILTER 的列不混进列映射。"""
+    await _seedThbiDataSource(dbSession)
+    classId, propertyIdByName = await _seedClassWithProperties(
+        dbSession,
+        className=_MULTI_ROLE_CLASS,
+        propertyColumns={"PO_NO": "PO_NO", "PO_QTY": "PO_QTY"},
+    )
+    await _seedSourceBinding(
+        dbSession,
+        classId=classId,
+        propertyIdByName=propertyIdByName,
+        propertyColumns={"PO_NO": "PO_NO"},
+        sourceTable=f"{_MULTI_ROLE_CLASS}_BASE",
+        bindingRole="BASE",
+    )
+    await _seedSourceBinding(
+        dbSession,
+        classId=classId,
+        propertyIdByName=propertyIdByName,
+        propertyColumns={"PO_QTY": "PO_QTY"},
+        sourceTable=f"{_MULTI_ROLE_CLASS}_FILTER",
+        bindingRole="FILTER",
+    )
+    resolved = await resolveBinding(
+        dbSession,
+        className=_MULTI_ROLE_CLASS,
+        requiredProperties=["PO_NO"],
+    )
+    assert resolved.sourceTable == f"{_MULTI_ROLE_CLASS}_BASE"
+    assert resolved.columns == {"PO_NO": "PO_NO"}
+    assert "PO_QTY" not in resolved.columns
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,10 @@ import type {
 
 const BASE = "/datasources";
 
+// 轮询 per-call 超时（spec：10s）。轮询接口只读内存态，正常毫秒级返回；
+// 请求超时（30s）远大于轮询间隔（1.5s）会让黑洞网络下叠出大量在飞请求。
+const INTROSPECT_POLL_TIMEOUT_MS = 10_000;
+
 export async function listDataSources(activeOnly = false): Promise<DataSource[]> {
   const res = await httpClient.get<DataSource[]>(BASE, {
     params: { activeOnly },
@@ -114,7 +118,7 @@ export async function getIntrospectJob(
 ): Promise<IntrospectJob> {
   const res = await httpClient.get<IntrospectJob>(
     `${BASE}/${id}/introspect-jobs/${jobId}`,
-    { timeout: REQUEST_TIMEOUT_MS, silentErrors: true },
+    { timeout: INTROSPECT_POLL_TIMEOUT_MS, silentErrors: true },
   );
   return res.data;
 }

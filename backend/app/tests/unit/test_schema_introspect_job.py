@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from app.services.schema_introspect_job import SchemaIntrospectJobRegistry
+import asyncio
+
+from app.domain.exceptions import DataSourceError
+from app.services import schema_introspect_job as jobModule
+from app.services.schema_introspect_job import (
+    SchemaIntrospectJobRegistry,
+    _userFacingError,
+)
 
 
 class _FakeClock:
@@ -154,3 +161,94 @@ def test_update_missing_job_raises_key_error() -> None:
     except KeyError:
         return
     raise AssertionError("未知 jobId 必须抛 KeyError")
+
+
+# ---- running 僵尸判据（活性超时） ----
+
+
+def test_create_or_get_replaces_stale_running_job() -> None:
+    """running job 超过 staleTimeoutSeconds 未更新 ⇒ 视为僵尸：移除并给新 jobId。
+
+    触发面：客户端提前断开导致 background 未执行、ownSession() 开会话即失败等
+    ⇒ updatedAt 再也不会被刷新。若永久复用，该数据源进程内无法再发起内省。
+    """
+    clock = _FakeClock()
+    registry = SchemaIntrospectJobRegistry(staleTimeoutSeconds=900.0, clock=clock)
+
+    stale = registry.createOrGet(datasourceId=7, schemaName="LC019999")
+    clock.advance(901)
+
+    assert registry.findRunning(datasourceId=7, schemaName="LC019999") is None
+    assert registry.get(stale.jobId) is None, "僵尸 job 必须从注册表移除"
+
+    fresh = registry.createOrGet(datasourceId=7, schemaName="LC019999")
+    assert fresh.jobId != stale.jobId, "僵尸 job 不得被复用"
+    assert fresh.status == "running"
+
+
+def test_create_or_get_reuses_recently_updated_running_job() -> None:
+    """仍在推进（updatedAt 被 update 刷新）的 job 即使创建已久也不得误判为僵尸。"""
+    clock = _FakeClock()
+    registry = SchemaIntrospectJobRegistry(staleTimeoutSeconds=900.0, clock=clock)
+
+    job = registry.createOrGet(datasourceId=7, schemaName="LC019999")
+    clock.advance(901)  # 距创建已超 900s
+    registry.update(job.jobId, completed=1)  # 进度刷新 updatedAt
+
+    clock.advance(899)  # 距上次刷新未超限
+    again = registry.createOrGet(datasourceId=7, schemaName="LC019999")
+    assert again.jobId == job.jobId, "刚刷新过的 running job 必须被复用"
+
+
+def test_run_job_marks_failed_when_own_session_raises(monkeypatch) -> None:
+    """ownSession() 抛错也必须落 failed（会话创建挪进 try）。"""
+    import app.infrastructure.database as databaseModule
+
+    registry = SchemaIntrospectJobRegistry(clock=_FakeClock())
+    job = registry.createOrGet(datasourceId=7, schemaName="LC019999")
+
+    def _boom():
+        raise RuntimeError("连接池初始化失败")
+
+    monkeypatch.setattr(databaseModule, "ownSession", _boom)
+
+    asyncio.run(
+        jobModule.runIntrospectJob(
+            datasourceId=7,
+            schemaName="LC019999",
+            jobId=job.jobId,
+            registry=registry,
+        )
+    )
+
+    final = registry.get(job.jobId)
+    assert final.status == "failed", "ownSession 失败不得让 job 永挂 running"
+    assert final.error, "failed 必须带用户可读文案"
+
+
+# ---- M3：错误文案保留可操作 detail，且不泄漏底层信息 ----
+
+
+def test_user_facing_error_includes_actionable_detail_without_leaking_cause() -> None:
+    """DataSourceError 的 detail 必须拼进 error，但 __cause__ 里的敏感文本不得出现。"""
+    try:
+        try:
+            raise RuntimeError("连接 LC019999@h:1521/X 失败：业务库不可达")
+        except RuntimeError as cause:
+            raise DataSourceError(
+                "数据源 7 schema 读取失败",
+                detail="业务数据库读取失败，请检查数据源连接配置",
+            ) from cause
+    except DataSourceError as exc:
+        text = _userFacingError(exc)
+
+    assert "业务数据库读取失败，请检查数据源连接配置" in text, "必须保留可操作提示"
+    assert "LC019999" not in text
+    assert "业务库不可达" not in text
+    assert "h:1521" not in text
+
+
+def test_user_facing_error_without_detail_falls_back_to_message() -> None:
+    exc = DataSourceError("数据源 7 schema 读取失败")
+    assert _userFacingError(exc) == "数据源 7 schema 读取失败"
+

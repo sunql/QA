@@ -246,6 +246,23 @@ describe("DatasourcePage", () => {
     expect(await screen.findByText(/缓存成功/)).toBeInTheDocument();
   });
 
+  it("缓存 Schema：total 尚未统计时显示「正在统计表数量」，不渲染 0/0", async () => {
+    const user = userEvent.setup();
+    // 新建 job 在后台任务执行前 total 恒为 0（表名列表尚未查完）。
+    api.startIntrospectJob.mockResolvedValue({
+      jobId: "j0", status: "running", total: 0, completed: 0,
+    });
+    api.getIntrospectJob.mockResolvedValue({
+      jobId: "j0", status: "running", total: 0, completed: 0,
+    });
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /缓存 Schema/i }));
+
+    expect(await screen.findByText(/正在统计表数量/)).toBeInTheDocument();
+    expect(screen.queryByText(/0\/0/)).not.toBeInTheDocument();
+  });
+
   it("缓存 Schema 失败：弹窗保持可见且停止轮询（不自动关闭）", async () => {
     const user = userEvent.setup();
     api.startIntrospectJob.mockResolvedValue({

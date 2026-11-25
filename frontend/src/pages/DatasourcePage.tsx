@@ -678,21 +678,36 @@ export default function DatasourcePage() {
           />
         ) : (
           <>
-            <p>
-              {t("datasource.introspectProgress", {
-                done: jobProgress?.completed ?? 0,
-                total: jobProgress?.total ?? 0,
-              })}
-            </p>
-            <Progress
-              percent={
-                jobProgress && jobProgress.total > 0
-                  ? Math.round((jobProgress.completed / jobProgress.total) * 100)
-                  : 0
-              }
-              // 失联后停掉 active 动画：红色异常态表明进度不再推进。
-              status={pollFailures >= MAX_POLL_FAILURES ? "exception" : "active"}
-            />
+            {jobProgress?.status === "running" && (jobProgress?.total ?? 0) === 0 ? (
+              // 新建 job 的 total 恒为 0（后台任务尚未查到表名列表），此时渲染
+              // 「0/0 + 0%」会让人误以为卡死；用不确定态进度条 + 「正在统计」文案。
+              <>
+                <p>{t("datasource.introspectCounting")}</p>
+                <Progress
+                  percent={0}
+                  status={pollFailures >= MAX_POLL_FAILURES ? "exception" : "active"}
+                  showInfo={false}
+                />
+              </>
+            ) : (
+              <>
+                <p>
+                  {t("datasource.introspectProgress", {
+                    done: jobProgress?.completed ?? 0,
+                    total: jobProgress?.total ?? 0,
+                  })}
+                </p>
+                <Progress
+                  percent={
+                    jobProgress && jobProgress.total > 0
+                      ? Math.round((jobProgress.completed / jobProgress.total) * 100)
+                      : 0
+                  }
+                  // 失联后停掉 active 动画：红色异常态表明进度不再推进。
+                  status={pollFailures >= MAX_POLL_FAILURES ? "exception" : "active"}
+                />
+              </>
+            )}
             {pollFailures >= MAX_POLL_FAILURES && (
               <Alert type="warning" showIcon message={t("datasource.introspectConnectionLost")} />
             )}

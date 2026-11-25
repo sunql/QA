@@ -63,6 +63,25 @@ class _FakeOracleAdapter:
             ]
         if "constraint_type = 'P'" in sql:
             return [{"table_name": t, "column_name": "COL1"} for t in picked]
+        if "constraint_type = 'R'" in sql:
+            # 至少 1 条外键：没有这一分支时，两条路径的 foreign_keys 都是 []，
+            # 等价断言恒真，丢 FK 的回归抓不到。
+            return [
+                {
+                    "table_name": t,
+                    "column_name": "COL2",
+                    "ref_table": "T000" if t != "T000" else "T001",
+                    "ref_column": "COL1",
+                }
+                for t in picked
+            ]
+        if "ALL_TAB_COMMENTS" in sql:
+            return [{"table_name": t, "comment": f"{t} 表注释"} for t in picked]
+        if "ALL_COL_COMMENTS" in sql:
+            return [
+                {"table_name": t, "column_name": "COL1", "comment": f"{t}.COL1 列注释"}
+                for t in picked
+            ]
         return []
 
 
@@ -130,13 +149,25 @@ def test_batched_equals_full_including_views() -> None:
         assert fullMap[name].columns == batchedMap[name].columns, f"{name} 列信息必须一致"
         assert fullMap[name].primary_keys == batchedMap[name].primary_keys
         assert fullMap[name].foreign_keys == batchedMap[name].foreign_keys
+        assert fullMap[name].comment == batchedMap[name].comment
+    # 等价断言必须非空集：伪适配器若不返回 FK / 注释，上面的 == 两边都是 [] / None，
+    # 恒真而无防护力。
+    assert all(fullMap[name].foreign_keys for name in fullMap), "用例必须覆盖到非空 FK"
+    assert all(fullMap[name].comment for name in fullMap), "用例必须覆盖到非空表注释"
+    assert all(
+        any(col.comment for col in fullMap[name].columns) for name in fullMap
+    ), "用例必须覆盖到非空列注释"
     # 表名列表必须走与列查询同源的 DISTINCT 查询，而非旧的 ALL_TABLES 口径
     assert any("SELECT DISTINCT table_name FROM ALL_TAB_COLUMNS" in s for s in adapter.executed)
     assert not any("SELECT table_name FROM ALL_TABLES" in s for s in adapter.executed)
 
 
 def test_batched_query_count_is_one_per_type_per_batch() -> None:
-    """250 表 / 100 一批 ⇒ 3 批；每批 5 类查询 + 1 次表名列表 = 16 次。"""
+    """250 表 / 100 一批 ⇒ 3 批；每批 5 类查询 + 1 次表名列表 = 16 次。
+
+    逐类断言而非只数总数：某类漏查（如 FK / 注释）时总数可能因另一类多查而
+    仍然凑巧为 16，按类型计数才能抓到。
+    """
     adapter = _FakeOracleAdapter([f"T{i:03d}" for i in range(250)])
     service = SchemaIntrospectionService(adapterProvider=lambda dsId, ds: adapter)
 
@@ -148,6 +179,16 @@ def test_batched_query_count_is_one_per_type_per_batch() -> None:
 
     tableListCalls = [s for s in adapter.executed if "SELECT DISTINCT table_name" in s]
     assert len(tableListCalls) == 1, "表名列表只查一次"
+
+    def _count(predicate) -> int:
+        return sum(1 for sql in adapter.executed if predicate(sql))
+
+    assert _count(lambda s: "ALL_TAB_COLUMNS" in s and "DISTINCT" not in s) == 3, "列查询每批一次"
+    assert _count(lambda s: "constraint_type = 'P'" in s) == 3, "PK 查询每批一次"
+    assert _count(lambda s: "constraint_type = 'R'" in s) == 3, "FK 查询每批一次"
+    assert _count(lambda s: "ALL_TAB_COMMENTS" in s) == 3, "表注释每批一次"
+    assert _count(lambda s: "ALL_COL_COMMENTS" in s) == 3, "列注释每批一次"
+    assert len(adapter.executed) == 16, "3 批 × 5 类 + 表名列表 = 16"
 
 
 def test_batched_filter_clause_precedes_order_by() -> None:

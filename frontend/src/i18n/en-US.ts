@@ -2144,6 +2144,7 @@ export const enUS = {
   importToOntology: "Import to Ontology",
   cacheSchema: "Cache Schema",
   introspectProgress: "Caching schema: {done}/{total} tables",
+  introspectCounting: "Counting tables…",
   introspectFailed: "Caching failed — check the datasource connection",
   introspectConnectionLost: "Lost connection to the server. Check your network and retry.",
   introspectExpired: "The introspection job has expired. Please start it again.",

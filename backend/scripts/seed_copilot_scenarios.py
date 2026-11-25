@@ -185,6 +185,22 @@ SEEDS: list[dict[str, Any]] = [
                 "label": "订单",
                 "conflictKeywords": ["订单", "订单号"],
             },
+            # 时间区间模式写入的隐藏槽位（同 pending_delivery）：monthsBack 控件带
+            # 「近N月 / 时间区间」分段，缺这两项时用户选的区间不会进问题/工具参数。
+            {
+                "key": "dateFrom",
+                "type": "text",
+                "label": "开始日期",
+                "conflictKeywords": ["日期", "时间段"],
+                "hidden": True,
+            },
+            {
+                "key": "dateTo",
+                "type": "text",
+                "label": "结束日期",
+                "conflictKeywords": ["日期", "时间段"],
+                "hidden": True,
+            },
         ],
         "question_template": "分析订单到货情况",
         "chips": [

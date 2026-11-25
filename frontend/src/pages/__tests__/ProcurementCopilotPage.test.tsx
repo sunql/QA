@@ -14,7 +14,11 @@ import { I18nextProvider } from "react-i18next";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "../../i18n/i18n";
-import ProcurementCopilotPage from "../ProcurementCopilotPage";
+import type { CopilotScenario } from "../../api/copilotScenario";
+import ProcurementCopilotPage, {
+  buildChipSlots,
+  defaultSlotValues,
+} from "../ProcurementCopilotPage";
 
 const authState = vi.hoisted(() => ({ roles: ["admin"] as string[] }));
 
@@ -1079,6 +1083,65 @@ describe("冲突检测：纯编码也算指定", () => {
     const slots = payloads[0].slots as Record<string, unknown>;
     expect(slots.supplierKeys).toEqual(["B125"]);
     expect(String(payloads[0].message)).toContain("B109");
+  });
+});
+
+
+/** 到货跟踪场景配置（与 backend/scripts/seed_copilot_scenarios.py 同构）。 */
+const DELIVERY_TRACKING_CONFIG: CopilotScenario = {
+  scenarioCode: "delivery_tracking",
+  name: "到货跟踪",
+  description: "按周期/供应商跟踪订单到货达成，含已到/未到物料明细",
+  iconCode: "car",
+  agentCode: "DELIVERY_TRACKING_AGENT",
+  slotSchema: [
+    { key: "monthsBack", type: "number", label: "时间窗" },
+    { key: "anchorDay", type: "number", label: "月度周期锚点日" },
+    { key: "periodIndex", type: "number", label: "周期期序" },
+    { key: "supplierKeys", type: "entityMulti", label: "供应商" },
+    { key: "orderKeys", type: "entityMulti", label: "订单" },
+    { key: "dateFrom", type: "text", label: "开始日期", hidden: true },
+    { key: "dateTo", type: "text", label: "结束日期", hidden: true },
+  ],
+  questionTemplate: "分析订单到货情况",
+  chips: [
+    { label: "近 12 个月到货概览", monthsBack: 12 },
+    { label: "近 3 个月到货概览", monthsBack: 3 },
+    { label: "本期到货概览（24 日周期）", anchorDay: 24, periodIndex: 0 },
+    { label: "上期到货概览（24 日周期）", anchorDay: 24, periodIndex: -1 },
+  ],
+  resultRenderer: "delivery_tracking",
+  requiredRole: null,
+};
+
+describe("场景槽位默认值（anchorDay=0 不得劫持取数窗口）", () => {
+  it("非 monthsBack 的数字槽位默认留空（不是 0）", () => {
+    const values = defaultSlotValues(DELIVERY_TRACKING_CONFIG);
+    expect(values.monthsBack).toBe(12);
+    expect("anchorDay" in values).toBe(false);
+    expect("periodIndex" in values).toBe(false);
+    expect(values.anchorDay).toBeUndefined();
+    expect(values.supplierKeys).toEqual([]);
+  });
+
+  it("点「近 12 个月」chip 上送的 slots 不含 anchorDay / periodIndex", () => {
+    const slots = buildChipSlots(
+      DELIVERY_TRACKING_CONFIG,
+      DELIVERY_TRACKING_CONFIG.chips[0],
+    );
+    expect(slots.monthsBack).toBe(12);
+    expect("anchorDay" in slots).toBe(false);
+    expect("periodIndex" in slots).toBe(false);
+    expect("dateFrom" in slots).toBe(false);
+  });
+
+  it("点「本期」chip 上送 anchorDay=24 / periodIndex=0", () => {
+    const slots = buildChipSlots(
+      DELIVERY_TRACKING_CONFIG,
+      DELIVERY_TRACKING_CONFIG.chips[2],
+    );
+    expect(slots.anchorDay).toBe(24);
+    expect(slots.periodIndex).toBe(0);
   });
 });
 

@@ -82,16 +82,33 @@ type CopilotView =
   | { kind: "free" }
   | { kind: "scenario"; scenario: CopilotScenario };
 
-/** 槽位默认值：monthsBack 12（时间窗兜底）、数字 0、多值 []。 */
-function defaultSlotValues(scenario: CopilotScenario): SlotValues {
+/** 槽位默认值：monthsBack 12（时间窗兜底）、多值 []、其余留空。
+ *
+ * 非 monthsBack 的数字槽位**不**预填 0：后端把 0 视为「显式指定」
+ * （如 anchorDay=0 会劫持取数窗口并触发校验失败），0 还会让空表单被
+ * `hasAdvancedFilters` 误判为「已改高级参数」。留空 ⇒ JSON 上送时该键
+ * 直接缺席，后端按 None 跳过。
+ */
+export function defaultSlotValues(scenario: CopilotScenario): SlotValues {
   const values: SlotValues = {};
   for (const slot of scenario.slotSchema) {
     if (slot.key === "monthsBack") values[slot.key] = DEFAULT_MONTHS_BACK;
-    else if (slot.type === "number") values[slot.key] = 0;
     else if (slot.type === "entityMulti" || slot.type === "dictMulti") values[slot.key] = [];
-    else values[slot.key] = undefined;
   }
   return values;
+}
+
+/** chip 预设 → 直接上送的 slots：默认值打底、chip 覆盖，丢弃 undefined。 */
+export function buildChipSlots(
+  scenario: CopilotScenario,
+  chip: CopilotScenarioChip,
+): Record<string, unknown> {
+  const { label: _label, ...chipSlots } = chip;
+  return Object.fromEntries(
+    Object.entries({ ...defaultSlotValues(scenario), ...chipSlots }).filter(
+      ([, value]) => value !== undefined,
+    ),
+  );
 }
 
 export default function ProcurementCopilotPage() {
@@ -534,11 +551,7 @@ export default function ProcurementCopilotPage() {
   const sendScenarioChip = useCallback(
     (chip: CopilotScenarioChip) => {
       if (!activeScenario) return;
-      const { label: _label, ...chipSlots } = chip;
-      const slots: Record<string, unknown> = {
-        ...defaultSlotValues(activeScenario),
-        ...chipSlots,
-      };
+      const slots = buildChipSlots(activeScenario, chip);
       if (isAdmin && datasourceId !== undefined) slots.datasourceId = datasourceId;
       void sendTurn({
         message: "",

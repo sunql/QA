@@ -1,15 +1,16 @@
 """Phase 6.4 Agent 注册种子脚本（幂等）。
 
-9 个 Agent 注册到 Agent Registry：
-- 7 个可运行（绑定 AGENT_DEFAULT_BINDINGS，Phase 6.4 验收「≥2 个 Agent 端到端可调用」）：
+Agent 清单与数量以本文件 `AGENT_SEEDS` 为准（下述为分组说明）：
+- 可运行 Agent（绑定 `_AGENT_DEFAULT_BINDINGS`，Phase 6.4 验收「≥2 个 Agent 端到端可调用」）：
     SUPPLIER_360_AGENT    → supplier_360 工具
     SUPPLIER_RISK_AGENT   → supplier_risk 工具
     GRAPH_REASONING_AGENT → graph_traverse 工具
+    DELIVERY_TRACKING_AGENT → delivery_tracking_query 工具（P5 到货跟踪）
     WIKI_SEARCH_AGENT     → wiki_search 工具     （feat-wiki-knowledge M8）
     WIKI_READ_AGENT       → wiki_read 工具       （feat-wiki-knowledge M8）
     WIKI_RULE_AGENT       → rule_evaluate 工具   （feat-wiki-knowledge M8）
     WIKI_COVERAGE_AGENT   → coverage_status 工具 （feat-wiki-knowledge M8）
-- 2 个元数据 Agent（仅注册展示，AGENT_DEFAULT_BINDINGS 无绑定 → 运行时返回 409 不可运行）：
+- 元数据 Agent（仅注册展示，`_AGENT_DEFAULT_BINDINGS` 无绑定 → 运行时返回 409 不可运行）：
     SUPPLIER_OTD_REPORT / PROCUREMENT_COPILOT
 
 独立可执行：`seedAgents` 自己补 tool config seed + registry warmUp（`_ensureToolRegistry`），
@@ -229,7 +230,7 @@ def _wikiAgent(code: str, name: str, description: str) -> dict[str, Any]:
     return _agent(code, name, description, domains=(), layers=())
 
 
-# 9 个 Agent 种子（与 AGENT_DEFAULT_BINDINGS 确定性绑定对齐：7 个可运行，2 个仅元数据）
+# Agent 种子（与 _AGENT_DEFAULT_BINDINGS 确定性绑定对齐：有绑定即可运行，无绑定仅元数据）
 AGENT_SEEDS: list[dict[str, Any]] = [
     _agent(
         "SUPPLIER_360_AGENT",

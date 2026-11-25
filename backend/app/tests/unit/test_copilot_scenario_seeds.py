@@ -58,6 +58,10 @@ def test_delivery_tracking_scenario_has_no_datasource_slot() -> None:
     seed = _deliveryTrackingSeed()
     keys = {slot["key"] for slot in seed["slot_schema"]}
     assert "datasourceId" not in keys
+
+
+def test_delivery_tracking_scenario_pins_renderer_and_agent() -> None:
+    seed = _deliveryTrackingSeed()
     assert seed["result_renderer"] == "delivery_tracking"
     assert seed["agent_code"] == "DELIVERY_TRACKING_AGENT"
 
@@ -79,6 +83,40 @@ def test_delivery_tracking_scenario_has_anchor_slots() -> None:
     assert {"monthsBack", "anchorDay", "periodIndex", "supplierKeys"} <= keys
 
 
+def test_delivery_tracking_scenario_has_hidden_date_slots() -> None:
+    """时间区间模式写入的 dateFrom/dateTo 必须存在且隐藏（否则区间静默失效）。"""
+    seed = _deliveryTrackingSeed()
+    keyed = {slot["key"]: slot for slot in seed["slot_schema"]}
+    for key in ("dateFrom", "dateTo"):
+        assert key in keyed, f"缺少隐藏日期槽位 {key}"
+        assert keyed[key].get("hidden") is True, key
+        assert keyed[key]["type"] == "text", key
+
+
+def test_delivery_tracking_chips_are_expected() -> None:
+    """4 条推荐 chip 的具体取值（近 12/3 月 + 本期/上期 24 日）。"""
+    seed = _deliveryTrackingSeed()
+    assert len(seed["chips"]) == 4
+    assert [c.get("monthsBack") for c in seed["chips"]] == [12, 3, None, None]
+    assert [c.get("anchorDay") for c in seed["chips"]] == [None, None, 24, 24]
+    assert [c.get("periodIndex") for c in seed["chips"]] == [None, None, 0, -1]
+
+
+def test_delivery_tracking_slot_keys_are_tool_input_properties() -> None:
+    """场景槽位 key ⊆ delivery_tracking_query 的 input_schema 属性。
+
+    工具声明 ``additionalProperties: false``——多出一个槽位 key 就意味着
+    后端渲染的参数必然被工具拒绝。这是场景↔工具最有价值的一道交叉守卫。
+    """
+    from scripts.seed_agent_tool_configs import TOOL_SEEDS
+
+    seed = _deliveryTrackingSeed()
+    tool = next(t for t in TOOL_SEEDS if t["name"] == "delivery_tracking_query")
+    properties = set(tool["input_schema"]["properties"])
+    extra = {slot["key"] for slot in seed["slot_schema"]} - properties
+    assert not extra, f"场景槽位不在工具 input_schema 中：{sorted(extra)}"
+
+
 def test_delivery_tracking_agent_seeded() -> None:
     """Agent 已登记且默认绑定到货跟踪工具。"""
     from scripts.seed_agents import _AGENT_DEFAULT_BINDINGS, AGENT_SEEDS
@@ -87,6 +125,20 @@ def test_delivery_tracking_agent_seeded() -> None:
     assert _AGENT_DEFAULT_BINDINGS["DELIVERY_TRACKING_AGENT"] == "delivery_tracking_query"
     codes = {a["agent_code"] for a in AGENT_SEEDS}
     assert "DELIVERY_TRACKING_AGENT" in codes
+
+
+def test_delivery_tracking_agent_profile_seeded() -> None:
+    """编排 profile：绑定 delivery_tracking_query，预算上限符合约定。"""
+    from scripts.seed_procurement_agent_profiles import PROFILE_SEEDS
+
+    instructions, tools, maxIterations, maxToolCalls = PROFILE_SEEDS[
+        "DELIVERY_TRACKING_AGENT"
+    ]
+    assert "delivery_tracking_query" in tools
+    assert maxIterations == 12
+    assert maxToolCalls == 18
+    assert "delivery_tracking_query" in instructions
+    assert "不要" in instructions  # 结构化数据由前端渲染，文字不复述数字
 
 
 def test_result_renderer_whitelist_includes_delivery_tracking() -> None:

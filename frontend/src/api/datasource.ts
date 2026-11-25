@@ -105,13 +105,16 @@ export async function startIntrospectJob(
 
 // 查询内省任务进度。后端只读内存态，正常毫秒级返回 ⇒ 用默认短超时；
 // 「正常进行中不判超时」由调用方的轮询逻辑保证（连续失败才判中断）。
+//
+// silentErrors：轮询失联时拦截器不再逐次弹「网络异常」toast —— 由调用方在
+// 连续失败达到阈值时只提示一次「连接中断」，避免 5 次失败弹 5 次 + 页面提示重复。
 export async function getIntrospectJob(
   id: number,
   jobId: string,
 ): Promise<IntrospectJob> {
   const res = await httpClient.get<IntrospectJob>(
     `${BASE}/${id}/introspect-jobs/${jobId}`,
-    { timeout: REQUEST_TIMEOUT_MS },
+    { timeout: REQUEST_TIMEOUT_MS, silentErrors: true },
   );
   return res.data;
 }

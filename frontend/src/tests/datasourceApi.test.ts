@@ -156,8 +156,10 @@ describe("api/datasource", () => {
       data: { jobId: "abc", status: "running", total: 860, completed: 200, error: null },
     });
     const job = await getIntrospectJob(11, "abc");
+    // silentErrors：轮询失败由页面按「连续 5 次」统一提示，拦截器不得逐次弹 toast。
     expect(httpMock.get).toHaveBeenCalledWith("/datasources/11/introspect-jobs/abc", {
       timeout: expect.any(Number),
+      silentErrors: true,
     });
     expect(job.completed).toBe(200);
     expect(job.total).toBe(860);

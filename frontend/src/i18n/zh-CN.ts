@@ -2150,6 +2150,7 @@ export const zhCN = {
   introspectProgress: "正在缓存 schema：{done}/{total} 张表",
   introspectFailed: "缓存失败，请检查数据源连接",
   introspectConnectionLost: "与服务器连接中断，请检查网络后重试",
+  introspectExpired: "内省任务已失效，请重新发起",
   layers: {
     action: "数据层分布",
     title: "数据层分布 — {{name}}",

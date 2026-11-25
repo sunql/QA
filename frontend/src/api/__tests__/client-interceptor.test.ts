@@ -41,6 +41,12 @@ function makeRejectingAdapter(status: number, data: unknown) {
   };
 }
 
+/** 造一个网络异常式 adapter：没有 HTTP 响应（status 0），模拟断网 / 超时。 */
+function makeNetworkErrorAdapter() {
+  return (config: InternalAxiosRequestConfig) =>
+    Promise.reject(new AxiosError("Network Error", AxiosError.ERR_NETWORK, config));
+}
+
 /** 持久层键名从 store 自己取（单一事实源，不在测试里复写字面量）。 */
 const PERSIST_KEY = useAuthStore.persist.getOptions().name ?? "";
 const EXPIRED_TOKEN = "fake-token-12345";
@@ -220,6 +226,37 @@ describe("client.ts response interceptor 401 vs 403（真链路）", () => {
       client.defaults.adapter = makeRejectingAdapter(404, { detail: { code: "NOT_FOUND" } });
 
       await expect(client.get("/datasources/11")).rejects.toMatchObject({ status: 404 });
+
+      expect(errorMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // Important 1：轮询接口（introspect job 进度）失联时会连续失败多次。
+  // 拦截器若无条件弹 toast ⇒ 5 次失败弹 5 次「网络异常」，与页面自己的
+  // 「连接中断」提示重复。silentErrors 让调用方独占提示时机。
+  describe("silentErrors：请求级关闭全局错误 toast", () => {
+    it("silentErrors:true 的请求失败 ⇒ 不弹 toast（错误仍向上抛，调用方自行处理）", async () => {
+      const errorMock = vi.fn();
+      setMessageApi({ error: errorMock } as unknown as MessageInstance);
+      client.defaults.adapter = makeNetworkErrorAdapter();
+
+      await expect(
+        client.get("/datasources/11/introspect-jobs/abc", { silentErrors: true })
+      ).rejects.toMatchObject({ status: 0 });
+
+      expect(errorMock).not.toHaveBeenCalled();
+    });
+
+    // 对照：同一 URL、同一个网络异常，但不带 silentErrors ⇒ 必须弹。
+    // 否则「不弹」的断言在「拦截器整体不弹任何 toast」的坏实现下也恒真（空集假通过）。
+    it("对照：不带 silentErrors 的同一请求失败仍然弹 toast", async () => {
+      const errorMock = vi.fn();
+      setMessageApi({ error: errorMock } as unknown as MessageInstance);
+      client.defaults.adapter = makeNetworkErrorAdapter();
+
+      await expect(
+        client.get("/datasources/11/introspect-jobs/abc")
+      ).rejects.toMatchObject({ status: 0 });
 
       expect(errorMock).toHaveBeenCalledTimes(1);
     });

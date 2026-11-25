@@ -171,6 +171,14 @@ class DataSourceInactiveError(ConflictError):
     """数据源已停用（is_active=false）仍被消费链路显式引用（C 方案 fail-closed）。"""
 
 
+class InternalInvariantError(DomainError):
+    """服务端不变式被破坏（**不是**用户输入问题 ⇒ 映射 5xx，而非 400）。
+
+    典型场景：结果装配时三态计数不自洽。用户看到 400 会以为参数写错，
+    实际是服务端口径出错 ⇒ 必须走 5xx，避免把内部缺陷伪装成调用方错误。
+    """
+
+
 class FeatureRuleNotFoundError(NotFoundError):
     """Feature rule 不存在（spec §9.2）。"""
 
@@ -240,4 +248,7 @@ def statusForError(exc: DomainError) -> int:
         return 403
     if isinstance(exc, LLMUnavailableError):
         return 503
+    if isinstance(exc, InternalInvariantError):
+        # 服务端不变式破坏：不是调用方的参数错误 ⇒ 5xx（此前落 400 误导用户）。
+        return 500
     return 400

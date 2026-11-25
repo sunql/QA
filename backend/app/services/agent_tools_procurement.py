@@ -312,37 +312,29 @@ async def _resolveBusinessDatasource(
 
 
 def _adapterFor(dsId: int, ds: DataSource):
-    """业务库 adapter 获取——**惰性导入** business_db_pool。
+    """业务库 adapter 获取——转发到中性模块（惰性导入 `business_db_pool`）。
 
     保持模块级 import 图不把 business_db_pool 拉进 CI 收集前闭包
     （其模块级 re.compile 会被 import 期钩子守卫 fail-closed，见
     test_ci_conftest_chain 守卫的判定语义）。
     """
-    from app.infrastructure.business_db_pool import get_adapter
+    from app.services.procurement_datasource import adapterFor
 
-    return get_adapter(dsId, ds)
+    return adapterFor(dsId, ds)
 
 
 def _ensureActive(ds: DataSource) -> None:
-    """停用源 fail-closed——**C 方案已进 main ⇒ 切共享 helper**（纵深二次过闸保留）。
-
-    handler 侧在 resolve 之后再显式调一次（纵深）：monkeypatch/旁路注入的 ds
-    也要过这道闸。
-    """
-    from app.services.datasource_service import ensureDatasourceActive
+    """停用源 fail-closed——共享 helper（纵深二次过闸保留）。"""
+    from app.services.procurement_datasource import ensureDatasourceActive
 
     ensureDatasourceActive(ds)
 
 
 async def _loadActiveDatasource(session: AsyncSession, datasourceId: int) -> DataSource:
-    """按 id 取数据源（待到货固定 THBI）；不存在或停用 fail-closed。"""
-    ds = (
-        await session.execute(select(DataSource).where(DataSource.id == datasourceId))
-    ).scalars().first()
-    if ds is None:
-        raise ConflictError(f"数据源不存在（id={datasourceId}）")
-    _ensureActive(ds)
-    return ds
+    """按 id 取数据源（待到货固定 THBI）；不存在或停用统一 409（fail-closed）。"""
+    from app.services.procurement_datasource import loadActiveDatasource
+
+    return await loadActiveDatasource(session, datasourceId)
 
 
 def _camelHistoryRow(row: dict[str, Any]) -> dict[str, Any]:

@@ -9,11 +9,21 @@ from __future__ import annotations
 
 import calendar
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.services.ontology_binding_resolver import ResolvedBinding
 
 #: 单次只读查询的行数上限（防大结果集拖垮只读适配器）。
 MAX_LIMIT = 50
 MONTHS_BACK_MIN, MONTHS_BACK_MAX = 1, 36
+
+#: 行级欠交量上限（spec 4.4）：≥ 1e6 判为源侧录入错误的脏行，剔除并显式计数。
+#:
+#: ⚠ 判据是**欠交量**（`PO_QTY - RECEIVED`），不是**订购量**：大额订购是真实业务
+#: （spec 4.2 明确拒绝按订购量剔行）。待到货与到货跟踪两个工具**共用**本常量，
+#: 两侧各写一份会让「同口径」的承诺慢慢漂移。
+OPEN_QTY_SANITY_MAX = 1_000_000
 
 
 def escapeLiteral(value: str) -> str:
@@ -21,15 +31,35 @@ def escapeLiteral(value: str) -> str:
     return value.replace("'", "''")
 
 
-def minusMonths(base: date, months: int) -> date:
-    """date - N 月（无 dateutil 依赖；月末夹齐：11-30 减 3 月 = 08-31）。"""
-    year = base.year
-    month = base.month - months
-    while month <= 0:
-        month += 12
-        year -= 1
+def shiftMonths(base: date, months: int) -> date:
+    """date 偏移 N 月（无 dateutil 依赖；月末夹齐：11-30 减 3 月 = 08-31；N 可负）。"""
+    total = base.year * 12 + (base.month - 1) + months
+    year, monthIndex = divmod(total, 12)
+    month = monthIndex + 1
     day = min(base.day, calendar.monthrange(year, month)[1])
     return date(year, month, day)
+
+
+def minusMonths(base: date, months: int) -> date:
+    """date - N 月（`shiftMonths` 的减法形态，保留既有调用点语义）。"""
+    return shiftMonths(base, -months)
+
+
+def monthsBackWindow(today: date, monthsBack: int) -> tuple[date, date]:
+    """近 N 月窗口：`[today - N 月, today)`（左闭右开，spec 4.3）。"""
+    return minusMonths(today, monthsBack), today
+
+
+def dateWindowPredicate(column: str, dateFrom: date, dateTo: date) -> str:
+    """时间窗谓词：`column` 落在 `[dateFrom, dateTo)`（左闭右开，spec 4.3）。
+
+    两个采购工具共用同一构造：待到货曾是闭区间、到货跟踪是左闭右开 ⇒
+    末日订单在两者间被算进/算不进，同一份数据两个数字。
+    """
+    return (
+        f"{column} >= DATE '{dateFrom.isoformat()}'"
+        f" AND {column} < DATE '{dateTo.isoformat()}'"
+    )
 
 
 def colValue(row: Any, name: str) -> Any:
@@ -94,3 +124,37 @@ class SqlDialect:
         if name not in ("mysql", "oracle"):
             name = "oracle"
         return SqlDialect(name)
+
+
+def receiptAggregate(
+    receipt: ResolvedBinding,
+    *,
+    includeItemDesc: bool = False,
+    includeRcvDate: bool = False,
+    poNoSubquery: str | None = None,
+) -> str:
+    """收货子查询：按 PO_NO+PO_LINE_NO 聚合已收量（两个采购工具**共用**）。
+
+    - `includeItemDesc` / `includeRcvDate`：明细展示用的物料名与最后收货日
+      （只有到货跟踪需要；待到货只取数量 ⇒ 聚合并集更小）；
+    - `poNoSubquery`：`SELECT ... PO_NO FROM <订单行> WHERE <窗口>`，把聚合
+      收敛到窗口内出现过的订单（semi-join）——否则每次汇总都全表 GROUP BY
+      整张收货明细（欢迎态热路径）。
+    """
+    poNo = receipt.column("PO_NO")
+    poLine = receipt.column("PO_LINE_NO")
+    selects = [
+        f"{poNo} AS PO_NO",
+        f"{poLine} AS PO_LINE_NO",
+        f"SUM({receipt.column('RCV_QTY_STU')}) AS RECEIVED_QTY",
+    ]
+    if includeItemDesc:
+        selects.append(f"MAX({receipt.column('ITEM_DESC')}) AS ITEM_DESC")
+    if includeRcvDate:
+        selects.append(f"MAX({receipt.column('RCV_DATE')}) AS RECEIPT_DATE")
+    where = "" if poNoSubquery is None else f" WHERE {poNo} IN ({poNoSubquery})"
+    return (
+        f"(SELECT {', '.join(selects)}"
+        f" FROM {receipt.qualifiedTable()}{where}"
+        f" GROUP BY {poNo}, {poLine})"
+    )

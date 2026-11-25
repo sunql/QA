@@ -1,6 +1,6 @@
 import axios from "axios";
 import { httpClient } from "./client";
-import { API_BASE_URL, REQUEST_TIMEOUT_MS } from "../config";
+import { API_BASE_URL, LONG_RUNNING_TIMEOUT_MS, REQUEST_TIMEOUT_MS } from "../config";
 import { useAuthStore } from "../stores/authStore";
 import type {
   DataSource,
@@ -63,12 +63,17 @@ export async function getDatasourceSchema(
 
 // 触发数据源 schema 发现并写缓存（数据未变化时复用缓存），返回全量 schema。
 // schema 缺省 = 连接用户默认 owner。
+//
+// 超时必须用 LONG_RUNNING_TIMEOUT_MS：全库内省是重操作（Oracle 大 owner 可达数分钟），
+// 走默认 30s 会被 axios 掐断 ⇒ status=0 ⇒ 前端误报「网络异常，请稍后重试」
+// （2026-11-25 本地实测 LC019999）。与 ontology 批量重操作同口径。
 export async function introspectDatasource(
   id: number,
   schema?: string | null,
 ): Promise<SchemaIntrospectResponse> {
   const res = await httpClient.post<SchemaIntrospectResponse>(`${BASE}/${id}/introspect`, undefined, {
     params: schema ? { schema } : undefined,
+    timeout: LONG_RUNNING_TIMEOUT_MS,
   });
   return res.data;
 }

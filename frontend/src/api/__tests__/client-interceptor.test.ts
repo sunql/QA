@@ -21,7 +21,8 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { AxiosError } from "axios";
 import type { InternalAxiosRequestConfig } from "axios";
-import { createHttpClient } from "../client";
+import { createHttpClient, setMessageApi } from "../client";
+import type { MessageInstance } from "antd/es/message/interface";
 import { useAuthStore } from "../../stores/authStore";
 
 /** 造一个拒绝式 adapter：模拟后端返回给定 status + data（config.url 由 axios 填充）。 */
@@ -195,6 +196,32 @@ describe("client.ts response interceptor 401 vs 403（真链路）", () => {
       client.defaults.adapter = makeRejectingAdapter(403, { detail: { code: "FORBIDDEN" } });
       await expect(client.get("/anything")).rejects.toMatchObject({ status: 403 });
       expect(assignedHrefs).toEqual([]);
+    });
+  });
+
+  describe("GET /datasources/{id}/schema 的 404：预期业务信号，不弹全局 toast", () => {
+    // 2026-11-25 本地实测：缓存 Schema 流程里 ImportWizard 先 GET /schema，
+    // 404 = 「尚未缓存」⇒ 调用方据此触发 introspect。拦截器若把 404 弹成
+    // 「请求失败 (HTTP 404)」，用户看到的是报错，而流程本身是正常的。
+    it("schema 404 不弹 toast（错误仍向上抛，调用方靠 isNotFound 判定）", async () => {
+      const errorMock = vi.fn();
+      setMessageApi({ error: errorMock } as unknown as MessageInstance);
+      client.defaults.adapter = makeRejectingAdapter(404, { detail: { code: "NOT_FOUND" } });
+
+      await expect(client.get("/datasources/11/schema", { params: { schema: "LC019999" } }))
+        .rejects.toMatchObject({ status: 404 });
+
+      expect(errorMock).not.toHaveBeenCalled();
+    });
+
+    it("对照：其他 URL 的 404 仍然弹 toast（白名单不是全局静默）", async () => {
+      const errorMock = vi.fn();
+      setMessageApi({ error: errorMock } as unknown as MessageInstance);
+      client.defaults.adapter = makeRejectingAdapter(404, { detail: { code: "NOT_FOUND" } });
+
+      await expect(client.get("/datasources/11")).rejects.toMatchObject({ status: 404 });
+
+      expect(errorMock).toHaveBeenCalledTimes(1);
     });
   });
 });

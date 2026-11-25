@@ -20,6 +20,7 @@ vi.mock("axios", () => ({
   },
 }));
 
+import { LONG_RUNNING_TIMEOUT_MS } from "../config";
 import {
   listDataSources,
   getDataSource,
@@ -120,6 +121,23 @@ describe("api/datasource", () => {
     const call = httpMock.post.mock.calls[0];
     expect(call[0]).toBe("/datasources/1/introspect");
     expect(call[2].params).toEqual({ schema: "THBI" });
+  });
+
+  it("introspectDatasource 必须用长超时 —— 全库内省 > 30s 会被掐断成「网络异常」", async () => {
+    // 2026-11-25 本地实测：Oracle 大 owner（如 LC019999）全库内省超过默认
+    // REQUEST_TIMEOUT_MS(30s) ⇒ axios status=0 ⇒ 前端误报「网络异常，请稍后重试」。
+    // 与 ontology 批量重操作同口径，改用 LONG_RUNNING_TIMEOUT_MS(280s)。
+    httpMock.post.mockResolvedValue({ data: schemaResponse });
+    await introspectDatasource(1);
+    const call = httpMock.post.mock.calls[0];
+    expect(call[2]?.timeout).toBe(LONG_RUNNING_TIMEOUT_MS);
+
+    // 带 schema 时 params 与 timeout 并存（不能因加 timeout 丢掉 params）
+    httpMock.post.mockClear();
+    await introspectDatasource(1, "LC019999");
+    const call2 = httpMock.post.mock.calls[0];
+    expect(call2[2].params).toEqual({ schema: "LC019999" });
+    expect(call2[2].timeout).toBe(LONG_RUNNING_TIMEOUT_MS);
   });
 
   it("startIntrospectJob POST /datasources/:id/introspect-jobs（带 schema）", async () => {

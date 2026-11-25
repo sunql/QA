@@ -117,10 +117,14 @@ class AgentToolRegistry:
         层无关工具允许 `data_layers=()`（回退对象粒度，旧行为兼容）。
         """
         if not tool.data_object or tool.data_object != tool.data_object.strip().upper():
-            raise ValueError(f"tool {tool.name}: data_object 必须非空全大写，got {tool.data_object!r}")
+            raise ValueError(
+                f"tool {tool.name}: data_object 必须非空全大写，got {tool.data_object!r}"
+            )
         for layer in tool.data_layers:
             if not layer or layer != layer.strip().upper():
-                raise ValueError(f"tool {tool.name}: data_layers 元素必须非空全大写，got {layer!r}")
+                raise ValueError(
+                    f"tool {tool.name}: data_layers 元素必须非空全大写，got {layer!r}"
+                )
 
     def validate(self) -> None:
         """全量自检（构建完成后兜底；register 已逐条校验）。"""
@@ -165,7 +169,9 @@ def _supplierKeyArgs(raw: str, specialized: Callable[[str], str | None]) -> dict
     return _keyOrNone(specialized(raw) or extractSupplierAnyKey(raw))
 
 
-async def _supplier360Handler(session: AsyncSession, args: dict, ctx: AgentToolContext) -> ToolResult:
+async def _supplier360Handler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
     # Phase 6.x：透传字符串 supplier_code（THBI '10105' 或合成 'SUP000001'），
     # service 内 _resolveSupplier 同时支持 enterprise_code/enterprise_key 双路查询。
     # 不再做 int() 强制转换（THBI 业务码 '10105' int() 后变 10105，无法命中 hash）。
@@ -180,7 +186,9 @@ async def _supplier360Handler(session: AsyncSession, args: dict, ctx: AgentToolC
     )
 
 
-async def _supplierRiskHandler(session: AsyncSession, args: dict, ctx: AgentToolContext) -> ToolResult:
+async def _supplierRiskHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
     # Phase 6.x：透传字符串 supplier_code（详见 _supplier360Handler 注释）。
     key = args["key"]
     read = await SupplierRiskService().assess(
@@ -197,7 +205,9 @@ async def _supplierRiskHandler(session: AsyncSession, args: dict, ctx: AgentTool
     )
 
 
-async def _graphTraverseHandler(session: AsyncSession, args: dict, ctx: AgentToolContext) -> ToolResult:
+async def _graphTraverseHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
     service = GraphTraversalService()
     traversal = await service.traverseForChat(str(args["key"]))
     return ToolResult(
@@ -211,7 +221,9 @@ async def _graphTraverseHandler(session: AsyncSession, args: dict, ctx: AgentToo
 # ---------------------------------------------------------------------------
 
 
-async def _nl2sqlDefaultHandler(session: AsyncSession, args: dict, ctx: AgentToolContext) -> ToolResult:
+async def _nl2sqlDefaultHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
     """NL2SQL handler：业务人员配的自然语言查询经 NL2SqlService 翻译执行。
 
     v1 仅暴露入口；完整 NL2SQL 流水线（ontology class 收集 + model 解析 + SQL
@@ -264,8 +276,8 @@ ARG_EXTRACTORS: dict[str, ArgExtractor] = {
     "supplier_graph_key": lambda raw: _supplierKeyArgs(raw, extractSupplierGraphKey),
     # M3-1：检索类工具对齐 wiki_text 模式——整条输入即检索词（chat 前奏语义）；
     # 结构化 args（编排路）不走 extractor（handler 直接读 args dict）。
-    "material_search": lambda raw: {"q": raw.strip()} if isinstance(raw, str) and raw.strip() else None,
-    "supplier_search": lambda raw: {"q": raw.strip()} if isinstance(raw, str) and raw.strip() else None,
+    "material_search": lambda raw: ({"q": raw.strip()} if isinstance(raw, str) and raw.strip() else None),
+    "supplier_search": lambda raw: ({"q": raw.strip()} if isinstance(raw, str) and raw.strip() else None),
     # 采购历史：chat 前奏只抽 supplier key（materialKey/monthsBack 走结构化 args）。
     "purchase_history_query": lambda raw: (
         {"supplierKey": k} if (k := _supplierKeyArgs(raw, extractSupplierAnyKey)) else None
@@ -316,18 +328,26 @@ class AgentToolAssembly:
         ext_kind = config_row.arg_extractor_kind
 
         if kind not in _VALID_HANDLER_REFS:
-            raise ValueError(f"agent_tool_config {config_row.name}: handler_kind 不支持: {kind!r}")
+            raise ValueError(
+                f"agent_tool_config {config_row.name}: handler_kind 不支持: {kind!r}"
+            )
         if ref not in _VALID_HANDLER_REFS[kind]:
-            raise ValueError(f"agent_tool_config {config_row.name}: handler_ref {ref!r} 不在 {kind} 白名单")
+            raise ValueError(
+                f"agent_tool_config {config_row.name}: handler_ref {ref!r} 不在 {kind} 白名单"
+            )
         if ext_kind not in ARG_EXTRACTORS:
-            raise ValueError(f"agent_tool_config {config_row.name}: arg_extractor_kind {ext_kind!r} 不存在")
+            raise ValueError(
+                f"agent_tool_config {config_row.name}: arg_extractor_kind {ext_kind!r} 不存在"
+            )
 
         handlers: dict[str, AgentHandler] = {**BUILTIN_HANDLERS, **NL2SQL_HANDLERS}
         return AgentTool(
             name=config_row.name,
             description=config_row.description or "",
             data_object=_normalizeDataObject(config_row.data_object),
-            data_layers=tuple(layer.strip().upper() for layer in (config_row.data_layers or [])),
+            data_layers=tuple(
+                layer.strip().upper() for layer in (config_row.data_layers or [])
+            ),
             input_schema=config_row.input_schema or {},
             arg_extractor=ARG_EXTRACTORS[ext_kind],
             handler=handlers[ref],

@@ -69,24 +69,33 @@ def _camelRow(row: Any) -> dict[str, Any]:
     }
 
 
-async def materialSearchHandler(session: AsyncSession, args: dict, ctx: AgentToolContext) -> ToolResult:
+async def materialSearchHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
     """物料检索：编码/名称/统一键 → 标准物料 + 跨系统映射。"""
     q = str(args.get("q") or "").strip()
     limit = max(1, min(int(args.get("limit") or 10), _MAX_LIMIT))
     if not q:
         return ToolResult(data={"materials": []}, answer="未命中：请提供物料编码或名称关键词。")
-    rows = await EntityMappingService().searchMappings(session, q=q, entityType="MATERIAL", limit=limit)
+    rows = await EntityMappingService().searchMappings(
+        session, q=q, entityType="MATERIAL", limit=limit
+    )
     materials = [_camelRow(r) for r in rows]
     if not materials:
         return ToolResult(data={"materials": []}, answer=f"未命中关键词「{q}」的物料。")
-    head = "、".join(f"{m['enterpriseCode']}（{m['name'] or m['enterpriseCode']}）" for m in materials[:3])
+    head = "、".join(
+        f"{m['enterpriseCode']}（{m['name'] or m['enterpriseCode']}）"
+        for m in materials[:3]
+    )
     return ToolResult(
         data={"materials": materials, "total": len(materials)},
         answer=f"命中 {len(materials)} 个物料：{head}" + ("…" if len(materials) > 3 else ""),
     )
 
 
-async def supplierSearchHandler(session: AsyncSession, args: dict, ctx: AgentToolContext) -> ToolResult:
+async def supplierSearchHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
     """供应商检索：materialKey ⇒ 图路（SUPPLIES 反查）；否则名称/编码检索。"""
     materialKey = str(args.get("materialKey") or "").strip()
     q = str(args.get("q") or "").strip()
@@ -107,17 +116,25 @@ async def supplierSearchHandler(session: AsyncSession, args: dict, ctx: AgentToo
         )
 
     if q:
-        rows = await EntityMappingService().searchMappings(session, q=q, entityType="SUPPLIER", limit=limit)
+        rows = await EntityMappingService().searchMappings(
+            session, q=q, entityType="SUPPLIER", limit=limit
+        )
         suppliers = [_camelRow(r) for r in rows]
         if not suppliers:
             # 名称问法兜底：用户问的是「哪个供应商能供 <物料名>」时，关键词是**物料名**，
             # 按 SUPPLIER 检索必然 0 命中。旧行为把缺口甩回给用户（"请提供物料编码"），
             # 2026-11-21 实测「FE-5顶丝M8×1×15」即为此类：物料名可解析到编码，
             # 图里也有 4 家在册供应商 ⇒ 名称→编码→供应关系是工具该自己走的一步。
-            resolved, materialMatches = await _suppliersByMaterialName(session, q, limit)
+            resolved, materialMatches = await _suppliersByMaterialName(
+                session, q, limit
+            )
             if resolved:
-                head = "、".join(f"{s['code']}（{s['name'] or s['code']}）" for s in resolved[:3])
-                materialText = "、".join(f"{m['code']}（{m['name']}）" for m in materialMatches[:3])
+                head = "、".join(
+                    f"{s['code']}（{s['name'] or s['code']}）" for s in resolved[:3]
+                )
+                materialText = "、".join(
+                    f"{m['code']}（{m['name']}）" for m in materialMatches[:3]
+                )
                 return ToolResult(
                     data={
                         "suppliers": resolved,
@@ -132,7 +149,9 @@ async def supplierSearchHandler(session: AsyncSession, args: dict, ctx: AgentToo
                     ),
                 )
             if materialMatches:
-                materialText = "、".join(f"{m['code']}（{m['name']}）" for m in materialMatches[:3])
+                materialText = "、".join(
+                    f"{m['code']}（{m['name']}）" for m in materialMatches[:3]
+                )
                 return ToolResult(
                     data={
                         "suppliers": [],
@@ -150,7 +169,8 @@ async def supplierSearchHandler(session: AsyncSession, args: dict, ctx: AgentToo
                 answer=f"未命中关键词「{q}」的供应商或物料。",
             )
         head = "、".join(
-            f"{s['enterpriseCode']}（{s['name'] or s['enterpriseCode']}）" for s in suppliers[:3]
+            f"{s['enterpriseCode']}（{s['name'] or s['enterpriseCode']}）"
+            for s in suppliers[:3]
         )
         return ToolResult(
             data={"suppliers": suppliers, "via": "entity_mapping", "total": len(suppliers)},
@@ -264,7 +284,9 @@ def _minusMonths(base: date, months: int) -> date:
     return date(year, month, day)
 
 
-async def _resolveBusinessDatasource(session: AsyncSession, ctx: AgentToolContext) -> DataSource:
+async def _resolveBusinessDatasource(
+    session: AsyncSession, ctx: AgentToolContext
+) -> DataSource:
     """业务数据源解析：ctx 优先（编排/调用方绑定）⇒ 回退默认活跃业务源。
 
     **C 方案复用**：`ensureDatasourceActive`（停用源 ⇒ 409，fail-closed）。
@@ -272,17 +294,13 @@ async def _resolveBusinessDatasource(session: AsyncSession, ctx: AgentToolContex
     ds = getattr(ctx, "datasource", None)
     if ds is None:
         ds = (
-            (
-                await session.execute(
-                    select(DataSource)
-                    .where(DataSource.is_default.is_(True))
-                    .where(DataSource.is_active.is_(True))
-                    .limit(1)
-                )
+            await session.execute(
+                select(DataSource)
+                .where(DataSource.is_default.is_(True))
+                .where(DataSource.is_active.is_(True))
+                .limit(1)
             )
-            .scalars()
-            .first()
-        )
+        ).scalars().first()
     if ds is None:
         raise ConflictError("无可用业务数据源（默认活跃源缺失）")
     _ensureActive(ds)
@@ -378,7 +396,9 @@ def _camelQuotationRow(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def quotationQueryHandler(session: AsyncSession, args: dict, ctx: AgentToolContext) -> ToolResult:
+async def quotationQueryHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
     """报价查询（业务库只读）：supplierKey / materialKey / segmentYear 任一必填。"""
     supplierKey = str(args.get("supplierKey") or "").strip() or None
     materialKey = str(args.get("materialKey") or "").strip() or None
@@ -393,10 +413,8 @@ async def quotationQueryHandler(session: AsyncSession, args: dict, ctx: AgentToo
     _ensureActive(ds)
     adapter = _adapterFor(ds.id, ds)
     sql = buildQuotationSql(
-        supplierKey=supplierKey,
-        materialKey=materialKey,
-        segmentYear=segmentYear,
-        limit=limit,
+        supplierKey=supplierKey, materialKey=materialKey,
+        segmentYear=segmentYear, limit=limit,
         dialect=_PendingDialect.fromAdapter(adapter).name,
     )
     assertReadonlySql(sql)
@@ -413,7 +431,9 @@ async def quotationQueryHandler(session: AsyncSession, args: dict, ctx: AgentToo
     )
 
 
-async def policyComplianceHandler(session: AsyncSession, args: dict, ctx: AgentToolContext) -> ToolResult:
+async def policyComplianceHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
     """`policy_compliance_check`：把一条**结论/做法**拿去比对企业制度文档。
 
     P3 的用途（见评估文档）：Copilot 给出"数据结论"后，用本工具回答
@@ -424,7 +444,9 @@ async def policyComplianceHandler(session: AsyncSession, args: dict, ctx: AgentT
     """
     claim = str(args.get("claim") or args.get("question") or "").strip()
     if not claim:
-        return ToolResult(data={"evidence": []}, answer="请提供要核对的结论或做法（claim）。")
+        return ToolResult(
+            data={"evidence": []}, answer="请提供要核对的结论或做法（claim）。"
+        )
     user = await _resolveToolUser(session, ctx)
     if user is None:
         return ToolResult(
@@ -432,7 +454,9 @@ async def policyComplianceHandler(session: AsyncSession, args: dict, ctx: AgentT
             answer="无法核验文档密级（缺少用户身份）⇒ 不执行制度核对；请经带身份的入口使用。",
         )
     limit = int(args.get("topK") or args.get("limit") or 3)
-    evidence = await searchProcurementDocuments(session, user, query=claim, topK=max(1, min(limit, 10)))
+    evidence = await searchProcurementDocuments(
+        session, user, query=claim, topK=max(1, min(limit, 10))
+    )
     if not evidence:
         return ToolResult(
             data={"evidence": [], "compliant": None},
@@ -491,7 +515,9 @@ def buildQuotationCompareSql(itemCodes: list[str], segmentYear: int) -> str:
     )
 
 
-async def quotationCompareHandler(session: AsyncSession, args: dict, ctx: AgentToolContext) -> ToolResult:
+async def quotationCompareHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
     """`quotation_compare`：年度报价的确定性比价矩阵（零 LLM）。
 
     口径见 `services/procurement_quotation_compare` 模块文档：
@@ -527,7 +553,9 @@ async def quotationCompareHandler(session: AsyncSession, args: dict, ctx: AgentT
     assertReadonlySql(sql)
     rows = await adapter.execute_read_only(sql)
 
-    groups = buildComparison(quotesFromRows(rows), lowThreshold=low, highThreshold=high)
+    groups = buildComparison(
+        quotesFromRows(rows), lowThreshold=low, highThreshold=high
+    )
     if not groups:
         return ToolResult(
             data={"groups": [], "currency": "CNY", "priceBasis": "EX_TAX"},
@@ -584,7 +612,9 @@ async def procurementPolicySearchHandler(
             answer="无法核验文档密级（缺少用户身份）⇒ 不执行制度检索；请经带身份的入口使用。",
         )
     limit = int(args.get("limit") or 5)
-    evidence = await searchProcurementDocuments(session, user, query=question, topK=max(1, min(limit, 20)))
+    evidence = await searchProcurementDocuments(
+        session, user, query=question, topK=max(1, min(limit, 20))
+    )
     if not evidence:
         return ToolResult(
             data={"evidence": []},
@@ -644,7 +674,9 @@ async def contractDocumentSearchHandler(
     )
 
 
-async def purchaseHistoryHandler(session: AsyncSession, args: dict, ctx: AgentToolContext) -> ToolResult:
+async def purchaseHistoryHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
     """采购历史查询（业务库只读）：supplierKey 必填；汇总（COUNT/SUM/MIN/MAX/AVG
     价格区间）+ 明细两段确定性 SQL——经 SQL Guard + 业务 adapter，零 LLM。"""
     supplierKey = str(args.get("supplierKey") or "").strip()
@@ -662,11 +694,8 @@ async def purchaseHistoryHandler(session: AsyncSession, args: dict, ctx: AgentTo
     _ensureActive(ds)  # 纵深：旁路注入的停用源也拦（测试 stub 路径覆盖）
     adapter = _adapterFor(ds.id, ds)
     detailSql = buildPurchaseHistorySql(
-        supplierKey=supplierKey,
-        materialKey=materialKey,
-        monthsBack=monthsBack,
-        limit=limit,
-        today=today,
+        supplierKey=supplierKey, materialKey=materialKey,
+        monthsBack=monthsBack, limit=limit, today=today,
         dialect=_PendingDialect.fromAdapter(adapter).name,
     )
     since = _minusMonths(today, monthsBack)
@@ -762,7 +791,6 @@ class _PendingDialect:
             name = "oracle"
         return _PendingDialect(name)
 
-
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 #: 待到货查询的同日结果缓存：key = 全部过滤参数 + 数据源 + 当天日期，
@@ -794,11 +822,15 @@ class PendingDeliveryFilters:
             if value is None:
                 continue
             if not _DATE_RE.match(value):
-                raise ValidationError(f"{field} 日期格式应为 YYYY-MM-DD，收到 {value!r}")
+                raise ValidationError(
+                    f"{field} 日期格式应为 YYYY-MM-DD，收到 {value!r}"
+                )
             try:
                 date.fromisoformat(value)
             except ValueError as exc:
-                raise ValidationError(f"{field} 不是有效日期：{value!r}") from exc
+                raise ValidationError(
+                    f"{field} 不是有效日期：{value!r}"
+                ) from exc
 
     @staticmethod
     def _splitKeys(keys: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -813,7 +845,9 @@ class PendingDeliveryFilters:
         since = _minusMonths(today, max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX)))
         return f"ORDDAT_0 >= DATE '{since.isoformat()}'"
 
-    def joinSql(self, *, withSupplierName: bool = False, withItemDesc: bool = False) -> str:
+    def joinSql(
+        self, *, withSupplierName: bool = False, withItemDesc: bool = False
+    ) -> str:
         """过滤 JOIN（m/f）+ 名称字典 JOIN（b=供应商 / im=物料描述，LEFT 防脏码丢行）。
 
         im 与过滤用的 m 同表不同别名：过滤 JOIN 只在给了 materialKeys 时出现，
@@ -837,31 +871,36 @@ class PendingDeliveryFilters:
         """
         conds: list[str] = []
         if self.supplierKeys:
-            conds.append("Q.BPSNUM_0 IN (" + ", ".join(f"'{_esc(k)}'" for k in self.supplierKeys) + ")")
+            conds.append(
+                "Q.BPSNUM_0 IN ("
+                + ", ".join(f"'{_esc(k)}'" for k in self.supplierKeys) + ")"
+            )
         if self.materialKeys:
             codes, names = self._splitKeys(self.materialKeys)
             parts: list[str] = []
             if codes:
-                parts.append("Q.ITMREF_0 IN (" + ", ".join(f"'{_esc(k)}'" for k in codes) + ")")
+                parts.append(
+                    "Q.ITMREF_0 IN ("
+                    + ", ".join(f"'{_esc(k)}'" for k in codes) + ")"
+                )
             parts.extend(f"m.ITMDES1_0 LIKE '%{_esc(k)}%'" for k in names)
             conds.append("(" + " OR ".join(parts) + ")")
         if self.siteKeys:
             codes, names = self._splitKeys(self.siteKeys)
             parts = []
             if codes:
-                parts.append("Q.POHFCY_0 IN (" + ", ".join(f"'{_esc(k)}'" for k in codes) + ")")
+                parts.append(
+                    "Q.POHFCY_0 IN ("
+                    + ", ".join(f"'{_esc(k)}'" for k in codes) + ")"
+                )
             parts.extend(f"f.FCYNAM_0 LIKE '%{_esc(k)}%'" for k in names)
             conds.append("(" + " OR ".join(parts) + ")")
         return (" AND " + " AND ".join(conds)) if conds else ""
 
 
 def _pendingCacheKey(
-    *,
-    datasourceId: int,
-    monthsBack: int,
-    filters: PendingDeliveryFilters,
-    minOverdueDays: int | None,
-    today: date,
+    *, datasourceId: int, monthsBack: int, filters: PendingDeliveryFilters,
+    minOverdueDays: int | None, today: date,
 ) -> str:
     payload = {
         "ds": datasourceId,
@@ -885,58 +924,32 @@ def _cacheTtlSeconds(now: datetime) -> int:
 
 
 async def _loadPendingDeliveryData(
-    adapter,
-    *,
-    datasourceId: int,
-    monthsBack: int,
-    today: date,
-    filters: PendingDeliveryFilters,
-    minOverdueDays: int | None,
-    limit: int,
+    adapter, *, datasourceId: int, monthsBack: int, today: date,
+    filters: PendingDeliveryFilters, minOverdueDays: int | None, limit: int,
 ) -> dict[str, Any]:
     """三段查询（汇总/按供应商/TOP 行）+ 同日结果缓存。
 
     命中 ⇒ 不再查库（省 DB 与工具执行成本）；未命中 ⇒ 查询并写缓存。
     """
     cacheKey = _pendingCacheKey(
-        datasourceId=datasourceId,
-        monthsBack=monthsBack,
-        filters=filters,
-        minOverdueDays=minOverdueDays,
-        today=today,
+        datasourceId=datasourceId, monthsBack=monthsBack, filters=filters,
+        minOverdueDays=minOverdueDays, today=today,
     )
     hit = _PENDING_RESULT_CACHE.get(cacheKey)
     now = datetime.now()
     if hit is not None and hit[0] > now.timestamp():
         return hit[1]
 
-    summaryRows = await adapter.execute_read_only(
-        buildPendingDeliverySummarySql(
-            monthsBack=monthsBack,
-            today=today,
-            filters=filters,
-            dialect=_PendingDialect.fromAdapter(adapter).name,
-        )
-    )
-    supplierRows = await adapter.execute_read_only(
-        buildPendingDeliveryBySupplierSql(
-            monthsBack=monthsBack,
-            today=today,
-            limit=5,
-            filters=filters,
-            dialect=_PendingDialect.fromAdapter(adapter).name,
-        )
-    )
-    lineRows = await adapter.execute_read_only(
-        buildPendingDeliveryLinesSql(
-            monthsBack=monthsBack,
-            today=today,
-            filters=filters,
-            minOverdueDays=minOverdueDays,
-            limit=limit,
-            dialect=_PendingDialect.fromAdapter(adapter).name,
-        )
-    )
+    summaryRows = await adapter.execute_read_only(buildPendingDeliverySummarySql(
+        monthsBack=monthsBack, today=today, filters=filters,
+        dialect=_PendingDialect.fromAdapter(adapter).name))
+    supplierRows = await adapter.execute_read_only(buildPendingDeliveryBySupplierSql(
+        monthsBack=monthsBack, today=today, limit=5, filters=filters,
+        dialect=_PendingDialect.fromAdapter(adapter).name))
+    lineRows = await adapter.execute_read_only(buildPendingDeliveryLinesSql(
+        monthsBack=monthsBack, today=today, filters=filters,
+        minOverdueDays=minOverdueDays, limit=limit,
+        dialect=_PendingDialect.fromAdapter(adapter).name))
 
     summaryRow = summaryRows[0] if summaryRows else {}
     data: dict[str, Any] = {
@@ -963,10 +976,7 @@ async def _loadPendingDeliveryData(
 
 
 def buildPendingDeliverySummarySql(
-    *,
-    monthsBack: int,
-    today: date,
-    filters: PendingDeliveryFilters | None = None,
+    *, monthsBack: int, today: date, filters: PendingDeliveryFilters | None = None,
     dialect: str = "oracle",
 ) -> str:
     """欠交汇总（单语句）：行数 / 总欠交量 / 逾期行数 / 脏数据行数。
@@ -992,10 +1002,7 @@ FROM (
 
 
 def buildPendingDeliveryBySupplierSql(
-    *,
-    monthsBack: int,
-    today: date,
-    limit: int,
+    *, monthsBack: int, today: date, limit: int,
     filters: PendingDeliveryFilters | None = None,
     dialect: str = "oracle",
 ) -> str:
@@ -1071,16 +1078,11 @@ def buildPendingDeliveryCountSql(
 ) -> str:
     """欠交行总数（明细页分页用）——与 lines SQL 同口径（含脏数据阈值）。"""
     filters = filters or PendingDeliveryFilters()
-    where = (
-        " AND ".join(
-            [
-                filters.windowSql(monthsBack, today),
-                "Q.QTYSTU_0 - Q.RCPQTYSTU_0 > 0",
-                f"Q.QTYSTU_0 - Q.RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}",
-            ]
-        )
-        + filters.filterSql()
-    )
+    where = " AND ".join([
+        filters.windowSql(monthsBack, today),
+        "Q.QTYSTU_0 - Q.RCPQTYSTU_0 > 0",
+        f"Q.QTYSTU_0 - Q.RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}",
+    ]) + filters.filterSql()
     return f"""
 SELECT COUNT(*) AS TOTAL_ROWS
 FROM {_PENDING_TABLE} Q{filters.joinSql(withSupplierName=True, withItemDesc=True)}
@@ -1106,14 +1108,18 @@ def _camelPendingRow(row: dict[str, Any]) -> dict[str, Any]:
 
 async def _loadActiveDatasource(session: AsyncSession, datasourceId: int) -> DataSource:
     """按 id 取数据源（场景槽位指定）；不存在或停用 fail-closed。"""
-    ds = (await session.execute(select(DataSource).where(DataSource.id == datasourceId))).scalars().first()
+    ds = (
+        await session.execute(select(DataSource).where(DataSource.id == datasourceId))
+    ).scalars().first()
     if ds is None:
         raise ConflictError(f"数据源不存在（id={datasourceId}）")
     _ensureActive(ds)
     return ds
 
 
-async def pendingDeliveryHandler(session: AsyncSession, args: dict, ctx: AgentToolContext) -> ToolResult:
+async def pendingDeliveryHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
     """`pending_delivery_query`：欠交汇总 + 按供应商 + TOP 明细（三段只读 SQL）。
 
     脏数据（欠交量 ≥ 1e6 的源侧录入错误）剔除并在 summary.excludedRows 显式回报。
@@ -1152,7 +1158,8 @@ async def pendingDeliveryHandler(session: AsyncSession, args: dict, ctx: AgentTo
         )
     try:
         filters = PendingDeliveryFilters(
-            supplierKeys=_strList("supplierKeys") or ((legacySupplier,) if legacySupplier else ()),
+            supplierKeys=_strList("supplierKeys")
+            or ((legacySupplier,) if legacySupplier else ()),
             materialKeys=tuple(dict.fromkeys([*materialCodes, *resolvedCodes, *materialNames])),
             siteKeys=_strList("siteKeys"),
             dateFrom=args.get("dateFrom"),
@@ -1171,13 +1178,8 @@ async def pendingDeliveryHandler(session: AsyncSession, args: dict, ctx: AgentTo
     today = date.today()
 
     data = await _loadPendingDeliveryData(
-        adapter,
-        datasourceId=ds.id,
-        monthsBack=monthsBack,
-        today=today,
-        filters=filters,
-        minOverdueDays=minOverdueDays,
-        limit=limit,
+        adapter, datasourceId=ds.id, monthsBack=monthsBack, today=today,
+        filters=filters, minOverdueDays=minOverdueDays, limit=limit,
     )
     summary = data["summary"]
     bySupplier = data["bySupplier"]
@@ -1186,24 +1188,24 @@ async def pendingDeliveryHandler(session: AsyncSession, args: dict, ctx: AgentTo
     if openLines == 0:
         return ToolResult(
             data={
-                "via": "business_db",
-                "datasourceId": ds.id,
-                "summary": summary,
-                "bySupplier": [],
-                "topLines": [],
+                "via": "business_db", "datasourceId": ds.id,
+                "summary": summary, "bySupplier": [], "topLines": [],
             },
             answer=f"近 {monthsBack} 个月没有欠交订单行（全部已交清）。",
         )
 
-    topSuppliers = "、".join(f"{item['supplierCode']}({item['openQty']})" for item in bySupplier[:3])
-    excludedNote = f"；另有 {summary['excludedRows']} 行源侧数量异常已剔除" if summary["excludedRows"] else ""
+    topSuppliers = "、".join(
+        f"{item['supplierCode']}({item['openQty']})" for item in bySupplier[:3]
+    )
+    excludedNote = (
+        f"；另有 {summary['excludedRows']} 行源侧数量异常已剔除"
+        if summary["excludedRows"]
+        else ""
+    )
     return ToolResult(
         data={
-            "via": "business_db",
-            "datasourceId": ds.id,
-            "summary": summary,
-            "bySupplier": bySupplier,
-            "topLines": lineRows,
+            "via": "business_db", "datasourceId": ds.id,
+            "summary": summary, "bySupplier": bySupplier, "topLines": lineRows,
         },
         answer=(
             f"近 {monthsBack} 个月欠交 {openLines} 行、总量 {summary['openQty']}；"

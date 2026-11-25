@@ -52,8 +52,9 @@ class TestBuiltinRegistry:
         """T8 (feat-agent-tool-config-db)：硬编码 _buildRegistry / agent_tool_registry /
         AGENT_DEFAULT_BINDINGS 已删除，运行时改读 agent_tool_config_registry（lifespan warmUp）。"""
         import app.services.agent_tools as mod
-
-        assert not hasattr(mod, "_buildRegistry"), "_buildRegistry 已迁至 DB（agent_tool_config），不允许残留"
+        assert not hasattr(mod, "_buildRegistry"), (
+            "_buildRegistry 已迁至 DB（agent_tool_config），不允许残留"
+        )
         assert not hasattr(mod, "agent_tool_registry"), (
             "agent_tool_registry 单例已迁至 agent_tool_config_registry"
         )
@@ -68,71 +69,49 @@ class TestBuiltinRegistry:
         这里只登记）；本断言是「注册表表面」的契约，新增工具必须同步。
         """
         from app.services.agent_tools import BUILTIN_HANDLERS
-
         assert set(BUILTIN_HANDLERS.keys()) == {
-            "supplier_360",
-            "supplier_risk",
-            "graph_traverse",
-            "material_search",
-            "supplier_search",
-            "purchase_history_query",
-            "quotation_query",
-            "procurement_policy_search",
-            "contract_document_search",
-            "quotation_compare",
-            "policy_compliance_check",
-            "pending_delivery_query",
+            "supplier_360", "supplier_risk", "graph_traverse",
+            "material_search", "supplier_search", "purchase_history_query",
+            "quotation_query", "procurement_policy_search",
+            "contract_document_search", "quotation_compare",
+            "policy_compliance_check", "pending_delivery_query",
             "delivery_tracking_query",
-            "wiki_search",
-            "wiki_read",
-            "rule_evaluate",
-            "coverage_status",
+            "wiki_search", "wiki_read", "rule_evaluate", "coverage_status",
         }
 
     def test_ARG_EXTRACTORS_unchanged(self):
         from app.services.agent_tools import ARG_EXTRACTORS
-
         assert set(ARG_EXTRACTORS.keys()) == {
-            "supplier_key",
-            "supplier_risk_key",
-            "supplier_graph_key",
-            "material_search",
-            "supplier_search",
-            "purchase_history_query",
-            "quotation_query",
-            "procurement_policy_search",
-            "contract_document_search",
-            "quotation_compare",
-            "policy_compliance_check",
-            "pending_delivery_query",
+            "supplier_key", "supplier_risk_key", "supplier_graph_key",
+            "material_search", "supplier_search", "purchase_history_query",
+            "quotation_query", "procurement_policy_search",
+            "contract_document_search", "quotation_compare",
+            "policy_compliance_check", "pending_delivery_query",
             "delivery_tracking_query",
-            "wiki_text",
-            "wiki_no_args",
+            "wiki_text", "wiki_no_args",
         }
 
     def test_wiki_extractors_pass_text_through(self):
         """Wiki 指称没有固定格式：整条输入即检索词，不做正则切分。"""
         from app.services.agent_tools import ARG_EXTRACTORS
-
-        assert ARG_EXTRACTORS["wiki_text"]("  供应商准入要求  ") == {"query": "供应商准入要求"}
+        assert ARG_EXTRACTORS["wiki_text"]("  供应商准入要求  ") == {
+            "query": "供应商准入要求"
+        }
 
     def test_wiki_extractors_empty_input_is_422_not_empty_query(self):
         """空输入必须返回 None（运行时转 422），不能变成「检索空字符串」。"""
         from app.services.agent_tools import ARG_EXTRACTORS
-
         assert ARG_EXTRACTORS["wiki_text"]("   ") is None
 
     def test_wiki_no_args_extractor_never_blocks(self):
         """无参工具对任意输入都解析成功——覆盖率查询不该因为一句话为空而 422。"""
         from app.services.agent_tools import ARG_EXTRACTORS
-
         assert ARG_EXTRACTORS["wiki_no_args"]("") == {}
         assert ARG_EXTRACTORS["wiki_no_args"]("现在的覆盖度如何") == {}
 
     def test_arg_extractors_parse_supplier_key(self):
         """内置 extractor 与 intent_service 正则对齐，中文问句可解析出 key。"""
         from app.services.agent_tools import ARG_EXTRACTORS
-
         cases = {
             "supplier_key": "供应商 100001 的情况",
             "supplier_risk_key": "供应商 100001 的风险",
@@ -145,5 +124,4 @@ class TestBuiltinRegistry:
 
     def test_arg_extractor_returns_none_without_key(self):
         from app.services.agent_tools import ARG_EXTRACTORS
-
         assert ARG_EXTRACTORS["supplier_risk_key"]("今天天气怎么样") is None

@@ -7,6 +7,8 @@
     订单三态        全到货 / 部分到货 / 未到货
     订单到货率      全到货订单 / 总订单              （主指标）
     量级率          SUM(RECEIVED) / SUM(<PO_QTY>)    （参考，受超大额未到货行影响）
+    脏数据（4.4）   行级 OPEN_QTY >= 1e6 ⇒ 录入错误行：不进三态/量级率，
+                   只在 EXCLUDED_ROWS 计数（byOrder 明细保留，供人核查）
 
 窗口（spec 4.3，左闭右开）
 --------------------------
@@ -42,6 +44,11 @@ _MAX_ANCHOR_DAY = 28
 _MIN_MONTHS_BACK = 1
 _MAX_MONTHS_BACK = 36
 _MAX_LIMIT = 200
+#: 行级欠交量上限（spec 4.4）：≥ 1e6 判为源侧录入错误的脏行，剔除并显式计数。
+#:
+#: ⚠ 判据是**欠交量**（`PO_QTY - RECEIVED`），不是**订购量**：大额订购是真实业务
+#: （spec 4.2 明确拒绝按订购量剔行）。阈值与既有 `pending_delivery_query` 同源。
+_OPEN_QTY_SANITY_MAX = 1_000_000
 #: 支持的方言：默认现役 Oracle；场景槽位可切 MySQL 源（与待到货工具一致）。
 _SUPPORTED_DIALECTS = frozenset({"oracle", "mysql"})
 
@@ -239,6 +246,73 @@ def _andClauses(*clauses: str | None) -> str:
     return "".join(f" AND {clause}" for clause in clauses if clause)
 
 
+def _dirtyCondition(order: ResolvedBinding) -> str:
+    """行级 `OPEN_QTY >= 1e6` ⇒ 源侧录入错误条目（spec 4.4）。
+
+    判据用**欠交量**而非订购量：大额订购是真实业务大单（spec 4.2）。
+    """
+    poQty = order.column("PO_QTY")
+    return f"O.{poQty} - COALESCE(R.RECEIVED_QTY, 0) >= {_OPEN_QTY_SANITY_MAX}"
+
+
+def _orderAggregate(order: ResolvedBinding, receipt: ResolvedBinding, window: DeliveryTrackingWindow) -> str:
+    """订单级派生表：按 PO_NO 聚合，脏行不计入任何统计但单列 `DIRTY_LINES`。"""
+    dirty = _dirtyCondition(order)
+    poNo = order.column("PO_NO")
+    poLine = order.column("PO_LINE_NO")
+    orderQty = order.column("PO_QTY")
+    return f"""
+  SELECT O.{poNo} AS PO_NO,
+         SUM(CASE WHEN {dirty} THEN 0 ELSE 1 END) AS LINE_COUNT,
+         SUM(CASE WHEN {dirty} THEN 0 ELSE O.{orderQty} END) AS ORDER_QTY,
+         SUM(CASE WHEN {dirty} THEN 0
+                  ELSE COALESCE(R.RECEIVED_QTY, 0) END) AS RECEIVED_QTY,
+         SUM(CASE WHEN {dirty} THEN 0
+                  WHEN O.{orderQty} - COALESCE(R.RECEIVED_QTY, 0) > 0
+                  THEN 1 ELSE 0 END) AS OPEN_LINES,
+         SUM(CASE WHEN {dirty} THEN 0
+                  WHEN COALESCE(R.RECEIVED_QTY, 0) > 0
+                  THEN 1 ELSE 0 END) AS RECEIVED_LINES,
+         SUM(CASE WHEN {dirty} THEN 1 ELSE 0 END) AS DIRTY_LINES
+  FROM {order.qualifiedTable()} O
+  LEFT JOIN {_receiptAggregate(receipt)} R
+    ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
+  WHERE {_windowPredicate(order, window)}
+  GROUP BY O.{poNo}"""
+
+
+def _supplierOrderAggregate(
+    order: ResolvedBinding,
+    receipt: ResolvedBinding,
+    window: DeliveryTrackingWindow,
+    supplierFilter: str,
+) -> str:
+    """供应商 × 订单派生表（脏行口径同 `_orderAggregate`）。"""
+    dirty = _dirtyCondition(order)
+    supplierCode = order.column("SUPPLIER_CODE")
+    poNo = order.column("PO_NO")
+    poLine = order.column("PO_LINE_NO")
+    orderQty = order.column("PO_QTY")
+    return f"""
+  SELECT O.{supplierCode} AS SUPPLIER_CODE, O.{poNo} AS PO_NO,
+         SUM(CASE WHEN {dirty} THEN 0 ELSE 1 END) AS LINE_COUNT,
+         SUM(CASE WHEN {dirty} THEN 0 ELSE O.{orderQty} END) AS ORDERED_QTY,
+         SUM(CASE WHEN {dirty} THEN 0
+                  ELSE COALESCE(R.RECEIVED_QTY, 0) END) AS RECEIVED_QTY,
+         SUM(CASE WHEN {dirty} THEN 0
+                  WHEN O.{orderQty} - COALESCE(R.RECEIVED_QTY, 0) > 0
+                  THEN 1 ELSE 0 END) AS OPEN_LINES,
+         SUM(CASE WHEN {dirty} THEN 0
+                  WHEN COALESCE(R.RECEIVED_QTY, 0) > 0
+                  THEN 1 ELSE 0 END) AS RECEIVED_LINES,
+         SUM(CASE WHEN {dirty} THEN 1 ELSE 0 END) AS DIRTY_LINES
+  FROM {order.qualifiedTable()} O
+  LEFT JOIN {_receiptAggregate(receipt)} R
+    ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
+  WHERE {_windowPredicate(order, window)}{supplierFilter}
+  GROUP BY O.{supplierCode}, O.{poNo}"""
+
+
 # ---------------------------------------------------------------- SQL 模板
 
 
@@ -249,38 +323,25 @@ def buildDeliveryTrackingSummarySql(
     window: DeliveryTrackingWindow,
     dialect: str = "oracle",
 ) -> str:
-    """窗口级汇总：总行数 / 订单数 / 订购量 / 已收量 / 订单三态。
+    """窗口级汇总：总行数 / 订单数 / 订购量 / 已收量 / 订单三态 / 脏行数。
 
     行级先按 PO_NO 聚合，再在订单级判三态 ⇒ 「全到货」不会被
-    「部分行已到」误判。别名是 Task 4 `_assembleSummary` 的取值契约。
+    「部分行已到」误判。脏行（欠交量 ≥ 1e6）不计入 `TOTAL_LINES`
+    与三态/量级率，只在 `EXCLUDED_ROWS` 显式计数（spec 4.4）。
+    别名是 Task 4 `_assembleSummary` 的取值契约。
     """
     _dialectName(dialect)
-    poNo = order.column("PO_NO")
-    poLine = order.column("PO_LINE_NO")
-    orderQty = order.column("PO_QTY")
     return f"""
 SELECT
-  SUM(T.LINE_COUNT) AS TOTAL_LINES,
-  COUNT(*) AS TOTAL_ORDERS,
+  SUM(CASE WHEN T.LINE_COUNT > 0 THEN T.LINE_COUNT ELSE 0 END) AS TOTAL_LINES,
+  SUM(CASE WHEN T.LINE_COUNT > 0 THEN 1 ELSE 0 END) AS TOTAL_ORDERS,
   SUM(T.ORDER_QTY) AS ORDERED_QTY,
   SUM(T.RECEIVED_QTY) AS RECEIVED_QTY,
-  SUM(CASE WHEN T.OPEN_LINES = 0 THEN 1 ELSE 0 END) AS ALL_ARRIVED,
+  SUM(CASE WHEN T.LINE_COUNT > 0 AND T.OPEN_LINES = 0 THEN 1 ELSE 0 END) AS ALL_ARRIVED,
   SUM(CASE WHEN T.OPEN_LINES > 0 AND T.RECEIVED_LINES > 0 THEN 1 ELSE 0 END) AS PARTIAL,
-  SUM(CASE WHEN T.RECEIVED_LINES = 0 THEN 1 ELSE 0 END) AS NOT_ARRIVED
-FROM (
-  SELECT O.{poNo} AS PO_NO,
-         COUNT(*) AS LINE_COUNT,
-         SUM(O.{orderQty}) AS ORDER_QTY,
-         SUM(COALESCE(R.RECEIVED_QTY, 0)) AS RECEIVED_QTY,
-         SUM(CASE WHEN O.{orderQty} - COALESCE(R.RECEIVED_QTY, 0) > 0
-                  THEN 1 ELSE 0 END) AS OPEN_LINES,
-         SUM(CASE WHEN COALESCE(R.RECEIVED_QTY, 0) > 0
-                  THEN 1 ELSE 0 END) AS RECEIVED_LINES
-  FROM {order.qualifiedTable()} O
-  LEFT JOIN {_receiptAggregate(receipt)} R
-    ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
-  WHERE {_windowPredicate(order, window)}
-  GROUP BY O.{poNo}
+  SUM(CASE WHEN T.LINE_COUNT > 0 AND T.RECEIVED_LINES = 0 THEN 1 ELSE 0 END) AS NOT_ARRIVED,
+  SUM(T.DIRTY_LINES) AS EXCLUDED_ROWS
+FROM ({_orderAggregate(order, receipt, window)}
 ) T""".strip()
 
 
@@ -293,35 +354,25 @@ def buildDeliveryTrackingBySupplierSql(
     limit: int = 50,
     dialect: str = "oracle",
 ) -> str:
-    """供应商分组：每家的订单数 / 三态 / 到货量（按未到货订单数降序）。"""
+    """供应商分组：每家的订单数 / 三态 / 到货量 / 脏行数（按未到货订单数降序）。
+
+    脏行口径同 `buildDeliveryTrackingSummarySql`：不计入三态与量级率，
+    只在 `EXCLUDED_ROWS` 显式计数（spec 4.4）。
+    """
     supplierCode = order.column("SUPPLIER_CODE")
-    poNo = order.column("PO_NO")
-    poLine = order.column("PO_LINE_NO")
-    orderQty = order.column("PO_QTY")
     supplierFilter = _andClauses(_inClause("O", supplierCode, supplierKeys))
     tail = _rowLimit(limit, dialect)
     return f"""
 SELECT
   S.SUPPLIER_CODE AS SUPPLIER_CODE,
-  COUNT(*) AS TOTAL_ORDERS,
-  SUM(CASE WHEN S.OPEN_LINES = 0 THEN 1 ELSE 0 END) AS ALL_ARRIVED,
+  SUM(CASE WHEN S.LINE_COUNT > 0 THEN 1 ELSE 0 END) AS TOTAL_ORDERS,
+  SUM(CASE WHEN S.LINE_COUNT > 0 AND S.OPEN_LINES = 0 THEN 1 ELSE 0 END) AS ALL_ARRIVED,
   SUM(CASE WHEN S.OPEN_LINES > 0 AND S.RECEIVED_LINES > 0 THEN 1 ELSE 0 END) AS PARTIAL,
-  SUM(CASE WHEN S.RECEIVED_LINES = 0 THEN 1 ELSE 0 END) AS NOT_ARRIVED,
+  SUM(CASE WHEN S.LINE_COUNT > 0 AND S.RECEIVED_LINES = 0 THEN 1 ELSE 0 END) AS NOT_ARRIVED,
   SUM(S.ORDERED_QTY) AS ORDERED_QTY,
-  SUM(S.RECEIVED_QTY) AS RECEIVED_QTY
-FROM (
-  SELECT O.{supplierCode} AS SUPPLIER_CODE, O.{poNo} AS PO_NO,
-         SUM(O.{orderQty}) AS ORDERED_QTY,
-         SUM(COALESCE(R.RECEIVED_QTY, 0)) AS RECEIVED_QTY,
-         SUM(CASE WHEN O.{orderQty} - COALESCE(R.RECEIVED_QTY, 0) > 0
-                  THEN 1 ELSE 0 END) AS OPEN_LINES,
-         SUM(CASE WHEN COALESCE(R.RECEIVED_QTY, 0) > 0
-                  THEN 1 ELSE 0 END) AS RECEIVED_LINES
-  FROM {order.qualifiedTable()} O
-  LEFT JOIN {_receiptAggregate(receipt)} R
-    ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
-  WHERE {_windowPredicate(order, window)}{supplierFilter}
-  GROUP BY O.{supplierCode}, O.{poNo}
+  SUM(S.RECEIVED_QTY) AS RECEIVED_QTY,
+  SUM(S.DIRTY_LINES) AS EXCLUDED_ROWS
+FROM ({_supplierOrderAggregate(order, receipt, window, supplierFilter)}
 ) S
 GROUP BY S.SUPPLIER_CODE
 ORDER BY NOT_ARRIVED DESC
@@ -338,7 +389,11 @@ def buildDeliveryTrackingByOrderSql(
     limit: int = 50,
     dialect: str = "oracle",
 ) -> str:
-    """订单明细：订单号 + 行级（物料 / 订购 / 已收 / 欠交 / 预期与最后收货日）。"""
+    """订单明细：订单号 + 行级（物料 / 订购 / 已收 / 欠交 / 预期与最后收货日）。
+
+    **不剔除脏行**（与 summary / bySupplier 刻意不同）：明细是给人看的证据，
+    脏行留着才能被发现；剔除只发生在统计口径里（spec 4.4）。
+    """
     poNo = order.column("PO_NO")
     poLine = order.column("PO_LINE_NO")
     orderQty = order.column("PO_QTY")

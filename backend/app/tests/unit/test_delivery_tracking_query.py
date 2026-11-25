@@ -356,7 +356,7 @@ def test_summary_sql_exposes_handler_contract_and_three_states() -> None:
         assert f"AS {alias}" in sql, f"summary SQL 缺别名 {alias}"
     # 订单级聚合：三态判据必须按 PO_NO 聚合后的行级计数
     assert "GROUP BY O.PO_NO" in sql
-    assert "CASE WHEN COALESCE(R.RECEIVED_QTY, 0) > 0" in sql
+    assert "WHEN COALESCE(R.RECEIVED_QTY, 0) > 0" in sql
 
 
 def test_sql_renders_renamed_binding_and_never_erp_raw_names() -> None:
@@ -542,6 +542,65 @@ def test_limit_rejects_non_integer() -> None:
             window=resolveWindow(today=date(2026, 11, 25), monthsBack=12),
             limit="50",  # type: ignore[arg-type]
         )
+
+
+def test_summary_sql_excludes_dirty_lines_and_counts_them() -> None:
+    """spec 4.4：行级欠交量 ≥ 1e6 的录入错误行剔除 + `EXCLUDED_ROWS` 显式计数。"""
+    from app.services.delivery_tracking_query import buildDeliveryTrackingSummarySql
+
+    sql = buildDeliveryTrackingSummarySql(
+        order=_orderBinding(),
+        receipt=_receiptBinding(),
+        window=resolveWindow(today=date(2026, 11, 25), monthsBack=12),
+    )
+
+    assert "AS EXCLUDED_ROWS" in sql
+    assert "O.PO_QTY - COALESCE(R.RECEIVED_QTY, 0) >= 1000000" in sql
+    # 4.2 vs 4.4 的关键区别：判据是**欠交量**，不是**订购量**（大额订购是真实业务）
+    assert "O.PO_QTY >= 1000000" not in sql
+    # 脏行确实被排除在统计之外（不只是"计数"）
+    assert (
+        "SUM(CASE WHEN O.PO_QTY - COALESCE(R.RECEIVED_QTY, 0) >= 1000000"
+        " THEN 0 ELSE 1 END) AS LINE_COUNT" in sql
+    )
+    assert "THEN 0 ELSE O.PO_QTY END) AS ORDER_QTY" in sql
+    # 剔除口径一致：TOTAL_LINES 只数有效行
+    assert "SUM(CASE WHEN T.LINE_COUNT > 0 THEN T.LINE_COUNT ELSE 0 END) AS TOTAL_LINES" in sql
+    # 全是脏行的订单不落入三态（也不进 TOTAL_ORDERS）
+    assert "CASE WHEN T.LINE_COUNT > 0 AND T.OPEN_LINES = 0" in sql
+    assert "CASE WHEN T.LINE_COUNT > 0 AND T.RECEIVED_LINES = 0" in sql
+
+
+def test_by_supplier_sql_excludes_dirty_lines_and_counts_them() -> None:
+    from app.services.delivery_tracking_query import buildDeliveryTrackingBySupplierSql
+
+    sql = buildDeliveryTrackingBySupplierSql(
+        order=_orderBinding(),
+        receipt=_receiptBinding(),
+        window=resolveWindow(today=date(2026, 11, 25), monthsBack=12),
+    )
+
+    assert "AS EXCLUDED_ROWS" in sql
+    assert "O.PO_QTY - COALESCE(R.RECEIVED_QTY, 0) >= 1000000" in sql
+    assert "O.PO_QTY >= 1000000" not in sql
+    assert "THEN 0 ELSE O.PO_QTY END) AS ORDERED_QTY" in sql
+    assert "CASE WHEN S.LINE_COUNT > 0 AND S.OPEN_LINES = 0" in sql
+    assert "CASE WHEN S.LINE_COUNT > 0 AND S.RECEIVED_LINES = 0" in sql
+
+
+def test_by_order_sql_keeps_dirty_lines() -> None:
+    """明细是给人看的：byOrder **不剔除**脏行（不做统计剔除，也不计 EXCLUDED_ROWS）。"""
+    from app.services.delivery_tracking_query import buildDeliveryTrackingByOrderSql
+
+    sql = buildDeliveryTrackingByOrderSql(
+        order=_orderBinding(),
+        receipt=_receiptBinding(),
+        window=resolveWindow(today=date(2026, 11, 25), monthsBack=12),
+    )
+
+    assert ">= 1000000" not in sql
+    assert "EXCLUDED_ROWS" not in sql
+    assert "AS OPEN_QTY" in sql
 
 
 def test_by_order_requires_material_desc_binding() -> None:

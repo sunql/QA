@@ -262,7 +262,11 @@ async def prepareCopilotTurn(
     service: AgentOrchestrationRunService | None = None,
 ) -> CopilotTurnResult:
     """一轮对话的完整编排：会话 → （续跑 or 带上下文新跑）→ 落轮次。"""
-    assertProcurementAgent(dto.agent_code)
+    # 域前缀守卫只管**自由分支**（Copilot 不是通用 Agent 的旁路）。场景分支
+    # 的 Agent 由配置钉定（_renderScenarioQuestion 强制请求值 == 配置值），
+    # 配置可以绑非 PROCUREMENT_ 前缀的采购 Agent（如 SUPPLIER_RISK_AGENT）。
+    if not dto.scenario_code:
+        assertProcurementAgent(dto.agent_code)
     runner = service or AgentOrchestrationRunService()
     conversationId = UUID(dto.conversation_id) if dto.conversation_id else None
     conversation = await conversationStore.loadOrCreateConversation(

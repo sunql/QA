@@ -112,6 +112,32 @@ SEEDS: list[dict[str, Any]] = [
         "sort_order": 10,
         "enabled": True,
     },
+    # P4 阶段4 验收场景：**纯配置加出**（零前端/后端改动）——绑定既有
+    # SUPPLIER_RISK_AGENT（supplier_risk 工具吃单个 key）。无结构化结果
+    # 渲染器 ⇒ result_renderer=none（答案走线程 Markdown 卡）。
+    {
+        "scenario_code": "supplier_risk",
+        "name": "供应商风险速览",
+        "description": "按供应商编码评估交付/质量/财务风险并给应对建议",
+        "icon_code": "search",
+        "agent_code": "SUPPLIER_RISK_AGENT",
+        "slot_schema": [
+            {
+                "key": "supplierKey",
+                "type": "text",
+                "label": "供应商编码",
+                "conflictKeywords": ["供应商", "厂家"],
+                "codePattern": _SUPPLIER_CODE,
+            },
+        ],
+        "question_template": "分析供应商风险情况",
+        # 必填槽位不带默认值 ⇒ 不设 chips（chips 空槽位发送会 422）
+        "chips": [],
+        "result_renderer": "none",
+        "required_role": None,
+        "sort_order": 20,
+        "enabled": True,
+    },
 ]
 
 

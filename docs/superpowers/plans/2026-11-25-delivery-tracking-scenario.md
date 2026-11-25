@@ -1156,31 +1156,57 @@ def _receiptAggregate(receipt: ResolvedBinding) -> str:
     )
 
 
+#: 脏数据阈值（spec 4.4）：行级欠交量 >= 此值判为源侧录入错误
+#: （ERP「数量填成物料码」）。⚠️ 判据是**欠交量**，不是订购量 ——
+#: spec 4.2 明确拒绝按订购量剔大额行（那是真实业务大单）。两者不可混用。
+_OPEN_QTY_SANITY_MAX = 1_000_000
+
+
+def _dirtyCondition(orderQty: str) -> str:
+    """脏行判据片段（欠交量 >= 阈值）。"""
+    return f"O.{orderQty} - COALESCE(R.RECEIVED_QTY, 0) >= {_OPEN_QTY_SANITY_MAX}"
+
+
 def buildDeliveryTrackingSummarySql(
     *, order: ResolvedBinding, receipt: ResolvedBinding,
     window: DeliveryTrackingWindow, dialect: str = "oracle",
 ) -> str:
-    """窗口级汇总：总行数 / 订单数 / 订购量 / 已收量 / 订单三态。"""
+    """窗口级汇总：总行数 / 订单数 / 订购量 / 已收量 / 三态 / 脏行数。
+
+    脏数据（spec 4.4）：欠交量 >= _OPEN_QTY_SANITY_MAX 的行**不参与**任何度量
+    （既不算欠交也不算已收），但单列 EXCLUDED_ROWS 显式回报。
+    全脏行订单经 LINE_COUNT > 0 守卫排除在 TOTAL_ORDERS 与三态之外。
+    """
     orderQty = order.column("PO_QTY")
     poNo = order.column("PO_NO")
+    dirty = _dirtyCondition(orderQty)
     return f"""
 SELECT
-  COUNT(*) AS TOTAL_LINES,
-  COUNT(DISTINCT O.{poNo}) AS TOTAL_ORDERS,
-  SUM(O.{orderQty}) AS ORDERED_QTY,
-  SUM(COALESCE(R.RECEIVED_QTY, 0)) AS RECEIVED_QTY,
-  COUNT(DISTINCT CASE WHEN OPEN_LINES = 0 THEN O.{poNo} END) AS ALL_ARRIVED,
-  COUNT(DISTINCT CASE WHEN OPEN_LINES > 0 AND RECEIVED_LINES > 0 THEN O.{poNo} END) AS PARTIAL,
-  COUNT(DISTINCT CASE WHEN RECEIVED_LINES = 0 THEN O.{poNo} END) AS NOT_ARRIVED
+  SUM(CASE WHEN T.LINE_COUNT > 0 THEN T.LINE_COUNT ELSE 0 END) AS TOTAL_LINES,
+  SUM(CASE WHEN T.LINE_COUNT > 0 THEN 1 ELSE 0 END) AS TOTAL_ORDERS,
+  SUM(T.ORDER_QTY) AS ORDERED_QTY,
+  SUM(T.RECEIVED_QTY) AS RECEIVED_QTY,
+  SUM(CASE WHEN T.LINE_COUNT > 0 AND T.OPEN_LINES = 0 THEN 1 ELSE 0 END) AS ALL_ARRIVED,
+  SUM(CASE WHEN T.LINE_COUNT > 0 AND T.OPEN_LINES > 0 AND T.RECEIVED_LINES > 0 THEN 1 ELSE 0 END) AS PARTIAL,
+  SUM(CASE WHEN T.LINE_COUNT > 0 AND T.RECEIVED_LINES = 0 THEN 1 ELSE 0 END) AS NOT_ARRIVED,
+  SUM(T.DIRTY_LINES) AS EXCLUDED_ROWS
 FROM (
-  SELECT O2.{poNo} AS PO_NO,
-         SUM(CASE WHEN O2.{orderQty} - COALESCE(R2.RECEIVED_QTY, 0) > 0 THEN 1 ELSE 0 END) AS OPEN_LINES,
-         SUM(CASE WHEN COALESCE(R2.RECEIVED_QTY, 0) > 0 THEN 1 ELSE 0 END) AS RECEIVED_LINES
-  FROM {order.qualifiedTable()} O2
-  LEFT JOIN {_receiptAggregate(receipt)} R2
-    ON R2.PO_NO = O2.{poNo} AND R2.PO_LINE_NO = O2.{order.column('PO_LINE_NO')}
+  SELECT O.{poNo} AS PO_NO,
+         SUM(CASE WHEN {dirty} THEN 0 ELSE 1 END) AS LINE_COUNT,
+         SUM(CASE WHEN {dirty} THEN 1 ELSE 0 END) AS DIRTY_LINES,
+         SUM(CASE WHEN {dirty} THEN 0 ELSE O.{orderQty} END) AS ORDER_QTY,
+         SUM(CASE WHEN {dirty} THEN 0 ELSE COALESCE(R.RECEIVED_QTY, 0) END) AS RECEIVED_QTY,
+         SUM(CASE WHEN {dirty} THEN 0
+                  WHEN O.{orderQty} - COALESCE(R.RECEIVED_QTY, 0) > 0 THEN 1
+                  ELSE 0 END) AS OPEN_LINES,
+         SUM(CASE WHEN {dirty} THEN 0
+                  WHEN COALESCE(R.RECEIVED_QTY, 0) > 0 THEN 1
+                  ELSE 0 END) AS RECEIVED_LINES
+  FROM {order.qualifiedTable()} O
+  LEFT JOIN {_receiptAggregate(receipt)} R
+    ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{order.column('PO_LINE_NO')}
   WHERE {_windowPredicate(order, window)}
-  GROUP BY O2.{poNo}
+  GROUP BY O.{poNo}
 ) T""".strip()
 
 
@@ -1202,11 +1228,12 @@ def buildDeliveryTrackingBySupplierSql(
 SELECT
   S.{supplierCode} AS SUPPLIER_CODE,
   COUNT(*) AS TOTAL_ORDERS,
-  SUM(CASE WHEN S.OPEN_LINES = 0 THEN 1 ELSE 0 END) AS ALL_ARRIVED,
-  SUM(CASE WHEN S.OPEN_LINES > 0 AND S.RECEIVED_LINES > 0 THEN 1 ELSE 0 END) AS PARTIAL,
-  SUM(CASE WHEN S.RECEIVED_LINES = 0 THEN 1 ELSE 0 END) AS NOT_ARRIVED,
+  SUM(CASE WHEN S.LINE_COUNT > 0 AND S.OPEN_LINES = 0 THEN 1 ELSE 0 END) AS ALL_ARRIVED,
+  SUM(CASE WHEN S.LINE_COUNT > 0 AND S.OPEN_LINES > 0 AND S.RECEIVED_LINES > 0 THEN 1 ELSE 0 END) AS PARTIAL,
+  SUM(CASE WHEN S.LINE_COUNT > 0 AND S.RECEIVED_LINES = 0 THEN 1 ELSE 0 END) AS NOT_ARRIVED,
   SUM(S.ORDERED_QTY) AS ORDERED_QTY,
-  SUM(S.RECEIVED_QTY) AS RECEIVED_QTY
+  SUM(S.RECEIVED_QTY) AS RECEIVED_QTY,
+  SUM(S.DIRTY_LINES) AS EXCLUDED_ROWS
 FROM (
   SELECT O.{supplierCode} AS SUPPLIER_CODE, O.{poNo} AS PO_NO,
          SUM(O.{orderQty}) AS ORDERED_QTY,

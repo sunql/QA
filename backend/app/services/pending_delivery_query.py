@@ -42,14 +42,29 @@ from app.services.pending_delivery_args import (
     readOptionalInt,
     rejectCallerDatasource,
 )
+from app.services.pending_delivery_rows import (
+    camelPendingRow as _camelPendingRow,
+)
+from app.services.pending_delivery_rows import (
+    withNames as _withNames,
+)
+from app.services.procurement_datasource import (
+    adapterFor as _adapterFor,
+)
+from app.services.procurement_datasource import (
+    loadActiveDatasource as _loadActiveDatasource,
+)
 from app.services.procurement_query_utils import (
     MAX_LIMIT,
     MONTHS_BACK_MAX,
     MONTHS_BACK_MIN,
+    OPEN_QTY_SANITY_MAX,
     SqlDialect,
     colValue,
+    dateWindowPredicate,
     escapeLiteral,
-    minusMonths,
+    monthsBackWindow,
+    receiptAggregate,
 )
 
 ORDER_CLASS_NAME = "DWD_PURCHASE_ORDER_DTL"
@@ -68,10 +83,6 @@ _ORDER_REQUIRED_PROPERTIES = (
 )
 _RECEIPT_REQUIRED_PROPERTIES = ("PO_NO", "PO_LINE_NO", "RCV_QTY_STU")
 _FACILITY_REQUIRED_PROPERTIES = ("FCY_0", "FCYNAM_0")
-
-#: 健全性阈值：欠交量 ≥ 1e6 视为源侧脏数据（探针实测 43 行「数量=物料码」），
-#: 剔除但**显式回报**（excludedRows），不静默丢。
-_OPEN_QTY_SANITY_MAX = 1_000_000
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _CJK_RE = re.compile(r"[一-鿿]")
@@ -132,15 +143,23 @@ class PendingDeliveryFilters:
         """基地名称项（需要 JOIN `DIM_FACILITY`）。"""
         return tuple(k for k in self.siteKeys if _CJK_RE.search(k))
 
-    def windowSql(self, monthsBack: int, today: date) -> str:
-        """时间窗：显式区间优先，否则近 N 月（闭区间，沿用既有行为）。"""
-        orderDate = f"O.{self.orderBinding.column('ORDER_DATE')}"
+    def windowSql(self, monthsBack: int, today: date, alias: str = "O") -> str:
+        """时间窗：显式区间优先，否则近 N 月；**左闭右开**（spec 4.3）。
+
+        与到货跟踪同一构造（`dateWindowPredicate`）：旧实现显式区间是闭区间、
+        monthsBack 无上界（含未来下单），同一份数据两个工具给出不同订单集合。
+        """
+        orderDate = f"{alias}.{self.orderBinding.column('ORDER_DATE')}"
         if self.dateFrom and self.dateTo:
-            return f"{orderDate} >= DATE '{self.dateFrom}' AND {orderDate} <= DATE '{self.dateTo}'"
-        since = minusMonths(
+            return dateWindowPredicate(
+                orderDate,
+                date.fromisoformat(self.dateFrom),
+                date.fromisoformat(self.dateTo),
+            )
+        since, until = monthsBackWindow(
             today, max(MONTHS_BACK_MIN, min(monthsBack, MONTHS_BACK_MAX))
         )
-        return f"{orderDate} >= DATE '{since.isoformat()}'"
+        return dateWindowPredicate(orderDate, since, until)
 
     def joinSql(self) -> str:
         """基地名过滤需要的 `DIM_FACILITY` JOIN（无名称项 ⇒ 不 JOIN）。"""
@@ -206,8 +225,14 @@ class PendingDeliveryFilters:
 
 async def resolvePendingDeliveryBindings(
     session: AsyncSession,
-) -> tuple[ResolvedBinding, ResolvedBinding, ResolvedBinding]:
-    """解析订单行 / 收货行 / 基地三条本体绑定（缺一即 fail-closed）。"""
+) -> tuple[ResolvedBinding, ResolvedBinding]:
+    """解析订单行 / 收货行两条**必需**绑定（缺一即 fail-closed）。
+
+    ⚠️ 基地（`DIM_FACILITY`）**不在这里**解析：它只服务基地过滤与 `/sites`
+    端点（`resolveFacilityBinding`）。旧实现在这里无条件解析三条 ⇒ 任何缺
+    facility 绑定行的库（启动 seed 未跑）都会让不按基地过滤的 summary/lines
+    整体 422 —— 用不上基地的请求也跟着挂掉。
+    """
     order = await resolveBinding(
         session,
         className=ORDER_CLASS_NAME,
@@ -218,12 +243,16 @@ async def resolvePendingDeliveryBindings(
         className=RECEIPT_CLASS_NAME,
         requiredProperties=_RECEIPT_REQUIRED_PROPERTIES,
     )
-    facility = await resolveBinding(
+    return order, receipt
+
+
+async def resolveFacilityBinding(session: AsyncSession) -> ResolvedBinding:
+    """解析基地字典绑定（**按需**：基地过滤 / `/sites` 端点才调用）。"""
+    return await resolveBinding(
         session,
         className=FACILITY_CLASS_NAME,
         requiredProperties=_FACILITY_REQUIRED_PROPERTIES,
     )
-    return order, receipt, facility
 
 
 async def resolveMaterialKeys(
@@ -259,23 +288,6 @@ async def resolveMaterialKeys(
 
 
 
-def _withNames(
-    row: dict[str, Any],
-    *,
-    supplierNames: dict[str, str],
-    materialNames: dict[str, str],
-) -> dict[str, Any]:
-    """给 SQL 行补 MDM 名称（返回新 dict，不原地改）。"""
-    enriched = dict(row)
-    supplierCode = colValue(row, "SUPPLIER_CODE")
-    if supplierCode is not None:
-        enriched["SUPPLIER_NAME"] = supplierNames.get(str(supplierCode))
-    materialCode = colValue(row, "ITEM_CODE")
-    if materialCode is not None:
-        enriched["MATERIAL_DESC"] = materialNames.get(str(materialCode))
-    return enriched
-
-
 # ---------------------------------------------------------------- SQL 片段
 
 
@@ -284,28 +296,28 @@ def _literalList(values: tuple[str, ...]) -> str:
     return ", ".join(f"'{escapeLiteral(value)}'" for value in values)
 
 
-def _receiptAggregate(receipt: ResolvedBinding) -> str:
-    """收货子查询：按 PO_NO+PO_LINE_NO 聚合已收量（与到货跟踪同口径）。"""
-    poNo = receipt.column("PO_NO")
-    poLine = receipt.column("PO_LINE_NO")
-    qty = receipt.column("RCV_QTY_STU")
-    return (
-        f"(SELECT {poNo} AS PO_NO, {poLine} AS PO_LINE_NO, "
-        f"SUM({qty}) AS RECEIVED_QTY "
-        f"FROM {receipt.qualifiedTable()} "
-        f"GROUP BY {poNo}, {poLine})"
-    )
-
-
 def _openQty(order: ResolvedBinding) -> str:
     """行级欠交量：`PO_QTY - 收货聚合已收量`（COALESCE 兜未收货）。"""
     return f"O.{order.column('PO_QTY')} - COALESCE(R.RECEIVED_QTY, 0)"
 
 
-def _receiptJoin(order: ResolvedBinding, receipt: ResolvedBinding) -> str:
-    """订单行 LEFT JOIN 收货聚合（按 PO_NO + PO_LINE_NO）。"""
+def _receiptJoin(
+    order: ResolvedBinding,
+    receipt: ResolvedBinding,
+    *,
+    windowSql: str,
+) -> str:
+    """订单行 LEFT JOIN 收货聚合（按 PO_NO + PO_LINE_NO）。
+
+    聚合片段来自 `procurement_query_utils.receiptAggregate`（与到货跟踪**同一份**）；
+    并通过 `windowSql` 做 PO_NO 半连接，避免每次汇总全表 GROUP BY 收货明细。
+    """
+    poNoSubquery = (
+        f"SELECT PO.{order.column('PO_NO')} FROM {order.qualifiedTable()} PO"
+        f" WHERE {windowSql}"
+    )
     return (
-        f" LEFT JOIN {_receiptAggregate(receipt)} R"
+        f" LEFT JOIN {receiptAggregate(receipt, poNoSubquery=poNoSubquery)} R"
         f" ON R.PO_NO = O.{order.column('PO_NO')}"
         f" AND R.PO_LINE_NO = O.{order.column('PO_LINE_NO')}"
     )
@@ -315,7 +327,7 @@ def _openQtyCond(order: ResolvedBinding) -> str:
     """欠交为正且未超脏数据阈值（统计 / 明细 / 计数共用同一口径）。"""
     return (
         f"{_openQty(order)} > 0"
-        f" AND {_openQty(order)} < {_OPEN_QTY_SANITY_MAX}"
+        f" AND {_openQty(order)} < {OPEN_QTY_SANITY_MAX}"
     )
 
 
@@ -340,19 +352,23 @@ def buildPendingDeliverySummarySql(
     overdue = d.overdueDays(
         todayLit, "O." + order.column("EXP_RCV_DATE")
     )
+    window = filters.windowSql(monthsBack, today)
+    receiptJoin = _receiptJoin(
+        order, receipt, windowSql=filters.windowSql(monthsBack, today, alias="PO")
+    )
     return f"""
 SELECT
-  SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} THEN 1 ELSE 0 END) AS OPEN_LINES,
-  {d.coalesce(f"SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} THEN OPEN_QTY ELSE 0 END)", "0")} AS OPEN_QTY,
-  SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} AND OVERDUE_DAYS > 0 THEN 1 ELSE 0 END) AS OVERDUE_LINES,
-  SUM(CASE WHEN OPEN_QTY >= {_OPEN_QTY_SANITY_MAX} THEN 1 ELSE 0 END) AS EXCLUDED_ROWS
+  SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {OPEN_QTY_SANITY_MAX} THEN 1 ELSE 0 END) AS OPEN_LINES,
+  {d.coalesce(f"SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {OPEN_QTY_SANITY_MAX} THEN OPEN_QTY ELSE 0 END)", "0")} AS OPEN_QTY,
+  SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {OPEN_QTY_SANITY_MAX} AND OVERDUE_DAYS > 0 THEN 1 ELSE 0 END) AS OVERDUE_LINES,
+  SUM(CASE WHEN OPEN_QTY >= {OPEN_QTY_SANITY_MAX} THEN 1 ELSE 0 END) AS EXCLUDED_ROWS
 FROM (
   SELECT O.{order.column("PO_NO")} AS PO_NO,
          O.{order.column("PO_LINE_NO")} AS PO_LINE_NO,
          {_openQty(order)} AS OPEN_QTY,
          {overdue} AS OVERDUE_DAYS
-  FROM {order.qualifiedTable()} O{filters.joinSql()}{_receiptJoin(order, receipt)}
-  WHERE {filters.windowSql(monthsBack, today)}{filters.filterSql()}
+  FROM {order.qualifiedTable()} O{filters.joinSql()}{receiptJoin}
+  WHERE {window}{filters.filterSql()}
 ) t""".strip()
 
 
@@ -374,6 +390,10 @@ def buildPendingDeliveryBySupplierSql(
     todayLit = f"DATE '{today.isoformat()}'"
     bounded = max(1, min(limit, MAX_LIMIT))
     overdue = d.overdueDays(todayLit, "O." + order.column("EXP_RCV_DATE"))
+    window = filters.windowSql(monthsBack, today)
+    receiptJoin = _receiptJoin(
+        order, receipt, windowSql=filters.windowSql(monthsBack, today, alias="PO")
+    )
     return f"""
 SELECT
   SUPPLIER_CODE,
@@ -384,8 +404,8 @@ FROM (
   SELECT O.{order.column("SUPPLIER_CODE")} AS SUPPLIER_CODE,
          {_openQty(order)} AS OPEN_QTY,
          {overdue} AS OVERDUE_DAYS
-  FROM {order.qualifiedTable()} O{filters.joinSql()}{_receiptJoin(order, receipt)}
-  WHERE {filters.windowSql(monthsBack, today)}
+  FROM {order.qualifiedTable()} O{filters.joinSql()}{receiptJoin}
+  WHERE {window}
     AND {_openQtyCond(order)}{filters.filterSql()}
 ) t
 GROUP BY SUPPLIER_CODE
@@ -411,7 +431,11 @@ def buildPendingDeliveryLinesSql(
     bounded = max(1, min(limit, MAX_LIMIT))
     boundedOffset = max(0, int(offset))
     overdue = d.overdueDays(todayLit, "O." + order.column("EXP_RCV_DATE"))
-    conds = [filters.windowSql(monthsBack, today), _openQtyCond(order)]
+    window = filters.windowSql(monthsBack, today)
+    receiptJoin = _receiptJoin(
+        order, receipt, windowSql=filters.windowSql(monthsBack, today, alias="PO")
+    )
+    conds = [window, _openQtyCond(order)]
     if minOverdueDays:
         conds.append(f"{overdue} >= {int(minOverdueDays)}")
     where = " AND ".join(conds) + filters.filterSql()
@@ -425,7 +449,7 @@ SELECT O.{order.column("PO_NO")} AS PO_NO,
        {_openQty(order)} AS OPEN_QTY,
        O.{order.column("EXP_RCV_DATE")} AS EXPECTED_DATE,
        {overdue} AS OVERDUE_DAYS
-FROM {order.qualifiedTable()} O{filters.joinSql()}{_receiptJoin(order, receipt)}
+FROM {order.qualifiedTable()} O{filters.joinSql()}{receiptJoin}
 WHERE {where}
 ORDER BY OPEN_QTY DESC
 {d.tail(bounded, boundedOffset)}""".strip()
@@ -441,12 +465,14 @@ def buildPendingDeliveryCountSql(
     """欠交行总数（明细页分页用）——与 lines SQL 同口径（含脏数据阈值）。"""
     order = filters.orderBinding
     receipt = filters.receiptBinding
-    where = " AND ".join(
-        [filters.windowSql(monthsBack, today), _openQtyCond(order)]
-    ) + filters.filterSql()
+    window = filters.windowSql(monthsBack, today)
+    receiptJoin = _receiptJoin(
+        order, receipt, windowSql=filters.windowSql(monthsBack, today, alias="PO")
+    )
+    where = " AND ".join([window, _openQtyCond(order)]) + filters.filterSql()
     return f"""
 SELECT COUNT(*) AS TOTAL_ROWS
-FROM {order.qualifiedTable()} O{filters.joinSql()}{_receiptJoin(order, receipt)}
+FROM {order.qualifiedTable()} O{filters.joinSql()}{receiptJoin}
 WHERE {where}""".strip()
 
 
@@ -471,6 +497,7 @@ def _pendingCacheKey(
     monthsBack: int,
     filters: PendingDeliveryFilters,
     minOverdueDays: int | None,
+    limit: int,
     today: date,
 ) -> str:
     payload = {
@@ -482,6 +509,9 @@ def _pendingCacheKey(
         "materials": sorted(filters.materialKeys),
         "sites": sorted(filters.siteKeys),
         "overdue": minOverdueDays,
+        # topLines 的截断长度是查询结果的一部分：漏了它，同日 limit=50 与
+        # limit=20 会命中同一个 key ⇒ 200 截断样本冒充 20（或反之）。
+        "limit": limit,
         "day": today.isoformat(),
         "binding": _bindingSignature(filters),
     }
@@ -620,6 +650,7 @@ async def _loadPendingDeliveryData(
         monthsBack=monthsBack,
         filters=filters,
         minOverdueDays=minOverdueDays,
+        limit=limit,
         today=today,
     )
     hit = _PENDING_RESULT_CACHE.get(cacheKey)
@@ -640,40 +671,7 @@ async def _loadPendingDeliveryData(
     return data
 
 
-def _camelPendingRow(row: dict[str, Any]) -> dict[str, Any]:
-    expected = colValue(row, "EXPECTED_DATE")
-    return {
-        "poNo": colValue(row, "PO_NO"),
-        "poLine": colValue(row, "PO_LINE_NO"),
-        "materialCode": colValue(row, "ITEM_CODE"),
-        "materialDesc": colValue(row, "MATERIAL_DESC"),
-        "supplierCode": colValue(row, "SUPPLIER_CODE"),
-        "supplierName": colValue(row, "SUPPLIER_NAME"),
-        "orderedQty": colValue(row, "ORDERED_QTY"),
-        "receivedQty": colValue(row, "RECEIVED_QTY"),
-        "openQty": colValue(row, "OPEN_QTY"),
-        "expectedDate": str(expected) if expected else None,
-        "overdueDays": colValue(row, "OVERDUE_DAYS"),
-    }
-
-
 # ---------------------------------------------------------------- handler 装配
-
-
-def _adapterFor(dsId: int, ds: Any) -> Any:
-    """业务库 adapter 获取（惰性转发到既有实现，保持 monkeypatch 点单一）。"""
-    from app.services.agent_tools_procurement import _adapterFor as impl
-
-    return impl(dsId, ds)
-
-
-async def _loadActiveDatasource(session: AsyncSession, datasourceId: int) -> Any:
-    """按 id 取数据源（THBI 固定）；不存在/停用 fail-closed。"""
-    from app.services.agent_tools_procurement import (
-        _loadActiveDatasource as impl,
-    )
-
-    return await impl(session, datasourceId)
 
 
 async def buildPendingDeliveryFilters(
@@ -757,7 +755,10 @@ async def pendingDeliveryHandler(
     limit = readIntArg(args.get("limit"), "limit", 20)
     supplierKeys, materialKeys, siteKeys, dateFrom, dateTo = readFilterArgs(args)
 
-    order, receipt, facility = await resolvePendingDeliveryBindings(session)
+    order, receipt = await resolvePendingDeliveryBindings(session)
+    # 基地绑定**按需**解析：只有真的按基地过滤时才需要它；缺绑定不应让
+    # 不带基地过滤的 summary/lines 整体挂掉（降级而非全挂）。
+    facility = await resolveFacilityBinding(session) if siteKeys else None
     filters = await buildPendingDeliveryFilters(
         session,
         orderBinding=order,

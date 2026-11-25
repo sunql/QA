@@ -69,8 +69,35 @@ async def _seedPendingBindings(dbSession: AsyncSession) -> None:
     )
 
 
+async def _seedPendingBindingsWithoutFacility(dbSession: AsyncSession) -> None:
+    """只种订单行 / 收货行（**不种** DIM_FACILITY）：验证基地绑定是「按需」的。"""
+    await _seedThbiDataSource(dbSession)
+    await _seedClassWithBinding(
+        dbSession,
+        className="DWD_PURCHASE_ORDER_DTL",
+        propertyColumns=_ORDER_COLUMNS,
+        sourceTable="DWD_PURCHASE_ORDER_DTL",
+    )
+    await _seedClassWithBinding(
+        dbSession,
+        className="DWD_GOODS_RECEIPT_DTL",
+        propertyColumns=_RECEIPT_COLUMNS,
+        sourceTable="DWD_GOODS_RECEIPT_DTL",
+    )
+
+
 async def _fakeLoadDatasource(session, datasourceId):
     return SimpleNamespace(id=datasourceId, name="THBI", is_active=True)
+
+
+class _EmptyAnalyticsAdapter:
+    """空结果适配器（无欠交 ⇒ 只验证链路不再因缺 facility 绑定 422）。"""
+
+    async def execute_read_only(self, sql: str):
+        if "EXCLUDED_ROWS" in sql:
+            return [{"OPEN_LINES": 0, "OPEN_QTY": 0,
+                     "OVERDUE_LINES": 0, "EXCLUDED_ROWS": 0}]
+        return []
 
 
 @pytest.fixture(autouse=True)
@@ -426,3 +453,70 @@ async def test_lines_endpoint_rejects_bad_date(client: AsyncClient) -> None:
         LINES_PATH, headers=OWNER_HEADERS, params={"dateFrom": "2026/01/01"}
     )
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------- C1：基地绑定按需
+
+
+@pytest.mark.asyncio
+async def test_summary_works_without_facility_binding_when_no_site_filter(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """缺 DIM_FACILITY 绑定 + 不按基地过滤 ⇒ summary 仍 200（降级而非全挂）。"""
+    await _seedPendingBindingsWithoutFacility(dbSession)
+    monkeypatch.setattr(
+        "app.services.pending_delivery_query._adapterFor",
+        lambda dsId, ds: _EmptyAnalyticsAdapter(),
+    )
+    monkeypatch.setattr(
+        "app.services.pending_delivery_query._loadActiveDatasource",
+        _fakeLoadDatasource,
+    )
+
+    resp = await client.get(SUMMARY_PATH, headers=OWNER_HEADERS)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["summary"]["openLines"] == 0
+
+
+@pytest.mark.asyncio
+async def test_summary_with_site_filter_requires_facility_binding(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """真按基地过滤时缺绑定仍然 fail-closed（422），不能悄悄忽略过滤条件。"""
+    await _seedPendingBindingsWithoutFacility(dbSession)
+    monkeypatch.setattr(
+        "app.services.pending_delivery_query._adapterFor",
+        lambda dsId, ds: _EmptyAnalyticsAdapter(),
+    )
+    monkeypatch.setattr(
+        "app.services.pending_delivery_query._loadActiveDatasource",
+        _fakeLoadDatasource,
+    )
+
+    resp = await client.get(
+        SUMMARY_PATH, headers=OWNER_HEADERS, params={"siteKeys": "T3"}
+    )
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_lines_endpoint_works_without_facility_binding(
+    client: AsyncClient, dbSession: AsyncSession, monkeypatch
+) -> None:
+    """明细端点同理：不带基地过滤 ⇒ 不需要 facility 绑定。"""
+    await _seedPendingBindingsWithoutFacility(dbSession)
+    monkeypatch.setattr(
+        "app.api.v1.procurement_analytics._adapterFor",
+        lambda dsId, ds: _EmptyAnalyticsAdapter(),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.procurement_analytics._loadActiveDatasource",
+        _fakeLoadDatasource,
+    )
+
+    resp = await client.get(LINES_PATH, headers=OWNER_HEADERS)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["total"] == 0

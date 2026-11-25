@@ -28,6 +28,7 @@ from app.services.pending_delivery_query import (
     buildPendingDeliveryFilters,
     buildPendingDeliveryLinesSql,
     enrichPendingLineRows,
+    resolveFacilityBinding,
     resolvePendingDeliveryBindings,
     validateDateArg,
 )
@@ -140,7 +141,8 @@ async def listPendingDeliverySites(
     基地字典与订单行站点列都来自本体绑定（`DIM_FACILITY` / 订单行的站点属性），
     不硬编码 schema / 表名。
     """
-    order, _, facility = await resolvePendingDeliveryBindings(session)
+    order, _ = await resolvePendingDeliveryBindings(session)
+    facility = await resolveFacilityBinding(session)
     ds = await _loadActiveDatasource(session, order.datasourceId)
     _ensureActiveAnalytics(ds)
     adapter = _adapterFor(order.datasourceId, ds)
@@ -199,7 +201,9 @@ async def listPendingDeliveryLines(
 ) -> dict[str, Any]:
     """欠交明细（分页 + 总数）——与工具同口径；明细页专用（工具 limit 上限 50）。"""
     dateFrom, dateTo = _dateSlots(dateFrom, dateTo)
-    order, receipt, facility = await resolvePendingDeliveryBindings(session)
+    order, receipt = await resolvePendingDeliveryBindings(session)
+    siteList = _splitKeys(siteKeys)
+    facility = await resolveFacilityBinding(session) if siteList else None
     filters = await buildPendingDeliveryFilters(
         session,
         orderBinding=order,
@@ -207,7 +211,7 @@ async def listPendingDeliveryLines(
         facilityBinding=facility,
         supplierKeys=_splitKeys(supplierKeys),
         materialKeys=_splitKeys(materialKeys),
-        siteKeys=_splitKeys(siteKeys),
+        siteKeys=siteList,
         dateFrom=dateFrom,
         dateTo=dateTo,
     )

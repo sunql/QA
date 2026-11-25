@@ -429,6 +429,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from scripts.seed_rbac import seedRbacBaseline
 
         await seedRbacBaseline(session)
+        # P5 到货跟踪（C1）：补 `DIM_FACILITY` 的本体源+属性绑定。缺这类库时
+        # 待到货的 siteKeys 过滤 / `/pending-delivery/sites` 解析不到物理表。
+        # 绑定解析本身已改为**按需**（不带基地过滤的 summary/lines 不受影响）⇒
+        # 这里**明确告警**而不阻塞启动：失败时基地过滤不可用，但既有待到货/到货
+        # 跟踪主链路仍可用；运维按日志手动 `python -m scripts.seed_procurement_bindings`。
+        try:
+            from scripts.seed_procurement_bindings import seed_facility_binding
+
+            createdBindings = await seed_facility_binding(session_factory)
+            logger.info(
+                "procurement binding seed: %d new DIM_FACILITY source binding(s)",
+                createdBindings,
+            )
+        except Exception:
+            logger.exception(
+                "DIM_FACILITY 本体绑定 seed 失败：基地过滤与 /pending-delivery/sites 将不可用。"
+                "请在 backend/ 下手动运行 `python -m scripts.seed_procurement_bindings` 后重启。"
+            )
     yield
     logger.info("关闭中，释放外部连接...")
     await shutdownCleanup()

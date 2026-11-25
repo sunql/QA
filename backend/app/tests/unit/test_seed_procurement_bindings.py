@@ -8,6 +8,8 @@ test_seed_facility_binding_creates_confirms_and_is_idempotent` 覆盖；
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from scripts import seed_procurement_bindings as mod
 
 
@@ -64,3 +66,19 @@ def test_facility_binding_spec_matches_resolver_hard_rules() -> None:
     assert spec["datasourceId"] == THBI_DATASOURCE_ID
     assert spec["schemaName"] == THBI_SCHEMA_NAME
     assert spec["bindingRole"] == BINDING_ROLE_BASE
+
+
+def test_facility_seed_is_wired_into_startup_chain() -> None:
+    """C1：启动 seed 链必须调用 `seed_facility_binding`（不是只有 CLI 入口）。
+
+    CLI 只在手动跑时生效；部署到缺绑定行的库时，启动链不跑 ⇒ 待到货
+    基地过滤 / `/sites` 解析不到物理表。失败必须显式告警（不许静默）。
+    """
+    mainSource = (
+        Path(__file__).resolve().parents[3] / "app" / "main.py"
+    ).read_text(encoding="utf-8")
+
+    assert "seed_procurement_bindings" in mainSource
+    assert "seed_facility_binding" in mainSource
+    # 失败必须有显式日志（异常不得被裸吞）
+    assert "logger.exception" in mainSource

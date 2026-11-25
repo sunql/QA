@@ -30,7 +30,9 @@ class CopilotMessageRequest(CamelModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    message: str = Field(min_length=1, max_length=COPILOT_MESSAGE_MAX_LENGTH)
+    #: 可为空：场景分支（scenarioCode + slots）下 chips 点击没有文字，
+    #: 主句由模板提供；自由文本分支的空消息在服务层 fail loud。
+    message: str = Field(default="", max_length=COPILOT_MESSAGE_MAX_LENGTH)
     agent_code: str = Field(min_length=1, max_length=64)
     model_config_id: int = Field(ge=1)
     #: 场景编码（P4）：与 ``slots`` 同时提供 ⇒ 后端按场景模板渲染最终提问

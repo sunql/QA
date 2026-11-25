@@ -274,6 +274,11 @@ async def prepareCopilotTurn(
     )
     turns = await conversationStore.listTurns(session, conversation.conversation_id)
 
+    # 空消息守卫：自由文本分支必须有文字；场景分支（slots 驱动，如 chips 点击）
+    # 主句由模板提供，允许空 —— 但两者都空就没有可发的东西了。
+    if not dto.message.strip() and not (dto.scenario_code and dto.slots):
+        raise ValidationError("消息不能为空")
+
     resumeRunId = await _resumeTargetRunId(session, turns, actor, runner)
     if resumeRunId is not None:
         # 续跑回复 = 用户回答追问：永远走自由文本，不做场景渲染。

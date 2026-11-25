@@ -30,7 +30,45 @@ const api = vi.hoisted(() => ({
   getPendingDeliverySummary: vi.fn(),
   searchMappings: vi.fn(),
   listPendingDeliverySites: vi.fn(),
+  listCopilotScenarios: vi.fn(),
 }));
+
+/** P4 场景配置（与 backend/scripts/seed_copilot_scenarios.py 同构）：
+ * 卡片墙 / 槽位表单 / chips 全部由此驱动；提问文本由后端渲染。 */
+const SCENARIO_CONFIG = {
+  scenarioCode: "pending_delivery",
+  name: "待到货 / 逾期未到",
+  description: "按供应商汇总欠交量并给催货建议，引用订单号与物料编码",
+  iconCode: "car",
+  agentCode: "PROCUREMENT_SOURCING",
+  slotSchema: [
+    { key: "monthsBack", type: "number", label: "时间窗", required: true,
+      conflictKeywords: ["时间窗"], displayTemplate: "近{value}个月" },
+    { key: "supplierKeys", type: "entityMulti", label: "供应商",
+      conflictKeywords: ["供应商", "厂家"],
+      codePattern: "(?<![0-9A-Za-z])[A-Z]\\d{2,4}(?![0-9A-Za-z])" },
+    { key: "materialKeys", type: "entityMulti", label: "物料",
+      conflictKeywords: ["物料", "材料"],
+      codePattern: "(?<![0-9A-Za-z])(?:[A-Z]{2,}\\d{4,}[A-Z]?|\\d{10,}[A-Z]?)(?![0-9A-Za-z])" },
+    { key: "siteKeys", type: "dictMulti", label: "基地",
+      conflictKeywords: ["基地", "厂区", "工厂", "车间"],
+      codePattern: "(?<![0-9A-Za-z])(?:T\\d{1,2}|C\\d)(?![0-9A-Za-z])" },
+    { key: "minOverdueDays", type: "number", label: "最低逾期天数" },
+    { key: "datasourceId", type: "number", label: "数据源",
+      conflictKeywords: ["数据源"], hidden: true },
+    { key: "dateFrom", type: "text", label: "开始日期",
+      conflictKeywords: ["日期", "时间段"], hidden: true },
+    { key: "dateTo", type: "text", label: "结束日期",
+      conflictKeywords: ["日期", "时间段"], hidden: true },
+  ],
+  questionTemplate: "分析待到货情况",
+  chips: [
+    { label: "全部供应商概览（近 12 个月）", monthsBack: 12, minOverdueDays: 0 },
+    { label: "近期欠交（近 3 个月）", monthsBack: 3, minOverdueDays: 0 },
+  ],
+  resultRenderer: "pending_delivery",
+  requiredRole: null,
+};
 
 vi.mock("../../api/procurementKnowledge", () => ({
   getAgentCatalog: api.getAgentCatalog,
@@ -53,9 +91,13 @@ vi.mock("../../api/procurementCopilot", () => ({
 vi.mock("../../api/agentOrchestrationApi", () => ({
   getAgentRunSteps: api.getAgentRunSteps,
 }));
+vi.mock("../../api/copilotScenario", () => ({
+  listCopilotScenarios: api.listCopilotScenarios,
+}));
 
 beforeEach(() => {
   api.listCopilotConversations.mockResolvedValue([]);
+  api.listCopilotScenarios.mockResolvedValue([SCENARIO_CONFIG]);
   api.getPendingDeliverySummary.mockResolvedValue({
     summary: { openLines: 9828, openQty: 209421924.058, overdueLines: 9828, excludedRows: 7 },
     bySupplier: [{ supplierCode: "J1", openLines: 2405, openQty: 57363604, overdueLines: 2405 }],
@@ -94,8 +136,8 @@ function renderPage() {
   return utils;
 }
 
-/** 进入「待到货」场景视图。 */
-function renderScenario() {
+/** 进入「待到货」场景视图（卡片墙是配置驱动 ⇒ 先等场景列表到位）。 */
+async function renderScenario() {
   const utils = render(
     <MemoryRouter>
       <I18nextProvider i18n={i18n}>
@@ -105,7 +147,8 @@ function renderScenario() {
       </I18nextProvider>
     </MemoryRouter>,
   );
-  fireEvent.click(screen.getByText(/待到货/));
+  const card = await waitFor(() => screen.getByText(/待到货/));
+  fireEvent.click(card);
   return utils;
 }
 
@@ -562,21 +605,23 @@ describe("ProcurementCopilotPage 待到货场景", () => {
       },
     ]);
 
-    renderScenario();
+    await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByText("全部供应商概览（近 12 个月）"));
 
     await waitFor(() => expect(payloads).toHaveLength(1));
-    const message = String(payloads[0].message);
-    expect(message).toContain("pending_delivery_query");
-    expect(message).toContain("近12个月");
-    expect(message).toContain("供应商=全部");
-    expect(message).toContain("最低逾期天数=0");
-    // 数据源槽位：默认选中 isDefault 源，消息里带 id 给工具取
-    expect(message).toContain("数据源 id=1");
-    expect(message).toContain("datasourceId=1");
+    // P4 新契约：前端只上送场景编码 + 结构化槽位；提问文本由**后端**渲染
+    //（pending_delivery_query / 近12个月 / 数据源 等口径断言已移至后端渲染单测）
+    expect(payloads[0].scenarioCode).toBe("pending_delivery");
     // 场景钉死 Agent：即使页面默认选了别的 Agent，也要以 SOURCING 发起
     expect(payloads[0].agentCode).toBe("PROCUREMENT_SOURCING");
+    expect(String(payloads[0].message)).toBe("");
+    const slots = payloads[0].slots as Record<string, unknown>;
+    expect(slots.monthsBack).toBe(12);
+    expect(slots.minOverdueDays).toBe(0);
+    expect(slots.supplierKeys).toEqual([]);
+    // admin 数据源随槽位上送（默认选中 isDefault 源）
+    expect(slots.datasourceId).toBe(1);
     await waitFor(() => expect(screen.getByText("欠交汇总")).toBeTruthy());
     // done 回读步骤 ⇒ 结构化结果卡（数据不经 LLM 复述）
     await waitFor(() =>
@@ -619,7 +664,7 @@ describe("ProcurementCopilotPage 待到货场景", () => {
       });
     });
 
-    renderScenario();
+    await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
 
@@ -634,12 +679,12 @@ describe("ProcurementCopilotPage 待到货场景", () => {
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
 
     await waitFor(() => expect(payloads).toHaveLength(1));
-    const message = String(payloads[0].message);
-    // 文字里写了 T3 ⇒ 基地让位（尾注与工具入参都不再携带）
-    expect(message).not.toContain("基地=T3");
-    expect(message).not.toContain("siteKeys=[T3]");
-    expect(message).toContain("看 T3 的欠交");
-    expect(message).toContain("pending_delivery_query");
+    // P4 新契约：前端透传槽位与文字；「让位」判定移至后端渲染器
+    //（尾注/入参的让位断言在后端 test_copilot_scenario_render.py）
+    const slots = payloads[0].slots as Record<string, unknown>;
+    expect(slots.siteKeys).toEqual(["T3"]);
+    expect(String(payloads[0].message)).toContain("看 T3 的欠交");
+    expect(payloads[0].scenarioCode).toBe("pending_delivery");
   });
 });
 
@@ -714,7 +759,8 @@ describe("ProcurementCopilotPage 场景卡片墙（首页）", () => {
         </I18nextProvider>
       </MemoryRouter>,
     );
-    expect(screen.getByText("待到货 / 逾期未到")).toBeTruthy();
+    // 卡片来自场景配置（异步加载）⇒ 等「待到货」卡出现再断言
+    await waitFor(() => expect(screen.getByText("待到货 / 逾期未到")).toBeTruthy());
     expect(screen.getByText(/自由问答/)).toBeTruthy();
     // 首页不显示对话输入框
     expect(screen.queryByPlaceholderText(/不锈钢板/)).toBeNull();
@@ -730,7 +776,7 @@ describe("ProcurementCopilotPage 场景卡片墙（首页）", () => {
     const backBtn = screen.getAllByRole("button", { name: /场景/ })
       .find((el) => el.textContent?.trim() === "场景");
     fireEvent.click(backBtn as HTMLElement);
-    expect(screen.getByText("待到货 / 逾期未到")).toBeTruthy();
+    await waitFor(() => expect(screen.getByText("待到货 / 逾期未到")).toBeTruthy());
   });
 });
 
@@ -754,7 +800,7 @@ describe("ProcurementCopilotPage 数据源槽位", () => {
       });
     });
 
-    renderScenario();
+    await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
 
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
@@ -768,9 +814,10 @@ describe("ProcurementCopilotPage 数据源槽位", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
     await waitFor(() => expect(payloads).toHaveLength(1));
-    const message = String(payloads[0].message);
-    expect(message).toContain("数据源 id=10");
-    expect(message).toContain("datasourceId=10");
+    // P4 新契约：数据源作为隐藏槽位随 slots 上送（文本口径在后端渲染）
+    const slots = payloads[0].slots as Record<string, unknown>;
+    expect(slots.datasourceId).toBe(10);
+    expect(payloads[0].scenarioCode).toBe("pending_delivery");
   });
 });
 
@@ -801,7 +848,7 @@ describe("供应商/物料远程搜索多选", () => {
       });
     });
 
-    renderScenario();
+    await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
 
@@ -819,9 +866,9 @@ describe("供应商/物料远程搜索多选", () => {
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
 
     await waitFor(() => expect(payloads).toHaveLength(1));
-    const message = String(payloads[0].message);
-    expect(message).toContain("供应商=F109");
-    expect(message).toContain("supplierKeys=[F109]");
+    const slots = payloads[0].slots as Record<string, unknown>;
+    expect(slots.supplierKeys).toEqual(["F109"]);
+    expect(String(payloads[0].message)).toContain("看一下欠交明细");
   });
 });
 
@@ -865,7 +912,7 @@ describe("三个交互优化", () => {
       });
     });
 
-    renderScenario();
+    await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByText("全部供应商概览（近 12 个月）"));
     await waitFor(() => expect(screen.getByText("待到货分析结果")).toBeTruthy());
@@ -902,7 +949,7 @@ describe("三个交互优化", () => {
       });
     });
 
-    renderScenario();
+    await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
     const siteSelect = screen.getAllByRole("combobox")[4];
@@ -914,14 +961,16 @@ describe("三个交互优化", () => {
     fireEvent.click(sendBtn);
 
     await waitFor(() => expect(payloads).toHaveLength(1));
-    const message = String(payloads[0].message);
-    expect(message).toContain("分析待到货情况");
-    expect(message).toContain("基地=T3");
+    // P4 新契约：无文字 ⇒ message 为空，主句由后端模板提供（「分析待到货情况」）
+    expect(String(payloads[0].message)).toBe("");
+    const slots = payloads[0].slots as Record<string, unknown>;
+    expect(slots.siteKeys).toEqual(["T3"]);
+    expect(slots.monthsBack).toBe(12);
   });
 
   it("① 重进场景：高级参数重置（summary 请求不再带 siteKeys）", async () => {
     mockOptions();
-    renderScenario();
+    await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
     const siteSelect = screen.getAllByRole("combobox")[4];
@@ -965,7 +1014,7 @@ describe("冲突参数以对话框为准", () => {
       });
     });
 
-    renderScenario();
+    await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
     // 与既有供应商搜索用例同款手法（mouseDown + change → debounce → click option）
@@ -981,14 +1030,11 @@ describe("冲突参数以对话框为准", () => {
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
 
     await waitFor(() => expect(payloads).toHaveLength(1));
-    const message = String(payloads[0].message);
-    expect(message).toContain("B019");
-    // 供应商槽位让位：尾注不再携带 B125
-    expect(message).not.toContain("供应商=B125");
-    expect(message).not.toContain("supplierKeys=[B125]");
-    // 非冲突维度保留
-    expect(message).toContain("时间窗=近12个月");
-    expect(message).toContain("最低逾期天数=0");
+    // P4 新契约：前端透传 B125 槽位与 B019 文字；「文字提到供应商 ⇒
+    // B125 让位」的判定在后端渲染器（test_copilot_scenario_render.py 覆盖）
+    const slots = payloads[0].slots as Record<string, unknown>;
+    expect(slots.supplierKeys).toEqual(["B125"]);
+    expect(String(payloads[0].message)).toContain("B019");
   });
 });
 
@@ -1013,7 +1059,7 @@ describe("冲突检测：纯编码也算指定", () => {
       });
     });
 
-    renderScenario();
+    await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
     const supplierSelect = screen.getAllByRole("combobox")[2];
@@ -1028,12 +1074,11 @@ describe("冲突检测：纯编码也算指定", () => {
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
 
     await waitFor(() => expect(payloads).toHaveLength(1));
-    const message = String(payloads[0].message);
-    expect(message).toContain("B109");
-    expect(message).not.toContain("supplierKeys=[B125]");
-    // 非冲突维度保留 + 冲突仲裁指令
-    expect(message).toContain("时间窗=近12个月");
-    expect(message).toContain("以用户问题描述为准");
+    // P4 新契约：B109 纯编码也让位的判定在后端（codePattern 配置），
+    // 前端只保证文字与槽位完整上送
+    const slots = payloads[0].slots as Record<string, unknown>;
+    expect(slots.supplierKeys).toEqual(["B125"]);
+    expect(String(payloads[0].message)).toContain("B109");
   });
 });
 
@@ -1042,7 +1087,7 @@ describe("数据源选择仅 admin 可见", () => {
   it("非 admin：高级参数里不出现「数据源」标签与下拉", async () => {
     authState.roles = ["procurement"];
     mockOptions();
-    renderScenario();
+    await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
 
@@ -1054,7 +1099,7 @@ describe("数据源选择仅 admin 可见", () => {
   it("admin：可见数据源标签与下拉", async () => {
     authState.roles = ["admin"];
     mockOptions();
-    renderScenario();
+    await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
 

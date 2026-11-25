@@ -181,10 +181,15 @@ export async function listPendingDeliverySites(
 }
 
 export interface CopilotMessageRequest {
+  /** 场景分支下可为空（主句由模板提供）；自由文本分支必须有文字。 */
   message: string;
   agentCode: string;
   /** **必填且后端不改派**（后端不替你选模型）。 */
   modelConfigId: number;
+  /** 场景编码（P4）：与 slots 同时提供 ⇒ 后端按场景模板渲染最终提问。 */
+  scenarioCode?: string;
+  /** 结构化槽位值（键 = slot_schema[].key）；续跑回复不带。 */
+  slots?: Record<string, unknown>;
   /** 多轮会话 id；缺省 = 新开会话（响应里会回传新 id）。 */
   conversationId?: string;
 }

@@ -66,6 +66,30 @@ PENDING_DELIVERY_SLOT_SCHEMA: list[dict[str, Any]] = [
         "codePattern": _SITE_CODE,
     },
     {"key": "minOverdueDays", "type": "number", "label": "最低逾期天数"},
+    # admin 数据源选择（治理动作）：仅 admin 前端会传；非 admin 缺省 ⇒ 走默认绑定。
+    # hidden = 前端槽位表单不渲染（由数据源下拉写入），后端渲染照常进尾注/入参
+    {
+        "key": "datasourceId",
+        "type": "number",
+        "label": "数据源",
+        "conflictKeywords": ["数据源"],
+        "hidden": True,
+    },
+    # 显式日期区间（高级参数「时间段」模式）：覆盖 monthsBack 的近 N 月口径
+    {
+        "key": "dateFrom",
+        "type": "text",
+        "label": "开始日期",
+        "conflictKeywords": ["日期", "时间段"],
+        "hidden": True,
+    },
+    {
+        "key": "dateTo",
+        "type": "text",
+        "label": "结束日期",
+        "conflictKeywords": ["日期", "时间段"],
+        "hidden": True,
+    },
 ]
 
 SEEDS: list[dict[str, Any]] = [
@@ -80,6 +104,8 @@ SEEDS: list[dict[str, Any]] = [
         "chips": [
             {"label": "全部供应商概览（近 12 个月）", "monthsBack": 12, "minOverdueDays": 0},
             {"label": "近期欠交（近 3 个月）", "monthsBack": 3, "minOverdueDays": 0},
+            {"label": "逾期超 30 天的欠交", "monthsBack": 12, "minOverdueDays": 30},
+            {"label": "长期逾期（超 90 天）", "monthsBack": 12, "minOverdueDays": 90},
         ],
         "result_renderer": "pending_delivery",
         "required_role": None,

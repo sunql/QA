@@ -20,6 +20,7 @@ vi.mock("axios", () => ({
   },
 }));
 
+import { LONG_RUNNING_TIMEOUT_MS } from "../config";
 import {
   listDataSources,
   getDataSource,
@@ -29,6 +30,8 @@ import {
   listDatasourceSchemas,
   getDatasourceSchema,
   introspectDatasource,
+  startIntrospectJob,
+  getIntrospectJob,
   testDataSource,
 } from "../api/datasource";
 
@@ -118,6 +121,48 @@ describe("api/datasource", () => {
     const call = httpMock.post.mock.calls[0];
     expect(call[0]).toBe("/datasources/1/introspect");
     expect(call[2].params).toEqual({ schema: "THBI" });
+  });
+
+  it("introspectDatasource 必须用长超时 —— 全库内省 > 30s 会被掐断成「网络异常」", async () => {
+    // 2026-11-25 本地实测：Oracle 大 owner（如 LC019999）全库内省超过默认
+    // REQUEST_TIMEOUT_MS(30s) ⇒ axios status=0 ⇒ 前端误报「网络异常，请稍后重试」。
+    // 与 ontology 批量重操作同口径，改用 LONG_RUNNING_TIMEOUT_MS(280s)。
+    httpMock.post.mockResolvedValue({ data: schemaResponse });
+    await introspectDatasource(1);
+    const call = httpMock.post.mock.calls[0];
+    expect(call[2]?.timeout).toBe(LONG_RUNNING_TIMEOUT_MS);
+
+    // 带 schema 时 params 与 timeout 并存（不能因加 timeout 丢掉 params）
+    httpMock.post.mockClear();
+    await introspectDatasource(1, "LC019999");
+    const call2 = httpMock.post.mock.calls[0];
+    expect(call2[2].params).toEqual({ schema: "LC019999" });
+    expect(call2[2].timeout).toBe(LONG_RUNNING_TIMEOUT_MS);
+  });
+
+  it("startIntrospectJob POST /datasources/:id/introspect-jobs（带 schema）", async () => {
+    httpMock.post.mockResolvedValue({
+      data: { jobId: "abc", status: "running", total: 0, completed: 0 },
+    });
+    const job = await startIntrospectJob(11, "LC019999");
+    const call = httpMock.post.mock.calls[0];
+    expect(call[0]).toBe("/datasources/11/introspect-jobs");
+    expect(call[2].params).toEqual({ schema: "LC019999" });
+    expect(job.jobId).toBe("abc");
+  });
+
+  it("getIntrospectJob GET /datasources/:id/introspect-jobs/:jobId", async () => {
+    httpMock.get.mockResolvedValue({
+      data: { jobId: "abc", status: "running", total: 860, completed: 200, error: null },
+    });
+    const job = await getIntrospectJob(11, "abc");
+    // silentErrors：轮询失败由页面按「连续 5 次」统一提示，拦截器不得逐次弹 toast。
+    expect(httpMock.get).toHaveBeenCalledWith("/datasources/11/introspect-jobs/abc", {
+      timeout: expect.any(Number),
+      silentErrors: true,
+    });
+    expect(job.completed).toBe(200);
+    expect(job.total).toBe(860);
   });
 
   it("testDataSource 走独立 raw axios POST /datasources/test", async () => {

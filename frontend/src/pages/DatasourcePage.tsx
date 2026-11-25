@@ -6,6 +6,7 @@ import {
   Table,
   Button,
   Modal,
+  Progress,
   Form,
   Input,
   InputNumber,
@@ -30,9 +31,12 @@ import {
   updateDataSource,
   deleteDataSource,
   testDataSource,
-  introspectDatasource,
+  startIntrospectJob,
+  getIntrospectJob,
   getDatasourceLayers,
 } from "../api/datasource";
+import type { IntrospectJob } from "../api/datasource";
+import type { AppError } from "../api/client";
 import type {
   DataSource,
   DataSourceCreate,
@@ -51,6 +55,15 @@ import { useTranslation } from "../i18n";
 import ImportWizard from "../components/localImport/ImportWizard";
 
 const { Title } = Typography;
+
+// 内省 job 轮询：请求成功即视为「正常进行中」，不判超时；仅连续失败才判失联。
+const POLL_INTERVAL_MS = 1500;
+const MAX_POLL_FAILURES = 5;
+
+interface ActiveJob {
+  datasourceId: number;
+  jobId: string;
+}
 
 const TYPE_COLORS: Record<DataSourceType, string> = {
   oracle: "red",
@@ -102,6 +115,12 @@ export default function DatasourcePage() {
   const [layersRecord, setLayersRecord] = useState<DataSource | null>(null);
   const [layersData, setLayersData] = useState<DataSourceLayersRead | null>(null);
   const [layersLoading, setLayersLoading] = useState(false);
+  // 缓存 Schema 异步 job：进度弹窗 + 轮询
+  const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
+  const [jobProgress, setJobProgress] = useState<IntrospectJob | null>(null);
+  const [pollFailures, setPollFailures] = useState(0);
+  // 404 = 后端 job 已淘汰（服务重启 / 过期），与「网络失联」区分展示。
+  const [jobExpired, setJobExpired] = useState(false);
   const [form] = Form.useForm<FormValues>();
   // 监听类型字段，用于条件展示 Oracle 版本下拉
   const currentType = Form.useWatch("type", form);
@@ -121,6 +140,70 @@ export default function DatasourcePage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 轮询内省进度：只要请求成功就视为「正常进行中」，永不判超时；
+  // 仅连续 MAX_POLL_FAILURES 次失败（与服务器失联）才中断。
+  // handle 先声明后赋值：tick 可能在 setInterval 之前就跑到 catch 分支，
+  // 直接引用 const handle 会命中 TDZ（ReferenceError）。
+  useEffect(() => {
+    if (!activeJob) return;
+    let cancelled = false;
+    let stopped = false;
+    // 请求超时（30s）远大于轮询间隔（1.5s）：黑洞网络下不设闸会叠出约 20 个在飞请求。
+    // in-flight 守卫保证同一时刻最多一个进度请求；stopped 屏蔽终态后的 stale 返回。
+    let inFlight = false;
+    let failures = 0;
+    let handle: number | undefined;
+    const stopPolling = () => {
+      stopped = true;
+      if (handle !== undefined) window.clearInterval(handle);
+    };
+    const tick = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      try {
+        const next = await getIntrospectJob(activeJob.datasourceId, activeJob.jobId);
+        // 终态（成功/失败/失效）后仍可能有 stale in-flight 返回：
+        // 不得再清空失败计数或重复弹错误。
+        if (cancelled || stopped) return;
+        failures = 0;
+        setPollFailures(0);
+        setJobProgress(next);
+        if (next.status === "succeeded") {
+          stopPolling();
+          setActiveJob(null);
+          setJobProgress(null);
+          void message.success(t("toast.schemaCached", { count: next.total }));
+        } else if (next.status === "failed") {
+          stopPolling(); // 终态失败：停止轮询，错误留在弹窗里
+        }
+      } catch (err) {
+        if (cancelled || stopped) return;
+        // 404 = 后端 job 已被淘汰（服务重启 / 过期），不是网络问题：
+        // 不能计成「与服务器连接中断」，改为明确提示重新发起。
+        if ((err as AppError)?.status === 404) {
+          stopPolling();
+          setJobExpired(true);
+          void message.error(t("datasource.introspectExpired"));
+          return;
+        }
+        failures += 1;
+        setPollFailures(failures);
+        if (failures >= MAX_POLL_FAILURES) {
+          stopPolling();
+          void message.error(t("datasource.introspectConnectionLost"));
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+    handle = window.setInterval(() => void tick(), POLL_INTERVAL_MS);
+    void tick();
+    return () => {
+      cancelled = true;
+      stopPolling();
+    };
+  }, [activeJob, t]);
 
   const openCreate = () => {
     setEditing(null);
@@ -233,13 +316,17 @@ export default function DatasourcePage() {
     }
   };
 
-  // 手工缓存：触发数据源 schema 发现并写入 schema_cache，
-  // 供 DQ 规则生成等下游在未自动缓存时仍可用。
+  // 手工缓存：启动异步 schema 内省 job，弹窗展示进度并由轮询推进。
+  // 同一数据源+schema 已在跑时后端返回既有 jobId（findRunning），
+  // 故关闭弹窗后再次点击按钮会拿回同一任务。
   const handleIntrospect = async (record: DataSource) => {
     setIntrospectingId(record.id);
     try {
-      const res = await introspectDatasource(record.id);
-      void message.success(t("toast.schemaCached", { count: res.tables.length }));
+      const job = await startIntrospectJob(record.id);
+      setPollFailures(0);
+      setJobExpired(false);
+      setJobProgress(job);
+      setActiveJob({ datasourceId: record.id, jobId: job.jobId });
     } catch {
       // 错误已由拦截器提示
     } finally {
@@ -567,6 +654,65 @@ export default function DatasourcePage() {
             )}
           </>
         ) : null}
+      </Modal>
+
+      <Modal
+        open={activeJob !== null}
+        title={t("datasource.cacheSchema")}
+        onCancel={() => {
+          // 允许关闭，后台任务继续；再次点击按钮会拿回同一 jobId（含当前进度）
+          setActiveJob(null);
+          setJobProgress(null);
+          setJobExpired(false);
+          setPollFailures(0);
+        }}
+        footer={null}
+      >
+        {jobExpired ? (
+          <Alert type="error" showIcon message={t("datasource.introspectExpired")} />
+        ) : jobProgress?.status === "failed" ? (
+          <Alert
+            type="error"
+            showIcon
+            message={jobProgress.error ?? t("datasource.introspectFailed")}
+          />
+        ) : (
+          <>
+            {jobProgress?.status === "running" && (jobProgress?.total ?? 0) === 0 ? (
+              // 新建 job 的 total 恒为 0（后台任务尚未查到表名列表），此时渲染
+              // 「0/0 + 0%」会让人误以为卡死；用不确定态进度条 + 「正在统计」文案。
+              <>
+                <p>{t("datasource.introspectCounting")}</p>
+                <Progress
+                  percent={0}
+                  status={pollFailures >= MAX_POLL_FAILURES ? "exception" : "active"}
+                  showInfo={false}
+                />
+              </>
+            ) : (
+              <>
+                <p>
+                  {t("datasource.introspectProgress", {
+                    done: jobProgress?.completed ?? 0,
+                    total: jobProgress?.total ?? 0,
+                  })}
+                </p>
+                <Progress
+                  percent={
+                    jobProgress && jobProgress.total > 0
+                      ? Math.round((jobProgress.completed / jobProgress.total) * 100)
+                      : 0
+                  }
+                  // 失联后停掉 active 动画：红色异常态表明进度不再推进。
+                  status={pollFailures >= MAX_POLL_FAILURES ? "exception" : "active"}
+                />
+              </>
+            )}
+            {pollFailures >= MAX_POLL_FAILURES && (
+              <Alert type="warning" showIcon message={t("datasource.introspectConnectionLost")} />
+            )}
+          </>
+        )}
       </Modal>
 
       <ImportWizard

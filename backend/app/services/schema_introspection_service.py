@@ -97,6 +97,87 @@ def _normalizeSchemaName(ds: DataSource, owner: str | None) -> str:
     return ""
 
 
+def _sqlLiteral(value: str) -> str:
+    """把字符串渲染为 SQL 字面量（单引号双写转义）。
+
+    表名来自数据库元数据字典表（非用户输入），仍做字面量转义防异常字符。
+    """
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _tableNameInClause(
+    tableNames: list[str], *, prefix: str = "", column: str | None = None,
+) -> str:
+    """追加 AND <目标列> IN (...)，用于把五类查询限定在本批表内。
+
+    prefix 必填于 JOIN 查询：PK/FK 的 SQL 里有多张表，裸 `table_name` 会歧义
+    （Oracle 报 ORA-00918，MySQL 报 1052）。单表查询用默认空前缀。
+
+    column 用于目标列名与 `table_name` 不同的场景：PG 注释查询来自
+    `pg_class c`，列名是 `c.relname`；SELECT 里 `AS table_name` 只是输出别名，
+    PostgreSQL 不允许在 WHERE 中引用输出别名（`AND table_name IN (...)` 会报
+    column does not exist）。显式传 column 时优先于 prefix。
+    """
+    if not tableNames:
+        return " AND 1 = 0"
+    joined = ", ".join(_sqlLiteral(name) for name in tableNames)
+    target = column or (f"{prefix}table_name" if prefix else "table_name")
+    return f" AND {target} IN ({joined})"
+
+
+def _withTableFilter(sql: str, clause: str) -> str:
+    """把 ` AND <col>table_name IN (...)` 插入 SQL 的 ORDER BY 之前。
+
+    现有查询常量均以 `ORDER BY ...` 结尾；若把过滤子句直接拼在其后，生成
+    `ORDER BY ... AND table_name IN (...)` 是非法 SQL（Oracle ORA-00933 /
+    MySQL 1064）。这里在（最后一个）ORDER BY 前插入，无 ORDER BY 的查询
+    （如注释查询）则直接追加到末尾。返回新字符串，不改动入参。
+    """
+    if not clause:
+        return sql
+    index = sql.upper().rfind("ORDER BY")
+    if index == -1:
+        return f"{sql.rstrip()}{clause}"
+    head = sql[:index].rstrip()
+    return f"{head}{clause}\n{sql[index:]}"
+
+
+def _dataSourceType(ds: DataSource) -> DataSourceType:
+    try:
+        return DataSourceType(ds.type)
+    except ValueError as exc:
+        raise ValidationError(
+            MSG_DATASOURCE_TYPE_NOT_SUPPORTED.format(dsType=ds.type)
+        ) from exc
+
+
+def _tableNamesSql(dsType: DataSourceType, owner: str) -> str:
+    """列出该 schema 下的业务表名（轻查询，分批的批次依据）。
+
+    必须与列查询**同源**（Oracle ALL_TAB_COLUMNS / PG·MySQL
+    information_schema.columns）：列来源包含视图（Oracle 还含分区表等），
+    若表名列表改用 ALL_TABLES / relkind='r' / table_type='BASE TABLE'，
+    分批路径会漏掉列查询能看到的视图 ⇒ schema 缓存比全量 introspect() 少表，
+    直接影响 NL2SQL 召回。两路同源才能保证「分批结果 ≡ 全量结果」。
+
+    Oracle 的 owner 由 _oracleOwner 白名单校验后传入，内联为字面量无注入面。
+    """
+    if dsType is DataSourceType.ORACLE:
+        return (
+            "SELECT DISTINCT table_name FROM ALL_TAB_COLUMNS "
+            f"WHERE owner = '{owner}' ORDER BY table_name"
+        )
+    if dsType is DataSourceType.POSTGRESQL:
+        return (
+            "SELECT DISTINCT table_name FROM information_schema.columns "
+            "WHERE table_schema = CURRENT_SCHEMA() ORDER BY table_name"
+        )
+    return (
+        "SELECT DISTINCT table_name FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() ORDER BY table_name"
+    )
+
+
 def _emptyTable() -> dict[str, Any]:
     return {"owner": "", "columns": [], "primary_keys": [], "foreign_keys": []}
 
@@ -240,6 +321,159 @@ class SchemaIntrospectionService:
                 detail=MSG_DATASOURCE_SCHEMA_TABLE_LIMIT_DETAIL,
             )
         return tables
+
+    async def introspectBatched(
+        self,
+        ds: DataSource,
+        *,
+        owner: str | None = None,
+        onProgress: Callable[[int, int], None],
+        batchSize: int = 100,
+    ) -> list[TableSchemaRead]:
+        """按表分批内省，每批结束回调 (已覆盖表数, 总表数)。
+
+        与 introspect 的差别只有执行粒度：先把表名列表查出来，再按 batchSize
+        切批，五类元数据查询均追加 table_name IN (...) 过滤；合并逻辑
+        （_mergeRows / _annotateComments / _assembleTables）与全量路径完全一致
+        ⇒ 结果等价（见 test_batched_merge_equals_full_and_progress_monotonic）。
+        """
+        adapter = self._adapterProvider(ds.id, ds)
+        dsType = _dataSourceType(ds)
+        schemaName = _normalizeSchemaName(ds, owner)
+        try:
+            tableNames = await self._listTableNames(adapter, ds, dsType, schemaName)
+            total = len(tableNames)
+            # 表数上限在跑批之前判：total 此时已知，没必要先把几万张表的
+            # 五类元数据查完才拒绝（超大 schema 下代价是几十次全表扫描）。
+            maxTables = getSettings().schemaMaxTables
+            if total > maxTables:
+                raise DataSourceError(
+                    MSG_DATASOURCE_SCHEMA_TABLE_LIMIT_EXCEEDED.format(
+                        datasourceId=ds.id, tableCount=total, maxTables=maxTables
+                    ),
+                    detail=MSG_DATASOURCE_SCHEMA_TABLE_LIMIT_DETAIL,
+                )
+            onProgress(0, total)
+            merged: dict[str, dict] = {}
+            for start in range(0, total, max(1, batchSize)):
+                batch = tableNames[start : start + batchSize]
+                merged.update(await self._queryBatch(adapter, ds, dsType, schemaName, batch))
+                onProgress(min(start + len(batch), total), total)
+        except ValidationError:
+            raise
+        except DataSourceError:
+            # 上限检查抛出的领域异常必须原样上抛，不能被下面的宽 except
+            # 重新包装成「schema 读取失败」（那会丢掉「表数超限」语义）。
+            raise
+        except Exception as exc:  # noqa: BLE001 - 与 introspect 同口径包装
+            logger.error("数据源 %s 分批 schema 读取失败: %s", ds.id, exc, exc_info=True)
+            raise DataSourceError(
+                MSG_DATASOURCE_SCHEMA_READ_FAILED.format(datasourceId=ds.id),
+                detail=MSG_DATASOURCE_SCHEMA_READ_FAILED_DETAIL,
+            ) from exc
+        tables = self._assembleTables(merged)
+        maxTables = getSettings().schemaMaxTables
+        if len(tables) > maxTables:
+            raise DataSourceError(
+                MSG_DATASOURCE_SCHEMA_TABLE_LIMIT_EXCEEDED.format(
+                    datasourceId=ds.id, tableCount=len(tables), maxTables=maxTables
+                ),
+                detail=MSG_DATASOURCE_SCHEMA_TABLE_LIMIT_DETAIL,
+            )
+        return tables
+
+    @staticmethod
+    async def _listTableNames(
+        adapter: BusinessDbAdapter,
+        ds: DataSource,
+        dsType: DataSourceType,
+        schemaName: str,
+    ) -> list[str]:
+        rows = await adapter.execute_read_only(_tableNamesSql(dsType, schemaName))
+        return [str(r.get("table_name") or "") for r in rows if r.get("table_name")]
+
+    async def _queryBatch(
+        self,
+        adapter: BusinessDbAdapter,
+        ds: DataSource,
+        dsType: DataSourceType,
+        schemaName: str,
+        tableNames: list[str],
+    ) -> dict[str, dict]:
+        """执行一批表的五类查询并合并；SQL 形态按数据源类型选择。"""
+        plain = _tableNameInClause(tableNames)  # 单表查询 / 注释查询
+        if dsType is DataSourceType.ORACLE:
+            columnRows = await adapter.execute_read_only(
+                _withTableFilter(_ORACLE_COLUMNS_SQL.format(owner=schemaName), plain)
+            )
+            pkRows = await adapter.execute_read_only(
+                _withTableFilter(
+                    _ORACLE_PK_SQL.format(owner=schemaName),
+                    _tableNameInClause(tableNames, prefix="c."),
+                )
+            )
+            fkRows = await adapter.execute_read_only(
+                _withTableFilter(
+                    _ORACLE_FK_SQL.format(owner=schemaName),
+                    _tableNameInClause(tableNames, prefix="cc."),
+                )
+            )
+            tableComments = await adapter.execute_read_only(
+                _withTableFilter(_ORACLE_TABLE_COMMENT_SQL.format(owner=schemaName), plain)
+            )
+            colComments = await adapter.execute_read_only(
+                _withTableFilter(_ORACLE_COL_COMMENT_SQL.format(owner=schemaName), plain)
+            )
+        elif dsType is DataSourceType.POSTGRESQL:
+            columnRows = await adapter.execute_read_only(
+                _withTableFilter(_PG_SQL["columns"], plain)
+            )
+            pkRows = await adapter.execute_read_only(
+                _withTableFilter(
+                    _PG_SQL["primary_keys"],
+                    _tableNameInClause(tableNames, prefix="tc."),
+                )
+            )
+            fkRows = await adapter.execute_read_only(
+                _withTableFilter(
+                    _PG_SQL["foreign_keys"],
+                    _tableNameInClause(tableNames, prefix="tc."),
+                )
+            )
+            # PG 注释查询来自 pg_class（列名 c.relname），WHERE 不能引用
+            # SELECT 的 `AS table_name` 别名 ⇒ 显式用 c.relname 过滤。
+            pgRelFilter = _tableNameInClause(tableNames, column="c.relname")
+            tableComments = await adapter.execute_read_only(
+                _withTableFilter(_PG_TABLE_COMMENT_SQL, pgRelFilter)
+            )
+            colComments = await adapter.execute_read_only(
+                _withTableFilter(_PG_COL_COMMENT_SQL, pgRelFilter)
+            )
+        else:
+            columnRows = await adapter.execute_read_only(
+                _withTableFilter(_MYSQL_SQL["columns"], plain)
+            )
+            pkRows = await adapter.execute_read_only(
+                _withTableFilter(
+                    _MYSQL_SQL["primary_keys"],
+                    _tableNameInClause(tableNames, prefix="tc."),
+                )
+            )
+            fkRows = await adapter.execute_read_only(
+                _withTableFilter(
+                    _MYSQL_SQL["foreign_keys"],
+                    _tableNameInClause(tableNames, prefix="tc."),
+                )
+            )
+            tableComments = await adapter.execute_read_only(
+                _withTableFilter(_MYSQL_TABLE_COMMENT_SQL, plain)
+            )
+            colComments = await adapter.execute_read_only(
+                _withTableFilter(_MYSQL_COL_COMMENT_SQL, plain)
+            )
+        merged = _mergeRows(columnRows, pkRows, fkRows)
+        _annotateComments(merged, tableComments, colComments)
+        return merged
 
     async def listSchemas(self, ds: DataSource) -> list[str]:
         """列出该连接可见的 Oracle owner（schema）命名空间，用于向导「选择 Schema」。
@@ -388,7 +622,26 @@ class SchemaIntrospectionService:
         tables = await self.introspect(ds, owner=schemaName)
         schemaData = [t.model_dump() for t in tables]
         version = _schemaVersion(schemaData)
+        return await self._persistSchemaCache(
+            session, ds, schemaName=schemaName, schemaData=schemaData, version=version
+        )
 
+    async def _persistSchemaCache(
+        self,
+        session: AsyncSession,
+        ds: DataSource,
+        *,
+        schemaName: str,
+        schemaData: list[dict],
+        version: str,
+    ) -> SchemaCache:
+        """把已内省好的 schema 数据落到 schema_cache（全量 / 分批两条路径共用）。
+
+        写入并发安全（跨 PG/SQLite 可移植，不依赖方言特有的 ON CONFLICT）：
+        - 首次写入：session.add + commit，若与并发请求撞复合唯一约束
+          （uq_schema_cache_datasource_schema），回滚后复用胜出者，避免 500；
+        - 数据变化：DB 级 UPDATE（不原地修改既有 ORM 对象，符合不可变约束），再刷新取最新值。
+        """
         existing = await self.getCached(session, ds.id, owner=schemaName, ds=ds)
         if existing is not None and existing.schema_version == version:
             logger.info("schema 缓存未变化，复用 datasource_id=%s schema=%s", ds.id, schemaName)
@@ -412,7 +665,7 @@ class SchemaIntrospectionService:
                     return winner
                 raise
             await session.refresh(cache)
-            logger.info("写入 schema 缓存 datasource_id=%s schema=%s tables=%s", ds.id, schemaName, len(tables))
+            logger.info("写入 schema 缓存 datasource_id=%s schema=%s tables=%s", ds.id, schemaName, len(schemaData))
             return cache
         # 数据变化：DB 级 UPDATE 刷新版本号与内容（同一行，缓存幂等，仅一条）
         await session.execute(
@@ -425,8 +678,39 @@ class SchemaIntrospectionService:
         )
         await session.commit()
         await session.refresh(existing)
-        logger.info("刷新 schema 缓存 datasource_id=%s schema=%s tables=%s", ds.id, schemaName, len(tables))
+        logger.info("刷新 schema 缓存 datasource_id=%s schema=%s tables=%s", ds.id, schemaName, len(schemaData))
         return existing
+
+    async def introspectAndCacheBatched(
+        self,
+        session: AsyncSession,
+        ds: DataSource,
+        *,
+        owner: str | None,
+        registry: Any,
+        jobId: str,
+    ) -> SchemaCache:
+        """分批内省 → 写缓存，并把进度同步到 job 注册表。
+
+        写库与 introspectAndCache 共用 _persistSchemaCache（同一套新建/复用/冲突
+        回滚/UPDATE 逻辑）；区别只在：
+        1. 内省走 introspectBatched（带进度回调）；
+        2. 回调把 (completed, total) 写进 job 注册表。
+        失败时异常向上抛，由 runIntrospectJob 统一落 failed（不写缓存）。
+        """
+        schemaName = _normalizeSchemaName(ds, owner)
+
+        def onProgress(done: int, total: int) -> None:
+            registry.update(jobId, total=total, completed=done)
+
+        tables = await self.introspectBatched(
+            ds, owner=schemaName, onProgress=onProgress
+        )
+        schemaData = [t.model_dump() for t in tables]
+        version = _schemaVersion(schemaData)
+        return await self._persistSchemaCache(
+            session, ds, schemaName=schemaName, schemaData=schemaData, version=version
+        )
 
     @staticmethod
     def buildResponse(cache: SchemaCache) -> SchemaIntrospectResponse:

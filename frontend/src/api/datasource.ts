@@ -1,6 +1,6 @@
 import axios from "axios";
 import { httpClient } from "./client";
-import { API_BASE_URL, REQUEST_TIMEOUT_MS } from "../config";
+import { API_BASE_URL, LONG_RUNNING_TIMEOUT_MS, REQUEST_TIMEOUT_MS } from "../config";
 import { useAuthStore } from "../stores/authStore";
 import type {
   DataSource,
@@ -13,6 +13,10 @@ import type {
 } from "../types/datasource";
 
 const BASE = "/datasources";
+
+// 轮询 per-call 超时（spec：10s）。轮询接口只读内存态，正常毫秒级返回；
+// 请求超时（30s）远大于轮询间隔（1.5s）会让黑洞网络下叠出大量在飞请求。
+const INTROSPECT_POLL_TIMEOUT_MS = 10_000;
 
 export async function listDataSources(activeOnly = false): Promise<DataSource[]> {
   const res = await httpClient.get<DataSource[]>(BASE, {
@@ -63,13 +67,59 @@ export async function getDatasourceSchema(
 
 // 触发数据源 schema 发现并写缓存（数据未变化时复用缓存），返回全量 schema。
 // schema 缺省 = 连接用户默认 owner。
+//
+// 超时必须用 LONG_RUNNING_TIMEOUT_MS：全库内省是重操作（Oracle 大 owner 可达数分钟），
+// 走默认 30s 会被 axios 掐断 ⇒ status=0 ⇒ 前端误报「网络异常，请稍后重试」
+// （2026-11-25 本地实测 LC019999）。与 ontology 批量重操作同口径。
 export async function introspectDatasource(
   id: number,
   schema?: string | null,
 ): Promise<SchemaIntrospectResponse> {
   const res = await httpClient.post<SchemaIntrospectResponse>(`${BASE}/${id}/introspect`, undefined, {
     params: schema ? { schema } : undefined,
+    timeout: LONG_RUNNING_TIMEOUT_MS,
   });
+  return res.data;
+}
+
+export interface IntrospectJob {
+  jobId: string;
+  status: "running" | "succeeded" | "failed";
+  total: number;
+  completed: number;
+  error?: string | null;
+}
+
+// 启动异步 schema 内省任务。同一数据源+schema 已在跑时后端返回既有 jobId
+// （并发保护），调用方无需自己去重。
+export async function startIntrospectJob(
+  id: number,
+  schema?: string | null,
+): Promise<IntrospectJob> {
+  const res = await httpClient.post<IntrospectJob>(
+    `${BASE}/${id}/introspect-jobs`,
+    undefined,
+    {
+      params: schema ? { schema } : undefined,
+      timeout: REQUEST_TIMEOUT_MS,
+    },
+  );
+  return res.data;
+}
+
+// 查询内省任务进度。后端只读内存态，正常毫秒级返回 ⇒ 用默认短超时；
+// 「正常进行中不判超时」由调用方的轮询逻辑保证（连续失败才判中断）。
+//
+// silentErrors：轮询失联时拦截器不再逐次弹「网络异常」toast —— 由调用方在
+// 连续失败达到阈值时只提示一次「连接中断」，避免 5 次失败弹 5 次 + 页面提示重复。
+export async function getIntrospectJob(
+  id: number,
+  jobId: string,
+): Promise<IntrospectJob> {
+  const res = await httpClient.get<IntrospectJob>(
+    `${BASE}/${id}/introspect-jobs/${jobId}`,
+    { timeout: INTROSPECT_POLL_TIMEOUT_MS, silentErrors: true },
+  );
   return res.data;
 }
 

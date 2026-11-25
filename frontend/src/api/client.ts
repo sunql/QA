@@ -7,6 +7,15 @@ import { useAuthStore, clearPersistedAuth } from "../stores/authStore";
 import { clearLastSessionIds } from "../stores/persistChatUiState";
 import { notifyUserSwitch } from "../stores/userSwitch";
 
+// 扩展 axios 请求配置：`silentErrors: true` 时响应拦截器**不弹全局错误 toast**，
+// 由调用方自行提示。用于高频轮询接口（如内省 job 进度）——一次失联不该连弹 N 次
+// 「网络异常」，也不该与页面自己的「连接中断」提示重复。
+declare module "axios" {
+  interface AxiosRequestConfig<D = any, P = any> {
+    silentErrors?: boolean;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // AppError interface — unified error shape for frontend error handling
 // ---------------------------------------------------------------------------
@@ -105,6 +114,23 @@ function isCredentialCheckRequest(url: string | undefined): boolean {
   return CREDENTIAL_CHECK_URLS.some((u) => (url ?? "").includes(u));
 }
 
+/** 404 是**预期业务信号**、不该弹全局 toast 的 URL。
+ *
+ *  `GET /datasources/{id}/schema` 的 404 = 「该 owner 尚未缓存 schema」——
+ *  调用方（ImportWizard）正是靠这个 404 触发一次 introspect 写缓存。
+ *  拦截器无条件弹「请求失败 (HTTP 404)」会让用户以为流程出错，而它其实在正常推进
+ *  （2026-11-25 本地实测：缓存 Schema 流程先看见 404 报错再看见内省结果）。
+ *
+ *  注意只放开 404：同 URL 的 401/403/5xx 仍照常提示（那些是真错误）。
+ */
+const EXPECTED_404_URLS = [/\/datasources\/\d+\/schema$/];
+
+function isExpected404(url: string | undefined, status: number | undefined): boolean {
+  if (status !== 404) return false;
+  const path = (url ?? "").split("?")[0];
+  return EXPECTED_404_URLS.some((re) => re.test(path));
+}
+
 // 创建带默认配置的 axios 实例
 export function createHttpClient(): AxiosInstance {
   const instance = axios.create({
@@ -183,8 +209,14 @@ export function createHttpClient(): AxiosInstance {
         (status
           ? i18n.t("errors.requestFailedHttp", { status: String(status) })
           : i18n.t("errors.networkError"));
-      // 401 不弹 toast —— 由 RequireAuth 或登录页处理
-      if (status !== 401) {
+      // 401 不弹 toast —— 由 RequireAuth 或登录页处理；
+      // 预期 404（如未缓存 schema）同理不弹，调用方靠 status 自行分支；
+      // silentErrors（如轮询进度）也不弹，调用方自己控制提示节奏。
+      if (
+        status !== 401 &&
+        !isExpected404(error.config?.url, status) &&
+        !error.config?.silentErrors
+      ) {
         showError(errMsg);
       }
       // audit-fx-3.3: use normalizeError to produce AppError with code + status + detail

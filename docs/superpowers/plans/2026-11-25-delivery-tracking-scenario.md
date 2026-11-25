@@ -244,31 +244,6 @@ Expected: 4 passed
 在同文件追加：
 
 ```python
-def test_resolve_binding_reads_confirmed_active_rows(monkeypatch) -> None:
-    """读路径只消费「已确认 + 生效中」的行；候选行被忽略。"""
-    from app.services import ontology_binding_resolver as mod
-
-    calls: dict = {}
-
-    async def _fakeRows(session, *, className, datasourceId):
-        calls["className"] = className
-        calls["datasourceId"] = datasourceId
-        return (
-            # (classRow, sourceRow, propertyRows)
-            (("cid", "DWD_PURCHASE_ORDER_DTL", None), ("sid", 1, "THBI", "DWD_PURCHASE_ORDER_DTL", False, None), (("pid", "PO_NO", "PO_NO", "cid"), ("pid", "PO_QTY", "PO_QTY", "cid"))),
-        )
-
-    monkeypatch.setattr(mod, "_loadBindingRows", _fakeRows)
-    resolved = mod._compileBinding(
-        className="DWD_PURCHASE_ORDER_DTL",
-        datasourceId=1,
-        rows=_fakeRows.__wrapped__ if False else None,
-    ) if False else None
-```
-
-**这一步停一下** —— 上面这段是错的写法（`rows=` 参数不存在）。按下面的**最终版**写：
-
-```python
 def test_compile_binding_rejects_candidate_rows() -> None:
     """候选绑定（is_candidate=True）不得进读路径。"""
     from app.services import ontology_binding_resolver as mod
@@ -585,7 +560,7 @@ git commit -m "feat(ontology): 运行时本体绑定解析器（类→物理表 
 
 from __future__ import annotations
 
-from app.scripts import seed_procurement_bindings as mod
+from scripts import seed_procurement_bindings as mod
 
 
 def test_facility_binding_spec_has_required_fields() -> None:
@@ -609,9 +584,12 @@ def test_facility_binding_spec_is_idempotent_keyed_by_class() -> None:
 ```bash
 cd backend && .venv/bin/python -m pytest app/tests/unit/test_seed_procurement_bindings.py -v
 ```
-Expected: FAIL —— `ModuleNotFoundError: No module named 'app.scripts'`
+Expected: FAIL —— `ModuleNotFoundError: No module named 'scripts.seed_procurement_bindings'`
 
-> **注意**：本仓的 `backend/scripts/` **不在** `app` 包内（是顶层 `scripts`）。若 `app.scripts` 导入失败，改用 `from scripts import seed_procurement_bindings as mod`，并按仓库现状调整 import 路径（`backend/scripts/__init__.py` 已存在 ⇒ 顶层 `scripts` 包可导入）。
+> **import 路径已核实**：`backend/scripts/__init__.py` 存在 ⇒ `scripts` 是 **backend 顶层包**
+> （pytest 从 `backend/` 目录运行 ⇒ 顶层包可导入）。既有同款测试
+> `backend/app/tests/unit/test_copilot_scenario_seeds.py` 就是
+> `from scripts.seed_copilot_scenarios import SEEDS` —— 照此写即可，**不是** `app.scripts`。
 
 - [ ] **Step 3: 实现 seed 脚本**
 

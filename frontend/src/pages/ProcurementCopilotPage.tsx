@@ -59,6 +59,7 @@ import {
   getPendingDeliverySummary,
   listCopilotConversations,
   listPendingDeliverySites,
+  pinCopilotConversation,
   streamCopilotMessage,
   type CopilotConversationSummary,
   type CopilotDonePayload,
@@ -111,27 +112,14 @@ export default function ProcurementCopilotPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [trace, setTrace] = useState<TraceState>(EMPTY_TRACE);
   const [conversations, setConversations] = useState<CopilotConversationSummary[]>([]);
-  /** 置顶的会话（本地持久化；跨设备同步需后端 pin 端点，另批）。 */
-  const [pinnedIds, setPinnedIds] = useState<string[]>(() => {
-    try {
-      const raw = localStorage.getItem("copilot.pinnedConversations");
-      const parsed = raw ? (JSON.parse(raw) as unknown) : [];
-      return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
-    } catch {
-      return [];
-    }
-  });
-  const togglePin = useCallback((id: string) => {
-    setPinnedIds((prev) => {
-      const next = prev.includes(id) ? prev.filter((v) => v !== id) : [id, ...prev];
-      try {
-        localStorage.setItem("copilot.pinnedConversations", JSON.stringify(next));
-      } catch {
-        /* 隐私模式/配额满：仅内存生效 */
-      }
-      return next;
-    });
-  }, []);
+  /** 置顶会话（P4 阶段5：pinned_at 落库跨设备同步；本端只读服务端状态）。 */
+  const pinnedIds = useMemo(
+    () =>
+      conversations
+        .filter((item) => Boolean(item.pinnedAt))
+        .map((item) => item.conversationId),
+    [conversations],
+  );
   // 历史侧栏默认收起（2026-11-24 反馈）：聚焦当前对话，历史从右侧浮钮展开
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -197,6 +185,19 @@ export default function ProcurementCopilotPage() {
       setHistoryLoading(false);
     }
   }, []);
+
+  const togglePin = useCallback(
+    (id: string) => {
+      const isPinned = pinnedIds.includes(id);
+      void pinCopilotConversation(id, !isPinned)
+        .then(() => loadConversations())
+        .catch(() => {
+          // 旧后端无 pin 端点（1124-fix04 仅发前端）⇒ 友好提示而非裸 404
+          message.warning(t("procurement.copilot.pinUnavailable"));
+        });
+    },
+    [pinnedIds, loadConversations, t],
+  );
 
   /** 选中历史会话：恢复轮次、场景与模型（Agent/模型绑定在会话上）。 */
   const restoreConversation = useCallback(async (id: string) => {

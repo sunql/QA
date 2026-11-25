@@ -3745,6 +3745,7 @@ export const zhCN = {
     analyzingTip: "结果出来后此窗口自动关闭",
     detailContent: "详细内容",
     resetParams: "重置",
+    pinUnavailable: "当前服务端版本暂不支持置顶会话，升级后可用",
     deleteUnavailable: "当前服务端版本暂不支持删除会话，升级后可用",
     resultInTabs: "本次结果已收进顶部「分析结果」标签页",
     scenarioFree: "自由问答（专家模式）",

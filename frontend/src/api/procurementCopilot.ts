@@ -73,6 +73,8 @@ export interface CopilotConversationSummary {
   turnCount: number;
   lastQuestion: string | null;
   updatedAt: string;
+  /** 置顶时间（P4 阶段5：跨设备同步；null = 未置顶）。 */
+  pinnedAt?: string | null;
 }
 
 /** 会话中的一轮（刷新后恢复线程用）。 */
@@ -120,6 +122,17 @@ export async function deleteCopilotConversation(
 ): Promise<void> {
   await httpClient.delete(
     `/procurement/copilot/conversations/${encodeURIComponent(conversationId)}`,
+  );
+}
+
+/** 置顶/取消置顶会话（pinned_at 落库 ⇒ 跨设备同步）。 */
+export async function pinCopilotConversation(
+  conversationId: string,
+  pinned: boolean,
+): Promise<void> {
+  await httpClient.post(
+    `/procurement/copilot/conversations/${encodeURIComponent(conversationId)}/pin`,
+    { pinned },
   );
 }
 

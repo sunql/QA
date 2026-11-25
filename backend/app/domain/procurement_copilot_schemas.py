@@ -93,6 +93,16 @@ class CopilotConversationSummary(CamelModel):
     #: 最后一轮的用户问题（预览用；没有轮次时为 None）
     last_question: str | None = None
     updated_at: str
+    #: 置顶时间（P4 阶段5：跨设备同步；None = 未置顶）
+    pinned_at: str | None = None
+
+
+class CopilotPinRequest(CamelModel):
+    """`POST /procurement/copilot/conversations/{id}/pin` 请求体。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pinned: bool
 
 
 class CopilotScenarioSlotRead(CamelModel):

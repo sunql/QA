@@ -30,6 +30,7 @@ from app.domain.procurement_copilot_schemas import (
     CopilotConversationRead,
     CopilotConversationSummary,
     CopilotMessageRequest,
+    CopilotPinRequest,
     CopilotScenarioRead,
     CopilotTaskRead,
 )
@@ -209,9 +210,34 @@ async def listCopilotConversations(
             turn_count=row.turnCount,
             last_question=row.lastQuestion,
             updated_at=row.conversation.updated_time.isoformat(),
+            pinned_at=None if row.conversation.pinned_at is None else row.conversation.pinned_at.isoformat(),
         )
         for row in rows
     ]
+
+
+@router.post(
+    "/copilot/conversations/{conversationId}/pin",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="置顶/取消置顶 Copilot 会话（创建者；pinned_at 跨设备同步）",
+)
+async def pinCopilotConversation(
+    conversationId: str,
+    dto: CopilotPinRequest,
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> Response:
+    """置顶状态落库（pinned_at 列）；别人的会话 404。"""
+    from uuid import UUID
+
+    from app.services.procurement_copilot_conversation import setPinnedConversation
+
+    try:
+        parsedId = UUID(conversationId)
+    except ValueError as exc:
+        raise NotFoundError("会话不存在或无权访问") from exc
+    await setPinnedConversation(session, parsedId, currentUser, pinned=dto.pinned)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.delete(

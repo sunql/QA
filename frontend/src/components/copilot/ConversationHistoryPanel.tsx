@@ -1,8 +1,8 @@
 /** 采购 Copilot 的会话历史侧栏（与 AIChatService 的 ChatHistoryPanel 同款形态）。
  *
  * 增强（2026-11-24）：搜索框、按场景分组、置顶。
- * - 置顶状态存在 **localStorage**（前端本地），避免为此加一次迁移；
- *   需要跨设备同步时再上移后端（会话表加 pinned 字段）。
+ * - 置顶状态在后端（pinned_at 列，P4 阶段5）⇒ 跨设备同步；
+ *   本组件只展示服务端下发的 pinnedIds（由页面从会话列表推导）。
  */
 
 import { useState } from "react";
@@ -40,7 +40,7 @@ interface ConversationHistoryPanelProps {
   conversations: CopilotConversationSummary[];
   currentConversationId: string | undefined;
   loading: boolean;
-  /** 置顶的会话 id 列表（顺序即置顶顺序）。 */
+  /** 置顶的会话 id 列表（来自服务端 pinned_at，跨设备一致）。 */
   pinnedIds: string[];
   /** agentCode → 场景显示名（分组用）。 */
   agentNames: Record<string, string>;

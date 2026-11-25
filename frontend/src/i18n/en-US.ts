@@ -3744,6 +3744,7 @@ export const enUS = {
     analyzingTip: "This dialog closes automatically when the result is ready",
     detailContent: "Full message",
     resetParams: "Reset",
+    pinUnavailable: "Server version does not support conversation pinning yet",
     deleteUnavailable: "Server version does not support conversation deletion yet",
     resultInTabs: "This result moved to the Results tabs above",
     scenarioFree: "Free Q&A (expert mode)",

@@ -103,12 +103,16 @@ async def getOwnedConversation(
 ) -> ProcurementCopilotConversation:
     """按 id 取会话；非创建者**一律 404**（不泄露会话是否存在）。"""
     row = (
-        await session.execute(
-            select(ProcurementCopilotConversation).where(
-                ProcurementCopilotConversation.conversation_id == conversationId
+        (
+            await session.execute(
+                select(ProcurementCopilotConversation).where(
+                    ProcurementCopilotConversation.conversation_id == conversationId
+                )
             )
         )
-    ).scalars().first()
+        .scalars()
+        .first()
+    )
     # 归属比较统一 str()：created_by 是 String 列，actor.userId 运行时
     # 可能是 int（stub 头直传）⇒ 类型不一致会误判 404
     if row is None or row.created_by != str(getattr(actor, "userId", None)):
@@ -146,16 +150,18 @@ async def loadOrCreateConversation(
     return conversation
 
 
-async def listTurns(
-    session: AsyncSession, conversationId: UUID
-) -> list[ProcurementCopilotTurn]:
+async def listTurns(session: AsyncSession, conversationId: UUID) -> list[ProcurementCopilotTurn]:
     rows = (
-        await session.execute(
-            select(ProcurementCopilotTurn)
-            .where(ProcurementCopilotTurn.conversation_id == conversationId)
-            .order_by(ProcurementCopilotTurn.seq)
+        (
+            await session.execute(
+                select(ProcurementCopilotTurn)
+                .where(ProcurementCopilotTurn.conversation_id == conversationId)
+                .order_by(ProcurementCopilotTurn.seq)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return list(rows)
 
 
@@ -170,9 +176,7 @@ async def appendTurn(
     turns = await listTurns(session, conversation.conversation_id)
     if len(turns) >= MAX_TURNS_PER_CONVERSATION:
         raise ValidationError(
-            MSG_COPILOT_CONVERSATION_TOO_MANY_TURNS.format(
-                limit=MAX_TURNS_PER_CONVERSATION
-            )
+            MSG_COPILOT_CONVERSATION_TOO_MANY_TURNS.format(limit=MAX_TURNS_PER_CONVERSATION)
         )
     turn = ProcurementCopilotTurn(
         conversation_id=conversation.conversation_id,
@@ -223,16 +227,22 @@ async def listOwnedConversations(
     """
     userId = str(getattr(actor, "userId", ""))  # 列为 String，比较侧统一 str
     conversations = (
-        await session.execute(
-            select(ProcurementCopilotConversation)
-            .where(ProcurementCopilotConversation.created_by == userId)
-            .order_by(
-                ProcurementCopilotConversation.updated_time.desc(),
-                ProcurementCopilotConversation.id.desc(),
+        (
+            await session.execute(
+                select(ProcurementCopilotConversation)
+                .where(ProcurementCopilotConversation.created_by == userId)
+                .order_by(
+                    # 置顶优先（P4 阶段5：pinned_at 跨设备同步；NULL 排后）
+                    ProcurementCopilotConversation.pinned_at.desc().nulls_last(),
+                    ProcurementCopilotConversation.updated_time.desc(),
+                    ProcurementCopilotConversation.id.desc(),
+                )
+                .limit(limit)
             )
-            .limit(limit)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if not conversations:
         return []
 
@@ -287,9 +297,23 @@ async def deleteOwnedConversation(
     """
     conversation = await getOwnedConversation(session, conversationId, actor)
     await session.execute(
-        delete(ProcurementCopilotTurn).where(
-            ProcurementCopilotTurn.conversation_id == conversationId
-        )
+        delete(ProcurementCopilotTurn).where(ProcurementCopilotTurn.conversation_id == conversationId)
     )
     await session.delete(conversation)
+    await session.commit()
+
+
+async def setPinnedConversation(
+    session: AsyncSession,
+    conversationId: UUID,
+    actor: object,
+    *,
+    pinned: bool,
+) -> None:
+    """置顶/取消置顶**自己的**会话（别人的会话一律 404，与详情同口径）。
+
+    P4 阶段5：置顶从 localStorage 上移为 `pinned_at` 列（0170）⇒ 跨设备同步。
+    """
+    conversation = await getOwnedConversation(session, conversationId, actor)
+    conversation.pinned_at = datetime.now(UTC) if pinned else None
     await session.commit()

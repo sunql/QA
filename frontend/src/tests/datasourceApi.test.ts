@@ -29,6 +29,8 @@ import {
   listDatasourceSchemas,
   getDatasourceSchema,
   introspectDatasource,
+  startIntrospectJob,
+  getIntrospectJob,
   testDataSource,
 } from "../api/datasource";
 
@@ -118,6 +120,29 @@ describe("api/datasource", () => {
     const call = httpMock.post.mock.calls[0];
     expect(call[0]).toBe("/datasources/1/introspect");
     expect(call[2].params).toEqual({ schema: "THBI" });
+  });
+
+  it("startIntrospectJob POST /datasources/:id/introspect-jobs（带 schema）", async () => {
+    httpMock.post.mockResolvedValue({
+      data: { jobId: "abc", status: "running", total: 0, completed: 0 },
+    });
+    const job = await startIntrospectJob(11, "LC019999");
+    const call = httpMock.post.mock.calls[0];
+    expect(call[0]).toBe("/datasources/11/introspect-jobs");
+    expect(call[2].params).toEqual({ schema: "LC019999" });
+    expect(job.jobId).toBe("abc");
+  });
+
+  it("getIntrospectJob GET /datasources/:id/introspect-jobs/:jobId", async () => {
+    httpMock.get.mockResolvedValue({
+      data: { jobId: "abc", status: "running", total: 860, completed: 200, error: null },
+    });
+    const job = await getIntrospectJob(11, "abc");
+    expect(httpMock.get).toHaveBeenCalledWith("/datasources/11/introspect-jobs/abc", {
+      timeout: expect.any(Number),
+    });
+    expect(job.completed).toBe(200);
+    expect(job.total).toBe(860);
   });
 
   it("testDataSource 走独立 raw axios POST /datasources/test", async () => {

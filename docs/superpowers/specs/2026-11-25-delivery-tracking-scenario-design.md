@@ -653,7 +653,11 @@ delivery_tracking_query(
   "icon_code": "car",
   "agent_code": "DELIVERY_TRACKING_AGENT",
   "slot_schema": [
-    { "key": "monthsBack", "type": "number", "label": "时间窗", "required": true,
+    # required 已移除（2026-11-25 执行期）：既有 seed lint
+    # `test_chips_satisfy_required_slots` 要求必填槽位出现在**每个** chip，
+    # 而两个 24 日锚点 chip 不含 monthsBack ⇒ 标 required 必红。
+    # 工具侧 monthsBack 本就有默认值 12（窗口优先级：显式区间 > 锚点 > monthsBack）。
+    { "key": "monthsBack", "type": "number", "label": "时间窗",
       "conflictKeywords": ["时间窗", "个月", "时间段", "日期", "上半年", "下半年", "本年度", "本年"],
       "displayTemplate": "近{value}个月" },
     { "key": "anchorDay", "type": "number", "label": "月度周期锚点日",
@@ -892,6 +896,7 @@ SQL 模板按解析结果渲染（表名/列名均为绑定解析产物，非代
 | 2 | **`byOrder` 订单级派生值剔除脏行** | 与 `summary`/`bySupplier` 口径对齐：`lines[]` 保留脏行供核查，但订单级 `status`/行数/数量只用非脏行；新增行级 `isDirty` 与订单级 `hasDirtyLines` 供前端提示 |
 | 3 | **`NOT_ARRIVED` 谓词补 `OPEN_LINES > 0`** | 原谓词会让「订购量 ≤ 0 且未收货」的订单**同时**计入全到货与未到货 ⇒ 到货率可 > 100%。装配层另加 `DeliveryTrackingInvariantError` 兜底 |
 | 4 | **供应商名 ERP 回退落地** | spec 5.7 原本只写了「以 MDM 为准，回退 ERP 名」；实现确认 `SUPPLIER_NAME` 在订单行/收货两类均已绑定，作为**可选**属性使用（缺绑定不 fail-closed） |
+| 5 | **`monthsBack` 移除 `required`** | 既有 seed lint `test_chips_satisfy_required_slots` 要求必填槽位出现在每个 chip，而两个 24 日锚点 chip 不含 `monthsBack` ⇒ 标 required 必红。工具侧该参数本有默认值 12 |
 
 ### 11.2 按建议定稿（2026-11-25 用户「没有异议」）
 

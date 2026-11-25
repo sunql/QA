@@ -1138,25 +1138,11 @@ def _receiptAggregate(receipt: ResolvedBinding) -> str:
     poNo = receipt.column("PO_NO")
     poLine = receipt.column("PO_LINE_NO")
     qty = receipt.column("RCV_QTY_STU")
+    itemDesc = receipt.column("ITEM_DESC")
     return (
-        f"(SELECT {poNo} AS PO_NO, {poLine} AS PO_LINE_NO, SUM({qty}) AS RECEIVED_QTY "
+        f"(SELECT {poNo} AS PO_NO, {poLine} AS PO_LINE_NO, SUM({qty}) AS RECEIVED_QTY, "
+        f"MAX({itemDesc}) AS ITEM_DESC "
         f"FROM {receipt.qualifiedTable()} GROUP BY {poNo}, {poLine})"
-    )
-
-
-def _orderLineBase(
-    order: ResolvedBinding, receipt: ResolvedBinding, window: DeliveryTrackingWindow
-) -> str:
-    """订单行 ⋈ 收货聚合 的 FROM + WHERE 片段（供三段 SQL 共用）。"""
-    poNo = order.column("PO_NO")
-    poLine = order.column("PO_LINE_NO")
-    orderQty = order.column("PO_QTY")
-    receiptAlias = "R"
-    return (
-        f"FROM {order.qualifiedTable()} O "
-        f"LEFT JOIN {_receiptAggregate(receipt)} {receiptAlias} "
-        f"ON {receiptAlias}.PO_NO = O.{poNo} AND {receiptAlias}.PO_LINE_NO = O.{poLine} "
-        f"WHERE {_windowPredicate(order, window)}"
     )
 
 
@@ -1254,9 +1240,12 @@ SELECT
   O.{poNo} AS PO_NO,
   O.{poLine} AS PO_LINE_NO,
   O.{supplierCode} AS SUPPLIER_CODE,
+  O.{order.column('ITEM_CODE')} AS MATERIAL_CODE,
+  R.ITEM_DESC AS MATERIAL_DESC,
   O.{orderQty} AS ORDER_QTY,
   COALESCE(R.RECEIVED_QTY, 0) AS RECEIVED_QTY,
   (O.{orderQty} - COALESCE(R.RECEIVED_QTY, 0)) AS OPEN_QTY,
+  O.{order.column('EXP_RCV_DATE')} AS EXPECTED_DATE,
   R.RECEIPT_DATE AS RECEIPT_DATE
 FROM {order.qualifiedTable()} O
 LEFT JOIN {_receiptAggregate(receipt)} R
@@ -1265,8 +1254,6 @@ WHERE {_windowPredicate(order, window)}{extra}
 ORDER BY OPEN_QTY DESC
 FETCH FIRST {limit} ROWS ONLY""".strip()
 ```
-
-**注意**：上面的 `_orderLineBase` 里 `base` 变量未被使用（各 SQL 各自展开 FROM/WHERE）——删掉那个函数里的无用 `base` 变量，或直接删除 `_orderLineBase` 函数。三段 SQL 各自展开即可，避免维护两份窗口谓词。
 
 - [ ] **Step 8: 运行测试确认通过**
 
@@ -1672,12 +1659,15 @@ async def deliveryTrackingHandler(
     order = await resolveBinding(
         session,
         className=ORDER_CLASS_NAME,
-        requiredProperties=["PO_NO", "PO_LINE_NO", "PO_QTY", "ORDER_DATE", "SUPPLIER_CODE"],
+        requiredProperties=[
+            "PO_NO", "PO_LINE_NO", "PO_QTY", "ORDER_DATE", "SUPPLIER_CODE",
+            "ITEM_CODE", "EXP_RCV_DATE",
+        ],
     )
     receipt = await resolveBinding(
         session,
         className=RECEIPT_CLASS_NAME,
-        requiredProperties=["PO_NO", "PO_LINE_NO", "RCV_QTY_STU"],
+        requiredProperties=["PO_NO", "PO_LINE_NO", "RCV_QTY_STU", "ITEM_DESC"],
     )
     ds = await _loadActiveDataSource(session, order.datasourceId)
     adapter = _getAdapter(order.datasourceId, ds)
@@ -1770,9 +1760,12 @@ def _assembleOrders(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         entry["receivedQty"] += receivedQty
         entry["lines"].append({
             "poLine": int(_col(row, "PO_LINE_NO") or 0),
+            "materialCode": _col(row, "MATERIAL_CODE"),
+            "materialDesc": _col(row, "MATERIAL_DESC"),
             "orderedQty": orderedQty,
             "receivedQty": receivedQty,
             "openQty": openQty,
+            "expectedDate": _col(row, "EXPECTED_DATE"),
             "lastReceiptDate": str(receiptDate) if receiptDate else None,
             "status": _orderStatus([{"openQty": openQty, "receivedQty": receivedQty}]),
         })
@@ -2355,8 +2348,9 @@ const SAMPLE = JSON.stringify({
         lines: [
           {
             poLine: 3000, materialCode: "5A2100000002",
+            materialDesc: "kun10/kun30/N1/N2方形焊接螺母M6",
             orderedQty: 1047000, receivedQty: 118261, openQty: 928739,
-            expectedDate: null, lastReceiptDate: "2026-11-24", status: "partial",
+            expectedDate: "2026-11-07", lastReceiptDate: "2026-11-24", status: "partial",
           },
         ],
       },
@@ -2470,6 +2464,7 @@ export interface DeliveryTrackingResult {
     lines: Array<{
       poLine: number;
       materialCode?: string | null;
+      materialDesc?: string | null;
       orderedQty: number;
       receivedQty: number;
       openQty: number;
@@ -2579,7 +2574,9 @@ export default function DeliveryTrackingResultCard({
                       title: "物料",
                       key: "material",
                       render: (_: unknown, line: DeliveryTrackingResult["byOrder"][number]["lines"][number]) =>
-                        line.materialCode ?? "-",
+                        line.materialDesc
+                          ? `${line.materialDesc}（${line.materialCode ?? "-"}）`
+                          : (line.materialCode ?? "-"),
                     },
                     { title: "订购", key: "o", render: (_: unknown, line: DeliveryTrackingResult["byOrder"][number]["lines"][number]) => fmtQty(line.orderedQty) },
                     { title: "已收", key: "r", render: (_: unknown, line: DeliveryTrackingResult["byOrder"][number]["lines"][number]) => fmtQty(line.receivedQty) },

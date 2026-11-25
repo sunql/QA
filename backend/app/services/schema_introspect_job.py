@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -181,6 +182,13 @@ async def runIntrospectJob(
             jobId=jobId,
         )
         registry.update(jobId, status="succeeded")
+    except asyncio.CancelledError:
+        # 取消/关停时 CancelledError 是 BaseException，不会被下面的 except Exception
+        # 兜住 ⇒ 若不在此落终态，job 会永远停在 running，注册表惰性淘汰又只清终态，
+        # createOrGet 将永久复用这个死 job（该数据源再也无法发起内省）。
+        # 落 failed 后必须 raise，保留取消语义（调用方/事件循环需要它向上传播）。
+        registry.update(jobId, status="failed", error="任务已取消")
+        raise
     except Exception as exc:  # noqa: BLE001 - 后台任务边界，必须兜住并落状态
         logger.error(
             "schema 内省 job 失败 jobId=%s datasource=%s schema=%s: %s",

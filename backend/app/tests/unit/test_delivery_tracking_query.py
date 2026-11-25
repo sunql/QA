@@ -240,6 +240,13 @@ def test_period_index_requires_anchor_day() -> None:
         resolveWindow(today=date(2026, 11, 25), periodIndex=0)
 
 
+@pytest.mark.parametrize("futureIndex", [1, 2])
+def test_anchor_day_rejects_future_period_index(futureIndex: int) -> None:
+    """正数期序是未结束的未来周期 ⇒ fail-closed（模块不变式：只取已结束周期）。"""
+    with pytest.raises(ValidationError, match="periodIndex 不能为正数"):
+        resolveWindow(today=date(2026, 11, 25), anchorDay=24, periodIndex=futureIndex)
+
+
 def test_anchor_day_rejects_non_integer_period_index() -> None:
     with pytest.raises(ValidationError, match="periodIndex 必须是整数"):
         resolveWindow(today=date(2026, 11, 25), anchorDay=24, periodIndex="0")  # type: ignore[arg-type]
@@ -313,6 +320,38 @@ def _allSqls(order: ResolvedBinding, receipt: ResolvedBinding, **kwargs: object)
             **kwargs,  # type: ignore[arg-type]
         ),
     }
+
+
+#: 脏行判据（欠交量 ≥ 1e6，**不是**订购量 —— spec 4.2/4.4 的关键区别）。
+_DIRTY_OPEN = "O.PO_QTY - COALESCE(R.RECEIVED_QTY, 0) >= 1000000"
+
+
+def _normSql(sql: str) -> str:
+    """空白归一化：SQL 片段断言不依赖换行/缩进。"""
+    return " ".join(sql.split())
+
+
+def _assertDirtyExclusion(sql: str, alias: str) -> None:
+    """钉住 spec 4.4 的完整保证：脏行计数为 1，且不混入已收量/欠交行/已收行与订单分母。"""
+    norm = _normSql(sql)
+    # 脏行确实被**计数**（否则 EXCLUDED_ROWS 恒 0 —— 死字段）
+    assert f"SUM(CASE WHEN {_DIRTY_OPEN} THEN 1 ELSE 0 END) AS DIRTY_LINES" in norm
+    # 脏行不计入已收量（否则量级率被污染）
+    assert f"SUM(CASE WHEN {_DIRTY_OPEN} THEN 0 ELSE COALESCE(R.RECEIVED_QTY, 0) END) AS RECEIVED_QTY" in norm
+    # 脏行不计入欠交行（否则三态被污染）
+    assert (
+        f"SUM(CASE WHEN {_DIRTY_OPEN} THEN 0"
+        " WHEN O.PO_QTY - COALESCE(R.RECEIVED_QTY, 0) > 0"
+        " THEN 1 ELSE 0 END) AS OPEN_LINES" in norm
+    )
+    # 脏行不计入已收行（否则三态被污染）
+    assert (
+        f"SUM(CASE WHEN {_DIRTY_OPEN} THEN 0"
+        " WHEN COALESCE(R.RECEIVED_QTY, 0) > 0"
+        " THEN 1 ELSE 0 END) AS RECEIVED_LINES" in norm
+    )
+    # 全脏行订单不进订单分母
+    assert f"SUM(CASE WHEN {alias}.LINE_COUNT > 0 THEN 1 ELSE 0 END) AS TOTAL_ORDERS" in norm
 
 
 def test_summary_sql_uses_bound_tables_and_columns() -> None:
@@ -492,6 +531,31 @@ def test_by_order_sql_escapes_quotes_in_order_keys() -> None:
     assert "O.PO_NO IN ('T1'' OR ''1''=''1')" in sql
 
 
+@pytest.mark.parametrize("badKey", [None, 123, "", "   "])
+def test_filter_keys_reject_non_string_or_blank(badKey: object) -> None:
+    """不可信过滤键不得被静默转成 `'None'`/空串（会假装“查无数据”）。"""
+    from app.services.delivery_tracking_query import (
+        buildDeliveryTrackingByOrderSql,
+        buildDeliveryTrackingBySupplierSql,
+    )
+
+    window = resolveWindow(today=date(2026, 11, 25), monthsBack=12)
+    with pytest.raises(ValidationError, match="键值必须是非空字符串"):
+        buildDeliveryTrackingBySupplierSql(
+            order=_orderBinding(),
+            receipt=_receiptBinding(),
+            window=window,
+            supplierKeys=(badKey,),  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValidationError, match="键值必须是非空字符串"):
+        buildDeliveryTrackingByOrderSql(
+            order=_orderBinding(),
+            receipt=_receiptBinding(),
+            window=window,
+            orderKeys=(badKey,),  # type: ignore[arg-type]
+        )
+
+
 def test_mysql_dialect_uses_limit_tail() -> None:
     from app.services.delivery_tracking_query import buildDeliveryTrackingByOrderSql
 
@@ -558,6 +622,7 @@ def test_summary_sql_excludes_dirty_lines_and_counts_them() -> None:
     assert "O.PO_QTY - COALESCE(R.RECEIVED_QTY, 0) >= 1000000" in sql
     # 4.2 vs 4.4 的关键区别：判据是**欠交量**，不是**订购量**（大额订购是真实业务）
     assert "O.PO_QTY >= 1000000" not in sql
+    _assertDirtyExclusion(sql, "T")
     # 脏行确实被排除在统计之外（不只是"计数"）
     assert (
         "SUM(CASE WHEN O.PO_QTY - COALESCE(R.RECEIVED_QTY, 0) >= 1000000"
@@ -584,6 +649,7 @@ def test_by_supplier_sql_excludes_dirty_lines_and_counts_them() -> None:
     assert "O.PO_QTY - COALESCE(R.RECEIVED_QTY, 0) >= 1000000" in sql
     assert "O.PO_QTY >= 1000000" not in sql
     assert "THEN 0 ELSE O.PO_QTY END) AS ORDERED_QTY" in sql
+    _assertDirtyExclusion(sql, "S")
     assert "CASE WHEN S.LINE_COUNT > 0 AND S.OPEN_LINES = 0" in sql
     assert "CASE WHEN S.LINE_COUNT > 0 AND S.RECEIVED_LINES = 0" in sql
 

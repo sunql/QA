@@ -121,6 +121,8 @@ def _resolveAnchor(today: date, anchorDay: object, periodIndex: object) -> Deliv
         if periodIndex is None
         else _requireInt(periodIndex, f"periodIndex 必须是整数，收到 {periodIndex!r}")
     )
+    if index > 0:
+        raise ValidationError(f"periodIndex 不能为正数（未结束的周期不可查询），收到 {periodIndex!r}")
     base = _anchorDate(today, anchor)
     # 本期 = [anchor 上月同日, anchor)；periodIndex=-1 再往前一期。
     return DeliveryTrackingWindow(
@@ -161,7 +163,7 @@ def resolveWindow(
     优先级：显式区间 > 24 日锚点 > 自然月窗口。
 
     :raises ValidationError: 单边区间、日期格式/日历非法、区间反向、
-        anchorDay 越界、periodIndex 缺 anchorDay、monthsBack 越界。
+        anchorDay 越界、periodIndex 缺 anchorDay 或为正数（未结束周期）、monthsBack 越界。
     """
     if dateFrom is not None or dateTo is not None:
         if dateFrom is None or dateTo is None:
@@ -233,8 +235,16 @@ def _receiptAggregate(receipt: ResolvedBinding) -> str:
 
 
 def _inClause(alias: str, column: str, keys: Iterable[str]) -> str | None:
-    """`alias.column IN ('a','b')`；无有效键 ⇒ None（不带空 IN）。"""
-    values = [str(key) for key in keys if str(key)]
+    """`alias.column IN ('a','b')`；无键 ⇒ None（不带空 IN）。
+
+    键必须是非空字符串：`None`/数字/空白串一律 fail-closed（不可信输入），
+    绝不静默转成字面量 `'None'`（那会匹配 0 行，把调用错误伪装成“查无数据”）。
+    """
+    values: list[str] = []
+    for key in keys:
+        if not isinstance(key, str) or not key.strip():
+            raise ValidationError(f"键值必须是非空字符串，收到 {key!r}")
+        values.append(key)
     if not values:
         return None
     literals = ",".join("'" + _esc(value) + "'" for value in values)
@@ -255,25 +265,51 @@ def _dirtyCondition(order: ResolvedBinding) -> str:
     return f"O.{poQty} - COALESCE(R.RECEIVED_QTY, 0) >= {_OPEN_QTY_SANITY_MAX}"
 
 
+def _lineMeasures(dirty: str, qtyExpr: str, qtyAlias: str) -> str:
+    """派生表的六个行级度量（唯一来源，防两个 aggregate 漂移）。
+
+    脏行（`dirty` 为真）在行数/订购量/已收量/欠交行/已收行里一律贡献 0
+    （即“既不算欠交也不算已收”），只计入 `DIRTY_LINES`。
+    """
+    measures = [
+        f"SUM(CASE WHEN {dirty} THEN 0 ELSE 1 END) AS LINE_COUNT",
+        f"SUM(CASE WHEN {dirty} THEN 0 ELSE {qtyExpr} END) AS {qtyAlias}",
+        f"SUM(CASE WHEN {dirty} THEN 0 ELSE COALESCE(R.RECEIVED_QTY, 0) END) AS RECEIVED_QTY",
+        f"SUM(CASE WHEN {dirty} THEN 0"
+        f" WHEN {qtyExpr} - COALESCE(R.RECEIVED_QTY, 0) > 0"
+        f" THEN 1 ELSE 0 END) AS OPEN_LINES",
+        f"SUM(CASE WHEN {dirty} THEN 0"
+        f" WHEN COALESCE(R.RECEIVED_QTY, 0) > 0"
+        f" THEN 1 ELSE 0 END) AS RECEIVED_LINES",
+        f"SUM(CASE WHEN {dirty} THEN 1 ELSE 0 END) AS DIRTY_LINES",
+    ]
+    body = "\n".join(f"         {measure}," for measure in measures[:-1])
+    return f"{body}\n         {measures[-1]}"
+
+
+def _statesSelect(alias: str) -> str:
+    """订单三态 select 片段（`alias` 为订单级派生表别名）。
+
+    三态互斥的前提是「有效行数 > 0」：全脏行订单不落入任一态。
+    """
+    return (
+        f"  SUM(CASE WHEN {alias}.LINE_COUNT > 0 AND {alias}.OPEN_LINES = 0"
+        f" THEN 1 ELSE 0 END) AS ALL_ARRIVED,\n"
+        f"  SUM(CASE WHEN {alias}.OPEN_LINES > 0 AND {alias}.RECEIVED_LINES > 0"
+        f" THEN 1 ELSE 0 END) AS PARTIAL,\n"
+        f"  SUM(CASE WHEN {alias}.LINE_COUNT > 0 AND {alias}.RECEIVED_LINES = 0"
+        f" THEN 1 ELSE 0 END) AS NOT_ARRIVED"
+    )
+
+
 def _orderAggregate(order: ResolvedBinding, receipt: ResolvedBinding, window: DeliveryTrackingWindow) -> str:
     """订单级派生表：按 PO_NO 聚合，脏行不计入任何统计但单列 `DIRTY_LINES`。"""
-    dirty = _dirtyCondition(order)
     poNo = order.column("PO_NO")
     poLine = order.column("PO_LINE_NO")
-    orderQty = order.column("PO_QTY")
+    qtyExpr = f"O.{order.column('PO_QTY')}"
     return f"""
   SELECT O.{poNo} AS PO_NO,
-         SUM(CASE WHEN {dirty} THEN 0 ELSE 1 END) AS LINE_COUNT,
-         SUM(CASE WHEN {dirty} THEN 0 ELSE O.{orderQty} END) AS ORDER_QTY,
-         SUM(CASE WHEN {dirty} THEN 0
-                  ELSE COALESCE(R.RECEIVED_QTY, 0) END) AS RECEIVED_QTY,
-         SUM(CASE WHEN {dirty} THEN 0
-                  WHEN O.{orderQty} - COALESCE(R.RECEIVED_QTY, 0) > 0
-                  THEN 1 ELSE 0 END) AS OPEN_LINES,
-         SUM(CASE WHEN {dirty} THEN 0
-                  WHEN COALESCE(R.RECEIVED_QTY, 0) > 0
-                  THEN 1 ELSE 0 END) AS RECEIVED_LINES,
-         SUM(CASE WHEN {dirty} THEN 1 ELSE 0 END) AS DIRTY_LINES
+{_lineMeasures(_dirtyCondition(order), qtyExpr, "ORDER_QTY")}
   FROM {order.qualifiedTable()} O
   LEFT JOIN {_receiptAggregate(receipt)} R
     ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
@@ -287,25 +323,14 @@ def _supplierOrderAggregate(
     window: DeliveryTrackingWindow,
     supplierFilter: str,
 ) -> str:
-    """供应商 × 订单派生表（脏行口径同 `_orderAggregate`）。"""
-    dirty = _dirtyCondition(order)
+    """供应商 × 订单派生表（脏行口径与 `_orderAggregate` 共用 `_lineMeasures`）。"""
     supplierCode = order.column("SUPPLIER_CODE")
     poNo = order.column("PO_NO")
     poLine = order.column("PO_LINE_NO")
-    orderQty = order.column("PO_QTY")
+    qtyExpr = f"O.{order.column('PO_QTY')}"
     return f"""
   SELECT O.{supplierCode} AS SUPPLIER_CODE, O.{poNo} AS PO_NO,
-         SUM(CASE WHEN {dirty} THEN 0 ELSE 1 END) AS LINE_COUNT,
-         SUM(CASE WHEN {dirty} THEN 0 ELSE O.{orderQty} END) AS ORDERED_QTY,
-         SUM(CASE WHEN {dirty} THEN 0
-                  ELSE COALESCE(R.RECEIVED_QTY, 0) END) AS RECEIVED_QTY,
-         SUM(CASE WHEN {dirty} THEN 0
-                  WHEN O.{orderQty} - COALESCE(R.RECEIVED_QTY, 0) > 0
-                  THEN 1 ELSE 0 END) AS OPEN_LINES,
-         SUM(CASE WHEN {dirty} THEN 0
-                  WHEN COALESCE(R.RECEIVED_QTY, 0) > 0
-                  THEN 1 ELSE 0 END) AS RECEIVED_LINES,
-         SUM(CASE WHEN {dirty} THEN 1 ELSE 0 END) AS DIRTY_LINES
+{_lineMeasures(_dirtyCondition(order), qtyExpr, "ORDERED_QTY")}
   FROM {order.qualifiedTable()} O
   LEFT JOIN {_receiptAggregate(receipt)} R
     ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
@@ -337,9 +362,7 @@ SELECT
   SUM(CASE WHEN T.LINE_COUNT > 0 THEN 1 ELSE 0 END) AS TOTAL_ORDERS,
   SUM(T.ORDER_QTY) AS ORDERED_QTY,
   SUM(T.RECEIVED_QTY) AS RECEIVED_QTY,
-  SUM(CASE WHEN T.LINE_COUNT > 0 AND T.OPEN_LINES = 0 THEN 1 ELSE 0 END) AS ALL_ARRIVED,
-  SUM(CASE WHEN T.OPEN_LINES > 0 AND T.RECEIVED_LINES > 0 THEN 1 ELSE 0 END) AS PARTIAL,
-  SUM(CASE WHEN T.LINE_COUNT > 0 AND T.RECEIVED_LINES = 0 THEN 1 ELSE 0 END) AS NOT_ARRIVED,
+{_statesSelect("T")},
   SUM(T.DIRTY_LINES) AS EXCLUDED_ROWS
 FROM ({_orderAggregate(order, receipt, window)}
 ) T""".strip()
@@ -366,9 +389,7 @@ def buildDeliveryTrackingBySupplierSql(
 SELECT
   S.SUPPLIER_CODE AS SUPPLIER_CODE,
   SUM(CASE WHEN S.LINE_COUNT > 0 THEN 1 ELSE 0 END) AS TOTAL_ORDERS,
-  SUM(CASE WHEN S.LINE_COUNT > 0 AND S.OPEN_LINES = 0 THEN 1 ELSE 0 END) AS ALL_ARRIVED,
-  SUM(CASE WHEN S.OPEN_LINES > 0 AND S.RECEIVED_LINES > 0 THEN 1 ELSE 0 END) AS PARTIAL,
-  SUM(CASE WHEN S.LINE_COUNT > 0 AND S.RECEIVED_LINES = 0 THEN 1 ELSE 0 END) AS NOT_ARRIVED,
+{_statesSelect("S")},
   SUM(S.ORDERED_QTY) AS ORDERED_QTY,
   SUM(S.RECEIVED_QTY) AS RECEIVED_QTY,
   SUM(S.DIRTY_LINES) AS EXCLUDED_ROWS

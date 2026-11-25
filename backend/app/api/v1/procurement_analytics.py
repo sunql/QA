@@ -18,16 +18,20 @@ from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.exceptions import DomainError
 from app.services.agent_tool_types import AgentToolContext
 from app.services.agent_tools_procurement import (
-    PendingDeliveryFilters,
     _adapterFor,
-    _camelPendingRow,
     _loadActiveDatasource,
-    _PendingDialect,
-    _resolveBusinessDatasource,
-    buildPendingDeliveryCountSql,
-    buildPendingDeliveryLinesSql,
     pendingDeliveryHandler,
 )
+from app.services.pending_delivery_query import (
+    _camelPendingRow,
+    buildPendingDeliveryCountSql,
+    buildPendingDeliveryFilters,
+    buildPendingDeliveryLinesSql,
+    enrichPendingLineRows,
+    resolvePendingDeliveryBindings,
+    validateDateArg,
+)
+from app.services.procurement_query_utils import SqlDialect as _PendingDialect
 
 router = APIRouter(tags=["procurement-analytics"])
 
@@ -58,20 +62,13 @@ def _splitKeys(raw: str | None) -> tuple[str, ...]:
     return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
-def _filtersFromQuery(
-    supplierKeys: str | None,
-    materialKeys: str | None,
-    siteKeys: str | None,
-    dateFrom: str | None,
-    dateTo: str | None,
-) -> PendingDeliveryFilters:
-    """Query 参数 → filters（非法日期在这里抛 ValidationError ⇒ 422）。"""
-    return PendingDeliveryFilters(
-        supplierKeys=_splitKeys(supplierKeys),
-        materialKeys=_splitKeys(materialKeys),
-        siteKeys=_splitKeys(siteKeys),
-        dateFrom=dateFrom,
-        dateTo=dateTo,
+def _dateSlots(
+    dateFrom: str | None, dateTo: str | None
+) -> tuple[str | None, str | None]:
+    """Query 参数日期校验（非法 ⇒ ValidationError ⇒ 422）。"""
+    return (
+        validateDateArg(dateFrom, "dateFrom"),
+        validateDateArg(dateTo, "dateTo"),
     )
 
 
@@ -80,7 +77,6 @@ def _filtersFromQuery(
     summary="待到货业务现状（轻量统计，不进编排）",
 )
 async def getPendingDeliverySummary(
-    datasourceId: int | None = Query(default=None, ge=1),
     monthsBack: int = Query(default=12, ge=1, le=36),
     supplierKeys: str | None = Query(default=None, description="逗号分隔"),
     materialKeys: str | None = Query(default=None, description="逗号分隔"),
@@ -90,22 +86,24 @@ async def getPendingDeliverySummary(
     currentUser: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
 ) -> dict[str, Any]:
-    """欠交汇总 + 按供应商 + TOP 行（与工具同口径，直接只读 SQL）。"""
-    filters = _filtersFromQuery(
-        supplierKeys, materialKeys, siteKeys, dateFrom, dateTo
-    )
+    """欠交汇总 + 按供应商 + TOP 行（与工具同口径，直接只读 SQL）。
+
+    数据源固定 THBI（本体绑定唯一确定）；前端历史参数 `datasourceId` 不再接线。
+    """
+    dateFrom, dateTo = _dateSlots(dateFrom, dateTo)
+    supplierList = _splitKeys(supplierKeys)
+    materialList = _splitKeys(materialKeys)
+    siteList = _splitKeys(siteKeys)
     args: dict[str, Any] = {
         "monthsBack": monthsBack,
-        "supplierKeys": list(filters.supplierKeys),
-        "materialKeys": list(filters.materialKeys),
-        "siteKeys": list(filters.siteKeys),
+        "supplierKeys": list(supplierList),
+        "materialKeys": list(materialList),
+        "siteKeys": list(siteList),
     }
-    if filters.dateFrom:
-        args["dateFrom"] = filters.dateFrom
-    if filters.dateTo:
-        args["dateTo"] = filters.dateTo
-    if datasourceId is not None:
-        args["datasourceId"] = datasourceId
+    if dateFrom:
+        args["dateFrom"] = dateFrom
+    if dateTo:
+        args["dateTo"] = dateTo
     ctx = AgentToolContext(actor=str(getattr(currentUser, "userId", "") or "runtime"))
     try:
         result = await pendingDeliveryHandler(session, args, ctx)
@@ -120,11 +118,11 @@ async def getPendingDeliverySummary(
         ) from exc
     data = dict(result.data)
     data["filters"] = {
-        "supplierKeys": list(filters.supplierKeys),
-        "materialKeys": list(filters.materialKeys),
-        "siteKeys": list(filters.siteKeys),
-        "dateFrom": filters.dateFrom,
-        "dateTo": filters.dateTo,
+        "supplierKeys": list(supplierList),
+        "materialKeys": list(materialList),
+        "siteKeys": list(siteList),
+        "dateFrom": dateFrom,
+        "dateTo": dateTo,
     }
     return data
 
@@ -134,20 +132,30 @@ async def getPendingDeliverySummary(
     summary="基地下拉数据源（FACILITY 字典 ∩ 订单实际出现过的基地）",
 )
 async def listPendingDeliverySites(
-    datasourceId: int | None = Query(default=None, ge=1),
     currentUser: CurrentUser = Depends(getCurrentUser),
     session: AsyncSession = Depends(getDb),
 ) -> list[dict[str, str]]:
-    """基地编码 + 名称（模糊下拉的选项来源，只读）。"""
-    ds = await _resolveBusinessDatasource(session, currentUser)
+    """基地编码 + 名称（模糊下拉的选项来源，只读）。
+
+    基地字典与订单行站点列都来自本体绑定（`DIM_FACILITY` / 订单行的站点属性），
+    不硬编码 schema / 表名。
+    """
+    order, _, facility = await resolvePendingDeliveryBindings(session)
+    ds = await _loadActiveDatasource(session, order.datasourceId)
     _ensureActiveAnalytics(ds)
-    adapter = _adapterFor(ds.id, ds)
+    adapter = _adapterFor(order.datasourceId, ds)
+    fcy = facility.column("FCY_0")
+    fcynam = facility.column("FCYNAM_0")
+    orderSite = order.column("PUR_SITE_CODE")
+    tail = _PendingDialect.fromAdapter(adapter).tail(100)
     rows: list[dict[str, Any]]
     try:
         rows = await adapter.execute_read_only(
-            "SELECT F.FCY_0, F.FCYNAM_0 FROM ZJTH.FACILITY F "
-            "WHERE EXISTS (SELECT 1 FROM ZJTH.PORDERQ Q WHERE Q.POHFCY_0 = F.FCY_0) "
-            "ORDER BY F.FCY_0 FETCH FIRST 100 ROWS ONLY")
+            f"SELECT F.{fcy} AS FCY_0, F.{fcynam} AS FCYNAM_0 "
+            f"FROM {facility.qualifiedTable()} F "
+            f"WHERE EXISTS (SELECT 1 FROM {order.qualifiedTable()} O"
+            f" WHERE O.{orderSite} = F.{fcy}) "
+            f"ORDER BY F.{fcy} {tail}")
     except DomainError:
         raise
     except Exception as exc:  # noqa: BLE001 — 同 summary：数据源侧失败友好化
@@ -156,8 +164,8 @@ async def listPendingDeliverySites(
             detail=f"该数据源读取基地字典失败：{str(exc)[:200]}",
         ) from exc
     return [
-        {"code": str(r.get("fcy_0") or r.get("FCY_0") or ""),
-         "name": str(r.get("fcynam_0") or r.get("FCYNAM_0") or "")}
+        {"code": str(_col(r, "FCY_0") or ""),
+         "name": str(_col(r, "FCYNAM_0") or "")}
         for r in rows
     ]
 
@@ -177,7 +185,6 @@ _LINES_PAGE_MAX = 200
     summary="待到货欠交明细（分页，供明细页使用）",
 )
 async def listPendingDeliveryLines(
-    datasourceId: int | None = Query(default=None, ge=1),
     monthsBack: int = Query(default=12, ge=1, le=36),
     supplierKeys: str | None = Query(default=None, description="逗号分隔"),
     materialKeys: str | None = Query(default=None, description="逗号分隔"),
@@ -191,16 +198,23 @@ async def listPendingDeliveryLines(
     session: AsyncSession = Depends(getDb),
 ) -> dict[str, Any]:
     """欠交明细（分页 + 总数）——与工具同口径；明细页专用（工具 limit 上限 50）。"""
-    filters = _filtersFromQuery(
-        supplierKeys, materialKeys, siteKeys, dateFrom, dateTo
+    dateFrom, dateTo = _dateSlots(dateFrom, dateTo)
+    order, receipt, facility = await resolvePendingDeliveryBindings(session)
+    filters = await buildPendingDeliveryFilters(
+        session,
+        orderBinding=order,
+        receiptBinding=receipt,
+        facilityBinding=facility,
+        supplierKeys=_splitKeys(supplierKeys),
+        materialKeys=_splitKeys(materialKeys),
+        siteKeys=_splitKeys(siteKeys),
+        dateFrom=dateFrom,
+        dateTo=dateTo,
     )
     try:
-        if datasourceId is not None:
-            ds = await _loadActiveDatasource(session, datasourceId)
-        else:
-            ds = await _resolveBusinessDatasource(session, currentUser)
+        ds = await _loadActiveDatasource(session, order.datasourceId)
         _ensureActiveAnalytics(ds)
-        adapter = _adapterFor(ds.id, ds)
+        adapter = _adapterFor(order.datasourceId, ds)
         dialect = _PendingDialect.fromAdapter(adapter).name
         countRows = await adapter.execute_read_only(
             buildPendingDeliveryCountSql(
@@ -223,9 +237,10 @@ async def listPendingDeliveryLines(
         ) from exc
 
     total = int(_col(countRows[0], "TOTAL_ROWS") or 0) if countRows else 0
+    enriched = await enrichPendingLineRows(session, rows)
     return {
         "total": total,
         "offset": offset,
         "limit": limit,
-        "rows": [_camelPendingRow(r) for r in rows],
+        "rows": [_camelPendingRow(row) for row in enriched],
     }

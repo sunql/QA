@@ -533,13 +533,80 @@ async def test_policy_compliance_requiresClaim() -> None:
     assert result.data["evidence"] == []
 
 
-# ── 待到货/逾期未到（pending_delivery_query，2026-11-23 探针定口径） ─────────
+# ── 待到货/逾期未到（pending_delivery_query，2026-11-25 迁本体 + THBI） ─────
 #
-# 口径（探针 scripts/probe_pending_delivery.py 实测得出）：
-#   欠交量 = QTYSTU_0 - RCPQTYSTU_0（同为库存单位；对账抽样 10/10 一致）
-#   健全性 = 欠交量 < 1e6（43 行「数量=物料码」脏数据必须剔除且显式回报）
-#   时间窗 = ORDDAT_0 >= today - monthsBack 月（DATE 字面量，确定性可测）
-#   逾期   = today - EXTRCPDAT_0 > 0（EXTRCPDAT 全非空，无需回退）
+# 口径（与到货跟踪同一套，THBI 探查实测）：
+#   欠交量 = PO_QTY - 收货已收量（收货类按 PO_NO + PO_LINE_NO 聚合）
+#   健全性 = 欠交量 < 1e6（「数量=物料码」脏数据必须剔除且显式回报）
+#   时间窗 = ORDER_DATE >= today - monthsBack 月（DATE 字面量，确定性可测）
+#   逾期   = today - EXP_RCV_DATE > 0
+#
+# 表名 / 列名只来自本体绑定（上面这些属性名经 ResolvedBinding 解析成物理列）。
+
+
+def _requirePendingModule():
+    from app.services import pending_delivery_query as mod
+
+    return mod
+
+
+def _pendingOrderBinding():
+    from app.services.ontology_binding_resolver import ResolvedBinding
+
+    return ResolvedBinding(
+        className="DWD_PURCHASE_ORDER_DTL",
+        datasourceId=1,
+        schemaName="THBI",
+        sourceTable="DWD_PURCHASE_ORDER_DTL",
+        columns={
+            "PO_NO": "PO_NO",
+            "PO_LINE_NO": "PO_LINE_NO",
+            "PO_QTY": "PO_QTY",
+            "ORDER_DATE": "ORDER_DATE",
+            "SUPPLIER_CODE": "SUPPLIER_CODE",
+            "PUR_SITE_CODE": "PUR_SITE_CODE",
+            "EXP_RCV_DATE": "EXP_RCV_DATE",
+            "ITEM_CODE": "ITEM_CODE",
+        },
+    )
+
+
+def _pendingReceiptBinding():
+    from app.services.ontology_binding_resolver import ResolvedBinding
+
+    return ResolvedBinding(
+        className="DWD_GOODS_RECEIPT_DTL",
+        datasourceId=1,
+        schemaName="THBI",
+        sourceTable="DWD_GOODS_RECEIPT_DTL",
+        columns={
+            "PO_NO": "PO_NO",
+            "PO_LINE_NO": "PO_LINE_NO",
+            "RCV_QTY_STU": "RCV_QTY_STU",
+        },
+    )
+
+
+def _pendingFacilityBinding():
+    from app.services.ontology_binding_resolver import ResolvedBinding
+
+    return ResolvedBinding(
+        className="DIM_FACILITY",
+        datasourceId=1,
+        schemaName="THBI",
+        sourceTable="DIM_FACILITY",
+        columns={"FCY_0": "FCY_0", "FCYNAM_0": "FCYNAM_0"},
+    )
+
+
+def _pendingFilters(**kwargs):
+    mod = _requirePendingModule()
+    return mod.PendingDeliveryFilters(
+        orderBinding=_pendingOrderBinding(),
+        receiptBinding=_pendingReceiptBinding(),
+        facilityBinding=_pendingFacilityBinding(),
+        **kwargs,
+    )
 
 
 def test_pending_delivery_registered() -> None:
@@ -549,62 +616,54 @@ def test_pending_delivery_registered() -> None:
     assert "pending_delivery_query" in ARG_EXTRACTORS
 
 
-from app.services.agent_tools_procurement import PendingDeliveryFilters  # noqa: E402
-
-_PENDING_FILTERS_EMPTY: PendingDeliveryFilters | None = None
-
-
 def test_pending_delivery_filters_fuzzy_and_dates() -> None:
-    """多选供应商 IN / 物料编码+名称模糊 / 基地编码+名称模糊 / 日期段。"""
-    from app.services.agent_tools_procurement import (
-        PendingDeliveryFilters,
-        buildPendingDeliveryLinesSql,
-    )
+    """供应商编码 / 物料编码 / 基地编码+名称 / 日期段：全部从绑定取物理列。"""
+    mod = _requirePendingModule()
 
-    filters = PendingDeliveryFilters(
-        supplierKeys=["F109"],
-        materialKeys=["502447700001", "不锈钢板"],
-        siteKeys=["T3", "滨海"],
+    filters = _pendingFilters(
+        supplierKeys=("F109",),
+        materialKeys=("502447700001",),
+        siteKeys=("T3", "滨海"),
         dateFrom="2026-01-01",
         dateTo="2026-06-30",
     )
-    sql = buildPendingDeliveryLinesSql(
+    sql = mod.buildPendingDeliveryLinesSql(
         monthsBack=12, today=date(2026, 11, 23),
         filters=filters, minOverdueDays=None, limit=10,
     )
     # 日期段覆盖 monthsBack（不再出现相对窗口起点）
     assert "DATE '2026-01-01'" in sql and "DATE '2026-06-30'" in sql
-    assert "ORDDAT_0 >= DATE '2025-11-23'" not in sql
-    # 物料：编码精确 OR 名称模糊（JOIN ITMMASTER）
-    assert "Q.ITMREF_0 IN ('502447700001')" in sql
-    assert "ITMDES1_0 LIKE '%不锈钢板%'" in sql
-    assert "JOIN ZJTH.ITMMASTER" in sql
-    # 基地：编码精确 OR 名称模糊（JOIN FACILITY）
-    assert "Q.POHFCY_0 IN ('T3')" in sql
+    assert "DATE '2025-11-23'" not in sql
+    # 物料：只认已解析编码（名称在 handler 侧先经 MDM 解析）
+    assert "O.ITEM_CODE IN ('502447700001')" in sql
+    # 基地：编码精确 OR 名称模糊（名称需要 DIM_FACILITY 绑定）
+    assert "O.PUR_SITE_CODE IN ('T3')" in sql
     assert "FCYNAM_0 LIKE '%滨海%'" in sql
-    assert "JOIN ZJTH.FACILITY" in sql
+    assert "JOIN THBI.DIM_FACILITY f ON f.FCY_0 = O.PUR_SITE_CODE" in sql
     assert ";" not in sql
 
-    # 只有模糊名（无精确码）⇒ 不渲染空 IN
-    sql2 = buildPendingDeliveryLinesSql(
-        monthsBack=12, today=date(2026, 11, 23),
-        filters=PendingDeliveryFilters(materialKeys=["齿轮"]), minOverdueDays=None, limit=5,
-    )
-    assert "Q.ITMREF_0 IN" not in sql2
-    assert "ITMDES1_0 LIKE '%齿轮%'" in sql2
+
+def test_pending_delivery_filters_reject_unresolved_material_names() -> None:
+    """未解析的中文物料名 fail-closed（迁 THBI 后没有数仓字典 LIKE 兜底）。"""
+    from app.domain.exceptions import ValidationError
+
+    mod = _requirePendingModule()
+    filters = _pendingFilters(materialKeys=("齿轮",))
+    with pytest.raises(ValidationError):
+        mod.buildPendingDeliveryLinesSql(
+            monthsBack=12, today=date(2026, 11, 23),
+            filters=filters, minOverdueDays=None, limit=5,
+        )
 
 
 def test_pending_delivery_filters_reject_bad_date() -> None:
     """日期段格式非法 ⇒ ValidationError（fail-closed，不静默忽略）。"""
-    import pytest as _pytest
-
     from app.domain.exceptions import ValidationError
-    from app.services.agent_tools_procurement import PendingDeliveryFilters
 
-    with _pytest.raises(ValidationError):
-        PendingDeliveryFilters(dateFrom="2026/01/01")
-    with _pytest.raises(ValidationError):
-        PendingDeliveryFilters(dateTo="2026-13-01")
+    with pytest.raises(ValidationError):
+        _pendingFilters(dateFrom="2026/01/01")
+    with pytest.raises(ValidationError):
+        _pendingFilters(dateTo="2026-13-01")
 
 
 def test_pending_delivery_in_tool_seed() -> None:
@@ -621,21 +680,23 @@ def test_pending_delivery_in_tool_seed() -> None:
 
 
 def test_build_pending_delivery_summary_sql() -> None:
-    from app.services.agent_tools_procurement import buildPendingDeliverySummarySql
+    mod = _requirePendingModule()
 
-    sql = buildPendingDeliverySummarySql(
-        monthsBack=12, today=date(2026, 11, 23), filters=_PENDING_FILTERS_EMPTY
+    sql = mod.buildPendingDeliverySummarySql(
+        monthsBack=12, today=date(2026, 11, 23), filters=_pendingFilters()
     )
     # 回归（2026-11-24 生产实测 ORA-00904）：外层 FROM 子查询**没有**别名，
-    # 引用内层别名（如 Q.BPSNUM_0）即 ORA-00904 ⇒ 500
-    assert "GROUP BY Q." not in sql
-    assert "\n  Q." not in sql
+    # 引用内层别名（如 O.SUPPLIER_CODE）即 ORA-00904 ⇒ 500
+    assert "GROUP BY O." not in sql
+    assert "\n  O." not in sql
     assert sql.strip().upper().startswith("SELECT")
-    assert "PORDERQ" in sql
+    # 表名来自本体绑定（THBI 数仓层，不是 ZJTH 源层）
+    assert "THBI.DWD_PURCHASE_ORDER_DTL" in sql
+    assert "THBI.DWD_GOODS_RECEIPT_DTL" in sql
     # 时间窗：12 个月前 = 2025-11-23
     assert "DATE '2025-11-23'" in sql
-    # 健全性阈值 + 欠交口径
-    assert "Q.QTYSTU_0 - Q.RCPQTYSTU_0" in sql
+    # 欠交口径 = PO_QTY - 收货已收量（COALESCE 兜未收货）
+    assert "O.PO_QTY - COALESCE(R.RECEIVED_QTY, 0)" in sql
     assert "1000000" in sql
     # 脏数据必须显式计数（不静默丢）
     assert "EXCLUDED_ROWS" in sql
@@ -643,77 +704,66 @@ def test_build_pending_delivery_summary_sql() -> None:
 
 
 def test_build_pending_delivery_lines_sql_filters() -> None:
-    from app.services.agent_tools_procurement import buildPendingDeliveryLinesSql
+    mod = _requirePendingModule()
 
-    sql = buildPendingDeliveryLinesSql(
+    sql = mod.buildPendingDeliveryLinesSql(
         monthsBack=12, today=date(2026, 11, 23),
-        filters=_PENDING_FILTERS_EMPTY, minOverdueDays=None, limit=20,
+        filters=_pendingFilters(), minOverdueDays=None, limit=20,
     )
-    assert "BPSNUM_0 IN" not in sql, "无供应商 ⇒ 不加过滤"
+    assert "SUPPLIER_CODE IN" not in sql, "无供应商 ⇒ 不加过滤"
     assert "FETCH FIRST 20 ROWS ONLY" in sql.upper()
     assert "OVERDUE_DAYS" in sql
 
-    sql2 = buildPendingDeliveryLinesSql(
+    sql2 = mod.buildPendingDeliveryLinesSql(
         monthsBack=3, today=date(2026, 11, 23),
-        filters=PendingDeliveryFilters(supplierKeys=["F109", "B125"]),
+        filters=_pendingFilters(supplierKeys=("F109", "B125")),
         minOverdueDays=30, limit=5,
     )
-    assert "Q.BPSNUM_0 IN ('F109', 'B125')" in sql2
+    assert "O.SUPPLIER_CODE IN ('F109', 'B125')" in sql2
 
     # BySupplier 外层同样不得引用内层别名
-    from app.services.agent_tools_procurement import buildPendingDeliveryBySupplierSql
-    supplier_sql = buildPendingDeliveryBySupplierSql(
-        monthsBack=12, today=date(2026, 11, 23), limit=5, filters=PendingDeliveryFilters()
+    supplier_sql = mod.buildPendingDeliveryBySupplierSql(
+        monthsBack=12, today=date(2026, 11, 23), limit=5, filters=_pendingFilters()
     )
-    assert "GROUP BY Q." not in supplier_sql
-    assert "BPSNUM_0 AS SUPPLIER_CODE" in supplier_sql
-    assert "JOIN ZJTH.BPSUPPLIER" in supplier_sql, "供应商名称经字典 JOIN 带出"
-    assert "SUPPLIER_NAME" in supplier_sql
-    # 明细 SQL 必须无条件带物料描述（im 别名）与供应商名称
-    assert "MATERIAL_DESC" in sql2
-    assert "LEFT JOIN ZJTH.ITMMASTER im" in sql2
+    assert "GROUP BY O." not in supplier_sql
+    assert "SUPPLIER_CODE," in supplier_sql
+    assert "BPSUPPLIER" not in supplier_sql, "供应商名称改走 MDM，不再 JOIN 数仓字典"
+    assert "SUPPLIER_NAME" not in supplier_sql, "名称由装配层从 MDM 补"
+    # 明细 SQL 不再 JOIN 物料字典（描述由装配层从 MDM 补）
+    assert "MATERIAL_DESC" not in sql2
+    assert "ITMMASTER" not in sql2
     assert ">= 30" in sql2, "minOverdueDays 过滤逾期下限"
     assert "DATE '2026-08-23'" in sql2
     assert "FETCH FIRST 5 ROWS ONLY" in sql2.upper()
 
 
 def test_pending_delivery_mysql_dialect_sql() -> None:
-    """场景槽位切 MySQL 源（2026-11-24 生产实测 1248）：方言参数生成 MySQL 合法 SQL。
+    """MySQL 方言：派生表别名 / NVL→COALESCE / TRUNC→DATEDIFF / LIMIT。"""
+    mod = _requirePendingModule()
 
-    根因：三个 builder 硬编码 Oracle 方言（派生表无别名 / NVL / TRUNC / FETCH FIRST），
-    datasourceId=3（MySQL）执行时 1248 'Every derived table must have its own alias'。
-    """
-    from app.services.agent_tools_procurement import (
-        buildPendingDeliveryBySupplierSql,
-        buildPendingDeliveryLinesSql,
-        buildPendingDeliverySummarySql,
-    )
-
-    summary = buildPendingDeliverySummarySql(
-        monthsBack=3, today=date(2026, 11, 24), filters=_PENDING_FILTERS_EMPTY,
+    summary = mod.buildPendingDeliverySummarySql(
+        monthsBack=3, today=date(2026, 11, 24), filters=_pendingFilters(),
         dialect="mysql",
     )
-    # MySQL 1248：派生表必须有别名（Oracle 不允许 AS 表别名 ⇒ 统一无 AS 的裸别名）
     assert ") t" in summary
-    # MySQL 无 NVL / TRUNC
     assert "NVL(" not in summary
     assert "TRUNC(" not in summary
     assert "COALESCE(" in summary
     assert "DATEDIFF(" in summary
     assert "FETCH FIRST" not in summary.upper()
 
-    supplier = buildPendingDeliveryBySupplierSql(
+    supplier = mod.buildPendingDeliveryBySupplierSql(
         monthsBack=3, today=date(2026, 11, 24), limit=5,
-        filters=PendingDeliveryFilters(), dialect="mysql",
+        filters=_pendingFilters(), dialect="mysql",
     )
     assert ") t" in supplier
     assert "TRUNC(" not in supplier
     assert "LIMIT 5" in supplier
     assert "FETCH FIRST" not in supplier.upper()
 
-    lines = buildPendingDeliveryLinesSql(
+    lines = mod.buildPendingDeliveryLinesSql(
         monthsBack=3, today=date(2026, 11, 24),
-        filters=_PENDING_FILTERS_EMPTY, minOverdueDays=30, limit=20,
+        filters=_pendingFilters(), minOverdueDays=30, limit=20,
         dialect="mysql",
     )
     assert "TRUNC(" not in lines
@@ -724,216 +774,163 @@ def test_pending_delivery_mysql_dialect_sql() -> None:
 
 def test_pending_delivery_oracle_dialect_default_unchanged() -> None:
     """默认（不传方言）保持现役 Oracle SQL 不变；派生表补裸别名对 Oracle 合法。"""
-    from app.services.agent_tools_procurement import buildPendingDeliverySummarySql
+    mod = _requirePendingModule()
 
-    sql = buildPendingDeliverySummarySql(
-        monthsBack=3, today=date(2026, 11, 24), filters=_PENDING_FILTERS_EMPTY,
+    sql = mod.buildPendingDeliverySummarySql(
+        monthsBack=3, today=date(2026, 11, 24), filters=_pendingFilters(),
     )
     assert "NVL(" in sql
     assert "TRUNC(" in sql
     assert ") t" in sql, "派生表补裸别名（无 AS），Oracle/MySQL 双合法"
 
 
+def _fakeBindingResolver():
+    async def _fakeResolve(session, *, className, requiredProperties, datasourceId=1):
+        return {
+            "DWD_PURCHASE_ORDER_DTL": _pendingOrderBinding(),
+            "DWD_GOODS_RECEIPT_DTL": _pendingReceiptBinding(),
+            "DIM_FACILITY": _pendingFacilityBinding(),
+        }[className]
+
+    return _fakeResolve
+
+
+async def _fakeLoadDatasource(session, datasourceId):
+    return SimpleNamespace(id=datasourceId, name="THBI", is_active=True)
+
+
+async def _fakeMdmNames(session, *, entityType, codes):
+    if entityType == "SUPPLIER":
+        return {"F109": "上海纳特汽车标准件有限公司"}
+    return {"502447700001": "不锈钢板SUS304"}
+
+
+class _PendingFakeAdapter:
+    def __init__(self, captured: list[str]):
+        self.captured = captured
+
+    async def execute_read_only(self, sql: str):
+        self.captured.append(sql)
+        if "EXCLUDED_ROWS" in sql:
+            return [{
+                "OPEN_LINES": 12, "OPEN_QTY": 5000.0,
+                "OVERDUE_LINES": 7, "EXCLUDED_ROWS": 3,
+            }]
+        if "GROUP BY SUPPLIER_CODE" in sql.upper():
+            return [
+                {"SUPPLIER_CODE": "F109", "OPEN_LINES": 5,
+                 "OPEN_QTY": 3000.0, "OVERDUE_LINES": 4},
+                {"SUPPLIER_CODE": "B170", "OPEN_LINES": 3,
+                 "OPEN_QTY": 1200.0, "OVERDUE_LINES": 1},
+            ]
+        return [
+            {"PO_NO": "T22511POH1251Q", "PO_LINE_NO": 1000,
+             "ITEM_CODE": "502447700001", "SUPPLIER_CODE": "F109",
+             "ORDERED_QTY": 1000000.0, "RECEIVED_QTY": 9600.0,
+             "OPEN_QTY": 990400.0, "EXPECTED_DATE": "2025-11-28",
+             "OVERDUE_DAYS": 360},
+        ]
+
+
 @pytest.mark.asyncio
 async def test_pending_delivery_handler_shapes_result(monkeypatch) -> None:
     """handler：三段只读 SQL（汇总/按供应商/TOP 行），脏数据行数显式回报。"""
-    from app.services import agent_tools_procurement
-
+    mod = _requirePendingModule()
     captured: list[str] = []
-
-    class _FakeAdapter:
-        async def execute_read_only(self, sql: str):
-            captured.append(sql)
-            if "EXCLUDED_ROWS" in sql:
-                return [{
-                    "OPEN_LINES": 12, "OPEN_QTY": 5000.0,
-                    "OVERDUE_LINES": 7, "EXCLUDED_ROWS": 3,
-                }]
-            if "GROUP BY" in sql.upper():
-                return [
-                    {"SUPPLIER_CODE": "F109", "SUPPLIER_NAME": "上海纳特汽车标准件有限公司",
-                     "OPEN_LINES": 5, "OPEN_QTY": 3000.0, "OVERDUE_LINES": 4},
-                    {"SUPPLIER_CODE": "B170", "SUPPLIER_NAME": None,
-                     "OPEN_LINES": 3, "OPEN_QTY": 1200.0, "OVERDUE_LINES": 1},
-                ]
-            return [
-                {"POHNUM_0": "T22511POH1251Q", "POPLIN_0": 1000,
-                 "ITMREF_0": "502447700001", "BPSNUM_0": "F109",
-                 "SUPPLIER_NAME": "上海纳特汽车标准件有限公司",
-                 "MATERIAL_DESC": "不锈钢板SUS304",
-                 "ORDERED_QTY": 1000000.0, "RECEIVED_QTY": 9600.0,
-                 "OPEN_QTY": 990400.0, "EXTRCPDAT_0": "2025-11-28",
-                 "OVERDUE_DAYS": 360},
-            ]
-
+    monkeypatch.setattr(mod, "resolveBinding", _fakeBindingResolver())
+    monkeypatch.setattr(mod, "_loadActiveDatasource", _fakeLoadDatasource)
+    monkeypatch.setattr(mod, "loadMdmNames", _fakeMdmNames)
     monkeypatch.setattr(
-        agent_tools_procurement, "_adapterFor", lambda dsId, ds: _FakeAdapter()
+        mod, "_adapterFor", lambda dsId, ds: _PendingFakeAdapter(captured)
     )
-    monkeypatch.setattr(
-        agent_tools_procurement, "_resolveBusinessDatasource",
-        async_simple(ds=SimpleNamespace(id=1, name="THBI", is_active=True)),
-    )
+    mod._PENDING_RESULT_CACHE.clear()
 
-    from app.services.agent_tools_procurement import pendingDeliveryHandler
-
-    result = await pendingDeliveryHandler(
+    result = await mod.pendingDeliveryHandler(
         None, {"monthsBack": 12}, SimpleNamespace()
     )
     assert len(captured) == 3, "汇总 + 按供应商 + TOP 行，三段只读 SQL"
+    assert result.data["datasourceId"] == 1, "数据源固定 THBI（绑定解析）"
     assert result.data["summary"]["openLines"] == 12
     assert result.data["summary"]["excludedRows"] == 3, "脏数据必须显式回报"
     assert result.data["bySupplier"][0]["supplierCode"] == "F109"
     assert result.data["bySupplier"][0]["supplierName"] == "上海纳特汽车标准件有限公司"
+    assert result.data["bySupplier"][1]["supplierName"] is None, "MDM 无行 ⇒ 名称缺省"
     assert result.data["topLines"][0]["supplierName"] == "上海纳特汽车标准件有限公司"
     assert result.data["topLines"][0]["materialDesc"] == "不锈钢板SUS304"
     assert result.data["topLines"][0]["overdueDays"] == 360
     assert "欠交" in result.answer and "12" in result.answer
 
 
-def async_simple(ds):
-    async def _resolve(session, ctx):
-        return ds
-    return _resolve
-
-
 @pytest.mark.asyncio
-async def test_pending_delivery_handler_honors_datasource_arg(monkeypatch) -> None:
-    """args.datasourceId 指定数据源（场景槽位）：不再默默落默认源。"""
-    from app.services import agent_tools_procurement
+async def test_pending_delivery_handler_rejects_datasource_arg() -> None:
+    """THBI 硬规则：调用方给 datasourceId 一律拒绝（不是工具参数）。"""
+    from app.domain.exceptions import ValidationError
 
-    class _FakeAdapter:
-        async def execute_read_only(self, sql: str):
-            if "EXCLUDED_ROWS" in sql:
-                return [{"OPEN_LINES": 1, "OPEN_QTY": 10.0,
-                         "OVERDUE_LINES": 1, "EXCLUDED_ROWS": 0}]
-            if "GROUP BY" in sql.upper():
-                return []
-            return []
-
-    picked: dict = {}
-
-    async def _fakeById(session, dsId):
-        picked["id"] = dsId
-        return SimpleNamespace(id=dsId, name="指定源", is_active=True)
-
-    monkeypatch.setattr(
-        agent_tools_procurement, "_adapterFor", lambda dsId, ds: _FakeAdapter()
-    )
-    monkeypatch.setattr(
-        agent_tools_procurement, "_loadActiveDatasource", _fakeById
-    )
-
-    from app.services.agent_tools_procurement import pendingDeliveryHandler
-
-    result = await pendingDeliveryHandler(
-        None,
-        {"monthsBack": 12, "datasourceId": 7,
-         "supplierKeys": ["F109"], "siteKeys": ["T3"]},
-        SimpleNamespace(),
-    )
-    assert picked["id"] == 7
-    assert result.data["datasourceId"] == 7
+    mod = _requirePendingModule()
+    with pytest.raises(ValidationError):
+        await mod.pendingDeliveryHandler(
+            None, {"monthsBack": 12, "datasourceId": 7}, SimpleNamespace()
+        )
 
 
 @pytest.mark.asyncio
 async def test_pending_delivery_material_name_resolved_via_mdm(monkeypatch) -> None:
-    """中文物料名 ⇒ 先经 MDM 解析成 ERP 编码再进 SQL（ITMDES1_0 几乎无中文）。"""
-    from app.services import agent_tools_procurement
+    """中文物料名 ⇒ 先经 MDM 解析成编码再进 SQL（不再有数仓字典 LIKE 兜底）。"""
+    mod = _requirePendingModule()
+    captured: list[str] = []
 
-    class _FakeAdapter:
-        async def execute_read_only(self, sql: str):
-            if "EXCLUDED_ROWS" in sql:
-                return [{"OPEN_LINES": 1, "OPEN_QTY": 5.0,
-                         "OVERDUE_LINES": 1, "EXCLUDED_ROWS": 0}]
-            if "GROUP BY" in sql.upper():
-                return []
-            return []
+    import app.services.entity_mapping_service as ems
 
     class _FakeMapping:
-        def __init__(self, *_a, **_k):
-            pass
-
         async def searchMappings(self, session, *, q, entityType, limit):
             assert entityType == "MATERIAL" and q == "不锈钢板"
             return [SimpleNamespace(enterprise_code="AJE0000781")]
 
-    monkeypatch.setattr(agent_tools_procurement, "EntityMappingService", _FakeMapping)
+    monkeypatch.setattr(ems, "EntityMappingService", _FakeMapping)
+    monkeypatch.setattr(mod, "resolveBinding", _fakeBindingResolver())
+    monkeypatch.setattr(mod, "_loadActiveDatasource", _fakeLoadDatasource)
+    monkeypatch.setattr(mod, "loadMdmNames", _fakeMdmNames)
     monkeypatch.setattr(
-        agent_tools_procurement, "_adapterFor", lambda dsId, ds: _FakeAdapter()
+        mod, "_adapterFor", lambda dsId, ds: _PendingFakeAdapter(captured)
     )
-    monkeypatch.setattr(
-        agent_tools_procurement, "_resolveBusinessDatasource",
-        async_simple(ds=SimpleNamespace(id=1, name="THBI", is_active=True)),
-    )
+    mod._PENDING_RESULT_CACHE.clear()
 
-    captured: list[str] = []
-
-    origAdapter = agent_tools_procurement._adapterFor
-    def _capture(dsId, ds):
-        return _CaptureAdapter(origAdapter, captured)
-
-    class _CaptureAdapter:
-        def __init__(self, factory, sink):
-            pass
-        async def execute_read_only(self, sql):
-            captured.append(sql)
-            return [{"OPEN_LINES": 1, "OPEN_QTY": 5.0,
-                     "OVERDUE_LINES": 1, "EXCLUDED_ROWS": 0}]
-
-    monkeypatch.setattr(agent_tools_procurement, "_adapterFor", _capture)
-
-    from app.services.agent_tools_procurement import pendingDeliveryHandler
-
-    await pendingDeliveryHandler(
+    await mod.pendingDeliveryHandler(
         None, {"monthsBack": 12, "materialKeys": ["不锈钢板"]}, SimpleNamespace()
     )
-    lines_sql = next(sql for sql in captured if "ORDER BY" in sql.upper())
-    assert "AJE0000781" in lines_sql, "MDM 解析出的编码必须进 IN"
-    assert "ITMDES1_0 LIKE '%不锈钢板%'" in lines_sql, "原词保留作 LIKE 兜底"
+    lines_sql = next(sql for sql in captured if "ORDER BY OPEN_QTY DESC" in sql.upper())
+    assert "O.ITEM_CODE IN ('AJE0000781')" in lines_sql, "MDM 解析出的编码必须进 IN"
+    assert "ITMDES" not in lines_sql, "不再有物料描述字典 LIKE 兜底"
 
 
 @pytest.mark.asyncio
 async def test_pending_delivery_same_day_cache(monkeypatch) -> None:
-    """同参数同日二次调用 ⇒ 不再查库（复用缓存），换参数/换源 ⇒ 重新查询。"""
-    from app.services import agent_tools_procurement
-
+    """同参数同日二次调用 ⇒ 不再查库（复用缓存），换参数 ⇒ 重新查询。"""
+    mod = _requirePendingModule()
     calls = {"count": 0}
 
-    class _FakeAdapter:
+    class _CountingAdapter(_PendingFakeAdapter):
         async def execute_read_only(self, sql: str):
             calls["count"] += 1
-            if "EXCLUDED_ROWS" in sql:
-                return [{"OPEN_LINES": 2, "OPEN_QTY": 50.0,
-                         "OVERDUE_LINES": 1, "EXCLUDED_ROWS": 0}]
-            if "GROUP BY" in sql.upper():
-                return [{"SUPPLIER_CODE": "F109", "SUPPLIER_NAME": "纳特",
-                         "OPEN_LINES": 1, "OPEN_QTY": 30.0, "OVERDUE_LINES": 1}]
-            return [{"POHNUM_0": "P1", "POPLIN_0": 1000, "ITMREF_0": "M1",
-                     "BPSNUM_0": "F109", "SUPPLIER_NAME": "纳特",
-                     "MATERIAL_DESC": "desc", "ORDERED_QTY": 40.0,
-                     "RECEIVED_QTY": 10.0, "OPEN_QTY": 30.0,
-                     "EXTRCPDAT_0": "2026-01-01", "OVERDUE_DAYS": 5}]
+            return await super().execute_read_only(sql)
 
+    monkeypatch.setattr(mod, "resolveBinding", _fakeBindingResolver())
+    monkeypatch.setattr(mod, "_loadActiveDatasource", _fakeLoadDatasource)
+    monkeypatch.setattr(mod, "loadMdmNames", _fakeMdmNames)
     monkeypatch.setattr(
-        agent_tools_procurement, "_adapterFor", lambda dsId, ds: _FakeAdapter()
+        mod, "_adapterFor", lambda dsId, ds: _CountingAdapter([])
     )
-    monkeypatch.setattr(
-        agent_tools_procurement, "_resolveBusinessDatasource",
-        async_simple(ds=SimpleNamespace(id=1, name="THBI", is_active=True)),
-    )
-    agent_tools_procurement._PENDING_RESULT_CACHE.clear()
+    mod._PENDING_RESULT_CACHE.clear()
 
-    from app.services.agent_tools_procurement import pendingDeliveryHandler
-
-    await pendingDeliveryHandler(None, {"monthsBack": 12}, SimpleNamespace())
+    await mod.pendingDeliveryHandler(None, {"monthsBack": 12}, SimpleNamespace())
     first = calls["count"]
     # 同参数二次调用 ⇒ 命中缓存，不再查库
-    await pendingDeliveryHandler(None, {"monthsBack": 12}, SimpleNamespace())
+    await mod.pendingDeliveryHandler(None, {"monthsBack": 12}, SimpleNamespace())
     assert calls["count"] == first, "同参数同日应命中缓存"
     # 换参数 ⇒ 重新查询
-    await pendingDeliveryHandler(None, {"monthsBack": 6}, SimpleNamespace())
+    await mod.pendingDeliveryHandler(None, {"monthsBack": 6}, SimpleNamespace())
     assert calls["count"] > first
-    agent_tools_procurement._PENDING_RESULT_CACHE.clear()
+    mod._PENDING_RESULT_CACHE.clear()
 
 
 def test_purchase_history_and_quotation_mysql_dialect() -> None:
@@ -971,34 +968,31 @@ def test_purchase_history_and_quotation_mysql_dialect() -> None:
 
 def test_pending_delivery_lines_sql_supports_offset_and_count() -> None:
     """明细页需要分页：lines SQL 带 offset，另有 count SQL 出总数。"""
-    from app.services.agent_tools_procurement import (
-        buildPendingDeliveryCountSql,
-        buildPendingDeliveryLinesSql,
-    )
+    mod = _requirePendingModule()
 
-    lines = buildPendingDeliveryLinesSql(
+    lines = mod.buildPendingDeliveryLinesSql(
         monthsBack=12, today=date(2026, 11, 24),
-        filters=PendingDeliveryFilters(), minOverdueDays=None, limit=50, offset=100,
+        filters=_pendingFilters(), minOverdueDays=None, limit=50, offset=100,
     )
     assert "OFFSET 100" in lines
     assert "FETCH FIRST 50 ROWS ONLY" in lines.upper()
 
-    count = buildPendingDeliveryCountSql(
-        monthsBack=12, today=date(2026, 11, 24), filters=PendingDeliveryFilters(),
+    count = mod.buildPendingDeliveryCountSql(
+        monthsBack=12, today=date(2026, 11, 24), filters=_pendingFilters(),
     )
     assert count.strip().upper().startswith("SELECT COUNT(*)")
-    assert "QTYSTU_0 - Q.RCPQTYSTU_0 > 0" in count
+    assert "O.PO_QTY - COALESCE(R.RECEIVED_QTY, 0) > 0" in count
     # 脏数据阈值同样生效（否则总数与明细对不上）
     assert "1000000" in count
 
 
 def test_pending_delivery_lines_offset_mysql_dialect() -> None:
     """MySQL 方言：LIMIT n OFFSET m（不是 Oracle 的 FETCH ... OFFSET）。"""
-    from app.services.agent_tools_procurement import buildPendingDeliveryLinesSql
+    mod = _requirePendingModule()
 
-    sql = buildPendingDeliveryLinesSql(
+    sql = mod.buildPendingDeliveryLinesSql(
         monthsBack=12, today=date(2026, 11, 24),
-        filters=PendingDeliveryFilters(), minOverdueDays=None, limit=20, offset=40,
+        filters=_pendingFilters(), minOverdueDays=None, limit=20, offset=40,
         dialect="mysql",
     )
     assert "LIMIT 20 OFFSET 40" in sql

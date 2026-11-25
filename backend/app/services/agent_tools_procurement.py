@@ -10,17 +10,13 @@ input_schema / handler_ref）在 DB ``agent_tool_config``（admin 维护）。
 
 from __future__ import annotations
 
-import hashlib
-import json
-import re
-from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.exceptions import ConflictError, ValidationError
+from app.domain.exceptions import ConflictError
 from app.domain.models import DataSource
 from app.infrastructure import neo4j_client
 from app.services.agent_tool_types import AgentToolContext, ToolResult
@@ -29,31 +25,58 @@ from app.services.delivery_tracking_query import (
 )
 from app.services.entity_mapping_service import EntityMappingService
 from app.services.knowledge.document_search import searchProcurementDocuments
+from app.services.pending_delivery_query import (
+    _PENDING_RESULT_CACHE as _PENDING_RESULT_CACHE,
+)
+
+# 待到货实现已拆到 `pending_delivery_query`（文件规模治理）：
+# 下面是同名 re-export（显式 `as` 自身），既有导入路径不变。
+from app.services.pending_delivery_query import (
+    PendingDeliveryFilters as PendingDeliveryFilters,
+)
+from app.services.pending_delivery_query import (
+    _camelPendingRow as _camelPendingRow,
+)
+from app.services.pending_delivery_query import (
+    buildPendingDeliveryBySupplierSql as buildPendingDeliveryBySupplierSql,
+)
+from app.services.pending_delivery_query import (
+    buildPendingDeliveryCountSql as buildPendingDeliveryCountSql,
+)
+from app.services.pending_delivery_query import (
+    buildPendingDeliveryLinesSql as buildPendingDeliveryLinesSql,
+)
+from app.services.pending_delivery_query import (
+    buildPendingDeliverySummarySql as buildPendingDeliverySummarySql,
+)
+from app.services.pending_delivery_query import (
+    pendingDeliveryHandler as pendingDeliveryHandler,
+)
+from app.services.pending_delivery_query import (
+    resolvePendingDeliveryBindings as resolvePendingDeliveryBindings,
+)
+from app.services.procurement_query_utils import (
+    MAX_LIMIT as _MAX_LIMIT,
+)
+from app.services.procurement_query_utils import (
+    MONTHS_BACK_MAX as _MONTHS_BACK_MAX,
+)
+from app.services.procurement_query_utils import (
+    MONTHS_BACK_MIN as _MONTHS_BACK_MIN,
+)
+from app.services.procurement_query_utils import (
+    SqlDialect as _PendingDialect,
+)
+from app.services.procurement_query_utils import (
+    colValue as _col,
+)
+from app.services.procurement_query_utils import (
+    escapeLiteral as _esc,
+)
+from app.services.procurement_query_utils import (
+    minusMonths as _minusMonths,
+)
 from app.services.research_sql_runner import assertReadonlySql
-
-_MAX_LIMIT = 50
-
-
-def _col(row: Any, name: str) -> Any:
-    """**大小写不敏感**地取列值。
-
-    ⚠️ 为什么必须这样：Oracle 的 ``cursor.description`` 返回大写标识符，而
-    ``business_db_pool`` 统一把它们**小写化**（见该文件 :698）⇒ 用大写 key
-    去 get **永远拿到 None**。
-
-    2026-11-22 实测踩到：``quotation_query`` / ``purchase_history`` 两个
-    工具从 Oracle 取到行后，``row.get("SUPPLIER_CODE")`` 全是 None ⇒
-    **它们在生产上从没返回过真实数据**（一直返回"命中 0 条"）。
-    """
-    if not isinstance(row, dict):
-        return None
-    if name in row:
-        return row[name]
-    lowered = name.lower()
-    for key, value in row.items():
-        if isinstance(key, str) and key.lower() == lowered:
-            return value
-    return None
 
 
 def _camelRow(row: Any) -> dict[str, Any]:
@@ -232,7 +255,6 @@ async def findSuppliersOfMaterial(materialKey: str, limit: int = 20) -> list[dic
 # ---------------------------------------------------------------------------
 
 _HISTORY_TABLE = "DWD_PURCHASE_ORDER_LINE"
-_MONTHS_BACK_MIN, _MONTHS_BACK_MAX = 1, 36
 
 
 def buildPurchaseHistorySql(
@@ -264,24 +286,6 @@ def buildPurchaseHistorySql(
         f"CREATION_DATE FROM {_HISTORY_TABLE} WHERE {where} "
         f"ORDER BY CREATION_DATE DESC {_PendingDialect(dialect).tail(limit)}"
     )
-
-
-def _esc(value: str) -> str:
-    """字面量转义（单引号翻倍；模板参数只接受标识符级输入）。"""
-    return value.replace("'", "''")
-
-
-def _minusMonths(base: date, months: int) -> date:
-    """date - N 月（无 dateutil 依赖；月末夹齐：11-30 减 3 月 = 08-31）。"""
-    import calendar
-
-    year = base.year
-    month = base.month - months
-    while month <= 0:
-        month += 12
-        year -= 1
-    day = min(base.day, calendar.monthrange(year, month)[1])
-    return date(year, month, day)
 
 
 async def _resolveBusinessDatasource(
@@ -328,6 +332,17 @@ def _ensureActive(ds: DataSource) -> None:
     from app.services.datasource_service import ensureDatasourceActive
 
     ensureDatasourceActive(ds)
+
+
+async def _loadActiveDatasource(session: AsyncSession, datasourceId: int) -> DataSource:
+    """按 id 取数据源（待到货固定 THBI）；不存在或停用 fail-closed。"""
+    ds = (
+        await session.execute(select(DataSource).where(DataSource.id == datasourceId))
+    ).scalars().first()
+    if ds is None:
+        raise ConflictError(f"数据源不存在（id={datasourceId}）")
+    _ensureActive(ds)
+    return ds
 
 
 def _camelHistoryRow(row: dict[str, Any]) -> dict[str, Any]:
@@ -729,488 +744,6 @@ async def purchaseHistoryHandler(
             f"{camelSummary['orderCount']} 张订单行、总量 {camelSummary['totalQty']}、"
             f"价格区间 {camelSummary['minPrice']}–{camelSummary['maxPrice']}；"
             f"明细返回 {len(rows)} 行。"
-        ),
-    )
-
-
-# ---------------------------------------------------------------------------
-# 待到货 / 逾期未到（pending_delivery_query，2026-11-23 探针定口径）
-# ---------------------------------------------------------------------------
-
-_PENDING_TABLE = "ZJTH.PORDERQ"
-_PENDING_ITEM_TABLE = "ZJTH.ITMMASTER"
-_PENDING_FACILITY_TABLE = "ZJTH.FACILITY"
-_PENDING_SUPPLIER_TABLE = "ZJTH.BPSUPPLIER"
-#: 健全性阈值：欠交量 ≥ 1e6 视为源侧脏数据（探针实测 43 行「数量=物料码」），
-#: 剔除但**显式回报**（excludedRows），不静默丢。
-_OPEN_QTY_SANITY_MAX = 1_000_000
-
-
-@dataclass(frozen=True)
-class _PendingDialect:
-    """待到货 SQL 的方言碎片（2026-11-24 生产实测：切 MySQL 源 500）。
-
-    根因：builder 硬编码 Oracle 方言，而场景槽位（datasourceId）可切到
-    MySQL 源——派生表无别名（MySQL 1248）、NVL/TRUNC 不存在。
-    只分叉差异构造，其余模板两边共用；派生表别名统一用**无 AS 裸别名**
-    （Oracle 不允许 ``AS`` 表别名，裸别名两边合法）。
-    其余方言（如 postgresql）回落 Oracle 分支——待到货表是 ERP 影子表，
-    不预期出现在 PG 源；真出现时错误语义同现在（fail loud），不做静默适配。
-    """
-
-    name: str
-
-    def overdueDays(self, todayLit: str, col: str) -> str:
-        """今天 - 预期到货日的天数差。"""
-        if self.name == "mysql":
-            return f"DATEDIFF({todayLit}, {col})"
-        return f"TRUNC({todayLit}) - TRUNC({col})"
-
-    def coalesce(self, expr: str, default: str) -> str:
-        if self.name == "mysql":
-            return f"COALESCE({expr}, {default})"
-        return f"NVL({expr}, {default})"
-
-    def tail(self, limit: int, offset: int = 0) -> str:
-        """行数限制（+ 可选偏移）：MySQL 8.0.19 以下不支持 FETCH FIRST，统一 LIMIT 更稳。
-
-        Oracle：``FETCH FIRST n ROWS ONLY OFFSET m``；
-        MySQL：``LIMIT n OFFSET m``（注意顺序与 Oracle 相反）。
-        """
-        if self.name == "mysql":
-            base = f"LIMIT {int(limit)}"
-            return f"{base} OFFSET {int(offset)}" if offset else base
-        base = f"FETCH FIRST {int(limit)} ROWS ONLY"
-        return f"{base} OFFSET {int(offset)}" if offset else base
-
-    @staticmethod
-    def fromAdapter(adapter: Any) -> _PendingDialect:
-        """从 adapter 读方言；Oracle 适配器（或测试桩）缺属性 ⇒ 回落 oracle。"""
-        name = str(getattr(adapter, "dialect", "") or "oracle").lower()
-        if name not in ("mysql", "oracle"):
-            name = "oracle"
-        return _PendingDialect(name)
-
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-#: 待到货查询的同日结果缓存：key = 全部过滤参数 + 数据源 + 当天日期，
-#: TTL = 距当日午夜（ODS 每日 ETL ⇒ 同日数据视为不变，2026-11-24 需求）。
-#: 进程内缓存：重启即失效（保守侧），跨天由 key 中的日期自然隔离。
-_PENDING_RESULT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
-
-
-@dataclass(frozen=True)
-class PendingDeliveryFilters:
-    """待到货查询过滤（2026-11-24：多选供应商/物料/基地 + 日期段）。
-
-    - materialKeys / siteKeys：**每项**既匹配精确编码也匹配名称模糊
-      （物料名 ITMDES1_0、基地名 FCYNAM_0，分别 JOIN 字典表）；
-    - dateFrom/dateTo（YYYY-MM-DD）：给出即**覆盖** monthsBack（按 ORDDAT_0 过滤）；
-      非法格式 fail-closed 抛 ValidationError，不静默忽略。
-    """
-
-    supplierKeys: tuple[str, ...] = ()
-    materialKeys: tuple[str, ...] = ()
-    siteKeys: tuple[str, ...] = ()
-    dateFrom: str | None = None
-    dateTo: str | None = None
-
-    def __post_init__(self) -> None:
-        for field in ("dateFrom", "dateTo"):
-            value = getattr(self, field)
-            if value is None:
-                continue
-            if not _DATE_RE.match(value):
-                raise ValidationError(
-                    f"{field} 日期格式应为 YYYY-MM-DD，收到 {value!r}"
-                )
-            try:
-                date.fromisoformat(value)
-            except ValueError as exc:
-                raise ValidationError(
-                    f"{field} 不是有效日期：{value!r}"
-                ) from exc
-
-    @staticmethod
-    def _splitKeys(keys: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """按「含中文 ⇒ 名称模糊」分类：编码走 IN，名称走 LIKE。"""
-        codes = tuple(k for k in keys if not _CJK_RE.search(k))
-        names = tuple(k for k in keys if _CJK_RE.search(k))
-        return codes, names
-
-    def windowSql(self, monthsBack: int, today: date) -> str:
-        if self.dateFrom and self.dateTo:
-            return f"ORDDAT_0 >= DATE '{self.dateFrom}' AND ORDDAT_0 <= DATE '{self.dateTo}'"
-        since = _minusMonths(today, max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX)))
-        return f"ORDDAT_0 >= DATE '{since.isoformat()}'"
-
-    def joinSql(
-        self, *, withSupplierName: bool = False, withItemDesc: bool = False
-    ) -> str:
-        """过滤 JOIN（m/f）+ 名称字典 JOIN（b=供应商 / im=物料描述，LEFT 防脏码丢行）。
-
-        im 与过滤用的 m 同表不同别名：过滤 JOIN 只在给了 materialKeys 时出现，
-        描述 JOIN 独立存在（TOP 行表始终要显示物料描述）。
-        """
-        joins = ""
-        if self.materialKeys:
-            joins += f" JOIN {_PENDING_ITEM_TABLE} m ON m.ITMREF_0 = Q.ITMREF_0"
-        if self.siteKeys:
-            joins += f" JOIN {_PENDING_FACILITY_TABLE} f ON f.FCY_0 = Q.POHFCY_0"
-        if withSupplierName:
-            joins += f" LEFT JOIN {_PENDING_SUPPLIER_TABLE} b ON b.BPSNUM_0 = Q.BPSNUM_0"
-        if withItemDesc:
-            joins += f" LEFT JOIN {_PENDING_ITEM_TABLE} im ON im.ITMREF_0 = Q.ITMREF_0"
-        return joins
-
-    def filterSql(self) -> str:
-        """过滤条件：编码精确 IN + 名称模糊 LIKE（分类见 _splitKeys）。
-
-        物料/基地的 LIKE 条件依赖 joinSql() 已建的字典表别名（m / f）。
-        """
-        conds: list[str] = []
-        if self.supplierKeys:
-            conds.append(
-                "Q.BPSNUM_0 IN ("
-                + ", ".join(f"'{_esc(k)}'" for k in self.supplierKeys) + ")"
-            )
-        if self.materialKeys:
-            codes, names = self._splitKeys(self.materialKeys)
-            parts: list[str] = []
-            if codes:
-                parts.append(
-                    "Q.ITMREF_0 IN ("
-                    + ", ".join(f"'{_esc(k)}'" for k in codes) + ")"
-                )
-            parts.extend(f"m.ITMDES1_0 LIKE '%{_esc(k)}%'" for k in names)
-            conds.append("(" + " OR ".join(parts) + ")")
-        if self.siteKeys:
-            codes, names = self._splitKeys(self.siteKeys)
-            parts = []
-            if codes:
-                parts.append(
-                    "Q.POHFCY_0 IN ("
-                    + ", ".join(f"'{_esc(k)}'" for k in codes) + ")"
-                )
-            parts.extend(f"f.FCYNAM_0 LIKE '%{_esc(k)}%'" for k in names)
-            conds.append("(" + " OR ".join(parts) + ")")
-        return (" AND " + " AND ".join(conds)) if conds else ""
-
-
-def _pendingCacheKey(
-    *, datasourceId: int, monthsBack: int, filters: PendingDeliveryFilters,
-    minOverdueDays: int | None, today: date,
-) -> str:
-    payload = {
-        "ds": datasourceId,
-        "months": monthsBack,
-        "from": filters.dateFrom,
-        "to": filters.dateTo,
-        "suppliers": sorted(filters.supplierKeys),
-        "materials": sorted(filters.materialKeys),
-        "sites": sorted(filters.siteKeys),
-        "overdue": minOverdueDays,
-        "day": today.isoformat(),
-    }
-    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def _cacheTtlSeconds(now: datetime) -> int:
-    """TTL = 距当日午夜（同日复用，跨天自然失效）。"""
-    midnight = datetime.combine(now.date() + timedelta(days=1), time.min)
-    return max(60, int((midnight - now).total_seconds()))
-
-
-async def _loadPendingDeliveryData(
-    adapter, *, datasourceId: int, monthsBack: int, today: date,
-    filters: PendingDeliveryFilters, minOverdueDays: int | None, limit: int,
-) -> dict[str, Any]:
-    """三段查询（汇总/按供应商/TOP 行）+ 同日结果缓存。
-
-    命中 ⇒ 不再查库（省 DB 与工具执行成本）；未命中 ⇒ 查询并写缓存。
-    """
-    cacheKey = _pendingCacheKey(
-        datasourceId=datasourceId, monthsBack=monthsBack, filters=filters,
-        minOverdueDays=minOverdueDays, today=today,
-    )
-    hit = _PENDING_RESULT_CACHE.get(cacheKey)
-    now = datetime.now()
-    if hit is not None and hit[0] > now.timestamp():
-        return hit[1]
-
-    summaryRows = await adapter.execute_read_only(buildPendingDeliverySummarySql(
-        monthsBack=monthsBack, today=today, filters=filters,
-        dialect=_PendingDialect.fromAdapter(adapter).name))
-    supplierRows = await adapter.execute_read_only(buildPendingDeliveryBySupplierSql(
-        monthsBack=monthsBack, today=today, limit=5, filters=filters,
-        dialect=_PendingDialect.fromAdapter(adapter).name))
-    lineRows = await adapter.execute_read_only(buildPendingDeliveryLinesSql(
-        monthsBack=monthsBack, today=today, filters=filters,
-        minOverdueDays=minOverdueDays, limit=limit,
-        dialect=_PendingDialect.fromAdapter(adapter).name))
-
-    summaryRow = summaryRows[0] if summaryRows else {}
-    data: dict[str, Any] = {
-        "summary": {
-            "openLines": int(_col(summaryRow, "OPEN_LINES") or 0),
-            "openQty": _col(summaryRow, "OPEN_QTY"),
-            "overdueLines": int(_col(summaryRow, "OVERDUE_LINES") or 0),
-            "excludedRows": int(_col(summaryRow, "EXCLUDED_ROWS") or 0),
-        },
-        "bySupplier": [
-            {
-                "supplierCode": _col(r, "SUPPLIER_CODE"),
-                "supplierName": _col(r, "SUPPLIER_NAME"),
-                "openLines": int(_col(r, "OPEN_LINES") or 0),
-                "openQty": _col(r, "OPEN_QTY"),
-                "overdueLines": int(_col(r, "OVERDUE_LINES") or 0),
-            }
-            for r in supplierRows
-        ],
-        "topLines": [_camelPendingRow(r) for r in lineRows],
-    }
-    _PENDING_RESULT_CACHE[cacheKey] = (_cacheTtlSeconds(now) + now.timestamp(), data)
-    return data
-
-
-def buildPendingDeliverySummarySql(
-    *, monthsBack: int, today: date, filters: PendingDeliveryFilters | None = None,
-    dialect: str = "oracle",
-) -> str:
-    """欠交汇总（单语句）：行数 / 总欠交量 / 逾期行数 / 脏数据行数。
-
-    dialect：oracle（默认，现役 ZJTH）| mysql（场景槽位切 MySQL 源，2026-11-24）。
-    派生表别名 ``) t``：MySQL 必须有（错误 1248），裸别名（无 AS）Oracle 也合法。
-    """
-    filters = filters or PendingDeliveryFilters()
-    d = _PendingDialect(dialect)
-    todayLit = f"DATE '{today.isoformat()}'"
-    return f"""
-SELECT
-  SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} THEN 1 ELSE 0 END) AS OPEN_LINES,
-  {d.coalesce(f"SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} THEN OPEN_QTY ELSE 0 END)", "0")} AS OPEN_QTY,
-  SUM(CASE WHEN OPEN_QTY > 0 AND OPEN_QTY < {_OPEN_QTY_SANITY_MAX} AND OVERDUE_DAYS > 0 THEN 1 ELSE 0 END) AS OVERDUE_LINES,
-  SUM(CASE WHEN OPEN_QTY >= {_OPEN_QTY_SANITY_MAX} THEN 1 ELSE 0 END) AS EXCLUDED_ROWS
-FROM (
-  SELECT Q.QTYSTU_0 - Q.RCPQTYSTU_0 AS OPEN_QTY,
-         {d.overdueDays(todayLit, "Q.EXTRCPDAT_0")} AS OVERDUE_DAYS
-  FROM {_PENDING_TABLE} Q{filters.joinSql()}
-  WHERE {filters.windowSql(monthsBack, today)}{filters.filterSql()}
-) t""".strip()
-
-
-def buildPendingDeliveryBySupplierSql(
-    *, monthsBack: int, today: date, limit: int,
-    filters: PendingDeliveryFilters | None = None,
-    dialect: str = "oracle",
-) -> str:
-    """按供应商聚合欠交（催货清单的分组视角）。方言语义同 summary。"""
-    filters = filters or PendingDeliveryFilters()
-    d = _PendingDialect(dialect)
-    todayLit = f"DATE '{today.isoformat()}'"
-    limit = max(1, min(limit, _MAX_LIMIT))
-    return f"""
-SELECT
-  BPSNUM_0 AS SUPPLIER_CODE,
-  MAX(SUPPLIER_NAME) AS SUPPLIER_NAME,
-  COUNT(*) AS OPEN_LINES,
-  SUM(OPEN_QTY) AS OPEN_QTY,
-  SUM(CASE WHEN OVERDUE_DAYS > 0 THEN 1 ELSE 0 END) AS OVERDUE_LINES
-FROM (
-  SELECT Q.BPSNUM_0, b.BPSNAM_0 AS SUPPLIER_NAME,
-         Q.QTYSTU_0 - Q.RCPQTYSTU_0 AS OPEN_QTY,
-         {d.overdueDays(todayLit, "Q.EXTRCPDAT_0")} AS OVERDUE_DAYS
-  FROM {_PENDING_TABLE} Q{filters.joinSql(withSupplierName=True)}
-  WHERE {filters.windowSql(monthsBack, today)}
-    AND Q.QTYSTU_0 - Q.RCPQTYSTU_0 > 0
-    AND Q.QTYSTU_0 - Q.RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}{filters.filterSql()}
-) t
-GROUP BY BPSNUM_0
-ORDER BY OPEN_QTY DESC
-{d.tail(limit)}""".strip()
-
-
-def buildPendingDeliveryLinesSql(
-    *,
-    monthsBack: int,
-    today: date,
-    filters: PendingDeliveryFilters | None,
-    minOverdueDays: int | None,
-    limit: int,
-    offset: int = 0,
-    dialect: str = "oracle",
-) -> str:
-    """TOP 欠交订单行（明细下钻）：多选供应商/物料/基地 + 日期段 + 逾期下限。方言语义同 summary。"""
-    filters = filters or PendingDeliveryFilters()
-    d = _PendingDialect(dialect)
-    todayLit = f"DATE '{today.isoformat()}'"
-    limit = max(1, min(limit, _MAX_LIMIT))
-    offset = max(0, int(offset))
-    conds = [
-        filters.windowSql(monthsBack, today),
-        "Q.QTYSTU_0 - Q.RCPQTYSTU_0 > 0",
-        f"Q.QTYSTU_0 - Q.RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}",
-    ]
-    if minOverdueDays:
-        conds.append(f"{d.overdueDays(todayLit, 'Q.EXTRCPDAT_0')} >= {int(minOverdueDays)}")
-    where = " AND ".join(conds) + filters.filterSql()
-    return f"""
-SELECT Q.POHNUM_0, Q.POPLIN_0, Q.ITMREF_0, Q.BPSNUM_0, b.BPSNAM_0 AS SUPPLIER_NAME,
-       im.ITMDES1_0 AS MATERIAL_DESC,
-       Q.QTYSTU_0 AS ORDERED_QTY, Q.RCPQTYSTU_0 AS RECEIVED_QTY,
-       (Q.QTYSTU_0 - Q.RCPQTYSTU_0) AS OPEN_QTY,
-       Q.EXTRCPDAT_0,
-       {d.overdueDays(todayLit, "Q.EXTRCPDAT_0")} AS OVERDUE_DAYS
-FROM {_PENDING_TABLE} Q{filters.joinSql(withSupplierName=True, withItemDesc=True)}
-WHERE {where}
-ORDER BY (Q.QTYSTU_0 - Q.RCPQTYSTU_0) DESC
-{d.tail(limit, offset)}""".strip()
-
-
-def buildPendingDeliveryCountSql(
-    *,
-    monthsBack: int,
-    today: date,
-    filters: PendingDeliveryFilters | None,
-    dialect: str = "oracle",
-) -> str:
-    """欠交行总数（明细页分页用）——与 lines SQL 同口径（含脏数据阈值）。"""
-    filters = filters or PendingDeliveryFilters()
-    where = " AND ".join([
-        filters.windowSql(monthsBack, today),
-        "Q.QTYSTU_0 - Q.RCPQTYSTU_0 > 0",
-        f"Q.QTYSTU_0 - Q.RCPQTYSTU_0 < {_OPEN_QTY_SANITY_MAX}",
-    ]) + filters.filterSql()
-    return f"""
-SELECT COUNT(*) AS TOTAL_ROWS
-FROM {_PENDING_TABLE} Q{filters.joinSql(withSupplierName=True, withItemDesc=True)}
-WHERE {where}""".strip()
-
-
-def _camelPendingRow(row: dict[str, Any]) -> dict[str, Any]:
-    expected = _col(row, "EXTRCPDAT_0")
-    return {
-        "poNo": _col(row, "POHNUM_0"),
-        "poLine": _col(row, "POPLIN_0"),
-        "materialCode": _col(row, "ITMREF_0"),
-        "materialDesc": _col(row, "MATERIAL_DESC"),
-        "supplierCode": _col(row, "BPSNUM_0"),
-        "supplierName": _col(row, "SUPPLIER_NAME"),
-        "orderedQty": _col(row, "ORDERED_QTY"),
-        "receivedQty": _col(row, "RECEIVED_QTY"),
-        "openQty": _col(row, "OPEN_QTY"),
-        "expectedDate": str(expected) if expected else None,
-        "overdueDays": _col(row, "OVERDUE_DAYS"),
-    }
-
-
-async def _loadActiveDatasource(session: AsyncSession, datasourceId: int) -> DataSource:
-    """按 id 取数据源（场景槽位指定）；不存在或停用 fail-closed。"""
-    ds = (
-        await session.execute(select(DataSource).where(DataSource.id == datasourceId))
-    ).scalars().first()
-    if ds is None:
-        raise ConflictError(f"数据源不存在（id={datasourceId}）")
-    _ensureActive(ds)
-    return ds
-
-
-async def pendingDeliveryHandler(
-    session: AsyncSession, args: dict, ctx: AgentToolContext
-) -> ToolResult:
-    """`pending_delivery_query`：欠交汇总 + 按供应商 + TOP 明细（三段只读 SQL）。
-
-    脏数据（欠交量 ≥ 1e6 的源侧录入错误）剔除并在 summary.excludedRows 显式回报。
-    """
-    monthsBack = int(args.get("monthsBack") or 12)
-    minOverdueDays = args.get("minOverdueDays")
-    limit = int(args.get("limit") or 20)
-    datasourceId = args.get("datasourceId")
-
-    def _strList(key: str) -> tuple[str, ...]:
-        raw = args.get(key)
-        if isinstance(raw, str):
-            raw = [raw]
-        if not isinstance(raw, list):
-            return ()
-        return tuple(str(item).strip() for item in raw if str(item).strip())
-
-    legacySupplier = str(args.get("supplierKey") or "").strip()
-    materialTerms = _strList("materialKeys")
-    materialCodes, materialNames = PendingDeliveryFilters._splitKeys(materialTerms)
-    # 中文物料名在 ERP 原表几乎不存在（ITMDES1_0 实测 35 万行仅 1 条含「标准件」），
-    # 业务词在 MDM entity_mapping 里 ⇒ 先把名称词解析成 ERP 编码，再进 SQL；
-    # 原词保留作 ITMDES1_0 LIKE 兜底（映射未覆盖的行仍可命中）。
-    resolvedCodes: list[str] = []
-    for term in materialNames:
-        try:
-            hits = await EntityMappingService().searchMappings(
-                session, q=term, entityType="MATERIAL", limit=50
-            )
-        except Exception:  # noqa: BLE001 — MDM 不可用降级为仅 LIKE
-            continue
-        resolvedCodes.extend(
-            str(getattr(row, "enterprise_code", "") or "")
-            for row in hits
-            if getattr(row, "enterprise_code", None)
-        )
-    try:
-        filters = PendingDeliveryFilters(
-            supplierKeys=_strList("supplierKeys")
-            or ((legacySupplier,) if legacySupplier else ()),
-            materialKeys=tuple(dict.fromkeys([*materialCodes, *resolvedCodes, *materialNames])),
-            siteKeys=_strList("siteKeys"),
-            dateFrom=args.get("dateFrom"),
-            dateTo=args.get("dateTo"),
-        )
-    except ValidationError as exc:
-        return ToolResult(data={"rows": []}, answer=str(exc))
-
-    if datasourceId:
-        # 场景槽位显式指定（2026-11-23 用户要求）：不再默默落默认源
-        ds = await _loadActiveDatasource(session, int(datasourceId))
-    else:
-        ds = await _resolveBusinessDatasource(session, ctx)
-        _ensureActive(ds)
-    adapter = _adapterFor(ds.id, ds)
-    today = date.today()
-
-    data = await _loadPendingDeliveryData(
-        adapter, datasourceId=ds.id, monthsBack=monthsBack, today=today,
-        filters=filters, minOverdueDays=minOverdueDays, limit=limit,
-    )
-    summary = data["summary"]
-    bySupplier = data["bySupplier"]
-    lineRows = data["topLines"]
-    openLines = int(summary["openLines"] or 0)
-    if openLines == 0:
-        return ToolResult(
-            data={
-                "via": "business_db", "datasourceId": ds.id,
-                "summary": summary, "bySupplier": [], "topLines": [],
-            },
-            answer=f"近 {monthsBack} 个月没有欠交订单行（全部已交清）。",
-        )
-
-    topSuppliers = "、".join(
-        f"{item['supplierCode']}({item['openQty']})" for item in bySupplier[:3]
-    )
-    excludedNote = (
-        f"；另有 {summary['excludedRows']} 行源侧数量异常已剔除"
-        if summary["excludedRows"]
-        else ""
-    )
-    return ToolResult(
-        data={
-            "via": "business_db", "datasourceId": ds.id,
-            "summary": summary, "bySupplier": bySupplier, "topLines": lineRows,
-        },
-        answer=(
-            f"近 {monthsBack} 个月欠交 {openLines} 行、总量 {summary['openQty']}；"
-            f"其中逾期 {summary['overdueLines']} 行{excludedNote}。"
-            f"欠交 TOP 供应商：{topSuppliers}。"
         ),
     )
 

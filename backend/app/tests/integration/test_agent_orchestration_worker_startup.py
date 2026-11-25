@@ -190,6 +190,16 @@ async def test_worker_warm_up_makes_real_registry_usable() -> None:
     assert isinstance(
         freshFeatureRegistry.getEnabledRules("SUPPLIER", "FEATURE", "RISK"), list
     )
+    # 2026-11-25 实证缺口：BusinessObjectCodeType 是 pydantic BeforeValidator，
+    # supplier_360 的 schema 校验一进来就查 businessObjectRegistry.isValid ⇒
+    # Worker 冷态 RuntimeError，supplier_360 工具必挂（供应商风险速览踩中）。
+    # 预热后必须 isValid 可用（与 API lifespan 全量对齐）。
+    from app.services.business_object_registry import businessObjectRegistry
+
+    assert businessObjectRegistry._loaded, (
+        "worker warmUp 未预热 businessObjectRegistry"
+    )
+    assert isinstance(businessObjectRegistry.getAll(), frozenset)
 
 
 async def test_prepare_reaches_tool_resolution_with_warmed_registry(

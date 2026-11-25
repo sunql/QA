@@ -76,6 +76,9 @@ CHECK_MARKERS=(
   "app/services/agent_tools_procurement.py:_PendingDialect"
   "app/api/v1/procurement_analytics.py:该数据源执行待到货查询失败"
   "app/api/v1/procurement_copilot.py:deleteCopilotConversation"
+  "app/services/copilot_scenario_render.py:renderScenarioQuestion"
+  "app/api/v1/procurement_copilot.py:pinCopilotConversation"
+  "scripts/seed_copilot_scenarios.py:seed_copilot_scenarios"
 )
 MISSING=""
 for marker in "${CHECK_MARKERS[@]}"; do

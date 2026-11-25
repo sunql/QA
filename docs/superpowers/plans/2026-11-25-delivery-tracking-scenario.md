@@ -86,11 +86,6 @@
   class BindingResolutionError(ValidationError): ...   # 继承 app.domain.exceptions.ValidationError
 
   @dataclass(frozen=True, slots=True)
-  class ResolvedColumn:
-      propertyName: str
-      sourceColumn: str
-
-  @dataclass(frozen=True, slots=True)
   class ResolvedBinding:
       className: str
       datasourceId: int
@@ -1153,7 +1148,6 @@ def buildDeliveryTrackingSummarySql(
     """窗口级汇总：总行数 / 订单数 / 订购量 / 已收量 / 订单三态。"""
     orderQty = order.column("PO_QTY")
     poNo = order.column("PO_NO")
-    base = _orderLineBase(order, receipt, window)
     return f"""
 SELECT
   COUNT(*) AS TOTAL_LINES,
@@ -1184,7 +1178,6 @@ def buildDeliveryTrackingBySupplierSql(
     supplierCode = order.column("SUPPLIER_CODE")
     poNo = order.column("PO_NO")
     orderQty = order.column("PO_QTY")
-    base = _orderLineBase(order, receipt, window)
     supplierFilter = ""
     if supplierKeys:
         literals = ", ".join(f"'{_esc(k)}'" for k in supplierKeys)

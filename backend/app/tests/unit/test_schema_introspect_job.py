@@ -65,6 +65,39 @@ def test_terminal_job_replaced_after_ttl_not_before() -> None:
     assert registry.get(running.jobId) is not None, "running job 不得淘汰"
 
 
+def test_create_or_get_does_not_reuse_succeeded_job() -> None:
+    """已 succeeded 的 job 不得被复用；TTL 淘汰后再调得到第三个新 jobId。"""
+    clock = _FakeClock()
+    registry = SchemaIntrospectJobRegistry(ttlSeconds=600.0, clock=clock)
+
+    first = registry.createOrGet(datasourceId=7, schemaName="LC019999")
+    registry.update(first.jobId, status="succeeded")
+
+    second = registry.createOrGet(datasourceId=7, schemaName="LC019999")
+    assert second.jobId != first.jobId, "终态 (succeeded) job 不得被 createOrGet 复用"
+    assert second.status == "running"
+
+    registry.update(second.jobId, status="succeeded")
+    clock.advance(601)
+
+    third = registry.createOrGet(datasourceId=7, schemaName="LC019999")
+    assert third.jobId != first.jobId
+    assert third.jobId != second.jobId, "淘汰后应得到第三个新 jobId"
+    assert third.status == "running"
+
+
+def test_create_or_get_does_not_reuse_failed_job() -> None:
+    """已 failed 的 job 同样不得被复用。"""
+    registry = SchemaIntrospectJobRegistry(clock=_FakeClock())
+
+    first = registry.createOrGet(datasourceId=7, schemaName="LC019999")
+    registry.update(first.jobId, status="failed")
+
+    second = registry.createOrGet(datasourceId=7, schemaName="LC019999")
+    assert second.jobId != first.jobId, "终态 (failed) job 不得被 createOrGet 复用"
+    assert second.status == "running"
+
+
 def test_update_missing_job_raises_key_error() -> None:
     registry = SchemaIntrospectJobRegistry(clock=_FakeClock())
     try:

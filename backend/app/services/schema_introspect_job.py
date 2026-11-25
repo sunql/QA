@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -46,28 +47,32 @@ class SchemaIntrospectJobRegistry:
         self._jobs: dict[str, SchemaIntrospectJob] = {}
         self._ttlSeconds = ttlSeconds
         self._clock = clock
+        # 进程内共享可变状态：public 方法与 _evict 均持同一把锁。
+        # 用 RLock 是因为 createOrGet/get 会先调 _evict（同线程重入）。
+        self._lock = threading.RLock()
 
     def createOrGet(
         self, *, datasourceId: int, schemaName: str
     ) -> SchemaIntrospectJob:
         """返回该目标上仍在运行的 job；没有则新建一个。"""
-        self._evict()
-        for job in self._jobs.values():
-            if (
-                job.datasourceId == datasourceId
-                and job.schemaName == schemaName
-                and job.status == "running"
-            ):
-                return job
-        created = SchemaIntrospectJob(
-            jobId=uuid.uuid4().hex,
-            datasourceId=datasourceId,
-            schemaName=schemaName,
-            status="running",
-            updatedAt=self._clock(),
-        )
-        self._jobs[created.jobId] = created
-        return created
+        with self._lock:
+            self._evict()
+            for job in self._jobs.values():
+                if (
+                    job.datasourceId == datasourceId
+                    and job.schemaName == schemaName
+                    and job.status == "running"
+                ):
+                    return job
+            created = SchemaIntrospectJob(
+                jobId=uuid.uuid4().hex,
+                datasourceId=datasourceId,
+                schemaName=schemaName,
+                status="running",
+                updatedAt=self._clock(),
+            )
+            self._jobs[created.jobId] = created
+            return created
 
     def update(
         self,
@@ -79,25 +84,27 @@ class SchemaIntrospectJobRegistry:
         error: str | None = None,
     ) -> SchemaIntrospectJob:
         """写入部分字段并返回新快照（不原地修改）。"""
-        current = self._jobs.get(jobId)
-        if current is None:
-            raise KeyError(f"未找到 job: {jobId}")
-        changes: dict[str, object] = {"updatedAt": self._clock()}
-        if total is not None:
-            changes["total"] = total
-        if completed is not None:
-            changes["completed"] = completed
-        if status is not None:
-            changes["status"] = status
-        if error is not None:
-            changes["error"] = error
-        updated = replace(current, **changes)
-        self._jobs[jobId] = updated
-        return updated
+        with self._lock:
+            current = self._jobs.get(jobId)
+            if current is None:
+                raise KeyError(f"未找到 job: {jobId}")
+            changes: dict[str, object] = {"updatedAt": self._clock()}
+            if total is not None:
+                changes["total"] = total
+            if completed is not None:
+                changes["completed"] = completed
+            if status is not None:
+                changes["status"] = status
+            if error is not None:
+                changes["error"] = error
+            updated = replace(current, **changes)
+            self._jobs[jobId] = updated
+            return updated
 
     def get(self, jobId: str) -> SchemaIntrospectJob | None:
-        self._evict()
-        return self._jobs.get(jobId)
+        with self._lock:
+            self._evict()
+            return self._jobs.get(jobId)
 
     def _evict(self) -> None:
         """惰性淘汰：只清终态且超 TTL 的 job（running 永不清）。"""

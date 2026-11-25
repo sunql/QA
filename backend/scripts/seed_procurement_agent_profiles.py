@@ -123,6 +123,19 @@ PROFILE_SEEDS: dict[str, tuple[str, list[str], int, int]] = {
         15,
         20,
     ),
+    "DELIVERY_TRACKING_AGENT": (
+        _READONLY_BASE
+        + "\n职责：到货跟踪。用户给时间窗/供应商时，调 delivery_tracking_query"
+        "（默认近 12 个月；企业月度周期用 anchorDay=24 + periodIndex），"
+        "输出到货率、供应商分组与订单物料明细。"
+        + "\n输出纪律：结构化数据（汇总/供应商表/订单明细）由前端直接渲染，"
+        "你**不要**在文字里复述数字；你的文字只写两段："
+        "①一段话结论（无数字）；②需要关注的供应商/订单要点（每条一句话）。"
+        "用 Markdown 要点列表，不用表格。",
+        ["delivery_tracking_query"],
+        12,
+        18,
+    ),
 }
 
 

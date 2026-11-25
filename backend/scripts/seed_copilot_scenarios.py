@@ -139,6 +139,65 @@ SEEDS: list[dict[str, Any]] = [
         "sort_order": 20,
         "enabled": True,
     },
+    # P5 到货跟踪：与待到货（pending_delivery）不同 —— 关注「已到/未到」的
+    # 到货达成（订单到货率 + 三态），按企业 24 日月度周期取窗。
+    # 无 datasourceId 槽位（THBI 硬规则：数据源由本体绑定唯一确定）；
+    # 无 materialKeys 槽位（编排方裁决：用户需求不含按物料过滤，工具侧亦未实现）。
+    {
+        "scenario_code": "delivery_tracking",
+        "name": "到货跟踪",
+        "description": "按周期/供应商跟踪订单到货达成，含已到/未到物料明细",
+        "icon_code": "car",
+        "agent_code": "DELIVERY_TRACKING_AGENT",
+        "slot_schema": [
+            # 非必填：工具缺省近 12 个月；给 anchorDay/periodIndex 时按锚点周期取窗，
+            # monthsBack 被忽略（窗口优先级：显式区间 > 锚点周期 > monthsBack 默认）。
+            # 若设为 required，24 日周期 chips 将无法通过「必填槽位必须在 chip 里有值」的种子 lint。
+            {
+                "key": "monthsBack",
+                "type": "number",
+                "label": "时间窗",
+                "conflictKeywords": ["时间窗", "个月", "时间段", "日期", "上半年", "下半年", "本年度", "本年"],
+                "displayTemplate": "近{value}个月",
+            },
+            {
+                "key": "anchorDay",
+                "type": "number",
+                "label": "月度周期锚点日",
+                "conflictKeywords": ["周期", "24日", "结算周期"],
+            },
+            {
+                "key": "periodIndex",
+                "type": "number",
+                "label": "周期期序",
+                "conflictKeywords": ["本期", "上期", "上个月"],
+            },
+            {
+                "key": "supplierKeys",
+                "type": "entityMulti",
+                "label": "供应商",
+                "conflictKeywords": ["供应商", "厂家"],
+                "codePattern": _SUPPLIER_CODE,
+            },
+            {
+                "key": "orderKeys",
+                "type": "entityMulti",
+                "label": "订单",
+                "conflictKeywords": ["订单", "订单号"],
+            },
+        ],
+        "question_template": "分析订单到货情况",
+        "chips": [
+            {"label": "近 12 个月到货概览", "monthsBack": 12},
+            {"label": "近 3 个月到货概览", "monthsBack": 3},
+            {"label": "本期到货概览（24 日周期）", "anchorDay": 24, "periodIndex": 0},
+            {"label": "上期到货概览（24 日周期）", "anchorDay": 24, "periodIndex": -1},
+        ],
+        "result_renderer": "delivery_tracking",
+        "required_role": None,
+        "sort_order": 30,
+        "enabled": True,
+    },
 ]
 
 

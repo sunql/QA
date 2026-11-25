@@ -99,6 +99,8 @@ _AGENT_DEFAULT_BINDINGS: dict[str, str] = {
     "PROCUREMENT_SUPPLIER_SEARCH_AGENT": "supplier_search",
     "PROCUREMENT_PURCHASE_HISTORY_AGENT": "purchase_history_query",
     "PROCUREMENT_CONTRACT_SEARCH_AGENT": "contract_document_search",
+    # P5 到货跟踪场景：单工具 Agent（本体取数，DWD）。
+    "DELIVERY_TRACKING_AGENT": "delivery_tracking_query",
     # 多工具场景 Agent：主工具登记 supplier_search（单工具运行时用），
     # 真正的工具组在编排 profile 里（supplier_search/360/risk/graph/purchase_history）。
     "PROCUREMENT_SOURCING": "supplier_search",
@@ -279,6 +281,12 @@ AGENT_SEEDS: list[dict[str, Any]] = [
         "PROCUREMENT_PURCHASE_HISTORY_AGENT",
         "采购历史查询 Agent",
         "供应商(+物料)近 N 月采购订单行汇总与明细（业务库只读，purchase_history_query 工具，SQL Guard 闸门）。",
+        layers=("DWD",),
+    ),
+    _agent(
+        "DELIVERY_TRACKING_AGENT",
+        "到货跟踪 Agent",
+        "按时间窗/供应商统计订单到货达成（订单到货率 + 三态）并给出订单物料明细（delivery_tracking_query 工具，只读无 LLM）。",
         layers=("DWD",),
     ),
     _agent(

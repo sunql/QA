@@ -44,3 +44,62 @@ def test_chips_satisfy_required_slots() -> None:
                 assert chip.get(key) not in (None, "", []), (
                     f"{seed['scenario_code']} chip「{chip['label']}」缺必填槽位 {key}"
                 )
+
+
+# ── delivery_tracking 场景（P5 到货跟踪）───────────────────────────────────
+
+
+def _deliveryTrackingSeed() -> dict:
+    return next(s for s in SEEDS if s["scenario_code"] == "delivery_tracking")
+
+
+def test_delivery_tracking_scenario_has_no_datasource_slot() -> None:
+    """THBI 硬规则：场景不提供数据源切换槽位。"""
+    seed = _deliveryTrackingSeed()
+    keys = {slot["key"] for slot in seed["slot_schema"]}
+    assert "datasourceId" not in keys
+    assert seed["result_renderer"] == "delivery_tracking"
+    assert seed["agent_code"] == "DELIVERY_TRACKING_AGENT"
+
+
+def test_delivery_tracking_scenario_has_no_material_slot() -> None:
+    """编排方裁决移除 materialKeys：用户原始需求 1-4 不含按物料过滤。
+
+    工具侧也未实现该过滤；若有人照旧 brief 加回该槽位，这里是拦截点。
+    """
+    seed = _deliveryTrackingSeed()
+    keys = {slot["key"] for slot in seed["slot_schema"]}
+    assert "materialKeys" not in keys
+
+
+def test_delivery_tracking_scenario_has_anchor_slots() -> None:
+    """24 日锚点槽位齐（anchorDay / periodIndex）。"""
+    seed = _deliveryTrackingSeed()
+    keys = {slot["key"] for slot in seed["slot_schema"]}
+    assert {"monthsBack", "anchorDay", "periodIndex", "supplierKeys"} <= keys
+
+
+def test_delivery_tracking_agent_seeded() -> None:
+    """Agent 已登记且默认绑定到货跟踪工具。"""
+    from scripts.seed_agents import _AGENT_DEFAULT_BINDINGS, AGENT_SEEDS
+
+    assert "DELIVERY_TRACKING_AGENT" in _AGENT_DEFAULT_BINDINGS
+    assert _AGENT_DEFAULT_BINDINGS["DELIVERY_TRACKING_AGENT"] == "delivery_tracking_query"
+    codes = {a["agent_code"] for a in AGENT_SEEDS}
+    assert "DELIVERY_TRACKING_AGENT" in codes
+
+
+def test_result_renderer_whitelist_includes_delivery_tracking() -> None:
+    from app.domain.copilot_scenario_models import RESULT_RENDERER_WHITELIST
+
+    assert "delivery_tracking" in RESULT_RENDERER_WHITELIST
+
+
+def test_delivery_tracking_scenario_agent_binding_is_consistent() -> None:
+    """场景钉的 Agent 必须真的绑定 delivery_tracking_query 工具。"""
+    from scripts.seed_agents import _AGENT_DEFAULT_BINDINGS
+
+    seed = _deliveryTrackingSeed()
+    agent_code = seed["agent_code"]
+    assert agent_code in _AGENT_DEFAULT_BINDINGS
+    assert _AGENT_DEFAULT_BINDINGS[agent_code] == "delivery_tracking_query"

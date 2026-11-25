@@ -73,6 +73,44 @@ export async function introspectDatasource(
   return res.data;
 }
 
+export interface IntrospectJob {
+  jobId: string;
+  status: "running" | "succeeded" | "failed";
+  total: number;
+  completed: number;
+  error?: string | null;
+}
+
+// 启动异步 schema 内省任务。同一数据源+schema 已在跑时后端返回既有 jobId
+// （并发保护），调用方无需自己去重。
+export async function startIntrospectJob(
+  id: number,
+  schema?: string | null,
+): Promise<IntrospectJob> {
+  const res = await httpClient.post<IntrospectJob>(
+    `${BASE}/${id}/introspect-jobs`,
+    undefined,
+    {
+      params: schema ? { schema } : undefined,
+      timeout: REQUEST_TIMEOUT_MS,
+    },
+  );
+  return res.data;
+}
+
+// 查询内省任务进度。后端只读内存态，正常毫秒级返回 ⇒ 用默认短超时；
+// 「正常进行中不判超时」由调用方的轮询逻辑保证（连续失败才判中断）。
+export async function getIntrospectJob(
+  id: number,
+  jobId: string,
+): Promise<IntrospectJob> {
+  const res = await httpClient.get<IntrospectJob>(
+    `${BASE}/${id}/introspect-jobs/${jobId}`,
+    { timeout: REQUEST_TIMEOUT_MS },
+  );
+  return res.data;
+}
+
 // 连接测试返回 { success, message }，其 success 字段与统一信封的 success 冲突：
 // 若走 httpClient，success=false 会被拦截器当作失败信封，丢失真实 message。
 // 故使用独立原始 axios 实例，不做信封解包，由调用方根据 success 展示结果。

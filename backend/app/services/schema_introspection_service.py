@@ -154,24 +154,27 @@ def _dataSourceType(ds: DataSource) -> DataSourceType:
 def _tableNamesSql(dsType: DataSourceType, owner: str) -> str:
     """列出该 schema 下的业务表名（轻查询，分批的批次依据）。
 
+    必须与列查询**同源**（Oracle ALL_TAB_COLUMNS / PG·MySQL
+    information_schema.columns）：列来源包含视图（Oracle 还含分区表等），
+    若表名列表改用 ALL_TABLES / relkind='r' / table_type='BASE TABLE'，
+    分批路径会漏掉列查询能看到的视图 ⇒ schema 缓存比全量 introspect() 少表，
+    直接影响 NL2SQL 召回。两路同源才能保证「分批结果 ≡ 全量结果」。
+
     Oracle 的 owner 由 _oracleOwner 白名单校验后传入，内联为字面量无注入面。
     """
     if dsType is DataSourceType.ORACLE:
         return (
-            "SELECT table_name FROM ALL_TABLES "
+            "SELECT DISTINCT table_name FROM ALL_TAB_COLUMNS "
             f"WHERE owner = '{owner}' ORDER BY table_name"
         )
     if dsType is DataSourceType.POSTGRESQL:
         return (
-            "SELECT c.relname AS table_name FROM pg_class c "
-            "JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE n.nspname = CURRENT_SCHEMA() AND c.relkind = 'r' "
-            "ORDER BY c.relname"
+            "SELECT DISTINCT table_name FROM information_schema.columns "
+            "WHERE table_schema = CURRENT_SCHEMA() ORDER BY table_name"
         )
     return (
-        "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' "
-        "ORDER BY table_name"
+        "SELECT DISTINCT table_name FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() ORDER BY table_name"
     )
 
 

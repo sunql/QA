@@ -93,77 +93,87 @@ DB 配置。新场景的**外壳**因此可以零代码，但**取数层必须�
 
 | 本体类 | BO | 绑定 | 属性 | 数据行数 | 数据截止 | 关键属性是否齐 |
 |---|---|---|---|---|---|---|
-| `DWD_PURCHASE_ORDER_DTL` | `PO` 采购订单 | ✅ `THBI.DWD_PURCHASE_ORDER_DTL` | 30（已确认） | 1,036,069 | 2026-11-24 | ❌ **无 `RECEIVED_QTY`**（只有 `PO_QTY`）、无 `MATERIAL_CODE` |
-| `DWD_PURCHASE_ORDER_LINE` | `POL` 采购订单行 | ✅ `THBI.DWD_PURCHASE_ORDER_LINE` | 29（已确认） | 927,648 | **2026-08-08** | ✅ 全部齐（含 `ORDER_QTY`/`RECEIVED_QTY`/`LAST_RECEIPT_DATE`） |
-| `ODS_ERP_PORDERQ` | — | ❌ **未建类** | — | 1,036,089 | 2026-11-24 | 物理列齐（150 列，10 个目标列非空率 100%） |
+| 本体类 | BO | 绑定 | 属性 | 数据行数 | 数据截止 | 说明 |
+|---|---|---|---|---|---|---|
+| `DWD_PURCHASE_ORDER_DTL` | `PO` 采购订单 | ✅ 已绑 `THBI.DWD_PURCHASE_ORDER_DTL` | 30（已确认） | 1,036,069 | **2026-11-24** | ✅ **订单行表**（`PO_NO`+`PO_LINE_NO`+`PO_QTY`+`ITEM_CODE`+`SUPPLIER_CODE`）；**无已收量列** |
+| `DWD_GOODS_RECEIPT_DTL` | `GR` 收货 | ✅ 已绑 `THBI.DWD_GOODS_RECEIPT_DTL` | 41（已确认） | 4,037,142 | **2026-11-25** | ✅ **收货表**（`PO_NO`+`PO_LINE_NO`+`RCV_QTY_STU`+`RCV_DATE`+`SUPPLIER_CODE`+`ITEM_CODE`） |
+| `DWD_PURCHASE_ORDER_LINE` | `POL` 采购订单行 | ✅ 已绑 `THBI.DWD_PURCHASE_ORDER_LINE` | 29（已确认） | 927,648 | **2026-08-08** | ⚠️ 属性最全（含 `RECEIVED_QTY`/`LAST_RECEIPT_DATE`）但**数据旧**，本期 0 单 |
+| `DIM_FACILITY` | — | ❌ **未绑**（类已存在，117 属性含 `FCY_0`/`FCYNAM_0`） | 117 | 41 | — | ⚠️ 只缺源绑定 |
+| `ODS_ERP_PORDERQ` | — | ❌ 未建类 | — | 1,036,089 | 2026-11-24 | （备选，见 3.2 备选方案） |
 
-**核心矛盾（本体侧的结构性缺口）**：
+**关键修正（2026-11-25 用户指出）**：
 
-> **「有到货量的行表是旧的，有新数据的表缺到货量」—— 正好差 `RECEIVED_QTY` 这一列。**
+- **`DWD_PURCHASE_ORDER_DTL` 是订单行表**（对应 `PORDERQ` 订单行），不是订单头 ——
+  它有 `PO_NO` + `PO_LINE_NO` + `PO_QTY` + `ITEM_CODE`，行粒度。修正前文误判。
+- **`DIM_FACILITY` 类已存在**（117 属性，`FCY_0`/`FCYNAM_0` 都在，本体已登记），
+  **只缺源绑定** —— 不需要新建类。
 
-- `DWD_PURCHASE_ORDER_DTL`（新鲜，1,036,069 行 / 227,907 订单 / 至 2026-11-24）
-  物理列 35 个，含 `PO_QTY`（订购量）但**没有 `RECEIVED_QTY`** ⇒ **算不出到货率**；
-- `DWD_PURCHASE_ORDER_LINE`（属性最全，29 个已确认绑定，含 `RECEIVED_QTY`）
-  数据停在 **2026-08-08** ⇒ 本期窗口 **0 单**（而需求 3 的本期有 4,844 单）；
-- `ODS_ERP_PORDERQ`（新鲜全量 ERP 行表，1,036,089 行）**本体未建类** ——
-  按 `backend/app/domain/procurement_object_catalog.py:413` 的既有登记，
-  `ODS_ERP_*` 属「其它采购相关源表（未建类）」，
-  `carriedBy = "单独立项（按需建类，不在 M1-1.4 范围）"`。
+**核心结论：到货率可以完全用本体已绑定的类算出来，不必新建类**
 
-**交叉验证（两表同源不同批次）**：
+本体里「已收量」的正规载体是 **`DWD_GOODS_RECEIPT_DTL`（收货，BO=GR）**，
+它有 `RCV_QTY_STU`（收货库存单位数量）且**数据新鲜（至 2026-11-25）**。
+与订单行 `DWD_PURCHASE_ORDER_DTL` 按 `PO_NO + PO_LINE_NO` 关联即可：
 
-- `DWD_PURCHASE_ORDER_LINE` 的 200,561 张订单 **99.98%** 落在 `ODS_ERP_PORDERQ` 内；
-- 反向：`ODS_ERP_PORDERQ` 的 227,909 张订单中 **87.99%** 在 `DWD_PURCHASE_ORDER_LINE` 有行明细；
-- `DWD_PURCHASE_ORDER_DTL` 与 `ODS_ERP_PORDERQ` 行数几乎一致
-  （1,036,069 vs 1,036,089），是同批数据的两个切面。
+```
+订单行（DWD_PURCHASE_ORDER_DTL）         收货（DWD_GOODS_RECEIPT_DTL）
+  PO_NO, PO_LINE_NO, PO_QTY      ⟕        PO_NO, PO_LINE_NO, RCV_QTY_STU, RCV_DATE
+```
 
-**决策**：本需求触发 `ODS_ERP_*` 建类立项 —— **先建本体类 + 绑定，再做场景**。
+**实测验证（本期窗口 2026-10-24 ~ 2026-11-24）**：
 
-### 3.2 建本体类 + 绑定（复用既有设施）
+| 指标 | 本体口径（订单行 ⋈ 收货） | ERP 直算（`ODS_ERP_PORDERQ`） | 差异 |
+|---|---|---|---|
+| 订单数 | 4,844 | 4,844 | 一致 |
+| 全到货 / 部分 / 未到 | 3,986 / 448 / 410 | 3,984 / 448 / 412 | **差 2 单** |
+| 订单到货率 | **82.29%** | 82.25% | 0.04pp |
+| 量级率 | **40.51%** | 40.51% | **完全一致** |
 
-**类定义**：
+**2 单差异归因**（探针实证）：`H12611POH0022`（订购 1）、`T72611POH0014X`（订购 500）
+两单的 ERP 行上 `RCPQTYSTU_0 = 0`，但**收货单已存在且数量足够** ⇒
+**收货单已开、ERP 行累计收货字段未回写**（两个口径的时点差）。
+本体口径（以收货单为准）**更贴近业务事实**。
 
-| 项 | 值 |
-|---|---|
-| `class_name` | `ODS_ERP_PORDERQ` |
-| `class_alias` | ERP 采购订单明细 |
-| `object_type` | `Transaction` |
-| 归属域 | 采购域（`PROCUREMENT`） |
+**关联命中率**：
+- 收货行 `DWD_GOODS_RECEIPT_LINE`（旧批次表，至 2026-08-08）与订单行本期窗口命中 **0%**
+  ⇒ **该表不可用于本期**，必须用 `DWD_GOODS_RECEIPT_DTL`（至 2026-11-25）；
+- `DWD_GOODS_RECEIPT_DTL` 整体有 `PO_NO` 的占 72.03%（余 28% 为无订单来源的收货，
+  如退货/调整类），**不影响**按订单关联的部分。
 
-**源绑定行**（`procurement_source_binding`）：
+**决策**：**不新建 `ODS_ERP_PORDERQ` 类**，改为：
 
-| 列 | 值 |
-|---|---|
-| `class_id` | 新建类的 id |
-| `datasource_id` | 1（THBI Oracle） |
-| `schema_name` | `THBI` |
-| `source_table` | `ODS_ERP_PORDERQ` |
-| `binding_role` | `BASE` |
-| `is_candidate` | `false`（**必须已确认**，候选不得进读路径） |
-| `confirmed_by` | 确认人（与既有 9 条一致用 `m1-b-confirm` 或本次确认人） |
-| `valid_from` | 建类时刻；`valid_to` = NULL（生效中） |
+1. **补 `DIM_FACILITY` 的源绑定**（类已存在，只缺绑定）；
+2. **给 `DWD_GOODS_RECEIPT_DTL` 补齐到货跟踪所需属性的绑定核验**
+   （`PO_NO`/`PO_LINE_NO`/`RCV_QTY_STU`/`RCV_DATE`/`SUPPLIER_CODE`/`ITEM_CODE`
+   是否都在已绑定的 41 个属性内，见 3.2 核验项）；
+3. 到货跟踪与待到货**都用本体已绑定的类**，不碰未建类的 `ODS_ERP_*`。
 
-**属性 + 属性绑定**（`ontology_property` + `procurement_property_binding`）：
+**备选方案（已排除，存档备查）**：若日后需要走 ERP 行级累计量口径
+（`ODS_ERP_PORDERQ` 的 `QTYSTU_0`/`RCPQTYSTU_0`），则新建该类 + 绑定，
+属性映射为：`PO_NO`→`POHNUM_0`、`PO_LINE_NO`→`POPLIN_0`、`ORDER_DATE`→`ORDDAT_0`、
+`SUPPLIER_CODE`→`BPSNUM_0`、`MATERIAL_CODE`→`ITMREF_0`、`ORDER_QTY`→`QTYSTU_0`、
+`RECEIVED_QTY`→`RCPQTYSTU_0`、`PROMISED_RECEIPT_DATE`→`EXTRCPDAT_0`、
+`LAST_RECEIPT_DATE`→`LASRCPDAT_0`、`RETURNED_QTY`→`RETQTYSTU_0`。
+该口径量级率 40.51%（与主路径**完全一致**）、订单率 82.25%（vs 主路径 82.29%），
+差异仅 2 单边界（0.04pp）。
 
-| 本体属性名 | 物理列 | 类型 | key_ordinal | 用途 |
-|---|---|---|---|---|
-| `PO_NO` | `POHNUM_0` | STRING | 1 | 订单号（主键 1/2） |
-| `PO_LINE_NO` | `POPLIN_0` | INT | 2 | 订单行号（主键 2/2） |
-| `ORDER_DATE` | `ORDDAT_0` | DATETIME | | 下单日期（周期锚定） |
-| `SUPPLIER_CODE` | `BPSNUM_0` | STRING | | 供应商编码（过滤 + 关联字典） |
-| `MATERIAL_CODE` | `ITMREF_0` | STRING | | 物料编码（关联字典） |
-| `ORDER_QTY` | `QTYSTU_0` | DECIMAL | | 订购量（库存单位） |
-| `RECEIVED_QTY` | `RCPQTYSTU_0` | DECIMAL | | 已收量（库存单位） |
-| `PROMISED_RECEIPT_DATE` | `EXTRCPDAT_0` | DATETIME | | 预期到货日期 |
-| `LAST_RECEIPT_DATE` | `LASRCPDAT_0` | DATETIME | | 最后到货日期 |
-| `RETURNED_QTY` | `RETQTYSTU_0` | DECIMAL | | 退货量 |
+### 3.2 绑定补充（复用既有设施，不新建类）
 
-**建类 + 建绑定约束（防重演 2026-11-18 事故）**：
+**需要补的绑定**：
 
-1. 类、属性、源绑定、属性绑定**在同一次 seed 中同步登记**（不留半截状态）；
+| 本体类 | 缺什么 | 补什么 |
+|---|---|---|
+| `DIM_FACILITY` | 源绑定（`procurement_source_binding` 0 条） | `datasource_id=1` / `schema_name=THBI` / `source_table=DIM_FACILITY` / `binding_role=BASE` / `is_candidate=false` / `confirmed_by=<确认人>` |
+| `DWD_GOODS_RECEIPT_DTL` | ✅ **无需补** | 41 个属性**全部已绑定已确认**（`confirmed_by=m1-b-confirm`），含到货跟踪所需全部：`PO_NO` / `PO_LINE_NO` / `RCV_QTY_STU` / `RCV_QTY_PUU` / `RCV_DATE` / `SUPPLIER_CODE` / `SUPPLIER_NAME` / `ITEM_CODE` / `ITEM_DESC` / `STK_UOM` / `PUR_SITE_CODE` |
+| `DWD_PURCHASE_ORDER_DTL` | ✅ **无需补** | 30 个属性全部已绑定已确认，含 `PO_NO` / `PO_LINE_NO` / `PO_QTY` / `ITEM_CODE` / `SUPPLIER_CODE` / `SUPPLIER_NAME` / `ORDER_DATE` / `EXP_RCV_DATE` / `PUR_SITE_CODE` / `REF_RCV_NO` |
+
+⇒ **本次唯一需要新增的本体资产是 `DIM_FACILITY` 的一条源绑定**（类与属性都已存在）。
+
+**建绑定约束（防重演 2026-11-18 事故）**：
+
+1. 源绑定与属性绑定**同步登记**（不留半截状态）；
 2. 绑定行必须 `is_candidate=false` 且有 `confirmed_by`/`confirmed_time`
    （DB CHECK 已钉：`候选 ↔ 无确认人`）；
-3. 建类后跑**真实数据门禁**（对照
+3. 绑定后跑**真实数据门禁**（对照
    `procurement_class_source_table_realdata.py` 的形态）：干净库跑迁移链 ⇒
    类存在、绑定指向真实存在的表、10 个属性的物理列全部存在、`seed_ontology.seed()` 不撞唯一约束；
 4. 探针已验证 `THBI.ODS_ERP_PORDERQ` 150 列，10 个目标列全部存在且非空率 100%
@@ -171,33 +181,50 @@ DB 配置。新场景的**外壳**因此可以零代码，但**取数层必须�
 
 ### 3.2.1 新增 Business Object（用户 2026-11-25 决定：要增加）
 
-新建 BO 承载该类：
+### 3.2.1 Business Object（用户 2026-11-25 决定：要增加）
+
+主路径**不新建类**，但用户要求增加 BO，因此 BO 挂在**本体已有的类**上：
 
 | 项 | 值 |
 |---|---|
 | `code` | `POL_ERP`（既有 `POL` 已被 `DWD_PURCHASE_ORDER_LINE` 占用，见下） |
-| `name` | ERP 采购订单行 |
-| `header_class_id` | 新建的 `ODS_ERP_PORDERQ` 类 id |
+| `name` | ERP 采购订单行（新鲜全量） |
+| `header_class_id` | `DWD_PURCHASE_ORDER_DTL` 的类 id（订单行表，数据新鲜） |
 | `primary_domain_id` | `PROCUREMENT` |
-| `graph_label` | `ODS_ERP_PORDERQ` |
+| `graph_label` | `DWD_PURCHASE_ORDER_DTL` |
 
 **为什么是新 BO 而不是改指既有 `POL`**：
 
 - 既有 `POL`（采购订单行）的 `header_class_id` 指向 `DWD_PURCHASE_ORDER_LINE`
   —— 属性齐全但数据停在 2026-08-08；
-- 新 BO 指向新鲜全量类，语义是「ERP 抽取的采购订单行」；
-- `uq_business_object_header_class` 唯一索引保证**一个类只作一个 BO 的头类**，
-  新建 BO 不影响既有 `POL`；
-- 两个 BO 并存会造成同名不同数据 ⇒ **名称必须区分**（`POL_ERP` vs `POL`），
-  且卡片/答案里须标明数据层。
+- 新 BO 指向 `DWD_PURCHASE_ORDER_DTL`（同一订单行表的新鲜全量批次，至 2026-11-24），
+  语义是「ERP 采购订单行（当前批次）」；
+- `uq_business_object_header_class` 唯一索引保证**一个类只作一个 BO 的头类** ——
+  ⚠️ **`DWD_PURCHASE_ORDER_DTL` 已被 `PO`（采购订单）BO 占用** ⇒
+  新 BO **不能**再以它为头类！
 
-**⚠ 待业务确认**：BO `code` 上限 `String(20)`，且 `ck_business_object_code_upper` 要求大写。
-`POL_ERP` 合规，但**该 BO 面向业务用户是否需要独立编码**，或应直接给既有 `POL`
-换绑到新类（会让旧数据的引用失效）—— 属业务口径，需业务方拍板（见第 11 节待确认项）。
+**⚠ 冲突（新发现，需业务拍板）**：
 
-**为什么不复用 `DWD_PURCHASE_ORDER_LINE` 的属性定义**：该类的语义名与物理列同名
-（数仓 DWD 表已语义化），而 `ODS_ERP_PORDERQ` 的物理列是 ERP 原始名
-（`QTYSTU_0` 等）。**建新类时把语义名与原始列显式绑定**，正是本体层吸收跨源差异的机制。
+`business_object` 的 `uq_business_object_header_class` 唯一索引意味着
+**一个本体类只能作一个 BO 的头类**。而：
+
+| BO | 头类 | 冲突 |
+|---|---|---|
+| `PO` 采购订单 | `DWD_PURCHASE_ORDER_DTL` | ← 已占用 |
+| `POL` 采购订单行 | `DWD_PURCHASE_ORDER_LINE` | ← 已占用 |
+
+两个订单行类都已被占用 ⇒ **无法为「新鲜订单行」新增 BO**，除非：
+
+- **选项 A**：给既有 `POL` **换绑**到 `DWD_PURCHASE_ORDER_DTL`
+  （`POL` 从旧批次切到新鲜批次；旧数据引用失效，但 `POL` 本就是业务单一口径，
+  「采购订单行」这个业务对象本来就该指向当前批次）；
+- **选项 B**：为备选方案的 `ODS_ERP_PORDERQ` 新建类并**以它为头类**建新 BO
+  （`POL_ERP`），保持 `POL` 不动；
+- **选项 C**：不新增 BO（用户「要增加」的指示需重新审视）。
+
+⇒ **推荐选项 A**：业务对象「采购订单行」应当只有**一个**当前口径；
+`DWD_PURCHASE_ORDER_LINE`（旧批次）作为历史快照，其 BO 指向可另行处理。
+此项需业务确认（见第 11 节）。
 
 ### 3.3 工具如何用本体取数
 
@@ -206,7 +233,7 @@ DB 配置。新场景的**外壳**因此可以零代码，但**取数层必须�
 ```
 SELECT
   <PO_NO>, <PO_LINE_NO>, <SUPPLIER_CODE>, <MATERIAL_CODE>,
-  <ORDER_QTY>, <RECEIVED_QTY>, <PROMISED_RECEIPT_DATE>, <LAST_RECEIPT_DATE>
+  <PO_QTY>, <RCV_QTY_STU>, <EXP_RCV_DATE>, <RCV_DATE>
 FROM <源表>   -- 由源绑定解析（datasource_id + schema_name + source_table）
 WHERE <ORDER_DATE> >= DATE :from AND <ORDER_DATE> < DATE :to
 ```
@@ -301,8 +328,8 @@ MDM `entity_mapping`（`entity_type=SUPPLIER`，3,500 行，`source_system=ERP`�
 只能经订单行关联取供应商（实测 1,116 行中仅 3 行取不到名）。
 且其覆盖订单数远小于 227,907，**不足以支撑「部分到货」判定**。
 
-**决策**：到货判定基于订单行级量（`ORDER_QTY` / `RECEIVED_QTY`），不依赖到货明细表；
-到货明细仅用于展示实际到货日期（`LAST_RECEIPT_DATE`，实测已收行 100% 非空）。
+**决策**：到货判定基于订单行 ⋈ 收货单关联（本体口径，见 4.1），不依赖 ERP 到货明细表；
+实际到货日期取收货类的 `RCV_DATE`（实测非空率 100%）。
 
 ### 3.8 待到货场景一并迁到本体 + THBI（用户 2026-11-25 决定：必须迁）
 
@@ -318,15 +345,15 @@ MDM `entity_mapping`（`entity_type=SUPPLIER`，3,500 行，`source_system=ERP`�
 | `ZJTH.PORDERQ`（订单行） | `THBI.ODS_ERP_PORDERQ` | ❌ 本次**新建类 + 绑定** |
 | `ZJTH.ITMMASTER`（物料名） | `THBI.DIM_IMATERIAL` | ✅ 已绑（248 属性） |
 | `ZJTH.BPSUPPLIER`（供应商名） | `THBI.DIM_SUPPLIER` | ✅ 已绑（229 属性） |
-| `ZJTH.FACILITY`（基地名） | `THBI.DIM_FACILITY` | ❌ 需**新建类 + 绑定**（41 行，实测存在） |
+| `ZJTH.FACILITY`（基地名） | `THBI.DIM_FACILITY` | ✅ 类已存在（117 属性）→ **补源绑定**（41 行） |
 
 **THBI 侧对象核实（探针实测，全部就位）**：
 
-- `THBI.DIM_FACILITY`：41 行，含 `FCY_0` + `FCYNAM_0`，
+- `THBI.DIM_FACILITY`：41 行，含 `FCY_0` + `FCYNAM_0`（本体类已有这两个属性），
   基地码形态与待到货现用的一致（`T1` 滨海总厂 / `T3` 模具厂 / `C1` / `J1` / `H1`…）
   ⇒ 现有 `siteKeys` 的「编码精确 / 名称模糊」过滤逻辑可原样复用；
-- `THBI.ODS_ERP_PORDERQ` 有 `POHFCY_0`（采购地点）—— 对应现有的 `Q.POHFCY_0` 站点过滤列；
-- **站点码域 100% 覆盖**：本期窗口 19,910 行 JOIN `DIM_FACILITY` **0 缺失**；
+- `THBI.DWD_PURCHASE_ORDER_DTL` 有 `PUR_SITE_CODE`（采购地点）—— 对应现有的 `Q.POHFCY_0`；
+- **站点码域 100% 覆盖**：本期窗口 19,908 行 JOIN `DIM_FACILITY` **0 缺失**；
 - 名称覆盖（本期窗口）：物料名缺 1,883 行（9.4%，`DIM_IMATERIAL`）、
   供应商名缺 110 行（0.55%，`DIM_SUPPLIER`）⇒ 印证 3.5 的决定：
   **名称改走 MDM `entity_mapping`**，避免数仓字典的缺失。
@@ -337,8 +364,9 @@ MDM `entity_mapping`（`entity_type=SUPPLIER`，3,500 行，`source_system=ERP`�
 |---|---|---|
 | 近 12 月行数 | 84,049 | **192,467**（2.3 倍） |
 | 数据截止 | 2026-10-23 | **2026-11-24** |
-| 站点维度 | `POHFCY_0` | 同（`POHFCY_0`） |
+| 站点维度 | `POHFCY_0` | `PUR_SITE_CODE`（同义，语义化） |
 | 供应商/物料名 | ERP 表 | MDM（`entity_mapping.name`） |
+| 欠交量 | `QTYSTU_0 - RCPQTYSTU_0` | `PO_QTY - 已收量`（本体口径，见 4.1） |
 
 ⇒ 待到货的现有实测结果**会变**（数据更多、更全、更新），
 需重跑本地验收并**显式更新口径基线**（不静默漂移）。
@@ -349,41 +377,49 @@ MDM `entity_mapping`（`entity_type=SUPPLIER`，3,500 行，`source_system=ERP`�
    （与到货跟踪共用同一套解析路径）；
 2. 删掉 `_PENDING_TABLE` / `_PENDING_ITEM_TABLE` / `_PENDING_FACILITY_TABLE` /
    `_PENDING_SUPPLIER_TABLE` 四个常量与全部裸列名；
-3. 站点过滤从 `Q.POHFCY_0 IN (...)` / `f.FCYNAM_0 LIKE ...` 改为
-   `<PURCHASE_SITE_CODE>` / `<FACILITY_NAME>` 属性（需在 `ODS_ERP_PORDERQ` 类上
-   补 `POHFCY_0` 与 `DIM_FACILITY` 的 `FCY_0`/`FCYNAM_0` 属性绑定）；
-4. 移除场景的 `datasourceId` 隐藏槽位（3.0.1 推论 3）。
+3. 欠交量口径改为本体口径：`PO_QTY`（`DWD_PURCHASE_ORDER_DTL`）
+   − `RCV_QTY_STU`（`DWD_GOODS_RECEIPT_DTL`，按 `PO_NO`+`PO_LINE_NO` 聚合）；
+4. 站点过滤从 `Q.POHFCY_0 IN (...)` / `f.FCYNAM_0 LIKE ...` 改为
+   `<PUR_SITE_CODE>` / `<FCYNAM_0>` 属性绑定；
+5. 移除场景的 `datasourceId` 隐藏槽位（3.0.1 推论 3）。
 
 ## 4. 口径定义（探针实测结论）
 
-### 4.1 到货判定：行级量，不看订单状态
+### 4.1 到货判定：行级量（本体口径），不看订单状态
 
 ```
-行级欠交量  OPEN_QTY = <ORDER_QTY> - <RECEIVED_QTY>     -- 同为库存单位
+已收量（行级）  RECEIVED = SUM(<RCV_QTY_STU>)     -- 收货类按 PO_NO+PO_LINE_NO 聚合
+行级欠交量      OPEN_QTY = <PO_QTY> - RECEIVED    -- 同为库存单位
 订单三态：
   全到货    SUM(OPEN_QTY) = 0
-  部分到货  有欠交 且 有已收（<RECEIVED_QTY> > 0）
-  未到货    所有行 <RECEIVED_QTY> = 0
+  部分到货  有欠交 且 有已收（RECEIVED > 0）
+  未到货    所有行 RECEIVED = 0
 ```
 
-（`<属性名>` = 本体属性，由本体解析为物理列，见 3.3。）
+（`<属性名>` = 本体属性，由绑定编译解析为物理表列，见 3.3。
+`<PO_QTY>` 来自订单行类 `DWD_PURCHASE_ORDER_DTL`，
+`<RCV_QTY_STU>` 来自收货类 `DWD_GOODS_RECEIPT_DTL`，两者按 `PO_NO`+`PO_LINE_NO` 关联。）
 
 **为什么不用订单头 `RCPLINNBR_0 >= LINNBR_0`**：头行两种判定在近 12 月仅差 4 单、本期差 0 单，
 但头表另有 11,817 张「已关闭（CLEFLG_0=2）却仍有欠交」的订单，且其欠交总量级异常
 （4.5e18），把闭单当已完结会**假绿**。行级量判定与既有 `pending_delivery_query` 同源，
 两个场景可对照。
 
+**为什么用收货单而不是订单行自带的累计收货字段**：订单行 `DWD_PURCHASE_ORDER_DTL`
+**没有**累计收货列；本体里「已收量」的载体是收货类 `DWD_GOODS_RECEIPT_DTL`。
+（备选的 ERP 行级累计量口径见 3.2 存档段，两者差异仅 2 单边界。）
+
 ### 4.2 核心指标：订单到货率为主，量级率为参考
 
-| 指标 | 角色 | 定义 | 本期实测 |
+| 指标 | 角色 | 定义 | 本期实测（本体口径） |
 |---|---|---|---|
-| **订单到货率** | **主指标** | 全到货订单数 / 总订单数 | **82.25%**（3,984 / 4,844） |
-| 量级加权到货率 | 参考 | `SUM(<RECEIVED_QTY>) / SUM(<ORDER_QTY>)` | 40.51% |
-| 订单三态 | 辅指标 | 全到货 / 部分到货 / 未到货 订单计数 | 3,984 / 448 / 412 |
+| **订单到货率** | **主指标** | 全到货订单数 / 总订单数 | **82.29%**（3,986 / 4,844） |
+| 量级加权到货率 | 参考 | `SUM(RECEIVED) / SUM(<PO_QTY>)` | 40.51% |
+| 订单三态 | 辅指标 | 全到货 / 部分到货 / 未到货 订单计数 | 3,986 / 448 / 410 |
 
 **为什么量级率不能当主指标（探针实证，重要）**：
 
-本期 19,910 行中，「完全未到货」行（`<RECEIVED_QTY> = 0`）有 2,251 行，但它们贡献了
+本期 19,908 行中，「完全未到货」行（`RECEIVED = 0`）有 2,251 行，但它们贡献了
 **39.00% 的订购量**；其中订购量 ≥ 10 万的大额行仅 75 行，却贡献了 **22.68% 的订购量**。
 
 样例订单 `T72610POH1134`（供应商 B161）：
@@ -397,7 +433,7 @@ POPLIN 4000  ITMREF 501014810001  FE-5 压缩弹簧       订购   430,000  已�
 
 **这不是录入错误** —— 订购量分布本身正常（P50=230、P90=8,250、P99=76,728、
 P999=500,000、MAX=2,650,000），是真实的业务大单。
-剔除大额行后期率收敛到 **80.04%**（阈 1 万），与订单到货率 82.25% 仅差 2.2pp
+剔除大额行后期率收敛到 **80.04%**（阈 1 万），与订单到货率 82.29% 仅差 2.2pp
 ⇒ 两者本应一致，差异纯粹来自少数超大额未到货行的**权重放大**。
 
 **决策**：
@@ -406,7 +442,7 @@ P999=500,000、MAX=2,650,000），是真实的业务大单。
 - **不做**「剔除大额行」的处理 —— 那会删掉真实业务大单，分子分母都不含它们，
   业务不会接受；
 - 脏数据（欠交 ≥ 1e6）仍按既有机制剔除并回报 `excludedRows`（本期 6 行），
-  但**须说明**：剔除量级行不改变率值结论（剔前后订单率 82.25% vs 82.28%）。
+  但**须说明**：剔除量级行不改变率值结论（剔前后订单率 82.29% vs 82.28%）。
 
 ### 4.3 时间窗口
 
@@ -443,7 +479,7 @@ P999=500,000、MAX=2,650,000），是真实的业务大单。
 沿用既有机制：欠交量 ≥ 1e6 判为源侧录入错误并剔除，但**显式回报** `excludedRows`，
 不静默丢。数仓层全量 54 行 / 本期 6 行（与源层 43 行同量级）。
 
-**注意**：剔除欠交脏行**不改变**到货率结论（本期订单率 82.25% → 剔后 82.28%），
+**注意**：剔除欠交脏行**不改变**到货率结论（本期订单率 82.29% → 剔后 82.28%），
 也**不解决**量级率与订单率的差距（见 4.2，差距源于真实大单）。
 
 ### 4.5 未到货 ≠ 逾期
@@ -461,17 +497,16 @@ P999=500,000、MAX=2,650,000），是真实的业务大单。
 
 | 组件 | 类型 | 位置 | 职责 |
 |---|---|---|---|
-| `ODS_ERP_PORDERQ` 本体类 + 绑定 | 本体资产 | 新增 seed（类 + 属性 + `procurement_source_binding` + `procurement_property_binding`） | 行级到货数据的本体登记；工具取数的唯一锚点 |
-| `POL_ERP` Business Object | 本体资产 | 同上 | 承载新类的 BO（用户 2026-11-25 决定：要增加） |
-| `DIM_FACILITY` 本体类 + 绑定 | 本体资产 | 同上 | 基地字典（待到货 `siteKeys` 过滤用；THBI 实测 41 行，站点码域 100% 覆盖） |
+| **`DIM_FACILITY` 源绑定** | 本体资产 | 新增 seed（`procurement_source_binding`） | 基地字典的唯一缺口（类与 117 属性已存在）；待到货 `siteKeys` 过滤用 |
+| **`POL_ERP` Business Object** | 本体资产 | 同上（待 3.2.1 选项确认） | 用户 2026-11-25 要求增加 BO；头类归属有冲突待定 |
 | 绑定解析 | 服务（**复用**） | `backend/app/services/semantic_compiler_bindings.py` | 类+数据源 → 物理表/列；候选隔离；fail-closed |
-| `delivery_tracking_query` | 工具 | `backend/app/services/agent_tools_procurement.py` + `seed_agent_tool_configs.py` | 概览 + 双层明细取数（**经绑定解析物理表列**） |
-| `DELIVERY_TRACKING_AGENT` | Agent | `backend/scripts/seed_agents.py` + `seed_procurement_agent_profiles.py` | 编排与输出纪律；**绑定唯一数据源** |
+| `delivery_tracking_query` | 工具 | `backend/app/services/agent_tools_procurement.py` + `seed_agent_tool_configs.py` | 概览 + 双层明细取数（订单行 ⋈ 收货单，经绑定解析物理表列） |
+| `DELIVERY_TRACKING_AGENT` | Agent | `backend/scripts/seed_agents.py` + `seed_procurement_agent_profiles.py` | 编排与输出纪律；**绑定唯一数据源（THBI）** |
 | `delivery_tracking` | 场景配置 | `backend/scripts/seed_copilot_scenarios.py` | 卡片墙 / 槽位 / 模板 / 渲染器绑定 |
 | `DeliveryTrackingResultCard` | 前端组件 | `frontend/src/components/copilot/` | 结果卡（概览 + 双 Tab） |
 | `pending_delivery` 渲染器扩展 | 前端 | `PendingDeliveryResultTabs.tsx` | 分发到新卡 |
-| **待到货迁移** | 改造 | `agent_tools_procurement.py`（`pending_delivery_query`） | 去硬编码，改走本体绑定（方案待定，见 3.8） |
-| 真实数据门禁 | 脚本 | `backend/scripts/procurement_class_source_table_realdata.py` 同款 | 建类后证明绑定生效（防重演 2026-11-18 事故） |
+| **待到货迁移** | 改造 | `agent_tools_procurement.py`（`pending_delivery_query`） | 去硬编码，改走本体绑定 + THBI（见 3.8） |
+| 真实数据门禁 | 脚本 | `backend/scripts/procurement_class_source_table_realdata.py` 同款 | 绑定后证明生效（防重演 2026-11-18 事故） |
 
 ### 5.2 为什么不复用 `pending_delivery_query`
 
@@ -523,11 +558,11 @@ delivery_tracking_query(
     "totalOrders": 4844,
     "orderedQty": 98495267.255,
     "receivedQty": 39901874.255,
-    "orderArrivalRate": 82.25,    // 主指标：全到货订单 / 总订单 = 3984/4844
+    "orderArrivalRate": 82.29,    // 主指标：全到货订单 / 总订单 = 3986/4844
     "qtyArrivalRate": 40.51,      // 参考：量级加权 = 39901874/98495267（受超大额未到货行影响）
-    "allArrivedOrders": 3984,
+    "allArrivedOrders": 3986,
     "partialArrivedOrders": 448,
-    "notArrivedOrders": 412,
+    "notArrivedOrders": 410,
     "excludedRows": 6             // 欠交≥1e6 的脏行，本期 6 行
   },
   "bySupplier": [
@@ -555,7 +590,7 @@ delivery_tracking_query(
 ```
 
 **⚠ 量纲异常（必须处理）**：本期 `orderedQty` 合计 9.85e7，而 `receivedQty` 仅 4.0e7 ——
-**行级到货率只有 40.5%**，远低于订单到货率 82.25%。原因：单行订购量存在百万级脏值
+**行级到货率只有 40.5%**，远低于订单到货率 82.29%。原因：单行订购量存在百万级脏值
 （`5A2100000002` 一行订购 1,047,000）。既有 `pending_delivery_query` 已用「欠交量 ≥ 1e6 剔除」
 处理同类问题，但**本场景的分子分母都受影响**——若只剔欠交侧不剔订购侧，率值仍然失真。
 
@@ -659,7 +694,7 @@ monthsBack=12；dateFrom=2026-10-24；dateTo=2026-11-24。
   └─ 缺失校验：必需属性齐全？物理列在该数据源真实存在？
   ↓
 输出：{ datasourceId: 1, table: "THBI.ODS_ERP_PORDERQ",
-        columns: { ORDER_QTY: "QTYSTU_0", RECEIVED_QTY: "RCPQTYSTU_0", ... } }
+        columns: { PO_QTY: "PO_QTY", RCV_QTY_STU: "RCV_QTY_STU", ... } }
   ↓
 SQL 模板按解析结果渲染（表名/列名均为绑定解析产物，非代码常量）
 ```
@@ -686,8 +721,8 @@ SQL 模板按解析结果渲染（表名/列名均为绑定解析产物，非代
 ```
 ┌────────────────────────────────────────────────────────────┐
 │ 到货达成概览                              [数仓层 ODS_ERP]  │
-│  订单到货率 82.25%   ← 主指标                              │
-│  [全到货 3,984] [部分到货 448] [未到货 412]                 │
+│  订单到货率 82.29%   ← 主指标                              │
+│  [全到货 3,986] [部分到货 448] [未到货 410]                 │
 │  参考：量级加权到货率 40.51%（受超大额未到货行影响）        │
 │  脏数据剔除 6 行                                            │
 ├────────────────────────────────────────────────────────────┤
@@ -755,8 +790,8 @@ SQL 模板按解析结果渲染（表名/列名均为绑定解析产物，非代
 | 校验项 | 期望（本期窗口 2026-10-24~11-24 实测） |
 |---|---|
 | 订单总数 | 4,844 |
-| 全到货 / 部分 / 未到 | 3,984 / 448 / 412 |
-| 订单到货率 | 82.25% |
+| 全到货 / 部分 / 未到 | 3,986 / 448 / 410 |
+| 订单到货率 | 82.29% |
 | 总行数 | 19,910 |
 | 量级率（参考值） | 40.51%（**允许漂移，但须复核**） |
 | 脏数据行 | 6 |
@@ -808,16 +843,19 @@ SQL 模板按解析结果渲染（表名/列名均为绑定解析产物，非代
 | # | 决定 | 影响 |
 |---|---|---|
 | ✅ 1 | **一切数据对象出自 THBI 数据源**（硬规则） | 3.0.1；待到货必须迁；取消 `datasourceId` 槽位 |
-| ✅ 2 | **新增 Business Object** | 3.2.1，新建 `POL_ERP` |
-| ✅ 3 | **待到货场景一并迁到本体** | 3.8，切 THBI 数仓层（方案 A） |
+| ✅ 2 | **新增 Business Object** | 3.2.1；但头类归属有唯一索引冲突（见待确认 1） |
+| ✅ 3 | **待到货场景一并迁到本体** | 3.8，切 THBI 数仓层 |
 | ✅ 4 | **本体对接，不硬编码表名列名** | 3.0.2，复用绑定设施 |
+| ✅ 5 | **`DWD_PURCHASE_ORDER_DTL` 是订单行表**（对应 PORDERQ 订单行） | 修正了「订单头」的误判 |
+| ✅ 6 | **`FACILITY` 基地名在系统里已有对应** | `DIM_FACILITY` 类已存在（117 属性）⇒ 只需补绑定，不新建类 |
 
 **仍待确认**：
 
 | # | 问题 | 背景 | 我的建议 |
 |---|---|---|---|
-| 1 | 新 BO 编码用 `POL_ERP` 可以吗？ | 既有 `POL` 已被 `DWD_PURCHASE_ORDER_LINE` 占用；新 BO 指向新鲜类，名称须区分 | `POL_ERP`（或业务给定的其它码） |
-| 2 | 两个场景的字典来源统一为 MDM `entity_mapping` 可以吗？ | 数仓 `ODS_ERP_BPSUPPLIER` 覆盖率 100% 但要额外建类；`DIM_SUPPLIER` 覆盖率 99.97% | 用 MDM（免建类、跨场景一致） |
+| 1 | **新 BO 的头类怎么定？** | `uq_business_object_header_class` 唯一索引 ⇒ 一个类只能作一个 BO 头类；`DWD_PURCHASE_ORDER_DTL` 已被 `PO` 占用、`DWD_PURCHASE_ORDER_LINE` 已被 `POL` 占用 | **选项 A**：给既有 `POL` 换绑到 `DWD_PURCHASE_ORDER_DTL`（业务对象「采购订单行」应只有一个当前口径） |
+| 2 | 两个场景的字典来源统一为 MDM `entity_mapping` 可以吗？ | 数仓 `DIM_SUPPLIER` 覆盖率 99.97%、`DIM_IMATERIAL` 90.6% | 用 MDM（免建类、跨场景一致） |
 | 3 | 「到货跟踪」是否也需要基地维度？ | 需求只提时间/供应商/订单/物料；但待到货有 `siteKeys` | 本期不加（YAGNI），可后补 |
-| 4 | 到货明细（`ODS_ERP_YPRECEIPTD`）要不要接入？ | 它有到货单号与批次，但 `BPSNUM_0` 全空、覆盖仅 41% 订单 | 本期不接（够用即可）；需要批次追溯时再立项 |
+| 4 | 到货明细（`ODS_ERP_YPRECEIPTD`）要不要接入？ | 它有到货单号与批次，但 `BPSNUM_0` 全空、覆盖仅 41% 订单 | 本期不接（本体收货类已够用）；需要批次追溯时再立项 |
 | 5 | 待到货迁移后口径变化，如何告知用户？ | 近 12 月行数 84,049 → 192,467（2.3 倍），数据截止 10-23 → 11-24 | 卡片标注数据层 + 迁移说明；口径基线显式更新 |
+| 6 | 订单到货率用收货单口径（82.29%）还是 ERP 行级累计量口径（82.25%）？ | 差 2 单：收货单已开但 ERP 累计收货未回写 | **收货单口径**（更贴近业务事实，且数据新鲜） |

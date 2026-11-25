@@ -897,6 +897,7 @@ SQL 模板按解析结果渲染（表名/列名均为绑定解析产物，非代
 | 3 | **`NOT_ARRIVED` 谓词补 `OPEN_LINES > 0`** | 原谓词会让「订购量 ≤ 0 且未收货」的订单**同时**计入全到货与未到货 ⇒ 到货率可 > 100%。装配层另加 `DeliveryTrackingInvariantError` 兜底 |
 | 4 | **供应商名 ERP 回退落地** | spec 5.7 原本只写了「以 MDM 为准，回退 ERP 名」；实现确认 `SUPPLIER_NAME` 在订单行/收货两类均已绑定，作为**可选**属性使用（缺绑定不 fail-closed） |
 | 5 | **`monthsBack` 移除 `required`** | 既有 seed lint `test_chips_satisfy_required_slots` 要求必填槽位出现在每个 chip，而两个 24 日锚点 chip 不含 `monthsBack` ⇒ 标 required 必红。工具侧该参数本有默认值 12 |
+| 6 | **取消 5.6「渲染层展开锚点」（原计划 Task 6）** | 计划的前提有误：它称「`anchorDay`/`periodIndex` 不是工具能直接用的参数」，但 `resolveWindow` 本就原生接受两者。渲染层再展开一份显式区间 ⇒ ①重复实现锚点日期数学（两份实现必然漂移）②`dateFrom/dateTo` 在工具侧优先级更高，结果相同，属冗余。**改为单一事实源**：槽位把 `anchorDay/periodIndex` 直接传给工具，由 `resolveWindow` 解析。锚点路径的端到端正确性由 Task 10 实测验证 |
 
 ### 11.2 按建议定稿（2026-11-25 用户「没有异议」）
 

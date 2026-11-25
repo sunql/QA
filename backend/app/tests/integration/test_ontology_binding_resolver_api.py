@@ -34,6 +34,12 @@ _ORDER_DTL_COLUMNS = {
     "PO_QTY": "PO_QTY",
     "ORDER_DATE": "ORDER_DATE",
 }
+_FACILITY_CLASS = "DIM_FACILITY"
+#: `DIM_FACILITY` 在 P5 到货场景的必需属性（基地主键 + 基地名）。
+_FACILITY_COLUMNS = {
+    "FCY_0": "FCY_0",
+    "FCYNAM_0": "FCYNAM_0",
+}
 _CANDIDATE_CLASS = "DWD_PURCHASE_ORDER_DTL_CANDIDATE"
 _TOMBSTONE_CLASS = "DWD_PURCHASE_ORDER_DTL_TOMBSTONED"
 _FUTURE_CLASS = "DWD_PURCHASE_ORDER_DTL_FUTURE"
@@ -202,6 +208,22 @@ async def seedThbiOrderDtlBinding(dbSession: AsyncSession) -> None:
         className=_ORDER_DTL_CLASS,
         propertyColumns=_ORDER_DTL_COLUMNS,
         sourceTable=_ORDER_DTL_CLASS,
+    )
+
+
+@pytest_asyncio.fixture
+async def seedThbiFacilityBinding(dbSession: AsyncSession) -> None:
+    """种一条确认生效的 THBI 基地字典绑定（含 FCY_0 / FCYNAM_0）。
+
+    与 `seedThbiOrderDtlBinding` 同形：本体表/列仍写 `STALE_*` 过期值，
+    物理表名/列名只由绑定表给出 ⇒ 解析器回退本体表就会露馅。
+    """
+    await _seedThbiDataSource(dbSession)
+    await _seedClassWithBinding(
+        dbSession,
+        className=_FACILITY_CLASS,
+        propertyColumns=_FACILITY_COLUMNS,
+        sourceTable=_FACILITY_CLASS,
     )
 
 
@@ -383,11 +405,33 @@ async def test_resolve_multi_role_binding_uses_base_only(dbSession) -> None:
 async def test_resolve_rejects_non_thbi_datasource(
     dbSession, seedThbiOrderDtlBinding
 ) -> None:
-    """硬规则：调用方不得指定别的数据源。"""
-    with pytest.raises(BindingResolutionError):
+    """硬规则：调用方不得指定别的数据源。
+
+    必须断言**具体病因**（不是只断言异常类型）：若把 `_assertThbiDatasource`
+    这道硬闸删掉，解析会继续走到「数据源 2 没有已确认生效的绑定」并照样抛
+    `BindingResolutionError` ⇒ 只断言类型就是假绿。
+    `"数据源硬闸"` 是该闸门消息里唯一且稳定的片段（普通失败消息只含「数据源」）。
+    """
+    with pytest.raises(BindingResolutionError) as exc:
         await resolveBinding(
             dbSession,
             className="DWD_PURCHASE_ORDER_DTL",
             requiredProperties=["PO_NO"],
             datasourceId=2,
         )
+    assert "数据源硬闸" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_resolve_facility_binding_from_real_db(
+    dbSession, seedThbiFacilityBinding
+) -> None:
+    """DIM_FACILITY 补绑定后可解析（Task 2 种子）。"""
+    resolved = await resolveBinding(
+        dbSession,
+        className="DIM_FACILITY",
+        requiredProperties=["FCY_0", "FCYNAM_0"],
+    )
+    assert resolved.qualifiedTable() == "THBI.DIM_FACILITY"
+    assert resolved.column("FCY_0") == "FCY_0"
+    assert resolved.column("FCYNAM_0") == "FCYNAM_0"

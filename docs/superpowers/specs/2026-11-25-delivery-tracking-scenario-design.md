@@ -179,10 +179,10 @@ DB 配置。新场景的**外壳**因此可以零代码，但**取数层必须�
 4. 探针已验证 `THBI.ODS_ERP_PORDERQ` 150 列，10 个目标列全部存在且非空率 100%
    （`ORDER_DATE` 空 0、`QTYSTU_0`/`RCPQTYSTU_0`/`BPSNUM_0`/`ITMREF_0` 全非空）。
 
-### 3.2.1 Business Object：给既有 `POL` 换绑（用户 2026-11-25 决定：选项 A）
+### 3.2.1 Business Object：给既有 `POL` 换绑（选项 A）—— **本轮推迟**
 
 `uq_business_object_header_class` 唯一索引 ⇒ 一个本体类只能作一个 BO 的头类。
-用户选定**选项 A**：把既有 `POL`（采购订单行）BO 的头类从
+选项 A 的内容：把既有 `POL`（采购订单行）BO 的头类从
 `DWD_PURCHASE_ORDER_LINE`（旧批次，2026-08-08）**换绑**到
 `DWD_PURCHASE_ORDER_DTL`（新鲜全量，至 2026-11-24）。
 
@@ -195,18 +195,22 @@ DB 配置。新场景的**外壳**因此可以零代码，但**取数层必须�
 | `graph_label` | `DWD_PURCHASE_ORDER_DTL` |
 
 **语义依据**：业务对象「采购订单行」应当只有**一个当前口径**；
-`DWD_PURCHASE_ORDER_LINE` 是同一业务对象的**旧抽取批次**
-（用户 2026-11-25 明确「这个不用了，我晚点就删除」），换绑后口径统一到新鲜批次。
+`DWD_PURCHASE_ORDER_LINE` 是同一业务对象的**旧抽取批次**。
 
-**换绑 + 删除的依赖链（必须按序执行，否则断链）**：
+**⚠ 本轮执行范围（用户 2026-11-25 决定：暂不动 `purchase_history_query`，推迟删类）**：
 
-`DWD_PURCHASE_ORDER_LINE` 并非孤立类，实测有 4 处活引用：
+⇒ **本轮不执行 BO 换绑，也不删 `DWD_PURCHASE_ORDER_LINE`**；
+BO 换绑与删类作为**独立后续立项**（本规格只记录依赖链，供后续执行）。
+
+**依赖链（已查清，后续换绑/删类时按此顺序，不可颠倒）**：
+
+`DWD_PURCHASE_ORDER_LINE` 实测有 4 处活引用：
 
 | # | 引用方 | 迁移动作 |
 |---|---|---|
-| 1 | `business_object.POL.header_class_id` | **先换绑**到 `DWD_PURCHASE_ORDER_DTL` |
-| 2 | **`purchase_history_query` 工具**（`agent_tools_procurement.py:231` `_HISTORY_TABLE`） | 改指向 `DWD_PURCHASE_ORDER_DTL`（本需求顺带做，见 3.8） |
-| 3 | **6 个采购 KPI 的口径锚点**（`ontology_metric_source` 的 NUMERATOR / DENOMINATOR / FILTER / BASE 四角色） | 指标源行换指 `DWD_PURCHASE_ORDER_DTL` |
+| 1 | `business_object.POL.header_class_id` | 换绑到 `DWD_PURCHASE_ORDER_DTL`（**先做**，否则 `POL` 指向墓碑 ⇒ 口径漂移） |
+| 2 | **`purchase_history_query` 工具**（`agent_tools_procurement.py:231` `_HISTORY_TABLE`） | 改指新类；**金额口径有坑，见 3.8** |
+| 3 | **6 个采购 KPI 的口径锚点**（`ontology_metric_source` 的 NUMERATOR / DENOMINATOR / FILTER / BASE 四角色） | 指标源行换指新类 + 重算 `feature_value` |
 | 4 | 图谱 JOIN 边（`apply_dim_imaterial_join_edges.py` / `apply_supplier_join_edges.py` / `sync_business_graph_from_thbi.py`） | 边的 `sourceClass` 改指新类 |
 
 **涉及的 6 个 KPI**（`feature_definition` 中 `status=ACTIVE`）：
@@ -216,19 +220,20 @@ DB 配置。新场景的**外壳**因此可以零代码，但**取数层必须�
 ⚠️ **其中 `SUPPLIER_RISK_SCORE` 与 `SUPPLIER_OTD_3M` 是上一轮「供应商风险速览」在用的**
 ⇒ 换绑/删类会**直接影响已上线场景**，必须连带重跑该场景的实测与回归。
 
-**执行顺序（不可颠倒）**：
-
-1. `POL` BO 头类换绑 → `DWD_PURCHASE_ORDER_DTL`（先做，否则 `POL` 指向墓碑 ⇒ 口径漂移）；
-2. `purchase_history_query` 改指新类；
-3. 6 个 KPI 的 `ontology_metric_source` 换指新类 + 重算 `feature_value`；
-4. 图谱 JOIN 边换指新类 + 重跑图谱同步；
-5. **最后**才软删 `DWD_PURCHASE_ORDER_LINE`（`deleteClass` 是软删除：`valid_to = now()`，
-   同步清理 Neo4j 节点与 Milvus 向量）；
-6. 回归：供应商风险速览 + 待到货 + 到货跟踪三个场景全量实测。
-
-**⚠ 口径影响（必须显式说明）**：KPI 换绑后取数表从 927,648 行（旧批次）换成
-1,036,069 行（新鲜批次），**6 个 KPI 的历史值口径随之变化** ⇒
+**后续换绑时的口径影响（必须显式说明）**：KPI 换绑后取数表从 927,648 行（旧批次）
+换成 1,036,069 行（新鲜批次），**6 个 KPI 的历史值口径随之变化** ⇒
 `feature_value` 需重算，且重算前后数值差异要**显式比对**（不静默漂移）。
+
+**本轮的口径割裂（如实记录，不掩盖）**：
+
+| 数据用途 | 本轮取数表 | 数据截止 |
+|---|---|---|
+| 待到货 / 到货跟踪场景 | `DWD_PURCHASE_ORDER_DTL`（新鲜） | 2026-11-24 |
+| 6 个采购 KPI（含风险速览） | `DWD_PURCHASE_ORDER_LINE`（旧批次） | 2026-08-08 |
+| `purchase_history_query` | `DWD_PURCHASE_ORDER_LINE`（旧批次） | 2026-08-08 |
+
+⇒ **场景数据与 KPI 数据暂时不同源**（两者本就是不同口径：订单行 vs KPI 聚合）。
+这是本轮「推迟删类」的直接后果，属已知欠账，须在界面上避免把两者并列比较。
 
 
 ### 3.3 工具如何用本体取数
@@ -388,32 +393,27 @@ MDM `entity_mapping`（`entity_type=SUPPLIER`，3,500 行，`source_system=ERP`�
    `<PUR_SITE_CODE>` / `<FCYNAM_0>` 属性绑定；
 5. 移除场景的 `datasourceId` 隐藏槽位（3.0.1 推论 3）。
 
-**顺带迁移：`purchase_history_query`**（因 `DWD_PURCHASE_ORDER_LINE` 将被删）
+**顺带迁移：`purchase_history_query`**（用户 2026-11-25 决定：**暂不动，推迟删类**）
 
-该工具当前硬编码 `_HISTORY_TABLE = "DWD_PURCHASE_ORDER_LINE"`（`agent_tools_procurement.py:231`），
-指向将被删除的类 ⇒ **必须一并改指** `DWD_PURCHASE_ORDER_DTL`，并把 SQL 里
-`SUPPLIER_CODE` / `MATERIAL_CODE` / `PO_NO` / `ORDER_QTY` / `UNIT_PRICE` / `CREATION_DATE`
-等裸列名改为属性名。注意该工具的语义列名与新类不完全同名：
+该工具当前硬编码 `_HISTORY_TABLE = "DWD_PURCHASE_ORDER_LINE"`（`agent_tools_procurement.py:231`）。
+用户决定本轮**不改该工具、不删 `DWD_PURCHASE_ORDER_LINE`** ⇒
+`DWD_PURCHASE_ORDER_LINE` 保留，其上挂的 6 个 KPI 口径锚点与图谱 JOIN 边**本轮也不动**。
 
-| 现用（`DWD_PURCHASE_ORDER_LINE`） | 新类（`DWD_PURCHASE_ORDER_DTL`） | 备注 |
-|---|---|---|
-| `ORDER_QTY` | `PO_QTY` | 订购量 |
-| `CREATION_DATE` | `CREATE_DATE` / `ORDER_DATE` | **口径需定**：现工具按创建时间过滤，新类有 `CREATE_DATE` 与 `ORDER_DATE` 两个 |
-| `UNIT_PRICE` | ❌ **无价格列**（只有 `PO_QTY`） | ⚠️ 新类**无单价/金额列**（旧类有 `LINE_AMOUNT_EXCL_TAX`/`LINE_AMOUNT_INCL_TAX`） |
-| `MATERIAL_CODE` | `ITEM_CODE` | 同义 |
-| `SUPPLIER_CODE` / `PO_NO` | 同名 | — |
+**但「金额改从发票关联取」的设计决定已定（为将来改指时备好）**：
 
-⚠️ **金额缺口（新发现，需业务确认）**：`DWD_PURCHASE_ORDER_DTL` 的 30 个已绑属性里
-**只有 `PO_QTY`，无单价也无金额**（旧类 `DWD_PURCHASE_ORDER_LINE` 有
-`LINE_AMOUNT_EXCL_TAX`/`LINE_AMOUNT_INCL_TAX`）。而 `purchase_history_query` 的返回含
-`UNIT_PRICE` ⇒ 照搬会丢金额。三个选项：
+用户选定：金额口径改从 `DWD_PURCHASE_INVOICE_LINE` 关联取。
+**探针实测该路径不可行**，必须记录原因（避免后来者重踩）：
 
-- **选项 1**：该工具的金额改从 `DWD_PURCHASE_INVOICE` / `DWD_PURCHASE_INVOICE_LINE`
-  （本体已登记且已绑，含价格）关联取；
-- **选项 2**：该工具降级为只返回量与单号（去 `UNIT_PRICE`），金额诉求另做；
-- **选项 3**：暂不动 `purchase_history_query`，推迟 `DWD_PURCHASE_ORDER_LINE` 的删除。
+| 候选 | 实测结论 |
+|---|---|
+| `DWD_PURCHASE_INVOICE_LINE` | ❌ **不可行**：数据截止 **2026-07-11**（比订单行旧 4 个月）；`PO_NO`/`PO_LINE_NO` **大量为 NULL**（样例 5 行全 NULL）；本期订单行关联命中率 **0.00%**；且该类**既无源绑定也无属性绑定** |
+| `DWD_PURCHASE_INVOICE_DTL`（发票头行） | ⚠️ **部分可行但有硬伤**：数据新鲜（至 **2026-11-24**）、有 `PO_NO`+`PO_LINE_NO`+`NET_UNIT_PRICE`+`INV_QTY`，抽样验证 `INV_QTY × NET_UNIT_PRICE` 与旧批次 `LINE_AMOUNT_EXCL_TAX` 吻合；**但** ① `PO_NO` 空值率逐年恶化（2024: 20.5% → 2025: 56.4% → 2026: 44.7%）② **该表无索引**（`ALL_IND_COLUMNS` 查无），与 103 万行订单表 join **直接超时** ③ 一订单行最多对应 **11 条发票行**（381 键重复）⇒ 金额须 `SUM(INV_QTY × NET_UNIT_PRICE)` 聚合 |
+| 保留旧类取金额 | ✅ `DWD_PURCHASE_ORDER_LINE` 有 `LINE_AMOUNT_EXCL_TAX`/`INCL_TAX`（非空率 99.998%）⇒ **本轮 `purchase_history_query` 不动即可保住金额口径** |
 
-⇒ 需业务确认后决定（见第 11 节待确认项）。
+⇒ **本轮结论**：`purchase_history_query` 与 `DWD_PURCHASE_ORDER_LINE` 保持原样
+（用户决定），金额口径暂不变；将来若要改指新类，须先解决发票关联的
+**覆盖率**（`PO_NO` 空值）与**性能**（缺索引）两个问题，或改用价格表
+（`DWD_SUPPLIER_PRICE_LIST_HEADER`，本体已绑，17,749 行）另建关联路径。
 
 ## 4. 口径定义（探针实测结论）
 
@@ -530,7 +530,7 @@ P999=500,000、MAX=2,650,000），是真实的业务大单。
 | 组件 | 类型 | 位置 | 职责 |
 |---|---|---|---|
 | **`DIM_FACILITY` 源绑定** | 本体资产 | 新增 seed（`procurement_source_binding`） | 基地字典的唯一缺口（类与 117 属性已存在）；待到货 `siteKeys` 过滤用 |
-| **`POL` BO 换绑** | 本体资产 | 同上 | 头类 `DWD_PURCHASE_ORDER_LINE` → `DWD_PURCHASE_ORDER_DTL`（选项 A）；连带迁 6 个 KPI 口径源与图谱边 |
+| **`POL` BO 换绑** | 本体资产 | **本轮推迟**（独立立项） | 头类 `DWD_PURCHASE_ORDER_LINE` → `DWD_PURCHASE_ORDER_DTL`（选项 A）；连带迁 6 个 KPI 口径源与图谱边；依赖链见 3.2.1 |
 | 绑定解析 | 服务（**复用**） | `backend/app/services/semantic_compiler_bindings.py` | 类+数据源 → 物理表/列；候选隔离；fail-closed |
 | `delivery_tracking_query` | 工具 | `backend/app/services/agent_tools_procurement.py` + `seed_agent_tool_configs.py` | 概览 + 双层明细取数（订单行 ⋈ 收货单，经绑定解析物理表列） |
 | `DELIVERY_TRACKING_AGENT` | Agent | `backend/scripts/seed_agents.py` + `seed_procurement_agent_profiles.py` | 编排与输出纪律；**绑定唯一数据源（THBI）** |
@@ -859,8 +859,9 @@ SQL 模板按解析结果渲染（表名/列名均为绑定解析产物，非代
 
 | 风险 | 缓解 |
 |---|---|
-| **建类引入本体绑定漂移**（2026-11-18 已发生过一次） | 建类走既有治理流程 + 真实数据门禁脚本；类/属性/绑定同步登记 |
+| **建类引入本体绑定漂移**（2026-11-18 已发生过一次） | 绑定走既有治理流程 + 真实数据门禁脚本；类/属性/绑定同步登记 |
 | 本体类被治理侧删除/改绑，工具随之失效 | 解析 fail-closed + 明确报错（不静默换表） |
+| **场景数据与 KPI 数据暂时不同源** | 本轮推迟删 `DWD_PURCHASE_ORDER_LINE` 的直接后果：场景走新鲜批次（至 11-24），6 个 KPI 仍走旧批次（至 08-08）。**界面上不得把两者并列比较**；后续换绑立项时一并收敛（3.2.1） |
 | 待到货迁移后**现有实测结果变化** | 迁移前后跑同一组基线并显式对比；口径基线随迁移更新（不静默漂移） |
 | 两个场景若不同源，用户发现数字对不上 | 方案 A 统一到数仓层（推荐）；卡片标注数据层 |
 | 数仓层供应商码与 MDM 码域未来漂移 | 解析统一走 MDM；过滤前校验码在 MDM 域内 |
@@ -868,21 +869,22 @@ SQL 模板按解析结果渲染（表名/列名均为绑定解析产物，非代
 | 24 日锚点与「自然月」两套窗口并存易混 | 卡上显示实际 `window.dateFrom/dateTo`，不只显示口径名 |
 | 量级率被超大额行主导，用户误读 | 主指标用订单率；量级率降为参考并附口径说明 |
 
-## 11. 待业务确认项
+## 11. 决策台账
 
-**已由用户拍板（2026-11-25）**：
+### 11.1 已由用户拍板（2026-11-25）
 
 | # | 决定 | 影响 |
 |---|---|---|
 | ✅ 1 | **一切数据对象出自 THBI 数据源**（硬规则） | 3.0.1；待到货必须迁；取消 `datasourceId` 槽位 |
-| ✅ 2 | **BO 用选项 A：给既有 `POL` 换绑到 `DWD_PURCHASE_ORDER_DTL`** | 3.2.1；连带迁 6 个 KPI 口径源 + `purchase_history_query` + 图谱边 |
-| ✅ 7 | **`DWD_PURCHASE_ORDER_LINE` 不再需要，将被删除** | 3.2.1 依赖链；删除必须排在换绑/迁移之后 |
+| ✅ 2 | **本体对接，不硬编码表名列名** | 3.0.2，复用既有绑定设施（`procurement_source_binding` / `procurement_property_binding` / `semantic_compiler_bindings`） |
 | ✅ 3 | **待到货场景一并迁到本体** | 3.8，切 THBI 数仓层 |
-| ✅ 4 | **本体对接，不硬编码表名列名** | 3.0.2，复用绑定设施 |
-| ✅ 5 | **`DWD_PURCHASE_ORDER_DTL` 是订单行表**（对应 PORDERQ 订单行） | 修正了「订单头」的误判 |
-| ✅ 6 | **`FACILITY` 基地名在系统里已有对应** | `DIM_FACILITY` 类已存在（117 属性）⇒ 只需补绑定，不新建类 |
+| ✅ 4 | **`DWD_PURCHASE_ORDER_DTL` 是订单行表**（对应 PORDERQ 订单行） | 修正了「订单头」的误判；到货率改走「订单行 ⋈ 收货单」 |
+| ✅ 5 | **`FACILITY` 基地名在系统里已有对应** | `DIM_FACILITY` 类已存在（117 属性）⇒ 只需补绑定，不新建类 |
+| ✅ 6 | **BO 用选项 A：给既有 `POL` 换绑到 `DWD_PURCHASE_ORDER_DTL`** | 3.2.1；**本轮推迟执行**（连带迁 6 个 KPI 口径源 + `purchase_history_query` + 图谱边） |
+| ✅ 7 | **`DWD_PURCHASE_ORDER_LINE` 本轮保留，删类推迟** | 3.2.1 依赖链；用户决定「暂不动 `purchase_history_query`，推迟删类」 |
+| ✅ 8 | **金额改从发票关联取**（设计决定） | 3.8；⚠️ 实测 `DWD_PURCHASE_INVOICE_LINE` 不可行（`PO_NO` 多空 + 数据旧 4 个月 + 无绑定），`DWD_PURCHASE_INVOICE_DTL` 有覆盖率与性能硬伤 ⇒ 本轮金额口径暂不变 |
 
-**仍待确认**：
+### 11.2 仍待确认
 
 | # | 问题 | 背景 | 我的建议 |
 |---|---|---|---|
@@ -891,6 +893,4 @@ SQL 模板按解析结果渲染（表名/列名均为绑定解析产物，非代
 | 3 | 到货明细（`ODS_ERP_YPRECEIPTD`）要不要接入？ | 它有到货单号与批次，但 `BPSNUM_0` 全空、覆盖仅 41% 订单 | 本期不接（本体收货类已够用）；需要批次追溯时再立项 |
 | 4 | 待到货迁移后口径变化，如何告知用户？ | 近 12 月行数 84,049 → 192,467（2.3 倍），数据截止 10-23 → 11-24 | 卡片标注数据层 + 迁移说明；口径基线显式更新 |
 | 5 | 订单到货率用收货单口径（82.29%）还是 ERP 行级累计量口径（82.25%）？ | 差 2 单：收货单已开但 ERP 累计收货未回写 | **收货单口径**（更贴近业务事实，且数据新鲜） |
-| 6 | **6 个采购 KPI 换绑后 `feature_value` 是否立即重算？** | 取数表从 927,648 行换成 1,036,069 行，历史值口径变化 | 重算并**显式比对**新旧值（不静默漂移）；`SUPPLIER_RISK_SCORE`/`SUPPLIER_OTD_3M` 变动会影响已上线的风险速览场景，需业务确认是否同步发布 |
-| 7 | `DWD_PURCHASE_ORDER_LINE` 的软删由谁执行、何时？ | 用户表示「晚点就删除」；但删除须排在 3.2.1 的 4 步迁移之后 | 由本需求完成迁移与回归后再删（或由用户执行，但需确认迁移已完成） |
-| 8 | **`purchase_history_query` 的金额（`UNIT_PRICE`）怎么办？** | 新类 `DWD_PURCHASE_ORDER_DTL` 无价格/金额列（旧类有 `LINE_AMOUNT_EXCL_TAX`/`INCL_TAX`） | 建议**选项 1**：金额从 `DWD_PURCHASE_INVOICE_LINE`（本体已绑、含价格）关联取；否则该工具降级为只返回量与单号 |
+| 6 | **场景数据与 KPI 数据暂时不同源，界面如何避免误读？** | 本轮推迟删类的直接后果：场景走新鲜批次（至 11-24），6 个 KPI 走旧批次（至 08-08） | 卡片显式标注各自数据层与截止日；不在同一张卡并列两者（见 3.2.1 风险表） |

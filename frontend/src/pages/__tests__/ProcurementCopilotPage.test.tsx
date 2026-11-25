@@ -58,8 +58,6 @@ const SCENARIO_CONFIG = {
       conflictKeywords: ["基地", "厂区", "工厂", "车间"],
       codePattern: "(?<![0-9A-Za-z])(?:T\\d{1,2}|C\\d)(?![0-9A-Za-z])" },
     { key: "minOverdueDays", type: "number", label: "最低逾期天数" },
-    { key: "datasourceId", type: "number", label: "数据源",
-      conflictKeywords: ["数据源"], hidden: true },
     { key: "dateFrom", type: "text", label: "开始日期",
       conflictKeywords: ["日期", "时间段"], hidden: true },
     { key: "dateTo", type: "text", label: "结束日期",
@@ -624,8 +622,8 @@ describe("ProcurementCopilotPage 待到货场景", () => {
     expect(slots.monthsBack).toBe(12);
     expect(slots.minOverdueDays).toBe(0);
     expect(slots.supplierKeys).toEqual([]);
-    // admin 数据源随槽位上送（默认选中 isDefault 源）
-    expect(slots.datasourceId).toBe(1);
+    // THBI 硬规则：admin 也不再随槽位上送数据源
+    expect("datasourceId" in slots).toBe(false);
     await waitFor(() => expect(screen.getByText("欠交汇总")).toBeTruthy());
     // done 回读步骤 ⇒ 结构化结果卡（数据不经 LLM 复述）
     await waitFor(() =>
@@ -673,7 +671,7 @@ describe("ProcurementCopilotPage 待到货场景", () => {
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
 
     // 基地多选（本地选项，label = 名称（编码））
-    const siteSelect = screen.getAllByRole("combobox")[4];
+    const siteSelect = screen.getAllByRole("combobox")[3];
     fireEvent.mouseDown(siteSelect);
     fireEvent.click(await waitFor(() => screen.getByText("模具厂（T3）")));
 
@@ -785,8 +783,8 @@ describe("ProcurementCopilotPage 场景卡片墙（首页）", () => {
 });
 
 
-describe("ProcurementCopilotPage 数据源槽位", () => {
-  it("切换数据源后，场景消息带新数据源 id", async () => {
+describe("ProcurementCopilotPage 数据源不再随槽位上送", () => {
+  it("admin：场景消息 slots 不含 datasourceId（THBI 硬规则）", async () => {
     mockOptions();
     const payloads: Array<Record<string, unknown>> = [];
     api.streamCopilotMessage.mockImplementation(async (payload, handlers) => {
@@ -807,20 +805,13 @@ describe("ProcurementCopilotPage 数据源槽位", () => {
     await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
 
-    fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
-    // 高级面板里 Select 顺序：模型(0)、数据源(1)、供应商(2)、物料(3)、基地(4)
-    const selects = screen.getAllByRole("combobox");
-    fireEvent.mouseDown(selects[1]);
-    fireEvent.click(await waitFor(() => screen.getByText("SRM-TH-01")));
-
     fireEvent.change(screen.getByPlaceholderText(/补充说明/), {
       target: { value: "看欠交" },
     });
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
     await waitFor(() => expect(payloads).toHaveLength(1));
-    // P4 新契约：数据源作为隐藏槽位随 slots 上送（文本口径在后端渲染）
     const slots = payloads[0].slots as Record<string, unknown>;
-    expect(slots.datasourceId).toBe(10);
+    expect("datasourceId" in slots).toBe(false);
     expect(payloads[0].scenarioCode).toBe("pending_delivery");
   });
 });
@@ -856,8 +847,8 @@ describe("供应商/物料远程搜索多选", () => {
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
 
-    // 供应商多选（combobox 顺序：模型0/数据源1/供应商2）
-    const supplierSelect = screen.getAllByRole("combobox")[2];
+    // 供应商多选（combobox 顺序：模型0/供应商1）
+    const supplierSelect = screen.getAllByRole("combobox")[1];
     fireEvent.mouseDown(supplierSelect);
     fireEvent.change(supplierSelect, { target: { value: "飞驰" } });
     // 300ms debounce ⇒ 等待远程搜索回来
@@ -956,7 +947,7 @@ describe("三个交互优化", () => {
     await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
-    const siteSelect = screen.getAllByRole("combobox")[4];
+    const siteSelect = screen.getAllByRole("combobox")[3];
     fireEvent.mouseDown(siteSelect);
     fireEvent.click(await waitFor(() => screen.getByText("模具厂（T3）")));
 
@@ -977,7 +968,7 @@ describe("三个交互优化", () => {
     await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
-    const siteSelect = screen.getAllByRole("combobox")[4];
+    const siteSelect = screen.getAllByRole("combobox")[3];
     fireEvent.mouseDown(siteSelect);
     fireEvent.click(await waitFor(() => screen.getByText("模具厂（T3）")));
     await waitFor(() => {
@@ -1022,7 +1013,7 @@ describe("冲突参数以对话框为准", () => {
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
     // 与既有供应商搜索用例同款手法（mouseDown + change → debounce → click option）
-    const supplierSelect = screen.getAllByRole("combobox")[2];
+    const supplierSelect = screen.getAllByRole("combobox")[1];
     fireEvent.mouseDown(supplierSelect);
     fireEvent.change(supplierSelect, { target: { value: "B125" } });
     await waitFor(() => expect(api.searchMappings).toHaveBeenCalled(), { timeout: 2000 });
@@ -1066,7 +1057,7 @@ describe("冲突检测：纯编码也算指定", () => {
     await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
-    const supplierSelect = screen.getAllByRole("combobox")[2];
+    const supplierSelect = screen.getAllByRole("combobox")[1];
     fireEvent.mouseDown(supplierSelect);
     fireEvent.change(supplierSelect, { target: { value: "B125" } });
     await waitFor(() => expect(api.searchMappings).toHaveBeenCalled(), { timeout: 2000 });
@@ -1223,9 +1214,9 @@ describe("场景槽位默认值（anchorDay=0 不得劫持取数窗口）", () =
 });
 
 
-describe("数据源选择仅 admin 可见", () => {
-  it("非 admin：高级参数里不出现「数据源」标签与下拉", async () => {
-    authState.roles = ["procurement"];
+describe("数据源下拉已彻底移除", () => {
+  it("admin：高级参数里也不出现「数据源」标签与下拉", async () => {
+    authState.roles = ["admin"];
     mockOptions();
     await renderScenario();
     await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
@@ -1234,15 +1225,5 @@ describe("数据源选择仅 admin 可见", () => {
     expect(screen.queryByText("数据源")).toBeNull();
     // 但其他槽位仍在
     expect(screen.getByText("时间窗")).toBeTruthy();
-  });
-
-  it("admin：可见数据源标签与下拉", async () => {
-    authState.roles = ["admin"];
-    mockOptions();
-    await renderScenario();
-    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: /高级参数/ }));
-
-    expect(screen.getByText("数据源")).toBeTruthy();
   });
 });

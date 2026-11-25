@@ -5,7 +5,8 @@
  * - 控件按槽位 key 分派（supplierKeys/materialKeys 走远程实体搜索、
  *   siteKeys 走基地字典、monthsBack 等数字走 InputNumber）——
  *   key 是场景配置契约的一部分；未知 type **不渲染**（fail-closed）；
- * - 模型/数据源选择器不是槽位，固定在面板顶部（数据源仅 admin 可见）。
+ * - 模型选择器不是槽位，固定在面板顶部；**数据源不再可选**
+ *   （THBI 硬规则：一切数据对象出自本体绑定，2026-11-25 取消切换槽位）。
  */
 
 import { useState } from "react";
@@ -15,7 +16,6 @@ import type { Dayjs } from "dayjs";
 import { useTranslation } from "../../i18n";
 import { searchMappings } from "../../api/entityMapping";
 import type { CopilotScenarioSlot } from "../../api/copilotScenario";
-import type { DataSource } from "../../types/datasource";
 import type { ModelConfig } from "../../types/modelConfig";
 
 const { Text } = Typography;
@@ -46,15 +46,11 @@ interface ScenarioAdvancedParamsProps {
   onChange: (key: string, value: unknown) => void;
   dateMode: DateMode;
   onDateModeChange: (mode: DateMode) => void;
-  /** 模型与数据源（非槽位）：固定在面板顶部 */
+  /** 模型（非槽位）：固定在面板顶部 */
   models: ModelConfig[];
   modelId: number | undefined;
   onModelChange: (id: number) => void;
-  isAdmin: boolean;
-  datasources: DataSource[];
-  datasourceId: number | undefined;
-  onDatasourceChange: (id: number) => void;
-  /** 基地字典选项（页面按数据源拉取） */
+  /** 基地字典选项（页面进入场景时拉取） */
   siteOptions: { code: string; name: string }[];
 }
 
@@ -73,10 +69,6 @@ export default function ScenarioAdvancedParams({
   models,
   modelId,
   onModelChange,
-  isAdmin,
-  datasources,
-  datasourceId,
-  onDatasourceChange,
   siteOptions,
 }: ScenarioAdvancedParamsProps) {
   const { t } = useTranslation();
@@ -111,8 +103,8 @@ export default function ScenarioAdvancedParams({
   );
 
   const renderSlot = (slot: CopilotScenarioSlot) => {
-    // 隐藏槽位：表单不渲染（dateFrom/dateTo 由时间窗的区间控件写入、
-    // datasourceId 由数据源下拉写入）；后端渲染不受影响
+    // 隐藏槽位：表单不渲染（dateFrom/dateTo 由时间窗的区间控件写入）；
+    // 后端渲染不受影响
     if (slot.hidden) return null;
     if (slot.key === "monthsBack" && slot.type === "number") {
       return (
@@ -278,24 +270,6 @@ export default function ScenarioAdvancedParams({
             label: model.modelName,
           }))}
         />
-        {/* 数据源切换 = 治理动作（可指向别的业务库）⇒ 仅 admin 可见 */}
-        {isAdmin && (
-          <>
-            <div style={{ fontSize: 12, color: "#5a6b87", marginBottom: 4 }}>
-              {t("procurement.copilot.slotDatasource")}
-            </div>
-            <Select
-              style={{ minWidth: 150 }}
-              placeholder={t("procurement.copilot.slotDatasource")}
-              value={datasourceId}
-              onChange={onDatasourceChange}
-              options={datasources.map((d) => ({
-                value: d.id,
-                label: d.name,
-              }))}
-            />
-          </>
-        )}
         {slots.map(renderSlot)}
         {hasDatePair && dateMode === "range" && !slots.some((s) => s.key === "monthsBack") && (
           <DateRangeSlot values={values} onChange={onChange} />

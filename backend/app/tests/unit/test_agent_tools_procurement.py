@@ -667,7 +667,11 @@ def test_pending_delivery_filters_reject_bad_date() -> None:
 
 
 def test_pending_delivery_in_tool_seed() -> None:
-    """工具元数据必须进种子（input_schema 给 planner 出参依据）。"""
+    """工具元数据必须进种子（input_schema 给 planner 出参依据）。
+
+    THBI 硬规则：`datasourceId` **不是**工具参数（调用方给了 handler 会拒绝），
+    schema 也不得声明它。
+    """
     from scripts.seed_agent_tool_configs import TOOL_SEEDS
 
     entry = next((s for s in TOOL_SEEDS if s["name"] == "pending_delivery_query"), None)
@@ -675,8 +679,11 @@ def test_pending_delivery_in_tool_seed() -> None:
     schema = entry["input_schema"]
     assert schema["additionalProperties"] is False
     for key in ("monthsBack", "dateFrom", "dateTo", "supplierKeys",
-                "materialKeys", "siteKeys", "datasourceId", "limit"):
+                "materialKeys", "siteKeys", "limit"):
         assert key in schema["properties"]
+    assert "datasourceId" not in schema["properties"], (
+        "THBI 硬规则：工具 schema 不得声明数据源参数"
+    )
 
 
 def test_build_pending_delivery_summary_sql() -> None:

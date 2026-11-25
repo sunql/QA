@@ -66,15 +66,7 @@ PENDING_DELIVERY_SLOT_SCHEMA: list[dict[str, Any]] = [
         "codePattern": _SITE_CODE,
     },
     {"key": "minOverdueDays", "type": "number", "label": "最低逾期天数"},
-    # admin 数据源选择（治理动作）：仅 admin 前端会传；非 admin 缺省 ⇒ 走默认绑定。
-    # hidden = 前端槽位表单不渲染（由数据源下拉写入），后端渲染照常进尾注/入参
-    {
-        "key": "datasourceId",
-        "type": "number",
-        "label": "数据源",
-        "conflictKeywords": ["数据源"],
-        "hidden": True,
-    },
+    # 无 datasourceId 槽位（THBI 硬规则：数据源由本体绑定唯一确定，2026-11-25 取消切换）
     # 显式日期区间（高级参数「时间段」模式）：覆盖 monthsBack 的近 N 月口径
     {
         "key": "dateFrom",

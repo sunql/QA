@@ -1,6 +1,6 @@
 /** hidden 槽位契约：`hidden: true` 的槽位不得渲染。
 
-后端 `slot_schema` 里 dateFrom/dateTo/datasourceId 是 hidden（由专用控件写入）；
+后端 `slot_schema` 里 dateFrom/dateTo 是 hidden（由时间窗区间控件写入）；
 一旦 API 丢了 hidden 字段，这里就会出现在高级参数面板里变成可见输入框。
  */
 
@@ -31,10 +31,6 @@ function renderPanel() {
         models={[]}
         modelId={undefined}
         onModelChange={() => undefined}
-        isAdmin={false}
-        datasources={[]}
-        datasourceId={undefined}
-        onDatasourceChange={() => undefined}
         siteOptions={[]}
       />
     </I18nextProvider>,
@@ -47,5 +43,13 @@ describe("ScenarioAdvancedParams hidden 槽位", () => {
     expect(screen.getByText("时间窗")).toBeTruthy();
     expect(screen.queryByText("开始日期")).toBeNull();
     expect(screen.queryByText("结束日期")).toBeNull();
+  });
+});
+
+describe("ScenarioAdvancedParams 数据源下拉已移除", () => {
+  it("不再渲染「数据源」标签与下拉（THBI 硬规则，admin 也不再可见）", () => {
+    renderPanel();
+    expect(screen.queryByText("数据源")).toBeNull();
+    expect(screen.queryByText("THBI Oracle")).toBeNull();
   });
 });

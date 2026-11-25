@@ -39,10 +39,6 @@ function Harness({ slots }: { slots: CopilotScenarioSlot[] }) {
         models={[]}
         modelId={undefined}
         onModelChange={() => undefined}
-        isAdmin={false}
-        datasources={[]}
-        datasourceId={undefined}
-        onDatasourceChange={() => undefined}
         siteOptions={[]}
       />
       {/* 槽位受控值只从 onChange 流转 ⇒ 用输出节点精确断言（antd 在 jsdom

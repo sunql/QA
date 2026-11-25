@@ -46,6 +46,31 @@ def test_chips_satisfy_required_slots() -> None:
                 )
 
 
+# ── pending_delivery 场景（THBI 硬规则：无数据源切换）──────────────────────
+
+
+def _pendingDeliverySeed() -> dict:
+    return next(s for s in SEEDS if s["scenario_code"] == "pending_delivery")
+
+
+def test_pending_delivery_scenario_has_no_datasource_slot() -> None:
+    """THBI 硬规则：既有 pending_delivery 场景也不再提供数据源槽位。"""
+    seed = _pendingDeliverySeed()
+    keys = {slot["key"] for slot in seed["slot_schema"]}
+    assert "datasourceId" not in keys
+
+
+def test_pending_delivery_slot_keys_are_tool_input_properties() -> None:
+    """场景槽位 key ⊆ pending_delivery_query 的 input_schema（同到货跟踪交叉守卫）。"""
+    from scripts.seed_agent_tool_configs import TOOL_SEEDS
+
+    seed = _pendingDeliverySeed()
+    tool = next(t for t in TOOL_SEEDS if t["name"] == "pending_delivery_query")
+    properties = set(tool["input_schema"]["properties"])
+    extra = {slot["key"] for slot in seed["slot_schema"]} - properties
+    assert not extra, f"场景槽位不在工具 input_schema 中：{sorted(extra)}"
+
+
 # ── delivery_tracking 场景（P5 到货跟踪）───────────────────────────────────
 
 

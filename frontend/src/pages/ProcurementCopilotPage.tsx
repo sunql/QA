@@ -25,7 +25,6 @@ import {
 import { LeftOutlined } from "@ant-design/icons";
 import { useTranslation } from "../i18n";
 import { useNavigate } from "react-router-dom";
-import { useAuthStore } from "../stores/authStore";
 import ConversationHistoryPanel from "../components/copilot/ConversationHistoryPanel";
 import { parsePendingDeliveryStep } from "../components/copilot/PendingDeliveryResultCard";
 import { parseSupplierRiskStep } from "../components/copilot/SupplierRiskResultCard";
@@ -49,7 +48,6 @@ import {
 } from "../components/copilot/copilotTurnModel";
 import { getAgentCatalog, type AgentCatalogEntry } from "../api/procurementKnowledge";
 import { listModels } from "../api/modelConfig";
-import { listDataSources } from "../api/datasource";
 import {
   listCopilotScenarios,
   type CopilotScenario,
@@ -69,7 +67,6 @@ import {
   type PendingDeliverySummaryResponse,
 } from "../api/procurementCopilot";
 import { getAgentRunSteps } from "../api/agentOrchestrationApi";
-import type { DataSource } from "../types/datasource";
 import type { ModelConfig } from "../types/modelConfig";
 
 const { TextArea } = Input;
@@ -116,9 +113,6 @@ export function buildChipSlots(
 export default function ProcurementCopilotPage() {
   const { t } = useTranslation();
   const nav = useNavigate();
-  // 数据源切换是治理动作（可指向别的业务库）⇒ 仅 admin 可见（2026-11-24 需求）
-  const user = useAuthStore((s) => s.user);
-  const isAdmin = (user?.roles ?? []).includes("admin");
   const [scenarioConfigs, setScenarioConfigs] = useState<CopilotScenario[]>([]);
   /** 自由对话用的通用 Agent 目录（只列 runnable）。 */
   const [scenarios, setScenarios] = useState<AgentCatalogEntry[]>([]);
@@ -148,22 +142,15 @@ export default function ProcurementCopilotPage() {
   const loadOptions = useCallback(async () => {
     setLoadError(null);
     try {
-      const [catalog, modelRows, dsRows, scenarioRows] = await Promise.all([
+      const [catalog, modelRows, scenarioRows] = await Promise.all([
         getAgentCatalog(),
         listModels(true),
-        listDataSources(true),
         listCopilotScenarios(),
       ]);
       const runnable = catalog.filter((entry) => entry.runnable);
       setScenarios(runnable);
       setModels(modelRows);
       setScenarioConfigs(scenarioRows);
-      setDatasources(Array.isArray(dsRows) ? dsRows : []);
-      setDatasourceId(
-        (prev) =>
-          prev ??
-          (Array.isArray(dsRows) ? dsRows.find((d) => d.isDefault)?.id ?? dsRows[0]?.id : undefined),
-      );
       setAgentCode((prev) => prev ?? runnable[0]?.agentCode);
       setModelId((prev) => prev ?? modelRows[0]?.id);
     } catch (err) {
@@ -341,8 +328,6 @@ export default function ProcurementCopilotPage() {
     }))
     .filter((item) => item.parsed !== null);
 
-  const [datasources, setDatasources] = useState<DataSource[]>([]);
-  const [datasourceId, setDatasourceId] = useState<number | undefined>();
   /** 结构化槽位值（键 = slotSchema[].key；发消息时随 scenarioCode 上送）。 */
   const [slotValues, setSlotValues] = useState<SlotValues>({});
   const [dateMode, setDateMode] = useState<DateMode>("months");
@@ -378,18 +363,17 @@ export default function ProcurementCopilotPage() {
 
   const [siteOptions, setSiteOptions] = useState<{ code: string; name: string }[]>([]);
 
-  /** 基地选项：进场景/换数据源拉一次。 */
+  /** 基地选项：进场景拉一次（数据源由后端本体绑定固定，前端不再传）。 */
   useEffect(() => {
     if (!isPendingDelivery) return;
-    listPendingDeliverySites(datasourceId)
+    listPendingDeliverySites()
       .then((rows) => setSiteOptions(Array.isArray(rows) ? rows : []))
       .catch(() => setSiteOptions([]));
-  }, [isPendingDelivery, datasourceId]);
+  }, [isPendingDelivery]);
 
-  /** 欢迎态业务现状：进入场景/换数据源/换时间窗即拉取（零 LLM 成本）。 */
+  /** 欢迎态业务现状：进入场景/换时间窗即拉取（零 LLM 成本）。 */
   const summaryFilters = useMemo(
     () => ({
-      datasourceId,
       monthsBack: Number(slotValues.monthsBack ?? DEFAULT_MONTHS_BACK),
       supplierKeys: Array.isArray(slotValues.supplierKeys) ? (slotValues.supplierKeys as string[]) : [],
       materialKeys: Array.isArray(slotValues.materialKeys) ? (slotValues.materialKeys as string[]) : [],
@@ -397,7 +381,7 @@ export default function ProcurementCopilotPage() {
       dateFrom: typeof slotValues.dateFrom === "string" ? slotValues.dateFrom : undefined,
       dateTo: typeof slotValues.dateTo === "string" ? slotValues.dateTo : undefined,
     }),
-    [datasourceId, slotValues],
+    [slotValues],
   );
 
   useEffect(() => {
@@ -422,7 +406,7 @@ export default function ProcurementCopilotPage() {
     };
   }, [isPendingDelivery, summaryFilters]);
 
-  /** 组装场景分支的 slots：当前槽位值 + admin 数据源（治理字段非 admin 不传）。 */
+  /** 组装场景分支的 slots：只上送当前槽位值（数据源由后端本体绑定固定）。 */
   const buildScenarioSlots = useCallback((): Record<string, unknown> | undefined => {
     if (!activeScenario) return undefined;
     const slots: Record<string, unknown> = { ...slotValues };
@@ -431,9 +415,8 @@ export default function ProcurementCopilotPage() {
       delete slots.dateFrom;
       delete slots.dateTo;
     }
-    if (isAdmin && datasourceId !== undefined) slots.datasourceId = datasourceId;
     return slots;
-  }, [activeScenario, slotValues, dateMode, isAdmin, datasourceId]);
+  }, [activeScenario, slotValues, dateMode]);
 
   /**
    * 发起一轮对话。场景分支 = scenarioCode + slots（主句可空，由模板提供）；
@@ -558,7 +541,6 @@ export default function ProcurementCopilotPage() {
     (chip: CopilotScenarioChip) => {
       if (!activeScenario) return;
       const slots = buildChipSlots(activeScenario, chip);
-      if (isAdmin && datasourceId !== undefined) slots.datasourceId = datasourceId;
       void sendTurn({
         message: "",
         displayQuestion: chip.label,
@@ -567,7 +549,7 @@ export default function ProcurementCopilotPage() {
         slots,
       });
     },
-    [activeScenario, isAdmin, datasourceId],
+    [activeScenario],
   );
 
   return (
@@ -655,10 +637,6 @@ export default function ProcurementCopilotPage() {
           models={models}
           modelId={modelId}
           onModelChange={setModelId}
-          isAdmin={isAdmin}
-          datasources={datasources}
-          datasourceId={datasourceId}
-          onDatasourceChange={setDatasourceId}
           siteOptions={siteOptions}
         />
       )}

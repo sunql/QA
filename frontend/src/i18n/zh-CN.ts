@@ -3714,7 +3714,6 @@ export const zhCN = {
     historyNew: "新建会话",
     scenarioDelivery: "待到货 / 逾期未到",
     scenarioDeliveryDesc: "按供应商汇总欠交量与逾期行，给催货建议（数据：采购订单行）。",
-    slotDatasource: "数据源",
     slotMonths: "时间窗（月）",
     slotSupplier: "供应商",
     slotSupplierAll: "全部",
@@ -3773,7 +3772,6 @@ export const zhCN = {
   pendingDelivery: {
     title: "待到货明细",
     subtitle: "欠交订单行（可按时间、供应商、物料、基地筛选）",
-    slotDatasource: "数据源",
     slotTime: "时间窗",
     timeMonthsUnit: "个月",
     slotSupplier: "供应商",

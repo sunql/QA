@@ -3713,7 +3713,6 @@ export const enUS = {
     historyNew: "New conversation",
     scenarioDelivery: "Pending delivery / overdue",
     scenarioDeliveryDesc: "Open quantities and overdue lines by supplier, with chase-up suggestions (source: PO lines).",
-    slotDatasource: "Datasource",
     slotMonths: "Window (months)",
     slotSupplier: "Supplier",
     slotSupplierAll: "All",
@@ -3772,7 +3771,6 @@ export const enUS = {
   pendingDelivery: {
     title: "Pending delivery lines",
     subtitle: "Open purchase order lines (filter by time, supplier, material, site)",
-    slotDatasource: "Datasource",
     slotTime: "Time window",
     timeMonthsUnit: "months",
     slotSupplier: "Supplier",

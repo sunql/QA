@@ -24,6 +24,9 @@ from app.domain.exceptions import ConflictError, ValidationError
 from app.domain.models import DataSource
 from app.infrastructure import neo4j_client
 from app.services.agent_tool_types import AgentToolContext, ToolResult
+from app.services.delivery_tracking_query import (
+    deliveryTrackingHandler as _deliveryTrackingHandler,
+)
 from app.services.entity_mapping_service import EntityMappingService
 from app.services.knowledge.document_search import searchProcurementDocuments
 from app.services.research_sql_runner import assertReadonlySql
@@ -1210,3 +1213,15 @@ async def pendingDeliveryHandler(
             f"欠交 TOP 供应商：{topSuppliers}。"
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# 到货跟踪（delivery_tracking_query，2026-11-25 P5）
+# ---------------------------------------------------------------------------
+
+
+async def deliveryTrackingQueryHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """`delivery_tracking_query` 转发（实现见 `delivery_tracking_query` 模块）。"""
+    return await _deliveryTrackingHandler(session, args, ctx)

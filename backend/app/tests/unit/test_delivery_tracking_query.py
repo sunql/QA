@@ -398,6 +398,51 @@ def test_summary_sql_exposes_handler_contract_and_three_states() -> None:
     assert "WHEN COALESCE(R.RECEIVED_QTY, 0) > 0" in sql
 
 
+def test_three_states_are_mutually_exclusive_and_exhaustive() -> None:
+    """三态互斥：未到货必须**同时**有欠交行，否则与全到货重叠 ⇒ 到货率 > 100%。
+
+    订购量 ≤ 0 且未收货的订单 `OPEN_LINES = 0` 且 `RECEIVED_LINES = 0`：
+    旧口径（只看 `RECEIVED_LINES = 0`）会把它同时算进「全到货」与「未到货」。
+    """
+    from app.services.delivery_tracking_query import (
+        buildDeliveryTrackingBySupplierSql,
+        buildDeliveryTrackingSummarySql,
+    )
+
+    window = resolveWindow(today=date(2026, 11, 25), monthsBack=12)
+    summarySql = buildDeliveryTrackingSummarySql(
+        order=_orderBinding(), receipt=_receiptBinding(), window=window
+    )
+    supplierSql = buildDeliveryTrackingBySupplierSql(
+        order=_orderBinding(), receipt=_receiptBinding(), window=window
+    )
+
+    # 全到货 = 无欠交（覆盖「订购量 ≤ 0 且未收货」）；未到货 = 有欠交且零收货。
+    assert "CASE WHEN T.LINE_COUNT > 0 AND T.OPEN_LINES = 0" in summarySql
+    assert (
+        "CASE WHEN T.LINE_COUNT > 0 AND T.RECEIVED_LINES = 0 AND T.OPEN_LINES > 0" in summarySql
+    )
+    assert (
+        "CASE WHEN S.LINE_COUNT > 0 AND S.RECEIVED_LINES = 0 AND S.OPEN_LINES > 0"
+        in supplierSql
+    )
+    # 反证：不允许「未到货」缺 OPEN_LINES 谓词（唯一会导致重复计数的形态）
+    assert "CASE WHEN T.LINE_COUNT > 0 AND T.RECEIVED_LINES = 0 THEN" not in summarySql
+
+
+def test_by_order_sql_carries_order_date_for_assembly() -> None:
+    """明细 SQL 必须带下单日期：结果结构 `orderDate` 的来源（否则字段恒 null）。"""
+    from app.services.delivery_tracking_query import buildDeliveryTrackingByOrderSql
+
+    sql = buildDeliveryTrackingByOrderSql(
+        order=_orderBinding(),
+        receipt=_receiptBinding(),
+        window=resolveWindow(today=date(2026, 11, 25), monthsBack=12),
+    )
+
+    assert "O.ORDER_DATE AS ORDER_DATE" in sql
+
+
 def test_sql_renders_renamed_binding_and_never_erp_raw_names() -> None:
     """表名/列名只来自绑定；ERP 原始列名一个都不许出现。"""
     order, receipt = _renamedBindings()

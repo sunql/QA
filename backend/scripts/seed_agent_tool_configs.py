@@ -134,6 +134,40 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "enabled": True,
     },
     {
+        "name": "delivery_tracking_query",
+        "description": (
+            "到货跟踪：按时间窗/供应商统计订单到货达成（订单到货率 + 订单三态）"
+            "+ 订单物料明细（已到/未到）。本体绑定取数（THBI），只读无 LLM。"
+        ),
+        "data_object": "PURCHASE_ORDER",
+        "data_layers": ["DWD"],
+        "handler_kind": "BUILTIN",
+        "handler_ref": "delivery_tracking_query",
+        "arg_extractor_kind": "delivery_tracking_query",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "monthsBack": {"type": "integer", "minimum": 1, "maximum": 36,
+                               "description": "时间窗（月，默认 12）；给了 dateFrom/dateTo 则忽略"},
+                "dateFrom": {"type": "string",
+                             "description": "下单日期段起（YYYY-MM-DD，与 dateTo 成对）"},
+                "dateTo": {"type": "string",
+                           "description": "下单日期段止（YYYY-MM-DD，与 dateFrom 成对）"},
+                "anchorDay": {"type": "integer", "minimum": 1, "maximum": 28,
+                              "description": "月度周期锚点日（企业默认 24）；给了则按锚点周期取窗"},
+                "periodIndex": {"type": "integer",
+                                "description": "锚点期序，0=本期（已结束的最近完整周期），-1=上期"},
+                "supplierKeys": {"type": "array", "items": {"type": "string"},
+                                 "description": "供应商列表（多选；每项可为编码/企业键/全名/简称）"},
+                "orderKeys": {"type": "array", "items": {"type": "string"},
+                              "description": "订单号列表（可选，下钻指定订单）"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "additionalProperties": False,
+        },
+        "enabled": True,
+    },
+    {
         "name": "purchase_history_query",
         "description": "采购历史查询：供应商(+物料)近 N 月订单行汇总与明细（业务库只读，SQL Guard 闸门，M3-2）",
         "data_object": "PURCHASE_ORDER",

@@ -1,10 +1,10 @@
-"""到货跟踪工具（2026-11-25，P5）：取数窗口 + 三段只读 SQL 模板。
+"""到货跟踪工具（2026-11-25，P5）：取数窗口 + 三段只读 SQL + handler 装配。
 
 口径（spec 4.1 / 4.2，THBI 实测基线）
 ------------------------------------
     已收量（行级）  RECEIVED = SUM(<RCV_QTY_STU>)   -- 收货类按 PO_NO+PO_LINE_NO 聚合
     行级欠交量      OPEN_QTY = <PO_QTY> - RECEIVED
-    订单三态        全到货 / 部分到货 / 未到货
+    订单三态        全到货 / 部分到货 / 未到货（**互斥且穷尽**）
     订单到货率      全到货订单 / 总订单              （主指标）
     量级率          SUM(RECEIVED) / SUM(<PO_QTY>)    （参考，受超大额未到货行影响）
     脏数据（4.4）   行级 OPEN_QTY >= 1e6 ⇒ 录入错误行：不进三态/量级率，
@@ -16,11 +16,19 @@
 - 本期 = **已结束的最近一个完整锚点周期**（今天 2026-11-25 ⇒ 2026-10-24~2026-11-24）；
 - 锚点日上限 28（29/30/31 在短月无对应日）。
 
+三段结果（spec 5.3，camelCase）
+-------------------------------
+    summary     窗口汇总（两个率值 + 三态计数 + excludedRows）
+    bySupplier  供应商分组（名称/企业键取自 MDM `entity_mapping`，不 JOIN 数仓字典）
+    byOrder     订单 × 行明细（脏行保留，供人核查）
+
 硬规则
 ------
 - 一切对象出自 THBI（`datasource_id=1` + `schema_name=THBI`），由绑定解析保证；
+  `datasourceId` **不是**工具参数（调用方给了即 fail-closed）；
 - 物理表名/列名只来自本体绑定解析，**不进代码常量**；
-- 失败一律显式抛出（非法参数 `ValidationError`，属性缺失 `BindingResolutionError`），
+- 失败一律显式抛出（非法参数 `ValidationError`，属性缺失 `BindingResolutionError`，
+  供应商解析失败 `NotFoundError`，三态不自洽 `DeliveryTrackingInvariantError`），
   不静默纠正、不静默忽略。
 """
 
@@ -31,12 +39,51 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ValidationError
-from app.services.ontology_binding_resolver import ResolvedBinding
+from app.services.agent_tool_types import AgentToolContext, ToolResult
+from app.services.delivery_tracking_assembly import (
+    # Task 4 契约：装配件与不变式异常从本模块可导入（实现见 assembly 模块）。
+    DeliveryTrackingInvariantError,  # noqa: F401
+    _assembleOrders,
+    _assembleSummary,
+    _assembleSupplier,
+    _orderStatus,  # noqa: F401
+    _supplierCodesOf,
+    _withSupplierDirectory,
+)
+from app.services.ontology_binding_resolver import ResolvedBinding, resolveBinding
 
 ORDER_CLASS_NAME = "DWD_PURCHASE_ORDER_DTL"
 RECEIPT_CLASS_NAME = "DWD_GOODS_RECEIPT_DTL"
+
+#: 结果里的数据层可读标识（THBI 的 ODS/ERP 影子表，spec 5.3）。
+DATA_LAYER_LABEL = "thbi_ods_erp"
+#: 订单明细上限默认值（`_rowLimit` 再把上界夹到 200）。
+_DEFAULT_ORDER_LIMIT = 50
+#: 绑定必需属性：与三段 SQL 的取值一一对应，缺一即 fail-closed。
+#:
+#: 收货侧必须含 `RCV_DATE` 与 `ITEM_DESC`：收货聚合 SELECT 会取
+#: `MAX(<ITEM_DESC>)` / `MAX(<RCV_DATE>)`（`_receiptAggregate`）。
+_ORDER_REQUIRED_PROPERTIES = (
+    "PO_NO",
+    "PO_LINE_NO",
+    "PO_QTY",
+    "ORDER_DATE",
+    "SUPPLIER_CODE",
+    "ITEM_CODE",
+    "EXP_RCV_DATE",
+)
+_RECEIPT_REQUIRED_PROPERTIES = (
+    "PO_NO",
+    "PO_LINE_NO",
+    "RCV_QTY_STU",
+    "ITEM_DESC",
+    "RCV_DATE",
+)
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 #: 锚点日上限 28：避免 29/30/31 在短月无对应日（spec 4.3）。
@@ -290,7 +337,16 @@ def _lineMeasures(dirty: str, qtyExpr: str, qtyAlias: str) -> str:
 def _statesSelect(alias: str) -> str:
     """订单三态 select 片段（`alias` 为订单级派生表别名）。
 
-    三态互斥的前提是「有效行数 > 0」：全脏行订单不落入任一态。
+    三态必须**互斥且穷尽**（有效行数 > 0 的订单恰好落入一态）：
+
+    - 全到货：无欠交行（不论是否收过货；订购量 ≤ 0 且未收货也在此态）；
+    - 部分：有欠交且有收货；
+    - 未到货：有欠交且一行都没收。
+
+    ⚠️ 「未到货」**必须**同时要求 `OPEN_LINES > 0`：否则「订购量 ≤ 0 且未收货」
+    的订单会同时命中「全到货」与「未到货」⇒ 三态之和 > 总订单数 ⇒ 到货率 > 100%
+    （本项目已知风险点；装配层另有 `DeliveryTrackingInvariantError` 兜底）。
+    全脏行订单（`LINE_COUNT = 0`）不落入任一态。
     """
     return (
         f"  SUM(CASE WHEN {alias}.LINE_COUNT > 0 AND {alias}.OPEN_LINES = 0"
@@ -298,7 +354,7 @@ def _statesSelect(alias: str) -> str:
         f"  SUM(CASE WHEN {alias}.OPEN_LINES > 0 AND {alias}.RECEIVED_LINES > 0"
         f" THEN 1 ELSE 0 END) AS PARTIAL,\n"
         f"  SUM(CASE WHEN {alias}.LINE_COUNT > 0 AND {alias}.RECEIVED_LINES = 0"
-        f" THEN 1 ELSE 0 END) AS NOT_ARRIVED"
+        f" AND {alias}.OPEN_LINES > 0 THEN 1 ELSE 0 END) AS NOT_ARRIVED"
     )
 
 
@@ -417,6 +473,7 @@ def buildDeliveryTrackingByOrderSql(
     """
     poNo = order.column("PO_NO")
     poLine = order.column("PO_LINE_NO")
+    orderDate = order.column("ORDER_DATE")
     orderQty = order.column("PO_QTY")
     supplierCode = order.column("SUPPLIER_CODE")
     itemCode = order.column("ITEM_CODE")
@@ -430,6 +487,7 @@ def buildDeliveryTrackingByOrderSql(
 SELECT
   O.{poNo} AS PO_NO,
   O.{poLine} AS PO_LINE_NO,
+  O.{orderDate} AS ORDER_DATE,
   O.{supplierCode} AS SUPPLIER_CODE,
   O.{itemCode} AS MATERIAL_CODE,
   R.ITEM_DESC AS MATERIAL_DESC,
@@ -444,3 +502,287 @@ LEFT JOIN {_receiptAggregate(receipt)} R
 WHERE {_windowPredicate(order, window)}{extraFilter}
 ORDER BY OPEN_QTY DESC
 {tail}""".strip()
+
+
+# ---------------------------------------------------------------- 供应商检索
+
+
+async def _resolveSupplierKey(session: AsyncSession, key: str) -> tuple[int, str, str | None]:
+    """供应商检索阶梯（编码 → 企业键 → 全名 → 简称）。
+
+    复用 `Supplier360Service._resolveSupplier`（四段阶梯；简称模糊多命中会
+    抛 `NotFoundError` 并列候选，**绝不静默取第一个**）。
+    """
+    from app.services.supplier_360_service import Supplier360Service
+
+    return await Supplier360Service()._resolveSupplier(session, key)
+
+
+async def _resolveSupplierCodes(
+    session: AsyncSession, keys: tuple[str, ...]
+) -> tuple[str, ...]:
+    """把用户给的供应商标识解析成业务码列表（去重、保序）。
+
+    解析失败**向上抛**（`NotFoundError`），不静默丢弃该供应商——
+    用户给了 3 家、静默丢 1 家，结果就是错的。
+    """
+    resolved: list[str] = []
+    for key in keys:
+        _, enterpriseCode, _ = await _resolveSupplierKey(session, key)
+        if enterpriseCode not in resolved:
+            resolved.append(enterpriseCode)
+    return tuple(resolved)
+
+
+async def _loadSupplierDirectory(
+    session: AsyncSession, codes: tuple[str, ...]
+) -> dict[str, dict[str, Any]]:
+    """按业务码批量取 MDM 供应商名称与企业键（spec 3.5 决策 9）。
+
+    名称**不 JOIN 数仓字典**（`DIM_SUPPLIER` 覆盖率不足）；MDM 无行 ⇒ 名称为 None。
+    """
+    if not codes:
+        return {}
+    from sqlalchemy import select
+
+    from app.domain.models import EntityMapping
+
+    rows = (
+        await session.execute(
+            select(
+                EntityMapping.enterprise_code,
+                EntityMapping.name,
+                EntityMapping.enterprise_key,
+            )
+            .where(
+                EntityMapping.entity_type == "SUPPLIER",
+                EntityMapping.enterprise_code.in_(codes),
+            )
+            .order_by(EntityMapping.name.asc().nulls_last())
+        )
+    ).all()
+    directory: dict[str, dict[str, Any]] = {}
+    for enterpriseCode, name, enterpriseKey in rows:
+        code = str(enterpriseCode)
+        current = directory.get(code)
+        if current is None:
+            directory[code] = {"name": name or None, "enterpriseKey": enterpriseKey}
+        elif current["name"] is None and name:
+            directory[code] = {"name": name, "enterpriseKey": enterpriseKey}
+    return directory
+
+
+# ---------------------------------------------------------------- handler 装配件
+
+
+async def _loadActiveDataSource(session: AsyncSession, datasourceId: int) -> Any:
+    """按 id 取数据源；不存在 `NotFoundError`、停用 `DataSourceInactiveError`。"""
+    from app.services.datasource_service import (
+        DataSourceService,
+        ensureDatasourceActive,
+    )
+
+    ds = await DataSourceService().get(session, datasourceId)
+    ensureDatasourceActive(ds)
+    return ds
+
+
+def _getAdapter(datasourceId: int, ds: Any) -> Any:
+    """取业务库适配器（惰性导入，与既有采购工具同路径）。"""
+    from app.infrastructure.business_db_pool import get_adapter
+
+    return get_adapter(datasourceId, ds)
+
+
+def _keyTuple(value: object, field: str) -> tuple[str, ...]:
+    """字符串键列表参数（单个字符串视作一项；数字先 `str()`）。"""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        items: list[object] = [value]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        raise ValidationError(f"{field} 必须是字符串列表，收到 {value!r}")
+    keys: list[str] = []
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            raise ValidationError(f"{field} 的元素必须是字符串或整数，收到 {item!r}")
+        text = str(item).strip()
+        if text:
+            keys.append(text)
+    return tuple(keys)
+
+
+def _intArg(value: object, field: str, default: int) -> int:
+    """整数参数（bool/字符串 fail-closed，不静默 `int()` 转换）。"""
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValidationError(f"{field} 必须是整数，收到 {value!r}")
+    return value
+
+
+async def _loadDeliveryTrackingRows(
+    *,
+    adapter: Any,
+    order: ResolvedBinding,
+    receipt: ResolvedBinding,
+    window: DeliveryTrackingWindow,
+    supplierKeys: tuple[str, ...],
+    orderKeys: tuple[str, ...],
+    limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """执行三段只读 SQL（summary / bySupplier / byOrder）。"""
+    summaryRows = await adapter.execute_read_only(
+        buildDeliveryTrackingSummarySql(order=order, receipt=receipt, window=window)
+    )
+    supplierRows = await adapter.execute_read_only(
+        buildDeliveryTrackingBySupplierSql(
+            order=order,
+            receipt=receipt,
+            window=window,
+            supplierKeys=supplierKeys,
+            limit=limit,
+        )
+    )
+    orderRows = await adapter.execute_read_only(
+        buildDeliveryTrackingByOrderSql(
+            order=order,
+            receipt=receipt,
+            window=window,
+            supplierKeys=supplierKeys,
+            orderKeys=orderKeys,
+            limit=limit,
+        )
+    )
+    return summaryRows, supplierRows, orderRows
+
+
+def _resolveTrackedWindow(args: dict) -> DeliveryTrackingWindow:
+    """工具参数 → 取数窗口（优先级与校验见 `resolveWindow`）。"""
+    return resolveWindow(
+        today=date.today(),
+        monthsBack=args.get("monthsBack"),
+        dateFrom=args.get("dateFrom"),
+        dateTo=args.get("dateTo"),
+        anchorDay=args.get("anchorDay"),
+        periodIndex=args.get("periodIndex"),
+    )
+
+
+async def _resolveFilterArgs(
+    session: AsyncSession, args: dict
+) -> tuple[tuple[str, ...], tuple[str, ...], int]:
+    """过滤参数：供应商（先过检索阶梯）/ 订单号 / 明细上限。"""
+    supplierKeys = await _resolveSupplierCodes(
+        session, _keyTuple(args.get("supplierKeys"), "supplierKeys")
+    )
+    orderKeys = _keyTuple(args.get("orderKeys"), "orderKeys")
+    limit = _intArg(args.get("limit"), "limit", _DEFAULT_ORDER_LIMIT)
+    return supplierKeys, orderKeys, limit
+
+
+async def _resolveTrackedBindings(
+    session: AsyncSession,
+) -> tuple[ResolvedBinding, ResolvedBinding]:
+    """解析订单行 / 收货行两条本体绑定（必需属性缺一即 fail-closed）。"""
+    order = await resolveBinding(
+        session,
+        className=ORDER_CLASS_NAME,
+        requiredProperties=_ORDER_REQUIRED_PROPERTIES,
+    )
+    receipt = await resolveBinding(
+        session,
+        className=RECEIPT_CLASS_NAME,
+        requiredProperties=_RECEIPT_REQUIRED_PROPERTIES,
+    )
+    return order, receipt
+
+
+def _buildResultData(
+    *,
+    datasourceId: int,
+    window: DeliveryTrackingWindow,
+    summary: dict[str, Any],
+    bySupplier: list[dict[str, Any]],
+    byOrder: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """工具结果 data（spec 5.3 形状；前端结果卡直接消费）。"""
+    return {
+        "via": "business_db",
+        "datasourceId": datasourceId,
+        "dataLayer": DATA_LAYER_LABEL,
+        "window": {
+            "dateFrom": window.dateFrom.isoformat(),
+            "dateTo": window.dateTo.isoformat(),
+            "mode": window.mode,
+        },
+        "summary": summary,
+        "bySupplier": bySupplier,
+        "byOrder": byOrder,
+    }
+
+
+def _buildAnswer(summary: dict[str, Any]) -> str:
+    """给编排/聊天层的一句话结论（数字与 data 同源）。"""
+    excludedNote = (
+        f"；剔除源侧数量异常行 {summary['excludedRows']} 行"
+        if summary["excludedRows"]
+        else ""
+    )
+    return (
+        f"到货率 {summary['orderArrivalRate']}%（全到货 {summary['allArrivedOrders']}"
+        f" / 部分 {summary['partialArrivedOrders']} / 未到货 {summary['notArrivedOrders']}，"
+        f"共 {summary['totalOrders']} 单）；量级加权到货率 {summary['qtyArrivalRate']}%"
+        f"{excludedNote}。"
+    )
+
+
+async def deliveryTrackingHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """`delivery_tracking_query`：到货率汇总 + 供应商分组 + 订单明细。
+
+    数据源固定 THBI（`datasource_id=1`，由绑定解析闸门保证），物理表列全部
+    来自本体绑定；调用方给 `datasourceId` 一律拒绝（不是工具参数）。
+    """
+    if "datasourceId" in args:
+        raise ValidationError(
+            "delivery_tracking_query 的数据源固定为 THBI，不接受调用方指定数据源（datasourceId）"
+        )
+    window = _resolveTrackedWindow(args)
+    # 供应商标识可能是编码/企业键/全名/简称 ⇒ 先过解析阶梯再进 SQL。
+    supplierKeys, orderKeys, limit = await _resolveFilterArgs(session, args)
+    order, receipt = await _resolveTrackedBindings(session)
+    ds = await _loadActiveDataSource(session, order.datasourceId)
+    adapter = _getAdapter(order.datasourceId, ds)
+
+    summaryRows, supplierRows, orderRows = await _loadDeliveryTrackingRows(
+        adapter=adapter,
+        order=order,
+        receipt=receipt,
+        window=window,
+        supplierKeys=supplierKeys,
+        orderKeys=orderKeys,
+        limit=limit,
+    )
+    directory = await _loadSupplierDirectory(
+        session, _supplierCodesOf([*supplierRows, *orderRows])
+    )
+    summary = _assembleSummary(summaryRows[0] if summaryRows else {})
+    bySupplier = [
+        _assembleSupplier(row) for row in _withSupplierDirectory(supplierRows, directory)
+    ]
+    byOrder = _assembleOrders(_withSupplierDirectory(orderRows, directory))
+
+    return ToolResult(
+        data=_buildResultData(
+            datasourceId=order.datasourceId,
+            window=window,
+            summary=summary,
+            bySupplier=bySupplier,
+            byOrder=byOrder,
+        ),
+        answer=_buildAnswer(summary),
+    )

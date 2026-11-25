@@ -404,3 +404,21 @@ async def test_assess_str_not_found_raises(dbSession: AsyncSession):
         await SupplierRiskService().assess(
             dbSession, "DOES_NOT_EXIST", llm_factory=None
         )
+
+def test_buildLlmPrompt_returns_message_objects():
+    """回归（2026-11-25 生产实证）：真实 openai_client.complete 要求消息带
+    .role/.content 属性（LlmMessage），裸 dict 必 AttributeError ⇒ 工具内
+    LLM 增强恒降级 fallback_template。"""
+    from types import SimpleNamespace
+
+    from app.infrastructure.llm.base_client import LlmMessage
+    from app.services.supplier_risk_service import _buildLlmPrompt
+    from app.domain.enums import RiskLevel
+
+    view = SimpleNamespace(
+        profile=SimpleNamespace(enterprise_code="A013", enterprise_key=1)
+    )
+    messages = _buildLlmPrompt(view, [], RiskLevel.LOW)
+    assert all(isinstance(m, LlmMessage) for m in messages)
+    assert [m.role for m in messages] == ["system", "user"]
+    assert all(isinstance(m.content, str) and m.content for m in messages)

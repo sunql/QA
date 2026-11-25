@@ -171,8 +171,12 @@ async def appendTurn(
     *,
     question: str,
     runId: str,
+    dataStamp: str | None = None,
 ) -> ProcurementCopilotTurn:
-    """追加一轮（seq 由已有轮数推导；上限后拒绝，要求新开会话）。"""
+    """追加一轮（seq 由已有轮数推导；上限后拒绝，要求新开会话）。
+
+    ``dataStamp``（0171）：场景分支的数据新鲜度戳，进同日复用匹配键。
+    """
     turns = await listTurns(session, conversation.conversation_id)
     if len(turns) >= MAX_TURNS_PER_CONVERSATION:
         raise ValidationError(
@@ -183,6 +187,7 @@ async def appendTurn(
         seq=len(turns) + 1,
         question=question,
         run_id=runId,
+        data_stamp=dataStamp or None,
         created_time=datetime.now(UTC),
     )
     session.add(turn)

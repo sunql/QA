@@ -187,16 +187,26 @@ async def _history(
     return conversationStore.historyFromTurns(turns, views)
 
 
-async def _sameDayReusableRunId(session: AsyncSession, *, dto: Any, actor: Any, question: str) -> str | None:
+async def _sameDayReusableRunId(
+    session: AsyncSession,
+    *,
+    dto: Any,
+    actor: Any,
+    question: str,
+    dataStamp: str = "",
+) -> str | None:
     """同日同问复用（2026-11-24 需求：一天内多次查询数据未变化 ⇒ 复用）。
 
-    命中条件：同用户 + 同 Agent + 同模型 + **同问题文本** + 当日 +
-    状态 ∈ {QUEUED, RUNNING, SUCCEEDED}（进行中的复用 = 相同问题并发去重；
-    FAILED/CANCELLED **不复用** —— 给用户重试的机会）。
+    命中条件：同用户 + 同 Agent + 同模型 + **同问题文本** + **同数据新鲜度戳**
+    + 当日 + 状态 ∈ {QUEUED, RUNNING, SUCCEEDED}（进行中的复用 = 相同问题并发
+    去重；FAILED/CANCELLED **不复用** —— 给用户重试的机会）。
+    数据戳（0171）：槽位实体在 feature_value 的最新 computed_at——指标重算
+    ⇒ 戳变化 ⇒ 相同问题文本**不**命中旧 run（2026-11-25 需求：数据变了就重算）。
     复用 = 本轮 turn 直接指向该 run（SSE 跟随其终态，**零 LLM 成本**）；
-    文字/参数不同 ⇒ 正常新跑。resume（追问续跑）优先级更高，在上文已处理。
+    文字/参数/数据不同 ⇒ 正常新跑。resume（追问续跑）优先级更高，在上文已处理。
     """
     # 惰性导入：本模块被 run service 侧引用 ⇒ 顶层 import 模型会成环
+    from sqlalchemy import func as sa_func
     from sqlalchemy import select as sa_select
 
     from app.domain.agent_orchestration_models import AgentOrchestrationRun
@@ -218,12 +228,53 @@ async def _sameDayReusableRunId(session: AsyncSession, *, dto: Any, actor: Any, 
             ),
             AgentOrchestrationRun.created_time >= todayStart,
             ProcurementCopilotTurn.question == question,
+            # NULL（非场景分支/旧行）与 ""（场景分支无特征数据）同视为无戳
+            sa_func.coalesce(ProcurementCopilotTurn.data_stamp, "") == dataStamp,
         )
         .order_by(AgentOrchestrationRun.created_time.desc(), AgentOrchestrationRun.id.desc())
         .limit(1)
     )
     row = (await session.execute(stmt)).scalars().first()
     return row
+
+
+async def _scenarioDataStamp(session: AsyncSession, dto: CopilotMessageRequest) -> str:
+    """场景分支的数据新鲜度戳（0171）：槽位里出现的实体键在 feature_value
+    中的最新 computed_at（ISO 串）。
+
+    - 非场景分支 / 无可解析实体 ⇒ ""（与旧行 NULL 同一复用桶，行为不变）；
+    - 实体键从槽位值递归收集（标量/数组）——编码即实体标识（B125/A013 等）；
+    - 指标重算 ⇒ computed_at 变化 ⇒ 戳变化 ⇒ 复用失效（数据变了就重算）。
+    """
+    if not dto.scenario_code or not dto.slots:
+        return ""
+    codes: set[str] = set()
+
+    def _collect(value: Any) -> None:
+        if isinstance(value, str):
+            if value.strip():
+                codes.add(value.strip())
+        elif isinstance(value, (int, float)):
+            codes.add(str(value))
+        elif isinstance(value, list):
+            for item in value:
+                _collect(item)
+
+    for value in dto.slots.values():
+        _collect(value)
+    if not codes:
+        return ""
+
+    from sqlalchemy import func as sa_func
+    from sqlalchemy import select as sa_select
+
+    from app.domain.models import FeatureValue
+
+    row = await session.execute(
+        sa_select(sa_func.max(FeatureValue.computed_at)).where(FeatureValue.entity_key.in_(codes))
+    )
+    stamp = row.scalar()
+    return stamp.isoformat() if stamp else ""
 
 
 async def _renderScenarioQuestion(session: AsyncSession, dto: CopilotMessageRequest) -> str:
@@ -300,13 +351,22 @@ async def prepareCopilotTurn(
     # （冲突让位 + 模板替换在 DB 配置驱动的一处收口）；缺 slots = 自由文本。
     runQuestion = await _renderScenarioQuestion(session, dto)
 
+    # 数据新鲜度戳（0171）：槽位实体在 feature_value 的最新 computed_at。
+    # 指标重算 ⇒ 戳变化 ⇒ 相同问题文本不再命中旧 run（数据变了就重算）。
+    dataStamp = await _scenarioDataStamp(session, dto)
+
     # 同日同问复用（resume 优先级更高，上文已处理）：命中 ⇒ turn 指向既有
     # SUCCEEDED run，SSE 立刻吐 done —— 零 LLM 成本（2026-11-24 需求：
     # 一天多次查询数据未变化 ⇒ 后台判断复用，前台正常问话即可）。
-    # 复用键用**渲染后**的问题（同槽位同文字 = 同一次取数）。
-    reusedRunId = await _sameDayReusableRunId(session, dto=dto, actor=actor, question=runQuestion)
+    # 复用键 = 渲染后问题 + 数据新鲜度戳（2026-11-25 需求：指标重算后同问
+    # 必须重算，不能拿旧数据答新数据的问题）。
+    reusedRunId = await _sameDayReusableRunId(
+        session, dto=dto, actor=actor, question=runQuestion, dataStamp=dataStamp
+    )
     if reusedRunId is not None:
-        await conversationStore.appendTurn(session, conversation, question=runQuestion, runId=reusedRunId)
+        await conversationStore.appendTurn(
+            session, conversation, question=runQuestion, runId=reusedRunId, dataStamp=dataStamp
+        )
         await session.commit()
         reusedRun = await runner.getRun(session, reusedRunId, actor)
         return CopilotTurnResult(
@@ -322,7 +382,9 @@ async def prepareCopilotTurn(
         toRunCreate(dto, inputText=conversationStore.buildRunInput(runQuestion, history)),
         actor,
     )
-    await conversationStore.appendTurn(session, conversation, question=runQuestion, runId=created.run_id)
+    await conversationStore.appendTurn(
+        session, conversation, question=runQuestion, runId=created.run_id, dataStamp=dataStamp
+    )
     await session.commit()
     return CopilotTurnResult(
         runId=created.run_id,

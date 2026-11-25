@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -264,9 +265,19 @@ _SCENARIO_ROW = SimpleNamespace(
 )
 
 
+class _Row:
+    """同时满足两种读取形态：.scalars().first()（复用查询）与 .scalar()（stamp）。"""
+
+    def scalars(self) -> Any:
+        return SimpleNamespace(first=lambda: None)
+
+    def scalar(self) -> Any:
+        return None
+
+
 class _ScenarioSession:
     async def execute(self, _stmt: Any) -> Any:
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+        return _Row()
 
     async def commit(self) -> None:
         return None
@@ -276,6 +287,7 @@ class _CapturingRunner:
     def __init__(self) -> None:
         self.createInput: str | None = None
         self.turnQuestions: list[str] = []
+        self.dataStamps: list[str] = []
 
     async def createRun(self, _session: Any, runCreate: Any, _actor: Any) -> Any:
         self.createInput = runCreate.input
@@ -289,8 +301,11 @@ def _installScenarioStore(monkeypatch: pytest.MonkeyPatch, runner: _CapturingRun
     async def _fakeTurns(_session: Any, _cid: Any) -> list[Any]:
         return []
 
-    async def _fakeAppend(_session: Any, _conv: Any, *, question: str, runId: str) -> None:
+    async def _fakeAppend(
+        _session: Any, _conv: Any, *, question: str, runId: str, dataStamp: str = ""
+    ) -> None:
         runner.turnQuestions.append(question)
+        runner.dataStamps.append(dataStamp)
 
     monkeypatch.setattr(copilot.conversationStore, "loadOrCreateConversation", _fakeLoad)
     monkeypatch.setattr(copilot.conversationStore, "listTurns", _fakeTurns)
@@ -426,3 +441,59 @@ async def test_emptyMessage_withoutSlots_rejected(
             SimpleNamespace(userId="u", roles=("admin",)),
             service=runner,
         )
+
+
+# ---------------------------------------------------------------- 数据新鲜度戳（0171）
+
+
+def _stampSession(maxComputedAt: Any) -> Any:
+
+    class _StampStmt:
+        def __init__(self, value: Any) -> None:
+            self._value = value
+
+        def where(self, *_a: Any, **_k: Any) -> _StampStmt:
+            return self
+
+        def scalars(self) -> Any:
+            return self
+
+        def first(self) -> Any:
+            return self._value
+
+        def scalar(self) -> Any:
+            return self._value
+
+    class _StampSession:
+        async def execute(self, _stmt: Any) -> Any:
+            return _StampStmt(maxComputedAt)
+
+    return _StampSession()
+
+
+@pytest.mark.asyncio
+async def test_scenarioDataStamp_usesMaxComputedAt() -> None:
+    """槽位实体 → feature_value 最新 computed_at（ISO 串）。"""
+    from datetime import UTC, datetime
+
+    ts = datetime(2026, 11, 25, 8, 0, 0, tzinfo=UTC)
+    stamp = await copilot._scenarioDataStamp(
+        _stampSession(ts),
+        _scenarioDto(scenario_code="supplier_risk", slots={"supplierKey": "A013"}),
+    )
+    assert stamp == ts.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_scenarioDataStamp_noFeatureRows_returnsEmpty() -> None:
+    stamp = await copilot._scenarioDataStamp(
+        _stampSession(None),
+        _scenarioDto(scenario_code="supplier_risk", slots={"supplierKey": "B125"}),
+    )
+    assert stamp == ""
+
+
+@pytest.mark.asyncio
+async def test_scenarioDataStamp_nonScenario_returnsEmpty() -> None:
+    stamp = await copilot._scenarioDataStamp(_stampSession(datetime.now(UTC)), _scenarioDto())
+    assert stamp == ""  # 非场景分支根本不查（恒空）

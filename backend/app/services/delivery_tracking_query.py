@@ -255,19 +255,19 @@ async def _resolveSupplierCodes(session: AsyncSession, keys: tuple[str, ...]) ->
 
 
 async def _loadSupplierDirectory(session: AsyncSession, codes: tuple[str, ...]) -> dict[str, dict[str, Any]]:
-    """按业务码批量取 MDM 供应商名称与企业键（spec 3.5 决策 9）。
+    """按业务码批量取供应商名称与企业键（spec 3.5 决策 9）。
 
-    名称**不 JOIN 数仓字典**（`DIM_SUPPLIER` 覆盖率不足）；MDM 无行 ⇒ 名称为 None
+    名称**不 JOIN 数仓字典**（`DIM_SUPPLIER` 覆盖率不足）；无行 ⇒ 名称为 None
     （装配层再回退 SQL 带出的 ERP 名，spec 5.7）。
 
-    ⚠️ 只取 `source_system = MDM` 的行：同一 `enterprise_code` 可能在 ERP/SRM
-    也有行，不限定来源就等于"按字母序任取一个"，与「以 MDM 为准」不符。
+    ⚠️ **不按 `source_system` 过滤**：`entity_mapping` 是主数据映射 SSOT，
+    `source_system` 只描述映射来源。实测生产库名称主要挂在 `ERP` 行
+    （`MDM` 行为 0）——筛 `source_system = MDM` 会把名称全部筛成 None。
     """
     if not codes:
         return {}
     from sqlalchemy import select
 
-    from app.domain.enums import SourceSystem
     from app.domain.models import EntityMapping
 
     rows = (
@@ -279,7 +279,6 @@ async def _loadSupplierDirectory(session: AsyncSession, codes: tuple[str, ...]) 
             )
             .where(
                 EntityMapping.entity_type == "SUPPLIER",
-                EntityMapping.source_system == SourceSystem.MDM,
                 EntityMapping.enterprise_code.in_(codes),
             )
             .order_by(EntityMapping.name.asc().nulls_last())

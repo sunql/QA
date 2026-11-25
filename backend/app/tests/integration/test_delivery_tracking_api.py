@@ -121,9 +121,13 @@ async def _seedSupplier(
     enterpriseKey: int,
     enterpriseCode: str,
     name: str,
-    sourceSystem: SourceSystem = SourceSystem.MDM,
+    sourceSystem: SourceSystem = SourceSystem.ERP,
 ) -> None:
-    """种一条供应商映射（真实 ORM 行；唯一键 = 类型+企业键+源系统）。"""
+    """种一条供应商映射（真实 ORM 行；唯一键 = 类型+企业键+源系统）。
+
+    默认用 `ERP`：生产库 `entity_mapping` 的名称主要挂在 ERP 行（MDM 行为 0）
+    ⇒ 测试数据必须与生产同形，否则「按 source_system 过滤」的回归抓不到。
+    """
     dbSession.add(
         EntityMapping(
             entity_type="SUPPLIER",
@@ -256,29 +260,27 @@ async def test_erp_supplier_name_binding_is_optional(dbSession: AsyncSession, mo
 
 
 @pytest.mark.asyncio
-async def test_supplier_directory_only_reads_mdm_source(dbSession: AsyncSession) -> None:
-    """Minor：同一业务码在 ERP/SRM 也有行时，名称只取 `source_system=MDM`。"""
+async def test_supplier_directory_reads_entity_mapping_regardless_of_source(
+    dbSession: AsyncSession,
+) -> None:
+    """名称取 `entity_mapping.name`（SSOT），**不按 `source_system` 筛选**。
+
+    生产库名称主要挂在 `ERP` 行（`MDM` 行为 0）⇒ 若实现按 `source_system=MDM`
+    过滤，这里会拿不到名称。无行的 code 返回空（名称缺省）。
+    """
     await _seedSupplier(
         dbSession,
         enterpriseKey=1,
         enterpriseCode="B125",
-        name="ERP 侧名称",
+        name="浙江力航汽车部件有限公司",
         sourceSystem=SourceSystem.ERP,
     )
 
-    directory = await mod._loadSupplierDirectory(dbSession, ("B125",))
+    directory = await mod._loadSupplierDirectory(dbSession, ("B125", "NOPE"))
 
-    assert directory == {}, "非 MDM 源的行不得作为供应商名称来源"
-
-    await _seedSupplier(
-        dbSession,
-        enterpriseKey=1,
-        enterpriseCode="B125",
-        name="MDM 侧名称",
-    )
-    directory = await mod._loadSupplierDirectory(dbSession, ("B125",))
-
-    assert directory["B125"]["name"] == "MDM 侧名称"
+    assert directory["B125"]["name"] == "浙江力航汽车部件有限公司"
+    assert directory["B125"]["enterpriseKey"] == 1
+    assert "NOPE" not in directory, "无映射行 ⇒ 名称缺省，不臆造"
 
 
 @pytest.mark.asyncio

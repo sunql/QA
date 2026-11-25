@@ -128,11 +128,13 @@ async def test_scenario_slot_hidden_flag_is_exposed(
     # 非 hidden 槽位不得被误标
     assert slots["monthsBack"].get("hidden", False) is False
 
-    # 既有场景同样受益：pending_delivery 的三条 hidden 槽位也要透出
+    # 既有场景同样受益：pending_delivery 的两条 hidden 日期槽位也要透出
     pending = next(i for i in body if i["scenarioCode"] == "pending_delivery")
     pendingSlots = {slot["key"]: slot for slot in pending["slotSchema"]}
-    for key in ("datasourceId", "dateFrom", "dateTo"):
+    for key in ("dateFrom", "dateTo"):
         assert pendingSlots[key]["hidden"] is True, key
+    # THBI 硬规则：数据源切换槽位已移除（2026-11-25）
+    assert "datasourceId" not in pendingSlots
 
 
 @pytest.mark.asyncio

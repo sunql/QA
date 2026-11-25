@@ -31,7 +31,6 @@ export interface PendingDeliveryLinesPage {
 }
 
 export interface PendingDeliveryLinesQuery {
-  datasourceId?: number;
   monthsBack?: number;
   dateFrom?: string;
   dateTo?: string;
@@ -45,7 +44,6 @@ export interface PendingDeliveryLinesQuery {
 
 function toParams(query: PendingDeliveryLinesQuery): Record<string, string | number> {
   const out: Record<string, string | number> = {};
-  if (query.datasourceId !== undefined) out.datasourceId = query.datasourceId;
   if (query.monthsBack !== undefined) out.monthsBack = query.monthsBack;
   if (query.dateFrom) out.dateFrom = query.dateFrom;
   if (query.dateTo) out.dateTo = query.dateTo;

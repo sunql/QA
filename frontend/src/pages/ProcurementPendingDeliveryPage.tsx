@@ -22,12 +22,9 @@ import type { ColumnsType } from "antd/es/table";
 import type { Dayjs } from "dayjs";
 import { ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { useTranslation } from "../i18n";
-import { useAuthStore } from "../stores/authStore";
 import { useTablePagination } from "../utils/useTablePagination";
-import { listDataSources } from "../api/datasource";
 import { listPendingDeliverySites } from "../api/procurementCopilot";
 import { searchMappings } from "../api/entityMapping";
-import type { DataSource } from "../types/datasource";
 import {
   listPendingDeliveryLines,
   type PendingDeliveryLine,
@@ -50,11 +47,7 @@ function fmtQty(value: number | undefined): string {
 
 export default function ProcurementPendingDeliveryPage() {
   const { t } = useTranslation();
-  const user = useAuthStore((s) => s.user);
-  const isAdmin = (user?.roles ?? []).includes("admin");
 
-  const [datasources, setDatasources] = useState<DataSource[]>([]);
-  const [datasourceId, setDatasourceId] = useState<number | undefined>();
   const [monthsBack, setMonthsBack] = useState(12);
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [supplierKeys, setSupplierKeys] = useState<string[]>([]);
@@ -71,29 +64,19 @@ export default function ProcurementPendingDeliveryPage() {
   const { pagination, setPage, state } = useTablePagination({ serverTotal: total });
 
   useEffect(() => {
-    listDataSources(true)
-      .then((list) => {
-        setDatasources(list);
-        setDatasourceId((prev) => prev ?? list.find((d) => d.isDefault)?.id ?? list[0]?.id);
-      })
-      .catch(() => setDatasources([]));
-  }, []);
-
-  useEffect(() => {
-    listPendingDeliverySites(datasourceId)
+    listPendingDeliverySites()
       .then((list) =>
         setSiteOptions(
           list.map((item) => ({ value: item.code, label: `${item.name}（${item.code}）` })),
         ),
       )
       .catch(() => setSiteOptions(EMPTY_OPTIONS));
-  }, [datasourceId]);
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const page = await listPendingDeliveryLines({
-        datasourceId,
         monthsBack,
         ...(dateRange
           ? {
@@ -116,7 +99,7 @@ export default function ProcurementPendingDeliveryPage() {
       setLoading(false);
     }
   }, [
-    datasourceId, monthsBack, dateRange, supplierKeys, materialKeys, siteKeys,
+    monthsBack, dateRange, supplierKeys, materialKeys, siteKeys,
     minOverdueDays, state.current, state.pageSize,
   ]);
 
@@ -214,21 +197,6 @@ export default function ProcurementPendingDeliveryPage() {
 
       <Card size="small" style={{ marginBottom: 16 }}>
         <Space wrap size={12} align="center">
-          {isAdmin && (
-            <>
-              <Text type="secondary">{t("pendingDelivery.slotDatasource")}</Text>
-              <Select
-                aria-label={t("pendingDelivery.slotDatasource")}
-                style={{ minWidth: 170 }}
-                value={datasourceId}
-                onChange={(value) => {
-                  setDatasourceId(value);
-                  setPage(1);
-                }}
-                options={datasources.map((d) => ({ value: d.id, label: d.name }))}
-              />
-            </>
-          )}
           <Text type="secondary">{t("pendingDelivery.slotTime")}</Text>
           <RangePicker
             value={dateRange}

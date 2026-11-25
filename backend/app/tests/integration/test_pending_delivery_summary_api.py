@@ -84,6 +84,57 @@ def _clearPendingCache():
 
 
 @pytest.mark.asyncio
+async def test_load_mdm_names_reads_entity_mapping_erp_rows(
+    dbSession: AsyncSession,
+) -> None:
+    """名称走 `entity_mapping.name`（SSOT），**不按 `source_system` 筛选**。
+
+    生产库名称主要挂在 `ERP` 行（`MDM` 行为 0）⇒ 本用例刻意只种 ERP 行；
+    若实现加回 `source_system = MDM` 过滤，这里会拿到空字典。
+    无映射行的 code 返回空（名称缺省，不臆造）。
+    """
+    from app.domain.enums import MatchRule, SourceSystem
+    from app.domain.models import EntityMapping
+    from app.services.pending_delivery_query import loadMdmNames
+
+    dbSession.add(
+        EntityMapping(
+            entity_type="SUPPLIER",
+            enterprise_key=9001,
+            enterprise_code="B125",
+            source_system=SourceSystem.ERP,
+            source_key="ERP-B125",
+            source_code="B125",
+            match_rule=MatchRule.MAPPING,
+            name="浙江力航汽车部件有限公司",
+        )
+    )
+    dbSession.add(
+        EntityMapping(
+            entity_type="MATERIAL",
+            enterprise_key=9002,
+            enterprise_code="5A2100000002",
+            source_system=SourceSystem.ERP,
+            source_key="ERP-5A21",
+            source_code="5A2100000002",
+            match_rule=MatchRule.MAPPING,
+            name="方形焊接螺母",
+        )
+    )
+    await dbSession.commit()
+
+    suppliers = await loadMdmNames(
+        dbSession, entityType="SUPPLIER", codes=("B125", "NOPE")
+    )
+    assert suppliers == {"B125": "浙江力航汽车部件有限公司"}
+    materials = await loadMdmNames(
+        dbSession, entityType="MATERIAL", codes=("5A2100000002",)
+    )
+    assert materials == {"5A2100000002": "方形焊接螺母"}
+    assert await loadMdmNames(dbSession, entityType="SUPPLIER", codes=()) == {}
+
+
+@pytest.mark.asyncio
 async def test_summary_returns_structured_payload(
     client: AsyncClient, monkeypatch
 ) -> None:
@@ -147,12 +198,26 @@ async def test_summary_honors_query_slots(client: AsyncClient, monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_summary_requires_login(client: AsyncClient) -> None:
-    """未登录 401/403（与采购域读端点同口径）。"""
+async def test_summary_requires_login(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未登录 401/403（与采购域读端点同口径）。
+
+    关掉 stub auth（模拟生产）⇒ 未带 JWT 一律被拒，而不是走到绑定解析。
+    """
+    from app.config import getSettings
+
+    monkeypatch.setenv("AUTH_STUB_ENABLED", "0")
+    getSettings.cache_clear()
     resp = await client.get(SUMMARY_PATH)
-    # 守卫面生效即可：未带合法会话 ⇒ 401/403/409（种子用户撞 mustChangePassword）；
-    # 无 THBI 绑定/数据源时绑定解析先 fail-closed（422），语义仍是「请求未放行」。
-    assert resp.status_code in (401, 403, 409, 422)
+    assert resp.status_code in (401, 403, 409)
+
+
+@pytest.mark.asyncio
+async def test_summary_fails_closed_when_bindings_missing(client: AsyncClient) -> None:
+    """stub 匿名通过后，无 THBI 绑定 ⇒ 422（fail-closed，不静默回退默认源）。"""
+    resp = await client.get(SUMMARY_PATH)
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio

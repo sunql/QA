@@ -162,10 +162,9 @@ export interface PendingDeliveryQueryFilters {
 }
 
 export async function getPendingDeliverySummary(
-  params: PendingDeliveryQueryFilters & { datasourceId?: number; monthsBack?: number } = {},
+  params: PendingDeliveryQueryFilters & { monthsBack?: number } = {},
 ): Promise<PendingDeliverySummaryResponse> {
   const query: Record<string, string | number> = {};
-  if (params.datasourceId !== undefined) query.datasourceId = params.datasourceId;
   if (params.monthsBack !== undefined) query.monthsBack = params.monthsBack;
   // 多值参数用**逗号分隔**：axios 默认把数组序列化成 `key[]=v`，
   // 与后端（FastAPI 读取逗号分隔字符串）对不上 ⇒ 静默变成空过滤。
@@ -182,13 +181,11 @@ export async function getPendingDeliverySummary(
   return res.data;
 }
 
-/** 基地下拉选项（FACILITY 字典 ∩ 订单实际出现过的基地）。 */
-export async function listPendingDeliverySites(
-  datasourceId?: number,
-): Promise<{ code: string; name: string }[]> {
+/** 基地下拉选项（FACILITY 字典 ∩ 订单实际出现过的基地）。数据源由后端绑定固定。 */
+export async function listPendingDeliverySites(): Promise<{ code: string; name: string }[]> {
   const res = await httpClient.get<{ code: string; name: string }[]>(
     "/procurement/pending-delivery/sites",
-    { params: datasourceId !== undefined ? { datasourceId } : {} },
+    { params: {} },
   );
   return res.data;
 }

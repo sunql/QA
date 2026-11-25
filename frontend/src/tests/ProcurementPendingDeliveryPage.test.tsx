@@ -4,7 +4,7 @@
  * - 初次加载带默认参数（近 12 个月）+ 分页 limit；
  * - 筛选变化 ⇒ offset 重置为 0（回到第 1 页）；
  * - 表格行渲染供应商名与物料描述（后端已带出）；
- * - 数据源选择仅 admin 可见。
+ * - 数据源由后端本体绑定固定 ⇒ 页面无数据源下拉、也不上送该参数。
  */
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -18,7 +18,6 @@ import ProcurementPendingDeliveryPage from "../pages/ProcurementPendingDeliveryP
 
 const api = vi.hoisted(() => ({
   listPendingDeliveryLines: vi.fn(),
-  listDataSources: vi.fn(),
   listPendingDeliverySites: vi.fn(),
   searchMappings: vi.fn(),
 }));
@@ -26,17 +25,10 @@ const api = vi.hoisted(() => ({
 vi.mock("../api/pendingDelivery", () => ({
   listPendingDeliveryLines: api.listPendingDeliveryLines,
 }));
-vi.mock("../api/datasource", () => ({ listDataSources: api.listDataSources }));
 vi.mock("../api/procurementCopilot", () => ({
   listPendingDeliverySites: api.listPendingDeliverySites,
 }));
 vi.mock("../api/entityMapping", () => ({ searchMappings: api.searchMappings }));
-
-const authState = vi.hoisted(() => ({ roles: ["admin"] as string[] }));
-vi.mock("../stores/authStore", () => ({
-  useAuthStore: (selector: (state: { user: unknown }) => unknown) =>
-    selector({ user: { roles: authState.roles } }),
-}));
 
 function renderPage() {
   return render(
@@ -51,10 +43,6 @@ function renderPage() {
 }
 
 beforeEach(() => {
-  authState.roles = ["admin"];
-  api.listDataSources.mockResolvedValue([
-    { id: 1, name: "THBI Oracle", type: "oracle", isDefault: true },
-  ]);
   api.listPendingDeliverySites.mockResolvedValue([
     { code: "T3", name: "模具厂" },
   ]);
@@ -92,14 +80,13 @@ describe("ProcurementPendingDeliveryPage", () => {
     expect(query.monthsBack).toBe(12);
     expect(query.limit).toBe(20);
     expect(query.offset).toBe(0);
-    // 数据源在 listDataSources 回来后才有值 ⇒ 等到带 datasourceId 的那次请求
-    await waitFor(() =>
-      expect(
-        api.listPendingDeliveryLines.mock.calls.some(
-          (call) => call[0]?.datasourceId === 1,
-        ),
-      ).toBe(true),
-    );
+    // THBI 硬规则：数据源由后端绑定固定 ⇒ 前端不再上送 datasourceId
+    expect(
+      api.listPendingDeliveryLines.mock.calls.every(
+        (call) => call[0]?.datasourceId === undefined,
+      ),
+    ).toBe(true);
+    expect(api.listPendingDeliverySites).toHaveBeenCalledWith();
 
     expect(screen.getByText("T22511POH1251Q")).toBeTruthy();
     expect(screen.getByText("X13 平头铆螺母")).toBeTruthy();
@@ -183,8 +170,7 @@ describe("ProcurementPendingDeliveryPage", () => {
     });
   });
 
-  it("非 admin：看不到数据源选择", async () => {
-    authState.roles = ["procurement"];
+  it("任何角色都看不到数据源选择（下拉已彻底移除）", async () => {
     renderPage();
     await waitFor(() =>
       expect(api.listPendingDeliveryLines).toHaveBeenCalled(),

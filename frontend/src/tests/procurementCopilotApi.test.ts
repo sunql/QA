@@ -113,34 +113,25 @@ describe("getPendingDeliverySummary", () => {
     });
 
     const result = await getPendingDeliverySummary({
-      datasourceId: 1,
       monthsBack: 6,
       supplierKeys: ["F109", "B125"],
     });
 
     expect(httpMock.get).toHaveBeenCalledWith(
       "/procurement/pending-delivery/summary",
-      { params: { datasourceId: 1, monthsBack: 6, supplierKeys: "F109,B125" } },
+      { params: { monthsBack: 6, supplierKeys: "F109,B125" } },
     );
     expect(result.summary.openLines).toBe(12);
   });
 });
 
 describe("listPendingDeliverySites", () => {
-  it("带 datasourceId 请求基地字典", async () => {
+  it("请求基地字典时不带数据源参数（THBI 硬规则）", async () => {
     httpMock.get.mockResolvedValue({ data: [{ code: "T3", name: "模具厂" }] });
-    const rows = await listPendingDeliverySites(10);
-    expect(httpMock.get).toHaveBeenCalledWith("/procurement/pending-delivery/sites", {
-      params: { datasourceId: 10 },
-    });
-    expect(rows[0].code).toBe("T3");
-  });
-
-  it("不带 datasourceId 时 params 为空对象", async () => {
-    httpMock.get.mockResolvedValue({ data: [] });
-    await listPendingDeliverySites();
+    const rows = await listPendingDeliverySites();
     expect(httpMock.get).toHaveBeenCalledWith("/procurement/pending-delivery/sites", {
       params: {},
     });
+    expect(rows[0].code).toBe("T3");
   });
 });

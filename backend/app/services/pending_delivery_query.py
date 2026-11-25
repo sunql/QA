@@ -30,12 +30,18 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ValidationError
 from app.services.agent_tool_types import AgentToolContext, ToolResult
+from app.services.entity_mapping_names import loadMdmNames
 from app.services.ontology_binding_resolver import ResolvedBinding, resolveBinding
+from app.services.pending_delivery_args import (
+    readFilterArgs,
+    readIntArg,
+    readOptionalInt,
+    rejectCallerDatasource,
+)
 from app.services.procurement_query_utils import (
     MAX_LIMIT,
     MONTHS_BACK_MAX,
@@ -50,7 +56,7 @@ ORDER_CLASS_NAME = "DWD_PURCHASE_ORDER_DTL"
 RECEIPT_CLASS_NAME = "DWD_GOODS_RECEIPT_DTL"
 FACILITY_CLASS_NAME = "DIM_FACILITY"
 
-#: 绑定必需属性（与四段 SQL 的取值一一对应；缺一即 fail-closed）。
+#: 绑定必需属性（与三段 SQL 的取值一一对应；缺一即 fail-closed）。
 _ORDER_REQUIRED_PROPERTIES = (
     "PO_NO",
     "PO_LINE_NO",
@@ -251,35 +257,6 @@ async def resolveMaterialKeys(
     return tuple(resolved)
 
 
-async def loadMdmNames(
-    session: AsyncSession, *, entityType: str, codes: tuple[str, ...]
-) -> dict[str, str]:
-    """按业务码批量取 MDM 名称（供应商 / 物料），只认 `source_system = MDM`。
-
-    名称**不 JOIN 数仓字典**（覆盖率不足）；MDM 无行 ⇒ 名称缺省（UI 显示编码）。
-    """
-    if not codes:
-        return {}
-    from app.domain.enums import SourceSystem
-    from app.domain.models import EntityMapping
-
-    rows = (
-        await session.execute(
-            select(EntityMapping.enterprise_code, EntityMapping.name)
-            .where(
-                EntityMapping.entity_type == entityType,
-                EntityMapping.source_system == SourceSystem.MDM,
-                EntityMapping.enterprise_code.in_(list(codes)),
-            )
-            .order_by(EntityMapping.name.asc().nulls_last())
-        )
-    ).all()
-    names: dict[str, str] = {}
-    for enterpriseCode, name in rows:
-        code = str(enterpriseCode)
-        if code not in names and name:
-            names[code] = name
-    return names
 
 
 def _withNames(
@@ -552,33 +529,16 @@ async def enrichPendingLineRows(
     ]
 
 
-async def _loadPendingDeliveryData(
-    session: AsyncSession,
+async def _runPendingQueries(
     adapter: Any,
     *,
-    datasourceId: int,
     monthsBack: int,
     today: date,
     filters: PendingDeliveryFilters,
     minOverdueDays: int | None,
     limit: int,
-) -> dict[str, Any]:
-    """四段查询（汇总/按供应商/明细）+ 同日结果缓存。
-
-    命中 ⇒ 不再查库（省 DB 与工具执行成本）；未命中 ⇒ 查询 → MDM 补名 → 写缓存。
-    """
-    cacheKey = _pendingCacheKey(
-        datasourceId=datasourceId,
-        monthsBack=monthsBack,
-        filters=filters,
-        minOverdueDays=minOverdueDays,
-        today=today,
-    )
-    hit = _PENDING_RESULT_CACHE.get(cacheKey)
-    now = datetime.now()
-    if hit is not None and hit[0] > now.timestamp():
-        return hit[1]
-
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """执行三段只读 SQL（汇总 / 按供应商 / 明细）。"""
     dialect = SqlDialect.fromAdapter(adapter).name
     summaryRows = await adapter.execute_read_only(
         buildPendingDeliverySummarySql(
@@ -597,7 +557,16 @@ async def _loadPendingDeliveryData(
             minOverdueDays=minOverdueDays, limit=limit, dialect=dialect,
         )
     )
+    return summaryRows, supplierRows, lineRows
 
+
+async def _assemblePendingData(
+    session: AsyncSession,
+    summaryRows: list[dict[str, Any]],
+    supplierRows: list[dict[str, Any]],
+    lineRows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """SQL 行 → 工具结果三段（MDM 补名称；返回新结构，不改入参）。"""
     summaryRow = summaryRows[0] if summaryRows else {}
     supplierNames, materialNames = await _loadNamesForRows(
         session, [*supplierRows, *lineRows]
@@ -610,7 +579,7 @@ async def _loadPendingDeliveryData(
         _withNames(row, supplierNames=supplierNames, materialNames=materialNames)
         for row in lineRows
     ]
-    data: dict[str, Any] = {
+    return {
         "summary": {
             "openLines": int(colValue(summaryRow, "OPEN_LINES") or 0),
             "openQty": colValue(summaryRow, "OPEN_QTY"),
@@ -629,6 +598,44 @@ async def _loadPendingDeliveryData(
         ],
         "topLines": [dict(row) for row in enrichedLines],
     }
+
+
+async def _loadPendingDeliveryData(
+    session: AsyncSession,
+    adapter: Any,
+    *,
+    datasourceId: int,
+    monthsBack: int,
+    today: date,
+    filters: PendingDeliveryFilters,
+    minOverdueDays: int | None,
+    limit: int,
+) -> dict[str, Any]:
+    """三段查询（汇总/按供应商/明细）+ 同日结果缓存。
+
+    命中 ⇒ 不再查库（省 DB 与工具执行成本）；未命中 ⇒ 查询 → MDM 补名 → 写缓存。
+    """
+    cacheKey = _pendingCacheKey(
+        datasourceId=datasourceId,
+        monthsBack=monthsBack,
+        filters=filters,
+        minOverdueDays=minOverdueDays,
+        today=today,
+    )
+    hit = _PENDING_RESULT_CACHE.get(cacheKey)
+    now = datetime.now()
+    if hit is not None and hit[0] > now.timestamp():
+        return hit[1]
+
+    summaryRows, supplierRows, lineRows = await _runPendingQueries(
+        adapter,
+        monthsBack=monthsBack,
+        today=today,
+        filters=filters,
+        minOverdueDays=minOverdueDays,
+        limit=limit,
+    )
+    data = await _assemblePendingData(session, summaryRows, supplierRows, lineRows)
     _PENDING_RESULT_CACHE[cacheKey] = (_cacheTtlSeconds(now) + now.timestamp(), data)
     return data
 
@@ -669,31 +676,6 @@ async def _loadActiveDatasource(session: AsyncSession, datasourceId: int) -> Any
     return await impl(session, datasourceId)
 
 
-def _intArg(value: object, field: str, default: int) -> int:
-    """整数参数（bool/字符串 fail-closed，不静默 `int()` 转换）。"""
-    if value is None:
-        return default
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValidationError(f"{field} 必须是整数，收到 {value!r}")
-    return value
-
-
-def _optionalInt(value: object, field: str) -> int | None:
-    if value is None or value == 0:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValidationError(f"{field} 必须是整数，收到 {value!r}")
-    return value
-
-
-def _strList(value: object) -> tuple[str, ...]:
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        return ()
-    return tuple(str(item).strip() for item in value if str(item).strip())
-
-
 async def buildPendingDeliveryFilters(
     session: AsyncSession,
     *,
@@ -720,62 +702,24 @@ async def buildPendingDeliveryFilters(
     )
 
 
-async def pendingDeliveryHandler(
-    session: AsyncSession, args: dict, ctx: AgentToolContext
+def _buildPendingToolResult(
+    *,
+    datasourceId: int,
+    monthsBack: int,
+    summary: dict[str, Any],
+    bySupplier: list[dict[str, Any]],
+    lineRows: list[dict[str, Any]],
 ) -> ToolResult:
-    """`pending_delivery_query`：欠交汇总 + 按供应商 + TOP 明细（四段只读 SQL）。
-
-    数据源固定 THBI（`datasource_id=1`，由绑定解析闸门保证），物理表列全部
-    来自本体绑定；调用方给 `datasourceId` 一律拒绝（不是工具参数）。
-
-    脏数据（欠交量 ≥ 1e6 的源侧录入错误）剔除并在 summary.excludedRows 显式回报。
-    """
-    if "datasourceId" in args:
-        raise ValidationError(
-            "pending_delivery_query 的数据源固定为 THBI，不接受调用方指定数据源（datasourceId）"
-        )
-    monthsBack = _intArg(args.get("monthsBack"), "monthsBack", 12)
-    minOverdueDays = _optionalInt(args.get("minOverdueDays"), "minOverdueDays")
-    limit = _intArg(args.get("limit"), "limit", 20)
-
-    legacySupplier = str(args.get("supplierKey") or "").strip()
-    supplierKeys = _strList(args.get("supplierKeys")) or (
-        (legacySupplier,) if legacySupplier else ()
-    )
-    order, receipt, facility = await resolvePendingDeliveryBindings(session)
-    filters = await buildPendingDeliveryFilters(
-        session,
-        orderBinding=order,
-        receiptBinding=receipt,
-        facilityBinding=facility,
-        supplierKeys=supplierKeys,
-        materialKeys=_strList(args.get("materialKeys")),
-        siteKeys=_strList(args.get("siteKeys")),
-        dateFrom=args.get("dateFrom"),
-        dateTo=args.get("dateTo"),
-    )
-
-    ds = await _loadActiveDatasource(session, order.datasourceId)
-    adapter = _adapterFor(order.datasourceId, ds)
-    today = date.today()
-
-    data = await _loadPendingDeliveryData(
-        session, adapter, datasourceId=order.datasourceId, monthsBack=monthsBack,
-        today=today, filters=filters, minOverdueDays=minOverdueDays, limit=limit,
-    )
-    summary = data["summary"]
-    bySupplier = data["bySupplier"]
-    lineRows = [_camelPendingRow(row) for row in data["topLines"]]
+    """装配工具结果（无欠交时显式告知，不返回空壳）。"""
     openLines = int(summary["openLines"] or 0)
     if openLines == 0:
         return ToolResult(
             data={
-                "via": "business_db", "datasourceId": order.datasourceId,
+                "via": "business_db", "datasourceId": datasourceId,
                 "summary": summary, "bySupplier": [], "topLines": [],
             },
             answer=f"近 {monthsBack} 个月没有欠交订单行（全部已交清）。",
         )
-
     topSuppliers = "、".join(
         f"{item['supplierCode']}({item['openQty']})" for item in bySupplier[:3]
     )
@@ -786,7 +730,7 @@ async def pendingDeliveryHandler(
     )
     return ToolResult(
         data={
-            "via": "business_db", "datasourceId": order.datasourceId,
+            "via": "business_db", "datasourceId": datasourceId,
             "summary": summary, "bySupplier": bySupplier, "topLines": lineRows,
         },
         answer=(
@@ -794,4 +738,48 @@ async def pendingDeliveryHandler(
             f"其中逾期 {summary['overdueLines']} 行{excludedNote}。"
             f"欠交 TOP 供应商：{topSuppliers}。"
         ),
+    )
+
+
+async def pendingDeliveryHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """`pending_delivery_query`：欠交汇总 + 按供应商 + TOP 明细（三段只读 SQL）。
+
+    数据源固定 THBI（`datasource_id=1`，由绑定解析闸门保证），物理表列全部
+    来自本体绑定；调用方给 `datasourceId` 一律拒绝（不是工具参数）。
+
+    脏数据（欠交量 ≥ 1e6 的源侧录入错误）剔除并在 summary.excludedRows 显式回报。
+    """
+    rejectCallerDatasource(args)
+    monthsBack = readIntArg(args.get("monthsBack"), "monthsBack", 12)
+    minOverdueDays = readOptionalInt(args.get("minOverdueDays"), "minOverdueDays")
+    limit = readIntArg(args.get("limit"), "limit", 20)
+    supplierKeys, materialKeys, siteKeys, dateFrom, dateTo = readFilterArgs(args)
+
+    order, receipt, facility = await resolvePendingDeliveryBindings(session)
+    filters = await buildPendingDeliveryFilters(
+        session,
+        orderBinding=order,
+        receiptBinding=receipt,
+        facilityBinding=facility,
+        supplierKeys=supplierKeys,
+        materialKeys=materialKeys,
+        siteKeys=siteKeys,
+        dateFrom=dateFrom,
+        dateTo=dateTo,
+    )
+    ds = await _loadActiveDatasource(session, order.datasourceId)
+    adapter = _adapterFor(order.datasourceId, ds)
+    data = await _loadPendingDeliveryData(
+        session, adapter, datasourceId=order.datasourceId, monthsBack=monthsBack,
+        today=date.today(), filters=filters,
+        minOverdueDays=minOverdueDays, limit=limit,
+    )
+    return _buildPendingToolResult(
+        datasourceId=order.datasourceId,
+        monthsBack=monthsBack,
+        summary=data["summary"],
+        bySupplier=data["bySupplier"],
+        lineRows=[_camelPendingRow(row) for row in data["topLines"]],
     )

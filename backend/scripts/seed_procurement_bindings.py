@@ -68,10 +68,10 @@ class FacilityBindingSpec(TypedDict):
     """源绑定规格的键契约（`TypedDict` ⇒ 键名笔误在静态检查期就暴露）。
 
     **每个键都必须驱动行为**：`className` / `datasourceId` / `schemaName` /
-    `sourceTable` / `bindingRole` 进绑定的唯一键与取值，`confirmedBy` 是审计 actor
-    （调用点直接读本字典，**不设**第二份 actor 字面量 ⇒ 改规格即改留痕）。
-    目标终态（已确认、非候选、生效中）**不是可配置字段** —— 它是 service
-    「候选 → 确认」两段式的**结果**，由 `_assertTerminalState` 在种子结束时校验。
+    `sourceTable` / `bindingRole` 进绑定的唯一键与取值；`confirmedBy` 是审计 actor
+    （调用点直接读本字典，**不设**第二份 actor 字面量 ⇒ 改规格即改留痕）；
+    `isCandidate` 是**期望终态**（`False` = 已确认生效），由 `_assertTerminalState`
+    拿实际落库行与之比对 ⇒ 流程没走到预期终态时响亮失败（不是死字段）。
     """
 
     className: str
@@ -79,6 +79,7 @@ class FacilityBindingSpec(TypedDict):
     schemaName: str
     sourceTable: str
     bindingRole: str
+    isCandidate: bool
     confirmedBy: str
 
 
@@ -89,6 +90,7 @@ FACILITY_BINDING: FacilityBindingSpec = {
     "schemaName": "THBI",
     "sourceTable": "DIM_FACILITY",
     "bindingRole": "BASE",
+    "isCandidate": False,
     "confirmedBy": "m1-b-confirm",
 }
 
@@ -324,20 +326,26 @@ async def _confirmBindings(
 
 
 async def _assertTerminalState(session: AsyncSession, sourceBindingId: int) -> None:
-    """校验种子结束后的**目标终态**：源绑定已确认且未失效。
+    """校验种子结束后的**目标终态**：实际落库行与规格期望一致（已确认、未失效）。
 
-    为什么显式校验：解析器只消费 `is_candidate IS FALSE` 且 `valid_to IS NULL` 的行
+    期望值取自 `FACILITY_BINDING["isCandidate"]`（契约：已确认 = `False`）——
+    拿**实际状态**与规格比对，而不是把期望再写一遍字面量 ⇒ 规格字段真正被消费。
+
+    为什么必须校验：解析器只消费 `is_candidate IS FALSE` 且 `valid_to IS NULL` 的行
     ⇒ 若确认链路哪天被短路，「新建 1 条」会写进去但**永远读不到**（静默失效）。
-    目标终态写死在代码里（不是规格里的可配置字段）——它是流程的**结果**。
     """
     source = await session.get(
         ProcurementSourceBinding, sourceBindingId, populate_existing=True
     )
-    if source is None or source.is_candidate or source.valid_to is not None:
+    if source is None or source.valid_to is not None:
         raise RuntimeError(
-            f"源绑定 id={sourceBindingId} 未达目标终态"
-            f"（is_candidate={None if source is None else source.is_candidate}，"
-            f"valid_to={None if source is None else source.valid_to}）"
+            f"源绑定 id={sourceBindingId} 已失效或不存在"
+            f"（valid_to={None if source is None else source.valid_to}）"
+        )
+    if source.is_candidate != FACILITY_BINDING["isCandidate"]:
+        raise RuntimeError(
+            f"源绑定 id={sourceBindingId} 的 is_candidate={source.is_candidate} "
+            f"与规格期望 {FACILITY_BINDING['isCandidate']} 不一致"
         )
 
 

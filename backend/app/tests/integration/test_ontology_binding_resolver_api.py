@@ -451,6 +451,23 @@ async def test_resolve_facility_binding_from_real_db(
 # ---------------------------------------------------------------- Task 2 种子（交付函数）
 
 
+async def _seedFacilityOntology(dbSession: AsyncSession) -> int:
+    """种 THBI 数据源 + `DIM_FACILITY` 本体类/属性（真名），返回 classId。
+
+    本体模型这里必须用**真名**（`stalePrefix=""`）：种子从它复制物理表名/列名进
+    绑定，`_assertSourceTable` 也要求 `ontology_class.source_table == "DIM_FACILITY"`。
+    """
+    await _seedThbiDataSource(dbSession)
+    classId, _propertyIdByName = await _seedClassWithProperties(
+        dbSession,
+        className=_FACILITY_CLASS,
+        propertyColumns=_FACILITY_COLUMNS,
+        stalePrefix="",
+    )
+    await dbSession.commit()
+    return classId
+
+
 @pytest.mark.asyncio
 async def test_seed_facility_binding_creates_confirms_and_is_idempotent(
     dbSession, capsys
@@ -460,18 +477,9 @@ async def test_seed_facility_binding_creates_confirms_and_is_idempotent(
     只读 `FACILITY_BINDING` 配置的单元测试无法证明「建行 → 确认 → 可解析」
     （评审 Important #2）⇒ 这里用真实 PG 跑**交付函数本身**：
     首次 1 / 再次 0 钉幂等，最后一次 `resolveBinding` 钉「确实确认生效」。
-
-    本体模型这里用真名（`stalePrefix=""`）：种子从本体模型复制物理表名/列名进绑定，
-    `_assertSourceTable` 也要求 `ontology_class.source_table == "DIM_FACILITY"`。
     另种一个**无物理列**的属性 ⇒ 断言覆盖提示会如实报「可绑定 2/3」。
     """
-    await _seedThbiDataSource(dbSession)
-    classId, _propertyIdByName = await _seedClassWithProperties(
-        dbSession,
-        className=_FACILITY_CLASS,
-        propertyColumns=_FACILITY_COLUMNS,
-        stalePrefix="",
-    )
+    classId = await _seedFacilityOntology(dbSession)
     dbSession.add(
         OntologyProperty(
             class_id=classId,
@@ -517,3 +525,20 @@ async def test_seed_facility_binding_creates_confirms_and_is_idempotent(
     )
     assert resolved.qualifiedTable() == "THBI.DIM_FACILITY"
     assert resolved.columns == {"FCY_0": "FCY_0", "FCYNAM_0": "FCYNAM_0"}
+
+
+@pytest.mark.asyncio
+async def test_seed_facility_binding_enforces_spec_terminal_state(
+    dbSession, monkeypatch
+) -> None:
+    """规格期望的终态与落库结果不符 ⇒ 种子响亮失败（`isCandidate` 真被消费）。
+
+    为什么需要这条：正常流程永远产出「已确认」⇒ 只跑成功路径的话，把
+    `_assertTerminalState` 里的 `isCandidate` 比较摘掉不会有任何测试变红，
+    字段就还是死的。这里把规格期望反转成「候选」，守卫必须拦下来。
+    """
+    await _seedFacilityOntology(dbSession)
+    monkeypatch.setitem(FACILITY_BINDING, "isCandidate", True)
+
+    with pytest.raises(RuntimeError, match="与规格期望"):
+        await seed_facility_binding(dbModule.getSessionFactory())

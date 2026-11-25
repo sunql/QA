@@ -12,12 +12,13 @@ from scripts import seed_procurement_bindings as mod
 
 
 def test_facility_binding_spec_has_required_fields() -> None:
-    """绑定规格：THBI 数据源 + BASE 角色 + 审计确认人。"""
+    """绑定规格：THBI 数据源 + BASE 角色 + 已确认终态 + 审计确认人。"""
     spec = mod.FACILITY_BINDING
     assert spec["datasourceId"] == 1
     assert spec["schemaName"] == "THBI"
     assert spec["sourceTable"] == "DIM_FACILITY"
     assert spec["bindingRole"] == "BASE"
+    assert spec["isCandidate"] is False
     assert spec["confirmedBy"]
 
 
@@ -26,14 +27,14 @@ def test_facility_binding_spec_keyed_by_class_name() -> None:
     assert mod.FACILITY_BINDING["className"] == "DIM_FACILITY"
 
 
-def test_facility_binding_spec_has_no_dead_fields() -> None:
-    """规格里**每个键都必须驱动行为**。
+def test_facility_binding_spec_keeps_full_contract() -> None:
+    """规格键集是**下游契约**，不得擅自增删（brief Step 1 钉的 7 个键）。
 
-    回归来历（评审 Important #1）：曾同时声明 `confirmedBy` 与独立字面量 `ACTOR`，
-    且 `isCandidate` 无人读取 —— 单元测试断言这两个字段，而实际行为走另一份字面量
-    ⇒ 测试可以一直绿，审计 actor 与「已确认、非候选」的意图却可静默漂移。
-    现在模块内**只有** `confirmedBy` 一份 actor 字面量，且由集成测试断言它真的
-    落进了库里的 `confirmed_by`（`test_seed_facility_binding_creates_confirms_...`）。
+    回归来历（两轮评审）：曾删掉 `isCandidate` 把键集缩到 6 个 —— 那是未获批的
+    契约变更；正确做法是**保留键并让它驱动行为**（`_assertTerminalState` 拿实际
+    落库状态与它比对，集成用例
+    `test_seed_facility_binding_enforces_spec_terminal_state` 证明它真被消费）。
+    本测试钉住键集，防止再次以「清死字段」为名缩小契约。
     """
     assert set(mod.FACILITY_BINDING) == {
         "className",
@@ -41,6 +42,7 @@ def test_facility_binding_spec_has_no_dead_fields() -> None:
         "schemaName",
         "sourceTable",
         "bindingRole",
+        "isCandidate",
         "confirmedBy",
     }
 

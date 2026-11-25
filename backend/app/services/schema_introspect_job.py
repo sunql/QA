@@ -9,12 +9,15 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 JobStatus = Literal["running", "succeeded", "failed"]
 
@@ -121,3 +124,68 @@ class SchemaIntrospectJobRegistry:
 
 #: 进程级单例（API 与后台任务共用同一份状态）
 schema_introspect_job_registry = SchemaIntrospectJobRegistry()
+
+
+# --------------------------------------------------------------------------
+# 后台执行入口
+# --------------------------------------------------------------------------
+
+
+#: 适配器提供者（测试可 monkeypatch；生产走 business_db_pool.get_adapter）
+def _defaultAdapterProvider(dsId: int, ds: Any):
+    from app.infrastructure.business_db_pool import get_adapter
+
+    return get_adapter(dsId, ds)
+
+
+_adapterProvider = _defaultAdapterProvider
+
+
+def _userFacingError(exc: BaseException) -> str:
+    """把底层异常映射为用户可读文案（不泄露 DSN / 用户名）。"""
+    from app.domain.exceptions import DataSourceError
+
+    if isinstance(exc, DataSourceError):
+        return str(exc)
+    return "数据源 schema 读取失败：请检查数据源连接是否正常"
+
+
+async def runIntrospectJob(
+    *,
+    datasourceId: int,
+    schemaName: str,
+    jobId: str,
+    registry: SchemaIntrospectJobRegistry,
+) -> None:
+    """在后台会话中跑一次分批内省并写缓存，全程维护 job 状态。
+
+    三条硬约束：
+    1. 用 ownSession() 自开会话（后台任务复用请求会话会触发 MissingGreenlet，
+       见 infrastructure/database.py 的 2026-11-16 事故说明）；
+    2. 任一批失败 ⇒ 不写缓存（introspectAndCacheBatched 内聚在单个事务里）；
+    3. 对外只暴露友好文案，底层异常文本只进服务端日志。
+    """
+    from app.infrastructure.database import ownSession
+    from app.services.datasource_service import DataSourceService
+    from app.services.schema_introspection_service import SchemaIntrospectionService
+
+    session = ownSession()
+    try:
+        ds = await DataSourceService().get(session, datasourceId)
+        service = SchemaIntrospectionService(adapterProvider=_adapterProvider)
+        await service.introspectAndCacheBatched(
+            session,
+            ds,
+            owner=schemaName,
+            registry=registry,
+            jobId=jobId,
+        )
+        registry.update(jobId, status="succeeded")
+    except Exception as exc:  # noqa: BLE001 - 后台任务边界，必须兜住并落状态
+        logger.error(
+            "schema 内省 job 失败 jobId=%s datasource=%s schema=%s: %s",
+            jobId, datasourceId, schemaName, exc, exc_info=True,
+        )
+        registry.update(jobId, status="failed", error=_userFacingError(exc))
+    finally:
+        await session.close()

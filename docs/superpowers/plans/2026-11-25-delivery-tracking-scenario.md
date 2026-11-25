@@ -800,7 +800,7 @@ git commit -m "feat(ontology): 补 DIM_FACILITY 源绑定（P5 唯一新增本�
   ```
   SQL 三段：`summary`（窗口级汇总）/ `bySupplier`（供应商分组）/ `byOrder`（订单+行明细）。
 
-**口径定义（spec 4.1 / 4.2）**
+**口径定义（spec 4.1 / 4.2 / 4.4）**
 
 ```
 已收量（行级）  RECEIVED = SUM(<RCV_QTY_STU>)       -- 收货类按 PO_NO+PO_LINE_NO 聚合
@@ -812,6 +812,21 @@ git commit -m "feat(ontology): 补 DIM_FACILITY 源绑定（P5 唯一新增本�
 订单到货率 = 全到货订单 / 总订单
 量级率     = SUM(RECEIVED) / SUM(<PO_QTY>)
 ```
+
+**脏数据剔除（spec 4.4，必须实现）**：
+
+- **判据**：行级 `OPEN_QTY >= _OPEN_QTY_SANITY_MAX`（= 1_000_000）判为源侧录入错误
+  （ERP 里「数量填成物料码」的已知脏数据，既有 `pending_delivery_query` 同款阈值）。
+- **行为**：这类行**不参与**三态判定与量级率计算（视作"无效行"，既不算欠交也不算已收）；
+  但必须在 `EXCLUDED_ROWS` 里**显式计数回报**，不静默丢。
+- **`summary` 与 `bySupplier` 都要**：两者都算率值 ⇒ 都需同样剔除 + 计数。
+- **`byOrder` 不剔除**：明细是给人看的，脏行留着才能被发现（文档里写明这个取舍）。
+- **⚠ 与 4.2 的区别（别搞混）**：
+  - 4.2 拒绝的是按 **订购量** 剔大额行（那是真实业务大单，如 2,650,000 件压缩弹簧）；
+  - 4.4 剔除的是按 **欠交量** 判的录入错误行。
+  两条判据不同，**不能**混用。
+- **预期量级**（spec 实测）：本期窗口约 6 行被剔；剔除**不改变**结论
+  （订单到货率 82.29% → 82.28%）。
 
 - [ ] **Step 1: 写失败测试（窗口解析）**
 
@@ -1660,7 +1675,7 @@ async def deliveryTrackingHandler(
     receipt = await resolveBinding(
         session,
         className=RECEIPT_CLASS_NAME,
-        requiredProperties=["PO_NO", "PO_LINE_NO", "RCV_QTY_STU", "ITEM_DESC"],
+        requiredProperties=["PO_NO", "PO_LINE_NO", "RCV_QTY_STU", "ITEM_DESC", "RCV_DATE"],
     )
     ds = await _loadActiveDataSource(session, order.datasourceId)
     adapter = _getAdapter(order.datasourceId, ds)

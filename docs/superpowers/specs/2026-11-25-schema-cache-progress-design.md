@@ -53,7 +53,7 @@ backend 副本，本方案需改为共享存储（DB/Redis）——届时另批�
 ```
 1. 轻查询列出该 owner 全部表名（ALL_TABLES / information_schema.tables）
    total = N；onProgress(0, N)
-2. 按 BATCH_SIZE = 50 张表切批，每批执行 5 类查询，均追加
+2. 按 BATCH_SIZE = 100 张表切批，每批执行 5 类查询，均追加
    AND table_name IN (<本批表名>) 过滤：
      columns / PK / FK / 表注释 / 列注释
    合并进累积 dict（_mergeRows / _annotateComments 可跨批累积）

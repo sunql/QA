@@ -648,6 +648,65 @@ class SchemaIntrospectionService:
         logger.info("刷新 schema 缓存 datasource_id=%s schema=%s tables=%s", ds.id, schemaName, len(tables))
         return existing
 
+    async def introspectAndCacheBatched(
+        self,
+        session: AsyncSession,
+        ds: DataSource,
+        *,
+        owner: str | None,
+        registry: Any,
+        jobId: str,
+    ) -> SchemaCache:
+        """分批内省 → 写缓存，并把进度同步到 job 注册表。
+
+        与 introspectAndCache 的写库逻辑完全一致；区别只在：
+        1. 内省走 introspectBatched（带进度回调）；
+        2. 回调把 (completed, total) 写进 job 注册表。
+        失败时异常向上抛，由 runIntrospectJob 统一落 failed（不写缓存）。
+        """
+        schemaName = _normalizeSchemaName(ds, owner)
+
+        def onProgress(done: int, total: int) -> None:
+            registry.update(jobId, total=total, completed=done)
+
+        tables = await self.introspectBatched(
+            ds, owner=schemaName, onProgress=onProgress
+        )
+        schemaData = [t.model_dump() for t in tables]
+        version = _schemaVersion(schemaData)
+        existing = await self.getCached(session, ds.id, owner=schemaName, ds=ds)
+        if existing is not None and existing.schema_version == version:
+            return existing
+        if existing is None:
+            cache = SchemaCache(
+                datasource_id=ds.id,
+                schema_name=schemaName,
+                schema_data=schemaData,
+                schema_version=version,
+            )
+            session.add(cache)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                winner = await self.getCached(session, ds.id, owner=schemaName, ds=ds)
+                if winner is not None:
+                    return winner
+                raise
+            await session.refresh(cache)
+            return cache
+        await session.execute(
+            update(SchemaCache)
+            .where(
+                SchemaCache.datasource_id == ds.id,
+                SchemaCache.schema_name == schemaName,
+            )
+            .values(schema_data=schemaData, schema_version=version, updated_time=datetime.now(UTC))
+        )
+        await session.commit()
+        await session.refresh(existing)
+        return existing
+
     @staticmethod
     def buildResponse(cache: SchemaCache) -> SchemaIntrospectResponse:
         """把缓存行转为 API 响应（schema_data 为 snake_case，经 DTO 转 camelCase）。"""

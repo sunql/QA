@@ -69,6 +69,18 @@ def _receiptBinding() -> ResolvedBinding:
     )
 
 
+def _orderBindingWithSupplierName() -> ResolvedBinding:
+    """订单行类绑定 + **可选** `SUPPLIER_NAME`（spec 5.7 的 ERP 名回退来源）。"""
+    order = _orderBinding()
+    return ResolvedBinding(
+        className=order.className,
+        datasourceId=order.datasourceId,
+        schemaName=order.schemaName,
+        sourceTable=order.sourceTable,
+        columns={**dict(order.columns), "SUPPLIER_NAME": "SUPPLIER_NAME"},
+    )
+
+
 class _FakeCtx:
     """最小 AgentToolContext 替身（本工具不读 ctx）。"""
 
@@ -79,6 +91,7 @@ class _FakeCtx:
 def _supplierRow() -> dict:
     return {
         "SUPPLIER_CODE": "B125",
+        "ERP_SUPPLIER_NAME": "力航-ERP 名",
         "TOTAL_ORDERS": 29,
         "ALL_ARRIVED": 1,
         "PARTIAL": 16,
@@ -89,12 +102,28 @@ def _supplierRow() -> dict:
     }
 
 
+def _supplierRowFallback() -> dict:
+    """MDM 无行的供应商（只靠 SQL 的 ERP 名回退，spec 5.7）。"""
+    return {
+        "SUPPLIER_CODE": "C1",
+        "ERP_SUPPLIER_NAME": "宁波备用件-ERP",
+        "TOTAL_ORDERS": 1,
+        "ALL_ARRIVED": 0,
+        "PARTIAL": 0,
+        "NOT_ARRIVED": 1,
+        "ORDERED_QTY": 50.0,
+        "RECEIVED_QTY": 0.0,
+        "EXCLUDED_ROWS": 0,
+    }
+
+
 def _orderRows() -> list[dict]:
     return [
         {
             "PO_NO": "T22611POH0223",
             "PO_LINE_NO": 3000,
             "SUPPLIER_CODE": "B125",
+            "ERP_SUPPLIER_NAME": "力航-ERP 名",
             "ORDER_DATE": "2026-10-28",
             "MATERIAL_CODE": "5A2100000002",
             "MATERIAL_DESC": "kun10/kun30/N1/N2方形焊接螺母M6",
@@ -181,9 +210,7 @@ def test_assemble_summary_accepts_states_summing_to_total() -> None:
     summary = mod._assembleSummary(_SUMMARY_ROW)
 
     assert (
-        summary["allArrivedOrders"]
-        + summary["partialArrivedOrders"]
-        + summary["notArrivedOrders"]
+        summary["allArrivedOrders"] + summary["partialArrivedOrders"] + summary["notArrivedOrders"]
         == summary["totalOrders"]
     )
 
@@ -218,9 +245,7 @@ def test_assemble_supplier_computes_rates_and_reads_mdm_fields() -> None:
     assert supplier["orderArrivalRate"] == 3.45
     assert supplier["qtyArrivalRate"] == 14.36
     assert (
-        supplier["allArrivedOrders"]
-        + supplier["partialArrivedOrders"]
-        + supplier["notArrivedOrders"]
+        supplier["allArrivedOrders"] + supplier["partialArrivedOrders"] + supplier["notArrivedOrders"]
         == supplier["totalOrders"]
     )
 
@@ -309,6 +334,136 @@ def test_assemble_orders_does_not_mutate_input_rows() -> None:
     assert rows == snapshot
 
 
+def _dirtyLineRow(poNo: str = "A", poLine: int = 2) -> dict:
+    """脏行：欠交量 ≥ 1e6（与 SQL `_dirtyCondition` 同阈值）。"""
+    return {
+        "PO_NO": poNo,
+        "PO_LINE_NO": poLine,
+        "SUPPLIER_CODE": "B125",
+        "ORDER_QTY": 1_200_000.0,
+        "RECEIVED_QTY": 0.0,
+        "OPEN_QTY": 1_200_000.0,
+    }
+
+
+def test_assemble_orders_excludes_dirty_lines_from_order_metrics() -> None:
+    """订单级口径与 summary 对齐：脏行只留在 lines[]，不进三态/行数/数量。
+
+    「正常行已全收 + 脏行未收」的订单：summary 计为全到货，byOrder 必须也是
+    `all`（旧装配会因脏行判成 `notArrived` —— 同一订单两个结论）。
+    """
+    rows = [
+        {
+            "PO_NO": "A",
+            "PO_LINE_NO": 1,
+            "SUPPLIER_CODE": "B125",
+            "ORDER_QTY": 100.0,
+            "RECEIVED_QTY": 100.0,
+            "OPEN_QTY": 0.0,
+        },
+        _dirtyLineRow("A", 2),
+        {
+            "PO_NO": "B",
+            "PO_LINE_NO": 1,
+            "SUPPLIER_CODE": "C1",
+            "ORDER_QTY": 50.0,
+            "RECEIVED_QTY": 0.0,
+            "OPEN_QTY": 50.0,
+        },
+    ]
+    summary = mod._assembleSummary(
+        {
+            "TOTAL_LINES": 2,
+            "TOTAL_ORDERS": 2,
+            "ORDERED_QTY": 150.0,
+            "RECEIVED_QTY": 100.0,
+            "ALL_ARRIVED": 1,
+            "PARTIAL": 0,
+            "NOT_ARRIVED": 1,
+            "EXCLUDED_ROWS": 1,
+        }
+    )
+
+    orders = mod._assembleOrders(rows)
+
+    assert [order["poNo"] for order in orders] == ["A", "B"]
+    first, second = orders
+    # A：正常行全收 ⇒ 全到货（与 summary 的 ALL_ARRIVED 一致）
+    assert first["status"] == "all"
+    assert first["totalLines"] == 1
+    assert first["arrivedLines"] == 1
+    assert first["notArrivedLines"] == 0
+    assert first["orderedQty"] == 100.0
+    assert first["receivedQty"] == 100.0
+    # 脏行仍在明细里（供人核查）+ 显式标记
+    assert len(first["lines"]) == 2
+    assert [line["isDirty"] for line in first["lines"]] == [False, True]
+    assert first["hasDirtyLines"] is True
+    # B：未到货，与 summary 的 NOT_ARRIVED 一致
+    assert second["status"] == "notArrived"
+    assert second["hasDirtyLines"] is False
+    # 与 summary 的对齐：行数与三态
+    assert sum(order["totalLines"] for order in orders) == summary["totalLines"]
+    assert sum(1 for order in orders if order["status"] == "all") == summary["allArrivedOrders"]
+    assert sum(1 for order in orders if order["status"] == "notArrived") == summary["notArrivedOrders"]
+
+
+def test_assemble_orders_status_uses_sql_line_predicates_not_quantity_sum() -> None:
+    """一正一负的两行不得抵消：SQL 判「有欠交行 + 有收货行」⇒ partial。"""
+    rows = [
+        {
+            "PO_NO": "A",
+            "PO_LINE_NO": 1,
+            "SUPPLIER_CODE": "B125",
+            "ORDER_QTY": 100.0,
+            "RECEIVED_QTY": 250.0,
+            "OPEN_QTY": -150.0,
+        },
+        {
+            "PO_NO": "A",
+            "PO_LINE_NO": 2,
+            "SUPPLIER_CODE": "B125",
+            "ORDER_QTY": 100.0,
+            "RECEIVED_QTY": 0.0,
+            "OPEN_QTY": 100.0,
+        },
+    ]
+
+    order = mod._assembleOrders(rows)[0]
+
+    # 若按 sum(openQty) = -50 判「全到」就与 SQL 的 OPEN_LINES>0 口径分叉
+    assert order["status"] == "partial"
+
+
+def test_assemble_orders_all_dirty_has_zero_valid_lines() -> None:
+    """全脏行订单不进任何订单级统计（status 保持缺省，hasDirtyLines 为真）。"""
+    order = mod._assembleOrders([_dirtyLineRow("A", 1), _dirtyLineRow("A", 2)])[0]
+
+    assert order["totalLines"] == 0
+    assert order["orderedQty"] == 0.0
+    assert order["receivedQty"] == 0.0
+    assert order["hasDirtyLines"] is True
+    assert len(order["lines"]) == 2
+
+
+def test_with_supplier_directory_prefers_mdm_then_erp_then_none() -> None:
+    """名称优先级：MDM 名 > ERP 名 > None（spec 5.7）。"""
+    rows = [
+        {"SUPPLIER_CODE": "B125", "ERP_SUPPLIER_NAME": "B125-ERP"},
+        {"SUPPLIER_CODE": "C1", "ERP_SUPPLIER_NAME": "C1-ERP"},
+        {"SUPPLIER_CODE": "D9"},
+    ]
+
+    enriched = mod._withSupplierDirectory(rows, {"B125": {"name": "MDM 全名", "enterpriseKey": 7}})
+
+    assert enriched[0]["SUPPLIER_NAME"] == "MDM 全名"
+    assert enriched[1]["SUPPLIER_NAME"] == "C1-ERP"
+    assert enriched[2]["SUPPLIER_NAME"] is None
+    assert enriched[0]["ENTERPRISE_KEY"] == 7
+    # 不可变：不往 adapter 返回的行里塞字段
+    assert "SUPPLIER_NAME" not in rows[0]
+
+
 # ---------------------------------------------------------------- 供应商检索
 
 
@@ -370,7 +525,7 @@ async def test_handler_returns_structured_payload(monkeypatch) -> None:
         if "TOTAL_LINES" in sql:
             return [dict(_SUMMARY_ROW)]
         if "GROUP BY S.SUPPLIER_CODE" in sql:
-            return [_supplierRow()]
+            return [_supplierRow(), _supplierRowFallback()]
         return _orderRows()
 
     class _FakeAdapter:
@@ -425,14 +580,19 @@ async def test_handler_returns_structured_payload(monkeypatch) -> None:
     assert data["bySupplier"][0]["supplierCode"] == "B125"
     assert data["bySupplier"][0]["supplierName"] == "浙江力航汽车部件有限公司"
     assert data["bySupplier"][0]["enterpriseKey"] == 195779358766766
+    # MDM 无行 ⇒ 回退 SQL 带出的 ERP 名（spec 5.7）
+    assert data["bySupplier"][1]["supplierCode"] == "C1"
+    assert data["bySupplier"][1]["supplierName"] == "宁波备用件-ERP"
+    assert data["bySupplier"][1]["enterpriseKey"] is None
     assert data["byOrder"][0]["status"] == "partial"
     assert data["byOrder"][0]["orderDate"] == "2026-10-28"
     assert data["byOrder"][0]["supplierName"] == "浙江力航汽车部件有限公司"
+    assert data["byOrder"][0]["hasDirtyLines"] is False
     # 本体绑定：两段解析、顺序固定，收货侧必需属性含聚合所需的日期/物料描述
     assert captured["classes"] == [mod.ORDER_CLASS_NAME, mod.RECEIPT_CLASS_NAME]
     assert {"RCV_DATE", "ITEM_DESC"} <= set(captured["required"][mod.RECEIPT_CLASS_NAME])
-    # MDM 名称按实际出现的供应商编码取一次
-    assert captured["directoryCodes"] == ("B125",)
+    # MDM 名称按实际出现的供应商编码取一次（去重保序）
+    assert captured["directoryCodes"] == ("B125", "C1")
     # 供应商解析后的业务码进 SQL；数字订单号先转字符串（`_inClause` 拒非 str）
     byOrderSql = next(sql for sql in captured["sqls"] if "ORDER BY OPEN_QTY DESC" in sql)
     assert "O.SUPPLIER_CODE IN ('A002')" in byOrderSql
@@ -469,3 +629,44 @@ async def test_handler_fails_closed_on_unknown_supplier(monkeypatch) -> None:
     monkeypatch.setattr(mod, "_resolveSupplierKey", _fakeResolveSupplier)
     with pytest.raises(NotFoundError, match="未找到供应商：查无此家"):
         await mod.deliveryTrackingHandler(None, {"supplierKeys": ["查无此家"]}, _FakeCtx())
+
+
+# ---------------------------------------------------------------- 可选 ERP 名（SQL）
+
+
+def test_by_supplier_sql_carries_optional_erp_supplier_name() -> None:
+    """ERP 名回退（spec 5.7）：`SUPPLIER_NAME` 已绑定 ⇒ 内层聚合 + 外层带出。"""
+    sql = mod.buildDeliveryTrackingBySupplierSql(
+        order=_orderBindingWithSupplierName(),
+        receipt=_receiptBinding(),
+        window=mod.resolveWindow(today=date(2026, 11, 25), monthsBack=12),
+    )
+
+    assert "MAX(O.SUPPLIER_NAME) AS ERP_SUPPLIER_NAME" in sql
+    assert "MAX(S.ERP_SUPPLIER_NAME) AS ERP_SUPPLIER_NAME" in sql
+
+
+def test_by_order_sql_carries_optional_erp_supplier_name() -> None:
+    """明细行也带 ERP 名（MDM 无行时按订单展示回退名）。"""
+    sql = mod.buildDeliveryTrackingByOrderSql(
+        order=_orderBindingWithSupplierName(),
+        receipt=_receiptBinding(),
+        window=mod.resolveWindow(today=date(2026, 11, 25), monthsBack=12),
+    )
+
+    assert "O.SUPPLIER_NAME AS ERP_SUPPLIER_NAME" in sql
+
+
+def test_erp_supplier_name_is_optional_and_absent_when_unbound() -> None:
+    """`SUPPLIER_NAME` 未绑定 ⇒ 三段 SQL 都不出现该列（不 fail-closed）。"""
+    order, receipt = _orderBinding(), _receiptBinding()
+    window = mod.resolveWindow(today=date(2026, 11, 25), monthsBack=12)
+
+    sqls = {
+        "summary": mod.buildDeliveryTrackingSummarySql(order=order, receipt=receipt, window=window),
+        "bySupplier": mod.buildDeliveryTrackingBySupplierSql(order=order, receipt=receipt, window=window),
+        "byOrder": mod.buildDeliveryTrackingByOrderSql(order=order, receipt=receipt, window=window),
+    }
+
+    for name, sql in sqls.items():
+        assert "ERP_SUPPLIER_NAME" not in sql, name

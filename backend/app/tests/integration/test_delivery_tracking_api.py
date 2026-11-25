@@ -28,6 +28,7 @@ _ORDER_COLUMNS = {
     "PO_QTY": "PO_QTY",
     "ORDER_DATE": "ORDER_DATE",
     "SUPPLIER_CODE": "SUPPLIER_CODE",
+    "SUPPLIER_NAME": "SUPPLIER_NAME",
     "ITEM_CODE": "ITEM_CODE",
     "EXP_RCV_DATE": "EXP_RCV_DATE",
 }
@@ -52,6 +53,7 @@ _SUMMARY_ROW = {
 }
 _SUPPLIER_ROW = {
     "SUPPLIER_CODE": "B125",
+    "ERP_SUPPLIER_NAME": "力航-ERP 名",
     "TOTAL_ORDERS": 29,
     "ALL_ARRIVED": 1,
     "PARTIAL": 16,
@@ -60,10 +62,23 @@ _SUPPLIER_ROW = {
     "RECEIVED_QTY": 2176026.0,
     "EXCLUDED_ROWS": 0,
 }
+#: MDM 无行的供应商 ⇒ 展示回退到 ERP 名（spec 5.7）。
+_SUPPLIER_ROW_FALLBACK = {
+    "SUPPLIER_CODE": "C1",
+    "ERP_SUPPLIER_NAME": "宁波备用件-ERP",
+    "TOTAL_ORDERS": 1,
+    "ALL_ARRIVED": 0,
+    "PARTIAL": 0,
+    "NOT_ARRIVED": 1,
+    "ORDERED_QTY": 50.0,
+    "RECEIVED_QTY": 0.0,
+    "EXCLUDED_ROWS": 0,
+}
 _ORDER_ROW = {
     "PO_NO": "T22611POH0223",
     "PO_LINE_NO": 3000,
     "SUPPLIER_CODE": "B125",
+    "ERP_SUPPLIER_NAME": "力航-ERP 名",
     "ORDER_DATE": "2026-10-28",
     "MATERIAL_CODE": "5A2100000002",
     "MATERIAL_DESC": "kun10/kun30/N1/N2方形焊接螺母M6",
@@ -75,8 +90,16 @@ _ORDER_ROW = {
 }
 
 
-def _fakeAdapterFor(captured: list[str]):
-    """按请求形态分派三段结果（业务库在测试环境不可达）。"""
+def _withoutErpName(row: dict) -> dict:
+    """模拟 SQL 未 SELECT `ERP_SUPPLIER_NAME` 时的行形状。"""
+    return {key: value for key, value in row.items() if key != "ERP_SUPPLIER_NAME"}
+
+
+def _fakeAdapterFor(captured: list[str], *, withErpName: bool = True):
+    """按请求形态分派三段结果（业务库在测试环境不可达）。
+
+    `withErpName=False` 时行里不含 ERP 名——用于验证"绑定缺失 ⇒ SQL 不产该列"。
+    """
 
     class _FakeAdapter:
         async def execute_read_only(self, sql: str):
@@ -84,8 +107,10 @@ def _fakeAdapterFor(captured: list[str]):
             if "TOTAL_LINES" in sql:
                 return [dict(_SUMMARY_ROW)]
             if "GROUP BY S.SUPPLIER_CODE" in sql:
-                return [dict(_SUPPLIER_ROW)]
-            return [dict(_ORDER_ROW)]
+                rows = [dict(_SUPPLIER_ROW), dict(_SUPPLIER_ROW_FALLBACK)]
+            else:
+                rows = [dict(_ORDER_ROW)]
+            return rows if withErpName else [_withoutErpName(row) for row in rows]
 
     return _FakeAdapter()
 
@@ -96,17 +121,18 @@ async def _seedSupplier(
     enterpriseKey: int,
     enterpriseCode: str,
     name: str,
+    sourceSystem: SourceSystem = SourceSystem.MDM,
 ) -> None:
-    """种一条 MDM 供应商映射（真实 ORM 行；唯一键 = 类型+企业键+源系统）。"""
+    """种一条供应商映射（真实 ORM 行；唯一键 = 类型+企业键+源系统）。"""
     dbSession.add(
         EntityMapping(
             entity_type="SUPPLIER",
             enterprise_key=enterpriseKey,
             enterprise_code=enterpriseCode,
-            source_system=SourceSystem.MDM,
+            source_system=sourceSystem,
             source_key=str(enterpriseKey),
             source_code=enterpriseCode,
-            match_rule=MatchRule.MDM_MASTER,
+            match_rule=(MatchRule.MDM_MASTER if sourceSystem == SourceSystem.MDM else MatchRule.MAPPING),
             name=name,
         )
     )
@@ -114,14 +140,17 @@ async def _seedSupplier(
 
 
 async def _seedDeliveryBindings(
-    dbSession: AsyncSession, *, receiptColumns: dict[str, str] | None = None
+    dbSession: AsyncSession,
+    *,
+    receiptColumns: dict[str, str] | None = None,
+    orderColumns: dict[str, str] | None = None,
 ) -> None:
     """种 THBI 数据源 + 订单行 / 收货行两条确认生效绑定。"""
     await _seedThbiDataSource(dbSession)
     await _seedClassWithBinding(
         dbSession,
         className=mod.ORDER_CLASS_NAME,
-        propertyColumns=_ORDER_COLUMNS,
+        propertyColumns=_ORDER_COLUMNS if orderColumns is None else orderColumns,
         sourceTable=mod.ORDER_CLASS_NAME,
     )
     await _seedClassWithBinding(
@@ -165,9 +194,7 @@ async def test_handler_resolves_real_bindings_and_returns_three_sections(
         name="浙江力航汽车部件有限公司",
     )
     capturedSql: list[str] = []
-    monkeypatch.setattr(
-        mod, "_getAdapter", lambda datasourceId, ds: _fakeAdapterFor(capturedSql)
-    )
+    monkeypatch.setattr(mod, "_getAdapter", lambda datasourceId, ds: _fakeAdapterFor(capturedSql))
 
     result = await mod.deliveryTrackingHandler(
         dbSession, {"anchorDay": 24, "periodIndex": 0, "limit": 50}, None
@@ -193,12 +220,65 @@ async def test_handler_resolves_real_bindings_and_returns_three_sections(
     assert data["bySupplier"][0]["supplierCode"] == "B125"
     assert data["bySupplier"][0]["supplierName"] == "浙江力航汽车部件有限公司"
     assert data["bySupplier"][0]["enterpriseKey"] == 195779358766766
+    # MDM 无行 ⇒ 用 SQL 带出的 ERP 名回退（spec 5.7）
+    assert data["bySupplier"][1]["supplierCode"] == "C1"
+    assert data["bySupplier"][1]["supplierName"] == "宁波备用件-ERP"
     assert data["byOrder"][0]["status"] == "partial"
     assert data["byOrder"][0]["orderDate"] == "2026-10-28"
     assert data["byOrder"][0]["supplierName"] == "浙江力航汽车部件有限公司"
     # 物理表/列来自真实绑定行（不是硬编码）
     assert any("FROM THBI.DWD_PURCHASE_ORDER_DTL O" in sql for sql in capturedSql)
     assert any("FROM THBI.DWD_GOODS_RECEIPT_DTL GROUP BY" in sql for sql in capturedSql)
+    # 可选 ERP 名属性被真实绑定解析到 SQL（MDM 无行时的回退来源）
+    assert any("MAX(O.SUPPLIER_NAME) AS ERP_SUPPLIER_NAME" in sql for sql in capturedSql)
+    assert any("O.SUPPLIER_NAME AS ERP_SUPPLIER_NAME" in sql for sql in capturedSql)
+
+
+@pytest.mark.asyncio
+async def test_erp_supplier_name_binding_is_optional(dbSession: AsyncSession, monkeypatch) -> None:
+    """`SUPPLIER_NAME` 未绑定 ⇒ 不回退、不 fail-closed（只是没有 ERP 名）。"""
+    await _seedDeliveryBindings(
+        dbSession,
+        orderColumns={key: value for key, value in _ORDER_COLUMNS.items() if key != "SUPPLIER_NAME"},
+    )
+    capturedSql: list[str] = []
+    monkeypatch.setattr(
+        mod,
+        "_getAdapter",
+        lambda datasourceId, ds: _fakeAdapterFor(capturedSql, withErpName=False),
+    )
+
+    result = await mod.deliveryTrackingHandler(dbSession, {"monthsBack": 3}, None)
+
+    assert not any("ERP_SUPPLIER_NAME" in sql for sql in capturedSql)
+    # 行里也没有 ERP 名 + MDM 无行 ⇒ 名称为 None（不回退、不 fail-closed）
+    assert result.data["bySupplier"][1]["supplierName"] is None
+
+
+@pytest.mark.asyncio
+async def test_supplier_directory_only_reads_mdm_source(dbSession: AsyncSession) -> None:
+    """Minor：同一业务码在 ERP/SRM 也有行时，名称只取 `source_system=MDM`。"""
+    await _seedSupplier(
+        dbSession,
+        enterpriseKey=1,
+        enterpriseCode="B125",
+        name="ERP 侧名称",
+        sourceSystem=SourceSystem.ERP,
+    )
+
+    directory = await mod._loadSupplierDirectory(dbSession, ("B125",))
+
+    assert directory == {}, "非 MDM 源的行不得作为供应商名称来源"
+
+    await _seedSupplier(
+        dbSession,
+        enterpriseKey=1,
+        enterpriseCode="B125",
+        name="MDM 侧名称",
+    )
+    directory = await mod._loadSupplierDirectory(dbSession, ("B125",))
+
+    assert directory["B125"]["name"] == "MDM 侧名称"
 
 
 @pytest.mark.asyncio

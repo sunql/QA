@@ -15,6 +15,7 @@ from datetime import date, datetime
 from typing import Any
 
 from app.domain.exceptions import DomainError
+from app.services.delivery_tracking_sql import _OPEN_QTY_SANITY_MAX
 
 
 class DeliveryTrackingInvariantError(DomainError):
@@ -110,14 +111,20 @@ def _assembleSummary(row: dict[str, Any]) -> dict[str, Any]:
 def _orderStatus(lines: list[dict[str, Any]]) -> str:
     """行级 → 订单三态：all / partial / notArrived。
 
-    优先级：无欠交 ⇒ 全到（含订购量 ≤ 0 且未收货）；有欠交且收过货 ⇒ 部分；
-    有欠交且一行未收 ⇒ 未到货。三支互斥（`_assertStateTotal` 的前提）。
+    **按行谓词计数**（不按数量求和），与 SQL `_statesSelect` 逐字同口径：
+    - 无欠交行（`openQty > 0` 计数为 0）⇒ 全到（含订购量 ≤ 0 且未收货）；
+    - 有欠交且收过货（`receivedQty > 0` 行数 > 0）⇒ 部分；
+    - 有欠交且一行未收 ⇒ 未到货。
+    三支互斥（`_assertStateTotal` 的前提）。
+
+    ⚠️ 不能改成 `sum(openQty) <= 0` 判全到：一正一负的两行（超收 + 欠交）
+    会相互抵消 ⇒ 汇总判「部分」、明细判「全到」（口径分叉）。
     """
-    openQty = sum(float(line.get("openQty") or 0.0) for line in lines)
-    receivedQty = sum(float(line.get("receivedQty") or 0.0) for line in lines)
-    if openQty <= 0:
+    openLines = sum(1 for line in lines if float(line.get("openQty") or 0.0) > 0)
+    if openLines == 0:
         return "all"
-    return "partial" if receivedQty > 0 else "notArrived"
+    receivedLines = sum(1 for line in lines if float(line.get("receivedQty") or 0.0) > 0)
+    return "partial" if receivedLines > 0 else "notArrived"
 
 
 def _assembleSupplier(row: dict[str, Any]) -> dict[str, Any]:
@@ -161,6 +168,7 @@ def _newOrderEntry(poNo: str, row: dict[str, Any]) -> dict[str, Any]:
         "enterpriseKey": _col(row, "ENTERPRISE_KEY"),
         "orderDate": _isoDate(_col(row, "ORDER_DATE")),
         "status": "notArrived",
+        "hasDirtyLines": False,
         "totalLines": 0,
         "arrivedLines": 0,
         "notArrivedLines": 0,
@@ -171,7 +179,11 @@ def _newOrderEntry(poNo: str, row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _assembleLine(row: dict[str, Any]) -> dict[str, Any]:
-    """单行明细（物料 / 订购 / 已收 / 欠交 / 预期与最后收货日 / 行状态）。"""
+    """单行明细（物料 / 订购 / 已收 / 欠交 / 预期与最后收货日 / 行状态）。
+
+    `isDirty` = 欠交量 ≥ 1e6（与 SQL `_dirtyCondition` 同一阈值）：
+    明细**保留**脏行供人核查，但它不进订单级派生值。
+    """
     orderedQty = float(_col(row, "ORDER_QTY") or 0.0)
     receivedQty = float(_col(row, "RECEIVED_QTY") or 0.0)
     openQty = float(_col(row, "OPEN_QTY") or 0.0)
@@ -185,7 +197,26 @@ def _assembleLine(row: dict[str, Any]) -> dict[str, Any]:
         "expectedDate": _isoDate(_col(row, "EXPECTED_DATE")),
         "lastReceiptDate": _isoDate(_col(row, "RECEIPT_DATE")),
         "status": _orderStatus([{"openQty": openQty, "receivedQty": receivedQty}]),
+        "isDirty": openQty >= _OPEN_QTY_SANITY_MAX,
     }
+
+
+def _aggregateOrderLines(entry: dict[str, Any]) -> None:
+    """订单级派生值 —— **只统计非脏行**（与 summary / bySupplier 同口径）。
+
+    脏行留在 `lines[]` 供核查，但不参与 `status` / 行数 / 订购量 / 已收量：
+    否则「一条正常行已全收 + 一条脏行未收」的订单会被明细判成未到货，
+    而 summary 判成全到货（同一订单两个结论）。
+    """
+    validLines = [line for line in entry["lines"] if not line["isDirty"]]
+    if validLines:
+        entry["status"] = _orderStatus(validLines)
+    entry["totalLines"] = len(validLines)
+    entry["arrivedLines"] = sum(1 for line in validLines if line["receivedQty"] > 0)
+    entry["notArrivedLines"] = sum(1 for line in validLines if line["receivedQty"] <= 0)
+    entry["orderedQty"] = sum(line["orderedQty"] for line in validLines)
+    entry["receivedQty"] = sum(line["receivedQty"] for line in validLines)
+    entry["hasDirtyLines"] = any(line["isDirty"] for line in entry["lines"])
 
 
 def _assembleOrders(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -196,17 +227,9 @@ def _assembleOrders(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         entry = grouped.setdefault(poNo, _newOrderEntry(poNo, row))
         if entry["orderDate"] is None:
             entry["orderDate"] = _isoDate(_col(row, "ORDER_DATE"))
-        line = _assembleLine(row)
-        entry["totalLines"] += 1
-        if line["receivedQty"] > 0:
-            entry["arrivedLines"] += 1
-        else:
-            entry["notArrivedLines"] += 1
-        entry["orderedQty"] += line["orderedQty"]
-        entry["receivedQty"] += line["receivedQty"]
-        entry["lines"].append(line)
+        entry["lines"].append(_assembleLine(row))
     for entry in grouped.values():
-        entry["status"] = _orderStatus(entry["lines"])
+        _aggregateOrderLines(entry)
     return list(grouped.values())
 
 
@@ -223,14 +246,18 @@ def _supplierCodesOf(rows: list[dict[str, Any]]) -> tuple[str, ...]:
 def _withSupplierDirectory(
     rows: list[dict[str, Any]], directory: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """把 MDM 名称/企业键注入结果行（返回新行，不改 adapter 返回对象）。"""
+    """把 MDM 名称/企业键注入结果行（返回新行，不改 adapter 返回对象）。
+
+    spec 5.7：展示以 MDM `name` 为准，**MDM 无行回退 ERP 名**
+    （SQL 侧可选属性 `SUPPLIER_NAME` → 行内 `ERP_SUPPLIER_NAME`）；都没有 ⇒ None。
+    """
     enriched: list[dict[str, Any]] = []
     for row in rows:
         info = directory.get(str(_col(row, "SUPPLIER_CODE") or ""), {})
         enriched.append(
             {
                 **row,
-                "SUPPLIER_NAME": info.get("name"),
+                "SUPPLIER_NAME": info.get("name") or _col(row, "ERP_SUPPLIER_NAME"),
                 "ENTERPRISE_KEY": info.get("enterpriseKey"),
             }
         )

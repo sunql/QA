@@ -7,6 +7,7 @@ handler / extractor 引擎在代码（app.services.agent_tools）—— DB 仅�
 元数据（name / description / data_object / data_layers / handler_kind /
 handler_ref / arg_extractor_kind / enabled）。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -111,22 +112,45 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "monthsBack": {"type": "integer", "minimum": 1, "maximum": 36,
-                               "description": "时间窗（月，默认 12）；给了 dateFrom/dateTo 则忽略"},
-                "dateFrom": {"type": "string",
-                             "description": "下单日期段起（YYYY-MM-DD，可选；与 dateTo 成对）"},
-                "dateTo": {"type": "string",
-                           "description": "下单日期段止（YYYY-MM-DD，可选；与 dateFrom 成对）"},
-                "supplierKeys": {"type": "array", "items": {"type": "string"},
-                                 "description": "供应商编码列表（多选，缺省=全部）"},
-                "materialKeys": {"type": "array", "items": {"type": "string"},
-                                 "description": "物料列表（多选；每项可为编码或名称关键词，编码精确/名称模糊）"},
-                "siteKeys": {"type": "array", "items": {"type": "string"},
-                             "description": "基地列表（多选；每项可为编码 T3 或名称如 滨海，编码精确/名称模糊）"},
-                "minOverdueDays": {"type": "integer", "minimum": 0,
-                                   "description": "最低逾期天数（可选，0=不筛）"},
-                "datasourceId": {"type": "integer", "minimum": 1,
-                                 "description": "数据源 id（从问题中的 数据源 id=N 取；缺省=默认业务源）"},
+                "monthsBack": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 36,
+                    "description": "时间窗（月，默认 12）；给了 dateFrom/dateTo 则忽略",
+                },
+                "dateFrom": {
+                    "type": "string",
+                    "description": "下单日期段起（YYYY-MM-DD，可选；与 dateTo 成对）",
+                },
+                "dateTo": {
+                    "type": "string",
+                    "description": "下单日期段止（YYYY-MM-DD，可选；与 dateFrom 成对）",
+                },
+                "supplierKeys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "供应商编码列表（多选，缺省=全部）",
+                },
+                "materialKeys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "物料列表（多选；每项可为编码或名称关键词，编码精确/名称模糊）",
+                },
+                "siteKeys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "基地列表（多选；每项可为编码 T3 或名称如 滨海，编码精确/名称模糊）",
+                },
+                "minOverdueDays": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "最低逾期天数（可选，0=不筛）",
+                },
+                "datasourceId": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "数据源 id（从问题中的 数据源 id=N 取；缺省=默认业务源）",
+                },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
             },
             "additionalProperties": False,
@@ -147,20 +171,34 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "monthsBack": {"type": "integer", "minimum": 1, "maximum": 36,
-                               "description": "时间窗（月，默认 12）；给了 dateFrom/dateTo 则忽略"},
-                "dateFrom": {"type": "string",
-                             "description": "下单日期段起（YYYY-MM-DD，与 dateTo 成对）"},
-                "dateTo": {"type": "string",
-                           "description": "下单日期段止（YYYY-MM-DD，与 dateFrom 成对）"},
-                "anchorDay": {"type": "integer", "minimum": 1, "maximum": 28,
-                              "description": "月度周期锚点日（企业默认 24）；给了则按锚点周期取窗"},
-                "periodIndex": {"type": "integer",
-                                "description": "锚点期序，0=本期（已结束的最近完整周期），-1=上期"},
-                "supplierKeys": {"type": "array", "items": {"type": "string"},
-                                 "description": "供应商列表（多选；每项可为编码/企业键/全名/简称）"},
-                "orderKeys": {"type": "array", "items": {"type": "string"},
-                              "description": "订单号列表（可选，下钻指定订单）"},
+                "monthsBack": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 36,
+                    "description": "时间窗（月，默认 12）；给了 dateFrom/dateTo 则忽略",
+                },
+                "dateFrom": {"type": "string", "description": "下单日期段起（YYYY-MM-DD，与 dateTo 成对）"},
+                "dateTo": {"type": "string", "description": "下单日期段止（YYYY-MM-DD，与 dateFrom 成对）"},
+                "anchorDay": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 28,
+                    "description": "月度周期锚点日（企业默认 24）；给了则按锚点周期取窗",
+                },
+                "periodIndex": {
+                    "type": "integer",
+                    "description": "锚点期序，0=本期（已结束的最近完整周期），-1=上期",
+                },
+                "supplierKeys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "供应商列表（多选；每项可为编码/企业键/全名/简称）",
+                },
+                "orderKeys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "订单号列表（可选，下钻指定订单）",
+                },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200},
             },
             "additionalProperties": False,
@@ -363,8 +401,7 @@ def _needsUpdate(row: AgentToolConfig, seed: dict) -> bool:
         or list(row.data_layers or []) != list(seed.get("data_layers", []))
         or row.handler_kind != seed["handler_kind"]
         or row.handler_ref != seed["handler_ref"]
-        or row.arg_extractor_kind
-        != seed.get("arg_extractor_kind", "supplier_key")
+        or row.arg_extractor_kind != seed.get("arg_extractor_kind", "supplier_key")
         # 编排路径要求 input_schema 是合法 object schema；漏比这一项 ⇒
         # 库里遗留的 `{}` 永远不会被 seed 修好（2026-11-21 实测：
         # profile 绑定直接 ValidationError，而 seed 报「0 changed」）。
@@ -378,9 +415,7 @@ async def seedAgentToolConfigs(session: AsyncSession) -> int:
     changed = 0
     for seed in TOOL_SEEDS:
         existing = (
-            await session.execute(
-                select(AgentToolConfig).where(AgentToolConfig.name == seed["name"])
-            )
+            await session.execute(select(AgentToolConfig).where(AgentToolConfig.name == seed["name"]))
         ).scalar_one_or_none()
         if existing is None or _needsUpdate(existing, seed):
             await service.upsertSeed(session, seed["name"], seed)

@@ -419,13 +419,8 @@ def test_three_states_are_mutually_exclusive_and_exhaustive() -> None:
 
     # 全到货 = 无欠交（覆盖「订购量 ≤ 0 且未收货」）；未到货 = 有欠交且零收货。
     assert "CASE WHEN T.LINE_COUNT > 0 AND T.OPEN_LINES = 0" in summarySql
-    assert (
-        "CASE WHEN T.LINE_COUNT > 0 AND T.RECEIVED_LINES = 0 AND T.OPEN_LINES > 0" in summarySql
-    )
-    assert (
-        "CASE WHEN S.LINE_COUNT > 0 AND S.RECEIVED_LINES = 0 AND S.OPEN_LINES > 0"
-        in supplierSql
-    )
+    assert "CASE WHEN T.LINE_COUNT > 0 AND T.RECEIVED_LINES = 0 AND T.OPEN_LINES > 0" in summarySql
+    assert "CASE WHEN S.LINE_COUNT > 0 AND S.RECEIVED_LINES = 0 AND S.OPEN_LINES > 0" in supplierSql
     # 反证：不允许「未到货」缺 OPEN_LINES 谓词（唯一会导致重复计数的形态）
     assert "CASE WHEN T.LINE_COUNT > 0 AND T.RECEIVED_LINES = 0 THEN" not in summarySql
 

@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import calendar
 import re
-from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -55,6 +54,12 @@ from app.services.delivery_tracking_assembly import (
     _supplierCodesOf,
     _withSupplierDirectory,
 )
+from app.services.delivery_tracking_sql import (
+    # Task 4 契约：三个 builder 从本模块可导入（实现见 sql 模块）。
+    buildDeliveryTrackingByOrderSql,
+    buildDeliveryTrackingBySupplierSql,
+    buildDeliveryTrackingSummarySql,
+)
 from app.services.ontology_binding_resolver import ResolvedBinding, resolveBinding
 
 ORDER_CLASS_NAME = "DWD_PURCHASE_ORDER_DTL"
@@ -68,6 +73,9 @@ _DEFAULT_ORDER_LIMIT = 50
 #:
 #: 收货侧必须含 `RCV_DATE` 与 `ITEM_DESC`：收货聚合 SELECT 会取
 #: `MAX(<ITEM_DESC>)` / `MAX(<RCV_DATE>)`（`_receiptAggregate`）。
+#:
+#: 注意 `SUPPLIER_NAME` **刻意不在必需列表**：它是可选的 ERP 名回退来源
+#: （spec 5.7），缺绑定只是没有回退名，不该 fail-closed（SQL builder 按需取）。
 _ORDER_REQUIRED_PROPERTIES = (
     "PO_NO",
     "PO_LINE_NO",
@@ -90,14 +98,6 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MAX_ANCHOR_DAY = 28
 _MIN_MONTHS_BACK = 1
 _MAX_MONTHS_BACK = 36
-_MAX_LIMIT = 200
-#: 行级欠交量上限（spec 4.4）：≥ 1e6 判为源侧录入错误的脏行，剔除并显式计数。
-#:
-#: ⚠ 判据是**欠交量**（`PO_QTY - RECEIVED`），不是**订购量**：大额订购是真实业务
-#: （spec 4.2 明确拒绝按订购量剔行）。阈值与既有 `pending_delivery_query` 同源。
-_OPEN_QTY_SANITY_MAX = 1_000_000
-#: 支持的方言：默认现役 Oracle；场景槽位可切 MySQL 源（与待到货工具一致）。
-_SUPPORTED_DIALECTS = frozenset({"oracle", "mysql"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,284 +226,6 @@ def resolveWindow(
     return _resolveMonthsBack(today, monthsBack)
 
 
-# ---------------------------------------------------------------- SQL 片段
-
-
-def _esc(value: str) -> str:
-    """字面量转义（单引号翻倍）。"""
-    return value.replace("'", "''")
-
-
-def _dialectName(dialect: str) -> str:
-    """校验并归一化方言（现役 Oracle / 场景槽位可切 MySQL）。"""
-    name = str(dialect or "").strip().lower()
-    if name not in _SUPPORTED_DIALECTS:
-        raise ValidationError(
-            f"不支持的数据源方言：{dialect!r}（仅支持 {' / '.join(sorted(_SUPPORTED_DIALECTS))}）"
-        )
-    return name
-
-
-def _rowLimit(limit: object, dialect: str) -> str:
-    """行数限制尾巴：Oracle `FETCH FIRST n ROWS ONLY` / MySQL `LIMIT n`。
-
-    `limit` 上界 200（防大结果集拖垮只读适配器）；非整数 fail-closed。
-    """
-    name = _dialectName(dialect)
-    if isinstance(limit, bool) or not isinstance(limit, int):
-        raise ValidationError(f"limit 必须是整数，收到 {limit!r}")
-    bounded = max(1, min(limit, _MAX_LIMIT))
-    return f"LIMIT {bounded}" if name == "mysql" else f"FETCH FIRST {bounded} ROWS ONLY"
-
-
-def _windowPredicate(order: ResolvedBinding, window: DeliveryTrackingWindow) -> str:
-    """窗口谓词：下单日期落在 [dateFrom, dateTo) —— 左闭右开。"""
-    orderDate = order.column("ORDER_DATE")
-    return (
-        f"{orderDate} >= DATE '{window.dateFrom.isoformat()}'"
-        f" AND {orderDate} < DATE '{window.dateTo.isoformat()}'"
-    )
-
-
-def _receiptAggregate(receipt: ResolvedBinding) -> str:
-    """收货子查询：按 PO_NO+PO_LINE_NO 聚合已收量（含物料名与最后收货日）。"""
-    poNo = receipt.column("PO_NO")
-    poLine = receipt.column("PO_LINE_NO")
-    qty = receipt.column("RCV_QTY_STU")
-    itemDesc = receipt.column("ITEM_DESC")
-    rcvDate = receipt.column("RCV_DATE")
-    return (
-        f"(SELECT {poNo} AS PO_NO, {poLine} AS PO_LINE_NO, "
-        f"SUM({qty}) AS RECEIVED_QTY, "
-        f"MAX({itemDesc}) AS ITEM_DESC, MAX({rcvDate}) AS RECEIPT_DATE "
-        f"FROM {receipt.qualifiedTable()} "
-        f"GROUP BY {poNo}, {poLine})"
-    )
-
-
-def _inClause(alias: str, column: str, keys: Iterable[str]) -> str | None:
-    """`alias.column IN ('a','b')`；无键 ⇒ None（不带空 IN）。
-
-    键必须是非空字符串：`None`/数字/空白串一律 fail-closed（不可信输入），
-    绝不静默转成字面量 `'None'`（那会匹配 0 行，把调用错误伪装成“查无数据”）。
-    """
-    values: list[str] = []
-    for key in keys:
-        if not isinstance(key, str) or not key.strip():
-            raise ValidationError(f"键值必须是非空字符串，收到 {key!r}")
-        values.append(key)
-    if not values:
-        return None
-    literals = ",".join("'" + _esc(value) + "'" for value in values)
-    return f"{alias}.{column} IN ({literals})"
-
-
-def _andClauses(*clauses: str | None) -> str:
-    """把可选谓词拼成 ` AND ...` 串（None/空串跳过）。"""
-    return "".join(f" AND {clause}" for clause in clauses if clause)
-
-
-def _dirtyCondition(order: ResolvedBinding) -> str:
-    """行级 `OPEN_QTY >= 1e6` ⇒ 源侧录入错误条目（spec 4.4）。
-
-    判据用**欠交量**而非订购量：大额订购是真实业务大单（spec 4.2）。
-    """
-    poQty = order.column("PO_QTY")
-    return f"O.{poQty} - COALESCE(R.RECEIVED_QTY, 0) >= {_OPEN_QTY_SANITY_MAX}"
-
-
-def _lineMeasures(dirty: str, qtyExpr: str, qtyAlias: str) -> str:
-    """派生表的六个行级度量（唯一来源，防两个 aggregate 漂移）。
-
-    脏行（`dirty` 为真）在行数/订购量/已收量/欠交行/已收行里一律贡献 0
-    （即“既不算欠交也不算已收”），只计入 `DIRTY_LINES`。
-    """
-    measures = [
-        f"SUM(CASE WHEN {dirty} THEN 0 ELSE 1 END) AS LINE_COUNT",
-        f"SUM(CASE WHEN {dirty} THEN 0 ELSE {qtyExpr} END) AS {qtyAlias}",
-        f"SUM(CASE WHEN {dirty} THEN 0 ELSE COALESCE(R.RECEIVED_QTY, 0) END) AS RECEIVED_QTY",
-        f"SUM(CASE WHEN {dirty} THEN 0"
-        f" WHEN {qtyExpr} - COALESCE(R.RECEIVED_QTY, 0) > 0"
-        f" THEN 1 ELSE 0 END) AS OPEN_LINES",
-        f"SUM(CASE WHEN {dirty} THEN 0"
-        f" WHEN COALESCE(R.RECEIVED_QTY, 0) > 0"
-        f" THEN 1 ELSE 0 END) AS RECEIVED_LINES",
-        f"SUM(CASE WHEN {dirty} THEN 1 ELSE 0 END) AS DIRTY_LINES",
-    ]
-    body = "\n".join(f"         {measure}," for measure in measures[:-1])
-    return f"{body}\n         {measures[-1]}"
-
-
-def _statesSelect(alias: str) -> str:
-    """订单三态 select 片段（`alias` 为订单级派生表别名）。
-
-    三态必须**互斥且穷尽**（有效行数 > 0 的订单恰好落入一态）：
-
-    - 全到货：无欠交行（不论是否收过货；订购量 ≤ 0 且未收货也在此态）；
-    - 部分：有欠交且有收货；
-    - 未到货：有欠交且一行都没收。
-
-    ⚠️ 「未到货」**必须**同时要求 `OPEN_LINES > 0`：否则「订购量 ≤ 0 且未收货」
-    的订单会同时命中「全到货」与「未到货」⇒ 三态之和 > 总订单数 ⇒ 到货率 > 100%
-    （本项目已知风险点；装配层另有 `DeliveryTrackingInvariantError` 兜底）。
-    全脏行订单（`LINE_COUNT = 0`）不落入任一态。
-    """
-    return (
-        f"  SUM(CASE WHEN {alias}.LINE_COUNT > 0 AND {alias}.OPEN_LINES = 0"
-        f" THEN 1 ELSE 0 END) AS ALL_ARRIVED,\n"
-        f"  SUM(CASE WHEN {alias}.OPEN_LINES > 0 AND {alias}.RECEIVED_LINES > 0"
-        f" THEN 1 ELSE 0 END) AS PARTIAL,\n"
-        f"  SUM(CASE WHEN {alias}.LINE_COUNT > 0 AND {alias}.RECEIVED_LINES = 0"
-        f" AND {alias}.OPEN_LINES > 0 THEN 1 ELSE 0 END) AS NOT_ARRIVED"
-    )
-
-
-def _orderAggregate(order: ResolvedBinding, receipt: ResolvedBinding, window: DeliveryTrackingWindow) -> str:
-    """订单级派生表：按 PO_NO 聚合，脏行不计入任何统计但单列 `DIRTY_LINES`。"""
-    poNo = order.column("PO_NO")
-    poLine = order.column("PO_LINE_NO")
-    qtyExpr = f"O.{order.column('PO_QTY')}"
-    return f"""
-  SELECT O.{poNo} AS PO_NO,
-{_lineMeasures(_dirtyCondition(order), qtyExpr, "ORDER_QTY")}
-  FROM {order.qualifiedTable()} O
-  LEFT JOIN {_receiptAggregate(receipt)} R
-    ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
-  WHERE {_windowPredicate(order, window)}
-  GROUP BY O.{poNo}"""
-
-
-def _supplierOrderAggregate(
-    order: ResolvedBinding,
-    receipt: ResolvedBinding,
-    window: DeliveryTrackingWindow,
-    supplierFilter: str,
-) -> str:
-    """供应商 × 订单派生表（脏行口径与 `_orderAggregate` 共用 `_lineMeasures`）。"""
-    supplierCode = order.column("SUPPLIER_CODE")
-    poNo = order.column("PO_NO")
-    poLine = order.column("PO_LINE_NO")
-    qtyExpr = f"O.{order.column('PO_QTY')}"
-    return f"""
-  SELECT O.{supplierCode} AS SUPPLIER_CODE, O.{poNo} AS PO_NO,
-{_lineMeasures(_dirtyCondition(order), qtyExpr, "ORDERED_QTY")}
-  FROM {order.qualifiedTable()} O
-  LEFT JOIN {_receiptAggregate(receipt)} R
-    ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
-  WHERE {_windowPredicate(order, window)}{supplierFilter}
-  GROUP BY O.{supplierCode}, O.{poNo}"""
-
-
-# ---------------------------------------------------------------- SQL 模板
-
-
-def buildDeliveryTrackingSummarySql(
-    *,
-    order: ResolvedBinding,
-    receipt: ResolvedBinding,
-    window: DeliveryTrackingWindow,
-    dialect: str = "oracle",
-) -> str:
-    """窗口级汇总：总行数 / 订单数 / 订购量 / 已收量 / 订单三态 / 脏行数。
-
-    行级先按 PO_NO 聚合，再在订单级判三态 ⇒ 「全到货」不会被
-    「部分行已到」误判。脏行（欠交量 ≥ 1e6）不计入 `TOTAL_LINES`
-    与三态/量级率，只在 `EXCLUDED_ROWS` 显式计数（spec 4.4）。
-    别名是 Task 4 `_assembleSummary` 的取值契约。
-    """
-    _dialectName(dialect)
-    return f"""
-SELECT
-  SUM(CASE WHEN T.LINE_COUNT > 0 THEN T.LINE_COUNT ELSE 0 END) AS TOTAL_LINES,
-  SUM(CASE WHEN T.LINE_COUNT > 0 THEN 1 ELSE 0 END) AS TOTAL_ORDERS,
-  SUM(T.ORDER_QTY) AS ORDERED_QTY,
-  SUM(T.RECEIVED_QTY) AS RECEIVED_QTY,
-{_statesSelect("T")},
-  SUM(T.DIRTY_LINES) AS EXCLUDED_ROWS
-FROM ({_orderAggregate(order, receipt, window)}
-) T""".strip()
-
-
-def buildDeliveryTrackingBySupplierSql(
-    *,
-    order: ResolvedBinding,
-    receipt: ResolvedBinding,
-    window: DeliveryTrackingWindow,
-    supplierKeys: tuple[str, ...] = (),
-    limit: int = 50,
-    dialect: str = "oracle",
-) -> str:
-    """供应商分组：每家的订单数 / 三态 / 到货量 / 脏行数（按未到货订单数降序）。
-
-    脏行口径同 `buildDeliveryTrackingSummarySql`：不计入三态与量级率，
-    只在 `EXCLUDED_ROWS` 显式计数（spec 4.4）。
-    """
-    supplierCode = order.column("SUPPLIER_CODE")
-    supplierFilter = _andClauses(_inClause("O", supplierCode, supplierKeys))
-    tail = _rowLimit(limit, dialect)
-    return f"""
-SELECT
-  S.SUPPLIER_CODE AS SUPPLIER_CODE,
-  SUM(CASE WHEN S.LINE_COUNT > 0 THEN 1 ELSE 0 END) AS TOTAL_ORDERS,
-{_statesSelect("S")},
-  SUM(S.ORDERED_QTY) AS ORDERED_QTY,
-  SUM(S.RECEIVED_QTY) AS RECEIVED_QTY,
-  SUM(S.DIRTY_LINES) AS EXCLUDED_ROWS
-FROM ({_supplierOrderAggregate(order, receipt, window, supplierFilter)}
-) S
-GROUP BY S.SUPPLIER_CODE
-ORDER BY NOT_ARRIVED DESC
-{tail}""".strip()
-
-
-def buildDeliveryTrackingByOrderSql(
-    *,
-    order: ResolvedBinding,
-    receipt: ResolvedBinding,
-    window: DeliveryTrackingWindow,
-    supplierKeys: tuple[str, ...] = (),
-    orderKeys: tuple[str, ...] = (),
-    limit: int = 50,
-    dialect: str = "oracle",
-) -> str:
-    """订单明细：订单号 + 行级（物料 / 订购 / 已收 / 欠交 / 预期与最后收货日）。
-
-    **不剔除脏行**（与 summary / bySupplier 刻意不同）：明细是给人看的证据，
-    脏行留着才能被发现；剔除只发生在统计口径里（spec 4.4）。
-    """
-    poNo = order.column("PO_NO")
-    poLine = order.column("PO_LINE_NO")
-    orderDate = order.column("ORDER_DATE")
-    orderQty = order.column("PO_QTY")
-    supplierCode = order.column("SUPPLIER_CODE")
-    itemCode = order.column("ITEM_CODE")
-    expectedDate = order.column("EXP_RCV_DATE")
-    extraFilter = _andClauses(
-        _inClause("O", supplierCode, supplierKeys),
-        _inClause("O", poNo, orderKeys),
-    )
-    tail = _rowLimit(limit, dialect)
-    return f"""
-SELECT
-  O.{poNo} AS PO_NO,
-  O.{poLine} AS PO_LINE_NO,
-  O.{orderDate} AS ORDER_DATE,
-  O.{supplierCode} AS SUPPLIER_CODE,
-  O.{itemCode} AS MATERIAL_CODE,
-  R.ITEM_DESC AS MATERIAL_DESC,
-  O.{orderQty} AS ORDER_QTY,
-  COALESCE(R.RECEIVED_QTY, 0) AS RECEIVED_QTY,
-  (O.{orderQty} - COALESCE(R.RECEIVED_QTY, 0)) AS OPEN_QTY,
-  O.{expectedDate} AS EXPECTED_DATE,
-  R.RECEIPT_DATE AS RECEIPT_DATE
-FROM {order.qualifiedTable()} O
-LEFT JOIN {_receiptAggregate(receipt)} R
-  ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
-WHERE {_windowPredicate(order, window)}{extraFilter}
-ORDER BY OPEN_QTY DESC
-{tail}""".strip()
-
-
 # ---------------------------------------------------------------- 供应商检索
 
 
@@ -518,9 +240,7 @@ async def _resolveSupplierKey(session: AsyncSession, key: str) -> tuple[int, str
     return await Supplier360Service()._resolveSupplier(session, key)
 
 
-async def _resolveSupplierCodes(
-    session: AsyncSession, keys: tuple[str, ...]
-) -> tuple[str, ...]:
+async def _resolveSupplierCodes(session: AsyncSession, keys: tuple[str, ...]) -> tuple[str, ...]:
     """把用户给的供应商标识解析成业务码列表（去重、保序）。
 
     解析失败**向上抛**（`NotFoundError`），不静默丢弃该供应商——
@@ -534,17 +254,20 @@ async def _resolveSupplierCodes(
     return tuple(resolved)
 
 
-async def _loadSupplierDirectory(
-    session: AsyncSession, codes: tuple[str, ...]
-) -> dict[str, dict[str, Any]]:
+async def _loadSupplierDirectory(session: AsyncSession, codes: tuple[str, ...]) -> dict[str, dict[str, Any]]:
     """按业务码批量取 MDM 供应商名称与企业键（spec 3.5 决策 9）。
 
-    名称**不 JOIN 数仓字典**（`DIM_SUPPLIER` 覆盖率不足）；MDM 无行 ⇒ 名称为 None。
+    名称**不 JOIN 数仓字典**（`DIM_SUPPLIER` 覆盖率不足）；MDM 无行 ⇒ 名称为 None
+    （装配层再回退 SQL 带出的 ERP 名，spec 5.7）。
+
+    ⚠️ 只取 `source_system = MDM` 的行：同一 `enterprise_code` 可能在 ERP/SRM
+    也有行，不限定来源就等于"按字母序任取一个"，与「以 MDM 为准」不符。
     """
     if not codes:
         return {}
     from sqlalchemy import select
 
+    from app.domain.enums import SourceSystem
     from app.domain.models import EntityMapping
 
     rows = (
@@ -556,6 +279,7 @@ async def _loadSupplierDirectory(
             )
             .where(
                 EntityMapping.entity_type == "SUPPLIER",
+                EntityMapping.source_system == SourceSystem.MDM,
                 EntityMapping.enterprise_code.in_(codes),
             )
             .order_by(EntityMapping.name.asc().nulls_last())
@@ -675,9 +399,7 @@ async def _resolveFilterArgs(
     session: AsyncSession, args: dict
 ) -> tuple[tuple[str, ...], tuple[str, ...], int]:
     """过滤参数：供应商（先过检索阶梯）/ 订单号 / 明细上限。"""
-    supplierKeys = await _resolveSupplierCodes(
-        session, _keyTuple(args.get("supplierKeys"), "supplierKeys")
-    )
+    supplierKeys = await _resolveSupplierCodes(session, _keyTuple(args.get("supplierKeys"), "supplierKeys"))
     orderKeys = _keyTuple(args.get("orderKeys"), "orderKeys")
     limit = _intArg(args.get("limit"), "limit", _DEFAULT_ORDER_LIMIT)
     return supplierKeys, orderKeys, limit
@@ -726,11 +448,7 @@ def _buildResultData(
 
 def _buildAnswer(summary: dict[str, Any]) -> str:
     """给编排/聊天层的一句话结论（数字与 data 同源）。"""
-    excludedNote = (
-        f"；剔除源侧数量异常行 {summary['excludedRows']} 行"
-        if summary["excludedRows"]
-        else ""
-    )
+    excludedNote = f"；剔除源侧数量异常行 {summary['excludedRows']} 行" if summary["excludedRows"] else ""
     return (
         f"到货率 {summary['orderArrivalRate']}%（全到货 {summary['allArrivedOrders']}"
         f" / 部分 {summary['partialArrivedOrders']} / 未到货 {summary['notArrivedOrders']}，"
@@ -739,9 +457,7 @@ def _buildAnswer(summary: dict[str, Any]) -> str:
     )
 
 
-async def deliveryTrackingHandler(
-    session: AsyncSession, args: dict, ctx: AgentToolContext
-) -> ToolResult:
+async def deliveryTrackingHandler(session: AsyncSession, args: dict, ctx: AgentToolContext) -> ToolResult:
     """`delivery_tracking_query`：到货率汇总 + 供应商分组 + 订单明细。
 
     数据源固定 THBI（`datasource_id=1`，由绑定解析闸门保证），物理表列全部
@@ -767,13 +483,9 @@ async def deliveryTrackingHandler(
         orderKeys=orderKeys,
         limit=limit,
     )
-    directory = await _loadSupplierDirectory(
-        session, _supplierCodesOf([*supplierRows, *orderRows])
-    )
+    directory = await _loadSupplierDirectory(session, _supplierCodesOf([*supplierRows, *orderRows]))
     summary = _assembleSummary(summaryRows[0] if summaryRows else {})
-    bySupplier = [
-        _assembleSupplier(row) for row in _withSupplierDirectory(supplierRows, directory)
-    ]
+    bySupplier = [_assembleSupplier(row) for row in _withSupplierDirectory(supplierRows, directory)]
     byOrder = _assembleOrders(_withSupplierDirectory(orderRows, directory))
 
     return ToolResult(

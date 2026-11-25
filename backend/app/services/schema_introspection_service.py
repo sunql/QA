@@ -608,7 +608,26 @@ class SchemaIntrospectionService:
         tables = await self.introspect(ds, owner=schemaName)
         schemaData = [t.model_dump() for t in tables]
         version = _schemaVersion(schemaData)
+        return await self._persistSchemaCache(
+            session, ds, schemaName=schemaName, schemaData=schemaData, version=version
+        )
 
+    async def _persistSchemaCache(
+        self,
+        session: AsyncSession,
+        ds: DataSource,
+        *,
+        schemaName: str,
+        schemaData: list[dict],
+        version: str,
+    ) -> SchemaCache:
+        """把已内省好的 schema 数据落到 schema_cache（全量 / 分批两条路径共用）。
+
+        写入并发安全（跨 PG/SQLite 可移植，不依赖方言特有的 ON CONFLICT）：
+        - 首次写入：session.add + commit，若与并发请求撞复合唯一约束
+          （uq_schema_cache_datasource_schema），回滚后复用胜出者，避免 500；
+        - 数据变化：DB 级 UPDATE（不原地修改既有 ORM 对象，符合不可变约束），再刷新取最新值。
+        """
         existing = await self.getCached(session, ds.id, owner=schemaName, ds=ds)
         if existing is not None and existing.schema_version == version:
             logger.info("schema 缓存未变化，复用 datasource_id=%s schema=%s", ds.id, schemaName)
@@ -632,7 +651,7 @@ class SchemaIntrospectionService:
                     return winner
                 raise
             await session.refresh(cache)
-            logger.info("写入 schema 缓存 datasource_id=%s schema=%s tables=%s", ds.id, schemaName, len(tables))
+            logger.info("写入 schema 缓存 datasource_id=%s schema=%s tables=%s", ds.id, schemaName, len(schemaData))
             return cache
         # 数据变化：DB 级 UPDATE 刷新版本号与内容（同一行，缓存幂等，仅一条）
         await session.execute(
@@ -645,7 +664,7 @@ class SchemaIntrospectionService:
         )
         await session.commit()
         await session.refresh(existing)
-        logger.info("刷新 schema 缓存 datasource_id=%s schema=%s tables=%s", ds.id, schemaName, len(tables))
+        logger.info("刷新 schema 缓存 datasource_id=%s schema=%s tables=%s", ds.id, schemaName, len(schemaData))
         return existing
 
     async def introspectAndCacheBatched(
@@ -659,7 +678,8 @@ class SchemaIntrospectionService:
     ) -> SchemaCache:
         """分批内省 → 写缓存，并把进度同步到 job 注册表。
 
-        与 introspectAndCache 的写库逻辑完全一致；区别只在：
+        写库与 introspectAndCache 共用 _persistSchemaCache（同一套新建/复用/冲突
+        回滚/UPDATE 逻辑）；区别只在：
         1. 内省走 introspectBatched（带进度回调）；
         2. 回调把 (completed, total) 写进 job 注册表。
         失败时异常向上抛，由 runIntrospectJob 统一落 failed（不写缓存）。
@@ -674,38 +694,9 @@ class SchemaIntrospectionService:
         )
         schemaData = [t.model_dump() for t in tables]
         version = _schemaVersion(schemaData)
-        existing = await self.getCached(session, ds.id, owner=schemaName, ds=ds)
-        if existing is not None and existing.schema_version == version:
-            return existing
-        if existing is None:
-            cache = SchemaCache(
-                datasource_id=ds.id,
-                schema_name=schemaName,
-                schema_data=schemaData,
-                schema_version=version,
-            )
-            session.add(cache)
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                winner = await self.getCached(session, ds.id, owner=schemaName, ds=ds)
-                if winner is not None:
-                    return winner
-                raise
-            await session.refresh(cache)
-            return cache
-        await session.execute(
-            update(SchemaCache)
-            .where(
-                SchemaCache.datasource_id == ds.id,
-                SchemaCache.schema_name == schemaName,
-            )
-            .values(schema_data=schemaData, schema_version=version, updated_time=datetime.now(UTC))
+        return await self._persistSchemaCache(
+            session, ds, schemaName=schemaName, schemaData=schemaData, version=version
         )
-        await session.commit()
-        await session.refresh(existing)
-        return existing
 
     @staticmethod
     def buildResponse(cache: SchemaCache) -> SchemaIntrospectResponse:

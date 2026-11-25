@@ -5,6 +5,8 @@
 
 刻意把 `ontology_class.source_table` 与 `ontology_property.source_column` 写成
 **过期值**（`STALE_*`）⇒ 解析器一旦回退到本体表/列（而不是读绑定）就会露馅。
+
+末尾另有 Task 2 种子**交付函数**的一条真实 PG 行为用例（建行 → 确认 → 幂等 → 可解析）。
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import DataSourceType
@@ -21,11 +24,16 @@ from app.domain.procurement_binding_models import (
     ProcurementPropertyBinding,
     ProcurementSourceBinding,
 )
+from app.infrastructure import database as dbModule
 from app.services.ontology_binding_resolver import (
     THBI_DATASOURCE_ID,
     THBI_SCHEMA_NAME,
     BindingResolutionError,
     resolveBinding,
+)
+from scripts.seed_procurement_bindings import (
+    FACILITY_BINDING,
+    seed_facility_binding,
 )
 
 _ORDER_DTL_CLASS = "DWD_PURCHASE_ORDER_DTL"
@@ -80,15 +88,18 @@ async def _seedClassWithProperties(
     className: str,
     propertyColumns: dict[str, str],
     isTombstone: bool = False,
+    stalePrefix: str = "STALE_",
 ) -> tuple[int, dict[str, int]]:
     """种本体类 + 其属性，返回 `(classId, {属性名: propertyId})`。
 
-    刻意把 `ontology_class.source_table` / `ontology_property.source_column`
+    默认刻意把 `ontology_class.source_table` / `ontology_property.source_column`
     写成**过期值**（`STALE_*`）⇒ 解析器若回退到本体表/列就会露馅。
+    `stalePrefix=""` 用于**本体模型就是物理名真相**的场景（种子脚本从它复制
+    表名/列名进绑定；`_assertSourceTable` 也会校验表名一致）。
     """
     ontologyClass = OntologyClass(
         class_name=className,
-        source_table=f"STALE_{className}",
+        source_table=f"{stalePrefix}{className}",
         version=1,
         created_by="test-binding-resolver",
     )
@@ -105,7 +116,7 @@ async def _seedClassWithProperties(
             data_type="string",
             is_primary_key=False,
             is_foreign_key=False,
-            source_column=f"STALE_{propertyName}",
+            source_column=f"{stalePrefix}{propertyName}",
         )
         dbSession.add(prop)
         propertyByName[propertyName] = prop
@@ -435,3 +446,74 @@ async def test_resolve_facility_binding_from_real_db(
     assert resolved.qualifiedTable() == "THBI.DIM_FACILITY"
     assert resolved.column("FCY_0") == "FCY_0"
     assert resolved.column("FCYNAM_0") == "FCYNAM_0"
+
+
+# ---------------------------------------------------------------- Task 2 种子（交付函数）
+
+
+@pytest.mark.asyncio
+async def test_seed_facility_binding_creates_confirms_and_is_idempotent(
+    dbSession, capsys
+) -> None:
+    """种子的真实交付行为：首次建 1 条并确认、再次 0 条、解析器读得到。
+
+    只读 `FACILITY_BINDING` 配置的单元测试无法证明「建行 → 确认 → 可解析」
+    （评审 Important #2）⇒ 这里用真实 PG 跑**交付函数本身**：
+    首次 1 / 再次 0 钉幂等，最后一次 `resolveBinding` 钉「确实确认生效」。
+
+    本体模型这里用真名（`stalePrefix=""`）：种子从本体模型复制物理表名/列名进绑定，
+    `_assertSourceTable` 也要求 `ontology_class.source_table == "DIM_FACILITY"`。
+    另种一个**无物理列**的属性 ⇒ 断言覆盖提示会如实报「可绑定 2/3」。
+    """
+    await _seedThbiDataSource(dbSession)
+    classId, _propertyIdByName = await _seedClassWithProperties(
+        dbSession,
+        className=_FACILITY_CLASS,
+        propertyColumns=_FACILITY_COLUMNS,
+        stalePrefix="",
+    )
+    dbSession.add(
+        OntologyProperty(
+            class_id=classId,
+            property_name="NO_COLUMN_PROPERTY",
+            data_type="string",
+            is_primary_key=False,
+            is_foreign_key=False,
+            source_column=None,
+        )
+    )
+    await dbSession.commit()
+
+    factory = dbModule.getSessionFactory()
+    assert await seed_facility_binding(factory) == 1
+    assert "属性可绑定 2/3" in capsys.readouterr().out
+    assert await seed_facility_binding(factory) == 0
+
+    # 规格 → 落库：审计 actor 必须来自规格（不是另一份字面量）。
+    expectedActor = FACILITY_BINDING["confirmedBy"]
+    sourceRows = (
+        await dbSession.execute(
+            select(ProcurementSourceBinding).where(
+                ProcurementSourceBinding.schema_name == THBI_SCHEMA_NAME,
+                ProcurementSourceBinding.source_table == _FACILITY_CLASS,
+            )
+        )
+    ).scalars().all()
+    assert [row.confirmed_by for row in sourceRows] == [expectedActor]
+    propertyActors = (
+        await dbSession.execute(
+            select(ProcurementPropertyBinding.confirmed_by).where(
+                ProcurementPropertyBinding.source_binding_id == sourceRows[0].id
+            )
+        )
+    ).scalars().all()
+    assert len(propertyActors) == 2
+    assert set(propertyActors) == {expectedActor}
+
+    resolved = await resolveBinding(
+        dbSession,
+        className=_FACILITY_CLASS,
+        requiredProperties=["FCY_0", "FCYNAM_0"],
+    )
+    assert resolved.qualifiedTable() == "THBI.DIM_FACILITY"
+    assert resolved.columns == {"FCY_0": "FCY_0", "FCYNAM_0": "FCYNAM_0"}

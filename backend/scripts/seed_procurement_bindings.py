@@ -19,7 +19,7 @@
 ⚠️ **列映射只能来自属性绑定**：`ontology_binding_resolver` 的物理列名**只**认
 `procurement_property_binding.source_column`（本体表里的 `source_column` 是历史遗留列）
 ⇒ 只补源绑定行的话，解析器能拿到表名但**拿不到任何列** ⇒ `requiredProperties`
-（`FCY_0` / `FCNAM_0`）必然 fail-closed ⇒ 本脚本**同时**补属性绑定。
+（`FCY_0` / `FCYNAM_0`）必然 fail-closed ⇒ 本脚本**同时**补属性绑定。
 
 物理表名 / 物理列名**不写死在脚本里**：表名取自本体模型
 （`ontology_class.source_table`），列名取自 `ontology_property.source_column`
@@ -29,6 +29,12 @@
 预查生效行；已存在且已确认 ⇒ 不覆盖既有确认信息，直接返回 0。
 若上次运行中断留下**候选**行 ⇒ 复用该行续跑（补属性 → 确认属性 → 确认源绑定）。
 
+⚠️ **已确认的绑定不会补属性**（重跑不追平本体）：service 把「已确认源绑定」的
+子集合视为**冻结**（`createPropertyBinding` 对已确认父行直接拒绝）⇒ 若 `DIM_FACILITY`
+后续新增了属性，重跑本脚本**不会**把它们补进来，必须先失效旧绑定 / 建新版本
+（业务裁决后另行发布）。因此返回 0 只表示「源绑定已确认生效」，
+**不**表示「属性集合与本体一致」。
+
 用法（backend/ 下）：
     python -m scripts.seed_procurement_bindings
 """
@@ -36,9 +42,9 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TypedDict
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -57,22 +63,34 @@ from app.schemas.procurement_binding import (
 )
 from app.services.procurement_binding_service import ProcurementBindingService
 
+
+class FacilityBindingSpec(TypedDict):
+    """源绑定规格的键契约（`TypedDict` ⇒ 键名笔误在静态检查期就暴露）。
+
+    **每个键都必须驱动行为**：`className` / `datasourceId` / `schemaName` /
+    `sourceTable` / `bindingRole` 进绑定的唯一键与取值，`confirmedBy` 是审计 actor
+    （调用点直接读本字典，**不设**第二份 actor 字面量 ⇒ 改规格即改留痕）。
+    目标终态（已确认、非候选、生效中）**不是可配置字段** —— 它是 service
+    「候选 → 确认」两段式的**结果**，由 `_assertTerminalState` 在种子结束时校验。
+    """
+
+    className: str
+    datasourceId: int
+    schemaName: str
+    sourceTable: str
+    bindingRole: str
+    confirmedBy: str
+
+
 #: `DIM_FACILITY` 的源绑定规格（THBI 硬规则：数据源 id=1 + schema THBI + BASE 角色）。
-#:
-#: `isCandidate=False` 描述的是**目标终态**（已确认生效，不是候选）；实际写入走
-#: service 的「候选 → 确认」两段式（见模块 docstring）。
-FACILITY_BINDING: dict[str, Any] = {
+FACILITY_BINDING: FacilityBindingSpec = {
     "className": "DIM_FACILITY",
     "datasourceId": 1,
     "schemaName": "THBI",
     "sourceTable": "DIM_FACILITY",
     "bindingRole": "BASE",
-    "isCandidate": False,
     "confirmedBy": "m1-b-confirm",
 }
-
-#: 确认人（审计口径）——与仓内既有 9 条采购绑定一致。
-ACTOR = "m1-b-confirm"
 
 
 async def _findClassRow(session: AsyncSession) -> OntologyClass:
@@ -157,7 +175,7 @@ async def _createSourceBinding(
             filter_expression=None,
             filter_allowlist=[],
         ),
-        actor=ACTOR,
+        actor=FACILITY_BINDING["confirmedBy"],
     )
 
 
@@ -183,6 +201,56 @@ async def _loadBindableProperties(
     )
 
 
+async def _propertyCoverage(
+    session: AsyncSession, classId: int
+) -> tuple[int, int]:
+    """返回 `(属性总数, 可绑定属性数)`。
+
+    两者不等 ⇒ 有属性缺物理列（`source_column IS NULL`），**无法绑定**：
+    运行时解析器对它 fail-closed（不会静默错列），但种子若只报「新建 N 条」
+    就看不出这个缺口 ⇒ 调用方据此打一行覆盖提示。
+    """
+    total = (
+        await session.execute(
+            select(func.count())
+            .select_from(OntologyProperty)
+            .where(OntologyProperty.class_id == classId)
+        )
+    ).scalar_one()
+    bindable = (
+        await session.execute(
+            select(func.count())
+            .select_from(OntologyProperty)
+            .where(
+                OntologyProperty.class_id == classId,
+                OntologyProperty.source_column.is_not(None),
+            )
+        )
+    ).scalar_one()
+    return int(total), int(bindable)
+
+
+def _creationOrder(
+    properties: list[OntologyProperty],
+    keyOrdinalByPropId: dict[int, int],
+    existingPropIds: set[int],
+) -> list[OntologyProperty]:
+    """排出待建属性的顺序：**键列在前**（按 `key_ordinal` 升序），非键列在后。
+
+    为什么键列必须升序：service 在建行时就校验「序号前缀齐全」
+    （`_assertKeyOrdinalFree`）⇒ 先建 `key_ordinal=3` 会当场撞闸。
+    非键列不占序号（`key_ordinal=None`，闸门直接放行），排在键列之后即可。
+    """
+    return sorted(
+        (prop for prop in properties if prop.id not in existingPropIds),
+        key=lambda prop: (
+            keyOrdinalByPropId.get(prop.id) is None,
+            keyOrdinalByPropId.get(prop.id) or 0,
+            prop.property_name,
+        ),
+    )
+
+
 async def _ensurePropertyBindings(
     session: AsyncSession,
     service: ProcurementBindingService,
@@ -191,9 +259,8 @@ async def _ensurePropertyBindings(
 ) -> int:
     """补齐属性绑定，返回新建条数。
 
-    主键属性按 `property_name` 序标 `key_ordinal` 1..N（复合键序号必须连续）。
-    **建键列的顺序**：先建 `key_ordinal=1`，再建 2、3… ⇒ service 的「序号前缀齐全」
-    闸门才放行（乱序建 ⇒ 撞闸）。
+    主键属性按 `property_name` 序标 `key_ordinal` 1..N（复合键序号必须连续）
+    ⇒ 建行顺序由 `_creationOrder` 决定（键列在前、序号升序）。
     """
     properties = await _loadBindableProperties(session, classId)
     keyOrdinalByPropId = {
@@ -212,13 +279,7 @@ async def _ensurePropertyBindings(
             )
         ).scalars().all()
     )
-    ordered = sorted(
-        (prop for prop in properties if prop.id not in existingPropIds),
-        key=lambda prop: (
-            keyOrdinalByPropId.get(prop.id, 0),
-            prop.property_name,
-        ),
-    )
+    ordered = _creationOrder(properties, keyOrdinalByPropId, existingPropIds)
     created = 0
     for prop in ordered:
         await service.createPropertyBinding(
@@ -230,7 +291,7 @@ async def _ensurePropertyBindings(
                 key_ordinal=keyOrdinalByPropId.get(prop.id),
                 transform_expression=None,
             ),
-            actor=ACTOR,
+            actor=FACILITY_BINDING["confirmedBy"],
         )
         created += 1
     return created
@@ -253,11 +314,31 @@ async def _confirmBindings(
     ).scalars().all()
     for binding in pending:
         await service.confirmPropertyBinding(
-            session, sourceBindingId, binding.id, actor=ACTOR
+            session, sourceBindingId, binding.id, actor=FACILITY_BINDING["confirmedBy"]
         )
     source = await service.getSourceBinding(session, sourceBindingId)
     if source.is_candidate:
-        await service.confirmSourceBinding(session, sourceBindingId, actor=ACTOR)
+        await service.confirmSourceBinding(
+            session, sourceBindingId, actor=FACILITY_BINDING["confirmedBy"]
+        )
+
+
+async def _assertTerminalState(session: AsyncSession, sourceBindingId: int) -> None:
+    """校验种子结束后的**目标终态**：源绑定已确认且未失效。
+
+    为什么显式校验：解析器只消费 `is_candidate IS FALSE` 且 `valid_to IS NULL` 的行
+    ⇒ 若确认链路哪天被短路，「新建 1 条」会写进去但**永远读不到**（静默失效）。
+    目标终态写死在代码里（不是规格里的可配置字段）——它是流程的**结果**。
+    """
+    source = await session.get(
+        ProcurementSourceBinding, sourceBindingId, populate_existing=True
+    )
+    if source is None or source.is_candidate or source.valid_to is not None:
+        raise RuntimeError(
+            f"源绑定 id={sourceBindingId} 未达目标终态"
+            f"（is_candidate={None if source is None else source.is_candidate}，"
+            f"valid_to={None if source is None else source.valid_to}）"
+        )
 
 
 async def seed_facility_binding(
@@ -266,12 +347,22 @@ async def seed_facility_binding(
     """幂等补 `DIM_FACILITY` 的源绑定 + 属性绑定。
 
     返回**新建的源绑定行数**（0 = 已存在且已确认）。
+    已确认的绑定**不会**补新属性（见模块 docstring 的冻结说明）。
     """
     service = ProcurementBindingService()
     async with session_factory() as session:
         classRow = await _findClassRow(session)
         _assertSourceTable(classRow)
         await _assertDatasource(session)
+        totalProperties, bindableProperties = await _propertyCoverage(
+            session, classRow.id
+        )
+        if bindableProperties != totalProperties:
+            print(
+                f"seed_procurement_bindings: ⚠️ {classRow.class_name} 属性可绑定 "
+                f"{bindableProperties}/{totalProperties}"
+                "（其余 source_column IS NULL，无法绑定）"
+            )
         sourceTable = str(classRow.source_table)
         existing = await _findActiveSourceBinding(session, classRow.id, sourceTable)
         if existing is not None and not existing.is_candidate:
@@ -279,6 +370,7 @@ async def seed_facility_binding(
         source = existing or await _createSourceBinding(session, service, classRow)
         await _ensurePropertyBindings(session, service, source.id, classRow.id)
         await _confirmBindings(session, service, source.id)
+        await _assertTerminalState(session, source.id)
         return 0 if existing is not None else 1
 
 

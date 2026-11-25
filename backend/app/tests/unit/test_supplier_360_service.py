@@ -15,6 +15,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import (
@@ -384,3 +385,69 @@ async def test_get_supplier_360_str_not_found_raises(dbSession: AsyncSession):
         await svc.get360(dbSession, "NONEXISTENT_CODE")
     # key 显示原始输入（不转 int 防误导）
     assert "NONEXISTENT_CODE" in str(excInfo.value)
+
+
+# ---------------------------------------------------------------------------
+# 名称/简称解析阶梯 + profile.supplierName（2026-11-25 需求）
+# ---------------------------------------------------------------------------
+
+
+async def _seedNamedSupplier(
+    dbSession: AsyncSession, key: int, code: str, name: str
+) -> None:
+    # datasource（id=9001）唯一：已存在则跳过（本 helper 可多次调用）
+    dsExists = (
+        await dbSession.execute(
+            select(DataSource.id).where(DataSource.id == 9001)
+        )
+    ).first()
+    if dsExists is None:
+        await _seedDatasource(dbSession)
+    rows = await _seedSupplierMappings(dbSession, key, code)
+    for row in rows:
+        row.name = name
+    await dbSession.commit()
+
+
+async def test_get360_resolves_by_exact_name(dbSession: AsyncSession):
+    """全名精确命中（供应商名称作为检索入口）。"""
+    await _seedNamedSupplier(dbSession, 100001, "SUP000001", "上海骏统贸易有限公司")
+
+    result = await Supplier360Service().get360(dbSession, "上海骏统贸易有限公司")
+
+    assert result.profile.enterprise_key == 100001
+    assert result.profile.enterprise_code == "SUP000001"
+    assert result.profile.supplier_name == "上海骏统贸易有限公司"
+
+
+async def test_get360_resolves_by_short_name_fuzzy(dbSession: AsyncSession):
+    """简称模糊命中（简称 ⊆ 全名的中文业务常态）。"""
+    await _seedNamedSupplier(dbSession, 100001, "SUP000001", "上海骏统贸易有限公司")
+
+    result = await Supplier360Service().get360(dbSession, "骏统")
+
+    assert result.profile.enterprise_code == "SUP000001"
+    assert result.profile.supplier_name == "上海骏统贸易有限公司"
+
+
+async def test_get360_fuzzy_ambiguous_lists_candidates(dbSession: AsyncSession):
+    """模糊命中多家 ⇒ NotFoundError 列出候选（规划器/用户消歧，不静默取第一个）。"""
+    await _seedNamedSupplier(dbSession, 100001, "SUP000001", "上海骏统贸易有限公司")
+    await _seedNamedSupplier(dbSession, 100002, "SUP000002", "上海舜业钢铁集团有限公司")
+
+    with pytest.raises(NotFoundError) as excInfo:
+        await Supplier360Service().get360(dbSession, "上海")
+
+    msg = str(excInfo.value)
+    assert "多个" in msg and "SUP000001" in msg and "SUP000002" in msg
+
+
+async def test_get360_profile_has_supplier_name_when_resolved_by_code(
+    dbSession: AsyncSession,
+):
+    """编码/企业键入口也要回填名称（结果卡头部展示用）。"""
+    await _seedNamedSupplier(dbSession, 100001, "SUP000001", "上海骏统贸易有限公司")
+
+    result = await Supplier360Service().get360(dbSession, "SUP000001")
+
+    assert result.profile.supplier_name == "上海骏统贸易有限公司"

@@ -125,7 +125,7 @@ SEEDS: list[dict[str, Any]] = [
             {
                 "key": "supplierKey",
                 "type": "text",
-                "label": "供应商编码",
+                "label": "供应商（编码/企业键/名称/简称）",
                 "conflictKeywords": ["供应商", "厂家"],
                 "codePattern": _SUPPLIER_CODE,
             },
@@ -133,7 +133,8 @@ SEEDS: list[dict[str, Any]] = [
         "question_template": "分析供应商风险情况",
         # 必填槽位不带默认值 ⇒ 不设 chips（chips 空槽位发送会 422）
         "chips": [],
-        "result_renderer": "none",
+        # 专用结果卡：头部「供应商 编码（企业键 …）+ 名称 + 分析结论」
+        "result_renderer": "supplier_risk",
         "required_role": None,
         "sort_order": 20,
         "enabled": True,

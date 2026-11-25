@@ -107,13 +107,14 @@ class Supplier360Service:
         supplierKey 同时接受 VARCHAR 业务码（如 THBI '10105'）与 BIGINT
         MDM 代理键（SHA-256 8B hash，如 3823452429）；详见模块 docstring。
         """
-        enterprise_key, enterprise_code = await self._resolveSupplier(
+        enterprise_key, enterprise_code, supplierName = await self._resolveSupplier(
             session, supplierKey
         )
         profile = Supplier360Profile(
             enterprise_key=enterprise_key,
             enterprise_code=enterprise_code,
             entity_type="SUPPLIER",
+            supplier_name=supplierName,
         )
         entity_codes = await self._safeLoadEntityCodes(session, enterprise_key)
         kpis = await self._safeLoadKpis(session, enterprise_code)
@@ -127,12 +128,16 @@ class Supplier360Service:
 
     async def _resolveSupplier(
         self, session: AsyncSession, supplierKey: Union[str, int]
-    ) -> tuple[int, str]:
-        """统一解析入口：返回 (enterprise_key, enterprise_code) 元组。
+    ) -> tuple[int, str, str | None]:
+        """统一解析入口：返回 (enterprise_key, enterprise_code, supplier_name)。
 
-        策略：先按 enterprise_code 查（覆盖 THBI 业务码 / 旧合成 SUP 编码），
-        未命中则按 enterprise_key 查（覆盖 BIGINT hash / 已存 chat 路径）。
-        两条都失败 → NotFoundError。
+        解析阶梯（2026-11-25 需求：供应商风险速览支持编码/企业键/名称/简称检索）：
+          ① enterprise_code 精确（THBI 业务码 / 旧合成 SUP 编码）；
+          ② enterprise_key 精确（BIGINT MDM 代理键）；
+          ③ name 精确（entity_mapping.name = 供应商全名）；
+          ④ name 模糊（简称 ⊆ 全名的中文业务常态；**多命中 ⇒ NotFoundError
+             列出候选**，让规划器/用户消歧，绝不静默取第一个）。
+        全部失败 → NotFoundError。
 
         接受 str / int 入参；调用方不用关心类型（业务层永远是"业务码"或"代理键"）。
         """
@@ -143,6 +148,7 @@ class Supplier360Service:
                     select(
                         EntityMapping.enterprise_key,
                         EntityMapping.enterprise_code,
+                        EntityMapping.name,
                     )
                     .where(
                         EntityMapping.entity_type == "SUPPLIER",
@@ -160,7 +166,7 @@ class Supplier360Service:
             row = None
 
         if row is not None:
-            return int(row[0]), str(row[1])
+            return int(row[0]), str(row[1]), row[2] and str(row[2])
 
         # Pass 2：按 enterprise_key 查（整数输入主路径；str 数字仅在 hash 巧合时命中）
         try:
@@ -174,6 +180,7 @@ class Supplier360Service:
                         select(
                             EntityMapping.enterprise_key,
                             EntityMapping.enterprise_code,
+                            EntityMapping.name,
                         )
                         .where(
                             EntityMapping.entity_type == "SUPPLIER",
@@ -190,9 +197,57 @@ class Supplier360Service:
                 )
                 row2 = None
             if row2 is not None:
-                return int(row2[0]), str(row2[1])
+                return int(row2[0]), str(row2[1]), None
 
-        # 两条都失败 → 404（防 typo 静默）
+        # ③ name 精确（供应商全名）
+        textKey = str(supplierKey).strip()
+        nameRow = (
+            await session.execute(
+                select(
+                    EntityMapping.enterprise_key,
+                    EntityMapping.enterprise_code,
+                    EntityMapping.name,
+                )
+                .where(
+                    EntityMapping.entity_type == "SUPPLIER",
+                    EntityMapping.name == textKey,
+                )
+                .limit(1)
+            )
+        ).first()
+        if nameRow is not None:
+            return int(nameRow[0]), str(nameRow[1]), nameRow[2] and str(nameRow[2])
+
+        # ④ name 模糊（简称/部分名称）；多命中 ⇒ 列候选（不静默取第一个）
+        fuzzyRows = (
+            await session.execute(
+                select(
+                    EntityMapping.enterprise_key,
+                    EntityMapping.enterprise_code,
+                    EntityMapping.name,
+                )
+                .where(
+                    EntityMapping.entity_type == "SUPPLIER",
+                    EntityMapping.name.ilike(f"%{textKey}%"),
+                )
+                # 同一供应商有 ERP/SRM 多行（同名）⇒ 三列全等，DISTINCT 去重
+                .distinct()
+                .order_by(EntityMapping.enterprise_code)
+                .limit(6)
+            )
+        ).all()
+        if len(fuzzyRows) == 1:
+            row3 = fuzzyRows[0]
+            return int(row3[0]), str(row3[1]), row3[2] and str(row3[2])
+        if len(fuzzyRows) > 1:
+            candidates = "；".join(
+                f"{r[1]}（{r[2] or '无名'}）" for r in fuzzyRows
+            )
+            raise NotFoundError(
+                f"「{textKey}」匹配到多个供应商，请用编码或企业键指定：{candidates}"
+            )
+
+        # 四段都失败 → 404（防 typo 静默）
         raise NotFoundError(
             MSG_SUPPLIER_360_NOT_FOUND.format(key=supplierKey)
         )

@@ -28,6 +28,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuthStore } from "../stores/authStore";
 import ConversationHistoryPanel from "../components/copilot/ConversationHistoryPanel";
 import { parsePendingDeliveryStep } from "../components/copilot/PendingDeliveryResultCard";
+import { parseSupplierRiskStep } from "../components/copilot/SupplierRiskResultCard";
 import PendingDeliveryResultTabs from "../components/copilot/PendingDeliveryResultTabs";
 import CopilotScenarioCards from "../components/copilot/CopilotScenarioCards";
 import CopilotTurnThread from "../components/copilot/CopilotTurnThread";
@@ -294,13 +295,26 @@ export default function ProcurementCopilotPage() {
     return map;
   }, [scenarios, scenarioConfigs]);
 
-  /** 会话内带结构化结果的轮次（顺序）——多结果用 Tabs 切换，不再纵向堆叠文字墙。 */
+  /** 有专用结果渲染器的场景（其余场景走线程 Markdown 答案）。 */
+  const structuredRenderer: "pending_delivery" | "supplier_risk" | null =
+    activeScenario?.resultRenderer === "supplier_risk"
+      ? "supplier_risk"
+      : activeScenario?.resultRenderer === "pending_delivery" || isPendingDelivery
+        ? "pending_delivery"
+        : null;
+  /** 会话内带结构化结果的轮次（顺序）——多结果用 Tabs 切换，不再纵向堆叠文字墙。
+   *  解析器按场景渲染器分派（每步只匹配各自工具的 observation）。 */
   const resultTurns = turns
     .map((turn) => ({
       turn,
-      parsed: turn.steps
-        .map((step) => parsePendingDeliveryStep(step))
-        .find((parsed) => parsed !== null) ?? null,
+      parsed:
+        turn.steps
+          .map((step) =>
+            structuredRenderer === "supplier_risk"
+              ? parseSupplierRiskStep(step)
+              : parsePendingDeliveryStep(step),
+          )
+          .find((parsed) => parsed !== null) ?? null,
     }))
     .filter((item) => item.parsed !== null);
 
@@ -719,8 +733,9 @@ export default function ProcurementCopilotPage() {
       )
       }
       {/* 会话内多结果：Tabs 仅作切换器，内容只渲染激活项（滚动不会看到其他结果） */}
-      {isPendingDelivery && resultTurns.length > 0 && (
+      {structuredRenderer && resultTurns.length > 0 && (
         <PendingDeliveryResultTabs
+          renderer={structuredRenderer}
           resultTurns={resultTurns}
           activeResultTurnId={activeResultTurnId}
           onChange={setActiveResultTurnId}

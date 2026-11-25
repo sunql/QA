@@ -9,15 +9,20 @@ import type { CopilotTurn } from "./copilotTurnModel";
 import PendingDeliveryResultCard, {
   type PendingDeliveryResult,
 } from "./PendingDeliveryResultCard";
+import SupplierRiskResultCard, {
+  type SupplierRiskResult,
+} from "./SupplierRiskResultCard";
 
 const { Text } = Typography;
 
 export interface ResultTurn {
   turn: CopilotTurn;
-  parsed: PendingDeliveryResult | null;
+  parsed: PendingDeliveryResult | SupplierRiskResult | null;
 }
 
 interface PendingDeliveryResultTabsProps {
+  /** 场景结果渲染器：决定激活项渲染哪张结构化卡。 */
+  renderer: "pending_delivery" | "supplier_risk";
   resultTurns: ResultTurn[];
   activeResultTurnId: string | null;
   onChange: (turnId: string) => void;
@@ -25,6 +30,7 @@ interface PendingDeliveryResultTabsProps {
 }
 
 export default function PendingDeliveryResultTabs({
+  renderer,
   resultTurns,
   activeResultTurnId,
   onChange,
@@ -75,10 +81,16 @@ export default function PendingDeliveryResultTabs({
       />
       {active.parsed ? (
         <>
-          <PendingDeliveryResultCard result={active.parsed} />
-          <Button size="small" icon={<TableOutlined />} onClick={onViewLines}>
-            {t("procurement.copilot.viewPendingDeliveryLines")}
-          </Button>
+          {renderer === "supplier_risk" ? (
+            <SupplierRiskResultCard result={active.parsed as SupplierRiskResult} />
+          ) : (
+            <PendingDeliveryResultCard result={active.parsed as PendingDeliveryResult} />
+          )}
+          {renderer === "pending_delivery" && (
+            <Button size="small" icon={<TableOutlined />} onClick={onViewLines}>
+              {t("procurement.copilot.viewPendingDeliveryLines")}
+            </Button>
+          )}
         </>
       ) : (
         <Empty description={t("procurement.copilot.traceEmpty")} />

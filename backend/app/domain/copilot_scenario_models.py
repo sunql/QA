@@ -15,7 +15,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.domain.models import Base, BigIntPk, TimestampMixin
 
 #: 结果渲染器白名单（fail-closed：未知渲染器不渲染）。
-RESULT_RENDERER_WHITELIST = frozenset({"pending_delivery", "generic_table", "none"})
+RESULT_RENDERER_WHITELIST = frozenset(
+    {"pending_delivery", "supplier_risk", "generic_table", "none"}
+)
 
 #: 槽位类型白名单（未知 type 的槽位前端不渲染）。
 SLOT_TYPE_WHITELIST = frozenset(

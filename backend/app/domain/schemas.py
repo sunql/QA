@@ -1271,13 +1271,14 @@ class Supplier360Profile(CamelModel):
     """供应商 360° 主数据块（Phase 5.3）。
 
     来源：entity_mapping.enterprise_code (e.g. SUP000001) + 各源系统 source_code。
-    DIM_SUPPLIER 主数据表（dw/04_dim.sql）目前未在 metadata DB 中镜像，本块先
-    用 enterprise_code 作为展示名锚点；后续 ADS view 接入后可补充 supplier_name。
+    supplier_name（2026-11-25）：entity_mapping.name（MDM 全名）——前端结果卡
+    头部展示「供应商 编码（企业键 …）+ 名称 + 分析结论」用。
     """
 
     enterprise_key: int = Field(..., description="企业统一代理键（MDM 主数据）")
     enterprise_code: str = Field(..., description="企业统一编码（如 SUP000001）")
     entity_type: BusinessObjectCodeType
+    supplier_name: str | None = Field(default=None, description="供应商名称（MDM 全名，可空）")
 
 
 class Supplier360Kpi(CamelModel):

@@ -219,6 +219,41 @@ describe("DeliveryTrackingResultCard", () => {
     expect(within(orderRow).getByText("含脏数据行")).toBeTruthy();
   });
 
+  it("ordersTruncated：明细样本不当全量计数，tab 标题与提示都标注截断", () => {
+    const truncated = JSON.parse(SAMPLE) as { data: Record<string, unknown> };
+    truncated.data.ordersTruncated = true;
+    const parsed = parseDeliveryTrackingStep(
+      step("delivery_tracking_query", JSON.stringify(truncated)),
+    )!;
+    renderCard(parsed);
+
+    expect(screen.getByTestId("delivery-orders-truncated").textContent).toContain("已截断");
+    const tabs = screen.getAllByRole("tab").map((el) => el.textContent ?? "");
+    expect(tabs[0]).toContain("已截断");
+    expect(tabs[0]).toContain("TOP");
+  });
+
+  it("dirtyOnly 订单单独成组，不混进「未到货订单」计数", () => {
+    const dirtyOnly = JSON.parse(SAMPLE) as { data: { byOrder: unknown[] } };
+    dirtyOnly.data.byOrder = [
+      {
+        poNo: "T-DIRTY-ONLY", supplierCode: "B999", supplierName: null,
+        orderDate: "2026-11-01", status: "dirtyOnly",
+        totalLines: 0, arrivedLines: 0, notArrivedLines: 0,
+        orderedQty: 0, receivedQty: 0, hasDirtyLines: true,
+        lines: [],
+      },
+    ];
+    const parsed = parseDeliveryTrackingStep(
+      step("delivery_tracking_query", JSON.stringify(dirtyOnly)),
+    )!;
+    renderCard(parsed);
+
+    const tabs = screen.getAllByRole("tab").map((el) => el.textContent ?? "");
+    expect(tabs.some((label) => label.includes("数据异常订单（1）"))).toBe(true);
+    expect(tabs[0]).toContain("未到货订单（0）");
+  });
+
   it("主次关系：订单到货率是大号主指标，量级率小号且带口径说明", () => {
     const parsed = parseDeliveryTrackingStep(step("delivery_tracking_query", SAMPLE))!;
     renderCard(parsed);

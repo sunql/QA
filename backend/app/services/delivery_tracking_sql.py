@@ -3,8 +3,9 @@
 窗口/参数解析与 handler 在 `delivery_tracking_query`；本模块只负责
 「本体绑定 → 物理表列」的 SQL 渲染（纯函数、无 IO），可独立单测。
 
-脏行（spec 4.4）判据 `OPEN_QTY >= 1e6` 的阈值是本模块与装配层共享的
-唯一来源（`_OPEN_QTY_SANITY_MAX`）—— 两处分叉会让 summary 与 byOrder 口径再次漂移。
+脏行（spec 4.4）判据 `OPEN_QTY >= 1e6` 的阈值与收货聚合片段从
+`procurement_query_utils` 取（与待到货**同一份**实现）—— 两处分叉会让
+summary 与 byOrder 口径再次漂移。
 """
 
 from __future__ import annotations
@@ -14,23 +15,19 @@ from typing import TYPE_CHECKING
 
 from app.domain.exceptions import ValidationError
 from app.services.ontology_binding_resolver import ResolvedBinding
+from app.services.procurement_query_utils import (
+    OPEN_QTY_SANITY_MAX,
+    dateWindowPredicate,
+    escapeLiteral,
+    receiptAggregate,
+)
 
 if TYPE_CHECKING:
     from app.services.delivery_tracking_query import DeliveryTrackingWindow
 
 _MAX_LIMIT = 200
-#: 行级欠交量上限（spec 4.4）：≥ 1e6 判为源侧录入错误的脏行，剔除并显式计数。
-#:
-#: ⚠ 判据是**欠交量**（`PO_QTY - RECEIVED`），不是**订购量**：大额订购是真实业务
-#: （spec 4.2 明确拒绝按订购量剔行）。阈值与既有 `pending_delivery_query` 同源。
-_OPEN_QTY_SANITY_MAX = 1_000_000
 #: 支持的方言：默认现役 Oracle；场景槽位可切 MySQL 源（与待到货工具一致）。
 _SUPPORTED_DIALECTS = frozenset({"oracle", "mysql"})
-
-
-def _esc(value: str) -> str:
-    """字面量转义（单引号翻倍）。"""
-    return value.replace("'", "''")
 
 
 def _dialectName(dialect: str) -> str:
@@ -56,27 +53,31 @@ def _rowLimit(limit: object, dialect: str) -> str:
 
 
 def _windowPredicate(order: ResolvedBinding, window: DeliveryTrackingWindow) -> str:
-    """窗口谓词：下单日期落在 [dateFrom, dateTo) —— 左闭右开。"""
-    orderDate = order.column("ORDER_DATE")
-    return (
-        f"{orderDate} >= DATE '{window.dateFrom.isoformat()}'"
-        f" AND {orderDate} < DATE '{window.dateTo.isoformat()}'"
+    """窗口谓词：下单日期落在 [dateFrom, dateTo) —— 左闭右开（与待到货同一构造）。"""
+    return dateWindowPredicate(
+        order.column("ORDER_DATE"), window.dateFrom, window.dateTo
     )
 
 
-def _receiptAggregate(receipt: ResolvedBinding) -> str:
-    """收货子查询：按 PO_NO+PO_LINE_NO 聚合已收量（含物料名与最后收货日）。"""
-    poNo = receipt.column("PO_NO")
-    poLine = receipt.column("PO_LINE_NO")
-    qty = receipt.column("RCV_QTY_STU")
-    itemDesc = receipt.column("ITEM_DESC")
-    rcvDate = receipt.column("RCV_DATE")
-    return (
-        f"(SELECT {poNo} AS PO_NO, {poLine} AS PO_LINE_NO, "
-        f"SUM({qty}) AS RECEIVED_QTY, "
-        f"MAX({itemDesc}) AS ITEM_DESC, MAX({rcvDate}) AS RECEIPT_DATE "
-        f"FROM {receipt.qualifiedTable()} "
-        f"GROUP BY {poNo}, {poLine})"
+def _receiptAggregate(
+    order: ResolvedBinding,
+    receipt: ResolvedBinding,
+    window: DeliveryTrackingWindow,
+) -> str:
+    """收货子查询（含物料名与最后收货日）+ 窗口内 PO_NO 半连接（I8）。
+
+    semi-join 把聚合收敛到窗口内出现过的订单：否则每次汇总都全表 GROUP BY
+    整张收货明细（欢迎态热路径）。窗口口径与主线 SQL 同源。
+    """
+    poNoSubquery = (
+        f"SELECT PO.PO_NO FROM {order.qualifiedTable()} PO"
+        f" WHERE {dateWindowPredicate('PO.' + order.column('ORDER_DATE'), window.dateFrom, window.dateTo)}"
+    )
+    return receiptAggregate(
+        receipt,
+        includeItemDesc=True,
+        includeRcvDate=True,
+        poNoSubquery=poNoSubquery,
     )
 
 
@@ -93,7 +94,7 @@ def _inClause(alias: str, column: str, keys: Iterable[str]) -> str | None:
         values.append(key)
     if not values:
         return None
-    literals = ",".join("'" + _esc(value) + "'" for value in values)
+    literals = ",".join("'" + escapeLiteral(value) + "'" for value in values)
     return f"{alias}.{column} IN ({literals})"
 
 
@@ -108,7 +109,7 @@ def _dirtyCondition(order: ResolvedBinding) -> str:
     判据用**欠交量**而非订购量：大额订购是真实业务大单（spec 4.2）。
     """
     poQty = order.column("PO_QTY")
-    return f"O.{poQty} - COALESCE(R.RECEIVED_QTY, 0) >= {_OPEN_QTY_SANITY_MAX}"
+    return f"O.{poQty} - COALESCE(R.RECEIVED_QTY, 0) >= {OPEN_QTY_SANITY_MAX}"
 
 
 def _erpSupplierNameColumn(order: ResolvedBinding) -> str | None:
@@ -188,7 +189,7 @@ def _orderAggregate(order: ResolvedBinding, receipt: ResolvedBinding, window: De
   SELECT O.{poNo} AS PO_NO,
 {_lineMeasures(_dirtyCondition(order), qtyExpr, "ORDER_QTY")}
   FROM {order.qualifiedTable()} O
-  LEFT JOIN {_receiptAggregate(receipt)} R
+  LEFT JOIN {_receiptAggregate(order, receipt, window)} R
     ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
   WHERE {_windowPredicate(order, window)}
   GROUP BY O.{poNo}"""
@@ -209,7 +210,7 @@ def _supplierOrderAggregate(
   SELECT O.{supplierCode} AS SUPPLIER_CODE, O.{poNo} AS PO_NO,
 {_lineMeasures(_dirtyCondition(order), qtyExpr, "ORDERED_QTY")}{_erpSupplierNameMeasure(order)}
   FROM {order.qualifiedTable()} O
-  LEFT JOIN {_receiptAggregate(receipt)} R
+  LEFT JOIN {_receiptAggregate(order, receipt, window)} R
     ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
   WHERE {_windowPredicate(order, window)}{supplierFilter}
   GROUP BY O.{supplierCode}, O.{poNo}"""
@@ -280,6 +281,64 @@ ORDER BY NOT_ARRIVED DESC
 {tail}""".strip()
 
 
+def _topOrderSubquery(
+    order: ResolvedBinding,
+    receipt: ResolvedBinding,
+    window: DeliveryTrackingWindow,
+    extraFilter: str,
+    limit: int,
+    dialect: str,
+) -> str:
+    """欠交量前 N **个订单**（I1：分页单位是订单，不是行）。
+
+    旧实现 `ORDER BY OPEN_QTY DESC FETCH FIRST n ROWS` 截的是**行**：
+    默认「近 12 个月概览」几乎必然 > n 行 ⇒ 明细静默截断，tab 计数与 summary
+    矛盾（某订单只留欠交行时还会被判错状态）。先对 PO_NO 聚合取前 N 单，
+    再拉这些订单的**全部行**。
+    """
+    poNo = order.column("PO_NO")
+    poLine = order.column("PO_LINE_NO")
+    orderQty = order.column("PO_QTY")
+    tail = _rowLimit(limit, dialect)
+    return f"""
+  SELECT O.{poNo} AS PO_NO,
+         SUM(O.{orderQty} - COALESCE(R.RECEIVED_QTY, 0)) AS OPEN_QTY
+  FROM {order.qualifiedTable()} O
+  LEFT JOIN {_receiptAggregate(order, receipt, window)} R
+    ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
+  WHERE {_windowPredicate(order, window)}{extraFilter}
+  GROUP BY O.{poNo}
+  ORDER BY OPEN_QTY DESC
+  {tail}"""
+
+
+def buildDeliveryTrackingOrderCountSql(
+    *,
+    order: ResolvedBinding,
+    window: DeliveryTrackingWindow,
+    supplierKeys: tuple[str, ...] = (),
+    orderKeys: tuple[str, ...] = (),
+) -> str:
+    """窗口内（含同样的过滤）的订单总数 —— 判定 byOrder 是否被截断。
+
+    `count > len(byOrder)` ⇒ 明细只是前 N 单样本，前端不得把样本当全量计数。
+    """
+    poNo = order.column("PO_NO")
+    supplierCode = order.column("SUPPLIER_CODE")
+    extraFilter = _andClauses(
+        _inClause("O", supplierCode, supplierKeys),
+        _inClause("O", poNo, orderKeys),
+    )
+    return f"""
+SELECT COUNT(*) AS TOTAL_ORDERS
+FROM (
+  SELECT O.{poNo} AS PO_NO
+  FROM {order.qualifiedTable()} O
+  WHERE {_windowPredicate(order, window)}{extraFilter}
+  GROUP BY O.{poNo}
+) T""".strip()
+
+
 def buildDeliveryTrackingByOrderSql(
     *,
     order: ResolvedBinding,
@@ -292,6 +351,8 @@ def buildDeliveryTrackingByOrderSql(
 ) -> str:
     """订单明细：订单号 + 行级（物料 / 订购 / 已收 / 欠交 / 预期与最后收货日）。
 
+    分页单位是**订单**（先取欠交量前 N 单，再拉这些单的全部行），不是行；
+    否则默认概览下明细静默截断、tab 计数与 summary 矛盾（见 `_topOrderSubquery`）。
     **不剔除脏行**（与 summary / bySupplier 刻意不同）：明细是给人看的证据，
     脏行留着才能被发现；剔除只发生在统计口径里（spec 4.4）。
     """
@@ -306,7 +367,9 @@ def buildDeliveryTrackingByOrderSql(
         _inClause("O", supplierCode, supplierKeys),
         _inClause("O", poNo, orderKeys),
     )
-    tail = _rowLimit(limit, dialect)
+    topOrders = _topOrderSubquery(
+        order, receipt, window, extraFilter, limit, dialect
+    )
     erpNameSelect = _byOrderErpNameSelect(order)
     return f"""
 SELECT
@@ -322,8 +385,9 @@ SELECT
   O.{expectedDate} AS EXPECTED_DATE,
   R.RECEIPT_DATE AS RECEIPT_DATE
 FROM {order.qualifiedTable()} O
-LEFT JOIN {_receiptAggregate(receipt)} R
+LEFT JOIN {_receiptAggregate(order, receipt, window)} R
   ON R.PO_NO = O.{poNo} AND R.PO_LINE_NO = O.{poLine}
 WHERE {_windowPredicate(order, window)}{extraFilter}
-ORDER BY OPEN_QTY DESC
-{tail}""".strip()
+  AND O.{poNo} IN (SELECT X.PO_NO FROM ({topOrders}
+  ) X)
+ORDER BY OPEN_QTY DESC""".strip()

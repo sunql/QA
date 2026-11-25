@@ -14,29 +14,21 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from app.domain.exceptions import DomainError
-from app.services.delivery_tracking_sql import _OPEN_QTY_SANITY_MAX
+from app.domain.exceptions import InternalInvariantError
+from app.services.procurement_query_utils import OPEN_QTY_SANITY_MAX, colValue
 
 
-class DeliveryTrackingInvariantError(DomainError):
-    """三段结果自身不自洽（三态重复/漏计数）—— fail-closed，宁可不返回错数。"""
+class DeliveryTrackingInvariantError(InternalInvariantError):
+    """三段结果自身不自洽（三态重复/漏计数）—— fail-closed，宁可不返回错数。
 
-
-def _col(row: Any, name: str, default: Any = None) -> Any:
-    """大小写不敏感取列值。
-
-    adapter 把 Oracle 的 `cursor.description` 大写列名统一小写化
-    （`business_db_pool`）⇒ 只按大写 `row.get` 会**永远拿到 None**。
+    继承 `InternalInvariantError` ⇒ HTTP 500（服务端口径破坏），不是 400
+    （用户看到 400 会以为自己的参数写错）。
     """
-    if not isinstance(row, dict):
-        return default
-    if name in row:
-        return row[name]
-    lowered = name.lower()
-    for key, value in row.items():
-        if isinstance(key, str) and key.lower() == lowered:
-            return value
-    return default
+
+
+#: 大小写不敏感取列值的唯一实现（`colValue`）；adapter 把 Oracle 的
+#: `cursor.description` 大写列名统一小写化 ⇒ 只按大写 `row.get` 永远拿到 None。
+_col = colValue
 
 
 def _rate(numerator: float, denominator: float) -> float:
@@ -197,7 +189,7 @@ def _assembleLine(row: dict[str, Any]) -> dict[str, Any]:
         "expectedDate": _isoDate(_col(row, "EXPECTED_DATE")),
         "lastReceiptDate": _isoDate(_col(row, "RECEIPT_DATE")),
         "status": _orderStatus([{"openQty": openQty, "receivedQty": receivedQty}]),
-        "isDirty": openQty >= _OPEN_QTY_SANITY_MAX,
+        "isDirty": openQty >= OPEN_QTY_SANITY_MAX,
     }
 
 
@@ -211,6 +203,11 @@ def _aggregateOrderLines(entry: dict[str, Any]) -> None:
     validLines = [line for line in entry["lines"] if not line["isDirty"]]
     if validLines:
         entry["status"] = _orderStatus(validLines)
+    elif entry["lines"]:
+        # 全脏行订单：summary 不把它计入任何一态（`LINE_COUNT = 0`）。
+        # 若沿用缺省 `notArrived`，tab 计数会比 summary 的 notArrivedOrders 多
+        # ⇒ 给显式状态，前端单独成组，不混进「未到货订单」。
+        entry["status"] = "dirtyOnly"
     entry["totalLines"] = len(validLines)
     entry["arrivedLines"] = sum(1 for line in validLines if line["receivedQty"] > 0)
     entry["notArrivedLines"] = sum(1 for line in validLines if line["receivedQty"] <= 0)

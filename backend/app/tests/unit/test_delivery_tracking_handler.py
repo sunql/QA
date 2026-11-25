@@ -496,14 +496,14 @@ async def test_resolve_supplier_keys_dedupes_preserving_order(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_resolve_supplier_keys_raises_on_unknown(monkeypatch) -> None:
-    """解析失败 ⇒ NotFoundError（不静默丢弃该供应商）。"""
+async def test_resolve_supplier_keys_raises_validation_error_on_unknown(monkeypatch) -> None:
+    """解析失败 ⇒ ValidationError（422）；与未知物料同类，不再落到误导性的 404。"""
 
     async def _fakeResolveSupplier(session, key):
         raise NotFoundError(f"未找到供应商：{key}")
 
     monkeypatch.setattr(mod, "_resolveSupplierKey", _fakeResolveSupplier)
-    with pytest.raises(NotFoundError, match="未找到供应商：查无此家"):
+    with pytest.raises(ValidationError, match="未找到供应商：查无此家"):
         await mod._resolveSupplierCodes(None, ("查无此家",))
 
 
@@ -526,6 +526,8 @@ async def test_handler_returns_structured_payload(monkeypatch) -> None:
             return [dict(_SUMMARY_ROW)]
         if "GROUP BY S.SUPPLIER_CODE" in sql:
             return [_supplierRow(), _supplierRowFallback()]
+        if "AS TOTAL_ORDERS" in sql:
+            return [{"TOTAL_ORDERS": 1}]
         return _orderRows()
 
     class _FakeAdapter:
@@ -535,8 +537,9 @@ async def test_handler_returns_structured_payload(monkeypatch) -> None:
     async def _fakeResolveSupplier(session, key):
         return (1, {"钢创": "A002", "B125": "B125"}[str(key)], "名称")
 
-    async def _fakeDirectory(session, codes):
+    async def _fakeDirectory(session, *, entityType, codes):
         captured["directoryCodes"] = codes
+        captured["directoryEntityType"] = entityType
         return {
             "B125": {
                 "name": "浙江力航汽车部件有限公司",
@@ -551,7 +554,7 @@ async def test_handler_returns_structured_payload(monkeypatch) -> None:
     monkeypatch.setattr(mod, "_resolveSupplierKey", _fakeResolveSupplier)
     monkeypatch.setattr(mod, "_loadActiveDataSource", _fakeLoadDataSource)
     monkeypatch.setattr(mod, "_getAdapter", lambda datasourceId, ds: _FakeAdapter())
-    monkeypatch.setattr(mod, "_loadSupplierDirectory", _fakeDirectory)
+    monkeypatch.setattr(mod, "loadMdmDirectory", _fakeDirectory)
 
     result = await mod.deliveryTrackingHandler(
         None,
@@ -591,12 +594,48 @@ async def test_handler_returns_structured_payload(monkeypatch) -> None:
     # 本体绑定：两段解析、顺序固定，收货侧必需属性含聚合所需的日期/物料描述
     assert captured["classes"] == [mod.ORDER_CLASS_NAME, mod.RECEIPT_CLASS_NAME]
     assert {"RCV_DATE", "ITEM_DESC"} <= set(captured["required"][mod.RECEIPT_CLASS_NAME])
-    # MDM 名称按实际出现的供应商编码取一次（去重保序）
+    # MDM 名称按实际出现的供应商编码取一次（去重保序；与待到货共用同一读取函数）
     assert captured["directoryCodes"] == ("B125", "C1")
+    assert captured["directoryEntityType"] == "SUPPLIER"
+    # 订单总数 == 样本数 ⇒ 未截断
+    assert data["ordersTruncated"] is False
     # 供应商解析后的业务码进 SQL；数字订单号先转字符串（`_inClause` 拒非 str）
     byOrderSql = next(sql for sql in captured["sqls"] if "ORDER BY OPEN_QTY DESC" in sql)
     assert "O.SUPPLIER_CODE IN ('A002')" in byOrderSql
     assert "O.PO_NO IN ('123')" in byOrderSql
+
+
+@pytest.mark.asyncio
+async def test_handler_marks_orders_truncated_when_sample_is_smaller(monkeypatch) -> None:
+    """I1：订单总数 > 明细样本数 ⇒ `ordersTruncated=True`（前端不得当全量计数）。"""
+
+    async def _fakeResolve(session, *, className, requiredProperties, datasourceId=1):
+        return _orderBinding() if className == mod.ORDER_CLASS_NAME else _receiptBinding()
+
+    class _Adapter:
+        async def execute_read_only(self, sql: str):
+            if "TOTAL_LINES" in sql:
+                return [dict(_SUMMARY_ROW)]
+            if "GROUP BY S.SUPPLIER_CODE" in sql:
+                return [_supplierRow()]
+            if "AS TOTAL_ORDERS" in sql:
+                return [{"TOTAL_ORDERS": 99}]
+            return _orderRows()
+
+    async def _fakeDirectory(session, *, entityType, codes):
+        return {}
+
+    async def _fakeLoadDataSource(session, datasourceId):
+        return {"id": datasourceId}
+
+    monkeypatch.setattr(mod, "resolveBinding", _fakeResolve)
+    monkeypatch.setattr(mod, "_loadActiveDataSource", _fakeLoadDataSource)
+    monkeypatch.setattr(mod, "_getAdapter", lambda i, ds: _Adapter())
+    monkeypatch.setattr(mod, "loadMdmDirectory", _fakeDirectory)
+
+    result = await mod.deliveryTrackingHandler(None, {"monthsBack": 12}, _FakeCtx())
+
+    assert result.data["ordersTruncated"] is True
 
 
 @pytest.mark.asyncio
@@ -627,7 +666,7 @@ async def test_handler_fails_closed_on_unknown_supplier(monkeypatch) -> None:
         raise NotFoundError(f"未找到供应商：{key}")
 
     monkeypatch.setattr(mod, "_resolveSupplierKey", _fakeResolveSupplier)
-    with pytest.raises(NotFoundError, match="未找到供应商：查无此家"):
+    with pytest.raises(ValidationError, match="未找到供应商：查无此家"):
         await mod.deliveryTrackingHandler(None, {"supplierKeys": ["查无此家"]}, _FakeCtx())
 
 

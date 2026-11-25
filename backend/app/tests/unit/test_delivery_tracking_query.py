@@ -362,7 +362,8 @@ def test_summary_sql_uses_bound_tables_and_columns() -> None:
     sql = buildDeliveryTrackingSummarySql(order=_orderBinding(), receipt=_receiptBinding(), window=window)
 
     assert "FROM THBI.DWD_PURCHASE_ORDER_DTL O" in sql
-    assert "FROM THBI.DWD_GOODS_RECEIPT_DTL GROUP BY" in sql
+    assert "FROM THBI.DWD_GOODS_RECEIPT_DTL" in sql
+    assert "GROUP BY PO_NO, PO_LINE_NO" in sql
     assert "O.PO_QTY" in sql
     assert "SUM(RCV_QTY_STU) AS RECEIVED_QTY" in sql
     # 左闭右开
@@ -516,6 +517,47 @@ def test_by_supplier_sql_omits_filter_when_no_codes() -> None:
     assert "ORDER_DATE >= DATE '2025-11-25'" in sql
 
 
+def test_by_order_sql_paginates_orders_not_lines() -> None:
+    """I1：分页单位必须是**订单**（先取欠交量前 N 单，再拉这些单的全部行）。
+
+    旧实现 `ORDER BY OPEN_QTY DESC FETCH FIRST n ROWS` 截的是行 ⇒ 默认概览下
+    明细静默截断、某订单只剩欠交行时还会被判错状态。
+    """
+    from app.services.delivery_tracking_query import buildDeliveryTrackingByOrderSql
+
+    sql = buildDeliveryTrackingByOrderSql(
+        order=_orderBinding(),
+        receipt=_receiptBinding(),
+        window=resolveWindow(today=date(2026, 11, 25), monthsBack=12),
+        limit=7,
+    )
+    norm = _normSql(sql)
+
+    # 内层：按订单聚合 + 欠交量倒序 + 前 N 单
+    assert "IN (SELECT X.PO_NO FROM (" in norm
+    assert "GROUP BY O.PO_NO ORDER BY OPEN_QTY DESC FETCH FIRST 7 ROWS ONLY" in norm
+    # 外层拉這些订单的全部行：不再有行级截断
+    assert not norm.endswith("ROWS ONLY"), "外层不得再按行截断"
+    assert norm.endswith("ORDER BY OPEN_QTY DESC")
+
+
+def test_order_count_sql_counts_orders_under_same_filters() -> None:
+    """I1：截断判定需要同口径订单总数（否则前端把样本当全量计数）。"""
+    from app.services.delivery_tracking_query import buildDeliveryTrackingOrderCountSql
+
+    sql = buildDeliveryTrackingOrderCountSql(
+        order=_orderBinding(),
+        window=resolveWindow(today=date(2026, 11, 25), monthsBack=12),
+        supplierKeys=("B125",),
+        orderKeys=("T1",),
+    )
+
+    assert "COUNT(*) AS TOTAL_ORDERS" in sql
+    assert "GROUP BY O.PO_NO" in sql
+    assert "O.SUPPLIER_CODE IN ('B125')" in sql
+    assert "O.PO_NO IN ('T1')" in sql
+
+
 def test_by_order_sql_carries_line_detail_columns() -> None:
     from app.services.delivery_tracking_query import buildDeliveryTrackingByOrderSql
 
@@ -607,7 +649,8 @@ def test_mysql_dialect_uses_limit_tail() -> None:
         dialect="mysql",
     )
 
-    assert sql.endswith("LIMIT 7")
+    # 订单级分页把 limit 放在「取欠交量前 7 单」的子查询里（不是整个 SQL 尾巴）
+    assert "LIMIT 7" in sql
     assert "FETCH FIRST" not in sql
 
 

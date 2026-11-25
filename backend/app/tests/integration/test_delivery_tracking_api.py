@@ -108,6 +108,8 @@ def _fakeAdapterFor(captured: list[str], *, withErpName: bool = True):
                 return [dict(_SUMMARY_ROW)]
             if "GROUP BY S.SUPPLIER_CODE" in sql:
                 rows = [dict(_SUPPLIER_ROW), dict(_SUPPLIER_ROW_FALLBACK)]
+            elif "AS TOTAL_ORDERS" in sql:
+                return [{"TOTAL_ORDERS": 1}]
             else:
                 rows = [dict(_ORDER_ROW)]
             return rows if withErpName else [_withoutErpName(row) for row in rows]
@@ -232,7 +234,7 @@ async def test_handler_resolves_real_bindings_and_returns_three_sections(
     assert data["byOrder"][0]["supplierName"] == "浙江力航汽车部件有限公司"
     # 物理表/列来自真实绑定行（不是硬编码）
     assert any("FROM THBI.DWD_PURCHASE_ORDER_DTL O" in sql for sql in capturedSql)
-    assert any("FROM THBI.DWD_GOODS_RECEIPT_DTL GROUP BY" in sql for sql in capturedSql)
+    assert any("FROM THBI.DWD_GOODS_RECEIPT_DTL" in sql for sql in capturedSql)
     # 可选 ERP 名属性被真实绑定解析到 SQL（MDM 无行时的回退来源）
     assert any("MAX(O.SUPPLIER_NAME) AS ERP_SUPPLIER_NAME" in sql for sql in capturedSql)
     assert any("O.SUPPLIER_NAME AS ERP_SUPPLIER_NAME" in sql for sql in capturedSql)
@@ -276,7 +278,11 @@ async def test_supplier_directory_reads_entity_mapping_regardless_of_source(
         sourceSystem=SourceSystem.ERP,
     )
 
-    directory = await mod._loadSupplierDirectory(dbSession, ("B125", "NOPE"))
+    from app.services.entity_mapping_names import loadMdmDirectory
+
+    directory = await loadMdmDirectory(
+        dbSession, entityType="SUPPLIER", codes=("B125", "NOPE")
+    )
 
     assert directory["B125"]["name"] == "浙江力航汽车部件有限公司"
     assert directory["B125"]["enterpriseKey"] == 1
@@ -374,5 +380,7 @@ async def test_unknown_supplier_raises_not_found(dbSession: AsyncSession) -> Non
         name="浙江钢创供应链有限公司",
     )
 
-    with pytest.raises(NotFoundError, match="不存在或尚未在 entity_mapping 建档"):
+    from app.domain.exceptions import ValidationError
+
+    with pytest.raises(ValidationError, match="不存在或尚未在 entity_mapping 建档"):
         await mod._resolveSupplierCodes(dbSession, ("查无此家XYZ",))

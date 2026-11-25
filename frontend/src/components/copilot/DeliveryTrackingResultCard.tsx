@@ -14,7 +14,7 @@ import { OrderTable, SupplierCell, fmtQty } from "./DeliveryTrackingOrderTables"
 
 const { Text } = Typography;
 
-export type DeliveryOrderStatus = "all" | "partial" | "notArrived";
+export type DeliveryOrderStatus = "all" | "partial" | "notArrived" | "dirtyOnly";
 
 export interface DeliveryTrackingWindow {
   dateFrom: string;
@@ -83,13 +83,16 @@ export interface DeliveryTrackingResult {
   summary: DeliveryTrackingSummary;
   bySupplier: DeliveryTrackingSupplier[];
   byOrder: DeliveryTrackingOrder[];
+  /** 明细只是欠交量前 N 单样本（还有更多单）——不得把样本当全量计数。 */
+  ordersTruncated?: boolean;
 }
 
-/** 三态排序权重：未到货 0、部分 1、已到货 2（越小越靠前）。 */
+/** 三态排序权重：未到货 0、部分 1、已到货 2、仅脏数据 3（越小越靠前）。 */
 const STATUS_RANK: Record<DeliveryOrderStatus, number> = {
   notArrived: 0,
   partial: 1,
   all: 2,
+  dirtyOnly: 3,
 };
 
 const PRIMARY_RATE_FONT_SIZE = 28;
@@ -122,6 +125,7 @@ export function parseDeliveryTrackingStep(
       summary: data.summary,
       bySupplier: data.bySupplier,
       byOrder: data.byOrder,
+      ordersTruncated: data.ordersTruncated === true,
     };
   } catch {
     return null;
@@ -236,9 +240,15 @@ export default function DeliveryTrackingResultCard({
 }) {
   // filter/sort 返回新数组，不改入参；未到货订单排在前（业务先看问题单）
   const openOrders = result.byOrder
-    .filter((order) => order.status !== "all")
+    .filter((order) => order.status === "partial" || order.status === "notArrived")
     .sort((a, b) => STATUS_RANK[a.status] - STATUS_RANK[b.status]);
   const arrivedOrders = result.byOrder.filter((order) => order.status === "all");
+  // 全脏行订单：summary 不把它计入任何一态（LINE_COUNT=0）⇒ 单独成组，
+  // 否则 tab 计数会比 summary 的 notArrivedOrders 多。
+  const dirtyOrders = result.byOrder.filter((order) => order.status === "dirtyOnly");
+  const openLabel = result.ordersTruncated
+    ? `未到货订单（TOP ${openOrders.length}，已截断）`
+    : `未到货订单（${openOrders.length}）`;
 
   return (
     <div>
@@ -249,11 +259,16 @@ export default function DeliveryTrackingResultCard({
       </Card>
 
       <Card size="small">
+        {result.ordersTruncated && (
+          <Tag color="gold" data-testid="delivery-orders-truncated" style={{ marginBottom: 8 }}>
+            {`订单明细已截断：仅展示欠交量前 ${result.byOrder.length} 单（总订单以概览为准）`}
+          </Tag>
+        )}
         <Tabs
           items={[
             {
               key: "open",
-              label: `未到货订单（${openOrders.length}）`,
+              label: openLabel,
               children: <OrderTable orders={openOrders} />,
             },
             {
@@ -261,6 +276,15 @@ export default function DeliveryTrackingResultCard({
               label: `已到货订单（${arrivedOrders.length}）`,
               children: <OrderTable orders={arrivedOrders} />,
             },
+            ...(dirtyOrders.length > 0
+              ? [
+                  {
+                    key: "dirty",
+                    label: `数据异常订单（${dirtyOrders.length}）`,
+                    children: <OrderTable orders={dirtyOrders} />,
+                  },
+                ]
+              : []),
           ]}
         />
       </Card>

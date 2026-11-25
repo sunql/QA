@@ -34,7 +34,6 @@
 
 from __future__ import annotations
 
-import calendar
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -42,7 +41,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.exceptions import ValidationError
+from app.domain.exceptions import NotFoundError, ValidationError
 from app.services.agent_tool_types import AgentToolContext, ToolResult
 from app.services.delivery_tracking_assembly import (
     # Task 4 契约：装配件与不变式异常从本模块可导入（实现见 assembly 模块）。
@@ -58,9 +57,23 @@ from app.services.delivery_tracking_sql import (
     # Task 4 契约：三个 builder 从本模块可导入（实现见 sql 模块）。
     buildDeliveryTrackingByOrderSql,
     buildDeliveryTrackingBySupplierSql,
+    buildDeliveryTrackingOrderCountSql,
     buildDeliveryTrackingSummarySql,
 )
+from app.services.entity_mapping_names import loadMdmDirectory
 from app.services.ontology_binding_resolver import ResolvedBinding, resolveBinding
+from app.services.procurement_datasource import (
+    adapterFor as _getAdapter,
+)
+from app.services.procurement_datasource import (
+    loadActiveDatasource as _loadActiveDataSource,
+)
+from app.services.procurement_query_utils import (
+    SqlDialect,
+    colValue,
+    monthsBackWindow,
+    shiftMonths,
+)
 
 ORDER_CLASS_NAME = "DWD_PURCHASE_ORDER_DTL"
 RECEIPT_CLASS_NAME = "DWD_GOODS_RECEIPT_DTL"
@@ -124,22 +137,13 @@ def _parseDate(value: object, field: str) -> date:
         raise ValidationError(f"{field} 不是有效日期：{value!r}") from exc
 
 
-def _shiftMonths(base: date, months: int) -> date:
-    """base 偏移 months 个月（月末夹齐：3-31 减 1 月 = 2-28）。"""
-    total = base.year * 12 + (base.month - 1) + months
-    year, monthIndex = divmod(total, 12)
-    month = monthIndex + 1
-    day = min(base.day, calendar.monthrange(year, month)[1])
-    return date(year, month, day)
-
-
 def _anchorDate(today: date, anchorDay: int) -> date:
     """锚点基准日：当月锚点日；若已过（或正值当天），取当月；否则取上月锚点日。
 
     取「不晚于今天」的最近锚点日 ⇒ 以它为右端点的周期一定已经结束。
     """
     current = date(today.year, today.month, anchorDay)
-    return current if current <= today else _shiftMonths(current, -1)
+    return current if current <= today else shiftMonths(current, -1)
 
 
 def _requireInt(value: object, message: str) -> int:
@@ -173,8 +177,8 @@ def _resolveAnchor(today: date, anchorDay: object, periodIndex: object) -> Deliv
     base = _anchorDate(today, anchor)
     # 本期 = [anchor 上月同日, anchor)；periodIndex=-1 再往前一期。
     return DeliveryTrackingWindow(
-        dateFrom=_shiftMonths(base, index - 1),
-        dateTo=_shiftMonths(base, index),
+        dateFrom=shiftMonths(base, index - 1),
+        dateTo=shiftMonths(base, index),
         mode="anchorDay",
         anchorDay=anchor,
         periodIndex=index,
@@ -193,7 +197,8 @@ def _resolveMonthsBack(today: date, monthsBack: object) -> DeliveryTrackingWindo
             raise ValidationError(
                 f"monthsBack 必须是 {_MIN_MONTHS_BACK}..{_MAX_MONTHS_BACK} 之间的整数，收到 {monthsBack!r}"
             )
-    return DeliveryTrackingWindow(dateFrom=_shiftMonths(today, -months), dateTo=today, mode="monthsBack")
+    dateFrom, dateTo = monthsBackWindow(today, months)
+    return DeliveryTrackingWindow(dateFrom=dateFrom, dateTo=dateTo, mode="monthsBack")
 
 
 def resolveWindow(
@@ -243,78 +248,27 @@ async def _resolveSupplierKey(session: AsyncSession, key: str) -> tuple[int, str
 async def _resolveSupplierCodes(session: AsyncSession, keys: tuple[str, ...]) -> tuple[str, ...]:
     """把用户给的供应商标识解析成业务码列表（去重、保序）。
 
-    解析失败**向上抛**（`NotFoundError`），不静默丢弃该供应商——
+    解析失败**向上抛**（`ValidationError` ⇒ 422），不静默丢弃该供应商——
     用户给了 3 家、静默丢 1 家，结果就是错的。
+
+    ⚠️ `Supplier360Service._resolveSupplier` 抛的是 `NotFoundError`（404），
+    但「过滤词没命中」与未知物料（422）是同一类调用方输入问题；404 最误导
+    （看起来像「资源不存在」而不是「这个过滤值查不到」）⇒ 在此统一成 422。
     """
     resolved: list[str] = []
     for key in keys:
-        _, enterpriseCode, _ = await _resolveSupplierKey(session, key)
+        try:
+            _, enterpriseCode, _ = await _resolveSupplierKey(session, key)
+        except NotFoundError as exc:
+            raise ValidationError(
+                exc.message, detail=exc.detail, details=exc.details
+            ) from exc
         if enterpriseCode not in resolved:
             resolved.append(enterpriseCode)
     return tuple(resolved)
 
 
-async def _loadSupplierDirectory(session: AsyncSession, codes: tuple[str, ...]) -> dict[str, dict[str, Any]]:
-    """按业务码批量取供应商名称与企业键（spec 3.5 决策 9）。
-
-    名称**不 JOIN 数仓字典**（`DIM_SUPPLIER` 覆盖率不足）；无行 ⇒ 名称为 None
-    （装配层再回退 SQL 带出的 ERP 名，spec 5.7）。
-
-    ⚠️ **不按 `source_system` 过滤**：`entity_mapping` 是主数据映射 SSOT，
-    `source_system` 只描述映射来源。实测生产库名称主要挂在 `ERP` 行
-    （`MDM` 行为 0）——筛 `source_system = MDM` 会把名称全部筛成 None。
-    """
-    if not codes:
-        return {}
-    from sqlalchemy import select
-
-    from app.domain.models import EntityMapping
-
-    rows = (
-        await session.execute(
-            select(
-                EntityMapping.enterprise_code,
-                EntityMapping.name,
-                EntityMapping.enterprise_key,
-            )
-            .where(
-                EntityMapping.entity_type == "SUPPLIER",
-                EntityMapping.enterprise_code.in_(codes),
-            )
-            .order_by(EntityMapping.name.asc().nulls_last())
-        )
-    ).all()
-    directory: dict[str, dict[str, Any]] = {}
-    for enterpriseCode, name, enterpriseKey in rows:
-        code = str(enterpriseCode)
-        current = directory.get(code)
-        if current is None:
-            directory[code] = {"name": name or None, "enterpriseKey": enterpriseKey}
-        elif current["name"] is None and name:
-            directory[code] = {"name": name, "enterpriseKey": enterpriseKey}
-    return directory
-
-
 # ---------------------------------------------------------------- handler 装配件
-
-
-async def _loadActiveDataSource(session: AsyncSession, datasourceId: int) -> Any:
-    """按 id 取数据源；不存在 `NotFoundError`、停用 `DataSourceInactiveError`。"""
-    from app.services.datasource_service import (
-        DataSourceService,
-        ensureDatasourceActive,
-    )
-
-    ds = await DataSourceService().get(session, datasourceId)
-    ensureDatasourceActive(ds)
-    return ds
-
-
-def _getAdapter(datasourceId: int, ds: Any) -> Any:
-    """取业务库适配器（惰性导入，与既有采购工具同路径）。"""
-    from app.infrastructure.business_db_pool import get_adapter
-
-    return get_adapter(datasourceId, ds)
 
 
 def _keyTuple(value: object, field: str) -> tuple[str, ...]:
@@ -355,10 +309,22 @@ async def _loadDeliveryTrackingRows(
     supplierKeys: tuple[str, ...],
     orderKeys: tuple[str, ...],
     limit: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """执行三段只读 SQL（summary / bySupplier / byOrder）。"""
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    int,
+]:
+    """执行四段只读 SQL（summary / bySupplier / byOrder / 订单总数）。
+
+    订单总数用于判定 byOrder 是否被截断（分页单位=订单；sample < total ⇒ 截断）。
+    方言由 adapter 推断后显式传给三个 builder（此前从不传 ⇒ mysql 分支死代码）。
+    """
+    dialect = SqlDialect.fromAdapter(adapter).name
     summaryRows = await adapter.execute_read_only(
-        buildDeliveryTrackingSummarySql(order=order, receipt=receipt, window=window)
+        buildDeliveryTrackingSummarySql(
+            order=order, receipt=receipt, window=window, dialect=dialect
+        )
     )
     supplierRows = await adapter.execute_read_only(
         buildDeliveryTrackingBySupplierSql(
@@ -367,6 +333,7 @@ async def _loadDeliveryTrackingRows(
             window=window,
             supplierKeys=supplierKeys,
             limit=limit,
+            dialect=dialect,
         )
     )
     orderRows = await adapter.execute_read_only(
@@ -377,9 +344,19 @@ async def _loadDeliveryTrackingRows(
             supplierKeys=supplierKeys,
             orderKeys=orderKeys,
             limit=limit,
+            dialect=dialect,
         )
     )
-    return summaryRows, supplierRows, orderRows
+    countRows = await adapter.execute_read_only(
+        buildDeliveryTrackingOrderCountSql(
+            order=order,
+            window=window,
+            supplierKeys=supplierKeys,
+            orderKeys=orderKeys,
+        )
+    )
+    totalOrders = int(colValue(countRows[0], "TOTAL_ORDERS") or 0) if countRows else 0
+    return summaryRows, supplierRows, orderRows, totalOrders
 
 
 def _resolveTrackedWindow(args: dict) -> DeliveryTrackingWindow:
@@ -428,8 +405,13 @@ def _buildResultData(
     summary: dict[str, Any],
     bySupplier: list[dict[str, Any]],
     byOrder: list[dict[str, Any]],
+    ordersTruncated: bool,
 ) -> dict[str, Any]:
-    """工具结果 data（spec 5.3 形状；前端结果卡直接消费）。"""
+    """工具结果 data（spec 5.3 形状；前端结果卡直接消费）。
+
+    `ordersTruncated`：`byOrder` 只是欠交量前 N 单样本（还有更多单）。
+    前端**不得**把样本长度当全量计数展示（否则 tab 与 summary 打架）。
+    """
     return {
         "via": "business_db",
         "datasourceId": datasourceId,
@@ -442,6 +424,7 @@ def _buildResultData(
         "summary": summary,
         "bySupplier": bySupplier,
         "byOrder": byOrder,
+        "ordersTruncated": ordersTruncated,
     }
 
 
@@ -473,7 +456,7 @@ async def deliveryTrackingHandler(session: AsyncSession, args: dict, ctx: AgentT
     ds = await _loadActiveDataSource(session, order.datasourceId)
     adapter = _getAdapter(order.datasourceId, ds)
 
-    summaryRows, supplierRows, orderRows = await _loadDeliveryTrackingRows(
+    summaryRows, supplierRows, orderRows, totalOrders = await _loadDeliveryTrackingRows(
         adapter=adapter,
         order=order,
         receipt=receipt,
@@ -482,7 +465,9 @@ async def deliveryTrackingHandler(session: AsyncSession, args: dict, ctx: AgentT
         orderKeys=orderKeys,
         limit=limit,
     )
-    directory = await _loadSupplierDirectory(session, _supplierCodesOf([*supplierRows, *orderRows]))
+    directory = await loadMdmDirectory(
+        session, entityType="SUPPLIER", codes=_supplierCodesOf([*supplierRows, *orderRows])
+    )
     summary = _assembleSummary(summaryRows[0] if summaryRows else {})
     bySupplier = [_assembleSupplier(row) for row in _withSupplierDirectory(supplierRows, directory)]
     byOrder = _assembleOrders(_withSupplierDirectory(orderRows, directory))
@@ -494,6 +479,7 @@ async def deliveryTrackingHandler(session: AsyncSession, args: dict, ctx: AgentT
             summary=summary,
             bySupplier=bySupplier,
             byOrder=byOrder,
+            ordersTruncated=totalOrders > len(byOrder),
         ),
         answer=_buildAnswer(summary),
     )

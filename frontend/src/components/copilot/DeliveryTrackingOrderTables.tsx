@@ -17,12 +17,15 @@ const STATUS_COLOR: Record<DeliveryOrderStatus, string> = {
   all: "green",
   partial: "orange",
   notArrived: "red",
+  // 全脏行订单：summary 不把它算进任何一态 ⇒ 单独标记，避免与未到货混淆
+  dirtyOnly: "gold",
 };
 
 const STATUS_LABEL: Record<DeliveryOrderStatus, string> = {
   all: "已到货",
   partial: "部分到货",
   notArrived: "未到货",
+  dirtyOnly: "仅脏数据行",
 };
 
 const DIRTY_ROW_COLOR = "#999999";

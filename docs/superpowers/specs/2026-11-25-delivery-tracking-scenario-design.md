@@ -663,8 +663,8 @@ delivery_tracking_query(
     { "key": "supplierKeys", "type": "entityMulti", "label": "供应商",
       "conflictKeywords": ["供应商", "厂家"],
       "codePattern": "(?<![0-9A-Za-z])[A-Z]\\d{2,4}(?![0-9A-Za-z])" },
-    { "key": "materialKeys", "type": "entityMulti", "label": "物料",
-      "conflictKeywords": ["物料", "材料"] },
+    # materialKeys 槽位已于 2026-11-25 推迟（见 11.3）：用户原始需求 1-4 未含按物料过滤；
+    # 增加一个静默不过滤的 UI 控件比不加更糟。工具侧亦未实现该过滤。
     { "key": "orderKeys", "type": "entityMulti", "label": "订单",
       "conflictKeywords": ["订单", "订单号"] }
   ],
@@ -883,6 +883,15 @@ SQL 模板按解析结果渲染（表名/列名均为绑定解析产物，非代
 | ✅ 6 | **BO 用选项 A：给既有 `POL` 换绑到 `DWD_PURCHASE_ORDER_DTL`** | 3.2.1；**本轮推迟执行**（连带迁 6 个 KPI 口径源 + `purchase_history_query` + 图谱边） |
 | ✅ 7 | **`DWD_PURCHASE_ORDER_LINE` 本轮保留，删类推迟** | 3.2.1 依赖链；用户决定「暂不动 `purchase_history_query`，推迟删类」 |
 | ✅ 8 | **金额改从发票关联取**（设计决定） | 3.8；⚠️ 实测 `DWD_PURCHASE_INVOICE_LINE` 不可行（`PO_NO` 多空 + 数据旧 4 个月 + 无绑定），`DWD_PURCHASE_INVOICE_DTL` 有覆盖率与性能硬伤 ⇒ 本轮金额口径暂不变 |
+
+### 11.3 执行期调整（2026-11-25，实现阶段发现）
+
+| # | 调整 | 理由 |
+|---|---|---|
+| 1 | **移除 `materialKeys` 槽位（本场景）** | 用户原始需求 1-4 未包含按物料过滤；加一个静默不过滤的 UI 控件比不加更糟；实现它要改三个 SQL builder 并改变率值语义 ⇒ YAGNI。工具侧 `delivery_tracking_query` 亦不接受该参数 |
+| 2 | **`byOrder` 订单级派生值剔除脏行** | 与 `summary`/`bySupplier` 口径对齐：`lines[]` 保留脏行供核查，但订单级 `status`/行数/数量只用非脏行；新增行级 `isDirty` 与订单级 `hasDirtyLines` 供前端提示 |
+| 3 | **`NOT_ARRIVED` 谓词补 `OPEN_LINES > 0`** | 原谓词会让「订购量 ≤ 0 且未收货」的订单**同时**计入全到货与未到货 ⇒ 到货率可 > 100%。装配层另加 `DeliveryTrackingInvariantError` 兜底 |
+| 4 | **供应商名 ERP 回退落地** | spec 5.7 原本只写了「以 MDM 为准，回退 ERP 名」；实现确认 `SUPPLIER_NAME` 在订单行/收货两类均已绑定，作为**可选**属性使用（缺绑定不 fail-closed） |
 
 ### 11.2 按建议定稿（2026-11-25 用户「没有异议」）
 

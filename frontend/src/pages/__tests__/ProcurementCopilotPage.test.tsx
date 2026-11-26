@@ -1182,6 +1182,98 @@ describe("ProcurementCopilotPage 到货跟踪渲染器分发", () => {
 });
 
 
+describe("ProcurementCopilotPage 推荐问题 chips（对所有场景生效）", () => {
+  it("到货跟踪场景显示配置里的 4 条推荐问题（非待到货专属）", async () => {
+    mockOptions();
+    api.listCopilotScenarios.mockResolvedValue([
+      SCENARIO_CONFIG,
+      DELIVERY_TRACKING_CONFIG,
+    ]);
+    render(
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}>
+          <ConfigProvider locale={zhCN}>
+            <ProcurementCopilotPage />
+          </ConfigProvider>
+        </I18nextProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await waitFor(() => screen.getByText("到货跟踪")));
+    await waitFor(() => expect(api.getAgentCatalog).toHaveBeenCalled());
+
+    // 2026-11-26 缺陷回归：chips 原先只在待到货欢迎态渲染 ⇒ 到货跟踪的
+    // 4 条 chips 是死配置（配置在、UI 不显示）
+    expect(screen.getByText("试试这样问我")).toBeTruthy();
+    for (const chip of DELIVERY_TRACKING_CONFIG.chips) {
+      expect(screen.getByText(chip.label)).toBeTruthy();
+    }
+  });
+
+  it("点「近 12 个月到货概览」chip 按预设槽位发问", async () => {
+    mockOptions();
+    api.listCopilotScenarios.mockResolvedValue([
+      SCENARIO_CONFIG,
+      DELIVERY_TRACKING_CONFIG,
+    ]);
+    const payloads: Array<Record<string, unknown>> = [];
+    api.streamCopilotMessage.mockImplementation(async (payload, handlers) => {
+      payloads.push(payload);
+      handlers.onDone?.({
+        runId: "r-chip",
+        status: "SUCCEEDED",
+        answer: "ok",
+        pauseCode: null,
+        errorCode: null,
+        errorMessage: null,
+        totalTokens: 1,
+        cost: 0,
+        stepsUrl: "/api/v1/agent-runs/r-chip/steps",
+      });
+    });
+
+    render(
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}>
+          <ConfigProvider locale={zhCN}>
+            <ProcurementCopilotPage />
+          </ConfigProvider>
+        </I18nextProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await waitFor(() => screen.getByText("到货跟踪")));
+    fireEvent.click(await waitFor(() => screen.getByText("近 12 个月到货概览")));
+
+    await waitFor(() => expect(payloads).toHaveLength(1));
+    expect(payloads[0].scenarioCode).toBe("delivery_tracking");
+    const slots = payloads[0].slots as Record<string, unknown>;
+    expect(slots.monthsBack).toBe(12);
+    expect("anchorDay" in slots).toBe(false);
+  });
+
+  it("待到货场景仍显示业务现状统计与推荐问题（回归守卫）", async () => {
+    mockOptions();
+    render(
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}>
+          <ConfigProvider locale={zhCN}>
+            <ProcurementCopilotPage />
+          </ConfigProvider>
+        </I18nextProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await waitFor(() => screen.getByText("待到货 / 逾期未到")));
+    await waitFor(() =>
+      expect(screen.getByText(/你好，我是采购待到货分析助手/)).toBeTruthy(),
+    );
+    // 业务现状统计仍是待到货专属
+    expect(screen.getByText("业务现状（实时）")).toBeTruthy();
+    // 推荐问题仍可见
+    expect(screen.getByText("试试这样问我")).toBeTruthy();
+    expect(screen.getByText("全部供应商概览（近 12 个月）")).toBeTruthy();
+  });
+});
+
+
 describe("场景槽位默认值（anchorDay=0 不得劫持取数窗口）", () => {
   it("非 monthsBack 的数字槽位默认留空（不是 0）", () => {
     const values = defaultSlotValues(DELIVERY_TRACKING_CONFIG);

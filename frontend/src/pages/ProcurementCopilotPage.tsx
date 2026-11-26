@@ -31,6 +31,7 @@ import { parseSupplierRiskStep } from "../components/copilot/SupplierRiskResultC
 import { parseDeliveryTrackingStep } from "../components/copilot/DeliveryTrackingResultCard";
 import PendingDeliveryResultTabs from "../components/copilot/PendingDeliveryResultTabs";
 import CopilotScenarioCards from "../components/copilot/CopilotScenarioCards";
+import CopilotSuggestedQuestions from "../components/copilot/CopilotSuggestedQuestions";
 import CopilotTurnThread from "../components/copilot/CopilotTurnThread";
 import PendingDeliveryWelcome from "../components/copilot/PendingDeliveryWelcome";
 import ScenarioAdvancedParams, {
@@ -284,6 +285,10 @@ export default function ProcurementCopilotPage() {
   const isScenarioView = view.kind === "scenario";
   const activeScenario = isScenarioView ? view.scenario : null;
   const isPendingDelivery = activeScenario?.scenarioCode === PENDING_DELIVERY_CODE;
+  /** 推荐问题 chips 可见：**任何**配了 chips 的场景在工作区都显示（不限场景）。
+   * 2026-11-26：原条件是 isPendingDelivery ⇒ 到货跟踪等场景的 chips 是死配置。 */
+  const showSuggestedQuestions =
+    turns.length === 0 && (activeScenario?.chips.length ?? 0) > 0;
 
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [activeResultTurnId, setActiveResultTurnId] = useState<string | null>(null);
@@ -578,9 +583,11 @@ export default function ProcurementCopilotPage() {
       ) : (
         <>
       {isPendingDelivery && turns.length === 0 && (
-        <PendingDeliveryWelcome
-          summary={summaryState}
-          chips={activeScenario?.chips ?? []}
+        <PendingDeliveryWelcome summary={summaryState} />
+      )}
+      {showSuggestedQuestions && activeScenario && (
+        <CopilotSuggestedQuestions
+          chips={activeScenario.chips}
           disabled={busy || !modelId}
           onChipClick={sendScenarioChip}
         />

@@ -242,10 +242,14 @@ SQL
 > 502（解析器 fail-closed）。2026-11-26 生产实测就是这一档：**绑定表总共只有 1 行**
 > （DIM_FACILITY），两个 DWD 类从未录入。
 
-#### 2.1.0 ⚠️ 生产已发版且缺绑定时的急救（无需等新镜像）
+#### 2.1.0 绑定补录：**下次发版的标准步骤**（也是缺绑定时的急救路径）
 
-如果 1126 已经发到生产、但 ④-1 缺两个 DWD 类（2026-11-26 实际发生），
-**不要回滚重发**：把补录脚本直接塞进现役容器跑一次即可（脚本幂等、可重复跑）。
+> **现状（2026-11-27 用户确认）**：1126 已发到生产；两处 DWD 绑定由用户**经系统
+> 页面手工补录**，功能已可用。因此本次不跑急救。
+> **下次发版把本节作为固定步骤执行一次** —— 手工补录的列集合可能不全
+> （只建了工具当前要读的那几个属性），而种子会按需补齐并**校验必需属性**，
+> 跑一次即可把生产状态与仓库口径对齐（幂等：已确认的不会重写）。
+> 下方命令同时适用于「生产已发版但缺绑定」的急救场景（无需回滚重发）。
 
 ```bash
 # ① 先做只读诊断（缺列时不白跑）
@@ -259,14 +263,17 @@ ORDER BY 1,2;
 SQL
 # 期望：12 行，src_col 都非 <空>。若大量为空 ⇒ 本体侧物理列没落，脚本会 fail-fast 报出缺哪个。
 
-# ② 把脚本塞进现役后端容器（开发机 → 生产机先 scp 这个文件）
-docker cp seed_procurement_bindings.py qa-backend:/app/scripts/seed_procurement_bindings.py
+# ② 新镜像已内置该脚本 ⇒ 正常发版直接跳过本步（§5 ③d 已含）。
+#    仅在「镜像里还没有该脚本」的急救场景才需要 docker cp：
+#    docker cp seed_procurement_bindings.py qa-backend:/app/scripts/seed_procurement_bindings.py
 
 # ③ 跑补录（走 ProcurementBindingService；缺必需属性会当场抛错并点名）
 docker exec qa-backend python -m scripts.seed_procurement_bindings
-# 期望：3 行输出 + 「合计新建 2 条」；DIM_FACILITY 显示「已存在且已确认」
+# 期望：两处 DWD 显示「已存在且已确认」（用户已手工录过）或「新建」；
+#       若提示缺必需属性 ⇒ 按报错先去补本体/属性绑定，别跳过
 
-# ④ 验收（期望从 1 行变 3 行，is_candidate=f，props = 7 / 5 / 2）
+# ④ 验收（期望 3 行、is_candidate=f；props ≥ 7 / 5 / 2 —— 手工补录通常正好这几个，
+#    种子补齐后会更多，因为脚本绑定所有有 source_column 的属性）
 docker exec -i qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tA -F"|"' <<'SQL'
 SELECT c.class_name, b.source_table, b.is_candidate,
        (SELECT count(*) FROM procurement_property_binding p WHERE p.source_binding_id=b.id) AS props
@@ -275,7 +282,7 @@ WHERE c.class_name IN ('DWD_PURCHASE_ORDER_DTL','DWD_GOODS_RECEIPT_DTL','DIM_FAC
   AND b.binding_role='BASE' AND b.valid_to IS NULL ORDER BY 1;
 SQL
 
-# ⑤ 页面复核：打开「待到货」发一次问，不再出现 BindingResolutionError
+# ⑤ 页面复核：「待到货」「到货跟踪」各发一次问，均不应出现 BindingResolutionError
 ```
 
 > `docker cp` 是**应急**手段：容器重建即失效。补完应尽快换成本批镜像
@@ -377,8 +384,10 @@ qa_compose exec backend python -m scripts.seed_agents
 qa_compose exec backend python -m scripts.seed_procurement_agent_profiles
 #    c. 写入 copilot_scenario 场景配置（P4 起场景=DB 资产；不跑 ⇒ 场景墙空白）
 qa_compose exec backend python -m scripts.seed_copilot_scenarios
-#    d. 补本体源绑定（DIM_FACILITY + 两个 DWD 宽表；启动链也会兜底，
-#       但**切换前端前**必须先补 —— 否则用户点开场景即 502）
+#    d. **必备步骤**：核对/补齐本体源绑定（DIM_FACILITY + 两个 DWD 宽表）。
+#       启动链也会兜底，但**切换前端前**必须先跑一次 —— 否则用户点开场景即 502。
+#       生产已于 2026-11-27 手工补录过，本步预期「三个类都已存在且已确认」；
+#       若报「必需属性未绑定」⇒ 先补本体/属性绑定（§2.1.0），不要跳过。
 qa_compose exec backend python -m scripts.seed_procurement_bindings
 
 # ④ worker（与 backend 同镜像；不 recreate 就跑旧代码）

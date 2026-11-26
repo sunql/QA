@@ -28,21 +28,23 @@ from datetime import date
 
 from app.infrastructure.database import getSessionFactory
 
-#: 实测基线（2026-11-25 Task 10，THBI 真实取数，含 spec 4.4 脏数据剔除）。
+#: 实测基线（2026-11-25 Task 10 + 端到端复核，THBI 真实取数，本体口径）。
 #:
-#: 与设计期（spec §4.2）的差异**全部**由「脏数据剔除」解释，已逐项验证：
-#:   - totalOrders 4844→4843、partial 448→447：恰好 **1 个订单的所有行都是脏行**，
-#:     被 `LINE_COUNT > 0` 守卫排除出订单分母（实测该数为 1）
-#:   - qtyArrivalRate 40.51%→44.46%：不剔除时实测**正好 40.51%**；脏行从分子分母同时
-#:     移除后升到 44.46%（脏行是超大额未到货行，剔除后拉高率值）
-#:   - 订单到货率 82.29%→82.30%：同上，1 个全脏行订单退出分母
+#: ⚠ **口径说明（必读）**：这是**本体口径**的基线 —— 订单行取
+#: `DWD_PURCHASE_ORDER_DTL`，已收量取收货单汇总 `SUM(DWD_GOODS_RECEIPT_DTL.RCV_QTY_STU)`
+#: （按 PO_NO+PO_LINE_NO），含 spec 4.4 的脏数据剔除。
+#:
+#: 设计期基线（4,844 单 / 82.29% / 40.51%）是在 **ERP 原始表 `ODS_ERP_PORDERQ`**
+#: 上算的（用 ERP 行自带累计字段 `RCPQTYSTU_0`）—— **不同的表、不同口径**，
+#: 不可直接对比。实测差异已逐项定位：两表订单行集合差 2 行（DWD 独有 0 / ODS_ERP 独有 2），
+#: 物料码与供应商码**逐行完全一致** ⇒ 差异只在行集合与已收量来源，不在码体系。
 BASELINE: dict[str, float] = {
     "totalOrders": 4843,
-    "allArrivedOrders": 3986,
-    "partialArrivedOrders": 447,
-    "notArrivedOrders": 410,
-    "orderArrivalRate": 82.30,
-    "qtyArrivalRate": 44.46,
+    "allArrivedOrders": 4052,
+    "partialArrivedOrders": 434,
+    "notArrivedOrders": 357,
+    "orderArrivalRate": 83.67,
+    "qtyArrivalRate": 46.73,
 }
 
 

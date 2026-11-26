@@ -56,6 +56,11 @@ READ_ONLY_HANDLER_REFS = frozenset({
     # 待到货/逾期未到（2026-11-23）：三段只读 SELECT（汇总/按供应商/TOP 行），
     # 欠交 = 订购-已收（库存单位），脏数据（≥1e6）剔除且显式回报。
     "pending_delivery_query",
+    # 到货跟踪（P5，2026-11-25）：三段只读 SELECT（汇总/供应商分组/订单明细），
+    # 订单行 ⋈ 收货单，脏数据（欠交 ≥1e6）剔除且显式回报，无写操作。
+    # 不放行 ⇒ DELIVERY_TRACKING_AGENT 的 profile 绑不上工具 ⇒ 场景 409
+    #（2026-11-25 本地端到端实测踩到，同 2026-11-21 那次）。
+    "delivery_tracking_query",
 })
 
 BUILTIN_HANDLER_KIND = "BUILTIN"

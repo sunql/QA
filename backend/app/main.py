@@ -447,6 +447,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "DIM_FACILITY 本体绑定 seed 失败：基地过滤与 /pending-delivery/sites 将不可用。"
                 "请在 backend/ 下手动运行 `python -m scripts.seed_procurement_bindings` 后重启。"
             )
+        # P5 到货跟踪：补采购场景 Agent 的**编排 profile**。缺 profile 的 Agent
+        # 调 Copilot 直接 409「尚无编排配置」（2026-11-25 本地端到端实测踩到）——
+        # 新增 Agent 只进 AGENT_SEEDS 是不够的，profile 由独立脚本负责。
+        # 同样**明确告警不阻塞启动**：失败时该 Agent 不可运行，其余 Agent 不受影响。
+        try:
+            from scripts.seed_procurement_agent_profiles import (
+                seedProcurementAgentProfiles,
+            )
+
+            profileStats = await seedProcurementAgentProfiles(session)
+            logger.info("procurement agent profile seed: %s", profileStats)
+        except Exception:
+            logger.exception(
+                "采购场景 Agent 编排 profile seed 失败：对应 Agent 调 Copilot 会 409。"
+                "请在 backend/ 下手动运行 `python -m scripts.seed_procurement_agent_profiles` 后重启。"
+            )
     yield
     logger.info("关闭中，释放外部连接...")
     await shutdownCleanup()

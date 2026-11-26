@@ -280,7 +280,8 @@ qa_compose exec backend python -m scripts.seed_agents
 #       **本步同时把「存量 profile 的旧措辞指令」刷新成新版**（2026-11-26）：
 #       指令改措辞（去掉「来源要写工具名」、加「正文禁内部术语」）后，存量部署的
 #       指令不会自动更新 ⇒ LLM 继续把 delivery_tracking_query 印进正文。
-#       同步只在存量指令**逐字等于上一版种子**时进行（管理员改过的不动）。
+#       同步只替换**旧公共块前缀**，职责段原样保留（管理员改过公共块的不动）。
+#       期望输出里 7 个采购 Agent 出现「公共块升级」字样（首次跑）；重跑应为无输出。
 qa_compose exec backend python -m scripts.seed_procurement_agent_profiles
 #    c. 写入 copilot_scenario 场景配置（P4 起场景=DB 资产；不跑 ⇒ 场景墙空白）
 qa_compose exec backend python -m scripts.seed_copilot_scenarios

@@ -40,14 +40,17 @@
 - 「待到货」从**能用**变成**接口 502**（回归！）；
 - 「到货跟踪」直接不可用。
 
-⇒ §2.1 的绑定审计是本批**唯一**可以「停下来不发」的依据，**审计不过不得切后端**。
+**2026-11-26 生产实测命中**：生产 `procurement_source_binding` **总共只有 1 行**
+（仅 `DIM_FACILITY`），两个 DWD 类从未录入 —— 因为旧版种子只补基地字典。
+本批已把种子扩展为覆盖 `DIM_FACILITY` + 两个 DWD 宽表（`BINDING_SPECS`），
+处置见 §2.1.1：**先补绑定、重审、再切**。
 
 ### 0.4 执行顺序速查（一页版）
 
 | # | 阶段 | 关键命令 | 停/过 |
 |---|---|---|---|
 | 1 | 预检 | §2 ⓪–④ | alembic=0169、health=200 |
-| 2 | **绑定审计** | §2.1 ④-1 / ④-2 | **3 行 + 12 行全 t**，否则停 |
+| 2 | **绑定审计** | §2.1 ④-1 / ④-2 | **3 行 + 12 行全 t**；缺则先按 §2.1.1 补绑定再重审 |
 | 3 | 锚点 | §3 `docker tag …:pre-1126` ×2 + `pg_dump` | 三者齐备 |
 | 4 | 传输 | §4 比 sha256 → `docker load` ×2 → `docker tag` ×2 | Image ID 吻合 |
 | 5 | 切后端 | §5 ① `qa_compose up … backend` | 日志见 0170/0171 + startup complete |
@@ -69,14 +72,14 @@
 
 | 镜像 tag | 平台 | Image ID | 说明 |
 |---|---|---|---|
-| `qa-system-backend:amd64-1126` | linux/amd64 | `e14437ea0dcb` | backend + agent-orchestration-worker 同镜像 |
+| `qa-system-backend:amd64-1126` | linux/amd64 | `37b0192758de` | backend + agent-orchestration-worker 同镜像（含 `seed_procurement_bindings` 全量绑定种子） |
 | `qa-system-frontend:amd64-1126` | linux/amd64 | `5021ad081640` | nginx + 静态 bundle `index-DgDAN_my.js` |
 
 ### 1.2 传输包
 
 | 文件 | 大小 | sha256 |
 |---|---|---|
-| `qa-backend-amd64-1126.tar.gz` | 431M | `746e271c34291e8eb44c2aabc824455a038ad672a1cd22fdd01bdd1229b3b0d9` |
+| `qa-backend-amd64-1126.tar.gz` | 431M | `7df76d01a126ac9031481be802ea664772d3c66d4e4d975324d0afe8e6727a03` |
 | `qa-frontend-amd64-1126.tar.gz` | 26M | `9981b43b1e00a55bd5f412e5953c0cbca705ac2c55cb813fb2fd3ae32853181f` |
 
 ### 1.3 镜像内容自证（已实测，非脚本内置）
@@ -91,6 +94,8 @@ backend（镜像内 `grep` 全部命中、运行时 import 全部通过）：
 | `scripts/seed_copilot_scenarios.py` → `seed_copilot_scenarios` | ✅ |
 | `app/services/agent_orchestration_planner.py` → `Never mention tool names` | ✅ |
 | `alembic/versions/0171_copilot_turn_data_stamp.py` | ✅ |
+| `scripts/seed_procurement_bindings.py` → `BINDING_SPECS`（3 个类） | ✅ 命中 3 处 |
+| `app/main.py` → 启动链调用 `seed_procurement_bindings` | ✅ 命中 4 处 |
 | 运行时依赖 `asyncpg` / `oracledb` / `pymysql` / `fastapi` / `uvicorn` / `alembic` / `bcrypt` | ✅ 全部可 import |
 
 frontend（bundle `index-DgDAN_my.js`）：
@@ -230,10 +235,30 @@ SQL
 | 结果 | 动作 |
 |---|---|
 | ④-1 = 3 行且 `is_candidate=f`，④-2 = 12 行全 `t` | ✅ 通过，继续 Phase 1 |
-| ④-1 缺 `DIM_FACILITY` **仅此一条** | 可继续：新镜像启动链会自动补（§5 ③ 里也有显式 seed） |
-| ④-1 缺 `DWD_PURCHASE_ORDER_DTL` / `DWD_GOODS_RECEIPT_DTL`，或 ④-2 有 `f` | ⛔ **停止发版**，把两段输出发回。缺失绑定需要按类补 seed（一次到位、可复跑），**不要**手工逐条建 |
+| ④-1 只有 `DIM_FACILITY` 一行 / 缺任一 DWD 类 / ④-2 有 `f` | ⚠️ **不要直接开跑** —— 先按 §2.1.1 补绑定，补完重跑 ④-1 / ④-2 直到全绿 |
 
-> 为什么停：缺绑定不影响迁移/启动，但会让「待到货」从能用变成 502 —— 那是比不发版更糟的结果。
+> 为什么不能跳过：缺绑定不影响迁移和启动，但会让「待到货」「到货跟踪」在点击瞬间
+> 502（解析器 fail-closed）。2026-11-26 生产实测就是这一档：**绑定表总共只有 1 行**
+> （DIM_FACILITY），两个 DWD 类从未录入。
+
+#### 2.1.1 缺绑定时的补法（可复跑，勿手工逐条建）
+
+```bash
+# 用新镜像里的种子脚本（走 ProcurementBindingService：候选→确认顺序 + audit + 闸门）
+qa_compose exec backend python -m scripts.seed_procurement_bindings
+# 期望输出（首次）：三个类各一行 + 合计新建 3 条
+#   DIM_FACILITY → 已存在且已确认
+#   DWD_PURCHASE_ORDER_DTL → 新建
+#   DWD_GOODS_RECEIPT_DTL → 新建
+# 重跑：三个类都显示「已存在且已确认」，合计新建 0 条
+```
+
+> - 脚本覆盖 `BINDING_SPECS` 里的**全部**类（`DIM_FACILITY` + 两个 DWD 宽表）；
+>   物理表名取自 `ontology_class.source_table`、列名取自 `ontology_property.source_column`，
+>   脚本里不写死任何表名列名。
+> - 启动链（lifespan）也会跑同一个函数 ⇒ 即使漏了这步，后端起来后也会自动补；
+>   但**补完前切换到前端**会让用户看到 502，所以仍要求在切换**前**补。
+> - 补完必须重跑 §2.1 的 ④-1 / ④-2 验收（12 个必需属性全 `t` 才算过）。
 
 ### 2.2 停下条件（汇总）
 
@@ -311,7 +336,8 @@ qa_compose exec backend python -m scripts.seed_agents
 qa_compose exec backend python -m scripts.seed_procurement_agent_profiles
 #    c. 写入 copilot_scenario 场景配置（P4 起场景=DB 资产；不跑 ⇒ 场景墙空白）
 qa_compose exec backend python -m scripts.seed_copilot_scenarios
-#    d. 补 DIM_FACILITY 源绑定（启动链已兜底；显式跑一次看输出）
+#    d. 补本体源绑定（DIM_FACILITY + 两个 DWD 宽表；启动链也会兜底，
+#       但**切换前端前**必须先补 —— 否则用户点开场景即 502）
 qa_compose exec backend python -m scripts.seed_procurement_bindings
 
 # ④ worker（与 backend 同镜像；不 recreate 就跑旧代码）

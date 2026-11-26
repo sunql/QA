@@ -68,17 +68,51 @@ def test_facility_binding_spec_matches_resolver_hard_rules() -> None:
     assert spec["bindingRole"] == BINDING_ROLE_BASE
 
 
-def test_facility_seed_is_wired_into_startup_chain() -> None:
-    """C1：启动 seed 链必须调用 `seed_facility_binding`（不是只有 CLI 入口）。
+def test_binding_seed_is_wired_into_startup_chain() -> None:
+    """C1：启动 seed 链必须调用**全量**绑定种子（不是只有 CLI 入口）。
 
     CLI 只在手动跑时生效；部署到缺绑定行的库时，启动链不跑 ⇒ 待到货
     基地过滤 / `/sites` 解析不到物理表。失败必须显式告警（不许静默）。
+
+    **2026-11-26 收紧**：原先只断言 `seed_facility_binding`（只补 DIM_FACILITY）。
+    生产实测绑定表总共只有 1 行 —— 两个 DWD 类从未录入 ⇒ 发版后待到货/到货跟踪
+    直接 fail-closed。故启动链改用 `seed_procurement_bindings`（覆盖 `BINDING_SPECS`
+    全部类），断言随之改名：守卫的对象从「基地字典」升级为「工具依赖的全部类」。
     """
     mainSource = (
         Path(__file__).resolve().parents[3] / "app" / "main.py"
     ).read_text(encoding="utf-8")
 
-    assert "seed_procurement_bindings" in mainSource
-    assert "seed_facility_binding" in mainSource
+    assert "seed_procurement_bindings" in mainSource, (
+        "启动链未调用全量绑定种子（漏 => 缺绑定的类在启动后仍 fail-closed）"
+    )
     # 失败必须有显式日志（异常不得被裸吞）
     assert "logger.exception" in mainSource
+
+
+def test_binding_specs_cover_every_class_the_tools_resolve() -> None:
+    """**交叉不变式**：工具里 `resolveBinding` 用到的类，必须在 `BINDING_SPECS` 里。
+
+    为什么（2026-11-26 生产实测）：工具硬编码了两个 DWD 类名，而种子只覆盖
+    `DIM_FACILITY` ⇒ 「仓库里没有脚本能补这两个类」⇒ 生产绑定表只有 1 行，
+    发版后待到货/到货跟踪直接不可用（解析器 fail-closed）。
+
+    这条守卫把「工具要读哪些类」与「种子会建哪些类」钉在一起：新增一个
+    `resolveBinding(className=...)` 却忘了加规格，这里立刻红。
+    """
+    from app.services import delivery_tracking_query as tracking
+    from app.services import pending_delivery_query as pending
+    from scripts import seed_procurement_bindings as mod
+
+    specClasses = {str(spec["className"]) for spec in mod.BINDING_SPECS}
+    toolClasses = {
+        tracking.ORDER_CLASS_NAME,
+        tracking.RECEIPT_CLASS_NAME,
+        pending.ORDER_CLASS_NAME,
+        pending.RECEIPT_CLASS_NAME,
+        pending.FACILITY_CLASS_NAME,
+    }
+    missing = toolClasses - specClasses
+    assert not missing, (
+        f"以下类被工具 resolveBinding 使用但没有任何绑定规格（生产会 fail-closed）：{missing}"
+    )

@@ -100,27 +100,35 @@ cd <repo>
 ```
 
 **Docker Hub 不可达时**（本次实测）：`FROM` 里的裸 tag 会被补成 `docker.io/...` 去查元数据而卡死，
-即使本地有同名镜像。改用 **digest 引用**即只读本地镜像库、完全不联网：
+即使本地有同名镜像。改用 **`repo@sha256:<digest>`** 引用（只读本地镜像库、完全不联网）：
 
 ```bash
-# 1) 取本地镜像 ID（基础镜像本地已有）
-B=$(docker image inspect qa-system-backend-base:2026-11-amd64 --format '{{.Id}}')
-# 2) 基础镜像本地没有的公共镜像，先从可用镜像站拉（本机可用：docker.m.daocloud.io）
+# ⚠️ 必须是 repo@sha256:<digest>，**不能**只写 sha256:<digest>：
+#    后者会被当成「仓库名 sha256 + tag <digest>」⇒ 去 docker.io/library/sha256:<digest>
+#    解析 ⇒ 报 `failed to resolve source metadata for docker.io/library/sha256:...`
+#    （2026-11-26 实测，两个会话各撞一次）。
+
+# 1) 取本地镜像的 RepoDigest（基础镜像本地已有）
+docker image inspect qa-system-backend-base:2026-11-amd64 --format '{{.RepoDigests}}'
+# 2) 本地没有的公共镜像，先从可用镜像站拉（本机可用：docker.m.daocloud.io）
 docker pull --platform linux/amd64 docker.m.daocloud.io/library/node:20-alpine
 docker pull --platform linux/amd64 docker.m.daocloud.io/library/python:3.12-slim
-# 3) 把两个 Dockerfile 复制成临时副本，把 FROM 改成 sha256:<ID> 后构建
+# 3) 复制 Dockerfile 成临时副本，FROM 写成 docker.m.daocloud.io/library/<name>@sha256:<digest>
 #    （仓库内 Dockerfile 不改；构建完删副本）
 ```
 
-> 现成的两个临时副本已放在开发机 `/tmp/qa-release-1126/.tmp.Dockerfile.{backend,frontend}`
-> （FROM 已全部换成 digest），可直接：
+> 现成的两个临时副本在开发机 `/tmp/qa-release-1126/.tmp.Dockerfile.{backend,frontend}`
+> （FROM 已改成 `repo@sha256:` 形式），可直接：
 > ```bash
 > docker buildx build --platform linux/amd64 -f /tmp/qa-release-1126/.tmp.Dockerfile.backend \
->   --build-arg "RUNTIME_BASE=<backend-base 的 sha256>" -t qa-system-backend:amd64-1126 --load <repo>
+>   --build-arg "RUNTIME_BASE=docker.m.daocloud.io/library/qa-system-backend-base@sha256:<digest>" \
+>   -t qa-system-backend:amd64-1126 --load <repo>
 > docker buildx build --platform linux/amd64 -f /tmp/qa-release-1126/.tmp.Dockerfile.frontend \
 >   -t qa-system-frontend:amd64-1126 --load <repo>
 > ```
-> 注：`--load` 后需人工补跑 §1.3 的自检（脚本里的 grep 校验不随之执行）。
+> 注 1：`--load` 后需人工补跑 §1.3 的自检（脚本里的 grep 校验不随之执行）。
+> 注 2：**镜像 ID 与上次构建相同时不要怀疑缓存**（2026-11-26 实测）：若 `backend/` 目录逐字节未变，
+> 层全命中是正确结果。要确认「镜像真含本批代码」，按 §1.3 在镜像内 grep 关键标记，而不是看 ID 是否变化。
 
 打包：
 

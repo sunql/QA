@@ -33,6 +33,21 @@
   `DWD_GOODS_RECEIPT_DTL`；且 `pending_delivery_query` 声明 `data_layers=["ODS"]` 而实际读 DWD 表。
   统一改为 DWD（角标「数仓层 DWD」+ 两个工具 `data_layers=["DWD"]`），与运行时 ACL 层判定一致。
 
+## 验证记录（2026-11-26 本地真实栈）
+
+本机 dev 栈（`qa-postgres` + 真实 THBI Oracle）用本批镜像实跑，全部通过：
+
+| 项 | 结果 |
+|---|---|
+| 迁移 | `0169 → 0170 → 0171`，启动日志 `Application startup complete` |
+| seed | 16 Agent / 14 已绑定；`copilot_scenario` 3 行启用；P5 两个工具行各 1 |
+| 指令升级 | 7 个采购 Agent 的 profile 全部含「内部术语」禁令 |
+| 端点 | `health=200`；`copilot/scenarios`、`delivery-tracking/overview`、`pending-delivery/summary` 均 403（已注册 + 鉴权生效） |
+| **欢迎态卡**（新增） | 进场景即出：订单到货率 **83.67%** / 量级加权 **46.73%** / 订单总数 **4,843** / 未到货 **357**；窗口 2026-10-24 ~ 2026-11-24；三态 4052/434/357；剔除 6 行 —— 与 `/overview` API 及工具口径**逐项一致** |
+| **结果卡** | 近 3 个月窗口：订单到货率 87.19%、供应商表 20 家、双 Tab 明细、两处截断标记正常 |
+| e2e | `p5-delivery-tracking.spec.ts` 两用例通过（结果卡 + 欢迎态专测） |
+| 离线构建 | Docker Hub 不可达时用 `repo@sha256:` 引用本地镜像完成 arm64 构建；镜像内关键标记自检通过 |
+
 ## 部署要点（详见 runbook）
 
 1. **Phase 0 硬门禁**：本体绑定审计（3 条 BASE 源绑定 + 12 个必需属性）——不过就停，

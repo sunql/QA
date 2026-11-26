@@ -212,7 +212,13 @@ function fmtPct(value: number | undefined): string {
   return `${value.toFixed(2)}%`;
 }
 
-/** `thbi_ods_erp` ⇒ 「数仓层 ODS_ERP」，避免与「待到货」场景的数据层混淆。 */
+/**
+ * `thbi_dwd` ⇒ 「数仓层 DWD」。
+ *
+ * **事实更正（2026-11-26）**：原值 `thbi_ods_erp` 来自设计期「ODS_ERP 是原始表、
+ * DWD 是宽表」的对照，但本体迁移后**两个采购工具读的是同一批 DWD 宽表**
+ * ⇒ 「源层 vs 数仓层」的区分已不存在，角标继续写 ODS_ERP 属事实错误。
+ */
 function dataLayerText(layer?: string | null): string | null {
   if (!layer) return null;
   const bare = layer.startsWith(DATA_LAYER_PREFIX)

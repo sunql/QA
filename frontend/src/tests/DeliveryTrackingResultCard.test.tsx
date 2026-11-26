@@ -34,7 +34,7 @@ const SAMPLE = JSON.stringify({
   data: {
     via: "business_db",
     datasourceId: 1,
-    dataLayer: "thbi_ods_erp",
+    dataLayer: "thbi_dwd",
     window: { dateFrom: "2026-10-24", dateTo: "2026-11-24", mode: "anchorDay" },
     summary: {
       totalLines: 19908, totalOrders: 4844,
@@ -93,7 +93,7 @@ const DIRTY_SAMPLE = JSON.stringify({
   data: {
     via: "business_db",
     datasourceId: 1,
-    dataLayer: "thbi_ods_erp",
+    dataLayer: "thbi_dwd",
     window: { dateFrom: "2026-10-24", dateTo: "2026-11-24", mode: "anchorDay" },
     summary: {
       totalLines: 2, totalOrders: 1,
@@ -149,7 +149,7 @@ describe("parseDeliveryTrackingStep", () => {
     expect(parsed?.bySupplier[0].supplierCode).toBe("B125");
     expect(parsed?.byOrder[0].status).toBe("partial");
     // 新增契约字段（任务 4 修复）也必须解析出来
-    expect(parsed?.dataLayer).toBe("thbi_ods_erp");
+    expect(parsed?.dataLayer).toBe("thbi_dwd");
     expect(parsed?.byOrder[0].hasDirtyLines).toBe(false);
     expect(parsed?.byOrder[0].lines[0].isDirty).toBe(false);
   });
@@ -194,7 +194,7 @@ describe("DeliveryTrackingResultCard", () => {
     expect(within(primary).getByText(/量级加权/)).toBeTruthy();
     expect(within(primary).getByText("40.51%")).toBeTruthy();
     // 数据层角标（避免与「待到货」场景误读）
-    expect(screen.getByText("数仓层 ODS_ERP")).toBeTruthy();
+    expect(screen.getByText("数仓层 DWD")).toBeTruthy();
 
     const supplierTable = screen.getByTestId("delivery-supplier-table");
     expect(within(supplierTable).getByText("浙江力航汽车部件有限公司")).toBeTruthy();

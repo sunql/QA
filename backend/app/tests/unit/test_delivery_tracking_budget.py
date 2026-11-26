@@ -86,7 +86,7 @@ def _shell() -> dict[str, Any]:
     return {
         "via": "business_db",
         "datasourceId": 1,
-        "dataLayer": "thbi_ods_erp",
+        "dataLayer": "thbi_dwd",
         "window": {"dateFrom": "2026-10-24", "dateTo": "2026-11-24", "mode": "anchorDay"},
         "summary": {
             "totalLines": 19908,

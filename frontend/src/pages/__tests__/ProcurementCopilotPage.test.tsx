@@ -32,6 +32,7 @@ const api = vi.hoisted(() => ({
   deleteCopilotConversation: vi.fn(),
   listDataSources: vi.fn(),
   getPendingDeliverySummary: vi.fn(),
+  getDeliveryTrackingOverview: vi.fn(),
   searchMappings: vi.fn(),
   listPendingDeliverySites: vi.fn(),
   listCopilotScenarios: vi.fn(),
@@ -88,6 +89,7 @@ vi.mock("../../api/procurementCopilot", () => ({
   getCopilotConversation: api.getCopilotConversation,
   deleteCopilotConversation: api.deleteCopilotConversation,
   getPendingDeliverySummary: api.getPendingDeliverySummary,
+  getDeliveryTrackingOverview: api.getDeliveryTrackingOverview,
   listPendingDeliverySites: api.listPendingDeliverySites,
 }));
 vi.mock("../../api/agentOrchestrationApi", () => ({
@@ -109,6 +111,22 @@ beforeEach(() => {
     { code: "T0", name: "泰鸿万立" },
     { code: "T3", name: "模具厂" },
   ]);
+  api.getDeliveryTrackingOverview.mockResolvedValue({
+    window: { dateFrom: "2026-10-24", dateTo: "2026-11-24", mode: "anchorDay" },
+    summary: {
+      totalLines: 19902, totalOrders: 4843,
+      orderedQty: 88619265.255, receivedQty: 41414210.255,
+      orderArrivalRate: 83.67, qtyArrivalRate: 46.73,
+      allArrivedOrders: 4052, partialArrivedOrders: 434,
+      notArrivedOrders: 357, excludedRows: 6,
+    },
+    bySupplier: [{
+      supplierCode: "B125", supplierName: "浙江力航汽车部件有限公司",
+      totalOrders: 29, allArrivedOrders: 1, partialArrivedOrders: 16,
+      notArrivedOrders: 12, orderArrivalRate: 3.45,
+      orderedQty: 15155100, receivedQty: 2176026,
+    }],
+  });
   api.searchMappings.mockResolvedValue([]);
   api.listDataSources.mockResolvedValue([
     { id: 1, name: "THBI Oracle", type: "oracle", isDefault: true },
@@ -1122,7 +1140,7 @@ describe("ProcurementCopilotPage 到货跟踪渲染器分发", () => {
           action: null, planSummary: null, toolName: "delivery_tracking_query",
           inputJson: null,
           outputJson: { text: JSON.stringify({ data: {
-            dataLayer: "thbi_ods_erp",
+            dataLayer: "thbi_dwd",
             window: { dateFrom: "2026-10-24", dateTo: "2026-11-24", mode: "anchorDay" },
             summary: {
               totalLines: 19908, totalOrders: 4844,
@@ -1178,6 +1196,37 @@ describe("ProcurementCopilotPage 到货跟踪渲染器分发", () => {
     expect(screen.getAllByText("订单到货率").length).toBeGreaterThan(0);
     expect(screen.getByText("浙江力航汽车部件有限公司")).toBeTruthy();
     expect(screen.queryByText("待到货分析结果")).toBeNull();
+  });
+
+  it("进场景即显示「本期业务现状」概览卡（零 LLM：直接读只读统计端点）", async () => {
+    mockOptions();
+    api.listCopilotScenarios.mockResolvedValue([
+      SCENARIO_CONFIG,
+      DELIVERY_TRACKING_CONFIG,
+    ]);
+
+    render(
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}>
+          <ConfigProvider locale={zhCN}>
+            <ProcurementCopilotPage />
+          </ConfigProvider>
+        </I18nextProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await waitFor(() => screen.getByText("到货跟踪")));
+
+    // 进场景就拉概览（不等用户提问）
+    await waitFor(() => expect(api.getDeliveryTrackingOverview).toHaveBeenCalled());
+    // 默认口径 = 本期（24 日结算周期）：只带供应商过滤，不带 monthsBack
+    expect(api.getDeliveryTrackingOverview).toHaveBeenCalledWith({
+      supplierKeys: [],
+    });
+    // 卡上显示本期窗口与主指标
+    await waitFor(() => expect(screen.getByText(/2026-10-24 ~ 2026-11-24/)).toBeTruthy());
+    expect(screen.getAllByText("订单到货率").length).toBeGreaterThan(0);
+    // 未误渲染待到货欢迎态
+    expect(screen.queryByText("业务现状（实时）")).toBeNull();
   });
 });
 

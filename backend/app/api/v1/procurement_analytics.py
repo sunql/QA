@@ -1,7 +1,12 @@
-"""待到货场景的轻量统计端点（欢迎态「业务现状」卡）。
+"""采购场景的轻量统计端点（欢迎态「业务现状」卡）。
 
 为什么独立于编排：欢迎态要求**进入即出数**，走 run 要等 worker 且烧 token。
-本路由直接调 `pendingDeliveryHandler`（同一段只读 SQL），零 LLM 成本。
+本路由直接调 handler / 只读 SQL（同一段口径），零 LLM 成本。
+
+两个场景：
+- 待到货：`/pending-delivery/summary|lines|sites`（走 `pendingDeliveryHandler`）；
+- 到货跟踪：`/delivery-tracking/overview`（走 `loadDeliveryTrackingOverview`，
+  只跑窗口汇总 + 供应商分组两段聚合）。
 """
 
 # ruff: noqa: B008 -- 全仓 API 层统一使用 FastAPI 的 Depends 默认参数写法。
@@ -21,6 +26,10 @@ from app.services.agent_tools_procurement import (
     _adapterFor,
     _loadActiveDatasource,
     pendingDeliveryHandler,
+)
+from app.services.delivery_tracking_overview import (
+    DEFAULT_ANCHOR_DAY,
+    loadDeliveryTrackingOverview,
 )
 from app.services.pending_delivery_query import (
     _camelPendingRow,
@@ -176,6 +185,43 @@ def _ensureActiveAnalytics(ds: Any) -> None:
     from app.services.datasource_service import ensureDatasourceActive
 
     ensureDatasourceActive(ds)
+
+
+@router.get(
+    "/delivery-tracking/overview",
+    summary="到货跟踪业务现状（本期概览，不进编排）",
+)
+async def getDeliveryTrackingOverview(
+    anchorDay: int = Query(default=DEFAULT_ANCHOR_DAY, ge=1, le=28),
+    periodIndex: int = Query(default=0, ge=-12, le=0),
+    supplierKeys: str | None = Query(default=None, description="逗号分隔"),
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> dict[str, Any]:
+    """本期（企业 24 日结算周期）到货达成概览：窗口汇总 + 供应商分组。
+
+    与「到货跟踪」工具同一套本体绑定与 SQL 口径，但**只跑两段聚合**
+    （欢迎态不需要订单明细）⇒ 成本约为工具的一半，且零 LLM。
+
+    数据源固定 THBI（本体绑定唯一确定）。
+    """
+    supplierList = _splitKeys(supplierKeys)
+    try:
+        return await loadDeliveryTrackingOverview(
+            session,
+            anchorDay=anchorDay,
+            periodIndex=periodIndex,
+            supplierKeys=supplierList,
+        )
+    except DomainError:
+        # 认证/参数/绑定类错误保持原语义（401/403/404/409/422），不转 502
+        raise
+    except Exception as exc:  # noqa: BLE001 — 仅数据源执行失败友好化：
+        # 未处理异常会绕过 CORS 中间件 ⇒ 浏览器只见 CORS 错误（2026-11-24 实测）
+        raise HTTPException(
+            status_code=502,
+            detail=f"该数据源执行到货跟踪概览失败：{str(exc)[:200]}",
+        ) from exc
 
 
 #: 明细页单页行数上限（工具侧 50；明细页允许更多，便于翻页浏览）。

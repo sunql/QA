@@ -708,7 +708,12 @@ def _buildPendingToolResult(
     bySupplier: list[dict[str, Any]],
     lineRows: list[dict[str, Any]],
 ) -> ToolResult:
-    """装配工具结果（无欠交时显式告知，不返回空壳）。"""
+    """装配工具结果（无欠交时显式告知，不返回空壳）。
+
+    **末尾附业务口径来源句**：编排层把 answer 当作「该怎么引用来源」的范本；
+    不给范本时 LLM 会照抄观测 JSON 里的内部字段名（工具名 / datasourceId 等），
+    业务方看不懂（2026-11-26 实测：83 条成功 run 里 68 条把工具名写进正文）。
+    """
     openLines = int(summary["openLines"] or 0)
     if openLines == 0:
         return ToolResult(
@@ -716,7 +721,10 @@ def _buildPendingToolResult(
                 "via": "business_db", "datasourceId": datasourceId,
                 "summary": summary, "bySupplier": [], "topLines": [],
             },
-            answer=f"近 {monthsBack} 个月没有欠交订单行（全部已交清）。",
+            answer=(
+                f"近 {monthsBack} 个月没有欠交订单行（全部已交清）。"
+                f"来源：采购订单与到货记录，统计窗口近 {monthsBack} 个月。"
+            ),
         )
     topSuppliers = "、".join(
         f"{item['supplierCode']}({item['openQty']})" for item in bySupplier[:3]
@@ -735,6 +743,7 @@ def _buildPendingToolResult(
             f"近 {monthsBack} 个月欠交 {openLines} 行、总量 {summary['openQty']}；"
             f"其中逾期 {summary['overdueLines']} 行{excludedNote}。"
             f"欠交 TOP 供应商：{topSuppliers}。"
+            f"来源：采购订单与到货记录，统计窗口近 {monthsBack} 个月。"
         ),
     )
 

@@ -571,7 +571,7 @@ async def test_handler_returns_structured_payload(monkeypatch) -> None:
     }
     assert data["via"] == "business_db"
     assert data["datasourceId"] == 1
-    assert data["dataLayer"] == "thbi_ods_erp"
+    assert data["dataLayer"] == "thbi_dwd"
     assert data["summary"]["orderArrivalRate"] == 82.29
     assert data["summary"]["excludedRows"] == 0
     assert (

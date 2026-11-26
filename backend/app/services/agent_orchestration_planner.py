@@ -126,6 +126,11 @@ Rules:
 4. A FINISH answer must cite the actual observations above; never invent
    results, identifiers or numbers.
 5. Keep CALL_TOOL.summary short. Never expose hidden reasoning.
+6. Write the FINISH answer for a business reader. Never mention tool names,
+   parameter names, JSON field names or other internal identifiers (e.g.
+   "delivery_tracking_query", "window.mode", "datasourceId"). Cite the source
+   in business terms: which data/system, which time window, which matched
+   codes or document references.
 """
 
 

@@ -72,14 +72,14 @@
 
 | 镜像 tag | 平台 | Image ID | 说明 |
 |---|---|---|---|
-| `qa-system-backend:amd64-1126` | linux/amd64 | `37b0192758de` | backend + agent-orchestration-worker 同镜像（含 `seed_procurement_bindings` 全量绑定种子） |
+| `qa-system-backend:amd64-1126` | linux/amd64 | `be4b79b8550d` | backend + agent-orchestration-worker 同镜像（含 `seed_procurement_bindings` 全量绑定种子） |
 | `qa-system-frontend:amd64-1126` | linux/amd64 | `5021ad081640` | nginx + 静态 bundle `index-DgDAN_my.js` |
 
 ### 1.2 传输包
 
 | 文件 | 大小 | sha256 |
 |---|---|---|
-| `qa-backend-amd64-1126.tar.gz` | 431M | `7df76d01a126ac9031481be802ea664772d3c66d4e4d975324d0afe8e6727a03` |
+| `qa-backend-amd64-1126.tar.gz` | 431M | `033694f2d77b28aef0430a7a4122af63e5cac6050faa1eb80f7a4270d180e040` |
 | `qa-frontend-amd64-1126.tar.gz` | 26M | `9981b43b1e00a55bd5f412e5953c0cbca705ac2c55cb813fb2fd3ae32853181f` |
 
 ### 1.3 镜像内容自证（已实测，非脚本内置）
@@ -96,6 +96,7 @@ backend（镜像内 `grep` 全部命中、运行时 import 全部通过）：
 | `alembic/versions/0171_copilot_turn_data_stamp.py` | ✅ |
 | `scripts/seed_procurement_bindings.py` → `BINDING_SPECS`（3 个类） | ✅ 命中 3 处 |
 | `app/main.py` → 启动链调用 `seed_procurement_bindings` | ✅ 命中 4 处 |
+| `scripts/seed_procurement_bindings.py` → `REQUIRED_PROPERTIES_BY_CLASS`（必需属性 fail-fast） | ✅ 命中 2 处 |
 | 运行时依赖 `asyncpg` / `oracledb` / `pymysql` / `fastapi` / `uvicorn` / `alembic` / `bcrypt` | ✅ 全部可 import |
 
 frontend（bundle `index-DgDAN_my.js`）：
@@ -240,6 +241,46 @@ SQL
 > 为什么不能跳过：缺绑定不影响迁移和启动，但会让「待到货」「到货跟踪」在点击瞬间
 > 502（解析器 fail-closed）。2026-11-26 生产实测就是这一档：**绑定表总共只有 1 行**
 > （DIM_FACILITY），两个 DWD 类从未录入。
+
+#### 2.1.0 ⚠️ 生产已发版且缺绑定时的急救（无需等新镜像）
+
+如果 1126 已经发到生产、但 ④-1 缺两个 DWD 类（2026-11-26 实际发生），
+**不要回滚重发**：把补录脚本直接塞进现役容器跑一次即可（脚本幂等、可重复跑）。
+
+```bash
+# ① 先做只读诊断（缺列时不白跑）
+docker exec -i qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tA -F"|"' <<'SQL'
+SELECT c.class_name, p.property_name, coalesce(p.source_column,'<空>') AS src_col
+FROM ontology_property p JOIN ontology_class c ON c.id=p.class_id
+WHERE c.class_name IN ('DWD_PURCHASE_ORDER_DTL','DWD_GOODS_RECEIPT_DTL')
+  AND p.property_name IN ('PO_NO','PO_LINE_NO','PO_QTY','ORDER_DATE','SUPPLIER_CODE',
+                          'ITEM_CODE','EXP_RCV_DATE','RCV_QTY_STU','ITEM_DESC','RCV_DATE')
+ORDER BY 1,2;
+SQL
+# 期望：12 行，src_col 都非 <空>。若大量为空 ⇒ 本体侧物理列没落，脚本会 fail-fast 报出缺哪个。
+
+# ② 把脚本塞进现役后端容器（开发机 → 生产机先 scp 这个文件）
+docker cp seed_procurement_bindings.py qa-backend:/app/scripts/seed_procurement_bindings.py
+
+# ③ 跑补录（走 ProcurementBindingService；缺必需属性会当场抛错并点名）
+docker exec qa-backend python -m scripts.seed_procurement_bindings
+# 期望：3 行输出 + 「合计新建 2 条」；DIM_FACILITY 显示「已存在且已确认」
+
+# ④ 验收（期望从 1 行变 3 行，is_candidate=f，props = 7 / 5 / 2）
+docker exec -i qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tA -F"|"' <<'SQL'
+SELECT c.class_name, b.source_table, b.is_candidate,
+       (SELECT count(*) FROM procurement_property_binding p WHERE p.source_binding_id=b.id) AS props
+FROM procurement_source_binding b JOIN ontology_class c ON c.id=b.class_id
+WHERE c.class_name IN ('DWD_PURCHASE_ORDER_DTL','DWD_GOODS_RECEIPT_DTL','DIM_FACILITY')
+  AND b.binding_role='BASE' AND b.valid_to IS NULL ORDER BY 1;
+SQL
+
+# ⑤ 页面复核：打开「待到货」发一次问，不再出现 BindingResolutionError
+```
+
+> `docker cp` 是**应急**手段：容器重建即失效。补完应尽快换成本批镜像
+> （`be4b79b8550d`，脚本已烤进 `/app/scripts/`），之后每次启动都会自动补（幂等）。
+> 补录脚本的 md5（与镜像内一致）：`927c2ca67c5e7fa896db1b774662202e`
 
 #### 2.1.1 缺绑定时的补法（可复跑，勿手工逐条建）
 

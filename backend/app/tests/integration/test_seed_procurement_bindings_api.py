@@ -162,6 +162,42 @@ async def test_seed_is_idempotent(dbSession: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_seed_fails_fast_when_required_property_unbindable(
+    dbSession: AsyncSession,
+) -> None:
+    """工具必需属性绑不上时**响亮失败**，不产出「补录成功但仍 502」的假象。
+
+    场景：本体里订单行类缺 `EXP_RCV_DATE`（或它的 `source_column` 为空）⇒
+    属性绑不出来 ⇒ 解析器的 `requiredProperties` 必 fail-closed。
+    种子必须当场报错并点名缺哪个，而不是打完「新建 3 条」就结束。
+    """
+    await _seedThbiDataSource(dbSession)
+    partialOrder = {k: v for k, v in _ORDER_PROPERTIES.items() if k != "EXP_RCV_DATE"}
+    await _seedClassWithProperties(
+        dbSession,
+        className="DWD_PURCHASE_ORDER_DTL",
+        propertyColumns=partialOrder,
+        stalePrefix="",
+    )
+    await _seedClassWithProperties(
+        dbSession,
+        className="DWD_GOODS_RECEIPT_DTL",
+        propertyColumns=_RECEIPT_PROPERTIES,
+        stalePrefix="",
+    )
+    await _seedClassWithProperties(
+        dbSession,
+        className="DIM_FACILITY",
+        propertyColumns=_FACILITY_PROPERTIES,
+        stalePrefix="",
+    )
+    await dbSession.commit()
+
+    with pytest.raises(RuntimeError, match="EXP_RCV_DATE"):
+        await seed_procurement_bindings(getSessionFactory())
+
+
+@pytest.mark.asyncio
 async def test_seed_is_per_class_independent(
     dbSession: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

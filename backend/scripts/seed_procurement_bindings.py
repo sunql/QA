@@ -134,6 +134,31 @@ BINDING_SPECS: tuple[FacilityBindingSpec, ...] = (
     RECEIPT_BINDING,
 )
 
+#: 每个类里**工具实际会读**的属性（= 工具的 `requiredProperties`）。
+#:
+#: 与 `BINDING_SPECS` 分开维护（规格的 7 键是冻结契约，不塞新键），
+#: 但语义上是同一件事的两半：规格说「绑哪个类」，这里说「绑完必须能用」。
+#: 种子结束前会拿它做终态校验 —— 缺一个就抛错，避免「补录成功但工具仍 502」。
+REQUIRED_PROPERTIES_BY_CLASS: dict[str, tuple[str, ...]] = {
+    "DWD_PURCHASE_ORDER_DTL": (
+        "PO_NO",
+        "PO_LINE_NO",
+        "PO_QTY",
+        "ORDER_DATE",
+        "SUPPLIER_CODE",
+        "ITEM_CODE",
+        "EXP_RCV_DATE",
+    ),
+    "DWD_GOODS_RECEIPT_DTL": (
+        "PO_NO",
+        "PO_LINE_NO",
+        "RCV_QTY_STU",
+        "ITEM_DESC",
+        "RCV_DATE",
+    ),
+    "DIM_FACILITY": ("FCY_0", "FCYNAM_0"),
+}
+
 
 async def _findClassRow(
     session: AsyncSession, spec: FacilityBindingSpec
@@ -403,6 +428,55 @@ async def _assertTerminalState(
         )
 
 
+async def _assertRequiredPropertiesBound(
+    session: AsyncSession,
+    classId: int,
+    class_name: str,
+    spec: FacilityBindingSpec,
+) -> None:
+    """校验**工具实际要读的属性**都已绑定；缺一个就响亮失败。
+
+    为什么必须 fail-fast（而不是只打一行覆盖率警告）：解析器对
+    `requiredProperties` 是 fail-closed 的 —— 缺 `EXP_RCV_DATE` 这类属性时，
+    补录看起来"成功"（源绑定已确认、属性建了 29 个），但工具一调就
+    `BindingResolutionError`。生产上这种「补完还是不通」比不补更费时间。
+
+    另一条触发路径：本体侧 `ontology_property.source_column` 为空 ⇒ 该属性
+    **无法绑定**（不能凭空造物理列名）。此时把缺口原样报出来，让人先补本体。
+    """
+    required = REQUIRED_PROPERTIES_BY_CLASS.get(class_name)
+    if not required:
+        return
+    bound = set(
+        (
+            await session.execute(
+                select(OntologyProperty.property_name)
+                .join(
+                    ProcurementPropertyBinding,
+                    ProcurementPropertyBinding.property_id == OntologyProperty.id,
+                )
+                .join(
+                    ProcurementSourceBinding,
+                    ProcurementSourceBinding.id == ProcurementPropertyBinding.source_binding_id,
+                )
+                .where(
+                    ProcurementSourceBinding.class_id == classId,
+                    ProcurementSourceBinding.valid_to.is_(None),
+                    ProcurementPropertyBinding.valid_to.is_(None),
+                    ProcurementPropertyBinding.is_candidate.is_(False),
+                )
+            )
+        ).scalars().all()
+    )
+    missing = sorted(set(required) - bound)
+    if missing:
+        raise RuntimeError(
+            f"{class_name}: 工具必需的属性未绑定：{missing}。"
+            "常见原因：① 本体属性 source_column 为空（先补本体再补绑定）；"
+            "② 属性绑定仍是候选（未确认）。请先修好本体，再重跑本脚本。"
+        )
+
+
 async def _seedOneSpec(
     session: AsyncSession,
     service: ProcurementBindingService,
@@ -411,6 +485,8 @@ async def _seedOneSpec(
     """幂等补一个类的源绑定 + 属性绑定；返回新建的**源绑定**行数（0 = 已存在且已确认）。
 
     已确认的绑定**不会**补新属性（见模块 docstring 的冻结说明）。
+    无论新建还是已存在，结束前都校验「工具必需属性已绑定」（见
+    `_assertRequiredPropertiesBound`）—— 否则会出现"补录成功但工具仍 502"。
     """
     classRow = await _findClassRow(session, spec)
     _assertSourceTable(classRow, spec)
@@ -425,11 +501,19 @@ async def _seedOneSpec(
     sourceTable = str(classRow.source_table)
     existing = await _findActiveSourceBinding(session, classRow.id, sourceTable, spec)
     if existing is not None and not existing.is_candidate:
+        # 已确认也要校验必需属性：既有绑定可能缺列（历史上按「本体有列才绑」建的），
+        # 那种情况下工具照样 502 —— 必须在补录时暴露，而不是等用户点开场景。
+        await _assertRequiredPropertiesBound(
+            session, classRow.id, str(spec["className"]), spec
+        )
         return 0
     source = existing or await _createSourceBinding(session, service, classRow, spec)
     await _ensurePropertyBindings(session, service, source.id, classRow.id, spec)
     await _confirmBindings(session, service, source.id, spec)
     await _assertTerminalState(session, source.id, spec)
+    await _assertRequiredPropertiesBound(
+        session, classRow.id, str(spec["className"]), spec
+    )
     return 0 if existing is not None else 1
 
 

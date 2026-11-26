@@ -104,7 +104,12 @@ TOOL_SEEDS: list[dict[str, Any]] = [
         "name": "pending_delivery_query",
         "description": "待到货/逾期未到：欠交量(订购-已收)汇总 + 按供应商聚合 + TOP 欠交订单行（业务库只读，2026-11-23 探针定口径）",
         "data_object": "PURCHASE_ORDER",
-        "data_layers": ["ODS"],
+        # **事实更正（2026-11-26）**：本体迁移后本工具读的也是 `DWD_PURCHASE_ORDER_DTL`
+        # + `DWD_GOODS_RECEIPT_DTL`（与到货跟踪同一批表），不再是 ODS 层表；
+        # 声明 ["ODS"] 是迁移前的遗留 ⇒ 与实际读取层、与 delivery_tracking_query 的
+        # ["DWD"] 都不一致。统一为 ["DWD"]：两个采购只读工具读同一层表，ACL 层判定
+        # 也随之对齐（少一条冗余授权 ⇒ 更小权限面）。
+        "data_layers": ["DWD"],
         "handler_kind": "BUILTIN",
         "handler_ref": "pending_delivery_query",
         "arg_extractor_kind": "pending_delivery_query",

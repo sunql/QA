@@ -42,6 +42,7 @@ const api = vi.hoisted(() => ({
   pinCopilotConversation: vi.fn(),
   listDataSources: vi.fn(),
   getPendingDeliverySummary: vi.fn(),
+  getDeliveryTrackingOverview: vi.fn(),
   searchMappings: vi.fn(),
   listPendingDeliverySites: vi.fn(),
   listCopilotScenarios: vi.fn(),
@@ -60,6 +61,7 @@ vi.mock("../api/procurementCopilot", () => ({
   deleteCopilotConversation: api.deleteCopilotConversation,
   pinCopilotConversation: api.pinCopilotConversation,
   getPendingDeliverySummary: api.getPendingDeliverySummary,
+  getDeliveryTrackingOverview: api.getDeliveryTrackingOverview,
   listPendingDeliverySites: api.listPendingDeliverySites,
 }));
 vi.mock("../api/agentOrchestrationApi", () => ({
@@ -92,6 +94,16 @@ beforeEach(() => {
   api.listDataSources.mockResolvedValue([]);
   api.searchMappings.mockResolvedValue([]);
   api.listPendingDeliverySites.mockResolvedValue([]);
+  api.getDeliveryTrackingOverview.mockResolvedValue({
+    window: { dateFrom: "2026-10-24", dateTo: "2026-11-24", mode: "anchorDay" },
+    summary: {
+      totalLines: 0, totalOrders: 0, orderedQty: 0, receivedQty: 0,
+      orderArrivalRate: 0, qtyArrivalRate: 0,
+      allArrivedOrders: 0, partialArrivedOrders: 0, notArrivedOrders: 0,
+      excludedRows: 0,
+    },
+    bySupplier: [],
+  });
   api.getPendingDeliverySummary.mockResolvedValue({
     summary: {
       openLines: 0,

@@ -215,7 +215,7 @@ async def test_handler_resolves_real_bindings_and_returns_three_sections(
     }
     assert data["via"] == "business_db"
     assert data["datasourceId"] == 1
-    assert data["dataLayer"] == "thbi_ods_erp"
+    assert data["dataLayer"] == "thbi_dwd"
     assert data["summary"]["orderArrivalRate"] == 82.29
     assert (
         data["summary"]["allArrivedOrders"]

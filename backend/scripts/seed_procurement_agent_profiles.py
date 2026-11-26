@@ -44,8 +44,35 @@ _SEED_ACTOR = CurrentUser(
     userId="seed-admin", roles=("admin",), departments=("procurement",)
 )
 
-#: 公共约束（三条都写进指令：只读、必须引用证据、缺数要说不缺编）。
+#: 公共约束（五条都写进指令：只读、必须引用证据、缺数要说不缺编、不写内部术语）。
+#:
+#: **第 2 条为什么要改**（2026-11-26 实测）：原措辞是「带上来源（**工具名** + …）」，
+#: LLM 于是把 `delivery_tracking_query` / `window.mode=anchorDay` 直接印进给用户的
+#: 结论里 —— 83 条成功 run 里 68 条把工具名写进了正文，业务方看不懂这是什么"数据来源"。
+#: 改为「**业务口径**（数据来自哪个体系/哪段时间窗口 + 命中的编码/单据号）」+ 第 5 条
+#: **禁止出现内部术语**（工具名/参数名/字段名）。引用工具信息改由**前端轨迹抽屉**
+#: 承担（那里本来就在显示 `step.toolName`），正文只留业务口径。
 _READONLY_BASE = (
+    "你是采购域的只读分析助手。铁律：\n"
+    "1. 只能通过已绑定的工具取数，不得编造数据、不得猜测不存在的字段或表；\n"
+    "2. 每条结论都要带上来源，但来源要用**业务口径**表述"
+    "（数据来自哪个体系/哪段时间窗口 + 命中的编码/单据号/文档片段），"
+    "让不懂系统内部实现的人也能读懂；\n"
+    "3. 取不到数据时明确说「当前数据不足以回答」并指出缺哪一项，不要用常识补齐；\n"
+    "4. 绝不执行任何写操作（询价、下单、审批、付款都不在你的能力范围内）。\n"
+    "5. **最终回答正文里禁止出现内部术语**：不要写工具名（如 delivery_tracking_query）、"
+    "参数名（如 monthsBack/anchorDay/datasourceId）或内部字段名（如 window.mode）；"
+    "要用中文业务说法（如「采购订单与到货记录」「本期 24 日结算周期」）。"
+    "（调用工具时照常使用工具名，那是对系统的指令，不算正文。）\n"
+)
+
+#: 上一版公共约束（2026-11-26 之前的措辞）。
+#:
+#: **为什么留着它**：本脚本**不覆盖已存在 profile 的 instructions**（管理员可能改过），
+#: 于是改了 `_READONLY_BASE` 之后，**存量部署的指令不会自动更新** ⇒ 新措辞永远落不下去。
+#: 用「旧公共块 + 各自职责段」拼出**旧版完整指令**，只在存量指令**逐字等于旧版**时
+#: 才替换成新版（管理员改过的一律不动）—— 幂等、可重复跑、且不踩管理员改动。
+_LEGACY_READONLY_BASE = (
     "你是采购域的只读分析助手。铁律：\n"
     "1. 只能通过已绑定的工具取数，不得编造数据、不得猜测不存在的字段或表；\n"
     "2. 每条结论都要带上来源（工具名 + 命中的编码/单据号/文档片段）；\n"
@@ -185,6 +212,71 @@ async def _reconcileToolBindings(
     print(f"[seed_procurement_agent_profiles] {agentCode}: 补齐工具 {missing}")
 
 
+async def _syncInstructions(
+    session: AsyncSession,
+    service: AgentOrchestrationConfigService,
+    agentCode: str,
+) -> bool:
+    """把存量指令的**旧公共块前缀**就地换成新版；返回是否改写。
+
+    **为什么按前缀替换，而不是整段比对/整段覆盖**（2026-11-26 实测教训）：
+    起初按「存量指令 == 旧版种子（旧公共块 + **当前**职责段）」判断，结果真实库上
+    7 个采购 Agent 只有 1 个命中 —— 其余 6 个的职责段是**更早版本**的（后续批次
+    改过职责文案），整段永远不可能相等 ⇒ 修复落不下去（而日志一片"already-enabled"，
+    静默失效）。改成**只替换公共块前缀**：
+    - 职责段（可能被管理员改过 / 可能是更早的种子版本）原样保留，一个字符都不动；
+    - 只有「仍带着旧公共块」的指令才会被改（管理员若改过公共块本身 ⇒ 前缀不匹配 ⇒ 不动）。
+
+    为什么需要这一步：`_READONLY_BASE` 改了措辞（去掉「工具名」、加「禁止内部术语」），
+    但本脚本**不覆盖已存在 profile 的 instructions** ⇒ 不改的话存量部署永远停在旧措辞
+    ⇒ LLM 继续把 `delivery_tracking_query` 印进正文。
+
+    **必须重新读 profile、不要用调用方手里的 ORM 对象**：上一步
+    `_reconcileToolBindings` 可能刚 commit 过，旧对象已被 expire ⇒ 读它的属性会触发
+    惰性刷新，在 async 会话里直接抛 `MissingGreenlet`（而且只有「工具也缺」时才复现，
+    单测很容易漏）。
+    """
+    profile = await service.get(session, agentCode)
+    current = profile.instructions
+    if not current.startswith(_LEGACY_READONLY_BASE):
+        return False  # 已是新措辞，或公共块被管理员改过 ⇒ 不动
+    migrated = _READONLY_BASE + current[len(_LEGACY_READONLY_BASE) :]
+    await service.update(
+        session,
+        agentCode,
+        AgentOrchestrationProfileUpdate(
+            instructions=migrated,
+            tool_names=[b.tool_name for b in profile.bindings],
+            default_max_iterations=profile.default_max_iterations,
+            default_max_tool_calls=profile.default_max_tool_calls,
+            default_max_cost_usd=profile.default_max_cost_usd,
+            default_timeout_seconds=profile.default_timeout_seconds,
+            max_observation_chars=profile.max_observation_chars,
+            revision=profile.revision,
+        ),
+        _SEED_ACTOR,
+    )
+    print(
+        f"[seed_procurement_agent_profiles] {agentCode}: 公共块升级"
+        f"（旧措辞 → 禁内部术语；职责段原样保留）"
+    )
+    return True
+
+
+def _legacyInstructionsFor(agentCode: str) -> str:
+    """该 agent 上一版种子的完整指令（旧公共块 + 当前职责段）。
+
+    用途仅限测试与文档：真实迁移走**前缀替换**（见 `_syncInstructions`），
+    因为存量职责段可能是更早版本、与当前种子不等。
+    """
+    current = PROFILE_SEEDS[agentCode][0]
+    if not current.startswith(_READONLY_BASE):
+        raise RuntimeError(
+            f"{agentCode} 的种子指令不以公共块开头，无法推导上一版；请手工核对。"
+        )
+    return _LEGACY_READONLY_BASE + current[len(_READONLY_BASE) :]
+
+
 async def seedProcurementAgentProfiles(session: AsyncSession) -> dict[str, str]:
     """为采购场景 Agent 建 profile 并启用；返回 {agent_code: 结果}。
 
@@ -211,6 +303,8 @@ async def seedProcurementAgentProfiles(session: AsyncSession) -> dict[str, str]:
             await _reconcileToolBindings(
                 session, service, agentCode, existing, toolNames
             )
+            # 种子措辞刷新：仅当存量指令**逐字等于上一版种子**时才改（见 _syncInstructions）
+            await _syncInstructions(session, service, agentCode)
             continue
         created = await service.create(
             session,

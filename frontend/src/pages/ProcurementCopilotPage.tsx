@@ -34,6 +34,7 @@ import CopilotScenarioCards from "../components/copilot/CopilotScenarioCards";
 import CopilotSuggestedQuestions from "../components/copilot/CopilotSuggestedQuestions";
 import CopilotTurnThread from "../components/copilot/CopilotTurnThread";
 import PendingDeliveryWelcome from "../components/copilot/PendingDeliveryWelcome";
+import DeliveryTrackingWelcome from "../components/copilot/DeliveryTrackingWelcome";
 import ScenarioAdvancedParams, {
   hasAdvancedFilters,
   type DateMode,
@@ -58,6 +59,7 @@ import {
 import {
   deleteCopilotConversation,
   getCopilotConversation,
+  getDeliveryTrackingOverview,
   getPendingDeliverySummary,
   listCopilotConversations,
   listPendingDeliverySites,
@@ -65,6 +67,7 @@ import {
   streamCopilotMessage,
   type CopilotConversationSummary,
   type CopilotDonePayload,
+  type DeliveryTrackingOverviewResponse,
   type PendingDeliverySummaryResponse,
 } from "../api/procurementCopilot";
 import { getAgentRunSteps } from "../api/agentOrchestrationApi";
@@ -73,6 +76,8 @@ import type { ModelConfig } from "../types/modelConfig";
 const { TextArea } = Input;
 /** 待到货场景编码（欢迎态统计/结果跳转按它识别；其余场景通用渲染）。 */
 const PENDING_DELIVERY_CODE = "pending_delivery";
+/** 到货跟踪场景编码（欢迎态「本期业务现状」卡按它识别）。 */
+const DELIVERY_TRACKING_CODE = "delivery_tracking";
 /** 欢迎态统计的默认时间窗（月）。 */
 const DEFAULT_MONTHS_BACK = 12;
 
@@ -285,6 +290,7 @@ export default function ProcurementCopilotPage() {
   const isScenarioView = view.kind === "scenario";
   const activeScenario = isScenarioView ? view.scenario : null;
   const isPendingDelivery = activeScenario?.scenarioCode === PENDING_DELIVERY_CODE;
+  const isDeliveryTracking = activeScenario?.scenarioCode === DELIVERY_TRACKING_CODE;
   /** 推荐问题 chips 可见：**任何**配了 chips 的场景在工作区都显示（不限场景）。
    * 2026-11-26：原条件是 isPendingDelivery ⇒ 到货跟踪等场景的 chips 是死配置。 */
   const showSuggestedQuestions =
@@ -410,6 +416,45 @@ export default function ProcurementCopilotPage() {
       cancelled = true;
     };
   }, [isPendingDelivery, summaryFilters]);
+
+  /** 到货跟踪欢迎态「本期业务现状」（零 LLM：后端只读 SQL，进场景即出数）。 */
+  const [overviewState, setOverviewState] = useState<{
+    loading: boolean;
+    error: string | null;
+    data: DeliveryTrackingOverviewResponse | null;
+  }>({ loading: false, error: null, data: null });
+
+  /** 欢迎态概览跟随供应商筛选（时间窗固定本期 24 日结算周期）。 */
+  const overviewFilters = useMemo(
+    () => ({
+      supplierKeys: Array.isArray(slotValues.supplierKeys)
+        ? (slotValues.supplierKeys as string[])
+        : [],
+    }),
+    [slotValues.supplierKeys],
+  );
+
+  useEffect(() => {
+    if (!isDeliveryTracking) return;
+    let cancelled = false;
+    setOverviewState((prev) => ({ ...prev, loading: true, error: null }));
+    getDeliveryTrackingOverview(overviewFilters)
+      .then((data) => {
+        if (!cancelled) setOverviewState({ loading: false, error: null, data });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setOverviewState({
+            loading: false,
+            error: err instanceof Error ? err.message : "统计加载失败",
+            data: null,
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isDeliveryTracking, overviewFilters]);
 
   /** 组装场景分支的 slots：只上送当前槽位值（数据源由后端本体绑定固定）。 */
   const buildScenarioSlots = useCallback((): Record<string, unknown> | undefined => {
@@ -584,6 +629,9 @@ export default function ProcurementCopilotPage() {
         <>
       {isPendingDelivery && turns.length === 0 && (
         <PendingDeliveryWelcome summary={summaryState} />
+      )}
+      {isDeliveryTracking && turns.length === 0 && (
+        <DeliveryTrackingWelcome overview={overviewState} />
       )}
       {showSuggestedQuestions && activeScenario && (
         <CopilotSuggestedQuestions

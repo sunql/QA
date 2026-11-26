@@ -80,8 +80,14 @@ from app.services.procurement_query_utils import (
 ORDER_CLASS_NAME = "DWD_PURCHASE_ORDER_DTL"
 RECEIPT_CLASS_NAME = "DWD_GOODS_RECEIPT_DTL"
 
-#: 结果里的数据层可读标识（THBI 的 ODS/ERP 影子表，spec 5.3）。
-DATA_LAYER_LABEL = "thbi_ods_erp"
+#: 结果里的数据层可读标识。
+#:
+#: **事实更正（2026-11-26）**：原值 `thbi_ods_erp` 来自设计期「ODS_ERP 是原始表、
+#: DWD 是宽表」的对照，但**本体迁移后两个工具读的是同一批 DWD 宽表**
+#: （`THBI.DWD_PURCHASE_ORDER_DTL` + `THBI.DWD_GOODS_RECEIPT_DTL`），
+#: 「源层 vs 数仓层」的区分已不存在 ⇒ 角标继续写 ODS_ERP 属**事实错误**。
+#: 现按真实物理层写 DWD，与 `agent_tool_config.data_layers`（ACL 层判定）保持一致。
+DATA_LAYER_LABEL = "thbi_dwd"
 #: 订单明细上限默认值（`_rowLimit` 再把上界夹到 200）。
 _DEFAULT_ORDER_LIMIT = 50
 #: 绑定必需属性：与三段 SQL 的取值一一对应，缺一即 fail-closed。
@@ -444,14 +450,22 @@ def _fitResultData(
     return fitToObservationBudget(data, totalOrders=totalOrders)
 
 
-def _buildAnswer(summary: dict[str, Any]) -> str:
-    """给编排/聊天层的一句话结论（数字与 data 同源）。"""
+def _buildAnswer(summary: dict[str, Any], window: DeliveryTrackingWindow) -> str:
+    """给编排/聊天层的一句话结论（数字与 data 同源）。
+
+    **末尾附业务口径来源句**：编排层把这段 answer 当作「该怎么引用来源」的范本，
+    不给范本时 LLM 会照抄观测 JSON 里的内部字段名（工具名 / window.mode 等）
+    —— 业务方看不懂（2026-11-26 实测：83 条成功 run 里 68 条把工具名写进正文）。
+    给出「采购订单与到货记录 + 时间窗」的中文说法，LLM 才有可抄的业务口径。
+    """
     excludedNote = f"；剔除源侧数量异常行 {summary['excludedRows']} 行" if summary["excludedRows"] else ""
     return (
         f"到货率 {summary['orderArrivalRate']}%（全到货 {summary['allArrivedOrders']}"
         f" / 部分 {summary['partialArrivedOrders']} / 未到货 {summary['notArrivedOrders']}，"
         f"共 {summary['totalOrders']} 单）；量级加权到货率 {summary['qtyArrivalRate']}%"
         f"{excludedNote}。"
+        f"来源：采购订单与到货记录，统计窗口 {window.dateFrom.isoformat()} ~ "
+        f"{window.dateTo.isoformat()}。"
     )
 
 
@@ -500,5 +514,5 @@ async def deliveryTrackingHandler(session: AsyncSession, args: dict, ctx: AgentT
             ),
             totalOrders=totalOrders,
         ),
-        answer=_buildAnswer(summary),
+        answer=_buildAnswer(summary, window),
     )

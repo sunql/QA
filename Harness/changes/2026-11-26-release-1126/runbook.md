@@ -25,7 +25,8 @@
 
 ### 0.2 验收标准（一句话）
 
-场景墙出现「到货跟踪」；点「近 3 个月到货概览」能出**结构化结果卡**（订单到货率 + 三态 + 供应商表 + 双 Tab）；
+场景墙出现「到货跟踪」；**进场景即出本期业务现状卡**；点「近 3 个月到货概览」能出
+**结构化结果卡**（订单到货率 + 三态 + 供应商表 + 双 Tab）；结论正文**不出现工具名/内部字段名**；
 **待到货场景不回归**（迁本体后仍能出摘要卡）。
 
 ### 0.3 ⚠️ 本批唯一的硬门禁：本体绑定必须先在库
@@ -276,6 +277,10 @@ docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
 #    a. 建 DELIVERY_TRACKING_AGENT 等 Agent 行 + 工具绑定
 qa_compose exec backend python -m scripts.seed_agents
 #    b. 建/启用编排 profile（依赖 a 的 Agent 行，缺行会直接抛错）
+#       **本步同时把「存量 profile 的旧措辞指令」刷新成新版**（2026-11-26）：
+#       指令改措辞（去掉「来源要写工具名」、加「正文禁内部术语」）后，存量部署的
+#       指令不会自动更新 ⇒ LLM 继续把 delivery_tracking_query 印进正文。
+#       同步只在存量指令**逐字等于上一版种子**时进行（管理员改过的不动）。
 qa_compose exec backend python -m scripts.seed_procurement_agent_profiles
 #    c. 写入 copilot_scenario 场景配置（P4 起场景=DB 资产；不跑 ⇒ 场景墙空白）
 qa_compose exec backend python -m scripts.seed_copilot_scenarios
@@ -326,6 +331,15 @@ SQL
 curl -s -o /dev/null -w "scenarios=%{http_code}\n"    http://localhost:8000/api/v1/procurement/copilot/scenarios
 curl -s -o /dev/null -w "sites=%{http_code}\n"        http://localhost:8000/api/v1/procurement/pending-delivery/sites
 curl -s -o /dev/null -w "pd_summary=%{http_code}\n"   http://localhost:8000/api/v1/procurement/pending-delivery/summary
+curl -s -o /dev/null -w "dt_overview=%{http_code}\n"  http://localhost:8000/api/v1/procurement/delivery-tracking/overview
+
+# 指令措辞已刷新（正文禁内部术语）——期望 7 行全带禁令
+docker exec -i qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tA -F"|"' <<'SQL'
+SELECT a.agent_code, (p.instructions LIKE '%内部术语%') AS has_ban
+FROM agent_definition a JOIN agent_orchestration_profile p ON p.agent_id = a.id
+WHERE a.agent_code LIKE 'PROCUREMENT%' OR a.agent_code = 'DELIVERY_TRACKING_AGENT'
+ORDER BY 1;
+SQL
 
 # 工具已注册 + 已 seed 进工具目录（期望各 1 行）
 docker exec qa-backend python -c "import app.services.delivery_tracking_query as m; print('module_ok', bool(m.deliveryTrackingHandler))"
@@ -347,7 +361,7 @@ SQL
 
 ```bash
 docker exec qa-frontend sh -c 'ls /usr/share/nginx/html/assets/index-*.js'   # 期望 FRONTEND_BUNDLE
-for t in "到货达成概览" "订单到货率" "量级加权到货率" "待到货 / 逾期未到"; do
+for t in "到货达成概览" "订单到货率" "量级加权到货率" "本期业务现状（实时）" "待到货 / 逾期未到"; do
   n=$(docker exec qa-frontend sh -c "grep -cF '$t' /usr/share/nginx/html/assets/index-*.js" || true)
   echo "$t = $n"     # 期望 ≥1
 done
@@ -356,15 +370,23 @@ done
 ### 6.3 浏览器端到端（Ctrl+Shift+R 硬刷新）
 
 1. 登录 → 「采购 Copilot」场景墙：应看到 **3 张场景卡**（待到货 / 到货跟踪 / 供应商风险速览）；
-2. 点「到货跟踪」→ 点推荐问题「**近 3 个月到货概览**」→ 等结构化卡：
-   - 「到货达成概览」+ 「数仓层 ODS_ERP」角标；
+2. 点「到货跟踪」→ **进场景即应看到「本期业务现状（实时）」卡**（零 LLM，不用发问）：
+   - 订单到货率 + 量级加权到货率 + 订单总数 + 未到货订单；
+   - 窗口为本期 24 日周期（如 2026-10-24 ~ 2026-11-24）；
+3. 点推荐问题「**近 3 个月到货概览**」→ 等结构化卡：
+   - 「到货达成概览」+ 「数仓层 DWD」角标；
    - 订单到货率（大号主指标）、量级加权到货率（带「受超大额未到货行影响，仅作参考」）；
    - 全到货 / 部分到货 / 未到货三态 Tag；双 Tab 明细可展开物料行；
    - 卡上**不应**出现「结果数据过大」降级提示；
-3. 回场景墙点「待到货」→ 发一次 → **摘要卡正常出**（回归核验）；
-4. 侧栏会话可置顶（P4 pin），刷新后置顶仍在。
+4. **正文不再出现工具名**（本批修复）：展开「解读与建议」卡，正文应有
+   「采购订单与到货记录 + 窗口」这类业务说法，**不得**出现
+   `delivery_tracking_query` / `window.mode` / `datasourceId` / `monthsBack`；
+5. 回场景墙点「待到货」→ 发一次 → **摘要卡正常出**（回归核验）；
+6. 侧栏会话可置顶（P4 pin），刷新后置顶仍在。
 
 > 若第 2 步出「本体绑定缺失 / 无法解析」类报错 ⇒ 直接回 §2.1，说明绑定没落全。
+> 若第 4 步仍见工具名 ⇒ 指令没刷新，回 §5 ③b 重跑 `seed_procurement_agent_profiles`
+> 并确认输出里有「指令刷新」字样。
 
 ---
 

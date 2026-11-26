@@ -183,12 +183,44 @@ async def test_policiesFor_multi_tool_agent_unions_tool_layers(
 
 
 @pytest.mark.asyncio
-async def test_policiesFor_sourcing_covers_pending_delivery_ods(pgSession: AsyncSession) -> None:
-    """SOURCING 的策略并集必须含 PURCHASE_ORDER/ODS（pending_delivery_query）。
+async def test_policiesFor_sourcing_covers_pending_delivery_layer(
+    pgSession: AsyncSession,
+) -> None:
+    """SOURCING 的策略并集必须含 pending_delivery_query 声明的每个层。
 
     回归（2026-11-23 生产实证）：工具只绑在编排 profile（seed_procurement_agent_profiles），
     而 ACL 种子按 _AGENT_DEFAULT_BINDINGS + _AGENT_EXTRA_BINDINGS 派生 ⇒
     漏登记 extras ⇒ 运行时 deny-by-default 判 PERMISSION_DENIED。
+
+    **层值随事实更正（2026-11-26）**：pending_delivery_query 迁本体后读的也是
+    `DWD_*` 宽表 ⇒ 声明层由 ODS 改为 DWD（与 delivery_tracking_query 一致）。
+    本用例断言的是「工具声明的层 ⊆ 策略并集」这个**不变量**，不写死层值 ——
+    写死层值会在下一次事实更正时又变成一条假绿/假红。
+    """
+    from scripts.seed_agents import seedAgents
+    from app.services.agent_tool_config_registry import agent_tool_config_registry
+
+    await seedAgents(pgSession)
+    await pgSession.commit()
+
+    tool = agent_tool_config_registry.get("pending_delivery_query")
+    assert tool is not None
+    policies = await _policiesFor(pgSession, "PROCUREMENT_SOURCING")
+    pairs = {(p.data_object, p.data_layer) for p in policies}
+
+    for layer in tool.data_layers:
+        assert (tool.data_object, layer) in pairs, (
+            f"策略并集缺 pending_delivery_query 需要的 {tool.data_object}/{layer}："
+            f"{sorted(pairs)}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_policiesFor_heals_missing_extra_layer(pgSession: AsyncSession) -> None:
+    """重跑 seed 必须把 extras 工具缺的 (object, layer) 补回来。
+
+    模拟「旧部署」：Agent 先建、工具后补 ⇒ 库里没有该层授权。
+    取 `SUPPLIER/DWD`（唯一由 extra 工具 graph_traverse 提供的层）。
     """
     from scripts.seed_agents import _SEED_ACTOR, seedAgents
     from app.services.agent_registry_service import AgentRegistryService
@@ -196,12 +228,11 @@ async def test_policiesFor_sourcing_covers_pending_delivery_ods(pgSession: Async
     await seedAgents(pgSession)
     await pgSession.commit()
 
-    # 模拟「旧部署」：Agent 先建、工具后补 ⇒ 库里没有 ODS 授权
     service = AgentRegistryService()
     policies = await service.listPolicies(pgSession, "PROCUREMENT_SOURCING")
     victim = next(
         p for p in policies
-        if p.data_object == "PURCHASE_ORDER" and p.data_layer == "ODS"
+        if p.data_object == "SUPPLIER" and p.data_layer == "DWD"
     )
     await service.deletePolicy(pgSession, "PROCUREMENT_SOURCING", victim.id, _SEED_ACTOR)
     await pgSession.commit()
@@ -214,6 +245,6 @@ async def test_policiesFor_sourcing_covers_pending_delivery_ods(pgSession: Async
         (p.data_object, p.data_layer)
         for p in await service.listPolicies(pgSession, "PROCUREMENT_SOURCING")
     }
-    assert ("PURCHASE_ORDER", "ODS") in remaining, (
-        f"重跑 seed 后仍缺 PURCHASE_ORDER/ODS：{sorted(remaining)}"
+    assert ("SUPPLIER", "DWD") in remaining, (
+        f"重跑 seed 后仍缺 SUPPLIER/DWD：{sorted(remaining)}"
     )

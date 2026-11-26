@@ -14,6 +14,7 @@ import {
   deleteCopilotConversation,
   describeCopilotError,
   getCopilotConversation,
+  getDeliveryTrackingOverview,
   getPendingDeliverySummary,
   listCopilotConversations,
   listPendingDeliverySites,
@@ -133,5 +134,40 @@ describe("listPendingDeliverySites", () => {
       params: {},
     });
     expect(rows[0].code).toBe("T3");
+  });
+});
+
+describe("getDeliveryTrackingOverview", () => {
+  it("默认请求本期概览（不带窗口参数）", async () => {
+    httpMock.get.mockResolvedValue({
+      data: {
+        window: { dateFrom: "2026-10-24", dateTo: "2026-11-24", mode: "anchorDay" },
+        summary: { totalOrders: 4843, orderArrivalRate: 83.67, notArrivedOrders: 357 },
+        bySupplier: [],
+      },
+    });
+
+    const result = await getDeliveryTrackingOverview();
+
+    expect(httpMock.get).toHaveBeenCalledWith("/procurement/delivery-tracking/overview", {
+      params: {},
+    });
+    expect(result.summary.orderArrivalRate).toBe(83.67);
+  });
+
+  it("供应商过滤用逗号分隔（axios 默认序列化成 key[]=v 会静默失效）", async () => {
+    httpMock.get.mockResolvedValue({
+      data: {
+        window: { dateFrom: "2026-10-24", dateTo: "2026-11-24", mode: "anchorDay" },
+        summary: { totalOrders: 1, orderArrivalRate: 0, notArrivedOrders: 1 },
+        bySupplier: [],
+      },
+    });
+
+    await getDeliveryTrackingOverview({ supplierKeys: ["B125", "B019"] });
+
+    expect(httpMock.get).toHaveBeenCalledWith("/procurement/delivery-tracking/overview", {
+      params: { supplierKeys: "B125,B019" },
+    });
   });
 });

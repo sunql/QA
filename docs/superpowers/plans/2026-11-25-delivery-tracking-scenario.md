@@ -1327,7 +1327,7 @@ git commit -m "feat(copilot): 到货跟踪窗口解析 + 三段 SQL 模板（本
   返回 `ToolResult(data={...}, answer=...)`，`data` 形状（camelCase，spec 5.3）：
   ```json
   {
-    "via": "business_db", "datasourceId": 1, "dataLayer": "thbi_ods_erp",
+    "via": "business_db", "datasourceId": 1, "dataLayer": "thbi_dwd",
     "window": {"dateFrom": "2026-10-24", "dateTo": "2026-11-24", "mode": "anchorDay"},
     "summary": {"totalLines": 19908, "totalOrders": 4844,
                 "orderedQty": 0.0, "receivedQty": 0.0,
@@ -1351,7 +1351,7 @@ git commit -m "feat(copilot): 到货跟踪窗口解析 + 三段 SQL 模板（本
   ```
 
 **关键规则**：
-- `dataLayer` 固定 `"thbi_ods_erp"`（THBI 硬规则的可读标识）。
+- `dataLayer` 固定 `"thbi_dwd"`（THBI 硬规则的可读标识）。
 - `status` 三态取值：`"all"` / `"partial"` / `"notArrived"`。
 - 供应商名从 MDM `entity_mapping.name` 取（spec 3.5 决策 9），**不 JOIN 数仓字典**（`DIM_SUPPLIER` 覆盖率 99.97%、`DIM_IMATERIAL` 90.6%）。
 - 率值保留 2 位小数。
@@ -1724,7 +1724,7 @@ async def deliveryTrackingHandler(
         data={
             "via": "business_db",
             "datasourceId": order.datasourceId,
-            "dataLayer": "thbi_ods_erp",
+            "dataLayer": "thbi_dwd",
             "window": {
                 "dateFrom": window.dateFrom.isoformat(),
                 "dateTo": window.dateTo.isoformat(),

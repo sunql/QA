@@ -190,6 +190,58 @@ export async function listPendingDeliverySites(): Promise<{ code: string; name: 
   return res.data;
 }
 
+/** 到货跟踪欢迎态「本期业务现状」响应（后端只读 SQL，零 LLM 成本）。 */
+export interface DeliveryTrackingOverviewResponse {
+  window: { dateFrom: string; dateTo: string; mode: string };
+  summary: {
+    totalLines: number;
+    totalOrders: number;
+    orderedQty: number;
+    receivedQty: number;
+    orderArrivalRate: number;
+    qtyArrivalRate: number;
+    allArrivedOrders: number;
+    partialArrivedOrders: number;
+    notArrivedOrders: number;
+    excludedRows: number;
+  };
+  bySupplier: {
+    supplierCode: string;
+    supplierName?: string | null;
+    totalOrders: number;
+    allArrivedOrders: number;
+    partialArrivedOrders: number;
+    notArrivedOrders: number;
+    orderArrivalRate: number;
+    orderedQty: number;
+    receivedQty: number;
+  }[];
+}
+
+/**
+ * 到货跟踪本期概览（欢迎态业务现状卡）。
+ *
+ * 口径：本期 = 企业默认月度结算周期（每月 24 日 → 次月 24 日），
+ * 与场景 chip「本期到货概览（24 日周期）」同源。
+ */
+export async function getDeliveryTrackingOverview(
+  params: { anchorDay?: number; periodIndex?: number; supplierKeys?: string[] } = {},
+): Promise<DeliveryTrackingOverviewResponse> {
+  const query: Record<string, string | number> = {};
+  if (params.anchorDay !== undefined) query.anchorDay = params.anchorDay;
+  if (params.periodIndex !== undefined) query.periodIndex = params.periodIndex;
+  // 多值参数用**逗号分隔**：axios 默认把数组序列化成 `key[]=v`，
+  // 与后端（FastAPI 读取逗号分隔字符串）对不上 ⇒ 静默变成空过滤。
+  if (params.supplierKeys && params.supplierKeys.length > 0) {
+    query.supplierKeys = params.supplierKeys.join(",");
+  }
+  const res = await httpClient.get<DeliveryTrackingOverviewResponse>(
+    "/procurement/delivery-tracking/overview",
+    { params: query },
+  );
+  return res.data;
+}
+
 export interface CopilotMessageRequest {
   /** 场景分支下可为空（主句由模板提供）；自由文本分支必须有文字。 */
   message: string;

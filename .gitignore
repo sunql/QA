@@ -86,3 +86,6 @@ frontend/node_modules
 # 业务问卷 A–E 及其回收登记快照：**用户编写的工作副本**，只留在本地，绝不入库
 # （答案的机器可读产物在 docs/update/1118/M0/answers/；同目录 README.md 是仓内说明，保留跟踪）
 docs/update/1118/M0/业务问卷/[A-E]-*.md
+
+# 本地备份副本（手工改文件前的 .local-bak 快照；正式件已在仓内跟踪）
+*.local-bak

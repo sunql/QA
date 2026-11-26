@@ -429,22 +429,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from scripts.seed_rbac import seedRbacBaseline
 
         await seedRbacBaseline(session)
-        # P5 到货跟踪（C1）：补 `DIM_FACILITY` 的本体源+属性绑定。缺这类库时
-        # 待到货的 siteKeys 过滤 / `/pending-delivery/sites` 解析不到物理表。
+        # P5 到货跟踪（C1）：补采购只读工具依赖的**全部**本体源+属性绑定
+        # （`DIM_FACILITY` + `DWD_PURCHASE_ORDER_DTL` + `DWD_GOODS_RECEIPT_DTL`）。
+        # 缺订单行/收货行两个类时，待到货与到货跟踪都会 fail-closed
+        # （2026-11-26 生产实测：绑定表总共只有 1 行，两个 DWD 类从未录入）。
         # 绑定解析本身已改为**按需**（不带基地过滤的 summary/lines 不受影响）⇒
-        # 这里**明确告警**而不阻塞启动：失败时基地过滤不可用，但既有待到货/到货
-        # 跟踪主链路仍可用；运维按日志手动 `python -m scripts.seed_procurement_bindings`。
+        # 这里**明确告警**而不阻塞启动：失败时相关场景不可用，但其余 Agent 不受影响；
+        # 运维按日志手动 `python -m scripts.seed_procurement_bindings` 后重启。
         try:
-            from scripts.seed_procurement_bindings import seed_facility_binding
+            from scripts.seed_procurement_bindings import seed_procurement_bindings
 
-            createdBindings = await seed_facility_binding(session_factory)
+            createdBindings = await seed_procurement_bindings(session_factory)
             logger.info(
-                "procurement binding seed: %d new DIM_FACILITY source binding(s)",
-                createdBindings,
+                "procurement binding seed: %s",
+                {name: count for name, count in createdBindings.items()},
             )
         except Exception:
             logger.exception(
-                "DIM_FACILITY 本体绑定 seed 失败：基地过滤与 /pending-delivery/sites 将不可用。"
+                "采购本体绑定 seed 失败：待到货 / 到货跟踪 / 基地过滤将不可用。"
                 "请在 backend/ 下手动运行 `python -m scripts.seed_procurement_bindings` 后重启。"
             )
         # P5 到货跟踪：补采购场景 Agent 的**编排 profile**。缺 profile 的 Agent

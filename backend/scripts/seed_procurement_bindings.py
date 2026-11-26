@@ -94,8 +94,75 @@ FACILITY_BINDING: FacilityBindingSpec = {
     "confirmedBy": "m1-b-confirm",
 }
 
+#: `DWD_PURCHASE_ORDER_DTL`（订单行宽表）的源绑定规格。
+#:
+#: **为什么它也需要种**（2026-11-26 生产实测）：到货跟踪与迁本体后的待到货都经
+#: `ontology_binding_resolver` 读这两个 DWD 类，且解析器 fail-closed（无生效绑定
+#: ⇒ 抛 `BindingResolutionError`，绝不回退默认源）。此前假定「这两个类早就有绑定」
+#: —— 生产实测绑定表**总共只有 1 行**（DIM_FACILITY），两个 DWD 类从未录入 ⇒
+#: 发版后待到货/到货跟踪直接不可用。仓库里也没有别的脚本能补它们
+#: （`m1b_confirm_procurement_bindings.py` 是 dev 引导脚本，自带 dev-only 守卫且
+#: 会顺带做域发布），故本脚本一并覆盖。
+ORDER_BINDING: FacilityBindingSpec = {
+    "className": "DWD_PURCHASE_ORDER_DTL",
+    "datasourceId": 1,
+    "schemaName": "THBI",
+    "sourceTable": "DWD_PURCHASE_ORDER_DTL",
+    "bindingRole": "BASE",
+    "isCandidate": False,
+    "confirmedBy": "m1-b-confirm",
+}
 
-async def _findClassRow(session: AsyncSession) -> OntologyClass:
+#: `DWD_GOODS_RECEIPT_DTL`（收货行宽表）的源绑定规格（理由同上）。
+RECEIPT_BINDING: FacilityBindingSpec = {
+    "className": "DWD_GOODS_RECEIPT_DTL",
+    "datasourceId": 1,
+    "schemaName": "THBI",
+    "sourceTable": "DWD_GOODS_RECEIPT_DTL",
+    "bindingRole": "BASE",
+    "isCandidate": False,
+    "confirmedBy": "m1-b-confirm",
+}
+
+#: 采购只读工具依赖的**全部**本体源绑定规格（按依赖顺序，非必需）。
+#:
+#: 新增一个靠本体取数的工具时，若用到了新类，把它的规格加进这里 ——
+#: 这是「换环境还会再踩」的唯一防线。
+BINDING_SPECS: tuple[FacilityBindingSpec, ...] = (
+    FACILITY_BINDING,
+    ORDER_BINDING,
+    RECEIPT_BINDING,
+)
+
+#: 每个类里**工具实际会读**的属性（= 工具的 `requiredProperties`）。
+#:
+#: 与 `BINDING_SPECS` 分开维护（规格的 7 键是冻结契约，不塞新键），
+#: 但语义上是同一件事的两半：规格说「绑哪个类」，这里说「绑完必须能用」。
+#: 种子结束前会拿它做终态校验 —— 缺一个就抛错，避免「补录成功但工具仍 502」。
+REQUIRED_PROPERTIES_BY_CLASS: dict[str, tuple[str, ...]] = {
+    "DWD_PURCHASE_ORDER_DTL": (
+        "PO_NO",
+        "PO_LINE_NO",
+        "PO_QTY",
+        "ORDER_DATE",
+        "SUPPLIER_CODE",
+        "ITEM_CODE",
+        "EXP_RCV_DATE",
+    ),
+    "DWD_GOODS_RECEIPT_DTL": (
+        "PO_NO",
+        "PO_LINE_NO",
+        "RCV_QTY_STU",
+        "ITEM_DESC",
+        "RCV_DATE",
+    ),
+    "DIM_FACILITY": ("FCY_0", "FCYNAM_0"),
+}
+
+
+async def _findClassRow(
+    session: AsyncSession, spec: FacilityBindingSpec
+) -> OntologyClass:
     """取生效中的本体类行（未墓碑 + 版本最高）。
 
     口径与 `ontology_binding_resolver._loadClassRow` 一致（读路径与写路径必须
@@ -105,7 +172,7 @@ async def _findClassRow(session: AsyncSession) -> OntologyClass:
         await session.execute(
             select(OntologyClass)
             .where(
-                OntologyClass.class_name == FACILITY_BINDING["className"],
+                OntologyClass.class_name == spec["className"],
                 OntologyClass.valid_to.is_(None),
             )
             .order_by(OntologyClass.version.desc())
@@ -113,28 +180,32 @@ async def _findClassRow(session: AsyncSession) -> OntologyClass:
     ).scalars().all()
     if not rows:
         raise RuntimeError(
-            f"本体类不存在或已墓碑：{FACILITY_BINDING['className']}（先跑 seed_ontology）"
+            f"本体类不存在或已墓碑：{spec['className']}（先跑 seed_ontology）"
         )
     return rows[0]
 
 
-def _assertSourceTable(classRow: OntologyClass) -> None:
+def _assertSourceTable(
+    classRow: OntologyClass, spec: FacilityBindingSpec
+) -> None:
     """本体模型声明的物理表必须与脚本规格一致（不一致 ⇒ 响亮失败，人工裁决）。
 
     为什么要有这道闸：物理表名有两处可能的真相（本体模型 vs 脚本规格）⇒
     不一致时静默取其一 = 把漂移埋进数据里。
     """
     declared = str(classRow.source_table or "")
-    if declared != str(FACILITY_BINDING["sourceTable"]):
+    if declared != str(spec["sourceTable"]):
         raise RuntimeError(
             f"本体类 {classRow.class_name} 的 source_table 与绑定规格不一致："
-            f"本体={declared!r} 规格={FACILITY_BINDING['sourceTable']!r}"
+            f"本体={declared!r} 规格={spec['sourceTable']!r}"
         )
 
 
-async def _assertDatasource(session: AsyncSession) -> None:
+async def _assertDatasource(
+    session: AsyncSession, spec: FacilityBindingSpec
+) -> None:
     """数据源必须存在且启用（否则绑定了也读不出来）。"""
-    datasourceId = int(FACILITY_BINDING["datasourceId"])
+    datasourceId = int(spec["datasourceId"])
     datasource = await session.get(DataSource, datasourceId)
     if datasource is None:
         raise RuntimeError(f"数据源不存在：{datasourceId}")
@@ -143,17 +214,20 @@ async def _assertDatasource(session: AsyncSession) -> None:
 
 
 async def _findActiveSourceBinding(
-    session: AsyncSession, classId: int, sourceTable: str
+    session: AsyncSession,
+    classId: int,
+    sourceTable: str,
+    spec: FacilityBindingSpec,
 ) -> ProcurementSourceBinding | None:
     """按唯一键（class + ds + schema + table + role）找**生效**源绑定行。"""
     return (
         await session.execute(
             select(ProcurementSourceBinding).where(
                 ProcurementSourceBinding.class_id == classId,
-                ProcurementSourceBinding.datasource_id == FACILITY_BINDING["datasourceId"],
-                ProcurementSourceBinding.schema_name == FACILITY_BINDING["schemaName"],
+                ProcurementSourceBinding.datasource_id == spec["datasourceId"],
+                ProcurementSourceBinding.schema_name == spec["schemaName"],
                 ProcurementSourceBinding.source_table == sourceTable,
-                ProcurementSourceBinding.binding_role == FACILITY_BINDING["bindingRole"],
+                ProcurementSourceBinding.binding_role == spec["bindingRole"],
                 ProcurementSourceBinding.valid_to.is_(None),
             )
         )
@@ -164,20 +238,21 @@ async def _createSourceBinding(
     session: AsyncSession,
     service: ProcurementBindingService,
     classRow: OntologyClass,
+    spec: FacilityBindingSpec,
 ) -> ProcurementSourceBinding:
     """建**候选**源绑定（物理表名取自本体模型，不是脚本常量）。"""
     return await service.createSourceBinding(
         session,
         SourceBindingCreate(
             class_id=classRow.id,
-            datasource_id=int(FACILITY_BINDING["datasourceId"]),
-            schema_name=str(FACILITY_BINDING["schemaName"]),
+            datasource_id=int(spec["datasourceId"]),
+            schema_name=str(spec["schemaName"]),
             source_table=str(classRow.source_table),
-            binding_role=str(FACILITY_BINDING["bindingRole"]),
+            binding_role=str(spec["bindingRole"]),
             filter_expression=None,
             filter_allowlist=[],
         ),
-        actor=FACILITY_BINDING["confirmedBy"],
+        actor=spec["confirmedBy"],
     )
 
 
@@ -258,6 +333,7 @@ async def _ensurePropertyBindings(
     service: ProcurementBindingService,
     sourceBindingId: int,
     classId: int,
+    spec: FacilityBindingSpec,
 ) -> int:
     """补齐属性绑定，返回新建条数。
 
@@ -293,7 +369,7 @@ async def _ensurePropertyBindings(
                 key_ordinal=keyOrdinalByPropId.get(prop.id),
                 transform_expression=None,
             ),
-            actor=FACILITY_BINDING["confirmedBy"],
+            actor=spec["confirmedBy"],
         )
         created += 1
     return created
@@ -303,6 +379,7 @@ async def _confirmBindings(
     session: AsyncSession,
     service: ProcurementBindingService,
     sourceBindingId: int,
+    spec: FacilityBindingSpec,
 ) -> None:
     """确认全部属性绑定，再确认源绑定（service 强制的顺序，不可颠倒）。"""
     pending = (
@@ -316,16 +393,18 @@ async def _confirmBindings(
     ).scalars().all()
     for binding in pending:
         await service.confirmPropertyBinding(
-            session, sourceBindingId, binding.id, actor=FACILITY_BINDING["confirmedBy"]
+            session, sourceBindingId, binding.id, actor=spec["confirmedBy"]
         )
     source = await service.getSourceBinding(session, sourceBindingId)
     if source.is_candidate:
         await service.confirmSourceBinding(
-            session, sourceBindingId, actor=FACILITY_BINDING["confirmedBy"]
+            session, sourceBindingId, actor=spec["confirmedBy"]
         )
 
 
-async def _assertTerminalState(session: AsyncSession, sourceBindingId: int) -> None:
+async def _assertTerminalState(
+    session: AsyncSession, sourceBindingId: int, spec: FacilityBindingSpec
+) -> None:
     """校验种子结束后的**目标终态**：实际落库行与规格期望一致（已确认、未失效）。
 
     期望值取自 `FACILITY_BINDING["isCandidate"]`（契约：已确认 = `False`）——
@@ -342,44 +421,140 @@ async def _assertTerminalState(session: AsyncSession, sourceBindingId: int) -> N
             f"源绑定 id={sourceBindingId} 已失效或不存在"
             f"（valid_to={None if source is None else source.valid_to}）"
         )
-    if source.is_candidate != FACILITY_BINDING["isCandidate"]:
+    if source.is_candidate != spec["isCandidate"]:
         raise RuntimeError(
             f"源绑定 id={sourceBindingId} 的 is_candidate={source.is_candidate} "
-            f"与规格期望 {FACILITY_BINDING['isCandidate']} 不一致"
+            f"与规格期望 {spec['isCandidate']} 不一致"
         )
+
+
+async def _assertRequiredPropertiesBound(
+    session: AsyncSession,
+    classId: int,
+    class_name: str,
+    spec: FacilityBindingSpec,
+) -> None:
+    """校验**工具实际要读的属性**都已绑定；缺一个就响亮失败。
+
+    为什么必须 fail-fast（而不是只打一行覆盖率警告）：解析器对
+    `requiredProperties` 是 fail-closed 的 —— 缺 `EXP_RCV_DATE` 这类属性时，
+    补录看起来"成功"（源绑定已确认、属性建了 29 个），但工具一调就
+    `BindingResolutionError`。生产上这种「补完还是不通」比不补更费时间。
+
+    另一条触发路径：本体侧 `ontology_property.source_column` 为空 ⇒ 该属性
+    **无法绑定**（不能凭空造物理列名）。此时把缺口原样报出来，让人先补本体。
+    """
+    required = REQUIRED_PROPERTIES_BY_CLASS.get(class_name)
+    if not required:
+        return
+    bound = set(
+        (
+            await session.execute(
+                select(OntologyProperty.property_name)
+                .join(
+                    ProcurementPropertyBinding,
+                    ProcurementPropertyBinding.property_id == OntologyProperty.id,
+                )
+                .join(
+                    ProcurementSourceBinding,
+                    ProcurementSourceBinding.id == ProcurementPropertyBinding.source_binding_id,
+                )
+                .where(
+                    ProcurementSourceBinding.class_id == classId,
+                    ProcurementSourceBinding.valid_to.is_(None),
+                    ProcurementPropertyBinding.valid_to.is_(None),
+                    ProcurementPropertyBinding.is_candidate.is_(False),
+                )
+            )
+        ).scalars().all()
+    )
+    missing = sorted(set(required) - bound)
+    if missing:
+        raise RuntimeError(
+            f"{class_name}: 工具必需的属性未绑定：{missing}。"
+            "常见原因：① 本体属性 source_column 为空（先补本体再补绑定）；"
+            "② 属性绑定仍是候选（未确认）。请先修好本体，再重跑本脚本。"
+        )
+
+
+async def _seedOneSpec(
+    session: AsyncSession,
+    service: ProcurementBindingService,
+    spec: FacilityBindingSpec,
+) -> int:
+    """幂等补一个类的源绑定 + 属性绑定；返回新建的**源绑定**行数（0 = 已存在且已确认）。
+
+    已确认的绑定**不会**补新属性（见模块 docstring 的冻结说明）。
+    无论新建还是已存在，结束前都校验「工具必需属性已绑定」（见
+    `_assertRequiredPropertiesBound`）—— 否则会出现"补录成功但工具仍 502"。
+    """
+    classRow = await _findClassRow(session, spec)
+    _assertSourceTable(classRow, spec)
+    await _assertDatasource(session, spec)
+    totalProperties, bindableProperties = await _propertyCoverage(session, classRow.id)
+    if bindableProperties != totalProperties:
+        print(
+            f"seed_procurement_bindings: ⚠️ {classRow.class_name} 属性可绑定 "
+            f"{bindableProperties}/{totalProperties}"
+            "（其余 source_column IS NULL，无法绑定）"
+        )
+    sourceTable = str(classRow.source_table)
+    existing = await _findActiveSourceBinding(session, classRow.id, sourceTable, spec)
+    if existing is not None and not existing.is_candidate:
+        # 已确认也要校验必需属性：既有绑定可能缺列（历史上按「本体有列才绑」建的），
+        # 那种情况下工具照样 502 —— 必须在补录时暴露，而不是等用户点开场景。
+        await _assertRequiredPropertiesBound(
+            session, classRow.id, str(spec["className"]), spec
+        )
+        return 0
+    source = existing or await _createSourceBinding(session, service, classRow, spec)
+    await _ensurePropertyBindings(session, service, source.id, classRow.id, spec)
+    await _confirmBindings(session, service, source.id, spec)
+    await _assertTerminalState(session, source.id, spec)
+    await _assertRequiredPropertiesBound(
+        session, classRow.id, str(spec["className"]), spec
+    )
+    return 0 if existing is not None else 1
+
+
+async def _seedSpecs(
+    session_factory: async_sessionmaker[AsyncSession],
+    specs: tuple[FacilityBindingSpec, ...],
+) -> dict[str, int]:
+    """逐个规格跑种子；返回 `{className: 新建源绑定行数}`。
+
+    单类失败**不吞**：抛错即中止（部署时缺一个类的绑定 ⇒ 对应场景不可用，
+    静默跳过只会把问题推迟到用户点开场景那一刻）。
+    """
+    service = ProcurementBindingService()
+    outcome: dict[str, int] = {}
+    async with session_factory() as session:
+        for spec in specs:
+            outcome[str(spec["className"])] = await _seedOneSpec(session, service, spec)
+    return outcome
 
 
 async def seed_facility_binding(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
-    """幂等补 `DIM_FACILITY` 的源绑定 + 属性绑定。
+    """幂等补 `DIM_FACILITY` 的源绑定 + 属性绑定（启动链用，行为与历史一致）。
 
     返回**新建的源绑定行数**（0 = 已存在且已确认）。
-    已确认的绑定**不会**补新属性（见模块 docstring 的冻结说明）。
     """
-    service = ProcurementBindingService()
-    async with session_factory() as session:
-        classRow = await _findClassRow(session)
-        _assertSourceTable(classRow)
-        await _assertDatasource(session)
-        totalProperties, bindableProperties = await _propertyCoverage(
-            session, classRow.id
-        )
-        if bindableProperties != totalProperties:
-            print(
-                f"seed_procurement_bindings: ⚠️ {classRow.class_name} 属性可绑定 "
-                f"{bindableProperties}/{totalProperties}"
-                "（其余 source_column IS NULL，无法绑定）"
-            )
-        sourceTable = str(classRow.source_table)
-        existing = await _findActiveSourceBinding(session, classRow.id, sourceTable)
-        if existing is not None and not existing.is_candidate:
-            return 0
-        source = existing or await _createSourceBinding(session, service, classRow)
-        await _ensurePropertyBindings(session, service, source.id, classRow.id)
-        await _confirmBindings(session, service, source.id)
-        await _assertTerminalState(session, source.id)
-        return 0 if existing is not None else 1
+    outcome = await _seedSpecs(session_factory, (FACILITY_BINDING,))
+    return outcome[FACILITY_BINDING["className"]]
+
+
+async def seed_procurement_bindings(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> dict[str, int]:
+    """幂等补**全部**采购只读工具依赖的本体源绑定（`BINDING_SPECS`）。
+
+    返回 `{className: 新建源绑定行数}`。这是生产/新环境的**主入口**：
+    `seed_facility_binding` 只覆盖基地字典，缺了订单行/收货行两个类时
+    「待到货」和「到货跟踪」会 fail-closed（2026-11-26 生产实测踩到）。
+    """
+    return await _seedSpecs(session_factory, BINDING_SPECS)
 
 
 async def main() -> None:
@@ -388,8 +563,14 @@ async def main() -> None:
     engine = create_async_engine(settings.databaseUrl, echo=False)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        created = await seed_facility_binding(factory)
-        print(f"seed_procurement_bindings: 新建 {created} 条（DIM_FACILITY 绑定）")
+        outcome = await seed_procurement_bindings(factory)
+        for className, created in outcome.items():
+            state = "新建" if created else "已存在且已确认"
+            print(f"seed_procurement_bindings: {className} → {state}")
+        print(
+            "seed_procurement_bindings: 合计新建 "
+            f"{sum(outcome.values())} 条（覆盖 {len(outcome)} 个类）"
+        )
     finally:
         await engine.dispose()
 

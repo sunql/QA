@@ -11,7 +11,8 @@
 
 | PR | 内容 |
 |---|---|
-| #178 | 全部改动（OPEN，head `c63f8eed`，`feat/ontology-evolution` → `main`） |
+| #178 | 主改动（**已合入 main**：`d40e5576`，`feat/ontology-evolution` → `main`） |
+| #183 | 本批修复：结论正文去内部术语 + 到货跟踪本期概览 + dataLayer 事实更正（`feat/copilot-source-attribution-and-overview`） |
 
 ### 0.1 迁移表（`0169 → 0171`）
 
@@ -39,14 +40,17 @@
 - 「待到货」从**能用**变成**接口 502**（回归！）；
 - 「到货跟踪」直接不可用。
 
-⇒ §2.1 的绑定审计是本批**唯一**可以「停下来不发」的依据，**审计不过不得切后端**。
+**2026-11-26 生产实测命中**：生产 `procurement_source_binding` **总共只有 1 行**
+（仅 `DIM_FACILITY`），两个 DWD 类从未录入 —— 因为旧版种子只补基地字典。
+本批已把种子扩展为覆盖 `DIM_FACILITY` + 两个 DWD 宽表（`BINDING_SPECS`），
+处置见 §2.1.1：**先补绑定、重审、再切**。
 
 ### 0.4 执行顺序速查（一页版）
 
 | # | 阶段 | 关键命令 | 停/过 |
 |---|---|---|---|
 | 1 | 预检 | §2 ⓪–④ | alembic=0169、health=200 |
-| 2 | **绑定审计** | §2.1 ④-1 / ④-2 | **3 行 + 12 行全 t**，否则停 |
+| 2 | **绑定审计** | §2.1 ④-1 / ④-2 | **3 行 + 12 行全 t**；缺则先按 §2.1.1 补绑定再重审 |
 | 3 | 锚点 | §3 `docker tag …:pre-1126` ×2 + `pg_dump` | 三者齐备 |
 | 4 | 传输 | §4 比 sha256 → `docker load` ×2 → `docker tag` ×2 | Image ID 吻合 |
 | 5 | 切后端 | §5 ① `qa_compose up … backend` | 日志见 0170/0171 + startup complete |
@@ -58,34 +62,54 @@
 
 ---
 
-## 1. 交付物（开发机产出）
+## 1. 交付物（开发机已产出并自证）
 
-> ⛔ **构建尚未完成（2026-11-26 14:45 状态）**：本机访问 Docker Hub 不通
-> （`registry-1.docker.io/v2/` 超时返回 000），`docker buildx` 卡在
-> `load metadata for docker.io/library/...` 这一步。镜像**还没产出**，下表的
-> Image ID / 大小 / sha256 均为待回填占位，**不要拿去发版**。
-> 构建恢复后按 §1.4 的步骤产出并回填本表。
+> ✅ 构建源：`feat/copilot-source-attribution-and-overview @ 70e31337`
+> （= main 合入 #178 后 + #183 本批修复；`git diff` 与合入后的 main 树一致）
+> 平台 `linux/amd64`，2026-11-26 23:19 产出。
 
 ### 1.1 镜像
 
 | 镜像 tag | 平台 | Image ID | 说明 |
 |---|---|---|---|
-| `qa-system-backend:amd64-1126` | linux/amd64 | `BACKEND_IMAGE_ID` | backend + agent-orchestration-worker 同镜像 |
-| `qa-system-frontend:amd64-1126` | linux/amd64 | `FRONTEND_IMAGE_ID` | nginx + 静态 bundle |
+| `qa-system-backend:amd64-1126` | linux/amd64 | `be4b79b8550d` | backend + agent-orchestration-worker 同镜像（含 `seed_procurement_bindings` 全量绑定种子） |
+| `qa-system-frontend:amd64-1126` | linux/amd64 | `5021ad081640` | nginx + 静态 bundle `index-DgDAN_my.js` |
 
 ### 1.2 传输包
 
 | 文件 | 大小 | sha256 |
 |---|---|---|
-| `qa-backend-amd64-1126.tar.gz` | `BACKEND_TAR_SIZE` | `BACKEND_TAR_SHA` |
-| `qa-frontend-amd64-1126.tar.gz` | `FRONTEND_TAR_SIZE` | `FRONTEND_TAR_SHA` |
+| `qa-backend-amd64-1126.tar.gz` | 431M | `033694f2d77b28aef0430a7a4122af63e5cac6050faa1eb80f7a4270d180e040` |
+| `qa-frontend-amd64-1126.tar.gz` | 26M | `9981b43b1e00a55bd5f412e5953c0cbca705ac2c55cb813fb2fd3ae32853181f` |
 
-### 1.3 镜像内容自证（构建脚本内置，任一缺失即构建失败）
+### 1.3 镜像内容自证（已实测，非脚本内置）
 
-- backend：`agent_tools_procurement.py:_PendingDialect`、`procurement_analytics.py:该数据源执行待到货查询失败`、
-  `procurement_copilot.py:deleteCopilotConversation` / `pinCopilotConversation`、
-  `copilot_scenario_render.py:renderScenarioQuestion`、`seed_copilot_scenarios.py:seed_copilot_scenarios`
-- frontend：bundle `FRONTEND_BUNDLE`，含「采购 Copilot」「待到货 / 逾期未到」「分析结果」
+backend（镜像内 `grep` 全部命中、运行时 import 全部通过）：
+
+| 项 | 实测 |
+|---|---|
+| `app/services/delivery_tracking_query.py` → `deliveryTrackingHandler` | ✅ |
+| `app/services/delivery_tracking_overview.py` → `loadDeliveryTrackingOverview` | ✅ |
+| `app/api/v1/procurement_analytics.py` → `delivery-tracking/overview`（命中 2 处） | ✅ |
+| `scripts/seed_copilot_scenarios.py` → `seed_copilot_scenarios` | ✅ |
+| `app/services/agent_orchestration_planner.py` → `Never mention tool names` | ✅ |
+| `alembic/versions/0171_copilot_turn_data_stamp.py` | ✅ |
+| `scripts/seed_procurement_bindings.py` → `BINDING_SPECS`（3 个类） | ✅ 命中 3 处 |
+| `app/main.py` → 启动链调用 `seed_procurement_bindings` | ✅ 命中 4 处 |
+| `scripts/seed_procurement_bindings.py` → `REQUIRED_PROPERTIES_BY_CLASS`（必需属性 fail-fast） | ✅ 命中 2 处 |
+| 运行时依赖 `asyncpg` / `oracledb` / `pymysql` / `fastapi` / `uvicorn` / `alembic` / `bcrypt` | ✅ 全部可 import |
+
+frontend（bundle `index-DgDAN_my.js`）：
+
+| 文案 | 命中 |
+|---|---|
+| 「本期业务现状（实时）」 | 1 |
+| 「到货达成概览」 | 1 |
+| 「未到货最多供应商」 | 1 |
+
+> ⚠️ 已知既有瑕疵（**非本批引入，不阻断**）：`backend/MEMORY.md`（Claude 记忆索引，
+> 单行纯文本、无凭据）自 main 起就提交在仓库里，因此会随镜像进入 `/app/MEMORY.md`。
+> 历史各批同样存在；建议后续单独清理（删文件 + `.dockerignore` 加一条）。
 
 > 生产机**不 build**：镜像靠开发机 `docker save` + `docker load`。
 
@@ -212,10 +236,77 @@ SQL
 | 结果 | 动作 |
 |---|---|
 | ④-1 = 3 行且 `is_candidate=f`，④-2 = 12 行全 `t` | ✅ 通过，继续 Phase 1 |
-| ④-1 缺 `DIM_FACILITY` **仅此一条** | 可继续：新镜像启动链会自动补（§5 ③ 里也有显式 seed） |
-| ④-1 缺 `DWD_PURCHASE_ORDER_DTL` / `DWD_GOODS_RECEIPT_DTL`，或 ④-2 有 `f` | ⛔ **停止发版**，把两段输出发回。缺失绑定需要按类补 seed（一次到位、可复跑），**不要**手工逐条建 |
+| ④-1 只有 `DIM_FACILITY` 一行 / 缺任一 DWD 类 / ④-2 有 `f` | ⚠️ **不要直接开跑** —— 先按 §2.1.1 补绑定，补完重跑 ④-1 / ④-2 直到全绿 |
 
-> 为什么停：缺绑定不影响迁移/启动，但会让「待到货」从能用变成 502 —— 那是比不发版更糟的结果。
+> 为什么不能跳过：缺绑定不影响迁移和启动，但会让「待到货」「到货跟踪」在点击瞬间
+> 502（解析器 fail-closed）。2026-11-26 生产实测就是这一档：**绑定表总共只有 1 行**
+> （DIM_FACILITY），两个 DWD 类从未录入。
+
+#### 2.1.0 绑定补录：**下次发版的标准步骤**（也是缺绑定时的急救路径）
+
+> **现状（2026-11-27 用户确认）**：1126 已发到生产；两处 DWD 绑定由用户**经系统
+> 页面手工补录**，功能已可用。因此本次不跑急救。
+> **下次发版把本节作为固定步骤执行一次** —— 手工补录的列集合可能不全
+> （只建了工具当前要读的那几个属性），而种子会按需补齐并**校验必需属性**，
+> 跑一次即可把生产状态与仓库口径对齐（幂等：已确认的不会重写）。
+> 下方命令同时适用于「生产已发版但缺绑定」的急救场景（无需回滚重发）。
+
+```bash
+# ① 先做只读诊断（缺列时不白跑）
+docker exec -i qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tA -F"|"' <<'SQL'
+SELECT c.class_name, p.property_name, coalesce(p.source_column,'<空>') AS src_col
+FROM ontology_property p JOIN ontology_class c ON c.id=p.class_id
+WHERE c.class_name IN ('DWD_PURCHASE_ORDER_DTL','DWD_GOODS_RECEIPT_DTL')
+  AND p.property_name IN ('PO_NO','PO_LINE_NO','PO_QTY','ORDER_DATE','SUPPLIER_CODE',
+                          'ITEM_CODE','EXP_RCV_DATE','RCV_QTY_STU','ITEM_DESC','RCV_DATE')
+ORDER BY 1,2;
+SQL
+# 期望：12 行，src_col 都非 <空>。若大量为空 ⇒ 本体侧物理列没落，脚本会 fail-fast 报出缺哪个。
+
+# ② 新镜像已内置该脚本 ⇒ 正常发版直接跳过本步（§5 ③d 已含）。
+#    仅在「镜像里还没有该脚本」的急救场景才需要 docker cp：
+#    docker cp seed_procurement_bindings.py qa-backend:/app/scripts/seed_procurement_bindings.py
+
+# ③ 跑补录（走 ProcurementBindingService；缺必需属性会当场抛错并点名）
+docker exec qa-backend python -m scripts.seed_procurement_bindings
+# 期望：两处 DWD 显示「已存在且已确认」（用户已手工录过）或「新建」；
+#       若提示缺必需属性 ⇒ 按报错先去补本体/属性绑定，别跳过
+
+# ④ 验收（期望 3 行、is_candidate=f；props ≥ 7 / 5 / 2 —— 手工补录通常正好这几个，
+#    种子补齐后会更多，因为脚本绑定所有有 source_column 的属性）
+docker exec -i qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tA -F"|"' <<'SQL'
+SELECT c.class_name, b.source_table, b.is_candidate,
+       (SELECT count(*) FROM procurement_property_binding p WHERE p.source_binding_id=b.id) AS props
+FROM procurement_source_binding b JOIN ontology_class c ON c.id=b.class_id
+WHERE c.class_name IN ('DWD_PURCHASE_ORDER_DTL','DWD_GOODS_RECEIPT_DTL','DIM_FACILITY')
+  AND b.binding_role='BASE' AND b.valid_to IS NULL ORDER BY 1;
+SQL
+
+# ⑤ 页面复核：「待到货」「到货跟踪」各发一次问，均不应出现 BindingResolutionError
+```
+
+> `docker cp` 是**应急**手段：容器重建即失效。补完应尽快换成本批镜像
+> （`be4b79b8550d`，脚本已烤进 `/app/scripts/`），之后每次启动都会自动补（幂等）。
+> 补录脚本的 md5（与镜像内一致）：`927c2ca67c5e7fa896db1b774662202e`
+
+#### 2.1.1 缺绑定时的补法（可复跑，勿手工逐条建）
+
+```bash
+# 用新镜像里的种子脚本（走 ProcurementBindingService：候选→确认顺序 + audit + 闸门）
+qa_compose exec backend python -m scripts.seed_procurement_bindings
+# 期望输出（首次）：三个类各一行 + 合计新建 3 条
+#   DIM_FACILITY → 已存在且已确认
+#   DWD_PURCHASE_ORDER_DTL → 新建
+#   DWD_GOODS_RECEIPT_DTL → 新建
+# 重跑：三个类都显示「已存在且已确认」，合计新建 0 条
+```
+
+> - 脚本覆盖 `BINDING_SPECS` 里的**全部**类（`DIM_FACILITY` + 两个 DWD 宽表）；
+>   物理表名取自 `ontology_class.source_table`、列名取自 `ontology_property.source_column`，
+>   脚本里不写死任何表名列名。
+> - 启动链（lifespan）也会跑同一个函数 ⇒ 即使漏了这步，后端起来后也会自动补；
+>   但**补完前切换到前端**会让用户看到 502，所以仍要求在切换**前**补。
+> - 补完必须重跑 §2.1 的 ④-1 / ④-2 验收（12 个必需属性全 `t` 才算过）。
 
 ### 2.2 停下条件（汇总）
 
@@ -293,7 +384,10 @@ qa_compose exec backend python -m scripts.seed_agents
 qa_compose exec backend python -m scripts.seed_procurement_agent_profiles
 #    c. 写入 copilot_scenario 场景配置（P4 起场景=DB 资产；不跑 ⇒ 场景墙空白）
 qa_compose exec backend python -m scripts.seed_copilot_scenarios
-#    d. 补 DIM_FACILITY 源绑定（启动链已兜底；显式跑一次看输出）
+#    d. **必备步骤**：核对/补齐本体源绑定（DIM_FACILITY + 两个 DWD 宽表）。
+#       启动链也会兜底，但**切换前端前**必须先跑一次 —— 否则用户点开场景即 502。
+#       生产已于 2026-11-27 手工补录过，本步预期「三个类都已存在且已确认」；
+#       若报「必需属性未绑定」⇒ 先补本体/属性绑定（§2.1.0），不要跳过。
 qa_compose exec backend python -m scripts.seed_procurement_bindings
 
 # ④ worker（与 backend 同镜像；不 recreate 就跑旧代码）

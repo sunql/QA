@@ -91,6 +91,12 @@ services:
       MINIO_ADDRESS: milvus-minio:9000
     volumes:
       - milvus_data:/var/lib/milvus
+      # 集合级 flush 配额覆盖（叠加在出厂 milvus.yaml 之上）：
+      #   出厂 0.1 qps = 每集合 10 秒 1 次 flush ⇒ 向量写路径「删+插」必然被限流拒绝。
+      #   CI 里表现为 integration shard 耗时 70+ 分钟、撞 job 超时被 cancel，
+      #   进而让 merge-gate 的基线失败集合不完整（门禁误报）。生产用同一份配置。
+      #   详见 docker/milvus-user.yaml 内的说明。
+      - ./milvus-user.yaml:/milvus/configs/user.yaml:ro
     ports:
       - "19530:19530"  # gRPC
       - "9091:9091"    # metrics

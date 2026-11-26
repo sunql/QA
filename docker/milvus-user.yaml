@@ -1,0 +1,23 @@
+# Milvus 集合级 flush 配额覆盖（叠加在镜像出厂的 milvus.yaml 之上，优先级更高）。
+#
+# 为什么需要（2026-11-17 生产止血 + 2026-11-26 CI 复现）：
+#   出厂 `quotaAndLimits.flushRate.collection.max: 0.1` ⇒ **每集合 10 秒只放行 1 次 flush**。
+#   本系统的向量写路径是「删一次 + 插一次 = 同集合 2 次 flush」⇒ 批量写必然被
+#   grpc RateLimiter 拒绝（`rate limit exceeded[rate=0.1]`），pymilvus 重试 75 次（约 210s）。
+#   - 生产后果：向量同步硬失败 ⇒ 语义召回静默失效（CRUD 仍 200，用户无感）。
+#     止血记录：Harness/changes/2026-11-17-fix-milvus-flush-quota/deploy-prod-milvus-config.md
+#   - CI 后果：integration shard 里 `deleteWikiPageChunks()` 的 flush 排队等配额，
+#     pytest faulthandler_timeout(300s) 触发 ⇒ 单个分片耗时 70+ 分钟、
+#     经常撞 job 的 90 分钟上限被 cancel ⇒ merge-gate 的**基线失败集合不完整**
+#     ⇒ 门禁判 UNUSABLE_JOBS ⇒ 每个 PR 都要人工复跑基线才能合并。
+#
+# 为什么是 5：本系统写入量是百量级实体/天，5 qps 足够，且远低于 compaction 压力阈值。
+#
+# ⚠️ 挂上本文件**不等于**配额生效 —— Milvus 是否真的读取并叠加
+#    `/milvus/configs/user.yaml`，必须靠行为验证（CI 里有「Verify Milvus flush quota」
+#    步骤做连续两次 flush 的耗时断言；生产按上面那份 runbook 的 §4 验证）。
+quotaAndLimits:
+  flushRate:
+    enabled: true
+    collection:
+      max: 5

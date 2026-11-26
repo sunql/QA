@@ -277,6 +277,51 @@ jobs:
         run: uv sync --frozen --extra dev
       - name: Migrate test database
         run: uv run alembic upgrade head
+      - name: Verify Milvus flush quota
+        # 行为级验证：**挂上 user.yaml ≠ 配额生效**（生产止血 runbook 的唯一判据是
+        # 「无 rate limit exceeded」，不是「配置文件存在」）。CI 用等价判据：同一集合
+        # 连续两次 flush，第二次的耗时反映 flushRate.collection.max
+        #   - 出厂 0.1 qps ⇒ 第二次必等 ≥10s（服务端限流是**拒绝**不是排队，
+        #     pymilvus 重试到配额放行）
+        #   - 抬到 5 qps ⇒ 第二次约 0.2s
+        # 失败 ⇒ 配额没生效 ⇒ integration shard 会被 flush 拖到 70+ 分钟、
+        # 撞 job 的 90 分钟上限被 cancel ⇒ merge-gate 基线失败集合不完整 ⇒ 门禁误报。
+        run: |
+          set -euo pipefail
+          echo "--- 容器内 user.yaml 是否真的挂上了 ---"
+          docker exec qa-milvus sh -c 'cat /milvus/configs/user.yaml' | tee /tmp/milvus-user.yaml
+          grep -q "max: 5" /tmp/milvus-user.yaml \
+            || { echo "::error::milvus user.yaml 未挂载或内容不对（flushRate 未抬）"; exit 1; }
+          echo "--- 行为验证：连续两次 flush 的耗时 ---"
+          uv run python - <<'PY'
+          import time
+          from pymilvus import MilvusClient
+
+          PROBE = "qa_ci_flush_quota_probe"
+          client = MilvusClient(uri="http://localhost:19530")
+          try:
+              client.create_collection(collection_name=PROBE, dimension=8)
+              client.insert(
+                  collection_name=PROBE,
+                  data=[{"id": 1, "vector": [0.0] * 8}],
+              )
+              client.flush(collection_name=PROBE)  # 第一次：空闲后立即放行
+              t0 = time.monotonic()
+              client.flush(collection_name=PROBE)  # 第二次：受 flushRate 约束
+              elapsed = time.monotonic() - t0
+          finally:
+              try:
+                  client.drop_collection(collection_name=PROBE)
+              except Exception:  # noqa: BLE001 - 探针清理失败不影响判定
+                  pass
+          print(f"第二次 flush 耗时 {elapsed:.2f}s")
+          if elapsed > 3.0:
+              raise SystemExit(
+                  f"::error::第二次 flush 耗时 {elapsed:.2f}s（>3s）"
+                  "⇒ flushRate.collection.max 未生效，仍是出厂 0.1 qps"
+              )
+          print("flush 配额已生效（连续两次 flush 未触发限流等待）")
+          PY
       - name: Run integration shard
         # ⚠️ 本 job 的分片归属仍是「排序后下标 mod 4」（**刻意不改**）：
         # integration/ 确实有跨文件副作用（Milvus `qa_ci` 库惰性创建、Neo4j 残留

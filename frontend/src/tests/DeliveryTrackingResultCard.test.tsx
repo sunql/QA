@@ -162,6 +162,25 @@ describe("parseDeliveryTrackingStep", () => {
       parseDeliveryTrackingStep(step("delivery_tracking_query", JSON.stringify({ data: {} }))),
     ).toBeNull();
   });
+
+  it("截断的 JSON ⇒ 降级结果（truncated=true），不是 null", () => {
+    const truncated = SAMPLE.slice(0, SAMPLE.indexOf('"bySupplier"'));
+    const parsed = parseDeliveryTrackingStep(step("delivery_tracking_query", truncated));
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.truncated).toBe(true);
+    expect(parsed?.truncatedNotice).toBeTruthy();
+    // 概要在载荷靠前 ⇒ 截断后仍可抢救出来（主指标继续可读）
+    expect(parsed?.summary.orderArrivalRate).toBe(82.29);
+    expect(parsed?.window.dateFrom).toBe("2026-10-24");
+    // 明细不可用 ⇒ 留空（不编造）
+    expect(parsed?.byOrder).toEqual([]);
+    expect(parsed?.bySupplier).toEqual([]);
+  });
+
+  it("完全损坏的 JSON（连概要都救不回）⇒ null", () => {
+    expect(parseDeliveryTrackingStep(step("delivery_tracking_query", "{broken"))).toBeNull();
+  });
 });
 
 describe("DeliveryTrackingResultCard", () => {
@@ -269,5 +288,44 @@ describe("DeliveryTrackingResultCard", () => {
     expect(qtyReference.textContent).toContain("受超大额未到货行影响");
     expect(qtyReference.textContent).toContain("仅作参考");
     expect(Number.parseFloat(qtyReference.style.fontSize)).toBeLessThan(primaryFontSize);
+  });
+
+  it("降级（观测被截断）：显示提示文案 + 概要，不空白、不崩", () => {
+    const truncated = SAMPLE.slice(0, SAMPLE.indexOf('"bySupplier"'));
+    const parsed = parseDeliveryTrackingStep(step("delivery_tracking_query", truncated))!;
+    renderCard(parsed);
+
+    const notice = screen.getByTestId("delivery-truncated-notice");
+    expect(notice.textContent).toContain("结果数据过大");
+    // 概要仍在 ⇒ 主指标继续可读
+    expect(screen.getByTestId("delivery-primary-rate").textContent).toBe("82.29%");
+    // 明细表格不渲染（没有数据 ⇒ 不给空表）
+    expect(screen.queryByTestId("delivery-supplier-table")).toBeNull();
+    expect(screen.queryByTestId("delivery-orders-truncated")).toBeNull();
+  });
+
+  it("供应商分组被裁剪 ⇒ 标注提示（不静默丢）", () => {
+    const truncated = JSON.parse(SAMPLE) as { data: Record<string, unknown> };
+    truncated.data.suppliersTruncated = true;
+    const parsed = parseDeliveryTrackingStep(
+      step("delivery_tracking_query", JSON.stringify(truncated)),
+    )!;
+    renderCard(parsed);
+
+    const tag = screen.getByTestId("delivery-suppliers-truncated");
+    expect(tag.textContent).toContain("供应商分组已截断");
+  });
+
+  it("单内行被裁剪 ⇒ 该订单标注「明细已截断」", () => {
+    const trimmed = JSON.parse(SAMPLE) as {
+      data: { byOrder: Array<Record<string, unknown>> };
+    };
+    trimmed.data.byOrder[0].linesTruncated = true;
+    const parsed = parseDeliveryTrackingStep(
+      step("delivery_tracking_query", JSON.stringify(trimmed)),
+    )!;
+    renderCard(parsed);
+
+    expect(screen.getByTestId("delivery-lines-truncated")).toBeTruthy();
   });
 });

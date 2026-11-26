@@ -45,6 +45,7 @@ from app.domain.exceptions import NotFoundError, ValidationError
 from app.services.agent_tool_types import AgentToolContext, ToolResult
 from app.services.delivery_tracking_assembly import (
     # Task 4 契约：装配件与不变式异常从本模块可导入（实现见 assembly 模块）。
+    OBSERVATION_BUDGET_CHARS,  # noqa: F401
     DeliveryTrackingInvariantError,  # noqa: F401
     _assembleOrders,
     _assembleSummary,
@@ -52,6 +53,7 @@ from app.services.delivery_tracking_assembly import (
     _orderStatus,  # noqa: F401
     _supplierCodesOf,
     _withSupplierDirectory,
+    fitToObservationBudget,
 )
 from app.services.delivery_tracking_sql import (
     # Task 4 契约：三个 builder 从本模块可导入（实现见 sql 模块）。
@@ -428,6 +430,20 @@ def _buildResultData(
     }
 
 
+def _fitResultData(
+    data: dict[str, Any],
+    *,
+    totalOrders: int,
+) -> dict[str, Any]:
+    """按观测字符预算裁剪结果载荷（编排观测上限 50,000，超限 ⇒ 前端解析失败）。
+
+    `ordersTruncated`（样本语义）与预算裁剪后的 `ordersTruncated`（明细被裁）
+    **同一个字段**：两者都表示"`byOrder` 不是全量"⇒ 前端必须标注截断，
+    不得把样本长度当全量计数展示。
+    """
+    return fitToObservationBudget(data, totalOrders=totalOrders)
+
+
 def _buildAnswer(summary: dict[str, Any]) -> str:
     """给编排/聊天层的一句话结论（数字与 data 同源）。"""
     excludedNote = f"；剔除源侧数量异常行 {summary['excludedRows']} 行" if summary["excludedRows"] else ""
@@ -473,13 +489,16 @@ async def deliveryTrackingHandler(session: AsyncSession, args: dict, ctx: AgentT
     byOrder = _assembleOrders(_withSupplierDirectory(orderRows, directory))
 
     return ToolResult(
-        data=_buildResultData(
-            datasourceId=order.datasourceId,
-            window=window,
-            summary=summary,
-            bySupplier=bySupplier,
-            byOrder=byOrder,
-            ordersTruncated=totalOrders > len(byOrder),
+        data=_fitResultData(
+            _buildResultData(
+                datasourceId=order.datasourceId,
+                window=window,
+                summary=summary,
+                bySupplier=bySupplier,
+                byOrder=byOrder,
+                ordersTruncated=totalOrders > len(byOrder),
+            ),
+            totalOrders=totalOrders,
         ),
         answer=_buildAnswer(summary),
     )

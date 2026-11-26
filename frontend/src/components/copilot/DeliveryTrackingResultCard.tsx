@@ -6,9 +6,14 @@
  * 数据源 = delivery_tracking_query 工具的 observation JSON（camelCase）；
  * 坏 JSON / 不匹配 ⇒ null（回退纯文本答案，结果卡不经 LLM 复述）。
  * 脏数据（`excludedRows` / `hasDirtyLines` / `isDirty`）单独标注，不参与统计。
+ *
+ * **降级（第二道防线）**：观测 JSON 解析失败（多半是被编排按
+ * `max_observation_chars` 截断）⇒ 返回 `truncated` 结果并抢救出**概要**
+ * （summary / window 在载荷靠前，通常仍完整）⇒ 卡片只展示概要 + 提示，
+ * 绝不空白、绝不崩。
  */
 
-import { Card, Table, Tabs, Tag, Typography } from "antd";
+import { Alert, Card, Table, Tabs, Tag, Typography } from "antd";
 import type { CopilotStepPayload } from "../../api/procurementCopilot";
 import { OrderTable, SupplierCell, fmtQty } from "./DeliveryTrackingOrderTables";
 
@@ -69,6 +74,8 @@ export interface DeliveryTrackingOrder {
   status: DeliveryOrderStatus;
   /** 任务 4 新增：该订单含脏行。 */
   hasDirtyLines?: boolean;
+  /** 任务 12 新增：该订单的行明细被体积预算裁剪（只展示部分行）。 */
+  linesTruncated?: boolean;
   totalLines: number;
   arrivedLines: number;
   notArrivedLines: number;
@@ -85,6 +92,15 @@ export interface DeliveryTrackingResult {
   byOrder: DeliveryTrackingOrder[];
   /** 明细只是欠交量前 N 单样本（还有更多单）——不得把样本当全量计数。 */
   ordersTruncated?: boolean;
+  /** 供应商分组被裁剪（只展示未到货订单数最多的前 N 家）。 */
+  suppliersTruncated?: boolean;
+  /**
+   * 观测 JSON 被截断/损坏 ⇒ 只展示概要（summary / window）。
+   * 载荷里若还有 summary / window 就抢救出来展示，其余部分留空。
+   */
+  truncated?: boolean;
+  /** 降级提示文案（给用户看的原因说明）。 */
+  truncatedNotice?: string;
 }
 
 /** 三态排序权重：未到货 0、部分 1、已到货 2、仅脏数据 3（越小越靠前）。 */
@@ -100,7 +116,40 @@ const REFERENCE_RATE_FONT_SIZE = 12;
 const SECONDARY_COLOR = "#8c8c8c";
 const DATA_LAYER_PREFIX = "thbi_";
 
-/** 从 delivery_tracking_query 工具步骤解析结构化结果；不匹配/坏 JSON ⇒ null。 */
+/** 降级提示文案（观测被截断 ⇒ 明细不可用，只展示概要）。 */
+const TRUNCATED_NOTICE = "结果数据过大，仅展示概要";
+
+/**
+ * 从**损坏/截断**的观测文本里抢救概要（summary / window）。
+ *
+ * 载荷的字段顺序是 `window` → `summary` → `bySupplier` → `byOrder`，所以被
+ * 截断时**概要通常仍然完整** —— 抢救出来就能继续展示主指标，而不是整卡空白。
+ */
+function salvageOverview(text: string): {
+  window?: DeliveryTrackingWindow;
+  summary?: DeliveryTrackingSummary;
+} {
+  const overview: { window?: DeliveryTrackingWindow; summary?: DeliveryTrackingSummary } = {};
+  const windowMatch = /"window"\s*:\s*(\{[^}]*\})/.exec(text);
+  if (windowMatch) {
+    try {
+      overview.window = JSON.parse(windowMatch[1]) as DeliveryTrackingWindow;
+    } catch {
+      // 概要也坏了 ⇒ 交给调用方走空态提示
+    }
+  }
+  const summaryMatch = /"summary"\s*:\s*(\{[^{}]*\})/.exec(text);
+  if (summaryMatch) {
+    try {
+      overview.summary = JSON.parse(summaryMatch[1]) as DeliveryTrackingSummary;
+    } catch {
+      // 同上
+    }
+  }
+  return overview;
+}
+
+/** 从 delivery_tracking_query 工具步骤解析结构化结果；不匹配 ⇒ null。 */
 export function parseDeliveryTrackingStep(
   step: CopilotStepPayload,
 ): DeliveryTrackingResult | null {
@@ -126,9 +175,35 @@ export function parseDeliveryTrackingStep(
       bySupplier: data.bySupplier,
       byOrder: data.byOrder,
       ordersTruncated: data.ordersTruncated === true,
+      suppliersTruncated: data.suppliersTruncated === true,
     };
   } catch {
-    return null;
+    // 观测被截断（多半是编排的 max_observation_chars）⇒ 降级：只展示概要。
+    const salvaged = salvageOverview(text);
+    if (!salvaged.summary && !salvaged.window) return null;
+    return {
+      window: salvaged.window ?? { dateFrom: "", dateTo: "", mode: "unknown" },
+      summary:
+        salvaged.summary ??
+        ({
+          totalLines: 0,
+          totalOrders: 0,
+          orderedQty: 0,
+          receivedQty: 0,
+          orderArrivalRate: 0,
+          qtyArrivalRate: 0,
+          allArrivedOrders: 0,
+          partialArrivedOrders: 0,
+          notArrivedOrders: 0,
+          excludedRows: 0,
+        } satisfies DeliveryTrackingSummary),
+      bySupplier: [],
+      byOrder: [],
+      ordersTruncated: true,
+      suppliersTruncated: true,
+      truncated: true,
+      truncatedNotice: TRUNCATED_NOTICE,
+    };
   }
 }
 
@@ -249,45 +324,67 @@ export default function DeliveryTrackingResultCard({
   const openLabel = result.ordersTruncated
     ? `未到货订单（TOP ${openOrders.length}，已截断）`
     : `未到货订单（${openOrders.length}）`;
+  // 降级（观测被截断）⇒ 只有概要，明细表格没有意义 ⇒ 不渲染空表。
+  const degraded = result.truncated === true;
 
   return (
     <div>
+      {degraded && (
+        <Alert
+          type="warning"
+          showIcon
+          data-testid="delivery-truncated-notice"
+          message={result.truncatedNotice ?? TRUNCATED_NOTICE}
+          description="明细数据超出单次观测上限，已省略；上方概要仍为完整口径。"
+          style={{ marginBottom: 12 }}
+        />
+      )}
+
       <SummaryHeader result={result} />
 
-      <Card size="small" title="供应商到货情况" style={{ marginBottom: 12 }}>
-        <SupplierTable suppliers={result.bySupplier} />
-      </Card>
+      {!degraded && (
+        <Card size="small" title="供应商到货情况" style={{ marginBottom: 12 }}>
+          <SupplierTable suppliers={result.bySupplier} />
+        </Card>
+      )}
 
-      <Card size="small">
-        {result.ordersTruncated && (
-          <Tag color="gold" data-testid="delivery-orders-truncated" style={{ marginBottom: 8 }}>
-            {`订单明细已截断：仅展示欠交量前 ${result.byOrder.length} 单（总订单以概览为准）`}
-          </Tag>
-        )}
-        <Tabs
-          items={[
-            {
-              key: "open",
-              label: openLabel,
-              children: <OrderTable orders={openOrders} />,
-            },
-            {
-              key: "arrived",
-              label: `已到货订单（${arrivedOrders.length}）`,
-              children: <OrderTable orders={arrivedOrders} />,
-            },
-            ...(dirtyOrders.length > 0
-              ? [
-                  {
-                    key: "dirty",
-                    label: `数据异常订单（${dirtyOrders.length}）`,
-                    children: <OrderTable orders={dirtyOrders} />,
-                  },
-                ]
-              : []),
-          ]}
-        />
-      </Card>
+      {!degraded && (
+        <Card size="small">
+          {result.ordersTruncated && (
+            <Tag color="gold" data-testid="delivery-orders-truncated" style={{ marginBottom: 8 }}>
+              {`订单明细已截断：仅展示欠交量前 ${result.byOrder.length} 单（总订单以概览为准）`}
+            </Tag>
+          )}
+          {result.suppliersTruncated && (
+            <Tag color="gold" data-testid="delivery-suppliers-truncated" style={{ marginBottom: 8 }}>
+              {`供应商分组已截断：仅展示未到货订单数最多的 ${result.bySupplier.length} 家`}
+            </Tag>
+          )}
+          <Tabs
+            items={[
+              {
+                key: "open",
+                label: openLabel,
+                children: <OrderTable orders={openOrders} />,
+              },
+              {
+                key: "arrived",
+                label: `已到货订单（${arrivedOrders.length}）`,
+                children: <OrderTable orders={arrivedOrders} />,
+              },
+              ...(dirtyOrders.length > 0
+                ? [
+                    {
+                      key: "dirty",
+                      label: `数据异常订单（${dirtyOrders.length}）`,
+                      children: <OrderTable orders={dirtyOrders} />,
+                    },
+                  ]
+                : []),
+            ]}
+          />
+        </Card>
+      )}
     </div>
   );
 }

@@ -141,6 +141,11 @@ export function OrderTable({ orders }: { orders: DeliveryTrackingOrder[] }) {
             <span>
               <StatusTag status={row.status} />
               {row.hasDirtyLines && <Tag color="gold">含脏数据行</Tag>}
+              {row.linesTruncated && (
+                <Tag color="gold" data-testid="delivery-lines-truncated">
+                  明细已截断
+                </Tag>
+              )}
             </span>
           ),
         },

@@ -7,15 +7,31 @@
 ⚠️ 三态必须**互斥且穷尽**（三态之和 == 总订单数）：订购量 ≤ 0 且未收货的
 订单会同时命中「全到货」与「未到货」⇒ 到货率 > 100%（本项目已知风险点）；
 SQL 侧已用 `OPEN_LINES > 0` 消除重叠，本模块 `_assertStateTotal` 再兜底。
+
+本模块还负责**观测体积裁剪**（`fitToObservationBudget`）：编排观测上限是
+50,000 字符（硬上限不可调高），工具返回的 data 超限 ⇒ 观测被截断成**不完整
+JSON** ⇒ 前端 `JSON.parse` 抛错 ⇒ 结果卡完全不渲染。故按**实际字符预算**
+裁剪（不猜行数上限 ⇒ 任何数据规模都不会超限）。
 """
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from typing import Any
 
 from app.domain.exceptions import InternalInvariantError
 from app.services.procurement_query_utils import OPEN_QTY_SANITY_MAX, colValue
+
+#: 编排观测字符上限是 50,000（`agent_orchestration_schemas.OBSERVATION_CHARS_MAX`，
+#: 硬上限不可调高）；留 10,000 余量给 answer / 元数据 ⇒ 本工具 data 的预算取
+#: 40,000。度量口径 = `len(json.dumps(data))`（默认分隔符 + ASCII 转义 ⇒ 比观测
+#: 出口的紧凑非转义序列化**更大** ⇒ 预算内必然不会撞上 50,000 上限）。
+OBSERVATION_BUDGET_CHARS = 40_000
+#: 供应商分组保留上限（按未到货订单数降序取前 N 家）。
+MAX_SUPPLIERS = 20
+#: 行内 `materialDesc` 的截断长度（预算不足时优先缩描述，而不是丢整行）。
+MATERIAL_DESC_MAX_CHARS = 60
 
 
 class DeliveryTrackingInvariantError(InternalInvariantError):
@@ -259,3 +275,124 @@ def _withSupplierDirectory(
             }
         )
     return enriched
+
+
+# ---------------------------------------------------------------- 观测体积裁剪
+
+
+def _chars(value: Any) -> int:
+    """JSON 序列化后的字符数。
+
+    口径 = `json.dumps` 默认（`, ` 分隔 + ASCII 转义）⇒ 比观测出口的紧凑
+    非转义序列化**更大** ⇒ 按它裁剪 ⇒ 观测绝不会撞上 50,000 硬上限。
+    """
+    return len(json.dumps(value))
+
+
+def _supplierPriority(supplier: dict[str, Any]) -> int:
+    """供应商排序权重：未到货订单数降序（= 业务上最该先看的供应商）。"""
+    return -int(supplier.get("notArrivedOrders") or 0)
+
+
+def _shortenMaterialDesc(line: dict[str, Any]) -> dict[str, Any]:
+    """行内 `materialDesc` 过长 ⇒ 截断到 `MATERIAL_DESC_MAX_CHARS` + 省略号。
+
+    只动描述文字 ⇒ PO 号 / 物料码 / 数量等**识别性字段**一律保留（比丢整行
+    信息损失小）。省略号 `…` 即"描述已截断"的可视标记。未超长时原样返回。
+    """
+    desc = line.get("materialDesc")
+    if not isinstance(desc, str) or len(desc) <= MATERIAL_DESC_MAX_CHARS:
+        return line
+    return {**line, "materialDesc": desc[:MATERIAL_DESC_MAX_CHARS] + "…"}
+
+
+def _trimOrderLines(order: dict[str, Any], allowance: int) -> dict[str, Any] | None:
+    """按剩余额度裁剪订单内的行（保留前 N 行 = 欠交量最大的行）。
+
+    `allowance` = 该订单（含 JSON 分隔符）可占用的字符数。返回裁剪后的新
+    订单；连一行都放不下 ⇒ `None`（整单丢弃）。
+
+    裁剪优先级：**先缩描述、再丢行** —— 丢行会连带丢掉该行的数量/物料信息，
+    缩描述只损失文字。丢行由 `linesTruncated` 显式回报，不静默丢。
+
+    ⚠️ 裁行**不改**订单级口径（`status` / `totalLines` / `orderedQty` …）：
+    它们描述的是整单的真实值，与 summary 的三态计数必须一致。行内识别性字段
+    （`poNo` / `materialCode` / 数量）一律保留。
+    """
+    lines = list(order.get("lines") or [])
+    shortened = [_shortenMaterialDesc(line) for line in lines]
+    for keep in range(len(lines), 0, -1):
+        candidate = {**order, "lines": shortened[:keep]}
+        if keep < len(lines):
+            candidate["linesTruncated"] = True
+        if _chars(candidate) + 2 <= allowance:
+            return candidate
+    return None
+
+
+def fitToObservationBudget(
+    data: dict[str, Any],
+    *,
+    totalOrders: int,
+    budget: int = OBSERVATION_BUDGET_CHARS,
+) -> dict[str, Any]:
+    """按字符预算裁剪结果载荷（返回**新** dict；不改入参）。
+
+    编排观测上限 50,000 字符（硬上限不可调高）：工具返回的 data 超限 ⇒ 观测被
+    **截断**成不完整 JSON ⇒ 前端 `JSON.parse` 抛错 ⇒ 结果卡完全不渲染。
+    故按**实际字符预算**裁剪（不猜行数上限 ⇒ 任何数据规模都不会超限）：
+
+    - `summary` 始终完整保留（主指标不能因体积被裁）；
+    - `bySupplier` 按未到货订单数降序取前 `MAX_SUPPLIERS` 家（装不下即止）；
+    - `byOrder` 逐单装入（源侧已按欠交量降序），单内行按剩余额度裁剪
+      （该单标 `linesTruncated`）；预算耗尽即停。
+
+    被裁掉的部分**显式回报**（不静默丢）：
+
+    - `suppliersTruncated`：供应商分组被裁（只展示未到货订单数最多的 N 家）；
+    - `ordersTruncated`：`byOrder` 不是全量订单（样本或预算裁掉了整单）——
+      前端**不得**把样本长度当全量计数展示；
+    - 单内 `linesTruncated`：该单只展示了部分行（订单级口径仍是整单真值）。
+    """
+    allSuppliers = list(data.get("bySupplier") or [])
+    allOrders = list(data.get("byOrder") or [])
+
+    # 固定开销：除两段明细外的全部内容（envelope + summary + 两个截断标记位）。
+    base = {
+        **data,
+        "bySupplier": [],
+        "byOrder": [],
+        "suppliersTruncated": False,
+        "ordersTruncated": False,
+    }
+
+    def sizeOf(suppliers: list[dict[str, Any]], orders: list[dict[str, Any]]) -> int:
+        return _chars({**base, "bySupplier": suppliers, "byOrder": orders})
+
+    keptSuppliers: list[dict[str, Any]] = []
+    for supplier in sorted(allSuppliers, key=_supplierPriority)[:MAX_SUPPLIERS]:
+        if sizeOf([*keptSuppliers, supplier], []) > budget:
+            break
+        keptSuppliers.append(supplier)
+    suppliersTruncated = len(keptSuppliers) < len(allSuppliers)
+
+    keptOrders: list[dict[str, Any]] = []
+    for order in allOrders:
+        if sizeOf(keptSuppliers, [*keptOrders, order]) <= budget:
+            keptOrders.append(order)
+            continue
+        # 整单装不下 ⇒ 裁该单的行；连一行都放不下 ⇒ 该单整体丢弃（预算耗尽即停）。
+        allowance = budget - sizeOf(keptSuppliers, keptOrders)
+        trimmed = _trimOrderLines(order, allowance)
+        if trimmed is None:
+            break
+        keptOrders.append(trimmed)
+        break
+
+    return {
+        **data,
+        "bySupplier": keptSuppliers,
+        "byOrder": keptOrders,
+        "suppliersTruncated": suppliersTruncated,
+        "ordersTruncated": totalOrders > len(keptOrders),
+    }

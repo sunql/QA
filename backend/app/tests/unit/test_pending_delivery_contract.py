@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from types import SimpleNamespace
 
@@ -222,6 +223,58 @@ def test_pending_cache_key_distinguishes_limit() -> None:
     assert pending._pendingCacheKey(**common, limit=20) != pending._pendingCacheKey(
         **common, limit=50
     )
+
+
+# ---------------------------------------------------------------- 观测体积（Task 12）
+
+
+def test_pending_delivery_payload_stays_within_observation_budget() -> None:
+    """待到货工具的载荷必须**天然**在观测预算内（无需裁剪）。
+
+    `topLines` 上限 `MAX_LIMIT`=50 行、`bySupplier` 上限 5 家 ⇒ 最坏情况也
+    远小于 50,000 字符上限（真实栈实测 limit=50 时 16,298 字符）。
+    本测试锁住这个前提：将来放宽 limit 时会先红。
+    """
+    from app.services.delivery_tracking_assembly import OBSERVATION_BUDGET_CHARS
+    from app.services.pending_delivery_rows import camelPendingRow
+
+    rows = [
+        camelPendingRow(
+            {
+                "PO_NO": f"PO{index:04d}",
+                "PO_LINE_NO": 3000,
+                "ITEM_CODE": f"M{index:06d}",
+                "MATERIAL_DESC": "物料描述" * 20,
+                "SUPPLIER_CODE": f"S{index % 5:03d}",
+                "SUPPLIER_NAME": "供应商名称",
+                "ORDER_QTY": 1000.0,
+                "RECEIVED_QTY": 100.0,
+                "OPEN_QTY": 900.0,
+                "EXPECTED_DATE": "2026-11-07",
+                "OVERDUE_DAYS": 5,
+            }
+        )
+        for index in range(50)
+    ]
+    suppliers = [
+        {
+            "supplierCode": f"S{index:03d}",
+            "supplierName": "供应商名称",
+            "openLines": 100,
+            "openQty": 1000.0,
+            "overdueLines": 10,
+        }
+        for index in range(5)
+    ]
+    result = pending._buildPendingToolResult(
+        datasourceId=1,
+        monthsBack=12,
+        summary={"openLines": 5000, "openQty": 500000.0, "overdueLines": 500, "excludedRows": 0},
+        bySupplier=suppliers,
+        lineRows=rows,
+    )
+
+    assert len(json.dumps(result.data)) <= OBSERVATION_BUDGET_CHARS
 
 
 # ---------------------------------------------------------------- I6：状态码

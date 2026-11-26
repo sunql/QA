@@ -66,8 +66,11 @@ PROFILE_SEEDS: dict[str, tuple[str, list[str], int, int]] = {
     "PROCUREMENT_SUPPLIER_SEARCH_AGENT": (
         _READONLY_BASE
         + "\n职责：供应商检索与 360 视图。按名称/编码定位供应商，"
-        "汇总其基础信息、供货关系与风险信号；多候选时列出候选并让用户确认。",
-        ["supplier_search", "supplier_360"],
+        "汇总其基础信息、供货关系与风险信号；多候选时列出候选并让用户确认。"
+        "\n定位顺序：用户只给**品类/物料描述**（如「外购标准件」）时，先调 "
+        "material_search 把品类解析成具体物料编码，再用供应商检索工具的 "
+        "materialKey 反查可供供应商；只有物料也解析不出来时才反问用户。",
+        ["material_search", "supplier_search", "supplier_360"],
         10,
         15,
     ),
@@ -85,7 +88,12 @@ PROFILE_SEEDS: dict[str, tuple[str, list[str], int, int]] = {
         + "\n职责：采购寻源。用户给物料或需求时，先定位物料 → 找可供供应商 →"
         " 逐个补充 360 视图/风险/历史采购，最后给出**候选清单 + 每家的依据与风险提示**；"
         "\n候选为空或数据缺失时，明确说明缺哪一环（物料没有供应商关系 / 主数据缺失），"
-        "不要用常识补候选。",
+        "不要用常识补候选。"
+        + "\n待到货分析：用户问「待到货/逾期未到/欠交」时，调 pending_delivery_query"
+          "（时间窗/供应商/逾期天数从问题里取，缺省近 12 个月），按供应商汇总后给催货建议。"
+          "\n输出纪律：结构化数据（汇总/供应商表/订单行）由前端直接渲染，你**不要**在文字里复述数字；"
+          "你的文字只写三段：①一段话结论（无数字）；②催货建议要点（每条一句话）；"
+          "③数据边界声明（如 TOP5 之外的供应商未覆盖）。用 Markdown 要点列表，不用表格。",
         [
             "material_search",
             "supplier_search",
@@ -94,6 +102,7 @@ PROFILE_SEEDS: dict[str, tuple[str, list[str], int, int]] = {
             "graph_traverse",
             "purchase_history_query",
             "policy_compliance_check",
+            "pending_delivery_query",
         ],
         15,
         20,
@@ -113,6 +122,19 @@ PROFILE_SEEDS: dict[str, tuple[str, list[str], int, int]] = {
         ["purchase_history_query", "quotation_query"],
         15,
         20,
+    ),
+    "DELIVERY_TRACKING_AGENT": (
+        _READONLY_BASE
+        + "\n职责：到货跟踪。用户给时间窗/供应商时，调 delivery_tracking_query"
+        "（默认近 12 个月；企业月度周期用 anchorDay=24 + periodIndex），"
+        "输出到货率、供应商分组与订单物料明细。"
+        + "\n输出纪律：结构化数据（汇总/供应商表/订单明细）由前端直接渲染，"
+        "你**不要**在文字里复述数字；你的文字只写两段："
+        "①一段话结论（无数字）；②需要关注的供应商/订单要点（每条一句话）。"
+        "用 Markdown 要点列表，不用表格。",
+        ["delivery_tracking_query"],
+        12,
+        18,
     ),
 }
 

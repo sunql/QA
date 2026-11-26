@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, time
 from time import monotonic
 from typing import Any
 from uuid import UUID
@@ -78,6 +79,7 @@ TERMINAL_STATUSES = frozenset(
     }
 )
 
+
 @dataclass(frozen=True)
 class CopilotStreamOptions:
     """一次 SSE 连接的转发参数（可经 FastAPI 依赖覆盖：测试/运维调参）。"""
@@ -104,14 +106,10 @@ def buildStepsUrl(runId: str) -> str:
 def assertProcurementAgent(agentCode: str) -> None:
     """Copilot 只接采购域 Agent（目录口径 `PROCUREMENT_` 前缀，同源）。"""
     if not agentCode.startswith(PROCUREMENT_AGENT_PREFIX):
-        raise ValidationError(
-            MSG_COPILOT_NOT_PROCUREMENT_AGENT.format(code=agentCode)
-        )
+        raise ValidationError(MSG_COPILOT_NOT_PROCUREMENT_AGENT.format(code=agentCode))
 
 
-def toRunCreate(
-    dto: CopilotMessageRequest, *, inputText: str | None = None
-) -> AgentRunCreate:
+def toRunCreate(dto: CopilotMessageRequest, *, inputText: str | None = None) -> AgentRunCreate:
     """Copilot 请求 → 编排运行请求。
 
     `inputText` 只在多轮时覆盖（= 上下文块 + 当前问题）；其余字段**一对一**。
@@ -177,7 +175,7 @@ async def _history(
 ) -> list[Any]:
     """最近几轮 → 上下文历史（逐 run 取答案；读不到就当作无答案）。"""
     views: dict[str, tuple[str | None, str]] = {}
-    for turn in turns[-conversationStore.MAX_CONTEXT_TURNS:]:
+    for turn in turns[-conversationStore.MAX_CONTEXT_TURNS :]:
         try:
             run = await service.getRun(session, turn.run_id, actor)
         except Exception:  # noqa: BLE001
@@ -189,6 +187,124 @@ async def _history(
     return conversationStore.historyFromTurns(turns, views)
 
 
+async def _sameDayReusableRunId(
+    session: AsyncSession,
+    *,
+    dto: Any,
+    actor: Any,
+    question: str,
+    dataStamp: str = "",
+) -> str | None:
+    """同日同问复用（2026-11-24 需求：一天内多次查询数据未变化 ⇒ 复用）。
+
+    命中条件：同用户 + 同 Agent + 同模型 + **同问题文本** + **同数据新鲜度戳**
+    + 当日 + 状态 ∈ {QUEUED, RUNNING, SUCCEEDED}（进行中的复用 = 相同问题并发
+    去重；FAILED/CANCELLED **不复用** —— 给用户重试的机会）。
+    数据戳（0171）：槽位实体在 feature_value 的最新 computed_at——指标重算
+    ⇒ 戳变化 ⇒ 相同问题文本**不**命中旧 run（2026-11-25 需求：数据变了就重算）。
+    复用 = 本轮 turn 直接指向该 run（SSE 跟随其终态，**零 LLM 成本**）；
+    文字/参数/数据不同 ⇒ 正常新跑。resume（追问续跑）优先级更高，在上文已处理。
+    """
+    # 惰性导入：本模块被 run service 侧引用 ⇒ 顶层 import 模型会成环
+    from sqlalchemy import func as sa_func
+    from sqlalchemy import select as sa_select
+
+    from app.domain.agent_orchestration_models import AgentOrchestrationRun
+    from app.domain.procurement_copilot_models import ProcurementCopilotTurn
+
+    todayStart = datetime.combine(datetime.now(UTC).date(), time.min, tzinfo=UTC)
+    stmt = (
+        sa_select(AgentOrchestrationRun.run_id)
+        .join(
+            ProcurementCopilotTurn,
+            ProcurementCopilotTurn.run_id == AgentOrchestrationRun.run_id,
+        )
+        .where(
+            AgentOrchestrationRun.created_by == str(getattr(actor, "userId", "")),
+            AgentOrchestrationRun.agent_code == dto.agent_code,
+            AgentOrchestrationRun.model_config_id == dto.model_config_id,
+            AgentOrchestrationRun.status.in_(
+                (RunStatus.QUEUED.value, RunStatus.RUNNING.value, RunStatus.SUCCEEDED.value)
+            ),
+            AgentOrchestrationRun.created_time >= todayStart,
+            ProcurementCopilotTurn.question == question,
+            # NULL（非场景分支/旧行）与 ""（场景分支无特征数据）同视为无戳
+            sa_func.coalesce(ProcurementCopilotTurn.data_stamp, "") == dataStamp,
+        )
+        .order_by(AgentOrchestrationRun.created_time.desc(), AgentOrchestrationRun.id.desc())
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).scalars().first()
+    return row
+
+
+async def _scenarioDataStamp(session: AsyncSession, dto: CopilotMessageRequest) -> str:
+    """场景分支的数据新鲜度戳（0171）：槽位里出现的实体键在 feature_value
+    中的最新 computed_at（ISO 串）。
+
+    - 非场景分支 / 无可解析实体 ⇒ ""（与旧行 NULL 同一复用桶，行为不变）；
+    - 实体键从槽位值递归收集（标量/数组）——编码即实体标识（B125/A013 等）；
+    - 指标重算 ⇒ computed_at 变化 ⇒ 戳变化 ⇒ 复用失效（数据变了就重算）。
+    """
+    if not dto.scenario_code or not dto.slots:
+        return ""
+    codes: set[str] = set()
+
+    def _collect(value: Any) -> None:
+        if isinstance(value, str):
+            if value.strip():
+                codes.add(value.strip())
+        elif isinstance(value, (int, float)):
+            codes.add(str(value))
+        elif isinstance(value, list):
+            for item in value:
+                _collect(item)
+
+    for value in dto.slots.values():
+        _collect(value)
+    if not codes:
+        return ""
+
+    from sqlalchemy import func as sa_func
+    from sqlalchemy import select as sa_select
+
+    from app.domain.models import FeatureValue
+
+    row = await session.execute(
+        sa_select(sa_func.max(FeatureValue.computed_at)).where(FeatureValue.entity_key.in_(codes))
+    )
+    stamp = row.scalar()
+    return stamp.isoformat() if stamp else ""
+
+
+async def _renderScenarioQuestion(session: AsyncSession, dto: CopilotMessageRequest) -> str:
+    """场景分支渲染（P4）：scenarioCode + slots 齐备才渲染，否则原样返回。
+
+    - 场景必须存在且启用（getByCode fail loud）；
+    - Agent 钉死校验：请求 agentCode 与场景配置不一致 ⇒ ValidationError
+      （防止前端配置漂移后问句进了错误 Agent 的编排）；
+    - 惰性导入：copilot_scenario 服务/渲染器顶层引 domain.models，
+      本模块被 run service 侧引用，顶层 import 会成环。
+    """
+    if not dto.scenario_code or not dto.slots:
+        return dto.message
+    from app.services.copilot_scenario_render import renderScenarioQuestion
+    from app.services.copilot_scenario_service import CopilotScenarioService
+
+    scenario = await CopilotScenarioService(session).getByCode(dto.scenario_code)
+    if scenario.agent_code != dto.agent_code:
+        raise ValidationError(
+            f"场景 {dto.scenario_code} 钉定的 Agent 是 {scenario.agent_code}，"
+            f"与请求的 {dto.agent_code} 不一致"
+        )
+    return renderScenarioQuestion(
+        template=scenario.question_template,
+        slots=dto.slots,
+        slotSchema=scenario.slot_schema,
+        message=dto.message,
+    )
+
+
 async def prepareCopilotTurn(
     session: AsyncSession,
     dto: CopilotMessageRequest,
@@ -197,11 +313,13 @@ async def prepareCopilotTurn(
     service: AgentOrchestrationRunService | None = None,
 ) -> CopilotTurnResult:
     """一轮对话的完整编排：会话 → （续跑 or 带上下文新跑）→ 落轮次。"""
-    assertProcurementAgent(dto.agent_code)
+    # 域前缀守卫只管**自由分支**（Copilot 不是通用 Agent 的旁路）。场景分支
+    # 的 Agent 由配置钉定（_renderScenarioQuestion 强制请求值 == 配置值），
+    # 配置可以绑非 PROCUREMENT_ 前缀的采购 Agent（如 SUPPLIER_RISK_AGENT）。
+    if not dto.scenario_code:
+        assertProcurementAgent(dto.agent_code)
     runner = service or AgentOrchestrationRunService()
-    conversationId = (
-        UUID(dto.conversation_id) if dto.conversation_id else None
-    )
+    conversationId = UUID(dto.conversation_id) if dto.conversation_id else None
     conversation = await conversationStore.loadOrCreateConversation(
         session,
         conversationId=conversationId,
@@ -211,14 +329,16 @@ async def prepareCopilotTurn(
     )
     turns = await conversationStore.listTurns(session, conversation.conversation_id)
 
+    # 空消息守卫：自由文本分支必须有文字；场景分支（slots 驱动，如 chips 点击）
+    # 主句由模板提供，允许空 —— 但两者都空就没有可发的东西了。
+    if not dto.message.strip() and not (dto.scenario_code and dto.slots):
+        raise ValidationError("消息不能为空")
+
     resumeRunId = await _resumeTargetRunId(session, turns, actor, runner)
     if resumeRunId is not None:
-        await runner.resumeRun(
-            session, resumeRunId, AgentRunResume(input=dto.message), actor
-        )
-        await conversationStore.appendTurn(
-            session, conversation, question=dto.message, runId=resumeRunId
-        )
+        # 续跑回复 = 用户回答追问：永远走自由文本，不做场景渲染。
+        await runner.resumeRun(session, resumeRunId, AgentRunResume(input=dto.message), actor)
+        await conversationStore.appendTurn(session, conversation, question=dto.message, runId=resumeRunId)
         await session.commit()
         return CopilotTurnResult(
             runId=resumeRunId,
@@ -227,16 +347,43 @@ async def prepareCopilotTurn(
             resumed=True,
         )
 
+    # 场景分支（P4）：scenarioCode + slots 同时提供 ⇒ 服务端渲染最终提问
+    # （冲突让位 + 模板替换在 DB 配置驱动的一处收口）；缺 slots = 自由文本。
+    runQuestion = await _renderScenarioQuestion(session, dto)
+
+    # 数据新鲜度戳（0171）：槽位实体在 feature_value 的最新 computed_at。
+    # 指标重算 ⇒ 戳变化 ⇒ 相同问题文本不再命中旧 run（数据变了就重算）。
+    dataStamp = await _scenarioDataStamp(session, dto)
+
+    # 同日同问复用（resume 优先级更高，上文已处理）：命中 ⇒ turn 指向既有
+    # SUCCEEDED run，SSE 立刻吐 done —— 零 LLM 成本（2026-11-24 需求：
+    # 一天多次查询数据未变化 ⇒ 后台判断复用，前台正常问话即可）。
+    # 复用键 = 渲染后问题 + 数据新鲜度戳（2026-11-25 需求：指标重算后同问
+    # 必须重算，不能拿旧数据答新数据的问题）。
+    reusedRunId = await _sameDayReusableRunId(
+        session, dto=dto, actor=actor, question=runQuestion, dataStamp=dataStamp
+    )
+    if reusedRunId is not None:
+        await conversationStore.appendTurn(
+            session, conversation, question=runQuestion, runId=reusedRunId, dataStamp=dataStamp
+        )
+        await session.commit()
+        reusedRun = await runner.getRun(session, reusedRunId, actor)
+        return CopilotTurnResult(
+            runId=reusedRunId,
+            conversationId=str(conversation.conversation_id),
+            status=str(getattr(reusedRun.status, "value", reusedRun.status)),
+            resumed=False,
+        )
+
     history = await _history(session, turns, actor, runner)
     created = await runner.createRun(
         session,
-        toRunCreate(
-            dto, inputText=conversationStore.buildRunInput(dto.message, history)
-        ),
+        toRunCreate(dto, inputText=conversationStore.buildRunInput(runQuestion, history)),
         actor,
     )
     await conversationStore.appendTurn(
-        session, conversation, question=dto.message, runId=created.run_id
+        session, conversation, question=runQuestion, runId=created.run_id, dataStamp=dataStamp
     )
     await session.commit()
     return CopilotTurnResult(
@@ -254,9 +401,7 @@ def _stepPayload(step: AgentRunStepRead) -> dict[str, Any]:
         "iterationNo": step.iteration_no,
         "kind": str(getattr(step.kind, "value", step.kind)),
         "status": str(getattr(step.status, "value", step.status)),
-        "action": None
-        if step.action is None
-        else str(getattr(step.action, "value", step.action)),
+        "action": None if step.action is None else str(getattr(step.action, "value", step.action)),
         "planSummary": step.plan_summary,
         "toolName": step.tool_name,
         "answer": step.answer,
@@ -329,9 +474,7 @@ async def streamCopilotRun(
             yield StreamEvent(EVENT_COPILOT_STEP, _stepPayload(step))
 
         status = getattr(run.status, "value", run.status)
-        if run.status in TERMINAL_STATUSES or status in {
-            item.value for item in TERMINAL_STATUSES
-        }:
+        if run.status in TERMINAL_STATUSES or status in {item.value for item in TERMINAL_STATUSES}:
             yield StreamEvent(EVENT_COPILOT_DONE, _donePayload(run))
             return
 

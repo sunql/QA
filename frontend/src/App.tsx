@@ -67,6 +67,7 @@ import ProcurementBindingsPage from "./pages/ProcurementBindingsPage";
 import ProcurementKnowledgePage from "./pages/ProcurementKnowledgePage";
 import ProcurementAgentCatalogPage from "./pages/ProcurementAgentCatalogPage";
 import ProcurementCopilotPage from "./pages/ProcurementCopilotPage";
+import ProcurementPendingDeliveryPage from "./pages/ProcurementPendingDeliveryPage";
 import SemanticReleasePage from "./pages/SemanticReleasePage";
 import OntologyDiscoveryPage from "./pages/OntologyDiscoveryPage";
 import WorkflowApprovalsPage from "./pages/WorkflowApprovalsPage";
@@ -155,6 +156,10 @@ export default function App() {
         <Route path="procurement/knowledge" element={<ProcurementKnowledgePage />} />
         <Route path="procurement/agents" element={<ProcurementAgentCatalogPage />} />
         <Route path="procurement/copilot" element={<ProcurementCopilotPage />} />
+        <Route
+          path="procurement/pending-delivery"
+          element={<ProcurementPendingDeliveryPage />}
+        />
         <Route path="workflow" element={<WorkflowInstancesPage />} />
         <Route path="workflow/approvals" element={<WorkflowApprovalsPage />} />
         <Route path="workflow/definitions" element={<WorkflowDefinitionsPage />} />

@@ -27,12 +27,11 @@ Round 1 范围：仅接 PG entity_mapping + feature_value；DW ADS view / DW DWS
 from __future__ import annotations
 
 import logging
-from typing import Union
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import BusinessObjectCode, FeatureStatus
+from app.domain.enums import FeatureStatus
 from app.domain.exceptions import NotFoundError
 from app.domain.models import EntityMapping, FeatureDefinition, FeatureValue
 from app.domain.schemas import (
@@ -65,9 +64,7 @@ async def _kpiSlotFeatureNames(
 
     # 来源 1：FeatureRule registry（向后兼容）
     for target_level in ("RISK", "QUALITY_SCORE", "CUSTOM"):
-        for rule in feature_rule_registry.getEnabledRules(
-            data_object, data_layer, target_level
-        ):
+        for rule in feature_rule_registry.getEnabledRules(data_object, data_layer, target_level):
             seen.add(rule.feature_name)
 
     # 来源 2：FeatureDefinition 表（Option A — 仅 session 可用时查询）
@@ -99,40 +96,39 @@ class Supplier360Service:
     - 子模块失败 → log warning + 该字段空值，整体响应仍返回
     """
 
-    async def get360(
-        self, session: AsyncSession, supplierKey: Union[str, int]
-    ) -> Supplier360Read:
+    async def get360(self, session: AsyncSession, supplierKey: str | int) -> Supplier360Read:
         """实时聚合单供应商 360° 数据（plan §5.3）。
 
         supplierKey 同时接受 VARCHAR 业务码（如 THBI '10105'）与 BIGINT
         MDM 代理键（SHA-256 8B hash，如 3823452429）；详见模块 docstring。
         """
-        enterprise_key, enterprise_code = await self._resolveSupplier(
-            session, supplierKey
-        )
+        enterprise_key, enterprise_code, supplierName = await self._resolveSupplier(session, supplierKey)
         profile = Supplier360Profile(
             enterprise_key=enterprise_key,
             enterprise_code=enterprise_code,
             entity_type="SUPPLIER",
+            supplier_name=supplierName,
         )
         entity_codes = await self._safeLoadEntityCodes(session, enterprise_key)
         kpis = await self._safeLoadKpis(session, enterprise_code)
-        return Supplier360Read(
-            profile=profile, entity_codes=entity_codes, kpis=kpis
-        )
+        return Supplier360Read(profile=profile, entity_codes=entity_codes, kpis=kpis)
 
     # ------------------------------------------------------------------
     # 内部：解析 supplierKey → (enterprise_key, enterprise_code)
     # ------------------------------------------------------------------
 
     async def _resolveSupplier(
-        self, session: AsyncSession, supplierKey: Union[str, int]
-    ) -> tuple[int, str]:
-        """统一解析入口：返回 (enterprise_key, enterprise_code) 元组。
+        self, session: AsyncSession, supplierKey: str | int
+    ) -> tuple[int, str, str | None]:
+        """统一解析入口：返回 (enterprise_key, enterprise_code, supplier_name)。
 
-        策略：先按 enterprise_code 查（覆盖 THBI 业务码 / 旧合成 SUP 编码），
-        未命中则按 enterprise_key 查（覆盖 BIGINT hash / 已存 chat 路径）。
-        两条都失败 → NotFoundError。
+        解析阶梯（2026-11-25 需求：供应商风险速览支持编码/企业键/名称/简称检索）：
+          ① enterprise_code 精确（THBI 业务码 / 旧合成 SUP 编码）；
+          ② enterprise_key 精确（BIGINT MDM 代理键）；
+          ③ name 精确（entity_mapping.name = 供应商全名）；
+          ④ name 模糊（简称 ⊆ 全名的中文业务常态；**多命中 ⇒ NotFoundError
+             列出候选**，让规划器/用户消歧，绝不静默取第一个）。
+        全部失败 → NotFoundError。
 
         接受 str / int 入参；调用方不用关心类型（业务层永远是"业务码"或"代理键"）。
         """
@@ -143,11 +139,14 @@ class Supplier360Service:
                     select(
                         EntityMapping.enterprise_key,
                         EntityMapping.enterprise_code,
+                        EntityMapping.name,
                     )
                     .where(
                         EntityMapping.entity_type == "SUPPLIER",
                         EntityMapping.enterprise_code == str(supplierKey),
                     )
+                    # 同一供应商 ERP/SRM 多行，name 可空 ⇒ 非空名优先
+                    .order_by(EntityMapping.name.desc().nulls_last())
                     .limit(1)
                 )
             ).first()
@@ -160,7 +159,7 @@ class Supplier360Service:
             row = None
 
         if row is not None:
-            return int(row[0]), str(row[1])
+            return int(row[0]), str(row[1]), row[2] and str(row[2])
 
         # Pass 2：按 enterprise_key 查（整数输入主路径；str 数字仅在 hash 巧合时命中）
         try:
@@ -174,11 +173,13 @@ class Supplier360Service:
                         select(
                             EntityMapping.enterprise_key,
                             EntityMapping.enterprise_code,
+                            EntityMapping.name,
                         )
                         .where(
                             EntityMapping.entity_type == "SUPPLIER",
                             EntityMapping.enterprise_key == enterprise_key_int,
                         )
+                        .order_by(EntityMapping.name.desc().nulls_last())
                         .limit(1)
                     )
                 ).first()
@@ -190,12 +191,54 @@ class Supplier360Service:
                 )
                 row2 = None
             if row2 is not None:
-                return int(row2[0]), str(row2[1])
+                return int(row2[0]), str(row2[1]), row2[2] and str(row2[2])
 
-        # 两条都失败 → 404（防 typo 静默）
-        raise NotFoundError(
-            MSG_SUPPLIER_360_NOT_FOUND.format(key=supplierKey)
-        )
+        # ③ name 精确（供应商全名）
+        textKey = str(supplierKey).strip()
+        nameRow = (
+            await session.execute(
+                select(
+                    EntityMapping.enterprise_key,
+                    EntityMapping.enterprise_code,
+                    EntityMapping.name,
+                )
+                .where(
+                    EntityMapping.entity_type == "SUPPLIER",
+                    EntityMapping.name == textKey,
+                )
+                .limit(1)
+            )
+        ).first()
+        if nameRow is not None:
+            return int(nameRow[0]), str(nameRow[1]), nameRow[2] and str(nameRow[2])
+
+        # ④ name 模糊（简称/部分名称）；多命中 ⇒ 列候选（不静默取第一个）
+        fuzzyRows = (
+            await session.execute(
+                select(
+                    EntityMapping.enterprise_key,
+                    EntityMapping.enterprise_code,
+                    EntityMapping.name,
+                )
+                .where(
+                    EntityMapping.entity_type == "SUPPLIER",
+                    EntityMapping.name.ilike(f"%{textKey}%"),
+                )
+                # 同一供应商有 ERP/SRM 多行（同名）⇒ 三列全等，DISTINCT 去重
+                .distinct()
+                .order_by(EntityMapping.enterprise_code)
+                .limit(6)
+            )
+        ).all()
+        if len(fuzzyRows) == 1:
+            row3 = fuzzyRows[0]
+            return int(row3[0]), str(row3[1]), row3[2] and str(row3[2])
+        if len(fuzzyRows) > 1:
+            candidates = "；".join(f"{r[1]}（{r[2] or '无名'}）" for r in fuzzyRows)
+            raise NotFoundError(f"「{textKey}」匹配到多个供应商，请用编码或企业键指定：{candidates}")
+
+        # 四段都失败 → 404（防 typo 静默）
+        raise NotFoundError(MSG_SUPPLIER_360_NOT_FOUND.format(key=supplierKey))
 
     # ------------------------------------------------------------------
     # 内部：entity_codes（异常隔离）
@@ -231,17 +274,11 @@ class Supplier360Service:
         return [
             Supplier360EntityCode(
                 source_system=(
-                    row.source_system.value
-                    if hasattr(row.source_system, "value")
-                    else row.source_system
+                    row.source_system.value if hasattr(row.source_system, "value") else row.source_system
                 ),
                 source_code=row.source_code,
                 source_key=row.source_key,
-                match_rule=(
-                    row.match_rule.value
-                    if hasattr(row.match_rule, "value")
-                    else row.match_rule
-                ),
+                match_rule=(row.match_rule.value if hasattr(row.match_rule, "value") else row.match_rule),
             )
             for row in result.scalars().all()
         ]
@@ -250,9 +287,7 @@ class Supplier360Service:
     # 内部：kpis（异常隔离 + 占位逻辑）
     # ------------------------------------------------------------------
 
-    async def _safeLoadKpis(
-        self, session: AsyncSession, enterpriseCode: str
-    ) -> list[Supplier360Kpi]:
+    async def _safeLoadKpis(self, session: AsyncSession, enterpriseCode: str) -> list[Supplier360Kpi]:
         """加载 4 个 SUPPLIER 特征的最新值。
 
         行为契约（与单测对齐）：
@@ -276,17 +311,13 @@ class Supplier360Service:
             fd = all_defs.get(feature_name)
             if fd is None:
                 # DB 中完全无此 feature → 占位
-                result.append(
-                    Supplier360Kpi(feature_name=feature_name, latest=False)
-                )
+                result.append(Supplier360Kpi(feature_name=feature_name, latest=False))
                 continue
             if not fd.is_enabled or fd.status != FeatureStatus.ACTIVE:
                 # 存在但未启用 / 草稿 → 跳过（前端无意义渲染）
                 continue
             try:
-                fv = await self._loadLatestFeatureValue(
-                    session, fd.id, enterpriseCode
-                )
+                fv = await self._loadLatestFeatureValue(session, fd.id, enterpriseCode)
             except Exception:
                 logger.warning(
                     "Supplier360 feature_value 取最新失败 feature=%s entity=%s",
@@ -298,18 +329,14 @@ class Supplier360Service:
             result.append(_buildKpi(fd, fv))
         return result
 
-    async def _loadAllDefaultDefinitions(
-        self, session: AsyncSession
-    ) -> dict[str, FeatureDefinition]:
+    async def _loadAllDefaultDefinitions(self, session: AsyncSession) -> dict[str, FeatureDefinition]:
         """加载 _kpiSlotFeatureNames() 的全部 FeatureDefinition（不限 is_enabled / status）。
 
         调用方根据 is_enabled + status 决定渲染 / 占位 / 跳过；
         SQL 阶段不过滤是必要的，否则无法区分「DB 中无此行」与「DB 中存在但 disabled」。
         """
         stmt = select(FeatureDefinition).where(
-            FeatureDefinition.feature_name.in_(
-                await _kpiSlotFeatureNames(session)
-            ),
+            FeatureDefinition.feature_name.in_(await _kpiSlotFeatureNames(session)),
             FeatureDefinition.entity_type == "SUPPLIER",
         )
         result = await session.execute(stmt)
@@ -332,9 +359,7 @@ class Supplier360Service:
         return result.scalar_one_or_none()
 
 
-def _buildKpi(
-    fd: FeatureDefinition, fv: FeatureValue | None
-) -> Supplier360Kpi:
+def _buildKpi(fd: FeatureDefinition, fv: FeatureValue | None) -> Supplier360Kpi:
     """把 (FeatureDefinition, FeatureValue|None) 组装成 Supplier360Kpi。
 
     取到值 → latest=True；否则 latest=False（前端展示「暂无数据」占位）。

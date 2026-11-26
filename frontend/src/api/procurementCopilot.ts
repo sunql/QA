@@ -11,6 +11,7 @@
  */
 
 import { API_BASE_URL } from "../config";
+import { httpClient } from "./client";
 import { authHeaders } from "./authHeaders";
 import { readSseStream, type SseEvent } from "../utils/sseStream";
 
@@ -34,6 +35,8 @@ export interface CopilotStepPayload {
   answer: string | null;
   errorCode: string | null;
   errorMessage: string | null;
+  /** TOOL 步骤的 observation：{"text": "<json 字符串>", "truncated": bool} */
+  output?: { text?: string; truncated?: boolean } | null;
 }
 
 export interface CopilotDonePayload {
@@ -62,11 +65,141 @@ export interface CopilotStreamHandlers {
   onError?: (payload: CopilotErrorPayload) => void;
 }
 
+/** 会话列表项（侧栏「历史会话」用）。 */
+export interface CopilotConversationSummary {
+  conversationId: string;
+  agentCode: string;
+  modelConfigId: number;
+  turnCount: number;
+  lastQuestion: string | null;
+  updatedAt: string;
+  /** 置顶时间（P4 阶段5：跨设备同步；null = 未置顶）。 */
+  pinnedAt?: string | null;
+}
+
+/** 会话中的一轮（刷新后恢复线程用）。 */
+export interface CopilotTurnRead {
+  seq: number;
+  question: string;
+  runId: string;
+  status: string;
+  answer: string | null;
+  pauseCode: string | null;
+  createdAt: string;
+}
+
+export interface CopilotConversationDetail {
+  conversationId: string;
+  agentCode: string;
+  modelConfigId: number;
+  turns: CopilotTurnRead[];
+}
+
+/** 列出当前用户的历史会话（最近更新在前）。 */
+export async function listCopilotConversations(
+  limit = 20,
+): Promise<CopilotConversationSummary[]> {
+  const res = await httpClient.get<CopilotConversationSummary[]>(
+    "/procurement/copilot/conversations",
+    { params: { limit } },
+  );
+  return res.data;
+}
+
+/** 读取会话详情（含每轮问题/状态/答案）。 */
+export async function getCopilotConversation(
+  conversationId: string,
+): Promise<CopilotConversationDetail> {
+  const res = await httpClient.get<CopilotConversationDetail>(
+    `/procurement/copilot/conversations/${encodeURIComponent(conversationId)}`,
+  );
+  return res.data;
+}
+
+/** 删除会话（连带轮次；运行记录保留）。 */
+export async function deleteCopilotConversation(
+  conversationId: string,
+): Promise<void> {
+  await httpClient.delete(
+    `/procurement/copilot/conversations/${encodeURIComponent(conversationId)}`,
+  );
+}
+
+/** 置顶/取消置顶会话（pinned_at 落库 ⇒ 跨设备同步）。 */
+export async function pinCopilotConversation(
+  conversationId: string,
+  pinned: boolean,
+): Promise<void> {
+  await httpClient.post(
+    `/procurement/copilot/conversations/${encodeURIComponent(conversationId)}/pin`,
+    { pinned },
+  );
+}
+
+/** 欢迎态「业务现状」卡的轻量统计（不走编排，零 LLM 成本）。 */
+export interface PendingDeliverySummaryResponse {
+  summary: {
+    openLines: number;
+    openQty: number;
+    overdueLines: number;
+    excludedRows: number;
+  };
+  bySupplier: {
+    supplierCode: string;
+    openLines: number;
+    openQty: number;
+    overdueLines: number;
+  }[];
+  topLines: unknown[];
+}
+
+export interface PendingDeliveryQueryFilters {
+  supplierKeys?: string[];
+  materialKeys?: string[];
+  siteKeys?: string[];
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+export async function getPendingDeliverySummary(
+  params: PendingDeliveryQueryFilters & { monthsBack?: number } = {},
+): Promise<PendingDeliverySummaryResponse> {
+  const query: Record<string, string | number> = {};
+  if (params.monthsBack !== undefined) query.monthsBack = params.monthsBack;
+  // 多值参数用**逗号分隔**：axios 默认把数组序列化成 `key[]=v`，
+  // 与后端（FastAPI 读取逗号分隔字符串）对不上 ⇒ 静默变成空过滤。
+  for (const key of ["supplierKeys", "materialKeys", "siteKeys"] as const) {
+    const values = params[key] ?? [];
+    if (values.length > 0) query[key] = values.join(",");
+  }
+  if (params.dateFrom) query.dateFrom = params.dateFrom;
+  if (params.dateTo) query.dateTo = params.dateTo;
+  const res = await httpClient.get<PendingDeliverySummaryResponse>(
+    "/procurement/pending-delivery/summary",
+    { params: query },
+  );
+  return res.data;
+}
+
+/** 基地下拉选项（FACILITY 字典 ∩ 订单实际出现过的基地）。数据源由后端绑定固定。 */
+export async function listPendingDeliverySites(): Promise<{ code: string; name: string }[]> {
+  const res = await httpClient.get<{ code: string; name: string }[]>(
+    "/procurement/pending-delivery/sites",
+    { params: {} },
+  );
+  return res.data;
+}
+
 export interface CopilotMessageRequest {
+  /** 场景分支下可为空（主句由模板提供）；自由文本分支必须有文字。 */
   message: string;
   agentCode: string;
   /** **必填且后端不改派**（后端不替你选模型）。 */
   modelConfigId: number;
+  /** 场景编码（P4）：与 slots 同时提供 ⇒ 后端按场景模板渲染最终提问。 */
+  scenarioCode?: string;
+  /** 结构化槽位值（键 = slot_schema[].key）；续跑回复不带。 */
+  slots?: Record<string, unknown>;
   /** 多轮会话 id；缺省 = 新开会话（响应里会回传新 id）。 */
   conversationId?: string;
 }

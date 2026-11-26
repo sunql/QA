@@ -11,10 +11,11 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import (
@@ -26,12 +27,11 @@ from app.domain.enums import (
 from app.domain.exceptions import NotFoundError
 from app.domain.models import DataSource, EntityMapping, FeatureDefinition, FeatureValue
 from app.domain.schemas import Supplier360Read
-from app.services.feature_rule_registry import feature_rule_registry
+from app.services.feature_rule_registry import FeatureRuleReady, FeatureThresholdReady, feature_rule_registry
 from app.services.supplier_360_service import (
     Supplier360Service,
+    _kpiSlotFeatureNames,
 )
-from app.services.supplier_360_service import _kpiSlotFeatureNames
-from app.services.feature_rule_registry import FeatureRuleReady, FeatureThresholdReady
 
 pytestmark = pytest.mark.asyncio
 
@@ -57,9 +57,7 @@ async def _seedDatasource(dbSession: AsyncSession) -> DataSource:
     return ds
 
 
-async def _seedSupplierMappings(
-    dbSession: AsyncSession, key: int, code: str
-) -> list[EntityMapping]:
+async def _seedSupplierMappings(dbSession: AsyncSession, key: int, code: str) -> list[EntityMapping]:
     """SUP000001 × {ERP, SRM} 两条。"""
     rows = [
         EntityMapping(
@@ -129,9 +127,7 @@ async def _seedFeatureValue(
         entity_key=entity_key,
         value=value,
         valid_at=valid_at,
-        computed_at=computed_at or datetime.combine(
-            valid_at, datetime.min.time(), tzinfo=timezone.utc
-        ),
+        computed_at=computed_at or datetime.combine(valid_at, datetime.min.time(), tzinfo=UTC),
     )
     dbSession.add(fv)
     await dbSession.commit()
@@ -181,18 +177,10 @@ async def test_get_supplier_360_aggregates_latest_feature_values(
     await _seedSupplierMappings(dbSession, 100001, "SUP000001")
 
     # Seed 4 features
-    fd_otd = await _seedFeature(
-        dbSession, 1, "SUPPLIER_OTD_3M", alias="3 月准时交付率", unit="%"
-    )
-    fd_defect = await _seedFeature(
-        dbSession, 2, "SUPPLIER_DEFECT_RATE_3M", alias="3 月拒收率", unit="%"
-    )
-    fd_price = await _seedFeature(
-        dbSession, 3, "SUPPLIER_PRICE_VARIANCE_3M", alias="3 月价格偏差", unit="%"
-    )
-    fd_risk = await _seedFeature(
-        dbSession, 4, "SUPPLIER_RISK_SCORE", alias="风险评分", unit="score"
-    )
+    fd_otd = await _seedFeature(dbSession, 1, "SUPPLIER_OTD_3M", alias="3 月准时交付率", unit="%")
+    fd_defect = await _seedFeature(dbSession, 2, "SUPPLIER_DEFECT_RATE_3M", alias="3 月拒收率", unit="%")
+    fd_price = await _seedFeature(dbSession, 3, "SUPPLIER_PRICE_VARIANCE_3M", alias="3 月价格偏差", unit="%")
+    fd_risk = await _seedFeature(dbSession, 4, "SUPPLIER_RISK_SCORE", alias="风险评分", unit="score")
 
     # 老 OTD 值（应被忽略）+ 新 OTD 值（应被取到）
     await _seedFeatureValue(dbSession, 1, "SUP000001", 88.0, date(2026, 7, 31))
@@ -273,14 +261,32 @@ async def test_get_supplier_360_returns_disabled_feature_with_no_value_marker(
 async def test_kpi_slot_feature_names_aggregates_from_registry() -> None:
     """_kpiSlotFeatureNames 聚合自 registry。"""
     feature_rule_registry._loaded = True
-    feature_rule_registry._rules = {("SUPPLIER", "FEATURE", "RISK"): [
-        FeatureRuleReady(id=1, code="a", data_object="SUPPLIER", data_layer="FEATURE",
-                          target_level="RISK", feature_name="X", enabled=True, priority=100,
-                          thresholds=(FeatureThresholdReady("HIGH", "lt", 10, "%", 1),)),
-        FeatureRuleReady(id=2, code="b", data_object="SUPPLIER", data_layer="FEATURE",
-                          target_level="RISK", feature_name="Y", enabled=True, priority=100,
-                          thresholds=(FeatureThresholdReady("HIGH", "lt", 20, "%", 1),)),
-    ]}
+    feature_rule_registry._rules = {
+        ("SUPPLIER", "FEATURE", "RISK"): [
+            FeatureRuleReady(
+                id=1,
+                code="a",
+                data_object="SUPPLIER",
+                data_layer="FEATURE",
+                target_level="RISK",
+                feature_name="X",
+                enabled=True,
+                priority=100,
+                thresholds=(FeatureThresholdReady("HIGH", "lt", 10, "%", 1),),
+            ),
+            FeatureRuleReady(
+                id=2,
+                code="b",
+                data_object="SUPPLIER",
+                data_layer="FEATURE",
+                target_level="RISK",
+                feature_name="Y",
+                enabled=True,
+                priority=100,
+                thresholds=(FeatureThresholdReady("HIGH", "lt", 20, "%", 1),),
+            ),
+        ]
+    }
     names = await _kpiSlotFeatureNames()
     assert set(names) == {"X", "Y"}
     # sorted alphabetically
@@ -384,3 +390,74 @@ async def test_get_supplier_360_str_not_found_raises(dbSession: AsyncSession):
         await svc.get360(dbSession, "NONEXISTENT_CODE")
     # key 显示原始输入（不转 int 防误导）
     assert "NONEXISTENT_CODE" in str(excInfo.value)
+
+
+# ---------------------------------------------------------------------------
+# 名称/简称解析阶梯 + profile.supplierName（2026-11-25 需求）
+# ---------------------------------------------------------------------------
+
+
+async def _seedNamedSupplier(dbSession: AsyncSession, key: int, code: str, name: str) -> None:
+    # datasource（id=9001）唯一：已存在则跳过（本 helper 可多次调用）
+    dsExists = (await dbSession.execute(select(DataSource.id).where(DataSource.id == 9001))).first()
+    if dsExists is None:
+        await _seedDatasource(dbSession)
+    rows = await _seedSupplierMappings(dbSession, key, code)
+    for row in rows:
+        row.name = name
+    await dbSession.commit()
+
+
+async def test_get360_resolves_by_exact_name(dbSession: AsyncSession):
+    """全名精确命中（供应商名称作为检索入口）。"""
+    await _seedNamedSupplier(dbSession, 100001, "SUP000001", "上海骏统贸易有限公司")
+
+    result = await Supplier360Service().get360(dbSession, "上海骏统贸易有限公司")
+
+    assert result.profile.enterprise_key == 100001
+    assert result.profile.enterprise_code == "SUP000001"
+    assert result.profile.supplier_name == "上海骏统贸易有限公司"
+
+
+async def test_get360_resolves_by_short_name_fuzzy(dbSession: AsyncSession):
+    """简称模糊命中（简称 ⊆ 全名的中文业务常态）。"""
+    await _seedNamedSupplier(dbSession, 100001, "SUP000001", "上海骏统贸易有限公司")
+
+    result = await Supplier360Service().get360(dbSession, "骏统")
+
+    assert result.profile.enterprise_code == "SUP000001"
+    assert result.profile.supplier_name == "上海骏统贸易有限公司"
+
+
+async def test_get360_fuzzy_ambiguous_lists_candidates(dbSession: AsyncSession):
+    """模糊命中多家 ⇒ NotFoundError 列出候选（规划器/用户消歧，不静默取第一个）。"""
+    await _seedNamedSupplier(dbSession, 100001, "SUP000001", "上海骏统贸易有限公司")
+    await _seedNamedSupplier(dbSession, 100002, "SUP000002", "上海舜业钢铁集团有限公司")
+
+    with pytest.raises(NotFoundError) as excInfo:
+        await Supplier360Service().get360(dbSession, "上海")
+
+    msg = str(excInfo.value)
+    assert "多个" in msg and "SUP000001" in msg and "SUP000002" in msg
+
+
+async def test_get360_profile_has_supplier_name_when_resolved_by_code(
+    dbSession: AsyncSession,
+):
+    """编码/企业键入口也要回填名称（结果卡头部展示用）。"""
+    await _seedNamedSupplier(dbSession, 100001, "SUP000001", "上海骏统贸易有限公司")
+
+    result = await Supplier360Service().get360(dbSession, "SUP000001")
+
+    assert result.profile.supplier_name == "上海骏统贸易有限公司"
+
+
+async def test_get360_profile_has_supplier_name_when_resolved_by_key(
+    dbSession: AsyncSession,
+):
+    """企业键入口同样回填名称（回归：pass 2 曾漏取 name 列 ⇒ None）。"""
+    await _seedNamedSupplier(dbSession, 100001, "SUP000001", "上海骏统贸易有限公司")
+
+    result = await Supplier360Service().get360(dbSession, 100001)
+
+    assert result.profile.supplier_name == "上海骏统贸易有限公司"

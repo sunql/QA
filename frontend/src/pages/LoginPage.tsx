@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate, useLocation, Navigate } from "react-router-dom";
 import { Form, Input, Button, Checkbox, message } from "antd";
 import { useTranslation } from "react-i18next";
+import { RobotOutlined } from "@ant-design/icons";
 import { useAuthStore } from "../stores/authStore";
 import type { AppError } from "../api/client";
 
@@ -52,27 +53,36 @@ export default function LoginPage() {
   };
 
   return (
-    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg-base, #0f1e2e)" }}>
-      <div style={{ width: 400, padding: 32, background: "var(--bg-container, #152838)", borderRadius: 4 }}>
-        <h2 style={{ textAlign: "center", marginBottom: 24 }}>{t("auth.login.title")}</h2>
-        <Form layout="vertical" onFinish={onFinish}>
+    <div className="login-page">
+      {/* AI 装饰层：神经网络节点 + 连线（纯 CSS，离线可用） */}
+      <div className="login-orb login-orb-1" aria-hidden />
+      <div className="login-orb login-orb-2" aria-hidden />
+      <div className="login-orb login-orb-3" aria-hidden />
+      <div className="login-grid" aria-hidden />
+
+      <div className="login-card">
+        <div className="login-brand">
+          <RobotOutlined className="login-brand-icon" />
+          <h2 className="login-title">{t("auth.login.title")}</h2>
+          <div className="login-tagline">{t("auth.login.tagline")}</div>
+        </div>
+        <Form layout="vertical" onFinish={onFinish} requiredMark={false}>
           <Form.Item name="username" label={t("auth.login.username")} rules={[{ required: true }]}>
-            <Input autoFocus autoComplete="username" />
+            <Input autoFocus autoComplete="username" size="large" />
           </Form.Item>
           <Form.Item name="password" label={t("auth.login.password")} rules={[{ required: true }]}>
-            <Input.Password autoComplete="current-password" />
+            <Input.Password autoComplete="current-password" size="large" />
           </Form.Item>
           <Form.Item name="rememberMe" valuePropName="checked" initialValue={false}>
             <Checkbox>{t("auth.login.rememberMe")}</Checkbox>
           </Form.Item>
-          <Button type="primary" htmlType="submit" block loading={submitting}>
+          <Button type="primary" htmlType="submit" block size="large" loading={submitting}>
             {t("auth.login.submit")}
           </Button>
-          <div style={{ marginTop: 16, textAlign: "center", color: "var(--text-secondary, #888)" }}>
-            {t("auth.login.forgot")}
-          </div>
+          <div className="login-forgot">{t("auth.login.forgot")}</div>
         </Form>
       </div>
+      <div className="login-footer">{t("auth.login.footer")}</div>
     </div>
   );
 }

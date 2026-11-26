@@ -38,7 +38,13 @@ from app.services.agent_tools_procurement import (
     contractDocumentSearchHandler as _contractDocumentSearchHandler,
 )
 from app.services.agent_tools_procurement import (
+    deliveryTrackingQueryHandler as _deliveryTrackingHandler,
+)
+from app.services.agent_tools_procurement import (
     materialSearchHandler as _materialSearchHandler,
+)
+from app.services.agent_tools_procurement import (
+    pendingDeliveryHandler as _pendingDeliveryHandler,
 )
 from app.services.agent_tools_procurement import (
     policyComplianceHandler as _policyComplianceHandler,
@@ -253,6 +259,8 @@ BUILTIN_HANDLERS: dict[str, AgentHandler] = {
     "contract_document_search": _contractDocumentSearchHandler,
     "policy_compliance_check": _policyComplianceHandler,
     "quotation_compare": _quotationCompareHandler,
+    "pending_delivery_query": _pendingDeliveryHandler,
+    "delivery_tracking_query": _deliveryTrackingHandler,
     # feat-wiki-knowledge M8：知识工具的实现集中在 agent_tools_wiki，
     # 这里只做登记（handler 引擎在代码、元数据在 DB 的既有分工）。
     **WIKI_HANDLERS,
@@ -277,6 +285,12 @@ ARG_EXTRACTORS: dict[str, ArgExtractor] = {
     "quotation_query": lambda raw: (
         {"supplierKey": k} if (k := _supplierKeyArgs(raw, extractSupplierAnyKey)) else None
     ),
+    # 待到货：chat 前奏只抽 supplier key（monthsBack/minOverdueDays 走结构化 args）。
+    "pending_delivery_query": lambda raw: (
+        {"supplierKey": k} if (k := _supplierKeyArgs(raw, extractSupplierAnyKey)) else None
+    ),
+    # 到货跟踪：结构化工具（时间窗/供应商/订单全走结构化 args）⇒ 不抽参数。
+    "delivery_tracking_query": lambda raw: None,
     # 制度检索：整条输入即问题（对齐 wiki_text）。
     "procurement_policy_search": lambda raw: (
         {"question": raw.strip()} if isinstance(raw, str) and raw.strip() else None

@@ -180,3 +180,40 @@ async def test_policiesFor_multi_tool_agent_unions_tool_layers(
     assert ("SUPPLIER", "DIM") in pairs
     # 并集不重复（同键只一条）
     assert len(pairs) == len(policies)
+
+
+@pytest.mark.asyncio
+async def test_policiesFor_sourcing_covers_pending_delivery_ods(pgSession: AsyncSession) -> None:
+    """SOURCING 的策略并集必须含 PURCHASE_ORDER/ODS（pending_delivery_query）。
+
+    回归（2026-11-23 生产实证）：工具只绑在编排 profile（seed_procurement_agent_profiles），
+    而 ACL 种子按 _AGENT_DEFAULT_BINDINGS + _AGENT_EXTRA_BINDINGS 派生 ⇒
+    漏登记 extras ⇒ 运行时 deny-by-default 判 PERMISSION_DENIED。
+    """
+    from scripts.seed_agents import _SEED_ACTOR, seedAgents
+    from app.services.agent_registry_service import AgentRegistryService
+
+    await seedAgents(pgSession)
+    await pgSession.commit()
+
+    # 模拟「旧部署」：Agent 先建、工具后补 ⇒ 库里没有 ODS 授权
+    service = AgentRegistryService()
+    policies = await service.listPolicies(pgSession, "PROCUREMENT_SOURCING")
+    victim = next(
+        p for p in policies
+        if p.data_object == "PURCHASE_ORDER" and p.data_layer == "ODS"
+    )
+    await service.deletePolicy(pgSession, "PROCUREMENT_SOURCING", victim.id, _SEED_ACTOR)
+    await pgSession.commit()
+
+    # 重跑 seed：策略愈合必须把缺的 (object, layer) 补回来
+    await seedAgents(pgSession)
+    await pgSession.commit()
+
+    remaining = {
+        (p.data_object, p.data_layer)
+        for p in await service.listPolicies(pgSession, "PROCUREMENT_SOURCING")
+    }
+    assert ("PURCHASE_ORDER", "ODS") in remaining, (
+        f"重跑 seed 后仍缺 PURCHASE_ORDER/ODS：{sorted(remaining)}"
+    )

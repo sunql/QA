@@ -20,33 +20,63 @@ from app.domain.exceptions import ConflictError
 from app.domain.models import DataSource
 from app.infrastructure import neo4j_client
 from app.services.agent_tool_types import AgentToolContext, ToolResult
+from app.services.delivery_tracking_query import (
+    deliveryTrackingHandler as _deliveryTrackingHandler,
+)
 from app.services.entity_mapping_service import EntityMappingService
 from app.services.knowledge.document_search import searchProcurementDocuments
+from app.services.pending_delivery_query import (
+    _PENDING_RESULT_CACHE as _PENDING_RESULT_CACHE,
+)
+
+# 待到货实现已拆到 `pending_delivery_query`（文件规模治理）：
+# 下面是同名 re-export（显式 `as` 自身），既有导入路径不变。
+from app.services.pending_delivery_query import (
+    PendingDeliveryFilters as PendingDeliveryFilters,
+)
+from app.services.pending_delivery_query import (
+    _camelPendingRow as _camelPendingRow,
+)
+from app.services.pending_delivery_query import (
+    buildPendingDeliveryBySupplierSql as buildPendingDeliveryBySupplierSql,
+)
+from app.services.pending_delivery_query import (
+    buildPendingDeliveryCountSql as buildPendingDeliveryCountSql,
+)
+from app.services.pending_delivery_query import (
+    buildPendingDeliveryLinesSql as buildPendingDeliveryLinesSql,
+)
+from app.services.pending_delivery_query import (
+    buildPendingDeliverySummarySql as buildPendingDeliverySummarySql,
+)
+from app.services.pending_delivery_query import (
+    pendingDeliveryHandler as pendingDeliveryHandler,
+)
+from app.services.pending_delivery_query import (
+    resolvePendingDeliveryBindings as resolvePendingDeliveryBindings,
+)
+from app.services.procurement_query_utils import (
+    MAX_LIMIT as _MAX_LIMIT,
+)
+from app.services.procurement_query_utils import (
+    MONTHS_BACK_MAX as _MONTHS_BACK_MAX,
+)
+from app.services.procurement_query_utils import (
+    MONTHS_BACK_MIN as _MONTHS_BACK_MIN,
+)
+from app.services.procurement_query_utils import (
+    SqlDialect as _PendingDialect,
+)
+from app.services.procurement_query_utils import (
+    colValue as _col,
+)
+from app.services.procurement_query_utils import (
+    escapeLiteral as _esc,
+)
+from app.services.procurement_query_utils import (
+    minusMonths as _minusMonths,
+)
 from app.services.research_sql_runner import assertReadonlySql
-
-_MAX_LIMIT = 50
-
-
-def _col(row: Any, name: str) -> Any:
-    """**大小写不敏感**地取列值。
-
-    ⚠️ 为什么必须这样：Oracle 的 ``cursor.description`` 返回大写标识符，而
-    ``business_db_pool`` 统一把它们**小写化**（见该文件 :698）⇒ 用大写 key
-    去 get **永远拿到 None**。
-
-    2026-11-22 实测踩到：``quotation_query`` / ``purchase_history`` 两个
-    工具从 Oracle 取到行后，``row.get("SUPPLIER_CODE")`` 全是 None ⇒
-    **它们在生产上从没返回过真实数据**（一直返回"命中 0 条"）。
-    """
-    if not isinstance(row, dict):
-        return None
-    if name in row:
-        return row[name]
-    lowered = name.lower()
-    for key, value in row.items():
-        if isinstance(key, str) and key.lower() == lowered:
-            return value
-    return None
 
 
 def _camelRow(row: Any) -> dict[str, Any]:
@@ -225,7 +255,6 @@ async def findSuppliersOfMaterial(materialKey: str, limit: int = 20) -> list[dic
 # ---------------------------------------------------------------------------
 
 _HISTORY_TABLE = "DWD_PURCHASE_ORDER_LINE"
-_MONTHS_BACK_MIN, _MONTHS_BACK_MAX = 1, 36
 
 
 def buildPurchaseHistorySql(
@@ -235,13 +264,14 @@ def buildPurchaseHistorySql(
     monthsBack: int,
     limit: int,
     today: date,
+    dialect: str = "oracle",
 ) -> str:
     """采购历史明细 SQL 模板（确定性，非 LLM 生成；单语句只读 + 行数上限）。
 
     列名来自本体映射（class 20 `DWD_PURCHASE_ORDER_LINE`：SUPPLIER_CODE /
     MATERIAL_CODE / PO_NO / ORDER_QTY / UNIT_PRICE / CREATION_DATE）。
     时间窗 = `CREATION_DATE >= today - monthsBack 月`（DATE 字面量，Oracle/PG 通吃）；
-    行数上限 `FETCH FIRST`（Oracle 12c+ / PG 通用）。
+    行数上限按方言分叉（MySQL 8.0.31 前不支持 FETCH FIRST ⇒ 用 LIMIT）。
     """
     monthsBack = max(_MONTHS_BACK_MIN, min(monthsBack, _MONTHS_BACK_MAX))
     limit = max(1, min(limit, _MAX_LIMIT))
@@ -254,26 +284,8 @@ def buildPurchaseHistorySql(
     return (
         f"SELECT SUPPLIER_CODE, PO_NO, MATERIAL_CODE, ORDER_QTY, UNIT_PRICE, "
         f"CREATION_DATE FROM {_HISTORY_TABLE} WHERE {where} "
-        f"ORDER BY CREATION_DATE DESC FETCH FIRST {limit} ROWS ONLY"
+        f"ORDER BY CREATION_DATE DESC {_PendingDialect(dialect).tail(limit)}"
     )
-
-
-def _esc(value: str) -> str:
-    """字面量转义（单引号翻倍；模板参数只接受标识符级输入）。"""
-    return value.replace("'", "''")
-
-
-def _minusMonths(base: date, months: int) -> date:
-    """date - N 月（无 dateutil 依赖；月末夹齐：11-30 减 3 月 = 08-31）。"""
-    import calendar
-
-    year = base.year
-    month = base.month - months
-    while month <= 0:
-        month += 12
-        year -= 1
-    day = min(base.day, calendar.monthrange(year, month)[1])
-    return date(year, month, day)
 
 
 async def _resolveBusinessDatasource(
@@ -300,26 +312,29 @@ async def _resolveBusinessDatasource(
 
 
 def _adapterFor(dsId: int, ds: DataSource):
-    """业务库 adapter 获取——**惰性导入** business_db_pool。
+    """业务库 adapter 获取——转发到中性模块（惰性导入 `business_db_pool`）。
 
     保持模块级 import 图不把 business_db_pool 拉进 CI 收集前闭包
     （其模块级 re.compile 会被 import 期钩子守卫 fail-closed，见
     test_ci_conftest_chain 守卫的判定语义）。
     """
-    from app.infrastructure.business_db_pool import get_adapter
+    from app.services.procurement_datasource import adapterFor
 
-    return get_adapter(dsId, ds)
+    return adapterFor(dsId, ds)
 
 
 def _ensureActive(ds: DataSource) -> None:
-    """停用源 fail-closed——**C 方案已进 main ⇒ 切共享 helper**（纵深二次过闸保留）。
-
-    handler 侧在 resolve 之后再显式调一次（纵深）：monkeypatch/旁路注入的 ds
-    也要过这道闸。
-    """
-    from app.services.datasource_service import ensureDatasourceActive
+    """停用源 fail-closed——共享 helper（纵深二次过闸保留）。"""
+    from app.services.procurement_datasource import ensureDatasourceActive
 
     ensureDatasourceActive(ds)
+
+
+async def _loadActiveDatasource(session: AsyncSession, datasourceId: int) -> DataSource:
+    """按 id 取数据源（待到货固定 THBI）；不存在或停用统一 409（fail-closed）。"""
+    from app.services.procurement_datasource import loadActiveDatasource
+
+    return await loadActiveDatasource(session, datasourceId)
 
 
 def _camelHistoryRow(row: dict[str, Any]) -> dict[str, Any]:
@@ -341,6 +356,7 @@ def buildQuotationSql(
     materialKey: str | None,
     segmentYear: int | None,
     limit: int,
+    dialect: str = "oracle",
 ) -> str:
     """年度报价明细 SQL 模板（确定性）。
 
@@ -365,7 +381,7 @@ def buildQuotationSql(
         f"SEG_START_DATE, SEG_END_DATE, CURRENCY_CODE, UOM, PRICE_LIST_CODE "
         f"FROM DWD_PURCHASE_QUOTATION_YEARLY_DTL"
         f"{where} ORDER BY SEG_YEAR DESC, ITEM_CODE "
-        f"FETCH FIRST {limit} ROWS ONLY"
+        f"{_PendingDialect(dialect).tail(limit)}"
     )
 
 
@@ -406,6 +422,7 @@ async def quotationQueryHandler(
     sql = buildQuotationSql(
         supplierKey=supplierKey, materialKey=materialKey,
         segmentYear=segmentYear, limit=limit,
+        dialect=_PendingDialect.fromAdapter(adapter).name,
     )
     assertReadonlySql(sql)
     rows = [_camelQuotationRow(r) for r in await adapter.execute_read_only(sql)]
@@ -686,6 +703,7 @@ async def purchaseHistoryHandler(
     detailSql = buildPurchaseHistorySql(
         supplierKey=supplierKey, materialKey=materialKey,
         monthsBack=monthsBack, limit=limit, today=today,
+        dialect=_PendingDialect.fromAdapter(adapter).name,
     )
     since = _minusMonths(today, monthsBack)
     conds = [f"SUPPLIER_CODE = '{_esc(supplierKey)}'"]
@@ -720,3 +738,15 @@ async def purchaseHistoryHandler(
             f"明细返回 {len(rows)} 行。"
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# 到货跟踪（delivery_tracking_query，2026-11-25 P5）
+# ---------------------------------------------------------------------------
+
+
+async def deliveryTrackingQueryHandler(
+    session: AsyncSession, args: dict, ctx: AgentToolContext
+) -> ToolResult:
+    """`delivery_tracking_query` 转发（实现见 `delivery_tracking_query` 模块）。"""
+    return await _deliveryTrackingHandler(session, args, ctx)

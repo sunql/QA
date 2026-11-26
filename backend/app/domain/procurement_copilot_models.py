@@ -34,6 +34,8 @@ class ProcurementCopilotConversation(Base, TimestampMixin):
     __table_args__ = (
         sa.Index("uq_copilot_conversation_id", "conversation_id", unique=True),
         sa.Index("ix_copilot_conversation_owner", "created_by"),
+        # 会话置顶（0170）：侧栏「置顶优先」排序用
+        sa.Index("ix_copilot_conversation_pinned", "pinned_at"),
     )
 
     id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
@@ -42,6 +44,10 @@ class ProcurementCopilotConversation(Base, TimestampMixin):
     #: 会话内 Agent 与模型**绑定**（中途换场景 = 新会话，避免上下文串味）。
     agent_code: Mapped[str] = mapped_column(sa.String(64), nullable=False)
     model_config_id: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    # 会话置顶（跨设备同步，0170）：NULL = 未置顶；非 NULL = 置顶时间
+    pinned_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
 
 
 class ProcurementCopilotTurn(Base, TimestampMixin):
@@ -59,6 +65,9 @@ class ProcurementCopilotTurn(Base, TimestampMixin):
     question: Mapped[str] = mapped_column(sa.Text, nullable=False)
     #: 回答这一轮的用户消息的运行（追问时与上一轮相同）
     run_id: Mapped[str] = mapped_column(sa.String(36), nullable=False)
+    #: 数据新鲜度戳（0171）：场景分支 = 槽位实体在 feature_value 的最新
+    #  computed_at；同日复用匹配键之一。NULL = 非场景分支。
+    data_stamp: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
     created_time: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), nullable=False
     )

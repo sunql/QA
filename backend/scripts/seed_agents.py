@@ -1,15 +1,16 @@
 """Phase 6.4 Agent 注册种子脚本（幂等）。
 
-9 个 Agent 注册到 Agent Registry：
-- 7 个可运行（绑定 AGENT_DEFAULT_BINDINGS，Phase 6.4 验收「≥2 个 Agent 端到端可调用」）：
+Agent 清单与数量以本文件 `AGENT_SEEDS` 为准（下述为分组说明）：
+- 可运行 Agent（绑定 `_AGENT_DEFAULT_BINDINGS`，Phase 6.4 验收「≥2 个 Agent 端到端可调用」）：
     SUPPLIER_360_AGENT    → supplier_360 工具
     SUPPLIER_RISK_AGENT   → supplier_risk 工具
     GRAPH_REASONING_AGENT → graph_traverse 工具
+    DELIVERY_TRACKING_AGENT → delivery_tracking_query 工具（P5 到货跟踪）
     WIKI_SEARCH_AGENT     → wiki_search 工具     （feat-wiki-knowledge M8）
     WIKI_READ_AGENT       → wiki_read 工具       （feat-wiki-knowledge M8）
     WIKI_RULE_AGENT       → rule_evaluate 工具   （feat-wiki-knowledge M8）
     WIKI_COVERAGE_AGENT   → coverage_status 工具 （feat-wiki-knowledge M8）
-- 2 个元数据 Agent（仅注册展示，AGENT_DEFAULT_BINDINGS 无绑定 → 运行时返回 409 不可运行）：
+- 元数据 Agent（仅注册展示，`_AGENT_DEFAULT_BINDINGS` 无绑定 → 运行时返回 409 不可运行）：
     SUPPLIER_OTD_REPORT / PROCUREMENT_COPILOT
 
 独立可执行：`seedAgents` 自己补 tool config seed + registry warmUp（`_ensureToolRegistry`），
@@ -72,6 +73,7 @@ _AGENT_EXTRA_BINDINGS: dict[str, tuple[str, ...]] = {
         "supplier_risk",
         "graph_traverse",
         "purchase_history_query",
+        "pending_delivery_query",
     ),
     "PROCUREMENT_QUOTATION_ANALYST": ("quotation_compare",),
 }
@@ -98,6 +100,8 @@ _AGENT_DEFAULT_BINDINGS: dict[str, str] = {
     "PROCUREMENT_SUPPLIER_SEARCH_AGENT": "supplier_search",
     "PROCUREMENT_PURCHASE_HISTORY_AGENT": "purchase_history_query",
     "PROCUREMENT_CONTRACT_SEARCH_AGENT": "contract_document_search",
+    # P5 到货跟踪场景：单工具 Agent（本体取数，DWD）。
+    "DELIVERY_TRACKING_AGENT": "delivery_tracking_query",
     # 多工具场景 Agent：主工具登记 supplier_search（单工具运行时用），
     # 真正的工具组在编排 profile 里（supplier_search/360/risk/graph/purchase_history）。
     "PROCUREMENT_SOURCING": "supplier_search",
@@ -226,7 +230,7 @@ def _wikiAgent(code: str, name: str, description: str) -> dict[str, Any]:
     return _agent(code, name, description, domains=(), layers=())
 
 
-# 9 个 Agent 种子（与 AGENT_DEFAULT_BINDINGS 确定性绑定对齐：7 个可运行，2 个仅元数据）
+# Agent 种子（与 _AGENT_DEFAULT_BINDINGS 确定性绑定对齐：有绑定即可运行，无绑定仅元数据）
 AGENT_SEEDS: list[dict[str, Any]] = [
     _agent(
         "SUPPLIER_360_AGENT",
@@ -278,6 +282,12 @@ AGENT_SEEDS: list[dict[str, Any]] = [
         "PROCUREMENT_PURCHASE_HISTORY_AGENT",
         "采购历史查询 Agent",
         "供应商(+物料)近 N 月采购订单行汇总与明细（业务库只读，purchase_history_query 工具，SQL Guard 闸门）。",
+        layers=("DWD",),
+    ),
+    _agent(
+        "DELIVERY_TRACKING_AGENT",
+        "到货跟踪 Agent",
+        "按时间窗/供应商统计订单到货达成（订单到货率 + 三态）并给出订单物料明细（delivery_tracking_query 工具，只读无 LLM）。",
         layers=("DWD",),
     ),
     _agent(
@@ -402,23 +412,18 @@ async def _reconcilePolicies(session: Any, code: str) -> tuple[int, int]:
         for p in await service.listPolicies(session, code)
     }
     added = 0
-    for layer in tool.data_layers:
-        if (tool.data_object, layer) not in have:
-            try:
-                await service.addPolicy(
-                    session,
-                    code,
-                    AgentAccessPolicyCreate(
-                        data_object=tool.data_object,
-                        permission=AgentPermission.READ,
-                        data_layer=layer,
-                        notes="Phase 6.4 Agent 运行时种子（显式分层，最小权限）",
-                    ),
-                    _SEED_ACTOR,
-                )
-            except ConflictError:
-                continue  # 并发：另一进程已补齐该层
-            added += 1
+    # 按**全部绑定工具**（primary + extras）的并集补缺：工具后补的场景
+    # （如 pending_delivery_query 只绑 profile）重跑 seed 必须自动拿到授权，
+    # 否则运行时 deny-by-default 判 PERMISSION_DENIED（2026-11-23 生产实证）。
+    for pol in await _policiesFor(session, code):
+        key = (pol.data_object, _normalizeDataLayer(pol.data_layer))
+        if key in have:
+            continue
+        try:
+            await service.addPolicy(session, code, pol, _SEED_ACTOR)
+        except ConflictError:
+            continue  # 并发：另一进程已补齐该层
+        added += 1
     return deleted, added
 
 

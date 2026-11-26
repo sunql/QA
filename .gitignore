@@ -79,6 +79,8 @@ scripts/e2e_smoke/node_modules
 frontend/node_modules
 # Playwright 根目录产物
 /test-results/
+# 真实栈视觉走查的截图留证（本地证据，非交付物；spec 自带写盘路径）
+frontend/e2e/__screenshots__/
 
 # Office 临时锁文件（Word/Excel 打开文档时自动生成，属本地状态，绝不入库）
 ~$*

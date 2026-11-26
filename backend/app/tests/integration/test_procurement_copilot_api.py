@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import getSettings
 from app.services.procurement_copilot import CopilotStreamOptions, copilotStreamOptions
 from app.tests import _pg_support
 from app.tests.integration._agent_runs_api_helpers import (
+    OUTSIDER_HEADERS,
     OWNER_HEADERS,
     _createAgent,
     _createModel,
@@ -184,7 +186,11 @@ async def test_first_message_creates_conversation_and_turn(
 async def test_second_message_carries_context_into_new_run(
     client: AsyncClient,
 ) -> None:
-    """同一会话的第二问 ⇒ 新 run，且 run.question 带上一轮上下文。"""
+    """同一会话的**不同**追问 ⇒ 新 run，且 run.question 带上一轮上下文。
+
+    同文字重复提问不在此列：run 级同日复用会直接指向既有 run
+    （见 test_same_day_same_question_reuses_run，2026-11-24 产品口径）。
+    """
     modelId = await _seedRunnableProcurementAgent(client)
     first = (
         await client.post(
@@ -192,10 +198,12 @@ async def test_second_message_carries_context_into_new_run(
         )
     ).json()
 
+    followup = "那B125的情况呢？"
     second = await client.post(
         COPILOT_PATH,
         headers=OWNER_HEADERS,
-        json={**_message(PROC_AGENT_CODE, modelId), "conversationId": first["conversationId"]},
+        json={**_message(PROC_AGENT_CODE, modelId), "message": followup,
+              "conversationId": first["conversationId"]},
     )
 
     assert second.status_code == 202, second.text
@@ -207,8 +215,8 @@ async def test_second_message_carries_context_into_new_run(
     run = await client.get(f"/api/v1/agent-runs/{body['runId']}", headers=OWNER_HEADERS)
     question = run.json()["question"]
     assert "[对话上下文]" in question
-    assert "哪些供应商能供不锈钢板？" in question
-    assert question.endswith("哪些供应商能供不锈钢板？")  # 当前问题在最后（同一句）
+    assert "哪些供应商能供不锈钢板？" in question  # 上一轮进上下文
+    assert question.rstrip().endswith(followup)  # 当前追问在最后
 
     conversation = await client.get(
         f"/api/v1/procurement/copilot/conversations/{body['conversationId']}",
@@ -302,3 +310,108 @@ async def test_switching_agent_inside_conversation_is_rejected(
 
     assert resp.status_code == 422, resp.text
     assert "新会话" in resp.text
+
+
+LIST_PATH = "/api/v1/procurement/copilot/conversations"
+
+
+async def test_conversation_list_returns_owner_thread_with_preview(
+    client: AsyncClient,
+) -> None:
+    """会话列表：返回自己的会话 + 轮数 + 最后一问（侧栏「历史会话」用）。"""
+    modelId = await _seedRunnableProcurementAgent(client)
+    created = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json=_message(PROC_AGENT_CODE, modelId),
+    )
+    assert created.status_code == 202
+    conversationId = created.json()["conversationId"]
+
+    resp = await client.get(LIST_PATH, headers=OWNER_HEADERS)
+    assert resp.status_code == 200
+    rows = resp.json()
+    row = next(r for r in rows if r["conversationId"] == conversationId)
+    assert row["agentCode"] == PROC_AGENT_CODE
+    assert row["turnCount"] == 1
+    assert row["lastQuestion"] == "哪些供应商能供不锈钢板？"
+    assert row["updatedAt"]
+
+
+async def test_conversation_list_is_owner_scoped(client: AsyncClient) -> None:
+    """别人的会话不出现在我的列表里（与详情接口同为 404 口径）。"""
+    modelId = await _seedRunnableProcurementAgent(client)
+    created = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json=_message(PROC_AGENT_CODE, modelId),
+    )
+    assert created.status_code == 202
+    conversationId = created.json()["conversationId"]
+
+    resp = await client.get(LIST_PATH, headers=OUTSIDER_HEADERS)
+    assert resp.status_code == 200
+    ids = [r["conversationId"] for r in resp.json()]
+    assert conversationId not in ids
+
+
+async def test_delete_conversation_removes_it_from_list(client: AsyncClient) -> None:
+    """删除自己的会话：204，随后列表与详情都不再可见。"""
+    modelId = await _seedRunnableProcurementAgent(client)
+    created = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json=_message(PROC_AGENT_CODE, modelId),
+    )
+    conversationId = created.json()["conversationId"]
+
+    resp = await client.delete(f"{LIST_PATH}/{conversationId}", headers=OWNER_HEADERS)
+    assert resp.status_code == 204
+
+    rows = (await client.get(LIST_PATH, headers=OWNER_HEADERS)).json()
+    assert conversationId not in [r["conversationId"] for r in rows]
+    detail = await client.get(f"{LIST_PATH}/{conversationId}", headers=OWNER_HEADERS)
+    assert detail.status_code == 404
+
+
+async def test_delete_conversation_is_owner_scoped(client: AsyncClient) -> None:
+    """别人的会话：删除返回 404，且原会话不受影响。"""
+    modelId = await _seedRunnableProcurementAgent(client)
+    created = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json=_message(PROC_AGENT_CODE, modelId),
+    )
+    conversationId = created.json()["conversationId"]
+
+    blocked = await client.delete(
+        f"{LIST_PATH}/{conversationId}", headers=OUTSIDER_HEADERS
+    )
+    assert blocked.status_code == 404
+
+    rows = (await client.get(LIST_PATH, headers=OWNER_HEADERS)).json()
+    assert conversationId in [r["conversationId"] for r in rows]
+
+
+@pytest.mark.asyncio
+async def test_same_day_same_question_reuses_run(client: AsyncClient) -> None:
+    """同日同问复用（2026-11-24 需求）：同问两次 ⇒ 第二次复用首个 run，零新查询。"""
+    modelId = await _seedRunnableProcurementAgent(client)
+    payload = _message(PROC_AGENT_CODE, modelId)
+
+    first = await client.post(COPILOT_PATH, headers=OWNER_HEADERS, json=payload)
+    assert first.status_code == 202
+    firstRunId = first.json()["runId"]
+
+    second = await client.post(COPILOT_PATH, headers=OWNER_HEADERS, json=payload)
+    assert second.status_code == 202
+    assert second.json()["runId"] == firstRunId, "同日同问必须复用既有 run"
+
+    # 不同问题 ⇒ 新 run（不复用）
+    other = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json={**payload, "message": "换个问题：B125 的欠交情况如何？"},
+    )
+    assert other.status_code == 202
+    assert other.json()["runId"] != firstRunId

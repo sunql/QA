@@ -429,6 +429,40 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from scripts.seed_rbac import seedRbacBaseline
 
         await seedRbacBaseline(session)
+        # P5 到货跟踪（C1）：补 `DIM_FACILITY` 的本体源+属性绑定。缺这类库时
+        # 待到货的 siteKeys 过滤 / `/pending-delivery/sites` 解析不到物理表。
+        # 绑定解析本身已改为**按需**（不带基地过滤的 summary/lines 不受影响）⇒
+        # 这里**明确告警**而不阻塞启动：失败时基地过滤不可用，但既有待到货/到货
+        # 跟踪主链路仍可用；运维按日志手动 `python -m scripts.seed_procurement_bindings`。
+        try:
+            from scripts.seed_procurement_bindings import seed_facility_binding
+
+            createdBindings = await seed_facility_binding(session_factory)
+            logger.info(
+                "procurement binding seed: %d new DIM_FACILITY source binding(s)",
+                createdBindings,
+            )
+        except Exception:
+            logger.exception(
+                "DIM_FACILITY 本体绑定 seed 失败：基地过滤与 /pending-delivery/sites 将不可用。"
+                "请在 backend/ 下手动运行 `python -m scripts.seed_procurement_bindings` 后重启。"
+            )
+        # P5 到货跟踪：补采购场景 Agent 的**编排 profile**。缺 profile 的 Agent
+        # 调 Copilot 直接 409「尚无编排配置」（2026-11-25 本地端到端实测踩到）——
+        # 新增 Agent 只进 AGENT_SEEDS 是不够的，profile 由独立脚本负责。
+        # 同样**明确告警不阻塞启动**：失败时该 Agent 不可运行，其余 Agent 不受影响。
+        try:
+            from scripts.seed_procurement_agent_profiles import (
+                seedProcurementAgentProfiles,
+            )
+
+            profileStats = await seedProcurementAgentProfiles(session)
+            logger.info("procurement agent profile seed: %s", profileStats)
+        except Exception:
+            logger.exception(
+                "采购场景 Agent 编排 profile seed 失败：对应 Agent 调 Copilot 会 409。"
+                "请在 backend/ 下手动运行 `python -m scripts.seed_procurement_agent_profiles` 后重启。"
+            )
     yield
     logger.info("关闭中，释放外部连接...")
     await shutdownCleanup()
@@ -778,6 +812,15 @@ def createApp() -> FastAPI:
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
         )
     app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    # 待到货场景轻量统计（欢迎态业务现状卡；只读，登录即可）
+    from app.api.v1 import procurement_analytics
+
+    app.include_router(
+        procurement_analytics.router,
+        prefix="/api/v1/procurement",
+        tags=["procurement-analytics"],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+    )
     app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     # auth.router 和 authRouter.router 不加 guard：白名单路径 /auth/me、/auth/change-password、/auth/logout 需无条件放行
     app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"], dependencies=[Depends(rateLimitDep)])

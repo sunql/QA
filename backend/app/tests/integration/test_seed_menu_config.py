@@ -223,6 +223,8 @@ async def test_seed_paths_aligned_with_frontend_routes(
         "/procurement/copilot",
         # G1/G5（2026-11-22）：语义发布管理页 + 本体发现工作台
         "/semantic-release", "/discovery-review",
+        # P4 待到货明细页（App.tsx:160 真实路由；seed 已发项，本清单漏同步）
+        "/procurement/pending-delivery",
     }
 
     svc = MenuConfigService(dbSession)

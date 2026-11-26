@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -115,9 +116,7 @@ def patchedRuntime(monkeypatch: pytest.MonkeyPatch):
 
     def _install(snapshots: list[tuple[SimpleNamespace, list[Any]]]) -> _FakeRunService:
         fake = _FakeRunService(snapshots)
-        monkeypatch.setattr(
-            copilot, "AgentOrchestrationRunService", lambda: fake
-        )
+        monkeypatch.setattr(copilot, "AgentOrchestrationRunService", lambda: fake)
         return fake
 
     return _install
@@ -132,9 +131,7 @@ def test_assertProcurementAgent_acceptsPrefix() -> None:
     copilot.assertProcurementAgent("PROCUREMENT_MATERIAL_SEARCH_AGENT")
 
 
-@pytest.mark.parametrize(
-    "code", ["ORCH_RUN_AGENT", "supplier_360_agent", "PROCUREMENTX_AGENT"]
-)
+@pytest.mark.parametrize("code", ["ORCH_RUN_AGENT", "supplier_360_agent", "PROCUREMENTX_AGENT"])
 def test_assertProcurementAgent_rejectsOthers(code: str) -> None:
     with pytest.raises(ValidationError):
         copilot.assertProcurementAgent(code)
@@ -246,3 +243,257 @@ async def test_stream_pausedIsTerminal(patchedRuntime: Any) -> None:
 
 async def _noSleep(_seconds: float) -> None:
     return None
+
+
+# ---------------------------------------------------------------- 场景分支（P4）
+
+_SCENARIO_SCHEMA = [
+    {"key": "monthsBack", "type": "number", "label": "时间窗", "required": True},
+    {
+        "key": "supplierKeys",
+        "type": "entityMulti",
+        "label": "供应商",
+        "conflictKeywords": ["供应商", "厂家"],
+        "codePattern": "(?<![0-9A-Za-z])[A-Z]\\d{2,4}(?![0-9A-Za-z])",
+    },
+]
+_SCENARIO_ROW = SimpleNamespace(
+    agent_code="PROCUREMENT_SOURCING",
+    question_template="分析待到货情况",
+    slot_schema=_SCENARIO_SCHEMA,
+    enabled=True,
+)
+
+
+class _Row:
+    """同时满足两种读取形态：.scalars().first()（复用查询）与 .scalar()（stamp）。"""
+
+    def scalars(self) -> Any:
+        return SimpleNamespace(first=lambda: None)
+
+    def scalar(self) -> Any:
+        return None
+
+
+class _ScenarioSession:
+    async def execute(self, _stmt: Any) -> Any:
+        return _Row()
+
+    async def commit(self) -> None:
+        return None
+
+
+class _CapturingRunner:
+    def __init__(self) -> None:
+        self.createInput: str | None = None
+        self.turnQuestions: list[str] = []
+        self.dataStamps: list[str] = []
+
+    async def createRun(self, _session: Any, runCreate: Any, _actor: Any) -> Any:
+        self.createInput = runCreate.input
+        return SimpleNamespace(run_id="run-1", status="QUEUED")
+
+
+def _installScenarioStore(monkeypatch: pytest.MonkeyPatch, runner: _CapturingRunner) -> None:
+    async def _fakeLoad(_session: Any, **_kw: Any) -> Any:
+        return SimpleNamespace(conversation_id="11111111-1111-1111-1111-111111111111")
+
+    async def _fakeTurns(_session: Any, _cid: Any) -> list[Any]:
+        return []
+
+    async def _fakeAppend(
+        _session: Any, _conv: Any, *, question: str, runId: str, dataStamp: str = ""
+    ) -> None:
+        runner.turnQuestions.append(question)
+        runner.dataStamps.append(dataStamp)
+
+    monkeypatch.setattr(copilot.conversationStore, "loadOrCreateConversation", _fakeLoad)
+    monkeypatch.setattr(copilot.conversationStore, "listTurns", _fakeTurns)
+    monkeypatch.setattr(copilot.conversationStore, "appendTurn", _fakeAppend)
+
+
+def _installScenarioService(monkeypatch: pytest.MonkeyPatch, row: Any) -> None:
+    class _FakeScenarioService:
+        def __init__(self, _session: Any) -> None:
+            return None
+
+        async def getByCode(self, _code: str) -> Any:
+            return row
+
+    monkeypatch.setattr(
+        "app.services.copilot_scenario_service.CopilotScenarioService",
+        _FakeScenarioService,
+    )
+
+
+def _scenarioDto(**overrides: Any) -> CopilotMessageRequest:
+    args: dict[str, Any] = {
+        "message": "分析一下B109待到货情况",
+        "agent_code": "PROCUREMENT_SOURCING",
+        "model_config_id": 1,
+    }
+    args.update(overrides)
+    return CopilotMessageRequest(**args)
+
+
+@pytest.mark.asyncio
+async def test_scenario_branch_rendersQuestionIntoRun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """scenarioCode+slots ⇒ 服务端渲染（B109 编码命中 ⇒ 供应商让位）。"""
+    runner = _CapturingRunner()
+    _installScenarioStore(monkeypatch, runner)
+    _installScenarioService(monkeypatch, _SCENARIO_ROW)
+
+    await copilot.prepareCopilotTurn(
+        _ScenarioSession(),
+        _scenarioDto(
+            scenario_code="pending_delivery",
+            slots={"monthsBack": 12, "supplierKeys": ["B125"]},
+        ),
+        SimpleNamespace(userId="u", roles=("admin",)),
+        service=runner,
+    )
+
+    assert runner.createInput is not None
+    assert "时间窗=12" in runner.createInput
+    assert "supplierKeys=" not in runner.createInput
+    assert "以用户问题描述为准" in runner.createInput
+    assert runner.turnQuestions == [runner.createInput]
+
+
+@pytest.mark.asyncio
+async def test_scenario_agentMismatch_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _CapturingRunner()
+    _installScenarioStore(monkeypatch, runner)
+    _installScenarioService(
+        monkeypatch,
+        SimpleNamespace(
+            agent_code="PROCUREMENT_OTHER",
+            question_template="x",
+            slot_schema=_SCENARIO_SCHEMA,
+            enabled=True,
+        ),
+    )
+    with pytest.raises(ValidationError, match="钉定的 Agent"):
+        await copilot.prepareCopilotTurn(
+            _ScenarioSession(),
+            _scenarioDto(scenario_code="pending_delivery", slots={"monthsBack": 12}),
+            SimpleNamespace(userId="u", roles=("admin",)),
+            service=runner,
+        )
+
+
+@pytest.mark.asyncio
+async def test_scenario_withoutSlots_staysFreeText(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """只带 scenarioCode（续跑回复等）⇒ 原文直入，不渲染。"""
+    runner = _CapturingRunner()
+    _installScenarioStore(monkeypatch, runner)
+    _installScenarioService(monkeypatch, _SCENARIO_ROW)
+
+    await copilot.prepareCopilotTurn(
+        _ScenarioSession(),
+        _scenarioDto(scenario_code="pending_delivery"),
+        SimpleNamespace(userId="u", roles=("admin",)),
+        service=runner,
+    )
+    assert runner.createInput == "分析一下B109待到货情况"
+
+
+@pytest.mark.asyncio
+async def test_emptyMessage_withSlots_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """chips 点击：无文字只有槽位 ⇒ 主句由模板提供（message 允许为空）。"""
+    runner = _CapturingRunner()
+    _installScenarioStore(monkeypatch, runner)
+    _installScenarioService(monkeypatch, _SCENARIO_ROW)
+
+    await copilot.prepareCopilotTurn(
+        _ScenarioSession(),
+        _scenarioDto(
+            message="",
+            scenario_code="pending_delivery",
+            slots={"monthsBack": 12},
+        ),
+        SimpleNamespace(userId="u", roles=("admin",)),
+        service=runner,
+    )
+    assert runner.createInput is not None
+    assert runner.createInput.startswith("分析待到货情况")
+
+
+@pytest.mark.asyncio
+async def test_emptyMessage_withoutSlots_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """自由文本分支空消息 ⇒ fail loud（没有任何可发的东西）。"""
+    runner = _CapturingRunner()
+    _installScenarioStore(monkeypatch, runner)
+    with pytest.raises(ValidationError, match="消息不能为空"):
+        await copilot.prepareCopilotTurn(
+            _ScenarioSession(),
+            _scenarioDto(message="  "),
+            SimpleNamespace(userId="u", roles=("admin",)),
+            service=runner,
+        )
+
+
+# ---------------------------------------------------------------- 数据新鲜度戳（0171）
+
+
+def _stampSession(maxComputedAt: Any) -> Any:
+
+    class _StampStmt:
+        def __init__(self, value: Any) -> None:
+            self._value = value
+
+        def where(self, *_a: Any, **_k: Any) -> _StampStmt:
+            return self
+
+        def scalars(self) -> Any:
+            return self
+
+        def first(self) -> Any:
+            return self._value
+
+        def scalar(self) -> Any:
+            return self._value
+
+    class _StampSession:
+        async def execute(self, _stmt: Any) -> Any:
+            return _StampStmt(maxComputedAt)
+
+    return _StampSession()
+
+
+@pytest.mark.asyncio
+async def test_scenarioDataStamp_usesMaxComputedAt() -> None:
+    """槽位实体 → feature_value 最新 computed_at（ISO 串）。"""
+    from datetime import UTC, datetime
+
+    ts = datetime(2026, 11, 25, 8, 0, 0, tzinfo=UTC)
+    stamp = await copilot._scenarioDataStamp(
+        _stampSession(ts),
+        _scenarioDto(scenario_code="supplier_risk", slots={"supplierKey": "A013"}),
+    )
+    assert stamp == ts.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_scenarioDataStamp_noFeatureRows_returnsEmpty() -> None:
+    stamp = await copilot._scenarioDataStamp(
+        _stampSession(None),
+        _scenarioDto(scenario_code="supplier_risk", slots={"supplierKey": "B125"}),
+    )
+    assert stamp == ""
+
+
+@pytest.mark.asyncio
+async def test_scenarioDataStamp_nonScenario_returnsEmpty() -> None:
+    stamp = await copilot._scenarioDataStamp(_stampSession(datetime.now(UTC)), _scenarioDto())
+    assert stamp == ""  # 非场景分支根本不查（恒空）

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,7 +28,10 @@ from app.dependencies import CurrentUser, getCurrentUser, getDb
 from app.domain.exceptions import DomainError, NotFoundError
 from app.domain.procurement_copilot_schemas import (
     CopilotConversationRead,
+    CopilotConversationSummary,
     CopilotMessageRequest,
+    CopilotPinRequest,
+    CopilotScenarioRead,
     CopilotTaskRead,
 )
 from app.infrastructure.rate_limit import limiter, rateLimitValue
@@ -41,7 +44,9 @@ from app.services.procurement_copilot import (
     streamCopilotRun,
 )
 from app.services.procurement_copilot_conversation import (
+    deleteOwnedConversation,
     getOwnedConversation,
+    listOwnedConversations,
     listTurns,
 )
 from app.services.stream_events import StreamEvent
@@ -52,9 +57,7 @@ SSE_MEDIA_TYPE = "text/event-stream"
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
-def _taskResponse(
-    runId: str, runStatus: str, conversationId: str, resumed: bool
-) -> CopilotTaskRead:
+def _taskResponse(runId: str, runStatus: str, conversationId: str, resumed: bool) -> CopilotTaskRead:
     return CopilotTaskRead(
         run_id=runId,
         status=runStatus,
@@ -62,6 +65,68 @@ def _taskResponse(
         conversation_id=conversationId,
         resumed=resumed,
     )
+
+
+@router.get(
+    "/copilot/scenarios",
+    response_model=list[CopilotScenarioRead],
+    summary="Copilot 场景列表（启用项按 sort_order；required_role 门控可见性）",
+)
+async def listCopilotScenarios(
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> list[CopilotScenarioRead]:
+    """卡片墙数据源（P4）：场景 = DB 配置行，非 admin 隐藏 admin 专属场景。"""
+    from sqlalchemy import select
+
+    from app.domain.copilot_scenario_models import CopilotScenario as ScenarioModel
+    from app.domain.procurement_copilot_schemas import CopilotScenarioSlotRead
+
+    userRoles = tuple(getattr(currentUser, "roles", None) or ())
+    rows = (
+        (
+            await session.execute(
+                select(ScenarioModel)
+                .where(ScenarioModel.enabled.is_(True))
+                .order_by(ScenarioModel.sort_order, ScenarioModel.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    views: list[CopilotScenarioRead] = []
+    for row in rows:
+        # required_role = 可见角色（NULL=全员）；用户不具备 ⇒ 直接跳过
+        # （不回 403 —— 卡片墙里「看不见」比报错更符合场景目录语义）
+        if row.required_role and row.required_role not in userRoles:
+            continue
+        views.append(
+            CopilotScenarioRead(
+                scenario_code=row.scenario_code,
+                name=row.name,
+                description=row.description,
+                icon_code=row.icon_code,
+                agent_code=row.agent_code,
+                slot_schema=[
+                    CopilotScenarioSlotRead(
+                        key=str(slot.get("key", "")),
+                        type=str(slot.get("type", "")),
+                        label=str(slot.get("label", "")),
+                        required=bool(slot.get("required", False)),
+                        conflict_keywords=[str(kw) for kw in (slot.get("conflictKeywords") or [])],
+                        code_pattern=slot.get("codePattern"),
+                        display_template=slot.get("displayTemplate"),
+                        hidden=bool(slot.get("hidden", False)),
+                    )
+                    for slot in (row.slot_schema or [])
+                ],
+                question_template=row.question_template,
+                chips=list(row.chips or []),
+                result_renderer=row.result_renderer,
+                required_role=row.required_role,
+            )
+        )
+    return views
 
 
 @router.post(
@@ -85,9 +150,7 @@ async def postCopilotMessage(
     turn = await prepareCopilotTurn(session, dto, currentUser)
 
     if dto.mode == "task":
-        return _taskResponse(
-            turn.runId, turn.status, turn.conversationId, turn.resumed
-        )
+        return _taskResponse(turn.runId, turn.status, turn.conversationId, turn.resumed)
 
     async def eventSource() -> AsyncIterator[str]:
         try:
@@ -126,6 +189,77 @@ async def postCopilotMessage(
         media_type=SSE_MEDIA_TYPE,
         headers=SSE_HEADERS,
     )
+
+
+@router.get(
+    "/copilot/conversations",
+    response_model=list[CopilotConversationSummary],
+    summary="多轮 Copilot 会话列表（当前用户，最近更新在前）",
+)
+async def listCopilotConversations(
+    limit: int = Query(default=20, ge=1, le=50),
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> list[CopilotConversationSummary]:
+    """侧栏「历史会话」的数据源：只列**自己的**会话 + 轮数 + 最后一问。"""
+    rows = await listOwnedConversations(session, currentUser, limit=limit)
+    return [
+        CopilotConversationSummary(
+            conversation_id=str(row.conversation.conversation_id),
+            agent_code=row.conversation.agent_code,
+            model_config_id=row.conversation.model_config_id,
+            turn_count=row.turnCount,
+            last_question=row.lastQuestion,
+            updated_at=row.conversation.updated_time.isoformat(),
+            pinned_at=None if row.conversation.pinned_at is None else row.conversation.pinned_at.isoformat(),
+        )
+        for row in rows
+    ]
+
+
+@router.post(
+    "/copilot/conversations/{conversationId}/pin",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="置顶/取消置顶 Copilot 会话（创建者；pinned_at 跨设备同步）",
+)
+async def pinCopilotConversation(
+    conversationId: str,
+    dto: CopilotPinRequest,
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> Response:
+    """置顶状态落库（pinned_at 列）；别人的会话 404。"""
+    from uuid import UUID
+
+    from app.services.procurement_copilot_conversation import setPinnedConversation
+
+    try:
+        parsedId = UUID(conversationId)
+    except ValueError as exc:
+        raise NotFoundError("会话不存在或无权访问") from exc
+    await setPinnedConversation(session, parsedId, currentUser, pinned=dto.pinned)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete(
+    "/copilot/conversations/{conversationId}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="删除多轮 Copilot 会话（创建者）",
+)
+async def deleteCopilotConversation(
+    conversationId: str,
+    currentUser: CurrentUser = Depends(getCurrentUser),
+    session: AsyncSession = Depends(getDb),
+) -> Response:
+    """删除会话及其轮次；别人的会话 404（不泄露是否存在）。"""
+    from uuid import UUID
+
+    try:
+        parsedId = UUID(conversationId)
+    except ValueError as exc:
+        raise NotFoundError("会话不存在或无权访问") from exc
+    await deleteOwnedConversation(session, parsedId, currentUser)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(

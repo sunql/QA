@@ -2932,3 +2932,6 @@ from app.domain.procurement_copilot_models import (  # noqa: F401,E402
     ProcurementCopilotConversation,
     ProcurementCopilotTurn,
 )
+
+# P4 场景配置化（0170）：copilot_scenario——导入让 alembic autogenerate 可见
+from app.domain.copilot_scenario_models import CopilotScenario  # noqa: F401,E402

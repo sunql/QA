@@ -119,7 +119,9 @@ class TestHandlerRegistries:
         ⚠️ 本断言是**集合相等型**（不是包含）⇒ 每次新增 builtin handler 都必须
         同步这里，否则本用例红（2026-11-21 实测：`contract_document_search` /
         `quotation_compare` 由 I3 采购 Copilot 批次加入注册表，但期望集没跟上；
-        2026-11-22 又漏了同一批的 `policy_compliance_check` ⇒ PR #176 净新增失败）。
+        2026-11-22 又漏了同一批的 `policy_compliance_check` ⇒ PR #176 净新增失败；
+        2026-11-25 同款第三次：`pending_delivery_query`（待到货，P4）
+        与 `delivery_tracking_query`（到货跟踪，P5）加入注册表时又漏同步）。
         """
         assert set(BUILTIN_HANDLERS.keys()) == {
             "supplier_360", "supplier_risk", "graph_traverse",
@@ -127,6 +129,8 @@ class TestHandlerRegistries:
             "quotation_query", "procurement_policy_search",
             "contract_document_search", "policy_compliance_check", "quotation_compare",
             "wiki_search", "wiki_read", "rule_evaluate", "coverage_status",
+            # P4 待到货 / P5 到货跟踪（2026-11-25）
+            "pending_delivery_query", "delivery_tracking_query",
         }
 
     def test_nl2sql_has_default(self):
@@ -140,6 +144,8 @@ class TestHandlerRegistries:
             "quotation_query", "procurement_policy_search",
             "contract_document_search", "policy_compliance_check", "quotation_compare",
             "wiki_text", "wiki_no_args",
+            # P4 待到货 / P5 到货跟踪（2026-11-25）
+            "pending_delivery_query", "delivery_tracking_query",
         }
 
     def test_valid_handler_refs_mapping(self):

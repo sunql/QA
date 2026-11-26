@@ -15,21 +15,24 @@ Phase 6.x：`supplier_key` 接受 `str | int` —— 透传 Supplier360Service.g
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
-from typing import Any, Union
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import RiskLevel, Severity
-from app.services.feature_rule_evaluator import RuleHit, _OPERATORS, _SEVERITY_ORDER
-from app.services.feature_rule_registry import feature_rule_registry
+from app.domain.enums import RiskLevel
 from app.domain.schemas import (
     Supplier360Kpi,
     Supplier360Read,
     SupplierRiskKpiContribution,
     SupplierRiskRead,
 )
+
+# LlmMessage：真实客户端（openai_client.complete）的消息契约——必须对象而非 dict
+from app.infrastructure.llm.base_client import LlmMessage
+from app.services.feature_rule_evaluator import _OPERATORS, _SEVERITY_ORDER, RuleHit
+from app.services.feature_rule_registry import feature_rule_registry
 from app.services.messages_zh import (
     MSG_RISK_ACTIONS_HIGH,
     MSG_RISK_ACTIONS_LOW,
@@ -89,18 +92,10 @@ class _Rule:
 
 # 4 个默认 feature 的风险规则（feature_name → Rule）
 RISK_RULES: dict[str, _Rule] = {
-    "SUPPLIER_RISK_SCORE": _Rule(
-        operator="lt_inverse", threshold="0.80", friendly_name="综合风险评分"
-    ),
-    "SUPPLIER_OTD_3M": _Rule(
-        operator="lt", threshold="90", friendly_name="准时交付率"
-    ),
-    "SUPPLIER_DEFECT_RATE_3M": _Rule(
-        operator="gt", threshold="5", friendly_name="缺陷率"
-    ),
-    "SUPPLIER_PRICE_VARIANCE_3M": _Rule(
-        operator="gt", threshold="10", friendly_name="价格偏差率"
-    ),
+    "SUPPLIER_RISK_SCORE": _Rule(operator="lt_inverse", threshold="0.80", friendly_name="综合风险评分"),
+    "SUPPLIER_OTD_3M": _Rule(operator="lt", threshold="90", friendly_name="准时交付率"),
+    "SUPPLIER_DEFECT_RATE_3M": _Rule(operator="gt", threshold="5", friendly_name="缺陷率"),
+    "SUPPLIER_PRICE_VARIANCE_3M": _Rule(operator="gt", threshold="10", friendly_name="价格偏差率"),
 }
 
 
@@ -116,7 +111,7 @@ class SupplierRiskService:
     async def assess(
         self,
         session: AsyncSession,
-        supplier_key: Union[str, int],
+        supplier_key: str | int,
         *,
         llm_factory: LlmFactory | None = None,
         llm_config: Any | None = None,
@@ -133,8 +128,19 @@ class SupplierRiskService:
         contributions = [_toContribution(kpi) for kpi in view.kpis]
         level, level_source = await self._decideLevel_via_rules(view, contributions)
         actions = _buildActions(level)
-        risk_points, points_source, prompt_tokens, completion_tokens, cost, model_name = await self._generateRiskPoints(
-            view, contributions, level, llm_factory=llm_factory, llm_config=llm_config,
+        (
+            risk_points,
+            points_source,
+            prompt_tokens,
+            completion_tokens,
+            cost,
+            model_name,
+        ) = await self._generateRiskPoints(
+            view,
+            contributions,
+            level,
+            llm_factory=llm_factory,
+            llm_config=llm_config,
         )
         tokens = prompt_tokens + completion_tokens
         return SupplierRiskRead(
@@ -180,7 +186,9 @@ class SupplierRiskService:
 
         # Fetch enabled rules for SUPPLIER / FEATURE / RISK scope
         rules = feature_rule_registry.getEnabledRules(
-            data_object="SUPPLIER", data_layer="FEATURE", target_level="RISK",
+            data_object="SUPPLIER",
+            data_layer="FEATURE",
+            target_level="RISK",
         )
 
         # Evaluate each rule: find the first (most severe) matching tier
@@ -219,8 +227,7 @@ class SupplierRiskService:
 
         # Step 3: MAX severity across other matched rules
         other_hits = [
-            h for h in rule_hits.values()
-            if h is not None and h.rule_code != "supplier_risk_score_main"
+            h for h in rule_hits.values() if h is not None and h.rule_code != "supplier_risk_score_main"
         ]
         if other_hits:
             worst = min(other_hits, key=lambda h: _SEVERITY_ORDER.get(h.severity, 99))
@@ -228,7 +235,6 @@ class SupplierRiskService:
 
         # Step 4: All values present, no rule matched → LOW
         return RiskLevel.LOW, "no_match"
-
 
     # ------------------------------------------------------------------
     # LLM 生成风险点 + 降级
@@ -289,8 +295,12 @@ class SupplierRiskService:
         content = getattr(response, "content", "") or ""
         # 真实 BaseLlmClient 返回 LlmResponse（camelCase: promptTokens/completionTokens/modelName）；
         # 兼容既有测试 fake（snake_case）。此前只读 snake_case 导致真实客户端计量恒为 0（审查 MEDIUM#2 根因）。
-        prompt_tokens = int(getattr(response, "promptTokens", None) or getattr(response, "prompt_tokens", 0) or 0)
-        completion_tokens = int(getattr(response, "completionTokens", None) or getattr(response, "completion_tokens", 0) or 0)
+        prompt_tokens = int(
+            getattr(response, "promptTokens", None) or getattr(response, "prompt_tokens", 0) or 0
+        )
+        completion_tokens = int(
+            getattr(response, "completionTokens", None) or getattr(response, "completion_tokens", 0) or 0
+        )
         model_name = getattr(response, "modelName", None) or getattr(response, "model_name", None)
         # 与 chat_service._costFor / agent_runtime._cost_for_usage 同公式同口径（USD，按 config 单价）
         cost = float(
@@ -402,9 +412,7 @@ def _buildLlmPrompt(
         threshold = c.threshold or "-"
         unit = c.unit or ""
         passed = "通过" if c.passed else "违规"
-        feature_lines.append(
-            f"- {c.feature_name}: {c.value}{unit}（阈值 {threshold}{unit}，{passed}）"
-        )
+        feature_lines.append(f"- {c.feature_name}: {c.value}{unit}（阈值 {threshold}{unit}，{passed}）")
     feature_block = "\n".join(feature_lines) if feature_lines else "（无数据）"
     system = (
         "你是采购域风险评估助理。基于供应商的特征数据，输出 1-2 句中文风险点描述。"
@@ -415,9 +423,13 @@ def _buildLlmPrompt(
         f"风险等级：{level.value}\n"
         f"特征数据：\n{feature_block}"
     )
+    # 必须是 LlmMessage（带 .role/.content 属性）：真实 openai_client.complete
+    # 按 m.role / m.content 取值，裸 dict 会 AttributeError（2026-11-25 生产实证
+    # ——工具内 LLM 增强恒降级 fallback_template 的根因；单测 fake 容忍 dict
+    # 才让这个 bug 长期隐身）。
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
+        LlmMessage(role="system", content=system),
+        LlmMessage(role="user", content=user),
     ]
 
 

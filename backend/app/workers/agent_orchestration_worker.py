@@ -33,13 +33,18 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings, getSettings
+from app.services.agent_binding_cache import agent_binding_cache
 from app.services.agent_orchestration_store import AgentOrchestrationStore
 from app.services.agent_orchestration_types import ClaimedRunRunner, LeaseLostError
 from app.services.agent_tool_config_registry import (
     AgentToolConfigRegistry,
     agent_tool_config_registry,
 )
+from app.services.business_object_registry import businessObjectRegistry
+from app.services.data_domain_registry import dataDomainRegistry
 from app.services.feature_rule_registry import FeatureRuleRegistry, feature_rule_registry
+from app.services.kpi_match_cache import kpi_match_cache
+from app.services.layer_rule_registry import layerRuleRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +81,21 @@ async def warmUpWorkerCaches(
     用它复现「Worker 进程冷启动」这一形态）；缺省时预热模块单例。
     """
     toolRegistry = registry if registry is not None else agent_tool_config_registry
-    ruleRegistry = (
-        featureRegistry if featureRegistry is not None else feature_rule_registry
-    )
+    ruleRegistry = featureRegistry if featureRegistry is not None else feature_rule_registry
     async with sessionFactory() as session:
         await toolRegistry.warmUp(session)
         await ruleRegistry.warmUp(session)
+        # 与 API lifespan 的预热清单**全量对齐**（2026-11-25 实证缺口）：
+        # ``BusinessObjectCodeType`` 是 pydantic BeforeValidator —— supplier_360
+        # 的 schema 校验一进来就查 ``businessObjectRegistry.isValid``，
+        # 冷态 RuntimeError ⇒ 「供应商风险速览」等场景的工具必挂。
+        # dataDomain/layerRule/kpi_match/agent_binding_cache 同理（任何
+        # 带治理语义字段的工具 schema 都可能在校验期触碰）。
+        await agent_binding_cache.warmUp(session)
+        await businessObjectRegistry.warmUp(session)
+        await dataDomainRegistry.warmUp(session)
+        await layerRuleRegistry.warmUp(session)
+        await kpi_match_cache.warmUp(session)
         await session.commit()
 
 
@@ -117,9 +131,7 @@ class AgentOrchestrationWorker:
     async def run(self) -> None:
         """主循环；feature flag 关闭时立即返回（不轮询）。"""
         if not self._settings.enableAgentOrchestration:
-            logger.info(
-                "agent orchestration 未启用（ENABLE_AGENT_ORCHESTRATION=false），worker 不轮询"
-            )
+            logger.info("agent orchestration 未启用（ENABLE_AGENT_ORCHESTRATION=false），worker 不轮询")
             return
 
         # 预热必须早于任何 run 被 claim、早于任何工具被解析：Worker 进程不经过
@@ -166,9 +178,7 @@ class AgentOrchestrationWorker:
             return False
 
         runId = run.id
-        logger.info(
-            "worker %s claim run %s（lease=%ds）", self._workerId, runId, leaseSeconds
-        )
+        logger.info("worker %s claim run %s（lease=%ds）", self._workerId, runId, leaseSeconds)
         try:
             await self._runner.runClaimed(runId, self._workerId)
         except LeaseLostError as error:
@@ -180,9 +190,7 @@ class AgentOrchestrationWorker:
                 error.reason,
             )
         except Exception:
-            logger.exception(
-                "worker %s run %s 执行异常，继续轮询", self._workerId, runId
-            )
+            logger.exception("worker %s run %s 执行异常，继续轮询", self._workerId, runId)
         return True
 
     async def _pollOnce(self) -> None:

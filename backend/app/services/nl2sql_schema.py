@@ -204,6 +204,34 @@ _CRITICAL_DIGEST_MAX_DESC_CHARS_DEFAULT = 200
 # 运行期从 system_config 现读（魔数治理 Phase 2 hard tier）。
 _VALUE_SAMPLE_VALUE_MAX_DEFAULT = 30
 
+# 「可选值」（allowed_values）渲染上限：窄值域属性的码→义摘要。
+# 宽值域应建字典类 + join 边（见 Harness 里的字典类接入食谱），不该塞进这里。
+_ALLOWED_VALUES_MAX_ITEMS_DEFAULT = 30
+_ALLOWED_VALUES_ITEM_MAX_CHARS_DEFAULT = 24
+
+
+def _formatAllowedValues(
+    values: list[str],
+    *,
+    maxItems: int = _ALLOWED_VALUES_MAX_ITEMS_DEFAULT,
+    itemMaxChars: int = _ALLOWED_VALUES_ITEM_MAX_CHARS_DEFAULT,
+) -> str:
+    """渲染「可选值: [1=外购, 2=自制]」；超上限截断并标省略号。
+
+    每个值都过 `_sanitizeSchemaField`（本体配置属外部输入：换行会注入裸指令行）。
+    """
+    items: list[str] = []
+    for raw in values[:maxItems]:
+        text = _sanitizeSchemaField(str(raw)).strip()
+        if not text:
+            continue
+        if len(text) > itemMaxChars:
+            text = text[:itemMaxChars] + "…"
+        items.append(text)
+    if len(values) > maxItems:
+        items.append("…")
+    return "[" + ", ".join(items) + "]"
+
 
 def _sampleValuesFor(
     prop: Any, table: str, valueSamples: dict[tuple[str, str], list[str]] | None
@@ -368,6 +396,10 @@ def buildSchemaText(
                 )
             if prop.description:
                 line += f" 说明: {_sanitizeSchemaField(prop.description)}"
+            # 窄值域（几个码）：码→义直接配在属性上，渲染进 prompt。
+            # 宽值域请建字典类 + join 边，不要往这里堆（有 30 条硬上限）。
+            if prop.allowed_values:
+                line += f" 可选值: {_formatAllowedValues(prop.allowed_values)}"
             # 2-1：关键列注入值域采样（WHERE 值不再写错）；值经去重/截断/转义
             samples = _sampleValuesFor(prop, cls.source_table, valueSamples)
             if prop.source_column and samples:

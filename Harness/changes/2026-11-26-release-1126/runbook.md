@@ -11,7 +11,8 @@
 
 | PR | 内容 |
 |---|---|
-| #178 | 全部改动（OPEN，head `c63f8eed`，`feat/ontology-evolution` → `main`） |
+| #178 | 主改动（**已合入 main**：`d40e5576`，`feat/ontology-evolution` → `main`） |
+| #183 | 本批修复：结论正文去内部术语 + 到货跟踪本期概览 + dataLayer 事实更正（`feat/copilot-source-attribution-and-overview`） |
 
 ### 0.1 迁移表（`0169 → 0171`）
 
@@ -58,34 +59,51 @@
 
 ---
 
-## 1. 交付物（开发机产出）
+## 1. 交付物（开发机已产出并自证）
 
-> ⛔ **构建尚未完成（2026-11-26 14:45 状态）**：本机访问 Docker Hub 不通
-> （`registry-1.docker.io/v2/` 超时返回 000），`docker buildx` 卡在
-> `load metadata for docker.io/library/...` 这一步。镜像**还没产出**，下表的
-> Image ID / 大小 / sha256 均为待回填占位，**不要拿去发版**。
-> 构建恢复后按 §1.4 的步骤产出并回填本表。
+> ✅ 构建源：`feat/copilot-source-attribution-and-overview @ 70e31337`
+> （= main 合入 #178 后 + #183 本批修复；`git diff` 与合入后的 main 树一致）
+> 平台 `linux/amd64`，2026-11-26 23:19 产出。
 
 ### 1.1 镜像
 
 | 镜像 tag | 平台 | Image ID | 说明 |
 |---|---|---|---|
-| `qa-system-backend:amd64-1126` | linux/amd64 | `BACKEND_IMAGE_ID` | backend + agent-orchestration-worker 同镜像 |
-| `qa-system-frontend:amd64-1126` | linux/amd64 | `FRONTEND_IMAGE_ID` | nginx + 静态 bundle |
+| `qa-system-backend:amd64-1126` | linux/amd64 | `e14437ea0dcb` | backend + agent-orchestration-worker 同镜像 |
+| `qa-system-frontend:amd64-1126` | linux/amd64 | `5021ad081640` | nginx + 静态 bundle `index-DgDAN_my.js` |
 
 ### 1.2 传输包
 
 | 文件 | 大小 | sha256 |
 |---|---|---|
-| `qa-backend-amd64-1126.tar.gz` | `BACKEND_TAR_SIZE` | `BACKEND_TAR_SHA` |
-| `qa-frontend-amd64-1126.tar.gz` | `FRONTEND_TAR_SIZE` | `FRONTEND_TAR_SHA` |
+| `qa-backend-amd64-1126.tar.gz` | 431M | `746e271c34291e8eb44c2aabc824455a038ad672a1cd22fdd01bdd1229b3b0d9` |
+| `qa-frontend-amd64-1126.tar.gz` | 26M | `9981b43b1e00a55bd5f412e5953c0cbca705ac2c55cb813fb2fd3ae32853181f` |
 
-### 1.3 镜像内容自证（构建脚本内置，任一缺失即构建失败）
+### 1.3 镜像内容自证（已实测，非脚本内置）
 
-- backend：`agent_tools_procurement.py:_PendingDialect`、`procurement_analytics.py:该数据源执行待到货查询失败`、
-  `procurement_copilot.py:deleteCopilotConversation` / `pinCopilotConversation`、
-  `copilot_scenario_render.py:renderScenarioQuestion`、`seed_copilot_scenarios.py:seed_copilot_scenarios`
-- frontend：bundle `FRONTEND_BUNDLE`，含「采购 Copilot」「待到货 / 逾期未到」「分析结果」
+backend（镜像内 `grep` 全部命中、运行时 import 全部通过）：
+
+| 项 | 实测 |
+|---|---|
+| `app/services/delivery_tracking_query.py` → `deliveryTrackingHandler` | ✅ |
+| `app/services/delivery_tracking_overview.py` → `loadDeliveryTrackingOverview` | ✅ |
+| `app/api/v1/procurement_analytics.py` → `delivery-tracking/overview`（命中 2 处） | ✅ |
+| `scripts/seed_copilot_scenarios.py` → `seed_copilot_scenarios` | ✅ |
+| `app/services/agent_orchestration_planner.py` → `Never mention tool names` | ✅ |
+| `alembic/versions/0171_copilot_turn_data_stamp.py` | ✅ |
+| 运行时依赖 `asyncpg` / `oracledb` / `pymysql` / `fastapi` / `uvicorn` / `alembic` / `bcrypt` | ✅ 全部可 import |
+
+frontend（bundle `index-DgDAN_my.js`）：
+
+| 文案 | 命中 |
+|---|---|
+| 「本期业务现状（实时）」 | 1 |
+| 「到货达成概览」 | 1 |
+| 「未到货最多供应商」 | 1 |
+
+> ⚠️ 已知既有瑕疵（**非本批引入，不阻断**）：`backend/MEMORY.md`（Claude 记忆索引，
+> 单行纯文本、无凭据）自 main 起就提交在仓库里，因此会随镜像进入 `/app/MEMORY.md`。
+> 历史各批同样存在；建议后续单独清理（删文件 + `.dockerignore` 加一条）。
 
 > 生产机**不 build**：镜像靠开发机 `docker save` + `docker load`。
 

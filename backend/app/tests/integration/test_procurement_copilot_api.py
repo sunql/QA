@@ -451,6 +451,14 @@ _DELIVERY_SLOT_SCHEMA: list[dict] = [
     {"key": "supplierKeys", "type": "entityMulti", "label": "供应商"},
 ]
 
+#: **已部署库的旧形态**：槽位在，但没有 minimum / maximum（seed 不覆盖已
+#: 存在场景行 ⇒ 新增字段拿不到）。配置层读不到范围 ⇒ 必须靠契约层兜住。
+_DELIVERY_SLOT_SCHEMA_WITHOUT_RANGE: list[dict] = [
+    {"key": "anchorDay", "type": "number", "label": "月度周期锚点日"},
+    {"key": "periodIndex", "type": "number", "label": "周期期序"},
+    {"key": "supplierKeys", "type": "entityMulti", "label": "供应商"},
+]
+
 
 async def _insertDeliveryScenario(slotSchema: list[dict]) -> None:
     """插一条到货跟踪场景配置（真实 PG）。"""
@@ -538,3 +546,27 @@ async def test_period_index_without_anchor_day_is_422(client: AsyncClient) -> No
 
     assert resp.status_code == 422, resp.text
     assert "周期期序" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_positive_period_index_is_422_even_without_configured_range(
+    client: AsyncClient,
+) -> None:
+    """**DB 里没有 min/max 时**，周期期序填 1 仍被 422 拦下。
+
+    已部署库的存量场景行拿不到 seed 新增的 minimum/maximum（seed 不覆盖
+    已存在行）⇒ 配置层读不到范围 ⇒ 靠**契约层**（periodIndex ≤ 0，真值在
+    代码里）兜住 ⇒ 生产防线不依赖 seed 补丁是否跑过。
+    """
+    await _insertDeliveryScenario(_DELIVERY_SLOT_SCHEMA_WITHOUT_RANGE)
+    before = await _countOrchestrationRuns()
+
+    resp = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json=_scenarioMessage(slots={"periodIndex": 1, "supplierKeys": ["B109"]}),
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert "周期期序" in resp.text
+    assert await _countOrchestrationRuns() == before, "非法槽位不得创建编排 run"

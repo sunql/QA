@@ -33,6 +33,9 @@ interface SlotRange {
   max?: number;
 }
 
+/** number 槽位的缺省展示值（未提交过 ⇒ 不进上送载荷）。 */
+const DEFAULT_NUMBER_VALUE = 0;
+
 /** 从槽位配置读取值范围（minimum / maximum 缺省即不限制）。 */
 function slotRange(slot: CopilotScenarioSlot): SlotRange {
   return {
@@ -55,6 +58,14 @@ function isOutOfRange(value: number, range: SlotRange): boolean {
   if (min !== undefined && value < min) return true;
   if (max !== undefined && value > max) return true;
   return false;
+}
+
+/** 把取值夹到声明范围内（缺省即不限制）。 */
+function clampToRange(value: number, range: SlotRange): number {
+  let out = value;
+  if (range.min !== undefined) out = Math.max(out, range.min);
+  if (range.max !== undefined) out = Math.min(out, range.max);
+  return out;
 }
 
 /** 时间窗/日期区间二选一：months = 近 N 月；range = 显式 dateFrom/dateTo。 */
@@ -173,17 +184,34 @@ export default function ScenarioAdvancedParams({
     }
     if (slot.type === "number") {
       const range = slotRange(slot);
-      const current = Number(values[slot.key] ?? 0);
+      const committed = values[slot.key];
+      const hasCommitted =
+        committed !== undefined && committed !== null && committed !== "";
+      // 未提交过的默认值：按范围夹取（声明了 minimum>0 的槽位不该显示 0），
+      // 且**不参与**越界判定（0 从未上送，不该弹提示）。
+      const current = hasCommitted
+        ? Number(committed)
+        : clampToRange(DEFAULT_NUMBER_VALUE, range);
       const outOfRange =
-        rangeError[slot.key] === true || isOutOfRange(current, range);
+        rangeError[slot.key] === true ||
+        (hasCommitted && isOutOfRange(current, range));
       return (
         <Space key={slot.key} wrap size={8}>
           {label(slot)}
           <InputNumber
-            min={range.min}
+            // 下界兜底 0：场景配置未声明范围时仍保留旧的下界（防负数入槽位）。
+            min={range.min ?? 0}
             max={range.max}
             value={current}
-            onChange={(v) => onChange(slot.key, v === null ? undefined : Number(v))}
+            onChange={(v) => {
+              const next = v === null ? undefined : Number(v);
+              onChange(slot.key, next);
+              // 值已进得来 ⇒ 重新判定提示状态（控件会把越界值夹到边界）。
+              setRangeError((prev) => ({
+                ...prev,
+                [slot.key]: next !== undefined && isOutOfRange(next, range),
+              }));
+            }}
             onInput={(text: string) => {
               const trimmed = text.trim();
               const parsed = Number(trimmed);
@@ -193,6 +221,10 @@ export default function ScenarioAdvancedParams({
                 isOutOfRange(parsed, range);
               setRangeError((prev) => ({ ...prev, [slot.key]: bad }));
             }}
+            // 失焦：控件把越界输入夹回合法边界 ⇒ 清掉提示（否则永久残留）。
+            onBlur={() =>
+              setRangeError((prev) => ({ ...prev, [slot.key]: false }))
+            }
           />
           {outOfRange && (
             <Text type="danger" style={{ fontSize: 12 }}>

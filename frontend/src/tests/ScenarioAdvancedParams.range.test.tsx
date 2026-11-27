@@ -79,6 +79,15 @@ const PLAIN_NUMBER_SLOT: CopilotScenarioSlot = {
   label: "某个计数",
 };
 
+/** 声明了正数下界的 number 槽位（默认值 0 越界 ⇒ 默认值必须夹取）。 */
+const POSITIVE_MIN_SLOT: CopilotScenarioSlot = {
+  key: "anchorDay",
+  type: "number",
+  label: "月度周期锚点日",
+  minimum: 1,
+  maximum: 28,
+};
+
 describe("ScenarioAdvancedParams number 槽位范围", () => {
   it("按场景声明的限制取值范围（aria-valuemin / aria-valuemax）", () => {
     renderParams([PERIOD_INDEX_SLOT]);
@@ -88,11 +97,11 @@ describe("ScenarioAdvancedParams number 槽位范围", () => {
     expect(input.getAttribute("aria-valuemax")).toBe("0");
   });
 
-  it("未声明范围时不加范围限制", () => {
+  it("未声明范围时保留下界 0（防负数入槽位）", () => {
     renderParams([PLAIN_NUMBER_SLOT]);
 
     const input = screen.getByRole("spinbutton");
-    expect(input.getAttribute("aria-valuemin")).toBeNull();
+    expect(input.getAttribute("aria-valuemin")).toBe("0");
     expect(input.getAttribute("aria-valuemax")).toBeNull();
   });
 
@@ -132,5 +141,30 @@ describe("ScenarioAdvancedParams number 槽位范围", () => {
     await waitFor(() => {
       expect(slotValues().periodIndex).toBe(-1);
     });
+  });
+
+  it("失焦后越界提示不残留（值已合法）", async () => {
+    const user = userEvent.setup();
+    renderParams([PERIOD_INDEX_SLOT]);
+
+    const input = screen.getByRole("spinbutton");
+    await user.type(input, "1");
+    await screen.findByText(/必须在/);
+
+    // 失焦 ⇒ antd 把值夹回合法边界（1 → 0）⇒ 提示必须消失
+    await user.tab();
+
+    await waitFor(() => {
+      expect(screen.queryByText(/必须在/)).toBeNull();
+    });
+  });
+
+  it("默认值按范围夹取（声明正数下界时显示下界，不显示 0）", () => {
+    renderParams([POSITIVE_MIN_SLOT]);
+
+    const input = screen.getByRole("spinbutton");
+    expect(input.getAttribute("aria-valuenow")).toBe("1");
+    // 未提交过的默认值不该触发越界提示
+    expect(screen.queryByText(/必须在/)).toBeNull();
   });
 });

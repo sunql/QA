@@ -24,6 +24,11 @@ updated: 2026-11-27
 | 后续修 | `00ab0ca5` | 修行选择**串选**（rowKey 补订单号）+ 「勾了却提示请先勾选」（key 格式不一致）+ **所有行都可催**（拆三处状态/脏行限制，含后端回查不再按 openQty 过滤） |
 | 后续修 | `dcbd0d98` | 欠交量异常行加**红色标识**（迁移 0173 加 `is_dirty`），要求重点核对 |
 
+> ⚠️ **生产当前状态（2026-11-27 实测）**：alembic = **0172**、前端 bundle =
+> `index-D4h2y-ri.js` ⇒ 第一批催货包已上线，但**带两个 bug**（同号行串选、
+> 只能催未到货行）、**无红色标识**、且后端回查仍按 openQty 过滤。
+> ⇒ **本批必须整体替换两个镜像**（不是只换前端）。
+
 > **PR #187 已合入 main**（merge commit `946e7b3e`，2026-11-27 08:26）；镜像构建源
 > `dad443c7` 与合并后 main 的**运行时代码逐字一致**
 > （`git diff dad443c7 946e7b3e -- backend/app backend/alembic frontend/src` 为空；
@@ -33,17 +38,19 @@ updated: 2026-11-27
 > 该 PR 在镜像构建**之后**才合入 main ⇒ 本包**不含**那两处修复；若生产「本体发现」
 > 正被那些 CLOB 表困扰，需按 `origin/main @ 8aab4023` **重建镜像**并重算 sha256。
 
-### 0.2 迁移表（`0171 → 0173`）
+### 0.2 迁移表（**本批只带 `0172 → 0173`**）
+
+> ⚠️ **生产当前已在 `0172`**（2026-11-27 实测：`select version_num from alembic_version` = 0172）
+> —— 第一批催货包已上线（前端 bundle `index-D4h2y-ri.js`）。
+> ⇒ 本批**不是**从 0171 起，而是 **0172 → 0173**（只加一列）。
 
 | revision | 内容 | 数据回填 | 可逆性 |
 |---|---|---|---|
-| `0172` | 新建 3 张表：`procurement_chase_draft` / `procurement_chase_line` / `procurement_chase_decision` | **无**（纯建表） | `downgrade 0171` ⇒ **drop 三张表** |
-| `0173` | `procurement_chase_line` 加 `is_dirty`（bool, not null, default false）—— 欠交量异常（≥ 1,000,000）标记，催货单上打**红色标识**要求重点核对 | **无**（纯加列） | `downgrade 0172` ⇒ drop 该列 |
+| `0173` | `procurement_chase_line` 加 `is_dirty`（bool, not null, default false）—— 欠交量异常（≥ 1,000,000）标记，催货单上打**红色标识**要求重点核对 | **无**（纯加列） | `downgrade 0172` ⇒ **只 drop 这一列** |
 
-**回滚边界（PRE_VER）= `0171`**。
+**回滚边界（PRE_VER）= `0172`**。
 
-⚠️ `downgrade 0171` 会 **drop 三张表** ⇒ 回滚后**催货单数据全丢**（新建的单据本来也没业务价值，
-但记录在此以免误判「回滚无损」）。
+✅ **回滚不丢催货单数据**（本批只加列，downgrade 只删列；三张催货表与其中的行全部保留）。
 
 ### 0.3 镜像批次边界（重要）
 
@@ -147,7 +154,7 @@ docker images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' | grep -E 'offl
 # 现役前端 bundle（记录备用，回滚用）
 docker exec qa-frontend sh -c 'ls /usr/share/nginx/html/assets/index-*.js'
 
-# 迁移版本（**不是 0171 ⇒ 停**）
+# 迁移版本（**不是 0172 ⇒ 停**）
 docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -c "select version_num from alembic_version"'
 
@@ -162,7 +169,7 @@ df -h / /var/lib/docker | tail -2
 - ⓪ compose 入口与 §0.2 假设不符 ⇒ 停，先核对再动
 - `config | grep 'image:'` 里 backend / frontend 的镜像引用名**不是** `qa-backend:offline` /
   `qa-system_frontend` ⇒ 停（以实测为准，回写 skill 固定值表）
-- alembic **不是 `0171`** ⇒ 停（别的批次先落地了，需重新评估边界）
+- alembic **不是 `0172`** ⇒ 停（别的批次先落地了，需重新评估边界）
 - 任一健康检查非 200 ⇒ 停
 - 磁盘余量不足（backend tar 431M + 前端 26M + 解压余量）⇒ 停
 
@@ -181,7 +188,7 @@ docker exec qa-postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > "$B
 ls -l "$BACKUP"          # 期望 > 0 字节
 
 # ③ 记录 PRE_VER
-PRE_VER=0171              # 回滚 downgrade 的目标
+PRE_VER=0172              # 回滚 downgrade 的目标（生产当前版本）
 echo "PRE_VER=$PRE_VER  BACKUP=$BACKUP"
 ```
 
@@ -290,21 +297,22 @@ done
 
 ## 7. 回滚
 
-后端回滚**必须先降库**：库在 0172 时，旧镜像（只认得 0171）启动会
-`Can't locate revision identified by '0172'` 直接起不来。
+后端回滚**必须先降库**：库在 0173 时，旧镜像（只认得 0172）启动会
+`Can't locate revision identified by '0173'` 直接起不来。
 
 ```bash
 # ① 停后端与 worker
 qa_compose stop backend agent-orchestration-worker
 
-# ② 用**新镜像**降级到 PRE_VER（0171）—— 会 drop 三张催货表（催货单数据丢失，见 §0.2）
+# ② 用**新镜像**降级到 PRE_VER（0172）—— **只 drop is_dirty 一列**，
+#    催货单三张表与其中的行**全部保留**（见 §0.2）
 docker run --rm --network qa-system_default \
   -v /opt/qa-system/docker/.env:/app/.env:ro \
-  qa-system-backend:amd64-1127-chase01 alembic downgrade 0171
+  qa-system-backend:amd64-1127-chase01 alembic downgrade 0172
 
 # ③ 复核
 docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-  -c "select version_num from alembic_version"'          # 期望 0171
+  -c "select version_num from alembic_version"'          # 期望 0172
 
 # ④ 换回旧镜像并拉起
 docker tag qa-backend:pre-1127-chase01         qa-backend:offline

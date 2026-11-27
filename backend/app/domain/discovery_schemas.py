@@ -97,9 +97,18 @@ class DiscoverySnapshotSummaryRead(CamelModel):
 
 
 class DiscoverySnapshotRead(DiscoverySnapshotSummaryRead):
-    """快照详情（含内容）。"""
+    """快照详情（含内容）。
+
+    `unprofilable_tables`：快照里**不可剖析**的表名（回收站对象等，表名含
+    标识符白名单外的字符）⇒ 前端选择器不显示它们，并提示「已隐藏 N 张」。
+    口径与 `domain.sql_identifier.isValidIdentifier` 同源。
+    """
 
     snapshot: dict[str, Any]
+    unprofilable_tables: list[str] = Field(
+        default_factory=list,
+        description="快照里不可剖析的表名（回收站对象等；前端应不显示）",
+    )
 
 
 class DiscoverySnapshotPage(CamelModel):

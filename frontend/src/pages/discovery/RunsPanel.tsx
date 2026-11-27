@@ -15,6 +15,11 @@ import type { ColumnsType } from "antd/es/table";
 import { useTranslation } from "../../i18n";
 import { useAuthStore } from "../../stores/authStore";
 import { getSnapshot, listSources, listSnapshots, startRun, type DiscoverySource } from "../../api/discoveryAdmin";
+import {
+  buildDiscoveryTableOptions,
+  matchTableOption,
+  type DiscoveryTableOption,
+} from "../../utils/discoveryTableFilter";
 import { listDiscoveryRuns, type DiscoveryRunSummary } from "../../api/discoveryReview";
 
 const STATUS_COLOR: Record<string, string> = { RUNNING: "processing", SUCCEEDED: "success", FAILED: "error" };
@@ -28,8 +33,12 @@ export default function RunsPanel() {
   const [sources, setSources] = useState<DiscoverySource[]>([]);
   const [loading, setLoading] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const [tables, setTables] = useState<Array<{ value: string; label: string }>>([]);
+  const [tables, setTables] = useState<DiscoveryTableOption[]>([]);
   const [tablesLoading, setTablesLoading] = useState(false);
+  /** 被隐藏的「不可剖析」表（Oracle 回收站对象等）—— 只提示，不列出来。 */
+  const [hiddenTableNames, setHiddenTableNames] = useState<string[]>([]);
+  /** 选择器的搜索词（用于把「按列名命中」标注到选项上）。 */
+  const [tableQuery, setTableQuery] = useState("");
   const [form] = Form.useForm();
 
   const load = useCallback(async () => {
@@ -66,13 +75,17 @@ export default function RunsPanel() {
         return;
       }
       const detail = await getSnapshot(latest.id);
-      const options = (detail.snapshot.tables ?? []).map((table) => ({
-        value: table.tableName,
-        label: `${table.owner ? `${table.owner}.` : ""}${table.tableName}`,
-      }));
-      setTables(options);
+      // 不可剖析的表（回收站对象等）**不显示** —— 它们必然被剖析护栏拒拼，
+      // 显示出来只会让用户选到然后整轮运行失败（见 discoveryTableFilter 注释）。
+      const built = buildDiscoveryTableOptions(
+        detail.snapshot.tables ?? [],
+        detail.unprofilableTables ?? [],
+      );
+      setTables(built.options);
+      setHiddenTableNames(built.hiddenTableNames);
     } catch {
       setTables([]);
+      setHiddenTableNames([]);
     } finally {
       setTablesLoading(false);
     }
@@ -109,6 +122,8 @@ export default function RunsPanel() {
             onClick={() => {
               form.resetFields();
               setTables([]);
+              setHiddenTableNames([]);
+              setTableQuery("");
               setCreateOpen(true);
             }}
           >
@@ -135,6 +150,8 @@ export default function RunsPanel() {
             setCreateOpen(false);
             form.resetFields();
             setTables([]);
+            setHiddenTableNames([]);
+            setTableQuery("");
             await load();
           } catch {
             // interceptor 已提示
@@ -155,9 +172,57 @@ export default function RunsPanel() {
           <Form.Item
             name="tables"
             label={t("discoveryAdmin.tables")}
-            extra={t("discoveryAdmin.tablesHint")}
+            extra={
+              <>
+                {t("discoveryAdmin.tablesHint")}
+                {hiddenTableNames.length > 0 && (
+                  <div style={{ marginTop: 4 }}>
+                    {t("discoveryAdmin.tablesHidden", {
+                      count: String(hiddenTableNames.length),
+                    })}
+                  </div>
+                )}
+              </>
+            }
           >
-            <Select mode="multiple" allowClear loading={tablesLoading} options={tables} placeholder={t("discoveryAdmin.tablesPlaceholder")} />
+            <Select
+              mode="multiple"
+              allowClear
+              showSearch
+              loading={tablesLoading}
+              options={tables}
+              placeholder={t("discoveryAdmin.tablesPlaceholder")}
+              /** 自定义过滤（**替换** antd 默认过滤，不是叠加）：表名 / 属主.表名 /
+               *  **列名** 都算命中 ⇒ 能「找出包含某列的表」。 */
+              filterOption={(input: string, option) =>
+                !option ||
+                matchTableOption(
+                  option as unknown as DiscoveryTableOption,
+                  input,
+                ).matched
+              }
+              onSearch={setTableQuery}
+              optionRender={(option) => {
+                const matched = option
+                  ? matchTableOption(
+                      option as unknown as DiscoveryTableOption,
+                      tableQuery,
+                    )
+                  : { matched: true, columnHit: null };
+                return (
+                  <span>
+                    {option.label}
+                    {matched.columnHit && (
+                      <span style={{ marginLeft: 6, opacity: 0.65 }}>
+                        {t("discoveryAdmin.tablesColumnHit", {
+                          column: matched.columnHit,
+                        })}
+                      </span>
+                    )}
+                  </span>
+                );
+              }}
+            />
           </Form.Item>
           <Form.Item name="withCandidates" label={t("discoveryAdmin.withCandidates")} valuePropName="checked">
             <Switch />

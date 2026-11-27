@@ -131,12 +131,16 @@ def test_aggregate_support_is_decided_by_type(
 
 
 def test_unsupported_aggregates_are_omitted_from_sql() -> None:
+    """**行为升级（2026-11-27）**：CLOB 现在整列被剔除（含空值计数）——
+    Oracle 连 `COUNT(clob_col)` 都报 ORA-00932（用户实测），旧裁剪只去掉
+    DISTINCT/MIN/MAX 是不够的。本用例改为钉「构造层拒绝整列不可聚合的列」；
+    「JSON 这类 supportsDistinct=False 但可 COUNT 的类型仍只做空值计数」
+    由 test_discovery_unprofilable_tables.py::test_null_count_only_column_produces_count_only_sql 覆盖。
+    """
     columns = profileColumnsFromSnapshot(_table([_column("PAYLOAD", "CLOB")]))
 
-    sql = buildColumnStatsSql("SUPPLIER", "THBI", columns, dialect="oracle")
-
-    assert "COUNT(DISTINCT" not in sql
-    assert "MIN(" not in sql and "MAX(" not in sql
+    with pytest.raises(ProfileSqlError, match="整列不可聚合"):
+        buildColumnStatsSql("SUPPLIER", "THBI", columns, dialect="oracle")
 
 
 # ---------------------------------------------------------------------------

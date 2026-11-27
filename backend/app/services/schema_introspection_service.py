@@ -38,6 +38,7 @@ from app.domain.schemas import (
     SchemaIntrospectResponse,
     TableSchemaRead,
 )
+from app.domain.sql_identifier import isValidIdentifier
 from app.infrastructure.business_db_pool import BusinessDbAdapter, get_adapter
 from app.services.messages_zh import (
     MSG_DATASOURCE_SCHEMA_READ_FAILED,
@@ -560,19 +561,47 @@ class SchemaIntrospectionService:
 
     @staticmethod
     def _assembleTables(merged: dict[str, dict]) -> list[TableSchemaRead]:
-        return [
-            TableSchemaRead(
-                table_name=name,
-                owner=info["owner"],
-                columns=[ColumnSchemaRead(**c) for c in info["columns"]],
-                primary_keys=info["primary_keys"],
-                foreign_keys=[ForeignKeySchemaRead(**fk) for fk in info["foreign_keys"]],
-                # feat-ontology-import-comment：DB 表注释透传；空表（无 _annotateComments 调用）
-                # 时 info["comment"] 缺 key，Pydantic 默认 None，向后兼容老数据源。
-                comment=info.get("comment"),
+        """把合并结果组装成表清单；**过滤掉不能作 SQL 标识符的表**。
+
+        为什么过滤（2026-11-27，feat/discovery-skip-unprofilable-tables）：
+        Oracle 的**回收站对象**（`BIN$W81vJmasuczgY0bNqMBvog==$0`）含 `=` ⇒ 不在
+        标识符白名单内 ⇒ 拼 SQL 前必被护栏拒 ⇒ **一次发现运行会因为「快照里混进
+        一张回收站表」而整轮失败**（用户实测：`ProfileSqlError: 表名不是合法标识符`）。
+
+        过滤点选在**内省的出口**（`_assembleTables` 是全量/分批两条路共用的汇合处）
+        ⇒ schema 缓存、快照、发现源的表选择器**全都干净** ⇒ 用户根本看不到这些表。
+        口径与 `discovery_profile_sql.assertIdentifier` 同源（`domain.sql_identifier`）
+        ⇒ 两边不会漂移。
+
+        ⚠️ 老快照（过滤前捕获的）里仍可能有回收站表 ⇒ 剖析层另有兜底：单表非法
+        标识符时**跳过该表**而不是让整轮运行失败（见 `discovery_profiler._collect`）。
+        """
+        tables: list[TableSchemaRead] = []
+        dropped: list[str] = []
+        for name, info in sorted(merged.items()):
+            if not isValidIdentifier(name):
+                dropped.append(name)
+                continue
+            tables.append(
+                TableSchemaRead(
+                    table_name=name,
+                    owner=info["owner"],
+                    columns=[ColumnSchemaRead(**c) for c in info["columns"]],
+                    primary_keys=info["primary_keys"],
+                    foreign_keys=[ForeignKeySchemaRead(**fk) for fk in info["foreign_keys"]],
+                    # feat-ontology-import-comment：DB 表注释透传；空表（无 _annotateComments 调用）
+                    # 时 info["comment"] 缺 key，Pydantic 默认 None，向后兼容老数据源。
+                    comment=info.get("comment"),
+                )
             )
-            for name, info in sorted(merged.items())
-        ]
+        if dropped:
+            # 不静默：过滤了几张、是谁 —— 操作员要能看见「库里有 N 张表被跳过」。
+            logger.warning(
+                "内省过滤掉 %d 个不可作 SQL 标识符的表（Oracle 回收站对象等）：%s",
+                len(dropped),
+                dropped[:10],
+            )
+        return tables
 
     # ===== 缓存 =====
 

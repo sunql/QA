@@ -284,8 +284,30 @@ done
 6. **回归核验**：到货跟踪卡、待到货场景仍正常（无「本体绑定缺失」类报错）。
 
 > ⚠️ **2026-11-27 生产实测：THBI Oracle（192.168.205.70:1521）从生产机「Connection refused」**
-> （**宿主机直连与容器内直连结果一致** ⇒ 与容器网络/我们改的配置无关，是生产机 ↔ Oracle
-> 之间的单向阻断 / Oracle 侧监听问题，已升级 DBA）。
+> （**宿主机直连与容器内直连结果一致** ⇒ 与容器网络无关）。
+>
+> **但不是「发版引起的」**：1126 那批的用户确认记录写着「绑定手工补录后**功能已可用**」⇒
+> 生产**那时能连** ⇒ 连通性是在 1126 之后、今天之前断的。
+> ⚠️ 生产侧的业务库路径**只有那一个单点证据**（1126 的生产验收验的是 403，鉴权层就挡了，
+> 不碰业务库；真实业务库请求只在 dev 栈验过）⇒ 缺少系统性回归检查，这也是它「今天才暴露」的原因。
+>
+> **判别（生产机跑）**：
+> ```bash
+> # ① 生产机连**另一个** Oracle（LQ-Supply 10.179.1.81:1522）
+> timeout 5 bash -c 'cat < /dev/null > /dev/tcp/10.179.1.81/1522' && echo OTHER_OK || echo OTHER_REFUSED
+> # ② 用**回滚锚点的旧镜像**连一次（排除镜像差异）
+> docker run --rm --network qa-system_default -v /opt/qa-system/docker/.env:/app/.env:ro \
+>   qa-backend:pre-1127-chase01 python -c "
+> import socket
+> for h,p in [('192.168.205.70',1521),('10.179.1.81',1522)]:
+>     s=socket.socket(); s.settimeout(5)
+>     try: s.connect((h,p)); print(h,p,'OK')
+>     except Exception as e: print(h,p,'FAIL',e)
+>     finally: s.close()"
+> ```
+> - ① OTHER_OK ⇒ 只有 1521 被拒 ⇒ Oracle 主机侧针对该端口（监听器/防火墙），找 DBA；
+> - ① OTHER_REFUSED ⇒ 生产机出站被整体封，找网络/DBA；
+> - ② 旧镜像同样拒 ⇒ 与本批镜像无关（纯环境）。
 > ⇒ **§6.3 的端到端部分整段挂起**（催货回查走的就是 THBI）：
 > · §6.1 的 `chase_drafts` 401/403 与 §6.2 的 bundle 文案**仍可验**（不碰业务库）；
 > · §6.3 端到端**待业务库恢复后**再验，**不要在未验的情况下签收**。

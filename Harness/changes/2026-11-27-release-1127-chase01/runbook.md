@@ -22,9 +22,10 @@ updated: 2026-11-27
 | #187 | `e7df635c` | 前端：Copilot 到货跟踪卡行级勾选 + 「按供应商创建催货单」+ 催货单管理页 + i18n |
 | #187 | `dad443c7` | 三张催货表入册采购范围裁决目录（准则 H，CI 抓到的真净新增失败） |
 
-> ⚠️ **PR #187 尚未合入 main**。本方案按「合并 #187 后再发版」写；发版前请确认
-> `origin/main` 已包含 `dad443c7`（`git log origin/main --oneline | head -5`）。
-> **本批不含 main 上未合入的任何分支改动。**
+**PR #187 已合入 main**（merge commit `946e7b3e`，2026-11-27 08:26）。
+镜像构建源 `dad443c7` 与合并后 main 的**运行时代码逐字一致**
+（`git diff dad443c7 946e7b3e -- backend/app backend/alembic frontend/src` 为空；
+两者仅差本发版方案文档）。**本批不含 main 上未合入的任何分支改动。**
 
 ### 0.2 迁移表（`0171 → 0172`）
 

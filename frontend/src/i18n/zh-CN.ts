@@ -8,7 +8,7 @@ export const zhCN = {
 },
   auth: {
   login: {
-    title: "登录 · 泰鸿智脑",
+    title: "登录 · {brand}",
     username: "用户名",
     password: "密码",
     rememberMe: "记住我",
@@ -76,7 +76,8 @@ export const zhCN = {
   suggestedThresholds: "建议阈值"
 },
   appLayout: {
-  brand: "泰鸿智脑",
+  // 注：品牌名不再放在 i18n 字典里 —— 它是**运行时参数**（system_config 的
+  // BRAND_NAME / BRAND_NAME_EN / BRAND_SHORT_NAME），见 src/branding/defaults.ts。
   menu: {
     models: "模型配置",
     embeddings: "Embedding 服务",

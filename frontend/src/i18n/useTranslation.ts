@@ -2,7 +2,7 @@
 
 调用方无需改动：
 - t(key, vars?) 返回 string
-- locale 固定为 "zh-CN"
+- locale 为当前语言（"zh-CN" | "en-US"，随 LanguageSwitch 变化）
 - {name} 占位符语法不变
 - 缺 key 返回 key 本身
 - 缺变量保留 {name} 字面量
@@ -13,7 +13,7 @@ import type { Vars } from "./types";
 
 export function useTranslation(): {
   t: (key: string, vars?: Vars) => string;
-  locale: "zh-CN";
+  locale: "zh-CN" | "en-US";
 } {
   const { t: i18nT, i18n } = useI18nextTranslation("translation", {
     useSuspense: false,
@@ -31,5 +31,9 @@ export function useTranslation(): {
     [i18nT],
   );
 
-  return { t, locale: (i18n.language ?? "zh-CN") as "zh-CN" };
+  // locale 反映**当前实际语言**（LanguageSwitch 可切到 en-US）。类型此前写死
+  // "zh-CN" 是个谎言：调用方写 `locale === "en-US"` 会被 TS 判为「永不相等」
+  // 而报错，于是各页面只能按中文硬编码分支。品牌名按语言取值（中文名 / 英文名）
+  // 就依赖这个真实类型。
+  return { t, locale: (i18n.language ?? "zh-CN") as "zh-CN" | "en-US" };
 }

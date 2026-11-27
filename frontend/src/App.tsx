@@ -76,6 +76,7 @@ import DocumentsPage from "./pages/DocumentsPage";
 import OntologyPropertyAdminPage from "./pages/OntologyPropertyAdminPage";
 import { setMessageApi } from "./api/client";
 import { useRestoreUser } from "./hooks/useRestoreUser";
+import { useBrandingStore } from "./stores/brandingStore";
 
 export default function App() {
   // 把 antd ``App`` 提供的 message 实例注入到 httpClient 拦截器。
@@ -86,6 +87,18 @@ export default function App() {
   useEffect(() => {
     setMessageApi(message);
   }, [message]);
+
+  // 品牌配置（feat-configurable-brand）：系统标题 / 名称是**运行时参数**
+  // （system_config），启动时拉一次；取不到就保留前端兜底默认值（零闪烁）。
+  const loadBranding = useBrandingStore((s) => s.loadBranding);
+  const brandTitle = useBrandingStore((s) => s.branding.brandTitle);
+  useEffect(() => {
+    void loadBranding();
+  }, [loadBranding]);
+  // 浏览器标签页标题（index.html 的静态 <title> 只是 JS 加载前的兜底）。
+  useEffect(() => {
+    document.title = brandTitle;
+  }, [brandTitle]);
 
   // 刷新恢复：persist 只存 token，不存 user（partialize）⇒ 直接刷新后
   // `user === null`，所有按角色收敛的写入口（词条/指标等）都会消失。

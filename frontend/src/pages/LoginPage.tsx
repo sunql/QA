@@ -4,14 +4,21 @@ import { Form, Input, Button, Checkbox, message } from "antd";
 import { useTranslation } from "react-i18next";
 import { RobotOutlined } from "@ant-design/icons";
 import { useAuthStore } from "../stores/authStore";
+import { useBrandingStore } from "../stores/brandingStore";
 import type { AppError } from "../api/client";
 
 export default function LoginPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const nav = useNavigate();
   const loc = useLocation();
   const token = useAuthStore((s) => s.token);
   const login = useAuthStore((s) => s.login);
+  // 品牌名是运行时参数（system_config），登录页标题按当前语言取对应名字。
+  // 本页直接用 react-i18next 的 useTranslation（不经 ../../i18n 包装）⇒
+  // 当前语言从 i18n.language 读。
+  const branding = useBrandingStore((s) => s.branding);
+  const brandLabel =
+    i18n.language === "en-US" ? branding.brandNameEn : branding.brandName;
   const [submitting, setSubmitting] = useState(false);
 
   if (token) {
@@ -63,7 +70,7 @@ export default function LoginPage() {
       <div className="login-card">
         <div className="login-brand">
           <RobotOutlined className="login-brand-icon" />
-          <h2 className="login-title">{t("auth.login.title")}</h2>
+          <h2 className="login-title">{t("auth.login.title", { brand: brandLabel })}</h2>
           <div className="login-tagline">{t("auth.login.tagline")}</div>
         </div>
         <Form layout="vertical" onFinish={onFinish} requiredMark={false}>

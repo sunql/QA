@@ -460,6 +460,28 @@ pass KPI 暂失 Tier A（degraded 注入，不阻断，但口径不完整）。
    degraded pass 落库 ⇒ 计数既漏掉干净 pass、又混入 degraded pass；闸门前须另查
    `after_json->>'degraded'='true'` 行数为 0，并逐 KPI diagnose 确认 `degraded=false`。
 
+## 品牌名 / 系统标题（2026-11-27）
+
+系统标题 / 名称（浏览器标签页、侧边栏展开与折叠态、登录页标题）是**运行时参数**，
+改**不用发版**：admin「系统配置」页改 `system_config` 的 4 行即可（有 audit_log）。
+
+| key | 含义 | 默认值 |
+|---|---|---|
+| `BRAND_NAME` | 品牌主名称（中文） | 泰鸿智脑 |
+| `BRAND_NAME_EN` | 品牌英文名 | Taihong ZhiNao |
+| `BRAND_SHORT_NAME` | 侧边栏折叠态缩写 | TH |
+| `BRAND_TITLE` | 浏览器标签页标题（**留空 ⇒ 跟随主名称**） | 留空（未配置） |
+
+- 读端点：`GET /api/v1/branding`（**公开**，未登录也能读 —— 登录页要显示名称）。
+- 写端点：`PUT /api/v1/admin/system-config/{key}`（admin-only）。
+- 生效：前端每次刷新页面重新读；`document.title` 与侧边栏同步更新。
+- ⚠️ **不要**手工跑 `python -m scripts.seed_system_config` 来「刷新」品牌 ——
+  该脚本的阈值部分是 DO UPDATE（默认值下发通道），会**重置 admin 调过的阈值**。
+  品牌种子 `seed_brand_config` 是 insert-if-absent（不覆盖已有值），
+  且已挂在**启动链**里：发版后品牌键一定存在，但值保持不变。
+- ⚠️ favicon 的字母（`index.html` 内联 SVG）**不参与配置化** —— 换品牌首字母变了
+  要一并改前端镜像（守卫 `frontend/src/tests/brandRenameGuard.test.ts` 会提醒）。
+
 ## 日志
 
 - 后端日志级别由 `LOG_LEVEL` 控制。

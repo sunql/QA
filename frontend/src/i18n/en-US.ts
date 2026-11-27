@@ -8,7 +8,7 @@ export const enUS = {
 },
   auth: {
   login: {
-    title: "Sign in to Taihong ZhiNao",
+    title: "Sign in to {brand}",
     username: "Username",
     password: "Password",
     rememberMe: "Remember me",
@@ -76,7 +76,7 @@ export const enUS = {
   suggestedThresholds: "Suggested Thresholds"
 },
   appLayout: {
-  brand: "Taihong ZhiNao",
+  // 品牌名是运行时参数（system_config），不在 i18n 字典里 —— 见 src/branding/defaults.ts。
   menu: {
     models: "Model Config",
     embeddings: "Embedding",

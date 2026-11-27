@@ -68,15 +68,15 @@ updated: 2026-11-27
 
 | 镜像 tag | 平台 | Image ID | 说明 |
 |---|---|---|---|
-| `qa-system-backend:amd64-1127-chase01` | linux/amd64 | `5a0ab312e6fa` | backend + agent-orchestration-worker 同镜像 |
-| `qa-system-frontend:amd64-1127-chase01` | linux/amd64 | `17fd38d9a64c` | nginx + 静态 bundle ``index-D4h2y-ri.js`` |
+| `qa-system-backend:amd64-1127-chase01` | linux/amd64 | `658c57c4d9f5` | backend + agent-orchestration-worker 同镜像 |
+| `qa-system-frontend:amd64-1127-chase01` | linux/amd64 | `50fd6774d0c9` | nginx + 静态 bundle ``index-DynAvBI9.js`` |
 
 ### 1.2 传输包
 
 | 文件 | 大小 | sha256 |
 |---|---|---|
-| `qa-backend-amd64-1127-chase01.tar.gz` | 491M | `893cc2246ceb3c19f7a0d20ae944eb6f5201cd4468e5487487959127ad507f0d` |
-| `qa-frontend-amd64-1127-chase01.tar.gz` | 26M | `e23fd220425759ce5c029cc884daf21595be378ed2bcda9668aa07eb8af967ba` |
+| `qa-backend-amd64-1127-chase01.tar.gz` | 491M | `4a112c38b57419cb37ed6de76371cdcff81e3fe40c2a87bac6c05fab9f4892c6` |
+| `qa-frontend-amd64-1127-chase01.tar.gz` | 26M | `e51dafcfa32d8bac402d756b562baeee7dd3c23ec4c176e5cc81f9f4da15c3a0` |
 
 ### 1.3 镜像内容自证（构建后实测）
 
@@ -91,7 +91,7 @@ docker run --rm --platform linux/amd64 --entrypoint sh qa-system-backend:amd64-1
 # frontend：bundle 文案（中文 key 的字面量会进 bundle）
 docker run --rm --platform linux/amd64 --entrypoint sh qa-system-frontend:amd64-1127-chase01 -c \
   'ls /usr/share/nginx/html/assets/index-*.js'
-for t in "按供应商创建催货单" "催货单" "已隐藏"; do
+for t in "按供应商创建催货单" "催货单" "数量异常·请重点核对"; do
   n=$(docker run --rm --platform linux/amd64 --entrypoint sh qa-system-frontend:amd64-1127-chase01 -c \
       "grep -cF '$t' /usr/share/nginx/html/assets/index-*.js" || true)
   echo "$t = $n"      # 期望 ≥1
@@ -105,6 +105,10 @@ backend（`docker run --rm --platform linux/amd64`）：
 | 项 | 实测 |
 |---|---|
 | `alembic/versions/0172_procurement_chase.py` | ✅ 存在 |
+| `alembic/versions/0173_procurement_chase_line_dirty_flag.py` | ✅ 存在 |
+| `app/services/procurement_chase_service.py` → `_isDirtyQty` | ✅ 命中 3 处 |
+| `app/services/procurement_chase_lookup.py` → `_openQtyCond`（**不得**出现：所有行可催） | ✅ 命中 0 处 |
+| `app/domain/procurement_chase_models.py` → `is_dirty` | ✅ |
 | `app/main.py` → `procurement_chase` 挂载 | ✅ 命中 2 处 |
 | `app/services/procurement_command_port.py` → `sendChase` | ✅ 命中 2 处 |
 | `app/services/procurement_chase_service.py` → `createDraftFromPending` | ✅ 命中 1 处 |
@@ -115,9 +119,11 @@ frontend：
 
 | 项 | 实测 |
 |---|---|
-| bundle | `index-D4h2y-ri.js` |
+| bundle | `index-DynAvBI9.js` |
 | `按供应商创建催货单` | ✅ 命中 1 |
 | `催货单` | ✅ 命中 1 |
+| `数量异常·请重点核对`（红标） | ✅ 命中 1 |
+| `行数量异常，请重点核对`（表头计数） | ✅ 命中 1 |
 
 ## 2. Phase 0 生产预检（只读）
 
@@ -248,8 +254,8 @@ docker exec qa-backend python -c "import app.services.procurement_chase_service 
 ### 6.2 前端（代码探针）
 
 ```bash
-docker exec qa-frontend sh -c 'ls /usr/share/nginx/html/assets/index-*.js'   # 期望 `index-D4h2y-ri.js`
-for t in "按供应商创建催货单" "催货单" "已隐藏"; do
+docker exec qa-frontend sh -c 'ls /usr/share/nginx/html/assets/index-*.js'   # 期望 `index-DynAvBI9.js`
+for t in "按供应商创建催货单" "催货单" "数量异常·请重点核对"; do
   n=$(docker exec qa-frontend sh -c "grep -cF '$t' /usr/share/nginx/html/assets/index-*.js" || true)
   echo "$t = $n"      # 期望 ≥1
 done

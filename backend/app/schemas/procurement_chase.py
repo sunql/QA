@@ -93,5 +93,7 @@ class ChaseFromPendingResultRead(ChaseModel):
 
 
 class ChaseDecisionBody(ChaseModel):
-    actor: str = Field(min_length=1, max_length=64)
+    """决策 body：只有 note —— **actor 从登录身份取**（`requireAdmin` 的 userId），
+    不收客户端传的 actor（可伪造；与 RFQ 的 `RfqDecisionBody` 同口径）。"""
+
     note: str | None = Field(default=None, max_length=2000)

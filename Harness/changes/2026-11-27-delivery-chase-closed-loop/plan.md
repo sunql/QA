@@ -114,6 +114,19 @@ POST   /chase/drafts/{id}/send            → SENDING → SENT（经 command por
 | 5 | 前端：卡片选行 + 催货单管理页 + i18n |
 | 6 | 单测/集成测试 + e2e |
 
+## 4.1 落地状态（2026-11-27）
+
+- ✅ 迁移 0172（三张表）+ ORM + models.py 登记
+- ✅ 状态机（复制矩阵，刻意解耦）+ 命令端口 sendChase + 模拟器
+- ✅ 服务层（from-pending 回查分组 / 幂等 / validate / approve / reject / cancel / send）
+- ✅ API 路由（requireAdmin + rateLimit；非法迁移 ⇒ 409 ConflictError）
+- ✅ 治理守卫登记（6 写 + 2 admin 读）
+- ✅ 前端：Copilot 到货跟踪卡选行（行级 checkbox，只允许 notArrived 非脏行）+
+  「按供应商创建催货单」+ 催货单管理页（procurement/chase 路由）+ i18n
+- ✅ 测试：后端 unit 10 + integration 8 + 治理守卫 51；前端 api 4 例
+- **业务拍板**：① 审批链路保留不做开关；② SENT 即终态（答复回流二期）；
+  ③ 自动升级不做（二期）
+
 ## 5. 待确认（业务输入）
 
 1. 催货单**要不要审批**（四眼），还是采购员可直接发？—— 本方案默认保留四眼

@@ -223,10 +223,13 @@ describe("DeliveryTrackingResultCard", () => {
 
     await user.click(screen.getByText(/物料明细/));
 
-    const dirtyRow = screen.getByText("DIRTY-CODE-1").closest("tr")!;
+    // 未到货 tab 现在默认展开行明细 + 行 checkbox ⇒ 同一物料码可能在
+    // 「行明细」与「展开的明细表」各出现一次 ⇒ 用 getAllByText 取第一行。
+    const dirtyCell = screen.getAllByText("DIRTY-CODE-1")[0]!;
+    const dirtyRow = dirtyCell.closest("tr")!;
     expect(within(dirtyRow).getByText(/不参与统计/)).toBeTruthy();
 
-    const cleanRow = screen.getByText("CLEAN-CODE-1").closest("tr")!;
+    const cleanRow = screen.getAllByText("CLEAN-CODE-1")[0]!.closest("tr")!;
     expect(within(cleanRow).queryByText(/不参与统计/)).toBeNull();
   });
 

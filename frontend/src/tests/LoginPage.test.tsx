@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import LoginPage from "../pages/LoginPage";
 import { useAuthStore } from "../stores/authStore";
+import { useBrandingStore } from "../stores/brandingStore";
 import { authApi } from "../api/auth";
 
 vi.mock("../api/auth");
@@ -19,6 +20,23 @@ describe("LoginPage", () => {
     render(<MemoryRouter><LoginPage /></MemoryRouter>);
     // 不会渲染 form
     expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("标题用配置里的品牌名（i18n 的 {brand} 插值真的生效）", () => {
+    // feat-configurable-brand：标题不再写死品牌名，改由 system_config 决定。
+    // 本用例同时守住 i18next 的**单花括号**占位符语法（本仓 i18n 配置
+    // prefix="{" / suffix="}"，不是 i18next 默认的 {{name}}）—— 写错语法时
+    // 页面会直接显示「登录 · {brand}」字面量。
+    useBrandingStore.setState({
+      branding: {
+        brandName: "泰鸿智云",
+        brandNameEn: "Taihong Cloud",
+        brandShortName: "TC",
+        brandTitle: "泰鸿智云 · 数据智能",
+      },    });
+    render(<MemoryRouter><LoginPage /></MemoryRouter>);
+    expect(screen.getByText("登录 · 泰鸿智云")).toBeInTheDocument();
+    expect(screen.queryByText(/\{brand\}/)).toBeNull();
   });
 
   it("登录成功 mustChangePassword=true 跳 /change-password", async () => {

@@ -4069,6 +4069,19 @@ class SystemConfigUpdate(CamelModel):
     value: str | None = Field(default=None, max_length=4096)
 
 
+class BrandingRead(CamelModel):
+    """品牌配置读视图（feat-configurable-brand）。
+
+    字段来自 `system_config` 的 4 个品牌键（见 `app/services/branding_service.py`），
+    JSON 用 camelCase（`brandName` / `brandNameEn` / `brandShortName` / `brandTitle`）。
+    """
+
+    brand_name: str
+    brand_name_en: str
+    brand_short_name: str
+    brand_title: str
+
+
 # ===========================================================================
 # Phase 1.5: Evaluation Report (feat-dq-evaluation-report)
 # ===========================================================================

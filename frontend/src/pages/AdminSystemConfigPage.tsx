@@ -29,6 +29,10 @@ import {
     updateSystemConfig,
 } from "../api/systemConfig";
 import type { SystemConfig, SystemConfigUpdate } from "../api/systemConfig";
+import { useBrandingStore } from "../stores/brandingStore";
+
+/** 品牌相关键（改完要立刻刷新品牌 store，让页面当场生效）。 */
+const BRAND_KEY_PREFIX = "BRAND_";
 
 export default function AdminSystemConfigPage(): JSX.Element {
     const { t } = useTranslation();
@@ -73,6 +77,11 @@ export default function AdminSystemConfigPage(): JSX.Element {
                 value: values.value === "" ? null : values.value,
             };
             await updateSystemConfig(editing.key, payload);
+            // 改的是品牌键 ⇒ 立刻重拉品牌配置，让侧边栏 / 标签页 / 登录页当场生效
+            // （否则要等下一次刷新页面才看得见，admin 会以为没保存成功）。
+            if (editing.key.startsWith(BRAND_KEY_PREFIX)) {
+                void useBrandingStore.getState().loadBranding();
+            }
             message.success(t("systemConfig.messages.updated"));
             setModalOpen(false);
             void fetchList();

@@ -21,6 +21,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.system_config import SystemConfig
+from app.services.branding_service import (
+    BRAND_NAME_KEY,
+    BRAND_SHORT_NAME_KEY,
+    BRAND_TITLE_KEY,
+)
 from app.services.chart_thresholds import (
     _CHART_HBAR_MIN_ROWS_DEFAULT,
     _CHART_HEATMAP_MIN_COVERAGE_DEFAULT,
@@ -29,7 +34,12 @@ from app.services.chart_thresholds import (
 )
 from app.services.data_summary import FULL_DATA_THRESHOLD
 from app.tests import _pg_support
-from scripts.seed_system_config import CHART_CONFIG_SEEDS, seed_system_config
+from scripts.seed_system_config import (
+    BRAND_CONFIG_SEEDS,
+    CHART_CONFIG_SEEDS,
+    seed_brand_config,
+    seed_system_config,
+)
 
 
 @pytest.fixture()
@@ -120,3 +130,85 @@ async def test_seeded_values_are_read_back_by_the_readers(
         thresholds = await loadChartThresholds(session)
 
     assert thresholds.topNMax == 42
+
+
+class TestSeedBrandConfig:
+    """品牌配置种子（feat-configurable-brand）。
+
+    与阈值种子的语义**相反**：品牌是内容，admin 改过的值不能被发版重置。
+    这条差异必须由测试钉住 —— 哪天有人图省事把品牌种子并回 DO UPDATE，
+    每次部署都会把品牌名打回「泰鸿智脑」，运维会认为功能坏了。
+    """
+
+    @pytest.mark.asyncio
+    async def test_seed_inserts_all_brand_keys(
+        self, pgFactory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """跑一次 ⇒ 4 个品牌键都在，且 admin 能在配置页看到它们。"""
+        count = await seed_brand_config(pgFactory)
+        assert count == len(BRAND_CONFIG_SEEDS)
+
+        async with pgFactory() as session:
+            rows = (
+                await session.execute(
+                    select(SystemConfig.key).where(
+                        SystemConfig.key.in_([k for k, _, _ in BRAND_CONFIG_SEEDS])
+                    )
+                )
+            ).scalars().all()
+        assert sorted(rows) == sorted(key for key, _, _ in BRAND_CONFIG_SEEDS)
+
+    @pytest.mark.asyncio
+    async def test_seed_does_not_overwrite_admin_value(
+        self, pgFactory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """**已存在的值不被覆盖**（insert-if-absent）—— 与阈值种子相反。
+
+        回归来历：品牌是**内容**。若这里被改成 DO UPDATE，每次发版都会把 admin
+        改好的品牌名重置回默认值 ⇒ 用户看到品牌名「自己变回去了」。
+        """
+        async with pgFactory() as session:
+            session.add(
+                SystemConfig(key=BRAND_NAME_KEY, value="泰鸿智云", description="admin 改的")
+            )
+            await session.commit()
+
+        await seed_brand_config(pgFactory)
+
+        async with pgFactory() as session:
+            value = (
+                await session.execute(
+                    select(SystemConfig.value).where(
+                        SystemConfig.key == BRAND_NAME_KEY
+                    )
+                )
+            ).scalar_one()
+        assert value == "泰鸿智云", "品牌种子覆盖了 admin 的值（语义反了）"
+
+    @pytest.mark.asyncio
+    async def test_seed_title_is_null_so_it_follows_name(
+        self, pgFactory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """`BRAND_TITLE` 播种为 NULL ⇒ 未配置时跟随 `BRAND_NAME`。
+
+        若播种成写死的主名，改了主名却发现标题没跟着变 ⇒ 功能看起来没生效。
+        """
+        await seed_brand_config(pgFactory)
+
+        async with pgFactory() as session:
+            value = (
+                await session.execute(
+                    select(SystemConfig.value).where(
+                        SystemConfig.key == BRAND_TITLE_KEY
+                    )
+                )
+            ).scalar_one()
+            name = (
+                await session.execute(
+                    select(SystemConfig.value).where(
+                        SystemConfig.key == BRAND_NAME_KEY
+                    )
+                )
+            ).scalar_one()
+        assert value is None
+        assert name is not None

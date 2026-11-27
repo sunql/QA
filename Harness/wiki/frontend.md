@@ -1,6 +1,6 @@
 ---
 created: 2026-09-01
-updated: 2026-11-16
+updated: 2026-11-27
 ---
 
 # Frontend
@@ -25,6 +25,42 @@ AppLayout mount → fetch /api/v1/menu-config → MenuConfig (DB)
 - roles: string[]
 
 本期不消费这两字段；后续接入 acl_service 时启用。
+
+## 品牌配置（系统标题 / 名称）（feat-configurable-brand）
+
+### 数据流
+```
+App mount → GET /api/v1/branding（公开只读）→ brandingStore（zustand）
+                                                   ↓
+                        侧边栏展开态 / 折叠态 · 登录页标题 · document.title
+```
+
+### 落点
+| 位置 | 取值 |
+|---|---|
+| 侧边栏展开态 | `brandName`（中文）/ `brandNameEn`（英文，按 `locale` 分支） |
+| 侧边栏折叠态 | `brandShortName` |
+| 登录页标题 | `t("auth.login.title", { brand })` —— i18n 词条是 `{brand}` **插值**，不是字面量 |
+| 浏览器标签页 | `document.title = brandTitle`（`index.html` 的静态 `<title>` 只是 JS 加载前的兜底） |
+
+### 三层回落
+1. `system_config` 的 4 个键（`BRAND_NAME` / `BRAND_NAME_EN` / `BRAND_SHORT_NAME` /
+   `BRAND_TITLE`）—— 运行时 SSOT，admin 可改；
+2. 后端源码默认值（`branding_service.DEFAULT_*`）—— 行缺失 / 空值时用
+   （`BRAND_TITLE` 留空 ⇒ 跟随 `BRAND_NAME`）；
+3. 前端兜底常量（`src/branding/defaults.ts`）—— 后端不可达时用。
+
+`index.html` 的静态 `<title>` 只是 **JS 加载前那一帧**的兜底。
+
+store 初始值 = 前端兜底常量 ⇒ **首屏零闪烁**（先渲染兜底名，后端回来再覆盖）。
+两端常量由 `backend/app/tests/unit/test_branding_service.py` 跨栈钉住（含长度上限）。
+
+### 坑
+- i18next 本仓用**单花括号** `{name}` 占位符（`prefix="{"` / `suffix="}"`），
+  不是 i18next 默认的 `{{name}}` ⇒ 写错会直接把 `{brand}` 显示给用户。
+- `useTranslation`（`src/i18n`）返回的 `locale` 此前被谎报成 `"zh-CN"`；
+  已修正为 `"zh-CN" | "en-US"`，否则「按语言取英文名」写不出来（TS 判永不相等）。
+- 品牌名**不在 i18n 字典里** —— 它是配置项不是翻译项；`appLayout.brand` 已删除。
 
 ## Phase 9 增量：数据质量评估报告 UI
 

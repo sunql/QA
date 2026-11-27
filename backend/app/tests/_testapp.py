@@ -304,6 +304,13 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     testApp.include_router(
         authRouter.router, prefix="/api/v1/auth", tags=["auth"], dependencies=[Depends(rateLimitDep)]
     )
+    # 品牌配置（feat-configurable-brand）：**公开**只读端点（无鉴权、无改密守卫）
+    # —— 登录页也要显示系统名称/标题。写入口仍是 admin-only 的 system-config。
+    from app.api.v1 import branding as brandingRouter
+
+    testApp.include_router(
+        brandingRouter.router, prefix="/api/v1", tags=["branding"], dependencies=[Depends(rateLimitDep)]
+    )
     testApp.include_router(
         graph_traversal.router, prefix="/api/v1/graph", tags=["graph"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]
     )

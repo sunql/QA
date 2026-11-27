@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Layout, Menu, Spin, Switch, theme, Alert } from "antd";
 import { useLocation, useNavigate, Outlet } from "react-router-dom";
 import { useThemeStore } from "../../stores/themeStore";
+import { useBrandingStore } from "../../stores/brandingStore";
 import { useTranslation } from "../../i18n";
 import { fetchMenuConfig } from "../../api/menuConfig";
 import type { MenuConfig, MenuItem, MenuSection } from "../../types/menuConfig";
@@ -39,7 +40,12 @@ export default function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const { token } = useToken();
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
+  // 品牌名是**运行时参数**（system_config），不是写死的字面量。
+  // 展开态按当前语言取中文名/英文名，折叠态取缩写。
+  const branding = useBrandingStore((s) => s.branding);
+  const brandLabel =
+    locale === "en-US" ? branding.brandNameEn : branding.brandName;
   const isDark = useThemeStore((s) => s.isDark);
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
   const [collapsed, setCollapsed] = useState(false);
@@ -132,7 +138,7 @@ export default function AppLayout() {
             whiteSpace: "nowrap",
           }}
         >
-          {collapsed ? "TH" : t("appLayout.brand")}
+          {collapsed ? branding.brandShortName : brandLabel}
         </div>
         {isLoading ? (
           <div style={{ padding: 16, color: "#fff", textAlign: "center" }}>

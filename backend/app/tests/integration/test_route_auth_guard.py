@@ -23,6 +23,10 @@ PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/v1/auth/login"),
     ("GET", "/api/v1/auth/password-policy"),
     ("GET", "/api/v1/data-quality/reports/share/{token}"),
+    # 品牌配置（feat-configurable-brand）：**公开**只读 —— 登录页在未登录时也要显示
+    # 系统名称/标题。只返回产品命名（4 个短字符串），不含租户/用户/业务数据；
+    # 写入口仍是 admin-only 的 PUT /api/v1/admin/system-config/{key}。
+    ("GET", "/api/v1/branding"),
 })
 
 # 已通过 middleware 层面鉴权的 Mount 路由。

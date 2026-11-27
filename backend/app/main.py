@@ -429,6 +429,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from scripts.seed_rbac import seedRbacBaseline
 
         await seedRbacBaseline(session)
+        # 品牌配置（feat-configurable-brand）：保证 4 个品牌键**存在**，让 admin
+        # 能在「系统配置」页看到并改。insert-if-absent —— admin 改过的值不会被
+        # 发版重置（与阈值种子的 DO UPDATE 语义相反，见 seed_system_config 模块注释）。
+        from scripts.seed_system_config import seed_brand_config
+
+        await seed_brand_config(session_factory)
         # P5 到货跟踪（C1）：补采购只读工具依赖的**全部**本体源+属性绑定
         # （`DIM_FACILITY` + `DWD_PURCHASE_ORDER_DTL` + `DWD_GOODS_RECEIPT_DTL`）。
         # 缺订单行/收货行两个类时，待到货与到货跟踪都会 fail-closed
@@ -550,6 +556,7 @@ def createApp() -> FastAPI:
         agents,
         audit,
         auth,
+        branding,
         business_object,
         chat,
         data_domains,
@@ -838,6 +845,13 @@ def createApp() -> FastAPI:
 
     app.include_router(
         authRouter.router, prefix="/api/v1/auth", tags=["auth"]
+    )
+    # 品牌配置（feat-configurable-brand）：**公开**只读端点（无鉴权）——
+    # 登录页也要显示系统名称/标题，此时用户尚未登录。端点只返回产品命名
+    # （4 个短字符串），不含租户/用户/业务数据。
+    # ⚠️ 改配置的**写**入口仍是 admin-only 的 PUT /api/v1/admin/system-config/{key}。
+    app.include_router(
+        branding.router, prefix="/api/v1", tags=["branding"], dependencies=[Depends(rateLimitDep)]
     )
     app.include_router(
         menu_config.router, prefix="/api/v1/menu-config", tags=["menu-config"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)]

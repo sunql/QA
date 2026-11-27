@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import App from "../App";
 import { useAuthStore } from "../stores/authStore";
+import { useBrandingStore } from "../stores/brandingStore";
+import { DEFAULT_BRANDING } from "../branding/defaults";
 
 const api = vi.hoisted(() => ({
   // ChatPanel 在 /chat 路由加载时调用 listModels(true) 拉可聊模型列表；
@@ -80,6 +82,30 @@ describe("App 路由", () => {
       mustChangePassword: false,
       rememberMe: true,
     });
+    // 品牌 store 是模块级单例 ⇒ 每个用例都要复位，否则上一个用例改过的品牌名
+    // 会漏进下一个用例（表现为「随机」的红）。
+    useBrandingStore.setState({ branding: DEFAULT_BRANDING });
+  });
+
+  it("浏览器标签页标题取自品牌配置（不是写死的）", async () => {
+    // feat-configurable-brand：document.title 由 system_config 决定。
+    useBrandingStore.setState({
+      branding: {
+        brandName: "泰鸿智云",
+        brandNameEn: "Taihong Cloud",
+        brandShortName: "TC",
+        brandTitle: "泰鸿智云 · 数据智能",
+      },
+    });
+    render(
+      <ConfigProvider locale={zhCN}>
+        <MemoryRouter initialEntries={["/"]}>
+          <App />
+        </MemoryRouter>
+      </ConfigProvider>
+    );
+
+    await waitFor(() => expect(document.title).toBe("泰鸿智云 · 数据智能"));
   });
 
   it("默认重定向到 /chat (AIChatService)", async () => {

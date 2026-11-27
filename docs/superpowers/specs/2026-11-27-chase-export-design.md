@@ -48,8 +48,13 @@ requireAdmin**，不做第二套权限体系。
 系统里目前也没有「公司主体名」字段。
 
 **方案**：新增 system_config 键（如 `chase.letter.company_name`），admin 在后台维护；
-导出服务读取该键，未配置时**留空并记 warning**（不阻塞导出，也不拿品牌名冒充法人名）。
-system_config 是既有表 ⇒ **无迁移**。
+导出服务读取该键。
+
+- **不写死任何默认公司名** —— 写死一个「看起来像公司名」的默认值比留空更危险：
+  用户没配却导出一封抬头错误的催货函，比抬头留空更糟。
+- **未配置 ⇒ 整行不渲染**（不是留一行空白）—— 避免「以为填了其实是空」的歧义；
+  同时服务端记 warning，**不阻塞导出**。
+- system_config 是既有表 ⇒ **无迁移**。
 
 ## 架构
 
@@ -96,8 +101,9 @@ system_config 是既有表 ⇒ **无迁移**。
 
 **Word 结构**（正式催货函版式）
 
-1. 抬头：**公司法定名称**（读 system_config 键 `chase.letter.company_name`；未配置则留空 +
-   服务端记 warning，**不拿产品品牌名冒充法人名**）+ 供应商全名 + 催货单号 + 回复期限
+1. 抬头：**公司法定名称**（读 system_config 键 `chase.letter.company_name`；**未配置则该行
+   整行不渲染** + 服务端记 warning，**不拿产品品牌名冒充法人名**）+ 供应商全名 + 催货单号 +
+   回复期限
 2. 催货说明段：欠交总行数 / 欠交总量 + 回复期限要求
 3. 明细表：订单号 / 行号 / 物料描述 / 欠交量 / 期望到货日 / 逾期天数
 4. 落款：催货人（`created_by`）+ 日期
@@ -179,6 +185,17 @@ GET /procurement/chase/drafts/{chaseDraftId}/export?format=xlsx|docx
 - 后端新增 1 个 service 文件 + 1 个端点；前端新增 1 个组件 + 2 处接入
 - 需重建 backend + frontend 镜像；worker 同镜像须一并 `--force-recreate`
   （见 `Harness/skills/thdeploy/SKILL.md` §worker 同步铁律）
+
+### 生产可用性（写清楚，免得生产验收误判）
+
+生产 DMZ 到业务 Oracle `192.168.205.70:1521` **本就隔离**（2026-09-30 已有先例，见
+`Harness/changes/2026-11-27-release-1127-chase01/summary.md`）。
+
+- 催货单的**真实业务数据**（待到货回查、欠交量）在生产跑不通 ⇒ 功能正确性只能在本地 dev 栈验；
+- **导出功能本身在生产可用**：它只读**已落库的催货单**（`procurement_chase_draft` /
+  `_line` / `_decision`），**不直连业务库** ⇒ 前提是催货单能被创建出来。
+
+⇒ 发版 runbook 的验收探针要写明这一点，别让生产验收把「业务库不可达」误判成导出功能坏了。
 
 ## 关联
 

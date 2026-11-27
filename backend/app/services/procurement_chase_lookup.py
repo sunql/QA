@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.exceptions import ValidationError
 from app.services.ontology_binding_resolver import (
+    ResolvedBinding,
     resolveBinding,
 )
 from app.services.pending_delivery_query import (
@@ -28,7 +29,6 @@ from app.services.pending_delivery_query import (
     RECEIPT_CLASS_NAME,
     _loadNamesForRows,
     _openQty,
-    _openQtyCond,
     _receiptJoin,
 )
 from app.services.pending_delivery_rows import withNames
@@ -51,6 +51,40 @@ def _colText(row: dict[str, Any], key: str) -> Any:
         if candidate in row:
             return row[candidate]
     return None
+
+
+def buildChaseLookupSql(
+    *,
+    order: ResolvedBinding,
+    receipt: ResolvedBinding,
+    identities: list[tuple[str, str]],
+    dialect: str = "oracle",
+) -> str:
+    """回查 SQL（纯函数，可单测）。
+
+    WHERE **只有身份对 IN (...)** —— 不含任何 openQty 条件（见调用处注释：
+    所有订单行都可催，脏数据行 / 已到货行同样要能催）。
+    """
+    d = SqlDialect(dialect)
+    poNoCol = order.column("PO_NO")
+    poLineCol = order.column("PO_LINE_NO")
+    pairConds = ", ".join(
+        f"({_sqlLiteral(po)}, {_sqlLiteral(line)})" for po, line in sorted(set(identities))
+    )
+    where = f"(O.{poNoCol}, O.{poLineCol}) IN ({pairConds})"
+    receiptJoin = _receiptJoin(order, receipt, windowSql="1=1")
+    return f"""
+SELECT O.{poNoCol} AS PO_NO,
+       O.{poLineCol} AS PO_LINE_NO,
+       O.{order.column("ITEM_CODE")} AS ITEM_CODE,
+       O.{order.column("SUPPLIER_CODE")} AS SUPPLIER_CODE,
+       O.{order.column("PO_QTY")} AS ORDERED_QTY,
+       COALESCE(R.RECEIVED_QTY, 0) AS RECEIVED_QTY,
+       {_openQty(order)} AS OPEN_QTY,
+       O.{order.column("EXP_RCV_DATE")} AS EXPECTED_DATE,
+       {d.overdueDays(f"DATE '{date.today().isoformat()}'", "O." + order.column("EXP_RCV_DATE"))} AS OVERDUE_DAYS
+FROM {order.qualifiedTable()} O{receiptJoin}
+WHERE {where}""".strip()
 
 
 async def fetchPendingLinesByIdentity(
@@ -81,32 +115,7 @@ async def fetchPendingLinesByIdentity(
     ds = await loadActiveDatasource(session, order.datasourceId)
     adapter = adapterFor(order.datasourceId, ds)
 
-    d = SqlDialect("oracle")
-    poNoCol = order.column("PO_NO")
-    poLineCol = order.column("PO_LINE_NO")
-    # 身份对过滤：(PO_NO, PO_LINE) IN ((...), ...) —— 逐对转义防注入
-    pairConds = ", ".join(
-        f"({_sqlLiteral(po)}, {_sqlLiteral(line)})" for po, line in sorted(set(identities))
-    )
-    conds = [
-        f"(O.{poNoCol}, O.{poLineCol}) IN ({pairConds})",
-        _openQtyCond(order),
-    ]
-    where = " AND ".join(conds)
-    receiptJoin = _receiptJoin(order, receipt, windowSql="1=1")
-    sql = f"""
-SELECT O.{poNoCol} AS PO_NO,
-       O.{poLineCol} AS PO_LINE_NO,
-       O.{order.column("ITEM_CODE")} AS ITEM_CODE,
-       O.{order.column("SUPPLIER_CODE")} AS SUPPLIER_CODE,
-       O.{order.column("PO_QTY")} AS ORDERED_QTY,
-       COALESCE(R.RECEIVED_QTY, 0) AS RECEIVED_QTY,
-       {_openQty(order)} AS OPEN_QTY,
-       O.{order.column("EXP_RCV_DATE")} AS EXPECTED_DATE,
-       {d.overdueDays(f"DATE '{date.today().isoformat()}'", "O." + order.column("EXP_RCV_DATE"))} AS OVERDUE_DAYS
-FROM {order.qualifiedTable()} O{receiptJoin}
-WHERE {where}""".strip()
-
+    sql = buildChaseLookupSql(order=order, receipt=receipt, identities=identities)
     rows = await adapter.execute_read_only(sql)
     result: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:

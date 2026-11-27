@@ -355,10 +355,15 @@ export default function DeliveryTrackingResultCard({
     setCreating(true);
     try {
       const lines: ChaseLineInput[] = [];
+      // key 必须与明细表 rowKey **逐字同格式**（`poNo:poLine`）——
+      // 两边格式不一致 ⇒ 「勾了但一个都找不到」⇒ 误报「请先勾选」。
+      // 用 String() 归一比较（antd 的 Key 可能是 number）。
+      const selected = new Set(selectedKeys.map((key) => String(key)));
       for (const order of openOrders) {
         for (const line of order.lines) {
           const key = `${order.poNo}:${line.poLine}`;
-          if (selectedKeys.includes(key) && line.status === "notArrived") {
+          // ⚠️ **不按状态/脏行过滤**（用户 2026-11-27 明确：所有订单行都可下催单）。
+          if (selected.has(key)) {
             lines.push({ poNo: order.poNo, poLine: String(line.poLine) });
           }
         }
@@ -438,10 +443,10 @@ export default function DeliveryTrackingResultCard({
                       rowSelection={{
                         selectedRowKeys: selectedKeys,
                         onChange: (keys) => setSelectedKeys([...keys]),
-                        // 只允许勾选未到货行（已收清/脏行不可催）
-                        getCheckboxProps: (line) => ({
-                          disabled: line.status !== "notArrived" || line.isDirty === true,
-                        }),
+                        // ⚠️ **不按状态/脏行禁用**（用户 2026-11-27 明确：
+                        //    所有订单行都可下催单 —— 不管是不是脏数据、不管是不是部分到货）。
+                        //    脏行与已到货行照样能催（催单快照里带 openQty 供人核对）。
+                        getCheckboxProps: () => ({ disabled: false }),
                       }}
                     />
                     {isAdmin && (

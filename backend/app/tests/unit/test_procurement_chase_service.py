@@ -248,6 +248,64 @@ async def test_create_rejects_past_deadline(dbSession: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 回查口径：**所有订单行都可催**（不按 openQty 过滤）
+# ---------------------------------------------------------------------------
+
+
+def test_lookup_sql_filters_only_by_identity_not_by_open_qty() -> None:
+    """回查 WHERE **只有身份对 IN (...)**，不含任何 openQty 条件。
+
+    用户 2026-11-27 明确：所有订单行都能下催单（不管脏数据、不管部分到货）。
+    曾经的 `_openQtyCond`（`openQty > 0 AND openQty < 脏阈值`）会把
+    ① 欠交量 ≥ 1e6 的**脏数据行**、② openQty = 0 的**已到货行** 一并滤掉
+    ⇒ 用户勾了却静默丢行 ⇒ 与需求相反。
+
+    这里只断言 SQL 形状（纯函数，不连库）：WHERE 子句里不能出现 openQty 的
+    大小比较表达式。
+    """
+    from app.services.ontology_binding_resolver import ResolvedBinding
+    from app.services.procurement_chase_lookup import buildChaseLookupSql
+
+    def _binding(table: str, columns: dict[str, str]) -> ResolvedBinding:
+        return ResolvedBinding(
+            className=table,
+            datasourceId=1,
+            schemaName="THBI",
+            sourceTable=table,
+            columns=columns,
+        )
+
+    order = _binding(
+        "DWD_PURCHASE_ORDER_DTL",
+        {
+            "PO_NO": "PO_NO",
+            "PO_LINE_NO": "PO_LINE_NO",
+            "ITEM_CODE": "ITEM_CODE",
+            "SUPPLIER_CODE": "SUPPLIER_CODE",
+            "PO_QTY": "PO_QTY",
+            "EXP_RCV_DATE": "EXP_RCV_DATE",
+        },
+    )
+    receipt = _binding(
+        "DWD_GOODS_RECEIPT_DTL",
+        {"PO_NO": "PO_NO", "PO_LINE_NO": "PO_LINE_NO", "RCV_QTY_STU": "RCV_QTY_STU"},
+    )
+
+    sql = buildChaseLookupSql(
+        order=order, receipt=receipt, identities=[("PO1", "1"), ("PO2", "3")]
+    )
+
+    whereClause = sql.split("WHERE", 1)[1]
+    # 身份对在 WHERE 里
+    assert "'PO1'" in whereClause and "'PO2'" in whereClause
+    # 但**不得**有 openQty 的大小比较（> 0 / < 脏阈值）
+    assert "> 0" not in whereClause, whereClause
+    assert "COALESCE" not in whereClause, whereClause
+    # openQty 仍算出来（快照里给人数值用），只是不当筛选条件
+    assert "AS OPEN_QTY" in sql
+
+
+# ---------------------------------------------------------------------------
 # 生命周期
 # ---------------------------------------------------------------------------
 

@@ -61,9 +61,12 @@ export function StatusTag({ status }: { status: DeliveryOrderStatus }) {
 
 function OrderLinesTable({
   lines,
+  poNo,
   rowSelection,
 }: {
   lines: DeliveryTrackingLine[];
+  /** 父订单号 —— rowKey 必须**全局唯一**（不同订单可能有同号行）。 */
+  poNo: string;
   rowSelection?: {
     selectedRowKeys: React.Key[];
     onChange: (keys: React.Key[]) => void;
@@ -74,7 +77,11 @@ function OrderLinesTable({
     <Table<DeliveryTrackingLine>
       size="small"
       pagination={false}
-      rowKey="poLine"
+      /** ⚠️ rowKey 必须含订单号：`poLine` 在不同订单间会重复 ⇒ 用它做 key 时
+       *  A 单第 1 行与 B 单第 1 行会**互相串选**（同一个 key 命中多张表）。
+       *  格式 `poNo:poLine` 与 `DeliveryTrackingResultCard.createChases` 里
+       *  拼的 key **必须一致**，否则「勾了但找不到」⇒ 提示「请先勾选」。 */
+      rowKey={(line) => `${poNo}:${line.poLine}`}
       dataSource={lines}
       rowSelection={rowSelection}
       onRow={(line) => (line.isDirty ? { style: { color: DIRTY_ROW_COLOR } } : {})}
@@ -149,7 +156,11 @@ export function OrderTable({
       expandable={{
         defaultExpandAllRows: rowSelection !== undefined,
         expandedRowRender: (order) => (
-          <OrderLinesTable lines={order.lines} rowSelection={rowSelection} />
+          <OrderLinesTable
+            lines={order.lines}
+            poNo={order.poNo}
+            rowSelection={rowSelection}
+          />
         ),
       }}
       columns={[
@@ -200,7 +211,9 @@ export function OrderTable({
                 {
                   key: "lines",
                   label: `物料明细（${row.lines.length} 行）`,
-                  children: <OrderLinesTable lines={row.lines} />,
+                  children: (
+                    <OrderLinesTable lines={row.lines} poNo={row.poNo} />
+                  ),
                 },
               ]}
             />

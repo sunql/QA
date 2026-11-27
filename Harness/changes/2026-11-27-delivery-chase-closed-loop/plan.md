@@ -114,6 +114,21 @@ POST   /chase/drafts/{id}/send            → SENDING → SENT（经 command por
 | 5 | 前端：卡片选行 + 催货单管理页 + i18n |
 | 6 | 单测/集成测试 + e2e |
 
+## 4.0 口径修正（用户 2026-11-27 实测后）
+
+**所有订单行都可以下催单 —— 不管是不是脏数据、不管是不是部分到货。**
+
+初版有三处限制与之冲突，全部拆掉：
+
+| 位置 | 初版限制 | 修正 |
+|---|---|---|
+| 前端 `DeliveryTrackingResultCard` `getCheckboxProps` | 非 `notArrived` 或脏行 ⇒ checkbox 禁用 | **不禁用**（任何行都可勾） |
+| 前端 `createChases` | 只提交 `notArrived` 且非脏行的行 | **提交全部勾选的行** |
+| 后端 `procurement_chase_lookup` 回查 WHERE | `_openQtyCond`（`openQty > 0 AND openQty < 脏阈值`）⇒ 脏行与已到货行被**静默滤掉** | **只按身份对过滤**；`openQty` 仍算出来写进快照（供人核对），但不当筛选条件 |
+
+> 后端那处最隐蔽：前端把行勾上、提交了，服务端回查却查不到 ⇒ 用户看到
+> 「跳过了 N 行」而不知为何。口径统一后前后端一致。
+
 ## 4.1 落地状态（2026-11-27）
 
 - ✅ 迁移 0172（三张表）+ ORM + models.py 登记

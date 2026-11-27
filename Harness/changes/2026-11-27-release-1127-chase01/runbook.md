@@ -31,15 +31,16 @@ updated: 2026-11-27
 > 该 PR 在镜像构建**之后**才合入 main ⇒ 本包**不含**那两处修复；若生产「本体发现」
 > 正被那些 CLOB 表困扰，需按 `origin/main @ 8aab4023` **重建镜像**并重算 sha256。
 
-### 0.2 迁移表（`0171 → 0172`）
+### 0.2 迁移表（`0171 → 0173`）
 
 | revision | 内容 | 数据回填 | 可逆性 |
 |---|---|---|---|
-| `0172` | 新建 3 张表：`procurement_chase_draft` / `procurement_chase_line` / `procurement_chase_decision` | **无**（纯建表，零数据回填） | `downgrade 0171` ⇒ **drop 三张表**（不丢任何既有业务数据） |
+| `0172` | 新建 3 张表：`procurement_chase_draft` / `procurement_chase_line` / `procurement_chase_decision` | **无**（纯建表） | `downgrade 0171` ⇒ **drop 三张表** |
+| `0173` | `procurement_chase_line` 加 `is_dirty`（bool, not null, default false）—— 欠交量异常（≥ 1,000,000）标记，催货单上打**红色标识**要求重点核对 | **无**（纯加列） | `downgrade 0172` ⇒ drop 该列 |
 
 **回滚边界（PRE_VER）= `0171`**。
 
-⚠️ 0172 的 `downgrade` 会 **drop 三张表** ⇒ 回滚后**催货单数据全丢**（新建的单据本来也没业务价值，
+⚠️ `downgrade 0171` 会 **drop 三张表** ⇒ 回滚后**催货单数据全丢**（新建的单据本来也没业务价值，
 但记录在此以免误判「回滚无损」）。
 
 ### 0.3 镜像批次边界（重要）
@@ -196,9 +197,9 @@ docker images | grep -E 'qa-backend:offline|qa-system_frontend'    # Image ID �
 # ① 后端（CMD 自带 alembic upgrade head：0171 → 0172，然后起 uvicorn）
 qa_compose up -d --no-build --no-deps --force-recreate backend
 docker logs -f qa-backend 2>&1 \
-  | grep -E "Running upgrade|0172|Application startup complete|ERROR|blocking" | head -60
+  | grep -E "Running upgrade|017[23]|Application startup complete|ERROR|blocking" | head -60
 
-# ② 迁移版本复核（期望 0172）
+# ② 迁移版本复核（期望 0173）
 docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -c "select version_num from alembic_version"'
 
@@ -227,7 +228,7 @@ docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'backend|fron
 ```bash
 # 迁移版本
 docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-  -c "select version_num from alembic_version"'          # 期望 0172
+  -c "select version_num from alembic_version"'          # 期望 0173
 
 # 三张新表（期望 3 行）
 docker exec -i qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tA -F"|"' <<'SQL'

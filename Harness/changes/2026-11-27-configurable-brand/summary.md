@@ -85,8 +85,37 @@ brandingStore（zustand）
 - `index.html` 的静态 `<title>` 保留为**JS 加载前的兜底**，运行时被
   `document.title` 覆盖。
 
-## 6. 合并注意
+## 6. CI 判据（2026-11-27 实测）
 
-本分支改动了 `backend/app/tests/_testapp.py`（CI 表面文件）⇒ merge-gate 的
-「失败集合差分」判据会变成 **INADMISSIBLE**（`CI_SURFACE_CHANGED`）⇒ 需人工裁决
-/ admin 绕过（与 #178 / #183 / #184 同样处理）。
+merge-gate `merge-gate / failure-set-diff` 的结论：
+
+```
+结论：不可合并（CI_SURFACE_CHANGED）
+基线 run 45866117459（head f065d48d）：失败 122 条
+PR    run 45922038120（head 381c1d71）：失败 122 条
+净新增 0 条 / 净丢失 0 条
+原因：PR 改动了 CI 相关面 ⇒ 两次 run 的失败集合不可比 ⇒ 对差不成立：
+      ['backend/app/tests/_testapp.py', 'backend/scripts/seed_system_config.py']
+      ⇒ 须人工确认；确知无影响时用 --allow-ci-change
+```
+
+- **失败集合两侧完全一致**（122 = 122，逐条 id 相同，净新增 0 / 净丢失 0）
+  —— 独立复核过：按用例 id 取 PR 与基线**全分片并集**再对差，结果一致。
+- ⚠️ 逐分片比对会**假报新增**：integration 分片是「排序下标 mod 4」，新增一个测试
+  文件会让后面所有文件**换分片** ⇒ 必须按并集比（工具 `ci_judge.py::
+  _unionUsableFailures` 就是这么做的）。
+- 前端 CI ✅（typecheck + coverage 13m05s）；8 个后端分片全红，但**全部是既有红**
+  （与基线同一批用例 id）。
+- 品牌相关用例**全部通过**：`test_branding_service.py`（unit shard 3）、
+  `test_branding_api.py` + `test_route_auth_guard.py`（integration shard 1）、
+  `test_seed_system_config.py`（integration shard 3）。
+
+## 7. 合并注意
+
+本分支改动了 `backend/app/tests/_testapp.py` 与 `backend/scripts/seed_system_config.py`
+（CI 表面文件）⇒ merge-gate 判 **CI_SURFACE_CHANGED** ⇒ 需人工裁决 / admin 绕过
+（与 #178 / #183 / #184 同样处理）。
+
+⚠️ 另注：`backend/app/tests/unit/test_no_sqlite_fallback.py` 守卫在 **main 上本来
+就红**（6 个既有违规文件），本分支新增的测试文件一度被算进违规名单（docstring 里
+提了那个被禁的库名全称）⇒ 已改写措辞，不扩白名单。

@@ -482,6 +482,58 @@ pass KPI 暂失 Tier A（degraded 注入，不阻断，但口径不完整）。
 - ⚠️ favicon 的字母（`index.html` 内联 SVG）**不参与配置化** —— 换品牌首字母变了
   要一并改前端镜像（守卫 `frontend/src/tests/brandRenameGuard.test.ts` 会提醒）。
 
+## 数据源接入：schema 缓存「表数量超过上限」（2026-11-27）
+
+**症状**：数据源页点「缓存 Schema」⇒ **400**，
+`数据源 <id> schema 表数量 <N> 超过上限 3000：请检查 schema owner 范围，或调整上限配置`。
+
+**这不是 bug，是护栏**：`SCHEMA_MAX_TABLES`（默认 3000，`app/config.py::Settings.schemaMaxTables`）
+挡住的是「把超大 schema 全量塞进 `schema_cache`」。超限抛 `DataSourceError` ⇒
+`statusForError` 默认映射 **400** ⇒ 与浏览器 F12 看到的 400 一致。
+
+### 排查三步（顺序别换）
+
+1. **数这个 owner 有多少表**（内省口径，含视图 ⇒ 这个数就是报错里的 N）：
+   ```sql
+   -- Oracle
+   SELECT COUNT(DISTINCT table_name) FROM ALL_TAB_COLUMNS WHERE owner = '<OWNER>';
+   ```
+2. **数可见 owner 有哪些**：
+   ```sql
+   SELECT owner, COUNT(*) FROM ALL_TABLES GROUP BY owner ORDER BY 2 DESC;
+   ```
+   ⇒ **除它自己以外全是系统 schema ⇒ 没有更小的业务 owner 可切** ⇒
+   报错里「请检查 schema owner 范围」这条提示**在此类源上无效**（owner 取自连接用户名，
+   见 `schema_introspection_service._normalizeSchemaName`）。
+3. **对「本体引用的表」求交集**：本体 `ontology_class.source_table` 去重后有多少张、
+   其中几张在该 owner 下存在？⇒ **0 张 ⇒ 这个源还没建本体 ⇒ 缓存下来也问不出东西**
+   （**本体才是 LLM 渲染 schema 的唯一来源**，`schema_cache` 只用于漂移告警 + 跨源过滤）。
+
+### 调大上限的代价（按同类 Oracle 样本换算）
+
+| 样本 | 缓存字节 | 表 | 列 | 字节/列 |
+|---|---|---|---|---|
+| ZJTH（Oracle） | 642012 | 1680 | 73207 | 8.77 |
+| THBI（Oracle） | 150042 | 216 | 9547 | 15.7 |
+
+⇒ 缓存体积 ≈ **列数 × 8.8~15.7 B**（30 万列的源 ≈ **2.6–4.7 MB** 单行 JSONB；
+**不能按表数外推** —— 平均列/表差异很大）。
+内省成本 = 5 类元数据查询 × ⌈表数/100⌉ 批（注释条数是大头）；
+`GET /datasources/{id}/schema` 一次返回数 MB，前端还要把 2 万行渲染成表格。
+且 `SCHEMA_MAX_TABLES` 是**全局** env ⇒ 调高会**同时放宽所有数据源**的上限。
+
+### 处置顺序
+
+1. 先确认这个源**指向对不对**（数据源名与实际内容常常不符）；
+2. 确认它在系统里**要做什么用**（问数 ⇒ 先建本体；只做字典 ⇒ 不必缓存）；
+3. 确实要全量 ⇒ 调 `SCHEMA_MAX_TABLES`（≥ 实际表数）+ **把它写进 `docker/.env`**
+   （⚠️ `.env.example` **没有**这个条目 ⇒ 旋钮不可发现）+ 走**异步** `introspect-jobs`
+   （同步接口会超时）+ 重启后端容器；
+4. 不需要 ⇒ 保持现状（它本来也问不出东西）。
+
+详细实测与四个选项对比见
+`Harness/changes/2026-11-27-schema-cache-table-limit/analysis.md`。
+
 ## 日志
 
 - 后端日志级别由 `LOG_LEVEL` 控制。

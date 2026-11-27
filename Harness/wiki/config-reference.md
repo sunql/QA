@@ -14,6 +14,7 @@
 | QUERY_ROW_LIMIT | 5000 | 查询行数上限 |
 | QUERY_TIMEOUT_SECONDS | 30 | 查询超时 |
 | NL2SQL_NO_SCOPE_ROW_LIMIT | 100 | 无范围明细查询兜底行数（0=关闭兜底注入；详见 changes/feat-scope-aware-row-limit） |
+| SCHEMA_MAX_TABLES | 3000 | 单数据源允许内省的表数量上限（超限 ⇒ 缓存 schema 返回 400）。**全局生效**，调高会同时放宽所有数据源；实测口径与处置见 [operations-runbook](operations-runbook.md) 的「数据源接入：schema 缓存『表数量超过上限』」 |
 
 ## LLM
 | 变量 | 说明 |

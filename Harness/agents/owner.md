@@ -56,7 +56,7 @@
 - [wiki-ontology-link](../wiki/wiki-ontology-link.md) - wiki ↔ ontology 链接管理 + NL2SQL 业务规则注入
 - [api-reference](../wiki/api-reference.md) - API 契约
 - [config-reference](../wiki/config-reference.md) - 环境变量
-- [operations-runbook](../wiki/operations-runbook.md) - 运维手册（部署 / 监控 / 备份 / 恢复）
+- [operations-runbook](../wiki/operations-runbook.md) - 运维手册（部署 / 监控 / 备份 / 恢复 / **数据源接入超限处置**）
 
 ### 变更 `changes/`
 - [_template/summary.md](../changes/_template/summary.md) - 变更 SSOT 模板

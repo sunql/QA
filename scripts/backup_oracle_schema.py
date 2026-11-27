@@ -70,29 +70,60 @@ def _literal(value: Any) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-#: 业务日期列优先级（订单/到货/发票等**业务时点**，不是入库时间）。
-#: 命中即用；否则退到「第一个 DATE/TIMESTAMP 列」；再退到 YMONTH（按实际格式）。
+#: **真业务日期列**（订单/到货/发票等**业务时点**，不是入库时间）。
+#: 命中即用；否则退到「其它非技术性的 DATE/TIMESTAMP 列」；再退到 YMONTH（按实际格式）。
+#:
+#: ⚠️ **CREATION_DATE 一类「入库/ETL 时间戳」不在此列** —— 拿它做 `>= 2025` 过滤会
+#: 把**主数据/存量数据**整片滤掉（实测 DIM_IMATERIAL 350,922 行 → 导出 0 行；
+#: DIM_SUPPLIER 3,500 → 0；DWD_ITEM_FACILITY 818,347 → 231,402）⇒ 备份不可用。
 _BUSINESS_DATE_COLUMNS = (
     "ORDER_DATE", "EXP_RCV_DATE", "EXPECTED_DATE", "EXPECT_RECEIPT_DATE",
     "RECEIPT_DATE", "ACTUAL_RECEIPT_DATE", "ARR_DATE", "ARRIVAL_DATE",
     "DELIVERY_DATE", "INVOICE_DATE", "BILL_DATE", "DOC_DATE", "PLAN_DATE",
-    "CREATION_DATE", "CREATED_DATE", "CREATION_TIME", "CREATED_TIME",
+    "RTN_DATE", "APPLY_DATE", "VALID_STR_DATE",
 )
 
+#: **技术时间戳**（入库 / ETL 批次 / 抽取时间）—— **不能**当业务日期用。
+_TECHNICAL_DATE_COLUMNS = (
+    "CREATION_DATE", "CREATED_DATE", "CREATION_TIME", "CREATED_TIME",
+    "ETL_LOAD_TS", "ETL_LOAD_TIME", "UPDATED_DATE", "UPDATE_DATE",
+    "LAST_MODIFIED_DATE", "LOAD_DATE", "LOAD_TIME", "BATCH_DATE",
+    "EXTRACT_TIME", "EXTRACT_DATE",
+)
 
-def _pickFilterColumn(columns: list[dict[str, Any]]) -> tuple[str | None, str]:
+#: 维度表前缀 —— **一律全量导出**（维度表是主数据，按时间切会丢历史版本）。
+_DIMENSION_TABLE_PREFIXES = ("DIM_",)
+
+
+def _pickFilterColumn(
+    tableName: str, columns: list[dict[str, Any]]
+) -> tuple[str | None, str]:
     """挑「用哪一列做时间过滤」⇒ (列名, 过滤表达式类型)。
 
-    返回列名 None ⇒ 该表**没有可用日期列** ⇒ 只能导全量（在 manifest 里标注）。
+    返回列名 None ⇒ 该表**不做时间过滤** ⇒ 导全量（在 manifest 里标注）。
     类型：``date``（DATE/TIMESTAMP 列）/ ``ym-dash``（'2025-01'）/ ``ym-plain``（'202501'）。
+
+    判定顺序（**故意**保守，宁可多导也别把主数据切没了）：
+    1. 维度表（``DIM_`` 前缀）⇒ 全量；
+    2. 真业务日期列 ⇒ 用它；
+    3. 其它**非技术性** DATE/TIMESTAMP 列 ⇒ 用它；
+    4. ``YMONTH`` ⇒ 用它（按实际格式）；
+    5. 都没有 ⇒ 全量。
     """
     byName = {c["name"].upper(): c for c in columns}
+    if tableName.upper().startswith(_DIMENSION_TABLE_PREFIXES):
+        return None, "none"
     for candidate in _BUSINESS_DATE_COLUMNS:
         column = byName.get(candidate)
         if column is not None:
             return column["name"], "date"
+    technical = set(_TECHNICAL_DATE_COLUMNS)
     for column in columns:
-        if str(column["type"]).upper().startswith(("DATE", "TIMESTAMP")):
+        name = str(column["name"]).upper()
+        dataType = str(column["type"]).upper()
+        if name in technical:
+            continue
+        if dataType.startswith(("DATE", "TIMESTAMP")):
             return column["name"], "date"
     ymonth = byName.get("YMONTH")
     if ymonth is not None:
@@ -113,6 +144,26 @@ def _filterClause(columnName: str, kind: str, fromYear: int) -> str:
     if kind == "ym-dash":
         return f"{quoted} >= '{fromYear}-01'"
     return f"{quoted} >= '{fromYear}01'"
+
+
+async def _detectYmKind(cursor, owner: str, table: str, column: str) -> str:
+    """探测 YMONTH 列的**实际字符串格式** ⇒ ``ym-dash``（'2025-01'）/ ``ym-plain``（'202501'）。
+
+    ⚠️ **两种格式在 THBI 里同时存在**（实测 19 张含 YMONTH 的表里，
+    **只有 ``DWS_PRICE_MONTHLY`` 是 ``ym-plain``**，其余 18 张都是 ``ym-dash``）——
+    字符串比较下 ``'2016-07' >= '202501'`` 为 **False** ⇒ 用错格式会把**整表滤成 0 行**。
+    ⇒ 每次都按表实测，不写死。
+    """
+    await cursor.execute(
+        f'SELECT MAX({_quote(column)}) FROM {_quote(owner)}.{_quote(table)} '
+        f'WHERE {_quote(column)} IS NOT NULL'
+    )
+    row = await cursor.fetchone()
+    sample = row[0] if row else None
+    text = str(sample) if sample is not None else ""
+    if text.isdigit() and len(text) == 6:
+        return "ym-plain"
+    return "ym-dash"
 
 
 def _hashExpr(column: dict[str, Any]) -> str:
@@ -180,6 +231,12 @@ async def main() -> int:
     parser.add_argument("--out", default="../backups/oracle", help="输出目录")
     parser.add_argument("--only-tables", default="", help="逗号分隔的表名（默认全部）")
     parser.add_argument(
+        "--skip-tables",
+        type=int,
+        default=0,
+        help="跳过按字母序的前 N 张表（**断点续传**：上轮超时被打断时，接着跑剩下的）",
+    )
+    parser.add_argument(
         "--from-year",
         type=int,
         default=0,
@@ -206,6 +263,11 @@ async def main() -> int:
         type=int,
         default=0,
         help="每表最多导多少行（0=不限）—— 小样本抽样用",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只决定「每张表用哪一列做时间过滤 / 是否全量」，**不导数据** —— 改过滤规则后先跑它",
     )
     args = parser.parse_args()
 
@@ -250,6 +312,12 @@ async def main() -> int:
         wanted = {t.strip().upper() for t in args.only_tables.split(",") if t.strip()}
         if wanted:
             tables = [t for t in tables if t["name"].upper() in wanted]
+        if args.skip_tables > 0:
+            skipped = args.skip_tables
+            tables = tables[skipped:]
+            print(
+                f"[backup_oracle_schema] 跳过前 {skipped} 张表（续传），本轮 {len(tables)} 张"
+            )
 
         if args.fingerprint:
             wantedTables = {
@@ -368,14 +436,43 @@ async def main() -> int:
                 filterColumn = None
                 filterKind = "none"
                 if args.from_year > 0:
-                    filterColumn, filterKind = _pickFilterColumn(columns)
+                    filterColumn, filterKind = _pickFilterColumn(name, columns)
                     if filterColumn is not None:
+                        if filterKind == "ym":
+                            filterKind = await _detectYmKind(
+                                cursor, owner, name, filterColumn
+                            )
                         selectSql += (
                             " WHERE "
                             + _filterClause(filterColumn, filterKind, args.from_year)
                         )
+                if args.dry_run:
+                    manifest.append(
+                        {
+                            "table": name,
+                            "rows": 0,
+                            "columns": len(columns),
+                            "skippedLobColumns": skipped,
+                            "filterColumn": filterColumn,
+                            "filterKind": filterKind,
+                            "dryRun": True,
+                        }
+                    )
+                    continue
                 await cursor.execute(selectSql)
                 rows = await cursor.fetchall()
+                fallbackFullExport = False
+                # ⚠️ 兜底：按时间过滤后 **0 行** ⇒ 该表大概率是**存量/主数据表**
+                # （业务日期列选错或数据本来就老）⇒ 回退成**全量导出**，
+                # 否则备份里会留下一张空表，恢复后关联不上。
+                if not rows and filterColumn is not None:
+                    await cursor.execute(
+                        f"SELECT {columnList} FROM {_quote(owner)}.{_quote(name)}"
+                    )
+                    rows = await cursor.fetchall()
+                    fallbackFullExport = True
+                    filterColumn = None
+                    filterKind = "none"
                 index = [c["name"] for c in dataColumns]
                 for row in rows:
                     values = ", ".join(_literal(row[pos]) for pos in range(len(index)))
@@ -388,6 +485,7 @@ async def main() -> int:
                         "skippedLobColumns": skipped,
                         "filterColumn": filterColumn,
                         "filterKind": filterKind,
+                        "fallbackFullExport": fallbackFullExport,
                     }
                 )
                 if skipped:
@@ -395,6 +493,10 @@ async def main() -> int:
                 if filterColumn:
                     out.write(
                         f"-- 时间过滤：{filterColumn} >= {args.from_year}-01-01\n"
+                    )
+                elif fallbackFullExport:
+                    out.write(
+                        "-- ⚠️ 时间过滤后 0 行 ⇒ 已**回退为全量导出**（该表疑似存量/主数据表）\n"
                     )
                 else:
                     out.write("-- ⚠️ 无可用日期列 ⇒ 本表**未做时间过滤**（导出全量）\n")

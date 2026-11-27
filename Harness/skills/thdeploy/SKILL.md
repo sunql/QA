@@ -54,6 +54,7 @@ qa_compose() {
 | 切换命令 | `qa_compose up -d --no-build --no-deps --force-recreate <svc>`；**v1 禁止 `--remove-orphans`** |
 | .env 纪律 | 禁改 `SECRET_KEY`/口令类；仅允许追加/修改 `ENABLE_*` 行；**先改 .env 后 recreate（顺序反了=改了没生效，restart 无效）**；改前备份 `.env.bak_时间戳` |
 | compose 入口权威来源 | 从现役容器 label 读：`docker inspect qa-backend --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'`（不要靠 ls 猜） |
+| **worker 与 backend 同镜像** | 两者跑同一份代码（本地：同一 tag；生产：compose 里 worker 只 `build:` 无 `image:`，镜像名由 compose 派生）。**换 backend 镜像必须同步 worker**，否则 worker 跑旧代码 ⇒ 启动 `warmUp` 时 `handler_ref 不在 BUILTIN 白名单` ⇒ ValueError ⇒ **restart 循环** ⇒ 编排 run 永远 QUEUED ⇒ 前端等结果 ⇒ **报「超时」**（2026-11-27 本地实证：到货跟踪全部超时，根因就是 worker 落后 backend 两个版本） |
 
 ## 方案结构（Phase 0–8，照 2026-11-22 runbook 逐节写）
 
@@ -67,12 +68,62 @@ qa_compose() {
    ```
    + pg_dump + 记录 PRE_VER（= 回滚 downgrade 边界）；三者齐备才准进 Phase 2
 4. **Phase 2 传输**：scp/加载后**先比 sha256** → `docker load -i` → `docker tag` 成上表引用名 → `docker images` 核对 Image ID 与 §1 一致
-5. **Phase 3 切换**：先后端再前端，不碰数据容器；`docker logs -f qa-backend | grep -E "Running upgrade|…|Application startup complete|ERROR|blocking"`；迁移版本复核；按需 seed（`qa_compose exec backend python -m scripts.seed_*`，幂等）；.env 开关走「先改后 recreate」铁律并验证 404→401/403
+5. **Phase 3 切换**：先后端再前端，不碰数据容器；**worker 随 backend 一并切换**（见下方 §worker 同步铁律）；`docker logs -f qa-backend | grep -E "Running upgrade|…|Application startup complete|ERROR|blocking"`；迁移版本复核；按需 seed（`qa_compose exec backend python -m scripts.seed_*`，幂等）；.env 开关走「先改后 recreate」铁律并验证 404→401/403
 6. **Phase 4 验收探针**：后端（logs / alembic 版本 / health / 新路由 401/403=已注册、404=未注册 / 新表 `\dt`）+ 前端（bundle 文件名与文案 grep 计数）+ 浏览器端到端（硬刷新）；**探针按本批特性定制，不是固定清单**
 7. **回滚**（写死在方案里，不是事后现想）：`qa_compose stop backend` → 用**新镜像**降库（`docker run --rm --network qa-system_default -v /opt/qa-system/docker/.env:/app/.env:ro qa-system-backend:amd64-<标识> alembic downgrade <PRE_VER>`）→ 复核版本 → `docker tag …:pre-<标识> …` 换回 → recreate；前端可单独回滚（不动库）；替代：保库只回前端
 8. **本批明确没做的事**：❌ 清单（不动哪些容器 / 不改哪些配置 / 不带未合 main 的改动）
 
-## 每批生成的变量（方案中唯一允许「待 Phase 0 实测」的位）
+## worker 同步铁律（换 backend 镜像时必做，漏了就出「假超时」）
+
+**症状**（2026-11-27 本地实证）：采购 Copilot 的到货跟踪等**编排类**功能「任意查询都报超时」，
+但数据库、网络、SQL、绑定全部正常。
+
+**根因链**：worker 跑旧镜像 ⇒ 启动 warmUp 时校验 `agent_tool_config.handler_ref` 不在旧代码的
+BUILTIN 白名单 ⇒ `ValueError` ⇒ 进程退出 ⇒ restart 循环 ⇒ **从不消费 QUEUED 的编排 run**
+⇒ 前端等 run 结果 ⇒ 30s 超时。
+
+**识别（30 秒定位）**：
+
+```bash
+# ① worker 是否在崩溃循环
+docker ps --format '{{.Names}}\t{{.Status}}' | grep worker      # Restarting (N) ⇒ 中招
+# ② worker 日志里的真因
+docker logs qa-agent-orchestration-worker --tail 20 2>&1 | grep -iE "ValueError|不在 BUILTIN 白名单"
+# ③ 两个容器的镜像是否同一个
+docker inspect qa-backend qa-agent-orchestration-worker --format '{{.Name}} {{.Image}}'
+# ④ 编排 run 是否全卡在 QUEUED（消费不掉的铁证）
+#    SELECT status, count(*) FROM agent_orchestration_run GROUP BY status;   -- QUEUED 堆积
+```
+
+**修复**：
+
+```bash
+# 本地（compose v2）
+docker tag qa-system-backend:latest qa-system-agent-orchestration-worker:latest
+docker compose -f docker/docker-compose.yml up -d --no-build --force-recreate backend
+docker compose -f docker/docker-compose.yml --profile agent-orchestration \
+  up -d --no-build --force-recreate agent-orchestration-worker
+```
+
+```bash
+# 生产（compose v1，见 §生产发版命令）
+docker tag qa-backend:offline <compose 里 worker 的实际引用名>
+qa_compose up -d --no-build --no-deps --force-recreate backend agent-orchestration-worker
+```
+
+**验收**：
+
+```bash
+docker ps --format '{{.Names}}\t{{.Status}}' | grep agent-orchestration-worker   # Up（不是 Restarting）
+docker inspect qa-backend qa-agent-orchestration-worker --format '{{.Name}} {{.Image}}'   # 两个 Image ID 相同
+# 编排 run 的 QUEUED 堆积应在 1~2 个轮询周期内被消费
+```
+
+**与「本地栈多人并行操作」的配合**：本地有多个会话轮流重建镜像时，**任何一方重建 backend
+都必须带上 worker**；否则 worker 落后 ⇒ 复现上面的「假超时」。若发现
+`docker inspect qa-backend` 引用的 Image ID 在 `docker images` 里查不到（悬空引用，
+镜像被删但容器还在跑），一并把 backend 拉回确定存在的 tag。
+
 
 - 发版标识、PR/commit 列表、迁移区间与可逆性、PRE_VER、seed 脚本清单、验收探针（新路由/新表/新文案）、image ID / sha256 / bundle 文件名
 - 除上述外**一切名字用固定值表**；固定值若与 Phase 0 label 核对输出冲突，以实测为准并回写本技能
@@ -105,6 +156,8 @@ docker images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' | grep amd64 | 
 - "worker 不用动" → 与 backend 同镜像，必须一起 recreate
 - "改了 .env restart 一下就行" → env 只在 create 时注入，必须 force-recreate
 - `--remove-orphans` / 现场 build → 禁用，用 `--no-build --no-deps --force-recreate`
+- 「只重建 backend，worker 回头再说」→ **worker 必须同步换镜像**（落后 ⇒ restart 循环 ⇒ 编排 run 永 QUEUED ⇒ 前端报「超时」，而 DB/网络/SQL 全部正常 ⇒ 极难自查）。见 §worker 同步铁律
+- 「前端报超时 ⇒ 一定是慢查询/缺索引」→ 先查 worker 状态与编排 run 状态；2026-11-27 的「到货跟踪全超时」根因是 worker 落后，**不是** SQL 慢（实测聚合仅 2~3 秒）
 
 ## 相关
 

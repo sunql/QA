@@ -63,6 +63,7 @@ import BusinessObjectPage from "./pages/BusinessObjectPage";
 import DataDomainPage from "./pages/DataDomainPage";
 import WorkflowInstancesPage from "./pages/WorkflowInstancesPage";
 import ProcurementRfqPage from "./pages/ProcurementRfqPage";
+import ProcurementChasePage from "./pages/ProcurementChasePage";
 import ProcurementBindingsPage from "./pages/ProcurementBindingsPage";
 import ProcurementKnowledgePage from "./pages/ProcurementKnowledgePage";
 import ProcurementAgentCatalogPage from "./pages/ProcurementAgentCatalogPage";
@@ -165,6 +166,7 @@ export default function App() {
         <Route path="business-objects" element={<BusinessObjectPage />} />
         <Route path="data-domains" element={<DataDomainPage />} />
         <Route path="procurement/rfq" element={<ProcurementRfqPage />} />
+        <Route path="procurement/chase" element={<ProcurementChasePage />} />
         <Route path="procurement/bindings" element={<ProcurementBindingsPage />} />
         <Route path="procurement/knowledge" element={<ProcurementKnowledgePage />} />
         <Route path="procurement/agents" element={<ProcurementAgentCatalogPage />} />

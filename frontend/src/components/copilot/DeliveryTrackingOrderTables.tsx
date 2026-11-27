@@ -59,13 +59,24 @@ export function StatusTag({ status }: { status: DeliveryOrderStatus }) {
   return <Tag color={STATUS_COLOR[status]}>{STATUS_LABEL[status]}</Tag>;
 }
 
-function OrderLinesTable({ lines }: { lines: DeliveryTrackingLine[] }) {
+function OrderLinesTable({
+  lines,
+  rowSelection,
+}: {
+  lines: DeliveryTrackingLine[];
+  rowSelection?: {
+    selectedRowKeys: React.Key[];
+    onChange: (keys: React.Key[]) => void;
+    getCheckboxProps: (line: DeliveryTrackingLine) => { disabled: boolean };
+  };
+}) {
   return (
     <Table<DeliveryTrackingLine>
       size="small"
       pagination={false}
       rowKey="poLine"
       dataSource={lines}
+      rowSelection={rowSelection}
       onRow={(line) => (line.isDirty ? { style: { color: DIRTY_ROW_COLOR } } : {})}
       columns={[
         { title: "行号", dataIndex: "poLine" },
@@ -116,13 +127,31 @@ function OrderLinesTable({ lines }: { lines: DeliveryTrackingLine[] }) {
   );
 }
 
-export function OrderTable({ orders }: { orders: DeliveryTrackingOrder[] }) {
+export function OrderTable({
+  orders,
+  rowSelection,
+}: {
+  orders: DeliveryTrackingOrder[];
+  /** 催货闭环：勾选未到货行（仅未到货 tab 传入）。行选择在**展开的明细表**上 ——
+   *  订单级 checkbox 语义模糊（部分行未到货），行级才是业务身份。 */
+  rowSelection?: {
+    selectedRowKeys: React.Key[];
+    onChange: (keys: React.Key[]) => void;
+    getCheckboxProps: (line: DeliveryTrackingLine) => { disabled: boolean };
+  };
+}) {
   return (
     <Table<DeliveryTrackingOrder>
       size="small"
       pagination={false}
       rowKey="poNo"
       dataSource={orders}
+      expandable={{
+        defaultExpandAllRows: rowSelection !== undefined,
+        expandedRowRender: (order) => (
+          <OrderLinesTable lines={order.lines} rowSelection={rowSelection} />
+        ),
+      }}
       columns={[
         { title: "订单号", dataIndex: "poNo" },
         {

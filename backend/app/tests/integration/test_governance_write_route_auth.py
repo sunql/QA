@@ -63,6 +63,14 @@ _WRITE_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/procurement-bindings/{id}/expire"),
         ("POST", "/api/v1/procurement-bindings/{id}/properties/{propertyBindingId}/confirm"),
         ("POST", "/api/v1/procurement-bindings/{id}/properties/{propertyBindingId}/expire"),
+        # 催货单（feat/delivery-chase-closed-loop）：对外动作（把欠交事实告知供应商）
+        # ⇒ 创建/推进/发送全部 admin。
+        ("POST", "/api/v1/procurement/chase/from-pending"),
+        ("POST", "/api/v1/procurement/chase/drafts/{chaseDraftId}/validate"),
+        ("POST", "/api/v1/procurement/chase/drafts/{chaseDraftId}/approve"),
+        ("POST", "/api/v1/procurement/chase/drafts/{chaseDraftId}/reject"),
+        ("POST", "/api/v1/procurement/chase/drafts/{chaseDraftId}/cancel"),
+        ("POST", "/api/v1/procurement/chase/drafts/{chaseDraftId}/send"),
     }
 )
 
@@ -96,6 +104,9 @@ _ADMIN_ONLY_READ_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/ontology-discovery/proposals/{proposalId}"),
         ("GET", "/api/v1/ontology-discovery/evaluations"),
         ("GET", "/api/v1/ontology-discovery/runs"),
+        # 催货单（feat/delivery-chase-closed-loop）：在途/已发催货是采购对外事实。
+        ("GET", "/api/v1/procurement/chase/drafts"),
+        ("GET", "/api/v1/procurement/chase/drafts/{chaseDraftId}"),
     }
 )
 
@@ -103,6 +114,7 @@ _TERM_PREFIX = "/api/v1/term-dictionary"
 _METRIC_PREFIX = "/api/v1/ontology/metrics"
 _DISCOVERY_PREFIX = "/api/v1/ontology-discovery"
 _BINDING_PREFIX = "/api/v1/procurement-bindings"
+_CHASE_PREFIX = "/api/v1/procurement/chase"
 
 
 def _productionRoutes() -> list[tuple[str, APIRoute, tuple[Any, ...]]]:
@@ -116,7 +128,7 @@ def _routeIndex() -> dict[tuple[str, str], tuple[APIRoute, tuple[Any, ...]]]:
     index: dict[tuple[str, str], tuple[APIRoute, tuple[Any, ...]]] = {}
     for path, route, inherited in _productionRoutes():
         if not path.startswith(
-            (_TERM_PREFIX, _METRIC_PREFIX, _DISCOVERY_PREFIX, _BINDING_PREFIX)
+            (_TERM_PREFIX, _METRIC_PREFIX, _DISCOVERY_PREFIX, _BINDING_PREFIX, _CHASE_PREFIX)
         ):
             continue
         for method in route.methods:

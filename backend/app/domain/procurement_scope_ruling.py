@@ -152,6 +152,33 @@ APPROVED_TABLES: tuple[TableRuling, ...] = (
             "历史不被改写；界面展示用轮次原文，而不是被 resume 追加过的 run.question"
         ),
     ),
+    TableRuling(
+        tableName="procurement_chase_draft",
+        replacement="0172",
+        reason=(
+            "催货单（feat/delivery-chase-closed-loop）：到货跟踪的业务闭环 ——"
+            "对未到货订单行按供应商催告。与 procurement_rfq_draft 分表"
+            "（payload 契约不同：催货行是 poNo/poLine 身份对 + 服务端回查数量；"
+            "状态语义不同：询价接报价回流、催货接答复提醒）——混表会让"
+            "payload 校验与状态机演进变成 if/else 分叉"
+        ),
+    ),
+    TableRuling(
+        tableName="procurement_chase_line",
+        replacement="0172",
+        reason=(
+            "催货行（独立行表）：poNo+poLine 是业务身份（(draft, po, line) 唯一），"
+            "塞 JSONB 会失去按行查询/去重能力；同批催货单的行可审计"
+        ),
+    ),
+    TableRuling(
+        tableName="procurement_chase_decision",
+        replacement="0172",
+        reason=(
+            "催货决策留痕（与 procurement_rfq_decision 同构）：谁/何时/批驳/意见，"
+            "不覆盖历史；决策人从登录身份取（防伪造）"
+        ),
+    ),
 )
 
 # 延后（D3：M6 决策）。**M6 前不许建**；若 M6 裁决要建，先改本目录再动表。

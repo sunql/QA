@@ -316,6 +316,15 @@ def buildTestApp(testFactory: Any) -> FastAPI:
     )
     testApp.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     testApp.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
+    # 催货单（feat/delivery-chase-closed-loop）—— 与 main.py 同构
+    from app.api.v1 import procurement_chase
+
+    testApp.include_router(
+        procurement_chase.router,
+        prefix="/api/v1/procurement/chase",
+        tags=["procurement-chase"],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+    )
     # 待到货场景轻量统计（欢迎态业务现状卡；只读，登录即可）
     from app.api.v1 import procurement_analytics
 

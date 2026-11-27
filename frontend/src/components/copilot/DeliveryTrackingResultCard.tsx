@@ -13,8 +13,15 @@
  * 绝不空白、绝不崩。
  */
 
-import { Alert, Card, Table, Tabs, Tag, Typography } from "antd";
+import { Alert, Button, Card, Table, Tabs, Tag, Typography, message } from "antd";
+import { useState, type Key as ReactKey } from "react";
+import { useTranslation } from "react-i18next";
 import type { CopilotStepPayload } from "../../api/procurementCopilot";
+import {
+  createChaseFromPending,
+  type ChaseLineInput,
+} from "../../api/procurementChase";
+import { useAuthStore } from "../../stores/authStore";
 import { OrderTable, SupplierCell, fmtQty } from "./DeliveryTrackingOrderTables";
 
 const { Text } = Typography;
@@ -319,6 +326,13 @@ export default function DeliveryTrackingResultCard({
 }: {
   result: DeliveryTrackingResult;
 }) {
+  // 催货闭环（feat/delivery-chase-closed-loop）：勾选未到货行 → 按供应商创建催货单。
+  // 本组件只负责「选行 + 提交身份对」；数量/供应商分组由服务端回查决定（防篡改）。
+  const { t } = useTranslation();
+  const [selectedKeys, setSelectedKeys] = useState<ReactKey[]>([]);
+  const [creating, setCreating] = useState(false);
+  const isAdmin = useAuthStore((s) => (s.user?.roles ?? []).includes("admin"));
+  const selectedCount = selectedKeys.length;
   // filter/sort 返回新数组，不改入参；未到货订单排在前（业务先看问题单）
   const openOrders = result.byOrder
     .filter((order) => order.status === "partial" || order.status === "notArrived")
@@ -330,6 +344,52 @@ export default function DeliveryTrackingResultCard({
   const openLabel = result.ordersTruncated
     ? `未到货订单（TOP ${openOrders.length}，已截断）`
     : `未到货订单（${openOrders.length}）`;
+
+  /** 把勾选的未到货行提交为催货单（按供应商分组在服务端）。
+   *  只传 {poNo, poLine} 身份对 —— 数量/供应商由服务端回查，前端传的会被忽略。 */
+  const createChases = async () => {
+    if (selectedCount === 0) {
+      void message.warning(t("chase.create.empty"));
+      return;
+    }
+    setCreating(true);
+    try {
+      const lines: ChaseLineInput[] = [];
+      for (const order of openOrders) {
+        for (const line of order.lines) {
+          const key = `${order.poNo}:${line.poLine}`;
+          if (selectedKeys.includes(key) && line.status === "notArrived") {
+            lines.push({ poNo: order.poNo, poLine: String(line.poLine) });
+          }
+        }
+      }
+      if (lines.length === 0) {
+        void message.warning(t("chase.create.empty"));
+        return;
+      }
+      const created = await createChaseFromPending({ lines });
+      setSelectedKeys([]);
+      if (created.unresolvedSuppliers.length > 0) {
+        void message.warning(
+          t("chase.create.partial", {
+            count: String(created.drafts.length),
+            unresolved: created.unresolvedSuppliers.join(", "),
+          }),
+        );
+      } else {
+        void message.success(
+          t("chase.create.success", {
+            count: String(created.drafts.length),
+            suppliers: String(new Set(created.drafts.map((d) => d.supplierCode)).size),
+          }),
+        );
+      }
+    } catch {
+      // interceptor 已提示
+    } finally {
+      setCreating(false);
+    }
+  };;
   // 降级（观测被截断）⇒ 只有概要，明细表格没有意义 ⇒ 不渲染空表。
   const degraded = result.truncated === true;
 
@@ -371,7 +431,33 @@ export default function DeliveryTrackingResultCard({
               {
                 key: "open",
                 label: openLabel,
-                children: <OrderTable orders={openOrders} />,
+                children: (
+                  <>
+                    <OrderTable
+                      orders={openOrders}
+                      rowSelection={{
+                        selectedRowKeys: selectedKeys,
+                        onChange: (keys) => setSelectedKeys([...keys]),
+                        // 只允许勾选未到货行（已收清/脏行不可催）
+                        getCheckboxProps: (line) => ({
+                          disabled: line.status !== "notArrived" || line.isDirty === true,
+                        }),
+                      }}
+                    />
+                    {isAdmin && (
+                      <div style={{ marginTop: 8, textAlign: "right" }}>
+                        <Button
+                          type="primary"
+                          disabled={selectedCount === 0}
+                          loading={creating}
+                          onClick={() => void createChases()}
+                        >
+                          {t("chase.create.button")}（{selectedCount}）
+                        </Button>
+                      </div>
+                    )}
+                  </>
+                ),
               },
               {
                 key: "arrived",

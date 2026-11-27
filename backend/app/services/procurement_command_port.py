@@ -49,6 +49,15 @@ class ProcurementCommandPort(Protocol):
         """发送询价草稿到 ERP/SRM（同键幂等）。"""
         ...
 
+    async def sendChase(
+        self,
+        draft: dict[str, Any],
+        *,
+        idempotencyKey: str,
+    ) -> RfqSendResult:
+        """发送催货单到 ERP/SRM（同键幂等；结果语义与 sendRfq 相同）。"""
+        ...
+
     async def querySendStatus(self, externalRef: str) -> RfqSendResult:
         """查询发送状态（状态回写用）。"""
         ...
@@ -73,14 +82,31 @@ class SimulatedErpSrmAdapter:
         idempotencyKey: str,
     ) -> RfqSendResult:
         self.sentKeys.append(idempotencyKey)
-        digest = hashlib.sha256(
-            f"{idempotencyKey}|{sorted(draft.items())}".encode()
-        ).hexdigest()[:16]
         return RfqSendResult(
-            externalRef=f"SIM-{digest}",
+            externalRef=self._simulatedRef(draft, idempotencyKey),
             status=self._status,
             detail="模拟发送（无真实副作用）",
         )
+
+    async def sendChase(
+        self,
+        draft: dict[str, Any],
+        *,
+        idempotencyKey: str,
+    ) -> RfqSendResult:
+        """发送催货单（与 sendRfq 同形态：同键幂等、确定性引用、零真实副作用）。"""
+        self.sentKeys.append(idempotencyKey)
+        return RfqSendResult(
+            externalRef=f"CHASE-{self._simulatedRef(draft, idempotencyKey)}",
+            status=self._status,
+            detail="模拟发送催货单（无真实副作用）",
+        )
+
+    def _simulatedRef(self, draft: dict[str, Any], idempotencyKey: str) -> str:
+        digest = hashlib.sha256(
+            f"{idempotencyKey}|{sorted(draft.items(), key=lambda kv: str(kv[0]))}".encode()
+        ).hexdigest()[:16]
+        return f"SIM-{digest}"
 
     async def querySendStatus(self, externalRef: str) -> RfqSendResult:
         return RfqSendResult(

@@ -27,6 +27,36 @@ const MONTHS_MIN = 1;
 const MONTHS_MAX = 36;
 const SEARCH_DEBOUNCE_MS = 300;
 
+/** 槽位声明的取值范围（缺省 = 不限制）。 */
+interface SlotRange {
+  min?: number;
+  max?: number;
+}
+
+/** 从槽位配置读取值范围（minimum / maximum 缺省即不限制）。 */
+function slotRange(slot: CopilotScenarioSlot): SlotRange {
+  return {
+    min: typeof slot.minimum === "number" ? slot.minimum : undefined,
+    max: typeof slot.maximum === "number" ? slot.maximum : undefined,
+  };
+}
+
+/** 范围的可读文本（给 i18n 文案拼装用）。 */
+function rangeText(range: SlotRange): string {
+  const { min, max } = range;
+  if (min !== undefined && max !== undefined) return `${min} ~ ${max}`;
+  if (min !== undefined) return `>= ${min}`;
+  return `<= ${max ?? ""}`;
+}
+
+/** 取值是否越界（非数值不算越界：交给既有逻辑/工具侧）。 */
+function isOutOfRange(value: number, range: SlotRange): boolean {
+  const { min, max } = range;
+  if (min !== undefined && value < min) return true;
+  if (max !== undefined && value > max) return true;
+  return false;
+}
+
 /** 时间窗/日期区间二选一：months = 近 N 月；range = 显式 dateFrom/dateTo。 */
 export type DateMode = "months" | "range";
 
@@ -75,6 +105,10 @@ export default function ScenarioAdvancedParams({
   const [supplierOptions, setSupplierOptions] = useState<{ code: string; name: string }[]>([]);
   const [materialOptions, setMaterialOptions] = useState<{ code: string; name: string }[]>([]);
   const [searchTimer, setSearchTimer] = useState<ReturnType<typeof setTimeout> | null>(null);
+  /** number 槽位的越界标记（键 = 槽位 key）：用户输入越界 ⇒ 就地提示。
+   * antd InputNumber 自带 min/max ⇒ 越界值**不会**进 onChange（控件内部拦），
+   * 因此这里用 onInput 拿原始输入串自行判定。 */
+  const [rangeError, setRangeError] = useState<Record<string, boolean>>({});
 
   /** 远程搜索防抖（Select onSearch 高频触发）。 */
   const remoteSearch = (
@@ -107,6 +141,7 @@ export default function ScenarioAdvancedParams({
     // 后端渲染不受影响
     if (slot.hidden) return null;
     if (slot.key === "monthsBack" && slot.type === "number") {
+      const range = slotRange(slot);
       return (
         <Space key={slot.key} wrap size={8}>
           {label(slot)}
@@ -121,8 +156,8 @@ export default function ScenarioAdvancedParams({
           {dateMode === "months" ? (
             <>
               <InputNumber
-                min={MONTHS_MIN}
-                max={MONTHS_MAX}
+                min={range.min ?? MONTHS_MIN}
+                max={range.max ?? MONTHS_MAX}
                 value={Number(values[slot.key] ?? 12)}
                 onChange={(v) => onChange(slot.key, Number(v) || 12)}
               />
@@ -137,14 +172,36 @@ export default function ScenarioAdvancedParams({
       );
     }
     if (slot.type === "number") {
+      const range = slotRange(slot);
+      const current = Number(values[slot.key] ?? 0);
+      const outOfRange =
+        rangeError[slot.key] === true || isOutOfRange(current, range);
       return (
         <Space key={slot.key} wrap size={8}>
           {label(slot)}
           <InputNumber
-            min={0}
-            value={Number(values[slot.key] ?? 0)}
-            onChange={(v) => onChange(slot.key, Number(v) || 0)}
+            min={range.min}
+            max={range.max}
+            value={current}
+            onChange={(v) => onChange(slot.key, v === null ? undefined : Number(v))}
+            onInput={(text: string) => {
+              const trimmed = text.trim();
+              const parsed = Number(trimmed);
+              const bad =
+                trimmed !== "" &&
+                !Number.isNaN(parsed) &&
+                isOutOfRange(parsed, range);
+              setRangeError((prev) => ({ ...prev, [slot.key]: bad }));
+            }}
           />
+          {outOfRange && (
+            <Text type="danger" style={{ fontSize: 12 }}>
+              {t("procurement.copilot.slotOutOfRange", {
+                label: slot.label,
+                range: rangeText(range),
+              })}
+            </Text>
+          )}
         </Space>
       );
     }

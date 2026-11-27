@@ -264,3 +264,50 @@ async def test_seed_cleanup_does_not_touch_unseeded_scenario(
     out = capsys.readouterr().out
     assert "cleaned admin_scen" not in out
     assert await _readSlotKeys(factory, "admin_scen") == ["monthsBack", "datasourceId"]
+
+
+# ── 槽位取值范围（2026-11-28 生产缺陷：周期期序填正数 ⇒ 查了所有供应商）─────
+
+
+def test_delivery_tracking_period_index_declares_range() -> None:
+    """周期期序必须声明 minimum=-12 / maximum=0（0=本期、-1=上期，正数非法）。
+
+    不声明 ⇒ 前端 InputNumber 无限制 ⇒ 用户能填 1 ⇒ 工具报错 → runner 不终止
+    run → LLM 重规划丢槽位 ⇒ 查了所有供应商。
+    """
+    seed = _deliveryTrackingSeed()
+    keyed = {slot["key"]: slot for slot in seed["slot_schema"]}
+    assert keyed["periodIndex"]["minimum"] == -12
+    assert keyed["periodIndex"]["maximum"] == 0
+
+
+def test_delivery_tracking_anchor_day_range_matches_tool() -> None:
+    """锚点日范围与工具契约一致（delivery_tracking_query._MAX_ANCHOR_DAY）。"""
+    from app.services.delivery_tracking_query import _MAX_ANCHOR_DAY
+
+    seed = _deliveryTrackingSeed()
+    keyed = {slot["key"]: slot for slot in seed["slot_schema"]}
+    assert keyed["anchorDay"]["minimum"] == 1
+    assert keyed["anchorDay"]["maximum"] == _MAX_ANCHOR_DAY
+
+
+def test_delivery_tracking_months_back_range_matches_tool() -> None:
+    """时间窗范围与工具契约一致（delivery_tracking_query._MIN/_MAX_MONTHS_BACK）。"""
+    from app.services.delivery_tracking_query import (
+        _MAX_MONTHS_BACK,
+        _MIN_MONTHS_BACK,
+    )
+
+    seed = _deliveryTrackingSeed()
+    keyed = {slot["key"]: slot for slot in seed["slot_schema"]}
+    assert keyed["monthsBack"]["minimum"] == _MIN_MONTHS_BACK
+    assert keyed["monthsBack"]["maximum"] == _MAX_MONTHS_BACK
+
+
+def test_pending_delivery_slot_ranges_declared() -> None:
+    """待到货场景也声明范围（前端此前把 min=0 写死在控件里 ⇒ 收进配置）。"""
+    seed = _pendingDeliverySeed()
+    keyed = {slot["key"]: slot for slot in seed["slot_schema"]}
+    assert keyed["minOverdueDays"]["minimum"] == 0
+    assert keyed["monthsBack"]["minimum"] == 1
+    assert keyed["monthsBack"]["maximum"] == 36

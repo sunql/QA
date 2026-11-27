@@ -283,6 +283,9 @@ async def _renderScenarioQuestion(session: AsyncSession, dto: CopilotMessageRequ
     - 场景必须存在且启用（getByCode fail loud）；
     - Agent 钉死校验：请求 agentCode 与场景配置不一致 ⇒ ValidationError
       （防止前端配置漂移后问句进了错误 Agent 的编排）；
+    - **槽位取值校验**（2026-11-28 生产缺陷）：非法槽位（如周期期序填正数）
+      在**创建编排 run 之前** ⇒ 422，不进 LLM。否则工具报错后 runner 记
+      FAILED 但不终止 run ⇒ LLM 重规划 ⇒ 槽位丢失 ⇒ 查了所有供应商；
     - 惰性导入：copilot_scenario 服务/渲染器顶层引 domain.models，
       本模块被 run service 侧引用，顶层 import 会成环。
     """
@@ -290,6 +293,9 @@ async def _renderScenarioQuestion(session: AsyncSession, dto: CopilotMessageRequ
         return dto.message
     from app.services.copilot_scenario_render import renderScenarioQuestion
     from app.services.copilot_scenario_service import CopilotScenarioService
+    from app.services.copilot_scenario_slot_validation import (
+        validateScenarioSlotValues,
+    )
 
     scenario = await CopilotScenarioService(session).getByCode(dto.scenario_code)
     if scenario.agent_code != dto.agent_code:
@@ -297,6 +303,11 @@ async def _renderScenarioQuestion(session: AsyncSession, dto: CopilotMessageRequ
             f"场景 {dto.scenario_code} 钉定的 Agent 是 {scenario.agent_code}，"
             f"与请求的 {dto.agent_code} 不一致"
         )
+    validateScenarioSlotValues(
+        slots=dto.slots,
+        slotSchema=scenario.slot_schema,
+        agentCode=scenario.agent_code,
+    )
     return renderScenarioQuestion(
         template=scenario.question_template,
         slots=dto.slots,

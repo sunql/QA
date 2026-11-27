@@ -49,6 +49,9 @@ PENDING_DELIVERY_SLOT_SCHEMA: list[dict[str, Any]] = [
         "required": True,
         "conflictKeywords": ["时间窗", "个月", "时间段", "日期", "上半年", "下半年", "本年度", "本年"],
         "displayTemplate": "近{value}个月",
+        # 范围同 procurement_query_utils.MONTHS_BACK_MIN/MAX（1..36）
+        "minimum": 1,
+        "maximum": 36,
     },
     {
         "key": "supplierKeys",
@@ -71,7 +74,7 @@ PENDING_DELIVERY_SLOT_SCHEMA: list[dict[str, Any]] = [
         "conflictKeywords": ["基地", "厂区", "工厂", "车间"],
         "codePattern": _SITE_CODE,
     },
-    {"key": "minOverdueDays", "type": "number", "label": "最低逾期天数"},
+    {"key": "minOverdueDays", "type": "number", "label": "最低逾期天数", "minimum": 0},
     # 无 datasourceId 槽位（THBI 硬规则：数据源由本体绑定唯一确定，2026-11-25 取消切换）
     # 显式日期区间（高级参数「时间段」模式）：覆盖 monthsBack 的近 N 月口径
     {
@@ -157,18 +160,30 @@ SEEDS: list[dict[str, Any]] = [
                 "label": "时间窗",
                 "conflictKeywords": ["时间窗", "个月", "时间段", "日期", "上半年", "下半年", "本年度", "本年"],
                 "displayTemplate": "近{value}个月",
+                # 范围同 delivery_tracking_query._MIN/_MAX_MONTHS_BACK（1..36）
+                "minimum": 1,
+                "maximum": 36,
             },
             {
                 "key": "anchorDay",
                 "type": "number",
                 "label": "月度周期锚点日",
                 "conflictKeywords": ["周期", "24日", "结算周期"],
+                # 范围同 delivery_tracking_query._MAX_ANCHOR_DAY（1..28）
+                "minimum": 1,
+                "maximum": 28,
             },
             {
                 "key": "periodIndex",
                 "type": "number",
                 "label": "周期期序",
                 "conflictKeywords": ["本期", "上期", "上个月"],
+                # 周期期序语义：0=本期、-1=上期，**正数非法**（未结束的周期不可查）。
+                # 不声明范围 ⇒ 前端能填正数 ⇒ 工具报错 → runner 不终止 run →
+                # LLM 重规划丢槽位 ⇒ 查了所有供应商（2026-11-28 生产缺陷）。
+                "minimum": -12,
+                "maximum": 0,
+                "hint": "0=本期，-1=上期",
             },
             {
                 "key": "supplierKeys",

@@ -3808,6 +3808,8 @@ export const enUS = {
     timeMonths: "By months",
     timeRange: "By date range",
     timeMonthsUnit: "months",
+    /** Slot value out of range ({label}=slot name, {range}=allowed range) */
+    slotOutOfRange: "{label} must be within {range}",
     slotMaterial: "Material",
     slotSite: "Site",
     searchSupplier: "Search supplier by name/code",

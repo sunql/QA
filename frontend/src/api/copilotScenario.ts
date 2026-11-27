@@ -17,6 +17,10 @@ export interface CopilotScenarioSlot {
   /** 编码让位模式（后端渲染用；前端只透传展示，不做判断） */
   codePattern?: string | null;
   displayTemplate?: string | null;
+  /** 数值槽位的取值范围（前端 InputNumber 限制 + 后端发起前校验同口径）。
+   * undefined = 该槽位不声明范围（不限制、不校验）。 */
+  minimum?: number;
+  maximum?: number;
   /** 隐藏槽位：前端表单不渲染（由专用控件写入，如日期区间/数据源）；
    * 后端渲染照常进尾注与工具入参。 */
   hidden?: boolean;

@@ -3809,6 +3809,8 @@ export const zhCN = {
     timeMonths: "按月",
     timeRange: "按时间段",
     timeMonthsUnit: "个月",
+    /** 槽位取值越界提示（{label}=槽位名，{range}=允许范围） */
+    slotOutOfRange: "{label} 必须在 {range} 之间",
     slotMaterial: "物料",
     slotSite: "基地",
     searchSupplier: "输入供应商名称/编码搜索",

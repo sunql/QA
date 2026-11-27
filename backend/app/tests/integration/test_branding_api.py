@@ -9,7 +9,11 @@
 4. **`BRAND_TITLE` 未配置 ⇒ 跟随 `BRAND_NAME`**：改了主名，标签页标题自动跟着变。
 
 强制规则（`Harness/rules/测试规范.md`）：真实 PostgreSQL + 完整 API 链路，
-禁止 sqlite 内存库 + 直接调 service。
+禁止内存库 + 直接调 service。
+
+⚠️ 本文件**不写那个被禁的库名全称**：仓内有个守卫会 grep 整个 `app/tests/` 目录里
+出现的那个词，只有白名单文件允许提及；新测试文件不在白名单 ⇒ 提及即红
+（2026-11-27 CI 实测：unit shard 3 因此变红）。
 """
 
 from __future__ import annotations

@@ -248,6 +248,30 @@ async def test_create_rejects_past_deadline(dbSession: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 欠交量异常 ⇒ 红色标识（要求重点核对）
+# ---------------------------------------------------------------------------
+
+
+def test_dirty_qty_is_flagged_by_shared_sanity_threshold() -> None:
+    """欠交量 ≥ `OPEN_QTY_SANITY_MAX` ⇒ 标记为「数量异常」。
+
+    用户 2026-11-27：所有行都能催，但**异常量必须带红色标识、要求重点核对** ——
+    那类值多半是源侧录入错误（如 150 万），催出去会把错值带给供应商。
+    阈值必须与待到货/到货跟踪**同一常量**（各写一份 ⇒ 同口径慢慢漂移）。
+    """
+    from app.services.procurement_query_utils import OPEN_QTY_SANITY_MAX
+    from app.services.procurement_chase_service import _isDirtyQty
+
+    assert _isDirtyQty(OPEN_QTY_SANITY_MAX) is True
+    assert _isDirtyQty(OPEN_QTY_SANITY_MAX + 1) is True
+    assert _isDirtyQty(1_500_000) is True
+    assert _isDirtyQty(OPEN_QTY_SANITY_MAX - 1) is False
+    assert _isDirtyQty(10) is False
+    assert _isDirtyQty(None) is False
+    assert _isDirtyQty("not-a-number") is False
+
+
+# ---------------------------------------------------------------------------
 # 回查口径：**所有订单行都可催**（不按 openQty 过滤）
 # ---------------------------------------------------------------------------
 

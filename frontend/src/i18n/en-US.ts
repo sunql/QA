@@ -3543,6 +3543,7 @@ export const enUS = {
       request: "Batch",
       lines: "Chase Lines",
       decisions: "Decision Timeline",
+      dirtyLines: "{count} line(s) with abnormal qty - verify carefully",
     },
     line: {
       poNo: "PO No",
@@ -3551,6 +3552,9 @@ export const enUS = {
       openQty: "Open Qty",
       expectedDate: "Expected",
       overdueDays: "Overdue Days",
+      status: "Check",
+      dirty: "Qty abnormal - verify carefully",
+      normal: "Normal",
     },
     decision: {
       decision: "Action",

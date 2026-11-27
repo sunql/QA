@@ -83,6 +83,7 @@ def _detailRead(detail: dict) -> ChaseDraftDetailRead:
                     line.expected_date.isoformat() if line.expected_date else None
                 ),
                 overdue_days=line.overdue_days,
+                is_dirty=bool(line.is_dirty),
             )
             for line in detail["lines"]
         ],

@@ -51,6 +51,8 @@ class ChaseLineRead(ChaseModel):
     open_qty: Decimal | None = None
     expected_date: str | None = None
     overdue_days: int | None = None
+    #: 欠交量异常（≥ OPEN_QTY_SANITY_MAX）⇒ 前端打**红色标识**，要求重点核对。
+    is_dirty: bool = False
 
 
 class ChaseDecisionRead(ChaseModel):

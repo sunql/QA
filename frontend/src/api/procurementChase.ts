@@ -47,6 +47,8 @@ export interface ChaseLine {
   openQty: number | null;
   expectedDate: string | null;
   overdueDays: number | null;
+  /** 欠交量异常（≥ 1,000,000）⇒ 红色标识，要求重点核对（多半是源侧录入错误）。 */
+  isDirty: boolean;
 }
 
 export interface ChaseDecision {

@@ -50,7 +50,10 @@ from app.services.procurement_command_port import (
     ProcurementCommandPort,
     defaultCommandPort,
 )
-from app.services.procurement_query_utils import colValue
+from app.services.procurement_query_utils import (
+    OPEN_QTY_SANITY_MAX,
+    colValue,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +102,20 @@ def _assertTransitionOrConflict(current: str, target: str) -> None:
         assertChaseTransition(current, target)
     except ValueError as exc:
         raise ConflictError(str(exc)) from exc
+
+
+def _isDirtyQty(openQty: Any) -> bool:
+    """欠交量是否异常（≥ `OPEN_QTY_SANITY_MAX`）—— 与待到货/到货跟踪**同一口径**。
+
+    异常行在催货单上带**红色标识**，要求重点核对：这类值多半是源侧录入错误
+    （如 150 万），催出去会把错值带给供应商。
+    """
+    if openQty is None:
+        return False
+    try:
+        return float(openQty) >= OPEN_QTY_SANITY_MAX
+    except (TypeError, ValueError):
+        return False
 
 
 def _asDate(value: Any) -> date | None:
@@ -362,6 +379,7 @@ class ProcurementChaseService:
                     open_qty=colValue(row, "OPEN_QTY"),
                     expected_date=_asDate(colValue(row, "EXPECTED_DATE")),
                     overdue_days=colValue(row, "OVERDUE_DAYS"),
+                    is_dirty=_isDirtyQty(colValue(row, "OPEN_QTY")),
                 )
             )
         await session.flush()
@@ -417,6 +435,8 @@ class ProcurementChaseService:
                         else None
                     ),
                     "overdueDays": colValue(row, "OVERDUE_DAYS"),
+                    # 异常欠交量 ⇒ 催货单上带红色标识（要求重点核对）
+                    "isDirty": _isDirtyQty(colValue(row, "OPEN_QTY")),
                 }
                 for row in sorted(
                     lines,

@@ -118,6 +118,13 @@ class ProcurementChaseLine(Base, TimestampMixin):
     open_qty: Mapped[Decimal | None] = mapped_column(sa.Numeric(18, 4), nullable=True)
     expected_date: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
     overdue_days: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    #: 欠交量异常（≥ `OPEN_QTY_SANITY_MAX`）⇒ **开单时就冻结**的标记，
+    #: 让催货单上这类行带**红色标识**，要求重点核对（多半是源侧录入错误，
+    #: 催出去会把错值带给供应商）。阈值口径与待到货/到货跟踪**共用**
+    #: `procurement_query_utils.OPEN_QTY_SANITY_MAX`。
+    is_dirty: Mapped[bool] = mapped_column(
+        sa.Boolean, nullable=False, default=False, server_default=sa.text("false")
+    )
 
 
 class ProcurementChaseDecision(Base, TimestampMixin):

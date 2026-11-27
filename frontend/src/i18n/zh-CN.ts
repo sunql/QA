@@ -3545,6 +3545,7 @@ export const zhCN = {
       request: "批次",
       lines: "催货行",
       decisions: "决策时间线",
+      dirtyLines: "{count} 行数量异常，请重点核对",
     },
     line: {
       poNo: "采购订单",
@@ -3553,6 +3554,9 @@ export const zhCN = {
       openQty: "欠交",
       expectedDate: "预计到货",
       overdueDays: "逾期天数",
+      status: "核对",
+      dirty: "数量异常·请重点核对",
+      normal: "正常",
     },
     decision: {
       decision: "动作",

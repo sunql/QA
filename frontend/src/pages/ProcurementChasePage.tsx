@@ -131,6 +131,18 @@ export default function ProcurementChasePage() {
     { title: t("chase.line.openQty"), dataIndex: "openQty", width: 90 },
     { title: t("chase.line.expectedDate"), dataIndex: "expectedDate", width: 110 },
     { title: t("chase.line.overdueDays"), dataIndex: "overdueDays", width: 90 },
+    {
+      title: t("chase.line.status"),
+      width: 190,
+      render: (_: unknown, line: ChaseLine) =>
+        line.isDirty ? (
+          <Tag color="red" data-testid="chase-line-dirty">
+            {t("chase.line.dirty")}
+          </Tag>
+        ) : (
+          <Tag color="green">{t("chase.line.normal")}</Tag>
+        ),
+    },
   ];
 
   const decisionColumns: ColumnsType<ChaseDecision> = [
@@ -151,6 +163,10 @@ export default function ProcurementChasePage() {
   ];
 
   const statusActions = detail ? detail.draft.status : null;
+  // 欠交量异常的行（红色标识，要求重点核对）
+  const dirtyLineCount = detail
+    ? detail.lines.filter((line) => line.isDirty).length
+    : 0;
 
   return (
     <div>
@@ -281,7 +297,14 @@ export default function ProcurementChasePage() {
                 {detail.draft.requestId}
               </Descriptions.Item>
             </Descriptions>
-            <h4 style={{ marginTop: 16 }}>{t("chase.detail.lines")}</h4>
+            <h4 style={{ marginTop: 16 }}>
+              {t("chase.detail.lines")}
+              {dirtyLineCount > 0 && (
+                <Tag color="red" style={{ marginLeft: 8 }}>
+                  {t("chase.detail.dirtyLines", { count: String(dirtyLineCount) })}
+                </Tag>
+              )}
+            </h4>
             <Table<ChaseLine>
               rowKey={(line) => `${line.poNo}-${line.poLine}`}
               size="small"

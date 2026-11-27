@@ -21,6 +21,8 @@ updated: 2026-11-27
 | #187 | `8f99a5cd` | 后端：迁移 0172 三张表 + 状态机 + 命令端口 `sendChase` + 服务层 + API + 治理守卫登记 |
 | #187 | `e7df635c` | 前端：Copilot 到货跟踪卡行级勾选 + 「按供应商创建催货单」+ 催货单管理页 + i18n |
 | #187 | `dad443c7` | 三张催货表入册采购范围裁决目录（准则 H，CI 抓到的真净新增失败） |
+| 后续修 | `00ab0ca5` | 修行选择**串选**（rowKey 补订单号）+ 「勾了却提示请先勾选」（key 格式不一致）+ **所有行都可催**（拆三处状态/脏行限制，含后端回查不再按 openQty 过滤） |
+| 后续修 | `dcbd0d98` | 欠交量异常行加**红色标识**（迁移 0173 加 `is_dirty`），要求重点核对 |
 
 > **PR #187 已合入 main**（merge commit `946e7b3e`，2026-11-27 08:26）；镜像构建源
 > `dad443c7` 与合并后 main 的**运行时代码逐字一致**
@@ -230,7 +232,7 @@ docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'backend|fron
 docker exec qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -c "select version_num from alembic_version"'          # 期望 0173
 
-# 三张新表（期望 3 行）
+# 三张新表（期望 3 行）+ 0173 的 is_dirty 列
 docker exec -i qa-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tA -F"|"' <<'SQL'
 SELECT table_name FROM information_schema.tables
 WHERE table_name LIKE 'procurement_chase%' ORDER BY 1;
@@ -259,9 +261,13 @@ done
 2. 「未到货订单」tab → **展开某个订单的行明细** → 勾选要催的行
    （只有 `notArrived` 状态、非脏行的行可勾；脏行 checkbox 应为禁用）；
 3. 点「**按供应商创建催货单（N）**」→ 成功提示「已创建 N 张催货单（M 个供应商）」；
+   - ⚠️ **所有订单行都可勾**（不管脏数据、不管部分到货）；
+   - ⚠️ **不同订单的同号行互不串选**（勾 A 单第 1 行，B 单第 1 行不应跟着亮）；
 4. 进 **催货单管理页**（`/procurement/chase`）→ 看到刚建的草稿（`DRAFT`）；
 5. 详情 → **校验**（→ `PENDING_APPROVAL`）→ **审批通过**（→ `READY_TO_SEND`）→
    **发送催货**（→ `SENT`）；决策时间线里最后一条 `SEND` 的意见是 `CHASE-SIM-xxxx`；
+   - **欠交量异常的行**（≥ 1,000,000）带**红色**「数量异常·请重点核对」标识，
+     表头显示「N 行数量异常，请重点核对」；
 6. **回归核验**：到货跟踪卡、待到货场景仍正常（无「本体绑定缺失」类报错）。
 
 > 若第 3 步提示「供应商不在统一实体映射」⇒ 该 supplierCode 不在 `entity_mapping`

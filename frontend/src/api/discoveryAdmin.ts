@@ -57,6 +57,9 @@ export interface SnapshotTable {
 
 export interface SnapshotDetail extends SnapshotSummary {
   snapshot: { schemaVersion?: string; tables?: SnapshotTable[] };
+  /** 快照里**不可剖析**的表名（Oracle 回收站对象等，表名含标识符白名单外的字符）。
+   *  选择器不显示它们；口径由后端 `domain.sql_identifier` 决定。 */
+  unprofilableTables?: string[];
 }
 
 export interface SnapshotCapture {

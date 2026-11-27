@@ -42,6 +42,7 @@ from app.domain.exceptions import DataSourceError, NotFoundError, ValidationErro
 from app.domain.models import DataSource
 from app.infrastructure import business_db_pool
 from app.services.discovery_profile_sql import (
+    ProfileIdentifierError,
     ProfileSqlError,
     buildColumnStatsSql,
     buildTableCountSql,
@@ -234,16 +235,53 @@ class DiscoveryProfiler:
         runId: int,
         snapshotId: int,
     ) -> list[DiscoveryProfile]:
-        """跑完全部查询，返回待落库的行（失败时一行都不返回）。"""
+        """跑完全部查询，返回待落库的行（失败时一行都不返回）。
+
+        ⚠️ **单表跳过**（2026-11-27，feat/discovery-skip-unprofilable-tables）：
+        表名 / 列名 / 属主**不能作 SQL 标识符**的对象（典型：Oracle 回收站对象
+        `BIN$W81vJmasuczgY0bNqMBvog==$0`）⇒ 护栏拒拼 SQL ⇒
+        `ProfileIdentifierError`。**这一张跳过、其余表继续** —— 原来是一张就
+        让**整轮运行失败**（用户实测：反复触发反复报同一个错）。
+
+        只跳过**标识符类**失败：其它 `ProfileSqlError`（分块大小非法、聚合无列/
+        无行）是整体问题 ⇒ 每张表都会同样失败 ⇒ 仍然整轮失败（跳过等于静默产出
+        空结果，比报错更糟）。
+
+        内省层已过滤掉这类对象（新快照干净 ⇒ 这里不会被触发）；本兜底针对
+        **过滤前捕获的老快照**与**直接调 API 传表名**两条路径。
+        """
         adapter = self._adapterProvider(datasource.id, datasource)
         rows: list[DiscoveryProfile] = []
+        skipped: list[str] = []
         for table in selected:
             tableName = str(table["tableName"])
             owner = str(table.get("owner") or "") or None
-            countSql = buildTableCountSql(tableName, owner, dialect=dialect)
-            rowCount = parseTableCount(
-                await adapter.execute_read_only(countSql)
-            )
+            try:
+                countSql = buildTableCountSql(tableName, owner, dialect=dialect)
+                rowCount = parseTableCount(
+                    await adapter.execute_read_only(countSql)
+                )
+                columnRows = await self._columnRows(
+                    adapter,
+                    table,
+                    tableName=tableName,
+                    owner=owner,
+                    dialect=dialect,
+                    sourceId=sourceId,
+                    runId=runId,
+                    snapshotId=snapshotId,
+                    rowCount=rowCount,
+                )
+            except ProfileIdentifierError as exc:
+                # 跳过这一张（不可剖析对象），继续下一张。
+                skipped.append(tableName)
+                logger.warning(
+                    "剖析跳过不可作标识符的表（run=%s table=%r）: %s",
+                    runId,
+                    tableName,
+                    exc,
+                )
+                continue
             rows.append(
                 _profileRow(
                     runId=runId,
@@ -255,19 +293,22 @@ class DiscoveryProfiler:
                     digest=sqlDigest(countSql),
                 )
             )
-            rows.extend(
-                await self._columnRows(
-                    adapter,
-                    table,
-                    tableName=tableName,
-                    owner=owner,
-                    dialect=dialect,
-                    sourceId=sourceId,
-                    runId=runId,
-                    snapshotId=snapshotId,
-                    rowCount=rowCount,
-                )
+            rows.extend(columnRows)
+        if skipped:
+            logger.warning(
+                "剖析跳过 %d 张不可剖析的表（run=%s）：%s",
+                len(skipped),
+                runId,
+                skipped[:10],
             )
+            if not rows:
+                # 一张都没剖析成 ⇒ **不能报成功**（否则用户以为「跑过了」，
+                # 实际零证据）。明确失败并说清原因。
+                raise ProfileSqlError(
+                    f"选中的 {len(skipped)} 张表全部不可剖析（表名/列名/属主含"
+                    f"SQL 标识符白名单外的字符，典型为 Oracle 回收站对象）："
+                    f"{'、'.join(skipped[:5])}"
+                )
         return rows
 
     async def _columnRows(
@@ -284,8 +325,23 @@ class DiscoveryProfiler:
         rowCount: int,
     ) -> list[DiscoveryProfile]:
         columns = profileColumnsFromSnapshot(table)
+        # 整列不可聚合的类型（CLOB / RAW / UNDEFINED 等）：连 `COUNT(col)` 都不被
+        # Oracle 允许（ORA-00932，2026-11-27 用户实测）⇒ 整列不进剖析 SQL，
+        # 该列**不写** profile 行（列级统计对 LOB 列本来意义就有限；
+        # 表级 `rowCount` 来自 `COUNT(*)`，不受影响）。
+        # 构造层 `buildColumnStatsSql` 对这类列抛错兜底 ⇒ 这里必须先剔除。
+        profilable = [column for column in columns if column.supportsNullCount]
+        skippedColumns = [column.name for column in columns if not column.supportsNullCount]
+        if skippedColumns:
+            logger.warning(
+                "剖析跳过 %d 个不可聚合的列（run=%s table=%s）：%s",
+                len(skippedColumns),
+                runId,
+                tableName,
+                skippedColumns[:10],
+            )
         rows: list[DiscoveryProfile] = []
-        for chunk in chunkColumns(columns):
+        for chunk in chunkColumns(profilable):
             sql = buildColumnStatsSql(tableName, owner, chunk, dialect=dialect)
             chunkStats = parseColumnStats(await adapter.execute_read_only(sql), chunk)
             digest = sqlDigest(sql)

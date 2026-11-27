@@ -42,6 +42,7 @@ from app.domain.external_text import sanitizeExternalText, sanitizeIdentifier
 from app.domain.models import DataSource
 from app.domain.schemas import TableSchemaRead
 from app.domain.semantic_manifest_schema import manifestHash
+from app.domain.sql_identifier import isValidIdentifier
 from app.infrastructure import business_db_pool
 from app.services.datasource_service import DataSourceService
 from app.services.schema_introspection_service import SchemaIntrospectionService
@@ -197,6 +198,45 @@ def sanitizeIdentifierValue(value: str | None) -> str | None:
     """
 
     return sanitizeIdentifier(value)
+
+
+def unprofilableTableNames(snapshotJson: Mapping[str, Any]) -> list[str]:
+    """快照里**不可剖析**的表名（表名 / 属主 / 列名任一不能作 SQL 标识符）。
+
+    为什么需要（2026-11-27，feat/discovery-skip-unprofilable-tables）：
+    Oracle 的**回收站对象**（`BIN$W81vJmasuczgY0bNqMBvog==$0`）含 `=` ⇒
+    拼 SQL 前必被护栏拒 ⇒ 一次发现运行会因为「快照里混进一张回收站表」而整轮失败。
+
+    这份清单给前端用：选择器**不显示**这些表 + 告诉用户「已隐藏 N 张」，
+    免得用户以为自己漏选了表。口径与 `discovery_profile_sql.assertIdentifier`
+    同源（`domain.sql_identifier.isValidIdentifier`）⇒ 两边不会漂移。
+
+    返回表名（去重、保序）；快照为空或结构异常 ⇒ 返回空列表（不抛错）。
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for table in snapshotJson.get("tables") or []:
+        if not isinstance(table, Mapping):
+            continue
+        name = str(table.get("tableName") or "")
+        if not name or name in seen:
+            continue
+        owner = str(table.get("owner") or "")
+        columns = table.get("columns") or []
+        columnNames = [
+            str(column.get("columnName") or "")
+            for column in columns
+            if isinstance(column, Mapping)
+        ]
+        if (
+            isValidIdentifier(name)
+            and (not owner or isValidIdentifier(owner))
+            and all(isValidIdentifier(columnName) for columnName in columnNames)
+        ):
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
 
 
 def normalizeSnapshot(tables: Sequence[TableSchemaRead]) -> dict[str, Any]:

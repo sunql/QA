@@ -30,25 +30,22 @@ Oracle 单 SELECT 的选择列表有上限（1000 列表达式），真实采购
 from __future__ import annotations
 
 import hashlib
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
+# 标识符白名单的**单一事实源**在 domain 层：SQL 构造护栏（本模块）与
+# 内省/快照的「不可剖析对象」分类共用同一份判定 ⇒ 两边不会漂移。
+from app.domain.sql_identifier import IDENTIFIER_PATTERN as _IDENTIFIER_PATTERN
+from app.domain.sql_identifier import MAX_IDENTIFIER_LENGTH
+
 #: 单条聚合 SQL 最多带多少列（每列最多 4 个表达式 ⇒ 80 个表达式，远低于 Oracle 的 1000）。
 PROFILE_CHUNK_SIZE = 20
 
-#: 标识符最大长度（与 `discovery_profile.table_name` / `column_name` 的列宽一致）。
-MAX_IDENTIFIER_LENGTH = 128
-
 #: 值域列的展示宽度（`discovery_profile.min_value` / `max_value` 是 String(200)）。
 MAX_VALUE_LENGTH = 200
-
-#: 严格标识符：字母/下划线开头，后续字母数字/`$`/`#`（Oracle 允许后两者）。
-#: 引号类字符一律不在白名单内 ⇒ 拼进 SQL 前就已无法闭合标识符。
-_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
 
 #: 不能 `COUNT(DISTINCT)` 的类型（大对象 / 二进制 / 无等值算子 / 结构化类型）。
 _UNSUPPORTED_DISTINCT = frozenset(
@@ -75,6 +72,18 @@ _UNSUPPORTED_DISTINCT = frozenset(
 #: 不能 `MIN/MAX` 的类型 = 上表 + 无序类型。
 _UNSUPPORTED_RANGE = _UNSUPPORTED_DISTINCT | frozenset({"BOOLEAN", "BOOL", "BIT"})
 
+#: **整列**不可聚合的类型：连 `COUNT(col)` 都不允许 ⇒ 空值数也做不了。
+#:
+#: 回归来历（2026-11-27，用户实测 ORA-00932）：Oracle 连 `COUNT(clob_col)` 都报
+#: 「数据类型不一致：应为 -，但却获得 CLOB」—— 旧裁剪只去掉
+#: `COUNT(DISTINCT)/MIN/MAX`，留下了 `COUNT(*) - COUNT(col)` ⇒ 含 CLOB 列的表
+#: **全量剖析必炸**（THBI 实测 38 个 CLOB 列）。这种列整列不进剖析 SQL：
+#: 空值数对 LOB 列本来意义就有限，`rowCount`（表级 `COUNT(*)`）不受影响。
+#:
+#: `UNDEFINED` 是 Oracle 19c 对不可识别类型（OJVM / 内部对象）的占位 ⇒
+#: 任何聚合都可能炸 ⇒ 一并整列跳过。
+_UNAGGREGATABLE_COLUMNS = _UNSUPPORTED_DISTINCT | frozenset({"UNDEFINED"})
+
 _MYSQL_DIALECTS = frozenset({"mysql", "mariadb"})
 
 
@@ -82,14 +91,34 @@ class ProfileSqlError(ValueError):
     """剖析 SQL 无法安全构造 / 结果无法解析（**不是**数据库错误）。"""
 
 
+class ProfileIdentifierError(ProfileSqlError):
+    """表名 / 列名 / 属主**不能作 SQL 标识符**（护栏拒绝拼 SQL）。
+
+    单列一个子类（而不是看异常文案）⇒ 调用方能精确区分两类失败：
+
+    - **标识符类**（本类）：这张对象**本身**没法剖析（典型：Oracle 回收站对象
+      `BIN$W81vJmasuczgY0bNqMBvog==$0` 含 `=`）⇒ 应当**跳过这一张**，其余表继续；
+    - 其它 `ProfileSqlError`（分块大小非法、聚合无列、聚合无行）：是**整体配置/
+      快照**问题 ⇒ 每一张表都会同样失败 ⇒ 仍然整轮失败（跳过等于静默产出空结果）。
+
+    ⚠️ 是 `ProfileSqlError` 的子类 ⇒ 既有 `except ProfileSqlError` 处理器行为不变
+    （向后兼容）。
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ProfileColumn:
-    """一列的剖析能力（由快照里的 `dataType` 决定）。"""
+    """一列的剖析能力（由快照里的 `dataType` 决定）。
+
+    `supportsNullCount=False` ⇒ 整列**不进**剖析 SQL（连 `COUNT(col)` 都不行，
+    见 `_UNAGGREGATABLE_COLUMNS`）；调用方据此跳过该列。
+    """
 
     name: str
     dataType: str
     supportsDistinct: bool
     supportsRange: bool
+    supportsNullCount: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,13 +154,15 @@ def profileColumnsFromSnapshot(table: Mapping[str, Any]) -> tuple[ProfileColumn,
         dataType = item.get("dataType")
         assertIdentifier(name, what="列名")
         baseType = _baseType(dataType)
-        supportsDistinct = baseType not in _UNSUPPORTED_DISTINCT
+        supportsNullCount = baseType not in _UNAGGREGATABLE_COLUMNS
+        supportsDistinct = supportsNullCount and baseType not in _UNSUPPORTED_DISTINCT
         columns.append(
             ProfileColumn(
                 name=str(name),
                 dataType=str(dataType or ""),
                 supportsDistinct=supportsDistinct,
                 supportsRange=supportsDistinct and baseType not in _UNSUPPORTED_RANGE,
+                supportsNullCount=supportsNullCount,
             )
         )
     columns.sort(key=lambda column: column.name)
@@ -169,12 +200,21 @@ def buildColumnStatsSql(
     *,
     dialect: str,
 ) -> str:
-    """一块列的聚合：空值数 / 不同值数 / 最小 / 最大（按列能力裁剪）。"""
+    """一块列的聚合：空值数 / 不同值数 / 最小 / 最大（按列能力裁剪）。
+
+    ⚠️ `supportsNullCount=False` 的列**不该出现在这里**（构造层防御：出现即抛错，
+    而不是静默产出一条会炸的 SQL）⇒ 调用方（`discovery_profiler`）负责先剔除。
+    """
     if not columns:
         raise ProfileSqlError("聚合 SQL 至少需要一列")
     expressions: list[str] = []
     for index, column in enumerate(columns):
         quoted = _quote(validateIdentifier(column.name), dialect)
+        if not column.supportsNullCount:
+            raise ProfileSqlError(
+                f"列 {column.name!r} 类型为 {column.dataType!r}，"
+                "整列不可聚合（含 COUNT），不应进入剖析 SQL"
+            )
         expressions.append(
             f"COUNT(*) - COUNT({quoted}) AS {_quote(f'N{index}', dialect)}"
         )
@@ -260,13 +300,13 @@ def stringifyValue(value: Any) -> str | None:
 
 
 def assertIdentifier(value: Any, *, what: str) -> str:
-    """校验并返回标识符；不合法一律 `ProfileSqlError`（拼 SQL 之前拒）。"""
+    """校验并返回标识符；不合法一律 `ProfileIdentifierError`（拼 SQL 之前拒）。"""
     if not isinstance(value, str) or not value:
-        raise ProfileSqlError(f"{what}必须是非空字符串（收到 {value!r}）")
+        raise ProfileIdentifierError(f"{what}必须是非空字符串（收到 {value!r}）")
     if len(value) > MAX_IDENTIFIER_LENGTH:
-        raise ProfileSqlError(f"{what}过长：{len(value)} > {MAX_IDENTIFIER_LENGTH}")
+        raise ProfileIdentifierError(f"{what}过长：{len(value)} > {MAX_IDENTIFIER_LENGTH}")
     if not _IDENTIFIER_PATTERN.match(value):
-        raise ProfileSqlError(f"{what}不是合法标识符：{value!r}")
+        raise ProfileIdentifierError(f"{what}不是合法标识符：{value!r}")
     return value
 
 

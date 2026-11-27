@@ -76,7 +76,10 @@ from app.services.discovery_evaluation_service import DiscoveryEvaluationService
 from app.services.discovery_monitor_service import DiscoveryMonitorService
 from app.services.discovery_proposal_service import DiscoveryProposalService
 from app.services.discovery_run_service import DiscoveryRunService
-from app.services.discovery_snapshot_service import DiscoverySnapshotService
+from app.services.discovery_snapshot_service import (
+    DiscoverySnapshotService,
+    unprofilableTableNames,
+)
 from app.services.semantic_diff_service import selectChangesForResponse
 from app.services.semantic_release_service import semanticReleaseService
 
@@ -265,6 +268,7 @@ async def getDiscoverySnapshot(
 
     _noStore(response)
     row = await _service.getSnapshot(session, snapshotId)
+    snapshotJson = row.snapshot_json or {}
     return DiscoverySnapshotRead(
         id=row.id,
         source_id=row.source_id,
@@ -273,7 +277,9 @@ async def getDiscoverySnapshot(
         column_count=row.column_count,
         captured_at=row.captured_at,
         created_by=row.created_by,
-        snapshot=row.snapshot_json or {},
+        snapshot=snapshotJson,
+        # 不可剖析的表（Oracle 回收站对象等）⇒ 前端不显示它们
+        unprofilable_tables=unprofilableTableNames(snapshotJson),
     )
 
 

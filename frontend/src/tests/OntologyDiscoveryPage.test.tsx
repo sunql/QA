@@ -200,6 +200,49 @@ it("运行页签：选源后加载快照表并提交运行", async () => {
 });
 
 
+it("运行页签：不可剖析的表（回收站对象）不显示，并提示已隐藏张数", async () => {
+  // 回归来历（2026-11-27，用户实测）：Oracle 回收站对象
+  // `BIN$…==$0` 必然被剖析护栏拒拼 ⇒ 选到它就废掉整轮运行。
+  // 前端按后端给的清单**不显示**它们，并明确告诉用户「隐藏了几张」。
+  adminApi.listSnapshots.mockResolvedValue({
+    rows: [{ id: 9, sourceId: 1, schemaHash: "a".repeat(64), tableCount: 2, columnCount: 2, capturedAt: "2026-11-22T10:00:00Z", createdBy: "x" }],
+    total: 1,
+  });
+  adminApi.getSnapshot.mockResolvedValue({
+    id: 9, sourceId: 1, schemaHash: "a".repeat(64), tableCount: 2, columnCount: 2,
+    capturedAt: "2026-11-22T10:00:00Z", createdBy: "x",
+    snapshot: {
+      tables: [
+        { tableName: "DIM_SUPPLIER", owner: "THBI", columns: [] },
+        { tableName: "BIN$W81vJmasuczgY0bNqMBvog==$0", owner: "THBI", columns: [] },
+      ],
+    },
+    unprofilableTables: ["BIN$W81vJmasuczgY0bNqMBvog==$0"],
+  });
+  adminApi.startRun.mockResolvedValue({ id: 12, status: "RUNNING", snapshotId: 9 });
+  renderPage();
+
+  await waitFor(() => expect(screen.getByText("probe:THBI Oracle")).toBeTruthy());
+  fireEvent.click(screen.getByRole("tab", { name: "运行" }));
+  fireEvent.click(await screen.findByRole("button", { name: /触发运行/ }));
+
+  const modal = modalAt(0);
+  await pickComboboxIn(modal, 0, /probe:THBI Oracle/);
+  await waitFor(() => expect(adminApi.getSnapshot).toHaveBeenCalledWith(9));
+
+  // 提示：已隐藏 1 张不可剖析的表
+  await waitFor(() =>
+    expect(screen.getByText(/已隐藏 1 张不可剖析的表/)).toBeTruthy(),
+  );
+
+  // 展开表选择器 ⇒ 回收站表**不在选项里**，正常表在
+  const selectors = modal.querySelectorAll(".ant-select-selector");
+  fireEvent.mouseDown(selectors[1] as Element);
+  await waitFor(() => expect(screen.getAllByText("THBI.DIM_SUPPLIER").length).toBeGreaterThan(0));
+  expect(screen.queryByText(/BIN\$/)).toBeNull();
+});
+
+
 it("编辑策略：保存表白名单调用 updateSource", async () => {
   adminApi.updateSource.mockResolvedValue({ ...SOURCE });
   renderPage();

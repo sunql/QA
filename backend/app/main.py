@@ -820,6 +820,17 @@ def createApp() -> FastAPI:
             tags=["procurement-rfqs"],
             dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
         )
+    # 催货单（feat/delivery-chase-closed-loop）：到货跟踪的业务闭环 ——
+    # 未到货行 → 按供应商创建催货单 → validate → approve → send（经命令端口）。
+    # 不挂在 enableWorkflow 下（催货单是采购域自有单据，不经 P5 工作流实例）。
+    from app.api.v1 import procurement_chase
+
+    app.include_router(
+        procurement_chase.router,
+        prefix="/api/v1/procurement/chase",
+        tags=["procurement-chase"],
+        dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)],
+    )
     app.include_router(feature_rules.router, tags=["feature-rules"], dependencies=[Depends(mustChangePasswordGuard), Depends(rateLimitDep)])
     # 待到货场景轻量统计（欢迎态业务现状卡；只读，登录即可）
     from app.api.v1 import procurement_analytics

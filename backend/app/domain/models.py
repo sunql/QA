@@ -2928,6 +2928,12 @@ from app.domain import semantic_release_check_models as _semantic_release_check_
 
 # M5-1：询价草稿 ORM（0160）——导入让 alembic autogenerate 可见
 from app.domain.procurement_rfq_models import ProcurementRfqDecision, ProcurementRfqDraft  # noqa: F401,E402
+# 催货单 ORM（feat/delivery-chase-closed-loop，0172）—— 同上，否则 drift 会报 extra_table
+from app.domain.procurement_chase_models import (  # noqa: F401,E402
+    ProcurementChaseDecision,
+    ProcurementChaseDraft,
+    ProcurementChaseLine,
+)
 from app.domain.procurement_copilot_models import (  # noqa: F401,E402
     ProcurementCopilotConversation,
     ProcurementCopilotTurn,

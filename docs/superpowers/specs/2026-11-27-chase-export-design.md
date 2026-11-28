@@ -194,7 +194,7 @@ PendingDelivery 之后），label 走 i18n（zh-CN / en-US）。
 | 场景 | 行为 |
 |---|---|
 | 催货单不存在 | 404 → 前端友好提示「催货单不存在或已删除」 |
-| `format` 非法 | 400（前端只传两个固定值，正常不会触发） |
+| `format` 非法 | 400 —— **走 `HTTPException` ⇒ `{"detail": "..."}`**；而 404 走统一错误包络（`{"success": false, "error": ...}`）⇒ **前端要兼容这两种形状** |
 | 导出服务异常 | 500 → 统一错误包络；前端提示「导出失败，请稍后重试」 |
 | 催货单无明细行 | **仍可导出**（只有抬头信息，明细表为空） |
 | MDM 查不到供应商名 | 回落 `supplier_code`，不阻塞导出 |
@@ -229,6 +229,9 @@ PendingDelivery 之后），label 走 i18n（zh-CN / en-US）。
 - **上线必做**：跑一次 `python -m scripts.seed_menu_config`（催货单菜单 code 是**全新**的 ⇒
   菜单 seed 的 `on_conflict_do_nothing` 对新 code 有效 ⇒ 直接**新增**该行；
   注意与场景 seed 不同，这里**不需要**定向补丁机制）
+- **抬头键无需手工动作**：`chase.letter.company_name` 已接入 `main.py` 启动链
+  （`seed_brand_config` 之后）⇒ **随发版自动播种**（value 播种为未配置，admin 随后可在
+  后台填写）
 - 需重建 backend + frontend 镜像；worker 同镜像须一并 `--force-recreate`
   （见 `Harness/skills/thdeploy/SKILL.md` §worker 同步铁律）
 

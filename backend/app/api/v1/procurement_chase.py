@@ -31,7 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getDb, requireAdmin
-from app.domain.exceptions import DomainError
+from app.domain.exceptions import DomainError, NotFoundError
 from app.models.system_config import SystemConfig
 from app.schemas.procurement_chase import (
     ChaseDecisionBody,
@@ -44,6 +44,7 @@ from app.schemas.procurement_chase import (
 )
 from app.services.entity_mapping_names import loadMdmDirectory
 from app.services.procurement_chase_export_service import (
+    COMPANY_NAME_CONFIG_KEY,
     buildChaseExportPayload,
     renderChaseDocx,
     renderChaseExcel,
@@ -62,8 +63,6 @@ _service = ProcurementChaseService()
 
 #: 导出支持的格式（单张下载，不做批量）
 _EXPORT_FORMATS: frozenset[str] = frozenset({"xlsx", "docx"})
-#: 公司法定名称的系统配置键（admin 在后台维护）
-_COMPANY_NAME_CONFIG_KEY = "chase.letter.company_name"
 #: 导出文件的 ASCII 回退名（RFC 5987 的 `filename` 参数只能是 ASCII）
 _EXPORT_ASCII_PREFIX = "chase-"
 #: xlsx / docx 的 MIME 类型
@@ -299,19 +298,22 @@ async def _companyNameOf(session: AsyncSession) -> str | None:
     读配置用 **savepoint**（``begin_nested``）：配置表读失败时 PG 会把当前
     事务置为 aborted，若不隔离，后面的查询会连环失败 ⇒ 一次配置读取故障
     就能把整张导出打成 500。
+
+    ⚠️ **只有 docx 需要抬头** ⇒ xlsx 路径**不调**本函数（Excel 的信息 Sheet
+    没有公司名行，在那儿读配置只会产出「抬头留空」的噪声 warning）。
     """
     try:
         async with session.begin_nested():
             row = await session.execute(
                 select(SystemConfig.value).where(
-                    SystemConfig.key == _COMPANY_NAME_CONFIG_KEY
+                    SystemConfig.key == COMPANY_NAME_CONFIG_KEY
                 )
             )
             raw = row.scalar_one_or_none()
     except Exception:  # noqa: BLE001 - 读不到不影响导出
         logger.warning(
             "读取系统配置 %s 失败，催货函抬头留空",
-            _COMPANY_NAME_CONFIG_KEY,
+            COMPANY_NAME_CONFIG_KEY,
             exc_info=True,
         )
         return None
@@ -319,7 +321,7 @@ async def _companyNameOf(session: AsyncSession) -> str | None:
     if not value:
         logger.warning(
             "系统配置 %s 未配置（或值为空），催货函抬头留空",
-            _COMPANY_NAME_CONFIG_KEY,
+            COMPANY_NAME_CONFIG_KEY,
         )
         return None
     return value
@@ -371,10 +373,13 @@ async def exportChaseDraft(
         )
     draftId = _normalizedDraftId(chaseDraftId)
     if draftId is None:
-        raise HTTPException(status_code=404, detail="催货单不存在")
+        # 与「催货单不存在」走**同一个异常类型** ⇒ 两条 404 的响应体形状一致
+        # （统一错误包络，而不是 HTTPException 的 {"detail": ...}）
+        raise NotFoundError(f"催货单不存在: {chaseDraftId}")
     detail = await _service.getDraft(session, draftId)
     draft = detail["draft"]
-    companyName = await _companyNameOf(session)
+    # 只有 Word 催货函有抬头 ⇒ xlsx 不读配置（避免「抬头留空」的噪声 warning）
+    companyName = await _companyNameOf(session) if format == "docx" else None
     supplierName = await _supplierNameOf(session, str(draft.supplier_code))
     payload = buildChaseExportPayload(
         draft=draft,
@@ -394,15 +399,14 @@ async def exportChaseDraft(
     stem = payload.chaseDraftId[:8]
     filename = f"催货单_{stem}.{extension}"
     asciiName = f"{_EXPORT_ASCII_PREFIX}{stem}.{extension}"
-    return Response(
+    response = Response(
         content=blob,
         media_type=mediaType,
-        headers={
-            "Content-Disposition": _contentDisposition(filename, asciiName),
-            # 催货函含采购敏感数据 ⇒ 不许缓存
-            "Cache-Control": "no-store",
-        },
+        headers={"Content-Disposition": _contentDisposition(filename, asciiName)},
     )
+    # 催货函含采购敏感数据 ⇒ 不许缓存（与本文件其它端点同一处理）
+    _noStore(response)
+    return response
 
 
 @router.post(

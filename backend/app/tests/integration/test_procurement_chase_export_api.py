@@ -28,8 +28,9 @@ from decimal import Decimal
 import bcrypt
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import Column, String, Text, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import declarative_base
 
 from app.domain.procurement_chase_models import (
     ProcurementChaseDraft,
@@ -177,6 +178,23 @@ def _exportUrl(chaseDraftId: str, format: str = "xlsx") -> str:
     return f"/api/v1/procurement/chase/drafts/{chaseDraftId}/export?format={format}"
 
 
+def _missingConfigModel():
+    """declarative 替身：映射到一张**不存在**的表。
+
+    用途：让「读配置」这一步产生**真正的 PG 错误**（UndefinedTable）——
+    只有真错误才会把 PG 事务置为 aborted；Python 层异常（如属性访问失败）
+    根本不会发 SQL，事务毫发无损 ⇒ 用例**区分不出有没有 savepoint**。
+    """
+    base = declarative_base()
+
+    class BrokenConfig(base):
+        __tablename__ = "system_config_definitely_not_exist"
+        key = Column(String(64), primary_key=True)
+        value = Column(Text)
+
+    return BrokenConfig
+
+
 # ---------------------------------------------------------------------------
 # 用例
 # ---------------------------------------------------------------------------
@@ -184,13 +202,14 @@ def _exportUrl(chaseDraftId: str, format: str = "xlsx") -> str:
 
 class TestChaseExport:
     async def test_export_xlsx_returns_attachment(
-        self, client: AsyncClient, exportUsers, seededChaseDraft
+        self, client: AsyncClient, exportUsers, seededChaseDraft, caplog
     ) -> None:
         token = await _login(client, ADMIN_USERNAME, ADMIN_PASSWORD)
         chaseDraftId, _supplierCode = seededChaseDraft
-        resp = await client.get(
-            _exportUrl(chaseDraftId), headers={"Authorization": f"Bearer {token}"}
-        )
+        with caplog.at_level(logging.WARNING, logger="app.api.v1.procurement_chase"):
+            resp = await client.get(
+                _exportUrl(chaseDraftId), headers={"Authorization": f"Bearer {token}"}
+            )
         assert resp.status_code == 200, resp.text
         disposition = resp.headers.get("content-disposition", "")
         assert "attachment" in disposition
@@ -200,6 +219,10 @@ class TestChaseExport:
             "application/vnd.openxmlformats-officedocument.spreadsheetml"
         )
         assert len(resp.content) > 0
+        # Excel 的信息 Sheet 没有公司名行 ⇒ xlsx 不该读配置、更不该打「抬头留空」warning
+        assert COMPANY_NAME_CONFIG_KEY not in caplog.text, (
+            f"xlsx 导出不应产生公司名 warning，实际日志：{caplog.text}"
+        )
 
     async def test_export_docx_returns_attachment(
         self, client: AsyncClient, exportUsers, seededChaseDraft
@@ -235,6 +258,26 @@ class TestChaseExport:
             _exportUrl("does-not-exist"), headers={"Authorization": f"Bearer {token}"}
         )
         assert resp.status_code == 404, resp.text
+
+    async def test_both_404_shapes_are_identical(
+        self, client: AsyncClient, exportUsers
+    ) -> None:
+        """两条 404（不存在 / 非法单号）走**同一个异常类型** ⇒ 响应体形状一致。
+
+        否则前端会看到两种错误包络（`{"detail": ...}` vs 统一包络）⇒ 分支代码。
+        """
+        token = await _login(client, ADMIN_USERNAME, ADMIN_PASSWORD)
+        missing = await client.get(
+            _exportUrl("00000000-0000-0000-0000-000000000000"),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        malformed = await client.get(
+            _exportUrl("does-not-exist"), headers={"Authorization": f"Bearer {token}"}
+        )
+        assert missing.status_code == malformed.status_code == 404
+        assert set(missing.json()) == set(malformed.json()), (
+            f"两条 404 的响应体形状不一致：{missing.json()} vs {malformed.json()}"
+        )
 
     async def test_export_bad_format_400(
         self, client: AsyncClient, exportUsers, seededChaseDraft
@@ -378,6 +421,10 @@ class TestChaseExport:
     ) -> None:
         """配置读取炸了 ⇒ 导出**不被阻塞**，且后续查询仍可用（savepoint 隔离）。
 
+        故障必须是**真正的 PG 错误**（读一张不存在的表 ⇒ UndefinedTable）——
+        只有真错误才会把 PG 事务置为 aborted；Python 层异常（如属性访问失败）
+        根本不会发 SQL，事务毫发无损 ⇒ 这样的用例**区分不出有没有 savepoint**。
+
         若配置读取失败把事务打成 aborted，后续的 MDM 查询会连环失败 ⇒
         供应商名会静默退化成编码。此用例用「供应商名仍然解析得到」守住这一点。
         """
@@ -398,18 +445,7 @@ class TestChaseExport:
         )
         await dbSession.commit()
 
-        class _BrokenSystemConfig:
-            """让 system_config 读取抛异常的替身（模拟配置表读失败）。"""
-
-            @property
-            def value(self) -> str:
-                raise RuntimeError("system_config 读炸了")
-
-            @property
-            def key(self) -> str:
-                raise RuntimeError("system_config 读炸了")
-
-        monkeypatch.setattr(chaseApi, "SystemConfig", _BrokenSystemConfig)
+        monkeypatch.setattr(chaseApi, "SystemConfig", _missingConfigModel())
 
         token = await _login(client, ADMIN_USERNAME, ADMIN_PASSWORD)
         chaseDraftId, _supplierCode = seededChaseDraft

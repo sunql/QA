@@ -435,6 +435,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from scripts.seed_system_config import seed_brand_config
 
         await seed_brand_config(session_factory)
+        # 催货函抬头（催货单导出）：保证 `chase.letter.company_name` **存在**
+        # （value=NULL ⇒ 未配置）—— 否则 `PUT /admin/system-config/{key}` 对
+        # 不存在的键抛 404，admin 在后台**根本改不了抬头**。同样是内容型种子：
+        # admin 改过的值不会被发版重置（见 seed_system_config 模块注释）。
+        from scripts.seed_system_config import seed_chase_letter_config
+
+        await seed_chase_letter_config(session_factory)
         # P5 到货跟踪（C1）：补采购只读工具依赖的**全部**本体源+属性绑定
         # （`DIM_FACILITY` + `DWD_PURCHASE_ORDER_DTL` + `DWD_GOODS_RECEIPT_DTL`）。
         # 缺订单行/收货行两个类时，待到货与到货跟踪都会 fail-closed

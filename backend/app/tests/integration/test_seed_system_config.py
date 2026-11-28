@@ -23,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.models.system_config import SystemConfig
 from app.services.branding_service import (
     BRAND_NAME_KEY,
-    BRAND_SHORT_NAME_KEY,
     BRAND_TITLE_KEY,
 )
 from app.services.chart_thresholds import (
@@ -33,11 +32,14 @@ from app.services.chart_thresholds import (
     _CHART_TOP_N_MAX_DEFAULT,
 )
 from app.services.data_summary import FULL_DATA_THRESHOLD
+from app.services.procurement_chase_export_service import COMPANY_NAME_CONFIG_KEY
 from app.tests import _pg_support
 from scripts.seed_system_config import (
     BRAND_CONFIG_SEEDS,
     CHART_CONFIG_SEEDS,
+    CHASE_LETTER_CONFIG_SEEDS,
     seed_brand_config,
+    seed_chase_letter_config,
     seed_system_config,
 )
 
@@ -212,3 +214,101 @@ class TestSeedBrandConfig:
             ).scalar_one()
         assert value is None
         assert name is not None
+
+
+class TestSeedChaseLetterConfig:
+    """催货函抬头配置种子（催货单导出，2026-11-28）。
+
+    与**品牌种子同款**语义（内容型，value 绝不覆盖），与阈值种子相反。
+    两条差异都必须由测试钉住：
+    - 行不存在 ⇒ **插入**（否则 admin 在后台改不了抬头：`PUT /admin/system-config/{key}`
+      对不存在的键抛 404）；
+    - 行已存在且 value 被 admin 改过 ⇒ **不覆盖**（否则每次发版都把抬头打回原形）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_seed_inserts_the_key_with_null_value(
+        self, pgFactory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """跑一次 ⇒ 键在库里，且 **value 为 NULL（未配置）**。
+
+        value 播种成 NULL 是刻意的：公司法定名称**不能写死默认值**
+        （写死一个「看起来像公司名」的值比留空更危险）。
+        """
+        count = await seed_chase_letter_config(pgFactory)
+        assert count == len(CHASE_LETTER_CONFIG_SEEDS)
+
+        async with pgFactory() as session:
+            value = (
+                await session.execute(
+                    select(SystemConfig.value).where(
+                        SystemConfig.key == COMPANY_NAME_CONFIG_KEY
+                    )
+                )
+            ).scalar_one_or_none()
+            description = (
+                await session.execute(
+                    select(SystemConfig.description).where(
+                        SystemConfig.key == COMPANY_NAME_CONFIG_KEY
+                    )
+                )
+            ).scalar_one_or_none()
+        assert value is None, "抬头种子不应写死任何默认公司名"
+        assert description, "admin 在配置页靠 description 理解这个键"
+
+    @pytest.mark.asyncio
+    async def test_seed_does_not_overwrite_admin_value(
+        self, pgFactory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """**已存在且被 admin 改过的值不被覆盖**（内容型种子语义）。"""
+        async with pgFactory() as session:
+            session.add(
+                SystemConfig(
+                    key=COMPANY_NAME_CONFIG_KEY,
+                    value="某某采购集团有限公司",
+                    description="admin 改的",
+                )
+            )
+            await session.commit()
+
+        await seed_chase_letter_config(pgFactory)
+
+        async with pgFactory() as session:
+            value = (
+                await session.execute(
+                    select(SystemConfig.value).where(
+                        SystemConfig.key == COMPANY_NAME_CONFIG_KEY
+                    )
+                )
+            ).scalar_one()
+        assert value == "某某采购集团有限公司", "催货函抬头种子覆盖了 admin 的值（语义反了）"
+
+    @pytest.mark.asyncio
+    async def test_seed_is_idempotent(
+        self, pgFactory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """跑两次行数不变（幂等）。"""
+        first = await seed_chase_letter_config(pgFactory)
+        second = await seed_chase_letter_config(pgFactory)
+        assert first == second == len(CHASE_LETTER_CONFIG_SEEDS)
+
+    def test_key_is_not_in_threshold_seeds(self) -> None:
+        """内容型键**不得**混进阈值种子（那里的冲突路径会 DO UPDATE set value）。"""
+        chartKeys = {key for key, _, _ in CHART_CONFIG_SEEDS}
+        assert COMPANY_NAME_CONFIG_KEY not in chartKeys
+
+    def test_seed_uses_the_content_channel(self) -> None:
+        """催货函抬头种子必须走**内容型**通道（只刷 description，不碰 value）。"""
+        import inspect
+
+        from scripts.seed_system_config import (
+            _seedContentConfigs,
+            seed_chase_letter_config,
+        )
+
+        assert "_seedContentConfigs" in inspect.getsource(seed_chase_letter_config), (
+            "催货函抬头种子必须走内容型通道"
+        )
+        assert 'set_={"value"' not in inspect.getsource(_seedContentConfigs), (
+            "内容型通道不得覆盖 value（admin 改过的抬头会被发版重置）"
+        )

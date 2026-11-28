@@ -107,6 +107,9 @@ _ADMIN_ONLY_READ_ROUTES: frozenset[tuple[str, str]] = frozenset(
         # 催货单（feat/delivery-chase-closed-loop）：在途/已发催货是采购对外事实。
         ("GET", "/api/v1/procurement/chase/drafts"),
         ("GET", "/api/v1/procurement/chase/drafts/{chaseDraftId}"),
+        # 催货单导出（催货单导出批次）：下载内容与详情同源（供应商 / 订单号 /
+        # 欠交量 / 逾期天数）⇒ 同样限 admin，不做第二套权限体系。
+        ("GET", "/api/v1/procurement/chase/drafts/{chaseDraftId}/export"),
     }
 )
 

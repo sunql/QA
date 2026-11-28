@@ -134,17 +134,25 @@ class TestBrandSeed:
         回归来历：品牌是**内容**，admin 改过之后不能被发版重置。
         （阈值种子的冲突路径是 `set_={"value": ...}` —— 那是「默认值下发」通道，
         品牌种子不能长成那样。）
+
+        实现细节（2026-11-28 催货函抬头种子复用同一通道后调整）：内容型种子的
+        upsert 收敛在 `_seedContentConfigs`（品牌 / 催货函抬头共用），`seed_brand_config`
+        是它的调用方 ⇒ **断言对象随之改成那个共享实现**，并额外钉住「品牌种子确实
+        走内容型通道」（否则有人把它改调阈值型通道，守卫会空转）。
         """
         import inspect
 
-        from scripts.seed_system_config import seed_brand_config
+        from scripts.seed_system_config import _seedContentConfigs, seed_brand_config
 
-        source = inspect.getsource(seed_brand_config)
+        source = inspect.getsource(_seedContentConfigs)
         assert 'set_={"description": description}' in source, (
-            "品牌种子的冲突路径应只刷 description"
+            "内容型种子的冲突路径应只刷 description"
         )
         assert 'set_={"value"' not in source, (
-            "品牌种子的冲突路径不得覆盖 value（admin 改过的品牌名会被发版重置）"
+            "内容型种子的冲突路径不得覆盖 value（admin 改过的品牌名会被发版重置）"
+        )
+        assert "_seedContentConfigs" in inspect.getsource(seed_brand_config), (
+            "品牌种子必须走内容型通道（只刷 description）"
         )
 
 

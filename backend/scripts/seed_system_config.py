@@ -47,6 +47,7 @@ from app.services.chart_thresholds import (
     _CHART_TOP_N_MAX_DEFAULT,
 )
 from app.services.data_summary import FULL_DATA_THRESHOLD
+from app.services.procurement_chase_export_service import COMPANY_NAME_CONFIG_KEY
 
 # (key, value, description)。value 一律用 str() 从源码常量派生 —— 不写字面量，
 # 这样源码默认值一改，种子自动跟随，漂移只可能来自「忘了把新键加进来」。
@@ -119,6 +120,38 @@ BRAND_CONFIG_SEEDS: tuple[tuple[str, str | None, str], ...] = (
     ),
 )
 
+#: 催货函抬头配置种子（催货单导出，2026-11-28）。
+#:
+#: ⚠️ **语义与阈值种子相反、与品牌种子相同**：这是**内容**（公司法定名称），
+#: 由 admin 在「系统配置」页维护 ⇒ 发版**不能**重置它。
+#:
+#: 播种为 **NULL（未配置）**：公司法定名称**不能写死默认值** —— 写死一个
+#: 「看起来像公司名」的值比留空更危险（抬头错误的催货函比没有抬头更糟）。
+#: 留空 + description 说明，是这里唯一诚实的表达（与 `BRAND_TITLE` 同款）。
+#:
+#: **为什么必须 seed 这一行**（而不是只在读取时容忍缺失）：
+#: `PUT /api/v1/admin/system-config/{key}` 对**不存在的 key** 抛 404 ⇒
+#: 没有种子行，admin 在后台**根本改不了抬头**（键不存在 ⇒ 改不了 ⇒ 催货函永远没抬头）。
+CHASE_LETTER_CONFIG_SEEDS: tuple[tuple[str, str | None, str], ...] = (
+    (
+        COMPANY_NAME_CONFIG_KEY,
+        None,
+        "催货函抬头的公司法定名称；留空（未配置）⇒ 导出时抬头整行不渲染"
+        "（不写死任何默认公司名）",
+    ),
+)
+
+
+async def seed_chase_letter_config(factory: async_sessionmaker[AsyncSession]) -> int:
+    """播种催货函抬头配置键（**value 绝不覆盖**，description 可刷新）。
+
+    与 `seed_brand_config` 同款「内容型」语义：行不存在 ⇒ 插入（value=NULL ⇒
+    未配置）；行已存在 ⇒ value 原样保留（admin 改过的抬头不能被发版重置）。
+
+    返回处理行数（与其它种子口径一致：冲突行同样计入）。
+    """
+    return await _seedContentConfigs(factory, CHASE_LETTER_CONFIG_SEEDS)
+
 
 async def seed_brand_config(factory: async_sessionmaker[AsyncSession]) -> int:
     """播种 4 个品牌配置键（**value 绝不覆盖**，description 可刷新）。
@@ -132,8 +165,26 @@ async def seed_brand_config(factory: async_sessionmaker[AsyncSession]) -> int:
 
     返回处理行数（与 `seed_system_config` 口径一致：冲突行同样计入）。
     """
+    return await _seedContentConfigs(factory, BRAND_CONFIG_SEEDS)
+
+
+async def _seedContentConfigs(
+    factory: async_sessionmaker[AsyncSession],
+    seeds: tuple[tuple[str, str | None, str], ...],
+) -> int:
+    """播种「内容型」配置键（**value 绝不覆盖**，description 可刷新）。
+
+    内容型（品牌名 / 催货函抬头公司名）与阈值型（CHART_* / FULL_DATA_THRESHOLD）
+    的语义**相反**：内容由 admin 在「系统配置」页维护，发版**不能**重置它。
+
+    - 行不存在 ⇒ 插入（value 用种子给的值，NULL 表示「未配置」）；
+    - 行已存在 ⇒ **value 一个字都不动**，只刷 description（元数据）。
+
+    ⚠️ **不要**把内容型键塞进 `CHART_CONFIG_SEEDS` —— 那里的冲突路径是
+    DO UPDATE set value ⇒ 会把 admin 调好的值重置掉。
+    """
     async with factory() as session:
-        for key, value, description in BRAND_CONFIG_SEEDS:
+        for key, value, description in seeds:
             stmt = (
                 pg_insert(SystemConfig)
                 .values(key=key, value=value, description=description)
@@ -144,7 +195,7 @@ async def seed_brand_config(factory: async_sessionmaker[AsyncSession]) -> int:
             )
             await session.execute(stmt)
         await session.commit()
-    return len(BRAND_CONFIG_SEEDS)
+    return len(seeds)
 
 
 async def seed_system_config(factory: async_sessionmaker[AsyncSession]) -> int:
@@ -192,6 +243,8 @@ async def main() -> None:
         print(f"seed_system_config: {n} rows upserted")
         b = await seed_brand_config(factory)
         print(f"seed_brand_config: {b} rows ensured (existing values kept)")
+        c = await seed_chase_letter_config(factory)
+        print(f"seed_chase_letter_config: {c} rows ensured (existing values kept)")
     finally:
         await engine.dispose()
 

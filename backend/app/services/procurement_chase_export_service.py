@@ -33,6 +33,13 @@ _INFO_SHEET_NAME = "催货单信息"
 #: Excel 明细 Sheet 名（表头在第 1 行）
 _DETAIL_SHEET_NAME = "催货明细"
 
+#: 公司法定名称的系统配置键（**唯一事实源**：API 层读它、种子脚本播种它）。
+#:
+#: 未配置 ⇒ 催货函抬头整行不渲染（**不写死任何默认公司名**）。该行必须**存在**
+#: 于 `system_config`（种子脚本播种，value 为 NULL）⇒ 否则 admin 在后台
+#: `PUT /admin/system-config/{key}` 会拿到 404，**根本改不了抬头**。
+COMPANY_NAME_CONFIG_KEY = "chase.letter.company_name"
+
 #: docx 正文中文字体（宋体；仅设置 w:eastAsia/ascii 名称，不内嵌字体）
 _CJK_FONT = "SimSun"
 

@@ -25,12 +25,26 @@
 
 | 决策点 | 结论 |
 |---|---|
-| 列表呈现位置 | **对话流内嵌列表卡**（不是跳转链接） |
+| 列表呈现位置 | **跳转链接到催货单页**（`/procurement/chase`）——该页已有完整列表/状态色/详情/决策，**不重复造列表卡** |
 | 下载粒度 | **单张下载** |
 | 下载时机 | **任何状态可下载** |
 | 供应商名称来源 | 与到货跟踪同款：**MDM 目录查询**（`loadMdmDirectory`） |
 | 下载权限 | **统一 requireAdmin**（与其它催货端点一致） |
 | 催货函抬头 | **系统配置键维护**（admin 在后台维护法定公司名，导出时读取） |
+
+### 入口缺失（2026-11-28 实测）
+
+`menu_config` 采购段有 6 项（Rfq / Bindings / Knowledge / Copilot / Agents /
+PendingDelivery），**唯独没有催货单** ⇒ 路由 `/procurement/chase` 虽已注册，
+导航里却找不到 ⇒ 「创建完想看列表」无路可循。
+
+⇒ 本批补两件事：
+1. **菜单项**：`seed_menu_config.py` 加 `item.procurementChase` → `/procurement/chase`
+   （+ 对应 i18n label）。**该 code 是全新的** ⇒ 菜单 seed 的
+   `on_conflict_do_nothing` 对新 code 有效 ⇒ 跑一次 `python -m scripts.seed_menu_config`
+   即**新增**该行（不像场景 seed 是给已有行补字段、需要定向补丁机制）。
+2. **创建后给跳转链接**：到货跟踪结果卡「创建催货单」成功后，toast/提示里带
+   「查看催货单」入口 ⇒ 跳 `/procurement/chase`。
 
 ### 权限取舍（已定：统一 requireAdmin）
 
@@ -62,8 +76,10 @@ requireAdmin**，不做第二套权限体系。
 采购 Copilot 结果卡 → [创建催货单]
    └→ POST /procurement/chase/from-pending  ← 响应已含 drafts[]
         ↓
-   对话流追加「催货单列表卡」（前端组件，无新端点）
-        │  每行：[Excel] [Word]
+   成功提示 + 「查看催货单」跳转链接 → /procurement/chase
+        │  （菜单新增 item.procurementChase，之前导航里找不到）
+        ↓
+   催货单页列表每行：[Excel] [Word]
         ↓
    GET /procurement/chase/drafts/{chaseDraftId}/export?format=xlsx|docx
         ↓
@@ -72,14 +88,12 @@ requireAdmin**，不做第二套权限体系。
 
 **关键点**
 
-1. **列表卡不需要新端点**：`POST /from-pending` 的响应 `ChaseFromPendingResultRead`
-   已返回 `drafts: list[ChaseDraftRead]`，字段含 `chase_draft_id` / `status` /
-   `supplier_code` / `line_count` / `expected_reply_deadline` / `notes` / `created_time`
-   —— 足够渲染列表卡。
+1. **不复刻列表卡**：催货单页 `GET /chase/drafts` 已有完整列表（状态色 / 详情 /
+   决策时间线）⇒ 只补「菜单入口」+「创建后跳转链接」。
 2. **导出在后端做**：Excel/Word 需要行明细（`ChaseLineRead`）与决策时间线
    （`ChaseDecisionRead`）；沿用 `evaluation_report_export_service` 的范式——
    **导出服务只接收 immutable payload，不接触 DB/ORM/FastAPI**。
-3. **两个下载入口共用一个端点**：对话流列表卡 + 催货单页（`/procurement/chase`）列表。
+3. **催货单页是唯一下载入口**。
 
 ## 后端
 
@@ -134,21 +148,19 @@ GET /procurement/chase/drafts/{chaseDraftId}/export?format=xlsx|docx
 
 ## 前端
 
-### 新增 `frontend/src/components/copilot/ChaseDraftListCard.tsx`
-
-- 每行：催货单号 / 供应商码 / 行数 / 状态标签 / 回复期限 / `[Excel] [Word]`
-- 状态标签颜色按状态机映射（`DRAFT` / `VALIDATING` / `PENDING_APPROVAL` /
-  `READY_TO_SEND` / `SENDING` / `SENT` / `CLOSED` / `REJECTED` / `CANCELLED`）
-- 空列表（有 `unresolvedSuppliers` / `skippedLines`）→ 显示提示而非空卡
-
 ### 改动 `frontend/src/components/copilot/DeliveryTrackingResultCard.tsx`
 
-创建成功分支：现在只有 `message.success` ⇒ 改为**追加一条列表卡消息**
-（`ChaseDraftListCard`），toast 保留（保留「部分未解析供应商」的 warning 语义）。
+创建成功分支：现在只有 `message.success` ⇒ 改为**成功提示 + 「查看催货单」跳转链接**
+（跳 `/procurement/chase`）。「部分未解析供应商」的 warning 语义保留。
 
 ### 改动 `frontend/src/pages/ProcurementChasePage.tsx`
 
-列表每行加 `[Excel] [Word]` 下载按钮，与列表卡共用同一端点。
+列表每行加 `[Excel] [Word]` 下载按钮（催货单页是**唯一**下载入口）。
+
+### 改动 `backend/scripts/seed_menu_config.py` + i18n
+
+加菜单项 `item.procurementChase` → `/procurement/chase`（采购段排序位在
+PendingDelivery 之后），label 走 i18n（zh-CN / en-US）。
 
 ### 下载实现
 
@@ -175,14 +187,17 @@ GET /procurement/chase/drafts/{chaseDraftId}/export?format=xlsx|docx
   **匿名访问 401**、**非 admin 登录 403**（确认 requireAdmin 生效）
 
 **前端**
-- 列表卡渲染：收到 `drafts` → 行数/供应商/状态正确显示
 - 下载按钮触发：调用导出端点且 format 正确
-- 创建成功 → 列表卡出现在对话流
+- 创建成功 → 出现「查看催货单」跳转链接
+- 菜单项：`seed_menu_config.py` 声明了 `item.procurementChase` → `/procurement/chase`
 
 ## 影响面与部署
 
-- **无 DDL / 无迁移**（只读导出 + 新端点）
-- 后端新增 1 个 service 文件 + 1 个端点；前端新增 1 个组件 + 2 处接入
+- **无 DDL / 无迁移**（只读导出 + 新端点 + 菜单项）
+- 后端新增 1 个 service 文件 + 1 个端点 + 菜单 seed 一项；前端 2 处接入（结果卡跳转链接 + 催货单页下载按钮）+ i18n
+- **上线必做**：跑一次 `python -m scripts.seed_menu_config`（催货单菜单 code 是**全新**的 ⇒
+  菜单 seed 的 `on_conflict_do_nothing` 对新 code 有效 ⇒ 直接**新增**该行；
+  注意与场景 seed 不同，这里**不需要**定向补丁机制）
 - 需重建 backend + frontend 镜像；worker 同镜像须一并 `--force-recreate`
   （见 `Harness/skills/thdeploy/SKILL.md` §worker 同步铁律）
 

@@ -13,6 +13,12 @@ seed 管理（第一期管理口径，2026-11-24 用户确认），seed 不回�
 字段一律不动。否则已部署库会永远躺着一个「存在但永不生效」的死槽位
 （2026-11-25 `pending_delivery.datasourceId` 即此例）。
 
+第二个例外是**槽位字段的定向补丁**（`SLOT_FIELD_PATCHES`）：seed 新增了
+槽位字段（如数值范围 ``minimum`` / ``maximum``）时，已存在的场景行不会
+被 upsert 覆盖 ⇒ 存量库永远拿不到新字段 ⇒ 前端输入限制不生效。
+补丁**只合并**登记过的字段（保留该槽位其它字段，如 label / type /
+conflictKeywords），管理员自加的槽位与补丁未命中的槽位一律不动。
+
 冲突让位启发式（conflictKeywords / codePattern）来自 2026-11-24 生产
 反馈：纯编码提问（如「分析一下B109待到货情况」）也算指定维度。
 codePattern 必须用显式 lookaround 声明边界 —— Python ``\\b`` 在
@@ -49,6 +55,9 @@ PENDING_DELIVERY_SLOT_SCHEMA: list[dict[str, Any]] = [
         "required": True,
         "conflictKeywords": ["时间窗", "个月", "时间段", "日期", "上半年", "下半年", "本年度", "本年"],
         "displayTemplate": "近{value}个月",
+        # 范围同 procurement_query_utils.MONTHS_BACK_MIN/MAX（1..36）
+        "minimum": 1,
+        "maximum": 36,
     },
     {
         "key": "supplierKeys",
@@ -71,7 +80,7 @@ PENDING_DELIVERY_SLOT_SCHEMA: list[dict[str, Any]] = [
         "conflictKeywords": ["基地", "厂区", "工厂", "车间"],
         "codePattern": _SITE_CODE,
     },
-    {"key": "minOverdueDays", "type": "number", "label": "最低逾期天数"},
+    {"key": "minOverdueDays", "type": "number", "label": "最低逾期天数", "minimum": 0},
     # 无 datasourceId 槽位（THBI 硬规则：数据源由本体绑定唯一确定，2026-11-25 取消切换）
     # 显式日期区间（高级参数「时间段」模式）：覆盖 monthsBack 的近 N 月口径
     {
@@ -157,18 +166,30 @@ SEEDS: list[dict[str, Any]] = [
                 "label": "时间窗",
                 "conflictKeywords": ["时间窗", "个月", "时间段", "日期", "上半年", "下半年", "本年度", "本年"],
                 "displayTemplate": "近{value}个月",
+                # 范围同 delivery_tracking_query._MIN/_MAX_MONTHS_BACK（1..36）
+                "minimum": 1,
+                "maximum": 36,
             },
             {
                 "key": "anchorDay",
                 "type": "number",
                 "label": "月度周期锚点日",
                 "conflictKeywords": ["周期", "24日", "结算周期"],
+                # 范围同 delivery_tracking_query._MAX_ANCHOR_DAY（1..28）
+                "minimum": 1,
+                "maximum": 28,
             },
             {
                 "key": "periodIndex",
                 "type": "number",
                 "label": "周期期序",
                 "conflictKeywords": ["本期", "上期", "上个月"],
+                # 周期期序语义：0=本期、-1=上期，**正数非法**（未结束的周期不可查）。
+                # 不声明范围 ⇒ 前端能填正数 ⇒ 工具报错 → runner 不终止 run →
+                # LLM 重规划丢槽位 ⇒ 查了所有供应商（2026-11-28 生产缺陷）。
+                "minimum": -12,
+                "maximum": 0,
+                "hint": "0=本期，-1=上期",
             },
             {
                 "key": "supplierKeys",
@@ -224,6 +245,33 @@ RETIRED_SLOT_KEYS: dict[str, frozenset[str]] = {
     "pending_delivery": frozenset({"datasourceId"}),
 }
 
+#: 槽位字段的**定向补丁**：按场景 → 槽位 key → 要合并的字段。
+#:
+#: 背景（2026-11-28 生产缺陷）：seed 对已存在的场景行**不覆盖任何字段**
+#: （`on_conflict_do_nothing`）⇒ 新增槽位字段（数值范围 minimum/maximum）
+#: 在已部署库里永远拿不到 ⇒ 前端 InputNumber 不限范围、后端通用范围规则
+#: 读不到 min/max 就跳过 ⇒ 两层防线在生产同时失效（周期期序填 1 ⇒ 查了
+#: 所有供应商）。
+#:
+#: 口径：
+#: - 只**合并**登记过的字段（保留该槽位其它字段：label / type /
+#:   conflictKeywords / hint …）；
+#: - 只作用于**已存在的同名槽位**：管理员自加的槽位不动，seed 里没有的
+#:   槽位不新增（不整体 upsert，避免覆盖管理员对 template/chips 的定制）；
+#: - 登记的字段本身是**工具契约**派生值（如 delivery_tracking_query 的
+#:   _MAX_ANCHOR_DAY / periodIndex 语义）⇒ 视为权威值。
+SLOT_FIELD_PATCHES: dict[str, dict[str, dict[str, Any]]] = {
+    "delivery_tracking": {
+        "monthsBack": {"minimum": 1, "maximum": 36},
+        "anchorDay": {"minimum": 1, "maximum": 28},
+        "periodIndex": {"minimum": -12, "maximum": 0},
+    },
+    "pending_delivery": {
+        "monthsBack": {"minimum": 1, "maximum": 36},
+        "minOverdueDays": {"minimum": 0},
+    },
+}
+
 
 async def _cleanRetiredSlotKeys(
     session: AsyncSession,
@@ -263,13 +311,56 @@ async def _cleanRetiredSlotKeys(
     return cleaned
 
 
+async def _patchSlotFields(
+    session: AsyncSession,
+) -> list[tuple[str, list[str]]]:
+    """定向补丁：给已存在场景行的指定槽位**合并**登记字段。
+
+    返回 `[(scenario_code, 已补槽位 key 排序列表), ...]`；无变化 ⇒ 空列表
+    （调用方据此保证幂等：第二次运行不写库、不打印）。
+
+    边界（务必保持）：
+    - 只改**登记过的** (场景, 槽位) 组合，且只**合并**登记字段；
+    - 该槽位的其它字段（label / type / conflictKeywords / hint …）保持原样；
+    - 管理员自加的槽位、seed 里没有的槽位一律不动（不新增、不删除）。
+    """
+    patched: list[tuple[str, list[str]]] = []
+    for code, slotPatches in SLOT_FIELD_PATCHES.items():
+        row = (
+            await session.execute(
+                select(CopilotScenario).where(CopilotScenario.scenario_code == code)
+            )
+        ).scalars().first()
+        if row is None or not isinstance(row.slot_schema, list):
+            continue
+        touched: list[str] = []
+        newSchema: list[dict[str, Any]] = []
+        for slot in row.slot_schema:
+            key = str(slot.get("key", ""))
+            fields = slotPatches.get(key)
+            if fields is None:
+                newSchema.append(slot)
+                continue
+            merged = {**slot, **fields}
+            if merged != slot:
+                touched.append(key)
+            newSchema.append(merged)
+        if not touched:
+            continue
+        row.slot_schema = newSchema
+        patched.append((code, sorted(touched)))
+    return patched
+
+
 async def seed_copilot_scenarios(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
     """幂等 upsert 场景配置。返回 seed 总数。
 
     冲突键：`scenario_code`（全局唯一）。重复运行不新增行、不刷新字段；
-    仅对 `RETIRED_SLOT_KEYS` 登记的过时槽位做定向清理。
+    仅做两处定向处理：
+    - `RETIRED_SLOT_KEYS` 登记的过时槽位清理；
+    - `SLOT_FIELD_PATCHES` 登记的槽位字段合并（让已部署库拿到新增字段）。
     """
     async with session_factory() as session:
         for seed in SEEDS:
@@ -282,6 +373,9 @@ async def seed_copilot_scenarios(
         cleaned = await _cleanRetiredSlotKeys(session)
         for code, keys in cleaned:
             print(f"cleaned {code}: removed slot keys {keys}")
+        patched = await _patchSlotFields(session)
+        for code, keys in patched:
+            print(f"patched {code}: merged slot fields for {keys}")
         await session.commit()
     return len(SEEDS)
 

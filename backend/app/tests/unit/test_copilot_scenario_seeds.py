@@ -264,3 +264,258 @@ async def test_seed_cleanup_does_not_touch_unseeded_scenario(
     out = capsys.readouterr().out
     assert "cleaned admin_scen" not in out
     assert await _readSlotKeys(factory, "admin_scen") == ["monthsBack", "datasourceId"]
+
+
+# ── 槽位取值范围（2026-11-28 生产缺陷：周期期序填正数 ⇒ 查了所有供应商）─────
+
+
+def test_delivery_tracking_period_index_declares_range() -> None:
+    """周期期序必须声明 minimum=-12 / maximum=0（0=本期、-1=上期，正数非法）。
+
+    不声明 ⇒ 前端 InputNumber 无限制 ⇒ 用户能填 1 ⇒ 工具报错 → runner 不终止
+    run → LLM 重规划丢槽位 ⇒ 查了所有供应商。
+    """
+    seed = _deliveryTrackingSeed()
+    keyed = {slot["key"]: slot for slot in seed["slot_schema"]}
+    assert keyed["periodIndex"]["minimum"] == -12
+    assert keyed["periodIndex"]["maximum"] == 0
+
+
+def test_delivery_tracking_anchor_day_range_matches_tool() -> None:
+    """锚点日范围与工具契约一致（delivery_tracking_query._MAX_ANCHOR_DAY）。"""
+    from app.services.delivery_tracking_query import _MAX_ANCHOR_DAY
+
+    seed = _deliveryTrackingSeed()
+    keyed = {slot["key"]: slot for slot in seed["slot_schema"]}
+    assert keyed["anchorDay"]["minimum"] == 1
+    assert keyed["anchorDay"]["maximum"] == _MAX_ANCHOR_DAY
+
+
+def test_delivery_tracking_months_back_range_matches_tool() -> None:
+    """时间窗范围与工具契约一致（delivery_tracking_query._MIN/_MAX_MONTHS_BACK）。"""
+    from app.services.delivery_tracking_query import (
+        _MAX_MONTHS_BACK,
+        _MIN_MONTHS_BACK,
+    )
+
+    seed = _deliveryTrackingSeed()
+    keyed = {slot["key"]: slot for slot in seed["slot_schema"]}
+    assert keyed["monthsBack"]["minimum"] == _MIN_MONTHS_BACK
+    assert keyed["monthsBack"]["maximum"] == _MAX_MONTHS_BACK
+
+
+def test_pending_delivery_slot_ranges_declared() -> None:
+    """待到货场景也声明范围（前端此前把 min=0 写死在控件里 ⇒ 收进配置）。"""
+    seed = _pendingDeliverySeed()
+    keyed = {slot["key"]: slot for slot in seed["slot_schema"]}
+    assert keyed["minOverdueDays"]["minimum"] == 0
+    assert keyed["monthsBack"]["minimum"] == 1
+    assert keyed["monthsBack"]["maximum"] == 36
+
+
+def test_slot_field_patches_match_seed_declarations() -> None:
+    """定向补丁表与 seed 声明的 min/max **必须一致**（防漂移）。
+
+    补丁表是「已部署库补字段」的唯一来源；seed 里改了范围而忘了同步补丁
+    ⇒ 已部署库拿到的是旧范围（前端提示与实际契约不一致）。
+    """
+    from scripts.seed_copilot_scenarios import SLOT_FIELD_PATCHES
+
+    for code, slotPatches in SLOT_FIELD_PATCHES.items():
+        seed = next(s for s in SEEDS if s["scenario_code"] == code)
+        keyed = {slot["key"]: slot for slot in seed["slot_schema"]}
+        for slotKey, fields in slotPatches.items():
+            assert slotKey in keyed, f"{code} 补丁引用了 seed 里没有的槽位 {slotKey}"
+            for field, value in fields.items():
+                assert keyed[slotKey].get(field) == value, (
+                    f"{code}.{slotKey}.{field} 补丁值 {value} "
+                    f"与 seed 声明 {keyed[slotKey].get(field)} 不一致"
+                )
+
+
+def test_slot_field_patches_cover_every_declared_range() -> None:
+    """seed 里声明了 min/max 的槽位 ⇒ 必须登记进补丁表（否则存量库拿不到）。"""
+    from scripts.seed_copilot_scenarios import SLOT_FIELD_PATCHES
+
+    for seed in SEEDS:
+        code = seed["scenario_code"]
+        patches = SLOT_FIELD_PATCHES.get(code, {})
+        for slot in seed["slot_schema"]:
+            declared = {
+                field: slot[field] for field in ("minimum", "maximum") if field in slot
+            }
+            if not declared:
+                continue
+            assert slot["key"] in patches, (
+                f"{code}.{slot['key']} 声明了范围但没登记进 SLOT_FIELD_PATCHES"
+            )
+            for field, value in declared.items():
+                assert patches[slot["key"]].get(field) == value
+
+
+# ── 槽位字段定向补丁（seed 不覆盖已存在行 ⇒ 已部署库拿不到新字段）─────────
+
+
+async def _readSlotSchema(factory, code: str) -> list[dict] | None:
+    async with factory() as session:
+        row = (
+            await session.execute(
+                select(CopilotScenario).where(CopilotScenario.scenario_code == code)
+            )
+        ).scalars().first()
+        if row is None:
+            return None
+        return list(row.slot_schema)
+
+
+def _legacyDeliveryScenario(*, slotKeys: tuple[str, ...]) -> CopilotScenario:
+    """构造一条「已部署库的旧形态」场景行：槽位在，但**没有** min/max。
+
+    模拟 seed 不覆盖已存在场景行 ⇒ 新增的 minimum/maximum 拿不到 ⇒
+    生产防线失效的历史事实。
+    """
+    base = next(s for s in SEEDS if s["scenario_code"] == "delivery_tracking")
+    return CopilotScenario(
+        **{
+            **base,
+            "slot_schema": [
+                {"key": key, "type": "number", "label": key} for key in slotKeys
+            ],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_seed_patches_slot_fields_on_existing_row(
+    seedEngine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """已存在的场景行 ⇒ 定向合并登记字段（min/max 到位）。"""
+    factory, _ = seedEngine
+    await _insertScenario(
+        factory,
+        _legacyDeliveryScenario(slotKeys=("periodIndex", "anchorDay")),
+    )
+
+    await seed_copilot_scenarios(factory)
+    out = capsys.readouterr().out
+    assert "patched delivery_tracking" in out
+
+    schema = await _readSlotSchema(factory, "delivery_tracking")
+    assert schema is not None
+    keyed = {slot["key"]: slot for slot in schema}
+    assert keyed["periodIndex"]["minimum"] == -12
+    assert keyed["periodIndex"]["maximum"] == 0
+    assert keyed["anchorDay"]["minimum"] == 1
+    assert keyed["anchorDay"]["maximum"] == 28
+
+
+@pytest.mark.asyncio
+async def test_seed_patch_is_idempotent(
+    seedEngine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """第二次运行无变化 ⇒ 不写库、不打印（幂等）。"""
+    factory, _ = seedEngine
+    await _insertScenario(
+        factory,
+        _legacyDeliveryScenario(slotKeys=("periodIndex", "anchorDay")),
+    )
+
+    await seed_copilot_scenarios(factory)
+    capsys.readouterr()
+    schemaAfterFirst = await _readSlotSchema(factory, "delivery_tracking")
+
+    await seed_copilot_scenarios(factory)
+    secondRun = capsys.readouterr().out
+    assert "patched" not in secondRun, "无变化时不得写库/打印（幂等）"
+    assert await _readSlotSchema(factory, "delivery_tracking") == schemaAfterFirst
+
+
+@pytest.mark.asyncio
+async def test_seed_patch_preserves_other_slot_fields_and_admin_slots(
+    seedEngine,
+) -> None:
+    """补丁只合并登记字段：其它字段保留，管理员自加的槽位不动。"""
+    factory, _ = seedEngine
+    base = next(s for s in SEEDS if s["scenario_code"] == "delivery_tracking")
+    scenario = CopilotScenario(
+        **{
+            **base,
+            "slot_schema": [
+                {
+                    "key": "periodIndex",
+                    "type": "number",
+                    "label": "周期期序",
+                    "conflictKeywords": ["本期", "上期"],
+                    "hint": "0=本期，-1=上期",
+                },
+                {"key": "adminSlot", "type": "text", "label": "管理员自加"},
+            ],
+        }
+    )
+    await _insertScenario(factory, scenario)
+
+    await seed_copilot_scenarios(factory)
+    schema = await _readSlotSchema(factory, "delivery_tracking")
+    assert schema is not None
+    keyed = {slot["key"]: slot for slot in schema}
+
+    # 登记字段被合并进来
+    assert keyed["periodIndex"]["minimum"] == -12
+    assert keyed["periodIndex"]["maximum"] == 0
+    # 该槽位其它字段保留
+    assert keyed["periodIndex"]["label"] == "周期期序"
+    assert keyed["periodIndex"]["hint"] == "0=本期，-1=上期"
+    assert keyed["periodIndex"]["conflictKeywords"] == ["本期", "上期"]
+    # 管理员自加的槽位原样保留（不被补丁删改，也不被整体 upsert 覆盖）
+    assert keyed["adminSlot"] == {"key": "adminSlot", "type": "text", "label": "管理员自加"}
+
+
+@pytest.mark.asyncio
+async def test_seed_patch_does_not_add_undeclared_slots(
+    seedEngine,
+) -> None:
+    """补丁**不新增**槽位（库里没有 monthsBack ⇒ 补丁后仍没有）。"""
+    factory, _ = seedEngine
+    await _insertScenario(
+        factory,
+        _legacyDeliveryScenario(slotKeys=("periodIndex",)),
+    )
+
+    await seed_copilot_scenarios(factory)
+    schema = await _readSlotSchema(factory, "delivery_tracking")
+    assert schema is not None
+    keys = {slot["key"] for slot in schema}
+    assert "periodIndex" in keys
+    assert "monthsBack" not in keys, "补丁不得新增槽位（会覆盖管理员定制）"
+
+
+@pytest.mark.asyncio
+async def test_seed_patch_does_not_touch_unseeded_scenario(
+    seedEngine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """只处理登记过的 scenario_code ⇒ 其它行原样保留。"""
+    factory, _ = seedEngine
+    await _insertScenario(
+        factory,
+        _legacyDeliveryScenario(slotKeys=("periodIndex",)),
+    )
+    # 改码为未登记场景
+    async with factory() as session:
+        row = (
+            await session.execute(
+                select(CopilotScenario).where(
+                    CopilotScenario.scenario_code == "delivery_tracking"
+                )
+            )
+        ).scalars().first()
+        assert row is not None
+        row.scenario_code = "admin_scen"
+        await session.commit()
+
+    await seed_copilot_scenarios(factory)
+    out = capsys.readouterr().out
+    assert "patched admin_scen" not in out
+    schema = await _readSlotSchema(factory, "admin_scen")
+    assert schema is not None
+    keyed = {slot["key"]: slot for slot in schema}
+    assert "minimum" not in keyed["periodIndex"]

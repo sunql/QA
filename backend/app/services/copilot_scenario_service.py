@@ -149,3 +149,15 @@ class CopilotScenarioService:
                     raise ValidationError(
                         f"slot {slot.get('key')} codePattern 非法：{exc}"
                     ) from exc
+            # 数值范围必须是数值（2026-11-28）：min/max 是 JSONB 里的任意值，
+            # 写成字符串 "0" 或对象 ⇒ 读接口按 int 解析会 500、发起前比较会
+            # TypeError ⇒ 在保存边界拦掉，错误是 422 而不是 500。
+            for bound in ("minimum", "maximum"):
+                value = slot.get(bound)
+                if value is None:
+                    continue
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValidationError(
+                        f"slot {slot.get('key')} 的 {bound} 必须是数值，"
+                        f"收到 {value!r}"
+                    )

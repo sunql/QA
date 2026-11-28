@@ -133,3 +133,42 @@ class TestSaveValidation:
                     ],
                 }
             )
+
+    @pytest.mark.asyncio
+    async def test_non_numeric_slot_range_rejected(self) -> None:
+        """min/max 写成字符串/对象 ⇒ 保存时 422（不是运行期 500）。"""
+        svc, _session = _service(_AgentRow())
+        for bound in ("minimum", "maximum"):
+            with pytest.raises(ValidationError, match="必须是数值"):
+                await svc.save(
+                    **{
+                        **VALID_ARGS,
+                        "slotSchema": [
+                            {
+                                "key": "periodIndex",
+                                "type": "number",
+                                "label": "周期期序",
+                                bound: "0",
+                            }
+                        ],
+                    }
+                )
+
+    @pytest.mark.asyncio
+    async def test_numeric_slot_range_accepted(self) -> None:
+        """合法数值范围照常保存（不抛 ValidationError）。"""
+        svc, _session = _service(_AgentRow())
+        await svc.save(
+            **{
+                **VALID_ARGS,
+                "slotSchema": [
+                    {
+                        "key": "periodIndex",
+                        "type": "number",
+                        "label": "周期期序",
+                        "minimum": -12,
+                        "maximum": 0,
+                    }
+                ],
+            }
+        )

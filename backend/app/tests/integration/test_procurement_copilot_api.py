@@ -415,3 +415,158 @@ async def test_same_day_same_question_reuses_run(client: AsyncClient) -> None:
     )
     assert other.status_code == 202
     assert other.json()["runId"] != firstRunId
+
+
+# ---------------------------------------------------------------------------
+# 场景槽位范围校验（2026-11-28 生产缺陷：周期期序填 1 ⇒ 查了所有供应商）
+# ---------------------------------------------------------------------------
+
+_DELIVERY_SCENARIO_CODE = "delivery_tracking"
+_DELIVERY_AGENT_CODE = "DELIVERY_TRACKING_AGENT"
+
+#: 到货跟踪场景槽位（与 seed_copilot_scenarios.py 同构的关键部分）。
+_DELIVERY_SLOT_SCHEMA: list[dict] = [
+    {
+        "key": "monthsBack",
+        "type": "number",
+        "label": "时间窗",
+        "minimum": 1,
+        "maximum": 36,
+    },
+    {
+        "key": "anchorDay",
+        "type": "number",
+        "label": "月度周期锚点日",
+        "minimum": 1,
+        "maximum": 28,
+    },
+    {
+        "key": "periodIndex",
+        "type": "number",
+        "label": "周期期序",
+        "minimum": -12,
+        "maximum": 0,
+        "hint": "0=本期，-1=上期",
+    },
+    {"key": "supplierKeys", "type": "entityMulti", "label": "供应商"},
+]
+
+#: **已部署库的旧形态**：槽位在，但没有 minimum / maximum（seed 不覆盖已
+#: 存在场景行 ⇒ 新增字段拿不到）。配置层读不到范围 ⇒ 必须靠契约层兜住。
+_DELIVERY_SLOT_SCHEMA_WITHOUT_RANGE: list[dict] = [
+    {"key": "anchorDay", "type": "number", "label": "月度周期锚点日"},
+    {"key": "periodIndex", "type": "number", "label": "周期期序"},
+    {"key": "supplierKeys", "type": "entityMulti", "label": "供应商"},
+]
+
+
+async def _insertDeliveryScenario(slotSchema: list[dict]) -> None:
+    """插一条到货跟踪场景配置（真实 PG）。"""
+    from app.domain.copilot_scenario_models import CopilotScenario
+    from app.infrastructure import database as dbModule
+
+    factory = dbModule.getSessionFactory()
+    async with factory() as session:
+        session.add(
+            CopilotScenario(
+                scenario_code=_DELIVERY_SCENARIO_CODE,
+                name="到货跟踪",
+                description="测试用场景",
+                icon_code="car",
+                agent_code=_DELIVERY_AGENT_CODE,
+                slot_schema=slotSchema,
+                question_template="分析订单到货情况",
+                chips=[],
+                result_renderer="delivery_tracking",
+                required_role=None,
+                sort_order=30,
+                enabled=True,
+            )
+        )
+        await session.commit()
+
+
+async def _countOrchestrationRuns() -> int:
+    """编排 run 行数（用于断言「非法请求不产生 run」）。"""
+    from sqlalchemy import func, select
+
+    from app.domain.agent_orchestration_models import AgentOrchestrationRun
+    from app.infrastructure import database as dbModule
+
+    factory = dbModule.getSessionFactory()
+    async with factory() as session:
+        rows = await session.execute(select(func.count()).select_from(AgentOrchestrationRun))
+        return int(rows.scalar() or 0)
+
+
+def _scenarioMessage(*, slots: dict) -> dict:
+    return {
+        "message": "看本期到货情况",
+        "agentCode": _DELIVERY_AGENT_CODE,
+        "modelConfigId": 1,
+        "scenarioCode": _DELIVERY_SCENARIO_CODE,
+        "slots": slots,
+        "mode": "task",
+    }
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_period_index_is_422_and_creates_no_run(
+    client: AsyncClient,
+) -> None:
+    """周期期序填 1（正数非法）⇒ 422，**不创建 run**（不进 LLM）。
+
+    修复前：工具侧报错 → runner 记 FAILED 但不终止 run → LLM 重规划 →
+    丢了 supplierKeys ⇒ 查了所有供应商（生产错结果）。
+    """
+    await _insertDeliveryScenario(_DELIVERY_SLOT_SCHEMA)
+    before = await _countOrchestrationRuns()
+
+    resp = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json=_scenarioMessage(slots={"periodIndex": 1, "supplierKeys": ["B109"]}),
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert "周期期序" in resp.text
+    assert await _countOrchestrationRuns() == before, "非法槽位不得创建编排 run"
+
+
+@pytest.mark.asyncio
+async def test_period_index_without_anchor_day_is_422(client: AsyncClient) -> None:
+    """给了周期期序却没给锚点日 ⇒ 422（工具同款规则提前到发起前）。"""
+    await _insertDeliveryScenario(_DELIVERY_SLOT_SCHEMA)
+
+    resp = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json=_scenarioMessage(slots={"periodIndex": 0, "supplierKeys": ["B109"]}),
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert "周期期序" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_positive_period_index_is_422_even_without_configured_range(
+    client: AsyncClient,
+) -> None:
+    """**DB 里没有 min/max 时**，周期期序填 1 仍被 422 拦下。
+
+    已部署库的存量场景行拿不到 seed 新增的 minimum/maximum（seed 不覆盖
+    已存在行）⇒ 配置层读不到范围 ⇒ 靠**契约层**（periodIndex ≤ 0，真值在
+    代码里）兜住 ⇒ 生产防线不依赖 seed 补丁是否跑过。
+    """
+    await _insertDeliveryScenario(_DELIVERY_SLOT_SCHEMA_WITHOUT_RANGE)
+    before = await _countOrchestrationRuns()
+
+    resp = await client.post(
+        COPILOT_PATH,
+        headers=OWNER_HEADERS,
+        json=_scenarioMessage(slots={"periodIndex": 1, "supplierKeys": ["B109"]}),
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert "周期期序" in resp.text
+    assert await _countOrchestrationRuns() == before, "非法槽位不得创建编排 run"

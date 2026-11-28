@@ -29,15 +29,32 @@
 | 下载粒度 | **单张下载** |
 | 下载时机 | **任何状态可下载** |
 | 供应商名称来源 | 与到货跟踪同款：**MDM 目录查询**（`loadMdmDirectory`） |
-| 下载权限 | **不限角色**（任何已登录用户）；仍需登录，见下「权限取舍」 |
+| 下载权限 | **统一 requireAdmin**（与其它催货端点一致） |
+| 催货函抬头 | **系统配置键维护**（admin 在后台维护法定公司名，导出时读取） |
 
-### 权限取舍（设计决定，需知悉）
+### 权限取舍（已定：统一 requireAdmin）
 
-催货 router **没有** router 级 `getCurrentUser`（现有端点各自 `requireAdmin`）。若把
-「不控制权限」照字面实现 = **匿名可下载**催货单（含供应商名、订单号、订购/欠交量）。
+催货的其它端点（from-pending / validate / approve / reject / cancel / send）全是
+`requireAdmin`，导出内容与它们**同源**（供应商 / 订单号 / 欠交量 / 逾期天数）。
+若做成「登录即可」＝普通登录用户拿到 admin 才能看的同一批采购数据 ⇒ **口径统一到
+requireAdmin**，不做第二套权限体系。
 
-**本设计取「需登录、不限角色」**：下载端点用 `Depends(getCurrentUser)`。
-若将来确认需要「匿名链接发给外部供应商」，改为无依赖并在 spec 记录风险。
+> 注：用户原话是「下载不控制权限」，经澄清其含义是「不要再单独加一套下载权限体系」，
+> 而非「放开给所有人」。
+
+### 抬头来源（已定：系统配置键）
+
+催货函抬头的**公司法定名称**不能取 `BRAND_NAME`（那是产品品牌「泰鸿智脑」，不是法人名），
+系统里目前也没有「公司主体名」字段。
+
+**方案**：新增 system_config 键（如 `chase.letter.company_name`），admin 在后台维护；
+导出服务读取该键。
+
+- **不写死任何默认公司名** —— 写死一个「看起来像公司名」的默认值比留空更危险：
+  用户没配却导出一封抬头错误的催货函，比抬头留空更糟。
+- **未配置 ⇒ 整行不渲染**（不是留一行空白）—— 避免「以为填了其实是空」的歧义；
+  同时服务端记 warning，**不阻塞导出**。
+- system_config 是既有表 ⇒ **无迁移**。
 
 ## 架构
 
@@ -84,13 +101,18 @@
 
 **Word 结构**（正式催货函版式）
 
-1. 抬头：供应商全名 + 催货单号 + 回复期限
+1. 抬头：**公司法定名称**（读 system_config 键 `chase.letter.company_name`；**未配置则该行
+   整行不渲染** + 服务端记 warning，**不拿产品品牌名冒充法人名**）+ 供应商全名 + 催货单号 +
+   回复期限
 2. 催货说明段：欠交总行数 / 欠交总量 + 回复期限要求
 3. 明细表：订单号 / 行号 / 物料描述 / 欠交量 / 期望到货日 / 逾期天数
 4. 落款：催货人（`created_by`）+ 日期
 
 中文字体：docx 侧用 `w:eastAsia` 设置（`pdf_fonts.ensureCjkFont()` 是 PDF 专用，不复用）。
 依赖已在 `backend/pyproject.toml`：`python-docx>=1.0.0`。
+
+**system_config 键**：既有表 ⇒ 无迁移。读法沿用仓内既有 system_config 读取模式
+（如 `config.py` 里 `SCHEMA_MAX_TABLES` 之类配置的读法），键名 `chase.letter.company_name`。
 
 ### 新增端点（挂 `backend/app/api/v1/procurement_chase.py` 的现有 router）
 
@@ -99,8 +121,7 @@ GET /procurement/chase/drafts/{chaseDraftId}/export?format=xlsx|docx
   200 → 文件流，Content-Disposition: attachment; filename="催货单_{单号}.{ext}"
   404 → 催货单不存在
   400 → format 非法（只允许 xlsx / docx）
-  依赖：Depends(getCurrentUser)（**端点自己声明**——催货 router 无级别依赖，
-        现有端点靠各自的 requireAdmin 兜住；本端点不要 admin，但必须登录）
+  401/403 → 未登录 / 非 admin（**requireAdmin**，与其它催货端点同口径）
 ```
 
 **供应商名获取**：API 层用
@@ -151,8 +172,7 @@ GET /procurement/chase/drafts/{chaseDraftId}/export?format=xlsx|docx
 - 导出服务单测：Excel 行数与列名正确、欠交量取值正确、空明细也能出文件；
   Word 含关键文本（供应商名 / 单号 / 欠交量 / 回复期限）
 - 端点集成测：200 + `Content-Disposition` 文件名正确、404（不存在）、400（format 非法）、
-  **匿名访问 401**（端点自带 `Depends(getCurrentUser)` ⇒ 必须登录）、
-  **非 admin 登录可下载 200**（确认「不限角色」真的不限）
+  **匿名访问 401**、**非 admin 登录 403**（确认 requireAdmin 生效）
 
 **前端**
 - 列表卡渲染：收到 `drafts` → 行数/供应商/状态正确显示
@@ -165,6 +185,17 @@ GET /procurement/chase/drafts/{chaseDraftId}/export?format=xlsx|docx
 - 后端新增 1 个 service 文件 + 1 个端点；前端新增 1 个组件 + 2 处接入
 - 需重建 backend + frontend 镜像；worker 同镜像须一并 `--force-recreate`
   （见 `Harness/skills/thdeploy/SKILL.md` §worker 同步铁律）
+
+### 生产可用性（写清楚，免得生产验收误判）
+
+生产 DMZ 到业务 Oracle `192.168.205.70:1521` **本就隔离**（2026-09-30 已有先例，见
+`Harness/changes/2026-11-27-release-1127-chase01/summary.md`）。
+
+- 催货单的**真实业务数据**（待到货回查、欠交量）在生产跑不通 ⇒ 功能正确性只能在本地 dev 栈验；
+- **导出功能本身在生产可用**：它只读**已落库的催货单**（`procurement_chase_draft` /
+  `_line` / `_decision`），**不直连业务库** ⇒ 前提是催货单能被创建出来。
+
+⇒ 发版 runbook 的验收探针要写明这一点，别让生产验收把「业务库不可达」误判成导出功能坏了。
 
 ## 关联
 

@@ -121,6 +121,11 @@ cd backend
 python -m scripts.seed_copilot_scenarios
 ```
 
+> ⚠️ **顺序要求：seed 必须跑在「新镜像已起来」之后** —— 新代码才有 min/max 的
+> 消费逻辑（前端限制 + 配置层校验）。若在旧镜像上先跑 seed，行里虽会写上 min/max
+> （旧代码不认识也不会用），但要等新镜像起来该数据才被消费；稳妥做法：
+> **先发版 → 确认 backend 容器正常 → 再跑 seed → 用 §6 验收 SQL 复核**。
+
 预期 stdout 出现（已存在场景行拿不到 min/max 的库）：
 
 ```

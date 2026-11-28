@@ -141,18 +141,30 @@ patched pending_delivery: merged slot fields for ['minOverdueDays', 'monthsBack'
 
 ```sql
 SELECT scenario_code,
-       slot -> 'periodIndex' ->> 'minimum' AS period_min,
-       slot -> 'periodIndex' ->> 'maximum' AS period_max
+       slot ->> 'key'       AS slot_key,
+       slot ->> 'minimum'   AS slot_min,
+       slot ->> 'maximum'   AS slot_max
 FROM copilot_scenario,
      LATERAL jsonb_array_elements(slot_schema) AS slot
 WHERE scenario_code = 'delivery_tracking'
-  AND slot ->> 'key' = 'periodIndex';
+  AND slot ->> 'key' IN ('periodIndex', 'anchorDay')
+ORDER BY slot_key;
 ```
 
-期望：`period_min = -12`、`period_max = 0`（为 NULL ⇒ seed 未生效，重跑 §5）。
+> ⚠️ **不要写成 `slot -> 'periodIndex' ->> 'minimum'`**：`slot` 是
+> `jsonb_array_elements` 展开的**单个槽位对象**，不是槽位数组 ⇒ 那样取恒为 NULL，
+> 会让人误判「seed 未生效」（2026-11-25 本地实测踩过）。
 
-同口径可查 `anchorDay`（1..28）、`monthsBack`（1..36）与
-`pending_delivery.minOverdueDays`（≥ 0）。
+期望（2026-11-25 本地实测输出）：
+
+```
+delivery_tracking|anchorDay   |1  |28
+delivery_tracking|periodIndex |-12|0
+```
+
+`periodIndex` 行缺失或 min/max 为 NULL ⇒ seed 未生效，重跑 §5。
+
+同口径可查 `monthsBack`（1..36）与 `pending_delivery.minOverdueDays`（≥ 0）。
 
 端到端验收：采购 Copilot → 到货跟踪 → 高级参数「周期期序」填 `1`
 ⇒ **应直接 422**（消息含「周期期序」），且**不产生编排 run**。

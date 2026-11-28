@@ -11,20 +11,28 @@
   POST /drafts/{id}/reject        → REJECTED（终态）
   POST /drafts/{id}/cancel        → CANCELLED（终态）
   POST /drafts/{id}/send          → SENDING → SENT（经命令端口；本期终态）
+  GET  /drafts/{id}/export        单张下载（xlsx 明细表 / docx 催货函）
 
 权限：admin（对外动作）；限流走 `rateLimitDep`；动作写 audit_log（service 层同事务
 决策留痕已有，这里再记操作审计）。
 """
 
+# ruff: noqa: B008 -- 全仓 API 层统一使用 FastAPI 的 Depends 默认参数写法。
+
 from __future__ import annotations
 
+import logging
 from datetime import UTC
+from urllib.parse import quote
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import CurrentUser, getDb, requireAdmin
 from app.domain.exceptions import DomainError
+from app.models.system_config import SystemConfig
 from app.schemas.procurement_chase import (
     ChaseDecisionBody,
     ChaseDecisionRead,
@@ -34,15 +42,37 @@ from app.schemas.procurement_chase import (
     ChaseFromPendingResultRead,
     ChaseLineRead,
 )
+from app.services.entity_mapping_names import loadMdmDirectory
+from app.services.procurement_chase_export_service import (
+    buildChaseExportPayload,
+    renderChaseDocx,
+    renderChaseExcel,
+)
 from app.services.procurement_chase_lookup import fetchPendingLinesEnriched
 from app.services.procurement_chase_service import (
     ProcurementChaseService,
     defaultReplyDeadline,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["procurement-chase"])
 
 _service = ProcurementChaseService()
+
+#: 导出支持的格式（单张下载，不做批量）
+_EXPORT_FORMATS: frozenset[str] = frozenset({"xlsx", "docx"})
+#: 公司法定名称的系统配置键（admin 在后台维护）
+_COMPANY_NAME_CONFIG_KEY = "chase.letter.company_name"
+#: 导出文件的 ASCII 回退名（RFC 5987 的 `filename` 参数只能是 ASCII）
+_EXPORT_ASCII_PREFIX = "chase-"
+#: xlsx / docx 的 MIME 类型
+_MEDIA_TYPE_XLSX = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+_MEDIA_TYPE_DOCX = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
 
 
 def _noStore(response: Response) -> None:
@@ -240,6 +270,139 @@ async def cancelChaseDraft(
     )
     await session.commit()
     return _detailRead(await _service.getDraft(session, str(draft.chase_draft_id)))
+
+
+# ---------------------------------------------------------------------------
+# 导出（单张下载）
+# ---------------------------------------------------------------------------
+
+
+def _normalizedDraftId(chaseDraftId: str) -> str | None:
+    """催货单号规范化；非法 UUID ⇒ None（⇒ 404，**不是** 500）。
+
+    为什么要这一步：``chase_draft_id`` 是 UUID 列，把任意字符串直接丢给
+    PG 会抛 ``ValueError``（⇒ 500「服务端错误」）。而语义上「单号不存在」
+    就是 404 —— 与 spec 的错误表一致。
+    """
+    try:
+        return str(UUID(chaseDraftId))
+    except ValueError:
+        return None
+
+
+async def _companyNameOf(session: AsyncSession) -> str | None:
+    """读系统配置里的公司法定名称（催货函抬头）。
+
+    **未配置 / 值为空 / 读失败 ⇒ None 且记 warning，不阻塞导出** ——
+    写死一个「看起来像公司名」的默认值比留空更危险（抬头错误的催货函更糟）。
+
+    读配置用 **savepoint**（``begin_nested``）：配置表读失败时 PG 会把当前
+    事务置为 aborted，若不隔离，后面的查询会连环失败 ⇒ 一次配置读取故障
+    就能把整张导出打成 500。
+    """
+    try:
+        async with session.begin_nested():
+            row = await session.execute(
+                select(SystemConfig.value).where(
+                    SystemConfig.key == _COMPANY_NAME_CONFIG_KEY
+                )
+            )
+            raw = row.scalar_one_or_none()
+    except Exception:  # noqa: BLE001 - 读不到不影响导出
+        logger.warning(
+            "读取系统配置 %s 失败，催货函抬头留空",
+            _COMPANY_NAME_CONFIG_KEY,
+            exc_info=True,
+        )
+        return None
+    value = (raw or "").strip()
+    if not value:
+        logger.warning(
+            "系统配置 %s 未配置（或值为空），催货函抬头留空",
+            _COMPANY_NAME_CONFIG_KEY,
+        )
+        return None
+    return value
+
+
+async def _supplierNameOf(session: AsyncSession, supplierCode: str) -> str | None:
+    """MDM 目录查供应商全名；查不到 ⇒ None（渲染层回落编码，不阻塞导出）。"""
+    try:
+        async with session.begin_nested():
+            directory = await loadMdmDirectory(
+                session, entityType="SUPPLIER", codes=(supplierCode,)
+            )
+    except Exception:  # noqa: BLE001 - 查不到不影响导出
+        logger.warning(
+            "查询供应商名称失败，回落编码 %s", supplierCode, exc_info=True
+        )
+        return None
+    name = (directory.get(supplierCode) or {}).get("name")
+    return str(name) if name else None
+
+
+def _contentDisposition(filename: str, asciiName: str) -> str:
+    """RFC 5987 文件名头：ASCII 回退名 + ``filename*=UTF-8''`` 百分号编码。"""
+    return (
+        f'attachment; filename="{asciiName}"; '
+        f"filename*=UTF-8''{quote(filename, safe='')}"
+    )
+
+
+@router.get(
+    "/drafts/{chaseDraftId}/export",
+    summary="导出催货单（Excel 明细表 / Word 催货函）",
+)
+async def exportChaseDraft(
+    chaseDraftId: str,
+    format: str = Query(default="xlsx", description="导出格式：xlsx | docx"),
+    _user: CurrentUser = Depends(requireAdmin),
+    session: AsyncSession = Depends(getDb),
+) -> Response:
+    """导出**单张**催货单：Excel 明细表 或 Word 催货函（任何状态可下载）。
+
+    权限与其它催货端点同口径（requireAdmin）—— 导出内容与它们同源
+    （供应商 / 订单号 / 欠交量 / 逾期天数），不做第二套权限体系。
+    """
+    if format not in _EXPORT_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"format 只支持 {sorted(_EXPORT_FORMATS)}，收到 {format!r}",
+        )
+    draftId = _normalizedDraftId(chaseDraftId)
+    if draftId is None:
+        raise HTTPException(status_code=404, detail="催货单不存在")
+    detail = await _service.getDraft(session, draftId)
+    draft = detail["draft"]
+    companyName = await _companyNameOf(session)
+    supplierName = await _supplierNameOf(session, str(draft.supplier_code))
+    payload = buildChaseExportPayload(
+        draft=draft,
+        lines=detail["lines"],
+        decisions=detail["decisions"],
+        supplierName=supplierName,
+        companyName=companyName,
+    )
+    if format == "xlsx":
+        blob = renderChaseExcel(payload)
+        mediaType = _MEDIA_TYPE_XLSX
+        extension = "xlsx"
+    else:
+        blob = renderChaseDocx(payload)
+        mediaType = _MEDIA_TYPE_DOCX
+        extension = "docx"
+    stem = payload.chaseDraftId[:8]
+    filename = f"催货单_{stem}.{extension}"
+    asciiName = f"{_EXPORT_ASCII_PREFIX}{stem}.{extension}"
+    return Response(
+        content=blob,
+        media_type=mediaType,
+        headers={
+            "Content-Disposition": _contentDisposition(filename, asciiName),
+            # 催货函含采购敏感数据 ⇒ 不许缓存
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.post(

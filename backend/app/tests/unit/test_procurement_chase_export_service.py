@@ -254,3 +254,135 @@ def test_excel_unknown_open_qty_cell_is_empty() -> None:
     book = load_workbook(io.BytesIO(renderChaseExcel(payload)))
     sheet = book["催货明细"]
     assert sheet.cell(row=2, column=7).value is None, "欠交量 NULL ⇒ 空单元格"
+
+
+# ---------------------------------------------------------------------------
+# Excel 公式注入（对外材料的安全红线）
+# ---------------------------------------------------------------------------
+
+_FORMULA_PAYLOAD = '=HYPERLINK("http://evil","click")'
+
+
+def test_excel_detail_cell_with_formula_is_stored_as_text() -> None:
+    """物料描述以 ``=`` 开头 ⇒ **不得**变成活公式（openpyxl 写入时判定为 ``data_type='f'``）。
+
+    供应商在 Excel 里打开即执行 ⇒ 对外材料的安全事故。
+    修法：写入后强制 ``data_type='s'``（内容原样，Excel 按文本存储）。
+    """
+    payload = _payload(lines=[_line(materialDesc=_FORMULA_PAYLOAD)])
+    book = load_workbook(io.BytesIO(renderChaseExcel(payload)))
+    cell = book["催货明细"].cell(row=2, column=4)  # 物料描述列
+    assert cell.data_type == "s", f"公式串必须按文本存储，实际 data_type={cell.data_type!r}"
+    assert cell.value == _FORMULA_PAYLOAD, "内容必须原样保留（不能被转义/截断）"
+
+
+def test_excel_info_cell_with_formula_is_stored_as_text() -> None:
+    """信息 Sheet（抬头）同样受保护 —— 备注 / 单号也是外部数据。"""
+    payload = _payload(notes=_FORMULA_PAYLOAD, chaseDraftId="=1+1")
+    book = load_workbook(io.BytesIO(renderChaseExcel(payload)))
+    info = book["催货单信息"]
+    values = {info.cell(row=r, column=1).value: info.cell(row=r, column=2) for r in range(1, 8)}
+    for label in ("备注", "催货单号"):
+        cell = values[label]
+        assert cell.data_type == "s", f"{label} 单元格 data_type={cell.data_type!r}（应为 s）"
+    assert values["备注"].value == _FORMULA_PAYLOAD
+    assert values["催货单号"].value == "=1+1"
+
+
+def test_excel_numeric_and_boolean_cells_keep_their_type() -> None:
+    """只压字符串的 data_type —— 数字/布尔仍是数字/布尔（不能被写成文本）。"""
+    payload = _payload(lines=[_line(orderedQty=Decimal("100"), isDirty=False)])
+    book = load_workbook(io.BytesIO(renderChaseExcel(payload)))
+    sheet = book["催货明细"]
+    assert sheet.cell(row=2, column=5).data_type == "n", "订购量是数字"
+    assert sheet.cell(row=2, column=10).data_type == "b", "脏数据标记是布尔"
+
+
+# ---------------------------------------------------------------------------
+# 对外时间口径（业务时区 UTC+8）
+# ---------------------------------------------------------------------------
+
+
+def test_deadline_rendered_in_business_timezone() -> None:
+    """UTC 墙钟直接渲染会让**对外承诺期限早 8 小时** ⇒ 必须转业务时区并标注。"""
+    payload = _payload(expectedReplyDeadline=datetime(2026, 12, 1, 23, 59, 59, tzinfo=UTC))
+    book = load_workbook(io.BytesIO(renderChaseExcel(payload)))
+    info = book["催货单信息"]
+    values = {info.cell(row=r, column=1).value: info.cell(row=r, column=2).value for r in range(1, 8)}
+    deadline = values["回复期限"]
+    assert deadline.startswith("2026-12-02 07:59"), (
+        f"UTC 23:59 ⇒ 业务时区应为 2026-12-02 07:59，实际 {deadline!r}"
+    )
+    assert "UTC+8" in deadline, f"对外文件必须标注时区，实际 {deadline!r}"
+
+
+def test_docx_deadline_uses_business_timezone_and_labels_it() -> None:
+    """Word 侧同口径：期限按业务时区渲染 + 时区标注。"""
+    payload = _payload(expectedReplyDeadline=datetime(2026, 12, 1, 23, 59, 59, tzinfo=UTC))
+    xml = _docxText(renderChaseDocx(payload))
+    assert "2026-12-02 07:59" in xml, "回复期限应按业务时区（+08:00）渲染"
+    assert "UTC+8" in xml, "对外文件必须标注时区"
+    assert "2026-12-01 23:59" not in xml, "不得出现 UTC 墙钟"
+
+
+def test_docx_signature_date_uses_business_timezone() -> None:
+    """落款日期同源 ⇒ 也按业务时区（UTC 深夜落款可能差一天）。"""
+    payload = _payload(createdTime=datetime(2026, 11, 30, 20, 0, tzinfo=UTC))
+    xml = _docxText(renderChaseDocx(payload))
+    assert "日期：2026-12-01" in xml, "UTC 2026-11-30 20:00 ⇒ 业务时区 2026-12-01"
+
+
+# ---------------------------------------------------------------------------
+# 合计口径：数量未知不得被陈述成「没有欠交」
+# ---------------------------------------------------------------------------
+
+
+def test_all_unknown_open_qty_does_not_claim_zero_owed() -> None:
+    """全部数量未知 ⇒ **不得**写「合计欠交 0」（那是向供应商断言没有欠交）。"""
+    payload = _payload(
+        lines=[_line(poNo="PO-A", openQty=None), _line(poNo="PO-B", openQty=None)]
+    )
+    xml = _docxText(renderChaseDocx(payload))
+    assert "数量待确认" in xml, "必须说明数量待确认"
+    assert "合计欠交 0" not in xml, (
+        f"全部数量未知时写「合计欠交 0」＝ 失实陈述，实际文案：{xml}"
+    )
+
+
+def test_partially_unknown_open_qty_states_pending_count() -> None:
+    """部分未知 ⇒ 合计照实写，并显式说明有几行数量待确认、未计入。"""
+    payload = _payload(
+        lines=[_line(poNo="PO-A", openQty=None), _line(poNo="PO-B", openQty=Decimal("60"))]
+    )
+    xml = _docxText(renderChaseDocx(payload))
+    assert "合计欠交 60（其中 1 行数量待确认，未计入）。" in xml
+
+
+def test_all_known_open_qty_keeps_plain_total() -> None:
+    """全部已知 ⇒ 保持原口径（不多余说明）。"""
+    xml = _docxText(renderChaseDocx(_payload()))
+    assert "本次催货单共 1 行订单明细，合计欠交 60。" in xml
+
+
+# ---------------------------------------------------------------------------
+# 供应商抬头：Excel 与 Word 同一口径
+# ---------------------------------------------------------------------------
+
+
+def test_supplier_header_is_consistent_between_excel_and_docx() -> None:
+    """有名字 ⇒ ``名字（编码）``；无名字 ⇒ **只显示编码**（不能是 ``F109（F109）``）。"""
+    withName = _payload()
+    excel = load_workbook(io.BytesIO(renderChaseExcel(withName)))
+    info = excel["催货单信息"]
+    excelValue = info.cell(row=2, column=2).value
+    docxXml = _docxText(renderChaseDocx(withName))
+    assert excelValue == "上海纳特（F109）"
+    assert "供应商：上海纳特（F109）" in docxXml, "Word 必须与 Excel 同口径"
+
+    withoutName = _payload(supplierName=None)
+    excel = load_workbook(io.BytesIO(renderChaseExcel(withoutName)))
+    info = excel["催货单信息"]
+    assert info.cell(row=2, column=2).value == "F109", "无名字时只显示编码，不能是 F109（F109）"
+    docxXml = _docxText(renderChaseDocx(withoutName))
+    assert "供应商：F109" in docxXml
+    assert "F109（F109）" not in docxXml, "供应商名冗余"

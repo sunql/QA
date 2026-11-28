@@ -20,8 +20,10 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import uuid
+import zipfile
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -264,6 +266,13 @@ class TestChaseExport:
             "application/vnd.openxmlformats-officedocument.spreadsheetml"
         )
         assert len(resp.content) > 0
+        # **必须是合法 OOXML**（不是「有内容」就算数）：zip 魔数 + xl/workbook.xml
+        assert resp.content[:2] == b"PK", "xlsx 是 zip（OOXML 打包格式）"
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
+            names = archive.namelist()
+            assert "xl/workbook.xml" in names, (
+                f"xlsx 缺少 xl/workbook.xml，不是合法 OOXML：{names[:10]}"
+            )
         # Excel 的信息 Sheet 没有公司名行 ⇒ xlsx 不该读配置、更不该打「抬头留空」warning
         assert COMPANY_NAME_CONFIG_KEY not in caplog.text, (
             f"xlsx 导出不应产生公司名 warning，实际日志：{caplog.text}"
@@ -397,8 +406,6 @@ class TestChaseExport:
         )
         assert resp.status_code == 200, resp.text
 
-        import io
-
         from docx import Document
 
         document = Document(io.BytesIO(resp.content))
@@ -416,8 +423,6 @@ class TestChaseExport:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200, resp.text
-
-        import io
 
         from docx import Document
 
@@ -452,8 +457,6 @@ class TestChaseExport:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200, resp.text
-
-        import io
 
         from docx import Document
 
@@ -499,8 +502,6 @@ class TestChaseExport:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200, resp.text
-
-        import io
 
         from docx import Document
 

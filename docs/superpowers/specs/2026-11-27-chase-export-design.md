@@ -40,9 +40,9 @@ PendingDelivery），**唯独没有催货单** ⇒ 路由 `/procurement/chase` �
 
 ⇒ 本批补两件事：
 1. **菜单项**：`seed_menu_config.py` 加 `item.procurementChase` → `/procurement/chase`
-   （+ 对应 i18n label）。**该 code 是全新的** ⇒ 菜单 seed 的
-   `on_conflict_do_nothing` 对新 code 有效 ⇒ 跑一次 `python -m scripts.seed_menu_config`
-   即**新增**该行（不像场景 seed 是给已有行补字段、需要定向补丁机制）。
+   （+ 对应 i18n label）。**该 code 是全新的** ⇒ 菜单 seed 对新 code 走**新增**
+   （不像场景 seed 是给已有行补字段、需要定向补丁机制）⇒ **菜单行随发版自动播种**
+   （`seed_menu_config` 已在启动链，见 `backend/app/main.py`）⇒ **无需手工动作**。
 2. **创建后给跳转链接**：到货跟踪结果卡「创建催货单」成功后，toast/提示里带
    「查看催货单」入口 ⇒ 跳 `/procurement/chase`。
 
@@ -137,6 +137,10 @@ requireAdmin**，不做第二套权限体系。
 2. 催货说明段：**「本次催货单共 N 行订单明细，合计欠交 X。」**（事实陈述）
    + 回复期限要求。⚠️ 不用「欠交总行数」措辞——它与「合计欠交 X」在
    **数量未知（`open_qty` 为 NULL）** 时会自相矛盾（2026-11-28 实施发现）。
+   ⚠️ **数量未知时合计层必须跟上**（2026-11-28 终审）：全部 `open_qty` 为 NULL 时
+   **不得**写「合计欠交 0」——那等于向供应商断言「没有欠交」（失实陈述）。
+   ⇒ 全部未知：「欠交数量待确认（全部 N 行数量未知，未计入合计）。」
+   ⇒ 部分未知：「合计欠交 X（其中 M 行数量待确认，未计入）。」
 3. 明细表：订单号 / 行号 / 物料描述 / 欠交量 / 期望到货日 / 逾期天数
 4. 落款：催货人（`created_by`）+ 日期
 
@@ -212,6 +216,16 @@ PendingDelivery 之后），label 走 i18n（zh-CN / en-US）。
 - 创建成功 → 出现「查看催货单」跳转链接
 - 菜单项：`seed_menu_config.py` 声明了 `item.procurementChase` → `/procurement/chase`
 
+## 外发材料的安全与正确性护栏（2026-11-28 终审）
+
+这批文件是**转发给供应商**的对外材料 ⇒ 三道硬护栏：
+
+| 护栏 | 问题 | 修法 |
+|---|---|---|
+| **Excel 公式注入** | 外部数据（物料描述/供应商名/备注/单号）以 `=` 开头 ⇒ openpyxl 写入时置 `data_type='f'` ⇒ 变成**活公式**（`=HYPERLINK(...)` 外链、`=cmd\|...`），供应商在 Excel 里打开即执行 | 写入**之后**强制 `cell.data_type = "s"`（内容原样，Excel 按文本存储）；只处理字符串，数字/日期/布尔不动 |
+| **对外时间口径** | `expected_reply_deadline` 是 timestamptz（asyncpg 返回 UTC aware）⇒ 直接渲染成 UTC 墙钟 ⇒ 对外承诺期限比页面口径（`toLocaleString()`）**早 8 小时**，且函上无时区说明 | 一律按**业务时区（固定 +08:00）**渲染并**标注时区**（`（北京时间 UTC+8）`）。⚠️ **不用 `ZoneInfo("Asia/Shanghai")`**（容器可能无 tzdata ⇒ `ZoneInfoNotFoundError`）⇒ 用固定偏移 `timezone(timedelta(hours=8))`（中国无夏令时） |
+| **合计失实陈述** | 全部行 `open_qty` 为 NULL ⇒ 函上白纸黑字写「合计欠交 0」⇒ 等于向供应商断言没有欠交 | 见上文「催货说明段」三种形态；明细单元格层面已区分「未知」与「0」，合计层必须跟上 |
+
 ## 外发材料的保密口径（2026-11-28 裁决）
 
 | 内容 | 进外发产物？ | 理由 |
@@ -226,9 +240,10 @@ PendingDelivery 之后），label 走 i18n（zh-CN / en-US）。
 ## 影响面与部署
 - **无 DDL / 无迁移**（只读导出 + 新端点 + 菜单项）
 - 后端新增 1 个 service 文件 + 1 个端点 + 菜单 seed 一项；前端 2 处接入（结果卡跳转链接 + 催货单页下载按钮）+ i18n
-- **上线必做**：跑一次 `python -m scripts.seed_menu_config`（催货单菜单 code 是**全新**的 ⇒
-  菜单 seed 的 `on_conflict_do_nothing` 对新 code 有效 ⇒ 直接**新增**该行；
-  注意与场景 seed 不同，这里**不需要**定向补丁机制）
+- **菜单行随发版自动播种**：`seed_menu_config` 已在 `main.py` 启动链
+  （`backend/app/main.py`）⇒ 催货单菜单 code（`item.procurementChase`，全新）对新 code
+  走**新增** ⇒ **无需手工跑 seed**（2026-11-28 终审：原稿的「上线必做：跑一次
+  `python -m scripts.seed_menu_config`」是多余步骤，已删）
 - **抬头键无需手工动作**：`chase.letter.company_name` 已接入 `main.py` 启动链
   （`seed_brand_config` 之后）⇒ **随发版自动播种**（value 播种为未配置，admin 随后可在
   后台填写）

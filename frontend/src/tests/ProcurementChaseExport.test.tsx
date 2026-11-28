@@ -23,6 +23,8 @@ import { useAuthStore } from "../stores/authStore";
 import DeliveryTrackingResultCard, {
   type DeliveryTrackingResult,
 } from "../components/copilot/DeliveryTrackingResultCard";
+import ProcurementChasePage from "../pages/ProcurementChasePage";
+import type { ChaseDraft } from "../api/procurementChase";
 
 const httpMock = vi.hoisted(() => ({
   get: vi.fn(),
@@ -258,5 +260,116 @@ describe("创建催货单后的跳转链接", () => {
 
     const link = await screen.findByText("查看催货单");
     expect(link.getAttribute("href")).toBe("/procurement/chase");
+  });
+});
+
+/** 催货单页下载按钮：**用被点那一行的 draftId** 调导出端点。
+ *
+ * 缺口（2026-11-28 终审）：原测试只测 `downloadChaseDraft` 函数本身，
+ * 没覆盖「页面某行的按钮 → 该行的 draftId」这条链路 ⇒ 传错行 id 的 bug
+ * （下错别人的催货单）测不出来。
+ */
+const DRAFT_A_ID = "aaaa1111-0000-0000-0000-000000000001";
+const DRAFT_B_ID = "bbbb2222-0000-0000-0000-000000000002";
+
+function _draft(chaseDraftId: string, supplierCode: string): ChaseDraft {
+  return {
+    chaseDraftId,
+    version: 1,
+    status: "DRAFT",
+    requestId: `R-${chaseDraftId.slice(0, 4)}`,
+    supplierEnterpriseKey: 1,
+    supplierCode,
+    expectedReplyDeadline: "2026-12-01T00:00:00Z",
+    notes: null,
+    lineCount: 1,
+    createdBy: "admin",
+    createdTime: "2026-11-28T00:00:00Z",
+    updatedTime: "2026-11-28T00:00:00Z",
+  };
+}
+
+describe("催货单页下载按钮", () => {
+  /** 本 describe 自己的 createElement 替身基线（afterEach 还原，避免泄漏到别的用例）。 */
+  let pristineCreateElement: typeof document.createElement;
+
+  afterEach(() => {
+    if (pristineCreateElement) {
+      document.createElement = pristineCreateElement;
+    }
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useAuthStore.setState({
+      token: "t",
+      user: {
+        id: 1,
+        username: "admin",
+        displayName: "管理员",
+        email: null,
+        enabled: true,
+        mustChangePassword: false,
+        roles: ["admin"],
+        organizations: [],
+        tenantId: "default",
+        lastLoginAt: null,
+      },
+      mustChangePassword: false,
+    });
+    (globalThis as unknown as { URL: { createObjectURL: () => string } }).URL.createObjectURL =
+      () => "blob:mock";
+    (globalThis as unknown as { URL: { revokeObjectURL: (u: string) => void } }).URL.revokeObjectURL =
+      () => undefined;
+    // jsdom 点 <a href="blob:..."> 会尝试导航（未实现 ⇒ 噪声错）⇒ 拦掉 click
+    pristineCreateElement = document.createElement.bind(document);
+    document.createElement = ((tagName: string) => {
+      const element = pristineCreateElement(tagName);
+      if (tagName === "a") {
+        (element as HTMLAnchorElement).click = vi.fn();
+      }
+      return element;
+    }) as typeof document.createElement;
+    // 列表接口返回两张单；导出接口返回空 blob
+    httpMock.get.mockImplementation((url: string) => {
+      if (String(url).includes("/export")) {
+        return Promise.resolve({
+          status: 200,
+          data: new Blob(["x"]),
+          headers: {},
+        });
+      }
+      return Promise.resolve({
+        data: [_draft(DRAFT_A_ID, "Q1000"), _draft(DRAFT_B_ID, "Q2000")],
+      });
+    });
+  });
+
+  it("点第二行的 Excel 按钮 ⇒ 用**那一行**的 draftId 调导出端点", async () => {
+    const user = userEvent.setup();
+    render(
+      <ConfigProvider locale={zhCNLocale}>
+        <I18nextProvider i18n={i18n}>
+          <MemoryRouter>
+            <ProcurementChasePage />
+          </MemoryRouter>
+        </I18nextProvider>
+      </ConfigProvider>,
+    );
+
+    // 第二行的单号前缀（表格里展示 id 前 8 位）
+    const idCell = await screen.findByText(DRAFT_B_ID.slice(0, 8));
+    const row = idCell.closest("tr")!;
+    await user.click(within(row).getByRole("button", { name: "Excel" }));
+
+    const exportCalls = httpMock.get.mock.calls.filter((call) =>
+      String(call[0]).includes("/export"),
+    );
+    expect(exportCalls).toHaveLength(1);
+    expect(exportCalls[0][0]).toBe(
+      `/procurement/chase/drafts/${DRAFT_B_ID}/export`,
+    );
+    expect(exportCalls[0][1].params).toEqual({ format: "xlsx" });
+    expect(String(exportCalls[0][0])).not.toContain(DRAFT_A_ID);
   });
 });

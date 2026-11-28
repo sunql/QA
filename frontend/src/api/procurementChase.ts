@@ -133,8 +133,10 @@ export type ChaseExportFormat = "xlsx" | "docx";
  * 由前端自己解析错误体的客户端错误状态。
  *
  * 400 ⇒ `HTTPException` ⇒ `{"detail": "..."}`；
- * 404/403 ⇒ 统一错误包络 ⇒ `{"success": false, "error": "..."}`。
- * 两种形状并存（Task 2 复审发现）⇒ 都要能读出文案。
+ * 403 ⇒ `requireAdmin` 抛 `PermissionDenied`（`HTTPException` 子类）⇒
+ * `{"detail": {"code": "...", "message": "..."}}`（**嵌套**）；
+ * 404 ⇒ 统一错误包络 ⇒ `{"success": false, "error": "..."}`。
+ * 三种形状并存（Task 2 复审 + 2026-11-28 终审）⇒ 都要能读出文案。
  */
 const EXPORT_ERROR_STATUSES: readonly number[] = [400, 403, 404];
 
@@ -196,7 +198,12 @@ async function readErrorMessage(payload: unknown): Promise<string> {
   return pickMessage(parsed) ?? i18n.t("chase.export.failed");
 }
 
-/** 兼容两种错误包络：`{"detail": "..."}` 与 `{"success": false, "error": "..."}`。 */
+/**
+ * 兼容三种错误包络：
+ * - `{"detail": "..."}`（400 `HTTPException`）；
+ * - `{"detail": {"code": "...", "message": "..."}}`（403 `PermissionDenied`）；
+ * - `{"success": false, "error": "..."}`（404 统一包络）。
+ */
 function pickMessage(value: unknown): string | null {
   if (typeof value === "string") return value.trim() || null;
   if (!value || typeof value !== "object") return null;

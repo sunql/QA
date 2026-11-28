@@ -1,12 +1,13 @@
-"""seed_menu_config - 幂等 upsert 9 类 55 项菜单（共 64 行）。
+"""seed_menu_config - 幂等 upsert 9 类 60 项菜单（共 69 行）。
 
 与 AppLayout 的旧 key 一一对应；feat-rbac-identity 追加 4 个 RBAC 管理页
 （用户/角色/组织/菜单）叶子项；feat-wiki-knowledge 追加 1 个一级类
 「企业 Wiki」+ 9 个二级项（对话/知识条目/导入/冲突/建议/覆盖度/知识图谱/
 关联/分类）；feat-research-entry 追加 1 个一级类「研究代理」+ 2 个叶子项
 （研究会话/研究对比）；P5 Workflow 追加 3 个叶子项（工作流实例/待办审批/
-工作流定义）；M4 追加 1 个一级类「采购协同」+ 4 个叶子项（询价草稿/绑定向导/
-知识检索/场景目录）。
+工作流定义）；M4 追加 1 个一级类「采购协同」+ 5 个叶子项（询价草稿/绑定向导/
+知识检索/采购 Copilot/待到货明细）+ 采购 Agent 场景；催货闭环追加 1 个叶子项
+（催货单 /procurement/chase）。
 
 UI 优先策略：本 seed 只在「行不存在」时 INSERT 默认值；行已存在时
 **不覆盖任何 UI 可编辑字段**（label_key / icon_code / path / visible /
@@ -151,13 +152,17 @@ ITEMS: list[dict[str, Any]] = [
     {"parent": "section.procurement", "code": "item.procurementCopilot", "label_key": "menu.item.procurementCopilot", "icon_code": "message", "sort_order": 2740, "path": "/procurement/copilot"},
     {"parent": "section.procurement", "code": "item.procurementPendingDelivery", "label_key": "menu.item.procurementPendingDelivery", "icon_code": "tags", "sort_order": 2745, "path": "/procurement/pending-delivery"},
     {"parent": "section.procurement", "code": "item.procurementAgents", "label_key": "menu.item.procurementAgents", "icon_code": "appstore", "sort_order": 2740, "path": "/procurement/agents"},
+    # 催货单（催货闭环）：列表 + 详情 + 单张导出（xlsx/docx）。
+    # sort_order 2750 —— 采购段末尾（现有 2710/2720/2730/2740/2745/2740）之后，
+    # 不与已有项撞值。
+    {"parent": "section.procurement", "code": "item.procurementChase", "label_key": "menu.item.procurementChase", "icon_code": "partition", "sort_order": 2750, "path": "/procurement/chase"},
 ]
 
 
 async def seed_menu_config(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
-    """幂等 upsert 9 个一级类 + 55 个叶子项。返回总行数（64）。
+    """幂等 upsert 9 个一级类 + 60 个叶子项。返回总行数（69）。
 
     冲突键：`code`（全局唯一）。重复运行不新增行，也不刷新任何字段 —— 已存在的行
     完全交给菜单管理 UI 维护（见文件头「UI 优先策略」）。

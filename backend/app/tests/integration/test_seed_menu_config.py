@@ -225,6 +225,8 @@ async def test_seed_paths_aligned_with_frontend_routes(
         "/semantic-release", "/discovery-review",
         # P4 待到货明细页（App.tsx:160 真实路由；seed 已发项，本清单漏同步）
         "/procurement/pending-delivery",
+        # 催货单（催货闭环）：列表 + 详情 + 单张导出（App.tsx:169 真实路由）
+        "/procurement/chase",
     }
 
     svc = MenuConfigService(dbSession)

@@ -186,6 +186,7 @@ export const enUS = {
     procurementAgents: "Agent Scenarios",
     procurementCopilot: "Procurement Copilot",
     procurementPendingDelivery: "Pending delivery lines",
+    procurementChase: "Chase Orders",
     workflowInstances: "Workflow Instances",
     workflowApprovals: "My Approvals",
     workflowDefinitions: "Workflow Definitions"
@@ -3583,6 +3584,13 @@ export const enUS = {
       empty: "Select order lines to chase first",
       note: "Chase note",
     },
+    export: {
+      excel: "Excel",
+      word: "Word",
+      success: "Chase order download started",
+      failed: "Failed to download the chase order",
+    },
+    viewList: "View chase orders",
   },
   procurement: {
   rfq: {

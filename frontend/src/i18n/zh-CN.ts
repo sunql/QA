@@ -187,6 +187,7 @@ export const zhCN = {
     procurementAgents: "采购 Agent 场景",
     procurementCopilot: "采购 Copilot",
     procurementPendingDelivery: "待到货明细",
+    procurementChase: "催货单",
     workflowInstances: "工作流实例",
     workflowApprovals: "待办审批",
     workflowDefinitions: "工作流定义"
@@ -3585,6 +3586,13 @@ export const zhCN = {
       empty: "请先勾选要催的订单行",
       note: "催货备注",
     },
+    export: {
+      excel: "Excel",
+      word: "Word",
+      success: "催货单已开始下载",
+      failed: "催货单下载失败",
+    },
+    viewList: "查看催货单",
   },
   procurement: {
   rfq: {

@@ -374,19 +374,37 @@ export default function DeliveryTrackingResultCard({
       }
       const created = await createChaseFromPending({ lines });
       setSelectedKeys([]);
+      // 成功提示里带「查看催货单」跳转链接（antd message 支持 ReactNode）：
+      // 催货单落在**另一个页面**，不给出路的话用户不知道东西去了哪。
+      // ⚠️ 用**普通 <a href>** 而不是 router 的 <Link>：antd 的静态 message
+      //    渲染在**独立的 React root** 里 ⇒ 拿不到 Router context（<Link>
+      //    会抛 "Cannot destructure property 'basename' of useContext(...)"）。
+      //    href 由 nginx 的 SPA fallback（try_files … /index.html）兜住。
+      const viewLink = (
+        <>
+          {" "}
+          <a href="/procurement/chase">{t("chase.viewList")}</a>
+        </>
+      );
       if (created.unresolvedSuppliers.length > 0) {
         void message.warning(
-          t("chase.create.partial", {
-            count: String(created.drafts.length),
-            unresolved: created.unresolvedSuppliers.join(", "),
-          }),
+          <>
+            {t("chase.create.partial", {
+              count: String(created.drafts.length),
+              unresolved: created.unresolvedSuppliers.join(", "),
+            })}
+            {viewLink}
+          </>,
         );
       } else {
         void message.success(
-          t("chase.create.success", {
-            count: String(created.drafts.length),
-            suppliers: String(new Set(created.drafts.map((d) => d.supplierCode)).size),
-          }),
+          <>
+            {t("chase.create.success", {
+              count: String(created.drafts.length),
+              suppliers: String(new Set(created.drafts.map((d) => d.supplierCode)).size),
+            })}
+            {viewLink}
+          </>,
         );
       }
     } catch {

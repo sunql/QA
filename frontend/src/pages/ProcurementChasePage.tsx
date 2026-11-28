@@ -21,6 +21,7 @@ import { useTranslation } from "react-i18next";
 import { useAuthStore } from "../stores/authStore";
 import {
   decideChase,
+  downloadChaseDraft,
   getChaseDraft,
   listChaseDrafts,
   sendChaseDraft,
@@ -28,6 +29,7 @@ import {
   type ChaseDecision,
   type ChaseDraft,
   type ChaseDraftDetail,
+  type ChaseExportFormat,
   type ChaseLine,
 } from "../api/procurementChase";
 
@@ -124,6 +126,25 @@ export default function ProcurementChasePage() {
     [noteForm],
   );
 
+  /**
+   * 下载催货单（Excel 明细表 / Word 催货函）。
+   *
+   * 失败提示取服务端文案（两种错误包络兼容，解析在 api 层完成）；
+   * 解析不出文案时才落回通用兜底 ⇒ 用户至少知道「下载失败」而不是静默无反应。
+   */
+  const handleExport = useCallback(
+    async (chaseDraftId: string, format: ChaseExportFormat) => {
+      try {
+        await downloadChaseDraft(chaseDraftId, format);
+        void message.success(t("chase.export.success"));
+      } catch (error) {
+        const text = error instanceof Error ? error.message : "";
+        void message.error(text || t("chase.export.failed"));
+      }
+    },
+    [t],
+  );
+
   const lineColumns: ColumnsType<ChaseLine> = [
     { title: t("chase.line.poNo"), dataIndex: "poNo", width: 140 },
     { title: t("chase.line.poLine"), dataIndex: "poLine", width: 70 },
@@ -189,11 +210,25 @@ export default function ProcurementChasePage() {
           { title: t("chase.column.createdBy"), dataIndex: "createdBy", width: 120 },
           {
             title: t("common.action"),
-            width: 100,
+            width: 220,
             render: (_, record) => (
-              <a onClick={() => void openDetail(record.chaseDraftId)}>
-                {t("chase.column.detail")}
-              </a>
+              <Space size={4}>
+                <Button
+                  size="small"
+                  onClick={() => void handleExport(record.chaseDraftId, "xlsx")}
+                >
+                  {t("chase.export.excel")}
+                </Button>
+                <Button
+                  size="small"
+                  onClick={() => void handleExport(record.chaseDraftId, "docx")}
+                >
+                  {t("chase.export.word")}
+                </Button>
+                <a onClick={() => void openDetail(record.chaseDraftId)}>
+                  {t("chase.column.detail")}
+                </a>
+              </Space>
             ),
           },
         ]}

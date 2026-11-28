@@ -95,13 +95,23 @@ def _toDecimal(value: Any) -> Decimal:
         return Decimal("0")
 
 
-def _formatQuantity(value: Any) -> str:
-    """数量格式化：去掉多余尾零，且不出现科学计数法（``Decimal('6E+1')`` ⇒ ``60``）。"""
-    quantity = _toDecimal(value)
+def _formatDecimalNumber(quantity: Decimal) -> str:
+    """数值格式化：去掉多余尾零，且不出现科学计数法（``Decimal('6E+1')`` ⇒ ``60``）。"""
     normalized = quantity.normalize()
     if normalized == normalized.to_integral_value():
         return str(int(normalized))
     return f"{normalized:f}"
+
+
+def _formatQuantity(value: Any) -> str:
+    """数量单元格文本：``None``（**数量未知**）⇒ 空串；``0`` 是合法值 ⇒ 显示 ``0``。
+
+    数量未知与数量为零**语义不同**：把 NULL 呈现成 ``0`` 等于凭空断言「已收满」，
+    因此渲染层留空；合计口径仍按 0 计（未知量不贡献欠交量）。
+    """
+    if value is None:
+        return ""
+    return _formatDecimalNumber(_toDecimal(value))
 
 
 def _text(value: Any) -> str:
@@ -146,6 +156,10 @@ def buildChaseExportPayload(
 
     ``draft``/``lines``/``decisions`` 只按属性读取，**不 import ORM 类型**，
     因此 API 层可以传 ORM 实例，也可以传任意同形对象（测试友好）。
+
+    ORM 列（``expected_reply_deadline`` / ``notes``）**直接取属性**、不用
+    ``getattr(..., None)`` 兜底：列确实存在，写错属性名应当 fail-fast，
+    而不是静默产出空值（仓内「守卫空集假通过」同款陷阱）。
     """
     return ChaseExportPayload(
         chaseDraftId=str(draft.chase_draft_id),
@@ -153,8 +167,8 @@ def buildChaseExportPayload(
         supplierCode=str(draft.supplier_code),
         supplierName=supplierName,
         companyName=companyName,
-        expectedReplyDeadline=getattr(draft, "expected_reply_deadline", None),
-        notes=getattr(draft, "notes", None),
+        expectedReplyDeadline=draft.expected_reply_deadline,
+        notes=draft.notes,
         createdBy=str(draft.created_by),
         createdTime=draft.created_time,
         lines=[
@@ -245,11 +259,15 @@ def renderChaseExcel(payload: ChaseExportPayload) -> bytes:
 
 
 def _setCjkFont(document: Any, size: int = 10) -> None:
-    """给 docx 的 Normal 样式设中文字体（``w:eastAsia``）。"""
+    """给 docx 的 Normal 样式设中文字体（``w:eastAsia``）。
+
+    ``rPr``/``rFonts`` 用 ``get_or_add_*`` 显式取，**不依赖** 上一行
+    ``style.font.name =`` 的副作用（否则换个调用顺序就 ``AttributeError``）。
+    """
     style = document.styles["Normal"]
     style.font.name = _CJK_FONT
     style.font.size = Pt(size)
-    rFonts = style.element.rPr.get_or_add_rFonts()
+    rFonts = style.element.get_or_add_rPr().get_or_add_rFonts()
     rFonts.set(qn("w:eastAsia"), _CJK_FONT)
 
 
@@ -263,7 +281,11 @@ def _writeCell(cell: Any, text: str, *, bold: bool = False) -> None:
 
 
 def _totalOpenQuantity(lines: list[dict[str, Any]]) -> Decimal:
-    """合计欠交量（Decimal 累加，避免浮点误差）。"""
+    """合计欠交量（Decimal 累加，避免浮点误差）。
+
+    ``openQty`` 为 NULL（数量未知）时按 0 计入合计 —— 未知量不贡献欠交量，
+    但**显示层仍留空**（见 ``_formatQuantity``），两者语义不同。
+    """
     return sum((_toDecimal(line.get("openQty")) for line in lines), Decimal("0"))
 
 
@@ -283,7 +305,10 @@ def renderChaseDocx(payload: ChaseExportPayload) -> bytes:
         document.add_paragraph(f"回复期限：{_formatDeadline(payload.expectedReplyDeadline)}")
 
     totalOpen = _totalOpenQuantity(payload.lines)
-    explain = f"催货说明：贵司有 {len(payload.lines)} 行订单尚未完成到货，合计欠交 {_formatQuantity(totalOpen)}。"
+    explain = (
+        f"催货说明：本次催货单共 {len(payload.lines)} 行订单明细，"
+        f"合计欠交 {_formatDecimalNumber(totalOpen)}。"
+    )
     if payload.expectedReplyDeadline:
         explain += f"请于 {payload.expectedReplyDeadline.strftime('%Y-%m-%d')} 前回复处理计划。"
     document.add_paragraph(explain)

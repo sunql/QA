@@ -6,7 +6,10 @@ import io
 import zipfile
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
+import pytest
+from docx import Document
 from openpyxl import load_workbook
 
 from app.services.procurement_chase_export_service import (
@@ -47,6 +50,24 @@ class _Decision:
     decided_time = datetime(2026, 11, 28, 10, 5, tzinfo=UTC)
 
 
+def _line(**overrides: Any) -> dict[str, Any]:
+    """一行明细（可覆写任意字段）。"""
+    base: dict[str, Any] = {
+        "poNo": "PO1",
+        "poLineNo": "10",
+        "materialCode": "M1",
+        "materialDesc": "不锈钢板",
+        "orderedQty": Decimal("100"),
+        "receivedQty": Decimal("40"),
+        "openQty": Decimal("60"),
+        "expectedDate": None,
+        "overdueDays": 15,
+        "isDirty": False,
+    }
+    base.update(overrides)
+    return base
+
+
 def _payload(**overrides) -> ChaseExportPayload:
     base = dict(
         chaseDraftId="d-1",
@@ -58,20 +79,7 @@ def _payload(**overrides) -> ChaseExportPayload:
         notes="请尽快回复",
         createdBy="admin",
         createdTime=datetime(2026, 11, 28, 10, 0, tzinfo=UTC),
-        lines=[
-            {
-                "poNo": "PO1",
-                "poLineNo": "10",
-                "materialCode": "M1",
-                "materialDesc": "不锈钢板",
-                "orderedQty": Decimal("100"),
-                "receivedQty": Decimal("40"),
-                "openQty": Decimal("60"),
-                "expectedDate": None,
-                "overdueDays": 15,
-                "isDirty": False,
-            }
-        ],
+        lines=[_line()],
         decisions=[],
     )
     base.update(overrides)
@@ -82,6 +90,12 @@ def _docxText(blob: bytes) -> str:
     """从 docx（zip）里取 word/document.xml 文本。"""
     with zipfile.ZipFile(io.BytesIO(blob)) as archive:
         return archive.read("word/document.xml").decode("utf-8")
+
+
+def _docxTableRows(blob: bytes) -> list[list[str]]:
+    """取 docx 第一张表的单元格文本（按行）。"""
+    document = Document(io.BytesIO(blob))
+    return [[cell.text for cell in row.cells] for row in document.tables[0].rows]
 
 
 def test_build_payload_maps_orm_fields() -> None:
@@ -116,24 +130,24 @@ def test_build_payload_maps_decisions() -> None:
     ]
 
 
-def test_build_payload_tolerates_missing_optional_fields() -> None:
-    class _MinimalDraft:
+def test_build_payload_fails_fast_on_missing_orm_column() -> None:
+    """ORM 列写错属性名 ⇒ 直接抛错，不静默产出空值（守卫空集假通过的同款陷阱）。"""
+
+    class _BrokenDraft:
         chase_draft_id = "d-2"
         status = "DRAFT"
         supplier_code = "F200"
         created_by = "buyer"
         created_time = datetime(2026, 11, 28, 10, 0, tzinfo=UTC)
 
-    payload = buildChaseExportPayload(
-        draft=_MinimalDraft(),
-        lines=[],
-        decisions=[],
-        supplierName=None,
-        companyName=None,
-    )
-    assert payload.expectedReplyDeadline is None
-    assert payload.notes is None
-    assert payload.lines == []
+    with pytest.raises(AttributeError):
+        buildChaseExportPayload(
+            draft=_BrokenDraft(),
+            lines=[],
+            decisions=[],
+            supplierName=None,
+            companyName=None,
+        )
 
 
 def test_excel_contains_header_and_one_data_row() -> None:
@@ -168,7 +182,8 @@ def test_docx_contains_key_texts() -> None:
     assert "上海纳特" in xml
     assert "某某有限公司" in xml
     assert "PO1" in xml
-    assert "60" in xml
+    # 断言具体文案而不是裸 "60"（裸数字几乎必然命中，定位不到问题）
+    assert "本次催货单共 1 行订单明细，合计欠交 60。" in xml
 
 
 def test_docx_omits_company_row_when_not_configured() -> None:
@@ -199,20 +214,43 @@ def test_quantity_zero_is_rendered_not_dropped() -> None:
     """欠交量 0 是合法值 ⇒ 不能被「空值兜底」抹成空串。"""
     payload = _payload(
         lines=[
-            {
-                "poNo": "PO2",
-                "poLineNo": "20",
-                "materialCode": "M2",
-                "materialDesc": None,
-                "orderedQty": Decimal("10"),
-                "receivedQty": Decimal("10"),
-                "openQty": Decimal("0"),
-                "expectedDate": None,
-                "overdueDays": 0,
-                "isDirty": False,
-            }
+            _line(
+                poNo="PO2",
+                poLineNo="20",
+                materialCode="M2",
+                materialDesc=None,
+                orderedQty=Decimal("10"),
+                receivedQty=Decimal("10"),
+                openQty=Decimal("0"),
+                overdueDays=0,
+            )
         ]
     )
+    rows = _docxTableRows(renderChaseDocx(payload))
+    assert rows[1][3] == "0", "欠交量 0 是合法值，必须显示 0"
     xml = _docxText(renderChaseDocx(payload))
-    assert "PO2" in xml
     assert "合计欠交 0" in xml
+
+
+def test_unknown_open_qty_renders_blank_not_zero() -> None:
+    """数量未知（ORM 允许 NULL）⇒ 显示留空，不得呈现为 0；合计按 0 计。"""
+    payload = _payload(
+        lines=[
+            _line(poNo="PO3", poLineNo="30", openQty=None),
+            _line(poNo="PO4", poLineNo="40", openQty=Decimal("60")),
+        ]
+    )
+    blob = renderChaseDocx(payload)
+    rows = _docxTableRows(blob)
+    assert rows[1][3] == "", "数量未知 ⇒ 单元格留空（不是 0）"
+    assert rows[2][3] == "60"
+    xml = _docxText(blob)
+    assert "合计欠交 60" in xml, "未知量不贡献欠交量"
+
+
+def test_excel_unknown_open_qty_cell_is_empty() -> None:
+    """Excel 侧同理：NULL 数量落空单元格，不写 0。"""
+    payload = _payload(lines=[_line(openQty=None)])
+    book = load_workbook(io.BytesIO(renderChaseExcel(payload)))
+    sheet = book["催货明细"]
+    assert sheet.cell(row=2, column=7).value is None, "欠交量 NULL ⇒ 空单元格"

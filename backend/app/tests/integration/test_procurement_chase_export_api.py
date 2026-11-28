@@ -24,6 +24,7 @@ import logging
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import bcrypt
 import pytest
@@ -37,6 +38,10 @@ from app.domain.procurement_chase_models import (
     ProcurementChaseLine,
 )
 from app.models.rbac import Role, User, UserRole
+from app.services.procurement_chase_export_service import COMPANY_NAME_CONFIG_KEY
+
+#: 仓库根（读源码做启动链守卫用；同 `test_branding_service.py` 的口径）
+_REPO_ROOT = Path(__file__).resolve().parents[4]
 
 ADMIN_USERNAME = "qa_export_admin"
 ADMIN_PASSWORD = "QaExport@2026"
@@ -47,7 +52,6 @@ VIEWER_PASSWORD = "QaExport@2026"
 BCRYPT_ROUNDS = 12
 
 SUPPLIER_CODE = "Q1630"
-COMPANY_NAME_CONFIG_KEY = "chase.letter.company_name"
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +202,47 @@ def _missingConfigModel():
 # ---------------------------------------------------------------------------
 # 用例
 # ---------------------------------------------------------------------------
+
+
+class TestChaseLetterConfigStartupChain:
+    """启动链守卫：**抬头配置键必须被播种**（admin 才改得了抬头）。
+
+    失败来历（2026-11-28 实测）：`PUT /api/v1/admin/system-config/{key}` 对**不存在的
+    key** 抛 404 ⇒ 键不存在时 admin 在后台**根本改不了抬头**（种子函数本身绿，
+    但 admin 失去了入口 ⇒ 催货函永远没有抬头）。
+    """
+
+    def test_startup_chain_seeds_chase_letter_config(self) -> None:
+        """启动链必须**调用**抬头种子（断言的是**调用点**而不是 import）。
+
+        只留 import、删掉调用 ⇒ 守卫照样绿 ⇒ 键不会被播种。
+        （同款守卫见 `test_branding_service.py::test_startup_chain_seeds_brand_config`。）
+        """
+        mainSource = (_REPO_ROOT / "backend" / "app" / "main.py").read_text(
+            encoding="utf-8"
+        )
+        assert "await seed_chase_letter_config(" in mainSource, (
+            "启动链未调用 seed_chase_letter_config"
+            f"（{COMPANY_NAME_CONFIG_KEY} 不会被播种 ⇒ admin 改不了抬头）"
+        )
+
+    def test_seed_function_does_not_overwrite_admin_value(self) -> None:
+        """抬头种子走**内容型**通道（只刷 description，value 一个字都不动）。
+
+        阈值种子（`CHART_CONFIG_SEEDS`）的冲突路径是 DO UPDATE set value ⇒
+        抬头若混进去，每次发版都会把 admin 改好的公司名打回原形。
+        """
+        from scripts.seed_system_config import (
+            CHART_CONFIG_SEEDS,
+            CHASE_LETTER_CONFIG_SEEDS,
+        )
+
+        chartKeys = {key for key, _, _ in CHART_CONFIG_SEEDS}
+        chaseKeys = {key for key, _, _ in CHASE_LETTER_CONFIG_SEEDS}
+        assert COMPANY_NAME_CONFIG_KEY in chaseKeys, "抬头键没有被种子覆盖"
+        assert COMPANY_NAME_CONFIG_KEY not in chartKeys, (
+            "抬头键混进了阈值种子（冲突路径会覆盖 value ⇒ 发版重置 admin 的抬头）"
+        )
 
 
 class TestChaseExport:

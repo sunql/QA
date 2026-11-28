@@ -61,7 +61,18 @@ requireAdmin**，不做第二套权限体系。
 催货函抬头的**公司法定名称**不能取 `BRAND_NAME`（那是产品品牌「泰鸿智脑」，不是法人名），
 系统里目前也没有「公司主体名」字段。
 
-**方案**：新增 system_config 键（如 `chase.letter.company_name`），admin 在后台维护；
+**方案**：新增 system_config 键 `chase.letter.company_name`，admin 在后台维护。
+
+**落地链路（2026-11-28 实施补齐，重要）**：`PUT /admin/system-config/{key}` 对**不存在的 key**
+抛 NotFoundError ⇒ admin **只能改已有行、不能新建** ⇒ 该键必须由 seed **先种出行**，
+否则 admin 无法维护。
+
+- 种子范式照 `backend/scripts/seed_system_config.py` 的 **`BRAND_CONFIG_SEEDS`**（**不是**
+  `CHART_CONFIG_SEEDS`——后者的冲突路径是 DO UPDATE set value ⇒ 会**覆盖 admin 调优**）：
+  - value 播种为 **None（未配置）**、description 说明用途；
+  - 冲突路径 `on_conflict_do_update(index_elements=["key"], set_={"description": ...})`
+    ⇒ **value 一个字都不动**（admin 改过的抬头不能被发版重置）。
+- 若 `seed_system_config` 不在 `main.py` 启动链 ⇒ 列入**上线必做动作**。
 导出服务读取该键。
 
 - **不写死任何默认公司名** —— 写死一个「看起来像公司名」的默认值比留空更危险：
@@ -140,9 +151,12 @@ requireAdmin**，不做第二套权限体系。
 ```
 GET /procurement/chase/drafts/{chaseDraftId}/export?format=xlsx|docx
   200 → 文件流，Content-Disposition: attachment; filename="催货单_{单号}.{ext}"
-  404 → 催货单不存在
+  404 → 催货单不存在（含非法单号 ⇒ 404 而非 500）
   400 → format 非法（只允许 xlsx / docx）
-  401/403 → 未登录 / 非 admin（**requireAdmin**，与其它催货端点同口径）
+  401 → **无效/过期 token**（全仓口径：401=token 无效，403=身份有效但无权限）
+  403 → 非 admin（**requireAdmin**，与其它催货端点同口径）
+  ⚠️ 「完全无 Authorization 头」在本仓不可断言 401：real 模式无头 ⇒ 403；
+     stub 模式无头 ⇒ 匿名拿到默认角色（含 admin）⇒ 放行。与**全部**既有催货端点同源。
 ```
 
 **供应商名获取**：API 层用
@@ -190,8 +204,8 @@ PendingDelivery 之后），label 走 i18n（zh-CN / en-US）。
 **后端**
 - 导出服务单测：Excel 行数与列名正确、欠交量取值正确、空明细也能出文件；
   Word 含关键文本（供应商名 / 单号 / 欠交量 / 回复期限）
-- 端点集成测：200 + `Content-Disposition` 文件名正确、404（不存在）、400（format 非法）、
-  **匿名访问 401**、**非 admin 登录 403**（确认 requireAdmin 生效）
+- 端点集成测：200 + `Content-Disposition` 文件名正确、404（不存在 + 非法单号）、
+  400（format 非法）、**无效 token 401**、**非 admin 登录 403**（确认 requireAdmin 生效）
 
 **前端**
 - 下载按钮触发：调用导出端点且 format 正确
@@ -217,6 +231,11 @@ PendingDelivery 之后），label 走 i18n（zh-CN / en-US）。
   注意与场景 seed 不同，这里**不需要**定向补丁机制）
 - 需重建 backend + frontend 镜像；worker 同镜像须一并 `--force-recreate`
   （见 `Harness/skills/thdeploy/SKILL.md` §worker 同步铁律）
+
+### 已知遗留项（本批未治）
+
+- **既有催货端点对非法 UUID 单号仍打成 500**：`GET /drafts/{chaseDraftId}` 等旧端点未做
+  单号规范化（本批只修了新导出端点）⇒ 建议下一批统一。
 
 ### 生产可用性（写清楚，免得生产验收误判）
 

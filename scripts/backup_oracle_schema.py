@@ -101,13 +101,17 @@ def _pickFilterColumn(
     """挑「用哪一列做时间过滤」⇒ (列名, 过滤表达式类型)。
 
     返回列名 None ⇒ 该表**不做时间过滤** ⇒ 导全量（在 manifest 里标注）。
-    类型：``date``（DATE/TIMESTAMP 列）/ ``ym-dash``（'2025-01'）/ ``ym-plain``（'202501'）。
+    类型：
+    - ``date``：DATE/TIMESTAMP 列 ⇒ 与 ``DATE '2025-01-01'`` 比较；
+    - ``text-date``：**VARCHAR** 存 ISO 日期（'2025-01-01'）⇒ 字符串比较；
+    - ``ym``：``YMONTH`` 列 ⇒ 按实测格式拼 '2025-01' / '202501'；
+    - ``none``：全量。
 
     判定顺序（**故意**保守，宁可多导也别把主数据切没了）：
     1. 维度表（``DIM_`` 前缀）⇒ 全量；
-    2. 真业务日期列 ⇒ 用它；
+    2. 真业务日期列 ⇒ 用它（按列的**实际类型**决定 date / text-date）；
     3. 其它**非技术性** DATE/TIMESTAMP 列 ⇒ 用它；
-    4. ``YMONTH`` ⇒ 用它（按实际格式）；
+    4. ``YMONTH`` ⇒ 用它；
     5. 都没有 ⇒ 全量。
     """
     byName = {c["name"].upper(): c for c in columns}
@@ -115,8 +119,16 @@ def _pickFilterColumn(
         return None, "none"
     for candidate in _BUSINESS_DATE_COLUMNS:
         column = byName.get(candidate)
-        if column is not None:
+        if column is None:
+            continue
+        dataType = str(column["type"]).upper()
+        if dataType.startswith(("DATE", "TIMESTAMP")):
             return column["name"], "date"
+        # ⚠️ 同名列**可能是 VARCHAR**（ODS 层的 SRM 表就是这样：
+        # ODS_SRM_RECEIPT_FINANCE_DETAIL.RECEIPT_DATE 是 VARCHAR）——
+        # 直接拿它和 DATE '2025-01-01' 比较 ⇒ Oracle 隐式 TO_DATE ⇒ **ORA-01861** 整轮挂。
+        # ⇒ VARCHAR 一律走 text-date（字符串比较），格式在主循环里实测确认。
+        return column["name"], "text-date"
     technical = set(_TECHNICAL_DATE_COLUMNS)
     for column in columns:
         name = str(column["name"]).upper()
@@ -137,13 +149,19 @@ def _filterClause(columnName: str, kind: str, fromYear: int) -> str:
     ⚠️ Oracle 用 **1600-01-03** 表示「空日期」⇒ `>= 2025-01-01` 天然排除这些哨兵行
     （实测 DWD_PURCHASE_ORDER_DTL.ORDER_DATE 最小值就是 1600-01-03）。
     ⚠️ `YMONTH` 格式**两张表不一样**（'2025-01' vs '202501'）⇒ 按 kind 分别拼。
+    ⚠️ ``text-date``（VARCHAR 存的 ISO 日期）**只能字符串比较** ——
+    拿它和 DATE 字面量比 ⇒ Oracle 隐式 TO_DATE ⇒ ORA-01861。
     """
     quoted = _quote(columnName)
     if kind == "date":
         return f"{quoted} >= DATE '{fromYear}-01-01'"
     if kind == "ym-dash":
         return f"{quoted} >= '{fromYear}-01'"
-    return f"{quoted} >= '{fromYear}01'"
+    if kind == "ym-plain":
+        return f"{quoted} >= '{fromYear}01'"
+    if kind == "text-date":
+        return f"{quoted} >= '{fromYear}-01-01'"
+    raise ValueError(f"未知的过滤类型：{kind}")
 
 
 async def _detectYmKind(cursor, owner: str, table: str, column: str) -> str:
@@ -163,7 +181,28 @@ async def _detectYmKind(cursor, owner: str, table: str, column: str) -> str:
     text = str(sample) if sample is not None else ""
     if text.isdigit() and len(text) == 6:
         return "ym-plain"
-    return "ym-dash"
+    if len(text) == 7 and text[4] == "-":
+        return "ym-dash"
+    return "ym-unknown"
+
+
+async def _detectTextDateKind(cursor, owner: str, table: str, column: str) -> str:
+    """探测 VARCHAR 日期列的实际格式 ⇒ ``text-date``（ISO '2025-01-01'）/ ``text-unknown``。
+
+    ⚠️ 只有 **ISO 格式**才能安全地做字符串比较（字典序 == 时间序）；
+    其它格式（EBS 的 '01-JAN-25'、'2025/01/01'…）一律 ``text-unknown``
+    ⇒ 该表**不做过滤**（导全量），宁可多导也别错滤。
+    """
+    await cursor.execute(
+        f'SELECT MAX({_quote(column)}) FROM {_quote(owner)}.{_quote(table)} '
+        f'WHERE {_quote(column)} IS NOT NULL'
+    )
+    row = await cursor.fetchone()
+    sample = row[0] if row else None
+    text = str(sample) if sample is not None else ""
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-" and text[:4].isdigit():
+        return "text-date"
+    return "text-unknown"
 
 
 def _hashExpr(column: dict[str, Any]) -> str:
@@ -442,10 +481,21 @@ async def main() -> int:
                             filterKind = await _detectYmKind(
                                 cursor, owner, name, filterColumn
                             )
-                        selectSql += (
-                            " WHERE "
-                            + _filterClause(filterColumn, filterKind, args.from_year)
-                        )
+                        elif filterKind == "text-date":
+                            filterKind = await _detectTextDateKind(
+                                cursor, owner, name, filterColumn
+                            )
+                        if filterKind in ("ym-unknown", "text-unknown"):
+                            # 格式认不出来 ⇒ 不冒险过滤，直接导全量
+                            filterColumn = None
+                            filterKind = "none"
+                        else:
+                            selectSql += (
+                                " WHERE "
+                                + _filterClause(
+                                    filterColumn, filterKind, args.from_year
+                                )
+                            )
                 if args.dry_run:
                     manifest.append(
                         {

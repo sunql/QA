@@ -198,7 +198,7 @@ PendingDelivery 之后），label 走 i18n（zh-CN / en-US）。
 - 创建成功 → 出现「查看催货单」跳转链接
 - 菜单项：`seed_menu_config.py` 声明了 `item.procurementChase` → `/procurement/chase`
 
-### 外发材料的保密口径（2026-11-28 裁决）
+## 外发材料的保密口径（2026-11-28 裁决）
 
 | 内容 | 进外发产物？ | 理由 |
 |---|---|---|
